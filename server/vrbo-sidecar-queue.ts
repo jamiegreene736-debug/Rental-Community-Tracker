@@ -1304,6 +1304,18 @@ function recordProviderFailure(provider: SidecarProviderKey, reason: string): Si
   if (providerFailureIsBlockLike(reason)) {
     const multiplier = Math.min(4, Math.max(1, state.consecutiveFailures));
     state.cooldownUntil = now + Math.min(PROVIDER_BLOCK_COOLDOWN_MAX_MS, PROVIDER_BLOCK_COOLDOWN_BASE_MS * multiplier);
+    // Monitoring for the cautious same-IP VRBO concurrency: a block cooldown is the signal
+    // that the 2-concurrency is NOT holding. While this is set, opConcurrencyLimit returns 1
+    // (single-file) for VRBO — i.e. we auto-back-off the IP until it clears.
+    console.warn(
+      `[sidecar] ${provider} BLOCK cooldown for ${Math.round((state.cooldownUntil - now) / 60_000)}m ` +
+      `(consecutiveFailures=${state.consecutiveFailures}) — VRBO ops auto-held to single-file until it clears. ` +
+      `reason="${state.failureReason}"`,
+    );
+  } else if (provider === "vrbo" && state.consecutiveFailures === 1) {
+    // First non-block failure after a healthy streak — VRBO concurrency just dropped to 1
+    // (it re-arms to 2 on the next success). Log once so a rising failure rate is visible.
+    console.warn(`[sidecar] vrbo failure — concurrency auto-held to single-file until the next success. reason="${state.failureReason}"`);
   }
   return providerHealthSnapshot(provider);
 }
@@ -1345,6 +1357,19 @@ function opConcurrencyLimit(opType: SidecarOpType, params?: SidecarRequest["para
       : "SIDECAR_AVAILABILITY_VRBO_CONCURRENCY";
     const configured = numberFromEnv(envName, 4);
     return Math.max(1, Math.floor(configured));
+  }
+  // CAUTIOUS SAME-IP PARALLELISM (2026-06-14): run up to SIDECAR_VRBO_CONCURRENCY (default 2)
+  // VRBO operations concurrently from the ONE residential IP — but ONLY while VRBO looks
+  // healthy. The instant VRBO pushes back (an active block cooldown OR any recent consecutive
+  // failure) we drop straight back to single-file, so we never sustain a high request rate
+  // against a rate-limiting IP. Bounded, self-healing downside. Set SIDECAR_VRBO_CONCURRENCY=1
+  // to fully revert to the old single-file behaviour.
+  if (group === "vrbo_search") {
+    const base = Math.max(1, Math.floor(numberFromEnv("SIDECAR_VRBO_CONCURRENCY", 2)));
+    if (base <= 1) return 1;
+    const h = providerHealth.get("vrbo");
+    const backingOff = Boolean(h && ((h.cooldownUntil && h.cooldownUntil > nowMs()) || h.consecutiveFailures > 0));
+    return backingOff ? 1 : base;
   }
   const groupEnvName = group === "ota_provider" ? "SIDECAR_OTA_CONCURRENCY" : "";
   const envName = `SIDECAR_${opType.toUpperCase()}_CONCURRENCY`;
