@@ -70,6 +70,15 @@ const HOME_RADIUS_KM = envInt("CITY_VRBO_EXPANSION_HOME_RADIUS_KM", 5, 1);
 // (1 junk listing, ~90s wasted). Default ON; CITY_VRBO_REGION_VALIDATION=0 reverts to
 // the old "search every Photon town name" behavior.
 const REGION_VALIDATION = (process.env.CITY_VRBO_REGION_VALIDATION ?? "1") !== "0";
+// Lever 1/2 (region de-dup + junk skip): the daemon skips a town's ~60-130s harvest when it
+// resolves to a Vrbo region already scanned this run, or to no region at all. Reads back the
+// LIVE regionId on each scan (recall-safe under Vrbo's intermittent collapse). Set to 0 to
+// stop sending the scanned-region set (daemon then never early-aborts).
+const REGION_DEDUP = (process.env.CITY_VRBO_REGION_DEDUP ?? "1") !== "0";
+// Lever 3 (stop-loss): after this many CONSECUTIVE duplicate/junk towns in a tier (no new
+// region, no combo), the tier's distinct regions are exhausted — stop scanning more of THAT
+// tier (the next, farther tier still runs). 0 disables.
+const STOP_AFTER_CONSEC_DUPS = envInt("CITY_VRBO_EXPANSION_STOP_AFTER_DUPS", 5, 0);
 
 // ── public types ───────────────────────────────────────────────────────────
 export type ExpansionJobStatus =
@@ -459,6 +468,10 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
     // BEFORE paying the ~90s scan (a recall-safe, pre-scan complement to the post-scan
     // Jaccard collapse-guard below).
     const planRegionIds = new Set<string>();
+    // Live Vrbo regionIds actually scanned this run (from each scan's resolvedRegionId) —
+    // sent to the daemon so a later town resolving to one of them skips its harvest (Lever 1).
+    // Distinct from planRegionIds (which holds the rate-limited suggestions-API regionIds).
+    const scannedRegionIds = new Set<string>();
     // If Vrbo's suggestions API turns out unreachable/rate-limited for this run, stop
     // probing it after the first miss (don't hammer it) and scan every town as before.
     let regionApiDown = false;
@@ -529,6 +542,9 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
       job.progress.citiesPlanned += plan.length;
       touch(job);
 
+      // Lever 3 stop-loss: consecutive duplicate/junk towns in THIS tier (resets on any
+      // genuinely-new region or a found combo).
+      let consecutiveDupOrJunk = 0;
       for (const p of plan) {
         if (Date.now() > deadline) {
           markRemaining(job, "skipped", "expansion time budget exhausted");
@@ -568,6 +584,10 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
             // state so a Florida combo's expansion towns aren't filtered against
             // the "Hawaii" default (HI properties still pass "Hawaii").
             targetState: BUY_IN_MARKET_LOCATIONS[job.community]?.state,
+            // Lever 1/2: the Vrbo regions already scanned this run. Passing an array (even
+            // empty) puts the daemon in region-dedup mode so it skips the harvest for a
+            // duplicate region or a junk non-region town.
+            skipRegionIds: REGION_DEDUP ? Array.from(scannedRegionIds) : undefined,
           });
         } catch (err: any) {
           setCityResult(job, p.term, { status: "scan-error", reason: String(err?.message ?? err) });
@@ -578,6 +598,27 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
 
         job.progress.citiesScanned += 1;
         job.workerOnline = scan.sidecar.workerOnline;
+
+        // LEVER 1/2: the daemon resolved this town to a region already scanned this run (dup)
+        // or to no region at all (junk keyword/"<town> condos" fallback) and skipped the
+        // ~60-130s harvest. Record it cheaply and move on — nothing new to find here.
+        if (scan.sidecar.duplicateRegionSkipped) {
+          const dupRegion = scan.sidecar.resolvedRegionId;
+          setCityResult(job, p.term, {
+            status: dupRegion ? "duplicate" : "skipped",
+            durationMs: scan.sidecar.durationMs,
+            reason: dupRegion
+              ? `Skipped before harvest — same Vrbo region (${dupRegion}) as an already-scanned town.`
+              : `Skipped before harvest — "${p.placeName}" is not a Vrbo-searchable region (keyword/listing result).`,
+          });
+          consecutiveDupOrJunk += 1;
+          touch(job);
+          if (STOP_AFTER_CONSEC_DUPS > 0 && consecutiveDupOrJunk >= STOP_AFTER_CONSEC_DUPS) {
+            console.log(`[city-vrbo-expansion] ${consecutiveDupOrJunk} consecutive duplicate/junk towns in tier ${tier} — distinct regions exhausted, stopping this tier early`);
+            break; // the farther tier still runs (it covers geographically-distinct regions)
+          }
+          continue;
+        }
 
         // A scan can come back workerOnline=false for TWO reasons: the worker is
         // genuinely offline, OR a per-search wallet/queue budget expired while a
@@ -635,10 +676,22 @@ async function runExpansionWorker(job: ExpansionJob): Promise<void> {
               durationMs: scan.sidecar.durationMs,
               reason: `VRBO returned the same broad pool as ${dupOf.label} — not a distinct local search for ${p.placeName}`,
             });
+            // Track this town's live region so the daemon can pre-skip a later town that
+            // resolves to it (Lever 1), and count it toward the tier stop-loss (Lever 3).
+            if (scan.sidecar.resolvedRegionId) scannedRegionIds.add(scan.sidecar.resolvedRegionId);
+            consecutiveDupOrJunk += 1;
             touch(job);
+            if (STOP_AFTER_CONSEC_DUPS > 0 && consecutiveDupOrJunk >= STOP_AFTER_CONSEC_DUPS) {
+              console.log(`[city-vrbo-expansion] ${consecutiveDupOrJunk} consecutive duplicate/junk towns in tier ${tier} — stopping this tier early`);
+              break;
+            }
             continue;
           }
           scannedPools.push({ label: p.placeName, urls: poolUrls });
+          // New distinct pool → track its live region for Lever-1 de-dup of later towns,
+          // and reset the consecutive-dup streak (we just found genuinely-new inventory).
+          if (scan.sidecar.resolvedRegionId) scannedRegionIds.add(scan.sidecar.resolvedRegionId);
+          consecutiveDupOrJunk = 0;
         }
 
         const exported = scan.listings.length;

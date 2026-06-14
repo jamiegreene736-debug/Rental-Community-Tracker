@@ -75,6 +75,10 @@ type CityVrboScrapeCacheEntry = {
     /** How many of rawCount came from the HomeToGo onsite source (0 when disabled). */
     hometogoCount?: number;
     mapHarvest: Record<string, unknown> | null;
+    /** Vrbo's live regionId for this scan (nearby-expansion region de-dup). */
+    resolvedRegionId?: string | null;
+    /** The daemon skipped the harvest: this town resolved to an already-scanned region. */
+    duplicateRegionSkipped?: boolean;
   };
   normalizePipeline: Omit<CityVrboFilterPipeline, "phraseFilter" | "afterPhraseFilter" | "phraseBuckets" | "suggestedPair">;
   /** Phase 4: set once detail-page coord/gallery enrichment has run for this pool. */
@@ -443,6 +447,8 @@ async function scrapeCityVrboPool(args: {
   // community's market state (home-city path) → "Hawaii" (default; byte-identical
   // mainland-namesake drop for HI). See AGENTS.md geo-guard note.
   targetState?: string;
+  /** Region de-dup (nearby expansion): Vrbo regionIds already scanned this run. */
+  skipRegionIds?: string[];
 }): Promise<CityVrboScrapeCacheEntry | null> {
   const citySearchTerm = resolveCityVrboSearchTerm(args);
   const targetState = args.targetState
@@ -492,6 +498,7 @@ async function scrapeCityVrboPool(args: {
     bedrooms: 1,
     searchMode: "destination_dropdown",
     cityWideInventory: true,
+    skipRegionIds: args.skipRegionIds,
     walletBudgetMs: args.walletBudgetMs ?? CITY_VRBO_WALLET_BUDGET_MS,
     queueBudgetMs: CITY_VRBO_QUEUE_BUDGET_MS,
     queueContext: {
@@ -603,6 +610,8 @@ async function scrapeCityVrboPool(args: {
       rawCount: mergedCandidates.length,
       hometogoCount: hometogoDeduped.length,
       mapHarvest: r?.mapHarvest ?? null,
+      resolvedRegionId: r?.resolvedRegionId ?? null,
+      duplicateRegionSkipped: Boolean(r?.duplicateRegionSkipped),
     },
     normalizePipeline: pipeline,
   };
@@ -632,6 +641,10 @@ export type CityVrboScanResult = {
     reason: string;
     rawCount: number;
     mapHarvest: Record<string, unknown> | null;
+    /** Vrbo's live regionId for this scan (nearby-expansion region de-dup). */
+    resolvedRegionId?: string | null;
+    /** The daemon skipped the harvest: this town resolved to an already-scanned region. */
+    duplicateRegionSkipped?: boolean;
   };
 };
 
@@ -661,6 +674,8 @@ async function runCityScanCore(args: {
   // MANUAL "Scan city VRBO" button omits it and keeps full enrichment. See the gate
   // at the Phase-4 block below.
   skipDetailEnrich?: boolean;
+  /** Region de-dup (nearby expansion): Vrbo regionIds already scanned this run. */
+  skipRegionIds?: string[];
 }): Promise<CityVrboScanResult> {
   const citySearchTerm = resolveCityVrboSearchTerm(args);
   const nights = Math.max(
@@ -690,6 +705,7 @@ async function runCityScanCore(args: {
       bedroomPlan: args.bedroomPlan,
       walletBudgetMs: args.walletBudgetMs,
       targetState: args.targetState,
+      skipRegionIds: args.skipRegionIds,
     });
     if (scrapeEntry) {
       cityVrboScrapeCache.set(cacheKey, scrapeEntry);
@@ -885,6 +901,8 @@ export async function runCityVrboInventoryScan(args: {
   // Automated callers (auto-fill loopback) pass true to suppress the Phase-4
   // detail-page enrichment; the manual scan omits it. See runCityScanCore.
   skipDetailEnrich?: boolean;
+  /** Region de-dup (nearby expansion): Vrbo regionIds already scanned this run. */
+  skipRegionIds?: string[];
 }): Promise<CityVrboScanResult> {
   return runCityScanCore({
     cacheKey: cacheKeyForScrape(args.community, args.checkIn, args.checkOut),
@@ -896,6 +914,7 @@ export async function runCityVrboInventoryScan(args: {
     filterPhrase: args.filterPhrase,
     skipCache: args.skipCache,
     skipDetailEnrich: args.skipDetailEnrich,
+    skipRegionIds: args.skipRegionIds,
   });
 }
 
@@ -923,6 +942,8 @@ export async function runCityVrboInventoryScanForCity(args: {
   // town's no-pair recovery does NOT fan out into per-listing detail scrapes —
   // that per-town multiplication is the worst offender for the automated queue.
   skipDetailEnrich?: boolean;
+  /** Region de-dup (nearby expansion): Vrbo regionIds already scanned this run. */
+  skipRegionIds?: string[];
 }): Promise<CityVrboScanResult> {
   return runCityScanCore({
     cacheKey: cacheKeyForCityTerm(args.citySearchTerm, args.checkIn, args.checkOut),
@@ -936,6 +957,7 @@ export async function runCityVrboInventoryScanForCity(args: {
     walletBudgetMs: args.walletBudgetMs,
     targetState: args.targetState,
     skipDetailEnrich: args.skipDetailEnrich,
+    skipRegionIds: args.skipRegionIds,
   });
 }
 

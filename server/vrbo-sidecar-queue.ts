@@ -107,6 +107,9 @@ export type SidecarVrboParams = {
    * non-Hawaii). See AGENTS.md geo-guard note + listing-geo.ts.
    */
   expectedState?: string;
+  /** Nearby-expansion region de-dup: Vrbo regionIds already scanned this run. If the
+   * daemon resolves this town to one of them, it skips the harvest (duplicate pool). */
+  skipRegionIds?: string[];
 };
 
 // HomeToGo onsite-offer search params (added 2026-06-11). HomeToGo is scraped via the
@@ -568,6 +571,8 @@ export type SidecarRequest = {
     | null;
   searchVariationSummary?: SidecarSearchVariationSummary;
   mapHarvest?: SidecarMapHarvestStats | null;
+  resolvedRegionId?: string | null; // Vrbo's live regionId for the search (nearby-expansion de-dup)
+  duplicateRegionSkipped?: boolean; // daemon skipped the harvest: this town's region was already scanned
   error?: string;
   createdAt: number;
   claimedAt?: number;
@@ -653,6 +658,8 @@ type CachedSidecarResult = {
   results: SidecarRequest["results"];
   searchVariationSummary?: SidecarSearchVariationSummary;
   mapHarvest?: SidecarMapHarvestStats | null;
+  resolvedRegionId?: string | null; // Vrbo's live regionId for the search (nearby-expansion de-dup)
+  duplicateRegionSkipped?: boolean; // daemon skipped the harvest: this town's region was already scanned
   cachedAt: number;
 };
 const successfulResultCache = new Map<string, CachedSidecarResult>();
@@ -855,7 +862,7 @@ function normalizeMapHarvestStats(raw: unknown): SidecarMapHarvestStats | null {
 
 function normalizeWorkerResultsPayload(
   raw: unknown,
-): { results: SidecarRequest["results"]; variationsTried: SidecarSearchVariationAttempt[]; mapHarvest: SidecarMapHarvestStats | null } {
+): { results: SidecarRequest["results"]; variationsTried: SidecarSearchVariationAttempt[]; mapHarvest: SidecarMapHarvestStats | null; resolvedRegionId: string | null; duplicateRegionSkipped: boolean } {
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     const obj = raw as Record<string, unknown>;
     const candidates = Array.isArray(obj.candidates) ? obj.candidates : undefined;
@@ -863,11 +870,13 @@ function normalizeWorkerResultsPayload(
       ? obj.variationsTried.map(normalizeVariationAttempt).filter((x): x is SidecarSearchVariationAttempt => Boolean(x))
       : [];
     const mapHarvest = normalizeMapHarvestStats(obj.mapHarvest);
+    const resolvedRegionId = typeof obj.resolvedRegionId === "string" ? obj.resolvedRegionId : null;
+    const duplicateRegionSkipped = obj.duplicateRegionSkipped === true;
     if (candidates) {
-      return { results: candidates as SidecarPropertyCandidate[], variationsTried, mapHarvest };
+      return { results: candidates as SidecarPropertyCandidate[], variationsTried, mapHarvest, resolvedRegionId, duplicateRegionSkipped };
     }
   }
-  return { results: raw as SidecarRequest["results"], variationsTried: [], mapHarvest: null };
+  return { results: raw as SidecarRequest["results"], variationsTried: [], mapHarvest: null, resolvedRegionId: null, duplicateRegionSkipped: false };
 }
 
 async function preferredVariationRows(input: {
@@ -2034,7 +2043,11 @@ export function complete(opts: {
     r.results = normalized.results;
     r.searchVariationSummary = recordSearchVariationSummary(r, normalized.variationsTried);
     r.mapHarvest = normalized.mapHarvest;
-    cacheSuccessfulResult(r);
+    r.resolvedRegionId = normalized.resolvedRegionId;
+    r.duplicateRegionSkipped = normalized.duplicateRegionSkipped;
+    // Do NOT cache a region-de-dup early-abort: its empty candidate list is a per-run
+    // artifact (skipRegionIds varies), so caching it would starve a later genuine scan.
+    if (!normalized.duplicateRegionSkipped) cacheSuccessfulResult(r);
   } else {
     r.status = "failed";
     r.error = opts.error || "worker reported failure with no message";
@@ -2536,6 +2549,8 @@ export async function searchVrboViaSidecar(opts: {
   queueBudgetMs?: number;
   signal?: AbortSignal;
   stopGeneration?: number;
+  /** Region de-dup (nearby expansion): Vrbo regionIds already scanned this run. */
+  skipRegionIds?: string[];
 }): Promise<{
   candidates: SidecarPropertyCandidate[];
   workerOnline: boolean;
@@ -2544,6 +2559,8 @@ export async function searchVrboViaSidecar(opts: {
   providerHealth?: SidecarProviderHealth;
   searchVariationSummary?: SidecarSearchVariationSummary;
   mapHarvest?: SidecarMapHarvestStats | null;
+  resolvedRegionId?: string | null; // Vrbo's live regionId for the search (nearby-expansion de-dup)
+  duplicateRegionSkipped?: boolean; // daemon skipped the harvest: this town's region was already scanned
 } | null> {
   const cooldown = activeProviderCooldown("vrbo");
   if (cooldown) return providerCooldownSearchResult("vrbo");
@@ -2597,6 +2614,7 @@ export async function searchVrboViaSidecar(opts: {
         // instead of dropping it as a mainland namesake. Derived from the parsed
         // search location; "hawaii"/undefined keeps the legacy reject-all behavior.
         expectedState: fullStateNameLower(location.state),
+        skipRegionIds: opts.skipRegionIds,
         variationMode: {
           filterTokens: policy.filterTokens,
           maxVariations: policy.maxVariations,
@@ -2622,6 +2640,8 @@ export async function searchVrboViaSidecar(opts: {
     providerHealth: recordProviderOutcome("vrbo", result),
     searchVariationSummary: r.searchVariationSummary,
     mapHarvest: r.mapHarvest ?? null,
+    resolvedRegionId: r.resolvedRegionId ?? null,
+    duplicateRegionSkipped: Boolean(r.duplicateRegionSkipped),
   };
 }
 
@@ -3343,6 +3363,8 @@ async function awaitOpResult(opts: {
   results: SidecarRequest["results"];
   searchVariationSummary?: SidecarSearchVariationSummary;
   mapHarvest?: SidecarMapHarvestStats | null;
+  resolvedRegionId?: string | null; // Vrbo's live regionId for the search (nearby-expansion de-dup)
+  duplicateRegionSkipped?: boolean; // daemon skipped the harvest: this town's region was already scanned
   workerOnline: boolean;
   durationMs: number;
   reason: string;
