@@ -119,30 +119,96 @@ assert.equal(
 
 resetQueue();
 
-// ── Background ops (e.g. "Verify community") yield to the bulk search ─────────
-// A background vrbo_photo_scrape shares the "vrbo_search" concurrency group with
-// the bulk's vrbo_search. It must NOT preempt a ready foreground search, but must
-// still run when nothing foreground is waiting (no starvation).
+// ── Cautious same-IP VRBO concurrency (2026-06-14) ───────────────────────────
+// The "vrbo_search" group default limit is SIDECAR_VRBO_CONCURRENCY (default 2):
+// when VRBO looks healthy, two VRBO ops run concurrently from the one IP (the
+// nearby-expansion / multi-unit speedup). The instant VRBO pushes back (a block
+// cooldown OR any recent consecutive failure) opConcurrencyLimit drops back to 1
+// — the same single value SIDECAR_VRBO_CONCURRENCY=1 forces — so we never sustain
+// a high request rate against a rate-limiting IP. The adaptive `backingOff` branch
+// is logic-identical to the env=1 branch below (both → limit 1) and is monitored
+// live via the recordProviderFailure cooldown log.
 {
+  // Two DISTINCT foreground VRBO searches (distinct params → not deduped).
+  const enqueueTwoVrbo = () => {
+    enqueueOp({
+      opType: "vrbo_search",
+      params: {
+        destination: "Poipu Kai", searchTerm: "Poipu Kai", checkIn: "2026-07-10", checkOut: "2026-07-17",
+        bedrooms: 3, queueContext: { ...buyInQueueContext, providerLabel: "VRBO" },
+      },
+    });
+    enqueueOp({
+      opType: "vrbo_search",
+      params: {
+        destination: "Koloa", searchTerm: "Koloa", checkIn: "2026-07-10", checkOut: "2026-07-17",
+        bedrooms: 3, queueContext: { ...buyInQueueContext, providerLabel: "VRBO" },
+      },
+    });
+  };
+
+  // Healthy default (concurrency 2): both VRBO searches are claimable at once.
   resetQueue();
-  // Background scrape enqueued FIRST (older)...
-  enqueueOp({
-    opType: "vrbo_photo_scrape",
-    params: { url: "https://www.vrbo.com/111", maxPhotos: 8, queueContext: { background: true, scanLabel: "verify-combo-community" } },
-  });
-  // ...then a foreground bulk search (newer). Despite being newer, it wins.
-  enqueueOp({
-    opType: "vrbo_search",
-    params: {
-      destination: "Poipu Kai", searchTerm: "Poipu Kai", checkIn: "2026-07-10", checkOut: "2026-07-17",
-      bedrooms: 3, queueContext: { ...buyInQueueContext, providerLabel: "VRBO" },
-    },
-  });
+  delete process.env.SIDECAR_VRBO_CONCURRENCY;
+  enqueueTwoVrbo();
+  const v1 = next({ slot: "1", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+  const v2 = next({ slot: "2", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+  assert.equal(v1?.opType, "vrbo_search", "first VRBO search claims (healthy)");
+  assert.equal(v2?.opType, "vrbo_search", "second VRBO search claims concurrently on the same IP (default concurrency 2)");
+  assert.equal(getStatus().inProgress, 2, "two VRBO searches run concurrently when VRBO is healthy");
+
+  // Env revert (SIDECAR_VRBO_CONCURRENCY=1): single-file, the old behaviour — and
+  // the exact limit the adaptive back-off applies when VRBO is unhealthy.
+  resetQueue();
+  process.env.SIDECAR_VRBO_CONCURRENCY = "1";
+  enqueueTwoVrbo();
+  const s1 = next({ slot: "1", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+  const s2 = next({ slot: "2", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+  assert.equal(s1?.opType, "vrbo_search", "first VRBO search claims (single-file)");
+  assert.equal(s2, null, "SIDECAR_VRBO_CONCURRENCY=1 keeps VRBO single-file (revert / adaptive-backoff limit)");
+  delete process.env.SIDECAR_VRBO_CONCURRENCY;
+}
+
+// ── Background ops (e.g. "Verify community") still YIELD priority to the bulk ──
+// A background vrbo_photo_scrape shares the "vrbo_search" concurrency group. It
+// must NEVER preempt a ready foreground search for the first slot. Under the
+// healthy default (concurrency 2) the SECOND slot may run it alongside; under
+// SIDECAR_VRBO_CONCURRENCY=1 the second slot stays blocked (single-file).
+{
+  const enqueueScrapeThenSearch = () => {
+    // Background scrape enqueued FIRST (older)...
+    enqueueOp({
+      opType: "vrbo_photo_scrape",
+      params: { url: "https://www.vrbo.com/111", maxPhotos: 8, queueContext: { background: true, scanLabel: "verify-combo-community" } },
+    });
+    // ...then a foreground bulk search (newer). Despite being newer, it wins slot 1.
+    enqueueOp({
+      opType: "vrbo_search",
+      params: {
+        destination: "Poipu Kai", searchTerm: "Poipu Kai", checkIn: "2026-07-10", checkOut: "2026-07-17",
+        bedrooms: 3, queueContext: { ...buyInQueueContext, providerLabel: "VRBO" },
+      },
+    });
+  };
+
+  // Healthy default: foreground preempts slot 1; the background scrape rides slot 2.
+  resetQueue();
+  delete process.env.SIDECAR_VRBO_CONCURRENCY;
+  enqueueScrapeThenSearch();
   const claim = next({ slot: "1", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
-  assert.equal(claim?.opType, "vrbo_search", "foreground bulk search must preempt the older background verify scrape");
-  // Group is now at its limit of 1 → the background scrape can't double up vs VRBO.
+  assert.equal(claim?.opType, "vrbo_search", "foreground bulk search must preempt the older background verify scrape for slot 1");
+  const second = next({ slot: "2", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+  assert.equal(second?.opType, "vrbo_photo_scrape", "background scrape rides the second VRBO slot when VRBO is healthy (concurrency 2)");
+
+  // Single-file revert: foreground still wins slot 1, scrape is blocked from slot 2.
+  resetQueue();
+  process.env.SIDECAR_VRBO_CONCURRENCY = "1";
+  enqueueScrapeThenSearch();
+  const claim1 = next({ slot: "1", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+  assert.equal(claim1?.opType, "vrbo_search", "foreground bulk search still preempts the background scrape (single-file)");
   const blocked = next({ slot: "2", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
-  assert.equal(blocked, null, "background scrape must not run concurrently with the bulk VRBO search (single-file)");
+  assert.equal(blocked, null, "under SIDECAR_VRBO_CONCURRENCY=1 the background scrape must not double up with the bulk VRBO search");
+  delete process.env.SIDECAR_VRBO_CONCURRENCY;
 }
 
 // Background op is NOT starved: when it's the only thing pending, it gets claimed.
