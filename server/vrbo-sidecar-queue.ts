@@ -1709,6 +1709,8 @@ function cacheSuccessfulResult(r: SidecarRequest): void {
     results: cloneSidecarResult(r.results),
     searchVariationSummary: cloneSidecarResult(r.searchVariationSummary),
     mapHarvest: cloneSidecarResult(r.mapHarvest ?? null),
+    resolvedRegionId: r.resolvedRegionId ?? null,
+    duplicateRegionSkipped: Boolean(r.duplicateRegionSkipped),
     cachedAt: nowMs(),
   });
 }
@@ -3408,6 +3410,8 @@ async function awaitOpResult(opts: {
         results: cached.results,
         searchVariationSummary: cached.searchVariationSummary,
         mapHarvest: cached.mapHarvest ?? null,
+        resolvedRegionId: cached.resolvedRegionId ?? null,
+        duplicateRegionSkipped: Boolean(cached.duplicateRegionSkipped),
         workerOnline: true,
         durationMs: nowMs() - startedAt,
         reason: `served from successful sidecar result cache (${Math.round(ageMs / 60000)}m old)`,
@@ -3466,6 +3470,8 @@ async function awaitOpResult(opts: {
           results: r.results ?? null,
           searchVariationSummary: r.searchVariationSummary,
           mapHarvest: r.mapHarvest ?? null,
+          resolvedRegionId: r.resolvedRegionId ?? null,
+          duplicateRegionSkipped: Boolean(r.duplicateRegionSkipped),
           workerOnline: true,
           durationMs: nowMs() - startedAt,
           reason: `worker returned ${
