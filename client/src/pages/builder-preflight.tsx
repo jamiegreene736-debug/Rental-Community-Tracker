@@ -113,10 +113,18 @@ function StatusBadge({
   result: UnitPlatformResult | undefined;
   checking: boolean;
 }) {
-  if (checking || !result) {
+  if (checking) {
     return (
       <span className="status-checking inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-muted text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin" /> Checking…
+      </span>
+    );
+  }
+  if (!result) {
+    // Check finished with no data — show "Unavailable", never the spinner.
+    return (
+      <span className="status-error inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
+        <AlertTriangle className="h-3 w-3" /> Unavailable
       </span>
     );
   }
@@ -168,10 +176,20 @@ function CompactStatusBadge({
   checking: boolean;
 }) {
   const base = "inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium whitespace-nowrap";
-  if (checking || !result) {
+  if (checking) {
     return (
       <span className={`${base} bg-muted text-muted-foreground`}>
         <Loader2 className="h-3 w-3 animate-spin" /> Checking
+      </span>
+    );
+  }
+  if (!result) {
+    // The unit's check already finished but this platform has no result (e.g. the
+    // text check is off / unavailable). NEVER fall back to the spinner here — a
+    // missing result with checking=false is exactly what made it "spin forever".
+    return (
+      <span className={`${base} bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400`}>
+        <AlertTriangle className="h-3 w-3" /> Unavailable
       </span>
     );
   }
@@ -724,7 +742,13 @@ export default function BuilderPreflight() {
         });
         if (hasUnitPhoto) setCheckPhase("photo");
         try {
-          const resp = await fetch(`/api/preflight/platform-check?${params.toString()}`);
+          // Hard timeout so a hung/slow server can never leave a unit "Checking"
+          // forever — on abort the catch below records an error result and the
+          // finally clears it from checkingUnitIds.
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 45_000);
+          const resp = await fetch(`/api/preflight/platform-check?${params.toString()}`, { signal: ctrl.signal })
+            .finally(() => clearTimeout(timer));
           if (resp.ok) {
             const data = await resp.json();
             const unitResult: UnitCheckResult | undefined = data?.units?.[0];
@@ -1482,6 +1506,25 @@ export default function BuilderPreflight() {
                 <p className="font-medium text-foreground/80">
                   {checkingLabels ? `Working on ${checkingLabels}` : "Finalizing results..."}
                 </p>
+              </div>
+              {/* Per-platform progress: how many units each search has resolved. */}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-primary/10 pt-2 text-[11px] text-muted-foreground">
+                {PLATFORM_LIST.map(({ key, label }) => {
+                  const done = Math.min(
+                    totalUnits,
+                    effectiveUnits.reduce((n, u) => n + (results[u.id]?.platforms?.[key] ? 1 : 0), 0),
+                  );
+                  const allDone = totalUnits > 0 && done >= totalUnits;
+                  return (
+                    <span key={key} className="inline-flex items-center gap-1.5">
+                      {allDone
+                        ? <CheckCircle2 className="h-3 w-3 text-green-600 dark:text-green-400" />
+                        : <Loader2 className="h-3 w-3 animate-spin" />}
+                      <span className="font-medium text-foreground/70">{label}</span>
+                      <span>{done}/{totalUnits}</span>
+                    </span>
+                  );
+                })}
               </div>
             </div>
           )}

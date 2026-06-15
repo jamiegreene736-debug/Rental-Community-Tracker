@@ -28543,17 +28543,114 @@ Return ONLY compact JSON with this exact shape:
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
     const city = normalizePlatformCheckCity(String(req.query.city ?? ""), units[0]?.address);
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
-    const disabledUnits = units.map((unit) => ({
-      ...unit,
-      platforms: [],
-      photoSignals: { airbnb: false, vrbo: false, booking: false },
-      photoMatchedUrls: { airbnb: null, vrbo: null, booking: null },
-      photoMatchCounts: { airbnb: 0, vrbo: 0, booking: 0 },
-      photoMatches: 0,
-      checkedPhotos: 0,
-      error: "Google Lens reverse-image platform checks are disabled to preserve SearchAPI quota.",
-    }));
-    return res.json({ units: disabledUnits, photoMode: "disabled" });
+    // ── Text-only platform check ────────────────────────────────────────────────
+    // The expensive Google Lens REVERSE-IMAGE probes stay disabled (045b2c5, to
+    // preserve SearchAPI quota) — the legacy Lens handler below is intentionally left
+    // unreachable. This restores the cheap, useful half: a site:-scoped Google TEXT
+    // search per platform that reports whether the unit appears listed on Airbnb /
+    // VRBO / Booking.com (same approach as /api/platform-check/quick). Without it the
+    // endpoint returned `platforms: []`, which the client rendered as a permanent
+    // "Checking" spinner. Gated by PREFLIGHT_PLATFORM_CHECK_TEXT (default on); =0 (or a
+    // missing SEARCHAPI key) returns a clean per-platform "error" state the client
+    // shows as "Unavailable" — never an infinite spinner.
+    const textCheckEnabled = (process.env.PREFLIGHT_PLATFORM_CHECK_TEXT ?? "1") !== "0";
+    if (!textCheckEnabled || !apiKey) {
+      const detail = !apiKey
+        ? "Platform check unavailable — search is not configured."
+        : "Platform text check is turned off.";
+      const offUnits = units.map((unit) => ({
+        unitId: unit.unitId,
+        unitNumber: unit.unitNumber,
+        address: unit.address,
+        platforms: {
+          airbnb:  { status: "error", url: null, detection: detail },
+          vrbo:    { status: "error", url: null, detection: detail },
+          booking: { status: "error", url: null, detection: detail },
+        },
+      }));
+      return res.json({ units: offUnits, photoMode: "disabled" });
+    }
+
+    const PREFLIGHT_PLATFORM_DOMAINS = [
+      { key: "airbnb",  domain: "airbnb.com" },
+      { key: "vrbo",    domain: "vrbo.com" },
+      { key: "booking", domain: "booking.com" },
+    ] as const;
+
+    // Street portion = before the first comma (or the whole string). The richer
+    // address helpers live in the legacy Lens path below (unreachable), so this is
+    // kept self-contained.
+    const preflightStreetOf = (addr: string): string => {
+      const a = String(addr || "").trim();
+      if (!a) return "";
+      return a.includes(",") ? a.split(",")[0].trim() : a;
+    };
+
+    const checkPlatformTextOnly = async (
+      domain: string,
+      street: string,
+      unitNumber: string,
+      complexName: string,
+    ): Promise<{ status: "confirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
+      const u = String(unitNumber || "").trim().toLowerCase();
+      const queries = Array.from(new Set([
+        street ? `site:${domain} "${street}" "${unitNumber}"` : "",
+        complexName ? `site:${domain} "${complexName}" "${unitNumber}"` : "",
+      ].filter(Boolean)));
+      if (queries.length === 0) {
+        return { status: "error", url: null, detection: "No address or community name to search" };
+      }
+      try {
+        for (const q of queries) {
+          const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "5" });
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 12_000);
+          const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, { signal: ctrl.signal })
+            .finally(() => clearTimeout(timer));
+          if (!resp.ok) continue;
+          const data = await resp.json() as any;
+          for (const r of (data.organic_results || []) as any[]) {
+            const link = String(r.link || "").toLowerCase();
+            const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
+            if (link.includes(domain) && (u === "" || text.includes(u) || text.includes(`#${u}`))) {
+              return {
+                status: "confirmed",
+                url: r.link,
+                detection: `${r.title || ""} — ${r.snippet || ""}`.replace(/\s+/g, " ").trim().slice(0, 200),
+              };
+            }
+          }
+          await new Promise((rr) => setTimeout(rr, 250));
+        }
+        return { status: "not-listed", url: null, detection: "No matching listing found in Google results" };
+      } catch (err: any) {
+        return {
+          status: "error",
+          url: null,
+          detection: err?.name === "AbortError" ? "Search timed out" : "Could not verify",
+        };
+      }
+    };
+
+    try {
+      const checkedUnits = await Promise.all(units.map(async (unit) => {
+        const street = preflightStreetOf(unit.address);
+        const [airbnb, vrbo, booking] = await Promise.all(
+          PREFLIGHT_PLATFORM_DOMAINS.map((p) => checkPlatformTextOnly(p.domain, street, unit.unitNumber, name)),
+        );
+        return {
+          unitId: unit.unitId,
+          unitNumber: unit.unitNumber,
+          address: unit.address,
+          platforms: { airbnb, vrbo, booking },
+        };
+      }));
+      return res.json({ units: checkedUnits, photoMode: "text-only" });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Platform check failed", message: String(err?.message ?? err) });
+    }
+
+    // eslint-disable-next-line no-unreachable -- legacy Google Lens reverse-image path (disabled)
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     const photoModeRaw = String(req.query.photoMode ?? req.query.photoAudit ?? "").toLowerCase();
     const fullPhotoAudit = photoModeRaw === "full" || photoModeRaw === "all" || photoModeRaw === "unit-audit" || req.query.fullPhotoAudit === "1";
