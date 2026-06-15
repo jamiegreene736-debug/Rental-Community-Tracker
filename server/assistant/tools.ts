@@ -15,6 +15,8 @@
 
 import { loopbackRequestHeaders } from "../auth";
 import { getPropertyUnits, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+import { communityAddressRuleForName } from "@shared/community-addresses";
+import { resolveComboUnitBedrooms, inferCombinedBedroomsFromDraft } from "@shared/draft-unit-bedrooms";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 
@@ -108,6 +110,85 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
         default:
           return { _error: true, message: `Unknown metric '${metric ?? ""}'.` };
       }
+    },
+  },
+  {
+    name: "list_properties",
+    kind: "read",
+    description:
+      "List the FULL property portfolio — both CONFIGURED/active properties AND saved community DRAFTS (listings still being built, which have NO Guesty bookings yet, e.g. 'Ko Olina Beach Villas'). " +
+      "Call this FIRST whenever the operator names a property / community / resort to act on (find photos, price, buy-in) and you can't find it via list_bookings — drafts never appear in bookings, so this is the only way to see them. " +
+      "Returns `properties`, each with: `id` (the internal property id to pass to find_buy_in / scan_city_vrbo / start_auto_fill — NEGATIVE for drafts), `kind` ('configured' | 'draft'), `community` (resort/complex name), `title`, `city`, `state`, `streetAddress`, `bedrooms` (per-unit list) and `totalBedrooms`. " +
+      "Match the operator's wording to `community`/`title` LOOSELY (case-insensitive substring — 'Ko Olina Beach' matches 'Ko Olina Beach Villas'). For find_photos, pass the matched `community` plus \"<city>, <state>\" as the location. Pass `query` to filter.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Optional case-insensitive substring to filter by community / title / city." },
+        includeDrafts: { type: "boolean", description: "Include community drafts (default true)." },
+      },
+      required: [],
+    },
+    execute: async (input) => {
+      const q = str(input.query)?.toLowerCase();
+      const includeDrafts = input.includeDrafts !== false;
+      const matches = (...vals: Array<string | null | undefined>): boolean =>
+        !q || vals.some((v) => typeof v === "string" && v.toLowerCase().includes(q));
+
+      const configured = Object.entries(PROPERTY_UNIT_CONFIGS)
+        .map(([id, cfg]) => {
+          const bedrooms = cfg.units.map((u) => u.bedrooms);
+          const rule = communityAddressRuleForName(cfg.community);
+          return {
+            id: Number(id),
+            kind: "configured" as const,
+            community: cfg.community,
+            title: null as string | null,
+            city: rule?.city ?? null,
+            state: rule?.state ?? null,
+            streetAddress: rule?.street ?? null,
+            bedrooms,
+            totalBedrooms: bedrooms.reduce((s, b) => s + b, 0),
+            units: cfg.units.length,
+          };
+        })
+        .filter((p) => matches(p.community));
+
+      let drafts: Array<Record<string, unknown>> = [];
+      if (includeDrafts) {
+        const raw = await loopbackGet("/api/community/drafts");
+        const list: any[] = Array.isArray(raw) ? raw : Array.isArray((raw as any)?.drafts) ? (raw as any).drafts : [];
+        drafts = list
+          .map((d: any) => {
+            const resolved = resolveComboUnitBedrooms(d);
+            const isSingle = d?.singleListing === true;
+            const bedrooms = (isSingle ? [resolved.unit1] : [resolved.unit1, resolved.unit2]).filter(
+              (b) => Number.isFinite(b) && b > 0,
+            );
+            return {
+              id: -Number(d.id), // real internal API id for drafts (the 900xxx dashboard number is cosmetic)
+              displayId: 900000 + Number(d.id),
+              kind: "draft" as const,
+              status: d.status ?? null,
+              community: d.name ?? null,
+              title: d.listingTitle ?? d.bookingTitle ?? null,
+              city: d.city ?? null,
+              state: d.state ?? null,
+              streetAddress: d.streetAddress ?? null,
+              bedrooms,
+              totalBedrooms: bedrooms.reduce((s: number, b: number) => s + b, 0) || inferCombinedBedroomsFromDraft(d) || null,
+              sourceUrl: d.sourceUrl ?? null,
+            };
+          })
+          .filter((p) => matches(p.community as string, p.title as string, p.city as string));
+      }
+
+      return {
+        note:
+          "Drafts use a NEGATIVE `id` for the buy-in/auto-fill tools (the 900xxx 'displayId' is just the dashboard label). Drafts have no Guesty bookings, so they never appear in list_bookings. Match the operator's wording to community/title loosely (substring, case-insensitive).",
+        configuredCount: configured.length,
+        draftCount: drafts.length,
+        properties: [...configured, ...drafts],
+      };
     },
   },
   {
@@ -313,7 +394,7 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
     name: "find_photos",
     kind: "read",
     description:
-      "Find candidate PHOTOS for a community/resort via image search — use for 'find photos for <community>' or 'I need photos of <resort>'. Provide communityName (the resort/complex, e.g. 'Poipu Kai Resort') and location (city + state, e.g. 'Koloa, Hawaii'); optionally bedrooms. Returns an `images` array of {url, thumbnail, label, source}. These are CANDIDATES for the operator to review — not auto-applied to any listing. For a booking's community/location, get_buy_in_estimate returns complexName + region.",
+      "Find candidate PHOTOS for a community/resort via image search — use for 'find photos for <community>' or 'I need photos of <resort>'. Provide communityName (the resort/complex, e.g. 'Poipu Kai Resort') and location (city + state, e.g. 'Koloa, Hawaii'); optionally bedrooms. Returns an `images` array of {url, thumbnail, label, source}. These are CANDIDATES for the operator to review — not auto-applied to any listing. For a booking's community/location, get_buy_in_estimate returns complexName + region; for a SAVED property or DRAFT being built (e.g. 'Ko Olina Beach Villas'), call list_properties first to get its community + city/state.",
     input_schema: {
       type: "object",
       properties: {

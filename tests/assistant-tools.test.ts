@@ -19,6 +19,7 @@ console.log("assistant: tool registry");
 // Registry is non-empty and the expected core tools exist.
 for (const name of [
   "get_dashboard",
+  "list_properties",
   "list_bookings",
   "get_reports",
   "get_buy_in_estimate",
