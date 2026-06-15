@@ -12460,6 +12460,33 @@ function SidecarStatusBadge() {
   const [acting, setActing] = useState<"stop" | "start" | "clear" | string | null>(null);
   const [showQueueStatus, setShowQueueStatus] = useState(false);
   const sidecarQueue = useSidecarQueueStatus(showQueueStatus || Boolean(state.data?.activeJob));
+  // Global pause for AUTOMATED (scheduler-driven) sidecar scans.
+  const [automation, setAutomation] = useState<{ paused: boolean; envOverride: boolean } | null>(null);
+  const refreshAutomation = async () => {
+    try {
+      const r = await apiRequest("GET", "/api/admin/sidecar-automation").then((res) => res.json());
+      setAutomation({ paused: !!r.paused, envOverride: !!r.envOverride });
+    } catch { /* leave as null — button hidden */ }
+  };
+  useEffect(() => { void refreshAutomation(); }, []);
+  const toggleAutomation = async () => {
+    const next = !(automation?.paused ?? false);
+    setActing("automation");
+    try {
+      const r = await apiRequest("POST", "/api/admin/sidecar-automation/toggle", { paused: next }).then((res) => res.json());
+      setAutomation({ paused: !!r.paused, envOverride: !!r.envOverride });
+      toast({
+        title: r.paused ? "Automated scans paused" : "Automated scans resumed",
+        description: r.paused
+          ? "Schedulers (sourceability gate, weekly scan) won't drive the sidecar until you resume. Your own searches still work."
+          : "Scheduled sidecar scans can run again.",
+      });
+    } catch (e: any) {
+      toast({ title: "Toggle failed", description: e?.message ?? String(e), variant: "destructive" });
+    } finally {
+      setActing(null);
+    }
+  };
 
   const refresh = async (): Promise<SidecarHeartbeat | null> => {
     try {
@@ -12717,6 +12744,31 @@ function SidecarStatusBadge() {
           <XCircle className="h-3 w-3 mr-1" />
           {acting === "clear" ? "Clearing…" : "Clear Queue"}
         </Button>
+
+        {automation && (
+          <Button
+            size="sm"
+            variant="outline"
+            className={`h-8 w-full text-xs ${automation.paused ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100" : ""}`}
+            disabled={acting !== null || automation.envOverride}
+            onClick={toggleAutomation}
+            data-testid="button-sidecar-automation-toggle"
+            title={automation.envOverride ? "Controlled by the SIDECAR_AUTOMATION_PAUSED env var" : undefined}
+          >
+            <Square className="h-3 w-3 mr-1" />
+            {acting === "automation"
+              ? "Saving…"
+              : automation.paused
+                ? "Resume automated scans"
+                : "Pause automated scans"}
+          </Button>
+        )}
+        {automation?.paused && (
+          <div className="text-[11px] text-amber-700">
+            Automated scheduler scans are paused. Your own searches still run.
+            {automation.envOverride ? " (locked by env var)" : ""}
+          </div>
+        )}
 
         <Button
           size="sm"

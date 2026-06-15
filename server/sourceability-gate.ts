@@ -27,6 +27,7 @@ import { runCityVrboInventoryScan } from "./city-vrbo-inventory";
 import { reconcileSourceabilityBlocks, type SyncResult } from "./sync-scanner-blocks";
 import { getLatestBulkAutoFillJob } from "./bulk-auto-fill-job";
 import { storage } from "./storage";
+import { isSidecarAutomationPaused } from "./sidecar-automation";
 import {
   decideSourceability,
   generateWeeklyWindows,
@@ -235,6 +236,7 @@ export async function runSourceabilitySweepAllEnabled(
   opts: { enforce?: boolean; now?: Date } = {},
 ): Promise<{ ran: boolean; reason?: string; reports: SourceabilitySweepReport[] }> {
   if (!isSourceabilityGateEnabled()) return { ran: false, reason: "disabled", reports: [] };
+  if (await isSidecarAutomationPaused()) return { ran: false, reason: "automated sidecar scans paused", reports: [] };
   if (_sweepInFlight) return { ran: false, reason: "already running", reports: [] };
   if (getLatestBulkAutoFillJob()?.status === "running") {
     return { ran: false, reason: "operator bulk queue active — yielding sidecar", reports: [] };
