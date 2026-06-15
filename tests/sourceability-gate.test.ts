@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 
-const { decideSourceability, generateWeeklyWindows } = await import("../server/sourceability-gate-core");
+const { decideSourceability, generateWeeklyWindows, applyConfirmation, confirmedAction } = await import("../server/sourceability-gate-core");
 
 console.log("sourceability gate suite");
 
@@ -70,5 +70,35 @@ console.log("  ✓ decideSourceability: fail-safe skip / block-on-loss / open-on
   }
 }
 console.log("  ✓ generateWeeklyWindows: 7-night windows within [minLead, horizon]");
+
+// ── Confirmation guard: immunity to single-scrape noise ──
+{
+  const zero = { consecutiveBlocks: 0, consecutiveOpens: 0 };
+  // streak accumulation + reset
+  assert.deepEqual(applyConfirmation(zero, "block"), { consecutiveBlocks: 1, consecutiveOpens: 0 });
+  assert.deepEqual(applyConfirmation({ consecutiveBlocks: 1, consecutiveOpens: 0 }, "block"), { consecutiveBlocks: 2, consecutiveOpens: 0 });
+  assert.deepEqual(applyConfirmation({ consecutiveBlocks: 2, consecutiveOpens: 0 }, "open"), { consecutiveBlocks: 0, consecutiveOpens: 1 }, "open resets the block streak");
+  // skip carries NO evidence — streaks unchanged (must not reset a confirmation)
+  assert.deepEqual(applyConfirmation({ consecutiveBlocks: 1, consecutiveOpens: 0 }, "skip"), { consecutiveBlocks: 1, consecutiveOpens: 0 }, "skip leaves streaks unchanged");
+
+  // confirmedAction only fires at the threshold
+  assert.equal(confirmedAction({ consecutiveBlocks: 1, consecutiveOpens: 0 }, 2), "pending", "1/2 blocks → pending (no calendar change)");
+  assert.equal(confirmedAction({ consecutiveBlocks: 2, consecutiveOpens: 0 }, 2), "block", "2/2 blocks → block");
+  assert.equal(confirmedAction({ consecutiveBlocks: 0, consecutiveOpens: 2 }, 2), "open", "2/2 opens → open");
+  assert.equal(confirmedAction({ consecutiveBlocks: 5, consecutiveOpens: 0 }, 1), "block", "threshold floors at 1");
+
+  // THE NOISE CASE we observed: block, open, block, block (threshold 2)
+  let s = { consecutiveBlocks: 0, consecutiveOpens: 0 };
+  for (const dec of ["block", "open", "block"]) { s = applyConfirmation(s, dec); assert.equal(confirmedAction(s, 2), "pending", `noisy ${dec} must NOT act`); }
+  s = applyConfirmation(s, "block");
+  assert.equal(confirmedAction(s, 2), "block", "only a 2nd CONSECUTIVE block confirms → block");
+
+  // a skip between two blocks does NOT break the confirmation (no evidence, not contradiction)
+  let t = applyConfirmation({ consecutiveBlocks: 0, consecutiveOpens: 0 }, "block");
+  t = applyConfirmation(t, "skip");
+  t = applyConfirmation(t, "block");
+  assert.equal(confirmedAction(t, 2), "block", "block, skip, block → confirmed (skip is neutral)");
+}
+console.log("  ✓ confirmation guard: N-consecutive required; noise never acts; skip is neutral");
 
 console.log("sourceability gate suite passed");
