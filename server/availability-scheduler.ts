@@ -39,6 +39,9 @@ import {
   DEFAULT_TIGHT_SCARCITY_MARKUP,
   demandFactorForAvailabilityVerdict,
   demandFactorForPolicyBand,
+  lastMinuteDemandFactor,
+  LAST_MINUTE_MARKUP_DAYS,
+  LAST_MINUTE_MARKUP_PCT,
   isDueForPolicyPass,
   type LeadTimePricingBand,
 } from "./availability-policy";
@@ -47,6 +50,9 @@ export {
   DEFAULT_TIGHT_SCARCITY_MARKUP,
   demandFactorForAvailabilityVerdict,
   demandFactorForPolicyBand,
+  lastMinuteDemandFactor,
+  LAST_MINUTE_MARKUP_DAYS,
+  LAST_MINUTE_MARKUP_PCT,
   isDueForPolicyPass,
 } from "./availability-policy";
 
@@ -60,20 +66,19 @@ export function getScannerSchedulerStatus() {
   return { lastTickAt: _lastTickAt, running: _tickRunning };
 }
 
-// Pure calendar lead-time scarcity policy (independent of inventory counts).
-// Generates critical weeks for the next N weeks based on days-until-arrival
-// vs the season band (standard 45 / high 75 / holiday 90 / ultra 120).
-function computePureLeadTimePolicyBlocks(
+// Last-minute (lead-time) pricing windows (independent of inventory counts).
+// 2026-06-14 redesign: a single FLAT markup applied only to the dates within
+// LAST_MINUTE_MARKUP_DAYS (14) of arrival, replacing the old escalating
+// 45/75/90/120-day-by-season-band scheme that priced us out of the market for
+// long-lead bookings. See availability-policy.ts for the rationale + measured
+// premium. Returns the weekly windows whose arrival falls inside the cutoff;
+// each carries daysUntilArrival so the caller sizes the flat markup.
+function computeLastMinuteMarkupWindows(
   today: Date,
   weeks = 52,
-  leadDays?: { standard?: number; high?: number; holiday?: number; ultra?: number },
   region: "hawaii" | "florida" = "hawaii",
-): Array<{ startDate: string; endDate: string; verdict: "blocked"; policyBand: LeadTimePricingBand; reason: string }> {
-  const blocks: Array<{ startDate: string; endDate: string; verdict: "blocked"; policyBand: LeadTimePricingBand; reason: string }> = [];
-  const std = leadDays?.standard ?? AVAILABILITY_POLICY_STANDARD_LEAD_DAYS;
-  const high = leadDays?.high ?? AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS;
-  const holiday = leadDays?.holiday ?? AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS;
-  const ultra = leadDays?.ultra ?? AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS;
+): Array<{ startDate: string; endDate: string; verdict: "blocked"; policyBand: LeadTimePricingBand; daysUntilArrival: number; reason: string }> {
+  const windows: Array<{ startDate: string; endDate: string; verdict: "blocked"; policyBand: LeadTimePricingBand; daysUntilArrival: number; reason: string }> = [];
 
   for (let w = 1; w <= weeks; w++) {
     const start = new Date(today);
@@ -92,25 +97,19 @@ function computePureLeadTimePolicyBlocks(
       now: today,
     });
 
-    const effectiveLead = policy.band === "ultraPeak" ? ultra :
-                          policy.band === "majorHoliday" ? holiday :
-                          policy.band === "high" ? high : std;
-
-    if (policy.daysUntilArrival <= effectiveLead) {
-      const bandLabel = policy.band === "ultraPeak" ? "ultra-peak" :
-                        policy.band === "majorHoliday" ? "major holiday" :
-                        policy.band === "high" ? "high season" : "standard";
-      blocks.push({
+    if (policy.daysUntilArrival <= LAST_MINUTE_MARKUP_DAYS) {
+      windows.push({
         startDate: sd,
         endDate: ed,
         verdict: "blocked",
         policyBand: policy.band,
-        reason: `lead-time safety: ${effectiveLead} days (${bandLabel})`,
+        daysUntilArrival: policy.daysUntilArrival,
+        reason: `last-minute pricing: within ${LAST_MINUTE_MARKUP_DAYS} days of arrival (${policy.daysUntilArrival}d out)`,
       });
     }
   }
 
-  return blocks;
+  return windows;
 }
 
 export type LeadTimePolicyPricePushResult = {
@@ -132,17 +131,15 @@ export async function pushLeadTimePolicyPricesToGuesty(args: {
   leadDays?: { standard?: number; high?: number; holiday?: number; ultra?: number };
   monthlyBuyInByMonth?: Map<string, number>;
 }): Promise<LeadTimePolicyPricePushResult> {
-  const scheduleRow = await storage.getScannerSchedule(args.propertyId).catch(() => null);
-  const leadDays = args.leadDays ?? {
-    standard: scheduleRow?.standardLeadDays ?? AVAILABILITY_POLICY_STANDARD_LEAD_DAYS,
-    high: scheduleRow?.highSeasonLeadDays ?? AVAILABILITY_POLICY_HIGH_SEASON_LEAD_DAYS,
-    holiday: scheduleRow?.majorHolidayLeadDays ?? AVAILABILITY_POLICY_MAJOR_HOLIDAY_LEAD_DAYS,
-    ultra: scheduleRow?.ultraPeakLeadDays ?? AVAILABILITY_POLICY_ULTRA_PEAK_LEAD_DAYS,
-  };
+  // 2026-06-14: the lead-time markup is now a single flat surcharge applied
+  // only within LAST_MINUTE_MARKUP_DAYS of arrival, so the per-season-band
+  // lead-day config is no longer read here (it still drives the availability
+  // scanner's open/blocked verdicts elsewhere). args.leadDays is accepted for
+  // backward compatibility but intentionally ignored for pricing.
   const todayNoon = args.now ? new Date(args.now) : new Date();
   todayNoon.setHours(12, 0, 0, 0);
   const region = getCommunityRegion(args.community);
-  const scarcityWindows = computePureLeadTimePolicyBlocks(todayNoon, args.weeks ?? 52, leadDays, region);
+  const scarcityWindows = computeLastMinuteMarkupWindows(todayNoon, args.weeks ?? 52, region);
   const calPath = `/availability-pricing/api/calendar/listings/${args.guestyListingId}`;
   const pushedWindows: LeadTimePolicyPricePushResult["windows"] = [];
   const failed: LeadTimePolicyPricePushResult["failed"] = [];
@@ -152,7 +149,10 @@ export async function pushLeadTimePolicyPricesToGuesty(args: {
     const setCost = args.monthlyBuyInByMonth?.get(monthKey)
       ?? totalNightlyBuyInForMonth(args.community, args.units, monthKey, args.propertyId);
     if (!(setCost > 0)) continue;
-    const demandFactor = demandFactorForPolicyBand(window.policyBand);
+    // setCost is fed to Guesty as the desired NET disbursement (cost × margin);
+    // Guesty applies the per-channel markup that recovers each channel's
+    // commission, so we do NOT gross up for commission here.
+    const demandFactor = lastMinuteDemandFactor(window.daysUntilArrival);
     const targetRate = Math.round(setCost * demandFactor * (1 + args.targetMargin));
     try {
       await guestyRequest("PUT", calPath, {
@@ -182,7 +182,7 @@ export async function pushLeadTimePolicyPricesToGuesty(args: {
     total: scarcityWindows.length,
     windows: pushedWindows,
     failed,
-    summary: `lead-time-prices ${pushedWindows.length}/${scarcityWindows.length} windows (+15/+25/+40/+50%)`,
+    summary: `last-minute-prices ${pushedWindows.length}/${scarcityWindows.length} windows (+${Math.round(LAST_MINUTE_MARKUP_PCT * 100)}% within ${LAST_MINUTE_MARKUP_DAYS}d)`,
   };
 }
 

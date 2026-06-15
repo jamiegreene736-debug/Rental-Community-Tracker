@@ -9,6 +9,36 @@ export const DEFAULT_ULTRA_PEAK_LEAD_TIME_MARKUP = 0.50;
 type AvailabilityPricingVerdict = "open" | "tight" | "blocked";
 export type LeadTimePricingBand = "standard" | "high" | "majorHoliday" | "ultraPeak";
 
+// ─────────────────────────────────────────────────────────────────────────
+// LAST-MINUTE (lead-time) PRICING MARKUP — 2026-06-14 redesign.
+//
+// Old scheme: an escalating per-SEASON-band surcharge (standard +15% / high
+// +25% / holiday +40% / ultra +50%) applied to EVERY date within 45/75/90/120
+// days of arrival. That priced us above market for near-term dates 6+ weeks
+// out where our actual buy-in cost had NOT yet risen, and (since we hold no
+// inventory) an over-market date just doesn't book.
+//
+// We measured the real premium from 479 of our own VRBO scrapes: cost/night is
+// flat until ~14 days out, then ~+6% (days 8-14) and ~+13% (final 7 days). So
+// the markup is now a single FLAT surcharge that only applies inside the final
+// LAST_MINUTE_MARKUP_DAYS — enough to cover the genuine final-fortnight bump
+// without pricing out the long lead-time bookings that are ~95% of demand.
+// See memory: leadtime-markup-vs-buyin-profit-analysis.
+export const LAST_MINUTE_MARKUP_DAYS = 14;   // only dates within 14 days of arrival
+export const LAST_MINUTE_MARKUP_PCT = 0.15;  // flat +15% (covers the measured ~+13% final-week cost bump)
+
+export function lastMinuteMarkupForDaysUntilArrival(daysUntilArrival: number): number {
+  return daysUntilArrival <= LAST_MINUTE_MARKUP_DAYS ? LAST_MINUTE_MARKUP_PCT : 0;
+}
+
+export function lastMinuteDemandFactor(daysUntilArrival: number): number {
+  return 1 + lastMinuteMarkupForDaysUntilArrival(daysUntilArrival);
+}
+
+// DEPRECATED for pricing (2026-06-14): the band-escalating lead-time markup is
+// no longer used to push rates — see lastMinuteDemandFactor above. Retained
+// only so the season-band constants/type still resolve for any band-model
+// reference; do NOT reintroduce this into a Guesty rate push.
 export function leadTimeMarkupForPolicyBand(band: LeadTimePricingBand | null | undefined): number {
   if (band === "ultraPeak") return DEFAULT_ULTRA_PEAK_LEAD_TIME_MARKUP;
   if (band === "majorHoliday") return DEFAULT_MAJOR_HOLIDAY_LEAD_TIME_MARKUP;
@@ -16,6 +46,7 @@ export function leadTimeMarkupForPolicyBand(band: LeadTimePricingBand | null | u
   return DEFAULT_STANDARD_LEAD_TIME_MARKUP;
 }
 
+/** @deprecated for pricing — use {@link lastMinuteDemandFactor}. */
 export function demandFactorForPolicyBand(band: LeadTimePricingBand | null | undefined): number {
   return 1 + leadTimeMarkupForPolicyBand(band);
 }

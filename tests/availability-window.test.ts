@@ -4,6 +4,10 @@ process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 
 const {
   demandFactorForPolicyBand,
+  lastMinuteMarkupForDaysUntilArrival,
+  lastMinuteDemandFactor,
+  LAST_MINUTE_MARKUP_DAYS,
+  LAST_MINUTE_MARKUP_PCT,
   isDueForPolicyPass,
 } = await import("../server/availability-policy");
 
@@ -188,10 +192,25 @@ assert.equal(
 );
 console.log("  ✓ daily policy pass is due after 1 AM Eastern");
 
+// Legacy band markups (retained but no longer drive pricing — see below).
 assert.equal(demandFactorForPolicyBand("standard"), 1.15);
 assert.equal(demandFactorForPolicyBand("high"), 1.25);
 assert.equal(demandFactorForPolicyBand("majorHoliday"), 1.4);
 assert.equal(demandFactorForPolicyBand("ultraPeak"), 1.5);
-console.log("  ✓ lead-time policy bands use fixed seasonal markups");
+console.log("  ✓ legacy lead-time policy band markups unchanged");
+
+// 2026-06-14 live pricing rule: a single FLAT markup applied ONLY within
+// LAST_MINUTE_MARKUP_DAYS of arrival, regardless of season band.
+assert.equal(LAST_MINUTE_MARKUP_DAYS, 14, "last-minute window is 14 days");
+assert.equal(LAST_MINUTE_MARKUP_PCT, 0.15, "last-minute markup is +15%");
+assert.equal(lastMinuteMarkupForDaysUntilArrival(0), 0.15, "0 days out → +15%");
+assert.equal(lastMinuteMarkupForDaysUntilArrival(7), 0.15, "7 days out → +15%");
+assert.equal(lastMinuteMarkupForDaysUntilArrival(14), 0.15, "14 days out → +15% (inclusive)");
+assert.equal(lastMinuteMarkupForDaysUntilArrival(15), 0, "15 days out → no markup");
+assert.equal(lastMinuteMarkupForDaysUntilArrival(45), 0, "45 days out → no markup (old standard window)");
+assert.equal(lastMinuteMarkupForDaysUntilArrival(120), 0, "120 days out → no markup (old ultra window)");
+assert.equal(lastMinuteDemandFactor(10), 1.15, "demand factor inside window is 1.15×");
+assert.equal(lastMinuteDemandFactor(30), 1, "demand factor outside window is 1.00×");
+console.log("  ✓ last-minute markup is flat +15% within 14 days, 0 beyond");
 
 console.log("availability window suite passed");

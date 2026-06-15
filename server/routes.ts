@@ -186,7 +186,9 @@ import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybr
 import {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
   DEFAULT_TIGHT_SCARCITY_MARKUP,
-  demandFactorForPolicyBand,
+  lastMinuteDemandFactor,
+  LAST_MINUTE_MARKUP_DAYS,
+  LAST_MINUTE_MARKUP_PCT,
   pushLeadTimePolicyPricesToGuesty,
   runFullScanForProperty,
   runFullScanNow,
@@ -842,6 +844,15 @@ function bulkPricingBaseUrl(): string {
   return `http://127.0.0.1:${process.env.PORT || "5000"}`;
 }
 
+// The rate we feed Guesty is the desired NET DISBURSEMENT: buy-in cost basis
+// × (1 + targetMargin). We do NOT gross up for channel commission here —
+// Guesty is configured to apply the per-channel markup that recovers each
+// channel's fee, then disburse this base rate to us net (operator decision
+// 2026-06-14). targetMargin is therefore the CLEAN margin over cost (e.g.
+// 0.20 = net 20% over cost after Airbnb/Booking.com/VRBO commission). If
+// Guesty's per-channel markups are ever turned off, this rate would net
+// (1 + targetMargin) × (1 − commission) instead — so keep those markups set
+// (Airbnb ~+18.3%, Booking.com ~+20.5%, VRBO ~+8.7% to fully recover fees).
 const cleanBaseRateFromBuyInServer = (
   buyIn: number,
   targetMargin: number,
@@ -26507,13 +26518,14 @@ Return ONLY compact JSON with this exact shape:
   // the last run of the availability scan) and emits a per-week pricing
   // forecast that the UI renders side-by-side with the scanner output.
   //
-  // Formula:
+  // Formula (2026-06-14: flat last-minute markup, not the old per-band scheme):
   //   baseNightly     = sum over units of the saved all-in buy-in basis for this month/season
-  //   demandFactor    = open → 1.00 | standard → 1.15 | high → 1.25 | holiday → 1.40 | ultra → 1.50
+  //   demandFactor    = within LAST_MINUTE_MARKUP_DAYS of arrival → 1 + LAST_MINUTE_MARKUP_PCT | else 1.00
   //   targetRate      = round(baseNightly × demandFactor × (1 + margin))
   //   deltaVsBase     = (targetRate - baseOnlyRate) / baseOnlyRate
   //
-  // The demand factor is fixed by the calendar lead-time policy band.
+  // The demand factor depends only on days-until-arrival now, matching the
+  // Guesty push in pushLeadTimePolicyPricesToGuesty.
   app.post("/api/availability/weekly-pricing/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId, 10);
     if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
@@ -26541,7 +26553,11 @@ Return ONLY compact JSON with this exact shape:
         baseNightly = totalNightlyBuyInForMonth(config.community, config.units, monthKey, propertyId);
         baseByMonth.set(monthKey, baseNightly);
       }
-      const demandFactor = w.verdict === "blocked" ? demandFactorForPolicyBand(w.policyBand) : 1;
+      const startMs = new Date(`${w.startDate}T12:00:00Z`).getTime();
+      const daysUntilArrival = Number.isFinite(startMs)
+        ? Math.round((startMs - Date.now()) / 86_400_000)
+        : Number.POSITIVE_INFINITY;
+      const demandFactor = lastMinuteDemandFactor(daysUntilArrival);
       const baseOnlyRate = Math.round(baseNightly * (1 + targetMargin));
       const targetRate = Math.round(baseNightly * demandFactor * (1 + targetMargin));
       const deltaVsBase = baseOnlyRate > 0 && targetRate > 0
@@ -26562,12 +26578,10 @@ Return ONLY compact JSON with this exact shape:
     res.json({
       community: config.community,
       targetMargin,
-      leadTimeMarkups: {
-        standard: 0.15,
-        high: 0.25,
-        majorHoliday: 0.40,
-        ultraPeak: 0.50,
-      },
+      // 2026-06-14: a single flat last-minute markup replaces the old
+      // per-season-band escalation. Reported as days→pct so the UI is honest
+      // about what actually gets pushed.
+      lastMinuteMarkup: { withinDays: LAST_MINUTE_MARKUP_DAYS, pct: LAST_MINUTE_MARKUP_PCT },
       rows,
     });
   });
