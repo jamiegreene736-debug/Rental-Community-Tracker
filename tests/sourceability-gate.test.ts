@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 
-const { decideSourceability, generateWeeklyWindows, applyConfirmation, confirmedAction } = await import("../server/sourceability-gate-core");
+const { decideSourceability, generateWeeklyWindows, applyConfirmation, confirmedAction, classifyObservation } = await import("../server/sourceability-gate-core");
 
 console.log("sourceability gate suite");
 
@@ -100,5 +100,34 @@ console.log("  ✓ generateWeeklyWindows: 7-night windows within [minLead, horiz
   assert.equal(confirmedAction(t, 2), "block", "block, skip, block → confirmed (skip is neutral)");
 }
 console.log("  ✓ confirmation guard: N-consecutive required; noise never acts; skip is neutral");
+
+// ── UI status classifier (the "1/2 — one more sweep to block" labels) ──
+{
+  // the operator's exact ask: flagged once, needs a second sweep
+  const onceFlagged = classifyObservation({ consecutiveBlocks: 1, consecutiveOpens: 0, threshold: 2, blockedOnGuesty: false });
+  assert.equal(onceFlagged.status, "block-pending");
+  assert.equal(onceFlagged.label, "Loss flagged 1/2 — 1 more sweep to block");
+  assert.deepEqual(onceFlagged.progress, { count: 1, of: 2 });
+
+  // confirmed (2/2) but not yet pushed to Guesty
+  const confirmed = classifyObservation({ consecutiveBlocks: 2, consecutiveOpens: 0, threshold: 2, blockedOnGuesty: false });
+  assert.equal(confirmed.status, "blocked");
+
+  // live on the calendar
+  const live = classifyObservation({ consecutiveBlocks: 2, consecutiveOpens: 0, threshold: 2, blockedOnGuesty: true });
+  assert.equal(live.status, "blocked");
+  assert.equal(live.label, "Blocked on Guesty");
+
+  // sourceable confirmed + forming
+  assert.equal(classifyObservation({ consecutiveBlocks: 0, consecutiveOpens: 2, threshold: 2, blockedOnGuesty: false }).status, "sourceable");
+  assert.equal(classifyObservation({ consecutiveBlocks: 0, consecutiveOpens: 1, threshold: 2, blockedOnGuesty: false }).status, "sourceable-pending");
+
+  // nothing yet
+  assert.equal(classifyObservation({ consecutiveBlocks: 0, consecutiveOpens: 0, threshold: 2, blockedOnGuesty: false }).status, "unknown");
+
+  // higher threshold pluralizes correctly
+  assert.equal(classifyObservation({ consecutiveBlocks: 1, consecutiveOpens: 0, threshold: 3, blockedOnGuesty: false }).label, "Loss flagged 1/3 — 2 more sweeps to block");
+}
+console.log("  ✓ classifyObservation: 1/2 pending, 2/2 confirmed, live-blocked, sourceable, plural labels");
 
 console.log("sourceability gate suite passed");

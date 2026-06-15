@@ -452,6 +452,8 @@ export default function AvailabilityScanner() {
           </Card>
         </div>
 
+        <SourceabilityGateCard />
+
         <Tabs defaultValue="results" className="space-y-4">
           <TabsList>
             <TabsTrigger value="results" data-testid="tab-results">
@@ -669,5 +671,140 @@ export default function AvailabilityScanner() {
         </Tabs>
       </div>
     </div>
+  );
+}
+
+// ── Sourceability Gate (auto-block) confirmation status ──────────────────────
+type SourceabilityWindow = {
+  propertyId: number;
+  community: string | null;
+  startDate: string;
+  endDate: string;
+  lastDecision: string | null;
+  consecutiveBlocks: number;
+  consecutiveOpens: number;
+  cheapestCost: number | null;
+  sellableRevenue: number | null;
+  lastReason: string | null;
+  updatedAt: string;
+  blockedOnGuesty: boolean;
+  status: "blocked" | "block-pending" | "sourceable" | "sourceable-pending" | "unknown";
+  statusLabel: string;
+  progress: { count: number; of: number } | null;
+};
+type SourceabilityObsResponse = {
+  enabled: boolean;
+  enforced: boolean;
+  confirmThreshold: number;
+  windows: SourceabilityWindow[];
+};
+
+const usd = (n: number | null) => (n == null ? "—" : `$${n.toLocaleString()}`);
+const fmtRange = (s: string, e: string) => {
+  const d = (x: string) => new Date(`${x}T12:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `${d(s)} – ${d(e)}`;
+};
+
+function StatusPill({ w }: { w: SourceabilityWindow }) {
+  if (w.status === "blocked") {
+    return <Badge className="bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300 border-red-200 gap-1"><Shield className="h-3 w-3" /> {w.statusLabel}</Badge>;
+  }
+  if (w.status === "block-pending") {
+    return <Badge className="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border-amber-200 gap-1"><AlertTriangle className="h-3 w-3" /> {w.statusLabel}</Badge>;
+  }
+  if (w.status === "sourceable") {
+    return <Badge className="bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 border-green-200 gap-1"><CheckCircle2 className="h-3 w-3" /> Sourceable</Badge>;
+  }
+  if (w.status === "sourceable-pending") {
+    return <Badge variant="secondary" className="gap-1"><CheckCircle2 className="h-3 w-3" /> {w.statusLabel}</Badge>;
+  }
+  return <Badge variant="outline" className="gap-1 text-muted-foreground"><Clock className="h-3 w-3" /> Checking…</Badge>;
+}
+
+function SourceabilityGateCard() {
+  const obsQuery = useQuery<SourceabilityObsResponse>({
+    queryKey: ["/api/availability/sourceability-observations"],
+    refetchInterval: 30000,
+  });
+  const data = obsQuery.data;
+  const windows = data?.windows ?? [];
+  const threshold = data?.confirmThreshold ?? 2;
+  const blocked = windows.filter((w) => w.status === "blocked").length;
+  const pending = windows.filter((w) => w.status === "block-pending").length;
+  const sourceable = windows.filter((w) => w.status === "sourceable").length;
+
+  return (
+    <Card className="p-4 mb-6 border-amber-200 dark:border-amber-900/60" data-testid="card-sourceability-gate">
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <h2 className="text-lg font-semibold flex items-center gap-2">
+          <Shield className="h-5 w-5 text-amber-500" /> Sourceability Gate
+        </h2>
+        <div className="flex items-center gap-2">
+          {data && (
+            <Badge variant={data.enabled ? "default" : "outline"} data-testid="badge-gate-enabled">
+              {data.enabled ? "On" : "Off"}
+            </Badge>
+          )}
+          {data && (
+            <Badge variant={data.enforced ? "default" : "secondary"} data-testid="badge-gate-enforced">
+              {data.enforced ? "Enforcing" : "Dry-run"}
+            </Badge>
+          )}
+          <Button variant="ghost" size="sm" onClick={() => obsQuery.refetch()} data-testid="button-gate-refresh">
+            <RefreshCw className={`h-4 w-4 ${obsQuery.isFetching ? "animate-spin" : ""}`} />
+          </Button>
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground mb-3">
+        A window must be flagged unsourceable (a loss) in <strong>{threshold} consecutive nightly sweeps</strong> before
+        its dates are blocked on Guesty — so one bad scan can never block a profitable week. The progress below shows how
+        close each window is.
+      </p>
+
+      {!data ? (
+        <p className="text-sm text-muted-foreground py-4 flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</p>
+      ) : windows.length === 0 ? (
+        <p className="text-sm text-muted-foreground py-4">
+          No windows evaluated yet. The nightly sweep populates this once it runs (after 1&nbsp;AM ET), or trigger a manual scan.
+        </p>
+      ) : (
+        <>
+          <div className="flex gap-4 text-sm mb-3">
+            <span className="text-red-600 dark:text-red-400 font-medium">{blocked} blocked</span>
+            <span className="text-amber-700 dark:text-amber-400 font-medium">{pending} needs another sweep</span>
+            <span className="text-green-600 dark:text-green-400 font-medium">{sourceable} sourceable</span>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Community / Unit</TableHead>
+                <TableHead>Window</TableHead>
+                <TableHead>Confirmation status</TableHead>
+                <TableHead className="text-right">Cheapest vs. sell</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {windows.slice(0, 40).map((w) => (
+                <TableRow key={`${w.propertyId}-${w.startDate}`} data-testid={`row-gate-${w.propertyId}-${w.startDate}`}>
+                  <TableCell className="font-medium">{w.community ?? `Property ${w.propertyId}`} <span className="text-xs text-muted-foreground">#{w.propertyId}</span></TableCell>
+                  <TableCell>{fmtRange(w.startDate, w.endDate)}</TableCell>
+                  <TableCell><StatusPill w={w} /></TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {w.cheapestCost != null || w.sellableRevenue != null ? (
+                      <span className={w.status === "blocked" || w.status === "block-pending" ? "text-red-600 dark:text-red-400" : ""}>
+                        {usd(w.cheapestCost)} <span className="text-muted-foreground">vs</span> {usd(w.sellableRevenue)}
+                      </span>
+                    ) : "—"}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {windows.length > 40 && (
+            <p className="text-xs text-muted-foreground mt-2">Showing 40 of {windows.length} windows (most actionable first).</p>
+          )}
+        </>
+      )}
+    </Card>
   );
 }
