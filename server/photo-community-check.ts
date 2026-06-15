@@ -83,7 +83,7 @@ export type CommunityGroupResult = {
   photosChecked: number;
   photosTotal: number;
   identifiedCommunity: string;
-  matchesExpected: "yes" | "no" | "uncertain";
+  matchesExpected: "yes" | "no";
   matchReason: string;
   allSameCommunity: boolean;
   outliers: FlaggedPhoto[];
@@ -98,7 +98,7 @@ export type UnitGroupResult = {
   photosChecked: number;
   photosTotal: number;
   identifiedCommunity: string;
-  sameAsCommunity: "yes" | "no" | "uncertain";
+  sameAsCommunity: "yes" | "no";
   reason: string;
   allSameUnit: boolean;
   outliers: FlaggedPhoto[];
@@ -287,18 +287,18 @@ function buildInstruction(expectedCommunity: string, unitLabels: string[]): stri
     "",
     "The photos are provided below. Each is preceded by a text marker giving its GROUP, a stable ID (e.g. C1, U1-3), and its current caption. Reference photos by that ID.",
     "",
-    "Judge carefully and avoid false alarms:",
-    "- UNIT photos are interiors; COMMUNITY photos are outdoor amenities. They naturally look different. Do NOT call a unit a different community just because it's an interior.",
-    "- Base any cross-community 'no' on a POSITIVE contradiction: a different named resort visible on signage/towels/keycards, a clearly different region or climate (e.g. tropical vs. alpine), an incompatible building type (oceanfront high-rise vs. low-rise garden condo) or view (ocean vs. cityscape) that cannot be the same resort, or a distinctly different architectural style/era/materials.",
-    "- Generic photos that COULD be the expected community but lack proof are 'uncertain', NOT 'no'.",
-    "- For matchesExpected: 'yes' = positive evidence it IS the expected community; 'no' = positive evidence it is a DIFFERENT community; 'uncertain' = plausible but unproven.",
+    "This is a BINARY decision tool. For matchesExpected and sameAsCommunity you MUST answer exactly \"yes\" or \"no\" — NEVER \"uncertain\", \"maybe\", or \"unclear\". (Only the free-text 'identified' field may say 'unclear' when you cannot name the exact resort — the yes/no DECISION is still required.)",
+    "Decide carefully and avoid false alarms:",
+    "- Default to \"yes\" (same community). Answer \"no\" ONLY when you can point to a POSITIVE contradiction: a different named resort visible on signage/towels/keycards, a clearly different region or climate (e.g. tropical vs. alpine), an incompatible building type (oceanfront high-rise vs. low-rise garden condo) or view (ocean vs. cityscape) that cannot be the same resort, or a distinctly different architectural style/era/materials.",
+    "- UNIT photos are interiors; COMMUNITY photos are outdoor amenities. They naturally look different — that difference ALONE is never grounds for \"no\". A generic or hard-to-place photo that shows no contradiction is \"yes\", NOT a maybe.",
+    "- matchesExpected: \"yes\" = consistent with the expected community / no contradiction found; \"no\" = positive evidence it is a DIFFERENT community than expected.",
     "",
     "For the COMMUNITY set: identify what resort/community/region the photos depict (read signage, architecture, landscape, landmarks; if you cannot name it, describe the place type and use 'unclear'); decide matchesExpected; decide whether ALL community photos are the same community and list any outlier IDs; flag junk.",
-    `For EACH UNIT set (in order: ${unitLabels.map((l, i) => `unit ${i + 1} = "${l}"`).join(", ") || "none"}): say what community/region it appears to be in; decide sameAsCommunity (is it the SAME community as the community photos?) using finishes, window/lanai views, balcony railings, landscaping visible outside, building style; decide whether all photos are the same unit and list outliers; flag junk.`,
+    `For EACH UNIT set (in order: ${unitLabels.map((l, i) => `unit ${i + 1} = "${l}"`).join(", ") || "none"}): say what community/region it appears to be in; decide sameAsCommunity as a strict yes/no (is it the SAME community as the community photos? "no" ONLY on a positive contradiction, else "yes") using finishes, window/lanai views, balcony railings, landscaping visible outside, building style; decide whether all photos are the same unit and list outliers; flag junk.`,
     "Junk = floorplans, maps, logos/branding tiles, screenshots, images whose main subject is a person's face, or any visible COMPETITOR watermark/branding (Airbnb/Vrbo/Booking/another property manager).",
     "",
     "Respond with ONLY a single minified JSON object — no prose, no code fences — matching this shape exactly:",
-    '{"community":{"identified":"string","matchesExpected":"yes|no|uncertain","matchReason":"short string","allSameCommunity":true,"outliers":[{"id":"C3","reason":"string"}],"junk":[{"id":"C5","reason":"string"}],"confidence":0.0},"units":[{"group":"echo the unit label","identified":"string","sameAsCommunity":"yes|no|uncertain","reason":"short string","allSameUnit":true,"outliers":[{"id":"U1-2","reason":"string"}],"junk":[],"confidence":0.0}],"overall":{"allSameCommunity":"yes|no|uncertain","summary":"1-3 sentence operator-facing summary","concerns":["short string"]}}',
+    '{"community":{"identified":"string","matchesExpected":"yes|no","matchReason":"short string","allSameCommunity":true,"outliers":[{"id":"C3","reason":"string"}],"junk":[{"id":"C5","reason":"string"}],"confidence":0.0},"units":[{"group":"echo the unit label","identified":"string","sameAsCommunity":"yes|no","reason":"short string","allSameUnit":true,"outliers":[{"id":"U1-2","reason":"string"}],"junk":[],"confidence":0.0}],"overall":{"allSameCommunity":"yes|no","summary":"1-3 sentence operator-facing summary","concerns":["short string"]}}',
     "Return units in the SAME ORDER the unit groups were presented. If there is no community set, set community to null and judge whether the unit sets are mutually the same community.",
   ].join("\n");
 }
@@ -326,11 +326,14 @@ type VisionJson = {
   overall?: { allSameCommunity?: unknown; summary?: unknown; concerns?: unknown };
 };
 
-function asTriState(v: unknown): "yes" | "no" | "uncertain" {
+// Binary decision mapper for the same-community questions. The operator wants a
+// definite yes/no, never a "maybe": "no" requires a POSITIVE different-community
+// signal; anything else (yes, blank, or a model that slipped and said
+// "uncertain"/"unclear") means no contradiction was found → "yes" (same).
+function asYesNo(v: unknown): "yes" | "no" {
   const s = String(v ?? "").trim().toLowerCase();
-  if (s === "yes" || s === "true") return "yes";
-  if (s === "no" || s === "false") return "no";
-  return "uncertain";
+  if (s === "no" || s === "false" || s === "different") return "no";
+  return "yes";
 }
 
 function asConfidence(v: unknown): number {
@@ -531,7 +534,7 @@ export async function runPhotoCommunityCheck(
       photosChecked: r.sampled.length,
       photosTotal: r.total,
       identifiedCommunity: String(c.identified ?? "").trim() || "unclear",
-      matchesExpected: asTriState(c.matchesExpected),
+      matchesExpected: asYesNo(c.matchesExpected),
       matchReason: String(c.matchReason ?? "").trim(),
       allSameCommunity: c.allSameCommunity !== false,
       outliers: asFlags(c.outliers, r.sampled),
@@ -548,8 +551,10 @@ export async function runPhotoCommunityCheck(
       photosChecked: r.sampled.length,
       photosTotal: r.total,
       identifiedCommunity: "unclear",
-      matchesExpected: "uncertain",
-      matchReason: "Model did not return a community assessment.",
+      // No assessment came back → no contradiction was found, so the binary
+      // decision defaults to "yes" (same) rather than a "maybe".
+      matchesExpected: "yes",
+      matchReason: "Model did not return a community assessment; no contradiction found.",
       allSameCommunity: true,
       outliers: [],
       junk: [],
@@ -568,7 +573,7 @@ export async function runPhotoCommunityCheck(
       photosChecked: r.sampled.length,
       photosTotal: r.total,
       identifiedCommunity: String(u.identified ?? "").trim() || "unclear",
-      sameAsCommunity: asTriState(u.sameAsCommunity),
+      sameAsCommunity: asYesNo(u.sameAsCommunity),
       reason: String(u.reason ?? "").trim(),
       allSameUnit: u.allSameUnit !== false,
       outliers: asFlags(u.outliers, r.sampled),
@@ -577,7 +582,7 @@ export async function runPhotoCommunityCheck(
     };
   });
 
-  const overallSame = asTriState(parsed.overall?.allSameCommunity);
+  const overallSame = asYesNo(parsed.overall?.allSameCommunity);
   const modelConcerns = Array.isArray(parsed.overall?.concerns)
     ? (parsed.overall!.concerns as unknown[]).map((c) => String(c).trim()).filter(Boolean)
     : [];
@@ -592,15 +597,17 @@ export async function runPhotoCommunityCheck(
   const fail = (msg: string) => { hasFail = true; concerns.push(msg); };
   const warn = (msg: string) => { hasWarn = true; concerns.push(msg); };
 
+  // The same-community decision is BINARY now (yes/no), so it only ever drives a
+  // hard FAIL on a positive different-community contradiction — never a "maybe"
+  // warn. Warns below are reserved for the SEPARATE advisory axes (within-folder
+  // outliers, junk/mis-filed, cross-folder duplicates).
   if (community) {
     if (community.matchesExpected === "no") fail(`Community photos appear to be a DIFFERENT community than "${expectedCommunity || "expected"}" (identified: ${community.identifiedCommunity}).`);
-    else if (community.matchesExpected === "uncertain") warn(`Could not positively confirm the community photos are "${expectedCommunity || "the expected community"}".`);
     if (!community.allSameCommunity || community.outliers.length > 0) warn(`Community folder has ${community.outliers.length || "some"} photo(s) that may be from a different place.`);
     if (community.junk.length > 0) warn(`Community folder has ${community.junk.length} junk/mis-filed photo(s).`);
   }
   for (const u of units) {
     if (u.sameAsCommunity === "no") fail(`${u.label} appears to be a DIFFERENT community than the community photos (identified: ${u.identifiedCommunity}).`);
-    else if (u.sameAsCommunity === "uncertain") warn(`Could not confirm ${u.label} is the same community as the community photos.`);
     if (!u.allSameUnit || u.outliers.length > 0) warn(`${u.label} has photo(s) that may not be the same unit.`);
     if (u.junk.length > 0) warn(`${u.label} has ${u.junk.length} junk/mis-filed photo(s).`);
   }

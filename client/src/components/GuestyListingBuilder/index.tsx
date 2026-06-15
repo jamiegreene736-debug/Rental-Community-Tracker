@@ -946,9 +946,12 @@ type CommunityCheckGroup = {
   photosChecked: number;
   photosTotal: number;
   identifiedCommunity: string;
-  matchesExpected?: "yes" | "no" | "uncertain";
+  // Binary by design — the server answers each folder yes/no, never "uncertain"
+  // (see asYesNo in server/photo-community-check.ts). The operator wants a
+  // definite verdict, not a maybe.
+  matchesExpected?: "yes" | "no";
   matchReason?: string;
-  sameAsCommunity?: "yes" | "no" | "uncertain";
+  sameAsCommunity?: "yes" | "no";
   reason?: string;
   allSameCommunity?: boolean;
   allSameUnit?: boolean;
@@ -6838,10 +6841,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     : r.verdict === "fail"
                                     ? { bg: "#fee2e2", fg: "#b91c1c", label: "✗ Problem found" }
                                     : { bg: "#fef9c3", fg: "#92400e", label: "⚠ Review needed" };
-                                  const tri = (s?: "yes" | "no" | "uncertain") =>
-                                    s === "yes" ? { bg: "#dcfce7", fg: "#15803d", label: "Yes" }
-                                    : s === "no" ? { bg: "#fee2e2", fg: "#b91c1c", label: "No" }
-                                    : { bg: "#f1f5f9", fg: "#475569", label: "Uncertain" };
+                                  // Binary badge for the same-community axis — never "Uncertain".
+                                  // Defaults to Yes (no positive contradiction = same community),
+                                  // mirroring the server's asYesNo() mapping so the operator always
+                                  // gets a definite yes/no, not a maybe.
+                                  const yn = (s?: "yes" | "no") =>
+                                    s === "no" ? { bg: "#fee2e2", fg: "#b91c1c", label: "No" }
+                                    : { bg: "#dcfce7", fg: "#15803d", label: "Yes" };
                                   const badge = (c: { bg: string; fg: string }): CSSProperties => ({
                                     display: "inline-block", fontSize: 10.5, fontWeight: 600, padding: "1px 7px",
                                     borderRadius: 10, background: c.bg, color: c.fg,
@@ -6863,51 +6869,32 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   const crossDupes = r.duplicates.filter((d) => d.scope === "cross-folder");
 
                                   // ── Same-community roll-up (the operator's core question) ──────
-                                  // One glanceable answer: name each folder's community and give a
-                                  // single GREEN "YES — all same" / RED "FAILED — not all same"
-                                  // verdict. This is computed deterministically from the per-folder
-                                  // signals (never the model's free-text "vibe"):
-                                  //   • RED   on any POSITIVE contradiction — the community folder is
-                                  //           a different community than the UI, or any unit is a
-                                  //           different community than the community folder.
-                                  //   • GREEN only when every set is POSITIVELY confirmed: the
-                                  //           community folder matches the UI AND every unit matches
-                                  //           the community folder.
-                                  //   • AMBER otherwise (no contradiction, but not fully confirmed) —
-                                  //           we never silently green an unconfirmed identity.
+                                  // One glanceable, BINARY answer: name each folder's community and
+                                  // give a single GREEN "YES" / RED "FAILED" verdict — never a maybe.
+                                  // The server now decides each folder yes/no ("no" ONLY on a positive
+                                  // different-community contradiction; see asYesNo), so the headline is:
+                                  //   • RED "FAILED" on ANY positive contradiction (community folder
+                                  //     ≠ the UI community, or any unit ≠ the community folder).
+                                  //   • GREEN "YES" otherwise — no contradiction found = same community.
+                                  // The only non-binary state left is purely factual, NOT a maybe: a
+                                  // single photo set has nothing to compare against (neutral grey).
                                   const communityMatch = r.community?.matchesExpected;
                                   const unitMatches = r.units.map((u) => u.sameAsCommunity);
-                                  // "All the same community" only means something with at least TWO
-                                  // photo sets to compare. A lone community folder (units not
-                                  // attached yet) or a single unit has nothing to confirm sameness
-                                  // against, so it must NEVER read as a confident GREEN — [].every()
-                                  // is vacuously true, which would otherwise green a one-folder check.
                                   const comparableSets = (r.community ? 1 : 0) + r.units.length;
                                   const anyDifferent =
                                     communityMatch === "no" ||
                                     unitMatches.some((m) => m === "no") ||
-                                    (!r.community && r.allSameCommunity === "no");
-                                  const allConfirmed =
-                                    !anyDifferent &&
-                                    comparableSets >= 2 &&
-                                    unitMatches.every((m) => m === "yes") &&
-                                    (r.community ? communityMatch === "yes" : r.allSameCommunity === "yes");
-                                  const sameVerdict: "yes" | "no" | "uncertain" =
-                                    anyDifferent ? "no" : allConfirmed ? "yes" : "uncertain";
-                                  // Distinguish "couldn't confirm" (≥2 sets, but not proven) from
-                                  // "nothing to compare" (only one set) — the latter isn't a warning.
+                                    r.allSameCommunity === "no";
                                   const nothingToCompare = !anyDifferent && comparableSets < 2;
                                   const sameStyle =
-                                    sameVerdict === "yes"
-                                      ? { bg: "#dcfce7", fg: "#15803d", label: "✓ YES — all the same community" }
-                                      : sameVerdict === "no"
+                                    anyDifferent
                                       ? { bg: "#fee2e2", fg: "#b91c1c", label: "✗ FAILED — NOT all the same community" }
                                       : nothingToCompare
                                       ? { bg: "#f1f5f9", fg: "#475569", label: "ⓘ Only one photo set — attach units to compare" }
-                                      : { bg: "#fef9c3", fg: "#92400e", label: "⚠ Couldn’t confirm — eyeball the folders below" };
+                                      : { bg: "#dcfce7", fg: "#15803d", label: "✓ YES — all the same community" };
                                   // Roster: community folder first, then each unit, each as
                                   // "<label> is <identified community>" + a same/different badge.
-                                  const rosterRows: Array<{ label: string; identified: string; status?: "yes" | "no" | "uncertain"; vsLabel: string }> = [];
+                                  const rosterRows: Array<{ label: string; identified: string; status?: "yes" | "no"; vsLabel: string }> = [];
                                   if (r.community) {
                                     rosterRows.push({
                                       label: r.community.label,
@@ -6929,7 +6916,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     <div style={{ marginTop: 10 }}>
                                       {/* Headline answer to the operator's literal question:
                                           "Community folder is X, Unit A is X, Unit B is X" +
-                                          one green YES / red FAILED verdict. */}
+                                          one green YES / red FAILED verdict. Only on a real
+                                          analysis — error results (no photos / no API key /
+                                          vision failed) fall through to the summary below,
+                                          which explains the failure. */}
+                                      {r.ok && (
                                       <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px", marginBottom: 8 }}>
                                         <div style={{ fontSize: 10.5, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>
                                           Same community?
@@ -6937,7 +6928,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         <span style={{ ...badge(sameStyle), fontSize: 13, padding: "3px 12px", borderRadius: 12 }}>{sameStyle.label}</span>
                                         <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
                                           {rosterRows.map((row, i) => {
-                                            const t = tri(row.status);
+                                            const t = yn(row.status);
                                             return (
                                               <div key={i} style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 12, flexWrap: "wrap" }}>
                                                 <span style={{ fontWeight: 600, color: "#0f172a" }}>{row.label}</span>
@@ -6953,6 +6944,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           <div style={{ fontSize: 10.5, color: "#94a3b8", marginTop: 7 }}>UI community: “{r.expectedCommunity}”</div>
                                         ) : null}
                                       </div>
+                                      )}
 
                                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                         <span style={{ ...badge(vStyle), fontSize: 12, padding: "2px 10px" }}>{vStyle.label}</span>
@@ -6973,7 +6965,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           </div>
                                           <div style={rowS}>Identified as: <b>{r.community.identifiedCommunity}</b></div>
                                           <div style={rowS}>
-                                            Matches expected{r.expectedCommunity ? ` ("${r.expectedCommunity}")` : ""}: <span style={badge(tri(r.community.matchesExpected))}>{tri(r.community.matchesExpected).label}</span>
+                                            Matches expected{r.expectedCommunity ? ` ("${r.expectedCommunity}")` : ""}: <span style={badge(yn(r.community.matchesExpected))}>{yn(r.community.matchesExpected).label}</span>
                                             {r.community.matchReason ? <span style={muted}> — {r.community.matchReason}</span> : null}
                                           </div>
                                           {!r.community.allSameCommunity && (
@@ -6985,7 +6977,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       )}
 
                                       {r.units.map((u, i) => {
-                                        const t = tri(u.sameAsCommunity);
+                                        const t = yn(u.sameAsCommunity);
                                         return (
                                           <div key={i} style={card}>
                                             <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
