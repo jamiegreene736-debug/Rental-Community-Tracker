@@ -1110,6 +1110,39 @@ margin on the SELL side (pricing) and the SOURCING side (the gate). PRs #663
   db:push creates it; also applied directly via psql per the db:push-skips-ALTER
   caveat below).
 
+49. **Market-rate refresh WIDENS the Airbnb search when a resort footprint has
+    no priced comps — it never falls back to static data.** `fetchAirbnbMedianNightly`
+    (`server/hybrid-pricing.ts`) scans one 7-night Airbnb window per calendar month
+    across the 24-month horizon and the refresh HARD-FAILS the whole property the
+    moment any month returns zero usable exact-BR samples (`deletePropertyMarketRate`
+    + throw "no usable exact-NBR samples"). Thin in-footprint markets — gated
+    golf/country-club communities like **Bonita National**, or tiny resort footprints
+    like **Santa Maria Resort** — have ~zero exact-BR entire-home Airbnb inventory
+    INSIDE their curated club bounding box, so the refresh used to abort. The sampler
+    now runs ordered passes: PASS 0 is the PRIMARY constraint (curated bounds →
+    center-radius → none) with the curated query list — **byte-identical** to before,
+    returning on the first query with samples (exactly ONE SearchAPI request for
+    healthy markets; locked by the Poipu Kai single-request test). PASSES 1+ are
+    geographic-widening FALLBACKS that run ONLY after every primary query returned
+    **rates.length===0** (NOT on red confidence — escalating on red would break the
+    single-request guarantee for legitimately-thin markets). Each widened pass uses a
+    progressively larger **center-radius** box (~6.6km then ~16km, `halfDeg` 0.06/0.15
+    around `BUY_IN_MARKET_LOCATIONS[community]`) with **city anchors first**
+    (`"Bonita Springs, FL"` etc.) so a healthy nearby-comp set wins before a thin 1-2
+    sample resort-name hit can short-circuit at red. LOAD-BEARING invariants: (a)
+    `geoConstraintForMarket` / `airbnbSearchGeoParamsForMarket` are UNCHANGED (curated
+    bounds stay primary; locked by the bounds tests); the override threads ONLY through
+    `fetchAirbnbMedianNightlyForQuery`. (b) Widened passes keep a center-radius box
+    (NEVER kind `"none"`) so confidence caps at 84 → a healthy widened month can still
+    reach yellow and clear the non-red save/push gate; the scorer is NOT loosened, so a
+    genuinely-empty market still fails closed with the real message (and a real HTTP
+    error still propagates — it is not swallowed as "no samples"). (c) Markets with no
+    mapped center never widen. Kill switch `MARKET_RATE_GEO_WIDENING=0/false/off/no`
+    reverts to the old hard-fail (default ON; widening can only improve a refresh that
+    would otherwise throw). Don't move the widening into `geoConstraintForMarket`, and
+    don't escalate on red confidence. PR #684; design + adversarial review via two
+    multi-agent workflows (0 confirmed blockers).
+
 ### Database & deploy
 
 15. **Schema sync on Railway boot: `ensureRuntimeSchema()` is authoritative;
@@ -2335,6 +2368,7 @@ Examples:
 2026-06-15 · Jamie: "add an email alias for the 2nd unit buy-in — at the moment there's only the option to make an alias for the first buy-in." · ACCEPTED · SimpleLogin buy-in aliases are now PER-UNIT, not per-reservation. Root cause: `reservation_aliases.reservation_id UNIQUE` (one row/reservation, no `buy_in_id`) + the UI gating the "Create alias" button to `firstBuyInId` in `bookings.tsx`. Changes: (1) nullable `buy_in_id` added to `reservation_aliases` (`shared/schema.ts`); `schema-maintenance.ts` backfills legacy rows to the reservation's earliest buy-in, DROPs `reservation_aliases_reservation_id_key`, and adds `UNIQUE INDEX (reservation_id, buy_in_id)`. (2) `getOrCreateReservationAlias` takes optional `buyInId` (look up / insert per reservation+unit); `getOrCreateVendorContact` + `POST /api/bookings/:id/simplelogin/alias` thread it and validate the buy-in belongs to the reservation. (3) `GET .../buy-in-communications` returns `aliases[]` (per-unit) + back-compat `alias`. (4) UI shows the alias control on EVERY attached unit; each panel reads `aliases.find(a => a.buyInId === buyIn.id)` and POSTs `{ buyInId }`; label "Booking email alias" → "Unit email alias". Verified: `npm run build` clean, full `npm test` green, `npm run check` 0 new TS errors (baseline 287). SimpleLogin live-smoke pending on deploy.
 2026-06-15 · Jamie reported every Railway deploy stalling ~15-20 min in DEPLOYING because boot `npm run db:push` hit an interactive truncate-prompt in the non-TTY container · FIXED (PR #677) · Root cause was a constraint-NAME mismatch: prod's `guest_receipts` token/dedup_key UNIQUE were Postgres-default-named (`*_key`) because `ensureRuntimeSchema` created the table with inline `UNIQUE`, but drizzle-kit matches constraints by NAME and wanted `*_unique`, so push prompted to "add" them every deploy. Renamed the two prod constraints to `guest_receipts_token_unique` / `guest_receipts_dedup_key_unique` (psql; verified no dup/null tokens). Durable guard: boot CMD now runs `timeout -k 10 120 npm run db:push </dev/null` then `; exec node` (non-interactive + bounded + non-blocking) — NOT `--force` (it auto-truncates). Verified live: post-merge deploy reached SUCCESS in ~3 min with `[✓] Changes applied` + `[boot] db:push completed` and zero prompt text in logs. Lesson: when a table is created by ensureRuntimeSchema raw SQL AND declared `.unique()` in schema.ts, name the raw-SQL constraint `<table>_<col>_unique`. See Load-Bearing #15.
 2026-06-15 · Jamie (angry): "every time I open the Operations tab a search pops up and starts the sidecar — I didn't start this." · DIAGNOSED + shipped a global pause switch · Verified the committed Operations page (`/bookings`) does NOT start any sidecar search on navigation — find-buy-in needs an expanded slot + click, the city-scan `autoScanTrigger` is dead (`cityInventoryScanTrigger` is never set), and the on-mount auto-fill/bulk rediscovery is READ-ONLY (the bulk 404 re-POST is guarded by an in-session `bulkPayloadsRef` that's empty on a fresh load). The unattended scans come from SERVER automation: the Sourceability Gate sweep (operator enabled `SOURCEABILITY_GATE_ENABLED` earlier today; up to `SCAN_BUDGET`=12 sidecar scans/sweep/property) and/or the off-repo inventory-feed sweep — the Operations page just SURFACES them in the sidecar panel. SHIPPED a single global kill-switch `server/sidecar-automation.ts` (`isSidecarAutomationPaused`/`setSidecarAutomationPaused`): env `SIDECAR_AUTOMATION_PAUSED=1/0` hard override, else a persisted `app_settings` toggle (`sidecar.automation_paused.v1`). Gated the two in-repo automated drivers (`runSourceabilitySweepAllEnabled` + the weekly Monday-3am OTA scan in `availability-scanner.ts`); operator-initiated HTTP searches are NEVER affected. Endpoints `GET /api/admin/sidecar-automation` + `POST .../toggle`; a "Pause/Resume automated scans" button on the Operations sidecar control. CANNOT stop the off-repo feed (not in this codebase) — that still needs a clean redeploy from `main`. Verified: `npm run build` clean, full `npm test` green, `npm run check` 0 new TS errors (baseline 287).
+2026-06-15 · Jamie hit "Update market pricing" and the bulk queue failed on "Sunny 2BR Condo at Bonita National!" with "SearchAPI Airbnb returned no usable exact-2BR samples for Bonita National Golf and Country Club, Bonita Springs, FL 2026-06" · FIXED (geographic-widening fallback) · Root cause: Bonita National is a gated golf community with ~zero exact-2BR entire-home Airbnb inventory inside its curated club bounding box (the box is correct — the resort center is inside it — the inventory is just thin), and the 24-month market-rate refresh hard-fails the moment any one month finds zero priced 2BR comps, with no geographic fallback. Fix: `fetchAirbnbMedianNightly` (`server/hybrid-pricing.ts`) now escalates to progressively wider center-radius boxes (~6.6km → ~16km around the community center) anchored on city-level queries ("Bonita Springs, FL"), but ONLY after every primary curated-box query returns zero usable samples — so healthy markets stay byte-identical (one SearchAPI request, curated box) and the Poipu single-request test holds. Real-data only (no static/seasonal fallback); a fully-empty widened search still fails closed; widened passes keep a center-radius box so confidence caps at 84 (yellow) and can clear the non-red gate. Also unblocks the other tight Florida footprints (Santa Maria Resort, Southern Dunes). Kill switch `MARKET_RATE_GEO_WIDENING=0`. Built + reviewed via two multi-agent workflows (3-lens design validation → GO-with-changes; 4-lens adversarial review → 0 confirmed blockers). 6 new tests; `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors in touched files. See Load-Bearing #49.
 ```
 
 (Populate on first dispute.)
