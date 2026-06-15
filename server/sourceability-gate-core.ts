@@ -93,3 +93,39 @@ export function confirmedAction(state: ConfirmationState, threshold: number): "b
   if (state.consecutiveOpens >= t) return "open";
   return "pending";
 }
+
+// ── UI status (what the operator sees per window) ────────────────────────────
+export type ObservationStatus = "blocked" | "block-pending" | "sourceable" | "sourceable-pending" | "unknown";
+
+/** Turn a window's persisted streaks into a human status + progress for the UI,
+ *  e.g. "Loss flagged 1/2 — 1 more sweep to block". `blockedOnGuesty` reflects
+ *  whether a live block actually exists on the calendar for the window. */
+export function classifyObservation(args: {
+  consecutiveBlocks: number;
+  consecutiveOpens: number;
+  threshold: number;
+  blockedOnGuesty: boolean;
+}): { status: ObservationStatus; label: string; progress: { count: number; of: number } | null } {
+  const t = Math.max(1, args.threshold);
+  if (args.blockedOnGuesty) {
+    return { status: "blocked", label: "Blocked on Guesty", progress: { count: t, of: t } };
+  }
+  if (args.consecutiveBlocks >= t) {
+    return { status: "blocked", label: "Loss confirmed — blocking next enforced sweep", progress: { count: t, of: t } };
+  }
+  if (args.consecutiveBlocks >= 1) {
+    const remaining = t - args.consecutiveBlocks;
+    return {
+      status: "block-pending",
+      label: `Loss flagged ${args.consecutiveBlocks}/${t} — ${remaining} more sweep${remaining === 1 ? "" : "s"} to block`,
+      progress: { count: args.consecutiveBlocks, of: t },
+    };
+  }
+  if (args.consecutiveOpens >= t) {
+    return { status: "sourceable", label: "Sourceable", progress: { count: t, of: t } };
+  }
+  if (args.consecutiveOpens >= 1) {
+    return { status: "sourceable-pending", label: `Sourceable ${args.consecutiveOpens}/${t}`, progress: { count: args.consecutiveOpens, of: t } };
+  }
+  return { status: "unknown", label: "Checking…", progress: null };
+}

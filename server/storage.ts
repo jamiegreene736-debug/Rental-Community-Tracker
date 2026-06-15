@@ -1768,6 +1768,17 @@ export class DatabaseStorage implements IStorage {
     await db.delete(sourceabilityObservations).where(sql`${sourceabilityObservations.endDate} < ${dateIso}`);
   }
 
+  async getAllSourceabilityObservations(): Promise<SourceabilityObservation[]> {
+    return db.select().from(sourceabilityObservations)
+      .orderBy(sourceabilityObservations.propertyId, sourceabilityObservations.startDate);
+  }
+
+  /** Active (not-yet-removed) scanner blocks across ALL properties, optionally filtered by source. */
+  async getAllActiveScannerBlocks(source?: string): Promise<ScannerBlock[]> {
+    const rows = await db.select().from(scannerBlocks).where(sql`${scannerBlocks.removedAt} IS NULL`);
+    return source ? rows.filter((b) => b.source === source) : rows;
+  }
+
   // ── Scanner overrides ──
   async getScannerOverrides(propertyId: number): Promise<ScannerOverride[]> {
     return db.select().from(scannerOverrides)

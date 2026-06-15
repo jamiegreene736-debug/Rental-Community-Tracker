@@ -26615,6 +26615,65 @@ Return ONLY compact JSON with this exact shape:
     });
   });
 
+  // Per-window confirmation state for the UI: each near-term window's streak
+  // toward the block threshold ("Loss flagged 1/2 — 1 more sweep to block"),
+  // plus whether it's actually blocked on Guesty. Powers the Sourceability
+  // Gate card on the availability scanner page.
+  app.get("/api/availability/sourceability-observations", async (_req, res) => {
+    try {
+      const { classifyObservation, DEFAULT_CONFIRM_SWEEPS } = await import("./sourceability-gate-core");
+      const { isSourceabilityGateEnabled, isSourceabilityGateEnforced } = await import("./sourceability-gate");
+      const { SOURCEABILITY_GATE_SOURCE } = await import("./sync-scanner-blocks");
+      const threshold = Math.max(1, Number(process.env.SOURCEABILITY_GATE_CONFIRM_SWEEPS) || DEFAULT_CONFIRM_SWEEPS);
+
+      const [observations, activeBlocks] = await Promise.all([
+        storage.getAllSourceabilityObservations(),
+        storage.getAllActiveScannerBlocks(SOURCEABILITY_GATE_SOURCE),
+      ]);
+      const blockedKey = new Set(activeBlocks.map((b) => `${b.propertyId}|${b.startDate}|${b.endDate}`));
+
+      const windows = observations.map((o) => {
+        const blockedOnGuesty = blockedKey.has(`${o.propertyId}|${o.startDate}|${o.endDate}`);
+        const cls = classifyObservation({
+          consecutiveBlocks: o.consecutiveBlocks,
+          consecutiveOpens: o.consecutiveOpens,
+          threshold,
+          blockedOnGuesty,
+        });
+        const config = PROPERTY_UNIT_CONFIGS[o.propertyId];
+        return {
+          propertyId: o.propertyId,
+          community: config?.community ?? null,
+          startDate: o.startDate,
+          endDate: o.endDate,
+          lastDecision: o.lastDecision,
+          consecutiveBlocks: o.consecutiveBlocks,
+          consecutiveOpens: o.consecutiveOpens,
+          cheapestCost: o.lastCheapestCost != null ? Math.round(Number(o.lastCheapestCost)) : null,
+          sellableRevenue: o.lastSellableRevenue != null ? Math.round(Number(o.lastSellableRevenue)) : null,
+          lastReason: o.lastReason,
+          updatedAt: o.updatedAt,
+          blockedOnGuesty,
+          status: cls.status,
+          statusLabel: cls.label,
+          progress: cls.progress,
+        };
+      });
+      // Surface the windows closest to a block first (block-pending highest count), then live blocks, then the rest.
+      const rank = (s: string) => (s === "block-pending" ? 0 : s === "blocked" ? 1 : s === "sourceable-pending" ? 2 : 3);
+      windows.sort((a, b) => rank(a.status) - rank(b.status) || a.startDate.localeCompare(b.startDate));
+
+      res.json({
+        enabled: isSourceabilityGateEnabled(),
+        enforced: isSourceabilityGateEnforced(),
+        confirmThreshold: threshold,
+        windows,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   // Push the weekly rate ranges to Guesty's calendar. Body: the same
   // shape the weekly-pricing endpoint returns (so the client can send
   // exactly what it's displaying). Critical windows are pushed as higher
