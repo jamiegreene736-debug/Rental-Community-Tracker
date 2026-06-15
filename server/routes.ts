@@ -28610,14 +28610,20 @@ Return ONLY compact JSON with this exact shape:
       const unitQueryFragment = !bareUnit
         ? ""
         : ambiguousUnit
-        ? `("Unit ${bareUnit}" OR "#${bareUnit}" OR "Apt ${bareUnit}" OR "Apartment ${bareUnit}" OR "Suite ${bareUnit}")`
+        // For an ambiguous 1-2 digit unit, only retrieve pages that reference it WITH a
+        // unit-type word — never a bare "#1" (which floods in from marketing "ranked #1").
+        ? `(${["Unit", "Apt", "Apartment", "Suite", "Villa", "Townhome", "Building"].map((w) => `"${w} ${bareUnit}"`).join(" OR ")})`
         : `"${bareUnit}"`;
-      const markerForms = ambiguousUnit
-        ? [`unit ${uLower}`, `unit #${uLower}`, `apt ${uLower}`, `apt. ${uLower}`, `apartment ${uLower}`, `suite ${uLower}`, `ste ${uLower}`, `ste. ${uLower}`, `villa ${uLower}`, `#${uLower}`, `# ${uLower}`, `no. ${uLower}`]
-        : [];
+      // Snippet validation. For an ambiguous unit the number MUST be immediately preceded by
+      // a unit-type word (optionally with "#"/"No."), so "Unit 1" / "Villa 1" / "Apt #1"
+      // confirm, but "ranked #1", "No. 1 rated", "1 king bed", "$1,200", "1 of 6", "sleeps 12"
+      // do NOT. \b on the number keeps "1" from matching "10"/"12"/"1A".
+      const unitMarkerRe = ambiguousUnit
+        ? new RegExp(`\\b(?:units?|apt|apt\\.|apartment|suite|ste|ste\\.|villas?|townhome|townhouse|building|bldg|cottage|casita)\\s*(?:#|no\\.?\\s*)?\\s*${uLower}\\b`, "i")
+        : null;
       const unitMentioned = (text: string): boolean => {
         if (!bareUnit) return true;
-        if (ambiguousUnit) return markerForms.some((f) => text.includes(f));
+        if (ambiguousUnit) return unitMarkerRe!.test(text);
         return text.includes(uLower) || text.includes(`#${uLower}`);
       };
       // Only trust a result that is an INDIVIDUAL LISTING page — not a region / search /
