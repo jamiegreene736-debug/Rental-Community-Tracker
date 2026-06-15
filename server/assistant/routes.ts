@@ -12,8 +12,29 @@
 // PLATFORM_ASSISTANT_ENABLED is set, so it ships dark until the operator opts in.
 
 import type { Express, Request, Response } from "express";
-import { runAssistantTurn } from "./agent";
+import { runAssistantTurn, runConfirmedAction } from "./agent";
 import { buildModelHistory, createSession, getMessages, getSession, listSessions } from "./store";
+
+// Open an SSE stream on a POST response (EventSource is GET-only, so the client
+// reads the body with fetch). Returns a `send` writer + a closed-flag getter.
+function openSse(req: Request, res: Response): { send: (e: Record<string, unknown>) => void; isClosed: () => boolean } {
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+  let closed = false;
+  req.on("close", () => {
+    closed = true;
+  });
+  return {
+    send: (event) => {
+      if (!closed) res.write(`data: ${JSON.stringify(event)}\n\n`);
+    },
+    isClosed: () => closed,
+  };
+}
 
 export function assistantEnabled(): boolean {
   return process.env.PLATFORM_ASSISTANT_ENABLED === "1" || process.env.PLATFORM_ASSISTANT_ENABLED === "true";
@@ -59,23 +80,7 @@ export function registerAssistantRoutes(app: Express): void {
       sessionId = created.id;
     }
 
-    // SSE handshake.
-    res.status(200);
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.flushHeaders?.();
-
-    let closed = false;
-    req.on("close", () => {
-      closed = true;
-    });
-    const send = (event: Record<string, unknown>) => {
-      if (closed) return;
-      res.write(`data: ${JSON.stringify(event)}\n\n`);
-    };
-
+    const { send, isClosed } = openSse(req, res);
     send({ type: "session", sessionId });
 
     try {
@@ -84,7 +89,33 @@ export function registerAssistantRoutes(app: Express): void {
       console.error("[assistant] turn failed:", (err as Error)?.message ?? err);
       send({ type: "error", message: "The assistant hit an unexpected error." });
     } finally {
-      if (!closed) res.end();
+      if (!isClosed()) res.end();
+    }
+  });
+
+  // Confirm (or cancel) a staged write action. SSE-streamed because confirming
+  // executes the action and then streams the model's outcome summary.
+  app.post("/api/assistant/confirm", async (req: Request, res: Response) => {
+    if (!assistantEnabled()) return res.status(404).json({ error: "Assistant is disabled." });
+
+    const sessionId = Number(req.body?.sessionId);
+    const confirmId = typeof req.body?.confirmId === "string" ? req.body.confirmId : "";
+    const decision = req.body?.decision === "cancel" ? "cancel" : "confirm";
+    if (!Number.isFinite(sessionId) || sessionId <= 0 || !confirmId) {
+      return res.status(400).json({ error: "sessionId and confirmId are required." });
+    }
+    const session = await getSession(sessionId);
+    if (!session) return res.status(404).json({ error: "Session not found." });
+
+    const { send, isClosed } = openSse(req, res);
+    send({ type: "session", sessionId });
+    try {
+      await runConfirmedAction({ sessionId, confirmId, decision, send });
+    } catch (err) {
+      console.error("[assistant] confirm failed:", (err as Error)?.message ?? err);
+      send({ type: "error", message: "The action hit an unexpected error." });
+    } finally {
+      if (!isClosed()) res.end();
     }
   });
 }

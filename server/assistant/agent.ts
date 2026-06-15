@@ -10,7 +10,8 @@
 // cannot yet take actions; write tools + a confirm-before-act gate land later.
 
 import { anthropicToolDefs, runAssistantTool, ASSISTANT_TOOLS_BY_NAME } from "./tools";
-import { appendMessage, touchSession, type AssistantMessageContent } from "./store";
+import { appendMessage, touchSession, buildModelHistory, type AssistantMessageContent } from "./store";
+import { createPendingAction, takePendingAction } from "./confirm";
 
 // Orchestrator model: the hardest part is mapping fuzzy operator asks to the
 // right tool chain and interpreting the economics, so use the most capable
@@ -39,7 +40,8 @@ CURRENT CAPABILITIES (read-only)
 - Operations data: dashboard metrics (revenue, cancellations, channel status, minimum stays), the account-wide bookings list, operations reports.
 - Buy-ins & combinations: a fast static buy-in profitability estimate (get_buy_in_estimate), a LIVE single-unit buy-in search (find_buy_in), and a LIVE city-wide combo finder (scan_city_vrbo) that surfaces the cheapest same-community combination + alternatives ("find a better combination / a new location").
 - Pricing: stored market nightly rates by property/bedroom/month (get_market_rates).
-- You CANNOT yet TAKE actions — attaching buy-ins to a booking, finding/replacing photos, sending guest messages, or changing pricing are coming in later phases (with a confirm-before-act step). If asked to do one, say it's coming soon and offer to run the relevant read-only search/estimate so the operator can act in the existing UI.
+- ACTIONS (confirm-before-act): you CAN start an auto-fill that searches and ATTACHES the cheapest profitable buy-in combo to a booking (start_auto_fill), then watch it with check_auto_fill. When you call start_auto_fill, it does NOT run immediately — the operator gets a confirm card and must click Confirm. So: describe what you're about to do and ask them to confirm; never claim it's done before they confirm. Pass expectedRevenue (the booking's net revenue from list_bookings) so the $100 profit gate stays on.
+- Still NOT available (coming later, also confirm-gated): finding/replacing photos, sending guest messages, changing pricing. If asked, say it's coming soon and offer the relevant read-only search/estimate.
 
 Keep answers grounded in tool output. When you state a figure, it should have come from a tool this turn or earlier in the conversation.`;
 }
@@ -122,14 +124,43 @@ export async function runAssistantTurn(opts: {
       for (const block of content) {
         if (block.type !== "tool_use") continue;
         const tool = ASSISTANT_TOOLS_BY_NAME.get(block.name);
-        toolCalls.push({ name: block.name, input: block.input });
-        send({ type: "tool_call", name: block.name, label: toolLabel(block.name), input: block.input });
+        const input = (block.input ?? {}) as Record<string, unknown>;
+        toolCalls.push({ name: block.name, input });
 
-        const output = await runAssistantTool(block.name, (block.input ?? {}) as Record<string, unknown>);
+        // CONFIRM-BEFORE-ACT: a write/outward tool is NEVER executed inside the
+        // loop. We stage it as a pending action, stream a confirm card to the
+        // UI, and hand the model a tool_result telling it the action is awaiting
+        // the operator's click — so it describes (not claims) the action. The
+        // real execution happens later in POST /api/assistant/confirm.
+        if (tool && tool.kind === "write") {
+          const label = tool.confirmLabel?.(input) ?? toolLabel(block.name);
+          const summary = tool.confirmSummary?.(input) ?? `Run ${block.name}.`;
+          const pending = createPendingAction({
+            sessionId,
+            toolName: block.name,
+            label,
+            summary,
+            input,
+          });
+          send({ type: "confirm", confirmId: pending.id, name: block.name, label, summary, input });
+          toolResults.push({ name: block.name, output: { _awaitingConfirmation: true, label } });
+          resultBlocks.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: JSON.stringify({
+              status: "AWAITING_OPERATOR_CONFIRMATION",
+              note: "This action was NOT executed. A confirm card was shown to the operator. Briefly tell them what will happen and that they must click Confirm. Do not say it is done.",
+              label,
+            }),
+          });
+          continue;
+        }
+
+        send({ type: "tool_call", name: block.name, label: toolLabel(block.name), input });
+        const output = await runAssistantTool(block.name, input);
         const ok = !(output && typeof output === "object" && (output as any)._error);
         toolResults.push({ name: block.name, output: truncateForAudit(output) });
         send({ type: "tool_result", name: block.name, ok });
-        void tool; // reserved: confirm-gate on tool.kind === "write" in later phase
 
         resultBlocks.push({
           type: "tool_result",
@@ -166,6 +197,93 @@ export async function runAssistantTurn(opts: {
   send({ type: "error", message: error });
   await appendMessage(sessionId, "assistant", { error, toolCalls, toolResults });
   return { text: null, toolCalls, toolResults, error };
+}
+
+/**
+ * Execute (or cancel) a previously-staged write action after the operator clicks
+ * Confirm/Cancel, then stream a short summary of the outcome. Runs the tool over
+ * loopback exactly like a read tool — the only difference is the explicit human
+ * gate that got us here.
+ */
+export async function runConfirmedAction(opts: {
+  sessionId: number;
+  confirmId: string;
+  decision: "confirm" | "cancel";
+  send: SseSend;
+}): Promise<void> {
+  const { sessionId, confirmId, decision, send } = opts;
+  const action = takePendingAction(confirmId, sessionId);
+
+  if (!action) {
+    send({ type: "error", message: "That action expired or was already handled. Please ask again." });
+    send({ type: "done" });
+    return;
+  }
+
+  if (decision === "cancel") {
+    await appendMessage(sessionId, "user", { text: `✕ Cancelled: ${action.label}` });
+    const text = `Okay — I didn't run "${action.label}". Nothing was changed.`;
+    send({ type: "text", text });
+    await appendMessage(sessionId, "assistant", { text });
+    await touchSession(sessionId);
+    send({ type: "done" });
+    return;
+  }
+
+  // Confirmed → execute the write tool for real.
+  await appendMessage(sessionId, "user", { text: `✓ Confirmed: ${action.label}` });
+  send({ type: "tool_call", name: action.toolName, label: action.label, input: action.input });
+  const output = await runAssistantTool(action.toolName, action.input);
+  const ok = !(output && typeof output === "object" && (output as any)._error);
+  send({ type: "tool_result", name: action.toolName, ok });
+  await appendMessage(sessionId, "tool", {
+    toolResults: [{ name: action.toolName, output: truncateForAudit(output) }],
+  });
+
+  // Let the model summarize the outcome for the operator.
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) {
+    const text = ok ? `Done — "${action.label}" completed.` : `"${action.label}" failed. Please check and retry.`;
+    send({ type: "text", text });
+    await appendMessage(sessionId, "assistant", { text });
+    send({ type: "done" });
+    return;
+  }
+
+  const history = await buildModelHistory(sessionId);
+  const followupPrompt =
+    `The operator just CONFIRMED and the action "${action.label}" (tool ${action.toolName}) was executed. ` +
+    `Tool result JSON:\n${JSON.stringify(output ?? null).slice(0, TOOL_RESULT_CAP)}\n\n` +
+    `Write a short, plain confirmation of the OUTCOME for the operator (what happened / what to check next). ` +
+    `If the result indicates an error, say so honestly and suggest a next step. Do not call any tools.`;
+
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 1024,
+        system: systemPrompt(),
+        messages: [...history.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: followupPrompt }],
+      }),
+    });
+    const data: any = await resp.json();
+    const text = (data?.content ?? [])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("\n")
+      .trim();
+    const final = text || (ok ? `Done — "${action.label}" completed.` : `"${action.label}" did not complete.`);
+    send({ type: "text", text: final });
+    await appendMessage(sessionId, "assistant", { text: final });
+  } catch {
+    const text = ok ? `Done — "${action.label}" completed.` : `"${action.label}" failed.`;
+    send({ type: "text", text });
+    await appendMessage(sessionId, "assistant", { text });
+  }
+  await touchSession(sessionId);
+  send({ type: "done" });
 }
 
 function toolLabel(name: string): string {
