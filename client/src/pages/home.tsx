@@ -185,6 +185,8 @@ type BulkPricingJob = {
       } | null;
       acceptedCandidates?: number;
       rejectedCandidates?: number;
+      blackoutCount?: number;
+      blackoutClosed?: number;
     } | null;
     error: string | null;
   }>;
@@ -3510,6 +3512,8 @@ function AdminDashboard() {
                             const recipeLabel = formatPricingRecipe(item.progress?.pricingRecipe);
                             const confidence = item.progress?.confidence;
                             const confidenceScore = typeof confidence?.score === "number" ? Math.round(confidence.score) : null;
+                            const blackoutCount = typeof item.progress?.blackoutCount === "number" ? item.progress.blackoutCount : 0;
+                            const blackoutClosed = typeof item.progress?.blackoutClosed === "number" ? item.progress.blackoutClosed : 0;
                             return (
                               <div key={`${item.propertyId}-${index}`} className="border-b px-3 py-3 last:border-b-0">
                                 <div className="flex items-start justify-between gap-3">
@@ -3521,11 +3525,16 @@ function AdminDashboard() {
                                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                                       Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
                                     </p>
-                                    {(recipeLabel || confidenceScore != null) && (
+                                    {(recipeLabel || confidenceScore != null || blackoutCount > 0) && (
                                       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
                                         {recipeLabel && (
                                           <span className="max-w-full truncate rounded border bg-muted/40 px-2 py-0.5 text-muted-foreground" title={recipeLabel}>
                                             {recipeLabel}
+                                          </span>
+                                        )}
+                                        {blackoutCount > 0 && (
+                                          <span className="rounded border border-amber-200 bg-amber-50 px-2 py-0.5 font-medium text-amber-700" title="Windows with no confident exact-bedroom comps were blacked out and closed on the Guesty calendar">
+                                            🚫 {blackoutCount} blacked out{blackoutClosed > 0 ? ` · ${blackoutClosed} closed` : ""}
                                           </span>
                                         )}
                                         {confidenceScore != null && (

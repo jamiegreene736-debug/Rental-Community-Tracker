@@ -184,7 +184,7 @@ import {
   runRealtyApiPhotoDiscoveryLeg,
 } from "./realtyapi-discovery";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
-import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
+import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridBlackoutWindow, type HybridMonthBlackoutEvent, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
 import {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
   DEFAULT_TIGHT_SCARCITY_MARKUP,
@@ -911,7 +911,7 @@ function marketRateBasisForMonth(args: {
 async function buildBulkGuestySeasonalPlan(
   propertyId: number,
   targetMargin: number,
-): Promise<{ listingId: string; community: string; monthlyRates: Array<{ yearMonth: string; price: number; buyIn: number }>; units: Array<{ bedrooms: number }>; targetMargin: number } | null> {
+): Promise<{ listingId: string; community: string; monthlyRates: Array<{ yearMonth: string; price: number; buyIn: number; checkIn?: string; checkOut?: string }>; units: Array<{ bedrooms: number }>; targetMargin: number; blackoutWindows: Array<{ yearMonth: string; checkIn: string; checkOut: string; reason: string }> } | null> {
   const listingId = await storage.getGuestyListingId(propertyId);
   if (!listingId) return null;
 
@@ -938,27 +938,58 @@ async function buildBulkGuestySeasonalPlan(
   for (const row of rows) rowByBR.set(row.bedrooms, row);
   const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
   const missingMonthlyRates = new Set<string>();
+  // Months a unit was intentionally blacked out (no confident exact-bedroom
+  // comp) — surfaced here so the push can CLOSE those windows on Guesty rather
+  // than treating them as a missing-data error.
+  const blackoutWindows: Array<{ yearMonth: string; checkIn: string; checkOut: string; reason: string }> = [];
   const monthlyRates = build24MonthPricingWindow().map(({ yearMonth }) => {
     const season = getSeasonForMonth(yearMonth, region);
     let buyIn = 0;
     let price = 0;
+    let checkIn: string | undefined;
+    let checkOut: string | undefined;
+    let blackout: { checkIn: string; checkOut: string; reason: string } | null = null;
+    // Track this month's genuinely-missing units (no row / no stored entry — a
+    // data error) SEPARATELY from intentional blackouts, so one unit's blackout
+    // can't mask another unit's missing data and silently close a window we
+    // can't explain.
+    const missingKeysThisMonth: string[] = [];
     for (const unit of units) {
-      const unitBuyIn = marketRateBasisForMonth({
-        community,
-        bedrooms: unit.bedrooms,
-        yearMonth,
-        season,
-        row: rowByBR.get(unit.bedrooms),
-      });
+      const row = rowByBR.get(unit.bedrooms);
+      const entry = row?.monthlyRates && typeof row.monthlyRates === "object"
+        ? (row.monthlyRates as Record<string, any>)[yearMonth]
+        : null;
+      if (entry?.checkIn && entry?.checkOut) { checkIn = entry.checkIn; checkOut = entry.checkOut; }
+      const unitBuyIn = marketRateBasisForMonth({ community, bedrooms: unit.bedrooms, yearMonth, season, row });
       if (unitBuyIn == null) {
-        missingMonthlyRates.add(`${yearMonth} ${unit.bedrooms}BR`);
+        if (entry?.blackout) {
+          // Intentional blackout for this unit/month — close, don't price or error.
+          if (!blackout && entry.checkIn && entry.checkOut) {
+            blackout = {
+              checkIn: entry.checkIn,
+              checkOut: entry.checkOut,
+              reason: typeof entry.blackoutReason === "string" ? entry.blackoutReason : `no confident exact-${unit.bedrooms}BR comps`,
+            };
+          }
+        } else {
+          missingKeysThisMonth.push(`${yearMonth} ${unit.bedrooms}BR`);
+        }
         continue;
       }
       buyIn += unitBuyIn;
       // Match the pricing table: ceil margin per unit, then sum (not ceil on combined buy-in).
       price += cleanBaseRateFromBuyInServer(unitBuyIn, targetMargin);
     }
-    return { yearMonth, buyIn, price };
+    // A month is a clean listing-level blackout only when EVERY non-priced unit
+    // was an intentional blackout (a combo can't be priced/sold half-covered).
+    // If any unit is genuinely missing (no stored entry), keep it as a hard
+    // error — the push must fail loudly rather than silently close the window.
+    if (blackout && missingKeysThisMonth.length === 0) {
+      blackoutWindows.push({ yearMonth, checkIn: blackout.checkIn, checkOut: blackout.checkOut, reason: blackout.reason });
+      return { yearMonth, buyIn: 0, price: 0, checkIn, checkOut };
+    }
+    for (const key of missingKeysThisMonth) missingMonthlyRates.add(key);
+    return { yearMonth, buyIn, price, checkIn, checkOut };
   }).filter((row) => row.buyIn > 0 && row.price > 0);
 
   if (missingMonthlyRates.size > 0) {
@@ -969,8 +1000,16 @@ async function buildBulkGuestySeasonalPlan(
     );
   }
 
-  return { listingId, community, monthlyRates, units, targetMargin };
+  return { listingId, community, monthlyRates, units, targetMargin, blackoutWindows };
 }
+
+type PricingBlackoutReconcile = {
+  created: number;
+  removed: number;
+  wouldCreate: number;
+  wouldRemove: number;
+  failures: Array<{ action: string; startDate: string; error: string }>;
+} | null;
 
 async function pushBulkGuestyPricingAfterRefresh(
   propertyId: number,
@@ -981,6 +1020,7 @@ async function pushBulkGuestyPricingAfterRefresh(
   targetMargin?: number;
   seasonal?: any;
   leadTime?: Awaited<ReturnType<typeof pushLeadTimePolicyPricesToGuesty>>;
+  blackout?: PricingBlackoutReconcile;
 }> {
   const schedule = await storage.getScannerSchedule(propertyId).catch(() => null);
   const configuredMargin = parseTargetMargin(schedule?.targetMargin);
@@ -989,8 +1029,41 @@ async function pushBulkGuestyPricingAfterRefresh(
   if (!plan) {
     return { skipped: true, reason: "No mapped Guesty listing or pricing configuration found for this property." };
   }
+
+  // Close blacked-out windows (and reopen any our-blocks whose month is priceable
+  // again) on the Guesty calendar. Non-fatal: a Guesty hiccup here must not undo
+  // a successful price push or fail the whole pricing item.
+  const reconcileBlackouts = async (): Promise<PricingBlackoutReconcile> => {
+    try {
+      const { reconcilePricingBlackoutBlocks } = await import("./sync-scanner-blocks");
+      const result = await reconcilePricingBlackoutBlocks({
+        propertyId,
+        desired: plan.blackoutWindows
+          .filter((w) => w.checkIn && w.checkOut)
+          .map((w) => ({ startDate: w.checkIn, endDate: w.checkOut, reason: w.reason })),
+        confirmedOpenMonths: plan.monthlyRates.map((r) => r.yearMonth),
+        dryRun: false,
+      });
+      return { created: result.created, removed: result.removed, wouldCreate: result.wouldCreate, wouldRemove: result.wouldRemove, failures: result.failures };
+    } catch (e: any) {
+      console.warn(`[bulk-pricing] pricing-blackout calendar reconcile failed for property ${propertyId}: ${e?.message ?? e}`);
+      return null;
+    }
+  };
+
   if (plan.monthlyRates.length === 0) {
-    return { skipped: true, listingId: plan.listingId, reason: "No valid monthly pricing plan was generated." };
+    // Every month was blacked out — nothing to price, but we still close the
+    // windows on Guesty so the listing isn't bookable at stale/unverifiable rates.
+    const blackout = await reconcileBlackouts();
+    const closed = blackout?.created ?? 0;
+    return {
+      skipped: true,
+      listingId: plan.listingId,
+      blackout,
+      reason: plan.blackoutWindows.length
+        ? `All ${plan.blackoutWindows.length} sampled window(s) blacked out (no confident comps); ${closed} closed on the Guesty calendar.`
+        : "No valid monthly pricing plan was generated.",
+    };
   }
 
   const base = bulkPricingBaseUrl();
@@ -1034,7 +1107,10 @@ async function pushBulkGuestyPricingAfterRefresh(
     });
     throw new Error(message);
   }
-  const combinedSummary = `${seasonal?.lastGuestyRatePushSummary ?? "Base seasonal rates pushed"} · ${leadTime.summary}`;
+  // After prices land, close any newly blacked-out windows and reopen ones that
+  // became priceable again on the Guesty calendar.
+  const blackout = await reconcileBlackouts();
+  const combinedSummary = `${seasonal?.lastGuestyRatePushSummary ?? "Base seasonal rates pushed"} · ${leadTime.summary}${blackout && (blackout.created || blackout.removed) ? ` · blackout windows ${blackout.created} closed/${blackout.removed} reopened` : ""}`;
   await storage.markScannerGuestyRatePush(propertyId, "ok", combinedSummary.slice(0, 240), targetMargin).catch((err: any) => {
     console.warn(`[bulk-pricing] could not record combined Guesty lead-time push for property ${propertyId}: ${err?.message ?? err}`);
   });
@@ -1045,6 +1121,7 @@ async function pushBulkGuestyPricingAfterRefresh(
     targetMargin,
     seasonal,
     leadTime,
+    blackout,
   };
 }
 
@@ -1058,7 +1135,8 @@ async function refreshHybridPricingForDraft(
   fallbackLabel: string,
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>,
   shouldCancel?: () => boolean | Promise<boolean>,
-): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
+  onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>,
+): Promise<{ propertyId: number; rows: any[]; logs: any[]; blackouts: HybridBlackoutWindow[] }> {
   const draftId = Math.abs(propertyId);
   let draft = await storage.getCommunityDraft(draftId);
   if (!draft) throw new Error(`Draft ${draftId} was not found`);
@@ -1082,6 +1160,7 @@ async function refreshHybridPricingForDraft(
     triggerType: "Manual Update",
     notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
     onMonthScanned,
+    onMonthBlackout,
     shouldCancel,
   });
 }
@@ -1178,6 +1257,9 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     return false;
   };
 
+  // Live running count of blacked-out windows, surfaced to the queue UI.
+  let blackoutMonthsCount = 0;
+
   const onMonthScanned = async (event: HybridMonthScannedEvent) => {
     if (await shouldCancel()) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
     const confidenceLabel = event.confidence ? `; confidence ${event.confidence.score}% ${event.confidence.level}` : "";
@@ -1194,20 +1276,49 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       pricingRecipe: event.pricingRecipe,
       acceptedCandidates: event.confidence?.acceptedCandidates,
       rejectedCandidates: event.confidence?.rejectedCandidates,
+      blackoutCount: blackoutMonthsCount,
     };
     item.heartbeatAt = Date.now();
     await persistBulkPricingJob(job);
   };
 
+  // No confident exact-bedroom comp for this month → black out the window and
+  // move on. Surfaced as an amber queue event + a running count on the item.
+  const onMonthBlackout = async (event: HybridMonthBlackoutEvent) => {
+    blackoutMonthsCount += 1;
+    const friendly = `${event.yearMonth} (${event.checkIn}→${event.checkOut})`;
+    item.progress = {
+      phase: "searchapi-airbnb",
+      percent: Math.min(79, Math.round(10 + (70 * (event.monthOffset + 1)) / event.horizonMonths)),
+      label: `${friendly}: no exact-${event.bedrooms}BR comps → blacked out, moving to next window`,
+      currentMonth: event.yearMonth,
+      monthsScanned: event.monthOffset + 1,
+      horizonMonths: event.horizonMonths,
+      bedrooms: event.bedrooms,
+      confidence: event.confidence,
+      pricingRecipe: (item.progress as any)?.pricingRecipe ?? null,
+      blackoutCount: blackoutMonthsCount,
+    };
+    item.heartbeatAt = Date.now();
+    await persistBulkPricingJob(job);
+    await topQueueEvent("bulk-pricing", job.id, "month-blackout", `${item.label}: ${friendly} had no exact-${event.bedrooms}BR comps → blacked out, moving to the next window`, {
+      itemKey: item.id,
+      level: "warn",
+      meta: { propertyId: item.propertyId, yearMonth: event.yearMonth, bedrooms: event.bedrooms, checkIn: event.checkIn, checkOut: event.checkOut, reason: event.reason },
+    });
+  };
+
   const pricingResult = item.propertyId < 0
-    ? await refreshHybridPricingForDraft(item.propertyId, item.label, onMonthScanned, shouldCancel)
+    ? await refreshHybridPricingForDraft(item.propertyId, item.label, onMonthScanned, shouldCancel, onMonthBlackout)
     : await refreshHybridPricingForProperty({
       propertyId: item.propertyId,
       triggerType: "Manual Update",
       notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
       onMonthScanned,
+      onMonthBlackout,
       shouldCancel,
     });
+  const blackoutWindows: HybridBlackoutWindow[] = Array.isArray(pricingResult.blackouts) ? pricingResult.blackouts : [];
   const confidenceSummary = summarizeMarketRateProgressConfidence(pricingResult.rows);
   const pricingRecipe = (item.progress as any)?.pricingRecipe ?? null;
   item.progress = {
@@ -1222,8 +1333,17 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   await persistBulkPricingJob(job);
   await topQueueEvent("bulk-pricing", job.id, "item-searchapi-completed", `SearchAPI Airbnb monthly pricing completed for ${item.label}`, {
     itemKey: item.id,
-    meta: { propertyId: item.propertyId, rows: pricingResult.rows.length, confidence: confidenceSummary, pricingRecipe },
+    meta: { propertyId: item.propertyId, rows: pricingResult.rows.length, confidence: confidenceSummary, pricingRecipe, blackoutCount: blackoutWindows.length },
   });
+  if (blackoutWindows.length > 0) {
+    const months = Array.from(new Set(blackoutWindows.map((w) => w.yearMonth))).sort();
+    const monthPreview = months.slice(0, 6).join(", ") + (months.length > 6 ? ` +${months.length - 6} more` : "");
+    await topQueueEvent("bulk-pricing", job.id, "item-blackout-summary", `${item.label}: ${blackoutWindows.length} window(s) blacked out (no confident comps): ${monthPreview}`, {
+      itemKey: item.id,
+      level: "warn",
+      meta: { propertyId: item.propertyId, blackoutCount: blackoutWindows.length, months },
+    });
+  }
 
   const latestJob = await loadBulkPricingJob(job.id).catch(() => null);
   if (latestJob?.cancelRequested) {
@@ -1256,6 +1376,23 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     await persistBulkPricingJob(job);
     throw e;
   }
+  const blackoutClosed = guestyPush.blackout?.created ?? 0;
+  const blackoutReopened = guestyPush.blackout?.removed ?? 0;
+  const blackoutSuffix = blackoutWindows.length > 0 || blackoutClosed > 0 || blackoutReopened > 0
+    ? ` · ${blackoutWindows.length} blacked out (${blackoutClosed} closed/${blackoutReopened} reopened on Guesty)`
+    : "";
+  // Calendar reconcile is non-fatal (prices already landed), so a Guesty
+  // calendar failure must not be silent: surface it as a warn event so the
+  // operator knows some windows didn't close/reopen (next scan will retry).
+  const blackoutReconcileFailed = blackoutWindows.length > 0 && !guestyPush.blackout;
+  const blackoutFailures = guestyPush.blackout?.failures?.length ?? 0;
+  if (blackoutReconcileFailed || blackoutFailures > 0) {
+    await topQueueEvent("bulk-pricing", job.id, "item-blackout-sync-failed", `${item.label}: Guesty calendar blackout sync incomplete (${blackoutReconcileFailed ? "reconcile errored" : `${blackoutFailures} window change(s) failed`}); will retry on the next scan`, {
+      itemKey: item.id,
+      level: "warn",
+      meta: { propertyId: item.propertyId, blackoutWindows: blackoutWindows.length, failures: guestyPush.blackout?.failures ?? "reconcile-threw" },
+    });
+  }
   if (guestyPush.skipped) {
     item.progress = {
       phase: "done",
@@ -1264,20 +1401,24 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       guestyPush,
       confidence: confidenceSummary,
       pricingRecipe,
+      blackoutCount: blackoutWindows.length,
+      blackoutClosed,
     };
     await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-skipped", `Guesty pricing push skipped for ${item.label}: ${guestyPush.reason ?? "not mapped"}`, {
       itemKey: item.id,
       level: "warn",
-      meta: { propertyId: item.propertyId, guestyPush, confidence: confidenceSummary, pricingRecipe },
+      meta: { propertyId: item.propertyId, guestyPush, confidence: confidenceSummary, pricingRecipe, blackoutCount: blackoutWindows.length },
     });
   } else {
     item.progress = {
       phase: "done",
       percent: 100,
-      label: `Market rates saved; Guesty base rates and ${guestyPush.leadTime?.pushed ?? 0}/${guestyPush.leadTime?.total ?? 0} lead-time windows pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin`,
+      label: `Market rates saved; Guesty base rates and ${guestyPush.leadTime?.pushed ?? 0}/${guestyPush.leadTime?.total ?? 0} lead-time windows pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin${blackoutSuffix}`,
       guestyPush,
       confidence: confidenceSummary,
       pricingRecipe,
+      blackoutCount: blackoutWindows.length,
+      blackoutClosed,
     };
     await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed Guesty base rates plus lead-time scarcity pricing for ${item.label}`, {
       itemKey: item.id,
