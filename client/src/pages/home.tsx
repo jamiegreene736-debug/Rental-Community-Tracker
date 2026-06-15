@@ -3497,6 +3497,7 @@ function AdminDashboard() {
                             <p className="truncate text-sm font-semibold">{bulkPricingJob.lockedBy || "—"}</p>
                           </div>
                         </div>
+                        {bulkPricingJob.startedAt && <BulkPricingChangesSummary job={bulkPricingJob} />}
                         <div className="max-h-80 overflow-y-auto rounded-md border">
                           {bulkPricingJob.items.map((item, index) => {
                             const statusTone =
@@ -4465,6 +4466,76 @@ function AdminDashboard() {
         open={connectTarget !== null}
         onOpenChange={(open) => { if (!open) setConnectTarget(null); }}
       />
+    </div>
+  );
+}
+
+// ─── Bulk pricing: "what changed" old→new summary ─────────────────────────────
+// After a bulk MARKET-RATE update, surface the previous vs current basis per
+// property/bedroom from pricing_update_logs (GET /api/pricing/update-logs),
+// filtered to the logs this run produced (propertyId in the job + createdAt
+// since the run started).
+type PricingLogEntry = {
+  propertyId: number;
+  propertyName: string;
+  bedrooms: number;
+  oldRate: string | null;
+  newRate: string | null;
+  createdAt: string;
+};
+function BulkPricingChangesSummary({ job }: { job: BulkPricingJob }) {
+  const { data } = useQuery<{ ok: boolean; logs: PricingLogEntry[] }>({
+    queryKey: ["bulk-pricing-changes", job.id, job.status],
+    queryFn: async () => {
+      const r = await fetch(`/api/pricing/update-logs?limit=250`, { credentials: "include" });
+      if (!r.ok) throw new Error(`pricing logs ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: job.status === "running" ? 8000 : false,
+    staleTime: 4000,
+  });
+  const propertyIds = new Set(job.items.map((i) => i.propertyId));
+  const sinceMs = job.startedAt ? new Date(job.startedAt).getTime() - 60_000 : 0;
+  const logs = (data?.logs ?? []).filter(
+    (l) => propertyIds.has(l.propertyId) && new Date(l.createdAt).getTime() >= sinceMs,
+  );
+  if (logs.length === 0) return null;
+  // group by property → latest row per bedroom (logs newest-first)
+  const byProp = new Map<number, { name: string; rows: Map<number, PricingLogEntry> }>();
+  for (const l of logs) {
+    if (!byProp.has(l.propertyId)) byProp.set(l.propertyId, { name: l.propertyName, rows: new Map() });
+    const g = byProp.get(l.propertyId)!;
+    if (!g.rows.has(l.bedrooms)) g.rows.set(l.bedrooms, l);
+  }
+  const groups = Array.from(byProp.values()).sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <div className="rounded-md border" data-testid="bulk-pricing-changes">
+      <div className="border-b bg-muted/40 px-3 py-2 text-xs font-semibold">
+        What changed — old rate → new rate (market basis per bedroom)
+      </div>
+      <div className="max-h-64 overflow-y-auto">
+        {groups.map((g) => (
+          <div key={g.name} className="border-b px-3 py-2 last:border-b-0">
+            <p className="truncate text-sm font-medium">{g.name}</p>
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+              {Array.from(g.rows.entries()).sort((a, b) => a[0] - b[0]).map(([br, l]) => {
+                const oldN = l.oldRate != null ? Number(l.oldRate) : null;
+                const newN = l.newRate != null ? Number(l.newRate) : null;
+                const delta = oldN != null && newN != null && oldN > 0 ? (newN - oldN) / oldN : null;
+                const tone = delta == null ? "text-muted-foreground" : delta > 0 ? "text-amber-700" : delta < 0 ? "text-green-700" : "text-muted-foreground";
+                return (
+                  <span key={br} className={tone}>
+                    <span className="font-semibold">{br}BR</span>{" "}
+                    {oldN != null ? `$${Math.round(oldN).toLocaleString()}` : "—"} →{" "}
+                    <span className="font-semibold">{newN != null ? `$${Math.round(newN).toLocaleString()}` : "—"}</span>
+                    {delta != null && <span> ({delta > 0 ? "+" : ""}{(delta * 100).toFixed(1)}%)</span>}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
