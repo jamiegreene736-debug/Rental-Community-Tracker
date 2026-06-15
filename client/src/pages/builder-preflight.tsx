@@ -670,6 +670,41 @@ export default function BuilderPreflight() {
     setLocation(`/builder/${id}/step-1`);
   };
 
+  // Auto-load cached photo signals (no credits) once the units' folders are known.
+  // MUST stay ABOVE the `if (!property)` early return below — otherwise the hook count
+  // changes between the loading render and the loaded render (React #310). Self-contained
+  // (reads property + unitOverrides directly) so it never depends on values declared after
+  // the early return.
+  const photoFolderKey = (property?.units ?? [])
+    .map((u) => (unitOverrides[u.id]?.photoFolder ?? (u as any).photoFolder) || "")
+    .join("|");
+  useEffect(() => {
+    const folders = Array.from(new Set(
+      (property?.units ?? [])
+        .map((u) => (unitOverrides[u.id]?.photoFolder ?? (u as any).photoFolder) as string | undefined)
+        .filter((f): f is string => !!f),
+    ));
+    if (folders.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await fetch("/api/preflight/photo-check", {
+          method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
+          body: JSON.stringify({ folders, run: false }),
+        });
+        if (!resp.ok || cancelled) return;
+        const data = await resp.json();
+        if (cancelled) return;
+        const map: Record<string, PhotoCheckRow> = {};
+        for (const c of (data.checks ?? [])) map[c.folder] = c;
+        setPhotoChecks(map);
+        if (data.budget) setPhotoBudget(data.budget);
+      } catch { /* non-fatal — the photo sub-badges just stay "not checked" */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photoFolderKey]);
+
   if (!property) {
     if (draftLoading) {
       return (
@@ -911,10 +946,6 @@ export default function BuilderPreflight() {
       setPhotoScanning(false);
     }
   };
-
-  // Auto-load cached photo signals (no credits) once the units' folders are known.
-  const photoFolderKey = effectiveUnits.map((u) => (u as any).photoFolder || "").join("|");
-  useEffect(() => { void loadPhotoChecks(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [photoFolderKey]);
 
   // Undo a saved unit swap — deletes from DB and removes from state
   const handleUndoSwap = async (oldUnitId: string) => {
