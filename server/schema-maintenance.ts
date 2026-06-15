@@ -478,13 +478,15 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured assistant chat tables");
 
-  // Bedroom re-mix / photo-reuse tracking on bulk combo listing queue items.
+  // Bedroom re-mix / photo-reuse tracking + worker-interruption counter on bulk
+  // combo listing queue items.
   await db.execute(sql`
     ALTER TABLE bulk_combo_listing_job_items
       ADD COLUMN IF NOT EXISTS effective_unit1_beds integer,
       ADD COLUMN IF NOT EXISTS effective_unit2_beds integer,
       ADD COLUMN IF NOT EXISTS remix_applied boolean NOT NULL DEFAULT false,
-      ADD COLUMN IF NOT EXISTS unit2_photos_reused boolean NOT NULL DEFAULT false
+      ADD COLUMN IF NOT EXISTS unit2_photos_reused boolean NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS interruptions integer NOT NULL DEFAULT 0
   `);
-  console.log("[schema] ensured bulk_combo_listing_job_items re-mix columns");
+  console.log("[schema] ensured bulk_combo_listing_job_items re-mix + interruption columns");
 }

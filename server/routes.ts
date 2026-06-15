@@ -33488,6 +33488,8 @@ Return ONLY compact JSON with this exact shape:
     effectiveUnit2Beds?: number | null;
     remixApplied?: boolean;
     unit2PhotosReused?: boolean;
+    // Worker restarts/interruptions that stopped this item mid-run (bounded reprieve).
+    interruptions?: number | null;
   };
   type BulkComboListingJob = {
     id: string;
@@ -33507,6 +33509,11 @@ Return ONLY compact JSON with this exact shape:
   };
   const activeBulkComboListingJobIds = new Set<string>();
   const BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS = 3;
+  // A "running" item recovered by recoverStaleBulkComboListingJob was ALWAYS
+  // interrupted (genuine failures exit as status="failed", never "running"), so a
+  // deploy/restart mid-listing gets up to this many fresh restarts before we give
+  // up — instead of permanently dropping a viable listing at max attempts.
+  const BULK_COMBO_LISTING_MAX_INTERRUPTIONS = 3;
   const BULK_COMBO_LISTING_STALE_MS = 5 * 60 * 1000;
   const BULK_COMBO_LISTING_RESUME_INTERVAL_MS = 60 * 1000;
   const BULK_COMBO_LISTING_RETRY_BACKOFF_MS = [15_000, 45_000];
@@ -33621,6 +33628,7 @@ Return ONLY compact JSON with this exact shape:
           effectiveUnit2Beds: item.effectiveUnit2Beds ?? null,
           remixApplied: item.remixApplied ?? false,
           unit2PhotosReused: item.unit2PhotosReused ?? false,
+          interruptions: item.interruptions ?? 0,
           sortOrder,
           startedAt: bulkComboDate(item.startedAt),
           finishedAt: bulkComboDate(item.finishedAt),
@@ -33660,6 +33668,7 @@ Return ONLY compact JSON with this exact shape:
         effectiveUnit2Beds: row.effectiveUnit2Beds ?? null,
         remixApplied: Boolean(row.remixApplied),
         unit2PhotosReused: Boolean(row.unit2PhotosReused),
+        interruptions: row.interruptions ?? 0,
       };
     });
     for (const item of items) hydrateBulkComboListingItem(item);
@@ -33692,18 +33701,34 @@ Return ONLY compact JSON with this exact shape:
     let dropped = 0;
     for (const item of job.items) {
       if (item.status !== "running" || (!leaseExpired && !isBulkComboListingStale(item))) continue;
+      // A "running" item here was INTERRUPTED (deploy/restart/crash) — genuine
+      // failures exit the retry loop as status="failed", never "running". So don't
+      // permanently drop it just because the interruption consumed its last attempt;
+      // give it a bounded number of fresh restarts (one more genuine attempt each).
       if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
-        item.status = "failed";
-        item.phase = "failed";
-        item.message = `Worker heartbeat went stale after ${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS} attempts; dropping this listing`;
-        item.error = item.message;
-        item.finishedAt = now;
-        item.heartbeatAt = now;
-        dropped += 1;
+        if ((item.interruptions ?? 0) < BULK_COMBO_LISTING_MAX_INTERRUPTIONS) {
+          item.interruptions = (item.interruptions ?? 0) + 1;
+          item.attemptCount = BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS - 1; // one more genuine attempt
+          item.status = "queued";
+          item.phase = "retrying";
+          item.message = `Worker stopped mid-listing (restart ${item.interruptions}/${BULK_COMBO_LISTING_MAX_INTERRUPTIONS}); re-queued for another attempt`;
+          item.error = null;
+          item.finishedAt = null;
+          item.heartbeatAt = null;
+          reset += 1;
+        } else {
+          item.status = "failed";
+          item.phase = "failed";
+          item.message = `Dropped after ${BULK_COMBO_LISTING_MAX_INTERRUPTIONS} worker restarts mid-listing without completing`;
+          item.error = item.message;
+          item.finishedAt = now;
+          item.heartbeatAt = now;
+          dropped += 1;
+        }
       } else {
         item.status = "queued";
         item.phase = "retrying";
-        item.message = "Previous worker heartbeat went stale; retrying this listing";
+        item.message = "Worker stopped mid-listing; re-queued to retry";
         item.error = null;
         item.finishedAt = null;
         item.heartbeatAt = null;
@@ -34187,7 +34212,10 @@ Return ONLY compact JSON with this exact shape:
           for (let i = 0; i < job.items.length; i += 1) {
             job.currentIndex = i;
             const item = job.items[i];
-            if (item.status === "completed" || item.status === "cancelled") continue;
+            // Skip terminal items. "failed" included so a deterministic failure (e.g.
+            // the address pre-check below, which leaves attemptCount at 0) is not
+            // re-processed — and its finishedAt not clobbered — on a job resume.
+            if (item.status === "completed" || item.status === "cancelled" || item.status === "failed") continue;
             if (item.status === "running" && isBulkComboListingStale(item)) {
               item.status = "queued";
               item.phase = "retrying";
@@ -34207,6 +34235,36 @@ Return ONLY compact JSON with this exact shape:
               job.updatedAt = Date.now();
               await persistBulkComboListingSnapshot(job);
               continue;
+            }
+            // Fail FAST on a missing/unresolvable street address: the save step
+            // hard-rejects without a real numbered street, so reject here BEFORE
+            // spending 10-15 min on photo discovery. hydrate first so curated
+            // COMMUNITY_ADDRESS_RULES + addressHint are applied. A missing address
+            // is deterministic, so don't burn retry attempts on it.
+            if (!item.draftId) {
+              hydrateBulkComboListingItem(item);
+              const community = item.community || {};
+              const addrPrecheck = validateCommunityStreetAddress({
+                communityName: community.name,
+                city: community.city,
+                state: community.state,
+                streetAddress: item.streetAddress,
+              });
+              if (!addrPrecheck.ok) {
+                item.status = "failed";
+                item.phase = "failed";
+                item.message = `No usable street address for "${community.name ?? "this community"}" — add one before queuing (skipped before searching photos). ${addrPrecheck.error}`;
+                item.error = item.message;
+                item.finishedAt = Date.now();
+                job.updatedAt = Date.now();
+                await queueEvent("bulk-combo-listing", job.id, "address-precheck", item.message, {
+                  itemKey: item.id,
+                  level: "error",
+                  meta: { error: addrPrecheck.error, expectedStreet: (addrPrecheck as any).expectedStreet ?? null },
+                });
+                await persistBulkComboListingSnapshot(job);
+                continue;
+              }
             }
             if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
               item.status = "failed";
@@ -34516,6 +34574,7 @@ Return ONLY compact JSON with this exact shape:
       item.finishedAt = null;
       item.heartbeatAt = null;
       item.attemptCount = 0;
+      item.interruptions = 0; // operator retry gets a fresh restart budget too
       reset += 1;
     }
     if (reset > 0) {

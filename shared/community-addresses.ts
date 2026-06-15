@@ -45,6 +45,9 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Manualoha at Poipu Kai"], street: "2371 Ho'ohu Road", city: "Koloa", state: "HI" },
   { names: ["Honua Kai Resort", "Honua Kai", "Honua Kai Resort & Spa"], street: "130 Kai Malina Pkwy", city: "Lahaina", cityAliases: ["Kaanapali", "Ka'anapali", "Kapalua", "Napili", "Honokowai"], state: "HI" },
   { names: ["Kaanapali Alii", "Kaanapali Ali'i"], street: "50 Nohea Kai Dr", city: "Lahaina", cityAliases: ["Kaanapali", "Ka'anapali"], state: "HI" },
+  { names: ["Wailea Elua Village", "Wailea Elua"], street: "3600 Wailea Alanui Dr", city: "Kihei", cityAliases: ["Wailea"], state: "HI" },
+  { names: ["Wailea Ekahi Village", "Wailea Ekahi"], street: "3300 Wailea Alanui Dr", city: "Kihei", cityAliases: ["Wailea"], state: "HI" },
+  { names: ["Grand Champions Villas", "Wailea Grand Champions"], street: "155 Wailea Ike Pl", city: "Kihei", cityAliases: ["Wailea"], state: "HI" },
   { names: ["Ko Olina Beach Villas", "Beach Villas at Ko Olina", "Beach Villas Ko Olina"], street: "92-102 Waialii Pl", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
   { names: ["Coconut Plantation at Ko Olina", "Coconut Plantation", "Coconut Plantation Ko Olina"], street: "92-1070 Olani St", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
 ];
