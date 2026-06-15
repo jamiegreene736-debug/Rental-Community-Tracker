@@ -1988,12 +1988,14 @@ margin on the SELL side (pricing) and the SOURCING side (the gate). PRs #663
     ScrapingBee secondary → sidecar tertiary (heartbeat-gated).
     The sidecar's `zillow_photo_scrape` op type extracts photos
     AND facts from the rendered DOM, so a sidecar success short-
-    circuits the find-clean-unit HTML-fallback step. Operator
-    needs to add `handleZillowPhotoScrape` to their local
-    `worker.mjs` per `docs/sidecar-worker-deltas/zillow-photo-
-    scrape.md` — until they do, sidecar requests time out
-    gracefully (90s wallet) and the chain falls through to its
-    existing behavior. PR #361.
+    circuits the find-clean-unit HTML-fallback step. PR #361.
+    **UPDATE (Load-Bearing #45, 2026-06-15):** the worker handler
+    that #41 said the operator must hand-add now SHIPS in the repo
+    `daemon/vrbo-sidecar/worker.mjs` — `zillow_photo_scrape` is
+    routed to the generic `processListingGalleryScrape`, so this
+    tier is no longer a phantom. The old delta doc
+    (`docs/sidecar-worker-deltas/zillow-photo-scrape.md`) is
+    superseded. See #45 for the full Redfin/Homes/Zillow tier.
 
 42. **find-clean-unit uses verify-then-discover prefiltering: OTA
     address index built BEFORE Zillow candidates get scraped.**
@@ -2092,6 +2094,40 @@ margin on the SELL side (pricing) and the SOURCING side (the gate). PRs #663
     **Do NOT** skip `scrapeListingPhotos` because search results include
     thumbnail URLs. **Do NOT** remove Apify/RentCast/Google legs — RealtyAPI
     is the primary Realtor URL harvester, not the only discovery source.
+
+45. **Redfin / Homes.com / Zillow have a residential-IP sidecar scrape
+    tier of last resort (`listing_gallery_scrape`).** Redfin and Homes.com
+    are richly DISCOVERED (SearchAPI `site:` queries) but their server-side
+    scrape chain is fetch → ScrapingBee with no Apify and no sidecar, so on
+    Railway's datacenter IP they frequently bot-wall down to a single
+    og:image and fail the downstream photo-count gate. The Redfin/Homes
+    branch of `scrapeListingPhotos` now falls back — ONLY when fetch +
+    ScrapingBee returned **0** photos — to `scrapeListingGalleryViaSidecar`
+    (a generic, host-agnostic gallery scrape via the operator's home-IP
+    Chrome). The same worker handler (`processListingGalleryScrape`) also
+    backs the previously-phantom `zillow_photo_scrape` caller (#41).
+
+    - **Sequential fallback only — never union** (Load-Bearing #5). It fires
+      solely on `result.urls.length === 0` and REPLACES the (empty) photo
+      set; it does not merge with or reorder fetch/ScrapingBee photos.
+    - **Real-estate hosts only** (PR #338). It lives inside the
+      `redfin.com|homes.com` branch, so no OTA host (VRBO/Airbnb/Booking)
+      can flow through it for replacement/find-unit photos.
+    - **Naturally inert** when the worker is offline (`workerOnline:false`)
+      and gated to non-zero wallets — `SCRAPE_WITHOUT_SIDECAR`
+      (`sidecarWalletMs:0`, used by `fetch-unit-photos`) skips it, so only
+      the find-unit / find-clean-unit paths use it. Kill switch:
+      `SIDECAR_GALLERY_SCRAPE_ENABLED=0`.
+    - **`makeRequestKey` MUST stay URL-keyed** for this op (sidecar
+      request-key exhaustiveness regression — a prior bug collided distinct
+      listings onto one dedup key).
+    - **DEPLOY:** the worker handler lives in the daemon (`worker.mjs`). A
+      Railway deploy ships the SERVER only — it does NOT activate the
+      handler. Run `cp daemon/vrbo-sidecar/worker.mjs
+      ~/.vrbo-sidecar-daemon/worker.mjs && launchctl kickstart -k
+      gui/$(id -u)/com.vrbosidecar.worker`. Until then the live (old) worker
+      hits `default: unknown opType`, the op fails, and the server tier
+      degrades to its existing 0-photo behavior — safe, just no benefit.
 
 ### Inbox auto-reply
 
@@ -2438,6 +2474,7 @@ Examples:
 2026-06-15 · Jamie: the bulk add-combo-listing queue kept producing combos with a BLANK second unit (Unit A 25 photos, Unit B 0) because both halves are the same community + same bedroom count and the resolver excludes Unit A's listing for Unit B — so when only one good listing exists, Unit B starves. "I like taking the same unit photos if it can't find a 2nd unit but… switch the combo to a [4] bedroom and find a 2 bedroom unit instead." · ACCEPTED + shipped (bedroom re-mix fallback) · `runComboPhotoFetchItem` (`server/routes.ts`) now escalates when the same-size second unit comes back < `MIN_INDEPENDENT_UNIT_PHOTOS`: (1) **re-mix** — `remixBedroomSplits` (`shared/community-combo.ts`) proposes same-TOTAL different-SIZE splits capped at 4BR (no 5BR condos; 3+3→4+2, 2+2→3+1, 4+4→none) and re-searches BOTH halves, committing only when both return real distinct galleries; (2) **photo reuse** (final safety net) — reuse Unit A's photos for Unit B so a combo is never saved blank. The effective (re-mixed) sizes flow into `generate-listing` copy + `/api/community/save` (`unit1Bedrooms`/`unit2Bedrooms`/`combinedBedrooms`) and the dedup/idempotency helpers (`effectiveBulkComboBeds`), so a re-mixed item finds its own draft on retry. Tracked durably via 4 new `bulk_combo_listing_job_items` columns (`ensureRuntimeSchema`, NOT db:push), a `remix`/`photo-reuse` queue event, and per-item UI badges + Unit A/B photo counts on the queue (`add-community.tsx`). Env: `COMBO_REMIX_ENABLED`/`COMBO_PHOTO_REUSE_ENABLED`/`COMBO_REMIX_MAX_UNIT_BEDROOMS=4` (default ON). LOAD-BEARING: the proof's duplicate-overlap check is SKIPPED when `unit2PhotosReused` (reused photos are identical by design); `effUnit*Beds` (not `pairing.unit*Beds`) must feed copy/save/dedup or a re-mixed draft mismatches + duplicates on retry. Built; new `tests/combo-remix.test.ts` (11) green, `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors (baseline 287); 3-lens adversarial review → 0 confirmed bugs. NOTE: separately surfaced two NON-photo blockers in the same live batch (not fixed here) — items fail on a missing community street address (`validateCommunityStreetAddress`) and on heartbeat-stale drops during long phases.
 2026-06-15 · Jamie hit "Replacement search session expired (server restarted or job not found)" while finding a replacement unit (screenshot) · ACCEPTED, client-only · The find-unit job is in-memory (`server/preflight-background-jobs.ts`) and a run is long (≤8×~350s); a Railway restart mid-run evicts it and the poll 404s, breaking the UI's "Safe to leave this tab — search continues on server" promise. Rather than a Postgres-backed job (the result isn't applied until the operator confirms, so there's nothing to durably persist — unlike auto-fill picks), `unit-replacement-flow.tsx` now persists the start PAYLOAD in localStorage and TRANSPARENTLY re-launches the same search on a 404 (`attemptAutoResume`, tri-state `resumed`/`in-progress`/`cannot`). Bounds are DURABLE: a `resumeCount` in the localStorage ref (cap 3, survives the close/reopen remount, incremented only on a confirmed start-POST) + a `lastAliveAt`-keyed 45-min freshness window (refreshed each successful poll) so it can't spin SearchAPI in a crash loop yet a long actively-watched search never ages out. Falls back to the original error (string preserved for the grep test) only when resume is truly impossible. Same ephemeral-job + client-relaunch philosophy as Auto-fill #6/#8. Built + hardened via TWO adversarial review Workflows (9 findings confirmed + fixed: concurrent-poll error-clobber [high], post-await cancel re-check, per-mount→durable cap, freshness re-anchor, budget-before-POST, transient flash, no resume signal/full-restart, long-run window age-out, claim-on-failure stuck-spinner). See the "Preflight replacement-find job survives a server restart" Load-Bearing subsection. Verified: full `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors in the touched file.
 2026-06-15 · Jamie: "fix the address issue as well and the heartbeat going stale on long phases" (the two NON-photo blockers flagged after the re-mix fix) · ACCEPTED + shipped · TWO fixes to the bulk add-combo-listing queue. (A) ADDRESS FAIL-FAST: `validateCommunityStreetAddress` (`shared/community-addresses.ts`) hard-rejects a community with no real numbered street, but only at the SAVE step — AFTER 10-15 min of photo work (Wailea Ekahi died here). Added a pre-check in the `runBulkComboListingJob` per-item loop (after the cancel check, before the max-attempts guard): `hydrateBulkComboListingItem` + `validateCommunityStreetAddress`, and on failure mark the item failed + `continue` (skips the retry loop entirely — no photos, no attempts burned, clear "add a street address" message + `address-precheck` event). Also added 3 curated resort addresses to `COMMUNITY_ADDRESS_RULES` (Wailea Elua Village 3600 Wailea Alanui Dr, Wailea Ekahi Village 3300 Wailea Alanui Dr, Grand Champions Villas 155 Wailea Ike Pl — all Kihei/Wailea HI, web-verified) so the operator's current batch resolves. (B) HEARTBEAT INTERRUPTION REPRIEVE: items were hard-dropped ("heartbeat went stale after 3 attempts") when a deploy/restart killed the worker mid-item at attemptCount=3 (the now-#691-rarer photo retries used to push items to att 3). KEY INSIGHT: a "running" item in `recoverStaleBulkComboListingJob` was ALWAYS interrupted (genuine failures exit the retry loop as status="failed", never "running"), so don't permanently drop it — give up to `BULK_COMBO_LISTING_MAX_INTERRUPTIONS=3` bounded reprieves (interruptions++, attemptCount=MAX-1 = one more genuine attempt, status="queued"). New persisted `interruptions` column (`ensureRuntimeSchema`, NOT db:push) bounds it across restarts. LOAD-BEARING: the reprieve relies on genuine failures never leaving an item "running"; the bound MUST persist (else a deploy storm loops forever). Built; new `tests/community-addresses.test.ts` (16) + full `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors (baseline 287); 2-lens adversarial review.
+2026-06-15 · Jamie disabled RealtyAPI (it burned metered API budget for low marginal value) and asked for OTHER ways to find unit photos · ACCEPTED · An architecture-mapping workflow found the real gap is SCRAPE-side, not discovery-side: Redfin/Homes.com are richly DISCOVERED but their scrape chain is fetch → ScrapingBee with no Apify and no sidecar tier, so on Railway's datacenter IP they bot-wall to a single og:image and fail the photo-count gate; and the `zillow_photo_scrape` sidecar op was a PHANTOM (server fully wired it but the repo `worker.mjs` had no handler — it hit `default: unknown opType` and failed silently; #41 had flagged this as an operator-TODO). Shipped ONE zero-marginal-cost change reusing the FREE Mac sidecar (no new paid API — the explicit anti-goal after the RealtyAPI overspend): a generic `listing_gallery_scrape` op (`processListingGalleryScrape` in `worker.mjs`, host-agnostic gallery + JSON-LD-facts harvest, gallery-container-scoped to avoid "similar homes" pollution) wired as a SEQUENTIAL last-resort tier in `scrapeListingPhotos`' Redfin/Homes branch (fires only on 0 photos from fetch+ScrapingBee → never unions, Load-Bearing #5); the same handler also backs the phantom `zillow_photo_scrape` caller. Gated `SIDECAR_GALLERY_SCRAPE_ENABLED` (default on) + inert when the worker is offline + skipped by `SCRAPE_WITHOUT_SIDECAR` (so `fetch-unit-photos` never fires it; the pipeline-logic meta-assertion holds). URL-keyed `makeRequestKey` (request-key exhaustiveness regression). Built + adversarially reviewed via two multi-agent workflows (architecture map → 4-lens review + verify). Verified: full `npm test` green (+2 new sidecar-gallery tests), `npm run build` clean, `npm run check` 0 new TS errors (baseline-diffed: queue.ts 15→15, routes.ts 172→172). DEPLOY: Railway ships the server; the worker handler needs `cp daemon/vrbo-sidecar/worker.mjs ~/.vrbo-sidecar-daemon/ && launchctl kickstart -k gui/$(id -u)/com.vrbosidecar.worker`. See Load-Bearing #45.
 ```
 
 (Populate on first dispute.)

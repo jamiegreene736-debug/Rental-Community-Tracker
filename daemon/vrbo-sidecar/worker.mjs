@@ -8336,6 +8336,178 @@ async function processVrboPhotoScrape(id, params) {
   await postResult(id, { photos, bedText, sleeps, lat: geo.lat, lng: geo.lng, complexName: geo.complexName, streetAddress: geo.streetAddress });
 }
 
+// ──────────── Generic real-estate listing gallery scrape ─────────────
+// Host-agnostic photo + facts scrape (Redfin / Homes.com / Zillow) via the
+// operator's home-IP Chrome. The residential IP bypasses the datacenter
+// anti-bot wall that reduces the server-side fetch+ScrapingBee chain to a
+// single og:image on Railway. Last-resort tier only (Load-Bearing #45) — the
+// server fires it after Apify/fetch/ScrapingBee return 0 photos, so it never
+// unions with or reorders an existing photo set (Load-Bearing #5). Also backs
+// the previously-phantom `zillow_photo_scrape` caller. Returns {photos, facts}.
+async function processListingGalleryScrape(id, params) {
+  const { url, maxPhotos = 40, host = "" } = params;
+  log(`listing_gallery_scrape ${id}: ${url}${host ? ` (${host})` : ""}`);
+  await ensureBrowser();
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
+  await page.waitForTimeout(PAGE_SETTLE_MS);
+  await dismissObstructions(page, "listing_gallery_scrape");
+
+  // Best-effort: open the full photo gallery so lazy-loaded images render.
+  // Generic across portals; when no matching control exists we just harvest
+  // whatever already rendered.
+  await page
+    .click(
+      'button:has-text("See all photos"), button:has-text("View all photos"), ' +
+      'button:has-text("Show all photos"), button:has-text("See photos"), ' +
+      'button:has-text("View photos"), button:has-text("All photos"), ' +
+      'a:has-text("See all photos"), [data-rf-test-name="photoPreview"], ' +
+      'button:has-text("Photos")',
+      { timeout: 2500 },
+    )
+    .catch(() => {});
+  await page.waitForTimeout(1200);
+
+  // Scroll so lazy galleries hydrate (Redfin/Zillow defer thumbnails), then
+  // return to the top.
+  await page
+    .evaluate(async () => {
+      await new Promise((resolve) => {
+        let y = 0;
+        const step = () => {
+          window.scrollTo(0, y);
+          y += 1400;
+          if (y < Math.min(document.body?.scrollHeight || 0, 40000)) setTimeout(step, 110);
+          else resolve();
+        };
+        step();
+      });
+      window.scrollTo(0, 0);
+    })
+    .catch(() => {});
+  await page.waitForTimeout(600);
+
+  const photos = await page.evaluate(({ maxPhotos }) => {
+    const seen = new Set();
+    const galleryHits = [];
+    const pageHits = [];
+    const scriptHits = [];
+
+    function normalize(raw) {
+      if (!raw) return "";
+      let u = String(raw).replace(/\\u002F/gi, "/").replace(/\\\//g, "/").replace(/&amp;/g, "&").trim();
+      if (u.startsWith("//")) u = `https:${u}`;
+      return u;
+    }
+    function accept(raw, bucket) {
+      const u = normalize(raw);
+      if (!/^https?:\/\//i.test(u)) return;
+      const lower = u.toLowerCase();
+      const hasExt = /\.(?:jpe?g|webp|png)(?:[?#]|$)/i.test(lower);
+      // Known listing-photo CDNs carry image bytes even without a clean extension.
+      const knownCdn = /(?:ssl\.cdn-redfin\.com|cdn-redfin\.com|photos\.zillowstatic\.com|maps\.zillowstatic\.com|rdcpix\.com|listingphotos\.sierrastatic\.com|cbhomes\.com\/p\/|cloudfront\.net\/img\/)/i.test(lower);
+      if (!hasExt && !knownCdn) return;
+      // Drop chrome: logos, map tiles/pins, etc. Structural tokens are safe to
+      // match anywhere in the URL.
+      if (/logo|icon|sprite|avatar|favicon|placeholder|transparent|no-?photo|nophoto|map-?(?:placeholder|pin|marker)|static-?map|streetview|street-view/i.test(lower)) return;
+      // People/brand tokens (agent headshots, broker watermarks) are SHORT and
+      // would false-drop legit photos as bare substrings (a "brandon-st" slug,
+      // a "team" path segment), so require a path/file delimiter on both sides.
+      if (/(?:^|[/_.\-])(?:agent|broker|headshot|team|brand|badge|watermark)(?:[/_.\-]|$)/i.test(lower)) return;
+      const key = lower.replace(/[?#].*$/, "");
+      if (seen.has(key)) return;
+      seen.add(key);
+      bucket.push(u);
+    }
+    function harvestFrom(root, bucket) {
+      root.querySelectorAll("img").forEach((img) => {
+        accept(img.currentSrc || img.src || img.getAttribute("data-src") || img.getAttribute("data-lazy-src") || img.getAttribute("data-flickity-lazyload"), bucket);
+        const ss = img.getAttribute("srcset");
+        if (ss) ss.split(",").forEach((p) => accept(p.trim().split(/\s+/)[0], bucket));
+      });
+      root.querySelectorAll("source[srcset]").forEach((s) => {
+        String(s.getAttribute("srcset") || "").split(",").forEach((p) => accept(p.trim().split(/\s+/)[0], bucket));
+      });
+    }
+
+    // Harvest in priority order; the shared `seen` makes the three buckets
+    // disjoint (a URL is claimed by the highest-priority source that sees it).
+    // 1) Scoped gallery/carousel containers — purest: the subject listing's own
+    //    gallery, which lives in a DIFFERENT container than "similar homes"/
+    //    neighborhood/agent sections, so those are structurally excluded.
+    const containerSel = [
+      ".photo-gallery", "[data-rf-test-name='MediaCarousel']", ".InlinePhotoPreview",
+      ".photos-container", "[data-testid='hollywood-image-tile']", "ul.media-stream",
+      "[data-testid='gallery']", ".gallery", "[class*='Gallery']", "[class*='gallery']",
+      "[class*='PhotoCarousel']", "[class*='photo-carousel']", "[aria-label*='photo' i]",
+    ].join(",");
+    document.querySelectorAll(containerSel).forEach((el) => harvestFrom(el, galleryHits));
+
+    // 2) Whole-page rendered <img>/<source> — images actually DISPLAYED on the
+    //    listing (used to backfill when the scoped gallery is sparse/absent).
+    harvestFrom(document, pageHits);
+
+    // 3) Script-mined JSON image URLs — SUPPLEMENTAL/last-resort only. Redfin &
+    //    Zillow embed the full gallery in JSON blobs, but those blobs ALSO carry
+    //    "similar homes"/comp photos on the SAME CDNs that the junk filter can't
+    //    tell apart (the prior regression `walkForPhotosScoped` skipKeys guards
+    //    against). Kept separate so a real DISPLAYED gallery is never polluted by
+    //    another property's interior shots.
+    document.querySelectorAll("script").forEach((s) => {
+      const t = normalize(s.textContent || "");
+      const m = t.match(/https?:\/\/[^"' <>()]+?(?:jpe?g|webp|png)(?:\?[^"' <>()]*)?/gi) || [];
+      m.forEach((u) => accept(u, scriptHits));
+    });
+
+    const cap = Math.max(1, Math.min(120, Number(maxPhotos) || 40));
+    const MIN_TRUSTED = 4;
+    let chosen;
+    if (galleryHits.length >= MIN_TRUSTED) {
+      // A substantial scoped gallery exists → return ONLY it (purest provenance,
+      // excludes page-level "similar homes" thumbnails and script comps).
+      chosen = galleryHits;
+    } else {
+      // Scoped gallery sparse/absent (portal markup didn't match, or a tiny
+      // widget): union the few gallery photos with the rest of the on-page
+      // images so a 1-2 image widget doesn't suppress a full page of photos.
+      // Fall to script-mined JSON ONLY when nothing was displayed at all.
+      const displayed = galleryHits.concat(pageHits);
+      chosen = displayed.length > 0 ? displayed : scriptHits;
+    }
+    return chosen.slice(0, cap);
+  }, { maxPhotos });
+
+  const facts = await page
+    .evaluate(() => {
+      const out = {};
+      const num = (x) => {
+        const n = Number(x);
+        return Number.isFinite(n) && n > 0 && n < 50 ? n : undefined;
+      };
+      for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+        try {
+          const data = JSON.parse(s.textContent || "{}");
+          const arr = Array.isArray(data) ? data : [data];
+          for (const obj of arr) {
+            const nodes = [obj, ...(Array.isArray(obj && obj["@graph"]) ? obj["@graph"] : [])];
+            for (const node of nodes) {
+              if (!node || typeof node !== "object") continue;
+              if (out.bedrooms == null) out.bedrooms = num(node.numberOfBedrooms ?? node.numberOfRooms);
+              if (out.bathrooms == null) out.bathrooms = num(node.numberOfBathroomsTotal ?? node.numberOfBathrooms);
+            }
+          }
+        } catch {}
+      }
+      const body = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
+      if (out.bedrooms == null) { const m = body.match(/(\d+(?:\.\d+)?)\s*(?:beds?|bedrooms?|bd)\b/i); if (m) out.bedrooms = num(m[1]); }
+      if (out.bathrooms == null) { const m = body.match(/(\d+(?:\.\d+)?)\s*(?:baths?|bathrooms?|ba)\b/i); if (m) out.bathrooms = num(m[1]); }
+      return out;
+    })
+    .catch(() => ({}));
+
+  log(`listing_gallery_scrape ${id}: ${photos.length} photos, beds=${facts.bedrooms ?? "?"}, baths=${facts.bathrooms ?? "?"}`);
+  await postResult(id, { photos, facts });
+}
+
 // ─────────────────────── Booking.com search ─────────────────────────
 async function processBookingSearch(id, params) {
   const { destination, searchTerm } = params;
@@ -11996,6 +12168,12 @@ async function processRequest(req) {
       case "airbnb_search": return await processAirbnbSearch(req.id, params);
       case "vrbo_search": return await processVrboSearch(req.id, params);
       case "vrbo_photo_scrape": return await processVrboPhotoScrape(req.id, params);
+      case "listing_gallery_scrape": return await processListingGalleryScrape(req.id, params);
+      // `zillow_photo_scrape` was fully wired on the server (helper + caller in
+      // scrapeListingPhotos) but never had a worker handler — every call hit
+      // `default: unknown opType` and failed silently. Route it through the same
+      // generic gallery scraper so the existing Zillow caller starts working too.
+      case "zillow_photo_scrape": return await processListingGalleryScrape(req.id, params);
       case "booking_search": return await processBookingSearch(req.id, params);
       case "google_serp": return await processGoogleSerp(req.id, params);
       case "pm_site_search": return await processPmSiteSearch(req.id, params);
