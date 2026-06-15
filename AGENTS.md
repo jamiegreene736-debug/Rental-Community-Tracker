@@ -1050,6 +1050,66 @@ established it so you can read the rationale in the commit message.
     only costs one SearchAPI call + one Nominatim call (or zero, on a
     cache hit).
 
+### Sourceability gate + last-minute pricing (Load-Bearing, 2026-06-15)
+
+The buy-in model sells inventory we don't own yet. These two mechanisms protect
+margin on the SELL side (pricing) and the SOURCING side (the gate). PRs #663
+(pricing) + #664/#665/#666 (gate). Don't "fix" any of these cold:
+
+- **Last-minute markup is a single FLAT +15% within 14 days — NOT the old
+  per-season-band escalation.** `server/availability-policy.ts`
+  `LAST_MINUTE_MARKUP_DAYS` (14) / `LAST_MINUTE_MARKUP_PCT` (0.15) +
+  `lastMinuteMarkupForDaysUntilArrival` / `lastMinuteDemandFactor`. The old
+  scheme (+15/25/40/50% across 45/75/90/120 days by season band) priced us above
+  market for near-term dates where our buy cost had not risen — measured from 479
+  of our own VRBO scrapes, unit cost is flat until ~14 days out then ~+13%. The
+  band functions (`demandFactorForPolicyBand`) are RETAINED but
+  deprecated-for-pricing. The availability scanner's 45/75/90/120 lead horizons
+  and the inventory-scarcity verdict markup are SEPARATE concerns and unchanged.
+  The pushed near-term rate (`pushLeadTimePolicyPricesToGuesty`) is
+  `setCost × lastMinuteDemandFactor(days) × (1+targetMargin)`.
+
+- **The rate fed to Guesty is the desired NET disbursement; do NOT gross up for
+  commission in code.** `cleanBaseRateFromBuyInServer` = `(1+targetMargin) ×
+  cost`. Operator decision: Guesty is configured to apply the per-channel markup
+  that recovers each channel's fee (Airbnb ~+18.3%, Booking.com ~+20.5%, VRBO
+  ~+8.7%) and disburse this rate net. Adding a code gross-up would double-count.
+  `CHANNEL_HOST_FEE` / `computeChannelMarkups` (`shared/pricing-rates.ts`) are
+  CLIENT-DISPLAY ONLY and are never pushed to Guesty. (If those Guesty markups are
+  ever turned off, the rate would net `(1+margin)×(1−commission)` instead — that's
+  a Guesty-config issue, not a code change.)
+
+- **The sourceability gate FAIL-SAFE IS OPEN.** `server/sourceability-gate.ts`
+  daily sweep, env-gated (`SOURCEABILITY_GATE_ENABLED` / `SOURCEABILITY_GATE_ENFORCE`,
+  both default OFF → a deploy is INERT until flipped). Per near-term window it runs
+  `runCityVrboInventoryScan` and decides block/open/skip (`decideSourceability` in
+  `sourceability-gate-core.ts`): it BLOCKS only when a CONFIRMED real pool's cheapest
+  same-community combo costs more than `sellableRevenue × (1+minMargin)` (or no combo
+  exists in a real pool). An offline/errored/EMPTY scan → "skip": neither block nor
+  unblock. A false block silently kills real revenue, so the asymmetry is deliberate.
+  `reconcileSourceabilityBlocks` (`sync-scanner-blocks.ts`) PUTs Guesty status
+  unavailable/available and touches ONLY `source="sourceability-gate"` scanner_blocks
+  (never human/legacy blocks). The sweep is single-flight, yields the sidecar to the
+  operator's bulk queue, is scan-budget-capped, and only covers the near-term horizon.
+
+- **Blocks/unblocks require N CONSECUTIVE agreeing sweeps (default 2) — the
+  confirmation guard.** Live validation caught the same Poipu Kai week reading
+  −$8,664 then +$5,045 minutes apart (partial scrape). `applyConfirmation` /
+  `confirmedAction` (`sourceability-gate-core.ts`) + per-window streaks persisted in
+  the NEW `sourceability_observations` table (so confirmation survives redeploys —
+  in-memory would reset every deploy). A "skip" is NEUTRAL: it leaves the streak (it
+  never resets nor counts toward a confirmation). DRY-RUN sweeps STILL build the
+  streaks (only the Guesty reconcile is gated by enforce), so the safe rollout is
+  dry-run a couple nights → review → flip ENFORCE; the next sweep then acts on the
+  already-confirmed windows. Tune via `SOURCEABILITY_GATE_CONFIRM_SWEEPS`.
+
+- **UI:** the Sourceability Gate card on `/availability-scanner`
+  (`SourceabilityGateCard`) reads `GET /api/availability/sourceability-observations`
+  (`classifyObservation` → "Loss flagged 1/2 — 1 more sweep to block" / "Blocked on
+  Guesty" / "Sourceable"). `sourceability_observations` is a NEW CREATE TABLE (boot
+  db:push creates it; also applied directly via psql per the db:push-skips-ALTER
+  caveat below).
+
 ### Database & deploy
 
 15. **Schema migrations run via `npm run db:push` on Railway boot.**
@@ -2254,6 +2314,8 @@ Examples:
 2026-06-15 · Jamie: "plan out the ultimate AI agent for the entire platform … a chat I can speak with … sitting on the dashboard … ask it about pricing basically anything in the system." · ACCEPTED, Phase 0 shipped (`claude/platform-ai-agent-design-n4uk3r`) · New dashboard chat agent "Magical" — a Claude `tool_use` orchestrator (generalization of `server/auto-reply.ts`'s loop, model `claude-opus-4-8` via env `ASSISTANT_MODEL`) that answers operator questions by calling existing endpoints as TOOLS over in-process loopback (`server/assistant/{tools,agent,store,routes}.ts`; floating `client/src/components/AssistantDock.tsx` mounted in `App.tsx`, SSE-streamed). **LOAD-BEARING — the agent NEVER touches DB/Guesty/VRBO directly; every tool is a thin wrapper over an existing HTTP endpoint via `loopbackRequestHeaders()` + `http://127.0.0.1:${PORT}` (same pattern as `auto-fill-job.ts`), so it inherits every existing guard (VRBO sight+click, $100 profit gate, geo guards, no-double-attach) for free. Don't add tools that bypass the endpoints.** Phase 0 is READ-ONLY (`get_dashboard`, `list_bookings`, `get_reports`, `get_buy_in_estimate`); tools carry a `kind:"read"|"write"` tag so the planned confirm-before-act gate for write/outward tools (attach/send/reprice) is a one-line check in `agent.ts`. Ships DARK behind `PLATFORM_ASSISTANT_ENABLED` (+`ANTHROPIC_API_KEY`); `GET /api/assistant/status` gates the dock, admin-only. Persistence `assistant_sessions`/`assistant_messages` (fail-soft; auto-create via `schema-maintenance.ts` + `db:push`). Full design + phased roadmap in `docs/platform-assistant.md` + the "Platform AI assistant" Load-Bearing subsection. Verified: `tests/assistant-tools.test.ts` 12/0, `npm run build` clean (client+server), `npm run check` adds 0 new TS errors in touched files (baseline 287). Could NOT live-smoke (no DB/ANTHROPIC creds in the cloud session) — code-path + build verified. FOLLOW-UPS (same day): Phases 1/1.5/2/3/4 shipped + merged (PRs #668–#672) — live buy-in/city-combo/pricing read tools, confirm-before-act gate + `start_auto_fill`/`check_auto_fill`, photo find/alerts/status, guest inbox read + confirm-gated `send_guest_message`/`send_payment_receipt`, prompt caching + session-history UI + nudges. 17 tools total.
 2026-06-15 · Jamie: "add that variable for me [on] the platform" (enable the assistant) · ACCEPTED, REVERSES the same-day "ships DARK behind `PLATFORM_ASSISTANT_ENABLED`" rollout decision · Could not set Railway env vars from the cloud session (no Railway tool/creds), so instead made the assistant ON BY DEFAULT in code: `assistantEnabled()` (`server/assistant/routes.ts`) returns true unless `PLATFORM_ASSISTANT_DISABLED=1` (or legacy `PLATFORM_ASSISTANT_ENABLED=0/false`). Still needs `ANTHROPIC_API_KEY` (already set for other AI features) and renders admin-only. Updated the Load-Bearing "Platform AI assistant" #3 bullet (REPLACED) + docs. Verified: `tests/assistant-tools.test.ts` 65/0, `npm run build` clean, `npm run check` 0 new errors.
 2026-06-15 · Jamie reported "the sidecar randomly going off" · DIAGNOSED + KILLED (operational); NO in-repo code fix is possible (PR #674 = docs only) · Root cause: an UNATTENDED inventory-feed sweep — every Kauai city (Koloa/Princeville/Poipu Beach/Wailua…) × consecutive weekly windows × full-city `cityWideInventory` export, each city firing BOTH a `vrbo_search` and a `hometogo_search` — enqueued onto the prod sidecar queue at ALL HOURS (bursts across Jun 11–15 incl. overnight 00:00–08:00 UTC), so the operator's LOCAL Chrome sidecar (8 workers polling `admin.vacationrentalexpertz.com`) drove itself unprompted for hours. SEPARATE from the already-gated Monday-3am `WEEKLY_AVAILABILITY_SCAN` sweep. **The feed scheduler is OFF-REPO** — it is in NO branch, NO worktree, NO local cron / Claude scheduled-task / `/loop`, and NOT on disk; it exists only as the deployed Railway artifact (prod runs code ahead of git — likely `railway up`'d from an uncommitted tree). **DO NOT try to gate it in-repo (this is the trap):** HomeToGo is NOT feed-only — as of the concurrent main merge it's a LEGIT second inventory source called from the shared city-scan core (`server/city-vrbo-inventory.ts` `runCityScanCore` → `searchHometogoViaSidecar`), so EVERY real operator scan (auto-fill / find-buy-in / bulk queue / expansion) now emits the SAME `vrbo_search` + `hometogo_search` cityWide pair. Feed jobs and operator jobs are therefore BYTE-IDENTICAL (same opType, same `cityWideInventory:true`, `bedrooms:1`, null queue context) at every layer this repo controls — a `hometogo_search` (or cityWide-1BR) kill-switch would silently degrade the operator's own buy-in coverage AND still wouldn't stop the VRBO half. An earlier draft of this PR added exactly that guard; it was REMOVED for this reason. Immediate kill (done): `POST /api/vrbo-sidecar/stop` paused the live queue (cancels active + blocks new → stops BOTH halves; worker idles, heartbeat stays green); `POST /api/vrbo-sidecar/start` re-enables. DURABLE FIX (operator, off-repo): disable the prod feed scheduler at its source, OR redeploy prod cleanly from git — current `main` contains NO feed scheduler (every city-scan caller is an on-demand operator flow), so a git-based deploy drops it while KEEPING HomeToGo as a legit source — then un-pause. Until then the sweep resumes the instant the queue is un-paused.
+2026-06-15 · Jamie asked to fix last-minute buy-in pricing (he believed late-arriving bookings lost money because the markup wasn't high enough) + account for VRBO/Booking/Airbnb commission, targeting "20% clean after fees" · ACCEPTED, but the data redirected the fix (PR #663) · Analysis of 23 committed reservations + 479 of our own VRBO scrapes: median booking lead ~200 days (almost no true last-minute bookings) and unit cost is FLAT until ~14 days out then ~+13% — so the old escalating per-season-band lead-time markup (+15/25/40/50% across 45/75/90/120 days) was PRICING US OUT of near-term dates where cost hadn't risen. Replaced it with a single FLAT +15% within 14 days (`server/availability-policy.ts` LAST_MINUTE_MARKUP_DAYS/PCT). Commission: operator confirmed Guesty applies the per-channel markup and disburses the fed rate NET, so `cleanBaseRateFromBuyInServer` stays the clean net target (cost×(1+margin)) with NO code gross-up — adding one would double-count. The real margin thinness is the sell-early/buy-late spread + Booking.com commission, NOT last-minute underpricing. See the "Sourceability gate + last-minute pricing" Load-Bearing subsection.
+2026-06-15 · Jamie asked to auto-block the Guesty calendar (near-immediately) for windows we can't source a buy-in for at a profit ("sell now, can't source later"), then — after live validation caught wild VRBO scan noise — a confirmation guard, then a UI showing each window's progress toward a block · ACCEPTED · Three PRs: (#664) sourceability gate — a daily sweep runs the existing buy-in scan per near-term window and blocks/unblocks via Guesty, tracking only our `source="sourceability-gate"` scanner_blocks; FAIL-SAFE IS OPEN (never block on a failed/empty scan). (#665) 2-sweep confirmation guard — the same Poipu Kai week read −$8,664 then +$5,045 minutes apart, so a window needs the SAME decision in N CONSECUTIVE sweeps (default 2) before the calendar moves; streaks persist in the new `sourceability_observations` table; a "skip" is neutral. (#666) the Sourceability Gate card on `/availability-scanner` (`GET /api/availability/sourceability-observations` → "Loss flagged 1/2 — 1 more sweep to block"). Env-gated + INERT on deploy; operator flipped SOURCEABILITY_GATE_ENABLED+ENFORCE on this day. Validated LIVE filtering real scan noise (a window hit 2/2 blocks then an open read reset it → never false-blocked). See the "Sourceability gate + last-minute pricing" Load-Bearing subsection.
 ```
 
 (Populate on first dispute.)
