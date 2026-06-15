@@ -14,12 +14,32 @@ const check = (name: string, ok: boolean, extra?: unknown) => {
 
 console.log("assistant: tool registry");
 
-// Every Phase 0 tool is read-only (write tools land with a confirm gate later).
-check("all Phase 0 tools are read-only", ASSISTANT_TOOLS.every((t) => t.kind === "read"));
+// Phase 0/1 tools are read-only (write tools land with a confirm gate later).
+check("all current tools are read-only", ASSISTANT_TOOLS.every((t) => t.kind === "read"));
 
 // Registry is non-empty and the expected core tools exist.
-for (const name of ["get_dashboard", "list_bookings", "get_reports", "get_buy_in_estimate"]) {
+for (const name of [
+  "get_dashboard",
+  "list_bookings",
+  "get_reports",
+  "get_buy_in_estimate",
+  "find_buy_in",
+  "scan_city_vrbo",
+  "get_market_rates",
+]) {
   check(`tool '${name}' registered`, ASSISTANT_TOOLS_BY_NAME.has(name));
+}
+
+// Every tool with required params declares them inside its schema properties.
+for (const t of ASSISTANT_TOOLS) {
+  const schema = t.input_schema as any;
+  const required: string[] = Array.isArray(schema?.required) ? schema.required : [];
+  const props = schema?.properties ?? {};
+  check(
+    `tool '${t.name}' required params are all declared`,
+    required.every((r) => r in props),
+    { required, props: Object.keys(props) },
+  );
 }
 
 // Each tool has a name, a meaningful description, and a JSON-schema object.

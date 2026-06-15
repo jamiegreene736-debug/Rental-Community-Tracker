@@ -96,16 +96,26 @@ renders the dock for the **admin** role when enabled.
 | Phase | Scope | Status |
 |---|---|---|
 | **0 · Skeleton** | SSE chat + dock + read tools: `get_dashboard`, `list_bookings`, `get_reports`, `get_buy_in_estimate` | **shipped** |
-| 1 · Buy-ins & pricing | `find_buy_in`, `start_auto_fill`+poll, `scan_city_vrbo`, `suggest_better_combo`, pricing tools; confirm-gated attach | planned |
+| **1 · Buy-ins & pricing (read)** | LIVE `find_buy_in` (single unit), `scan_city_vrbo` (combo finder — "find a better combination / new location"), `get_market_rates` (pricing). Confirm-gate **store** (`confirm.ts`) landed; gated **attach/auto-fill** deferred (see below). | **shipped (read tools)** |
+| 1.5 · Confirm-gated attach | wire `confirm.ts` into the agent loop + a `/confirm` endpoint + client confirm card; first write tool = attach a found combo to a booking | next |
 | 2 · Photos & listings | `find_photos`, `check_photo_community`, `build_listing`, photo audit | planned |
 | 3 · Inbox & outward actions | guest threads, drafting, confirm-gated sends/relocation | planned |
 | 4 · Polish | Haiku fast-router, prompt caching, session history UI, proactive nudges | planned |
+
+**Why the gated attach was split into Phase 1.5:** the auto-fill/attach path takes
+a large reservation-slot-specific payload (per-slot `unitId`/`bedrooms`) and
+drives the live browser sidecar, so it can't be exercised from the cloud dev
+session (no DB, no sidecar). It deserves a focused increment with live
+verification rather than shipping unverified on the money path. The read tools
+already deliver the headline "find a better combination / new location / pricing"
+value safely; `confirm.ts` is in place so the gate is ready to wire.
 
 ## Files
 
 - `server/assistant/tools.ts` — tool registry (read tools → loopback).
 - `server/assistant/agent.ts` — Claude tool_use loop + SSE event emission.
 - `server/assistant/store.ts` — chat persistence (fail-soft).
+- `server/assistant/confirm.ts` — confirm-before-act pending-action store (write tools).
 - `server/assistant/routes.ts` — `registerAssistantRoutes(app)`; SSE chat + history.
 - `client/src/components/AssistantDock.tsx` — floating dock, SSE consumer.
 - `shared/schema.ts` — `assistantSessions` / `assistantMessages`.

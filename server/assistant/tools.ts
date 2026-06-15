@@ -152,6 +152,70 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
         cleaningFeePerUnit: input.cleaningFeePerUnit != null ? String(input.cleaningFeePerUnit) : undefined,
       }),
   },
+  {
+    name: "find_buy_in",
+    kind: "read",
+    description:
+      "Run a LIVE multi-source buy-in search (Airbnb / VRBO / Booking.com / property managers) for ONE unit of a given bedroom count at a property's resort, for specific dates. Use to answer 'find a buy-in / a unit to cover this booking' for a single-unit need, or to price what covering a stay would cost. Returns `cheapest` (top options by nightly price), per-source results, and `diagnostics`. " +
+      "This is SLOW (it drives the live browser sidecar — can take 30–90s+) and needs the operator's sidecar online; if it returns few/no results, say so and surface the diagnostics. To get propertyId + bedrooms for a booking, call get_buy_in_estimate first (it returns propertyId and per-unit bedrooms from the listingId).",
+    input_schema: {
+      type: "object",
+      properties: {
+        propertyId: { type: "number", description: "Internal property id (from get_buy_in_estimate)." },
+        bedrooms: { type: "number", description: "Bedroom count to search for." },
+        checkIn: { type: "string", description: "Check-in YYYY-MM-DD." },
+        checkOut: { type: "string", description: "Check-out YYYY-MM-DD." },
+        listingId: { type: "string", description: "Optional Guesty listing id for better resort inference." },
+        community: { type: "string", description: "Optional community/resort override." },
+        nocache: { type: "boolean", description: "Set true to force a fresh scan (skips the result cache)." },
+      },
+      required: ["propertyId", "bedrooms", "checkIn", "checkOut"],
+    },
+    execute: async (input) =>
+      loopbackGet("/api/operations/find-buy-in", {
+        propertyId: input.propertyId != null ? String(input.propertyId) : undefined,
+        bedrooms: input.bedrooms != null ? String(input.bedrooms) : undefined,
+        checkIn: str(input.checkIn),
+        checkOut: str(input.checkOut),
+        listingId: str(input.listingId),
+        community: str(input.community),
+        nocache: input.nocache ? "1" : undefined,
+      }),
+  },
+  {
+    name: "scan_city_vrbo",
+    kind: "read",
+    description:
+      "Run a LIVE city-wide VRBO scan for a multi-unit (combo) property and find the best same-community COMBINATION that covers the booking. This is the tool for 'find a better combination' and 'find a new location' — it returns `suggestedPair` (cheapest walkable same-community combo), `suggestedPairs` (ranked alternatives), the full `listings`, the `bedroomPlan`/`unitLabels`, and `coverage` (how complete the scan was). " +
+      "SLOW (drives the live sidecar; tens of seconds) and needs the sidecar online. Use scan_city_vrbo for combo properties; use find_buy_in for a single unit. Get propertyId from get_buy_in_estimate.",
+    input_schema: {
+      type: "object",
+      properties: {
+        propertyId: { type: "number", description: "Internal property id (from get_buy_in_estimate)." },
+        checkIn: { type: "string", description: "Check-in YYYY-MM-DD." },
+        checkOut: { type: "string", description: "Check-out YYYY-MM-DD." },
+        phrase: { type: "string", description: "Optional resort/community phrase filter." },
+        nocache: { type: "boolean", description: "Set true to force a fresh scan." },
+      },
+      required: ["propertyId", "checkIn", "checkOut"],
+    },
+    execute: async (input) =>
+      loopbackGet("/api/operations/city-vrbo-inventory", {
+        propertyId: input.propertyId != null ? String(input.propertyId) : undefined,
+        checkIn: str(input.checkIn),
+        checkOut: str(input.checkOut),
+        phrase: str(input.phrase),
+        nocache: input.nocache ? "1" : undefined,
+      }),
+  },
+  {
+    name: "get_market_rates",
+    kind: "read",
+    description:
+      "Read the portfolio's stored market nightly rates by property and bedroom count, including per-month seasonal rates (LOW/HIGH/HOLIDAY). Use to answer pricing questions like 'what should I charge for <property> in <month>?' or 'what's the going nightly rate for a 3BR?'. Returns an array of rate rows; each has propertyId, bedrooms, medianNightly, and a monthlyRates map keyed by YYYY-MM.",
+    input_schema: { type: "object", properties: {}, required: [] },
+    execute: async () => loopbackGet("/api/property/market-rates"),
+  },
 ];
 
 export const ASSISTANT_TOOLS_BY_NAME = new Map(ASSISTANT_TOOLS.map((t) => [t.name, t]));

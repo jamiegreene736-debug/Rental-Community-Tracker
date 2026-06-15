@@ -29,7 +29,7 @@ const pending = new Map<string, PendingAction>();
 
 function sweep(): void {
   const cutoff = Date.now() - PENDING_TTL_MS;
-  for (const [id, action] of pending) {
+  for (const [id, action] of Array.from(pending.entries())) {
     if (action.createdAt < cutoff) pending.delete(id);
   }
 }
