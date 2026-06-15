@@ -561,6 +561,72 @@ runs inside the server job) but left in place; don't wire it back to the button.
    cache-only ladder stages); without this the 5-min grace could lapse and the Mac
    sleep mid-queue. This too is a DAEMON change (cp supervisor.mjs + kickstart).
 
+### Preflight replacement-find job survives a server restart (Load-Bearing, 2026-06-15)
+
+The unit-replacement flow (`client/src/components/unit-replacement-flow.tsx`,
+the "Find a New Unit" panel in builder-preflight) runs find-unit as a SERVER-SIDE
+job (`server/preflight-background-jobs.ts` `replacementFindJobs` Map) and the
+client polls `GET /api/preflight/replacement-find-jobs/:jobId`. That job is
+IN-MEMORY only and a find-unit run is LONG (up to 8 continuation passes ×
+~350s). Railway recycles the process on every deploy / idle-cycle / crash, which
+evicts the in-flight job, so the poll 404s — even though the UI promises **"Safe
+to leave this tab — search continues on server"**. The operator hit this:
+a red dead-end "Replacement search session expired … run Find Replacement Unit
+again." (screenshot, 2026-06-15).
+
+Fix (CLIENT-ONLY transparent restart — same philosophy as Auto-fill #6/#8 above:
+ephemeral job + client re-launch, not a Postgres-backed job). Built + hardened
+via two adversarial review Workflows (9 findings confirmed + all fixed — the
+"don't simplify these back" list below IS those fixes):
+
+1. **Persist the start PAYLOAD** in the localStorage ref (`ReplacementJobRef`),
+   not just `{jobId, targetUnitId}`. All of `payload`/`startedAt`/`lastAliveAt`/
+   `resumeCount` are optional so a ref written by an older client still parses;
+   the mount restore effect rehydrates `lastSearchPayloadRef` from it.
+2. **On a poll 404, `attemptAutoResume(evictedJobId)`** re-POSTs the SAME payload
+   to start a fresh job, saves the new ref, `setReplacementJobId(newId)` (which
+   starts a new poll loop), and sets the old poll's `cancelled=true`. It returns a
+   **TRI-STATE** — `"resumed"` / `"in-progress"` / `"cannot"` — and ONLY `"cannot"`
+   falls through to the original "session expired" error (string preserved —
+   `tests/pipeline-logic.test.ts` greps it).
+3. **The tri-state is load-bearing (fixes the concurrency bug).** The 2s poll
+   `setInterval` has no in-flight guard, so two `poll()`s can hit the same 404
+   concurrently. `attemptAutoResume` claims the evicted jobId in `autoResumedFromRef`
+   (per-mount Set) SYNCHRONOUSLY before its await; a 2nd concurrent call (or a tick
+   in the post-success re-render window where the old jobId is still polled) gets
+   `"in-progress"` and returns WITHOUT touching the error setters — otherwise it
+   would clobber the resume with the very dead-end this fix removes. The claim is
+   KEPT on success but **RELEASED on a failed start-POST** (the `!data.job.id` and
+   `catch` paths `delete` it) — otherwise a resume POST that fails while the effect
+   resubscribed mid-flight (so the failing tick's `cancelled` re-check swallows its
+   error) would strand the UI on a permanent `"in-progress"` spinner with no error
+   and no retry button. The poll also re-checks `cancelled` AFTER the resume await
+   before any state mutation (incl. the localStorage clear), so a teardown
+   mid-resume can't wipe the ref.
+4. **Bounds are DURABLE, not per-mount (don't weaken — find-unit burns SearchAPI
+   budget):** the restart cap reads `stored.resumeCount` from localStorage and
+   increments it ONLY on a confirmed successful start-POST (cap
+   `MAX_REPLACEMENT_AUTO_RESUMES` = 3) — so it survives the close/reopen REMOUNT
+   (the component is conditionally rendered, refs reset on remount) and a failed
+   POST doesn't erode the budget. A fresh operator `search()` / remediation resets
+   `resumeCount` to 0. The freshness window (`REPLACEMENT_AUTO_RESUME_WINDOW_MS`,
+   45 min) is keyed on `lastAliveAt` — refreshed by `markReplacementJobRefAlive`
+   on every successful (queued/running) poll — NOT on `startedAt`, so a long search
+   the operator is actively watching never ages out, while a days-stale reopen
+   still does. `startedAt` is carried forward across resumes (informational). A
+   completed/failed job clears the ref on terminal, so a finished search never
+   spuriously resumes.
+5. **Auto-resume is a FULL RESTART, not a progress-preserving resume.** The evicted
+   job's `diagnostic` (uncheckedCandidates) died with the process, so unlike the
+   `OperationFailureActions` "continue-search" playbook we re-run discovery from
+   scratch. The progress bar resets — so a sky "Server restarted — your search
+   resumed automatically" banner (`resumedAfterRestart`) renders in the searching
+   stage so the reset reads as recovery, not regression.
+
+NOTE: `PreflightPhotoFetchJob` in the same file shares the in-memory pattern but
+is NOT auto-resumed here (its "Find Photos" UX dead-ends less painfully and a
+re-click is cheap) — a sibling candidate if the operator reports it.
+
 ### Bulk buy-in queue is a SERVER-SIDE background job (Load-Bearing, 2026-06-09)
 
 The bookings-page **bulk buy-in queue** ("Run bulk buy-ins" over many selected
@@ -2370,6 +2436,7 @@ Examples:
 2026-06-15 · Jamie (angry): "every time I open the Operations tab a search pops up and starts the sidecar — I didn't start this." · DIAGNOSED + shipped a global pause switch · Verified the committed Operations page (`/bookings`) does NOT start any sidecar search on navigation — find-buy-in needs an expanded slot + click, the city-scan `autoScanTrigger` is dead (`cityInventoryScanTrigger` is never set), and the on-mount auto-fill/bulk rediscovery is READ-ONLY (the bulk 404 re-POST is guarded by an in-session `bulkPayloadsRef` that's empty on a fresh load). The unattended scans come from SERVER automation: the Sourceability Gate sweep (operator enabled `SOURCEABILITY_GATE_ENABLED` earlier today; up to `SCAN_BUDGET`=12 sidecar scans/sweep/property) and/or the off-repo inventory-feed sweep — the Operations page just SURFACES them in the sidecar panel. SHIPPED a single global kill-switch `server/sidecar-automation.ts` (`isSidecarAutomationPaused`/`setSidecarAutomationPaused`): env `SIDECAR_AUTOMATION_PAUSED=1/0` hard override, else a persisted `app_settings` toggle (`sidecar.automation_paused.v1`). Gated the two in-repo automated drivers (`runSourceabilitySweepAllEnabled` + the weekly Monday-3am OTA scan in `availability-scanner.ts`); operator-initiated HTTP searches are NEVER affected. Endpoints `GET /api/admin/sidecar-automation` + `POST .../toggle`; a "Pause/Resume automated scans" button on the Operations sidecar control. CANNOT stop the off-repo feed (not in this codebase) — that still needs a clean redeploy from `main`. Verified: `npm run build` clean, full `npm test` green, `npm run check` 0 new TS errors (baseline 287).
 2026-06-15 · Jamie hit "Update market pricing" and the bulk queue failed on "Sunny 2BR Condo at Bonita National!" with "SearchAPI Airbnb returned no usable exact-2BR samples for Bonita National Golf and Country Club, Bonita Springs, FL 2026-06" · FIXED (geographic-widening fallback) · Root cause: Bonita National is a gated golf community with ~zero exact-2BR entire-home Airbnb inventory inside its curated club bounding box (the box is correct — the resort center is inside it — the inventory is just thin), and the 24-month market-rate refresh hard-fails the moment any one month finds zero priced 2BR comps, with no geographic fallback. Fix: `fetchAirbnbMedianNightly` (`server/hybrid-pricing.ts`) now escalates to progressively wider center-radius boxes (~6.6km → ~16km around the community center) anchored on city-level queries ("Bonita Springs, FL"), but ONLY after every primary curated-box query returns zero usable samples — so healthy markets stay byte-identical (one SearchAPI request, curated box) and the Poipu single-request test holds. Real-data only (no static/seasonal fallback); a fully-empty widened search still fails closed; widened passes keep a center-radius box so confidence caps at 84 (yellow) and can clear the non-red gate. Also unblocks the other tight Florida footprints (Santa Maria Resort, Southern Dunes). Kill switch `MARKET_RATE_GEO_WIDENING=0`. Built + reviewed via two multi-agent workflows (3-lens design validation → GO-with-changes; 4-lens adversarial review → 0 confirmed blockers). 6 new tests; `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors in touched files. See Load-Bearing #49.
 2026-06-15 · Jamie: the bulk add-combo-listing queue kept producing combos with a BLANK second unit (Unit A 25 photos, Unit B 0) because both halves are the same community + same bedroom count and the resolver excludes Unit A's listing for Unit B — so when only one good listing exists, Unit B starves. "I like taking the same unit photos if it can't find a 2nd unit but… switch the combo to a [4] bedroom and find a 2 bedroom unit instead." · ACCEPTED + shipped (bedroom re-mix fallback) · `runComboPhotoFetchItem` (`server/routes.ts`) now escalates when the same-size second unit comes back < `MIN_INDEPENDENT_UNIT_PHOTOS`: (1) **re-mix** — `remixBedroomSplits` (`shared/community-combo.ts`) proposes same-TOTAL different-SIZE splits capped at 4BR (no 5BR condos; 3+3→4+2, 2+2→3+1, 4+4→none) and re-searches BOTH halves, committing only when both return real distinct galleries; (2) **photo reuse** (final safety net) — reuse Unit A's photos for Unit B so a combo is never saved blank. The effective (re-mixed) sizes flow into `generate-listing` copy + `/api/community/save` (`unit1Bedrooms`/`unit2Bedrooms`/`combinedBedrooms`) and the dedup/idempotency helpers (`effectiveBulkComboBeds`), so a re-mixed item finds its own draft on retry. Tracked durably via 4 new `bulk_combo_listing_job_items` columns (`ensureRuntimeSchema`, NOT db:push), a `remix`/`photo-reuse` queue event, and per-item UI badges + Unit A/B photo counts on the queue (`add-community.tsx`). Env: `COMBO_REMIX_ENABLED`/`COMBO_PHOTO_REUSE_ENABLED`/`COMBO_REMIX_MAX_UNIT_BEDROOMS=4` (default ON). LOAD-BEARING: the proof's duplicate-overlap check is SKIPPED when `unit2PhotosReused` (reused photos are identical by design); `effUnit*Beds` (not `pairing.unit*Beds`) must feed copy/save/dedup or a re-mixed draft mismatches + duplicates on retry. Built; new `tests/combo-remix.test.ts` (11) green, `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors (baseline 287); 3-lens adversarial review → 0 confirmed bugs. NOTE: separately surfaced two NON-photo blockers in the same live batch (not fixed here) — items fail on a missing community street address (`validateCommunityStreetAddress`) and on heartbeat-stale drops during long phases.
+2026-06-15 · Jamie hit "Replacement search session expired (server restarted or job not found)" while finding a replacement unit (screenshot) · ACCEPTED, client-only · The find-unit job is in-memory (`server/preflight-background-jobs.ts`) and a run is long (≤8×~350s); a Railway restart mid-run evicts it and the poll 404s, breaking the UI's "Safe to leave this tab — search continues on server" promise. Rather than a Postgres-backed job (the result isn't applied until the operator confirms, so there's nothing to durably persist — unlike auto-fill picks), `unit-replacement-flow.tsx` now persists the start PAYLOAD in localStorage and TRANSPARENTLY re-launches the same search on a 404 (`attemptAutoResume`, tri-state `resumed`/`in-progress`/`cannot`). Bounds are DURABLE: a `resumeCount` in the localStorage ref (cap 3, survives the close/reopen remount, incremented only on a confirmed start-POST) + a `lastAliveAt`-keyed 45-min freshness window (refreshed each successful poll) so it can't spin SearchAPI in a crash loop yet a long actively-watched search never ages out. Falls back to the original error (string preserved for the grep test) only when resume is truly impossible. Same ephemeral-job + client-relaunch philosophy as Auto-fill #6/#8. Built + hardened via TWO adversarial review Workflows (9 findings confirmed + fixed: concurrent-poll error-clobber [high], post-await cancel re-check, per-mount→durable cap, freshness re-anchor, budget-before-POST, transient flash, no resume signal/full-restart, long-run window age-out, claim-on-failure stuck-spinner). See the "Preflight replacement-find job survives a server restart" Load-Bearing subsection. Verified: full `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors in the touched file.
 ```
 
 (Populate on first dispute.)
