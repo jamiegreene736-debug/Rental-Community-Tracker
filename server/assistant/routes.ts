@@ -38,7 +38,16 @@ function openSse(req: Request, res: Response): { send: (e: Record<string, unknow
 }
 
 export function assistantEnabled(): boolean {
-  return process.env.PLATFORM_ASSISTANT_ENABLED === "1" || process.env.PLATFORM_ASSISTANT_ENABLED === "true";
+  // Default ON (operator asked to enable it without adding a Railway var). Two
+  // ways to turn it OFF: PLATFORM_ASSISTANT_DISABLED=1, or the legacy explicit
+  // PLATFORM_ASSISTANT_ENABLED=0/false. The dock still only renders for the
+  // admin role, and chat requires ANTHROPIC_API_KEY (status reports `hasKey`).
+  const disabled =
+    process.env.PLATFORM_ASSISTANT_DISABLED === "1" ||
+    process.env.PLATFORM_ASSISTANT_DISABLED === "true" ||
+    process.env.PLATFORM_ASSISTANT_ENABLED === "0" ||
+    process.env.PLATFORM_ASSISTANT_ENABLED === "false";
+  return !disabled;
 }
 
 export function registerAssistantRoutes(app: Express): void {
