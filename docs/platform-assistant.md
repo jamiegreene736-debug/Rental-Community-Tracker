@@ -58,24 +58,38 @@ physically cannot route around them.
 body (the client reads it with `fetch` — `EventSource` is GET-only). Event
 types (`data: {json}\n\n`):
 
+Both `POST /api/assistant/chat` and `POST /api/assistant/confirm` stream these
+event types (`data: {json}\n\n`):
+
 | type | payload | meaning |
 |---|---|---|
 | `session` | `{sessionId}` | session created/resumed |
 | `status` | `{text}` | "Thinking…" / "Working…" |
 | `tool_call` | `{name,label,input}` | a tool started |
 | `tool_result` | `{name,ok}` | that tool finished |
+| `confirm` | `{confirmId,label,summary,input}` | a WRITE action is staged, awaiting the operator's Confirm/Cancel |
 | `text` | `{text}` | final assistant answer |
 | `error` | `{message}` | user-facing failure |
 | `done` | — | turn complete |
 
-## Safety model — confirm-before-act (planned for write tools)
+## Safety model — confirm-before-act (ACTIVE)
 
-Tools carry a `kind: "read" | "write"`. **Phase 0 ships read-only tools only.**
-When write/outward tools land (attach buy-in, send guest message, reprice,
-publish), they will NOT execute directly: the agent will emit a confirm card
-(plain-English summary + exact payload + Confirm/Cancel) and only run the
-endpoint on explicit operator confirm. The `kind` tag exists now so that gate is
-a one-line check (`if (tool.kind === "write") …`) in `agent.ts`.
+Tools carry a `kind: "read" | "write"`. **Write tools NEVER execute inside the
+agent loop.** When the model calls one, the loop stages it in `confirm.ts`
+(one-shot, TTL'd, in-memory), streams a `confirm` event, and hands the model a
+tool_result saying the action is *awaiting operator confirmation* — so it
+describes (not claims) the action. The client renders a confirm card (label +
+plain-English summary + Confirm/Cancel). Clicking Confirm POSTs
+`/api/assistant/confirm`, which `takePendingAction` (one-shot — can never run
+twice), executes the tool over loopback, and streams the model's outcome
+summary. Cancel records the decision and runs nothing.
+
+Write tools MUST supply `confirmLabel(input)` + `confirmSummary(input)` (enforced
+by `tests/assistant-tools.test.ts`). The first write tool is **`start_auto_fill`**
+(searches + attaches the cheapest profitable buy-in combo to a booking); it
+builds the auto-fill payload server-side from `getPropertyUnits(propertyId)` and
+passes `expectedRevenue` so the $100 profit gate stays on. `check_auto_fill`
+(read) polls the resulting job.
 
 ## Persistence
 
@@ -96,30 +110,28 @@ renders the dock for the **admin** role when enabled.
 | Phase | Scope | Status |
 |---|---|---|
 | **0 · Skeleton** | SSE chat + dock + read tools: `get_dashboard`, `list_bookings`, `get_reports`, `get_buy_in_estimate` | **shipped** |
-| **1 · Buy-ins & pricing (read)** | LIVE `find_buy_in` (single unit), `scan_city_vrbo` (combo finder — "find a better combination / new location"), `get_market_rates` (pricing). Confirm-gate **store** (`confirm.ts`) landed; gated **attach/auto-fill** deferred (see below). | **shipped (read tools)** |
-| 1.5 · Confirm-gated attach | wire `confirm.ts` into the agent loop + a `/confirm` endpoint + client confirm card; first write tool = attach a found combo to a booking | next |
+| **1 · Buy-ins & pricing (read)** | LIVE `find_buy_in` (single unit), `scan_city_vrbo` (combo finder — "find a better combination / new location"), `get_market_rates` (pricing). | **shipped** |
+| **1.5 · Confirm-gated attach** | confirm gate wired end-to-end (agent intercept + `/api/assistant/confirm` + client confirm card); first write tool `start_auto_fill` + `check_auto_fill`. | **shipped** |
 | 2 · Photos & listings | `find_photos`, `check_photo_community`, `build_listing`, photo audit | planned |
 | 3 · Inbox & outward actions | guest threads, drafting, confirm-gated sends/relocation | planned |
 | 4 · Polish | Haiku fast-router, prompt caching, session history UI, proactive nudges | planned |
 
-**Why the gated attach was split into Phase 1.5:** the auto-fill/attach path takes
-a large reservation-slot-specific payload (per-slot `unitId`/`bedrooms`) and
-drives the live browser sidecar, so it can't be exercised from the cloud dev
-session (no DB, no sidecar). It deserves a focused increment with live
-verification rather than shipping unverified on the money path. The read tools
-already deliver the headline "find a better combination / new location / pricing"
-value safely; `confirm.ts` is in place so the gate is ready to wire.
+**Note on `start_auto_fill` verification:** the auto-fill/attach path drives the
+live browser sidecar and commits buy-ins, so it can't be fully exercised from the
+cloud dev session (no DB, no sidecar). The confirm-gate plumbing + payload
+construction are unit-tested and code-path verified; the live attach should be
+smoke-tested on Railway with the sidecar online before relying on it.
 
 ## Files
 
-- `server/assistant/tools.ts` — tool registry (read tools → loopback).
-- `server/assistant/agent.ts` — Claude tool_use loop + SSE event emission.
+- `server/assistant/tools.ts` — tool registry (read + write tools → loopback).
+- `server/assistant/agent.ts` — Claude tool_use loop + SSE + confirm intercept + `runConfirmedAction`.
 - `server/assistant/store.ts` — chat persistence (fail-soft).
-- `server/assistant/confirm.ts` — confirm-before-act pending-action store (write tools).
-- `server/assistant/routes.ts` — `registerAssistantRoutes(app)`; SSE chat + history.
-- `client/src/components/AssistantDock.tsx` — floating dock, SSE consumer.
+- `server/assistant/confirm.ts` — confirm-before-act pending-action store (one-shot, TTL'd).
+- `server/assistant/routes.ts` — `registerAssistantRoutes(app)`; SSE chat / confirm / history.
+- `client/src/components/AssistantDock.tsx` — floating dock, SSE consumer + confirm card.
 - `shared/schema.ts` — `assistantSessions` / `assistantMessages`.
-- `tests/assistant-tools.test.ts` — registry shape + dispatch.
+- `tests/assistant-tools.test.ts` — registry shape, write-tool confirm contract, dispatch.
 
 ## Enabling it
 

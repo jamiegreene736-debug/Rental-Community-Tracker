@@ -14,9 +14,6 @@ const check = (name: string, ok: boolean, extra?: unknown) => {
 
 console.log("assistant: tool registry");
 
-// Phase 0/1 tools are read-only (write tools land with a confirm gate later).
-check("all current tools are read-only", ASSISTANT_TOOLS.every((t) => t.kind === "read"));
-
 // Registry is non-empty and the expected core tools exist.
 for (const name of [
   "get_dashboard",
@@ -26,8 +23,35 @@ for (const name of [
   "find_buy_in",
   "scan_city_vrbo",
   "get_market_rates",
+  "start_auto_fill",
+  "check_auto_fill",
 ]) {
   check(`tool '${name}' registered`, ASSISTANT_TOOLS_BY_NAME.has(name));
+}
+
+// Confirm-before-act contract: every WRITE tool MUST provide confirmLabel +
+// confirmSummary (so the operator sees what's about to happen); read tools need
+// neither. start_auto_fill is currently the only write tool.
+for (const t of ASSISTANT_TOOLS) {
+  if (t.kind === "write") {
+    check(
+      `write tool '${t.name}' has confirmLabel + confirmSummary`,
+      typeof t.confirmLabel === "function" && typeof t.confirmSummary === "function",
+      t,
+    );
+  }
+}
+check("start_auto_fill is a write tool", ASSISTANT_TOOLS_BY_NAME.get("start_auto_fill")?.kind === "write");
+check("check_auto_fill is a read tool", ASSISTANT_TOOLS_BY_NAME.get("check_auto_fill")?.kind === "read");
+
+// The confirm summary/label render without throwing for a representative input.
+{
+  const t = ASSISTANT_TOOLS_BY_NAME.get("start_auto_fill");
+  const input = { reservationId: "R1", propertyId: 4, checkIn: "2026-07-01", checkOut: "2026-07-08", expectedRevenue: 8000 };
+  const label = t?.confirmLabel?.(input) ?? "";
+  const summary = t?.confirmSummary?.(input) ?? "";
+  check("start_auto_fill confirm label is non-empty", label.length > 0, label);
+  check("start_auto_fill confirm summary mentions the booking", summary.includes("R1") && summary.length > 30, summary);
 }
 
 // Every tool with required params declares them inside its schema properties.

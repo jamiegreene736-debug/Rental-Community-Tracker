@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MessageCircle, X, Send, Loader2, Sparkles, Check, Wrench } from "lucide-react";
+import { MessageCircle, X, Send, Loader2, Sparkles, Check, Wrench, ShieldAlert } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import { usePortalSession } from "@/lib/auth";
@@ -16,6 +16,12 @@ interface ToolChip {
   ok: boolean;
 }
 
+interface ConfirmCard {
+  confirmId: string;
+  label: string;
+  summary: string;
+}
+
 interface ChatMsg {
   id: string;
   role: "user" | "assistant";
@@ -24,6 +30,8 @@ interface ChatMsg {
   status?: string;
   error?: string;
   streaming?: boolean;
+  confirm?: ConfirmCard;
+  confirmDecision?: "confirm" | "cancel";
 }
 
 const uid = () => Math.random().toString(36).slice(2);
@@ -52,31 +60,21 @@ export default function AssistantDock() {
   const patchAssistant = (id: string, patch: (m: ChatMsg) => ChatMsg) =>
     setMessages((prev) => prev.map((m) => (m.id === id ? patch(m) : m)));
 
-  async function send() {
-    const text = input.trim();
-    if (!text || busy) return;
-    setInput("");
+  // Stream an SSE POST response into the given assistant message bubble.
+  async function streamInto(url: string, body: Record<string, unknown>, botId: string) {
     setBusy(true);
-
-    const userMsg: ChatMsg = { id: uid(), role: "user", text, tools: [] };
-    const botId = uid();
-    const botMsg: ChatMsg = { id: botId, role: "assistant", text: "", tools: [], status: "Thinking…", streaming: true };
-    setMessages((prev) => [...prev, userMsg, botMsg]);
-
     try {
-      const resp = await fetch("/api/assistant/chat", {
+      const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ sessionId: sessionIdRef.current ?? undefined, message: text }),
+        body: JSON.stringify(body),
       });
       if (!resp.ok || !resp.body) {
         const msg = resp.status === 401 ? "Your session expired — please reload." : `Request failed (${resp.status}).`;
         patchAssistant(botId, (m) => ({ ...m, status: undefined, error: msg, streaming: false }));
-        setBusy(false);
         return;
       }
-
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -106,6 +104,37 @@ export default function AssistantDock() {
     }
   }
 
+  async function send() {
+    const text = input.trim();
+    if (!text || busy) return;
+    setInput("");
+    const userMsg: ChatMsg = { id: uid(), role: "user", text, tools: [] };
+    const botId = uid();
+    const botMsg: ChatMsg = { id: botId, role: "assistant", text: "", tools: [], status: "Thinking…", streaming: true };
+    setMessages((prev) => [...prev, userMsg, botMsg]);
+    await streamInto("/api/assistant/chat", { sessionId: sessionIdRef.current ?? undefined, message: text }, botId);
+  }
+
+  async function respondToConfirm(srcMsgId: string, card: ConfirmCard, decision: "confirm" | "cancel") {
+    if (busy) return;
+    patchAssistant(srcMsgId, (m) => ({ ...m, confirmDecision: decision }));
+    const botId = uid();
+    const botMsg: ChatMsg = {
+      id: botId,
+      role: "assistant",
+      text: "",
+      tools: [],
+      status: decision === "confirm" ? "Running…" : undefined,
+      streaming: true,
+    };
+    setMessages((prev) => [...prev, botMsg]);
+    await streamInto(
+      "/api/assistant/confirm",
+      { sessionId: sessionIdRef.current ?? undefined, confirmId: card.confirmId, decision },
+      botId,
+    );
+  }
+
   function handleEvent(botId: string, evt: any) {
     switch (evt?.type) {
       case "session":
@@ -132,6 +161,13 @@ export default function AssistantDock() {
           }
           return { ...m, tools };
         });
+        break;
+      case "confirm":
+        patchAssistant(botId, (m) => ({
+          ...m,
+          status: undefined,
+          confirm: { confirmId: evt.confirmId, label: evt.label || "this action", summary: evt.summary || "" },
+        }));
         break;
       case "text":
         patchAssistant(botId, (m) => ({ ...m, text: evt.text, status: undefined }));
@@ -185,7 +221,7 @@ export default function AssistantDock() {
               </div>
             )}
             {messages.map((m) => (
-              <MessageBubble key={m.id} msg={m} />
+              <MessageBubble key={m.id} msg={m} busy={busy} onConfirm={respondToConfirm} />
             ))}
           </div>
 
@@ -222,7 +258,15 @@ export default function AssistantDock() {
   );
 }
 
-function MessageBubble({ msg }: { msg: ChatMsg }) {
+function MessageBubble({
+  msg,
+  busy,
+  onConfirm,
+}: {
+  msg: ChatMsg;
+  busy: boolean;
+  onConfirm: (msgId: string, card: ConfirmCard, decision: "confirm" | "cancel") => void;
+}) {
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
@@ -260,6 +304,39 @@ function MessageBubble({ msg }: { msg: ChatMsg }) {
         {msg.text && (
           <div className="rounded-2xl rounded-bl-sm bg-white px-3 py-2 text-sm text-slate-800 shadow-sm">
             <RichText text={msg.text} />
+          </div>
+        )}
+        {msg.confirm && (
+          <div className="rounded-2xl rounded-bl-sm border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm">
+            <div className="mb-1 flex items-center gap-1.5 font-semibold text-amber-800">
+              <ShieldAlert className="h-4 w-4" />
+              Confirm: {msg.confirm.label}
+            </div>
+            <p className="mb-2 text-amber-900">{msg.confirm.summary}</p>
+            {msg.confirmDecision ? (
+              <div className="text-xs font-medium text-amber-700">
+                {msg.confirmDecision === "confirm" ? "✓ Confirmed" : "✕ Cancelled"}
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onConfirm(msg.id, msg.confirm!, "confirm")}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-40"
+                >
+                  Confirm
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onConfirm(msg.id, msg.confirm!, "cancel")}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
         )}
         {msg.error && (

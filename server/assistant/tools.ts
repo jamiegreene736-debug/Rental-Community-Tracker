@@ -14,6 +14,7 @@
 // check when those land.
 
 import { loopbackRequestHeaders } from "../auth";
+import { getPropertyUnits, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 
@@ -23,6 +24,10 @@ export interface AssistantTool {
   description: string;
   input_schema: Record<string, unknown>;
   execute: (input: Record<string, unknown>) => Promise<unknown>;
+  // Write tools MUST provide these so the confirm-before-act card can show the
+  // operator exactly what's about to happen before it runs. Read tools omit them.
+  confirmLabel?: (input: Record<string, unknown>) => string;
+  confirmSummary?: (input: Record<string, unknown>) => string;
 }
 
 async function loopbackGet(path: string, query?: Record<string, string | undefined>): Promise<unknown> {
@@ -46,7 +51,28 @@ async function loopbackGet(path: string, query?: Record<string, string | undefin
   return body;
 }
 
+async function loopbackPost(path: string, body: Record<string, unknown>): Promise<unknown> {
+  const resp = await fetch(`${loopbackBaseUrl()}${path}`, {
+    method: "POST",
+    headers: loopbackRequestHeaders(),
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text();
+  let parsed: unknown = text;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    /* keep text */
+  }
+  if (!resp.ok) return { _error: true, status: resp.status, body: parsed };
+  return parsed;
+}
+
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+const money = (v: unknown): string => {
+  const n = Number(v);
+  return Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "an unknown amount";
+};
 
 export const ASSISTANT_TOOLS: AssistantTool[] = [
   {
@@ -215,6 +241,73 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
       "Read the portfolio's stored market nightly rates by property and bedroom count, including per-month seasonal rates (LOW/HIGH/HOLIDAY). Use to answer pricing questions like 'what should I charge for <property> in <month>?' or 'what's the going nightly rate for a 3BR?'. Returns an array of rate rows; each has propertyId, bedrooms, medianNightly, and a monthlyRates map keyed by YYYY-MM.",
     input_schema: { type: "object", properties: {}, required: [] },
     execute: async () => loopbackGet("/api/property/market-rates"),
+  },
+  {
+    name: "start_auto_fill",
+    kind: "write",
+    description:
+      "ACTION (requires operator confirmation): start the 'auto-fill cheapest' background job for a booking. It runs the full escalation ladder (resort find-buy-in → home-city VRBO → nearby-city expansion → per-slot fallback) and ATTACHES the cheapest PROFITABLE buy-in combination to the reservation's empty unit slots. This is a real, money-committing change to the booking — it is gated behind a confirm card and only runs after the operator clicks Confirm. " +
+      "Provide reservationId, propertyId (configured multi-unit/combo property), checkIn, checkOut, and expectedRevenue (the booking's net revenue / host payout from list_bookings — REQUIRED so the $100 profit gate works; without it the gate is disabled). The unit slots are derived server-side from the property config. Returns a jobId; then use check_auto_fill to watch progress.",
+    input_schema: {
+      type: "object",
+      properties: {
+        reservationId: { type: "string", description: "Guesty reservation id." },
+        propertyId: { type: "number", description: "Internal property id (must be a configured combo/multi-unit property)." },
+        checkIn: { type: "string", description: "Check-in YYYY-MM-DD." },
+        checkOut: { type: "string", description: "Check-out YYYY-MM-DD." },
+        expectedRevenue: { type: "number", description: "Booking net revenue / host payout (drives the profit gate)." },
+        listingId: { type: "string", description: "Optional Guesty listing id." },
+        propertyName: { type: "string", description: "Optional display name." },
+      },
+      required: ["reservationId", "propertyId", "checkIn", "checkOut"],
+    },
+    confirmLabel: (input) => `Auto-fill booking ${str(input.reservationId) ?? ""}`.trim(),
+    confirmSummary: (input) => {
+      const propertyId = Number(input.propertyId);
+      const cfg = PROPERTY_UNIT_CONFIGS[propertyId];
+      const units = getPropertyUnits(propertyId);
+      const where = cfg?.community ? ` in ${cfg.community}` : "";
+      const unitDesc = units.length
+        ? `${units.length} unit slot${units.length > 1 ? "s" : ""} (${units.map((u) => `${u.bedrooms}BR`).join(" + ")})`
+        : "its unit slots";
+      const rev = input.expectedRevenue != null ? ` Profit gate uses revenue ${money(input.expectedRevenue)} (won't attach a combo losing >$100).` : " No revenue provided, so the profit gate is OFF.";
+      return `Search and attach the cheapest profitable buy-in combo${where} for booking ${str(input.reservationId) ?? ""} (${str(input.checkIn)}→${str(input.checkOut)}), filling ${unitDesc}.${rev} This commits real buy-ins to the reservation.`;
+    },
+    execute: async (input) => {
+      const propertyId = Number(input.propertyId);
+      const slots = getPropertyUnits(propertyId).map((u) => ({
+        unitId: u.unitId,
+        unitLabel: u.unitLabel,
+        bedrooms: u.bedrooms,
+      }));
+      if (slots.length === 0) {
+        return { _error: true, message: `Property ${propertyId} has no configured unit slots — not a combo property.` };
+      }
+      const cfg = PROPERTY_UNIT_CONFIGS[propertyId];
+      return loopbackPost("/api/operations/auto-fill", {
+        reservationId: str(input.reservationId),
+        propertyId,
+        listingId: str(input.listingId) ?? null,
+        propertyName: str(input.propertyName) ?? `Property ${propertyId}`,
+        community: cfg?.community ?? null,
+        checkIn: str(input.checkIn),
+        checkOut: str(input.checkOut),
+        slots,
+        expectedRevenue: input.expectedRevenue != null ? Number(input.expectedRevenue) : undefined,
+      });
+    },
+  },
+  {
+    name: "check_auto_fill",
+    kind: "read",
+    description:
+      "Check the progress/result of an auto-fill job started by start_auto_fill. Pass the jobId. Returns status, done (terminal flag), the escalation phase, the units `attached` so far, `skipped` slots, `totalCost`, `expectedProfit`, and `cityEconomics`. Poll this after confirming an auto-fill; if not done, tell the operator it's still running.",
+    input_schema: {
+      type: "object",
+      properties: { jobId: { type: "string", description: "Job id returned by start_auto_fill." } },
+      required: ["jobId"],
+    },
+    execute: async (input) => loopbackGet(`/api/operations/auto-fill/${encodeURIComponent(str(input.jobId) ?? "")}`),
   },
 ];
 
