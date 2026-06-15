@@ -38,6 +38,34 @@ export async function ensureRuntimeSchema(): Promise<void> {
     ALTER TABLE reservation_aliases
       ADD COLUMN IF NOT EXISTS expires_at timestamp
   `);
+  // Per-unit buy-in aliases: each attached buy-in (unit) can have its own alias.
+  // Add buy_in_id, backfill legacy reservation-level rows to the reservation's
+  // earliest buy-in, then replace the UNIQUE(reservation_id) constraint with a
+  // UNIQUE(reservation_id, buy_in_id) index so unit B can hold a 2nd alias.
+  await db.execute(sql`
+    ALTER TABLE reservation_aliases
+      ADD COLUMN IF NOT EXISTS buy_in_id integer
+  `);
+  await db.execute(sql`
+    UPDATE reservation_aliases ra
+      SET buy_in_id = sub.bid
+      FROM (
+        SELECT guesty_reservation_id AS rid, MIN(id) AS bid
+        FROM buy_ins
+        WHERE guesty_reservation_id IS NOT NULL
+        GROUP BY guesty_reservation_id
+      ) sub
+      WHERE ra.buy_in_id IS NULL AND ra.reservation_id = sub.rid
+  `);
+  await db.execute(sql`
+    ALTER TABLE reservation_aliases
+      DROP CONSTRAINT IF EXISTS reservation_aliases_reservation_id_key
+  `);
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS reservation_aliases_resv_buyin_idx
+      ON reservation_aliases (reservation_id, buy_in_id)
+  `);
+  console.log("[schema] ensured reservation_aliases per-buy-in alias support");
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS buy_in_vendor_contacts (
       id serial PRIMARY KEY,
