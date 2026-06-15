@@ -5,6 +5,7 @@ import {
   runAssistantTool,
 } from "../server/assistant/tools";
 import { cacheSystem, cacheTools } from "../server/assistant/prompt-cache";
+import { formatPageContext } from "../server/assistant/page-context";
 
 let pass = 0;
 let fail = 0;
@@ -102,6 +103,16 @@ check(
   const ct = cacheTools(anthropicToolDefs() as any[]) as any[];
   check("cacheTools count matches registry", ct.length === ASSISTANT_TOOLS.length, ct.length);
   check("cacheTools marks ONLY the last tool", !ct[0]?.cache_control && ct[ct.length - 1]?.cache_control?.type === "ephemeral");
+}
+
+// Page context (Phase: page-awareness): empty/garbage → undefined; real context
+// → a block that includes the JSON and the "use this; don't ask" instruction.
+check("formatPageContext: undefined for empty", formatPageContext(undefined) === undefined && formatPageContext({}) === undefined);
+check("formatPageContext: non-object → undefined", formatPageContext("x" as unknown) === undefined);
+{
+  const block = formatPageContext({ page: "Pre-flight", data: { community: "Paniolo Hale", address: "100 Lio Pl, Maunaloa, Hawaii" } }) ?? "";
+  check("formatPageContext: includes the data", block.includes("Paniolo Hale") && block.includes("Maunaloa"), block);
+  check("formatPageContext: instructs to act, not ask", /do NOT ask/i.test(block), block);
 }
 
 // Unknown tool dispatch is graceful (no throw, returns an _error envelope).

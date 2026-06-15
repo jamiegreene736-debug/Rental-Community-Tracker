@@ -12,7 +12,8 @@
 import { anthropicToolDefs, runAssistantTool, ASSISTANT_TOOLS_BY_NAME } from "./tools";
 import { appendMessage, touchSession, buildModelHistory, type AssistantMessageContent } from "./store";
 import { createPendingAction, takePendingAction } from "./confirm";
-import { cacheSystem, cacheTools } from "./prompt-cache";
+import { cacheSystem, cacheTools, PROMPT_CACHE } from "./prompt-cache";
+import { formatPageContext } from "./page-context";
 
 // Orchestrator model: the hardest part is mapping fuzzy operator asks to the
 // right tool chain and interpreting the economics, so use the most capable
@@ -21,10 +22,15 @@ const MODEL = process.env.ASSISTANT_MODEL || "claude-opus-4-8";
 const MAX_TURNS = 8;
 const TOOL_RESULT_CAP = 12_000; // chars of tool JSON fed back per result
 
-// Prompt caching: see server/assistant/prompt-cache.ts. These thin wrappers feed
-// the live system prompt + tool defs through the pure cache helpers.
-function cachedSystem(): unknown {
-  return cacheSystem(systemPrompt());
+// Prompt caching: see server/assistant/prompt-cache.ts. The big static system
+// prompt + tool defs are cached; the (small, per-message) page-context block is
+// appended AFTER the cache breakpoint so it never busts the cache.
+function cachedSystem(contextBlock?: string): unknown {
+  const base = systemPrompt();
+  if (!PROMPT_CACHE) return contextBlock ? `${base}\n\n${contextBlock}` : base;
+  const blocks: Record<string, unknown>[] = [{ type: "text", text: base, cache_control: { type: "ephemeral" } }];
+  if (contextBlock) blocks.push({ type: "text", text: contextBlock });
+  return blocks;
 }
 function cachedTools(): unknown[] {
   return cacheTools(anthropicToolDefs() as Record<string, unknown>[]);
@@ -44,7 +50,8 @@ YOUR JOB
 - When a tool returns an object with "_error": true, tell the operator what failed in one plain sentence (don't dump the raw error) and suggest a next step.
 - Chain tools when needed. To work on a specific booking: list_bookings → get its listingId + dates → get_buy_in_estimate (this returns the internal propertyId + per-unit bedrooms) → then find_buy_in (single unit) or scan_city_vrbo (combo/multi-unit property). Don't ask the operator for an id you can look up yourself.
 - find_buy_in and scan_city_vrbo are LIVE and SLOW (they drive the operator's browser sidecar and can take tens of seconds). Run them only when the operator actually wants a fresh search, tell them it's running, and if results are thin, surface the diagnostics/coverage rather than pretending it's empty.
-- If a request is genuinely ambiguous (e.g. "the Poipu booking" when several match), ask ONE short clarifying question rather than guessing.
+- BE PROACTIVE, NOT INTERROGATING. When a CURRENT PAGE context block is provided below, the operator is looking at that screen right now — treat its facts (community/resort, address, city/state, unit bedroom layout, ids, dates) as given and ACT on them. Do NOT ask the operator to re-state details that are already in the context or earlier in the chat. Only ask a question when essential info is genuinely missing everywhere.
+- If a request is genuinely ambiguous (e.g. "the Poipu booking" when several match AND no page context disambiguates), ask ONE short clarifying question rather than guessing.
 
 CURRENT CAPABILITIES (read-only)
 - Operations data: dashboard metrics (revenue, cancellations, channel status, minimum stays), the account-wide bookings list, operations reports.
@@ -77,9 +84,11 @@ export async function runAssistantTurn(opts: {
   userMessage: string;
   history: { role: "user" | "assistant"; content: string }[];
   send: SseSend;
+  context?: unknown;
 }): Promise<TurnResult> {
   const { sessionId, userMessage, history, send } = opts;
   const key = process.env.ANTHROPIC_API_KEY;
+  const contextBlock = formatPageContext(opts.context);
 
   const toolCalls: { name: string; input: unknown }[] = [];
   const toolResults: { name: string; output: unknown }[] = [];
@@ -98,7 +107,7 @@ export async function runAssistantTurn(opts: {
     { role: "user", content: userMessage },
   ];
   const tools = cachedTools();
-  const system = cachedSystem();
+  const system = cachedSystem(contextBlock);
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     send({ type: "status", text: turn === 0 ? "Thinking…" : "Working…" });
