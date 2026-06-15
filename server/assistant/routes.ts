@@ -118,6 +118,10 @@ export function registerAssistantRoutes(app: Express): void {
     const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
     if (!message) return res.status(400).json({ error: "message is required." });
 
+    // Page context the client attaches (current route + the entity on screen) so
+    // the assistant acts on what the operator is looking at instead of asking.
+    const context = req.body?.context && typeof req.body.context === "object" ? req.body.context : undefined;
+
     const username = (res.locals.portalSession?.username as string) || "admin";
 
     let sessionId = Number(req.body?.sessionId);
@@ -136,7 +140,7 @@ export function registerAssistantRoutes(app: Express): void {
     send({ type: "session", sessionId });
 
     try {
-      await runAssistantTurn({ sessionId, userMessage: message, history, send });
+      await runAssistantTurn({ sessionId, userMessage: message, history, send, context });
     } catch (err) {
       console.error("[assistant] turn failed:", (err as Error)?.message ?? err);
       send({ type: "error", message: "The assistant hit an unexpected error." });

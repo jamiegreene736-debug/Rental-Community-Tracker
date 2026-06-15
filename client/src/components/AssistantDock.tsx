@@ -3,6 +3,23 @@ import { MessageCircle, X, Send, Loader2, Sparkles, Check, Wrench, ShieldAlert, 
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import { usePortalSession } from "@/lib/auth";
+import { getAssistantContext } from "@/lib/assistant-context";
+
+// Build the page-context payload sent with each message: the current route +
+// page title (always) merged with whatever the active page published. This is
+// what lets Magical act on the screen the operator is looking at.
+function collectPageContext(): Record<string, unknown> {
+  const ctx: Record<string, unknown> = {};
+  if (typeof window !== "undefined") {
+    ctx.route = window.location.pathname + window.location.search;
+    if (document?.title) ctx.title = document.title;
+  }
+  const published = getAssistantContext();
+  if (published?.page) ctx.page = published.page;
+  if (published?.description) ctx.description = published.description;
+  if (published?.data && Object.keys(published.data).length > 0) ctx.data = published.data;
+  return ctx;
+}
 
 // Floating dashboard chat agent ("Magical"). Talks to POST /api/assistant/chat,
 // which streams Server-Sent-Events over the POST response body (status / tool
@@ -134,7 +151,11 @@ export default function AssistantDock() {
     const botId = uid();
     const botMsg: ChatMsg = { id: botId, role: "assistant", text: "", tools: [], status: "Thinking…", streaming: true };
     setMessages((prev) => [...prev, userMsg, botMsg]);
-    await streamInto("/api/assistant/chat", { sessionId: sessionIdRef.current ?? undefined, message: text }, botId);
+    await streamInto(
+      "/api/assistant/chat",
+      { sessionId: sessionIdRef.current ?? undefined, message: text, context: collectPageContext() },
+      botId,
+    );
   }
 
   function newChat() {

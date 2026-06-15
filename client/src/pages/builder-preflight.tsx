@@ -17,6 +17,7 @@ import {
   Search,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "@/data/unit-builder-data";
+import { useAssistantContext } from "@/lib/assistant-context";
 import { loadDraftPropertyByNegativeId } from "@/data/adapt-draft";
 import { apiRequest } from "@/lib/queryClient";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
@@ -287,6 +288,25 @@ export default function BuilderPreflight() {
   }, [id, staticProperty]);
   const property = staticProperty ?? draftProperty;
   const isPromotedDraft = id < 0;
+
+  // Publish what the operator is looking at to the dashboard assistant ("Magical")
+  // so it acts on this listing (community, address, units) instead of asking.
+  useAssistantContext(
+    property
+      ? {
+          page: "Pre-flight check — is this unit already listed?",
+          description:
+            "Operator is reviewing a listing's photos and checking whether its units are already on Airbnb/VRBO/Booking before publishing.",
+          data: {
+            propertyId: id,
+            community: property.complexName,
+            propertyName: property.propertyName,
+            address: property.address,
+            units: property.units.map((u) => ({ id: u.id, bedrooms: u.bedrooms })),
+          },
+        }
+      : null,
+  );
 
   const { toast } = useToast();
 

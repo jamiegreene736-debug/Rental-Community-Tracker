@@ -39,6 +39,7 @@ import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { usePortalSession } from "@/lib/auth";
+import { useAssistantContext } from "@/lib/assistant-context";
 
 type ArrivalUnitDetail = {
   id: number;
@@ -2458,6 +2459,23 @@ export default function InboxPage() {
 
   const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
   const selectedConv = selectedConvRaw ? applyLocalReplyOverride(selectedConvRaw) : null;
+
+  // Publish the open conversation to the dashboard assistant ("Magical") so a
+  // request like "draft a reply to this guest" acts on the thread on screen.
+  useAssistantContext({
+    page: "Guest inbox",
+    description: selectedConv
+      ? "Operator is viewing a guest conversation thread."
+      : "Operator is in the guest inbox.",
+    data: selectedConv
+      ? {
+          conversationId: selectedConvId,
+          guestName: (selectedConv as any).guestName ?? null,
+          reservationId: (selectedConv as any).reservationId ?? null,
+          listingId: (selectedConv as any).listingId ?? null,
+        }
+      : undefined,
+  });
 
   // Conversation metadata (assignee, priority, integration, etc.)
   const { data: threadData, isLoading: threadLoading } = useQuery<any>({
