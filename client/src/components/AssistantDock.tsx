@@ -178,9 +178,9 @@ export default function AssistantDock() {
                 <p className="mb-3 font-medium text-slate-700">Hi Jamie — what can I look up?</p>
                 <ul className="space-y-1.5 text-left text-xs text-slate-500">
                   <li>• "What's my revenue over the last 30 days?"</li>
-                  <li>• "Which bookings are checking in this week?"</li>
-                  <li>• "Estimate the buy-in for the next Poipu Kai stay."</li>
-                  <li>• "Any cancellations recently?"</li>
+                  <li>• "Find a better combination for the next Poipu Kai booking."</li>
+                  <li>• "What should I charge for a 3BR in December?"</li>
+                  <li>• "Estimate the buy-in for the next Kaha Lani stay."</li>
                 </ul>
               </div>
             )}
