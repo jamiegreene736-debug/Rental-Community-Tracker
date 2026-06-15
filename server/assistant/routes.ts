@@ -14,6 +14,7 @@
 import type { Express, Request, Response } from "express";
 import { runAssistantTurn, runConfirmedAction } from "./agent";
 import { buildModelHistory, createSession, getMessages, getSession, listSessions } from "./store";
+import { loopbackRequestHeaders as loopbackHeaders } from "../auth";
 
 // Open an SSE stream on a POST response (EventSource is GET-only, so the client
 // reads the body with fetch). Returns a `send` writer + a closed-flag getter.
@@ -49,6 +50,48 @@ export function registerAssistantRoutes(app: Express): void {
   app.get("/api/assistant/sessions", async (_req, res) => {
     if (!assistantEnabled()) return res.status(404).json({ error: "Assistant is disabled." });
     res.json({ sessions: await listSessions() });
+  });
+
+  // Proactive nudges: starter suggestion chips shown in the empty dock. A few
+  // are dynamic (real attention signals from fast local sources); the rest are
+  // static helpers. Always fail-soft + fast — a slow signal is simply omitted.
+  app.get("/api/assistant/nudges", async (_req, res) => {
+    if (!assistantEnabled()) return res.status(404).json({ error: "Assistant is disabled." });
+    const suggestions: { label: string; prompt: string; badge?: number }[] = [];
+
+    // Dynamic: unacknowledged photo alerts (local DB, but fetched over loopback
+    // with a tight timeout so the dock never hangs on open).
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 2500);
+      const r = await fetch(`http://127.0.0.1:${process.env.PORT || "5000"}/api/photo-listing-alerts?unacknowledged=1`, {
+        headers: loopbackHeaders(),
+        signal: controller.signal,
+      });
+      clearTimeout(t);
+      if (r.ok) {
+        const data = (await r.json()) as { alerts?: unknown[] };
+        const n = Array.isArray(data?.alerts) ? data.alerts.length : 0;
+        if (n > 0) {
+          suggestions.push({
+            label: `Review ${n} photo alert${n > 1 ? "s" : ""}`,
+            prompt: "Show me the unacknowledged photo alerts and what changed.",
+            badge: n,
+          });
+        }
+      }
+    } catch {
+      /* omit on error/timeout */
+    }
+
+    suggestions.push(
+      { label: "Revenue last 30 days", prompt: "What's my revenue over the last 30 days?" },
+      { label: "Find a better combination", prompt: "Find a better combination for an upcoming booking that still needs units." },
+      { label: "New guest messages", prompt: "Any new guest messages? Summarize what each guest is asking." },
+      { label: "Find photos", prompt: "Find photos for one of my communities." },
+    );
+
+    res.json({ suggestions });
   });
 
   app.get("/api/assistant/sessions/:id", async (req, res) => {

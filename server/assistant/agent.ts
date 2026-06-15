@@ -12,6 +12,7 @@
 import { anthropicToolDefs, runAssistantTool, ASSISTANT_TOOLS_BY_NAME } from "./tools";
 import { appendMessage, touchSession, buildModelHistory, type AssistantMessageContent } from "./store";
 import { createPendingAction, takePendingAction } from "./confirm";
+import { cacheSystem, cacheTools } from "./prompt-cache";
 
 // Orchestrator model: the hardest part is mapping fuzzy operator asks to the
 // right tool chain and interpreting the economics, so use the most capable
@@ -19,6 +20,15 @@ import { createPendingAction, takePendingAction } from "./confirm";
 const MODEL = process.env.ASSISTANT_MODEL || "claude-opus-4-8";
 const MAX_TURNS = 8;
 const TOOL_RESULT_CAP = 12_000; // chars of tool JSON fed back per result
+
+// Prompt caching: see server/assistant/prompt-cache.ts. These thin wrappers feed
+// the live system prompt + tool defs through the pure cache helpers.
+function cachedSystem(): unknown {
+  return cacheSystem(systemPrompt());
+}
+function cachedTools(): unknown[] {
+  return cacheTools(anthropicToolDefs() as Record<string, unknown>[]);
+}
 
 export type SseSend = (event: Record<string, unknown>) => void;
 
@@ -87,7 +97,8 @@ export async function runAssistantTurn(opts: {
     ...history.map((m) => ({ role: m.role, content: m.content })),
     { role: "user", content: userMessage },
   ];
-  const tools = anthropicToolDefs();
+  const tools = cachedTools();
+  const system = cachedSystem();
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     send({ type: "status", text: turn === 0 ? "Thinking…" : "Working…" });
@@ -100,7 +111,7 @@ export async function runAssistantTurn(opts: {
         body: JSON.stringify({
           model: MODEL,
           max_tokens: 2048,
-          system: systemPrompt(),
+          system,
           tools,
           messages,
         }),
@@ -269,7 +280,7 @@ export async function runConfirmedAction(opts: {
       body: JSON.stringify({
         model: MODEL,
         max_tokens: 1024,
-        system: systemPrompt(),
+        system: cachedSystem(),
         messages: [...history.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: followupPrompt }],
       }),
     });
