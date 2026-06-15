@@ -643,6 +643,9 @@ export const bulkComboListingJobItems = pgTable("bulk_combo_listing_job_items", 
   effectiveUnit2Beds: integer("effective_unit2_beds"),
   remixApplied: boolean("remix_applied").notNull().default(false),
   unit2PhotosReused: boolean("unit2_photos_reused").notNull().default(false),
+  // Count of worker restarts/interruptions that stopped this item mid-run (bounded
+  // reprieve so a deploy mid-listing doesn't permanently drop a viable listing).
+  interruptions: integer("interruptions").notNull().default(0),
   sortOrder: integer("sort_order").notNull().default(0),
   startedAt: timestamp("started_at"),
   finishedAt: timestamp("finished_at"),
