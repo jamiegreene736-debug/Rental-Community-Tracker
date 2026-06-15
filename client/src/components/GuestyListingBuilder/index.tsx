@@ -1,6 +1,6 @@
 import { Component, useState, useEffect, useCallback, useMemo, useRef, type ReactNode, type CSSProperties } from "react";
 import { useLocation } from "wouter";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry, GuestyListingSummary } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
@@ -632,6 +632,62 @@ type GuestyMonthlyRate = {
   maxRate: number;
   days: number;
 };
+
+// ─── Market-rate old→new summary ──────────────────────────────────────────────
+// Shows the previous vs current market-rate basis (per bedroom) from the most
+// recent pricing_update_logs row, captured at each market-rate refresh (manual
+// or bulk). The basis is the LOW-season medianNightly that drives the seasonal
+// rates table below it. See GET /api/pricing/update-logs.
+type PricingUpdateLogRow = {
+  bedrooms: number;
+  oldRate: string | null;
+  newRate: string | null;
+  triggerType: string;
+  createdAt: string;
+};
+function MarketRateChangeSummary({ propertyId }: { propertyId?: number }) {
+  const { data } = useQuery<{ ok: boolean; logs: PricingUpdateLogRow[] }>({
+    queryKey: ["/api/pricing/update-logs", propertyId],
+    queryFn: async () => {
+      const r = await fetch(`/api/pricing/update-logs?propertyId=${propertyId}&limit=30`, { credentials: "include" });
+      if (!r.ok) throw new Error(`pricing logs ${r.status}`);
+      return r.json();
+    },
+    enabled: typeof propertyId === "number" && propertyId > 0,
+    staleTime: 30_000,
+  });
+  const logs = data?.logs ?? [];
+  if (logs.length === 0) return null;
+  // logs are newest-first → keep the latest row per bedroom
+  const byBR = new Map<number, PricingUpdateLogRow>();
+  for (const l of logs) if (!byBR.has(l.bedrooms)) byBR.set(l.bedrooms, l);
+  const rows = Array.from(byBR.values()).sort((a, b) => a.bedrooms - b.bedrooms);
+  const latestAt = rows.reduce((m, r) => Math.max(m, new Date(r.createdAt).getTime()), 0);
+  return (
+    <div style={{ marginBottom: 8, padding: 8, background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, fontSize: 11 }} data-testid="market-rate-change-summary">
+      <div style={{ fontWeight: 600, color: "#334155", marginBottom: 4 }}>
+        Market rate (basis) — old → new{latestAt ? ` · last updated ${new Date(latestAt).toLocaleString()}` : ""}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+        {rows.map((r) => {
+          const oldN = r.oldRate != null ? Number(r.oldRate) : null;
+          const newN = r.newRate != null ? Number(r.newRate) : null;
+          const delta = oldN != null && newN != null && oldN > 0 ? (newN - oldN) / oldN : null;
+          const color = delta == null ? "#6b7280" : delta > 0 ? "#b45309" : delta < 0 ? "#166534" : "#6b7280";
+          return (
+            <span key={r.bedrooms} style={{ color }}>
+              <b>{r.bedrooms}BR</b>{" "}
+              {oldN != null ? `$${Math.round(oldN).toLocaleString()}` : "—"}
+              {" → "}
+              <b>{newN != null ? `$${Math.round(newN).toLocaleString()}` : "—"}</b>
+              {delta != null && <span> ({delta > 0 ? "+" : ""}{(delta * 100).toFixed(1)}%)</span>}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 // Pushes the marked-up base calendar rates to Guesty. Guesty owns any
@@ -6086,6 +6142,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 })}
                               </div>
                             )}
+                            <MarketRateChangeSummary propertyId={propertyId} />
                             <table className="glb-season-table">
                               <thead>
                                 <tr>
