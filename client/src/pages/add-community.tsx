@@ -576,6 +576,13 @@ export default function AddCommunity() {
       etaSeconds?: number | null;
       unit1Photos?: Array<{ url: string }>;
       unit2Photos?: Array<{ url: string }>;
+      unit1SourceUrl?: string | null;
+      unit2SourceUrl?: string | null;
+      effectiveUnit1Beds?: number | null;
+      effectiveUnit2Beds?: number | null;
+      remixApplied?: boolean;
+      unit2PhotosReused?: boolean;
+      pairing?: { unit1Beds: number; unit2Beds: number; totalBeds: number };
     }>;
   };
   type QueueJobEventPayload = {
@@ -2881,6 +2888,23 @@ export default function AddCommunity() {
                               </p>
                               {item.draftId && (
                                 <p className="mt-0.5 text-xs text-emerald-700">Saved as dashboard draft #{item.draftId}</p>
+                              )}
+                              {(item.unit1Photos || item.unit2Photos || item.status === "running" || item.status === "completed") && (
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                  Photos — Unit A: <span className="tabular-nums">{item.unit1Photos?.length ?? 0}</span>
+                                  {" · "}Unit B: <span className="tabular-nums">{item.unit2Photos?.length ?? 0}</span>
+                                  {item.unit2PhotosReused ? " (reused from Unit A)" : ""}
+                                </p>
+                              )}
+                              {item.remixApplied && item.effectiveUnit1Beds && item.effectiveUnit2Beds && (
+                                <span className="mt-1 inline-flex w-fit items-center gap-1 rounded-sm border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                                  🔀 Re-mixed{item.pairing ? ` ${item.pairing.unit1Beds}BR+${item.pairing.unit2Beds}BR` : ""} → {item.effectiveUnit1Beds}BR+{item.effectiveUnit2Beds}BR for a distinct 2nd unit
+                                </span>
+                              )}
+                              {item.unit2PhotosReused && !item.remixApplied && (
+                                <span className="mt-1 inline-flex w-fit items-center gap-1 rounded-sm border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                                  ♻︎ Reused Unit A photos for Unit B
+                                </span>
                               )}
                             </div>
                             <div className="flex shrink-0 flex-col items-end gap-1">

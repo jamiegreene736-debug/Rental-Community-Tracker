@@ -103,6 +103,52 @@ export function formatTypicalComboLabel(pair: TypicalComboPair | null | undefine
   return ` · 2×${pair.unitBeds}BR=${pair.totalBeds}BR`;
 }
 
+export type RemixSplit = { unit1Beds: number; unit2Beds: number };
+
+/**
+ * When a same-size combo (e.g. 3BR + 3BR) cannot source two DISTINCT units in a
+ * community, propose alternative bedroom SPLITS of the SAME total using two
+ * DIFFERENT unit sizes — so each half draws from a different inventory pool and
+ * is far more likely to resolve to a genuine second unit.
+ *
+ * Rules (operator-driven):
+ * - Preserves the combined bedroom total (a 6BR combo stays 6BR: 3+3 -> 4+2).
+ * - Caps each half at `maxUnitBeds` (default 4 — there is no 5BR condo in these
+ *   communities) and floors at `minUnitBeds` (default 1).
+ * - Both halves must be DIFFERENT sizes (the whole point), and the original
+ *   split is excluded.
+ * - The larger half is returned as `unit1Beds` (Unit A), the smaller as
+ *   `unit2Beds` (Unit B). Ordered most-balanced-first and capped to `limit`.
+ *
+ * Examples (maxUnitBeds=4): 3+3 -> [{4,2}]; 2+2 -> [{3,1}]; 4+4 -> [] (no valid
+ * same-total split under the 4BR cap) -> caller falls back to photo reuse.
+ */
+export function remixBedroomSplits(
+  unit1Beds: number,
+  unit2Beds: number,
+  opts: { maxUnitBeds?: number; minUnitBeds?: number; limit?: number } = {},
+): RemixSplit[] {
+  const a0 = Math.round(Number(unit1Beds) || 0);
+  const b0 = Math.round(Number(unit2Beds) || 0);
+  const total = a0 + b0;
+  const maxUnitBeds = Math.max(1, Math.round(opts.maxUnitBeds ?? 4));
+  const minUnitBeds = Math.max(1, Math.round(opts.minUnitBeds ?? 1));
+  const limit = Math.max(0, Math.round(opts.limit ?? 3));
+  if (total <= 0 || limit === 0) return [];
+  const out: RemixSplit[] = [];
+  // `big` = larger half: from the cap down to just above half (so big > small).
+  for (let big = Math.min(maxUnitBeds, total - minUnitBeds); big * 2 > total; big -= 1) {
+    const small = total - big;
+    if (small < minUnitBeds || small > maxUnitBeds) continue;
+    if (big === small) continue; // must be two DIFFERENT sizes
+    if ((big === a0 && small === b0) || (big === b0 && small === a0)) continue; // skip original
+    out.push({ unit1Beds: big, unit2Beds: small });
+  }
+  // Most-balanced first (smallest larger-half), then cap.
+  out.sort((x, y) => x.unit1Beds - y.unit1Beds);
+  return out.slice(0, limit);
+}
+
 export function normalizeCombinedBedroomsTypical(community: TypicalComboBedroomFields): number | undefined {
   const inferred = inferTypicalComboPair(community);
   if (inferred) return inferred.totalBeds;

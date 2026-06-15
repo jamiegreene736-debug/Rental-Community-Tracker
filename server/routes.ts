@@ -229,6 +229,7 @@ import {
   summarizeUnitPhotoProof,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
+import { remixBedroomSplits } from "@shared/community-combo";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { geocode, walkBetween } from "./walking-distance";
@@ -32335,6 +32336,13 @@ Return ONLY compact JSON with this exact shape:
     error: string | null;
     attemptCount: number;
     heartbeatAt: number | null;
+    // Bedroom sizes actually used to source each unit after any re-mix fallback
+    // (equal to the requested sizes when no re-mix happened). Drives the bulk
+    // listing copy/save so a re-mixed 3BR+3BR -> 4BR+2BR is recorded correctly.
+    resolvedUnit1Bedrooms?: number | null;
+    resolvedUnit2Bedrooms?: number | null;
+    remixApplied?: boolean;
+    unit2PhotosReused?: boolean;
   };
   type ComboPhotoFetchJob = {
     id: string;
@@ -32358,6 +32366,16 @@ Return ONLY compact JSON with this exact shape:
   const COMBO_PHOTO_FETCH_HEARTBEAT_MS = 15_000;
   const COMBO_PHOTO_FETCH_STALE_HEARTBEAT_MS = 2 * 60 * 1000;
   const COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS = 12_000;
+  // Bedroom re-mix fallback: when a same-size combo (e.g. 3BR + 3BR) can't find
+  // two DISTINCT units, re-mix to a same-total different-size split (3+3 -> 4+2)
+  // so each half draws from a different inventory pool. Photo reuse is the final
+  // safety net (reuse Unit A's photos for Unit B) so a combo is never saved with
+  // a blank second unit. All env-tunable; default ON per operator request.
+  const COMBO_REMIX_ENABLED = process.env.COMBO_REMIX_ENABLED !== "0";
+  const COMBO_PHOTO_REUSE_ENABLED = process.env.COMBO_PHOTO_REUSE_ENABLED !== "0";
+  // No 5BR condos exist in these communities — cap each re-mixed half at 4BR.
+  const COMBO_REMIX_MAX_UNIT_BEDROOMS = Math.max(1, Number(process.env.COMBO_REMIX_MAX_UNIT_BEDROOMS) || 4);
+  const COMBO_REMIX_MAX_SPLITS = Math.max(1, Number(process.env.COMBO_REMIX_MAX_SPLITS) || 2);
   const toQueueMs = (value: Date | string | number | null | undefined): number | null => {
     if (!value) return null;
     if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -32799,6 +32817,89 @@ Return ONLY compact JSON with this exact shape:
       await persistProgress();
     }
 
+    // ── Re-mix fallback ───────────────────────────────────────────────────────
+    // If the same-size second unit came back starved (no DISTINCT listing for
+    // this community at that bedroom count), try alternative same-total bedroom
+    // SPLITS (3+3 -> 4+2) so each half draws from a different inventory pool, and
+    // re-search BOTH halves. Only commit a split when BOTH return real, distinct
+    // galleries — otherwise the original Unit A result is preserved for reuse.
+    const unitsAreSearchMode = !item.unit1?.url && !item.unit2?.url;
+    let remixApplied = false;
+    let unit2PhotosReused = false;
+    if (
+      COMBO_REMIX_ENABLED
+      && unitsAreSearchMode
+      && item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS
+      && canComboPhotoFetchUnit(item, item.unit1)
+      && canComboPhotoFetchUnit(item, item.unit2)
+      && typeof item.unit1?.bedrooms === "number"
+      && typeof item.unit2?.bedrooms === "number"
+    ) {
+      const origUnit2Beds = item.unit2.bedrooms;
+      const splits = remixBedroomSplits(item.unit1.bedrooms, item.unit2.bedrooms, {
+        maxUnitBeds: COMBO_REMIX_MAX_UNIT_BEDROOMS,
+        limit: COMBO_REMIX_MAX_SPLITS,
+      });
+      for (const split of splits) {
+        if (job.cancelRequested) break;
+        const remixUnit1: ComboPhotoFetchUnit = { ...item.unit1, bedrooms: split.unit1Beds, title: `Unit A — ${split.unit1Beds}BR` };
+        const remixUnit2: ComboPhotoFetchUnit = { ...item.unit2, bedrooms: split.unit2Beds, title: `Unit B — ${split.unit2Beds}BR` };
+        const reA = await runWithHeartbeat(
+          `No distinct ${origUnit2Beds}BR second unit — re-mixing to ${split.unit1Beds}BR + ${split.unit2Beds}BR (searching ${split.unit1Beds}BR)`,
+          () => fetchComboPhotosForUnit(job, item, remixUnit1, [], [], abortKey, signal, otaProgress),
+        );
+        if (reA.photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) continue;
+        const reB = await runWithHeartbeat(
+          `Re-mix ${split.unit1Beds}BR + ${split.unit2Beds}BR — searching a distinct ${split.unit2Beds}BR second unit`,
+          () => fetchComboPhotosForUnit(job, item, remixUnit2, reA.sourceUrl ? [reA.sourceUrl] : [], reA.photos, abortKey, signal, otaProgress),
+        );
+        let reBPhotos = reB.photos;
+        if (reA.photos.length > 0 && photoSetLooksSameForComboPhotoJob(reA.photos, reBPhotos)) reBPhotos = [];
+        if (reBPhotos.length < MIN_INDEPENDENT_UNIT_PHOTOS) continue;
+        // Both halves sourced & distinct — commit the re-mix.
+        item.unit1Photos = reA.photos;
+        item.unit1SourceUrl = reA.sourceUrl;
+        item.unit1Proof = reA.proof;
+        item.unit2Photos = reBPhotos;
+        item.unit2SourceUrl = reB.sourceUrl;
+        item.unit2Proof = reBPhotos.length === reB.photos.length
+          ? reB.proof
+          : buildUnitPhotoResolverProof({ photos: reBPhotos, sourceUrl: reB.sourceUrl, requestedBedrooms: split.unit2Beds, relaxedSearch: reB.relaxed });
+        item.unit1 = remixUnit1;
+        item.unit2 = remixUnit2;
+        item.message = `Re-mixed to ${split.unit1Beds}BR + ${split.unit2Beds}BR (${reA.photos.length} + ${reBPhotos.length} photos)`;
+        remixApplied = true;
+        await persistProgress();
+        break;
+      }
+    }
+
+    // ── Photo-reuse fallback (final safety net) ───────────────────────────────
+    // If the second unit is STILL starved, reuse Unit A's photos for Unit B so a
+    // combo is never saved with a blank second unit. Original sizes are kept.
+    if (
+      COMBO_PHOTO_REUSE_ENABLED
+      && !item.unit2?.url
+      && item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS
+      && item.unit1Photos.length >= MIN_INDEPENDENT_UNIT_PHOTOS
+    ) {
+      item.unit2Photos = item.unit1Photos.map((p) => ({ ...p }));
+      item.unit2SourceUrl = item.unit1SourceUrl;
+      item.unit2Proof = buildUnitPhotoResolverProof({
+        photos: item.unit2Photos,
+        sourceUrl: item.unit2SourceUrl,
+        requestedBedrooms: item.unit2?.bedrooms ?? null,
+      });
+      unit2PhotosReused = true;
+      item.message = "Reused Unit A photos for Unit B (no distinct second unit found)";
+      await persistProgress();
+    }
+
+    item.resolvedUnit1Bedrooms = item.unit1?.bedrooms ?? null;
+    item.resolvedUnit2Bedrooms = item.unit2?.bedrooms ?? null;
+    item.remixApplied = remixApplied;
+    item.unit2PhotosReused = unit2PhotosReused;
+
     item.phase = "done";
     const total = item.unit1Photos.length + item.unit2Photos.length;
     const proofFailures: string[] = [];
@@ -32819,7 +32920,7 @@ Return ONLY compact JSON with this exact shape:
     if (item.unit1Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS || item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
       proofFailures.push(`one or both units had fewer than ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos`);
     }
-    if (item.unit1Proof && item.unit2Proof) {
+    if (item.unit1Proof && item.unit2Proof && !item.unit2PhotosReused) {
       const comparison = compareUnitPhotoProofs(item.unit1Proof, item.unit2Proof);
       if (comparison.duplicate) {
         proofFailures.push(`Unit A and Unit B are not independent (${comparison.issues.join(", ") || "duplicate-photo-overlap"}; overlap ${comparison.overlapCount}, ratio ${comparison.overlapRatio.toFixed(2)})`);
@@ -33380,6 +33481,13 @@ Return ONLY compact JSON with this exact shape:
     error: string | null;
     attemptCount: number;
     heartbeatAt: number | null;
+    // Re-mix / photo-reuse tracking (durable; surfaced in the queue UI + history).
+    // effectiveUnit*Beds are the bedroom sizes actually sourced + saved (after any
+    // re-mix); they equal the requested pairing sizes when no re-mix happened.
+    effectiveUnit1Beds?: number | null;
+    effectiveUnit2Beds?: number | null;
+    remixApplied?: boolean;
+    unit2PhotosReused?: boolean;
   };
   type BulkComboListingJob = {
     id: string;
@@ -33509,6 +33617,10 @@ Return ONLY compact JSON with this exact shape:
           error: item.error,
           attemptCount: item.attemptCount,
           heartbeatAt: bulkComboDate(item.heartbeatAt),
+          effectiveUnit1Beds: item.effectiveUnit1Beds ?? null,
+          effectiveUnit2Beds: item.effectiveUnit2Beds ?? null,
+          remixApplied: item.remixApplied ?? false,
+          unit2PhotosReused: item.unit2PhotosReused ?? false,
           sortOrder,
           startedAt: bulkComboDate(item.startedAt),
           finishedAt: bulkComboDate(item.finishedAt),
@@ -33544,6 +33656,10 @@ Return ONLY compact JSON with this exact shape:
         error: row.error ?? null,
         attemptCount: row.attemptCount ?? 0,
         heartbeatAt: toBulkComboMs(row.heartbeatAt),
+        effectiveUnit1Beds: row.effectiveUnit1Beds ?? null,
+        effectiveUnit2Beds: row.effectiveUnit2Beds ?? null,
+        remixApplied: Boolean(row.remixApplied),
+        unit2PhotosReused: Boolean(row.unit2PhotosReused),
       };
     });
     for (const item of items) hydrateBulkComboListingItem(item);
@@ -33736,9 +33852,17 @@ Return ONLY compact JSON with this exact shape:
       .replace(/[^a-z0-9]+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
+  // Bedroom sizes actually saved for this item — the re-mixed sizes when a
+  // re-mix happened, otherwise the requested pairing. Idempotency/dedup must key
+  // off these so a re-mixed item still finds its own draft on a retry.
+  const effectiveBulkComboBeds = (item: BulkComboListingItem) => {
+    const pairing = item.pairing || ({} as BulkComboListingItem["pairing"]);
+    const unit1Beds = Number(item.effectiveUnit1Beds ?? pairing?.unit1Beds ?? 0);
+    const unit2Beds = Number(item.effectiveUnit2Beds ?? pairing?.unit2Beds ?? 0);
+    return { unit1Beds, unit2Beds, totalBeds: unit1Beds + unit2Beds };
+  };
   const draftBedroomsMatchBulkComboItem = (draft: any, item: BulkComboListingItem) => {
-    const unit1Beds = Number(item.pairing?.unit1Beds || 0);
-    const unit2Beds = Number(item.pairing?.unit2Beds || 0);
+    const { unit1Beds, unit2Beds } = effectiveBulkComboBeds(item);
     const draft1Beds = Number(draft?.unit1Bedrooms || 0);
     const draft2Beds = Number(draft?.unit2Bedrooms || 0);
     return (draft1Beds === unit1Beds && draft2Beds === unit2Beds) || (draft1Beds === unit2Beds && draft2Beds === unit1Beds);
@@ -33757,7 +33881,7 @@ Return ONLY compact JSON with this exact shape:
     streetAddress: string | null | undefined,
   ): Promise<number | null> => {
     const community = item.community || {};
-    const expectedBedrooms = Number(item.pairing?.totalBeds || (item.pairing?.unit1Beds || 0) + (item.pairing?.unit2Beds || 0));
+    const expectedBedrooms = effectiveBulkComboBeds(item).totalBeds;
     const expectedName = normalizeQueueText(community.name);
     const expectedCity = normalizeQueueText(community.city);
     const expectedState = normalizeQueueText(community.state);
@@ -33783,7 +33907,7 @@ Return ONLY compact JSON with this exact shape:
   };
   const bulkComboIdempotencyKey = (jobId: string, item: BulkComboListingItem) => {
     const community = item.community || {};
-    const pairing = item.pairing || {};
+    const eff = effectiveBulkComboBeds(item);
     return [
       "bulk-combo",
       jobId,
@@ -33791,9 +33915,9 @@ Return ONLY compact JSON with this exact shape:
       normalizeQueueText(community.name),
       normalizeQueueText(community.city),
       normalizeQueueText(community.state),
-      pairing.unit1Beds ?? "",
-      pairing.unit2Beds ?? "",
-      pairing.totalBeds ?? "",
+      eff.unit1Beds || "",
+      eff.unit2Beds || "",
+      eff.totalBeds || "",
     ].join(":");
   };
   const runBulkComboListingItem = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
@@ -33886,16 +34010,34 @@ Return ONLY compact JSON with this exact shape:
     item.unit2Photos = photoItem.unit2Photos;
     item.unit1SourceUrl = photoItem.unit1SourceUrl;
     item.unit2SourceUrl = photoItem.unit2SourceUrl;
+    // Adopt any bedroom re-mix decided during photo discovery so the listing copy
+    // and the saved draft reflect the units we actually sourced (e.g. 3+3 -> 4+2).
+    item.effectiveUnit1Beds = photoItem.resolvedUnit1Bedrooms ?? pairing.unit1Beds;
+    item.effectiveUnit2Beds = photoItem.resolvedUnit2Bedrooms ?? pairing.unit2Beds;
+    item.remixApplied = photoItem.remixApplied ?? false;
+    item.unit2PhotosReused = photoItem.unit2PhotosReused ?? false;
+    const effUnit1Beds = Number(item.effectiveUnit1Beds) || pairing.unit1Beds;
+    const effUnit2Beds = Number(item.effectiveUnit2Beds) || pairing.unit2Beds;
+    const effTotalBeds = effUnit1Beds + effUnit2Beds;
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
+    if (item.remixApplied) {
+      await queueEvent("bulk-combo-listing", job.id, "remix",
+        `No distinct ${pairing.unit2Beds}BR second unit — re-mixed ${pairing.unit1Beds}BR + ${pairing.unit2Beds}BR -> ${effUnit1Beds}BR + ${effUnit2Beds}BR`,
+        { itemKey: item.id, level: "info", meta: { from: [pairing.unit1Beds, pairing.unit2Beds], to: [effUnit1Beds, effUnit2Beds] } });
+    } else if (item.unit2PhotosReused) {
+      await queueEvent("bulk-combo-listing", job.id, "photo-reuse",
+        "No distinct second unit found — reused Unit A photos for Unit B",
+        { itemKey: item.id, level: "warn", meta: { unit1Beds: effUnit1Beds, unit2Beds: effUnit2Beds } });
+    }
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
     const generated = await runBulkComboListingStep(job, item, "copy", "Generating listing draft", () => fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/generate-listing`, {
       communityName: community.name,
       city: community.city,
       state: community.state,
-      unit1: { bedrooms: pairing.unit1Beds, url: "", address: undefined },
-      unit2: { bedrooms: pairing.unit2Beds, url: "", address: undefined },
+      unit1: { bedrooms: effUnit1Beds, url: "", address: undefined },
+      unit2: { bedrooms: effUnit2Beds, url: "", address: undefined },
       suggestedRate: pairing.estimatedSellRate,
     }, { abortKey, timeoutMs: 120_000 }));
 
@@ -33938,7 +34080,7 @@ Return ONLY compact JSON with this exact shape:
         minimumStayEvidence: community.minimumStayEvidence ?? null,
         minimumStaySourceUrl: community.minimumStaySourceUrl ?? null,
         unit1Url: item.unit1SourceUrl,
-        unit1Bedrooms: pairing.unit1Beds,
+        unit1Bedrooms: effUnit1Beds,
         unit1Bathrooms: generated.unitA?.bathrooms ?? null,
         unit1Sqft: generated.unitA?.sqft ?? null,
         unit1MaxGuests: generated.unitA?.maxGuests ?? null,
@@ -33946,14 +34088,14 @@ Return ONLY compact JSON with this exact shape:
         unit1ShortDescription: generated.unitA?.shortDescription ?? null,
         unit1LongDescription: generated.unitA?.longDescription ?? null,
         unit2Url: item.unit2SourceUrl,
-        unit2Bedrooms: pairing.unit2Beds,
+        unit2Bedrooms: effUnit2Beds,
         unit2Bathrooms: generated.unitB?.bathrooms ?? null,
         unit2Sqft: generated.unitB?.sqft ?? null,
         unit2MaxGuests: generated.unitB?.maxGuests ?? null,
         unit2Bedding: generated.unitB?.bedding ?? null,
         unit2ShortDescription: generated.unitB?.shortDescription ?? null,
         unit2LongDescription: generated.unitB?.longDescription ?? null,
-        combinedBedrooms: pairing.totalBeds || pairing.unit1Beds + pairing.unit2Beds,
+        combinedBedrooms: effTotalBeds,
         suggestedRate: pairing.estimatedSellRate,
         listingTitle: generated.title ?? null,
         bookingTitle: generated.bookingTitle ?? generated.title ?? null,

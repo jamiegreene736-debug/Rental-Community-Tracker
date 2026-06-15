@@ -477,4 +477,14 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ON assistant_sessions (last_active_at DESC)
   `);
   console.log("[schema] ensured assistant chat tables");
+
+  // Bedroom re-mix / photo-reuse tracking on bulk combo listing queue items.
+  await db.execute(sql`
+    ALTER TABLE bulk_combo_listing_job_items
+      ADD COLUMN IF NOT EXISTS effective_unit1_beds integer,
+      ADD COLUMN IF NOT EXISTS effective_unit2_beds integer,
+      ADD COLUMN IF NOT EXISTS remix_applied boolean NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS unit2_photos_reused boolean NOT NULL DEFAULT false
+  `);
+  console.log("[schema] ensured bulk_combo_listing_job_items re-mix columns");
 }
