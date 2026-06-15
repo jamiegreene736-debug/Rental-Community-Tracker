@@ -4510,6 +4510,52 @@ async function scrapeListingPhotos(
       console.log(`[scrapeGenericRealEstate] fetch returned 0, trying ScrapingBee for ${primaryUrl}`);
       result = await scrapeGenericRealEstateViaScrapingBee(primaryUrl, options?.scrapingBeeTimeoutMs);
     }
+    // Last-resort tier: the operator's home-IP Chrome sidecar. Railway's
+    // datacenter IP frequently bot-walls Redfin/Homes down to a single
+    // og:image (the failure described above), so when the cheaper datacenter
+    // tiers returned 0 photos AND the sidecar is online, recover the full
+    // gallery from a residential IP. SEQUENTIAL fallback only — fires solely
+    // on result.urls.length === 0, so it never unions with or reorders an
+    // existing photo set (Load-Bearing #5). Naturally inert when the worker is
+    // offline; env SIDECAR_GALLERY_SCRAPE_ENABLED=0 kills it (Load-Bearing #45).
+    const galleryScrapeEnabled =
+      String(process.env.SIDECAR_GALLERY_SCRAPE_ENABLED ?? "1").trim() !== "0";
+    const gallerySidecarWalletMs = options?.sidecarWalletMs ?? 90_000;
+    if (galleryScrapeEnabled && gallerySidecarWalletMs > 0 && result.urls.length === 0) {
+      try {
+        const { getHeartbeat, scrapeListingGalleryViaSidecar } = await import("./vrbo-sidecar-queue");
+        const heartbeat = getHeartbeat();
+        if (heartbeat.isOnline) {
+          const sidecarHost = /redfin\.com/i.test(primaryUrl) ? "Redfin" : "Homes.com";
+          console.log(`[scrapeGenericRealEstate] sidecar fallback (0 photos from fetch/ScrapingBee) host=${sidecarHost} wallet=${gallerySidecarWalletMs}ms`);
+          const sidecar = await scrapeListingGalleryViaSidecar({
+            url: primaryUrl,
+            host: sidecarHost,
+            walletBudgetMs: gallerySidecarWalletMs,
+          });
+          if (sidecar.photos.length > 0) {
+            console.log(`[scrapeGenericRealEstate] sidecar recovered ${sidecar.photos.length} photos in ${sidecar.durationMs}ms (facts ${sidecar.facts ? "yes" : "no"})`);
+            result = {
+              urls: sidecar.photos,
+              facts: {
+                bedrooms: result.facts.bedrooms ?? sidecar.facts?.bedrooms,
+                bathrooms: result.facts.bathrooms ?? sidecar.facts?.bathrooms,
+                homeType: result.facts.homeType ?? sidecar.facts?.homeType,
+                homeStatus: result.facts.homeStatus ?? sidecar.facts?.homeStatus,
+                propertySubType: result.facts.propertySubType ?? sidecar.facts?.propertySubType,
+                photoCount: result.facts.photoCount ?? sidecar.facts?.photoCount,
+              },
+            };
+          } else {
+            console.log(`[scrapeGenericRealEstate] sidecar returned 0 photos in ${sidecar.durationMs}ms (reason: ${sidecar.reason})`);
+          }
+        } else {
+          console.log(`[scrapeGenericRealEstate] sidecar offline (heartbeat ageMs=${heartbeat.ageMs ?? "—"}); skipping`);
+        }
+      } catch (e: any) {
+        console.warn(`[scrapeGenericRealEstate] sidecar fallback errored: ${e?.message ?? e}`);
+      }
+    }
     if (listingFacts) {
       if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
       if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;

@@ -1,5 +1,14 @@
 # Sidecar worker delta: `zillow_photo_scrape`
 
+> **SUPERSEDED (2026-06-15, Load-Bearing #45).** This manual hand-edit is
+> no longer needed. The repo `daemon/vrbo-sidecar/worker.mjs` now ships a
+> handler: `zillow_photo_scrape` is routed to the generic
+> `processListingGalleryScrape` (which also serves the new
+> `listing_gallery_scrape` op for Redfin/Homes.com). Just `cp` the repo
+> `worker.mjs` to `~/.vrbo-sidecar-daemon/worker.mjs` and `launchctl
+> kickstart` the daemon — no code edit required. Kept for historical
+> context on the original Zillow-specific `__NEXT_DATA__` extraction.
+
 When this PR (claude/sidecar-zillow-scrape) deploys, the server starts
 enqueuing `zillow_photo_scrape` operations whenever Apify+ScrapingBee
 both return zero photos for a Zillow URL (third-tier fallback inside
