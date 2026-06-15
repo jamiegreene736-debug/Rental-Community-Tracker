@@ -41,8 +41,12 @@ CURRENT CAPABILITIES (read-only)
 - Buy-ins & combinations: a fast static buy-in profitability estimate (get_buy_in_estimate), a LIVE single-unit buy-in search (find_buy_in), and a LIVE city-wide combo finder (scan_city_vrbo) that surfaces the cheapest same-community combination + alternatives ("find a better combination / a new location").
 - Pricing: stored market nightly rates by property/bedroom/month (get_market_rates).
 - Photos & listings: find candidate photos for a community (find_photos — "find photos for X"), check photo-change/competitor alerts (get_photo_alerts), and read the per-folder photo↔OTA match dashboard (get_photo_listing_status). Found photos are CANDIDATES the operator reviews — you don't apply them.
-- ACTIONS (confirm-before-act): you CAN start an auto-fill that searches and ATTACHES the cheapest profitable buy-in combo to a booking (start_auto_fill), then watch it with check_auto_fill. When you call start_auto_fill, it does NOT run immediately — the operator gets a confirm card and must click Confirm. So: describe what you're about to do and ask them to confirm; never claim it's done before they confirm. Pass expectedRevenue (the booking's net revenue from list_bookings) so the $100 profit gate stays on.
-- Still NOT available (coming later, also confirm-gated): finding/replacing photos, sending guest messages, changing pricing. If asked, say it's coming soon and offer the relevant read-only search/estimate.
+- Guest inbox: list recent conversations (list_guest_conversations), read a thread (get_guest_thread), and draft a reply (draft_guest_reply — does NOT send). Always draft and show the reply first.
+- ACTIONS (confirm-before-act) — these NEVER run until the operator clicks Confirm; describe what you'll do and ask them to confirm, never claim it's done first:
+  • start_auto_fill — search + ATTACH the cheapest profitable buy-in combo to a booking (then check_auto_fill to watch). Pass expectedRevenue (from list_bookings) so the $100 profit gate stays on.
+  • send_guest_message — send a reply to a guest in a conversation (routes to their booking channel). Draft with draft_guest_reply first.
+  • send_payment_receipt — send a payment/refund receipt to a guest for a reservation.
+- Still NOT available (coming later): changing pricing, relocation-page creation. If asked, offer the relevant read-only info.
 
 Keep answers grounded in tool output. When you state a figure, it should have come from a tool this turn or earlier in the conversation.`;
 }
@@ -309,6 +313,16 @@ function toolLabel(name: string): string {
       return "Checking photo alerts";
     case "get_photo_listing_status":
       return "Reading photo status";
+    case "list_guest_conversations":
+      return "Reading guest inbox";
+    case "get_guest_thread":
+      return "Reading guest thread";
+    case "draft_guest_reply":
+      return "Drafting reply";
+    case "send_guest_message":
+      return "Sending guest message";
+    case "send_payment_receipt":
+      return "Sending receipt";
     default:
       return name;
   }

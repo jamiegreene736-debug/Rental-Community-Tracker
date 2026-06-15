@@ -28,6 +28,11 @@ for (const name of [
   "find_photos",
   "get_photo_alerts",
   "get_photo_listing_status",
+  "list_guest_conversations",
+  "get_guest_thread",
+  "draft_guest_reply",
+  "send_guest_message",
+  "send_payment_receipt",
 ]) {
   check(`tool '${name}' registered`, ASSISTANT_TOOLS_BY_NAME.has(name));
 }

@@ -85,11 +85,14 @@ twice), executes the tool over loopback, and streams the model's outcome
 summary. Cancel records the decision and runs nothing.
 
 Write tools MUST supply `confirmLabel(input)` + `confirmSummary(input)` (enforced
-by `tests/assistant-tools.test.ts`). The first write tool is **`start_auto_fill`**
-(searches + attaches the cheapest profitable buy-in combo to a booking); it
-builds the auto-fill payload server-side from `getPropertyUnits(propertyId)` and
-passes `expectedRevenue` so the $100 profit gate stays on. `check_auto_fill`
-(read) polls the resulting job.
+by `tests/assistant-tools.test.ts`). Current write (confirm-gated) tools:
+- **`start_auto_fill`** — searches + attaches the cheapest profitable buy-in combo
+  to a booking (payload built server-side from `getPropertyUnits(propertyId)`,
+  `expectedRevenue` passed so the $100 profit gate stays on). `check_auto_fill`
+  (read) polls the job.
+- **`send_guest_message`** — sends a reply into a Guesty conversation, routed to the
+  guest's booking channel (reads the conversation's `module` first, like the inbox).
+- **`send_payment_receipt`** — sends a payment/refund receipt for a reservation.
 
 ## Persistence
 
@@ -113,7 +116,7 @@ renders the dock for the **admin** role when enabled.
 | **1 · Buy-ins & pricing (read)** | LIVE `find_buy_in` (single unit), `scan_city_vrbo` (combo finder — "find a better combination / new location"), `get_market_rates` (pricing). | **shipped** |
 | **1.5 · Confirm-gated attach** | confirm gate wired end-to-end (agent intercept + `/api/assistant/confirm` + client confirm card); first write tool `start_auto_fill` + `check_auto_fill`. | **shipped** |
 | **2 · Photos & listings (read)** | `find_photos` (candidate photos for a community), `get_photo_alerts` (OTA photo-change/competitor alerts), `get_photo_listing_status` (per-folder photo↔OTA dashboard). | **shipped** |
-| 3 · Inbox & outward actions | guest threads, drafting, confirm-gated sends/relocation | planned |
+| **3 · Inbox & outward actions** | read: `list_guest_conversations`, `get_guest_thread`, `draft_guest_reply`. Confirm-gated writes: `send_guest_message`, `send_payment_receipt`. | **shipped** |
 | 4 · Polish | Haiku fast-router, prompt caching, session history UI, proactive nudges | planned |
 
 **Note on `start_auto_fill` verification:** the auto-fill/attach path drives the

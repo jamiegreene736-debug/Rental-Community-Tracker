@@ -351,6 +351,147 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
     input_schema: { type: "object", properties: {}, required: [] },
     execute: async () => loopbackGet("/api/photo-listing-check"),
   },
+  {
+    name: "list_guest_conversations",
+    kind: "read",
+    description:
+      "List recent guest inbox conversations (from Guesty) — guest name, channel, last message, unread state. Use for 'who messaged me?', 'any new guest messages?', or to find a conversationId to read a thread or reply. Returns Guesty's conversation list; summarize it (don't dump). Each conversation has an `id` (the conversationId for get_guest_thread / send_guest_message).",
+    input_schema: {
+      type: "object",
+      properties: { limit: { type: "number", description: "Max conversations (default 50)." } },
+      required: [],
+    },
+    execute: async (input) => {
+      const limit = Math.min(Math.max(Number(input.limit) || 50, 1), 100);
+      // `fields=` (empty) is load-bearing — it makes Guesty return the full
+      // state.lastMessage shape the inbox relies on (see CLAUDE.md 2026-05-04).
+      return loopbackGet(`/api/guesty-proxy/communication/conversations?limit=${limit}&fields=`);
+    },
+  },
+  {
+    name: "get_guest_thread",
+    kind: "read",
+    description:
+      "Read the messages in one guest conversation thread (newest activity included). Pass the conversationId from list_guest_conversations. Use to understand what a guest asked before drafting or sending a reply. Returns Guesty `posts`.",
+    input_schema: {
+      type: "object",
+      properties: {
+        conversationId: { type: "string", description: "Guesty conversation id." },
+        limit: { type: "number", description: "Max posts (default 50)." },
+      },
+      required: ["conversationId"],
+    },
+    execute: async (input) => {
+      const id = encodeURIComponent(str(input.conversationId) ?? "");
+      const limit = Math.min(Math.max(Number(input.limit) || 50, 1), 100);
+      return loopbackGet(`/api/guesty-proxy/communication/conversations/${id}/posts?limit=${limit}`);
+    },
+  },
+  {
+    name: "draft_guest_reply",
+    kind: "read",
+    description:
+      "Generate a suggested reply DRAFT to a guest message (does NOT send). Pass the guestMessage (and any context: propertyName, guestName, checkIn, checkOut, channel, conversationHistory). Returns { draft }. Show the draft to the operator and offer to send it with send_guest_message (which is confirm-gated). Use this before sending so the operator can review/edit.",
+    input_schema: {
+      type: "object",
+      properties: {
+        guestMessage: { type: "string", description: "The guest's latest message to reply to." },
+        propertyName: { type: "string", description: "Optional property/listing name." },
+        guestName: { type: "string", description: "Optional guest first name." },
+        checkIn: { type: "string", description: "Optional check-in YYYY-MM-DD." },
+        checkOut: { type: "string", description: "Optional check-out YYYY-MM-DD." },
+        channel: { type: "string", description: "Optional channel (airbnb/vrbo/booking/email)." },
+        conversationHistory: { type: "string", description: "Optional prior thread text, oldest→newest." },
+      },
+      required: ["guestMessage"],
+    },
+    execute: async (input) =>
+      loopbackPost("/api/inbox/ai-draft", {
+        guestMessage: str(input.guestMessage),
+        propertyName: str(input.propertyName),
+        guestName: str(input.guestName),
+        checkIn: str(input.checkIn),
+        checkOut: str(input.checkOut),
+        channel: str(input.channel),
+        conversationHistory: str(input.conversationHistory),
+      }),
+  },
+  {
+    name: "send_guest_message",
+    kind: "write",
+    description:
+      "ACTION (requires operator confirmation): send a message to a guest in a Guesty conversation. It routes to the guest's booking channel (Airbnb/VRBO/Booking/email) automatically. Pass conversationId (from list_guest_conversations) and the exact message body. ALWAYS draft with draft_guest_reply and show it first; only call this once the operator wants it sent. Gated behind a confirm card — it does not send until the operator clicks Confirm.",
+    input_schema: {
+      type: "object",
+      properties: {
+        conversationId: { type: "string", description: "Guesty conversation id." },
+        body: { type: "string", description: "Exact message text to send to the guest." },
+      },
+      required: ["conversationId", "body"],
+    },
+    confirmLabel: () => "Send message to guest",
+    confirmSummary: (input) => {
+      const body = str(input.body) ?? "";
+      const preview = body.length > 240 ? `${body.slice(0, 240)}…` : body;
+      return `Send this message to the guest (conversation ${str(input.conversationId) ?? ""}), via their booking channel:\n\n"${preview}"`;
+    },
+    execute: async (input) => {
+      const id = encodeURIComponent(str(input.conversationId) ?? "");
+      const body = str(input.body);
+      if (!body) return { _error: true, message: "Empty message body." };
+      // Mirror the inbox client: read the conversation's module so the message
+      // routes to the guest's actual channel; Guesty 400s on extra module keys.
+      let mod: Record<string, unknown> = { type: "email" };
+      try {
+        const conv: any = await loopbackGet(`/api/guesty-proxy/communication/conversations/${id}`);
+        const rawMod = (conv?.data?.module ?? conv?.module ?? {}) as Record<string, unknown>;
+        const picked: Record<string, unknown> = {};
+        for (const k of ["type", "channelId", "platform", "integrationId"]) {
+          if (rawMod[k] !== undefined) picked[k] = rawMod[k];
+        }
+        if (!picked.type) picked.type = "email";
+        mod = picked;
+      } catch {
+        /* fall back to email module */
+      }
+      return loopbackPost(`/api/guesty-proxy/communication/conversations/${id}/send-message`, { body, module: mod });
+    },
+  },
+  {
+    name: "send_payment_receipt",
+    kind: "write",
+    description:
+      "ACTION (requires operator confirmation): send a payment or refund RECEIPT message to a guest for a reservation (also mints a durable /receipt page). Use after a payment was taken or a refund issued. Provide reservationId (or confirmationCode) and kind ('payment' or 'refund'); optionally amount + dateIso to force a specific transaction. Gated behind a confirm card.",
+    input_schema: {
+      type: "object",
+      properties: {
+        reservationId: { type: "string", description: "Guesty reservation id (or use confirmationCode)." },
+        confirmationCode: { type: "string", description: "Guesty confirmation code (if no reservationId)." },
+        kind: { type: "string", enum: ["payment", "refund"], description: "Receipt type." },
+        amount: { type: "number", description: "Optional amount in $ to force a specific transaction." },
+        dateIso: { type: "string", description: "Optional transaction date YYYY-MM-DD." },
+      },
+      required: [],
+    },
+    confirmLabel: (input) => `Send ${str(input.kind) ?? "payment"} receipt`,
+    confirmSummary: (input) => {
+      const who = str(input.reservationId) ?? str(input.confirmationCode) ?? "the reservation";
+      const amt = input.amount != null ? ` for ${money(input.amount)}` : "";
+      return `Send the guest a ${str(input.kind) ?? "payment"} receipt${amt} for reservation ${who}, via their booking channel, and create a durable receipt page.`;
+    },
+    execute: async (input) => {
+      if (!str(input.reservationId) && !str(input.confirmationCode)) {
+        return { _error: true, message: "Provide a reservationId or confirmationCode." };
+      }
+      return loopbackPost("/api/inbox/guest-receipts/send-for-reservation", {
+        reservationId: str(input.reservationId),
+        confirmationCode: str(input.confirmationCode),
+        kind: str(input.kind),
+        amount: input.amount != null ? Number(input.amount) : undefined,
+        dateIso: str(input.dateIso),
+      });
+    },
+  },
 ];
 
 export const ASSISTANT_TOOLS_BY_NAME = new Map(ASSISTANT_TOOLS.map((t) => [t.name, t]));
