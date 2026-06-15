@@ -3726,6 +3726,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
   }, [propertyId, marketRatesRefreshing, queueMarketPricingRefresh, recordRefreshNotice, reloadMarketRates, reloadPricingLogs, toast]);
 
+  // Per-bedroom snapshot of the market rate as it was BEFORE the most recent
+  // refresh, so the seasonal table can render an old → new diff per month.
+  // pricing_update_logs are written once per bedroom per market-rate refresh
+  // (the only writer) newest-first, and each carries calendarJson = that run's
+  // full per-month medianNightly map. The FIRST log per bedroom is the current
+  // run; the SECOND is the immediately-prior state we diff against.
+  const priorMonthlyByBedroom = useMemo(() => {
+    const seenCurrent = new Set<number>();
+    const prior = new Map<number, Record<string, any>>();
+    for (const log of pricingUpdateLogs) {
+      const br = Number(log.bedrooms);
+      if (!Number.isFinite(br)) continue;
+      if (!seenCurrent.has(br)) { seenCurrent.add(br); continue; } // skip the current (latest) run
+      if (prior.has(br)) continue;                                  // keep only the immediately-prior run
+      if (log.calendarJson && typeof log.calendarJson === "object") prior.set(br, log.calendarJson);
+    }
+    return prior;
+  }, [pricingUpdateLogs]);
+
   // Aggregate monthly rates across all units for the 24-month seasonal table
   const seasonalMonths = useMemo(() => {
     if (!propertyId) return [];
@@ -3747,6 +3766,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           sellRate: cleanBaseRateFromBuyIn(buyInRate),
         };
       });
+      // Buy-in (= the market rate the queue rewrites) as it was BEFORE the most
+      // recent refresh, summed across units. Null unless EVERY unit has a prior
+      // value for this month, so the old → new diff is apples-to-apples.
+      const previousUnitBuyIns = propPricing.units.map((u) => {
+        const v = Number((priorMonthlyByBedroom.get(u.bedrooms)?.[row.yearMonth] as any)?.medianNightly);
+        return Number.isFinite(v) && v > 0 ? Math.round(v) : null;
+      });
+      const previousBuyInTotal = previousUnitBuyIns.every((n) => n != null)
+        ? previousUnitBuyIns.reduce((s, n) => s + (n ?? 0), 0)
+        : null;
       return {
         month: row.month,
         year: row.year,
@@ -3755,10 +3784,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         totalBuyIn: currentUnitRates.reduce((s, u) => s + u.buyInRate, 0),
         totalSell:  currentUnitRates.reduce((s, u) => s + u.sellRate, 0),
         monthlySampleTotal,
+        previousBuyInTotal,
       };
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [propertyId, marketRatesVersion]);
+  }, [propertyId, marketRatesVersion, priorMonthlyByBedroom]);
   const displayedBasePrice = seasonalMonths[0]?.totalSell ?? pricing?.basePrice ?? null;
 
   // Per-bedroom live-buy-in summary for the Pricing tab header. Pulls
@@ -6211,7 +6241,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         </span>
                                       </td>
                                       <td>
-                                        ${buyIn.toLocaleString()}
+                                        {row.previousBuyInTotal != null && row.previousBuyInTotal !== buyIn ? (
+                                          <span
+                                            title={`Market rate changed from $${row.previousBuyInTotal.toLocaleString()} to $${buyIn.toLocaleString()} on the most recent refresh (${buyIn >= row.previousBuyInTotal ? "+" : ""}${(((buyIn - row.previousBuyInTotal) / row.previousBuyInTotal) * 100).toFixed(1)}%).`}
+                                          >
+                                            <span style={{ color: "#dc2626", textDecoration: "line-through", fontWeight: 500 }}>
+                                              ${row.previousBuyInTotal.toLocaleString()}
+                                            </span>
+                                            <span style={{ color: "#9ca3af" }}> / </span>
+                                            <span style={{ color: "#16a34a", fontWeight: 700 }}>
+                                              ${buyIn.toLocaleString()}
+                                            </span>
+                                            <span style={{ color: buyIn >= row.previousBuyInTotal ? "#b45309" : "#166534", fontSize: 9, marginLeft: 4, fontWeight: 600 }}>
+                                              {buyIn >= row.previousBuyInTotal ? "▲" : "▼"}{Math.abs(Math.round(((buyIn - row.previousBuyInTotal) / row.previousBuyInTotal) * 100))}%
+                                            </span>
+                                          </span>
+                                        ) : (
+                                          <>${buyIn.toLocaleString()}</>
+                                        )}
                                         {row.monthlySampleTotal != null && Math.abs(row.monthlySampleTotal - buyIn) >= 1 && (
                                           <div
                                             style={{ fontSize: 9, color: "#9ca3af", marginTop: 2 }}
