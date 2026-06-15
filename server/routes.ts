@@ -28596,7 +28596,7 @@ Return ONLY compact JSON with this exact shape:
       street: string,
       unitNumber: string,
       complexName: string,
-    ): Promise<{ status: "confirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
+    ): Promise<{ status: "confirmed" | "unconfirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
       const bareUnit = String(unitNumber || "").trim();
       const uLower = bareUnit.toLowerCase();
       // Short / ambiguous unit numbers (1-2 bare digits) appear in almost any listing
@@ -28618,8 +28618,13 @@ Return ONLY compact JSON with this exact shape:
       // a unit-type word (optionally with "#"/"No."), so "Unit 1" / "Villa 1" / "Apt #1"
       // confirm, but "ranked #1", "No. 1 rated", "1 king bed", "$1,200", "1 of 6", "sleeps 12"
       // do NOT. \b on the number keeps "1" from matching "10"/"12"/"1A".
+      // Only WHOLE-UNIT words — deliberately NOT "suite"/"room"/"bedroom" (those label a
+      // unit's INTERNAL rooms: "Suite #1", "Bedroom 1" appear in almost every multi-room
+      // listing) and NOT plural "villas"/"units" (the resort name "…Beach Villas 1 bedroom"
+      // would collide). Even so, an ambiguous match is only ever flagged for REVIEW below,
+      // never asserted as "Listed".
       const unitMarkerRe = ambiguousUnit
-        ? new RegExp(`\\b(?:units?|apt|apt\\.|apartment|suite|ste|ste\\.|villas?|townhome|townhouse|building|bldg|cottage|casita)\\s*(?:#|no\\.?\\s*)?\\s*${uLower}\\b`, "i")
+        ? new RegExp(`\\b(?:unit|apt|apt\\.|apartment|villa|townhome|townhouse|building|bldg|cottage|casita)\\s*(?:#|no\\.?\\s*)?\\s*${uLower}\\b`, "i")
         : null;
       const unitMentioned = (text: string): boolean => {
         if (!bareUnit) return true;
@@ -28664,11 +28669,17 @@ Return ONLY compact JSON with this exact shape:
             const link = String(r.link || "").toLowerCase();
             const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
             if (isPreflightListingUrl(link) && unitMentioned(text)) {
-              return {
-                status: "confirmed",
-                url: r.link,
-                detection: `${r.title || ""} — ${r.snippet || ""}`.replace(/\s+/g, " ").trim().slice(0, 200),
-              };
+              const snippet = `${r.title || ""} — ${r.snippet || ""}`.replace(/\s+/g, " ").trim().slice(0, 200);
+              // A 1-2 digit unit number can't be CONFIRMED by text — "Unit 1" / "Apt 1" also
+              // appear as internal room labels and at other units — so surface it as a
+              // manual-review flag, not a "Listed" assertion. Specific units confirm normally.
+              return ambiguousUnit
+                ? {
+                    status: "unconfirmed" as const,
+                    url: r.link,
+                    detection: `Possible match — verify manually (unit "${bareUnit}" is too short to confirm by text): ${snippet}`,
+                  }
+                : { status: "confirmed" as const, url: r.link, detection: snippet };
             }
           }
           await new Promise((rr) => setTimeout(rr, 250));
