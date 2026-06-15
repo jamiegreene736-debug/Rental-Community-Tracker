@@ -104,11 +104,13 @@ Both auto-create on boot via `server/schema-maintenance.ts` (`CREATE TABLE IF
 NOT EXISTS`) **and** `db:push`. All store helpers are fail-soft (return
 empty/null on DB error) so the chat never 500s the dashboard.
 
-## Rollout (feature-flagged)
+## Rollout (ON by default)
 
-Everything is dark unless **`PLATFORM_ASSISTANT_ENABLED=1`** (and
-`ANTHROPIC_API_KEY` set). The client polls `GET /api/assistant/status` and only
-renders the dock for the **admin** role when enabled.
+The assistant is **enabled by default** (operator request, 2026-06-15). It needs
+`ANTHROPIC_API_KEY` set (already used by other AI features); the dock renders only
+for the **admin** role. Turn it OFF with **`PLATFORM_ASSISTANT_DISABLED=1`** (or
+the legacy `PLATFORM_ASSISTANT_ENABLED=0`). The client polls
+`GET /api/assistant/status` (`{enabled, hasKey}`).
 
 | Phase | Scope | Status |
 |---|---|---|
@@ -157,6 +159,7 @@ smoke-tested on Railway with the sidecar online before relying on it.
 
 ## Enabling it
 
-1. Set `PLATFORM_ASSISTANT_ENABLED=1` and `ANTHROPIC_API_KEY` in Railway.
-2. Redeploy (tables auto-create). The indigo chat bubble appears bottom-right of
-   the dashboard for the admin operator.
+It's ON by default. Just make sure `ANTHROPIC_API_KEY` is set in Railway and
+deploy (tables auto-create) — the indigo chat bubble appears bottom-right of the
+dashboard for the admin operator. To turn it OFF, set
+`PLATFORM_ASSISTANT_DISABLED=1`.
