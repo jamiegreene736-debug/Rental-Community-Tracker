@@ -309,6 +309,48 @@ export const ASSISTANT_TOOLS: AssistantTool[] = [
     },
     execute: async (input) => loopbackGet(`/api/operations/auto-fill/${encodeURIComponent(str(input.jobId) ?? "")}`),
   },
+  {
+    name: "find_photos",
+    kind: "read",
+    description:
+      "Find candidate PHOTOS for a community/resort via image search — use for 'find photos for <community>' or 'I need photos of <resort>'. Provide communityName (the resort/complex, e.g. 'Poipu Kai Resort') and location (city + state, e.g. 'Koloa, Hawaii'); optionally bedrooms. Returns an `images` array of {url, thumbnail, label, source}. These are CANDIDATES for the operator to review — not auto-applied to any listing. For a booking's community/location, get_buy_in_estimate returns complexName + region.",
+    input_schema: {
+      type: "object",
+      properties: {
+        communityName: { type: "string", description: "Resort/complex name." },
+        location: { type: "string", description: "City, State (e.g. 'Koloa, Hawaii')." },
+        bedrooms: { type: "number", description: "Optional bedroom count to bias results." },
+      },
+      required: ["communityName", "location"],
+    },
+    execute: async (input) =>
+      loopbackGet("/api/photos/find-replacement", {
+        communityName: str(input.communityName),
+        location: str(input.location),
+        bedrooms: input.bedrooms != null ? String(input.bedrooms) : undefined,
+      }),
+  },
+  {
+    name: "get_photo_alerts",
+    kind: "read",
+    description:
+      "List photo-listing alerts — cases where a property's photos on an OTA (Airbnb/VRBO/Booking) changed or a competitor match was detected. Use for 'are any listings flagged for photo issues?'. Pass unacknowledgedOnly=true to see only open alerts. Returns `alerts` with folder, platform, prior/new status, matched URLs, and detected/acknowledged timestamps.",
+    input_schema: {
+      type: "object",
+      properties: { unacknowledgedOnly: { type: "boolean", description: "Only return un-acknowledged alerts." } },
+      required: [],
+    },
+    execute: async (input) =>
+      loopbackGet("/api/photo-listing-alerts", { unacknowledged: input.unacknowledgedOnly ? "1" : undefined }),
+  },
+  {
+    name: "get_photo_listing_status",
+    kind: "read",
+    description:
+      "Read the per-folder photo↔OTA match status dashboard (the daily photo-listing check): for each community folder, whether its photos currently appear on Airbnb/VRBO/Booking and any matched URLs. Use for 'what's the photo listing status?' or to see which listings' photos are syncing/flagged. Returns `checks` (one row per folder) + `activeFolderAliases`.",
+    input_schema: { type: "object", properties: {}, required: [] },
+    execute: async () => loopbackGet("/api/photo-listing-check"),
+  },
 ];
 
 export const ASSISTANT_TOOLS_BY_NAME = new Map(ASSISTANT_TOOLS.map((t) => [t.name, t]));

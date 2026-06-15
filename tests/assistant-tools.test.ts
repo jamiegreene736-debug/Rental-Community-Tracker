@@ -25,6 +25,9 @@ for (const name of [
   "get_market_rates",
   "start_auto_fill",
   "check_auto_fill",
+  "find_photos",
+  "get_photo_alerts",
+  "get_photo_listing_status",
 ]) {
   check(`tool '${name}' registered`, ASSISTANT_TOOLS_BY_NAME.has(name));
 }

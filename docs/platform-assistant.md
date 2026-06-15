@@ -112,7 +112,7 @@ renders the dock for the **admin** role when enabled.
 | **0 · Skeleton** | SSE chat + dock + read tools: `get_dashboard`, `list_bookings`, `get_reports`, `get_buy_in_estimate` | **shipped** |
 | **1 · Buy-ins & pricing (read)** | LIVE `find_buy_in` (single unit), `scan_city_vrbo` (combo finder — "find a better combination / new location"), `get_market_rates` (pricing). | **shipped** |
 | **1.5 · Confirm-gated attach** | confirm gate wired end-to-end (agent intercept + `/api/assistant/confirm` + client confirm card); first write tool `start_auto_fill` + `check_auto_fill`. | **shipped** |
-| 2 · Photos & listings | `find_photos`, `check_photo_community`, `build_listing`, photo audit | planned |
+| **2 · Photos & listings (read)** | `find_photos` (candidate photos for a community), `get_photo_alerts` (OTA photo-change/competitor alerts), `get_photo_listing_status` (per-folder photo↔OTA dashboard). | **shipped** |
 | 3 · Inbox & outward actions | guest threads, drafting, confirm-gated sends/relocation | planned |
 | 4 · Polish | Haiku fast-router, prompt caching, session history UI, proactive nudges | planned |
 
