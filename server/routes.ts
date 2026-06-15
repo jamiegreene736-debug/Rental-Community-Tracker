@@ -28620,6 +28620,24 @@ Return ONLY compact JSON with this exact shape:
         if (ambiguousUnit) return markerForms.some((f) => text.includes(f));
         return text.includes(uLower) || text.includes(`#${uLower}`);
       };
+      // Only trust a result that is an INDIVIDUAL LISTING page — not a region / search /
+      // category roundup. Those directory pages mention many properties at once, so a unit
+      // marker in the snippet can belong to a DIFFERENT property (e.g. a booking.com
+      // /budget/region page listing "Mountain View Retreat Unit 1" while also name-dropping
+      // "Waikoloa Beach Villas"). Mirrors the legacy isListingUrl patterns.
+      const isPreflightListingUrl = (url: string): boolean => {
+        const lu = String(url || "").toLowerCase();
+        if (!lu) return false;
+        if (domain === "airbnb.com") return lu.includes("airbnb.com/rooms/") || lu.includes("airbnb.com/h/");
+        if (domain === "vrbo.com") {
+          if (/vrbo\.com\/\d+[a-z]{0,3}(?:[\/?#]|$)/.test(lu)) return true;   // /1234567, /1234567ha
+          if (/vrbo\.com\/[a-z]{2}-[a-z]{2}\/p\d+/.test(lu)) return true;     // /en-us/p12345
+          if (/vrbo\.com\/vacation-rental\/p\d+/.test(lu)) return true;       // /vacation-rental/p12345
+          return false;                                                       // reject search/region/category
+        }
+        if (domain === "booking.com") return lu.includes("booking.com/hotel/") || lu.includes("booking.com/apartments/");
+        return lu.includes(domain);
+      };
       const queries = Array.from(new Set([
         street ? `site:${domain} "${street}" ${unitQueryFragment}`.trim() : "",
         complexName ? `site:${domain} "${complexName}" ${unitQueryFragment}`.trim() : "",
@@ -28639,7 +28657,7 @@ Return ONLY compact JSON with this exact shape:
           for (const r of (data.organic_results || []) as any[]) {
             const link = String(r.link || "").toLowerCase();
             const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
-            if (link.includes(domain) && unitMentioned(text)) {
+            if (isPreflightListingUrl(link) && unitMentioned(text)) {
               return {
                 status: "confirmed",
                 url: r.link,
