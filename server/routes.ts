@@ -208,7 +208,7 @@ import {
   scanSeasonalAvailabilityCapacity,
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
-import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage } from "./photo-listing-scanner";
+import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest } from "./photo-community-check";
 import {
   MIN_DISTINCT_STRONG_PHOTO_MATCHES,
@@ -40497,6 +40497,69 @@ Return ONLY compact JSON with this exact shape:
   const tryParseJson = (s: string): unknown => {
     try { return JSON.parse(s); } catch { return []; }
   };
+
+  // POST /api/preflight/photo-check
+  // Photo cross-check for the builder Pre-Flight page. Reuses the credit-aware
+  // photo-listing-scanner (interior-only, dHash-deduped hero photos, cached one row per
+  // folder).
+  //   run:false (default) → READ the cached photo_listing_checks rows for the given unit
+  //     folders. ZERO SearchAPI credits — this is the page-load path.
+  //   run:true            → on-demand DEEP check: 5 distinct interior photos/unit via Lens,
+  //     but only for folders not conclusively scanned in the last 24h (unless force:true),
+  //     and only while today's spend is under the daily cap. Fire-and-forget; the client
+  //     polls run:false until checkedAt advances.
+  app.post("/api/preflight/photo-check", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { folders?: unknown; run?: boolean; force?: boolean };
+      const folders = Array.isArray(body.folders)
+        ? Array.from(new Set(body.folders.filter((f): f is string => typeof f === "string" && f.trim().length > 0))).slice(0, 24)
+        : [];
+      const budget = await getPhotoCheckBudget();
+
+      const statusFor = async (folder: string) => {
+        const row = await storage.getPhotoListingCheckByFolder(folder);
+        if (!row) return { folder, scanned: false as const };
+        return {
+          folder,
+          scanned: true as const,
+          airbnb: row.airbnbStatus,
+          vrbo: row.vrboStatus,
+          booking: row.bookingStatus,
+          airbnbMatches: row.airbnbMatches ? tryParseJson(row.airbnbMatches) : [],
+          vrboMatches: row.vrboMatches ? tryParseJson(row.vrboMatches) : [],
+          bookingMatches: row.bookingMatches ? tryParseJson(row.bookingMatches) : [],
+          photosChecked: row.photosChecked,
+          checkedAt: row.checkedAt,
+          error: normalizeSearchApiErrorMessage(row.errorMessage),
+        };
+      };
+      const checks = await Promise.all(folders.map(statusFor));
+
+      if (!body.run) {
+        return res.json({ checks, budget, started: false });
+      }
+      // run:true — DEEP check. Refuse if the daily budget is spent.
+      if (budget.remaining <= 0) {
+        return res.json({ checks, budget, started: false, budgetReached: true });
+      }
+      // Skip-if-fresh: a folder scanned conclusively (clean/found, not unknown/error) in the
+      // last 24h is reused — re-opening the page never re-burns credits. force:true overrides
+      // (use after changing a unit's photos).
+      const FRESH_MS = 24 * 60 * 60 * 1000;
+      const isFresh = (c: any) =>
+        c.scanned && c.checkedAt && (Date.now() - new Date(c.checkedAt).getTime() < FRESH_MS) &&
+        [c.airbnb, c.vrbo, c.booking].every((s) => s === "clean" || s === "found");
+      const toScan = body.force ? folders : checks.filter((c) => !isFresh(c)).map((c) => c.folder);
+      if (toScan.length === 0) {
+        return res.json({ checks, budget, started: false, allFresh: true });
+      }
+      // 5 distinct interior photos/unit; the batch stops if it crosses the daily cap.
+      void runPhotoListingCheckForFolders(toScan, { maxPhotos: 5, budgetCap: budget.cap });
+      return res.json({ checks, budget, started: true, scanning: toScan });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Photo check failed" });
+    }
+  });
 
   // GET /api/photo-listing-check
   // Returns the latest status row per folder. The dashboard aggregates

@@ -55,6 +55,7 @@ import {
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch } from "./photo-match-guardrails";
+import { isDuplicateHash } from "./photo-hashing";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 
 const SEARCHAPI_KEY = process.env.SEARCHAPI_API_KEY;
@@ -80,6 +81,15 @@ const HOSTS: Array<{ key: "airbnb" | "vrbo" | "booking"; host: string }> = [
 
 const PHOTOS_PER_FOLDER = 3;
 const MIN_MATCHES = 2;
+// Daily SearchAPI/Lens budget for photo-listing checks (circuit-breaker). Counted as the
+// sum of lensCalls across today's photo_listing_checks rows. The on-demand preflight deep
+// check refuses to start past this; the background scheduler is unaffected (it passes no cap).
+const PHOTO_CHECK_DAILY_CAP = (() => {
+  // 0 is a valid value (hard-disables the on-demand deep check — read path still works),
+  // so don't use `|| 200` (which would treat 0 as unset).
+  const n = Number(process.env.PHOTO_CHECK_DAILY_CAP);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 200;
+})();
 const LENS_TIMEOUT_MS = 45_000;
 const VERIFY_TIMEOUT_MS = 20_000;
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
@@ -95,6 +105,7 @@ type PhotoCandidate = {
   userLabel?: string | null;
   category?: string | null;
   userCategory?: string | null;
+  perceptualHash?: string | null;
 };
 
 export type ScanResult = {
@@ -376,8 +387,14 @@ async function alertOnStateWorsen(
   }
 }
 
-export async function runPhotoListingCheckForFolder(folder: string): Promise<ScanResult> {
-  console.error(`[photo-listing-scanner] ${folder}: starting`);
+export async function runPhotoListingCheckForFolder(
+  folder: string,
+  opts: { maxPhotos?: number } = {},
+): Promise<ScanResult> {
+  // How many DISTINCT interior photos to reverse-image (1 Lens call each). Background
+  // scheduler uses the cheap default (3); the on-demand preflight deep check passes 5.
+  const maxPhotos = Math.max(1, Math.min(10, Math.floor(opts.maxPhotos ?? PHOTOS_PER_FOLDER)));
+  console.error(`[photo-listing-scanner] ${folder}: starting (maxPhotos=${maxPhotos})`);
   const result: ScanResult = {
     folder,
     airbnbStatus: "unknown",
@@ -461,9 +478,20 @@ export async function runPhotoListingCheckForFolder(folder: string): Promise<Sca
     label: l.userLabel ?? l.label,
   }));
   const interior = privateUnitPhotos.filter((l) => INTERIOR_CATEGORIES.has(effectiveCategory(l)));
-  const heros = interior.length >= PHOTOS_PER_FOLDER
-    ? interior.slice(0, PHOTOS_PER_FOLDER)
-    : privateUnitPhotos.slice(0, PHOTOS_PER_FOLDER);
+  // dHash de-dup so the maxPhotos Lens calls cover DISTINCT rooms, not near-identical
+  // shots of the same room — maximises coverage (and confidence in a "clean" verdict)
+  // per credit. Photos without a perceptual hash are kept (can't compare them).
+  const dedupeByHash = (cands: PhotoCandidate[]): PhotoCandidate[] => {
+    const kept: PhotoCandidate[] = [];
+    for (const c of cands) {
+      const h = c.perceptualHash;
+      if (!h || !kept.some((k) => k.perceptualHash && isDuplicateHash(h, k.perceptualHash))) kept.push(c);
+    }
+    return kept;
+  };
+  const interiorDistinct = dedupeByHash(interior);
+  const privateDistinct = dedupeByHash(privateUnitPhotos);
+  const heros = (interiorDistinct.length >= PHOTOS_PER_FOLDER ? interiorDistinct : privateDistinct).slice(0, maxPhotos);
 
   if (heros.length === 0) {
     result.errorMessage = "No visible photos in folder";
@@ -705,16 +733,49 @@ export async function listScanableFolders(): Promise<string[]> {
 // Run one folder at a time, pausing between to avoid SearchAPI rate
 // limits. Used by both the manual "Run now" endpoint (with a specific
 // folder list) and the weekly scheduler (with the stale-folder list).
+// Sum of Lens calls spent TODAY across all photo-listing scans. Each scan upserts one row
+// per folder with that scan's lensCalls + checkedAt, so this is durable across deploys (the
+// in-memory counter would reset on every redeploy). Powers the daily circuit-breaker + the
+// "credits used today" indicator. With skip-if-fresh each folder spends ~once/day, so re-scans
+// don't inflate the sum.
+export async function getLensCallsUsedToday(): Promise<number> {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  try {
+    const rows = await storage.getAllPhotoListingChecks();
+    return rows.reduce((sum, r) => {
+      const at = r.checkedAt ? new Date(r.checkedAt as any).getTime() : 0;
+      return at >= startOfDay.getTime() ? sum + (Number(r.lensCalls) || 0) : sum;
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
+export async function getPhotoCheckBudget(): Promise<{ used: number; cap: number; remaining: number }> {
+  const used = await getLensCallsUsedToday();
+  return { used, cap: PHOTO_CHECK_DAILY_CAP, remaining: Math.max(0, PHOTO_CHECK_DAILY_CAP - used) };
+}
+
 export async function runPhotoListingCheckForFolders(
   folders: string[],
-  opts: { pauseMs?: number } = {},
+  opts: { pauseMs?: number; maxPhotos?: number; budgetCap?: number } = {},
 ): Promise<ScanResult[]> {
   const pause = opts.pauseMs ?? 1500;
   const results: ScanResult[] = [];
   for (let i = 0; i < folders.length; i++) {
     const f = folders[i];
+    // Circuit-breaker: if today's Lens spend already hit the cap, stop before this folder.
+    // Scans run sequentially, so the DB sum reflects every folder already done this batch.
+    if (opts.budgetCap && opts.budgetCap > 0) {
+      const used = await getLensCallsUsedToday();
+      if (used >= opts.budgetCap) {
+        console.error(`[photo-listing-scanner] daily Lens budget ${used}/${opts.budgetCap} reached — stopping batch, ${folders.length - i} folder(s) skipped`);
+        break;
+      }
+    }
     try {
-      const r = await runPhotoListingCheckForFolder(f);
+      const r = await runPhotoListingCheckForFolder(f, { maxPhotos: opts.maxPhotos });
       results.push(r);
       console.error(
         `[photo-listing-scanner] ${f}: airbnb=${r.airbnbStatus}, vrbo=${r.vrboStatus}, booking=${r.bookingStatus} (${r.photosChecked} photos, ${r.lensCalls} lens calls)`,

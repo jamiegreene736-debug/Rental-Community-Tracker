@@ -241,6 +241,23 @@ const PLATFORM_LIST: { key: keyof UnitCheckResult["platforms"]; label: string }[
   { key: "booking", label: "Booking.com" },
 ];
 
+// Cached photo-listing-check row for one unit folder (from /api/preflight/photo-check).
+// status: "found" = the unit's interior photos match a live listing on that channel;
+// "clean" = checked, no match; "unknown" = couldn't check (API hiccup); undefined = not scanned.
+type PhotoMatchStatus = "clean" | "found" | "unknown";
+type PhotoCheckRow = {
+  folder: string;
+  scanned: boolean;
+  airbnb?: PhotoMatchStatus;
+  vrbo?: PhotoMatchStatus;
+  booking?: PhotoMatchStatus;
+  airbnbMatches?: Array<{ listingUrl?: string; title?: string }>;
+  vrboMatches?: Array<{ listingUrl?: string; title?: string }>;
+  bookingMatches?: Array<{ listingUrl?: string; title?: string }>;
+  checkedAt?: string;
+  error?: string | null;
+};
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function BuilderPreflight() {
@@ -549,6 +566,11 @@ export default function BuilderPreflight() {
   const [committing, setCommitting] = useState(false);
   const autoRunFired = useRef(false);
 
+  // Photo cross-check (credit-aware scanner via /api/preflight/photo-check).
+  const [photoChecks, setPhotoChecks] = useState<Record<string, PhotoCheckRow>>({});
+  const [photoBudget, setPhotoBudget] = useState<{ used: number; cap: number; remaining: number } | null>(null);
+  const [photoScanning, setPhotoScanning] = useState(false);
+
   // Maps old unit ID → replacement unit data
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
   // Replacement photos live in a separate folder until commit; fetch counts
@@ -814,6 +836,85 @@ export default function BuilderPreflight() {
     setResults({});
     runPlatformCheck(effectiveUnits, { fullPhotoAudit: true });
   };
+
+  // ── Photo cross-check ───────────────────────────────────────────────────────
+  const photoFoldersForUnits = (): string[] =>
+    Array.from(new Set(effectiveUnits.map((u) => (u as any).photoFolder as string | undefined).filter((f): f is string => !!f)));
+
+  // READ-only: pull cached photo-listing rows for the units' folders. ZERO credits.
+  const loadPhotoChecks = async () => {
+    const folders = photoFoldersForUnits();
+    if (folders.length === 0) return;
+    try {
+      const resp = await fetch("/api/preflight/photo-check", {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
+        body: JSON.stringify({ folders, run: false }),
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const map: Record<string, PhotoCheckRow> = {};
+      for (const c of (data.checks ?? [])) map[c.folder] = c;
+      setPhotoChecks(map);
+      if (data.budget) setPhotoBudget(data.budget);
+    } catch { /* non-fatal — photo signal just won't show */ }
+  };
+
+  // On-demand DEEP check: spends credits (5 interior photos/unit), skips folders checked
+  // < 24h ago, refuses past the daily cap, then polls the read path until results land.
+  const runDeepPhotoCheck = async () => {
+    const folders = photoFoldersForUnits();
+    if (folders.length === 0) {
+      toast({ title: "No unit photos to check", description: "Use Find Photos to add interior photos first." });
+      return;
+    }
+    setPhotoScanning(true);
+    try {
+      const resp = await fetch("/api/preflight/photo-check", {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
+        body: JSON.stringify({ folders, run: true }),
+      });
+      const data = await resp.json().catch(() => ({} as any));
+      if (data.budget) setPhotoBudget(data.budget);
+      if (data.budgetReached) {
+        toast({ title: "Daily photo-check budget reached", description: `${data.budget?.used}/${data.budget?.cap} SearchAPI credits used today. Try again tomorrow.`, variant: "destructive" });
+        return;
+      }
+      if (!data.started) {
+        await loadPhotoChecks();
+        toast({ title: "Already checked recently", description: "Reusing photo results from the last 24h — no credits spent." });
+        return;
+      }
+      const scanning: string[] = data.scanning ?? folders;
+      toast({ title: "Deep photo check started", description: `Reverse-image-searching ${scanning.length} unit(s) — this takes ~30-60s each.` });
+      const before: Record<string, string | undefined> = {};
+      for (const f of scanning) before[f] = photoChecks[f]?.checkedAt;
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 6000));
+        let d2: any;
+        try {
+          const resp2 = await fetch("/api/preflight/photo-check", {
+            method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
+            body: JSON.stringify({ folders, run: false }),
+          });
+          if (!resp2.ok) continue;
+          d2 = await resp2.json();
+        } catch { continue; }
+        const map: Record<string, PhotoCheckRow> = {};
+        for (const c of (d2.checks ?? [])) map[c.folder] = c;
+        setPhotoChecks(map);
+        if (d2.budget) setPhotoBudget(d2.budget);
+        if (scanning.every((f) => map[f]?.checkedAt && map[f]?.checkedAt !== before[f])) break;
+      }
+    } catch (e: any) {
+      toast({ title: "Photo check failed", description: e?.message || String(e), variant: "destructive" });
+    } finally {
+      setPhotoScanning(false);
+    }
+  };
+
+  // Auto-load cached photo signals (no credits) once the units' folders are known.
+  const photoFolderKey = effectiveUnits.map((u) => (u as any).photoFolder || "").join("|");
+  useEffect(() => { void loadPhotoChecks(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [photoFolderKey]);
 
   // Undo a saved unit swap — deletes from DB and removes from state
   const handleUndoSwap = async (oldUnitId: string) => {
@@ -1175,6 +1276,30 @@ export default function BuilderPreflight() {
                     </>
                   )}
                 </Button>
+                <Button
+                  id="btn-deep-photo-check"
+                  aria-label="Deep photo check"
+                  variant="outline"
+                  size="sm"
+                  onClick={runDeepPhotoCheck}
+                  disabled={photoScanning || (photoBudget ? photoBudget.remaining <= 0 : false)}
+                  className="h-7 px-2 text-xs flex-shrink-0"
+                  title="Reverse-image-search 5 interior photos per unit against Airbnb / VRBO / Booking. Uses SearchAPI credits; results cached 24h."
+                >
+                  {photoScanning ? (
+                    <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Photo check…</>
+                  ) : (
+                    <><Camera className="h-3 w-3 mr-1" /> Deep photo check</>
+                  )}
+                </Button>
+                {photoBudget && (
+                  <span
+                    className="self-center text-[10px] text-muted-foreground"
+                    title="SearchAPI credits used today for photo checks (resets daily)"
+                  >
+                    {photoBudget.used}/{photoBudget.cap} photo credits today
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -1588,6 +1713,36 @@ export default function BuilderPreflight() {
                                   {r.detection}
                                 </p>
                               )}
+                              {(() => {
+                                const folder = (unit as any).photoFolder as string | undefined;
+                                if (!folder) return null;
+                                const pc = photoChecks[folder];
+                                const ps = pc?.[key as "airbnb" | "vrbo" | "booking"];
+                                const matches = (pc as any)?.[`${key}Matches`] as Array<{ listingUrl?: string }> | undefined;
+                                const matchUrl = matches?.find((m) => m?.listingUrl)?.listingUrl;
+                                if (photoScanning && (!pc || ps === undefined)) {
+                                  return (
+                                    <p className="mt-1 inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+                                      <Loader2 className="h-3 w-3 animate-spin" /> Photo check…
+                                    </p>
+                                  );
+                                }
+                                if (!pc || !pc.scanned || ps === undefined) {
+                                  return <p className="mt-1 text-[10px] text-muted-foreground/60"><Camera className="inline h-3 w-3 mr-0.5" />photos not checked</p>;
+                                }
+                                if (ps === "found") {
+                                  return (
+                                    <p className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-red-700 dark:text-red-300" title="This unit's interior photos appear on a live listing here">
+                                      <Camera className="h-3 w-3" /> Photos match a listing
+                                      {matchUrl && <a href={matchUrl} target="_blank" rel="noopener noreferrer" className="underline">view</a>}
+                                    </p>
+                                  );
+                                }
+                                if (ps === "clean") {
+                                  return <p className="mt-1 inline-flex items-center gap-1 text-[10px] text-emerald-700 dark:text-emerald-400" title="Interior photos reverse-image-searched — no match found here"><Camera className="h-3 w-3" /> Photos clear</p>;
+                                }
+                                return <p className="mt-1 text-[10px] text-muted-foreground/60"><Camera className="inline h-3 w-3 mr-0.5" />photos inconclusive</p>;
+                              })()}
                             </div>
                           );
                         })}
