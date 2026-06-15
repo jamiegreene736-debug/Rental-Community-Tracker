@@ -28583,7 +28583,12 @@ Return ONLY compact JSON with this exact shape:
     const preflightStreetOf = (addr: string): string => {
       const a = String(addr || "").trim();
       if (!a) return "";
-      return a.includes(",") ? a.split(",")[0].trim() : a;
+      if (a.includes(",")) return a.split(",")[0].trim();
+      // No-comma form (common for Hawaii addresses like "68 3553 Malina St Waikoloa HI"):
+      // take through the last street-type token so we search the STREET, not the whole
+      // "street + city + state" phrase (quoting that over-constrains the query → 0 results).
+      const m = a.match(/^(.*?\b(?:rd|road|st|street|ave|avenue|dr|drive|blvd|boulevard|ln|lane|way|ct|court|pl|place|ter|terrace|cir|circle|pkwy|parkway|hwy|highway))\b/i);
+      return (m ? m[1] : a).trim();
     };
 
     const checkPlatformTextOnly = async (
@@ -28592,10 +28597,32 @@ Return ONLY compact JSON with this exact shape:
       unitNumber: string,
       complexName: string,
     ): Promise<{ status: "confirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
-      const u = String(unitNumber || "").trim().toLowerCase();
+      const bareUnit = String(unitNumber || "").trim();
+      const uLower = bareUnit.toLowerCase();
+      // Short / ambiguous unit numbers (1-2 bare digits) appear in almost any listing
+      // snippet — prices, bed counts, ratings, building numbers — so a bare substring
+      // match false-positives constantly (e.g. unit "1" "matched" every Waikoloa listing
+      // that mentions a "1"). For these, require an explicit unit MARKER in BOTH the query
+      // and the snippet ("Unit 1" / "#1" / "Apt 1" / "Suite 1"). 3+ digit or alphanumeric
+      // unit numbers (e.g. "3553", "13B") are specific enough to match bare. This mirrors
+      // the short-unit gating in the legacy (Lens) handler's isShortUnitNumber/unitQueryTerm.
+      const ambiguousUnit = /^\d{1,2}$/.test(bareUnit);
+      const unitQueryFragment = !bareUnit
+        ? ""
+        : ambiguousUnit
+        ? `("Unit ${bareUnit}" OR "#${bareUnit}" OR "Apt ${bareUnit}" OR "Apartment ${bareUnit}" OR "Suite ${bareUnit}")`
+        : `"${bareUnit}"`;
+      const markerForms = ambiguousUnit
+        ? [`unit ${uLower}`, `unit #${uLower}`, `apt ${uLower}`, `apt. ${uLower}`, `apartment ${uLower}`, `suite ${uLower}`, `ste ${uLower}`, `ste. ${uLower}`, `villa ${uLower}`, `#${uLower}`, `# ${uLower}`, `no. ${uLower}`]
+        : [];
+      const unitMentioned = (text: string): boolean => {
+        if (!bareUnit) return true;
+        if (ambiguousUnit) return markerForms.some((f) => text.includes(f));
+        return text.includes(uLower) || text.includes(`#${uLower}`);
+      };
       const queries = Array.from(new Set([
-        street ? `site:${domain} "${street}" "${unitNumber}"` : "",
-        complexName ? `site:${domain} "${complexName}" "${unitNumber}"` : "",
+        street ? `site:${domain} "${street}" ${unitQueryFragment}`.trim() : "",
+        complexName ? `site:${domain} "${complexName}" ${unitQueryFragment}`.trim() : "",
       ].filter(Boolean)));
       if (queries.length === 0) {
         return { status: "error", url: null, detection: "No address or community name to search" };
@@ -28612,7 +28639,7 @@ Return ONLY compact JSON with this exact shape:
           for (const r of (data.organic_results || []) as any[]) {
             const link = String(r.link || "").toLowerCase();
             const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
-            if (link.includes(domain) && (u === "" || text.includes(u) || text.includes(`#${u}`))) {
+            if (link.includes(domain) && unitMentioned(text)) {
               return {
                 status: "confirmed",
                 url: r.link,
