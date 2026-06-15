@@ -20,6 +20,7 @@ const COMMUNITIES = [
   "Poipu Brenneckes Oceanfront",
   "Pili Mai",
   "Coconut Plantation at Ko Olina",
+  "Ko Olina Beach Villas",
 ];
 
 const COMMUNITY_FOLDERS: Record<string, string> = {
@@ -34,6 +35,7 @@ const COMMUNITY_FOLDERS: Record<string, string> = {
   "Poipu Brenneckes Oceanfront": "community-poipu-oceanfront",
   "Pili Mai": "community-pili-mai",
   "Coconut Plantation at Ko Olina": "community-coconut-plantation-at-ko-olina",
+  "Ko Olina Beach Villas": "community-ko-olina-beach-villas",
 };
 
 interface PhotoResult {

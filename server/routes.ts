@@ -2096,6 +2096,14 @@ const COMMUNITY_SOURCE_URLS: Record<string, { primary: string; fallback?: string
   "Paniolo Hale": {
     primary: "https://www.zillow.com/b/paniolo-hale-maunaloa-hi-9NxCHL/",
   },
+  // Ko Olina Beach Villas (draft 14) — scrape the operator's own listing page
+  // directly (the draft.sourceUrl) so the draft's auto community-photo fetch
+  // gets real Ko Olina Beach Villas photos instead of a generic name search.
+  // scrapeListingPhotos routes a non-real-estate host through its generic
+  // real-estate / headless og:image branch.
+  "Ko Olina Beach Villas": {
+    primary: "https://www.olaproperties.com/ko-olina-beach-villas/",
+  },
 };
 
 // Maps communityPhotoFolder folder names to their display community names
@@ -2113,6 +2121,7 @@ const COMMUNITY_FOLDER_TO_NAME: Record<string, string> = {
   "community-pili-mai": "Pili Mai",
   "community-menehune-shores": "Menehune Shores",
   "community-coconut-plantation-at-ko-olina": "Coconut Plantation at Ko Olina",
+  "community-ko-olina-beach-villas": "Ko Olina Beach Villas",
 };
 
 // Street address fragment for each community — used to find individual
@@ -2132,6 +2141,7 @@ const COMMUNITY_FOLDER_TO_ADDRESS: Record<string, string> = {
   "community-pili-mai": "2611 Kiahuna Plantation Dr",       // Pili Mai at Poipu
   "community-menehune-shores": "760 S Kihei Rd",            // Menehune Shores
   "community-coconut-plantation-at-ko-olina": "92-1070 Olani St", // Coconut Plantation at Ko Olina
+  "community-ko-olina-beach-villas": "92-102 Waialii Pl",         // Ko Olina Beach Villas (Kapolei) — NOT Coconut Plantation's Olani St
 };
 
 interface ScrapedPhoto {
@@ -30702,22 +30712,46 @@ Return ONLY compact JSON with this exact shape:
         `"${communityName}" "${communityAddress}" condo`,
       );
     }
-    if (/olani|waialii|ko\s*olina|coconut\s*plantation/i.test(`${communityName} ${communityAddress} ${canonicalStreet}`)) {
+    const koOlinaHaystack = `${communityName} ${communityAddress} ${canonicalStreet}`;
+    if (/olani|waialii|ko\s*olina|coconut\s*plantation/i.test(koOlinaHaystack)) {
       const koOlinaCity = communityLocForQueries?.city ?? "Kapolei";
       const koOlinaState = communityLocForQueries?.state ?? "Hawaii";
       const hawaiiStreetPair = (communityAddress || canonicalStreet).match(/\b(\d{1,2})-(\d{2,5})\b/);
       const streetPairTerm = hawaiiStreetPair ? `"${hawaiiStreetPair[1]}-${hawaiiStreetPair[2]}"` : "";
-      searchQueries.unshift(
-        ...(streetPairTerm ? [
-          `site:zillow.com ${streetPairTerm} Olani ${koOlinaCity}`,
-          `site:realtor.com ${streetPairTerm} Olani`,
-          `site:redfin.com ${streetPairTerm} Olani ${koOlinaCity}`,
-        ] : []),
-        `site:zillow.com Olani St "${koOlinaCity}" "${koOlinaState}"`,
-        `site:realtor.com "Coconut Plantation" "${koOlinaCity}"`,
-        `site:redfin.com Olani St "${koOlinaCity}" condo`,
-        `site:zillow.com "Coconut Plantation" Ko Olina condo`,
-      );
+      // Two DISTINCT Ko Olina resorts share the "Ko Olina"/Kapolei tokens but sit on
+      // DIFFERENT streets: Coconut Plantation at Ko Olina (Olani St) vs Ko Olina Beach
+      // Villas (Waialii Pl). Branch so we never pair one resort's hyphenated street
+      // NUMBER with the other's street NAME — doing so prepends top-priority wrong-resort
+      // queries and risks putting Coconut photos on a Beach Villas listing (or vice versa).
+      const isBeachVillas = /waialii|beach\s*villas/i.test(koOlinaHaystack);
+      if (isBeachVillas) {
+        searchQueries.unshift(
+          ...(streetPairTerm ? [
+            `site:zillow.com ${streetPairTerm} Waialii ${koOlinaCity}`,
+            `site:realtor.com ${streetPairTerm} Waialii`,
+            `site:redfin.com ${streetPairTerm} Waialii ${koOlinaCity}`,
+          ] : []),
+          `site:zillow.com Waialii Pl "${koOlinaCity}" "${koOlinaState}"`,
+          `site:realtor.com "Ko Olina Beach Villas" "${koOlinaCity}"`,
+          `site:redfin.com Waialii Pl "${koOlinaCity}" condo`,
+          `site:zillow.com "Ko Olina Beach Villas" Ko Olina condo`,
+        );
+      } else {
+        // Coconut Plantation at Ko Olina (Olani St). Also the fallback for a bare
+        // "Ko Olina" match with no Beach-Villas marker (the only Ko Olina community
+        // wired before Beach Villas was added).
+        searchQueries.unshift(
+          ...(streetPairTerm ? [
+            `site:zillow.com ${streetPairTerm} Olani ${koOlinaCity}`,
+            `site:realtor.com ${streetPairTerm} Olani`,
+            `site:redfin.com ${streetPairTerm} Olani ${koOlinaCity}`,
+          ] : []),
+          `site:zillow.com Olani St "${koOlinaCity}" "${koOlinaState}"`,
+          `site:realtor.com "Coconut Plantation" "${koOlinaCity}"`,
+          `site:redfin.com Olani St "${koOlinaCity}" condo`,
+          `site:zillow.com "Coconut Plantation" Ko Olina condo`,
+        );
+      }
     }
     // PR #338: VRBO query branch removed (operator directive).
     // Replacement photos must come from real-estate sources only —
