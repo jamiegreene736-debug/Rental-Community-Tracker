@@ -34,6 +34,7 @@ import {
 import { getPropertyUnits } from "@shared/property-units";
 import { applyAirbnbBiasAndCombo } from "@shared/pricing-rates";
 import { clearScannerBlocksForProperty } from "./sync-scanner-blocks";
+import { runSourceabilitySweepAllEnabled, isSourceabilityGateEnabled } from "./sourceability-gate";
 import {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
   DEFAULT_TIGHT_SCARCITY_MARKUP,
@@ -61,6 +62,7 @@ const TICK_MS = 10 * 60 * 1000; // every 10 min
 let _timer: NodeJS.Timeout | null = null;
 let _lastTickAt: Date | null = null;
 let _tickRunning = false;
+let _lastSourceabilitySweepAt: Date | null = null;
 
 export function getScannerSchedulerStatus() {
   return { lastTickAt: _lastTickAt, running: _tickRunning };
@@ -436,6 +438,20 @@ async function tick() {
         }).catch(() => {});
         console.error(`[availability-scheduler] property ${row.propertyId} FAILED: ${msg}`);
       }
+    }
+
+    // Sourceability gate — once per Eastern day, in the BACKGROUND (fire-and-
+    // forget so the heavy sidecar sweep never blocks the pricing tick). Env-
+    // gated and OFF by default, so a deploy is inert until explicitly enabled.
+    // The sweep has its own single-flight latch + yields to the operator queue.
+    if (isSourceabilityGateEnabled() && isDueForPolicyPass(_lastSourceabilitySweepAt, now)) {
+      _lastSourceabilitySweepAt = now;
+      void runSourceabilitySweepAllEnabled({})
+        .then((r) => {
+          if (r.ran) console.log(`[sourceability-gate] swept ${r.reports.length} properties`);
+          else console.log(`[sourceability-gate] sweep skipped: ${r.reason}`);
+        })
+        .catch((e) => console.error("[sourceability-gate] sweep error:", e?.message ?? e));
     }
   } finally {
     _tickRunning = false;

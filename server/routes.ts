@@ -26586,6 +26586,35 @@ Return ONLY compact JSON with this exact shape:
     });
   });
 
+  // ── Sourceability gate ──────────────────────────────────────────────
+  // Manual trigger / verification of the auto-block sweep. DRY-RUN by default
+  // (computes the block/unblock plan, makes NO Guesty writes); pass ?enforce=1
+  // to actually push to Guesty. force:true lets the operator run it on demand
+  // even while the master env flag is off. See server/sourceability-gate.ts.
+  app.post("/api/availability/sourceability-sweep/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const enforce = req.query.enforce === "1" || req.query.enforce === "true"
+      || (req.body && (req.body as any).enforce === true);
+    try {
+      const { runSourceabilitySweepForProperty } = await import("./sourceability-gate");
+      const report = await runSourceabilitySweepForProperty(propertyId, { force: true, enforce: !!enforce });
+      res.json(report);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  app.get("/api/availability/sourceability-status", async (_req, res) => {
+    const { getLastSourceabilitySweepReport, isSourceabilityGateEnabled, isSourceabilityGateEnforced } =
+      await import("./sourceability-gate");
+    res.json({
+      enabled: isSourceabilityGateEnabled(),
+      enforced: isSourceabilityGateEnforced(),
+      lastSweep: getLastSourceabilitySweepReport(),
+    });
+  });
+
   // Push the weekly rate ranges to Guesty's calendar. Body: the same
   // shape the weekly-pricing endpoint returns (so the client can send
   // exactly what it's displaying). Critical windows are pushed as higher

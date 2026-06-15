@@ -104,3 +104,92 @@ export async function clearScannerBlocksForProperty(propertyId: number): Promise
     failures,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sourceability gate reconcile (2026-06-15). The sourceability gate
+// (server/sourceability-gate.ts) decides, per near-term window, whether we
+// can source the buy-in at a profit. This pushes those decisions to Guesty:
+// BLOCK (status unavailable) windows we can't source, and RESTORE (status
+// available) windows that became sourceable again — touching ONLY the blocks
+// WE created (source = SOURCEABILITY_GATE_SOURCE), never human/legacy blocks.
+//
+// FAIL-SAFE: a window is only un-blocked when this pass CONFIRMED it sourceable
+// (in confirmedOpen). A window whose scan failed/was skipped is NOT in
+// confirmedOpen, so its block is LEFT in place — we never lift a block on doubt.
+// ─────────────────────────────────────────────────────────────────────────
+export const SOURCEABILITY_GATE_SOURCE = "sourceability-gate";
+
+export async function reconcileSourceabilityBlocks(args: {
+  propertyId: number;
+  desired: Array<{ startDate: string; endDate: string; reason: string }>;
+  confirmedOpen: Array<{ startDate: string; endDate: string }>;
+  /** When true, compute wouldCreate/wouldRemove but make NO Guesty calls. */
+  dryRun?: boolean;
+}): Promise<SyncResult & { wouldCreate: number; wouldRemove: number }> {
+  const { propertyId, desired, confirmedOpen, dryRun = false } = args;
+  const guestyListingId = await storage.getGuestyListingId(propertyId);
+  if (!guestyListingId) {
+    return {
+      success: false, propertyId, guestyListingId: null,
+      created: 0, removed: 0, unchanged: 0, failures: [],
+      reason: `No Guesty listing mapped for property ${propertyId}`,
+      wouldCreate: 0, wouldRemove: 0,
+    };
+  }
+
+  const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
+  // Only OUR sourceability blocks — never touch human/legacy scanner blocks.
+  const active = (await storage.getActiveScannerBlocks(propertyId))
+    .filter((b) => b.source === SOURCEABILITY_GATE_SOURCE);
+  const k = (s: string, e: string) => `${s}|${e}`;
+  const activeKeys = new Set(active.map((b) => k(b.startDate, b.endDate)));
+  const desiredKeys = new Set(desired.map((d) => k(d.startDate, d.endDate)));
+  const openKeys = new Set(confirmedOpen.map((o) => k(o.startDate, o.endDate)));
+
+  const failures: SyncResult["failures"] = [];
+  let created = 0, removed = 0, wouldCreate = 0, wouldRemove = 0;
+
+  // CREATE: desired windows not already blocked by us.
+  for (const d of desired) {
+    if (activeKeys.has(k(d.startDate, d.endDate))) continue;
+    wouldCreate++;
+    if (dryRun) continue;
+    try {
+      await guestyCalendarPutWithRetry(calPath, { startDate: d.startDate, endDate: d.endDate, status: "unavailable" });
+      await storage.createScannerBlock({
+        propertyId, guestyListingId, startDate: d.startDate, endDate: d.endDate,
+        reason: d.reason.slice(0, 250), source: SOURCEABILITY_GATE_SOURCE,
+      });
+      created++;
+      await sleep(750);
+    } catch (e: any) {
+      failures.push({ action: "create", startDate: d.startDate, error: e?.message ?? String(e) });
+    }
+  }
+
+  // REMOVE: our blocks whose window is now CONFIRMED sourceable again. A block
+  // whose window merely failed/skipped this pass is left untouched (fail-safe).
+  for (const b of active) {
+    const key = k(b.startDate, b.endDate);
+    if (desiredKeys.has(key)) continue;   // still want it blocked
+    if (!openKeys.has(key)) continue;     // not confirmed open ⇒ leave it
+    wouldRemove++;
+    if (dryRun) continue;
+    try {
+      await guestyCalendarPutWithRetry(calPath, { startDate: b.startDate, endDate: b.endDate, status: "available" });
+      await storage.markScannerBlockRemoved(b.id);
+      removed++;
+      await sleep(750);
+    } catch (e: any) {
+      failures.push({ action: "remove", startDate: b.startDate, error: e?.message ?? String(e) });
+    }
+  }
+
+  return {
+    success: failures.length === 0,
+    propertyId, guestyListingId,
+    created, removed,
+    unchanged: Math.max(0, active.length - removed),
+    failures, wouldCreate, wouldRemove,
+  };
+}
