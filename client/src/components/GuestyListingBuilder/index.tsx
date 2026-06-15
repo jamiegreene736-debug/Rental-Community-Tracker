@@ -6862,8 +6862,98 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     ) : null;
                                   const crossDupes = r.duplicates.filter((d) => d.scope === "cross-folder");
 
+                                  // ── Same-community roll-up (the operator's core question) ──────
+                                  // One glanceable answer: name each folder's community and give a
+                                  // single GREEN "YES — all same" / RED "FAILED — not all same"
+                                  // verdict. This is computed deterministically from the per-folder
+                                  // signals (never the model's free-text "vibe"):
+                                  //   • RED   on any POSITIVE contradiction — the community folder is
+                                  //           a different community than the UI, or any unit is a
+                                  //           different community than the community folder.
+                                  //   • GREEN only when every set is POSITIVELY confirmed: the
+                                  //           community folder matches the UI AND every unit matches
+                                  //           the community folder.
+                                  //   • AMBER otherwise (no contradiction, but not fully confirmed) —
+                                  //           we never silently green an unconfirmed identity.
+                                  const communityMatch = r.community?.matchesExpected;
+                                  const unitMatches = r.units.map((u) => u.sameAsCommunity);
+                                  // "All the same community" only means something with at least TWO
+                                  // photo sets to compare. A lone community folder (units not
+                                  // attached yet) or a single unit has nothing to confirm sameness
+                                  // against, so it must NEVER read as a confident GREEN — [].every()
+                                  // is vacuously true, which would otherwise green a one-folder check.
+                                  const comparableSets = (r.community ? 1 : 0) + r.units.length;
+                                  const anyDifferent =
+                                    communityMatch === "no" ||
+                                    unitMatches.some((m) => m === "no") ||
+                                    (!r.community && r.allSameCommunity === "no");
+                                  const allConfirmed =
+                                    !anyDifferent &&
+                                    comparableSets >= 2 &&
+                                    unitMatches.every((m) => m === "yes") &&
+                                    (r.community ? communityMatch === "yes" : r.allSameCommunity === "yes");
+                                  const sameVerdict: "yes" | "no" | "uncertain" =
+                                    anyDifferent ? "no" : allConfirmed ? "yes" : "uncertain";
+                                  // Distinguish "couldn't confirm" (≥2 sets, but not proven) from
+                                  // "nothing to compare" (only one set) — the latter isn't a warning.
+                                  const nothingToCompare = !anyDifferent && comparableSets < 2;
+                                  const sameStyle =
+                                    sameVerdict === "yes"
+                                      ? { bg: "#dcfce7", fg: "#15803d", label: "✓ YES — all the same community" }
+                                      : sameVerdict === "no"
+                                      ? { bg: "#fee2e2", fg: "#b91c1c", label: "✗ FAILED — NOT all the same community" }
+                                      : nothingToCompare
+                                      ? { bg: "#f1f5f9", fg: "#475569", label: "ⓘ Only one photo set — attach units to compare" }
+                                      : { bg: "#fef9c3", fg: "#92400e", label: "⚠ Couldn’t confirm — eyeball the folders below" };
+                                  // Roster: community folder first, then each unit, each as
+                                  // "<label> is <identified community>" + a same/different badge.
+                                  const rosterRows: Array<{ label: string; identified: string; status?: "yes" | "no" | "uncertain"; vsLabel: string }> = [];
+                                  if (r.community) {
+                                    rosterRows.push({
+                                      label: r.community.label,
+                                      identified: r.community.identifiedCommunity,
+                                      status: r.community.matchesExpected,
+                                      vsLabel: r.expectedCommunity ? `vs UI “${r.expectedCommunity}”` : "reference set",
+                                    });
+                                  }
+                                  for (const u of r.units) {
+                                    rosterRows.push({
+                                      label: u.label,
+                                      identified: u.identifiedCommunity,
+                                      status: u.sameAsCommunity,
+                                      vsLabel: r.community ? "vs community folder" : "vs other units",
+                                    });
+                                  }
+
                                   return (
                                     <div style={{ marginTop: 10 }}>
+                                      {/* Headline answer to the operator's literal question:
+                                          "Community folder is X, Unit A is X, Unit B is X" +
+                                          one green YES / red FAILED verdict. */}
+                                      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px", marginBottom: 8 }}>
+                                        <div style={{ fontSize: 10.5, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>
+                                          Same community?
+                                        </div>
+                                        <span style={{ ...badge(sameStyle), fontSize: 13, padding: "3px 12px", borderRadius: 12 }}>{sameStyle.label}</span>
+                                        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
+                                          {rosterRows.map((row, i) => {
+                                            const t = tri(row.status);
+                                            return (
+                                              <div key={i} style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 12, flexWrap: "wrap" }}>
+                                                <span style={{ fontWeight: 600, color: "#0f172a" }}>{row.label}</span>
+                                                <span style={{ color: "#64748b" }}>is</span>
+                                                <b style={{ color: "#0f172a" }}>{row.identified}</b>
+                                                <span style={{ ...badge(t), marginLeft: "auto" }}>{t.label}</span>
+                                                <span style={{ fontSize: 10, color: "#94a3b8" }}>{row.vsLabel}</span>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                        {r.expectedCommunity ? (
+                                          <div style={{ fontSize: 10.5, color: "#94a3b8", marginTop: 7 }}>UI community: “{r.expectedCommunity}”</div>
+                                        ) : null}
+                                      </div>
+
                                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                         <span style={{ ...badge(vStyle), fontSize: 12, padding: "2px 10px" }}>{vStyle.label}</span>
                                         <span style={{ fontSize: 12, color: "#334155", flex: 1, minWidth: 200 }}>{r.summary}</span>
