@@ -967,6 +967,32 @@ export type AutoReplyLog = typeof autoReplyLog.$inferSelect;
 export type InsertAutoReplyStyleExample = z.infer<typeof insertAutoReplyStyleExampleSchema>;
 export type AutoReplyStyleExample = typeof autoReplyStyleExamples.$inferSelect;
 
+// ── Platform AI assistant (dashboard chat agent) ──
+// Conversational front-door to the whole platform. One row per chat thread in
+// `assistant_sessions`; every turn (operator message, assistant reply, and the
+// tool calls/results in between) is persisted in `assistant_messages` so the
+// operator gets durable scrollback AND an audit trail of what the agent did.
+// `content` is a JSON blob: { text?, toolCalls?: [{name,input}], toolResults?:
+// [{name,output}] }. See server/assistant/* for the agent loop + tool registry.
+export const assistantSessions = pgTable("assistant_sessions", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull().default("New chat"),
+  createdBy: text("created_by").notNull().default("admin"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  lastActiveAt: timestamp("last_active_at").defaultNow().notNull(),
+});
+
+export const assistantMessages = pgTable("assistant_messages", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").notNull(),
+  role: text("role").notNull(), // user | assistant | tool
+  content: jsonb("content").notNull().default(sql`'{}'::jsonb`),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type AssistantSession = typeof assistantSessions.$inferSelect;
+export type AssistantMessage = typeof assistantMessages.$inferSelect;
+
 // Tiny persisted key-value store for operator-controlled toggles that must
 // survive restarts (the auto-send master toggle / review window). Value is a
 // JSON-encoded string. Read via storage.getSetting / written via setSetting.

@@ -1,0 +1,307 @@
+import { useEffect, useRef, useState } from "react";
+import { MessageCircle, X, Send, Loader2, Sparkles, Check, Wrench } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { cn } from "@/lib/utils";
+import { usePortalSession } from "@/lib/auth";
+
+// Floating dashboard chat agent ("Magical"). Talks to POST /api/assistant/chat,
+// which streams Server-Sent-Events over the POST response body (status / tool
+// activity / final text). Ships dark unless /api/assistant/status reports
+// enabled (PLATFORM_ASSISTANT_ENABLED) — see server/assistant/routes.ts.
+
+interface ToolChip {
+  name: string;
+  label: string;
+  done: boolean;
+  ok: boolean;
+}
+
+interface ChatMsg {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  tools: ToolChip[];
+  status?: string;
+  error?: string;
+  streaming?: boolean;
+}
+
+const uid = () => Math.random().toString(36).slice(2);
+
+export default function AssistantDock() {
+  const { data: session } = usePortalSession();
+  const { data: status } = useQuery<{ enabled: boolean; hasKey: boolean }>({
+    queryKey: ["/api/assistant/status"],
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const [open, setOpen] = useState(false);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const sessionIdRef = useRef<number | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, open]);
+
+  // Only show for the admin operator, and only when the server enabled it.
+  if (session?.role !== "admin" || !status?.enabled) return null;
+
+  const patchAssistant = (id: string, patch: (m: ChatMsg) => ChatMsg) =>
+    setMessages((prev) => prev.map((m) => (m.id === id ? patch(m) : m)));
+
+  async function send() {
+    const text = input.trim();
+    if (!text || busy) return;
+    setInput("");
+    setBusy(true);
+
+    const userMsg: ChatMsg = { id: uid(), role: "user", text, tools: [] };
+    const botId = uid();
+    const botMsg: ChatMsg = { id: botId, role: "assistant", text: "", tools: [], status: "Thinking…", streaming: true };
+    setMessages((prev) => [...prev, userMsg, botMsg]);
+
+    try {
+      const resp = await fetch("/api/assistant/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ sessionId: sessionIdRef.current ?? undefined, message: text }),
+      });
+      if (!resp.ok || !resp.body) {
+        const msg = resp.status === 401 ? "Your session expired — please reload." : `Request failed (${resp.status}).`;
+        patchAssistant(botId, (m) => ({ ...m, status: undefined, error: msg, streaming: false }));
+        setBusy(false);
+        return;
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const line = part.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          let evt: any;
+          try {
+            evt = JSON.parse(line.slice(6));
+          } catch {
+            continue;
+          }
+          handleEvent(botId, evt);
+        }
+      }
+    } catch {
+      patchAssistant(botId, (m) => ({ ...m, status: undefined, error: "Connection interrupted.", streaming: false }));
+    } finally {
+      setBusy(false);
+      patchAssistant(botId, (m) => ({ ...m, streaming: false, status: undefined }));
+    }
+  }
+
+  function handleEvent(botId: string, evt: any) {
+    switch (evt?.type) {
+      case "session":
+        if (typeof evt.sessionId === "number") sessionIdRef.current = evt.sessionId;
+        break;
+      case "status":
+        patchAssistant(botId, (m) => ({ ...m, status: evt.text }));
+        break;
+      case "tool_call":
+        patchAssistant(botId, (m) => ({
+          ...m,
+          status: evt.label || "Working…",
+          tools: [...m.tools, { name: evt.name, label: evt.label || evt.name, done: false, ok: true }],
+        }));
+        break;
+      case "tool_result":
+        patchAssistant(botId, (m) => {
+          const tools = [...m.tools];
+          for (let i = tools.length - 1; i >= 0; i--) {
+            if (tools[i].name === evt.name && !tools[i].done) {
+              tools[i] = { ...tools[i], done: true, ok: !!evt.ok };
+              break;
+            }
+          }
+          return { ...m, tools };
+        });
+        break;
+      case "text":
+        patchAssistant(botId, (m) => ({ ...m, text: evt.text, status: undefined }));
+        break;
+      case "error":
+        patchAssistant(botId, (m) => ({ ...m, error: evt.message, status: undefined, streaming: false }));
+        break;
+      case "done":
+        patchAssistant(botId, (m) => ({ ...m, status: undefined, streaming: false }));
+        break;
+    }
+  }
+
+  return (
+    <>
+      {/* Launcher */}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="fixed bottom-5 right-5 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-indigo-600 text-white shadow-lg transition hover:bg-indigo-700"
+        aria-label="Open assistant"
+      >
+        {open ? <X className="h-6 w-6" /> : <MessageCircle className="h-6 w-6" />}
+      </button>
+
+      {open && (
+        <div className="fixed bottom-24 right-5 z-50 flex h-[34rem] max-h-[80vh] w-[24rem] max-w-[92vw] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+          {/* Header */}
+          <div className="flex items-center gap-2 border-b border-slate-200 bg-indigo-600 px-4 py-3 text-white">
+            <Sparkles className="h-5 w-5" />
+            <div className="flex-1">
+              <div className="text-sm font-semibold leading-tight">Magical</div>
+              <div className="text-xs text-indigo-200">Ask about bookings, revenue & buy-ins</div>
+            </div>
+            <button type="button" onClick={() => setOpen(false)} aria-label="Close">
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+
+          {/* Messages */}
+          <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto bg-slate-50 px-3 py-4">
+            {messages.length === 0 && (
+              <div className="mt-6 px-3 text-center text-sm text-slate-500">
+                <p className="mb-3 font-medium text-slate-700">Hi Jamie — what can I look up?</p>
+                <ul className="space-y-1.5 text-left text-xs text-slate-500">
+                  <li>• "What's my revenue over the last 30 days?"</li>
+                  <li>• "Which bookings are checking in this week?"</li>
+                  <li>• "Estimate the buy-in for the next Poipu Kai stay."</li>
+                  <li>• "Any cancellations recently?"</li>
+                </ul>
+              </div>
+            )}
+            {messages.map((m) => (
+              <MessageBubble key={m.id} msg={m} />
+            ))}
+          </div>
+
+          {/* Composer */}
+          <div className="border-t border-slate-200 bg-white p-2">
+            <div className="flex items-end gap-2">
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void send();
+                  }
+                }}
+                rows={1}
+                placeholder="Ask anything…"
+                className="max-h-28 flex-1 resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+              />
+              <button
+                type="button"
+                onClick={() => void send()}
+                disabled={busy || !input.trim()}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-600 text-white transition hover:bg-indigo-700 disabled:opacity-40"
+                aria-label="Send"
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function MessageBubble({ msg }: { msg: ChatMsg }) {
+  if (msg.role === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-indigo-600 px-3 py-2 text-sm text-white">
+          {msg.text}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[90%] space-y-2">
+        {msg.tools.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {msg.tools.map((t, i) => (
+              <span
+                key={i}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]",
+                  t.done ? (t.ok ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700") : "bg-slate-200 text-slate-600",
+                )}
+              >
+                {t.done ? <Check className="h-3 w-3" /> : <Loader2 className="h-3 w-3 animate-spin" />}
+                {t.label}
+              </span>
+            ))}
+          </div>
+        )}
+        {msg.status && (
+          <div className="flex items-center gap-1.5 text-xs text-slate-500">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {msg.status}
+          </div>
+        )}
+        {msg.text && (
+          <div className="rounded-2xl rounded-bl-sm bg-white px-3 py-2 text-sm text-slate-800 shadow-sm">
+            <RichText text={msg.text} />
+          </div>
+        )}
+        {msg.error && (
+          <div className="flex items-start gap-1.5 rounded-2xl rounded-bl-sm bg-rose-50 px-3 py-2 text-sm text-rose-700">
+            <Wrench className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{msg.error}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Minimal, dependency-free markdown-ish renderer: paragraphs, bullet lines, and
+// **bold** spans. Good enough for the assistant's short answers; swap for a real
+// markdown lib later if needed.
+function RichText({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <div className="space-y-1">
+      {lines.map((line, i) => {
+        const trimmed = line.trim();
+        const bullet = /^[-*•]\s+/.test(trimmed);
+        const body = bullet ? trimmed.replace(/^[-*•]\s+/, "") : line;
+        return (
+          <p key={i} className={cn(bullet && "pl-3", trimmed === "" && "h-2")}>
+            {bullet && <span className="mr-1 text-slate-400">•</span>}
+            {renderBold(body)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+function renderBold(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return parts.map((p, i) =>
+    p.startsWith("**") && p.endsWith("**") ? (
+      <strong key={i}>{p.slice(2, -2)}</strong>
+    ) : (
+      <span key={i}>{p}</span>
+    ),
+  );
+}
