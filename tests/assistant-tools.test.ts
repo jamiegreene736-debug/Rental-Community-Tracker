@@ -4,6 +4,7 @@ import {
   anthropicToolDefs,
   runAssistantTool,
 } from "../server/assistant/tools";
+import { cacheSystem, cacheTools } from "../server/assistant/prompt-cache";
 
 let pass = 0;
 let fail = 0;
@@ -91,6 +92,17 @@ check(
   defs.every((d) => Object.keys(d).sort().join(",") === "description,input_schema,name"),
   defs[0] && Object.keys(defs[0]),
 );
+
+// Prompt caching (Phase 4): system becomes a content-block array with a cache
+// breakpoint, and ONLY the last tool def carries cache_control.
+{
+  const sys = cacheSystem("system text here") as any[];
+  check("cacheSystem is a content-block array", Array.isArray(sys) && sys.length === 1, sys);
+  check("cacheSystem block has ephemeral cache_control", sys?.[0]?.cache_control?.type === "ephemeral", sys?.[0]);
+  const ct = cacheTools(anthropicToolDefs() as any[]) as any[];
+  check("cacheTools count matches registry", ct.length === ASSISTANT_TOOLS.length, ct.length);
+  check("cacheTools marks ONLY the last tool", !ct[0]?.cache_control && ct[ct.length - 1]?.cache_control?.type === "ephemeral");
+}
 
 // Unknown tool dispatch is graceful (no throw, returns an _error envelope).
 (async () => {

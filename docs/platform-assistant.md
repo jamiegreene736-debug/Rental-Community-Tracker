@@ -117,7 +117,25 @@ renders the dock for the **admin** role when enabled.
 | **1.5 · Confirm-gated attach** | confirm gate wired end-to-end (agent intercept + `/api/assistant/confirm` + client confirm card); first write tool `start_auto_fill` + `check_auto_fill`. | **shipped** |
 | **2 · Photos & listings (read)** | `find_photos` (candidate photos for a community), `get_photo_alerts` (OTA photo-change/competitor alerts), `get_photo_listing_status` (per-folder photo↔OTA dashboard). | **shipped** |
 | **3 · Inbox & outward actions** | read: `list_guest_conversations`, `get_guest_thread`, `draft_guest_reply`. Confirm-gated writes: `send_guest_message`, `send_payment_receipt`. | **shipped** |
-| 4 · Polish | Haiku fast-router, prompt caching, session history UI, proactive nudges | planned |
+| **4 · Polish** | prompt caching (system + tools), session-history UI (list/load past chats) + new-chat, proactive nudge chips (`GET /api/assistant/nudges`). Haiku fast-router deferred (see below). | **shipped** |
+
+### Phase 4 notes
+
+- **Prompt caching** (`server/assistant/prompt-cache.ts`) marks the system prompt
+  + the last tool def with `cache_control: ephemeral`, so the large system + 17
+  tool defs are cached across turns within a session (~5min TTL). Off via
+  `ASSISTANT_PROMPT_CACHE=0`. Cuts input-token cost/latency on multi-turn chats.
+- **Session history**: the dock header has a history button (lists past chats via
+  `GET /api/assistant/sessions`, loads one via `GET /api/assistant/sessions/:id`)
+  and a new-chat button. Loaded chats replay user/assistant text + tool chips.
+- **Proactive nudges**: `GET /api/assistant/nudges` returns starter suggestion
+  chips for the empty dock — dynamic where cheap (unacknowledged photo-alert count
+  via a tight-timeout loopback call, fail-soft) plus static helpers. Clicking a
+  chip sends that prompt.
+- **Haiku fast-router — deferred (intentional).** A cheap-model router for trivial
+  lookups adds an extra classification call + mis-routing risk, and its main win
+  (cost/latency) is largely captured by prompt caching. The model stays
+  configurable via `ASSISTANT_MODEL`; revisit a router only if cost data warrants.
 
 **Note on `start_auto_fill` verification:** the auto-fill/attach path drives the
 live browser sidecar and commits buy-ins, so it can't be fully exercised from the
@@ -131,6 +149,7 @@ smoke-tested on Railway with the sidecar online before relying on it.
 - `server/assistant/agent.ts` — Claude tool_use loop + SSE + confirm intercept + `runConfirmedAction`.
 - `server/assistant/store.ts` — chat persistence (fail-soft).
 - `server/assistant/confirm.ts` — confirm-before-act pending-action store (one-shot, TTL'd).
+- `server/assistant/prompt-cache.ts` — pure prompt-caching helpers (system + tools).
 - `server/assistant/routes.ts` — `registerAssistantRoutes(app)`; SSE chat / confirm / history.
 - `client/src/components/AssistantDock.tsx` — floating dock, SSE consumer + confirm card.
 - `shared/schema.ts` — `assistantSessions` / `assistantMessages`.

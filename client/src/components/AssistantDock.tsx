@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MessageCircle, X, Send, Loader2, Sparkles, Check, Wrench, ShieldAlert } from "lucide-react";
+import { MessageCircle, X, Send, Loader2, Sparkles, Check, Wrench, ShieldAlert, History, Plus } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import { usePortalSession } from "@/lib/auth";
@@ -36,6 +36,14 @@ interface ChatMsg {
 
 const uid = () => Math.random().toString(36).slice(2);
 
+// Shown if the nudges endpoint hasn't loaded yet.
+const FALLBACK_SUGGESTIONS: { label: string; prompt: string; badge?: number }[] = [
+  { label: "Revenue last 30 days", prompt: "What's my revenue over the last 30 days?" },
+  { label: "Find a better combination", prompt: "Find a better combination for an upcoming booking that still needs units." },
+  { label: "Find photos", prompt: "Find photos for one of my communities." },
+  { label: "New guest messages", prompt: "Any new guest messages? Summarize what each guest is asking." },
+];
+
 export default function AssistantDock() {
   const { data: session } = usePortalSession();
   const { data: status } = useQuery<{ enabled: boolean; hasKey: boolean }>({
@@ -47,8 +55,22 @@ export default function AssistantDock() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const sessionIdRef = useRef<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Starter suggestion chips for the empty dock (proactive nudges).
+  const { data: nudges } = useQuery<{ suggestions: { label: string; prompt: string; badge?: number }[] }>({
+    queryKey: ["/api/assistant/nudges"],
+    enabled: open && session?.role === "admin" && !!status?.enabled,
+    staleTime: 60 * 1000,
+  });
+  // Past chat sessions (loaded when the history panel opens).
+  const { data: sessionList } = useQuery<{ sessions: { id: number; title: string; lastActiveAt: string }[] }>({
+    queryKey: ["/api/assistant/sessions"],
+    enabled: historyOpen && session?.role === "admin" && !!status?.enabled,
+    staleTime: 10 * 1000,
+  });
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -104,8 +126,8 @@ export default function AssistantDock() {
     }
   }
 
-  async function send() {
-    const text = input.trim();
+  async function send(explicit?: string) {
+    const text = (explicit ?? input).trim();
     if (!text || busy) return;
     setInput("");
     const userMsg: ChatMsg = { id: uid(), role: "user", text, tools: [] };
@@ -113,6 +135,42 @@ export default function AssistantDock() {
     const botMsg: ChatMsg = { id: botId, role: "assistant", text: "", tools: [], status: "Thinking…", streaming: true };
     setMessages((prev) => [...prev, userMsg, botMsg]);
     await streamInto("/api/assistant/chat", { sessionId: sessionIdRef.current ?? undefined, message: text }, botId);
+  }
+
+  function newChat() {
+    if (busy) return;
+    sessionIdRef.current = null;
+    setMessages([]);
+    setHistoryOpen(false);
+    setInput("");
+  }
+
+  async function loadSession(id: number) {
+    if (busy) return;
+    setHistoryOpen(false);
+    try {
+      const resp = await fetch(`/api/assistant/sessions/${id}`, { credentials: "include" });
+      if (!resp.ok) return;
+      const data = (await resp.json()) as { messages?: { role: string; content: any }[] };
+      const loaded: ChatMsg[] = [];
+      for (const m of data.messages ?? []) {
+        const c = m.content ?? {};
+        const text = typeof c.text === "string" ? c.text : "";
+        if (m.role === "user") {
+          loaded.push({ id: uid(), role: "user", text, tools: [] });
+        } else if (m.role === "assistant") {
+          const tools: ToolChip[] = Array.isArray(c.toolCalls)
+            ? c.toolCalls.map((t: any) => ({ name: t.name, label: t.name, done: true, ok: true }))
+            : [];
+          loaded.push({ id: uid(), role: "assistant", text, tools, error: c.error });
+        }
+        // "tool" role rows are execution audit — not rendered as bubbles.
+      }
+      sessionIdRef.current = id;
+      setMessages(loaded);
+    } catch {
+      /* ignore */
+    }
   }
 
   async function respondToConfirm(srcMsgId: string, card: ConfirmCard, decision: "confirm" | "cancel") {
@@ -202,22 +260,61 @@ export default function AssistantDock() {
               <div className="text-sm font-semibold leading-tight">Magical</div>
               <div className="text-xs text-indigo-200">Ask about bookings, revenue & buy-ins</div>
             </div>
+            <button type="button" onClick={() => setHistoryOpen((v) => !v)} aria-label="Chat history" title="Chat history">
+              <History className="h-5 w-5" />
+            </button>
+            <button type="button" onClick={newChat} aria-label="New chat" title="New chat">
+              <Plus className="h-5 w-5" />
+            </button>
             <button type="button" onClick={() => setOpen(false)} aria-label="Close">
               <X className="h-5 w-5" />
             </button>
           </div>
+
+          {/* History panel */}
+          {historyOpen && (
+            <div className="border-b border-slate-200 bg-white px-3 py-2">
+              <div className="mb-1 text-xs font-semibold text-slate-500">Recent chats</div>
+              <div className="max-h-44 space-y-0.5 overflow-y-auto">
+                {(sessionList?.sessions ?? []).length === 0 && (
+                  <div className="px-1 py-2 text-xs text-slate-400">No past chats yet.</div>
+                )}
+                {(sessionList?.sessions ?? []).map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => void loadSession(s.id)}
+                    className="block w-full truncate rounded px-2 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100"
+                    title={s.title}
+                  >
+                    {s.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Messages */}
           <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto bg-slate-50 px-3 py-4">
             {messages.length === 0 && (
               <div className="mt-6 px-3 text-center text-sm text-slate-500">
                 <p className="mb-3 font-medium text-slate-700">Hi Jamie — what can I look up?</p>
-                <ul className="space-y-1.5 text-left text-xs text-slate-500">
-                  <li>• "What's my revenue over the last 30 days?"</li>
-                  <li>• "Find a better combination for the next Poipu Kai booking."</li>
-                  <li>• "Find photos for Poipu Kai Resort."</li>
-                  <li>• "Any new guest messages? Draft a reply to the latest."</li>
-                </ul>
+                <div className="flex flex-col gap-1.5">
+                  {(nudges?.suggestions ?? FALLBACK_SUGGESTIONS).map((s, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void send(s.prompt)}
+                      className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-xs text-slate-700 transition hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50"
+                    >
+                      <span>{s.label}</span>
+                      {typeof s.badge === "number" && s.badge > 0 && (
+                        <span className="shrink-0 rounded-full bg-amber-500 px-1.5 text-[10px] font-bold text-white">{s.badge}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
             {messages.map((m) => (
