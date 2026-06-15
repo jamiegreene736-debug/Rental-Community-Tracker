@@ -1,6 +1,7 @@
 import { storage } from "./storage";
 import { log } from "./index";
 import { syncAllPropertiesToGuesty } from "./guesty-sync";
+import { isSidecarAutomationPaused } from "./sidecar-automation";
 import {
   BUY_IN_MARKET_LOCATIONS,
   resolveBuyInMarket,
@@ -1044,7 +1045,7 @@ export function startWeeklyScheduler() {
       // Run availability scans ON DEMAND from the dashboard / availability-scanner
       // "Run bulk scan" button instead. Re-enable the unattended weekly OTA sweep
       // with WEEKLY_AVAILABILITY_SCAN=1.
-      if (process.env.WEEKLY_AVAILABILITY_SCAN === "1") {
+      if (process.env.WEEKLY_AVAILABILITY_SCAN === "1" && !(await isSidecarAutomationPaused())) {
         try {
           await runAvailabilityScan(52);
         } catch (err: any) {
@@ -1052,7 +1053,7 @@ export function startWeeklyScheduler() {
         }
       } else {
         log(
-          "Weekly availability OTA scan SKIPPED (WEEKLY_AVAILABILITY_SCAN not set) — " +
+          "Weekly availability OTA scan SKIPPED (WEEKLY_AVAILABILITY_SCAN not set, or automated sidecar scans paused) — " +
           "run on demand from the dashboard to avoid unattended local-Chrome sweeps",
           "scanner",
         );

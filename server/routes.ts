@@ -99,6 +99,7 @@ import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./a
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts, setAutoSendConfig, runAutoSendQueue } from "./auto-reply";
 import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { registerAssistantRoutes } from "./assistant/routes";
+import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar-automation";
 import { formatReceiptMoney, formatReceiptLongDate } from "@shared/receipt-message";
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
@@ -24779,6 +24780,26 @@ Return ONLY compact JSON with this exact shape:
     const { resumeQueue } = await import("./vrbo-sidecar-queue");
     const result = resumeQueue();
     return res.json({ ok: true, paused: false, ...result });
+  });
+
+  // Global pause for AUTOMATED (scheduler-driven) sidecar scans — the
+  // sourceability gate sweep + the weekly OTA scan. Operator-initiated searches
+  // are never affected. See server/sidecar-automation.ts.
+  app.get("/api/admin/sidecar-automation", async (_req, res) => {
+    try {
+      res.json(await getSidecarAutomationState());
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to read sidecar automation state", message: err?.message });
+    }
+  });
+  app.post("/api/admin/sidecar-automation/toggle", async (req, res) => {
+    try {
+      const paused = req.body?.paused === true || req.body?.paused === "true";
+      await setSidecarAutomationPaused(paused);
+      res.json(await getSidecarAutomationState());
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to set sidecar automation state", message: err?.message });
+    }
   });
 
   // ── Sidecar cookie sync (Chrome extension → daemon bridge) ─────────
