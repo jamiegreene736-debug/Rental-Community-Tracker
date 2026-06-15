@@ -948,6 +948,11 @@ async function buildBulkGuestySeasonalPlan(
     let checkIn: string | undefined;
     let checkOut: string | undefined;
     let blackout: { checkIn: string; checkOut: string; reason: string } | null = null;
+    // Track this month's genuinely-missing units (no row / no stored entry — a
+    // data error) SEPARATELY from intentional blackouts, so one unit's blackout
+    // can't mask another unit's missing data and silently close a window we
+    // can't explain.
+    const missingKeysThisMonth: string[] = [];
     for (const unit of units) {
       const row = rowByBR.get(unit.bedrooms);
       const entry = row?.monthlyRates && typeof row.monthlyRates === "object"
@@ -966,7 +971,7 @@ async function buildBulkGuestySeasonalPlan(
             };
           }
         } else {
-          missingMonthlyRates.add(`${yearMonth} ${unit.bedrooms}BR`);
+          missingKeysThisMonth.push(`${yearMonth} ${unit.bedrooms}BR`);
         }
         continue;
       }
@@ -974,14 +979,15 @@ async function buildBulkGuestySeasonalPlan(
       // Match the pricing table: ceil margin per unit, then sum (not ceil on combined buy-in).
       price += cleanBaseRateFromBuyInServer(unitBuyIn, targetMargin);
     }
-    // A month is a listing-level blackout if ANY configured unit was blacked
-    // out: a combo can't be priced/sold with only part of it covered. Close
-    // that window and drop the month from the price push (filtered below).
-    if (blackout) {
-      for (const unit of units) missingMonthlyRates.delete(`${yearMonth} ${unit.bedrooms}BR`);
+    // A month is a clean listing-level blackout only when EVERY non-priced unit
+    // was an intentional blackout (a combo can't be priced/sold half-covered).
+    // If any unit is genuinely missing (no stored entry), keep it as a hard
+    // error — the push must fail loudly rather than silently close the window.
+    if (blackout && missingKeysThisMonth.length === 0) {
       blackoutWindows.push({ yearMonth, checkIn: blackout.checkIn, checkOut: blackout.checkOut, reason: blackout.reason });
       return { yearMonth, buyIn: 0, price: 0, checkIn, checkOut };
     }
+    for (const key of missingKeysThisMonth) missingMonthlyRates.add(key);
     return { yearMonth, buyIn, price, checkIn, checkOut };
   }).filter((row) => row.buyIn > 0 && row.price > 0);
 
@@ -1374,6 +1380,18 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   const blackoutSuffix = blackoutWindows.length > 0 || blackoutClosed > 0 || blackoutReopened > 0
     ? ` · ${blackoutWindows.length} blacked out (${blackoutClosed} closed/${blackoutReopened} reopened on Guesty)`
     : "";
+  // Calendar reconcile is non-fatal (prices already landed), so a Guesty
+  // calendar failure must not be silent: surface it as a warn event so the
+  // operator knows some windows didn't close/reopen (next scan will retry).
+  const blackoutReconcileFailed = blackoutWindows.length > 0 && !guestyPush.blackout;
+  const blackoutFailures = guestyPush.blackout?.failures?.length ?? 0;
+  if (blackoutReconcileFailed || blackoutFailures > 0) {
+    await topQueueEvent("bulk-pricing", job.id, "item-blackout-sync-failed", `${item.label}: Guesty calendar blackout sync incomplete (${blackoutReconcileFailed ? "reconcile errored" : `${blackoutFailures} window change(s) failed`}); will retry on the next scan`, {
+      itemKey: item.id,
+      level: "warn",
+      meta: { propertyId: item.propertyId, blackoutWindows: blackoutWindows.length, failures: guestyPush.blackout?.failures ?? "reconcile-threw" },
+    });
+  }
   if (guestyPush.skipped) {
     item.progress = {
       phase: "done",
