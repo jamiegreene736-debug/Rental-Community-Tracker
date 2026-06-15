@@ -17,8 +17,6 @@
 // July 4 week where most listings are booked). For those edge cases, the
 // daily re-scan + manual force-block override is the safety net.
 
-import type { PropertyUnitConfig } from "@shared/property-units";
-
 import {
   BUY_IN_MARKET_LOCATIONS,
   resolveBuyInMarket,
@@ -112,7 +110,7 @@ export async function countAirbnbCandidates(opts: CountOptions): Promise<CountBy
 // E.g. a 5BR listing made of 3BR + 2BR needs 1 of each per set. With
 // 7 3BR candidates and 4 2BR candidates → min(7, 4) = 4 sets.
 export function computeSetsFromCounts(
-  unitSlots: PropertyUnitConfig["units"],
+  unitSlots: Array<{ bedrooms: number }>,
   countsByBR: Record<number, number>,
 ): number {
   const need: Record<number, number> = {};
@@ -132,6 +130,125 @@ export function verdictFor(maxSets: number, minSets: number): "open" | "tight" |
   if (maxSets < minSets) return "blocked";
   if (maxSets <= minSets + 1) return "tight";
   return "open";
+}
+
+// ── Airbnb date-availability check (the sourceability gate's black-out test) ──
+// Operator directive 2026-06-15: a calendar window is blacked out ONLY when a
+// live SearchAPI Airbnb search for those EXACT dates can't surface the unit
+// sizes the listing is built from. A 5BR = 3BR + 2BR needs at least one
+// available 3BR AND one available 2BR for the dates (a [3,3] plan needs two
+// distinct available 3BRs). No VRBO, no pricing/comp confidence — pure
+// availability. If Airbnb has the set, the window stays open.
+//
+// Uses the SAME engine=airbnb, dated, entire-home query the market-rate sampler
+// already uses (server/availability-scanner.ts `searchAirbnb`), so this is the
+// channel the operator means by "the Airbnb API". A keyless / errored / rate-
+// limited search returns ok:false so the gate fail-safe-SKIPs (never blocks on
+// a failed search).
+
+export type AirbnbPlanAvailability = {
+  ok: boolean;                         // false ⇒ search failed / no key ⇒ caller SKIPs (fail-safe)
+  setsAvailable: number;               // complete unit-sets Airbnb can supply for the dates
+  perBedroom: Record<number, number>;  // available entire-home listings per required bedroom size
+  detail: string;                      // e.g. "3BR×4, 2BR×9 → 4 set(s)"
+};
+
+// One engine=airbnb search for a single bedroom size on specific dates.
+// Returns the count of available entire-home listings that meet OR exceed the
+// requested size (a 4BR can back a 3BR slot), or -1 on any failure so the
+// caller can treat it as "unknown" rather than "zero available".
+async function countAvailableAirbnbForDates(opts: {
+  searchLocation: string;
+  bedrooms: number;
+  checkIn: string;
+  checkOut: string;
+  apiKey: string;
+}): Promise<number> {
+  const params = new URLSearchParams({
+    engine: "airbnb",
+    check_in_date: opts.checkIn,
+    check_out_date: opts.checkOut,
+    adults: "2",
+    bedrooms: String(opts.bedrooms),
+    type_of_place: "entire_home",
+    currency: "USD",
+    api_key: opts.apiKey,
+    q: opts.searchLocation,
+  });
+  try {
+    const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+    if (!r.ok) return -1;
+    const data = (await r.json()) as any;
+    if (data?.error) {
+      console.warn(`[availability-search] airbnb avail ${opts.searchLocation} ${opts.bedrooms}BR: ${data.error}`);
+      return -1;
+    }
+    const props: any[] = Array.isArray(data?.properties) ? data.properties : [];
+    // Engine `bedrooms` is a floor; count listings meeting or exceeding the
+    // requested size. Unparsed bedroom counts are credited (the dated search
+    // already constrained the result), so we never under-count availability.
+    let n = 0;
+    for (const p of props) {
+      const pb = typeof p?.bedrooms === "number" ? p.bedrooms : null;
+      if (pb == null || pb >= opts.bedrooms) n++;
+    }
+    return n;
+  } catch (e: any) {
+    console.error(`[availability-search] airbnb avail error ${opts.searchLocation} ${opts.bedrooms}BR ${opts.checkIn}: ${e?.message ?? e}`);
+    return -1;
+  }
+}
+
+export async function checkAirbnbAvailabilityForPlan(opts: {
+  community: string;
+  unitSlots: Array<{ bedrooms: number }>;
+  checkIn: string;
+  checkOut: string;
+  apiKey?: string;
+}): Promise<AirbnbPlanAvailability> {
+  const apiKey = opts.apiKey ?? process.env.SEARCHAPI_API_KEY;
+  if (!apiKey) {
+    return { ok: false, setsAvailable: 0, perBedroom: {}, detail: "no SEARCHAPI_API_KEY — fail-safe skip" };
+  }
+  // One search per DISTINCT required bedroom size (a [3,2] plan → two searches).
+  const need: Record<number, number> = {};
+  for (const s of opts.unitSlots) need[s.bedrooms] = (need[s.bedrooms] ?? 0) + 1;
+  // Resolve the search to the TOWN level ("Wailua, Hawaii" / "Bonita Springs,
+  // Florida"), NOT the single resort string. A resort-anchored query (e.g.
+  // "Kaha Lani Resort, Wailua, Kauai, Hawaii") can return ZERO entire-home
+  // listings of a required size for a thin resort even when the surrounding
+  // town has plenty — and a zero from a SUCCESSFUL search becomes a BLOCK (not
+  // a skip). That is the exact false-zero the market-rate sampler had to
+  // geo-widen away (PR #684, market-rate-geo-widening). The town is also where
+  // we'd actually source the buy-in, so it's the correct scope for "can we
+  // source this set". The 2-sweep confirmation guard still backstops a transient
+  // town-level zero.
+  const market = BUY_IN_MARKET_LOCATIONS[opts.community];
+  const town = market?.city && market?.state ? `${market.city}, ${market.state}` : null;
+  const searchLocation = town || searchLocationForBuyInMarket(opts.community) || `${opts.community}, Hawaii`;
+  const perBedroom: Record<number, number> = {};
+  for (const brStr of Object.keys(need)) {
+    const br = Number(brStr);
+    const count = await countAvailableAirbnbForDates({
+      searchLocation,
+      bedrooms: br,
+      checkIn: opts.checkIn,
+      checkOut: opts.checkOut,
+      apiKey,
+    });
+    // A failed search for ANY required size ⇒ the whole window is "unknown" ⇒
+    // fail-safe skip (we must not block on an incomplete picture).
+    if (count < 0) {
+      return { ok: false, setsAvailable: 0, perBedroom, detail: `Airbnb search error for ${br}BR — fail-safe skip` };
+    }
+    perBedroom[br] = count;
+  }
+  const setsAvailable = computeSetsFromCounts(opts.unitSlots, perBedroom);
+  const detail =
+    Object.entries(perBedroom)
+      .map(([br, n]) => `${br}BR×${n}`)
+      .join(", ") + ` → ${setsAvailable} set(s)`;
+  return { ok: true, setsAvailable, perBedroom, detail };
 }
 
 // ── Price-side helpers (Phase 3) ────────────────────────────────────────

@@ -939,9 +939,10 @@ async function buildBulkGuestySeasonalPlan(
   for (const row of rows) rowByBR.set(row.bedrooms, row);
   const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
   const missingMonthlyRates = new Set<string>();
-  // Months a unit was intentionally blacked out (no confident exact-bedroom
-  // comp) — surfaced here so the push can CLOSE those windows on Guesty rather
-  // than treating them as a missing-data error.
+  // Kept (always empty now) so the pricing-blackout reconcile still REMOVES any
+  // legacy "pricing-blackout" Guesty blocks: with no desired blackouts and every
+  // month in confirmedOpenMonths, reconcilePricingBlackoutBlocks reopens them.
+  // See the THIN-COMP STATIC FALLBACK note below for why we no longer black out.
   const blackoutWindows: Array<{ yearMonth: string; checkIn: string; checkOut: string; reason: string }> = [];
   const monthlyRates = build24MonthPricingWindow().map(({ yearMonth }) => {
     const season = getSeasonForMonth(yearMonth, region);
@@ -949,11 +950,8 @@ async function buildBulkGuestySeasonalPlan(
     let price = 0;
     let checkIn: string | undefined;
     let checkOut: string | undefined;
-    let blackout: { checkIn: string; checkOut: string; reason: string } | null = null;
     // Track this month's genuinely-missing units (no row / no stored entry — a
-    // data error) SEPARATELY from intentional blackouts, so one unit's blackout
-    // can't mask another unit's missing data and silently close a window we
-    // can't explain.
+    // data error) so unexplained gaps still fail the push loudly.
     const missingKeysThisMonth: string[] = [];
     for (const unit of units) {
       const row = rowByBR.get(unit.bedrooms);
@@ -961,33 +959,28 @@ async function buildBulkGuestySeasonalPlan(
         ? (row.monthlyRates as Record<string, any>)[yearMonth]
         : null;
       if (entry?.checkIn && entry?.checkOut) { checkIn = entry.checkIn; checkOut = entry.checkOut; }
-      const unitBuyIn = marketRateBasisForMonth({ community, bedrooms: unit.bedrooms, yearMonth, season, row });
+      let unitBuyIn = marketRateBasisForMonth({ community, bedrooms: unit.bedrooms, yearMonth, season, row });
+      // THIN-COMP STATIC FALLBACK (operator directive 2026-06-15): when the live
+      // market scan couldn't gather a confident exact-bedroom comp basis it used
+      // to BLACK OUT the calendar month (source "pricing-blackout") — which
+      // black-holed ~2 years of a thin-3BR resort like Kaha Lani / Kapaa. The
+      // operator's rule now: NEVER black out the calendar for thin comps. Price
+      // the month from the operator-validated static seasonal basis (BUY_IN_RATES
+      // via getBuyInRate) so the window stays OPEN and sellable. Calendar
+      // black-outs are owned SOLELY by the Airbnb-availability gate
+      // (server/sourceability-gate.ts). A GENUINELY missing unit (no stored entry
+      // at all — a data bug, not a thin-comp blackout) still hard-errors below.
+      if (unitBuyIn == null && entry?.blackout) {
+        const staticBasis = getBuyInRate(community, unit.bedrooms, propertyId > 0 ? propertyId : undefined, season, yearMonth);
+        if (staticBasis > 0) unitBuyIn = staticBasis;
+      }
       if (unitBuyIn == null) {
-        if (entry?.blackout) {
-          // Intentional blackout for this unit/month — close, don't price or error.
-          if (!blackout && entry.checkIn && entry.checkOut) {
-            blackout = {
-              checkIn: entry.checkIn,
-              checkOut: entry.checkOut,
-              reason: typeof entry.blackoutReason === "string" ? entry.blackoutReason : `no confident exact-${unit.bedrooms}BR comps`,
-            };
-          }
-        } else {
-          missingKeysThisMonth.push(`${yearMonth} ${unit.bedrooms}BR`);
-        }
+        missingKeysThisMonth.push(`${yearMonth} ${unit.bedrooms}BR`);
         continue;
       }
       buyIn += unitBuyIn;
       // Match the pricing table: ceil margin per unit, then sum (not ceil on combined buy-in).
       price += cleanBaseRateFromBuyInServer(unitBuyIn, targetMargin);
-    }
-    // A month is a clean listing-level blackout only when EVERY non-priced unit
-    // was an intentional blackout (a combo can't be priced/sold half-covered).
-    // If any unit is genuinely missing (no stored entry), keep it as a hard
-    // error — the push must fail loudly rather than silently close the window.
-    if (blackout && missingKeysThisMonth.length === 0) {
-      blackoutWindows.push({ yearMonth, checkIn: blackout.checkIn, checkOut: blackout.checkOut, reason: blackout.reason });
-      return { yearMonth, buyIn: 0, price: 0, checkIn, checkOut };
     }
     for (const key of missingKeysThisMonth) missingMonthlyRates.add(key);
     return { yearMonth, buyIn, price, checkIn, checkOut };
@@ -26860,6 +26853,70 @@ Return ONLY compact JSON with this exact shape:
       const { runSourceabilitySweepForProperty } = await import("./sourceability-gate");
       const report = await runSourceabilitySweepForProperty(propertyId, { force: true, enforce: !!enforce });
       res.json(report);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // Operator unblock: REMOVE every auto-created calendar block (the VRBO-era
+  // "sourceability-gate" blocks AND the thin-comp "pricing-blackout" blocks) for
+  // a property and reset the gate's confirmation streaks. Used after the
+  // 2026-06-15 switch to Airbnb-availability-only black-outs to clear legacy
+  // blocks immediately instead of waiting for the next pricing push / sweep to
+  // reconcile them away. Reuses the existing reconcile helpers (Guesty PUT
+  // available + scanner_blocks markRemoved), so it only ever touches OUR blocks,
+  // never human/legacy ones. DRY-RUN with ?dryRun=1. ADMIN-gated.
+  app.post("/api/availability/release-auto-blocks/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const dryRun = req.query.dryRun === "1" || req.query.dryRun === "true";
+    try {
+      const {
+        reconcileSourceabilityBlocks,
+        reconcilePricingBlackoutBlocks,
+        SOURCEABILITY_GATE_SOURCE,
+        PRICING_BLACKOUT_SOURCE,
+      } = await import("./sync-scanner-blocks");
+      const active = await storage.getActiveScannerBlocks(propertyId);
+      const gateActive = active.filter((b) => b.source === SOURCEABILITY_GATE_SOURCE);
+      const pbActive = active.filter((b) => b.source === PRICING_BLACKOUT_SOURCE);
+
+      // desired:[] + every active window in confirmedOpen ⇒ both reconcilers
+      // reopen (and untrack) all of OUR blocks for this property.
+      const gateSync = await reconcileSourceabilityBlocks({
+        propertyId,
+        desired: [],
+        confirmedOpen: gateActive.map((b) => ({ startDate: b.startDate, endDate: b.endDate })),
+        dryRun,
+      });
+      const pbSync = await reconcilePricingBlackoutBlocks({
+        propertyId,
+        desired: [],
+        confirmedOpenMonths: pbActive.map((b) => b.startDate.slice(0, 7)),
+        dryRun,
+      });
+
+      // Reset gate confirmation streaks so a stale block streak can't instantly
+      // re-block before the new Airbnb-availability sweep re-evaluates.
+      if (!dryRun) {
+        for (const b of gateActive) {
+          await storage.upsertSourceabilityObservation({
+            propertyId, startDate: b.startDate, endDate: b.endDate,
+            consecutiveBlocks: 0, consecutiveOpens: 0,
+            lastDecision: "open", lastCheapestCost: null, lastSellableRevenue: null,
+            lastReason: "released by operator (Airbnb-availability switch)",
+          }).catch(() => {});
+        }
+      }
+
+      res.json({
+        propertyId,
+        dryRun,
+        found: { sourceabilityGate: gateActive.length, pricingBlackout: pbActive.length },
+        removed: { sourceabilityGate: gateSync.removed, pricingBlackout: pbSync.removed },
+        wouldRemove: { sourceabilityGate: gateSync.wouldRemove, pricingBlackout: pbSync.wouldRemove },
+        failures: [...gateSync.failures, ...pbSync.failures],
+      });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? String(e) });
     }
