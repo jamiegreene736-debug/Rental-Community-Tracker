@@ -10895,11 +10895,24 @@ Requirements:
     reservationId: string;
     guestName?: string | null;
     buyIns?: Array<{ checkOut?: unknown }>;
+    // When provided, the alias is scoped to this specific buy-in (unit), so a
+    // combo booking can have a distinct alias per unit. Omitted = legacy
+    // reservation-level lookup (matches the earliest existing alias row).
+    buyInId?: number | null;
+    unitLabel?: string | null;
   }) {
+    const hasBuyInId = typeof input.buyInId === "number" && Number.isFinite(input.buyInId);
     const existing = await db
       .select()
       .from(reservationAliases)
-      .where(eq(reservationAliases.reservationId, input.reservationId))
+      .where(
+        hasBuyInId
+          ? and(
+              eq(reservationAliases.reservationId, input.reservationId),
+              eq(reservationAliases.buyInId, input.buyInId as number),
+            )
+          : eq(reservationAliases.reservationId, input.reservationId),
+      )
       .limit(1);
     if (existing[0]) {
       const alias = await ensureReservationAliasExpiresAt(existing[0], input.buyIns ?? []);
@@ -10909,7 +10922,7 @@ Requirements:
     const payload = await createSimpleLoginAlias({
       prefix: aliasPrefixForGuest(input.guestName, input.reservationId),
       guestName: input.guestName,
-      note: `Buy-in communication alias for Guesty reservation ${input.reservationId}`,
+      note: `Buy-in communication alias for Guesty reservation ${input.reservationId}${input.unitLabel ? ` — ${input.unitLabel}` : ""}`,
     });
     const aliasEmail = extractSimpleLoginAliasEmail(payload);
     const simpleloginAliasId = extractSimpleLoginAliasId(payload);
@@ -10919,6 +10932,7 @@ Requirements:
       .insert(reservationAliases)
       .values({
         reservationId: input.reservationId,
+        buyInId: hasBuyInId ? (input.buyInId as number) : null,
         guestName: input.guestName ?? null,
         aliasEmail,
         simpleloginAliasId,
@@ -10952,6 +10966,8 @@ Requirements:
       reservationId: input.reservationId,
       guestName: input.guestName,
       buyIns: [buyIn],
+      buyInId: input.buyInId,
+      unitLabel: buyIn.unitLabel ?? null,
     });
     if (!alias.simpleloginAliasId) throw new Error("Saved SimpleLogin alias is missing its alias id");
 
@@ -11086,12 +11102,19 @@ Requirements:
     try {
       const reservationId = req.params.reservationId;
       const buyIns = await storage.getBuyInsByReservation(reservationId);
-      const [rawAlias] = await db
+      const rawAliases = await db
         .select()
         .from(reservationAliases)
-        .where(eq(reservationAliases.reservationId, reservationId))
-        .limit(1);
-      const alias = rawAlias ? await ensureReservationAliasExpiresAt(rawAlias, buyIns) : null;
+        .where(eq(reservationAliases.reservationId, reservationId));
+      // Per-unit: refresh each alias's expiry against its own buy-in (fallback to
+      // all buy-ins for legacy reservation-level rows with no buyInId).
+      const aliases = await Promise.all(
+        rawAliases.map((row) =>
+          ensureReservationAliasExpiresAt(row, row.buyInId ? buyIns.filter((b) => b.id === row.buyInId) : buyIns),
+        ),
+      );
+      // Back-compat: `alias` is the reservation-level / earliest row.
+      const alias = aliases.find((a) => a.buyInId == null) ?? aliases[0] ?? null;
       const contacts = await db
         .select()
         .from(buyInVendorContacts)
@@ -11102,7 +11125,7 @@ Requirements:
         .where(eq(buyInEmails.reservationId, reservationId))
         .orderBy(desc(buyInEmails.sentAt))
         .limit(100);
-      res.json({ reservationId, alias: alias ?? null, buyIns, contacts, emails });
+      res.json({ reservationId, alias: alias ?? null, aliases, buyIns, contacts, emails });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch buy-in communications", message: err.message });
     }
@@ -11112,8 +11135,20 @@ Requirements:
     try {
       const reservationId = req.params.reservationId;
       const guestName = String(req.body?.guestName ?? "").trim() || null;
+      const rawBuyInId = req.body?.buyInId;
+      const buyInId = Number.isFinite(Number(rawBuyInId)) ? Number(rawBuyInId) : null;
       const buyIns = await storage.getBuyInsByReservation(reservationId);
-      const result = await getOrCreateReservationAlias({ reservationId, guestName, buyIns });
+      // When a buyInId is given, scope the alias to that unit (and validate it
+      // belongs to this reservation). Otherwise fall back to reservation-level.
+      let scopedBuyIns = buyIns;
+      let unitLabel: string | null = null;
+      if (buyInId != null) {
+        const target = buyIns.find((b) => b.id === buyInId);
+        if (!target) return res.status(404).json({ error: "Buy-in not found for this reservation" });
+        scopedBuyIns = [target];
+        unitLabel = target.unitLabel ?? null;
+      }
+      const result = await getOrCreateReservationAlias({ reservationId, guestName, buyIns: scopedBuyIns, buyInId, unitLabel });
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to create SimpleLogin alias", message: err.message });

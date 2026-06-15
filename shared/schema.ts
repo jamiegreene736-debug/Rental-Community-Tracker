@@ -229,6 +229,9 @@ export type ManualReservation = typeof manualReservations.$inferSelect;
 export const reservationAliases = pgTable("reservation_aliases", {
   id: serial("id").primaryKey(),
   reservationId: text("reservation_id").notNull(),
+  // Per-unit: each attached buy-in (unit) gets its own alias. NULL = a legacy
+  // reservation-level alias (pre per-unit). Uniqueness is (reservation_id, buy_in_id).
+  buyInId: integer("buy_in_id"),
   guestName: text("guest_name"),
   aliasEmail: text("alias_email").notNull(),
   simpleloginAliasId: integer("simplelogin_alias_id"),
