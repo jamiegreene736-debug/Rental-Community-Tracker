@@ -43,6 +43,36 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-15 ("sidecar randomly going off" = unattended inventory-feed sweep; OFF-REPO root cause):
+  Operator reported the local Chrome sidecar firing unprompted. Diagnosed from the
+  live worker log (`~/.vrbo-sidecar-daemon/sidecar-launchd.log`): an UNATTENDED
+  inventory-feed sweep — every Kauai city (Koloa/Princeville/Poipu Beach/Wailua…) ×
+  consecutive weekly windows × full-city `cityWideInventory` export, each city firing
+  BOTH a `vrbo_search` and a `hometogo_search` — was being enqueued onto the PROD
+  sidecar queue at ALL HOURS (bursts across Jun 11–15 incl. overnight), so the 8 local
+  Chrome workers (which poll `admin.vacationrentalexpertz.com`) drove themselves for
+  hours. NOT the already-gated Monday-3am `WEEKLY_AVAILABILITY_SCAN` sweep — a
+  separate feed. **The feed scheduler is OFF-REPO:** it's in NO branch, NO worktree,
+  NO local cron / Claude scheduled-task / `/loop`, and NOT on disk — only the deployed
+  Railway artifact (prod runs code ahead of git, likely `railway up`'d from an
+  uncommitted tree). **Why there is NO clean in-repo fix (the trap — don't gate it):**
+  HomeToGo is NOT feed-only. As of a concurrent main merge it's a legit 2nd inventory
+  source called from the shared city-scan core (`server/city-vrbo-inventory.ts`
+  `runCityScanCore` → `searchHometogoViaSidecar`), so EVERY real operator scan
+  (auto-fill / find-buy-in / bulk queue / expansion) now emits the SAME
+  `vrbo_search` + `hometogo_search` cityWide pair. Feed and operator jobs are
+  byte-identical at every layer this repo controls; a `hometogo_search` (or
+  cityWide-1BR) kill-switch would degrade the operator's OWN buy-in coverage and still
+  not stop the VRBO half. (An earlier cut of this PR added that guard — removed.)
+  Immediate relief (DONE, holding): `POST /api/vrbo-sidecar/stop` (X-Admin-Secret)
+  paused the live queue — cancels active + blocks new, both halves stop, worker idles
+  (heartbeat stays green). `POST /api/vrbo-sidecar/start` re-enables your own scans.
+  DURABLE FIX (off-repo, operator): disable the prod feed scheduler at its source, OR
+  redeploy prod cleanly from git — current `main` has NO feed scheduler, so a
+  git-based deploy drops it while keeping HomeToGo as a legit source — then un-pause.
+  Until then the sweep resumes the moment the queue is un-paused. Full rationale in
+  AGENTS.md Decision Log 2026-06-15. PR #674 is docs-only.
+
 - 2026-06-10 (guest payment/refund RECEIPTS — auto-message + durable page):
   Operator asked: when he sends a refund (or takes a payment) via Guesty, auto-send
   the guest a message that's a receipt of it, store it in the guest inbox, "try
