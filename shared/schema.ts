@@ -1289,6 +1289,29 @@ export const scannerBlocks = pgTable("scanner_blocks", {
 export type ScannerBlock = typeof scannerBlocks.$inferSelect;
 export type InsertScannerBlock = typeof scannerBlocks.$inferInsert;
 
+// ── Sourceability gate per-window confirmation state ──
+// The sourceability gate (server/sourceability-gate.ts) only blocks/unblocks a
+// Guesty window after the SAME decision repeats across N CONSECUTIVE sweeps, so
+// a single flaky/partial VRBO scrape can't false-block (or false-unblock) a
+// window — we observed the same week read −$8,664 then +$5,045 minutes apart.
+// This persists the consecutive-decision streaks per (property, window) so the
+// confirmation survives redeploys (in-memory would reset every deploy).
+export const sourceabilityObservations = pgTable("sourceability_observations", {
+  id: serial("id").primaryKey(),
+  propertyId: integer("property_id").notNull(),
+  startDate: date("start_date").notNull(),
+  endDate: date("end_date").notNull(),
+  consecutiveBlocks: integer("consecutive_blocks").notNull().default(0),
+  consecutiveOpens: integer("consecutive_opens").notNull().default(0),
+  lastDecision: text("last_decision"),            // "block" | "open" | "skip"
+  lastCheapestCost: numeric("last_cheapest_cost", { precision: 10, scale: 2 }),
+  lastSellableRevenue: numeric("last_sellable_revenue", { precision: 10, scale: 2 }),
+  lastReason: text("last_reason"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type SourceabilityObservation = typeof sourceabilityObservations.$inferSelect;
+export type InsertSourceabilityObservation = typeof sourceabilityObservations.$inferInsert;
+
 // ── Per-window manual overrides ──
 // Users can force a window to be normal-priced or critical-priced regardless
 // of the policy result. One row per (propertyId, startDate).

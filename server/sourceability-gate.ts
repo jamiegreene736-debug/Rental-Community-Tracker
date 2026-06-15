@@ -30,12 +30,15 @@ import { storage } from "./storage";
 import {
   decideSourceability,
   generateWeeklyWindows,
+  applyConfirmation,
+  confirmedAction,
+  DEFAULT_CONFIRM_SWEEPS,
   type SourceabilityScan,
   type SourceabilityDecision,
 } from "./sourceability-gate-core";
 
 // Re-export the pure decision core so existing importers keep working.
-export { decideSourceability, generateWeeklyWindows } from "./sourceability-gate-core";
+export { decideSourceability, generateWeeklyWindows, applyConfirmation, confirmedAction } from "./sourceability-gate-core";
 export type { SourceabilityScan, SourceabilityDecision } from "./sourceability-gate-core";
 
 // ── Config (env-tunable; defaults are conservative) ──────────────────────────
@@ -61,6 +64,9 @@ const SCAN_BUDGET = () => num(process.env.SOURCEABILITY_GATE_SCAN_BUDGET, 12);
  *  (revenue < cost). Set 0.2 to block anything under a 20% clean margin. */
 const MIN_MARGIN = () => num(process.env.SOURCEABILITY_GATE_MIN_MARGIN, 0);
 const DEFAULT_TARGET_MARGIN = () => num(process.env.SOURCEABILITY_GATE_TARGET_MARGIN, 0.20);
+/** How many CONSECUTIVE sweeps must agree before we block/unblock Guesty. ≥2
+ *  makes the gate immune to a single noisy/partial VRBO scrape. */
+const CONFIRM_SWEEPS = () => Math.max(1, num(process.env.SOURCEABILITY_GATE_CONFIRM_SWEEPS, DEFAULT_CONFIRM_SWEEPS));
 
 // ── The sweep (IO) ───────────────────────────────────────────────────────────
 export type SourceabilitySweepReport = {
@@ -70,9 +76,18 @@ export type SourceabilitySweepReport = {
   enforced: boolean;
   dryRun: boolean;
   scans: number;
-  decisions: Array<{ startDate: string; endDate: string; decision: SourceabilityDecision; reason: string }>;
-  blockedCount: number;
-  openCount: number;
+  decisions: Array<{
+    startDate: string;
+    endDate: string;
+    decision: SourceabilityDecision;        // this sweep's raw scan decision
+    action?: "block" | "open" | "pending";  // confirmed action after N-sweep streak
+    streak?: number;                        // consecutive count toward the confirm threshold
+    reason: string;
+  }>;
+  confirmThreshold: number;
+  blockedCount: number;   // CONFIRMED blocks acted on this sweep
+  openCount: number;      // CONFIRMED opens acted on this sweep
+  pendingCount: number;   // scanned, decided, but not yet confirmed (calendar untouched)
   skippedCount: number;
   sync: (SyncResult & { wouldCreate?: number; wouldRemove?: number }) | null;
   note?: string;
@@ -93,9 +108,11 @@ export async function runSourceabilitySweepForProperty(
 ): Promise<SourceabilitySweepReport> {
   const enabled = isSourceabilityGateEnabled();
   const enforce = opts.enforce ?? isSourceabilityGateEnforced();
+  const confirmThreshold = CONFIRM_SWEEPS();
   const base: SourceabilitySweepReport = {
     propertyId, community: null, enabled, enforced: enforce, dryRun: !enforce,
-    scans: 0, decisions: [], blockedCount: 0, openCount: 0, skippedCount: 0, sync: null,
+    scans: 0, decisions: [], confirmThreshold,
+    blockedCount: 0, openCount: 0, pendingCount: 0, skippedCount: 0, sync: null,
   };
 
   if (!enabled && !opts.force) return { ...base, note: "sourceability gate disabled (SOURCEABILITY_GATE_ENABLED unset)" };
@@ -151,9 +168,32 @@ export async function runSourceabilitySweepForProperty(
     }
 
     const d = decideSourceability({ scan, sellableRevenue, minMargin });
-    decisions.push({ startDate: w.startDate, endDate: w.endDate, decision: d.decision, reason: d.reason });
-    if (d.decision === "block") toBlock.push({ startDate: w.startDate, endDate: w.endDate, reason: d.reason });
-    else if (d.decision === "open") confirmedOpen.push({ startDate: w.startDate, endDate: w.endDate });
+
+    // CONFIRMATION GUARD: fold this scan's decision into the persisted streak,
+    // and only act on Guesty once the SAME decision has repeated `confirmThreshold`
+    // times in a row — so a single noisy/partial scrape can't move the calendar.
+    const prev = await storage.getSourceabilityObservation(propertyId, w.startDate, w.endDate).catch(() => null);
+    const nextState = applyConfirmation(
+      { consecutiveBlocks: prev?.consecutiveBlocks ?? 0, consecutiveOpens: prev?.consecutiveOpens ?? 0 },
+      d.decision,
+    );
+    await storage.upsertSourceabilityObservation({
+      propertyId, startDate: w.startDate, endDate: w.endDate,
+      consecutiveBlocks: nextState.consecutiveBlocks, consecutiveOpens: nextState.consecutiveOpens,
+      lastDecision: d.decision, lastCheapestCost: scan.cheapestCost,
+      lastSellableRevenue: Math.round(sellableRevenue), lastReason: d.reason,
+    }).catch((e) => console.error(`[sourceability-gate] persist obs failed (${propertyId} ${w.startDate}):`, e?.message ?? e));
+
+    const action = confirmedAction(nextState, confirmThreshold);
+    const streak = d.decision === "block" ? nextState.consecutiveBlocks
+      : d.decision === "open" ? nextState.consecutiveOpens : 0;
+    decisions.push({
+      startDate: w.startDate, endDate: w.endDate, decision: d.decision, action, streak,
+      reason: `${d.reason} · ${d.decision}=${streak}/${confirmThreshold} → ${action}`,
+    });
+    if (action === "block") toBlock.push({ startDate: w.startDate, endDate: w.endDate, reason: d.reason });
+    else if (action === "open") confirmedOpen.push({ startDate: w.startDate, endDate: w.endDate });
+    // action === "pending" ⇒ scanned + decided, but not yet confirmed: leave the calendar untouched.
   }
 
   const sync = await reconcileSourceabilityBlocks({
@@ -168,8 +208,10 @@ export async function runSourceabilitySweepForProperty(
     community,
     scans,
     decisions,
+    confirmThreshold,
     blockedCount: toBlock.length,
     openCount: confirmedOpen.length,
+    pendingCount: decisions.filter((d) => d.action === "pending").length,
     skippedCount: decisions.filter((d) => d.decision === "skip").length,
     sync,
   };
@@ -201,6 +243,9 @@ export async function runSourceabilitySweepAllEnabled(
   _sweepInFlight = true;
   const reports: SourceabilitySweepReport[] = [];
   try {
+    // Tidy: drop confirmation rows for windows that have already passed.
+    const todayIso = (opts.now ?? new Date()).toISOString().slice(0, 10);
+    await storage.deleteSourceabilityObservationsEndingBefore(todayIso).catch(() => {});
     const propertyIds = Object.keys(PROPERTY_UNIT_CONFIGS).map(Number).filter((id) => id > 0);
     for (const propertyId of propertyIds) {
       const listingId = await storage.getGuestyListingId(propertyId).catch(() => null);

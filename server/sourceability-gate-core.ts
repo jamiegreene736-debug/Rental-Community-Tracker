@@ -64,3 +64,32 @@ export function generateWeeklyWindows(
   }
   return windows;
 }
+
+// ── Confirmation guard (immunity to single-scrape noise) ─────────────────────
+// We observed the SAME window read −$8,664 (block) then +$5,045 (open) minutes
+// apart — VRBO scrapes are noisy/partial. So the gate never acts on one scan:
+// a window must produce the SAME decision in N CONSECUTIVE sweeps before we
+// block/unblock it on Guesty. Random noise never reaches N-in-a-row; a genuine,
+// persistent loss does. The streaks are persisted per window (survive deploys).
+export const DEFAULT_CONFIRM_SWEEPS = 2;
+
+export type ConfirmationState = { consecutiveBlocks: number; consecutiveOpens: number };
+
+/** Fold this sweep's decision into the running streaks. "skip" carries NO
+ *  evidence (failed/empty scan) and leaves both streaks unchanged — a failed
+ *  scan must never reset a confirmation nor count toward one. */
+export function applyConfirmation(prev: ConfirmationState, decision: SourceabilityDecision): ConfirmationState {
+  if (decision === "block") return { consecutiveBlocks: prev.consecutiveBlocks + 1, consecutiveOpens: 0 };
+  if (decision === "open") return { consecutiveBlocks: 0, consecutiveOpens: prev.consecutiveOpens + 1 };
+  return { consecutiveBlocks: prev.consecutiveBlocks, consecutiveOpens: prev.consecutiveOpens };
+}
+
+/** The CONFIRMED action — only fires once a decision has repeated `threshold`
+ *  times in a row. Until then the window is "pending" and the calendar is left
+ *  exactly as it is. */
+export function confirmedAction(state: ConfirmationState, threshold: number): "block" | "open" | "pending" {
+  const t = Math.max(1, threshold);
+  if (state.consecutiveBlocks >= t) return "block";
+  if (state.consecutiveOpens >= t) return "open";
+  return "pending";
+}

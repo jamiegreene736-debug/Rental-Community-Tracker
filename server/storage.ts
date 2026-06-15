@@ -31,10 +31,11 @@ import {
   type PhotoSync, type InsertPhotoSync,
   type PhotoSyncAudit, type InsertPhotoSyncAudit,
   type ScannerBlock, type InsertScannerBlock,
+  type SourceabilityObservation,
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, guestInboxMessages, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, builderBookingRules, messageTemplates, autoReplyLog, autoReplyStyleExamples, appSettings, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
+  users, buyIns, guestInboxMessages, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, builderBookingRules, messageTemplates, autoReplyLog, autoReplyStyleExamples, appSettings, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, sourceabilityObservations, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
   type PropertyMarketRate, type InsertPropertyMarketRate,
   type PricingUpdateLog, type InsertPricingUpdateLog,
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
@@ -1724,6 +1725,47 @@ export class DatabaseStorage implements IStorage {
     await db.update(scannerBlocks)
       .set({ removedAt: new Date() })
       .where(eq(scannerBlocks.id, id));
+  }
+
+  // ── Sourceability gate observations (per-window confirmation streaks) ──
+  async getSourceabilityObservation(propertyId: number, startDate: string, endDate: string): Promise<SourceabilityObservation | null> {
+    const [row] = await db.select().from(sourceabilityObservations)
+      .where(and(
+        eq(sourceabilityObservations.propertyId, propertyId),
+        eq(sourceabilityObservations.startDate, startDate),
+        eq(sourceabilityObservations.endDate, endDate),
+      )).limit(1);
+    return row ?? null;
+  }
+
+  async upsertSourceabilityObservation(data: {
+    propertyId: number; startDate: string; endDate: string;
+    consecutiveBlocks: number; consecutiveOpens: number;
+    lastDecision: string; lastCheapestCost: number | null;
+    lastSellableRevenue: number | null; lastReason: string;
+  }): Promise<void> {
+    const values = {
+      consecutiveBlocks: data.consecutiveBlocks,
+      consecutiveOpens: data.consecutiveOpens,
+      lastDecision: data.lastDecision,
+      lastCheapestCost: data.lastCheapestCost != null ? String(data.lastCheapestCost) : null,
+      lastSellableRevenue: data.lastSellableRevenue != null ? String(data.lastSellableRevenue) : null,
+      lastReason: data.lastReason.slice(0, 250),
+      updatedAt: new Date(),
+    };
+    // Single-flight sweep ⇒ no concurrency; select-then-write is safe (no composite unique needed).
+    const existing = await this.getSourceabilityObservation(data.propertyId, data.startDate, data.endDate);
+    if (existing) {
+      await db.update(sourceabilityObservations).set(values).where(eq(sourceabilityObservations.id, existing.id));
+    } else {
+      await db.insert(sourceabilityObservations).values({
+        propertyId: data.propertyId, startDate: data.startDate, endDate: data.endDate, ...values,
+      });
+    }
+  }
+
+  async deleteSourceabilityObservationsEndingBefore(dateIso: string): Promise<void> {
+    await db.delete(sourceabilityObservations).where(sql`${sourceabilityObservations.endDate} < ${dateIso}`);
   }
 
   // ── Scanner overrides ──
