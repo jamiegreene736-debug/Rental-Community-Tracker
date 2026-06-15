@@ -26,6 +26,7 @@ import Bookings from "@/pages/bookings";
 import Agreement from "@/pages/agreement";
 import { setLivePropertyMarketRates, type LivePropertyMarketRateInput } from "@shared/pricing-rates";
 import { usePortalSession } from "@/lib/auth";
+import AssistantDock from "@/components/AssistantDock";
 
 function AgentRouteGate({ children }: { children: React.ReactNode }) {
   const { data: session, isLoading } = usePortalSession();
@@ -113,6 +114,7 @@ function App() {
         <Toaster />
         {!isAgreementRoute && <MarketRatesHydrator />}
         <Router />
+        {!isAgreementRoute && <AssistantDock />}
       </TooltipProvider>
     </QueryClientProvider>
   );

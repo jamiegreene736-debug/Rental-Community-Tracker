@@ -418,4 +418,35 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ON guest_receipts (created_at DESC)
   `);
   console.log("[schema] ensured guest_receipts table");
+
+  // Platform AI assistant (dashboard chat agent). Created here too so a fresh
+  // Railway deploy works before `npm run db:push` runs. The list/history
+  // endpoints fail-soft (return empty) until these exist.
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS assistant_sessions (
+      id serial PRIMARY KEY,
+      title text NOT NULL DEFAULT 'New chat',
+      created_by text NOT NULL DEFAULT 'admin',
+      created_at timestamp NOT NULL DEFAULT now(),
+      last_active_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS assistant_messages (
+      id serial PRIMARY KEY,
+      session_id integer NOT NULL,
+      role text NOT NULL,
+      content jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS assistant_messages_session_idx
+      ON assistant_messages (session_id, created_at ASC)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS assistant_sessions_active_idx
+      ON assistant_sessions (last_active_at DESC)
+  `);
+  console.log("[schema] ensured assistant chat tables");
 }

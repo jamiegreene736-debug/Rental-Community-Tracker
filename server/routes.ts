@@ -98,6 +98,7 @@ import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigS
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts, setAutoSendConfig, runAutoSendQueue } from "./auto-reply";
 import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
+import { registerAssistantRoutes } from "./assistant/routes";
 import { formatReceiptMoney, formatReceiptLongDate } from "@shared/receipt-message";
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
@@ -5538,6 +5539,11 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Platform AI assistant (dashboard chat agent). Read-only Phase 0, gated
+  // behind PLATFORM_ASSISTANT_ENABLED. Registered first so its routes sit
+  // inside requireAuth like everything else.
+  registerAssistantRoutes(app);
+
   void (async () => {
     try {
       const drafts = await storage.getCommunityDrafts();
