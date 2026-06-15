@@ -216,7 +216,7 @@ export default function AssistantDock() {
                   <li>• "What's my revenue over the last 30 days?"</li>
                   <li>• "Find a better combination for the next Poipu Kai booking."</li>
                   <li>• "Find photos for Poipu Kai Resort."</li>
-                  <li>• "Any photo alerts on my listings?"</li>
+                  <li>• "Any new guest messages? Draft a reply to the latest."</li>
                 </ul>
               </div>
             )}
