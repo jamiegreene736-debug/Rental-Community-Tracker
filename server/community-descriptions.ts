@@ -156,6 +156,12 @@ export const CURATED_COMMUNITY_DESCRIPTIONS: CuratedCommunityDescription[] = [
       "The Ilikai is an iconic Waikiki landmark, a Y-shaped tower set at the western edge of Waikiki along the Ala Wai Yacht Harbor. The community sits in one of Honolulu's most convenient spots, with the boats of the marina just outside and Duke Kahanamoku Beach and Lagoon, the calm western end of Waikiki Beach, a short walk away. On the grounds, guests can enjoy two heated swimming pools and a sun deck, a fitness center, and a selection of restaurants and shops. Just beyond the building you are minutes from the open-air Ala Moana Center and the broad sands of Ala Moana Beach Park, while many suites take in sweeping views of the harbor, the Pacific, and the Honolulu skyline.",
   },
   {
+    name: "Ko Olina Beach Villas",
+    aliases: ["Ko Olina Beach Villas", "Beach Villas at Ko Olina", "Beach Villas Ko Olina"],
+    description:
+      "Ko Olina Beach Villas is a beachfront condominium resort set within the gated Ko Olina Resort on Oahu's sunny leeward coast in Kapolei. The community sits directly beside the resort's calm, protected man-made lagoons, whose gentle waters are ideal for swimming and snorkeling, with a sandy beach just steps from the towers. Guests enjoy resort-style amenities including landscaped pools and spa hot tubs, a fitness center, and barbecue and lounge areas, while the wider Ko Olina Resort puts the Ko Olina Golf Club, the marina, and the shops and restaurants of the marketplace within easy reach. Many villas take in sweeping ocean, lagoon, and golf-course views, making it a polished, relaxed base on Oahu's west side close to the area's beaches and activities.",
+  },
+  {
     name: "Coconut Plantation at Ko Olina",
     aliases: ["Coconut Plantation at Ko Olina", "Coconut Plantation", "Ko Olina"],
     description:
