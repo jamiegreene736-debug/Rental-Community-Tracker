@@ -1112,9 +1112,25 @@ margin on the SELL side (pricing) and the SOURCING side (the gate). PRs #663
 
 ### Database & deploy
 
-15. **Schema migrations run via `npm run db:push` on Railway boot.**
-    See `Dockerfile` `CMD`. Adding a column = bump `shared/schema.ts`;
-    Drizzle handles the rest. Do NOT write bespoke migration SQL.
+15. **Schema sync on Railway boot: `ensureRuntimeSchema()` is authoritative;
+    boot `npm run db:push` is a NON-INTERACTIVE backstop.** See `Dockerfile`
+    `CMD` + `server/schema-maintenance.ts`. `ensureRuntimeSchema` (runs in
+    `server/index.ts` on boot) does idempotent `CREATE TABLE` / `ADD COLUMN` /
+    `CREATE INDEX IF NOT EXISTS` — THIS is where new tables/columns/indexes
+    actually land, because boot `db:push` SILENTLY SKIPS `ADD COLUMN` on
+    existing tables (new `CREATE TABLE` does work). The boot CMD runs
+    `( timeout -k 10 120 npm run db:push </dev/null && echo ok || echo skip );
+    exec node …` — non-interactive (stdin denied), bounded, NON-BLOCKING.
+    DON'T revert the `;` back to `&&`, and DON'T switch to `drizzle-kit push
+    --force`: a data-loss diff (e.g. adding a unique constraint to a populated
+    table) makes drizzle-kit prompt, which in the non-TTY container wedged every
+    deploy ~15-20 min; `--force` "fixes" the wait by auto-TRUNCATING the table
+    (PR #677, Decision Log 2026-06-15). `shared/schema.ts` declares NO indexes,
+    so a cleanly-completing push DROPS the ~16 `*_idx` ensureRuntimeSchema
+    creates and boot recreates them (churn — and running push against prod from
+    a laptop drops them live until the next boot). Apply genuinely destructive
+    DDL by hand via the Postgres public proxy; keep `shared/schema.ts` +
+    `server/schema-maintenance.ts` in sync.
 
 16. **Railway auto-deploys on push to `main`.** No `railway up`
     equivalent needed. Server changes don't change the client bundle
@@ -2317,6 +2333,7 @@ Examples:
 2026-06-15 · Jamie asked to fix last-minute buy-in pricing (he believed late-arriving bookings lost money because the markup wasn't high enough) + account for VRBO/Booking/Airbnb commission, targeting "20% clean after fees" · ACCEPTED, but the data redirected the fix (PR #663) · Analysis of 23 committed reservations + 479 of our own VRBO scrapes: median booking lead ~200 days (almost no true last-minute bookings) and unit cost is FLAT until ~14 days out then ~+13% — so the old escalating per-season-band lead-time markup (+15/25/40/50% across 45/75/90/120 days) was PRICING US OUT of near-term dates where cost hadn't risen. Replaced it with a single FLAT +15% within 14 days (`server/availability-policy.ts` LAST_MINUTE_MARKUP_DAYS/PCT). Commission: operator confirmed Guesty applies the per-channel markup and disburses the fed rate NET, so `cleanBaseRateFromBuyInServer` stays the clean net target (cost×(1+margin)) with NO code gross-up — adding one would double-count. The real margin thinness is the sell-early/buy-late spread + Booking.com commission, NOT last-minute underpricing. See the "Sourceability gate + last-minute pricing" Load-Bearing subsection.
 2026-06-15 · Jamie asked to auto-block the Guesty calendar (near-immediately) for windows we can't source a buy-in for at a profit ("sell now, can't source later"), then — after live validation caught wild VRBO scan noise — a confirmation guard, then a UI showing each window's progress toward a block · ACCEPTED · Three PRs: (#664) sourceability gate — a daily sweep runs the existing buy-in scan per near-term window and blocks/unblocks via Guesty, tracking only our `source="sourceability-gate"` scanner_blocks; FAIL-SAFE IS OPEN (never block on a failed/empty scan). (#665) 2-sweep confirmation guard — the same Poipu Kai week read −$8,664 then +$5,045 minutes apart, so a window needs the SAME decision in N CONSECUTIVE sweeps (default 2) before the calendar moves; streaks persist in the new `sourceability_observations` table; a "skip" is neutral. (#666) the Sourceability Gate card on `/availability-scanner` (`GET /api/availability/sourceability-observations` → "Loss flagged 1/2 — 1 more sweep to block"). Env-gated + INERT on deploy; operator flipped SOURCEABILITY_GATE_ENABLED+ENFORCE on this day. Validated LIVE filtering real scan noise (a window hit 2/2 blocks then an open read reset it → never false-blocked). See the "Sourceability gate + last-minute pricing" Load-Bearing subsection.
 2026-06-15 · Jamie: "add an email alias for the 2nd unit buy-in — at the moment there's only the option to make an alias for the first buy-in." · ACCEPTED · SimpleLogin buy-in aliases are now PER-UNIT, not per-reservation. Root cause: `reservation_aliases.reservation_id UNIQUE` (one row/reservation, no `buy_in_id`) + the UI gating the "Create alias" button to `firstBuyInId` in `bookings.tsx`. Changes: (1) nullable `buy_in_id` added to `reservation_aliases` (`shared/schema.ts`); `schema-maintenance.ts` backfills legacy rows to the reservation's earliest buy-in, DROPs `reservation_aliases_reservation_id_key`, and adds `UNIQUE INDEX (reservation_id, buy_in_id)`. (2) `getOrCreateReservationAlias` takes optional `buyInId` (look up / insert per reservation+unit); `getOrCreateVendorContact` + `POST /api/bookings/:id/simplelogin/alias` thread it and validate the buy-in belongs to the reservation. (3) `GET .../buy-in-communications` returns `aliases[]` (per-unit) + back-compat `alias`. (4) UI shows the alias control on EVERY attached unit; each panel reads `aliases.find(a => a.buyInId === buyIn.id)` and POSTs `{ buyInId }`; label "Booking email alias" → "Unit email alias". Verified: `npm run build` clean, full `npm test` green, `npm run check` 0 new TS errors (baseline 287). SimpleLogin live-smoke pending on deploy.
+2026-06-15 · Jamie reported every Railway deploy stalling ~15-20 min in DEPLOYING because boot `npm run db:push` hit an interactive truncate-prompt in the non-TTY container · FIXED (PR #677) · Root cause was a constraint-NAME mismatch: prod's `guest_receipts` token/dedup_key UNIQUE were Postgres-default-named (`*_key`) because `ensureRuntimeSchema` created the table with inline `UNIQUE`, but drizzle-kit matches constraints by NAME and wanted `*_unique`, so push prompted to "add" them every deploy. Renamed the two prod constraints to `guest_receipts_token_unique` / `guest_receipts_dedup_key_unique` (psql; verified no dup/null tokens). Durable guard: boot CMD now runs `timeout -k 10 120 npm run db:push </dev/null` then `; exec node` (non-interactive + bounded + non-blocking) — NOT `--force` (it auto-truncates). Verified live: post-merge deploy reached SUCCESS in ~3 min with `[✓] Changes applied` + `[boot] db:push completed` and zero prompt text in logs. Lesson: when a table is created by ensureRuntimeSchema raw SQL AND declared `.unique()` in schema.ts, name the raw-SQL constraint `<table>_<col>_unique`. See Load-Bearing #15.
 ```
 
 (Populate on first dispute.)
