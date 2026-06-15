@@ -23,6 +23,33 @@ export type HybridMonthScannedEvent = {
   pricingRecipe?: MarketRatePricingRecipe;
 };
 
+// Emitted when a single month's exact-bedroom scan can't find a confident
+// comp basis (red confidence or no usable samples). Instead of aborting the
+// whole property (the pre-2026-06-15 behavior), the scan records a blackout
+// for that month's window and continues to the next month. The bulk pricing
+// queue surfaces these and the Guesty push closes the window on the calendar.
+export type HybridMonthBlackoutEvent = {
+  propertyId: number;
+  bedrooms: number;
+  monthOffset: number;
+  horizonMonths: number;
+  yearMonth: string;
+  checkIn: string;
+  checkOut: string;
+  reason: string;
+  confidence?: MarketRateConfidence;
+};
+
+// A blacked-out (yearMonth, bedrooms) window returned by the scan so callers
+// can close it on Guesty (see reconcilePricingBlackoutBlocks).
+export type HybridBlackoutWindow = {
+  bedrooms: number;
+  yearMonth: string;
+  checkIn: string;
+  checkOut: string;
+  reason: string;
+};
+
 const hybridPricingCancelledError = () => Object.assign(new Error("Cancelled by operator"), { cancelled: true });
 
 export type HybridLayerBreakdown = {
@@ -93,6 +120,10 @@ type HybridPricingConfig = {
 export type LegacySeason = "LOW" | "HIGH" | "HOLIDAY";
 
 export type HybridMonthlyRate = {
+  // 0 for blackout months (no confident comp basis); a positive nightly
+  // basis otherwise. Readers that price off this value must skip blackout
+  // entries (medianNightly <= 0 / blackout === true) — getLiveMonthlyBuyIn
+  // already returns null for non-positive values.
   medianNightly: number;
   season: "LOW" | "HIGH" | "HOLIDAY";
   checkIn: string;
@@ -104,6 +135,12 @@ export type HybridMonthlyRate = {
   seasonTierLabel: string;
   confidence?: MarketRateConfidence;
   evidence?: MarketRateEvidence;
+  // Set when this month had no confident exact-bedroom comps. The month is
+  // kept in monthlyRates (so the 24-month count stays whole and the Guesty
+  // push can tell "intentionally blacked out" from "missing/error") but no
+  // price is pushed and the window is closed on the Guesty calendar.
+  blackout?: boolean;
+  blackoutReason?: string;
   channels: { airbnb: number | null; vrbo: null; booking: null; pm: null };
   hybrid: {
     baseAirbnbMedian: number;
@@ -842,7 +879,7 @@ function representativeMonthlyRate(
   season: LegacySeason,
 ): HybridMonthlyRate | null {
   return Object.values(monthlyRates).find(
-    (rate) => legacySeasonForDemandClass(rate.demandClass) === season,
+    (rate) => !rate.blackout && legacySeasonForDemandClass(rate.demandClass) === season,
   ) ?? null;
 }
 
@@ -902,8 +939,9 @@ export async function refreshHybridPricingForTarget(args: {
   searchName?: string;
   asOf?: Date;
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
+  onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>;
   shouldCancel?: () => boolean | Promise<boolean>;
-}): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
+}): Promise<{ propertyId: number; rows: any[]; logs: any[]; blackouts: HybridBlackoutWindow[] }> {
   const { storage } = await import("./storage");
   const asOf = args.asOf ?? new Date();
   const searchQueries = curatedAirbnbSearchQueries(args.community, args.searchName);
@@ -911,6 +949,11 @@ export async function refreshHybridPricingForTarget(args: {
   const pricingRegion = getCommunityRegion(args.community);
   const rows: any[] = [];
   const logs: any[] = [];
+  // Windows that had no confident exact-bedroom comp this run, accumulated
+  // across all bedroom counts. Returned to the caller so the Guesty push can
+  // close them on the calendar (reversible — reopened when a later scan finds
+  // comps for that month).
+  const blackouts: HybridBlackoutWindow[] = [];
   const bedroomCounts = Array.from(new Set(args.bedroomCounts))
     .filter((bedrooms) => Number.isFinite(bedrooms) && bedrooms > 0)
     .sort((a, b) => a - b);
@@ -935,6 +978,60 @@ export async function refreshHybridPricingForTarget(args: {
     const horizonMonths = HYBRID_PRICING_CONFIG.scanSettings.horizonMonths;
     const stayNights = HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights;
 
+    // Record a blacked-out month (no confident exact-bedroom comp) instead of
+    // aborting the whole property. The month is kept in monthlyRates (medianNightly
+    // 0 + blackout flag) so the 24-month count stays whole and the Guesty push can
+    // tell "intentionally blacked out" from "missing"; the window is queued for a
+    // calendar close. The scan then moves on to the next month.
+    const recordMonthBlackout = async (params: {
+      monthOffset: number;
+      window: { yearMonth: string; checkIn: string; checkOut: string };
+      reason: string;
+      confidence?: MarketRateConfidence;
+    }) => {
+      const { monthOffset, window, reason, confidence } = params;
+      const season = getSeasonForMonth(window.yearMonth, pricingRegion);
+      const tier = resolveSeasonTier(window.checkIn);
+      monthlyRates[window.yearMonth] = {
+        medianNightly: 0,
+        blackout: true,
+        blackoutReason: reason,
+        season,
+        checkIn: window.checkIn,
+        checkOut: window.checkOut,
+        channelCount: 0,
+        sampleCount: 0,
+        demandClass: tier.demandClass,
+        seasonTierId: tier.id,
+        seasonTierLabel: tier.label,
+        confidence,
+        channels: { airbnb: null, vrbo: null, booking: null, pm: null },
+        hybrid: { baseAirbnbMedian: 0, finalRate: 0, layers: [], notes: [`Blackout: ${reason}`] },
+      };
+      blackouts.push({ bedrooms, yearMonth: window.yearMonth, checkIn: window.checkIn, checkOut: window.checkOut, reason });
+      console.info("[hybrid-pricing] month blackout", JSON.stringify({
+        propertyId: args.propertyId,
+        community: args.community,
+        bedrooms,
+        yearMonth: window.yearMonth,
+        checkIn: window.checkIn,
+        checkOut: window.checkOut,
+        reason,
+        confidence,
+      }));
+      await args.onMonthBlackout?.({
+        propertyId: args.propertyId,
+        bedrooms,
+        monthOffset,
+        horizonMonths,
+        yearMonth: window.yearMonth,
+        checkIn: window.checkIn,
+        checkOut: window.checkOut,
+        reason,
+        confidence,
+      });
+    };
+
     for (let monthOffset = 0; monthOffset < horizonMonths; monthOffset += 1) {
       if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
       let airbnb: Awaited<ReturnType<typeof fetchAirbnbMedianNightly>> | null = null;
@@ -943,7 +1040,8 @@ export async function refreshHybridPricingForTarget(args: {
         if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
         window = hybridPricingWindowForMonth(asOf, monthOffset, stayNights);
         const previousYearMonth = monthOffset > 0 ? dateOnly(monthStart(asOf, monthOffset - 1)).slice(0, 7) : null;
-        const previousBasis = previousYearMonth ? monthlyRates[previousYearMonth]?.medianNightly ?? null : null;
+        const previousEntry = previousYearMonth ? monthlyRates[previousYearMonth] : null;
+        const previousBasis = previousEntry && !previousEntry.blackout ? previousEntry.medianNightly : null;
         airbnb = await fetchAirbnbMedianNightly({
           community: args.community,
           bedrooms,
@@ -962,30 +1060,35 @@ export async function refreshHybridPricingForTarget(args: {
         );
       }
       if (!airbnb || airbnb.medianNightly == null) {
-        await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
-        throw new Error(
-          `SearchAPI Airbnb returned no usable exact-${bedrooms}BR samples for ${searchName} ` +
-          `${window.yearMonth} (${window.checkIn} to ${window.checkOut}); static fallback is disabled for market-rate refreshes.`,
-        );
+        // No usable exact-bedroom comps for this window. Don't abort the whole
+        // property — black out this month's window and move to the next month.
+        await recordMonthBlackout({
+          monthOffset,
+          window,
+          reason: `no usable exact-${bedrooms}BR comps for ${window.checkIn} to ${window.checkOut}`,
+          confidence: airbnb?.confidence,
+        });
+        await sleep(HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs);
+        continue;
       }
       if (!airbnb.confidence || airbnb.confidence.level === "red") {
-        await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
-        const details = airbnb.confidence?.reasons?.length ? ` ${airbnb.confidence.reasons.join("; ")}` : "";
-        throw new Error(
-          `SearchAPI Airbnb confidence too low for ${searchName} exact-${bedrooms}BR ` +
-          `${window.yearMonth} (${window.checkIn} to ${window.checkOut}): ` +
-          `${airbnb.confidence?.summary ?? "not scored"}.${details}`,
-        );
+        // Confidence too low (e.g. exact-bedroom comps missing, as for 3BR in a
+        // mostly-1/2BR resort). Black out this window and continue rather than
+        // failing the property.
+        const summary = airbnb.confidence?.summary ?? "not scored";
+        await recordMonthBlackout({
+          monthOffset,
+          window,
+          reason: `no confident exact-${bedrooms}BR comps (${summary})`,
+          confidence: airbnb.confidence,
+        });
+        await sleep(HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs);
+        continue;
       }
-      const previousYearMonth = monthOffset > 0 ? dateOnly(monthStart(asOf, monthOffset - 1)).slice(0, 7) : null;
-      const previousBasis = previousYearMonth ? monthlyRates[previousYearMonth]?.medianNightly ?? null : null;
-      if (previousBasis != null && airbnb.medianNightly === previousBasis) {
-        await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
-        throw new Error(
-          `SearchAPI Airbnb produced the same p${MARKET_PRICING_PERCENTILE} basis ($${airbnb.medianNightly}) for ` +
-          `${window.yearMonth} and ${previousYearMonth}; refusing to push duplicate monthly pricing. Retry the market pricing refresh.`,
-        );
-      }
+      // A repeated basis vs the prior priced month is no longer fatal: the
+      // retry loop above already tried distinct windows to avoid it, and a
+      // confident-but-identical month is still real, sellable inventory — far
+      // better to keep it than to abort the property over a cosmetic dupe.
       const basis = airbnb.medianNightly;
       const season = getSeasonForMonth(window.yearMonth, pricingRegion);
       const tier = resolveSeasonTier(window.checkIn);
@@ -1053,39 +1156,49 @@ export async function refreshHybridPricingForTarget(args: {
       await sleep(HYBRID_PRICING_CONFIG.scanSettings.rateLimitMs);
     }
 
-    const { lowBasis, highBasis, holidayBasis, missing } = seasonalBasisSummary(seasonalMedians);
-    if (missing.length > 0) {
-      await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
-      throw new Error(
-        `SearchAPI Airbnb monthly scans for ${searchName} did not produce ${missing.join("/")} demand-tier samples ` +
-        `(need standard/low, high, and peak/ultra windows); static fallback is disabled.`,
-      );
-    }
+    // Aggregate over PRICED months only — blacked-out months (medianNightly 0)
+    // must never pollute the seasonal bases, min/max, or the live buy-in cache.
+    const pricedValues = Object.values(monthlyRates).filter((rate) => !rate.blackout).map((rate) => rate.medianNightly);
+    const blackoutCount = Object.values(monthlyRates).filter((rate) => rate.blackout).length;
+    const { lowBasis, highBasis, holidayBasis } = seasonalBasisSummary(seasonalMedians);
+    // A demand tier with no priced months (all blacked out) is no longer fatal.
+    // Fall back to the overall priced basis so the legacy seasonal columns stay
+    // sane; when EVERY month is blacked out, store 0 (setLivePropertyMarketRates
+    // skips <=0, so getBuyInRate falls through to the static table — no zero
+    // leaks into buy-in cost).
+    const overallBasis = marketPricingBasis(pricedValues).basis;
+    const lowB = lowBasis ?? overallBasis ?? 0;
+    const highB = highBasis ?? overallBasis ?? lowB;
+    const holidayB = holidayBasis ?? overallBasis ?? highB;
+    const lowNightly = pricedValues.length ? Math.min(...pricedValues) : 0;
+    const highNightly = pricedValues.length ? Math.max(...pricedValues) : 0;
     const lowRate = representativeMonthlyRate(monthlyRates, "LOW");
     const highRate = representativeMonthlyRate(monthlyRates, "HIGH");
     const holidayRate = representativeMonthlyRate(monthlyRates, "HOLIDAY");
-    if (!lowRate || !highRate || !holidayRate) {
-      await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
-      throw new Error(`SearchAPI Airbnb monthly scans missing a LOW/HIGH/HOLIDAY month for ${searchName}.`);
-    }
-    const monthlyValues = Object.values(monthlyRates).map((rate) => rate.medianNightly);
     const scannedMonths = Object.keys(monthlyRates).sort();
     const confidenceSummary = summarizeMarketRateConfidence(monthlyConfidences);
+    // Every month is now accounted for either as a priced basis or a blackout,
+    // so the calendar must still be whole. (Blacked-out months stay in
+    // monthlyRates with medianNightly 0 + blackout=true.)
     if (scannedMonths.length !== horizonMonths) {
       await storage.deletePropertyMarketRate(args.propertyId, bedrooms).catch(() => undefined);
       throw new Error(
-        `SearchAPI Airbnb monthly scan for ${searchName} stored ${scannedMonths.length}/${horizonMonths} months; expected one ${MARKET_PRICING_PERCENTILE}th percentile basis per calendar month.`,
+        `SearchAPI Airbnb monthly scan for ${searchName} stored ${scannedMonths.length}/${horizonMonths} months; expected one ${MARKET_PRICING_PERCENTILE}th percentile basis (or a blackout) per calendar month.`,
       );
     }
+    const pricedCount = pricedValues.length;
+    const blackoutSuffix = blackoutCount > 0
+      ? ` ${blackoutCount} month(s) blacked out (no confident exact-${bedrooms}BR comps); those windows are closed on the Guesty calendar.`
+      : "";
     const row = await storage.upsertPropertyMarketRate({
       propertyId: args.propertyId,
       bedrooms,
-      medianNightly: String(lowBasis),
-      medianNightlyHigh: String(highBasis),
-      medianNightlyHoliday: String(holidayBasis),
+      medianNightly: String(lowB),
+      medianNightlyHigh: String(highB),
+      medianNightlyHoliday: String(holidayB),
       monthlyRates,
-      lowNightly: String(Math.min(...monthlyValues)),
-      highNightly: String(Math.max(...monthlyValues)),
+      lowNightly: String(lowNightly),
+      highNightly: String(highNightly),
       sampleCount: totalSamples,
       source: "airbnb",
     });
@@ -1096,17 +1209,18 @@ export async function refreshHybridPricingForTarget(args: {
       bedrooms,
       triggerType: args.triggerType,
       oldRate: previous?.medianNightly ?? null,
-      newRate: String(lowBasis),
+      newRate: String(lowB),
       status: "ok",
       notes: [
         args.notes || `SearchAPI Airbnb monthly ${MARKET_PRICING_PERCENTILE}th percentile bases saved without hybrid markup layers; static buy-in fallback is disabled for market-rate refreshes.`,
-        `Scanned ${scannedMonths.length} calendar months (${scannedMonths[0]} through ${scannedMonths[scannedMonths.length - 1]}).`,
+        `Priced ${pricedCount}/${scannedMonths.length} calendar months (${scannedMonths[0]} through ${scannedMonths[scannedMonths.length - 1]}).${blackoutSuffix}`,
         confidenceSummary ? `Confidence: ${confidenceSummary.summary}.` : "Confidence: not enough evidence to score.",
       ].join(" "),
       layersJson: [{
         type: "market-rate-confidence",
         pricingRecipe,
         confidenceSummary,
+        blackoutCount,
       }],
       calendarJson: monthlyRates,
     }));
@@ -1122,36 +1236,38 @@ export async function refreshHybridPricingForTarget(args: {
       pricingRecipe,
       confidenceSummary,
       sampleCount: totalSamples,
+      pricedCount,
+      blackoutCount,
       low: {
-        basis: lowBasis,
-        checkIn: lowRate.checkIn,
-        checkOut: lowRate.checkOut,
-        baseAirbnbMedian: lowRate.hybrid.baseAirbnbMedian,
-        finalRate: lowRate.hybrid.finalRate,
+        basis: lowB,
+        checkIn: lowRate?.checkIn ?? null,
+        checkOut: lowRate?.checkOut ?? null,
+        baseAirbnbMedian: lowRate?.hybrid?.baseAirbnbMedian ?? null,
+        finalRate: lowRate?.hybrid?.finalRate ?? null,
       },
       high: {
-        basis: highBasis,
-        checkIn: highRate.checkIn,
-        checkOut: highRate.checkOut,
-        baseAirbnbMedian: highRate.hybrid.baseAirbnbMedian,
-        finalRate: highRate.hybrid.finalRate,
+        basis: highB,
+        checkIn: highRate?.checkIn ?? null,
+        checkOut: highRate?.checkOut ?? null,
+        baseAirbnbMedian: highRate?.hybrid?.baseAirbnbMedian ?? null,
+        finalRate: highRate?.hybrid?.finalRate ?? null,
       },
       holiday: {
-        basis: holidayBasis,
-        checkIn: holidayRate.checkIn,
-        checkOut: holidayRate.checkOut,
-        baseAirbnbMedian: holidayRate.hybrid.baseAirbnbMedian,
-        finalRate: holidayRate.hybrid.finalRate,
+        basis: holidayB,
+        checkIn: holidayRate?.checkIn ?? null,
+        checkOut: holidayRate?.checkOut ?? null,
+        baseAirbnbMedian: holidayRate?.hybrid?.baseAirbnbMedian ?? null,
+        finalRate: holidayRate?.hybrid?.finalRate ?? null,
       },
-      lowNightly: Math.min(...monthlyValues),
-      highNightly: Math.max(...monthlyValues),
+      lowNightly,
+      highNightly,
       monthsScanned: scannedMonths.length,
       scannedMonths,
       monthlyPreview: summarizeMonthlyHybridRates(monthlyRates),
       layers: [],
     }));
   }
-  return { propertyId: args.propertyId, rows, logs };
+  return { propertyId: args.propertyId, rows, logs, blackouts };
 }
 
 export async function refreshHybridPricingForProperty(args: {
@@ -1160,8 +1276,9 @@ export async function refreshHybridPricingForProperty(args: {
   notes?: string;
   asOf?: Date;
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
+  onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>;
   shouldCancel?: () => boolean | Promise<boolean>;
-}): Promise<{ propertyId: number; rows: any[]; logs: any[] }> {
+}): Promise<{ propertyId: number; rows: any[]; logs: any[]; blackouts: HybridBlackoutWindow[] }> {
   const config = PROPERTY_UNIT_CONFIGS[args.propertyId];
   if (!config) throw new Error(`Property ${args.propertyId} is not configured for hybrid pricing`);
   return refreshHybridPricingForTarget({
@@ -1174,6 +1291,7 @@ export async function refreshHybridPricingForProperty(args: {
     notes: args.notes,
     asOf: args.asOf,
     onMonthScanned: args.onMonthScanned,
+    onMonthBlackout: args.onMonthBlackout,
     shouldCancel: args.shouldCancel,
   });
 }

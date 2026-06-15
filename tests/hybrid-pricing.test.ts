@@ -418,11 +418,29 @@ assert.equal(
 );
 assert.ok(
   hybridPricingSource.includes("deletePropertyMarketRate(args.propertyId, bedrooms)"),
-  "empty Airbnb SearchAPI samples should clear stale market-rate rows instead of retaining static or old data",
+  "a genuinely unworkable scan (no eligible window / month-count integrity failure) should still clear the stale market-rate row",
 );
 assert.ok(
   hybridPricingSource.includes('airbnb.confidence.level === "red"'),
-  "red market-rate confidence should fail closed before saving stale rows or pushing Guesty pricing",
+  "red market-rate confidence must still be detected (it now triggers a month blackout instead of pricing the window)",
+);
+// Blackout behavior (2026-06-15): a red/no-comp month no longer aborts the
+// whole property — it blacks out that window and the scan continues.
+assert.ok(
+  hybridPricingSource.includes("recordMonthBlackout") && hybridPricingSource.includes("blackout: true"),
+  "a red/no-comp month must be recorded as a blackout and the scan must continue, not throw",
+);
+assert.ok(
+  hybridPricingSource.includes("onMonthBlackout") && hybridPricingSource.includes("blackouts: HybridBlackoutWindow[]"),
+  "the scan must emit blackout events and return the blacked-out windows to the caller",
+);
+assert.ok(
+  routesSource.includes("reconcilePricingBlackoutBlocks"),
+  "the Guesty push must close blacked-out windows on the calendar (and reopen ones that became priceable)",
+);
+assert.ok(
+  routesSource.includes("blackoutWindows") && routesSource.includes("entry?.blackout"),
+  "the seasonal plan builder must skip blacked-out months (not treat them as a missing-data error)",
 );
 assert.ok(
   !hybridPricingSource.includes("sampled once"),

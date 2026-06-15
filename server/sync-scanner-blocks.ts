@@ -193,3 +193,99 @@ export async function reconcileSourceabilityBlocks(args: {
     failures, wouldCreate, wouldRemove,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Pricing-blackout reconcile (2026-06-15). The market-pricing scan blacks out
+// a month's window when it can't find a confident exact-bedroom comp basis
+// (e.g. 3BR in a mostly-1/2BR resort). This pushes those decisions to Guesty:
+// CLOSE (status unavailable) windows we couldn't price, and REOPEN (status
+// available) windows that became priceable again — touching ONLY the blocks WE
+// created (source = PRICING_BLACKOUT_SOURCE), never human/legacy/sourceability
+// blocks.
+//
+// Matched by CALENDAR MONTH, not exact dates: the scan samples a different
+// 7-night window per run, so a month re-blocked or re-priced with shifted dates
+// must still reconcile against the prior block for that month.
+//
+// FAIL-SAFE: a previously-blacked month is only reopened when this run
+// CONFIRMED it priceable (confirmedOpenMonths). A month whose scan errored/was
+// skipped this run is in neither set, so its block is LEFT in place.
+// ─────────────────────────────────────────────────────────────────────────
+export const PRICING_BLACKOUT_SOURCE = "pricing-blackout";
+
+const monthKeyOf = (date: string) => String(date).slice(0, 7);
+
+export async function reconcilePricingBlackoutBlocks(args: {
+  propertyId: number;
+  desired: Array<{ startDate: string; endDate: string; reason: string }>;
+  confirmedOpenMonths: string[];
+  /** When true, compute wouldCreate/wouldRemove but make NO Guesty calls. */
+  dryRun?: boolean;
+}): Promise<SyncResult & { wouldCreate: number; wouldRemove: number }> {
+  const { propertyId, desired, confirmedOpenMonths, dryRun = false } = args;
+  const guestyListingId = await storage.getGuestyListingId(propertyId);
+  if (!guestyListingId) {
+    return {
+      success: false, propertyId, guestyListingId: null,
+      created: 0, removed: 0, unchanged: 0, failures: [],
+      reason: `No Guesty listing mapped for property ${propertyId}`,
+      wouldCreate: 0, wouldRemove: 0,
+    };
+  }
+
+  const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
+  // Only OUR pricing-blackout blocks — never touch human/legacy/sourceability blocks.
+  const active = (await storage.getActiveScannerBlocks(propertyId))
+    .filter((b) => b.source === PRICING_BLACKOUT_SOURCE);
+  const activeMonths = new Set(active.map((b) => monthKeyOf(b.startDate)));
+  const desiredMonths = new Set(desired.map((d) => monthKeyOf(d.startDate)));
+  const openMonths = new Set(confirmedOpenMonths.map((m) => monthKeyOf(m)));
+
+  const failures: SyncResult["failures"] = [];
+  let created = 0, removed = 0, wouldCreate = 0, wouldRemove = 0;
+
+  // CREATE: desired blackout windows whose month isn't already blocked by us.
+  for (const d of desired) {
+    if (activeMonths.has(monthKeyOf(d.startDate))) continue;
+    wouldCreate++;
+    if (dryRun) continue;
+    try {
+      await guestyCalendarPutWithRetry(calPath, { startDate: d.startDate, endDate: d.endDate, status: "unavailable" });
+      await storage.createScannerBlock({
+        propertyId, guestyListingId, startDate: d.startDate, endDate: d.endDate,
+        reason: d.reason.slice(0, 250), source: PRICING_BLACKOUT_SOURCE,
+      });
+      created++;
+      await sleep(750);
+    } catch (e: any) {
+      failures.push({ action: "create", startDate: d.startDate, error: e?.message ?? String(e) });
+    }
+  }
+
+  // REMOVE: our blocks whose MONTH is now CONFIRMED priceable again and is not
+  // re-blacked this run. A block whose month merely failed/skipped this pass is
+  // left untouched (fail-safe).
+  for (const b of active) {
+    const month = monthKeyOf(b.startDate);
+    if (desiredMonths.has(month)) continue;   // still blacked out
+    if (!openMonths.has(month)) continue;     // not confirmed priceable ⇒ leave it
+    wouldRemove++;
+    if (dryRun) continue;
+    try {
+      await guestyCalendarPutWithRetry(calPath, { startDate: b.startDate, endDate: b.endDate, status: "available" });
+      await storage.markScannerBlockRemoved(b.id);
+      removed++;
+      await sleep(750);
+    } catch (e: any) {
+      failures.push({ action: "remove", startDate: b.startDate, error: e?.message ?? String(e) });
+    }
+  }
+
+  return {
+    success: failures.length === 0,
+    propertyId, guestyListingId,
+    created, removed,
+    unchanged: Math.max(0, active.length - removed),
+    failures, wouldCreate, wouldRemove,
+  };
+}
