@@ -3969,6 +3969,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [pricingPushStatus?.jobId, pricingPushStatus?.status, pricingPushStatus?.startedAt, propertyId, recordDataPush, reloadMarketRates, reloadPricingLogs]);
 
   // Aggregate monthly rates across all units for the 24-month seasonal table
+  // Target markup margin (slider in the Guesty rate-push card, persisted to the
+  // scanner schedule). Declared HERE — ahead of the seasonalMonths memo that
+  // consumes it — so the "Sheet Base / Night" target recomputes when the
+  // operator changes the markup (e.g. 20% -> 10%).
+  const [targetMarginPct, setTargetMarginPct] = useState(MIN_PROFIT_MARGIN * 100);
+  const pricingMarginTarget = targetMarginPct / 100;
   const seasonalMonths = useMemo(() => {
     if (!propertyId) return [];
     const propPricing = getPropertyPricing(propertyId);
@@ -3982,13 +3988,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const monthlySampleTotal = monthlySampleComplete
         ? Math.round(monthlySampleRates.reduce((s, n) => s + (n ?? 0), 0))
         : null;
-      const currentUnitRates = propPricing.units.map((u) => {
-        const buyInRate = getBuyInRate(u.community, u.bedrooms, propertyId, row.season, row.yearMonth);
-        return {
-          buyInRate,
-          sellRate: cleanBaseRateFromBuyIn(buyInRate),
-        };
-      });
+      const totalBuyIn = propPricing.units.reduce(
+        (s, u) => s + getBuyInRate(u.community, u.bedrooms, propertyId, row.season, row.yearMonth),
+        0,
+      );
       // Buy-in (= the market rate the queue rewrites) as it was BEFORE the most
       // recent refresh, summed across units. Null unless EVERY unit has a prior
       // value for this month, so the old → new diff is apples-to-apples.
@@ -4004,14 +4007,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         year: row.year,
         yearMonth: row.yearMonth,
         season: row.season,
-        totalBuyIn: currentUnitRates.reduce((s, u) => s + u.buyInRate, 0),
-        totalSell:  currentUnitRates.reduce((s, u) => s + u.sellRate, 0),
+        totalBuyIn,
+        // Sheet base = buy-in × (1 + TARGET MARGIN), summed-then-rounded —
+        // IDENTICAL to the marked-up Guesty push (computeSeasonalRates uses
+        // cleanBaseRateFromBuyIn(totalBuyIn, m)). Tracking pricingMarginTarget
+        // here is what makes "Sheet Base / Night" follow the markup slider so
+        // the table stops showing a phantom "drift vs sheet" once the operator
+        // changes the markup (e.g. 20% -> 10%).
+        totalSell: cleanBaseRateFromBuyIn(totalBuyIn, pricingMarginTarget),
         monthlySampleTotal,
         previousBuyInTotal,
       };
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [propertyId, marketRatesVersion, priorMonthlyByBedroom]);
+  }, [propertyId, marketRatesVersion, priorMonthlyByBedroom, pricingMarginTarget]);
   const displayedBasePrice = seasonalMonths[0]?.totalSell ?? pricing?.basePrice ?? null;
 
   // Per-bedroom live-buy-in summary for the Pricing tab header. Pulls
@@ -4072,8 +4081,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // Live market refresh state (from the new /refresh-market-rates endpoint)
   const [liveMarket, setLiveMarket] = useState<any>(null);
   const [marketRefreshing, setMarketRefreshing] = useState(false);
-  const [targetMarginPct, setTargetMarginPct] = useState(MIN_PROFIT_MARGIN * 100);
-  const pricingMarginTarget = targetMarginPct / 100;
   const [scannerSchedule, setScannerSchedule] = useState<ScannerScheduleSnapshot | null>(null);
 
   const refreshScannerSchedule = useCallback(async () => {
