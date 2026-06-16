@@ -325,6 +325,25 @@ export function syncSleepsInTitle(title: string, sleeps: number): string {
   return title.replace(/\bsleeps\s+\d+\b/i, (token) => token.replace(/\d+/, String(sleeps)));
 }
 
+// Keep occupancy numbers in the DESCRIPTION body in sync with the listing's
+// sleeps. After an occupancy change the AI-written prose still says things like
+// "Sleep up to 14 guests" / "accommodate up to 14 guests". This rewrites only
+// the LISTING-LEVEL "... N guests" occupancy phrases to the total sleeps; it
+// deliberately leaves bedroom counts ("two 3-bedroom condos"), square footage,
+// and per-unit "Sleeps N with <beds>" sentences (which describe one unit's beds,
+// not the whole-listing total) untouched — those have no "guests" token.
+export function syncSleepsInDescription(text: string, sleeps: number): string {
+  if (!text || !Number.isFinite(sleeps) || sleeps <= 0) return text;
+  return text
+    // "Sleep(s)/Sleeping/accommodate(s)/host(s) [up to] N guests"
+    .replace(
+      /((?:sleeps?|sleeping|accommodates?|hosts?)\s+(?:up\s+to\s+)?)\d+(\s+guests?\b)/gi,
+      (_m, pre, post) => `${pre}${sleeps}${post}`,
+    )
+    // bare "up to N guests" / "for N guests" not already caught above
+    .replace(/(\b(?:up\s+to|for)\s+)\d+(\s+guests?\b)/gi, (_m, pre, post) => `${pre}${sleeps}${post}`);
+}
+
 export function parseSqft(sqftStr: string): number {
   return parseInt(sqftStr.replace(/[^0-9]/g, ""), 10) || 0;
 }
