@@ -313,6 +313,18 @@ export function dedupeListingRoomsByNumber<
   return Array.from(byNumber.values());
 }
 
+// Keep the "Sleeps N" token in a listing title in sync with the bed-derived
+// occupancy (accommodates). The operator hit a listing whose title said
+// "Sleeps 14" and Guesty said 12 while the beds actually sleep 16 — three
+// different numbers. The bed config is the source of truth, so this rewrites
+// ONLY an existing "Sleeps <number>" token to match it (preserving the rest of
+// the title and the word's casing). Titles without a "Sleeps N" token, and
+// non-positive counts, are returned unchanged (never append one).
+export function syncSleepsInTitle(title: string, sleeps: number): string {
+  if (!title || !Number.isFinite(sleeps) || sleeps <= 0) return title;
+  return title.replace(/\bsleeps\s+\d+\b/i, (token) => token.replace(/\d+/, String(sleeps)));
+}
+
 export function parseSqft(sqftStr: string): number {
   return parseInt(sqftStr.replace(/[^0-9]/g, ""), 10) || 0;
 }

@@ -5,7 +5,7 @@ import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry, GuestyListingSummary } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
-import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
+import { buildListingRooms, parseSqft, syncSleepsInTitle } from "@/data/guesty-listing-config";
 import {
   loadBeddingConfig as loadBuilderBeddingConfig,
   buildGuestyListingRooms as buildBeddingListingRooms,
@@ -1181,8 +1181,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   } | null>(null);
 
   useEffect(() => {
-    setEditableTitle(propertyData?.descriptions?.title ?? "");
-  }, [propertyData?.descriptions?.title]);
+    // Show the title with its "Sleeps N" already synced to the bed-derived
+    // occupancy, so the builder doesn't display a stale count (guarded: a
+    // 0/not-yet-loaded bedding config leaves the title untouched).
+    const initSleeps = typeof propertyId === "number" ? totalBeddingSleeps(loadBuilderBeddingConfig(propertyId)) : 0;
+    setEditableTitle(syncSleepsInTitle(propertyData?.descriptions?.title ?? "", initSleeps));
+  }, [propertyData?.descriptions?.title, propertyId]);
 
   useEffect(() => {
     if (!propertyId || !selectedId) {
@@ -2833,10 +2837,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
     setDescPushState("pushing");
     setDescPushError(null);
+    // Keep the title's "Sleeps N" in sync with the bed-derived occupancy so the
+    // Guesty title/nickname can't drift from the actual sleeping capacity (the
+    // operator hit a title saying "Sleeps 14" while the beds sleep 16).
+    const sleeps = typeof propertyId === "number" ? totalBeddingSleeps(loadBuilderBeddingConfig(propertyId)) : 0;
+    const descriptions = {
+      ...effectivePropertyData.descriptions,
+      title: syncSleepsInTitle(effectivePropertyData.descriptions.title ?? "", sleeps),
+    };
     const res = await fetch("/api/builder/push-descriptions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ listingId: selectedId, descriptions: effectivePropertyData.descriptions }),
+      body: JSON.stringify({ listingId: selectedId, descriptions }),
     });
     const data = await res.json() as { success: boolean; error?: string; returnedDescriptions?: Record<string, string> | null };
     if (!res.ok || !data.success) {
@@ -2848,7 +2860,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         toast({ title: "Descriptions pushed to Guesty", description: "Summary, Space, Neighborhood, and other description fields updated." });
     }
     return data;
-  }, [effectivePropertyData, selectedId, recordDataPush, toast]);
+  }, [effectivePropertyData, selectedId, recordDataPush, toast, propertyId]);
 
   const pushDescriptions = useCallback(async () => {
     if (descPushState === "pushing") return;
@@ -2881,6 +2893,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       areaSquareFeet: sqft || undefined,
       bedrooms: beds || undefined,
       bathrooms: baths || undefined,
+      accommodates: sleeps || undefined,
       listingRooms: rooms.length > 0 ? rooms : undefined,
     });
 
