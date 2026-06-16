@@ -236,17 +236,63 @@ export function buildListingRooms(propertyId: number): GuestyRoom[] {
   return allRooms;
 }
 
-// Guesty (and Airbnb) model exactly ONE shared space per listing at
-// roomNumber 0; bedrooms are 1..N. Both room builders above emit one
-// roomNumber-0 "Living Room" entry PER unit, so a multi-unit combo (e.g. a
-// 6BR = two 3BR units) produces TWO rooms with roomNumber 0. Guesty's
-// PUT /listings dedups rooms by roomNumber and rejects the duplicate with a
-// generic "Unknown error when updating listing" (a single-unit listing, with
-// exactly one roomNumber 0, succeeds). Collapse any duplicate roomNumber into
-// a single room, summing bed quantities by type, so every roomNumber is
-// unique and the combined shared space carries all the sofa beds
-// (e.g. SOFA_BED x2). Insertion order is preserved (Map keeps first-seen
-// order), and the first non-empty name wins.
+// The set of bed `type` values Guesty's PUT /listings actually accepts —
+// VERIFIED empirically against the live Open API (2026-06-16). Anything else
+// (FUTON, MURPHY_BED, FULL_BED, TWIN_BED, a bare "KING", null, …) makes the
+// whole update fail with HTTP 500 { code: ERR_UPDATE_LISTING_FAILED,
+// message: "Unknown error when updating listing" } — the opaque error the
+// operator hit on the bedding push. This is the ACTUAL root cause (duplicate
+// roomNumber 0 is fine — Guesty accepts it; see dedupeListingRoomsByNumber,
+// kept only because one shared space is cleaner).
+const VALID_GUESTY_BED_TYPES = new Set<string>([
+  "KING_BED", "QUEEN_BED", "DOUBLE_BED", "SINGLE_BED", "SOFA_BED", "BUNK_BED",
+  "AIR_MATTRESS", "FLOOR_MATTRESS", "WATER_BED", "TODDLER_BED", "CRIB", "COUCH",
+]);
+
+// Legacy / alias / shorthand bed-type values (e.g. stale localStorage configs,
+// the "twin" wording) → the nearest VALID Guesty enum.
+const BED_TYPE_ALIASES: Record<string, string> = {
+  TWIN_BED: "SINGLE_BED", TWIN: "SINGLE_BED", SINGLE: "SINGLE_BED",
+  FULL_BED: "DOUBLE_BED", FULL: "DOUBLE_BED", DOUBLE: "DOUBLE_BED",
+  KING: "KING_BED", QUEEN: "QUEEN_BED", BUNK: "BUNK_BED",
+  SOFA: "SOFA_BED", SOFABED: "SOFA_BED", SLEEPER: "SOFA_BED",
+  PULLOUT: "SOFA_BED", PULL_OUT: "SOFA_BED", FUTON: "SOFA_BED",
+  MURPHY: "QUEEN_BED", MURPHY_BED: "QUEEN_BED", WALL_BED: "QUEEN_BED",
+};
+
+// Map any bed-type string to a Guesty-accepted enum, or null if unmappable.
+export function normalizeGuestyBedType(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const up = raw.trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (!up) return null;
+  if (VALID_GUESTY_BED_TYPES.has(up)) return up;
+  if (BED_TYPE_ALIASES[up]) return BED_TYPE_ALIASES[up];
+  if (VALID_GUESTY_BED_TYPES.has(`${up}_BED`)) return `${up}_BED`;
+  return null;
+}
+
+// Coerce every bed in every room to a Guesty-accepted type, dropping beds whose
+// type cannot be mapped. Without this, a single bad bed type (legacy localStorage
+// data) makes the ENTIRE bedding push fail with the opaque "Unknown error when
+// updating listing". An empty beds[] is fine — Guesty accepts it.
+export function sanitizeListingRoomsForGuesty<
+  R extends { roomNumber: number; name?: string; beds: Array<{ type: string; quantity: number }> },
+>(rooms: R[]): R[] {
+  return rooms.map((r) => ({
+    ...r,
+    beds: r.beds.flatMap((b) => {
+      const type = normalizeGuestyBedType(b.type);
+      return type ? [{ ...b, type }] : [];
+    }),
+  }) as R);
+}
+
+// Guesty models exactly ONE shared space per listing at roomNumber 0; bedrooms
+// are 1..N. Both room builders above emit one roomNumber-0 "Living Room" entry
+// PER unit, so a multi-unit combo emits TWO roomNumber-0 rooms. Guesty actually
+// ACCEPTS duplicate roomNumbers, but collapsing them into one shared space
+// (summing sofa beds, e.g. SOFA_BED x2) matches Guesty/Airbnb's one-shared-space
+// model and is cleaner. Insertion order preserved; first non-empty name wins.
 export function dedupeListingRoomsByNumber<
   R extends { roomNumber: number; name?: string; beds: Array<{ type: string; quantity: number }> },
 >(rooms: R[]): R[] {

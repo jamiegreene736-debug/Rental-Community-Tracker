@@ -1,4 +1,4 @@
-import { dedupeListingRoomsByNumber } from "@/data/guesty-listing-config";
+import { dedupeListingRoomsByNumber, sanitizeListingRoomsForGuesty } from "@/data/guesty-listing-config";
 
 const GUESTY_API_BASE = "/api/guesty-proxy";
 
@@ -292,10 +292,14 @@ class GuestyService {
     if (details.bedrooms) payload.bedrooms = details.bedrooms;
     if (details.bathrooms) payload.bathrooms = details.bathrooms;
     if (details.listingRooms && details.listingRooms.length > 0) {
-      // Collapse duplicate roomNumbers (a multi-unit combo emits one
-      // roomNumber-0 living room per unit) — Guesty rejects two rooms sharing
-      // a roomNumber with a generic "Unknown error when updating listing".
-      payload.listingRooms = dedupeListingRoomsByNumber(details.listingRooms);
+      // Coerce bed types to Guesty's accepted enum FIRST — a single invalid
+      // type (e.g. a legacy "TWIN_BED"/"FULL_BED" in stale config) makes the
+      // whole update fail with "Unknown error when updating listing". Then
+      // collapse duplicate roomNumbers into one shared space (cleaner; Guesty
+      // accepts dups either way).
+      payload.listingRooms = dedupeListingRoomsByNumber(
+        sanitizeListingRoomsForGuesty(details.listingRooms),
+      );
     }
     return this.request("PUT", `/listings/${id}`, payload);
   }
