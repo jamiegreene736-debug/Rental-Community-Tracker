@@ -141,6 +141,7 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
       await guestyService.updateListingDetails(guestyListingId, {
         bedrooms: totals.bedrooms || undefined,
         bathrooms: totals.bathrooms || undefined,
+        accommodates: totals.sleeps || undefined,
         listingRooms: buildGuestyListingRooms(config),
       });
       const message = `Bedding updated: ${totals.bedrooms} BR, ${totals.bathrooms} bath, sleeps ${totals.sleeps}`;

@@ -286,11 +286,14 @@ class GuestyService {
     return this.request<{ _id: string }>("POST", "/listings", payload);
   }
 
-  async updateListingDetails(id: string, details: { areaSquareFeet?: number; bedrooms?: number; bathrooms?: number; listingRooms?: GuestyRoom[] }) {
+  async updateListingDetails(id: string, details: { areaSquareFeet?: number; bedrooms?: number; bathrooms?: number; accommodates?: number; listingRooms?: GuestyRoom[] }) {
     const payload: Record<string, unknown> = {};
     if (details.areaSquareFeet) payload.areaSquareFeet = details.areaSquareFeet;
     if (details.bedrooms) payload.bedrooms = details.bedrooms;
     if (details.bathrooms) payload.bathrooms = details.bathrooms;
+    // accommodates = bed-derived occupancy. Without this Guesty keeps a stale
+    // "sleeps" count (e.g. 12) that disagrees with the bedding + the title.
+    if (details.accommodates) payload.accommodates = details.accommodates;
     if (details.listingRooms && details.listingRooms.length > 0) {
       // Coerce bed types to Guesty's accepted enum FIRST — a single invalid
       // type (e.g. a legacy "TWIN_BED"/"FULL_BED" in stale config) makes the

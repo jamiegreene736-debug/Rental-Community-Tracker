@@ -14,7 +14,7 @@ import {
   TOP_MARKET_SEEDS,
 } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
-import { dedupeListingRoomsByNumber, normalizeGuestyBedType, sanitizeListingRoomsForGuesty } from "../client/src/data/guesty-listing-config";
+import { dedupeListingRoomsByNumber, normalizeGuestyBedType, sanitizeListingRoomsForGuesty, syncSleepsInTitle } from "../client/src/data/guesty-listing-config";
 import {
   discoveryCityForPhotoSearch,
   discoverySearchCitiesForPhotoSearch,
@@ -3588,3 +3588,26 @@ console.log("  ✓ bedding listingRooms dedupe (combo duplicate roomNumber 0)");
   assert.equal(rooms[1].beds[0].type, "TWIN_BED", "sanitizer does not mutate the input");
 }
 console.log("  ✓ bedding bed-type sanitization (invalid type -> coerce/drop, the real Guesty 500)");
+
+// ── Title "Sleeps N" stays in sync with the bed-derived occupancy ──────────
+// The operator hit a listing whose title said "Sleeps 14" while Guesty said 12
+// and the beds sleep 16. syncSleepsInTitle rewrites ONLY an existing "Sleeps N"
+// token to the bed-derived count (the source of truth), leaving everything else.
+{
+  assert.equal(
+    syncSleepsInTitle("Ko Olina - 6BR Condos - Sleeps 14", 16),
+    "Ko Olina - 6BR Condos - Sleeps 16",
+    "stale Sleeps 14 -> 16; the 6BR token is untouched",
+  );
+  // Case of the word is preserved.
+  assert.equal(syncSleepsInTitle("Cozy condo, sleeps 8", 10), "Cozy condo, sleeps 10");
+  // No "Sleeps N" token -> returned unchanged (never appended).
+  assert.equal(syncSleepsInTitle("Ko Olina 6BR Condos", 16), "Ko Olina 6BR Condos");
+  // Non-positive / empty -> unchanged (guards a not-yet-loaded bedding config).
+  assert.equal(syncSleepsInTitle("Resort - Sleeps 14", 0), "Resort - Sleeps 14");
+  assert.equal(syncSleepsInTitle("", 16), "");
+  // Multi-digit + already-correct are both fine (idempotent).
+  assert.equal(syncSleepsInTitle("Villa - Sleeps 22", 16), "Villa - Sleeps 16");
+  assert.equal(syncSleepsInTitle("Villa - Sleeps 16", 16), "Villa - Sleeps 16");
+}
+console.log("  ✓ title Sleeps token sync (occupancy consistency: title == beds == accommodates)");
