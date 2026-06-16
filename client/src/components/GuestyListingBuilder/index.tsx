@@ -5,7 +5,7 @@ import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry, GuestyListingSummary } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
 import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
-import { buildListingRooms, parseSqft, syncSleepsInTitle } from "@/data/guesty-listing-config";
+import { buildListingRooms, parseSqft, syncSleepsInTitle, syncSleepsInDescription } from "@/data/guesty-listing-config";
 import {
   loadBeddingConfig as loadBuilderBeddingConfig,
   buildGuestyListingRooms as buildBeddingListingRooms,
@@ -1262,14 +1262,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!propertyData) return null;
     const withCompliance = { ...propertyData, ...complianceOverrides };
     if (!propertyData.descriptions) return withCompliance;
+    // Sync the occupancy numbers baked into the description prose ("Sleep up to
+    // 14 guests", "accommodate up to 14 guests") to the bed-derived sleeps so
+    // the Descriptions tab + the Guesty push stop showing a stale count. Only
+    // listing-level "... N guests" phrases are rewritten (bedroom counts/sqft
+    // and per-unit "Sleeps N with <beds>" sentences are left alone).
+    const sleeps = typeof propertyId === "number" ? totalBeddingSleeps(loadBuilderBeddingConfig(propertyId)) : 0;
+    const d = propertyData.descriptions;
+    const fix = <T extends string | undefined>(s: T): T => (s ? (syncSleepsInDescription(s, sleeps) as T) : s);
     return {
       ...withCompliance,
       descriptions: {
-        ...propertyData.descriptions,
-        title: editableTitle || propertyData.descriptions.title,
+        ...d,
+        title: editableTitle || d.title,
+        summary: fix(d.summary),
+        space: fix(d.space),
+        neighborhood: fix(d.neighborhood),
+        transit: fix(d.transit),
+        access: fix(d.access),
+        notes: fix(d.notes),
+        houseRules: fix(d.houseRules),
       },
     };
-  }, [propertyData, complianceOverrides, editableTitle]);
+  }, [propertyData, complianceOverrides, editableTitle, propertyId]);
 
   useEffect(() => {
     if (!selectedId) {

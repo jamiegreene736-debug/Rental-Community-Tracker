@@ -14,7 +14,7 @@ import {
   TOP_MARKET_SEEDS,
 } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
-import { dedupeListingRoomsByNumber, normalizeGuestyBedType, sanitizeListingRoomsForGuesty, syncSleepsInTitle } from "../client/src/data/guesty-listing-config";
+import { dedupeListingRoomsByNumber, normalizeGuestyBedType, sanitizeListingRoomsForGuesty, syncSleepsInTitle, syncSleepsInDescription } from "../client/src/data/guesty-listing-config";
 import {
   discoveryCityForPhotoSearch,
   discoverySearchCitiesForPhotoSearch,
@@ -3611,3 +3611,36 @@ console.log("  ✓ bedding bed-type sanitization (invalid type -> coerce/drop, t
   assert.equal(syncSleepsInTitle("Villa - Sleeps 16", 16), "Villa - Sleeps 16");
 }
 console.log("  ✓ title Sleeps token sync (occupancy consistency: title == beds == accommodates)");
+
+// ── Description body occupancy sync (the Descriptions-tab "N guests" prose) ─
+// The AI summary said "Sleep up to 14 guests ... accommodate up to 14 guests"
+// after the title/accommodates were corrected to 16. syncSleepsInDescription
+// rewrites only the listing-level "... N guests" phrases, never bedroom counts,
+// sqft, or per-unit "Sleeps N with <beds>" sentences.
+{
+  const summary =
+    "Sleep up to 14 guests in two side-by-side 3-bedroom condos at Coconut Plantation. " +
+    "Typical bedding across the two units can accommodate up to 14 guests comfortably, " +
+    "with a mix of king, queen, and twin beds plus sleeper sofa options.";
+  const fixed = syncSleepsInDescription(summary, 16);
+  assert.ok(fixed.includes("Sleep up to 16 guests"), "leading 'Sleep up to N guests' -> 16");
+  assert.ok(fixed.includes("accommodate up to 16 guests"), "'accommodate up to N guests' -> 16");
+  assert.ok(!fixed.includes(" 14 guests"), "no stale '14 guests' remains");
+  assert.ok(fixed.includes("two side-by-side 3-bedroom condos"), "bedroom count is untouched");
+
+  // Per-unit "Sleeps N with <beds>" has no 'guests' token -> left alone.
+  const perUnit = "Sleeps 8 with a King bed, Queen bed, 2 Twins, and a queen sleeper sofa.";
+  assert.equal(syncSleepsInDescription(perUnit, 16), perUnit, "per-unit bed sentence untouched");
+
+  // sqft / bedroom numbers untouched.
+  assert.equal(
+    syncSleepsInDescription("~1,800 sq ft condo with 6 bedrooms.", 16),
+    "~1,800 sq ft condo with 6 bedrooms.",
+    "sqft and bedroom counts untouched (no 'guests' token)",
+  );
+  // Idempotent + guards.
+  assert.equal(syncSleepsInDescription("accommodate up to 16 guests", 16), "accommodate up to 16 guests");
+  assert.equal(syncSleepsInDescription("Sleep up to 12 guests", 0), "Sleep up to 12 guests", "0 sleeps -> unchanged");
+  assert.equal(syncSleepsInDescription("", 16), "");
+}
+console.log("  ✓ description body occupancy sync (prose 'N guests' -> listing sleeps)");
