@@ -2,48 +2,46 @@
 //
 // Split out from sourceability-gate.ts so the risk-bearing logic
 // (block / open / skip) can be unit-tested without dragging in the server
-// graph (storage, sidecar scan, bulk-queue) that the full module imports.
+// graph (storage, Airbnb search) that the full module imports.
 //
-// LOAD-BEARING: fail-safe is OPEN. A scan that is offline / errored / empty
-// yields "skip" — we never block or unblock on doubt. We only BLOCK on a
-// CONFIRMED real pool whose cheapest sourceable combo is a confirmed loss.
+// 2026-06-15 (operator directive): the calendar black-out is decided PURELY by
+// live Airbnb availability — NO VRBO, no profit/combo math. A window is blocked
+// only when a SearchAPI Airbnb search for those exact dates can't surface the
+// unit sizes the listing is built from (e.g. a 5BR = 3BR + 2BR needs ≥1
+// available 3BR AND ≥1 available 2BR). If Airbnb has them, the window stays
+// OPEN.
+//
+// LOAD-BEARING: fail-safe is OPEN. A search that is keyless / errored / rate-
+// limited yields "skip" — we never block or unblock on doubt. We only BLOCK
+// when a SUCCESSFUL Airbnb search confirms a required unit size is unavailable.
 // A false block silently kills real revenue, so the asymmetry is deliberate.
 
-export type SourceabilityScan = {
-  /** True only when the scan is trustworthy: sidecar online AND a real pool was
-   *  harvested. False ⇒ caller must treat the window as "skip" (fail-safe). */
+export type AvailabilityScan = {
+  /** True only when the Airbnb search succeeded (API key present, no provider
+   *  error). False ⇒ caller must treat the window as "skip" (fail-safe). */
   ok: boolean;
-  /** Cheapest sourceable same-community combo cost for the full stay, or null
-   *  when a real pool was scanned but no same-community combo could be formed. */
-  cheapestCost: number | null;
+  /** How many COMPLETE unit-sets Airbnb can supply for the dates. A 3BR+2BR
+   *  plan needs ≥1 available 3BR and ≥1 available 2BR ⇒ ≥1 set. 0 ⇒ at least
+   *  one required size is unavailable on Airbnb for the window. */
+  setsAvailable: number;
+  /** Human detail for the observation row, e.g. "3BR×4, 2BR×9 → 4 set(s)". */
+  detail?: string;
 };
 
 export type SourceabilityDecision = "block" | "open" | "skip";
 
-export function decideSourceability(args: {
-  scan: SourceabilityScan;
-  /** What we'd sell the window for (stay total) = nightly basis × (1+margin) × nights. */
-  sellableRevenue: number;
-  /** Required margin as a fraction of cost. Default 0 ⇒ block on actual loss. */
-  minMargin?: number;
-}): { decision: SourceabilityDecision; reason: string; projectedProfit: number | null } {
-  if (!args.scan.ok) {
-    return { decision: "skip", reason: "scan unavailable/empty — fail-safe, no calendar change", projectedProfit: null };
+/** The whole black-out decision: open when Airbnb can supply the unit set,
+ *  block when a successful search shows it can't, skip on a failed search. */
+export function decideAvailabilitySourceability(
+  scan: AvailabilityScan,
+): { decision: SourceabilityDecision; reason: string } {
+  if (!scan.ok) {
+    return { decision: "skip", reason: "Airbnb search unavailable — fail-safe, no calendar change" };
   }
-  const minMargin = Math.max(0, args.minMargin ?? 0);
-  if (args.scan.cheapestCost == null) {
-    return { decision: "block", reason: "no sourceable same-community combo in a real pool", projectedProfit: null };
+  if (scan.setsAvailable >= 1) {
+    return { decision: "open", reason: `Airbnb has the units (${scan.detail ?? "available"})` };
   }
-  const profit = args.sellableRevenue - args.scan.cheapestCost;
-  const required = args.scan.cheapestCost * minMargin;
-  if (profit < required) {
-    return {
-      decision: "block",
-      reason: `unsourceable at a profit: cheapest combo $${Math.round(args.scan.cheapestCost)} vs sellable $${Math.round(args.sellableRevenue)} → profit $${Math.round(profit)}${minMargin > 0 ? ` (need ≥ $${Math.round(required)})` : ""}`,
-      projectedProfit: profit,
-    };
-  }
-  return { decision: "open", reason: `sourceable: profit $${Math.round(profit)}`, projectedProfit: profit };
+  return { decision: "block", reason: `Airbnb has no available unit set for these dates (${scan.detail ?? "0 sets"})` };
 }
 
 /** Weekly 7-night windows from now+minLead out to now+horizon (UTC, YYYY-MM-DD). */
@@ -98,8 +96,8 @@ export function confirmedAction(state: ConfirmationState, threshold: number): "b
 export type ObservationStatus = "blocked" | "block-pending" | "sourceable" | "sourceable-pending" | "unknown";
 
 /** Turn a window's persisted streaks into a human status + progress for the UI,
- *  e.g. "Loss flagged 1/2 — 1 more sweep to block". `blockedOnGuesty` reflects
- *  whether a live block actually exists on the calendar for the window. */
+ *  e.g. "No Airbnb units 1/2 — 1 more sweep to block". `blockedOnGuesty`
+ *  reflects whether a live block actually exists on the calendar for the window. */
 export function classifyObservation(args: {
   consecutiveBlocks: number;
   consecutiveOpens: number;
@@ -111,21 +109,21 @@ export function classifyObservation(args: {
     return { status: "blocked", label: "Blocked on Guesty", progress: { count: t, of: t } };
   }
   if (args.consecutiveBlocks >= t) {
-    return { status: "blocked", label: "Loss confirmed — blocking next enforced sweep", progress: { count: t, of: t } };
+    return { status: "blocked", label: "No Airbnb units — blocking next enforced sweep", progress: { count: t, of: t } };
   }
   if (args.consecutiveBlocks >= 1) {
     const remaining = t - args.consecutiveBlocks;
     return {
       status: "block-pending",
-      label: `Loss flagged ${args.consecutiveBlocks}/${t} — ${remaining} more sweep${remaining === 1 ? "" : "s"} to block`,
+      label: `No Airbnb units ${args.consecutiveBlocks}/${t} — ${remaining} more sweep${remaining === 1 ? "" : "s"} to block`,
       progress: { count: args.consecutiveBlocks, of: t },
     };
   }
   if (args.consecutiveOpens >= t) {
-    return { status: "sourceable", label: "Sourceable", progress: { count: t, of: t } };
+    return { status: "sourceable", label: "Available on Airbnb", progress: { count: t, of: t } };
   }
   if (args.consecutiveOpens >= 1) {
-    return { status: "sourceable-pending", label: `Sourceable ${args.consecutiveOpens}/${t}`, progress: { count: args.consecutiveOpens, of: t } };
+    return { status: "sourceable-pending", label: `Available on Airbnb ${args.consecutiveOpens}/${t}`, progress: { count: args.consecutiveOpens, of: t } };
   }
   return { status: "unknown", label: "Checking…", progress: null };
 }

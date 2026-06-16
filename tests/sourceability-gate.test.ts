@@ -2,54 +2,46 @@ import assert from "node:assert/strict";
 
 process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
 
-const { decideSourceability, generateWeeklyWindows, applyConfirmation, confirmedAction, classifyObservation } = await import("../server/sourceability-gate-core");
+const { decideAvailabilitySourceability, generateWeeklyWindows, applyConfirmation, confirmedAction, classifyObservation } = await import("../server/sourceability-gate-core");
+const { computeSetsFromCounts } = await import("../server/availability-search");
 
-console.log("sourceability gate suite");
+console.log("sourceability gate suite (Airbnb-availability)");
 
-// FAIL-SAFE: an offline/empty/failed scan must NEVER block or unblock,
-// regardless of the numbers — a false block silently kills real revenue.
+// FAIL-SAFE: a failed/keyless Airbnb search must NEVER block or unblock — a
+// false block silently kills real revenue, so we only act on a SUCCESSFUL search.
 {
-  const d = decideSourceability({ scan: { ok: false, cheapestCost: 5000 }, sellableRevenue: 1 });
-  assert.equal(d.decision, "skip", "scan not ok → skip (fail-safe, no calendar change)");
-  const d2 = decideSourceability({ scan: { ok: false, cheapestCost: null }, sellableRevenue: 99999 });
-  assert.equal(d2.decision, "skip", "scan not ok always skips even with huge revenue");
+  const d = decideAvailabilitySourceability({ ok: false, setsAvailable: 0, detail: "no key" });
+  assert.equal(d.decision, "skip", "search not ok → skip (fail-safe, no calendar change)");
+  const d2 = decideAvailabilitySourceability({ ok: false, setsAvailable: 5 });
+  assert.equal(d2.decision, "skip", "search not ok always skips, even if a stale count is present");
 }
 
-// Real pool but no sourceable same-community combo → block.
+// A SUCCESSFUL search that can supply ≥1 complete unit-set → open (keep selling).
 {
-  const d = decideSourceability({ scan: { ok: true, cheapestCost: null }, sellableRevenue: 9000 });
-  assert.equal(d.decision, "block", "real pool, no combo → block");
+  const d = decideAvailabilitySourceability({ ok: true, setsAvailable: 1, detail: "3BR×4, 2BR×9 → 1 set" });
+  assert.equal(d.decision, "open", "≥1 set available on Airbnb → open");
+  const d2 = decideAvailabilitySourceability({ ok: true, setsAvailable: 7 });
+  assert.equal(d2.decision, "open", "plenty of sets → open");
 }
 
-// The actual Lea case: cheapest combo $18,617 vs sold $12,187 → clear loss → block.
+// A SUCCESSFUL search that can't supply the unit set (a required size missing) → block.
 {
-  const d = decideSourceability({ scan: { ok: true, cheapestCost: 18617 }, sellableRevenue: 12187 });
-  assert.equal(d.decision, "block", "cost >> revenue → block");
-  assert.equal(d.projectedProfit, 12187 - 18617, "projected profit is revenue − cost");
+  const d = decideAvailabilitySourceability({ ok: true, setsAvailable: 0, detail: "3BR×0, 2BR×9 → 0 sets" });
+  assert.equal(d.decision, "block", "a required size unavailable on Airbnb → block");
 }
+console.log("  ✓ decideAvailabilitySourceability: fail-safe skip / open when set available / block when a size is missing");
 
-// The Nancy case: cheapest combo $7,983 vs sellable $9,237 → profit → open.
+// computeSetsFromCounts: the bedroom-plan set math that drives availability.
 {
-  const d = decideSourceability({ scan: { ok: true, cheapestCost: 7983 }, sellableRevenue: 9237 });
-  assert.equal(d.decision, "open", "profitable → open");
+  // 5BR = 3BR + 2BR: needs one of each per set → min(have3, have2).
+  assert.equal(computeSetsFromCounts([{ bedrooms: 3 }, { bedrooms: 2 }], { 3: 4, 2: 9 }), 4, "5BR=3+2: min(4,9)=4 sets");
+  assert.equal(computeSetsFromCounts([{ bedrooms: 3 }, { bedrooms: 2 }], { 3: 0, 2: 9 }), 0, "no 3BR → 0 sets (would block)");
+  assert.equal(computeSetsFromCounts([{ bedrooms: 3 }, { bedrooms: 2 }], { 3: 1, 2: 1 }), 1, "one of each → exactly 1 set (open)");
+  // 6BR = 3BR + 3BR: needs TWO distinct 3BRs per set → floor(have3 / 2).
+  assert.equal(computeSetsFromCounts([{ bedrooms: 3 }, { bedrooms: 3 }], { 3: 7 }), 3, "6BR=3+3: floor(7/2)=3 sets");
+  assert.equal(computeSetsFromCounts([{ bedrooms: 3 }, { bedrooms: 3 }], { 3: 1 }), 0, "6BR=3+3 with only one 3BR → 0 sets (would block)");
 }
-
-// minMargin threshold: thin-but-positive is blocked only when a margin is required.
-{
-  const thin20 = decideSourceability({ scan: { ok: true, cheapestCost: 10000 }, sellableRevenue: 11000, minMargin: 0.20 });
-  assert.equal(thin20.decision, "block", "profit $1,000 < required $2,000 (20% of cost) → block");
-  const ok20 = decideSourceability({ scan: { ok: true, cheapestCost: 10000 }, sellableRevenue: 12500, minMargin: 0.20 });
-  assert.equal(ok20.decision, "open", "profit $2,500 ≥ $2,000 → open");
-  const dflt = decideSourceability({ scan: { ok: true, cheapestCost: 10000 }, sellableRevenue: 11000 });
-  assert.equal(dflt.decision, "open", "default minMargin 0 blocks only actual losses, not thin margins");
-}
-
-// Exact break-even is NOT a loss at the default threshold (profit 0 ≥ required 0).
-{
-  const even = decideSourceability({ scan: { ok: true, cheapestCost: 10000 }, sellableRevenue: 10000 });
-  assert.equal(even.decision, "open", "break-even is not a loss at minMargin 0");
-}
-console.log("  ✓ decideSourceability: fail-safe skip / block-on-loss / open-on-profit / minMargin gate");
+console.log("  ✓ computeSetsFromCounts: per-size set math (3+2 needs one each; 3+3 needs two distinct 3BRs)");
 
 // Windows: weekly 7-night, within [minLead, horizon], each start+7 = end.
 {
@@ -71,7 +63,7 @@ console.log("  ✓ decideSourceability: fail-safe skip / block-on-loss / open-on
 }
 console.log("  ✓ generateWeeklyWindows: 7-night windows within [minLead, horizon]");
 
-// ── Confirmation guard: immunity to single-scrape noise ──
+// ── Confirmation guard: immunity to single-search noise ──
 {
   const zero = { consecutiveBlocks: 0, consecutiveOpens: 0 };
   // streak accumulation + reset
@@ -87,9 +79,9 @@ console.log("  ✓ generateWeeklyWindows: 7-night windows within [minLead, horiz
   assert.equal(confirmedAction({ consecutiveBlocks: 0, consecutiveOpens: 2 }, 2), "open", "2/2 opens → open");
   assert.equal(confirmedAction({ consecutiveBlocks: 5, consecutiveOpens: 0 }, 1), "block", "threshold floors at 1");
 
-  // THE NOISE CASE we observed: block, open, block, block (threshold 2)
+  // THE NOISE CASE: block, open, block, block (threshold 2)
   let s = { consecutiveBlocks: 0, consecutiveOpens: 0 };
-  for (const dec of ["block", "open", "block"]) { s = applyConfirmation(s, dec); assert.equal(confirmedAction(s, 2), "pending", `noisy ${dec} must NOT act`); }
+  for (const dec of ["block", "open", "block"] as const) { s = applyConfirmation(s, dec); assert.equal(confirmedAction(s, 2), "pending", `noisy ${dec} must NOT act`); }
   s = applyConfirmation(s, "block");
   assert.equal(confirmedAction(s, 2), "block", "only a 2nd CONSECUTIVE block confirms → block");
 
@@ -103,10 +95,10 @@ console.log("  ✓ confirmation guard: N-consecutive required; noise never acts;
 
 // ── UI status classifier (the "1/2 — one more sweep to block" labels) ──
 {
-  // the operator's exact ask: flagged once, needs a second sweep
+  // flagged once, needs a second sweep
   const onceFlagged = classifyObservation({ consecutiveBlocks: 1, consecutiveOpens: 0, threshold: 2, blockedOnGuesty: false });
   assert.equal(onceFlagged.status, "block-pending");
-  assert.equal(onceFlagged.label, "Loss flagged 1/2 — 1 more sweep to block");
+  assert.equal(onceFlagged.label, "No Airbnb units 1/2 — 1 more sweep to block");
   assert.deepEqual(onceFlagged.progress, { count: 1, of: 2 });
 
   // confirmed (2/2) but not yet pushed to Guesty
@@ -118,16 +110,17 @@ console.log("  ✓ confirmation guard: N-consecutive required; noise never acts;
   assert.equal(live.status, "blocked");
   assert.equal(live.label, "Blocked on Guesty");
 
-  // sourceable confirmed + forming
+  // available confirmed + forming
   assert.equal(classifyObservation({ consecutiveBlocks: 0, consecutiveOpens: 2, threshold: 2, blockedOnGuesty: false }).status, "sourceable");
+  assert.equal(classifyObservation({ consecutiveBlocks: 0, consecutiveOpens: 2, threshold: 2, blockedOnGuesty: false }).label, "Available on Airbnb");
   assert.equal(classifyObservation({ consecutiveBlocks: 0, consecutiveOpens: 1, threshold: 2, blockedOnGuesty: false }).status, "sourceable-pending");
 
   // nothing yet
   assert.equal(classifyObservation({ consecutiveBlocks: 0, consecutiveOpens: 0, threshold: 2, blockedOnGuesty: false }).status, "unknown");
 
   // higher threshold pluralizes correctly
-  assert.equal(classifyObservation({ consecutiveBlocks: 1, consecutiveOpens: 0, threshold: 3, blockedOnGuesty: false }).label, "Loss flagged 1/3 — 2 more sweeps to block");
+  assert.equal(classifyObservation({ consecutiveBlocks: 1, consecutiveOpens: 0, threshold: 3, blockedOnGuesty: false }).label, "No Airbnb units 1/3 — 2 more sweeps to block");
 }
-console.log("  ✓ classifyObservation: 1/2 pending, 2/2 confirmed, live-blocked, sourceable, plural labels");
+console.log("  ✓ classifyObservation: 1/2 pending, 2/2 confirmed, live-blocked, available, plural labels");
 
 console.log("sourceability gate suite passed");
