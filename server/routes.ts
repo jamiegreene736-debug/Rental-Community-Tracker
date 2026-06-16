@@ -1645,7 +1645,11 @@ function assertPricingRefreshNotCancelled(propertyKey: number, cancelGeneration:
 }
 
 function isImgBbRateLimit(status: number, body: string): boolean {
-  return status === 429 || /rate limit|too many requests/i.test(body);
+  // ImgBB free-tier quota/rate errors come back as 429 OR as a 4xx whose body
+  // says "limit"/"quota"/"exceeded" (not just "rate limit"). Treat all of those
+  // as retryable so a transient quota blip backs off instead of hard-failing the
+  // whole multi-photo push (which then cascades every photo to the fallback).
+  return status === 429 || /rate.?limit|too many requests|quota|exceeded|limit reached|slow down|try again/i.test(body);
 }
 
 function isGuestyCalendarRetryableError(error: any): boolean {
@@ -1729,7 +1733,13 @@ async function uploadBufferToImgBbWithRetry(
     try {
       return await uploadBufferToImgBb(imgbbKey, buffer);
     } catch (e: any) {
-      const retryable = e?.rateLimited || e?.status === 429 || e?.status >= 500;
+      const status = Number(e?.status ?? 0);
+      // Retry rate/quota limits (now incl. 4xx quota via isImgBbRateLimit),
+      // server errors, AND transient network failures (no HTTP status). An
+      // auth/bad-key 4xx (no quota keywords) stays non-retryable — retrying
+      // wouldn't help — and falls back to app-hosting as before.
+      const transientNetwork = !status && /ECONNRESET|ETIMEDOUT|EAI_AGAIN|timeout|fetch failed|network|socket/i.test(String(e?.message ?? ""));
+      const retryable = e?.rateLimited || status === 429 || status >= 500 || transientNetwork;
       if (!retryable || attempt >= waits.length) throw e;
       const waitMs = waits[attempt];
       onRetry(attempt + 1, waitMs, e);

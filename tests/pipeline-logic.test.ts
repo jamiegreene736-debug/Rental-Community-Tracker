@@ -3644,3 +3644,22 @@ console.log("  ✓ title Sleeps token sync (occupancy consistency: title == beds
   assert.equal(syncSleepsInDescription("", 16), "");
 }
 console.log("  ✓ description body occupancy sync (prose 'N guests' -> listing sleeps)");
+
+// ── ImgBB photo-push resilience (the failed Photos push) ───────────────────
+// A free-tier ImgBB quota error (a 4xx saying "limit"/"exceeded", not just
+// "rate limit") must be treated as retryable so a transient blip doesn't
+// cascade the whole multi-photo push into a hard failure.
+assert.ok(
+  /function isImgBbRateLimit/.test(routesSource) &&
+    /quota|exceeded|limit reached/i.test(
+      routesSource.slice(routesSource.indexOf("function isImgBbRateLimit"), routesSource.indexOf("function isImgBbRateLimit") + 400),
+    ),
+  "isImgBbRateLimit should flag quota/limit-exceeded bodies as retryable, not only 'rate limit'",
+);
+assert.ok(
+  routesSource.includes("uploadBufferToImgBbWithRetry") &&
+    /transientNetwork/.test(routesSource) &&
+    /ECONNRESET|ETIMEDOUT|fetch failed/.test(routesSource),
+  "ImgBB upload retry should also retry transient network failures (no HTTP status)",
+);
+console.log("  ✓ ImgBB photo-push retry resilience (quota + transient network)");
