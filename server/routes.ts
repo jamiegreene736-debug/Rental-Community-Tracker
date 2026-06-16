@@ -28962,6 +28962,11 @@ Return ONLY compact JSON with this exact shape:
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
     const city = normalizePlatformCheckCity(String(req.query.city ?? ""), units[0]?.address);
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
+    // Whole-home single listing (the client sends this when the property has exactly one unit and
+    // no unit number to disambiguate). For these the street/community IS the unit, so a STRONG
+    // property match can confirm without a unit token. (Named singleHomeMode to avoid clashing with
+    // the legacy path's own `singleListingMode` const further down this handler.)
+    const singleHomeMode = ["1", "true", "yes"].includes(String(req.query.singleListing ?? req.query.standalone ?? "").toLowerCase());
     // ── Text-only platform check ────────────────────────────────────────────────
     // The expensive Google Lens REVERSE-IMAGE probes stay disabled (045b2c5, to
     // preserve SearchAPI quota) — the legacy Lens handler below is intentionally left
@@ -29015,6 +29020,7 @@ Return ONLY compact JSON with this exact shape:
       street: string,
       unitNumber: string,
       complexName: string,
+      singleListing: boolean,
       expectedBedrooms?: number,
     ): Promise<{ status: "confirmed" | "unconfirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
       const bareUnit = String(unitNumber || "").trim();
@@ -29140,22 +29146,34 @@ Return ONLY compact JSON with this exact shape:
             // Skip results that evidence NEITHER our property (even weakly) NOR our specific unit —
             // those are Google fuzzy/cross-domain hits unrelated to this listing.
             if (!weak && !onUnit) continue;
+            // A whole-home single listing has no unit to disambiguate, so the property itself counts
+            // as "pinned". A multi-unit listing must pin the SPECIFIC unit token (onUnit).
+            const unitPinned = onUnit || singleListing;
             const snippet = `${r.title || ""} — ${r.snippet || ""}`.replace(/\s+/g, " ").trim().slice(0, 200);
             const listingBeds = snippetBedrooms(text);
             const bedroomConflict = typeof expectedBedrooms === "number" && expectedBedrooms > 0 && listingBeds !== null && listingBeds !== expectedBedrooms;
-            // CONFIRM only when the result pins our SPECIFIC unit AT our property (STRONG evidence:
-            // both distinctive community parts, or the street) and the bedroom count (if stated) is
-            // consistent. A non-discriminating unit (A/B, 1-2 digits, empty) can never satisfy
-            // onUnit, so it can never confirm — exactly the bug fix. Everything else → review.
-            if (onUnit && strong && !bedroomConflict) {
+            // CONFIRM only when the result pins our unit (or it's a single home) AT our property with
+            // STRONG evidence (both distinctive community parts, or the street) and a consistent
+            // bedroom count. A non-discriminating unit (A/B, 1-2 digits, empty) can never satisfy
+            // onUnit, so it can never confirm — exactly the bug fix.
+            if (unitPinned && strong && !bedroomConflict) {
               return { status: "confirmed" as const, url: r.link, detection: snippet };
             }
-            if (!bestUnconfirmed) {
-              const reason = nonDiscriminatingUnit
-                ? `Found "${complexName}" listed but can't confirm ${unitLabel} by text (too generic to pin a specific unit) — verify by photos`
-                : bedroomConflict
+            // REVIEW only when there's genuine ambiguity:
+            //   • we pinned the unit but the property evidence is weak, or the bedrooms conflict, OR
+            //   • the unit number is non-discriminating and the community is listed (can't pin it).
+            // A SPECIFIC unit whose token is ABSENT is deliberately NOT flagged just because the
+            // resort is listed — that unit simply isn't there → falls through to "not-listed/Clear"
+            // (avoids flagging every brand-new unit at a known resort for manual review).
+            const flagReview =
+              (unitPinned && (bedroomConflict || !strong)) ||
+              (nonDiscriminatingUnit && !singleListing && weak);
+            if (flagReview && !bestUnconfirmed) {
+              const reason = bedroomConflict
                 ? `Found a listing but it's ${listingBeds}BR vs this unit's ${expectedBedrooms}BR — likely a different unit; verify manually`
-                : `Found "${complexName}" listed but couldn't confirm ${unitLabel} specifically — verify manually`;
+                : (nonDiscriminatingUnit && !singleListing)
+                ? `Found "${complexName}" listed but can't confirm ${unitLabel} by text (too generic to pin a specific unit) — verify by photos`
+                : `Found a possible match but couldn't confirm it's ${singleListing ? "this property" : unitLabel} at "${complexName}" — verify manually`;
               bestUnconfirmed = { url: r.link, detection: `${reason}: ${snippet}` };
             }
           }
@@ -29179,7 +29197,7 @@ Return ONLY compact JSON with this exact shape:
         const street = preflightStreetOf(unit.address);
         const expectedBedrooms = typeof unit.bedrooms === "number" && unit.bedrooms > 0 ? unit.bedrooms : undefined;
         const [airbnb, vrbo, booking] = await Promise.all(
-          PREFLIGHT_PLATFORM_DOMAINS.map((p) => checkPlatformTextOnly(p.domain, street, unit.unitNumber, name, expectedBedrooms)),
+          PREFLIGHT_PLATFORM_DOMAINS.map((p) => checkPlatformTextOnly(p.domain, street, unit.unitNumber, name, singleHomeMode, expectedBedrooms)),
         );
         return {
           unitId: unit.unitId,
