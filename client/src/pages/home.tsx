@@ -1480,7 +1480,17 @@ function AdminDashboard() {
   // Active properties first so they sort to the top by default;
   // drafts append below until the user changes sort order.
   const allProperties = useMemo(
-    () => [...activeProperties, ...draftsAsProperties],
+    () =>
+      [...activeProperties, ...draftsAsProperties].map((p) => {
+        // Derive "Guests" (sleeps) from the occupancy formula instead of the
+        // old hardcoded/inferred numbers, which never reflected the corrected
+        // Guesty values: bedrooms x2 + one double sleeper sofa (x2) per condo.
+        // unitCount is the condo count (units.length for active rows, 1/2 for
+        // single/combo drafts), so this matches what we write to Guesty
+        // accommodates and keeps the dashboard column in sync.
+        const condos = p.unitCount && p.unitCount > 0 ? p.unitCount : p.multiUnit ? 2 : 1;
+        return p.bedrooms > 0 ? { ...p, guests: p.bedrooms * 2 + condos * 2 } : p;
+      }),
     [activeProperties, draftsAsProperties],
   );
 
