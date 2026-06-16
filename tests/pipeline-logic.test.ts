@@ -14,6 +14,7 @@ import {
   TOP_MARKET_SEEDS,
 } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
+import { dedupeListingRoomsByNumber } from "../client/src/data/guesty-listing-config";
 import {
   discoveryCityForPhotoSearch,
   discoverySearchCitiesForPhotoSearch,
@@ -3483,3 +3484,61 @@ assert.ok(
   "VRBO sidecar worker should still support map_bounds deep harvest for legacy callers only",
 );
 console.log("  ✓ city VRBO inventory export + combo pairing");
+
+// ── Bedding push: dedupe duplicate roomNumber (combo "Unknown error") ──────
+// A 2-unit combo (e.g. Ko Olina 6BR = two 3BR units) numbers bedrooms with a
+// running counter (1..6, unique) but emits one roomNumber-0 "Living Room" per
+// unit. Guesty's PUT /listings rejects two rooms sharing a roomNumber with a
+// generic "Unknown error when updating listing"; dedupeListingRoomsByNumber
+// must collapse them into ONE shared space carrying the summed sofa beds.
+{
+  const comboRooms = [
+    { roomNumber: 1, name: "Master Bedroom", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 2, name: "Bedroom 2", beds: [{ type: "QUEEN_BED", quantity: 1 }] },
+    { roomNumber: 3, name: "Bedroom 3", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 0, name: "Living Room", beds: [{ type: "SOFA_BED", quantity: 1 }] },
+    { roomNumber: 4, name: "Bedroom 4", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 5, name: "Bedroom 5", beds: [{ type: "QUEEN_BED", quantity: 1 }] },
+    { roomNumber: 6, name: "Bedroom 6", beds: [{ type: "QUEEN_BED", quantity: 1 }] },
+    { roomNumber: 0, name: "Living Room", beds: [{ type: "SOFA_BED", quantity: 1 }] },
+  ];
+  const deduped = dedupeListingRoomsByNumber(comboRooms);
+
+  const roomNumbers = deduped.map((r) => r.roomNumber);
+  assert.equal(deduped.length, 7, "combo rooms should collapse 8 -> 7 (two living rooms merge)");
+  assert.equal(
+    new Set(roomNumbers).size,
+    roomNumbers.length,
+    "every roomNumber must be unique after dedupe (no duplicate roomNumber 0)",
+  );
+  assert.equal(
+    roomNumbers.filter((n) => n === 0).length,
+    1,
+    "exactly one shared-space room (roomNumber 0) after dedupe",
+  );
+  const sharedSpace = deduped.find((r) => r.roomNumber === 0)!;
+  assert.equal(
+    sharedSpace.beds.find((b) => b.type === "SOFA_BED")?.quantity,
+    2,
+    "the merged shared space carries both units' sofa beds (SOFA_BED x2)",
+  );
+  // Insertion order preserved: roomNumber 0 stays where it first appeared.
+  assert.deepEqual(roomNumbers, [1, 2, 3, 0, 4, 5, 6], "first-seen order preserved");
+  // Bedrooms are untouched.
+  assert.equal(deduped.find((r) => r.roomNumber === 1)?.beds[0]?.quantity, 1);
+
+  // Single shared space (single-unit listing) is unchanged / idempotent.
+  const singleUnit = [
+    { roomNumber: 1, name: "Master Bedroom", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 0, name: "Living Room", beds: [{ type: "SOFA_BED", quantity: 1 }] },
+  ];
+  assert.deepEqual(
+    dedupeListingRoomsByNumber(singleUnit),
+    singleUnit,
+    "single-unit rooms (one roomNumber 0) pass through unchanged",
+  );
+  // Does not mutate the caller's array/objects.
+  assert.equal(comboRooms.length, 8, "input array is not mutated");
+  assert.equal(comboRooms[3].beds[0].quantity, 1, "input room objects are not mutated");
+}
+console.log("  ✓ bedding listingRooms dedupe (combo duplicate roomNumber 0)");

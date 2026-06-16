@@ -236,6 +236,37 @@ export function buildListingRooms(propertyId: number): GuestyRoom[] {
   return allRooms;
 }
 
+// Guesty (and Airbnb) model exactly ONE shared space per listing at
+// roomNumber 0; bedrooms are 1..N. Both room builders above emit one
+// roomNumber-0 "Living Room" entry PER unit, so a multi-unit combo (e.g. a
+// 6BR = two 3BR units) produces TWO rooms with roomNumber 0. Guesty's
+// PUT /listings dedups rooms by roomNumber and rejects the duplicate with a
+// generic "Unknown error when updating listing" (a single-unit listing, with
+// exactly one roomNumber 0, succeeds). Collapse any duplicate roomNumber into
+// a single room, summing bed quantities by type, so every roomNumber is
+// unique and the combined shared space carries all the sofa beds
+// (e.g. SOFA_BED x2). Insertion order is preserved (Map keeps first-seen
+// order), and the first non-empty name wins.
+export function dedupeListingRoomsByNumber<
+  R extends { roomNumber: number; name?: string; beds: Array<{ type: string; quantity: number }> },
+>(rooms: R[]): R[] {
+  const byNumber = new Map<number, R>();
+  for (const r of rooms) {
+    const existing = byNumber.get(r.roomNumber);
+    if (!existing) {
+      byNumber.set(r.roomNumber, { ...r, beds: r.beds.map((b) => ({ ...b })) } as R);
+      continue;
+    }
+    for (const bed of r.beds) {
+      const match = existing.beds.find((b) => b.type === bed.type);
+      if (match) match.quantity += bed.quantity;
+      else existing.beds.push({ ...bed });
+    }
+    if (!existing.name && r.name) existing.name = r.name;
+  }
+  return Array.from(byNumber.values());
+}
+
 export function parseSqft(sqftStr: string): number {
   return parseInt(sqftStr.replace(/[^0-9]/g, ""), 10) || 0;
 }
