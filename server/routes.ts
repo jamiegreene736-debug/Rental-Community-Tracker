@@ -7941,11 +7941,25 @@ export async function registerRoutes(
       }
 
       const contentType = guestyRes.headers.get("content-type") || "";
+      // Capture the real Guesty rejection for listing writes — the client only
+      // sees a generic "Unknown error when updating listing", so log the actual
+      // response body + the payload we sent (bedding/listingRooms pushes, etc.).
+      const isListingWrite = req.method !== "GET" && /^\/listings\b/.test(guestyPath);
       if (contentType.includes("application/json")) {
         const data = await guestyRes.json();
+        if (!guestyRes.ok && isListingWrite) {
+          console.error(
+            `[guesty-proxy] ${req.method} ${guestyPath} -> ${guestyRes.status}: ${JSON.stringify(data).slice(0, 1200)} | payload: ${JSON.stringify(req.body).slice(0, 1800)}`,
+          );
+        }
         return res.status(guestyRes.status).json(data);
       } else {
         const text = await guestyRes.text();
+        if (!guestyRes.ok && isListingWrite) {
+          console.error(
+            `[guesty-proxy] ${req.method} ${guestyPath} -> ${guestyRes.status} (non-json): ${text.slice(0, 1200)} | payload: ${JSON.stringify(req.body).slice(0, 1800)}`,
+          );
+        }
         return res.status(guestyRes.status).send(text);
       }
     } catch (err: any) {

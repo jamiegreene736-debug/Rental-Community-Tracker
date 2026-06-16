@@ -191,12 +191,30 @@ class GuestyService {
 
     if (!res.ok) {
       if (res.status === 429) throw new Error("RATE_LIMITED");
-      const err = await res.json().catch(() => ({})) as { message?: string; error?: string | { message?: string; code?: string } };
-      const msg =
+      // Capture the RAW body, not just `.message`. Guesty often returns a
+      // generic "Unknown error when updating listing" while the real cause
+      // (validation errors / field codes) sits in `errors`/`details`/`code`.
+      // Swallowing those left the operator with an unactionable toast.
+      const raw = await res.text().catch(() => "");
+      let err: any = {};
+      try { err = raw ? JSON.parse(raw) : {}; } catch { err = {}; }
+      const base =
         err.message ||
         (typeof err.error === "object" ? err.error?.message : err.error) ||
         `Guesty API ${res.status}: ${endpoint}`;
-      throw new Error(msg);
+      const extra: string[] = [];
+      const code = (err && typeof err.error === "object" ? (err.error as any)?.code : undefined) ?? err.code;
+      if (code) extra.push(`code ${code}`);
+      const detail =
+        err.details ?? err.errors ?? err.validation ??
+        (err && typeof err.error === "object" ? ((err.error as any)?.details ?? (err.error as any)?.errors) : undefined);
+      if (detail) extra.push(typeof detail === "string" ? detail : JSON.stringify(detail));
+      // Last resort: a generic message with no structured detail — attach the
+      // raw body so the actual reason is visible in the toast.
+      if (!extra.length && /unknown error/i.test(base) && raw && raw.length <= 1500 && raw.trim() !== base) {
+        extra.push(raw);
+      }
+      throw new Error(extra.length ? `${base} — ${extra.join("; ")}` : base);
     }
 
     if (res.status === 204) return { success: true } as T;
