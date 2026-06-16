@@ -28958,7 +28958,7 @@ Return ONLY compact JSON with this exact shape:
     const unitsParam = (req.query.units as string || "[]");
     if (!name) return res.status(400).json({ error: "name is required" });
 
-    let units: { unitId: string; unitNumber: string; address: string; photoFolder?: string }[] = [];
+    let units: { unitId: string; unitNumber: string; address: string; photoFolder?: string; bedrooms?: number }[] = [];
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
     const city = normalizePlatformCheckCity(String(req.query.city ?? ""), units[0]?.address);
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
@@ -29015,41 +29015,82 @@ Return ONLY compact JSON with this exact shape:
       street: string,
       unitNumber: string,
       complexName: string,
+      expectedBedrooms?: number,
     ): Promise<{ status: "confirmed" | "unconfirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
       const bareUnit = String(unitNumber || "").trim();
       const uLower = bareUnit.toLowerCase();
-      // Short / ambiguous unit numbers (1-2 bare digits) appear in almost any listing
-      // snippet — prices, bed counts, ratings, building numbers — so a bare substring
-      // match false-positives constantly (e.g. unit "1" "matched" every Waikoloa listing
-      // that mentions a "1"). For these, require an explicit unit MARKER in BOTH the query
-      // and the snippet ("Unit 1" / "#1" / "Apt 1" / "Suite 1"). 3+ digit or alphanumeric
-      // unit numbers (e.g. "3553", "13B") are specific enough to match bare. This mirrors
-      // the short-unit gating in the legacy (Lens) handler's isShortUnitNumber/unitQueryTerm.
-      const ambiguousUnit = /^\d{1,2}$/.test(bareUnit);
-      const unitQueryFragment = !bareUnit
+      // ── Discriminating vs non-discriminating unit identifiers ───────────────────────
+      // A text match against a community/street query is necessarily a BUILDING-level
+      // match — every unit at "The Cliffs at Princeville" / "3811 Edward Rd" shares both.
+      // To assert "Listed" we need the result to also pin THIS SPECIFIC unit. Some unit
+      // identifiers simply can't do that by text:
+      //   • empty                         — no unit token at all
+      //   • a single letter ("A"/"B")     — `text.includes("a")` is true for almost any page
+      //   • 1-2 bare digits ("1", "07")   — collide with prices / bed counts / ratings
+      // For all of these we can find the COMMUNITY but never the UNIT, so the honest verdict
+      // is "unconfirmed → verify by photos", never "confirmed". (This was the bug: A/B units
+      // at a busy resort all showed green "Listed" off the community name alone, and 1BR/2BR
+      // listings matched 3BR units because bedroom count was never compared.)
+      const isSingleLetter = /^[a-z]$/i.test(bareUnit);
+      const isShortNumeric = /^\d{1,2}$/.test(bareUnit);
+      const nonDiscriminatingUnit = !bareUnit || isSingleLetter || isShortNumeric;
+      // Short NUMERIC units still query with explicit unit-type markers so Google only returns
+      // pages that position the digits as a unit id (not a price/rating). Single letters add no
+      // useful constraint (and "A"/"B" can't be marker-quoted usefully) → community/street only.
+      const unitQueryFragment = (!bareUnit || isSingleLetter)
         ? ""
-        : ambiguousUnit
-        // For an ambiguous 1-2 digit unit, only retrieve pages that reference it WITH a
-        // unit-type word — never a bare "#1" (which floods in from marketing "ranked #1").
+        : isShortNumeric
         ? `(${["Unit", "Apt", "Apartment", "Suite", "Villa", "Townhome", "Building"].map((w) => `"${w} ${bareUnit}"`).join(" OR ")})`
         : `"${bareUnit}"`;
-      // Snippet validation. For an ambiguous unit the number MUST be immediately preceded by
-      // a unit-type word (optionally with "#"/"No."), so "Unit 1" / "Villa 1" / "Apt #1"
-      // confirm, but "ranked #1", "No. 1 rated", "1 king bed", "$1,200", "1 of 6", "sleeps 12"
-      // do NOT. \b on the number keeps "1" from matching "10"/"12"/"1A".
-      // Only WHOLE-UNIT words — deliberately NOT "suite"/"room"/"bedroom" (those label a
-      // unit's INTERNAL rooms: "Suite #1", "Bedroom 1" appear in almost every multi-room
-      // listing) and NOT plural "villas"/"units" (the resort name "…Beach Villas 1 bedroom"
-      // would collide). Even so, an ambiguous match is only ever flagged for REVIEW below,
-      // never asserted as "Listed".
-      const unitMarkerRe = ambiguousUnit
-        ? new RegExp(`\\b(?:unit|apt|apt\\.|apartment|villa|townhome|townhouse|building|bldg|cottage|casita)\\s*(?:#|no\\.?\\s*)?\\s*${uLower}\\b`, "i")
-        : null;
-      const unitMentioned = (text: string): boolean => {
-        if (!bareUnit) return true;
-        if (ambiguousUnit) return unitMarkerRe!.test(text);
-        return text.includes(uLower) || text.includes(`#${uLower}`);
+
+      // ── Evidence helpers ────────────────────────────────────────────────────────────
+      const norm = (s: string): string => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+      // Community tokens (drop generic resort words so we require the DISTINCTIVE name parts,
+      // e.g. "cliffs" + "princeville" — not just "resort"/"villas"/"condo").
+      const COMMUNITY_STOPWORDS = new Set(["the", "at", "of", "and", "a", "an", "in", "on", "by", "resort", "resorts", "villas", "villa", "condo", "condos", "condominium", "condominiums", "club", "apartments", "apartment", "suites", "suite", "vacation", "rentals", "rental", "hotel", "hotels", "beach", "bay"]);
+      const communityTokens = norm(complexName).split(" ").filter((t) => t.length >= 3 && !COMMUNITY_STOPWORDS.has(t));
+      const communityHits = (text: string): number => {
+        if (communityTokens.length === 0) return 0;
+        const hay = ` ${norm(text)} `;
+        return communityTokens.filter((t) => hay.includes(` ${t} `) || hay.includes(` ${t}`)).length;
       };
+      // STRONG: the distinctive name parts co-occur (≥2, e.g. "cliffs" + "princeville"). Used to
+      // gate a CONFIRM so a single shared town word ("Princeville") can't promote a different
+      // resort (a Pali Ke Kua "207" hit). WEAK: ≥1 distinctive token — enough to flag the
+      // community as "listed somewhere" for a REVIEW verdict, where over-flagging is the safe error.
+      const communityEvidenceStrong = (text: string): boolean => communityHits(text) >= Math.min(2, communityTokens.length);
+      const communityEvidenceWeak = (text: string): boolean => communityHits(text) >= 1;
+      // Street tokens: number + distinctive street-name word(s) (drop the type suffix Rd/St/Ave…).
+      const streetParts = norm(street).split(" ").filter(Boolean);
+      const streetNumber = /^\d+$/.test(streetParts[0] || "") ? streetParts[0] : "";
+      const STREET_TYPE = new Set(["rd", "road", "st", "street", "ave", "avenue", "dr", "drive", "blvd", "boulevard", "ln", "lane", "way", "ct", "court", "pl", "place", "ter", "terrace", "cir", "circle", "pkwy", "parkway", "hwy", "highway"]);
+      const streetNameTokens = streetParts.slice(streetNumber ? 1 : 0).filter((t) => t.length >= 3 && !STREET_TYPE.has(t));
+      const streetEvidence = (text: string): boolean => {
+        if (!streetNumber || streetNameTokens.length === 0) return false;
+        const hay = ` ${norm(text)} `;
+        return hay.includes(` ${streetNumber} `) && streetNameTokens.some((t) => hay.includes(` ${t} `) || hay.includes(` ${t}`));
+      };
+      const strongProperty = (text: string): boolean => communityEvidenceStrong(text) || streetEvidence(text);
+      const weakProperty = (text: string): boolean => communityEvidenceWeak(text) || streetEvidence(text);
+      // Specific-unit evidence: the (discriminating) unit token appears bounded — with a unit
+      // marker, as a URL slug, or street-adjacent. NEVER true for non-discriminating units.
+      const escUnit = uLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const specificUnitEvidence = (text: string): boolean => {
+        if (nonDiscriminatingUnit) return false;
+        const markerRe = new RegExp(`\\b(?:unit|apt|apt\\.|apartment|suite|villa|townhome|townhouse|building|bldg|cottage|casita|no\\.?)\\s*#?\\s*${escUnit}\\b`, "i");
+        const hashRe = new RegExp(`#\\s*${escUnit}\\b`, "i");
+        const slugRe = new RegExp(`-${escUnit}(?:[\\/?#-]|$)`, "i");
+        const boundedRe = new RegExp(`\\b${escUnit}\\b`, "i"); // bare bounded token (e.g. "4-207" id)
+        return markerRe.test(text) || hashRe.test(text) || slugRe.test(text) || boundedRe.test(text);
+      };
+      // Bedroom count stated in the snippet ("2BR", "3 bedroom", "2-bedroom", "studio").
+      const snippetBedrooms = (text: string): number | null => {
+        if (/\bstudio\b/i.test(text)) return 0;
+        const m = text.match(/\b(\d{1,2})\s*-?\s*(?:br|bd|bdr|bedroom|bedrooms|bedroomed)\b/i);
+        if (m) { const n = parseInt(m[1], 10); if (n >= 1 && n <= 12) return n; }
+        return null;
+      };
+
       // Only trust a result that is an INDIVIDUAL LISTING page — not a region / search /
       // category roundup. Those directory pages mention many properties at once, so a unit
       // marker in the snippet can belong to a DIFFERENT property (e.g. a booking.com
@@ -29075,7 +29116,12 @@ Return ONLY compact JSON with this exact shape:
       if (queries.length === 0) {
         return { status: "error", url: null, detection: "No address or community name to search" };
       }
+      const unitLabel = bareUnit ? `unit "${bareUnit}"` : "this unit";
       try {
+        // Best fallback when we can't outright CONFIRM: a result that proves the community/
+        // building is listed but not this exact unit (or a bedroom-count conflict). Surfaced as
+        // "Possible match — verify manually" (yellow), never green "Listed".
+        let bestUnconfirmed: { url: string | null; detection: string } | null = null;
         for (const q of queries) {
           const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "5" });
           const ctrl = new AbortController();
@@ -29086,22 +29132,37 @@ Return ONLY compact JSON with this exact shape:
           const data = await resp.json() as any;
           for (const r of (data.organic_results || []) as any[]) {
             const link = String(r.link || "").toLowerCase();
+            if (!isPreflightListingUrl(link)) continue;
             const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
-            if (isPreflightListingUrl(link) && unitMentioned(text)) {
-              const snippet = `${r.title || ""} — ${r.snippet || ""}`.replace(/\s+/g, " ").trim().slice(0, 200);
-              // A 1-2 digit unit number can't be CONFIRMED by text — "Unit 1" / "Apt 1" also
-              // appear as internal room labels and at other units — so surface it as a
-              // manual-review flag, not a "Listed" assertion. Specific units confirm normally.
-              return ambiguousUnit
-                ? {
-                    status: "unconfirmed" as const,
-                    url: r.link,
-                    detection: `Possible match — verify manually (unit "${bareUnit}" is too short to confirm by text): ${snippet}`,
-                  }
-                : { status: "confirmed" as const, url: r.link, detection: snippet };
+            const strong = strongProperty(text);
+            const weak = weakProperty(text);
+            const onUnit = specificUnitEvidence(text);
+            // Skip results that evidence NEITHER our property (even weakly) NOR our specific unit —
+            // those are Google fuzzy/cross-domain hits unrelated to this listing.
+            if (!weak && !onUnit) continue;
+            const snippet = `${r.title || ""} — ${r.snippet || ""}`.replace(/\s+/g, " ").trim().slice(0, 200);
+            const listingBeds = snippetBedrooms(text);
+            const bedroomConflict = typeof expectedBedrooms === "number" && expectedBedrooms > 0 && listingBeds !== null && listingBeds !== expectedBedrooms;
+            // CONFIRM only when the result pins our SPECIFIC unit AT our property (STRONG evidence:
+            // both distinctive community parts, or the street) and the bedroom count (if stated) is
+            // consistent. A non-discriminating unit (A/B, 1-2 digits, empty) can never satisfy
+            // onUnit, so it can never confirm — exactly the bug fix. Everything else → review.
+            if (onUnit && strong && !bedroomConflict) {
+              return { status: "confirmed" as const, url: r.link, detection: snippet };
+            }
+            if (!bestUnconfirmed) {
+              const reason = nonDiscriminatingUnit
+                ? `Found "${complexName}" listed but can't confirm ${unitLabel} by text (too generic to pin a specific unit) — verify by photos`
+                : bedroomConflict
+                ? `Found a listing but it's ${listingBeds}BR vs this unit's ${expectedBedrooms}BR — likely a different unit; verify manually`
+                : `Found "${complexName}" listed but couldn't confirm ${unitLabel} specifically — verify manually`;
+              bestUnconfirmed = { url: r.link, detection: `${reason}: ${snippet}` };
             }
           }
           await new Promise((rr) => setTimeout(rr, 250));
+        }
+        if (bestUnconfirmed) {
+          return { status: "unconfirmed" as const, url: bestUnconfirmed.url, detection: bestUnconfirmed.detection };
         }
         return { status: "not-listed", url: null, detection: "No matching listing found in Google results" };
       } catch (err: any) {
@@ -29116,8 +29177,9 @@ Return ONLY compact JSON with this exact shape:
     try {
       const checkedUnits = await Promise.all(units.map(async (unit) => {
         const street = preflightStreetOf(unit.address);
+        const expectedBedrooms = typeof unit.bedrooms === "number" && unit.bedrooms > 0 ? unit.bedrooms : undefined;
         const [airbnb, vrbo, booking] = await Promise.all(
-          PREFLIGHT_PLATFORM_DOMAINS.map((p) => checkPlatformTextOnly(p.domain, street, unit.unitNumber, name)),
+          PREFLIGHT_PLATFORM_DOMAINS.map((p) => checkPlatformTextOnly(p.domain, street, unit.unitNumber, name, expectedBedrooms)),
         );
         return {
           unitId: unit.unitId,

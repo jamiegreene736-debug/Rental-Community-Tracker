@@ -809,6 +809,9 @@ export default function BuilderPreflight() {
           unitNumber: unit.unitNumber,
           address,
           photoFolder: hasUnitPhoto ? unit.photoFolder : "",
+          // Pass bedroom count so the server can reject a listing whose snippet states a
+          // DIFFERENT bedroom count (e.g. a 2BR "Oceanview End Unit" matched to a 3BR unit).
+          bedrooms: (unit as any).bedrooms,
         }];
         const params = new URLSearchParams({
           name: searchCommunityName,
@@ -886,10 +889,17 @@ export default function BuilderPreflight() {
     runPlatformCheck();
   };
 
-  const runFullUnitAudit = () => {
+  // The full unit audit is the ONE comprehensive button: it runs the text platform check AND
+  // the real reverse-image photo scan (the only reliable signal for units whose number can't be
+  // confirmed by text). It subsumes the old standalone "Deep photo check" button. The photo scan
+  // is budget-capped + 24h-cached inside runDeepPhotoCheck, so a re-run won't re-burn credits.
+  const runFullUnitAudit = async () => {
     setPlatformDone(false);
     setResults({});
-    runPlatformCheck(effectiveUnits, { fullPhotoAudit: true });
+    await runPlatformCheck(effectiveUnits, { fullPhotoAudit: true });
+    if (photoFoldersForUnits().length > 0) {
+      await runDeepPhotoCheck();
+    }
   };
 
   // ── Photo cross-check ───────────────────────────────────────────────────────
@@ -1297,14 +1307,19 @@ export default function BuilderPreflight() {
                 {canFullUnitAudit && (
                   <Button
                     id="btn-full-unit-audit"
-                    aria-label="Run full unit photo audit"
+                    aria-label="Run full unit audit (text + reverse-image photos)"
                     variant="outline"
                     size="sm"
                     onClick={runFullUnitAudit}
+                    disabled={photoScanning}
                     className="h-7 px-2 text-xs flex-shrink-0"
+                    title="Text search + reverse-image photo check (5 interior photos/unit) against Airbnb / VRBO / Booking. Uses SearchAPI credits; photo results cached 24h."
                   >
-                    <Camera className="h-3 w-3 mr-1" />
-                    Full unit audit
+                    {photoScanning ? (
+                      <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Auditing photos…</>
+                    ) : (
+                      <><Camera className="h-3 w-3 mr-1" /> Full unit audit</>
+                    )}
                   </Button>
                 )}
                 <Button
@@ -1313,6 +1328,7 @@ export default function BuilderPreflight() {
                   variant="ghost"
                   size="sm"
                   onClick={rerunChecks}
+                  disabled={photoScanning}
                   className="h-7 px-2 text-xs flex-shrink-0"
                 >
                   {platformDone ? (
@@ -1325,22 +1341,6 @@ export default function BuilderPreflight() {
                       <Search className="h-3 w-3 mr-1" />
                       Run check
                     </>
-                  )}
-                </Button>
-                <Button
-                  id="btn-deep-photo-check"
-                  aria-label="Deep photo check"
-                  variant="outline"
-                  size="sm"
-                  onClick={runDeepPhotoCheck}
-                  disabled={photoScanning || (photoBudget ? photoBudget.remaining <= 0 : false)}
-                  className="h-7 px-2 text-xs flex-shrink-0"
-                  title="Reverse-image-search 5 interior photos per unit against Airbnb / VRBO / Booking. Uses SearchAPI credits; results cached 24h."
-                >
-                  {photoScanning ? (
-                    <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Photo check…</>
-                  ) : (
-                    <><Camera className="h-3 w-3 mr-1" /> Deep photo check</>
                   )}
                 </Button>
                 {photoBudget && (
@@ -1361,7 +1361,7 @@ export default function BuilderPreflight() {
           </p>
           {lastCheckWasFullAudit && hasAnyResults && (
             <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300">
-              Full unit audit complete: every available photo in each unit folder was checked against Airbnb, VRBO, and Booking.com.
+              Full unit audit complete — each unit was checked by text search and by reverse-image photo match against Airbnb, VRBO, and Booking.com. Photo matches appear per platform below (cached 24h). A unit whose number can't be confirmed by text shows “Possible Match — Check Manually”; the photo match is the reliable signal there.
             </div>
           )}
 
