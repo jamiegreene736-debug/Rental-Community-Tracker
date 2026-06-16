@@ -1,3 +1,5 @@
+import { dedupeListingRoomsByNumber } from "@/data/guesty-listing-config";
+
 const GUESTY_API_BASE = "/api/guesty-proxy";
 
 export type GuestyAddress = {
@@ -271,7 +273,12 @@ class GuestyService {
     if (details.areaSquareFeet) payload.areaSquareFeet = details.areaSquareFeet;
     if (details.bedrooms) payload.bedrooms = details.bedrooms;
     if (details.bathrooms) payload.bathrooms = details.bathrooms;
-    if (details.listingRooms && details.listingRooms.length > 0) payload.listingRooms = details.listingRooms;
+    if (details.listingRooms && details.listingRooms.length > 0) {
+      // Collapse duplicate roomNumbers (a multi-unit combo emits one
+      // roomNumber-0 living room per unit) — Guesty rejects two rooms sharing
+      // a roomNumber with a generic "Unknown error when updating listing".
+      payload.listingRooms = dedupeListingRoomsByNumber(details.listingRooms);
+    }
     return this.request("PUT", `/listings/${id}`, payload);
   }
 
