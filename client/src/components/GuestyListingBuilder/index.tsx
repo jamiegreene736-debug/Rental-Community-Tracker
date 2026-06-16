@@ -596,6 +596,28 @@ function dataPushStorageKey(listingId: string, propertyId?: number) {
   return `nexstay_data_push_${listingId}_${propertyId ?? "unknown"}`;
 }
 
+// Live status of the market-pricing refresh + Guesty rate push kicked off by
+// the unified "Push … & Pricing" button. The pricing step is ASYNC — the
+// button queues a /api/pricing/bulk-refresh job that first runs the SearchAPI
+// Airbnb P40 refresh and only THEN pushes the marked-up base rates to Guesty —
+// so the operator needs to see when the rate push actually lands, not just
+// that the refresh was queued. Mirrors the bulk-refresh item's progress shape
+// (phase: searchapi-airbnb -> pushing-guesty -> done). Persisted per-property
+// so it survives a builder remount / reload while the job runs in the cloud.
+type PricingPushStatus = {
+  jobId: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  phase: string;
+  percent: number;
+  label: string;
+  error?: string;
+  startedAt: number;
+  finishedAt?: number;
+};
+function pricingPushStatusKeyFor(propertyId?: number) {
+  return `nexstay.market-rate-push.${propertyId ?? "unknown"}.status`;
+}
+
 function formatDataPushTime(value?: string) {
   if (!value) return "Never pushed";
   const date = new Date(value);
@@ -1053,6 +1075,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [descPushError, setDescPushError] = useState<string | null>(null);
   const [dataPushBusy, setDataPushBusy] = useState(false);
   const [dataPushLog, setDataPushLog] = useState<DataPushLog>({});
+  // Async Guesty rate-push status for the unified "Push … & Pricing" button.
+  const [pricingPushStatus, setPricingPushStatus] = useState<PricingPushStatus | null>(null);
   const [amenityPushState, setAmenityPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
   const [amenityPushResult, setAmenityPushResult] = useState<{
     sent: number;
@@ -1265,6 +1289,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         localStorage.setItem(dataPushStorageKey(selectedId, propertyId), JSON.stringify(next));
       } catch {
         // Local push history is advisory; the Guesty push itself already completed.
+      }
+      return next;
+    });
+  }, [selectedId, propertyId]);
+
+  // Drop a row back to the "…" pending state (no ✓/✗). Used for pricing while
+  // the async Guesty rate push is still in flight, so the chip doesn't show a
+  // premature green check the instant the refresh is merely queued.
+  const markDataPushPending = useCallback((row: DataPushRow) => {
+    if (!selectedId) return;
+    setDataPushLog((prev) => {
+      if (!prev[row]) return prev;
+      const next = { ...prev };
+      delete next[row];
+      try {
+        localStorage.setItem(dataPushStorageKey(selectedId, propertyId), JSON.stringify(next));
+      } catch {
+        // advisory only
       }
       return next;
     });
@@ -3037,10 +3079,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
     try {
       const job = await queueMarketPricingRefresh();
-      pricingMessage = job?.id
-        ? `Market pricing refresh queued (${job.id}); Guesty rate push runs after refresh`
-        : "Market pricing refresh queued; Guesty rate push runs after refresh";
-      recordDataPush("pricing", "success", pricingMessage);
+      if (job?.id && propertyId) {
+        // The rate push is async (refresh P40 -> then push to Guesty). Seed the
+        // live status; the poller effect below tracks it through to the actual
+        // Guesty rate push and the chip is left pending (not a premature ✓)
+        // until the job terminates.
+        const queued: PricingPushStatus = {
+          jobId: job.id,
+          status: "queued",
+          phase: "queued",
+          percent: 5,
+          label: "Market pricing refresh queued; Guesty rate push runs after refresh",
+          startedAt: Date.now(),
+        };
+        setPricingPushStatus(queued);
+        try {
+          localStorage.setItem(pricingPushStatusKeyFor(propertyId), JSON.stringify(queued));
+        } catch {
+          // advisory persistence only
+        }
+        markDataPushPending("pricing");
+        pricingMessage = `Market pricing refresh queued (${job.id}); the Guesty rate push runs after the SearchAPI Airbnb refresh — watch the status below the button.`;
+      } else {
+        pricingMessage = "Market pricing refresh queued; Guesty rate push runs after refresh.";
+      }
     } catch (e) {
       const message = (e as Error).message;
       failures.push(`Market pricing: ${message}`);
@@ -3078,6 +3140,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     pushBookableToGuestyOnce,
     queueMarketPricingRefresh,
     recordDataPush,
+    markDataPushPending,
+    propertyId,
     toast,
   ]);
 
@@ -3747,6 +3811,162 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
     return prior;
   }, [pricingUpdateLogs]);
+
+  // ── Async Guesty rate-push status (unified "Push … & Pricing" button) ──
+  // Restore the last/in-flight status for the selected property so it survives
+  // a builder remount or page reload while the cloud job keeps running.
+  useEffect(() => {
+    if (!propertyId || typeof window === "undefined") {
+      setPricingPushStatus(null);
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(pricingPushStatusKeyFor(propertyId));
+      if (!raw) {
+        setPricingPushStatus(null);
+        return;
+      }
+      const parsed = JSON.parse(raw) as PricingPushStatus;
+      setPricingPushStatus(parsed && typeof parsed.jobId === "string" ? parsed : null);
+    } catch {
+      setPricingPushStatus(null);
+    }
+  }, [propertyId]);
+
+  const dismissPricingPushStatus = useCallback(() => {
+    setPricingPushStatus(null);
+    try {
+      if (propertyId && typeof window !== "undefined") {
+        window.localStorage.removeItem(pricingPushStatusKeyFor(propertyId));
+      }
+    } catch {
+      // advisory only
+    }
+  }, [propertyId]);
+
+  // Poll the queued /api/pricing/bulk-refresh job until the Guesty rate push
+  // terminates. Re-subscribes only on jobId / status-bucket / property change
+  // (the in-run "running" → "running" updates keep the same status string so
+  // the interval is not torn down each tick); the top guard makes a restored
+  // TERMINAL status a no-op. Bulk-pricing jobs are DB-durable, so a 404 means
+  // a genuinely unknown job, not a redeploy gap.
+  useEffect(() => {
+    const jobId = pricingPushStatus?.jobId;
+    const startedAt = pricingPushStatus?.startedAt ?? Date.now();
+    if (!jobId || !propertyId) return;
+    if (
+      pricingPushStatus &&
+      (pricingPushStatus.status === "completed" ||
+        pricingPushStatus.status === "failed" ||
+        pricingPushStatus.status === "cancelled")
+    ) {
+      return;
+    }
+    let stopped = false;
+    let misses = 0;
+    const deadline = startedAt + 4 * 60 * 60 * 1000;
+    const persist = (next: PricingPushStatus) => {
+      try {
+        window.localStorage.setItem(pricingPushStatusKeyFor(propertyId), JSON.stringify(next));
+      } catch {
+        // advisory only
+      }
+    };
+    const apply = (next: PricingPushStatus) => {
+      setPricingPushStatus(next);
+      persist(next);
+    };
+    const poll = async () => {
+      if (stopped) return;
+      if (Date.now() > deadline) {
+        apply({
+          jobId,
+          startedAt,
+          status: "failed",
+          phase: "error",
+          percent: 100,
+          label: "Still running after 4h — reopen the builder later to confirm the Guesty rate push.",
+          finishedAt: Date.now(),
+        });
+        return;
+      }
+      let resp: Response;
+      let data: any;
+      try {
+        resp = await fetch(`/api/pricing/bulk-refresh/${jobId}`);
+        data = await resp.json().catch(() => ({}));
+      } catch {
+        return; // transient network blip — retry next tick
+      }
+      if (stopped) return;
+      if (!resp.ok || data?.ok === false || !data?.job) {
+        misses += 1;
+        if (misses >= 3) {
+          apply({
+            jobId,
+            startedAt,
+            status: "failed",
+            phase: "error",
+            percent: 100,
+            label: "Pricing job status could not be read. Re-run the push to confirm the Guesty rates.",
+            finishedAt: Date.now(),
+          });
+        }
+        return;
+      }
+      misses = 0;
+      const job = data.job as {
+        status?: string;
+        completed?: number;
+        total?: number;
+        items?: Array<{
+          propertyId?: number;
+          status?: string;
+          progress?: { phase?: string; percent?: number; label?: string } | null;
+          error?: string | null;
+        }>;
+      };
+      const items = Array.isArray(job.items) ? job.items : [];
+      const item = items.find((c) => c.propertyId === propertyId) ?? items[0];
+      const itemStatus = String(item?.status || job.status || "running");
+      const isCompleted = itemStatus === "completed";
+      const isFailed = itemStatus === "failed" || job.status === "failed";
+      const isCancelled = itemStatus === "cancelled" || job.status === "cancelled";
+      const total = typeof job.total === "number" ? job.total : 0;
+      const completed = typeof job.completed === "number" ? job.completed : 0;
+      const queuePercent = total > 0 ? Math.round((Math.max(0, completed) / total) * 100) : 5;
+      const itemPercent = typeof item?.progress?.percent === "number" ? item.progress.percent : queuePercent;
+      const label =
+        item?.progress?.label ||
+        (isCompleted ? "Marked-up Guesty rates pushed" : `Market pricing ${completed}/${total} complete`);
+      const next: PricingPushStatus = {
+        jobId,
+        startedAt,
+        status: isCompleted ? "completed" : isFailed ? "failed" : isCancelled ? "cancelled" : "running",
+        phase: String(item?.progress?.phase || item?.status || job.status || "running"),
+        percent: Math.max(0, Math.min(100, itemPercent)),
+        label,
+        error: item?.error || undefined,
+        finishedAt: isCompleted || isFailed || isCancelled ? Date.now() : undefined,
+      };
+      apply(next);
+      if (isCompleted) {
+        recordDataPush("pricing", "success", label);
+        void reloadMarketRates();
+        void reloadPricingLogs();
+        stopped = true;
+      } else if (isFailed || isCancelled) {
+        recordDataPush("pricing", "error", item?.error || label);
+        stopped = true;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(poll, 5_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [pricingPushStatus?.jobId, pricingPushStatus?.status, pricingPushStatus?.startedAt, propertyId, recordDataPush, reloadMarketRates, reloadPricingLogs]);
 
   // Aggregate monthly rates across all units for the 24-month seasonal table
   const seasonalMonths = useMemo(() => {
@@ -4786,6 +5006,101 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 <span style={{ fontSize: 11, color: "var(--muted)" }}>Select a Guesty listing first</span>
               )}
             </div>
+            {/* Async Guesty rate-push status. The pricing step queues a refresh
+                that pushes marked-up rates to Guesty only AFTER the SearchAPI
+                Airbnb P40 refresh finishes, so surface the live phase + the
+                terminal "rates pushed" / failure outcome here under the button. */}
+            {pricingPushStatus && (() => {
+              const s = pricingPushStatus;
+              const running = s.status === "queued" || s.status === "running";
+              const done = s.status === "completed";
+              const failed = s.status === "failed";
+              const cancelled = s.status === "cancelled";
+              const pushing = s.phase === "pushing-guesty";
+              const palette = done
+                ? { bg: "#ecfdf5", border: "#a7f3d0", fg: "#065f46", dot: "#16a34a" }
+                : failed
+                  ? { bg: "#fef2f2", border: "#fecaca", fg: "#991b1b", dot: "#dc2626" }
+                  : cancelled
+                    ? { bg: "#fffbeb", border: "#fde68a", fg: "#92400e", dot: "#b45309" }
+                    : { bg: "#eff6ff", border: "#bfdbfe", fg: "#1e40af", dot: "#2563eb" };
+              const title = done
+                ? "✓ Marked-up rates pushed to Guesty"
+                : failed
+                  ? "✗ Guesty rate push didn’t finish"
+                  : cancelled
+                    ? "Rate push cancelled"
+                    : pushing
+                      ? "Pushing marked-up rates to Guesty…"
+                      : "Refreshing market rates (SearchAPI Airbnb P40)…";
+              return (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  data-testid="pricing-push-status"
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 10,
+                    margin: "8px 0 0",
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    border: `1px solid ${palette.border}`,
+                    background: palette.bg,
+                    color: palette.fg,
+                    fontSize: 12,
+                  }}
+                >
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      width: 9,
+                      height: 9,
+                      marginTop: 4,
+                      borderRadius: "50%",
+                      background: palette.dot,
+                      flexShrink: 0,
+                      animation: running ? "glb-pulse 1.2s ease-in-out infinite" : undefined,
+                    }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600 }}>
+                      {title}
+                      {running ? ` · ${s.percent}%` : ""}
+                    </div>
+                    <div style={{ marginTop: 2, opacity: 0.85, wordBreak: "break-word" }}>{s.label}</div>
+                    {failed && s.error && s.error !== s.label && (
+                      <div style={{ marginTop: 2, color: "#991b1b", opacity: 0.95 }}>{s.error}</div>
+                    )}
+                    {running && (
+                      <div style={{ marginTop: 2, opacity: 0.7 }}>
+                        Safe to leave this page — the push runs in the cloud.
+                      </div>
+                    )}
+                  </div>
+                  {!running && (
+                    <button
+                      type="button"
+                      onClick={dismissPricingPushStatus}
+                      aria-label="Dismiss rate-push status"
+                      data-testid="pricing-push-status-dismiss"
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: palette.fg,
+                        cursor: "pointer",
+                        fontSize: 16,
+                        lineHeight: 1,
+                        padding: 0,
+                        flexShrink: 0,
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
             <div className="glb-panel">
               <div className="glb-tabs">
                 {(["descriptions", "bedding", "amenities", "pricing", "photos", "availability", "otaVisibility"] as const).map((t) => {
