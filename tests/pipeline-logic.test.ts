@@ -14,7 +14,7 @@ import {
   TOP_MARKET_SEEDS,
 } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
-import { dedupeListingRoomsByNumber } from "../client/src/data/guesty-listing-config";
+import { dedupeListingRoomsByNumber, normalizeGuestyBedType, sanitizeListingRoomsForGuesty } from "../client/src/data/guesty-listing-config";
 import {
   discoveryCityForPhotoSearch,
   discoverySearchCitiesForPhotoSearch,
@@ -3542,3 +3542,49 @@ console.log("  ✓ city VRBO inventory export + combo pairing");
   assert.equal(comboRooms[3].beds[0].quantity, 1, "input room objects are not mutated");
 }
 console.log("  ✓ bedding listingRooms dedupe (combo duplicate roomNumber 0)");
+
+// ── Bedding push: bed-type sanitization (the REAL "Unknown error") ─────────
+// VERIFIED against live Guesty (2026-06-16): PUT /listings 500s with
+// "Unknown error when updating listing" when ANY bed.type is not an accepted
+// enum (TWIN_BED, FULL_BED, FUTON, MURPHY_BED, a bare "KING", null, …). One
+// bad bed in a stale/legacy config sinks the whole bedding push. The sanitizer
+// must coerce known aliases to a valid enum and drop the unmappable.
+{
+  // Accepted enums pass through unchanged.
+  for (const t of ["KING_BED", "QUEEN_BED", "DOUBLE_BED", "SINGLE_BED", "SOFA_BED", "BUNK_BED", "COUCH", "CRIB"]) {
+    assert.equal(normalizeGuestyBedType(t), t, `${t} should be accepted as-is`);
+  }
+  // Legacy / shorthand / mixed-case → nearest valid enum.
+  assert.equal(normalizeGuestyBedType("TWIN_BED"), "SINGLE_BED");
+  assert.equal(normalizeGuestyBedType("TWIN"), "SINGLE_BED");
+  assert.equal(normalizeGuestyBedType("FULL_BED"), "DOUBLE_BED");
+  assert.equal(normalizeGuestyBedType("FUTON"), "SOFA_BED");
+  assert.equal(normalizeGuestyBedType("MURPHY_BED"), "QUEEN_BED");
+  assert.equal(normalizeGuestyBedType("King"), "KING_BED");
+  assert.equal(normalizeGuestyBedType("queen bed"), "QUEEN_BED");
+  // Unmappable / invalid → null (caller drops the bed).
+  assert.equal(normalizeGuestyBedType("XYZ"), null);
+  assert.equal(normalizeGuestyBedType(""), null);
+  assert.equal(normalizeGuestyBedType(null), null);
+  assert.equal(normalizeGuestyBedType(undefined), null);
+
+  // sanitizeListingRoomsForGuesty coerces in place and drops unmappable beds.
+  const rooms = [
+    { roomNumber: 1, name: "Master Bedroom", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 3, name: "Bedroom 3", beds: [{ type: "TWIN_BED", quantity: 2 }] },
+    { roomNumber: 0, name: "Living Room", beds: [{ type: "FUTON", quantity: 1 }] },
+    { roomNumber: 4, name: "Bogus", beds: [{ type: "WHATEVER", quantity: 1 }, { type: "QUEEN_BED", quantity: 1 }] },
+  ];
+  const clean = sanitizeListingRoomsForGuesty(rooms);
+  const allTypes = clean.flatMap((r) => r.beds.map((b) => b.type));
+  const VALID = new Set(["KING_BED", "QUEEN_BED", "DOUBLE_BED", "SINGLE_BED", "SOFA_BED", "BUNK_BED", "AIR_MATTRESS", "FLOOR_MATTRESS", "WATER_BED", "TODDLER_BED", "CRIB", "COUCH"]);
+  assert.ok(allTypes.every((t) => VALID.has(t)), `all bed types must be valid Guesty enums; got ${allTypes.join(",")}`);
+  assert.equal(clean[1].beds[0].type, "SINGLE_BED", "TWIN_BED coerced to SINGLE_BED");
+  assert.equal(clean[1].beds[0].quantity, 2, "quantity preserved through coercion");
+  assert.equal(clean[2].beds[0].type, "SOFA_BED", "FUTON coerced to SOFA_BED");
+  assert.equal(clean[3].beds.length, 1, "unmappable bed dropped, valid sibling kept");
+  assert.equal(clean[3].beds[0].type, "QUEEN_BED");
+  // Original input is not mutated.
+  assert.equal(rooms[1].beds[0].type, "TWIN_BED", "sanitizer does not mutate the input");
+}
+console.log("  ✓ bedding bed-type sanitization (invalid type -> coerce/drop, the real Guesty 500)");
