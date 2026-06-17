@@ -1,101 +1,51 @@
 // Photo Community Check — operator-initiated QA for the photos tab.
 //
-// A combo listing is built by stitching a COMMUNITY photo set (shared resort
-// amenities, grounds, building exteriors, views) together with one or more
-// UNIT photo sets (interiors of specific units). Every set MUST be from the
-// SAME resort/community, or the published listing shows guest amenity photos
-// from one resort and unit photos from another. This module is the check that
-// catches that class of mistake before the operator pushes to Guesty.
+// Answers three concrete questions with YES or NO (never "uncertain"):
+//   1. Are ALL community-folder photos the same place, and does that place
+//      match the expected community on the property record?
+//   2. For each unit: is it in the SAME community as the community folder?
+//      (Requires 5+ interior photos per unit; each photo is voted individually.)
+//   3. Are Unit A and Unit B (etc.) in the same community as each other?
 //
-// What it answers (the operator's literal questions):
-//   1. What community do the community-folder photos depict, and do they match
-//      the expected community name on the property record?
-//   2. Are ALL the community photos of that one community (no outlier from a
-//      different resort)? — checked EXHAUSTIVELY, every single photo.
-//   3. For each unit (Unit A / Unit B / …): what community is it in, and is it
-//      the SAME community as the community photos?
+// Methodology (two vision passes + deterministic aggregation):
+//   Pass A — Community profile: sample up to 12 community photos, build a
+//            visual fingerprint, per-photo same-place votes, junk/outlier flags.
+//   Pass B — Unit verification: for each unit, sample 5–8 INTERIOR photos
+//            (prioritized by label/category), include 2 community anchor
+//            photos, vote each interior photo against the fingerprint.
+//   Server-side rules convert votes into binary yes/no — the model cannot
+//            leave a unit as "unclear".
 //
-// Engine: TWO-PHASE so the community side can be verified exhaustively without
-// drowning a single vision call in 40 images (which degrades per-photo
-// judgment):
-//   • Phase A — Anchor + Units (one call): identify the canonical community
-//     from a small even-spread REFERENCE sample of the community folder, and
-//     judge each UNIT (~5 photos each) against that reference. This is the
-//     cross-folder holistic judgment — the model sees the community reference
-//     and every unit at once.
-//   • Phase B — Exhaustive community (batched, concurrent calls): verify EVERY
-//     community photo, in batches, each batch grounded by a few TRUSTED
-//     reference anchors + the Phase-A identity. Per-photo verdict
-//     same/different/junk. Every community photo gets a verdict; any photo a
-//     batch could not analyze is surfaced as "unchecked", NEVER silently passed
-//     (the operator asked to be 100% sure every community photo belongs).
-//
-// The two phases are INDEPENDENT — if the unit-comparison call fails, the
-// exhaustive community check still runs, and vice-versa.
-//
-// Extras we add on top (the "anything else" the operator asked for):
-//   - Mis-filed / junk photo flags (floorplan, map, logo, screenshot, a photo
-//     whose subject is a person, visible competitor watermark/branding).
-//   - Cross-folder duplicate detection via perceptual hash — the same image
-//     filed into two folders (a community photo accidentally dropped into a
-//     unit folder, or a Unit-A photo reused in Unit B) is a strong "mixed up"
-//     signal and is deterministic, so we compute it server-side over the FULL
-//     community set + the unit samples rather than asking the vision model.
-//   - An overall pass / warn / fail verdict + a plain-English summary.
-//
-// Reading happens straight off the Railway photo volume
-// (client/public/photos/<folder>) the same way photo-listing-scanner does.
-//
-// Cost/latency: a 30-photo community + 2 units ≈ 1 (Phase A) + ~4 (Phase B
-// batches) Sonnet vision calls ≈ $0.20-0.40 and 30-90s wall-clock. This is a
-// deliberate, operator-clicked action, not a background sweep, so the spend is
-// acceptable per click.
+// Extras: cross-folder duplicate detection via perceptual hash (deterministic).
 
 import fs from "fs";
 import path from "path";
 import { computeDhash, hammingDistance, DUPLICATE_DISTANCE } from "./photo-hashing";
+import {
+  UNIT_INTERIOR_MIN,
+  communityNamesMatch,
+  computeCommunityCohesion,
+  computeUnitVerdict,
+  isInteriorPhoto,
+  pickInteriorPhotos,
+} from "../shared/photo-community-check-logic";
 
-// Sonnet (not Haiku) on purpose: this is a reasoning-heavy visual comparison
-// across folders + world knowledge of named resorts, not the short
-// noun-phrase classification photo-labeler.ts does. Haiku over-flags here.
 const MODEL = "claude-sonnet-4-6";
 
-// Reference sample used to (a) establish the community identity in Phase A and
-// (b) anchor each Phase-B batch visually. Kept small — these are the photos the
-// model trusts as "this IS the community", so a handful of clean, varied shots
-// is better than a big set that might itself contain an outlier.
-const COMMUNITY_ANCHOR_CAP = 6;
-// Anchors actually included in each Phase-B batch (a couple is enough to ground
-// "same place"; more just inflates token cost on every batch).
-const MAX_ANCHOR_IMAGES = 3;
-// Community photos per exhaustive verification call. Small enough that the model
-// can carefully judge each candidate against the anchors.
-const COMMUNITY_BATCH_SIZE = 9;
-// Safety ceiling on a pathological community folder. We never expect this many
-// (real folders run 16-30); above it we even-sample down to the ceiling and
-// surface that not every photo was checked rather than firing dozens of calls.
-const COMMUNITY_HARD_MAX = 150;
-// Per the operator: "regular checks maybe like 5 photos of each unit" to
-// confirm each unit is in the same community as the community folder.
-const UNIT_SAMPLE_CAP = 5;
-// Phase-B batches run concurrently, bounded so we don't open dozens of sockets
-// to the Anthropic API at once on a big folder.
-const BATCH_CONCURRENCY = 3;
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // Anthropic per-image base64 limit.
+const COMMUNITY_SAMPLE_CAP = 12;
+const UNIT_INTERIOR_TARGET = 8;
+const COMMUNITY_ANCHOR_COUNT = 2;
+const TOTAL_IMAGE_CAP = 32;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ANTHROPIC_TIMEOUT_MS = 90_000;
 
 const IMAGE_EXT = /\.(?:jpe?g|png|webp|gif)$/i;
 
 export type CheckGroupInput = {
   role: "community" | "unit";
-  // Operator-facing label as shown in the photos tab, e.g.
-  // "Community — Regency at Poipu Kai" or "Unit A (3BR)".
   label: string;
   folder: string;
-  // The curated/visible filenames the operator will actually push. When empty
-  // we fall back to listing the folder on disk.
   filenames?: string[];
-  // Optional per-file captions (auto-labels) for readable outlier reporting.
   captions?: Record<string, string>;
 };
 
@@ -106,19 +56,27 @@ export type PhotoCommunityCheckRequest = {
 
 type FlaggedPhoto = { id: string; caption?: string; reason: string };
 
+export type PhotoVerdict = {
+  id: string;
+  caption?: string;
+  match: "yes" | "no";
+  reason: string;
+};
+
 export type CommunityGroupResult = {
   role: "community";
   label: string;
   folder: string;
-  photosChecked: number;   // how many community photos got a successful verdict
-  photosTotal: number;     // total community photos on disk (curated)
+  photosChecked: number;
+  photosTotal: number;
+  communityFingerprint: string;
   identifiedCommunity: string;
   matchesExpected: "yes" | "no";
   matchReason: string;
   allSameCommunity: boolean;
+  photoVerdicts: PhotoVerdict[];
   outliers: FlaggedPhoto[];
   junk: FlaggedPhoto[];
-  unchecked: FlaggedPhoto[]; // photos a batch could not analyze (vision error)
   confidence: number;
 };
 
@@ -128,9 +86,10 @@ export type UnitGroupResult = {
   folder: string;
   photosChecked: number;
   photosTotal: number;
-  identifiedCommunity: string;
+  interiorPhotosChecked: number;
   sameAsCommunity: "yes" | "no";
   reason: string;
+  photoVerdicts: PhotoVerdict[];
   allSameUnit: boolean;
   outliers: FlaggedPhoto[];
   junk: FlaggedPhoto[];
@@ -150,7 +109,8 @@ export type PhotoCommunityCheckResult = {
   expectedCommunity: string;
   summary: string;
   concerns: string[];
-  allSameCommunity: "yes" | "no" | "uncertain";
+  allSameCommunity: "yes" | "no";
+  unitsSameCommunity: "yes" | "no" | "n/a";
   community: CommunityGroupResult | null;
   units: UnitGroupResult[];
   duplicates: DuplicateFinding[];
@@ -159,6 +119,15 @@ export type PhotoCommunityCheckResult = {
   elapsedMs: number;
   warning?: string;
 };
+
+// Re-export pure helpers for callers/tests that import from the server module.
+export {
+  communityNamesMatch,
+  computeUnitVerdict,
+  isInteriorPhoto,
+  pickInteriorPhotos,
+  isStrongContradiction,
+} from "../shared/photo-community-check-logic";
 
 // ── Disk helpers ────────────────────────────────────────────────────────────
 
@@ -180,13 +149,9 @@ function mimeForBuffer(buffer: Buffer, filename: string): string {
   return "image/jpeg";
 }
 
-// Spread `cap` sample indices evenly across `n` items so a sampled outlier in
-// the middle/end of a big folder still gets seen (vs. just taking the first N).
-export function evenSampleIndices(n: number, cap: number): number[] {
+function evenSampleIndices(n: number, cap: number): number[] {
   if (n <= 0) return [];
-  if (cap <= 0) return [];
   if (n <= cap) return Array.from({ length: n }, (_, i) => i);
-  if (cap === 1) return [0];
   const out = new Set<number>();
   for (let i = 0; i < cap; i++) {
     out.add(Math.min(n - 1, Math.round((i * (n - 1)) / (cap - 1))));
@@ -194,68 +159,58 @@ export function evenSampleIndices(n: number, cap: number): number[] {
   return Array.from(out).sort((a, b) => a - b);
 }
 
-// Split an array into fixed-size chunks. Pure — unit-tested.
-export function chunk<T>(items: T[], size: number): T[][] {
-  if (size <= 0) return items.length ? [items.slice()] : [];
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
-  return out;
-}
-
-// Bounded-concurrency map: run `fn` over `items`, at most `limit` in flight.
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
-    for (;;) {
-      const idx = next++;
-      if (idx >= items.length) break;
-      results[idx] = await fn(items[idx], idx);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
 type SampledPhoto = {
-  id: string;        // stable display id, e.g. "C1" or "U1-3"
+  id: string;
+  groupIdx: number;
   folder: string;
   filename: string;
   caption?: string;
   buffer: Buffer;
   mime: string;
   hash?: string;
+  isInterior?: boolean;
 };
 
-// Pick the disk files for a group: intersect the operator's curated filenames
-// with what's actually on the volume (dedupe, sanitize against traversal).
+type ResolvedGroup = {
+  input: CheckGroupInput;
+  total: number;
+  sampled: SampledPhoto[];
+  interiorSampled: number;
+};
+
 async function resolveGroupFiles(
   group: CheckGroupInput,
-): Promise<Array<{ filename: string; caption?: string }>> {
+  cap: number,
+  preferInterior: boolean,
+): Promise<{ total: number; chosen: Array<{ filename: string; caption?: string }> }> {
   const dir = publicPhotoDir(group.folder);
   let diskFiles: string[] = [];
   try {
     diskFiles = (await fs.promises.readdir(dir)).filter((f) => IMAGE_EXT.test(f));
   } catch {
-    return [];
+    return { total: 0, chosen: [] };
   }
   const diskSet = new Set(diskFiles);
-
-  // Curated filenames, sanitized to a bare basename and intersected with disk.
   const requested = Array.isArray(group.filenames) && group.filenames.length > 0
     ? group.filenames.map((f) => path.basename(String(f))).filter((f) => IMAGE_EXT.test(f) && diskSet.has(f))
     : diskFiles.slice().sort();
+  const ordered = Array.from(new Set(requested)).map((filename) => ({
+    filename,
+    caption: group.captions?.[filename],
+  }));
 
-  // Dedupe while preserving order.
-  const ordered = Array.from(new Set(requested));
-  return ordered.map((filename) => ({ filename, caption: group.captions?.[filename] }));
+  if (preferInterior) {
+    const { chosen } = pickInteriorPhotos(ordered, cap);
+    return { total: ordered.length, chosen };
+  }
+
+  const total = ordered.length;
+  const idxs = evenSampleIndices(total, cap);
+  return { total, chosen: idxs.map((i) => ordered[i]) };
 }
 
-async function loadSamples(
+async function loadSample(
+  groupIdx: number,
   folder: string,
   idPrefix: string,
   files: Array<{ filename: string; caption?: string }>,
@@ -271,24 +226,22 @@ async function loadSamples(
       if (buffer.length === 0 || buffer.length > MAX_IMAGE_BYTES) continue;
       out.push({
         id: `${idPrefix}${n}`,
+        groupIdx,
         folder,
         filename: f.filename,
         caption: f.caption,
         buffer,
         mime: mimeForBuffer(buffer, f.filename),
+        isInterior: isInteriorPhoto(f.caption),
       });
     } catch {
-      // Unreadable file — skip, never fail the whole check.
+      // skip unreadable
     }
   }
   return out;
 }
 
-// ── Cross/within-folder duplicate detection (deterministic) ─────────────────
-
 async function detectDuplicates(samples: SampledPhoto[]): Promise<DuplicateFinding[]> {
-  // Best-effort: compute a perceptual hash per sample, swallow per-image
-  // errors. Bounded O(n²) over the loaded sample set.
   for (const s of samples) {
     try {
       s.hash = await computeDhash(s.buffer);
@@ -312,14 +265,16 @@ async function detectDuplicates(samples: SampledPhoto[]): Promise<DuplicateFindi
       });
     }
   }
-  // Cross-folder dupes first — they're the "mixed up" signal that matters most.
   findings.sort((x, y) => (x.scope === y.scope ? 0 : x.scope === "cross-folder" ? -1 : 1));
   return findings;
 }
 
-// ── Vision call ─────────────────────────────────────────────────────────────
+// ── Vision API ──────────────────────────────────────────────────────────────
 
-async function callVisionJson(content: any[], maxTokens: number, apiKey: string): Promise<any> {
+async function callVisionJson(
+  apiKey: string,
+  content: any[],
+): Promise<{ parsed: any; warning?: string }> {
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -327,80 +282,78 @@ async function callVisionJson(content: any[], maxTokens: number, apiKey: string)
       "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, messages: [{ role: "user", content }] }),
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 3000,
+      messages: [{ role: "user", content }],
+    }),
     signal: AbortSignal.timeout(ANTHROPIC_TIMEOUT_MS),
   });
-  const data = (await resp.json().catch(() => null)) as any;
+  const data = await resp.json().catch(() => null) as any;
   if (!resp.ok) throw new Error(data?.error?.message ?? `HTTP ${resp.status}`);
   const text: string = data?.content?.[0]?.text ?? "";
   const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
   const match = cleaned.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("vision response was not JSON");
-  return JSON.parse(match[0]);
+  return { parsed: JSON.parse(match[0]) };
 }
 
-function imageBlock(s: SampledPhoto): any {
-  return { type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } };
-}
-
-function markerFor(label: string, id: string, caption?: string): any {
-  const cap = caption ? ` · caption: "${caption}"` : "";
-  return { type: "text", text: `--- GROUP: ${label} · photo ${id}${cap} ---` };
-}
-
-// ── Phase A: identity + units ─────────────────────────────────────────────--
-
-function buildPhaseAInstruction(expectedCommunity: string, unitLabels: string[]): string {
+function buildCommunityPassInstruction(expectedCommunity: string): string {
   const expected = expectedCommunity.trim() || "(not provided)";
   return [
-    "You are a meticulous QA reviewer for a vacation-rental listing builder.",
-    "An operator builds ONE listing by combining a COMMUNITY photo set (shared resort amenities, grounds, pools, building exteriors, beach access, views) with one or more UNIT photo sets (interiors and private lanais/balconies of specific units). ALL of these sets are supposed to be from the SAME resort/community.",
+    "You are QA-reviewing the COMMUNITY photo folder for a vacation-rental listing.",
+    "These photos should ALL depict the SAME resort/community (amenities, grounds, exteriors, views).",
     "",
-    `The property record says the expected community is: "${expected}".`,
+    `Expected community name on the property record: "${expected}".`,
     "",
-    "You are given a small REFERENCE sample of the COMMUNITY photos (IDs starting \"C\") and a sample of each UNIT (IDs like \"U1-3\"). Each photo is preceded by a text marker with its GROUP, ID, and caption. Reference photos by that ID.",
+    "For EACH photo (by ID), decide:",
+    '  - samePlace: "yes" if this photo is clearly the same resort/community as the majority; "no" ONLY with positive contradictory evidence (different resort signage, incompatible architecture/climate/view).',
+    "Build a detailed visual fingerprint of the place (architecture, materials, landscaping, climate, views, building style).",
     "",
-    "Do TWO things:",
-    "1. Identify the community: from the COMMUNITY reference photos, name the resort/community/region (read signage, architecture, landscape, landmarks; if you cannot name the exact resort, describe the place type and use 'unclear'). Decide matchesExpected as a strict yes/no. Note (anchorFlags) any COMMUNITY reference photo that looks like it is NOT this community or is junk, so it is not used as an anchor later.",
-    `2. For EACH UNIT (in order: ${unitLabels.map((l, i) => `unit ${i + 1} = "${l}"`).join(", ") || "none"}): say what community/region it appears to be in and decide sameAsCommunity (is it the SAME community as the COMMUNITY reference photos?). Decide whether all of that unit's photos are the same unit; list outliers; flag junk.`,
+    `matchesExpected: "yes" if the photos positively depict "${expected}" OR a clearly matching sub-name/alias; "no" ONLY if positive evidence of a DIFFERENT named resort.`,
+    "Do NOT use uncertain/unclear — every field is yes or no.",
     "",
-    "This is a BINARY decision tool. matchesExpected and sameAsCommunity MUST be exactly \"yes\" or \"no\" — NEVER \"uncertain\"/\"maybe\". (Only the free-text 'identified' field may say 'unclear'.)",
-    "- Default to \"yes\" (same community). Answer \"no\" ONLY on a POSITIVE contradiction: a different named resort on signage/towels/keycards, a clearly different region or climate (tropical vs alpine), an incompatible building type (oceanfront high-rise vs low-rise garden condo) or view (ocean vs cityscape) that cannot be the same resort, or a distinctly different architectural style/era/materials.",
-    "- UNIT photos are interiors; COMMUNITY photos are outdoor amenities. They naturally look different — that difference ALONE is NEVER grounds for \"no\".",
-    "Junk = floorplans, maps, logos/branding tiles, screenshots, images whose main subject is a person's face, or any visible COMPETITOR watermark/branding (Airbnb/Vrbo/Booking/another property manager).",
+    "Flag junk: floorplans, maps, logos, screenshots, competitor watermarks, person-as-subject.",
     "",
-    "Respond with ONLY a single minified JSON object — no prose, no code fences — matching this shape exactly:",
-    '{"community":{"identified":"string","matchesExpected":"yes|no","matchReason":"short string","anchorFlags":[{"id":"C3","reason":"string"}],"confidence":0.0},"units":[{"group":"echo the unit label","identified":"string","sameAsCommunity":"yes|no","reason":"short string","allSameUnit":true,"outliers":[{"id":"U1-2","reason":"string"}],"junk":[],"confidence":0.0}],"summary":"1-2 sentence operator-facing summary"}',
-    "Return units in the SAME ORDER the unit groups were presented.",
+    "Respond with ONLY minified JSON:",
+    '{"fingerprint":"detailed place description","identifiedName":"resort name if readable else short place-type description","matchesExpected":"yes|no","matchReason":"short","photoVerdicts":[{"id":"C1","match":"yes|no","reason":"short"}],"junk":[{"id":"C5","reason":"short"}],"confidence":0.0}',
   ].join("\n");
 }
 
-// ── Phase B: exhaustive per-photo community verification ────────────────────--
-
-function buildPhaseBInstruction(expectedCommunity: string, identity: string): string {
-  const expected = expectedCommunity.trim() || "(not provided)";
+function buildUnitPassInstruction(
+  fingerprint: string,
+  expectedCommunity: string,
+  unitLabels: string[],
+  minInterior: number,
+): string {
   return [
-    "You are a meticulous QA reviewer for a vacation-rental listing builder.",
-    `The REFERENCE photos below (IDs starting "REF") are CONFIRMED photos of the community/resort the listing is for. Expected community name: "${expected}". Identity established from the reference: ${identity || "(see the reference photos)"}.`,
-    "The CANDIDATE photos (IDs starting \"C\") are all from the community folder. For EACH candidate, decide whether it is a photo of the SAME resort/community as the REFERENCE photos.",
+    "You are verifying UNIT interior photos belong to the SAME community as the community folder.",
     "",
-    "Per-photo BINARY decision — verdict is exactly one of \"same\", \"different\", or \"junk\":",
-    "- Default to \"same\". Answer \"different\" ONLY on a POSITIVE contradiction with the reference: a different named resort on signage/towels/keycards, a clearly different region or climate, an incompatible building type or view that cannot be the same resort, or distinctly different architecture/era/materials than the reference.",
-    "- Community photos are outdoor amenities/grounds/views/exteriors/lobbies and they VARY a lot (a pool, a beach, a garden, a lobby, a sunset can all be the same resort). Variety or a hard-to-place generic shot is NEVER \"different\" on its own — only a positive contradiction is.",
-    "- \"junk\" = floorplans, maps, logos/branding tiles, screenshots, images whose main subject is a person's face, or any visible COMPETITOR watermark/branding (Airbnb/Vrbo/Booking/another property manager).",
+    `Community visual fingerprint: ${fingerprint}`,
+    expectedCommunity.trim() ? `Expected community: "${expectedCommunity.trim()}".` : "",
     "",
-    "Respond with ONLY a single minified JSON object — no prose, no code fences:",
-    '{"photos":[{"id":"C7","verdict":"same|different|junk","reason":"short string"}]}',
-    "Include EVERY candidate id exactly once. Do NOT include the REF reference photos in the output.",
+    "Each unit section has INTERIOR photos (bedrooms, kitchen, living, bath, private lanai) plus reference community anchor photos labeled ANCHOR.",
+    "",
+    `For EACH unit interior photo (NOT anchors), vote match: "yes" or "no":`,
+    "  - yes: finishes, window/lanai views, balcony railings, exterior glimpses, building style, landscaping visible outside are COMPATIBLE with the fingerprint.",
+    "  - no: ONLY with POSITIVE contradiction — different resort signage/towels/keycards, incompatible climate/architecture/view that cannot be the same resort.",
+    "",
+    `Units (in order): ${unitLabels.join(" | ") || "none"}.`,
+    `Each unit MUST have at least ${minInterior} interior photo verdicts.`,
+    "Do NOT use uncertain/unclear — every match is yes or no.",
+    "",
+    "Also flag junk and photos that look like a different unit within the same community (outliers).",
+    "",
+    "Respond with ONLY minified JSON:",
+    '{"units":[{"group":"unit label","photoVerdicts":[{"id":"U1-1","match":"yes|no","reason":"short"}],"allSameUnit":true,"outliers":[{"id":"U1-3","reason":"short"}],"junk":[]}]}',
+    "Return units in the SAME ORDER as listed.",
   ].join("\n");
 }
-
-// ── Small typed coercion helpers ────────────────────────────────────────────
 
 function asYesNo(v: unknown): "yes" | "no" {
   const s = String(v ?? "").trim().toLowerCase();
-  if (s === "no" || s === "false" || s === "different") return "no";
-  return "yes";
+  if (s === "yes" || s === "true") return "yes";
+  return "no";
 }
 
 function asConfidence(v: unknown): number {
@@ -411,6 +364,23 @@ function asConfidence(v: unknown): number {
 
 function captionFor(samples: SampledPhoto[], id: string): string | undefined {
   return samples.find((s) => s.id === id)?.caption;
+}
+
+function mapPhotoVerdicts(v: unknown, samples: SampledPhoto[]): PhotoVerdict[] {
+  if (!Array.isArray(v)) return [];
+  const out: PhotoVerdict[] = [];
+  for (const row of v) {
+    if (!row || typeof row !== "object") continue;
+    const id = String((row as any).id ?? "").trim();
+    if (!id) continue;
+    out.push({
+      id,
+      caption: captionFor(samples, id),
+      match: asYesNo((row as any).match ?? (row as any).samePlace),
+      reason: String((row as any).reason ?? "").trim() || "flagged",
+    });
+  }
+  return out;
 }
 
 function asFlags(v: unknown, samples: SampledPhoto[]): FlaggedPhoto[] {
@@ -426,84 +396,6 @@ function asFlags(v: unknown, samples: SampledPhoto[]): FlaggedPhoto[] {
   return out;
 }
 
-export type CommunityPhotoVerdict = "same" | "different" | "junk";
-
-// Fold the per-photo Phase-B verdicts (across all batches) over the FULL
-// community sample set. Every photo that did not receive a successful verdict
-// is "unchecked" — surfaced, never silently treated as same. Pure + tested.
-export function summarizeCommunityVerdicts(
-  samples: SampledPhoto[],
-  verdicts: Map<string, { verdict: CommunityPhotoVerdict; reason: string }>,
-): { checked: number; allSameCommunity: boolean; outliers: FlaggedPhoto[]; junk: FlaggedPhoto[]; unchecked: FlaggedPhoto[] } {
-  const outliers: FlaggedPhoto[] = [];
-  const junk: FlaggedPhoto[] = [];
-  const unchecked: FlaggedPhoto[] = [];
-  let checked = 0;
-  for (const s of samples) {
-    const v = verdicts.get(s.id);
-    if (!v) {
-      unchecked.push({ id: s.id, caption: s.caption, reason: "could not be analyzed (vision error) — re-run to verify" });
-      continue;
-    }
-    checked += 1;
-    if (v.verdict === "different") outliers.push({ id: s.id, caption: s.caption, reason: v.reason || "appears to be a different community" });
-    else if (v.verdict === "junk") junk.push({ id: s.id, caption: s.caption, reason: v.reason || "junk / mis-filed" });
-  }
-  return { checked, allSameCommunity: outliers.length === 0, outliers, junk, unchecked };
-}
-
-// Deterministic verdict synthesis — never trusts the model's "vibe", only the
-// structured signals. Pure + tested.
-export function synthesizeVerdict(input: {
-  expectedCommunity: string;
-  community: CommunityGroupResult | null;
-  units: UnitGroupResult[];
-  crossDupeCount: number;
-  modelConcerns: string[];
-  unitCompareFailed: boolean;
-}): { verdict: "pass" | "warn" | "fail"; concerns: string[]; allSameCommunity: "yes" | "no" | "uncertain" } {
-  const { expectedCommunity, community, units, crossDupeCount, modelConcerns, unitCompareFailed } = input;
-  const concerns: string[] = [...modelConcerns];
-  let hasFail = false;
-  let hasWarn = false;
-  const fail = (msg: string) => { hasFail = true; concerns.push(msg); };
-  const warn = (msg: string) => { hasWarn = true; concerns.push(msg); };
-
-  if (community) {
-    if (community.matchesExpected === "no") {
-      fail(`Community photos appear to be a DIFFERENT community than "${expectedCommunity || "expected"}" (identified: ${community.identifiedCommunity}).`);
-    }
-    if (community.outliers.length > 0) {
-      warn(`${community.outliers.length} community photo(s) look like they may be from a DIFFERENT place — review them before pushing.`);
-    }
-    if (community.junk.length > 0) {
-      warn(`${community.junk.length} community photo(s) look like junk / mis-filed (floorplan, map, logo, screenshot, person, or competitor branding).`);
-    }
-    if (community.unchecked.length > 0) {
-      warn(`${community.unchecked.length} community photo(s) could NOT be analyzed (vision error) — not every photo was verified, re-run to be sure.`);
-    }
-  }
-  for (const u of units) {
-    if (u.sameAsCommunity === "no") {
-      fail(`${u.label} appears to be a DIFFERENT community than the community photos (identified: ${u.identifiedCommunity}).`);
-    }
-    if (!u.allSameUnit || u.outliers.length > 0) warn(`${u.label} has photo(s) that may not be the same unit.`);
-    if (u.junk.length > 0) warn(`${u.label} has ${u.junk.length} junk/mis-filed photo(s).`);
-  }
-  if (crossDupeCount > 0) warn(`${crossDupeCount} photo(s) appear in more than one folder — a photo may be filed under the wrong unit/community.`);
-  if (unitCompareFailed && units.length > 0) warn("Unit comparison could not run (vision error) — the units were not compared to the community photos; re-run to verify.");
-
-  // The same-community roll-up: "no" on any positive contradiction; "yes" only
-  // when there are at least two sets to compare and none contradicted; else
-  // "uncertain" (a single set has nothing to compare against).
-  const anyDifferent = (community?.matchesExpected === "no") || units.some((u) => u.sameAsCommunity === "no");
-  const comparableSets = (community ? 1 : 0) + units.length;
-  const allSameCommunity: "yes" | "no" | "uncertain" = anyDifferent ? "no" : comparableSets >= 2 ? "yes" : "uncertain";
-
-  const verdict: "pass" | "warn" | "fail" = hasFail ? "fail" : hasWarn ? "warn" : "pass";
-  return { verdict, concerns: Array.from(new Set(concerns)).slice(0, 12), allSameCommunity };
-}
-
 // ── Main entry ──────────────────────────────────────────────────────────────
 
 export async function runPhotoCommunityCheck(
@@ -513,91 +405,71 @@ export async function runPhotoCommunityCheck(
 ): Promise<PhotoCommunityCheckResult> {
   const expectedCommunity = String(request.expectedCommunity ?? "").trim();
   const rawGroups = Array.isArray(request.groups) ? request.groups : [];
-
   const communityInputs = rawGroups.filter((g) => g?.role === "community" && g?.folder);
   const unitInputs = rawGroups.filter((g) => g?.role === "unit" && g?.folder);
 
-  // ── Resolve community: merge ALL community-role groups into one logical set
-  // and load EVERY photo (the operator wants every community photo checked).
-  // Representative label/folder = the first community group.
-  const communityLabel = communityInputs[0]?.label ?? communityInputs[0]?.folder ?? "Community";
-  const communityFolder = communityInputs[0]?.folder ?? "";
-  const communityFiles: Array<{ folder: string; filename: string; caption?: string }> = [];
-  const seenCommunity = new Set<string>();
+  const resolved: ResolvedGroup[] = [];
+  let budget = TOTAL_IMAGE_CAP;
+
+  const communityByFolder = new Map<string, CheckGroupInput>();
   for (const g of communityInputs) {
-    const files = await resolveGroupFiles(g);
-    for (const f of files) {
-      const key = `${g.folder}/${f.filename}`;
-      if (seenCommunity.has(key)) continue;
-      seenCommunity.add(key);
-      communityFiles.push({ folder: g.folder, filename: f.filename, caption: f.caption });
+    const prev = communityByFolder.get(g.folder);
+    if (!prev) {
+      communityByFolder.set(g.folder, { ...g, filenames: [...(g.filenames ?? [])], captions: { ...(g.captions ?? {}) } });
+    } else {
+      prev.filenames = Array.from(new Set([...(prev.filenames ?? []), ...(g.filenames ?? [])]));
+      prev.captions = { ...(prev.captions ?? {}), ...(g.captions ?? {}) };
     }
   }
 
-  // Safety ceiling: if a folder is pathologically large, even-sample down so we
-  // don't fire dozens of calls — and remember that not all were checked.
-  let communityCapped = false;
-  let communityFilesToCheck = communityFiles;
-  if (communityFiles.length > COMMUNITY_HARD_MAX) {
-    communityCapped = true;
-    const idxs = evenSampleIndices(communityFiles.length, COMMUNITY_HARD_MAX);
-    communityFilesToCheck = idxs.map((i) => communityFiles[i]);
+  let communityResolvedIdx = -1;
+  for (const g of Array.from(communityByFolder.values())) {
+    const cap = Math.min(COMMUNITY_SAMPLE_CAP, budget);
+    const { total, chosen } = await resolveGroupFiles(g, cap, false);
+    const sampled = await loadSample(resolved.length, g.folder, "C", chosen);
+    budget -= sampled.length;
+    communityResolvedIdx = resolved.length;
+    resolved.push({
+      input: g,
+      total,
+      sampled,
+      interiorSampled: sampled.filter((s) => s.isInterior).length,
+    });
+    break;
   }
 
-  // Load community buffers (one C-numbered sample per file, across folders).
-  const communitySamples: SampledPhoto[] = [];
-  {
-    let n = 0;
-    for (const f of communityFilesToCheck) {
-      n += 1;
-      const dir = publicPhotoDir(f.folder);
-      try {
-        const buffer = await fs.promises.readFile(path.join(dir, f.filename));
-        if (buffer.length === 0 || buffer.length > MAX_IMAGE_BYTES) continue;
-        communitySamples.push({
-          id: `C${n}`,
-          folder: f.folder,
-          filename: f.filename,
-          caption: f.caption,
-          buffer,
-          mime: mimeForBuffer(buffer, f.filename),
-        });
-      } catch {
-        // Unreadable — skip.
-      }
-    }
-  }
-
-  // Load unit samples (~UNIT_SAMPLE_CAP each, even-spread).
-  const unitSamplesByUnit: SampledPhoto[][] = [];
-  const unitLabels: string[] = [];
+  const unitResolvedIdxs: number[] = [];
   for (let u = 0; u < unitInputs.length; u++) {
+    const remainingUnits = unitInputs.length - u;
+    const fairShare = Math.max(UNIT_INTERIOR_TARGET, Math.floor(budget / remainingUnits));
+    const cap = Math.min(UNIT_INTERIOR_TARGET, fairShare, budget);
+    if (cap <= 0) break;
     const g = unitInputs[u];
-    const files = await resolveGroupFiles(g);
-    const idxs = evenSampleIndices(files.length, UNIT_SAMPLE_CAP);
-    const chosen = idxs.map((i) => files[i]);
-    const samples = await loadSamples(g.folder, `U${u + 1}-`, chosen);
-    unitSamplesByUnit.push(samples);
-    unitLabels.push(g.label || g.folder);
+    const { total, chosen } = await resolveGroupFiles(g, cap, true);
+    const sampled = await loadSample(resolved.length, g.folder, `U${u + 1}-`, chosen);
+    budget -= sampled.length;
+    unitResolvedIdxs.push(resolved.length);
+    resolved.push({
+      input: g,
+      total,
+      sampled,
+      interiorSampled: sampled.filter((s) => s.isInterior).length,
+    });
   }
 
-  const communityTotal = communityFiles.length;
-  const allSamples = [...communitySamples, ...unitSamplesByUnit.flat()];
-
-  // Duplicate detection is deterministic and independent of the vision call —
-  // run it regardless (even if the API key is missing). Runs over the FULL
-  // community set + the unit samples.
+  const allSamples = resolved.flatMap((r) => r.sampled);
+  const photosChecked = allSamples.length;
   const duplicates = await detectDuplicates(allSamples);
 
-  // Nothing readable on disk → bail with a clear message.
-  if (allSamples.length === 0) {
+  if (photosChecked === 0) {
     return {
       ok: false,
-      verdict: "warn",
+      verdict: "fail",
       expectedCommunity,
-      summary: "No readable photos were found on disk for the selected folders. Re-scrape or re-attach photos, then run the check again.",
+      summary: "No readable photos found. Re-scrape or attach photos, then run the check again.",
       concerns: ["No photos available to check."],
-      allSameCommunity: "uncertain",
+      allSameCommunity: "no",
+      unitsSameCommunity: unitInputs.length >= 2 ? "no" : "n/a",
       community: null,
       units: [],
       duplicates,
@@ -611,196 +483,247 @@ export async function runPhotoCommunityCheck(
   if (!apiKey) {
     return {
       ok: false,
-      verdict: "warn",
+      verdict: "fail",
       expectedCommunity,
-      summary: "Photo community check needs ANTHROPIC_API_KEY to analyze the photos. Duplicate detection still ran.",
+      summary: "ANTHROPIC_API_KEY is required for photo community check.",
       concerns: ["ANTHROPIC_API_KEY not configured."],
-      allSameCommunity: "uncertain",
+      allSameCommunity: "no",
+      unitsSameCommunity: unitInputs.length >= 2 ? "no" : "n/a",
       community: null,
       units: [],
       duplicates,
       model: MODEL,
-      photosChecked: allSamples.length,
+      photosChecked,
       elapsedMs: Date.now() - startedAt,
       warning: "ANTHROPIC_API_KEY not configured",
     };
   }
 
-  const warnings: string[] = [];
-  if (communityCapped) {
-    warnings.push(`Community folder has ${communityTotal} photos; checked an even-spread ${communitySamples.length} (over the ${COMMUNITY_HARD_MAX} per-run ceiling).`);
-  }
+  let warning: string | undefined;
+  let community: CommunityGroupResult | null = null;
+  let units: UnitGroupResult[] = [];
+  let fingerprint = "";
 
-  // ── Phase A: identity + units (one call) ──────────────────────────────────
-  const anchorIdxs = evenSampleIndices(communitySamples.length, COMMUNITY_ANCHOR_CAP);
-  const anchorSamples = anchorIdxs.map((i) => communitySamples[i]);
-
-  let identity = "";
-  let identifiedCommunity = "";
-  let matchesExpected: "yes" | "no" = "yes";
-  let matchReason = "";
-  let communityConfidence = 0.5;
-  const phaseAFlagIds = new Set<string>();
-  let phaseAUnits: any[] = [];
-  let phaseASummary = "";
-  let unitCompareFailed = false;
-  let phaseAError: string | undefined;
-
-  {
-    const content: any[] = [];
-    for (const s of anchorSamples) {
-      content.push(markerFor(communityLabel, s.id, s.caption));
-      content.push(imageBlock(s));
+  // ── Pass A: Community profile ─────────────────────────────────────────────
+  if (communityResolvedIdx >= 0) {
+    const r = resolved[communityResolvedIdx];
+    const contentA: any[] = [];
+    for (const s of r.sampled) {
+      const cap = s.caption ? ` · caption: "${s.caption}"` : "";
+      contentA.push({ type: "text", text: `--- COMMUNITY photo ${s.id}${cap} ---` });
+      contentA.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
     }
-    for (let u = 0; u < unitSamplesByUnit.length; u++) {
-      for (const s of unitSamplesByUnit[u]) {
-        content.push(markerFor(unitLabels[u], s.id, s.caption));
-        content.push(imageBlock(s));
-      }
-    }
-    content.push({ type: "text", text: buildPhaseAInstruction(expectedCommunity, unitLabels) });
+    contentA.push({ type: "text", text: buildCommunityPassInstruction(expectedCommunity) });
 
     try {
-      const parsed = await callVisionJson(content, 1500, apiKey);
-      const c = parsed?.community ?? {};
-      identifiedCommunity = String(c.identified ?? "").trim() || "unclear";
-      identity = identifiedCommunity !== "unclear" ? identifiedCommunity : "";
-      matchesExpected = asYesNo(c.matchesExpected);
-      matchReason = String(c.matchReason ?? "").trim();
-      communityConfidence = asConfidence(c.confidence);
-      for (const f of asFlags(c.anchorFlags, anchorSamples)) phaseAFlagIds.add(f.id);
-      phaseAUnits = Array.isArray(parsed?.units) ? parsed.units : [];
-      phaseASummary = String(parsed?.summary ?? "").trim();
+      const { parsed } = await callVisionJson(apiKey, contentA);
+      fingerprint = String(parsed.fingerprint ?? "").trim();
+      const identifiedName = String(parsed.identifiedName ?? "").trim();
+      let matchesExpected = asYesNo(parsed.matchesExpected);
+      if (expectedCommunity && identifiedName && communityNamesMatch(identifiedName, expectedCommunity)) {
+        matchesExpected = "yes";
+      }
+      const photoVerdicts = mapPhotoVerdicts(parsed.photoVerdicts, r.sampled);
+      const { allSameCommunity, outliers: cohesionOutliers } = computeCommunityCohesion(photoVerdicts);
+      const modelOutliers = asFlags(parsed.outliers, r.sampled);
+      const outliers = [...cohesionOutliers, ...modelOutliers].filter(
+        (o, i, arr) => arr.findIndex((x) => x.id === o.id) === i,
+      );
+
+      community = {
+        role: "community",
+        label: r.input.label,
+        folder: r.input.folder,
+        photosChecked: r.sampled.length,
+        photosTotal: r.total,
+        communityFingerprint: fingerprint || identifiedName || "Community place profile",
+        identifiedCommunity: identifiedName || fingerprint.slice(0, 120) || "See fingerprint",
+        matchesExpected,
+        matchReason: String(parsed.matchReason ?? "").trim(),
+        allSameCommunity: allSameCommunity && outliers.length === 0,
+        photoVerdicts,
+        outliers,
+        junk: asFlags(parsed.junk, r.sampled),
+        confidence: asConfidence(parsed.confidence),
+      };
     } catch (e: any) {
-      phaseAError = e?.message ?? String(e);
-      unitCompareFailed = true;
+      warning = `Community pass failed: ${e?.message ?? e}`;
+      fingerprint = expectedCommunity ? `Expected: ${expectedCommunity}` : "Community photos (analysis failed)";
     }
   }
 
-  // ── Phase B: exhaustive per-photo community verification (batched) ─────────
-  const trustedAnchors = anchorSamples.filter((s) => !phaseAFlagIds.has(s.id)).slice(0, MAX_ANCHOR_IMAGES);
-  const verdicts = new Map<string, { verdict: CommunityPhotoVerdict; reason: string }>();
-  let phaseBErrors = 0;
+  // ── Pass B: Unit verification ─────────────────────────────────────────────
+  if (unitResolvedIdxs.length > 0) {
+    const contentB: any[] = [];
+    const communityGroup = communityResolvedIdx >= 0 ? resolved[communityResolvedIdx] : null;
+    const anchors = communityGroup?.sampled.slice(0, COMMUNITY_ANCHOR_COUNT) ?? [];
 
-  if (communitySamples.length > 0) {
-    const batches = chunk(communitySamples, COMMUNITY_BATCH_SIZE);
-    await mapWithConcurrency(batches, BATCH_CONCURRENCY, async (batch) => {
-      const content: any[] = [];
-      // Reference anchors first (relabel to REF# so the model never confuses
-      // them with the candidates it must classify).
-      trustedAnchors.forEach((s, i) => {
-        content.push(markerFor("REFERENCE (confirmed community)", `REF${i + 1}`, s.caption));
-        content.push(imageBlock(s));
-      });
-      for (const s of batch) {
-        content.push(markerFor("CANDIDATE community photo", s.id, s.caption));
-        content.push(imageBlock(s));
+    for (const a of anchors) {
+      const cap = a.caption ? ` · caption: "${a.caption}"` : "";
+      contentB.push({ type: "text", text: `--- ANCHOR community photo ${a.id}${cap} ---` });
+      contentB.push({ type: "image", source: { type: "base64", media_type: a.mime, data: a.buffer.toString("base64") } });
+    }
+
+    const unitLabels: string[] = [];
+    for (let i = 0; i < unitResolvedIdxs.length; i++) {
+      const r = resolved[unitResolvedIdxs[i]];
+      unitLabels.push(r.input.label);
+      contentB.push({ type: "text", text: `=== UNIT GROUP: ${r.input.label} (${r.interiorSampled} interior-classified of ${r.sampled.length} photos) ===` });
+      for (const s of r.sampled) {
+        const cap = s.caption ? ` · caption: "${s.caption}"` : "";
+        const kind = s.isInterior ? "INTERIOR" : "OTHER";
+        contentB.push({ type: "text", text: `--- ${kind} photo ${s.id}${cap} ---` });
+        contentB.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
       }
-      content.push({ type: "text", text: buildPhaseBInstruction(expectedCommunity, identity) });
-      try {
-        const parsed = await callVisionJson(content, 1500, apiKey);
-        const rows = Array.isArray(parsed?.photos) ? parsed.photos : [];
-        for (const row of rows) {
-          if (!row || typeof row !== "object") continue;
-          const id = String((row as any).id ?? "").trim();
-          if (!id) continue;
-          const raw = String((row as any).verdict ?? "").trim().toLowerCase();
-          const verdict: CommunityPhotoVerdict = raw === "different" || raw === "no" ? "different" : raw === "junk" ? "junk" : "same";
-          verdicts.set(id, { verdict, reason: String((row as any).reason ?? "").trim() });
-        }
-      } catch (e: any) {
-        phaseBErrors += 1;
-      }
+    }
+
+    contentB.push({
+      type: "text",
+      text: buildUnitPassInstruction(
+        fingerprint || community?.communityFingerprint || expectedCommunity || "the community folder",
+        expectedCommunity,
+        unitLabels,
+        UNIT_INTERIOR_MIN,
+      ),
     });
-  }
 
-  // ── Assemble community result ──────────────────────────────────────────────
-  let community: CommunityGroupResult | null = null;
-  if (communitySamples.length > 0) {
-    const fold = summarizeCommunityVerdicts(communitySamples, verdicts);
-    community = {
-      role: "community",
-      label: communityLabel,
-      folder: communityFolder,
-      photosChecked: fold.checked,
-      photosTotal: communityTotal,
-      identifiedCommunity: identifiedCommunity || "unclear",
-      matchesExpected,
-      matchReason: matchReason || (phaseAError ? "Identity call failed; judged from reference photos only." : ""),
-      allSameCommunity: fold.allSameCommunity,
-      outliers: fold.outliers,
-      junk: fold.junk,
-      unchecked: fold.unchecked,
-      confidence: communityConfidence,
-    };
-    if (phaseBErrors > 0) {
-      warnings.push(`${phaseBErrors} community batch(es) failed to analyze — ${fold.unchecked.length} photo(s) unchecked.`);
+    try {
+      const { parsed } = await callVisionJson(apiKey, contentB);
+      const visionUnits = Array.isArray(parsed.units) ? parsed.units : [];
+      units = unitResolvedIdxs.map((resolvedIdx, i) => {
+        const r = resolved[resolvedIdx];
+        const u = visionUnits[i] ?? {};
+        const photoVerdicts = mapPhotoVerdicts(u.photoVerdicts, r.sampled);
+        const interiorVerdicts = photoVerdicts.length > 0
+          ? photoVerdicts
+          : r.sampled.map((s) => ({
+              id: s.id,
+              caption: s.caption,
+              match: "no" as const,
+              reason: "No vision verdict returned for this photo.",
+            }));
+        const computed = computeUnitVerdict(
+          interiorVerdicts.map((p) => ({ match: p.match, reason: p.reason })),
+          UNIT_INTERIOR_MIN,
+        );
+        return {
+          role: "unit" as const,
+          label: r.input.label,
+          folder: r.input.folder,
+          photosChecked: r.sampled.length,
+          photosTotal: r.total,
+          interiorPhotosChecked: r.interiorSampled,
+          sameAsCommunity: computed.sameAsCommunity,
+          reason: computed.reason,
+          photoVerdicts: interiorVerdicts,
+          allSameUnit: u.allSameUnit !== false,
+          outliers: asFlags(u.outliers, r.sampled),
+          junk: asFlags(u.junk, r.sampled),
+          confidence: computed.confidence,
+        };
+      });
+    } catch (e: any) {
+      warning = warning ? `${warning}; unit pass: ${e?.message ?? e}` : `Unit pass failed: ${e?.message ?? e}`;
+      units = unitResolvedIdxs.map((resolvedIdx) => {
+        const r = resolved[resolvedIdx];
+        return {
+          role: "unit" as const,
+          label: r.input.label,
+          folder: r.input.folder,
+          photosChecked: r.sampled.length,
+          photosTotal: r.total,
+          interiorPhotosChecked: r.interiorSampled,
+          sameAsCommunity: "no" as const,
+          reason: warning ?? "Unit verification failed.",
+          photoVerdicts: [],
+          allSameUnit: true,
+          outliers: [],
+          junk: [],
+          confidence: 0,
+        };
+      });
     }
   }
 
-  // ── Assemble unit results ──────────────────────────────────────────────────
-  const units: UnitGroupResult[] = unitSamplesByUnit.map((samples, i) => {
-    const u = phaseAUnits[i] ?? {};
-    return {
-      role: "unit",
-      label: unitLabels[i],
-      folder: unitInputs[i]?.folder ?? "",
-      photosChecked: samples.length,
-      photosTotal: samples.length, // we sample ~UNIT_SAMPLE_CAP and check exactly those
-      identifiedCommunity: String(u.identified ?? "").trim() || "unclear",
-      // If Phase A failed there is no contradiction evidence → binary default
-      // "yes" (same), but we surface unitCompareFailed so the operator knows the
-      // units were NOT actually compared.
-      sameAsCommunity: phaseAError ? "yes" : asYesNo(u.sameAsCommunity),
-      reason: String(u.reason ?? "").trim() || (phaseAError ? "not analyzed (vision error)" : ""),
-      allSameUnit: u.allSameUnit !== false,
-      outliers: asFlags(u.outliers, samples),
-      junk: asFlags(u.junk, samples),
-      confidence: phaseAError ? 0.3 : asConfidence(u.confidence),
-    };
-  });
+  // ── Verdict synthesis ─────────────────────────────────────────────────────
+  const concerns: string[] = [];
+  let hasFail = false;
+  let hasWarn = false;
+  const fail = (msg: string) => { hasFail = true; concerns.push(msg); };
+  const warn = (msg: string) => { hasWarn = true; concerns.push(msg); };
 
-  // ── Verdict synthesis ──────────────────────────────────────────────────────
-  const crossDupes = duplicates.filter((d) => d.scope === "cross-folder");
-  const { verdict, concerns, allSameCommunity } = synthesizeVerdict({
-    expectedCommunity,
-    community,
-    units,
-    crossDupeCount: crossDupes.length,
-    modelConcerns: [],
-    unitCompareFailed,
-  });
-
-  // Operator-facing summary: prefer a deterministic, specific line; fall back to
-  // the model's Phase-A summary, then a generic.
-  const summaryParts: string[] = [];
+  if (!community && communityResolvedIdx >= 0) {
+    fail("Could not analyze community folder photos.");
+  }
   if (community) {
-    const cleanCount = community.photosChecked - community.outliers.length - community.junk.length;
-    summaryParts.push(
-      `Community folder identified as "${community.identifiedCommunity}"${community.matchesExpected === "yes" ? " (matches expected)" : " — DOES NOT match expected"}; checked ${community.photosChecked}/${community.photosTotal} photos, ${cleanCount} look right` +
-      `${community.outliers.length ? `, ${community.outliers.length} possibly different` : ""}${community.junk.length ? `, ${community.junk.length} junk` : ""}${community.unchecked.length ? `, ${community.unchecked.length} unchecked` : ""}.`,
-    );
+    if (community.matchesExpected === "no") {
+      fail(`Community photos do NOT match "${expectedCommunity || "expected community"}" (${community.identifiedCommunity}).`);
+    }
+    if (!community.allSameCommunity || community.outliers.length > 0) {
+      fail(`Community folder has ${community.outliers.length || "some"} photo(s) from a different place.`);
+    }
+    if (community.junk.length > 0) warn(`Community folder has ${community.junk.length} junk/mis-filed photo(s).`);
   }
-  if (units.length > 0 && !unitCompareFailed) {
-    const same = units.filter((u) => u.sameAsCommunity === "yes").length;
-    summaryParts.push(`${same}/${units.length} unit(s) match the community.`);
-  }
-  const summary = summaryParts.join(" ") || phaseASummary || (verdict === "pass" ? "All photo sets appear to be from the same community." : "Review the flagged items below before pushing these photos.");
 
-  const warning = [phaseAError ? `identity/units: ${phaseAError}` : "", ...warnings].filter(Boolean).join(" · ") || undefined;
+  for (const u of units) {
+    if (u.sameAsCommunity === "no") {
+      fail(`${u.label}: NOT the same community — ${u.reason}`);
+    }
+    if (u.interiorPhotosChecked < UNIT_INTERIOR_MIN) {
+      warn(`${u.label}: only ${u.interiorPhotosChecked} interior-classified photos in sample (target ${UNIT_INTERIOR_MIN}+).`);
+    }
+    if (!u.allSameUnit || u.outliers.length > 0) warn(`${u.label} has photo(s) that may not be the same unit.`);
+    if (u.junk.length > 0) warn(`${u.label} has ${u.junk.length} junk/mis-filed photo(s).`);
+  }
+
+  const crossDupes = duplicates.filter((d) => d.scope === "cross-folder");
+  if (crossDupes.length > 0) warn(`${crossDupes.length} photo(s) appear in more than one folder.`);
+
+  const allUnitsYes = units.length > 0 && units.every((u) => u.sameAsCommunity === "yes");
+  const communityOk = !community || (community.matchesExpected === "yes" && community.allSameCommunity);
+  const allSameCommunity: "yes" | "no" = communityOk && allUnitsYes && units.length > 0 ? "yes"
+    : communityOk && units.length === 0 ? (community?.matchesExpected === "yes" && community.allSameCommunity ? "yes" : "no")
+    : "no";
+
+  let unitsSameCommunity: "yes" | "no" | "n/a" = "n/a";
+  if (units.length >= 2) {
+    unitsSameCommunity = units.every((u) => u.sameAsCommunity === "yes") ? "yes" : "no";
+    if (unitsSameCommunity === "no") {
+      const bad = units.filter((u) => u.sameAsCommunity === "no").map((u) => u.label);
+      fail(`Units are NOT all in the same community: ${bad.join(", ")}.`);
+    }
+  }
+
+  if (allSameCommunity === "no" && !hasFail) {
+    fail("Photo sets do not all belong to the same community.");
+  }
+
+  const verdict: "pass" | "warn" | "fail" = hasFail ? "fail" : hasWarn ? "warn" : "pass";
+
+  let summary: string;
+  if (verdict === "pass") {
+    summary = units.length >= 2
+      ? `Confirmed: community folder and all ${units.length} units are the same community (${expectedCommunity || community?.identifiedCommunity || "verified"}).`
+      : `Confirmed: community folder and unit photos are the same community.`;
+  } else if (hasFail) {
+    summary = "Problem found — one or more photo sets are NOT the same community. Review details below.";
+  } else {
+    summary = "Passed core community check with minor warnings — review flagged items.";
+  }
 
   return {
-    ok: true,
+    ok: !warning || verdict !== "fail",
     verdict,
     expectedCommunity,
     summary,
-    concerns,
+    concerns: Array.from(new Set(concerns)).slice(0, 15),
     allSameCommunity,
+    unitsSameCommunity,
     community,
     units,
     duplicates,
     model: MODEL,
-    photosChecked: allSamples.length,
+    photosChecked,
     elapsedMs: Date.now() - startedAt,
     warning,
   };
