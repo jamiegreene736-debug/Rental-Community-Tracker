@@ -87,7 +87,7 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
-import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress } from "./hawaii-compliance-lookup";
+import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress, lookupHawaiiStatewideTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
   acquireSidecarLane,
   clearActiveSidecarLane,
@@ -6833,25 +6833,34 @@ export async function registerRoutes(
       if (/\b(kauai|koloa|poipu|princeville|kapaa|lihue|wailua|hanalei|waimea|kekaha)\b/i.test(address)) {
         return res.json(await lookupKauaiTmkFromAddress(address));
       }
-      const publicValues = await lookupHawaiiPublicListingLicenses({ address, listingName });
-      if (publicValues?.taxMapKey) {
-        return res.json({
-          taxMapKey: publicValues.taxMapKey,
-          confidence: "public-listing",
-          note: publicValues.note,
-          searchedAddress: address,
-          geocodedAddress: address,
-          source: publicValues.source,
-          sourceUrl: publicValues.sourceUrl,
-          parcel: {},
-          candidates: [],
-        });
+      // Big Island / Maui / Oahu / Molokai / Lanai: the State of Hawaii statewide
+      // GIS parcel layer is the authoritative TMK source. Try it first; only fall
+      // back to public OTA snippet scraping if GIS can't resolve the address.
+      try {
+        return res.json(await lookupHawaiiStatewideTmkFromAddress(address));
+      } catch (gisErr: any) {
+        const gisMessage = gisErr?.message || String(gisErr);
+        console.warn("[tmk-lookup] statewide GIS miss, trying public search:", gisMessage);
+        const publicValues = await lookupHawaiiPublicListingLicenses({ address, listingName });
+        if (publicValues?.taxMapKey) {
+          return res.json({
+            taxMapKey: publicValues.taxMapKey,
+            confidence: "public-listing",
+            note: publicValues.note,
+            searchedAddress: address,
+            geocodedAddress: address,
+            source: publicValues.source,
+            sourceUrl: publicValues.sourceUrl,
+            parcel: {},
+            candidates: [],
+          });
+        }
+        throw new Error(`No Hawaii TMK found in the statewide GIS parcel layer (${gisMessage}) or in public listing records for this Guesty address or listing name.`);
       }
-      throw new Error("No public Hawaii TMK / MAP license value matched this Guesty address or listing name.");
     } catch (err: any) {
       const message = err?.message || String(err);
       console.error("[tmk-lookup] failed:", message);
-      if (/No geocoded Hawaii address found|No Kauai parcel TMK found|No public Hawaii TMK/i.test(message)) {
+      if (/No geocoded Hawaii address found|No Kauai parcel TMK found|No Hawaii parcel TMK found|No Hawaii TMK found|No public Hawaii TMK/i.test(message)) {
         return res.status(404).json({ error: message, searchedAddress: address });
       }
       res.status(500).json({ error: "TMK lookup failed", message });
