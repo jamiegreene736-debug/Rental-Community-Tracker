@@ -43,6 +43,29 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-17 (guest inbox: "Do buy-in search" button — live read-only buy-in
+  search on an inquiry): Operator asked to run the EXACT Operations "Auto-fill
+  cheapest" search from inside a guest inquiry (sidecar + cheapest combos) and just
+  SEE the results — no attach. Shipped on `claude/inbox-buy-in-search` as an
+  additive, default-false `dryRun` mode on the existing auto-fill job
+  (`server/auto-fill-job.ts`) — NOT a re-implementation, so it inherits every
+  load-bearing rule. The whole trick: `attachPick` is the only attach boundary and
+  every detach/rollback site is already guarded by `buyInId != null`, so a dry-run
+  that records the would-be pick with `buyInId:null` + skips the two create/attach
+  POSTs leaves all downstream control flow byte-identical with zero other server
+  changes. Reservation-keyed persistence (started/loss-options/SIGTERM stamp) is
+  skipped for dry-run (synthetic `inbox-search:` reservationId); profit gate
+  disabled (inquiry has no committed revenue). New `POST /api/inbox/buy-in-search`
+  resolves the inquiry (guestyPropertyMap → PROPERTY_UNIT_CONFIGS) + starts the job;
+  the inbox polls the normal `GET /api/operations/auto-fill/:jobId` and renders
+  `attached`/`comboOptions`/`cityEconomics` read-only (`InboxBuyInSearchResults`).
+  Full rationale in AGENTS.md "Read-only inbox buy-in search (dry-run auto-fill)" +
+  the 2026-06-17 Decision Log line. Verified: `tests/inbox-buy-in-search.test.ts`
+  (20) green, full `npm test` green, `npm run build` clean, `npm run check` 0 new TS
+  errors. Could NOT live-smoke (no Guesty/sidecar creds in the cloud session) —
+  build + test + code-path verified; confirm live by opening an inquiry and clicking
+  the button.
+
 - 2026-06-15 ("sidecar randomly going off" = unattended inventory-feed sweep; OFF-REPO root cause):
   Operator reported the local Chrome sidecar firing unprompted. Diagnosed from the
   live worker log (`~/.vrbo-sidecar-daemon/sidecar-launchd.log`): an UNATTENDED
