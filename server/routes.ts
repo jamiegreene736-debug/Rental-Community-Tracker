@@ -173,6 +173,7 @@ import {
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "@shared/bulk-combo-queue-progress";
+import { discoverCommunityStreetAddress } from "./community-address-discovery";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import {
@@ -33904,6 +33905,22 @@ Return ONLY compact JSON with this exact shape:
         .where(and(eq(bulkComboListingJobItemRows.jobId, job.id), eq(bulkComboListingJobItemRows.itemKey, item.id)));
     }
   };
+  // Persist a discovered/backfilled street into the item's payload so it survives a
+  // worker restart and shows up in diagnostics. persistBulkComboListingSnapshot does
+  // NOT write payload, so this is a targeted merge-write for the one item.
+  const persistBulkComboItemStreetAddress = async (jobId: string, itemKey: string, street: string) => {
+    const [row] = await db
+      .select({ payload: bulkComboListingJobItemRows.payload })
+      .from(bulkComboListingJobItemRows)
+      .where(and(eq(bulkComboListingJobItemRows.jobId, jobId), eq(bulkComboListingJobItemRows.itemKey, itemKey)))
+      .limit(1);
+    const payload = (row?.payload && typeof row.payload === "object" ? { ...(row.payload as Record<string, unknown>) } : {}) as Record<string, unknown>;
+    payload.streetAddress = street;
+    await db
+      .update(bulkComboListingJobItemRows)
+      .set({ payload, updatedAt: new Date() })
+      .where(and(eq(bulkComboListingJobItemRows.jobId, jobId), eq(bulkComboListingJobItemRows.itemKey, itemKey)));
+  };
   const loadBulkComboListingJob = async (jobId: string): Promise<BulkComboListingJob | null> => {
     const [jobRow] = await db.select().from(bulkComboListingJobRows).where(eq(bulkComboListingJobRows.id, jobId)).limit(1);
     if (!jobRow) return null;
@@ -34619,16 +34636,44 @@ Return ONLY compact JSON with this exact shape:
             if (!item.draftId) {
               hydrateBulkComboListingItem(item);
               const community = item.community || {};
-              const addrPrecheck = validateCommunityStreetAddress({
+              let addrPrecheck = validateCommunityStreetAddress({
                 communityName: community.name,
                 city: community.city,
                 state: community.state,
                 streetAddress: item.streetAddress,
               });
+              // No curated/hint/operator street resolved — try LIVE discovery before
+              // failing. Only when there is NO curated rule: a curated mismatch
+              // ("should use X") must surface, not be papered over by a map lookup.
+              if (!addrPrecheck.ok && !communityAddressRuleForName(community.name)) {
+                const discovered = await discoverCommunityStreetAddress({
+                  communityName: community.name,
+                  city: community.city,
+                  state: community.state,
+                }).catch((e: any) => {
+                  console.warn(`[bulk-combo-listings] address discovery failed for "${community.name}": ${e?.message ?? e}`);
+                  return null;
+                });
+                if (discovered?.street) {
+                  item.streetAddress = discovered.street;
+                  await persistBulkComboItemStreetAddress(job.id, item.id, discovered.street).catch(() => {});
+                  await queueEvent("bulk-combo-listing", job.id, "address-discovered", `Discovered street address "${discovered.street}" for "${community.name ?? "this community"}"`, {
+                    itemKey: item.id,
+                    meta: { street: discovered.street, fullAddress: discovered.fullAddress, matchedTitle: discovered.matchedTitle, query: discovered.query },
+                  });
+                  addrPrecheck = validateCommunityStreetAddress({
+                    communityName: community.name,
+                    city: community.city,
+                    state: community.state,
+                    streetAddress: item.streetAddress,
+                  });
+                }
+              }
               if (!addrPrecheck.ok) {
                 item.status = "failed";
                 item.phase = "failed";
-                item.message = `No usable street address for "${community.name ?? "this community"}" — add one before queuing (skipped before searching photos). ${addrPrecheck.error}`;
+                const couldDiscover = !communityAddressRuleForName(community.name);
+                item.message = `No usable street address for "${community.name ?? "this community"}"${couldDiscover ? " (curated rules + live map lookup both came up empty)" : ""} — add one before queuing (skipped before searching photos). ${addrPrecheck.error}`;
                 item.error = item.message;
                 item.finishedAt = Date.now();
                 job.updatedAt = Date.now();

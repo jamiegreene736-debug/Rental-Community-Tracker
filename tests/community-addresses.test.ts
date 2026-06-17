@@ -6,6 +6,7 @@ import {
   validateCommunityStreetAddress,
   inferCommunityStreetAddress,
   resolveBulkComboListingStreet,
+  communityAddressRuleForName,
 } from "../shared/community-addresses";
 
 let pass = 0;
@@ -57,6 +58,44 @@ check('bare "Grand Champions" still resolves to 155 Wailea Ike Pl',
 for (const stranger of ["Grand Champions Spa", "Grand Champions Pool Club"]) {
   const inferred = inferCommunityStreetAddress({ communityName: stranger, city: "Orlando", state: "FL" });
   check(`"${stranger}" does NOT falsely resolve to the Wailea address`, inferred !== "155 Wailea Ike Pl", inferred);
+}
+
+// ── Word-boundary fuzzy-match guard ───────────────────────────────────────────
+// "Alii Kai" (Princeville, Kauai) must NOT inherit the "Halii Kai" rule (Waikoloa,
+// Big Island) just because "alii kai" is a raw substring of "halii kai". A live
+// 2026-06-17 sweep saved a Kauai Alii Kai combo against the Big-Island address
+// before this was fixed.
+const aliiKaiRule = communityAddressRuleForName("Alii Kai");
+check('"Alii Kai" does NOT match the Halii Kai rule',
+  !(aliiKaiRule && aliiKaiRule.names.some((n) => /halii/i.test(n))),
+  aliiKaiRule?.street);
+check('"Alii Kai Resort" does NOT match the Halii Kai rule',
+  !(() => { const r = communityAddressRuleForName("Alii Kai Resort"); return r && r.names.some((n) => /halii/i.test(n)); })(),
+  communityAddressRuleForName("Alii Kai Resort")?.street);
+// Halii Kai itself must still resolve to its curated rule.
+check('"Halii Kai at Waikoloa" still resolves to its curated rule',
+  communityAddressRuleForName("Halii Kai at Waikoloa")?.street === "69-1029 Nawahine Pl",
+  communityAddressRuleForName("Halii Kai at Waikoloa")?.street);
+
+// Legit partial matches must survive the word-boundary tightening.
+const partials: Array<{ name: string; street: string }> = [
+  { name: "Grand Champions", street: "155 Wailea Ike Pl" },           // ⊂ "Wailea Grand Champions"
+  { name: "Kahala at Poipu Kai", street: "1831 Poipu Rd" },           // contains "Poipu Kai"
+  { name: "Kaiulani", street: "4100 Queen Emma's Dr" },               // bare ⊂ "Kaiulani of Princeville"
+  { name: "Wailea Elua", street: "3600 Wailea Alanui Dr" },           // ⊂ "Wailea Elua Village"
+];
+for (const p of partials) {
+  check(`"${p.name}" still resolves (word-boundary partial)`,
+    communityAddressRuleForName(p.name)?.street === p.street,
+    communityAddressRuleForName(p.name)?.street);
+}
+
+// The 4 Kauai resorts that failed the live sweep have NO curated rule — confirming
+// they correctly depend on the live discovery fallback, not a silent mismatch.
+for (const unknown of ["Lae Nani", "Puu Poa", "Hanalei Bay Resort", "Waipouli Beach Resort"]) {
+  check(`"${unknown}" has no curated rule (depends on live discovery)`,
+    communityAddressRuleForName(unknown) === null,
+    communityAddressRuleForName(unknown)?.street);
 }
 
 console.log(`\ncommunity-addresses: ${pass} passed, ${fail} failed`);
