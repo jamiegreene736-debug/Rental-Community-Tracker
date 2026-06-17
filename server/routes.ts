@@ -27962,9 +27962,6 @@ Return ONLY compact JSON with this exact shape:
   // Community Photo Finder
   app.get("/api/community-photos/search", async (req, res) => {
     const apiKey = process.env.SEARCHAPI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
-    }
 
     const communityName = req.query.communityName as string;
     if (!communityName || !communityName.trim()) {
@@ -27973,8 +27970,25 @@ Return ONLY compact JSON with this exact shape:
 
     const name = communityName.trim();
 
-    // --- If this community has a hardcoded listing URL, scrape it directly ---
-    const sourceConfig = COMMUNITY_SOURCE_URLS[name];
+    // Optional explicit photo source URL (e.g. a draft's own `sourceUrl`).
+    // An authoritative per-community source ALWAYS beats the generic Google
+    // Images name search below, which historically pulled in WRONG-resort
+    // photos: its per-image validation only required ONE name word to appear
+    // anywhere in a caption, so a Grand Hyatt / Marriott / 1 Hotel Hanalei
+    // photo whose caption merely said "Poipu" passed as "Poipu Kapili".
+    // persist-community-photos now threads the draft's sourceUrl here so EVERY
+    // newly-added community scrapes its own site first. See the stricter
+    // distinctive-word validation in scoreAndValidate() for the name-search
+    // backstop. (claude/community-photo-source — 2026-06-17)
+    const explicitSourceUrl =
+      typeof req.query.sourceUrl === "string" && /^https?:\/\//i.test(req.query.sourceUrl.trim())
+        ? req.query.sourceUrl.trim()
+        : null;
+
+    // --- If this community has a hardcoded listing URL (or the caller passed
+    // an explicit sourceUrl), scrape it directly. This path does NOT need
+    // SearchAPI, so the key check below is deferred until the name-search. ---
+    const sourceConfig = COMMUNITY_SOURCE_URLS[name] ?? (explicitSourceUrl ? { primary: explicitSourceUrl } : undefined);
     if (sourceConfig) {
       try {
         const scraped = await scrapeListingPhotos(sourceConfig.primary, sourceConfig.fallback);
@@ -27994,6 +28008,13 @@ Return ONLY compact JSON with this exact shape:
         console.warn(`[community-photos] Scraping failed for ${name}, falling back to search:`, err.message);
         // Fall through to search below
       }
+    }
+
+    // The generic name-search path below needs SearchAPI. The authoritative
+    // source scrape above does not, so this guard lives here rather than at
+    // the top of the handler.
+    if (!apiKey) {
+      return res.status(500).json({ error: "SearchAPI.io API key not configured" });
     }
 
     // Five targeted on-property queries — each focuses on a specific amenity/area type
@@ -28034,7 +28055,28 @@ Return ONLY compact JSON with this exact shape:
       "jeanandabbott.com", "kauaibeachrentals.com", "remax.com", "zillow.com",
     ];
 
+    // Generic geographic / descriptor words that appear in MANY unrelated
+    // resorts' captions. Matching ONLY one of these is NOT enough to trust a
+    // photo belongs to THIS community — that is exactly how a Grand Hyatt photo
+    // captioned "…Poipu…" passed as "Poipu Kapili". We therefore require at
+    // least one DISTINCTIVE (non-generic) word from the community name to match.
+    const GENERIC_GEO_WORDS = new Set([
+      // Hawaii islands / regions / towns
+      "poipu", "koloa", "kauai", "princeville", "kapaa", "lihue", "kalaheo",
+      "hanalei", "wailua", "maui", "oahu", "hawaii", "hawaiian", "island",
+      "islands", "kihei", "wailea", "kapolei", "kona", "kohala", "waikoloa",
+      "keauhou", "lahaina", "kaanapali", "honolulu", "kailua",
+      // Generic resort descriptors
+      "resort", "resorts", "beach", "beachfront", "beachside", "oceanfront",
+      "ocean", "village", "plantation", "estates", "shores", "condos", "condo",
+      "vacation", "rentals", "rental",
+    ]);
     const nameWords = name.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+    // Words that actually identify THIS community (the resort name itself),
+    // dropping pure geographic/descriptor words. If a name is entirely generic
+    // (rare), fall back to the full word list so we never reject everything.
+    const distinctiveNameWords = nameWords.filter(w => !GENERIC_GEO_WORDS.has(w));
+    const requiredNameWords = distinctiveNameWords.length > 0 ? distinctiveNameWords : nameWords;
 
     function scoreAndValidate(img: any): { valid: boolean; label: string; score: number } {
       const title = (img.title || "").toLowerCase();
@@ -28060,10 +28102,13 @@ Return ONLY compact JSON with this exact shape:
         return { valid: false, label: "", score: 0 };
       }
 
-      // Community name validation: at least one significant word from community name
-      // must appear in the title, source URL, or image URL
+      // Community name validation: at least one DISTINCTIVE word from the
+      // community name (resort name, not a bare region/descriptor word) must
+      // appear in the title, source URL, or image URL. Requiring a distinctive
+      // word — rather than any name word — is what rejects a wrong-resort photo
+      // whose caption merely contains the shared region (e.g. "Poipu").
       const contextText = `${title} ${sourceLink} ${sourceName} ${imageUrl}`;
-      const nameMatch = nameWords.some(w => contextText.includes(w));
+      const nameMatch = requiredNameWords.some(w => contextText.includes(w));
       if (!nameMatch) return { valid: false, label: "", score: 0 };
 
       // Build a human-readable label
@@ -40316,10 +40361,17 @@ Return ONLY compact JSON with this exact shape:
     // Search step. The existing endpoint runs five Google Images
     // queries in parallel + scoring; reuse it via an in-process HTTP
     // call rather than copy-pasting ~170 lines of search/scoring code.
+    // Pass the draft's OWN source URL so the search scrapes the authoritative
+    // community site first instead of a generic name search — the generic
+    // search is what historically saved wrong-resort photos into the folder.
+    const draftSourceUrl =
+      typeof draft.sourceUrl === "string" && /^https?:\/\//i.test(draft.sourceUrl)
+        ? `&sourceUrl=${encodeURIComponent(draft.sourceUrl)}`
+        : "";
     let topUrls: string[] = [];
     try {
       const searchResp = await fetch(
-        `${base}/api/community-photos/search?communityName=${encodeURIComponent(draft.name)}`,
+        `${base}/api/community-photos/search?communityName=${encodeURIComponent(draft.name)}${draftSourceUrl}`,
         { signal: AbortSignal.timeout(45_000) },
       );
       if (!searchResp.ok) {
