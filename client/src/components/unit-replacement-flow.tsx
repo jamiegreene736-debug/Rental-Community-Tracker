@@ -174,6 +174,10 @@ export type ReplacementUnitData = {
   // as proof the listing actually has interior photography.
   sampledCategories?: string[];
   platformCheck?: PlatformCheck;
+  // Set when the operator opted into "Include units already on Airbnb/VRBO"
+  // (allowOtaListed) and this unit was kept despite being listed on that host.
+  // Its real-estate photos were still verified as not reused on the OTA.
+  otaListedOn?: string | null;
 };
 
 export function UnitReplacementFlow({
@@ -207,6 +211,11 @@ export function UnitReplacementFlow({
   const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "replacing" | "error">("idle");
   const [result, setResult] = useState<ReplacementUnitData | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
+  // Operator opt-in for STVR-saturated communities (e.g. Waikoloa Beach Villas):
+  // include units that are already listed on Airbnb/VRBO/Booking.com instead of
+  // requiring a fully-clean unit. Photos are still sourced only from real-estate
+  // sites and checked for OTA reuse, so this never reuses OTA photos.
+  const [allowOtaListed, setAllowOtaListed] = useState(false);
   const [searchStartedAt, setSearchStartedAt] = useState<number | null>(null);
   const [progressTick, setProgressTick] = useState(0);
   const [lastSearchExpanded, setLastSearchExpanded] = useState(false);
@@ -437,6 +446,7 @@ export function UnitReplacementFlow({
       requiredBedrooms: selectedUnit.bedrooms,
       skipUrls: [...skipUrls, ...nextExtra],
       expandedSearch: expanded,
+      allowOtaListed,
     };
     lastSearchPayloadRef.current = startPayload;
     try {
@@ -563,15 +573,34 @@ export function UnitReplacementFlow({
           </div>
 
           {stage === "idle" && (
-            <Button
-              size="sm"
-              className="w-full"
-              onClick={() => search({ expanded: hasActiveReplacement })}
-              data-testid="button-start-unit-search"
-            >
-              <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
-              Find Replacement Unit
-            </Button>
+            <div className="space-y-2">
+              <Button
+                size="sm"
+                className="w-full"
+                onClick={() => search({ expanded: hasActiveReplacement })}
+                data-testid="button-start-unit-search"
+              >
+                <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
+                Find Replacement Unit
+              </Button>
+              <label
+                className="flex items-start gap-1.5 text-[11px] text-muted-foreground cursor-pointer select-none"
+                data-testid="toggle-allow-ota-listed"
+              >
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-3 w-3 cursor-pointer accent-primary"
+                  checked={allowOtaListed}
+                  onChange={(e) => setAllowOtaListed(e.target.checked)}
+                />
+                <span>
+                  Include units already on Airbnb/VRBO
+                  <span className="block text-[10px] opacity-80">
+                    For heavily-rented communities (e.g. Waikoloa Beach Villas) where most units are already short-term rentals. Photos still come only from real-estate sites and are checked for reuse.
+                  </span>
+                </span>
+              </label>
+            </div>
           )}
 
           {(stage === "searching" || stage === "checking") && (
@@ -702,20 +731,26 @@ export function UnitReplacementFlow({
         // "clean" for a full green shield. Any "unknown" downgrades to
         // amber (SearchAPI couldn't confirm on that platform, so the
         // user should treat the result as "probably clean, not proven").
-        // We never surface "found" — the server filters those out.
+        // Normally we never surface "found" — but when the operator opted into
+        // "Include units already on Airbnb/VRBO" (allowOtaListed), the server
+        // returns an OTA-listed unit flagged via `otaListedOn`; surface that
+        // distinctly so the green "clean" shield never lies.
         const pc = result.platformCheck;
+        const otaListedHost = result.otaListedOn;
         const statuses: Array<[label: string, key: keyof PlatformCheck]> = [
           ["Airbnb",      "airbnb"],
           ["VRBO",        "vrbo"],
           ["Booking.com", "bookingCom"],
         ];
-        const allClean = pc ? statuses.every(([, k]) => pc[k] === "clean") : false;
+        const allClean = !otaListedHost && (pc ? statuses.every(([, k]) => pc[k] === "clean") : false);
         const anyUnknown = pc ? statuses.some(([, k]) => pc[k] === "unknown") : true;
-        const headerTone = allClean
-          ? "green"
-          : anyUnknown
-            ? "amber"
-            : "green"; // no platformCheck field at all → treat as old-behavior green
+        const headerTone = otaListedHost
+          ? "amber"
+          : allClean
+            ? "green"
+            : anyUnknown
+              ? "amber"
+              : "green"; // no platformCheck field at all → treat as old-behavior green
         return (
         <div className="space-y-2.5">
           <div className="space-y-1.5">
@@ -731,12 +766,19 @@ export function UnitReplacementFlow({
               ) : (
                 <ShieldAlert className="h-3.5 w-3.5" />
               )}
-              {allClean
-                ? "Clean on Airbnb, VRBO, and Booking.com"
-                : anyUnknown
-                  ? "Partial check — one or more platforms couldn't be verified"
-                  : "Clean replacement found"}
+              {otaListedHost
+                ? `Already listed on ${otaListedHost} — kept by your "include OTA-listed" setting`
+                : allClean
+                  ? "Clean on Airbnb, VRBO, and Booking.com"
+                  : anyUnknown
+                    ? "Partial check — one or more platforms couldn't be verified"
+                    : "Clean replacement found"}
             </p>
+            {otaListedHost && (
+              <p className="text-[11px] text-amber-700 dark:text-amber-400" data-testid="replacement-ota-listed-note">
+                This unit is already a short-term rental on {otaListedHost}. Its real-estate photos were verified as not reused on the OTA, so they're safe to use.
+              </p>
+            )}
             {pc && (
               <div className="flex items-center gap-1 flex-wrap">
                 {statuses.map(([label, key]) => {
