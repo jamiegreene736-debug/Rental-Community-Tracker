@@ -65,7 +65,7 @@ const savePhotoFetchJobIds = (propertyId: number, next: Record<string, string>) 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type UnitPlatformResult = {
-  status: "confirmed" | "photo-confirmed" | "photo-only" | "unconfirmed" | "not-listed" | "error";
+  status: "confirmed" | "not-listed" | "error";
   url: string | null;
   detection: string;
 };
@@ -124,31 +124,13 @@ function StatusBadge({
     case "confirmed":
       return (
         <span className="status-confirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300">
-          <CheckCircle2 className="h-3 w-3" /> Yes — Listed (title confirmed)
-        </span>
-      );
-    case "photo-confirmed":
-      return (
-        <span className="status-photo-confirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300">
-          <CheckCircle2 className="h-3 w-3" /> Yes — Listed (photos confirmed)
-        </span>
-      );
-    case "photo-only":
-      return (
-        <span className="status-photo-only inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300">
-          <AlertTriangle className="h-3 w-3" /> Likely Listed — Found via photos only
-        </span>
-      );
-    case "unconfirmed":
-      return (
-        <span className="status-unconfirmed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300">
-          <AlertTriangle className="h-3 w-3" /> Possible Match — Check Manually
+          <CheckCircle2 className="h-3 w-3" /> Yes — Listed
         </span>
       );
     case "not-listed":
       return (
         <span className="status-not-listed inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300">
-          <XCircle className="h-3 w-3" /> Not Found — Likely Safe to Use
+          <XCircle className="h-3 w-3" /> No — Not Found
         </span>
       );
     default:
@@ -177,28 +159,15 @@ function CompactStatusBadge({
   }
   switch (result.status) {
     case "confirmed":
-    case "photo-confirmed":
       return (
         <span className={`${base} bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300`}>
-          <CheckCircle2 className="h-3 w-3" /> Listed
-        </span>
-      );
-    case "photo-only":
-      return (
-        <span className={`${base} bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300`}>
-          <AlertTriangle className="h-3 w-3" /> Likely
-        </span>
-      );
-    case "unconfirmed":
-      return (
-        <span className={`${base} bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300`}>
-          <AlertTriangle className="h-3 w-3" /> Review
+          <CheckCircle2 className="h-3 w-3" /> Yes
         </span>
       );
     case "not-listed":
       return (
         <span className={`${base} bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300`}>
-          <XCircle className="h-3 w-3" /> Clear
+          <XCircle className="h-3 w-3" /> No
         </span>
       );
     default:
@@ -212,7 +181,7 @@ function CompactStatusBadge({
 
 // Whether a status is "listed" (should suggest replacing the unit)
 function isListedStatus(status: UnitPlatformResult["status"]) {
-  return status === "confirmed" || status === "photo-confirmed" || status === "photo-only";
+  return status === "confirmed";
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -1575,10 +1544,8 @@ export default function BuilderPreflight() {
           {/* Status legend */}
           {hasAnyResults && (
             <div className="mt-4 pt-4 border-t border-border/60 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
-              <span className="flex items-center gap-1"><CheckCircle2 className="h-3 w-3 text-green-600" /> Listed &amp; verified</span>
-              <span className="flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-orange-500" /> Likely listed — review recommended</span>
-              <span className="flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-yellow-500" /> Possible match — check manually</span>
-              <span className="flex items-center gap-1"><XCircle className="h-3 w-3 text-red-500" /> Not found — safe to use</span>
+              <span className="flex items-center gap-1"><CheckCircle2 className="h-3 w-3 text-green-600" /> Yes — unit, community, and photos verified</span>
+              <span className="flex items-center gap-1"><XCircle className="h-3 w-3 text-red-500" /> No — not listed or insufficient evidence</span>
             </div>
           )}
         </Card>

@@ -162,6 +162,15 @@ import {
   resolveBulkComboListingStreet,
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
+import {
+  combineStrictPlatformCheck,
+  explicitLetterUnitMarkers,
+  hasVerifiableUnitTokens,
+  letterUnitClaimForVerification,
+  listingLocationConflictsWithTarget,
+  photoEvidenceMeetsThreshold,
+  snippetMentionsCommunity,
+} from "@shared/preflight-platform-match";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "@shared/bulk-combo-queue-progress";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
@@ -25483,17 +25492,6 @@ Return ONLY compact JSON with this exact shape:
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
     const city = normalizePlatformCheckCity(String(req.query.city ?? ""), units[0]?.address);
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
-    const disabledUnits = units.map((unit) => ({
-      ...unit,
-      platforms: [],
-      photoSignals: { airbnb: false, vrbo: false, booking: false },
-      photoMatchedUrls: { airbnb: null, vrbo: null, booking: null },
-      photoMatchCounts: { airbnb: 0, vrbo: 0, booking: 0 },
-      photoMatches: 0,
-      checkedPhotos: 0,
-      error: "Google Lens reverse-image platform checks are disabled to preserve SearchAPI quota.",
-    }));
-    return res.json({ units: disabledUnits, photoMode: "disabled" });
     if (!apiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
     const photoModeRaw = String(req.query.photoMode ?? req.query.photoAudit ?? "").toLowerCase();
     const fullPhotoAudit = photoModeRaw === "full" || photoModeRaw === "all" || photoModeRaw === "unit-audit" || req.query.fullPhotoAudit === "1";
@@ -25670,7 +25668,13 @@ Return ONLY compact JSON with this exact shape:
     const textSearch = async (
       unit: { unitNumber: string; address: string },
       cfg: typeof PLATFORM_CONFIGS[0],
-    ): Promise<{ listed: boolean | null; url: string | null; titleMatch: boolean }> => {
+    ): Promise<{
+      listed: boolean | null;
+      url: string | null;
+      titleMatch: boolean;
+      hasCommunity: boolean;
+      hasLocationConflict: boolean;
+    }> => {
       const domain = cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`;
       const unitClaims = singleListingMode ? [] : unitVerificationClaims(unit.unitNumber, unit.address);
       const primaryUnitClaim = unitClaims[0] || normalizeUnitClaim(unit.unitNumber);
@@ -25724,8 +25728,6 @@ Return ONLY compact JSON with this exact shape:
         const streetName = street.replace(/^\d+\s*/, "").trim();
         const streetTail = streetName; // used for adjacency heuristic in snippetMentionsUnit
 
-        let bestUrl: string | null = null;
-        let bestTitleMatch = false;
         for (const r of allResults) {
           const link: string = r.link || r.url || "";
           if (!link.toLowerCase().includes(cfg.key === "booking" ? "booking.com" : `${cfg.key}.com`)) continue;
@@ -25737,33 +25739,34 @@ Return ONLY compact JSON with this exact shape:
           if (singleListingMode) {
             const addressMatch = addressEvidenceInResult(r, street);
             const nameMatch = name.length >= 4 && normalizeSearchText(resultText(r)).includes(normalizeSearchText(name));
-            if (addressMatch || nameMatch) {
-              return { listed: true, url: link, titleMatch: true };
+            const locationConflict = listingLocationConflictsWithTarget(resultText(r), { communityName: name, city });
+            const hasCommunity = snippetMentionsCommunity(resultText(r), name, street, city);
+            if ((addressMatch || nameMatch) && hasCommunity && !locationConflict) {
+              return { listed: true, url: link, titleMatch: true, hasCommunity: true, hasLocationConflict: false };
             }
-            if (!bestUrl) { bestUrl = link; bestTitleMatch = false; }
             continue;
           }
+          const haystack = resultText(r);
+          const locationConflict = listingLocationConflictsWithTarget(haystack, { communityName: name, city });
+          if (locationConflict) continue;
           const unitInSnippet = (unitClaims.length > 0 ? unitClaims : [unit.unitNumber])
-            .some((claim) => snippetMentionsUnit(r, claim, streetTail));
-          // For titleMatch we also need the STREET to appear in the snippet.
-          // A listing URL + unit-number mention alone is still a "possible
-          // match" (shown yellow in the UI), not a confirmed one.
+            .some((claim) => snippetMentionsUnit(r, claim, streetTail))
+            || explicitLetterUnitMarkers(unit.unitNumber).some((marker) => haystack.includes(marker.toLowerCase()));
           const streetInSnippet = streetName.length >= 3
-            ? resultText(r).includes(streetName.toLowerCase())
+            ? haystack.includes(streetName.toLowerCase())
             : false;
-          // Hard gate: if NEITHER the street nor the unit number actually
-          // appears in the snippet, Google's site: search returned a fuzzy
-          // match that's probably a different listing entirely — the
-          // scenario that produced the Unit 122 / villa false positive.
-          // Skip it rather than surface it as a "possible match".
-          if (!unitInSnippet && !streetInSnippet) continue;
-          const titleMatch = unitInSnippet && streetInSnippet;
-          if (titleMatch) return { listed: true, url: link, titleMatch: true };
-          if (!bestUrl) { bestUrl = link; bestTitleMatch = false; }
+          const hasCommunity = snippetMentionsCommunity(haystack, name, street, city);
+          if (!unitInSnippet || !streetInSnippet || !hasCommunity) continue;
+          return {
+            listed: true,
+            url: link,
+            titleMatch: true,
+            hasCommunity: true,
+            hasLocationConflict: false,
+          };
         }
-        if (bestUrl) return { listed: true, url: bestUrl, titleMatch: bestTitleMatch };
-        return { listed: false, url: null, titleMatch: false };
-      } catch { return { listed: null, url: null, titleMatch: false }; }
+        return { listed: false, url: null, titleMatch: false, hasCommunity: false, hasLocationConflict: false };
+      } catch { return { listed: null, url: null, titleMatch: false, hasCommunity: false, hasLocationConflict: false }; }
     };
 
     // ── Helper: after Google Lens returns a candidate listing URL,
@@ -25805,6 +25808,65 @@ Return ONLY compact JSON with this exact shape:
       } catch {
         return false;
       }
+    };
+
+    const verifyUrlMentionsCommunity = async (
+      url: string,
+      communityName: string,
+      street: string,
+      searchCity: string,
+    ): Promise<boolean> => {
+      if (!url || !communityName) return false;
+      let parsed: URL;
+      try { parsed = new URL(url); } catch { return false; }
+      const host = parsed.hostname.replace(/^www\./, "");
+      const pathClean = parsed.pathname.replace(/\.[a-z0-9.-]+$/i, "").replace(/\/+$/, "");
+      if (!pathClean) return false;
+      const phraseMarkers = discoveryCommunityNameAliases(communityName)
+        .slice(0, 2)
+        .map((phrase) => `"${phrase}"`)
+        .join(" OR ");
+      const streetMarker = street ? `"${street}"` : "";
+      const cityMarker = searchCity ? `"${searchCity}"` : "";
+      const markers = [phraseMarkers, streetMarker, cityMarker].filter(Boolean).join(" OR ");
+      if (!markers) return false;
+      const q = `site:${host}${pathClean} (${markers})`;
+      try {
+        const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "3" });
+        const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, {
+          headers: { "User-Agent": "NexStay/1.0" },
+        });
+        if (!resp.ok) return false;
+        const data = await resp.json() as any;
+        return ((data.organic_results || []) as any[]).length > 0;
+      } catch {
+        return false;
+      }
+    };
+
+    const verifyPhotoListingCandidate = async (
+      matchedLink: string,
+      candidateText: string,
+      unitNumber: string,
+      verifyTokens: string[],
+      street: string,
+    ): Promise<boolean> => {
+      if (listingLocationConflictsWithTarget(`${candidateText} ${matchedLink}`, { communityName: name, city })) {
+        return false;
+      }
+      if (!(await verifyUrlMentionsCommunity(matchedLink, name, street, city))) {
+        return false;
+      }
+      if (verifyTokens.length > 0) {
+        for (const token of verifyTokens) {
+          if (await verifyUrlMentionsUnit(matchedLink, token)) return true;
+        }
+        return false;
+      }
+      if (letterUnitClaimForVerification(unitNumber)) {
+        return verifyUrlMentionsUnit(matchedLink, unitNumber);
+      }
+      return false;
     };
 
     // ── Helper: photo reverse image search for a unit.
@@ -25862,6 +25924,8 @@ Return ONLY compact JSON with this exact shape:
         : unitScopedTokens.length > 0
           ? unitScopedTokens
           : folderTokens;
+      const cleanedAddr = stripUnitFromAddress(unitAddress || "", unitScopedTokens[0] || normalizeUnitClaim(unitNumber));
+      const photoStreet = extractStreet(cleanedAddr);
       console.log(`[preflight-platform-check] photoSearch folder=${photoFolder} singleListing=${singleListingMode} mode=${fullPhotoAudit ? "full" : "sample"} files=${files.length}/${allFiles.length}`);
       const photoHits: Record<"airbnb" | "vrbo" | "booking", Set<string>> = {
         airbnb: new Set(),
@@ -25915,31 +25979,23 @@ Return ONLY compact JSON with this exact shape:
               // match that here so a brand-new property's preflight
               // gets the same detection rate the scanner gets on
               // existing folders.
-              const candidates = sourceRows.map(({ row }) => String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || ""))
-                .filter((l: string) => {
-                  const ll = l.toLowerCase();
+              const candidates = sourceRows.map(({ row }) => ({
+                link: String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || ""),
+                text: `${row?.title || ""} ${row?.snippet || ""} ${row?.source || ""}`,
+              }))
+                .filter(({ link }) => {
+                  const ll = link.toLowerCase();
                   if (!ll.includes(domain)) return false;
                   return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
                 }).slice(0, 3);
               const key = cfg.key as "airbnb" | "vrbo" | "booking";
               let verifiedCandidate: string | null = null;
-              for (const matchedLink of candidates) {
-                // Cross-validate: confirm the matched page actually
-                // names one of this folder/unit's tokens. For shared-building addresses
-                // the same Lens result set can contain listings for
-                // many units — without this check, the first one
-                // "wins" even if it's the wrong unit (e.g. 3920 Wyllie
-                // Rd unit 2A returned for a unit 9 query). A Google
-                // site: scoped to the listing's path must surface an
-                // explicit unit marker.
-                const verified = verifyTokens.length > 0
-                  ? await (async () => {
-                      for (const token of verifyTokens) {
-                        if (await verifyUrlMentionsUnit(matchedLink, token)) return true;
-                      }
-                      return false;
-                    })()
-                  : true;
+              for (const { link: matchedLink, text: candidateText } of candidates) {
+                const verified = singleListingMode
+                  ? !(await verifyUrlMentionsCommunity(matchedLink, name, photoStreet, city))
+                    ? false
+                    : !listingLocationConflictsWithTarget(`${candidateText} ${matchedLink}`, { communityName: name, city })
+                  : await verifyPhotoListingCandidate(matchedLink, candidateText, unitNumber, verifyTokens, photoStreet);
                 if (!verified) continue;
                 verifiedCandidate = matchedLink;
                 matchedUrls[cfg.key] = matchedLink;
@@ -25959,7 +26015,7 @@ Return ONLY compact JSON with this exact shape:
       }
       for (const key of ["airbnb", "vrbo", "booking"] as const) {
         matchCounts[key] = photoHits[key].size;
-        signals[key] = matchCounts[key] >= MIN_DISTINCT_STRONG_PHOTO_MATCHES;
+        signals[key] = photoEvidenceMeetsThreshold(matchCounts[key], fullPhotoAudit);
         if (signals[key] && !matchedUrls[key] && firstStrongUrls[key]) {
           matchedUrls[key] = firstStrongUrls[key];
         }
@@ -25967,52 +26023,7 @@ Return ONLY compact JSON with this exact shape:
       return { signals, matchedUrls, matchCounts, matchCount, totalChecked: files.length };
     };
 
-    // ── Combine text + photo signals into a single status per platform ─────────
-    type CombinedResult = { status: string; url: string | null; detection: string };
-    const combine = (
-      text: { listed: boolean | null; url: string | null; titleMatch: boolean },
-      photoFound: boolean,
-      photoMatchedUrl: string | null,
-      photoMatchCount: number,
-      totalPhotos: number,
-    ): CombinedResult => {
-      if (text.listed && text.titleMatch)
-        return { status: "confirmed", url: text.url, detection: "Title match confirmed" };
-      if (text.listed && !text.titleMatch && photoFound)
-        // Text + photo both hit — prefer the text URL (the actual listing
-        // we verified) but fall back to the photo-matched one when the
-        // text search couldn't pin a specific listing-page URL.
-        return { status: "photo-confirmed", url: text.url ?? photoMatchedUrl, detection: "Text found + photos matched" };
-      if (!text.listed && photoFound)
-        // Photo-only branch — surface the URL where the photo was found
-        // so the user can click through and verify the match instead of
-        // taking our boolean signal on faith.
-        return { status: "photo-only", url: photoMatchedUrl, detection: `${photoMatchCount} strong unit photos matched (${totalPhotos} checked) — no text confirmation` };
-      if (text.listed && !text.titleMatch && !photoFound)
-        return { status: "unconfirmed", url: text.url, detection: "Text found — title unconfirmed, no photo match" };
-      if (text.listed === null)
-        return { status: "error", url: null, detection: "Could not verify" };
-      return {
-        status: "not-listed",
-        url: null,
-        detection: totalPhotos > 0
-          ? `No signals found (${totalPhotos} photo${totalPhotos !== 1 ? "s" : ""} checked)`
-          : "No signals found",
-      };
-    };
-
     // ── Pre-load scanner data for any photoFolders we'll be checking. ──────────
-    // The hourly photo-listing-scanner (server/photo-listing-scanner.ts)
-    // already runs the same kind of reverse-image-search this preflight
-    // does, but with stronger verification (multi-token, multi-URL,
-    // authorized-URL suppression) and persists the result in
-    // photo_listing_checks. When the scanner has a fresh "found"
-    // verdict for a folder, that's a stronger signal than anything our
-    // live search can produce in a single request — so promote it
-    // unconditionally. This was the bug behind a draft preflight
-    // saying "Not Found — Likely Safe to Use" for unit-621 / unit-423
-    // while the dashboard's photo-listing-alert banner showed both
-    // units flipped to "found" the day before.
     const SCANNER_FRESHNESS_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
     const folderToScannerRow = new Map<string, any>();
     const photoFolders = units.map(u => u.photoFolder).filter((f): f is string => !!f && f.trim() !== "");
@@ -26055,15 +26066,17 @@ Return ONLY compact JSON with this exact shape:
       return null;
     };
 
-    // Promote a per-platform result with the scanner's verdict. "found"
-    // upgrades to photo-confirmed (or keeps existing "confirmed" but
-    // backfills the URL); "clean" / "unknown" leaves the result alone.
+    // ── Combine text + photo signals into a strict yes/no status per platform ─
+    type CombinedResult = { status: string; url: string | null; detection: string };
+
+    // Promote a per-platform result with the scanner's verdict only when the
+    // live check already confirmed a listing — never upgrade weak signals.
     const applyScannerOverride = (
       combined: CombinedResult,
       row: any | undefined,
       platform: "airbnb" | "vrbo" | "booking",
     ): CombinedResult => {
-      if (!isScannerFresh(row)) return combined;
+      if (!isScannerFresh(row) || combined.status !== "confirmed") return combined;
       const status = platform === "airbnb"
         ? row.airbnbStatus
         : platform === "vrbo"
@@ -26071,16 +26084,7 @@ Return ONLY compact JSON with this exact shape:
           : row.bookingStatus;
       if (status !== "found") return combined;
       const scannerUrl = firstScannerMatchUrl(row, platform);
-      if (combined.status === "confirmed") {
-        return { ...combined, url: combined.url ?? scannerUrl };
-      }
-      return {
-        status: "photo-confirmed",
-        url: scannerUrl ?? combined.url,
-        detection: combined.status === "unconfirmed" || combined.status === "photo-only"
-          ? "Text + scanner photo match"
-          : "Scanner photo match — Lens detected our photos on a third-party listing",
-      };
+      return { ...combined, url: combined.url ?? scannerUrl };
     };
 
     // ── Process each unit: run text searches + photo search concurrently ───────
@@ -26095,22 +26099,39 @@ Return ONLY compact JSON with this exact shape:
         const scannerRow = unit.photoFolder && scannerRowAppliesToUnit(unit.photoFolder, unit.unitNumber, unit.address)
           ? folderToScannerRow.get(unit.photoFolder)
           : undefined;
+        const unitHasPhotoEvidence = hasVerifiableUnitTokens(unit.unitNumber, unit.address);
 
-        // Cross-platform correlation: if found on 2+ platforms via text, treat unconfirmed as confirmed
-        const textListedCount = [airbnbText, vrboText, bookingText].filter(t => t.listed).length;
-        const crossConfirmed = textListedCount >= 2;
-
-        const resolveText = (t: typeof airbnbText) =>
-          crossConfirmed && t.listed && !t.titleMatch ? { ...t, titleMatch: true } : t;
+        const buildPlatformResult = (
+          text: typeof airbnbText,
+          platform: "airbnb" | "vrbo" | "booking",
+        ) => applyScannerOverride(
+          combineStrictPlatformCheck({
+            textListed: text.listed,
+            textUrl: text.url,
+            textTitleMatch: text.titleMatch,
+            textHasCommunity: text.hasCommunity,
+            textHasLocationConflict: text.hasLocationConflict,
+            photoFound: signals[platform],
+            photoMatchedUrl: matchedUrls[platform],
+            photoMatchCount: matchCounts[platform],
+            totalPhotos: totalChecked,
+            photoHasCommunity: signals[platform],
+            photoHasLocationConflict: false,
+            photoHasUnitEvidence: unitHasPhotoEvidence,
+            fullPhotoAudit,
+          }),
+          scannerRow,
+          platform,
+        );
 
         return {
           unitId: unit.unitId,
           unitNumber: unit.unitNumber,
           address: unit.address,
           platforms: {
-            airbnb:  applyScannerOverride(combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  matchCounts.airbnb, totalChecked), scannerRow, "airbnb"),
-            vrbo:    applyScannerOverride(combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    matchCounts.vrbo, totalChecked), scannerRow, "vrbo"),
-            booking: applyScannerOverride(combine(resolveText(bookingText), signals.booking, matchedUrls.booking, matchCounts.booking, totalChecked), scannerRow, "booking"),
+            airbnb: buildPlatformResult(airbnbText, "airbnb"),
+            vrbo: buildPlatformResult(vrboText, "vrbo"),
+            booking: buildPlatformResult(bookingText, "booking"),
           },
         };
       }),

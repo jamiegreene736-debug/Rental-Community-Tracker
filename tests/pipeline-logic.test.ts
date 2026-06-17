@@ -40,6 +40,11 @@ import {
   pickBestAvailableComboPairing,
 } from "../shared/community-combo";
 import { unitVerificationClaims } from "../shared/folder-unit-map";
+import {
+  combineStrictPlatformCheck,
+  listingLocationConflictsWithTarget,
+  snippetMentionsCommunity,
+} from "../shared/preflight-platform-match";
 import { verificationTokensForFolder } from "../shared/photo-folder-utils";
 import { MAX_BUY_IN_WALK_MINUTES } from "../shared/walking-distance";
 import {
@@ -3404,3 +3409,111 @@ assert.ok(
   "VRBO sidecar worker should still support map_bounds deep harvest for legacy callers only",
 );
 console.log("  ✓ city VRBO inventory export + combo pairing");
+
+assert.equal(
+  listingLocationConflictsWithTarget(
+    "Spacious 4BR condo at Runaway Bay Jamaica with pool",
+    { communityName: "The Cliffs at Princeville", city: "Princeville" },
+  ),
+  true,
+  "Runaway Bay listings must not match Princeville communities",
+);
+assert.equal(
+  listingLocationConflictsWithTarget(
+    "The Cliffs at Princeville 3811 Edward Rd Unit A Princeville HI",
+    { communityName: "The Cliffs at Princeville", city: "Princeville" },
+  ),
+  false,
+  "Princeville community evidence should not conflict with itself",
+);
+assert.equal(
+  snippetMentionsCommunity(
+    "VRBO: The Cliffs at Princeville 3811 Edward Rd Princeville HI Unit A",
+    "The Cliffs at Princeville",
+    "3811 Edward Rd",
+    "Princeville",
+  ),
+  true,
+  "community + street evidence should pass for Cliffs at Princeville",
+);
+assert.equal(
+  snippetMentionsCommunity(
+    "Runaway Bay Resort vacation rental with ocean views",
+    "The Cliffs at Princeville",
+    "3811 Edward Rd",
+    "Princeville",
+  ),
+  false,
+  "Runaway Bay snippets should not satisfy Cliffs community evidence",
+);
+assert.equal(
+  combineStrictPlatformCheck({
+    textListed: true,
+    textUrl: "https://www.vrbo.com/1234567",
+    textTitleMatch: true,
+    textHasCommunity: true,
+    textHasLocationConflict: false,
+    photoFound: false,
+    photoMatchedUrl: null,
+    photoMatchCount: 0,
+    totalPhotos: 25,
+    photoHasCommunity: false,
+    photoHasLocationConflict: false,
+    photoHasUnitEvidence: true,
+    fullPhotoAudit: true,
+  }).status,
+  "confirmed",
+  "text path with unit + street + community should be YES",
+);
+assert.equal(
+  combineStrictPlatformCheck({
+    textListed: true,
+    textUrl: "https://www.vrbo.com/9999999",
+    textTitleMatch: false,
+    textHasCommunity: false,
+    textHasLocationConflict: true,
+    photoFound: true,
+    photoMatchedUrl: "https://www.vrbo.com/9999999",
+    photoMatchCount: 2,
+    totalPhotos: 25,
+    photoHasCommunity: true,
+    photoHasLocationConflict: true,
+    photoHasUnitEvidence: true,
+    fullPhotoAudit: true,
+  }).status,
+  "not-listed",
+  "location conflict should force NO even when photos hit",
+);
+assert.equal(
+  combineStrictPlatformCheck({
+    textListed: false,
+    textUrl: null,
+    textTitleMatch: false,
+    textHasCommunity: false,
+    textHasLocationConflict: false,
+    photoFound: true,
+    photoMatchedUrl: "https://www.vrbo.com/1234567",
+    photoMatchCount: 3,
+    totalPhotos: 25,
+    photoHasCommunity: true,
+    photoHasLocationConflict: false,
+    photoHasUnitEvidence: true,
+    fullPhotoAudit: true,
+  }).status,
+  "confirmed",
+  "full audit with 3 verified interior photos should be YES",
+);
+assert.ok(
+  routesSource.includes("combineStrictPlatformCheck") &&
+    routesSource.includes("listingLocationConflictsWithTarget") &&
+    routesSource.includes("verifyUrlMentionsCommunity") &&
+    !routesSource.includes("crossConfirmed"),
+  "preflight platform check must use strict yes/no matching without cross-platform boost",
+);
+assert.ok(
+  preflightSource.includes("Yes — Listed") &&
+    preflightSource.includes("No — Not Found") &&
+    !preflightSource.includes("Possible Match"),
+  "preflight UI must show binary yes/no platform results",
+);
+console.log("  ✓ strict preflight platform-check matching");
