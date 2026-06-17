@@ -44,18 +44,6 @@ type KauaiParcelAttributes = {
   TYPE?: string;
 };
 
-type GeodataParcelAttributes = {
-  tmk?: number;
-  tmk_txt?: string;
-  cty_tmk?: string;
-  county?: string;
-  zone?: string;
-  section?: string;
-  plat?: string;
-  parcel?: string;
-  qpub_link?: string;
-};
-
 export type KauaiTvrRecord = {
   permitRaw: string;
   permitNumber: string;
@@ -67,12 +55,29 @@ export type KauaiTvrRecord = {
 
 const KAUAI_PARCEL_LAYER =
   "https://maps.kauai.gov/server/rest/services/Parcels_and_CPRs_WGS84_Degrees/FeatureServer/0/query";
-const GEODATA_STATEWIDE_PARCEL_LAYER =
-  "https://geodata.hawaii.gov/arcgis/rest/services/ParcelsZoning/MapServer/25/query";
 const ARCGIS_GEOCODER =
   "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates";
 const KAUAI_TVR_PDF_URL =
   "https://www.kauai.gov/files/assets/public/v/19/planning-department/documents/tvr/list-of-approved-homestays-and-nonconforming-tvrs-by-tmk.pdf";
+// State of Hawaii Statewide GIS "Statewide TMKs" parcel layer. Covers EVERY
+// island (Hawaii/Big Island, Maui, Oahu, Molokai, Lanai, Kauai) and exposes
+// the authoritative master-parcel TMK (`tmk_txt`) + the public qPublic record
+// link (`qpub_link`). Kauai keeps its dedicated CPR-aware parcel layer above
+// (it surfaces individual condo CPR units); this statewide layer is the
+// fallback for the other counties, which previously had NO official TMK source
+// at all and fell through to unreliable public OTA snippet scraping.
+const HAWAII_STATEWIDE_TMK_LAYER =
+  "https://geodata.hawaii.gov/arcgis/rest/services/ParcelsZoning/MapServer/25/query";
+const HAWAII_ISLAND_LABELS: Record<string, string> = {
+  HAW: "Hawaii (Big Island)",
+  MAU: "Maui",
+  OAH: "Oahu",
+  KAU: "Kauai",
+  MOL: "Molokai",
+  LAN: "Lanai",
+  NII: "Niihau",
+  KAH: "Kahoolawe",
+};
 
 const normalizeTmkText = (value: unknown): string | null => {
   const digits = String(value ?? "").replace(/\D/g, "");
@@ -235,8 +240,11 @@ export async function fetchKauaiTvrRecords(): Promise<KauaiTvrRecord[]> {
   return records;
 }
 
-export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiTmkLookupResult> {
-  const searchedAddress = address.trim();
+// Shared ArcGIS geocode step used by both the Kauai parcel/CPR lookup and the
+// statewide (Big Island / Maui / Oahu) parcel lookup. Returns the best-scoring
+// point candidate; throws the same "No geocoded Hawaii address found" message
+// the routes layer already maps to a 404.
+async function geocodeHawaiiAddress(searchedAddress: string): Promise<{ x: number; y: number; address: string }> {
   const geocodeParams = new URLSearchParams({
     f: "json",
     SingleLine: searchedAddress,
@@ -254,6 +262,12 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
   if (!bestGeocode) {
     throw new Error("No geocoded Hawaii address found");
   }
+  return { x: bestGeocode.location.x, y: bestGeocode.location.y, address: bestGeocode.address };
+}
+
+export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiTmkLookupResult> {
+  const searchedAddress = address.trim();
+  const bestGeocode = { location: await geocodeHawaiiAddress(searchedAddress) };
 
   const pointParams = new URLSearchParams({
     f: "json",
@@ -312,7 +326,7 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
     confidence: isUnitCpr ? "unit-cpr" : "master-parcel",
     note,
     searchedAddress,
-    geocodedAddress: bestGeocode.address,
+    geocodedAddress: bestGeocode.location.address,
     source: "County of Kauai ArcGIS Parcels and CPRs",
     sourceUrl: selected.LINKQ || KAUAI_PARCEL_LAYER,
     parcel: selected,
@@ -326,18 +340,6 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
     })),
   };
 }
-
-const queryGeodataParcels = async (params: URLSearchParams): Promise<GeodataParcelAttributes[]> => {
-  const resp = await fetch(`${GEODATA_STATEWIDE_PARCEL_LAYER}?${params.toString()}`, {
-    headers: { "User-Agent": "NexStay/1.0" },
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!resp.ok) throw new Error(`Hawaii statewide parcel query failed (${resp.status})`);
-  const data = await resp.json() as any;
-  return Array.isArray(data?.features)
-    ? data.features.map((f: any) => f?.attributes ?? {}).filter(Boolean)
-    : [];
-};
 
 /** Convert geodata.hawaii.gov `tmk_txt` (9-digit) into the 12-digit bare TMK Guesty/Airbnb expect. */
 export function formatGeodataTaxMapKey(tmkTxt: unknown, unitToken?: string): string | null {
@@ -354,69 +356,73 @@ export function formatGeodataTaxMapKey(tmkTxt: unknown, unitToken?: string): str
   return null;
 }
 
-export async function lookupGeodataHawaiiTmkFromAddress(address: string): Promise<KauaiTmkLookupResult> {
+// Big Island (Hawaii County), Maui, and Oahu TMK lookup via the State of Hawaii
+// Statewide GIS parcel layer. Mirrors lookupKauaiTmkFromAddress's contract so the
+// tmk-lookup route can return it unchanged, but the statewide layer only exposes
+// the MASTER parcel (no individual CPR/condo units), so confidence is always
+// "master-parcel". This is the path that fixes Big Island resorts like Waikoloa
+// Beach Villas, which previously had no authoritative TMK source and fell through
+// to public OTA snippet scraping (which finds nothing for heavily-rented resorts).
+export async function lookupHawaiiStatewideTmkFromAddress(address: string): Promise<KauaiTmkLookupResult> {
   const searchedAddress = address.trim();
-  const geocodeParams = new URLSearchParams({
-    f: "json",
-    SingleLine: searchedAddress,
-    outFields: "Match_addr,Addr_type,Score",
-    maxLocations: "3",
-  });
-  const geocodeResp = await fetch(`${ARCGIS_GEOCODER}?${geocodeParams.toString()}`, {
-    headers: { "User-Agent": "NexStay/1.0" },
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!geocodeResp.ok) throw new Error(`Address geocode failed (${geocodeResp.status})`);
-  const geocodeData = await geocodeResp.json() as any;
-  const geocodeCandidates = Array.isArray(geocodeData?.candidates) ? geocodeData.candidates : [];
-  const bestGeocode = geocodeCandidates.find((c: any) => Number(c?.score ?? 0) >= 80 && c?.location?.x && c?.location?.y);
-  if (!bestGeocode) {
-    throw new Error("No geocoded Hawaii address found");
-  }
+  const geo = await geocodeHawaiiAddress(searchedAddress);
+  const unitToken = extractUnitTokenFromAddress(searchedAddress);
 
-  const pointParams = new URLSearchParams({
+  const params = new URLSearchParams({
     f: "json",
     where: "1=1",
-    geometry: `${bestGeocode.location.x},${bestGeocode.location.y}`,
+    geometry: JSON.stringify({ x: geo.x, y: geo.y, spatialReference: { wkid: 4326 } }),
     geometryType: "esriGeometryPoint",
     inSR: "4326",
     spatialRel: "esriSpatialRelIntersects",
-    outFields: "tmk,tmk_txt,cty_tmk,county,zone,section,plat,parcel,qpub_link",
+    outFields: "tmk_txt,cty_tmk,county,island,division,zone,section,plat1,parcel1,qpub_link",
     returnGeometry: "false",
   });
-  const rows = await queryGeodataParcels(pointParams);
-  const unitToken = extractUnitTokenFromAddress(searchedAddress);
-  const selected = rows[0];
-  const taxMapKey = formatGeodataTaxMapKey(selected?.tmk_txt ?? selected?.tmk, unitToken);
+  const resp = await fetch(`${HAWAII_STATEWIDE_TMK_LAYER}?${params.toString()}`, {
+    headers: { "User-Agent": "NexStay/1.0" },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!resp.ok) throw new Error(`Hawaii statewide parcel query failed (${resp.status})`);
+  const data = await resp.json() as any;
+  const features: Array<Record<string, unknown>> = Array.isArray(data?.features)
+    ? data.features.map((f: any) => f?.attributes ?? {}).filter(Boolean)
+    : [];
+  const tmkDigits = (value: unknown): string => String(value ?? "").replace(/\D/g, "");
+  const selected = features.find((row) => tmkDigits(row.tmk_txt));
+  const taxMapKey = formatGeodataTaxMapKey(selected?.tmk_txt, unitToken);
   if (!selected || !taxMapKey) {
     throw new Error("No Hawaii parcel TMK found for this address");
   }
 
-  const county = String(selected.county ?? "").trim() || "Hawaii";
+  const islandCode = String(selected.island ?? "").toUpperCase();
+  const islandLabel = HAWAII_ISLAND_LABELS[islandCode] || String(selected.county ?? "Hawaii");
+  const qpubLink = typeof selected.qpub_link === "string" ? selected.qpub_link : undefined;
   const numericUnit = Boolean(unitToken && /^\d+$/.test(unitToken));
   const isUnitCpr = numericUnit && !taxMapKey.endsWith("000");
-  const note = isUnitCpr
-    ? `Matched ${county} County parcel ${taxMapKey} (numeric unit ${unitToken}) from the exact Guesty listing address.`
-    : unitToken
-      ? `Matched the official ${county} County master parcel ${taxMapKey} for the exact Guesty listing address. The statewide GIS layer does not expose CPR rows for letter-coded units — verify on qPublic if Airbnb requires a unit-level TMK.`
-      : `Matched the official ${county} County parcel ${taxMapKey} for the exact Guesty listing address.`;
 
   return {
     taxMapKey,
     confidence: isUnitCpr ? "unit-cpr" : "master-parcel",
-    note,
+    note: isUnitCpr
+      ? `Matched the official State of Hawaii (${islandLabel}) GIS parcel ${taxMapKey} (numeric unit ${unitToken}) from the exact Guesty listing address.`
+      : `Matched the official State of Hawaii (${islandLabel}) GIS master parcel for the exact Guesty listing address. The statewide layer exposes the master TMK, not individual CPR/condo units — verify the qPublic link before pushing if the channel requires a unit-level CPR.`,
     searchedAddress,
-    geocodedAddress: bestGeocode.address,
-    source: "Hawaii Statewide GIS Program (geodata.hawaii.gov)",
-    sourceUrl: selected.qpub_link || GEODATA_STATEWIDE_PARCEL_LAYER,
-    parcel: selected as unknown as KauaiParcelAttributes,
-    candidates: rows.slice(0, 8).map((row) => ({
-      taxMapKey: formatGeodataTaxMapKey(row.tmk_txt ?? row.tmk),
+    geocodedAddress: geo.address,
+    source: `State of Hawaii Statewide GIS Parcels (${islandLabel})`,
+    sourceUrl: qpubLink || HAWAII_STATEWIDE_TMK_LAYER,
+    parcel: {
+      PARTXT: taxMapKey,
+      COTMK: Number(tmkDigits(selected.cty_tmk)) || undefined,
+      TYPE: "Statewide TMK parcel",
+      LINKQ: qpubLink,
+    },
+    candidates: features.slice(0, 8).map((row) => ({
+      taxMapKey: formatGeodataTaxMapKey(row.tmk_txt),
       cprUnit: "",
       owner: null,
-      project: null,
-      type: row.county ?? null,
-      sourceUrl: row.qpub_link ?? null,
+      project: typeof row.county === "string" ? row.county : null,
+      type: "Statewide TMK parcel",
+      sourceUrl: typeof row.qpub_link === "string" ? row.qpub_link : null,
     })),
   };
 }
