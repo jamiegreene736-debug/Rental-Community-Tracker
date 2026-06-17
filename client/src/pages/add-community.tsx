@@ -2891,6 +2891,15 @@ export default function AddCommunity() {
                             const checked = sweepResortSelection.has(selKey);
                             const comboLabel = formatTypicalComboLabel(inferTypicalComboPair(c));
                             const alreadyQueued = (c.existingComboLabels?.length || c.reservedComboLabels?.length) ? true : false;
+                            // True when we already have a listing/draft (or a queued combo) in this
+                            // resort — surfaced as an icon next to the combo badge so the operator
+                            // can see at a glance which resorts they already cover.
+                            const hasListing = c.hasExistingListing === true || alreadyQueued;
+                            const listingTooltip = `You already have a listing in this resort${
+                              c.existingComboLabels?.length ? ` — ${c.existingComboLabels.join(", ")} built` : ""
+                            }${
+                              c.reservedComboLabels?.length ? ` · ${c.reservedComboLabels.join(", ")} queued` : ""
+                            }`;
                             // Ticking is enabled only once the WHOLE sweep is done — until
                             // then a finished market's resorts render as a read-only preview
                             // (the queue footer that acts on them doesn't exist yet either).
@@ -2932,14 +2941,19 @@ export default function AddCommunity() {
                                         {c.combinabilityScore}{comboLabel}
                                       </span>
                                     )}
+                                    {hasListing && (
+                                      <span
+                                        className="inline-flex items-center rounded bg-blue-600 px-1 py-0.5 text-[10px] font-semibold text-white"
+                                        title={listingTooltip}
+                                        data-testid={`badge-sweep-existing-listing-${mi}-${ci}`}
+                                      >
+                                        <CheckCircle2 className="h-2.5 w-2.5 mr-0.5" />
+                                        Listed
+                                      </span>
+                                    )}
                                     {!elig.eligible && (
                                       <span className="inline-flex items-center rounded border border-red-300 bg-red-50 px-1 py-0.5 text-[10px] text-red-700">
                                         Not supported
-                                      </span>
-                                    )}
-                                    {alreadyQueued && (
-                                      <span className="inline-flex items-center rounded border border-blue-300 bg-blue-50 px-1 py-0.5 text-[10px] text-blue-700">
-                                        Existing: {[...(c.existingComboLabels ?? []), ...(c.reservedComboLabels ?? []).map((l) => `${l} queued`)].join(", ")}
                                       </span>
                                     )}
                                   </span>
