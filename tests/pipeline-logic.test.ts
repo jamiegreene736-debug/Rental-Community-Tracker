@@ -295,7 +295,7 @@ assert.match(
 );
 assert.match(
   preflightJobsSource,
-  /reserveDraftPhotoProof[\s\S]*compareUnitPhotoProofs/,
+  /withDraftPhotoProofLock[\s\S]*reserveDraftPhotoProof/,
   "parallel preflight unit photo jobs must reserve proof so Unit A and Unit B cannot save the same gallery",
 );
 assert.match(
@@ -400,7 +400,17 @@ assert.match(
 assert.match(
   preflightSource,
   /replacingExistingPhotos[\s\S]*siblingSourceUrls/,
-  "preflight Find different photos must not skip the sibling unit source URL so sparse resorts still have candidates",
+  "preflight Find different photos must skip a sibling unit's saved source URL so both units cannot re-save the same listing",
+);
+assert.match(
+  preflightSource,
+  /photoCountForUnit\(u\.id, u\.photos/,
+  "preflight must only block sibling source URLs when that sibling already has saved photos",
+);
+assert.doesNotMatch(
+  preflightSource,
+  /rescrapeSourceUrl/,
+  "preflight Find different photos must discover a new listing instead of rescraping the saved source URL",
 );
 assert.match(
   preflightSource,
@@ -419,8 +429,13 @@ assert.match(
 );
 assert.match(
   preflightJobsSource,
-  /rescrapeSourceUrl[\s\S]*fetch-unit-photos[\s\S]*url: rescrapeSourceUrl/,
-  "preflight Find different photos must rescrape the saved listing URL directly with the full gallery",
+  /withDraftPhotoProofLock/,
+  "parallel preflight unit photo jobs must serialize proof reservation so Unit A and Unit B cannot save the same gallery",
+);
+assert.match(
+  routesSource,
+  /const clusterUrls = \[candidate\.url\]/,
+  "bounded unit photo discovery must scrape one listing URL at a time instead of merging every unit at the same street address",
 );
 assert.match(
   routesSource,
