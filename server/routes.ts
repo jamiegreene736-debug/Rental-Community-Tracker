@@ -87,7 +87,7 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
-import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress } from "./hawaii-compliance-lookup";
+import { lookupGeodataHawaiiTmkFromAddress, lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
   acquireSidecarLane,
   clearActiveSidecarLane,
@@ -6811,12 +6811,10 @@ export async function registerRoutes(
 
   // GET /api/builder/tmk-lookup
   //
-  // Pulls a real Hawaii/Kauai Tax Map Key from official public data instead
-  // of relying on sample/static values. Kauai's qPublic UI is Cloudflare-
-  // protected, but the County ArcGIS parcel/CPR layer exposes the same
-  // 12-digit parcel text (`PARTXT`) and qPublic record link (`LINKQ`).
-  // Some condo resorts expose only the master parcel in GIS; return that
-  // with an explicit note instead of pretending it is a CPR-unit hit.
+  // Pulls a real Hawaii Tax Map Key from official public data instead
+  // of relying on sample/static values. Kauai uses the County ArcGIS CPR
+  // layer; all other Hawaii counties use the statewide geodata.hawaii.gov
+  // parcel layer (Big Island / Maui / Oahu — e.g. Waikoloa Beach Villas).
   // Important: look up the exact address that will be pushed to Guesty.
   // Airbnb validates license/TMK details against the Guesty listing address,
   // so do not append a sample unit or mutate the address before geocoding.
@@ -6832,6 +6830,15 @@ export async function registerRoutes(
     try {
       if (/\b(kauai|koloa|poipu|princeville|kapaa|lihue|wailua|hanalei|waimea|kekaha)\b/i.test(address)) {
         return res.json(await lookupKauaiTmkFromAddress(address));
+      }
+      try {
+        return res.json(await lookupGeodataHawaiiTmkFromAddress(address));
+      } catch (geodataErr: any) {
+        const geodataMessage = geodataErr?.message || String(geodataErr);
+        if (/No geocoded Hawaii address found/i.test(geodataMessage)) {
+          throw geodataErr;
+        }
+        console.warn(`[tmk-lookup] geodata parcel lookup unavailable: ${geodataMessage}`);
       }
       const publicValues = await lookupHawaiiPublicListingLicenses({ address, listingName });
       if (publicValues?.taxMapKey) {
@@ -6851,7 +6858,7 @@ export async function registerRoutes(
     } catch (err: any) {
       const message = err?.message || String(err);
       console.error("[tmk-lookup] failed:", message);
-      if (/No geocoded Hawaii address found|No Kauai parcel TMK found|No public Hawaii TMK/i.test(message)) {
+      if (/No geocoded Hawaii address found|No Kauai parcel TMK found|No Hawaii parcel TMK found|No public Hawaii TMK/i.test(message)) {
         return res.status(404).json({ error: message, searchedAddress: address });
       }
       res.status(500).json({ error: "TMK lookup failed", message });

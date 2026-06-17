@@ -1434,12 +1434,17 @@ console.log("\nHawaii compliance lookup suite");
 import {
   extractHawaiiComplianceFromPublicText,
   extractHawaiiComplianceFromGuestyListing,
+  formatGeodataTaxMapKey,
   formatKauaiCountyPermit,
   matchKauaiStrPermit,
   pairHawaiiTaxLicense,
   parseKauaiTvrPdfText,
   tmkMatchKeys,
 } from "../server/hawaii-compliance-lookup";
+
+assert.equal(formatGeodataTaxMapKey("369008014"), "369008014000", "Big Island master parcel pads to 12 digits");
+assert.equal(formatGeodataTaxMapKey("370110060", "1"), "370110060001", "numeric unit suffix replaces CPR tail");
+assert.equal(formatGeodataTaxMapKey("370110060001"), "370110060001", "already-12-digit TMK passes through");
 
 assert.equal(formatKauaiCountyPermit("218"), "TVNC-0218");
 assert.equal(formatKauaiCountyPermit("TVR-2022-037"), "TVR-2022-037");

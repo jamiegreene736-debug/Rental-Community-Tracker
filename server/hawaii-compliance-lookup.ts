@@ -44,6 +44,18 @@ type KauaiParcelAttributes = {
   TYPE?: string;
 };
 
+type GeodataParcelAttributes = {
+  tmk?: number;
+  tmk_txt?: string;
+  cty_tmk?: string;
+  county?: string;
+  zone?: string;
+  section?: string;
+  plat?: string;
+  parcel?: string;
+  qpub_link?: string;
+};
+
 export type KauaiTvrRecord = {
   permitRaw: string;
   permitNumber: string;
@@ -55,6 +67,8 @@ export type KauaiTvrRecord = {
 
 const KAUAI_PARCEL_LAYER =
   "https://maps.kauai.gov/server/rest/services/Parcels_and_CPRs_WGS84_Degrees/FeatureServer/0/query";
+const GEODATA_STATEWIDE_PARCEL_LAYER =
+  "https://geodata.hawaii.gov/arcgis/rest/services/ParcelsZoning/MapServer/25/query";
 const ARCGIS_GEOCODER =
   "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates";
 const KAUAI_TVR_PDF_URL =
@@ -309,6 +323,100 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
       project: row.ALTID ?? null,
       type: row.TYPE ?? null,
       sourceUrl: row.LINKQ ?? null,
+    })),
+  };
+}
+
+const queryGeodataParcels = async (params: URLSearchParams): Promise<GeodataParcelAttributes[]> => {
+  const resp = await fetch(`${GEODATA_STATEWIDE_PARCEL_LAYER}?${params.toString()}`, {
+    headers: { "User-Agent": "NexStay/1.0" },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!resp.ok) throw new Error(`Hawaii statewide parcel query failed (${resp.status})`);
+  const data = await resp.json() as any;
+  return Array.isArray(data?.features)
+    ? data.features.map((f: any) => f?.attributes ?? {}).filter(Boolean)
+    : [];
+};
+
+/** Convert geodata.hawaii.gov `tmk_txt` (9-digit) into the 12-digit bare TMK Guesty/Airbnb expect. */
+export function formatGeodataTaxMapKey(tmkTxt: unknown, unitToken?: string): string | null {
+  const digits = String(tmkTxt ?? "").replace(/\D/g, "");
+  if (digits.length === 12) return digits;
+  if (digits.length === 9) {
+    const numericUnit = unitToken && /^\d+$/.test(unitToken)
+      ? unitToken.replace(/^0+/, "").padStart(3, "0").slice(-3)
+      : null;
+    if (numericUnit) return `${digits}${numericUnit}`;
+    return `${digits}000`;
+  }
+  if (digits.length >= 11 && digits.length <= 13) return digits;
+  return null;
+}
+
+export async function lookupGeodataHawaiiTmkFromAddress(address: string): Promise<KauaiTmkLookupResult> {
+  const searchedAddress = address.trim();
+  const geocodeParams = new URLSearchParams({
+    f: "json",
+    SingleLine: searchedAddress,
+    outFields: "Match_addr,Addr_type,Score",
+    maxLocations: "3",
+  });
+  const geocodeResp = await fetch(`${ARCGIS_GEOCODER}?${geocodeParams.toString()}`, {
+    headers: { "User-Agent": "NexStay/1.0" },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!geocodeResp.ok) throw new Error(`Address geocode failed (${geocodeResp.status})`);
+  const geocodeData = await geocodeResp.json() as any;
+  const geocodeCandidates = Array.isArray(geocodeData?.candidates) ? geocodeData.candidates : [];
+  const bestGeocode = geocodeCandidates.find((c: any) => Number(c?.score ?? 0) >= 80 && c?.location?.x && c?.location?.y);
+  if (!bestGeocode) {
+    throw new Error("No geocoded Hawaii address found");
+  }
+
+  const pointParams = new URLSearchParams({
+    f: "json",
+    where: "1=1",
+    geometry: `${bestGeocode.location.x},${bestGeocode.location.y}`,
+    geometryType: "esriGeometryPoint",
+    inSR: "4326",
+    spatialRel: "esriSpatialRelIntersects",
+    outFields: "tmk,tmk_txt,cty_tmk,county,zone,section,plat,parcel,qpub_link",
+    returnGeometry: "false",
+  });
+  const rows = await queryGeodataParcels(pointParams);
+  const unitToken = extractUnitTokenFromAddress(searchedAddress);
+  const selected = rows[0];
+  const taxMapKey = formatGeodataTaxMapKey(selected?.tmk_txt ?? selected?.tmk, unitToken);
+  if (!selected || !taxMapKey) {
+    throw new Error("No Hawaii parcel TMK found for this address");
+  }
+
+  const county = String(selected.county ?? "").trim() || "Hawaii";
+  const numericUnit = Boolean(unitToken && /^\d+$/.test(unitToken));
+  const isUnitCpr = numericUnit && !taxMapKey.endsWith("000");
+  const note = isUnitCpr
+    ? `Matched ${county} County parcel ${taxMapKey} (numeric unit ${unitToken}) from the exact Guesty listing address.`
+    : unitToken
+      ? `Matched the official ${county} County master parcel ${taxMapKey} for the exact Guesty listing address. The statewide GIS layer does not expose CPR rows for letter-coded units — verify on qPublic if Airbnb requires a unit-level TMK.`
+      : `Matched the official ${county} County parcel ${taxMapKey} for the exact Guesty listing address.`;
+
+  return {
+    taxMapKey,
+    confidence: isUnitCpr ? "unit-cpr" : "master-parcel",
+    note,
+    searchedAddress,
+    geocodedAddress: bestGeocode.address,
+    source: "Hawaii Statewide GIS Program (geodata.hawaii.gov)",
+    sourceUrl: selected.qpub_link || GEODATA_STATEWIDE_PARCEL_LAYER,
+    parcel: selected as unknown as KauaiParcelAttributes,
+    candidates: rows.slice(0, 8).map((row) => ({
+      taxMapKey: formatGeodataTaxMapKey(row.tmk_txt ?? row.tmk),
+      cprUnit: "",
+      owner: null,
+      project: null,
+      type: row.county ?? null,
+      sourceUrl: row.qpub_link ?? null,
     })),
   };
 }
