@@ -75,11 +75,14 @@ export function mergeUnitVerdict(
     if (photoClearDeep) return { status: "not-listed", url: null, detection: "A full reverse-image scan of every interior photo found no matching listing here." };
     return { status: "photo-confirmed", url: text.url, detection: text.detection || "This unit's interior photos were found on a live listing here." };
   }
-  // 4. Text located a concrete PER-UNIT listing it couldn't fully confirm (pinned the unit token, or a
-  //    bedroom mismatch on a real listing page). Keep "Review" WITH the link; never erase it, even on a
-  //    clean photo scan. A "generic-unit" unconfirmed only proves the RESORT is listed (not this unit),
-  //    so it is NOT preserved here — a deep clean scan can resolve it to Clear below.
-  if (text.status === "unconfirmed" && text.url && text.reason !== "generic-unit") return text;
+  // 4. Legacy "unconfirmed" text hits are no longer emitted by the strict matcher. If one arrives
+  //    from a cached row, treat it as inconclusive → NO unless a verified photo match says YES.
+  if (text.status === "unconfirmed") {
+    if (photoClearDeep) {
+      return { status: "not-listed", url: null, detection: "No verified listing match for this unit." };
+    }
+    return { status: "not-listed", url: null, detection: text.detection || "No verified listing match for this unit." };
+  }
   // 5. Text already says NO (unit token absent) — a clean photo scan just reinforces it.
   if (text.status === "not-listed") return text;
   // 6. Community-present "unconfirmed" (or an errored text) with a DEEP clean scan → confident NO,

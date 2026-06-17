@@ -173,6 +173,13 @@ import {
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "@shared/bulk-combo-queue-progress";
+import {
+  buildPreflightMatchContext,
+  buildPreflightSearchQueries,
+  evaluatePreflightSearchResult,
+  notListedVerdict,
+  type PreflightPlatformKey,
+} from "@shared/preflight-platform-match";
 import { discoverCommunityStreetAddress } from "./community-address-discovery";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
@@ -29118,141 +29125,32 @@ Return ONLY compact JSON with this exact shape:
       return res.json({ units: offUnits, photoMode: "disabled" });
     }
 
-    const PREFLIGHT_PLATFORM_DOMAINS = [
-      { key: "airbnb",  domain: "airbnb.com" },
-      { key: "vrbo",    domain: "vrbo.com" },
-      { key: "booking", domain: "booking.com" },
-    ] as const;
+    const PREFLIGHT_PLATFORMS: PreflightPlatformKey[] = ["airbnb", "vrbo", "booking"];
 
-    // Street portion = before the first comma (or the whole string). The richer
-    // address helpers live in the legacy Lens path below (unreachable), so this is
-    // kept self-contained.
-    const preflightStreetOf = (addr: string): string => {
-      const a = String(addr || "").trim();
-      if (!a) return "";
-      if (a.includes(",")) return a.split(",")[0].trim();
-      // No-comma form (common for Hawaii addresses like "68 3553 Malina St Waikoloa HI"):
-      // take through the last street-type token so we search the STREET, not the whole
-      // "street + city + state" phrase (quoting that over-constrains the query → 0 results).
-      const m = a.match(/^(.*?\b(?:rd|road|st|street|ave|avenue|dr|drive|blvd|boulevard|ln|lane|way|ct|court|pl|place|ter|terrace|cir|circle|pkwy|parkway|hwy|highway))\b/i);
-      return (m ? m[1] : a).trim();
-    };
-
-    const checkPlatformTextOnly = async (
-      domain: string,
-      street: string,
-      unitNumber: string,
-      complexName: string,
-      singleListing: boolean,
-      expectedBedrooms?: number,
-    ): Promise<{ status: "confirmed" | "unconfirmed" | "not-listed" | "error"; url: string | null; detection: string; reason?: "generic-unit" | "unit-pinned" | "bedroom-conflict" }> => {
-      const bareUnit = String(unitNumber || "").trim();
-      const uLower = bareUnit.toLowerCase();
-      // ── Discriminating vs non-discriminating unit identifiers ───────────────────────
-      // A text match against a community/street query is necessarily a BUILDING-level
-      // match — every unit at "The Cliffs at Princeville" / "3811 Edward Rd" shares both.
-      // To assert "Listed" we need the result to also pin THIS SPECIFIC unit. Some unit
-      // identifiers simply can't do that by text:
-      //   • empty                         — no unit token at all
-      //   • a single letter ("A"/"B")     — `text.includes("a")` is true for almost any page
-      //   • 1-2 bare digits ("1", "07")   — collide with prices / bed counts / ratings
-      // For all of these we can find the COMMUNITY but never the UNIT, so the honest verdict
-      // is "unconfirmed → verify by photos", never "confirmed". (This was the bug: A/B units
-      // at a busy resort all showed green "Listed" off the community name alone, and 1BR/2BR
-      // listings matched 3BR units because bedroom count was never compared.)
-      const isSingleLetter = /^[a-z]$/i.test(bareUnit);
-      const isShortNumeric = /^\d{1,2}$/.test(bareUnit);
-      const nonDiscriminatingUnit = !bareUnit || isSingleLetter || isShortNumeric;
-      // Short NUMERIC units still query with explicit unit-type markers so Google only returns
-      // pages that position the digits as a unit id (not a price/rating). Single letters add no
-      // useful constraint (and "A"/"B" can't be marker-quoted usefully) → community/street only.
-      const unitQueryFragment = (!bareUnit || isSingleLetter)
-        ? ""
-        : isShortNumeric
-        ? `(${["Unit", "Apt", "Apartment", "Suite", "Villa", "Townhome", "Building"].map((w) => `"${w} ${bareUnit}"`).join(" OR ")})`
-        : `"${bareUnit}"`;
-
-      // ── Evidence helpers ────────────────────────────────────────────────────────────
-      const norm = (s: string): string => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
-      // Community tokens (drop generic resort words so we require the DISTINCTIVE name parts,
-      // e.g. "cliffs" + "princeville" — not just "resort"/"villas"/"condo").
-      const COMMUNITY_STOPWORDS = new Set(["the", "at", "of", "and", "a", "an", "in", "on", "by", "resort", "resorts", "villas", "villa", "condo", "condos", "condominium", "condominiums", "club", "apartments", "apartment", "suites", "suite", "vacation", "rentals", "rental", "hotel", "hotels", "beach", "bay"]);
-      const communityTokens = norm(complexName).split(" ").filter((t) => t.length >= 3 && !COMMUNITY_STOPWORDS.has(t));
-      const communityHits = (text: string): number => {
-        if (communityTokens.length === 0) return 0;
-        const hay = ` ${norm(text)} `;
-        return communityTokens.filter((t) => hay.includes(` ${t} `) || hay.includes(` ${t}`)).length;
-      };
-      // STRONG: the distinctive name parts co-occur (≥2, e.g. "cliffs" + "princeville"). Used to
-      // gate a CONFIRM so a single shared town word ("Princeville") can't promote a different
-      // resort (a Pali Ke Kua "207" hit). WEAK: ≥1 distinctive token — enough to flag the
-      // community as "listed somewhere" for a REVIEW verdict, where over-flagging is the safe error.
-      const communityEvidenceStrong = (text: string): boolean => communityHits(text) >= Math.min(2, communityTokens.length);
-      const communityEvidenceWeak = (text: string): boolean => communityHits(text) >= 1;
-      // Street tokens: number + distinctive street-name word(s) (drop the type suffix Rd/St/Ave…).
-      const streetParts = norm(street).split(" ").filter(Boolean);
-      const streetNumber = /^\d+$/.test(streetParts[0] || "") ? streetParts[0] : "";
-      const STREET_TYPE = new Set(["rd", "road", "st", "street", "ave", "avenue", "dr", "drive", "blvd", "boulevard", "ln", "lane", "way", "ct", "court", "pl", "place", "ter", "terrace", "cir", "circle", "pkwy", "parkway", "hwy", "highway"]);
-      const streetNameTokens = streetParts.slice(streetNumber ? 1 : 0).filter((t) => t.length >= 3 && !STREET_TYPE.has(t));
-      const streetEvidence = (text: string): boolean => {
-        if (!streetNumber || streetNameTokens.length === 0) return false;
-        const hay = ` ${norm(text)} `;
-        return hay.includes(` ${streetNumber} `) && streetNameTokens.some((t) => hay.includes(` ${t} `) || hay.includes(` ${t}`));
-      };
-      const strongProperty = (text: string): boolean => communityEvidenceStrong(text) || streetEvidence(text);
-      const weakProperty = (text: string): boolean => communityEvidenceWeak(text) || streetEvidence(text);
-      // Specific-unit evidence: the (discriminating) unit token appears bounded — with a unit
-      // marker, as a URL slug, or street-adjacent. NEVER true for non-discriminating units.
-      const escUnit = uLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const specificUnitEvidence = (text: string): boolean => {
-        if (nonDiscriminatingUnit) return false;
-        const markerRe = new RegExp(`\\b(?:unit|apt|apt\\.|apartment|suite|villa|townhome|townhouse|building|bldg|cottage|casita|no\\.?)\\s*#?\\s*${escUnit}\\b`, "i");
-        const hashRe = new RegExp(`#\\s*${escUnit}\\b`, "i");
-        const slugRe = new RegExp(`-${escUnit}(?:[\\/?#-]|$)`, "i");
-        const boundedRe = new RegExp(`\\b${escUnit}\\b`, "i"); // bare bounded token (e.g. "4-207" id)
-        return markerRe.test(text) || hashRe.test(text) || slugRe.test(text) || boundedRe.test(text);
-      };
-      // Bedroom count stated in the snippet ("2BR", "3 bedroom", "2-bedroom", "studio").
-      const snippetBedrooms = (text: string): number | null => {
-        if (/\bstudio\b/i.test(text)) return 0;
-        const m = text.match(/\b(\d{1,2})\s*-?\s*(?:br|bd|bdr|bedroom|bedrooms|bedroomed)\b/i);
-        if (m) { const n = parseInt(m[1], 10); if (n >= 1 && n <= 12) return n; }
-        return null;
-      };
-
-      // Only trust a result that is an INDIVIDUAL LISTING page — not a region / search /
-      // category roundup. Those directory pages mention many properties at once, so a unit
-      // marker in the snippet can belong to a DIFFERENT property (e.g. a booking.com
-      // /budget/region page listing "Mountain View Retreat Unit 1" while also name-dropping
-      // "Waikoloa Beach Villas"). Mirrors the legacy isListingUrl patterns.
-      const isPreflightListingUrl = (url: string): boolean => {
-        const lu = String(url || "").toLowerCase();
-        if (!lu) return false;
-        if (domain === "airbnb.com") return lu.includes("airbnb.com/rooms/") || lu.includes("airbnb.com/h/");
-        if (domain === "vrbo.com") {
-          if (/vrbo\.com\/\d+[a-z]{0,3}(?:[\/?#]|$)/.test(lu)) return true;   // /1234567, /1234567ha
-          if (/vrbo\.com\/[a-z]{2}-[a-z]{2}\/p\d+/.test(lu)) return true;     // /en-us/p12345
-          if (/vrbo\.com\/vacation-rental\/p\d+/.test(lu)) return true;       // /vacation-rental/p12345
-          return false;                                                       // reject search/region/category
-        }
-        if (domain === "booking.com") return lu.includes("booking.com/hotel/") || lu.includes("booking.com/apartments/");
-        return lu.includes(domain);
-      };
-      const queries = Array.from(new Set([
-        street ? `site:${domain} "${street}" ${unitQueryFragment}`.trim() : "",
-        complexName ? `site:${domain} "${complexName}" ${unitQueryFragment}`.trim() : "",
-      ].filter(Boolean)));
+    const checkPlatformStrict = async (
+      platform: PreflightPlatformKey,
+      unit: { unitNumber: string; address: string; bedrooms?: number },
+    ): Promise<{ status: "confirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
+      const matchContext = buildPreflightMatchContext({
+        complexName: name,
+        city,
+        unitNumber: unit.unitNumber,
+        address: unit.address,
+        bedrooms: unit.bedrooms,
+      });
+      const queries = buildPreflightSearchQueries({
+        platform,
+        street: matchContext.street,
+        complexName: name,
+        city,
+        unitNumber: unit.unitNumber,
+      });
       if (queries.length === 0) {
         return { status: "error", url: null, detection: "No address or community name to search" };
       }
-      const unitLabel = bareUnit ? `unit "${bareUnit}"` : "this unit";
       try {
-        // Best fallback when we can't outright CONFIRM: a result that proves the community/
-        // building is listed but not this exact unit (or a bedroom-count conflict). Surfaced as
-        // "Possible match — verify manually" (yellow), never green "Listed".
-        let bestUnconfirmed: { url: string | null; detection: string; reason: "generic-unit" | "unit-pinned" | "bedroom-conflict" } | null = null;
         for (const q of queries) {
-          const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "5" });
+          const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "8" });
           const ctrl = new AbortController();
           const timer = setTimeout(() => ctrl.abort(), 12_000);
           const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, { signal: ctrl.signal })
@@ -29260,61 +29158,16 @@ Return ONLY compact JSON with this exact shape:
           if (!resp.ok) continue;
           const data = await resp.json() as any;
           for (const r of (data.organic_results || []) as any[]) {
-            const link = String(r.link || "").toLowerCase();
-            if (!isPreflightListingUrl(link)) continue;
-            const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
-            const strong = strongProperty(text);
-            const weak = weakProperty(text);
-            const onUnit = specificUnitEvidence(text);
-            // Skip results that evidence NEITHER our property (even weakly) NOR our specific unit —
-            // those are Google fuzzy/cross-domain hits unrelated to this listing.
-            if (!weak && !onUnit) continue;
-            // A whole-home single listing has no unit to disambiguate, so the property itself counts
-            // as "pinned". A multi-unit listing must pin the SPECIFIC unit token (onUnit).
-            const unitPinned = onUnit || singleListing;
-            const snippet = `${r.title || ""} — ${r.snippet || ""}`.replace(/\s+/g, " ").trim().slice(0, 200);
-            const listingBeds = snippetBedrooms(text);
-            const bedroomConflict = typeof expectedBedrooms === "number" && expectedBedrooms > 0 && listingBeds !== null && listingBeds !== expectedBedrooms;
-            // CONFIRM only when the result pins our unit (or it's a single home) AT our property with
-            // STRONG evidence (both distinctive community parts, or the street) and a consistent
-            // bedroom count. A non-discriminating unit (A/B, 1-2 digits, empty) can never satisfy
-            // onUnit, so it can never confirm — exactly the bug fix.
-            if (unitPinned && strong && !bedroomConflict) {
-              return { status: "confirmed" as const, url: r.link, detection: snippet };
-            }
-            // REVIEW only when there's genuine ambiguity:
-            //   • we pinned the unit but the property evidence is weak, or the bedrooms conflict, OR
-            //   • the unit number is non-discriminating and the community is listed (can't pin it).
-            // A SPECIFIC unit whose token is ABSENT is deliberately NOT flagged just because the
-            // resort is listed — that unit simply isn't there → falls through to "not-listed/Clear"
-            // (avoids flagging every brand-new unit at a known resort for manual review).
-            const flagReview =
-              (unitPinned && (bedroomConflict || !strong)) ||
-              (nonDiscriminatingUnit && !singleListing && weak);
-            if (flagReview && !bestUnconfirmed) {
-              // reviewKind distinguishes a result that PINNED this unit (real per-unit listing the
-              // client must keep on "Review" with its link, even after a clean photo scan) from a
-              // "generic-unit" hit that only proves the RESORT is listed (the client may resolve that
-              // one to "Clear" if a deep photo scan finds no listing of this unit). See mergeUnitVerdict.
-              const reviewKind: "generic-unit" | "unit-pinned" | "bedroom-conflict" = bedroomConflict
-                ? "bedroom-conflict"
-                : (nonDiscriminatingUnit && !singleListing)
-                ? "generic-unit"
-                : "unit-pinned";
-              const reason = bedroomConflict
-                ? `Found a listing but it's ${listingBeds}BR vs this unit's ${expectedBedrooms}BR — likely a different unit; verify manually`
-                : (nonDiscriminatingUnit && !singleListing)
-                ? `Found "${complexName}" listed but can't confirm ${unitLabel} by text (too generic to pin a specific unit) — verify by photos`
-                : `Found a possible match but couldn't confirm it's ${singleListing ? "this property" : unitLabel} at "${complexName}" — verify manually`;
-              bestUnconfirmed = { url: r.link, detection: `${reason}: ${snippet}`, reason: reviewKind };
-            }
+            const verdict = evaluatePreflightSearchResult(
+              { title: r.title, snippet: r.snippet, link: r.link },
+              platform,
+              matchContext,
+            );
+            if (verdict) return verdict;
           }
           await new Promise((rr) => setTimeout(rr, 250));
         }
-        if (bestUnconfirmed) {
-          return { status: "unconfirmed" as const, url: bestUnconfirmed.url, detection: bestUnconfirmed.detection, reason: bestUnconfirmed.reason };
-        }
-        return { status: "not-listed", url: null, detection: "No matching listing found in Google results" };
+        return notListedVerdict();
       } catch (err: any) {
         return {
           status: "error",
@@ -29326,10 +29179,8 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       const checkedUnits = await Promise.all(units.map(async (unit) => {
-        const street = preflightStreetOf(unit.address);
-        const expectedBedrooms = typeof unit.bedrooms === "number" && unit.bedrooms > 0 ? unit.bedrooms : undefined;
         const [airbnb, vrbo, booking] = await Promise.all(
-          PREFLIGHT_PLATFORM_DOMAINS.map((p) => checkPlatformTextOnly(p.domain, street, unit.unitNumber, name, singleHomeMode, expectedBedrooms)),
+          PREFLIGHT_PLATFORMS.map((platform) => checkPlatformStrict(platform, unit)),
         );
         return {
           unitId: unit.unitId,

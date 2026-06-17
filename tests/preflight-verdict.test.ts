@@ -56,25 +56,25 @@ check("text not-listed stays Clear (clean photo reinforces)",
 check("errored text + DEEP clean → Clear",
   verdict(text("error"), "clean", true) === "not-listed");
 
-// ── False-Clear guardrails (the review's core findings) ─────────────────────────
-check("SHALLOW clean does NOT override a generic-unit unconfirmed (no false Clear) → stays Review",
-  verdict(text("unconfirmed", { reason: "generic-unit" }), "clean", false) === "unconfirmed");
+// ── Legacy unconfirmed rows collapse to NO unless photos prove YES ───────────────
+check("SHALLOW clean + legacy unconfirmed → No (no Review state)",
+  verdict(text("unconfirmed", { reason: "generic-unit" }), "clean", false) === "not-listed");
 
-check("unit-pinned unconfirmed with a real listing URL stays Review even on a DEEP clean (don't erase a found listing)",
-  verdict(text("unconfirmed", { reason: "unit-pinned", url: "https://airbnb.com/rooms/9" }), "clean", true) === "unconfirmed");
+check("unit-pinned legacy unconfirmed + DEEP clean → No",
+  verdict(text("unconfirmed", { reason: "unit-pinned", url: "https://airbnb.com/rooms/9" }), "clean", true) === "not-listed");
 
-check("bedroom-conflict unconfirmed stays Review even on a DEEP clean",
-  verdict(text("unconfirmed", { reason: "bedroom-conflict", url: "https://vrbo.com/77" }), "clean", true) === "unconfirmed");
+check("bedroom-conflict legacy unconfirmed + DEEP clean → No",
+  verdict(text("unconfirmed", { reason: "bedroom-conflict", url: "https://vrbo.com/77" }), "clean", true) === "not-listed");
 
-check("unit-pinned unconfirmed PRESERVES its listing URL when kept on Review",
-  mergeUnitVerdict(text("unconfirmed", { reason: "unit-pinned", url: "https://airbnb.com/rooms/9" }), "clean", true)?.url === "https://airbnb.com/rooms/9");
+check("legacy unconfirmed without photo evidence drops listing URL",
+  mergeUnitVerdict(text("unconfirmed", { reason: "unit-pinned", url: "https://airbnb.com/rooms/9" }), "clean", true)?.url == null);
 
 // ── Residual / inconclusive ─────────────────────────────────────────────────────
-check("unknown photo + generic-unit unconfirmed → stays Review (honest residual)",
-  verdict(text("unconfirmed", { reason: "generic-unit" }), "unknown", false) === "unconfirmed");
+check("unknown photo + legacy unconfirmed → No",
+  verdict(text("unconfirmed", { reason: "generic-unit" }), "unknown", false) === "not-listed");
 
-check("no photo scanned + generic-unit unconfirmed → stays Review",
-  verdict(text("unconfirmed", { reason: "generic-unit" }), undefined, false) === "unconfirmed");
+check("no photo scanned + legacy unconfirmed → No",
+  verdict(text("unconfirmed", { reason: "generic-unit" }), undefined, false) === "not-listed");
 
 // ── photo-only collapse (defensive: text endpoint's live path can't emit it, but be safe) ───────────
 check("text photo-only → collapses to Listed (photo-confirmed)",
