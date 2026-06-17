@@ -60,7 +60,7 @@ console.log("hawaii-tmk-lookup: statewide GIS TMK lookup (Big Island / Maui / Oa
   installFetch((url) =>
     url.includes("geocode") ? { ok: true, body: GEOCODE_OK } : { ok: true, body: PARCEL_OK });
   const result = await lookupHawaiiStatewideTmkFromAddress("69-180 Waikoloa Beach Dr, Waikoloa, HI");
-  check("returns the statewide master-parcel TMK", result.taxMapKey === "369008014", result.taxMapKey);
+  check("returns the statewide master-parcel TMK (12-digit)", result.taxMapKey === "369008014000", result.taxMapKey);
   check("confidence is master-parcel", result.confidence === "master-parcel", result.confidence);
   check("note names the Big Island", /Big Island/.test(result.note), result.note);
   check("sourceUrl is the qPublic record link", result.sourceUrl?.includes("qpublic"), result.sourceUrl);

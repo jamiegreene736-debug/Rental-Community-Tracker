@@ -1579,7 +1579,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       toast({
         title: "TMK lookup failed",
         description: timedOut
-          ? "Kauai TMK lookup timed out. Try again in a moment."
+          ? "Hawaii TMK lookup timed out. Try again in a moment."
           : err?.message || String(err),
         variant: "destructive",
       });

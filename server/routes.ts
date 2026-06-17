@@ -6811,12 +6811,10 @@ export async function registerRoutes(
 
   // GET /api/builder/tmk-lookup
   //
-  // Pulls a real Hawaii/Kauai Tax Map Key from official public data instead
-  // of relying on sample/static values. Kauai's qPublic UI is Cloudflare-
-  // protected, but the County ArcGIS parcel/CPR layer exposes the same
-  // 12-digit parcel text (`PARTXT`) and qPublic record link (`LINKQ`).
-  // Some condo resorts expose only the master parcel in GIS; return that
-  // with an explicit note instead of pretending it is a CPR-unit hit.
+  // Pulls a real Hawaii Tax Map Key from official public data instead
+  // of relying on sample/static values. Kauai uses the County ArcGIS CPR
+  // layer; all other Hawaii counties use the statewide geodata.hawaii.gov
+  // parcel layer (Big Island / Maui / Oahu — e.g. Waikoloa Beach Villas).
   // Important: look up the exact address that will be pushed to Guesty.
   // Airbnb validates license/TMK details against the Guesty listing address,
   // so do not append a sample unit or mutate the address before geocoding.

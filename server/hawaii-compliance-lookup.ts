@@ -341,6 +341,21 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
   };
 }
 
+/** Convert geodata.hawaii.gov `tmk_txt` (9-digit) into the 12-digit bare TMK Guesty/Airbnb expect. */
+export function formatGeodataTaxMapKey(tmkTxt: unknown, unitToken?: string): string | null {
+  const digits = String(tmkTxt ?? "").replace(/\D/g, "");
+  if (digits.length === 12) return digits;
+  if (digits.length === 9) {
+    const numericUnit = unitToken && /^\d+$/.test(unitToken)
+      ? unitToken.replace(/^0+/, "").padStart(3, "0").slice(-3)
+      : null;
+    if (numericUnit) return `${digits}${numericUnit}`;
+    return `${digits}000`;
+  }
+  if (digits.length >= 11 && digits.length <= 13) return digits;
+  return null;
+}
+
 // Big Island (Hawaii County), Maui, and Oahu TMK lookup via the State of Hawaii
 // Statewide GIS parcel layer. Mirrors lookupKauaiTmkFromAddress's contract so the
 // tmk-lookup route can return it unchanged, but the statewide layer only exposes
@@ -351,6 +366,7 @@ export async function lookupKauaiTmkFromAddress(address: string): Promise<KauaiT
 export async function lookupHawaiiStatewideTmkFromAddress(address: string): Promise<KauaiTmkLookupResult> {
   const searchedAddress = address.trim();
   const geo = await geocodeHawaiiAddress(searchedAddress);
+  const unitToken = extractUnitTokenFromAddress(searchedAddress);
 
   const params = new URLSearchParams({
     f: "json",
@@ -373,7 +389,7 @@ export async function lookupHawaiiStatewideTmkFromAddress(address: string): Prom
     : [];
   const tmkDigits = (value: unknown): string => String(value ?? "").replace(/\D/g, "");
   const selected = features.find((row) => tmkDigits(row.tmk_txt));
-  const taxMapKey = tmkDigits(selected?.tmk_txt);
+  const taxMapKey = formatGeodataTaxMapKey(selected?.tmk_txt, unitToken);
   if (!selected || !taxMapKey) {
     throw new Error("No Hawaii parcel TMK found for this address");
   }
@@ -381,11 +397,15 @@ export async function lookupHawaiiStatewideTmkFromAddress(address: string): Prom
   const islandCode = String(selected.island ?? "").toUpperCase();
   const islandLabel = HAWAII_ISLAND_LABELS[islandCode] || String(selected.county ?? "Hawaii");
   const qpubLink = typeof selected.qpub_link === "string" ? selected.qpub_link : undefined;
+  const numericUnit = Boolean(unitToken && /^\d+$/.test(unitToken));
+  const isUnitCpr = numericUnit && !taxMapKey.endsWith("000");
 
   return {
     taxMapKey,
-    confidence: "master-parcel",
-    note: `Matched the official State of Hawaii (${islandLabel}) GIS master parcel for the exact Guesty listing address. The statewide layer exposes the master TMK, not individual CPR/condo units — verify the qPublic link before pushing if the channel requires a unit-level CPR.`,
+    confidence: isUnitCpr ? "unit-cpr" : "master-parcel",
+    note: isUnitCpr
+      ? `Matched the official State of Hawaii (${islandLabel}) GIS parcel ${taxMapKey} (numeric unit ${unitToken}) from the exact Guesty listing address.`
+      : `Matched the official State of Hawaii (${islandLabel}) GIS master parcel for the exact Guesty listing address. The statewide layer exposes the master TMK, not individual CPR/condo units — verify the qPublic link before pushing if the channel requires a unit-level CPR.`,
     searchedAddress,
     geocodedAddress: geo.address,
     source: `State of Hawaii Statewide GIS Parcels (${islandLabel})`,
@@ -397,7 +417,7 @@ export async function lookupHawaiiStatewideTmkFromAddress(address: string): Prom
       LINKQ: qpubLink,
     },
     candidates: features.slice(0, 8).map((row) => ({
-      taxMapKey: tmkDigits(row.tmk_txt) || null,
+      taxMapKey: formatGeodataTaxMapKey(row.tmk_txt),
       cprUnit: "",
       owner: null,
       project: typeof row.county === "string" ? row.county : null,
