@@ -18,7 +18,9 @@
 // daily re-scan + manual force-block override is the safety net.
 
 import {
+  BUY_IN_MARKETS,
   BUY_IN_MARKET_LOCATIONS,
+  haversineMiles,
   resolveBuyInMarket,
   searchLocationForBuyInMarket,
 } from "@shared/buy-in-market";
@@ -249,6 +251,221 @@ export async function checkAirbnbAvailabilityForPlan(opts: {
       .map(([br, n]) => `${br}BR×${n}`)
       .join(", ") + ` → ${setsAvailable} set(s)`;
   return { ok: true, setsAvailable, perBedroom, detail };
+}
+
+// ── Profit-aware sourcing cost (operator direction 2026-06-17) ───────────────
+// The availability check above answers "do the unit sizes exist for the dates".
+// In a LIQUID market (e.g. Poipu) inventory almost never runs dry, so the real
+// risk is PROFIT: a week sold far out can later cost MORE to source than we sold
+// it for (the "Lea" case — sold a 6BR for $12,187, cheapest combo now $18,617).
+// This block derives an ASSUMED buy-in cost from the SAME engine=airbnb fetch
+// used for availability — NO extra sidecar, NO new API surface — by taking the
+// HIGH END (operator's pick: p90/near-max) of the same-community, same-size,
+// OWN-LISTINGS-EXCLUDED nightly rates. The gate then blocks a window only when
+// that assumed cost beats our real Guesty sell price.
+//
+// Three precision rules the 2026-06-17 live calibration proved load-bearing:
+//  (1) engine=airbnb has NO `bedrooms` field — read `accommodations`.
+//  (2) `q=` returns an ISLAND-WIDE pool — require the community ALIAS in the
+//      title AND a loose geo radius (town / resort / "Poipu" queries are
+//      identical; geo alone can't separate Poipu Kai from Makahuena/Brenneckes/
+//      Pili Mai, which sit 0.5-0.9mi apart and all map to "Koloa, Hawaii").
+//  (3) EXCLUDE our own listings — ours appear in the results at our own asking
+//      price, which would pin assumedCost ≈ sellPrice and hide every real loss.
+
+/** Exact bedroom count from an engine=airbnb listing. The API never populates a
+ *  top-level `bedrooms` field (always null); the real count lives in
+ *  `accommodations` (e.g. ["3 bedrooms","4 beds"]). "4 beds" must NOT read as
+ *  bedrooms. Studio ⇒ 0. Returns null when unparseable. */
+export function exactBedroomsFromAirbnbListing(p: any): number | null {
+  const acc: any[] = Array.isArray(p?.accommodations) ? p.accommodations : [];
+  for (const a of acc) {
+    const s = String(a).toLowerCase();
+    const m = s.match(/(\d+)\s*bedroom/);
+    if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n)) return n; }
+    if (/\bstudio\b/.test(s)) return 0;
+  }
+  return null;
+}
+
+/** Same-community membership: the listing name/title/description must match the
+ *  community's alias regex (BUY_IN_MARKETS[community].aliases). This is the
+ *  precision layer — a geo radius alone can't mean "same community" in the
+ *  overlapping Koloa cluster. When a community has no alias signal we fail OPEN
+ *  on membership (count it) so a missing config can never manufacture a block. */
+export function matchesCommunityName(p: any, aliases: RegExp[] | undefined): boolean {
+  if (!aliases || aliases.length === 0) return true;
+  const hay = [p?.title, p?.name, p?.description].filter(Boolean).map(String).join(" ");
+  return aliases.some((re) => re.test(hay));
+}
+
+/** Is this Airbnb result one of OUR OWN managed listings? Ours surface in the
+ *  search at our own asking price; including them pins the assumed cost to the
+ *  sell price and masks every real loss. Conservative normalized lead-match
+ *  against our Guesty listing names/nicknames (community + size, before
+ *  "Sleeps N"). */
+export function isOwnListing(p: any, ownNames: string[]): boolean {
+  if (!ownNames || ownNames.length === 0) return false;
+  const norm = (s: string) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  const hay = norm([p?.title, p?.name].filter(Boolean).join(" "));
+  if (!hay) return false;
+  for (const raw of ownNames) {
+    const own = norm(raw);
+    if (!own) continue;
+    const lead = own.split(" sleeps ")[0].trim();   // distinctive lead, drop the "sleeps N" tail
+    if (lead.length >= 8 && hay.includes(lead)) return true;
+  }
+  return false;
+}
+
+/** Percentile of a numeric list with a small-sample outlier trim: when n ≥ 4,
+ *  drop the single largest value before taking the percentile, so one luxury
+ *  listing can't spike a thin pool (the live p90 swung run-to-run on n=6 from a
+ *  single outlier appearing/vanishing). Returns null on an empty list. */
+export function trimmedPercentile(values: number[], q: number): number | null {
+  const xs = values.filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  if (xs.length === 0) return null;
+  const pool = xs.length >= 4 ? xs.slice(0, -1) : xs;
+  if (pool.length === 1) return pool[0];
+  const k = (pool.length - 1) * Math.min(1, Math.max(0, q));
+  const f = Math.floor(k), c = Math.ceil(k);
+  return f === c ? pool[f] : pool[f] * (c - k) + pool[c] * (k - f);
+}
+
+/** Cheapest assumed sourcing cost for the plan, from the per-size high-end
+ *  nightlies. Considers the literal combo (sum of every slot) AND a single unit
+ *  of the total bedroom size, taking the cheaper PRICED path. null when no path
+ *  can be priced (⇒ caller fail-safe-opens; never blocks on missing cost). */
+export function assumedComboCost(
+  unitSlots: Array<{ bedrooms: number }>,
+  highEndNightlyBySize: Record<number, number | null>,
+  nights: number,
+): number | null {
+  const n = Math.max(1, nights);
+  let comboNightly = 0, comboOk = unitSlots.length > 0;
+  for (const s of unitSlots) {
+    const v = highEndNightlyBySize[s.bedrooms];
+    if (v == null || !(v > 0)) { comboOk = false; break; }
+    comboNightly += v;
+  }
+  const comboCost = comboOk ? comboNightly * n : null;
+  const totalBr = unitSlots.reduce((acc, u) => acc + u.bedrooms, 0);
+  const singleV = highEndNightlyBySize[totalBr];
+  const singleCost = singleV != null && singleV > 0 ? singleV * n : null;
+  const candidates = [comboCost, singleCost].filter((c): c is number => c != null && c > 0);
+  return candidates.length ? Math.round(Math.min(...candidates)) : null;
+}
+
+// In-memory dedup cache so every property in the same community shares ONE
+// SearchApi fetch per (town, size, week) within a sweep (the daily sweep runs
+// all properties back-to-back). Success-only + short TTL so a transient error
+// is retried next sweep, never cached. This is the town-keyed dedup that keeps
+// the deduped monthly call volume (~7k) well inside the plan.
+type CellCache = { at: number; props: any[] };
+const _cellCache = new Map<string, CellCache>();
+const CELL_TTL_MS = 6 * 60 * 60 * 1000; // 6h — dedups one daily sweep, expires before the next
+export function clearAirbnbCellCache(): void { _cellCache.clear(); }
+
+async function fetchAirbnbCell(
+  searchLocation: string, bedrooms: number, checkIn: string, checkOut: string, apiKey: string,
+): Promise<{ ok: boolean; props: any[] }> {
+  const key = `${searchLocation}|${bedrooms}|${checkIn}|${checkOut}`;
+  const hit = _cellCache.get(key);
+  if (hit && Date.now() - hit.at < CELL_TTL_MS) return { ok: true, props: hit.props };
+  const params = new URLSearchParams({
+    engine: "airbnb", check_in_date: checkIn, check_out_date: checkOut, adults: "2",
+    bedrooms: String(bedrooms), type_of_place: "entire_home", currency: "USD", api_key: apiKey, q: searchLocation,
+  });
+  try {
+    const r = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`);
+    if (!r.ok) return { ok: false, props: [] };
+    const data = (await r.json()) as any;
+    if (data?.error) { console.warn(`[availability-search] airbnb cell ${searchLocation} ${bedrooms}BR: ${data.error}`); return { ok: false, props: [] }; }
+    const props: any[] = Array.isArray(data?.properties) ? data.properties : [];
+    _cellCache.set(key, { at: Date.now(), props });
+    return { ok: true, props };
+  } catch (e: any) {
+    console.error(`[availability-search] airbnb cell error ${searchLocation} ${bedrooms}BR ${checkIn}: ${e?.message ?? e}`);
+    return { ok: false, props: [] };
+  }
+}
+
+export type AirbnbPlanProfitAnalysis = {
+  ok: boolean;                                    // false ⇒ caller fail-safe SKIPs
+  setsAvailable: number;                          // complete same-community sets Airbnb can supply
+  perBedroom: Record<number, number>;             // same-community own-excluded available count per slot size
+  highEndNightlyBySize: Record<number, number | null>; // trimmed-p90 nightly per size (for cost)
+  detail: string;
+};
+
+const DEFAULT_GEO_RADIUS_MILES = 3.0;
+
+/** One engine=airbnb fetch per distinct size (slot sizes + the total bedroom
+ *  size as a single-unit sourcing alternative), filtered to exact-BR +
+ *  same-community alias + own-excluded + within geo radius, returning both the
+ *  availability set count AND the high-end (trimmed-p90) nightly per size.
+ *  Fail-safe: any cell error / missing key ⇒ ok:false. */
+export async function analyzeAirbnbPlanForProfit(opts: {
+  community: string;
+  unitSlots: Array<{ bedrooms: number }>;
+  checkIn: string;
+  checkOut: string;
+  apiKey?: string;
+  costPercentile?: number;   // default 0.90 (operator's "high end" pick)
+  ownNames?: string[];       // our own Guesty listing names to exclude from the cost pool
+  geoRadiusMiles?: number;   // default 3.0 (loose; alias is the precision layer)
+}): Promise<AirbnbPlanProfitAnalysis> {
+  const apiKey = opts.apiKey ?? process.env.SEARCHAPI_API_KEY;
+  if (!apiKey) return { ok: false, setsAvailable: 0, perBedroom: {}, highEndNightlyBySize: {}, detail: "no SEARCHAPI_API_KEY — fail-safe skip" };
+
+  const market = BUY_IN_MARKETS[opts.community];
+  const loc = BUY_IN_MARKET_LOCATIONS[opts.community];
+  const aliases = market?.aliases;
+  const town = loc?.city && loc?.state ? `${loc.city}, ${loc.state}` : null;
+  const searchLocation = town || searchLocationForBuyInMarket(opts.community) || `${opts.community}, Hawaii`;
+  const center = loc && typeof loc.lat === "number" && typeof loc.lng === "number" ? { lat: loc.lat, lng: loc.lng } : null;
+  const radius = opts.geoRadiusMiles ?? DEFAULT_GEO_RADIUS_MILES;
+  const pct = opts.costPercentile ?? 0.90;
+  const ownNames = opts.ownNames ?? [];
+  const nights = Math.max(1, Math.round((+new Date(opts.checkOut) - +new Date(opts.checkIn)) / 86_400_000));
+
+  const slotSizes = Array.from(new Set(opts.unitSlots.map((s) => s.bedrooms)));
+  const totalBr = opts.unitSlots.reduce((acc, u) => acc + u.bedrooms, 0);
+  const sizesToFetch = Array.from(new Set([...slotSizes, totalBr]));
+
+  const perBedroom: Record<number, number> = {};
+  const highEndNightlyBySize: Record<number, number | null> = {};
+
+  for (const br of sizesToFetch) {
+    const cell = await fetchAirbnbCell(searchLocation, br, opts.checkIn, opts.checkOut, apiKey);
+    if (!cell.ok) {
+      return { ok: false, setsAvailable: 0, perBedroom, highEndNightlyBySize, detail: `Airbnb cell error for ${br}BR — fail-safe skip` };
+    }
+    let count = 0;
+    const nightlies: number[] = [];
+    for (const p of cell.props) {
+      if (exactBedroomsFromAirbnbListing(p) !== br) continue;          // exact size (param is a MIN filter)
+      if (!matchesCommunityName(p, aliases)) continue;                 // same community (alias)
+      if (isOwnListing(p, ownNames)) continue;                         // never price against ourselves
+      if (center) {
+        const lat = Number(p?.gps_coordinates?.latitude), lng = Number(p?.gps_coordinates?.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lng) && haversineMiles(center.lat, center.lng, lat, lng) > radius) continue;
+        // missing coords ⇒ credit (fail-safe; Airbnb jitters/omits coordinates)
+      }
+      count++;
+      const total = Number(p?.price?.extracted_total_price ?? 0);
+      if (total > 0) nightlies.push(total / nights);
+    }
+    if (slotSizes.includes(br)) perBedroom[br] = count;
+    highEndNightlyBySize[br] = trimmedPercentile(nightlies, pct);
+  }
+
+  const setsAvailable = computeSetsFromCounts(opts.unitSlots, perBedroom);
+  const detail =
+    Object.entries(perBedroom).map(([br, n]) => `${br}BR×${n}`).join(", ") +
+    ` → ${setsAvailable} set(s); p${Math.round(pct * 100)} ` +
+    Object.entries(highEndNightlyBySize).map(([br, v]) => `${br}BR=${v == null ? "-" : Math.round(v)}`).join("/");
+  return { ok: true, setsAvailable, perBedroom, highEndNightlyBySize, detail };
 }
 
 // ── Price-side helpers (Phase 3) ────────────────────────────────────────
