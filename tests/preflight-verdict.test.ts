@@ -1,7 +1,5 @@
 // Locks the decisive YES/NO merge for the builder Pre-Flight "Full unit audit"
-// (shared/preflight-verdict.ts mergeUnitVerdict). These cases encode the guardrails that came out of
-// the adversarial review: a verified photo match is a YES, a DEEP clean is a NO, a SHALLOW clean never
-// overrides text (no false Clear), and a real per-unit listing the text pinned is never erased.
+// (shared/preflight-verdict.ts mergeUnitVerdict).
 import assert from "node:assert";
 import {
   mergeUnitVerdict,
@@ -22,74 +20,64 @@ const text = (
   extra: Partial<PreflightTextResult> = {},
 ): PreflightTextResult => ({ status, url: null, detection: "", ...extra });
 
-const verdict = (
+const dual = (
+  t: PreflightTextResult | undefined,
+  p: PreflightPhotoStatus | undefined,
+  deep: boolean,
+  extra: { photoPending?: boolean } = {},
+) => mergeUnitVerdict(t, p, deep, { requireDual: true, hasPhotoFolder: true, ...extra })?.status;
+
+const quick = (
   t: PreflightTextResult | undefined,
   p: PreflightPhotoStatus | undefined,
   deep: boolean,
 ) => mergeUnitVerdict(t, p, deep)?.status;
 
-console.log("preflight-verdict: decisive YES/NO merge");
+console.log("preflight-verdict: dual + quick merge");
 
-// ── YES paths ────────────────────────────────────────────────────────────────
-check("text confirmed → Listed (confirmed), unchanged",
-  verdict(text("confirmed", { url: "https://airbnb.com/rooms/1" }), undefined, false) === "confirmed");
+// ── Full unit audit (requireDual) ────────────────────────────────────────────
+check("dual: text confirmed + photo found → Listed",
+  dual(text("confirmed", { url: "https://airbnb.com/rooms/1" }), "found", true) === "confirmed");
 
-check("photo found (deep) → Listed (photo-confirmed)",
-  verdict(text("unconfirmed", { reason: "generic-unit" }), "found", true) === "photo-confirmed");
+check("dual: photo found WITHOUT text confirm → No (Texas false-positive guard)",
+  dual(text("not-listed"), "found", true) === "not-listed");
 
-check("photo found is decisive YES even from a SHALLOW scan (>=2 verified hits is strong)",
-  verdict(text("unconfirmed", { reason: "generic-unit" }), "found", false) === "photo-confirmed");
+check("dual: photo found + legacy unconfirmed → No",
+  dual(text("unconfirmed", { reason: "generic-unit" }), "found", true) === "not-listed");
 
-check("photo found overrides a text not-listed → Listed",
-  verdict(text("not-listed"), "found", true) === "photo-confirmed");
+check("dual: text confirmed + DEEP clean → No",
+  dual(text("confirmed", { url: "https://vrbo.com/1" }), "clean", true) === "not-listed");
 
-check("confirmed text is NEVER downgraded by a clean photo scan",
-  verdict(text("confirmed", { url: "https://vrbo.com/123" }), "clean", true) === "confirmed");
+check("dual: text not-listed + DEEP clean → No",
+  dual(text("not-listed"), "clean", true) === "not-listed");
 
-// ── NO paths (decisive Clear) ──────────────────────────────────────────────────
-check("generic-unit unconfirmed + DEEP clean → Clear (the operator's screenshot case)",
-  verdict(text("unconfirmed", { reason: "generic-unit", url: "https://booking.com/hotel/x" }), "clean", true) === "not-listed");
+check("dual: legacy unconfirmed + DEEP clean → No",
+  dual(text("unconfirmed", { reason: "generic-unit" }), "clean", true) === "not-listed");
 
-check("text not-listed stays Clear (clean photo reinforces)",
-  verdict(text("not-listed"), "clean", true) === "not-listed");
+check("dual: photo pending → undefined (still checking)",
+  mergeUnitVerdict(text("confirmed"), undefined, false, { requireDual: true, hasPhotoFolder: true, photoPending: true }) === undefined);
 
-check("errored text + DEEP clean → Clear",
-  verdict(text("error"), "clean", true) === "not-listed");
+check("dual without photo folder: text confirmed → Listed (text-only fallback)",
+  mergeUnitVerdict(text("confirmed", { url: "https://airbnb.com/rooms/1" }), undefined, false, { requireDual: true, hasPhotoFolder: false })?.status === "confirmed");
 
-// ── Legacy unconfirmed rows collapse to NO unless photos prove YES ───────────────
-check("SHALLOW clean + legacy unconfirmed → No (no Review state)",
-  verdict(text("unconfirmed", { reason: "generic-unit" }), "clean", false) === "not-listed");
+// ── Quick platform check (legacy) ─────────────────────────────────────────────
+check("quick: text confirmed → Listed, unchanged",
+  quick(text("confirmed", { url: "https://airbnb.com/rooms/1" }), undefined, false) === "confirmed");
 
-check("unit-pinned legacy unconfirmed + DEEP clean → No",
-  verdict(text("unconfirmed", { reason: "unit-pinned", url: "https://airbnb.com/rooms/9" }), "clean", true) === "not-listed");
+check("quick: photo found alone → No (never Listed without text)",
+  quick(text("not-listed"), "found", true) === "not-listed");
 
-check("bedroom-conflict legacy unconfirmed + DEEP clean → No",
-  verdict(text("unconfirmed", { reason: "bedroom-conflict", url: "https://vrbo.com/77" }), "clean", true) === "not-listed");
+check("quick: confirmed text is NOT downgraded by a clean photo scan",
+  quick(text("confirmed", { url: "https://vrbo.com/123" }), "clean", true) === "confirmed");
 
-check("legacy unconfirmed without photo evidence drops listing URL",
-  mergeUnitVerdict(text("unconfirmed", { reason: "unit-pinned", url: "https://airbnb.com/rooms/9" }), "clean", true)?.url == null);
+check("quick: legacy unconfirmed + DEEP clean → No",
+  quick(text("unconfirmed", { reason: "generic-unit" }), "clean", true) === "not-listed");
 
-// ── Residual / inconclusive ─────────────────────────────────────────────────────
-check("unknown photo + legacy unconfirmed → No",
-  verdict(text("unconfirmed", { reason: "generic-unit" }), "unknown", false) === "not-listed");
+check("quick: no text + deep clean → No",
+  quick(undefined, "clean", true) === "not-listed");
 
-check("no photo scanned + legacy unconfirmed → No",
-  verdict(text("unconfirmed", { reason: "generic-unit" }), undefined, false) === "not-listed");
-
-// ── photo-only collapse (defensive: text endpoint's live path can't emit it, but be safe) ───────────
-check("text photo-only → collapses to Listed (photo-confirmed)",
-  verdict(text("photo-only", { url: "https://airbnb.com/rooms/2" }), undefined, false) === "photo-confirmed");
-
-check("text photo-only contradicted by a DEEP clean → Clear",
-  verdict(text("photo-only", { url: "https://airbnb.com/rooms/2" }), "clean", true) === "not-listed");
-
-// ── No-text branch ──────────────────────────────────────────────────────────────
-check("no text + deep clean → Clear",
-  verdict(undefined, "clean", true) === "not-listed");
-check("no text + shallow clean → undefined (not decisive)",
-  mergeUnitVerdict(undefined, "clean", false) === undefined);
-check("no text + found → Listed",
-  verdict(undefined, "found", true) === "photo-confirmed");
+check("quick: no text + found → No",
+  quick(undefined, "found", true) === "not-listed");
 
 // ── DEEP_PHOTO_MIN sanity ───────────────────────────────────────────────────────
 check("DEEP_PHOTO_MIN is above the background scheduler's 3-photo scan", DEEP_PHOTO_MIN > 3);

@@ -1302,7 +1302,7 @@ export default function BuilderPreflight() {
                     onClick={runFullUnitAudit}
                     disabled={photoScanning}
                     className="h-7 px-2 text-xs flex-shrink-0"
-                    title="Text search + reverse-image photo check (every interior photo per unit) against Airbnb / VRBO / Booking. The photo scan is the decisive signal: a match = Listed, a thorough clean scan = Clear. Results cached 24h."
+                    title="Text search + reverse-image photo check (every interior photo per unit) against Airbnb / VRBO / Booking. Listed only when both text and photos confirm the same unit; otherwise Not Listed."
                   >
                     {photoScanning ? (
                       <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Auditing photos…</>
@@ -1352,7 +1352,7 @@ export default function BuilderPreflight() {
           </p>
           {lastCheckWasFullAudit && hasAnyResults && (
             <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300">
-              Full unit audit complete — each unit was checked by text search and by a reverse-image scan of <strong>every interior photo</strong> against Airbnb, VRBO, and Booking.com (cached 24h). Each platform shows a decisive verdict: <strong>Listed</strong> (text confirmed it, or the unit's photos were found on a live listing) or <strong>Clear</strong> (a full photo scan found no listing of this unit). A unit stays on <strong>Review</strong> only when neither signal could decide — text found a possible listing it couldn't pin, or there were no/too-few photos to scan.
+              Full unit audit complete — each unit was checked by text search and by a reverse-image scan of <strong>every interior photo</strong> against Airbnb, VRBO, and Booking.com. Each platform shows a decisive verdict: <strong>Listed</strong> only when <strong>both</strong> text search and photo scan confirm the same unit, or <strong>Not Listed</strong> otherwise.
             </div>
           )}
 
@@ -1735,9 +1735,13 @@ export default function BuilderPreflight() {
                           // A "clean" only decides the verdict when it came from a DEEP scan (full
                           // gallery), not a shallow 3-photo background row — else we'd assert a false NO.
                           const photoDeep = !!pc && pc.scanned && (Number(pc.photosChecked) || 0) >= DEEP_PHOTO_MIN;
-                          // Decisive badge = text result merged with the photo result (verified photo
-                          // match → YES; deep clean → NO; shallow/unknown photo never overrides text).
-                          const r = mergeUnitVerdict(unitResult?.platforms[key], ps, photoDeep);
+                          const inFullAudit = lastCheckWasFullAudit || fullAuditRunning;
+                          const photoPending = inFullAudit && !!folder && (photoScanning || !pc?.scanned);
+                          const r = mergeUnitVerdict(unitResult?.platforms[key], ps, photoDeep, {
+                            requireDual: inFullAudit && !!folder,
+                            photoPending,
+                            hasPhotoFolder: !!folder,
+                          });
                           return (
                             <div key={key} id={`check-${key}-${unit.id}`} className="rounded border border-border/60 bg-muted/20 px-2.5 py-2">
                               <div className="flex items-center justify-between gap-2">
@@ -1757,7 +1761,7 @@ export default function BuilderPreflight() {
                                 )}
                               </div>
                               <div className="mt-1.5">
-                                <CompactStatusBadge result={r} checking={unitChecking} />
+                                <CompactStatusBadge result={r} checking={unitChecking || photoPending} />
                               </div>
                               {r?.detection && (
                                 <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground" title={r.detection}>
