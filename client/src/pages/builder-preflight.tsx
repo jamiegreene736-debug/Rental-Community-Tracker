@@ -525,6 +525,7 @@ export default function BuilderPreflight() {
         skipUrls,
         replacingExistingPhotos,
         skipFirst: skipUrls.length === 0 && replacingExistingPhotos ? 1 : 0,
+        rescrapeSourceUrl: replacingExistingPhotos ? (currentSourceUrl ?? undefined) : undefined,
       };
       photoFetchStartPayloadByUnit.current[unit.id] = startPayload;
       const resp = await apiRequest("POST", "/api/preflight/photo-fetch-jobs", startPayload);

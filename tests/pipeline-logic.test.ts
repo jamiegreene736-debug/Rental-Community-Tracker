@@ -419,6 +419,16 @@ assert.match(
 );
 assert.match(
   preflightJobsSource,
+  /rescrapeSourceUrl[\s\S]*fetch-unit-photos[\s\S]*url: rescrapeSourceUrl/,
+  "preflight Find different photos must rescrape the saved listing URL directly with the full gallery",
+);
+assert.match(
+  routesSource,
+  /rescrape-unit-photos[\s\S]*unitGalleryMaxKeep\(scraped\.length\)/,
+  "preflight rescrape-unit-photos must not hard-cap galleries at 25",
+);
+assert.match(
+  preflightJobsSource,
   /preflightPhotoDiscoveryAttempts/,
   "preflight photo-fetch jobs must reuse the shared discovery attempt caps",
 );
