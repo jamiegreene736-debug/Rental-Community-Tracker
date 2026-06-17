@@ -979,6 +979,10 @@ type CommunityCheckGroup = {
   allSameUnit?: boolean;
   outliers: CommunityCheckFlag[];
   junk: CommunityCheckFlag[];
+  // Community-only: photos a Phase-B batch could not analyze (vision error).
+  // Surfaced so "checked X/Y" never hides a gap — the operator wants every
+  // community photo verified, not silently passed.
+  unchecked?: CommunityCheckFlag[];
   confidence: number;
 };
 type CommunityCheckDuplicate = {
@@ -7173,14 +7177,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     {communityCheckPhase === "running" ? "🔎 Checking photos…" : "🔎 Check photo community"}
                                   </button>
                                   <span style={{ fontSize: 11, color: "#64748b", flex: 1, minWidth: 220 }}>
-                                    AI-confirms the community folder and each unit are all the SAME community, and flags junk / mis-filed photos and the same photo appearing in two folders.
+                                    Checks EVERY community-folder photo (one by one) plus ~5 photos of each unit to confirm they're all the SAME community, and flags junk / mis-filed photos and the same photo appearing in two folders.
                                   </span>
                                 </div>
 
                                 {communityCheckPhase === "running" && (
                                   <div style={{ fontSize: 11, color: "#0e7490", marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
                                     <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#06b6d4", animation: "glb-blink 1s infinite" }} />
-                                    Analyzing photos with AI vision — usually 20-40 seconds…
+                                    Analyzing every community photo with AI vision — usually 30-90 seconds…
                                   </div>
                                 )}
 
@@ -7327,6 +7331,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           )}
                                           {flagList(r.community.outliers, "Possible different-community photos", "#b45309")}
                                           {flagList(r.community.junk, "Junk / mis-filed", "#b45309")}
+                                          {flagList(r.community.unchecked ?? [], "Not analyzed (vision error — re-run)", "#b45309")}
                                         </div>
                                       )}
 
