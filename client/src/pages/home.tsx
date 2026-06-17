@@ -69,6 +69,7 @@ import {
   Play,
 } from "lucide-react";
 import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { occupancyForBedrooms } from "@/data/bedding-config";
 import { isScannableFolder } from "@shared/photo-folder-utils";
 import { useToast } from "@/hooks/use-toast";
 import { extractBRList } from "@/data/quality-score";
@@ -472,7 +473,7 @@ const properties: Property[] = [
     location: "Koloa",
     island: "Kauai",
     bedrooms: 5,
-    guests: 12,
+    guests: 14,
     bathrooms: 4,
     lowPrice: 1313,
     highPrice: 2237,
@@ -482,13 +483,13 @@ const properties: Property[] = [
   },
   {
     id: 19,
-    name: "Fabulous 5 bedroom for 10 townhome above Anini Beach!",
+    name: "Fabulous 5 bedroom for 14 townhome above Anini Beach!",
     community: "Mauna Kai Princeville",
     pricingArea: "Princeville",
     location: "Princeville",
     island: "Kauai",
     bedrooms: 5,
-    guests: 10,
+    guests: 14,
     bathrooms: 3,
     lowPrice: 1225,
     highPrice: 2092,
@@ -498,13 +499,13 @@ const properties: Property[] = [
   },
   {
     id: 20,
-    name: "Fabulous 7 bedrooms for 16 above Anini Beach!",
+    name: "Fabulous 7 bedrooms for 18 above Anini Beach!",
     community: "Mauna Kai Princeville",
     pricingArea: "Princeville",
     location: "Princeville",
     island: "Kauai",
     bedrooms: 7,
-    guests: 16,
+    guests: 18,
     bathrooms: 5,
     lowPrice: 2035,
     highPrice: 2970,
@@ -514,13 +515,13 @@ const properties: Property[] = [
   },
   {
     id: 23,
-    name: "Gorgeous 5 br for 12 in Kapaa - Beachfront!",
+    name: "Gorgeous 5 br for 14 in Kapaa - Beachfront!",
     community: "Kaha Lani Resort",
     pricingArea: "Kapaa Beachfront",
     location: "Kapaa",
     island: "Kauai",
     bedrooms: 5,
-    guests: 11,
+    guests: 14,
     bathrooms: 5,
     lowPrice: 1577,
     highPrice: 1973,
@@ -530,13 +531,13 @@ const properties: Property[] = [
   },
   {
     id: 24,
-    name: "Wonderful 5 br 12 Poipu ocean view! Oceanfront complex!",
+    name: "Wonderful 5 br 14 Poipu ocean view! Oceanfront complex!",
     community: "Makahuena at Poipu",
     pricingArea: "Poipu Oceanfront",
     location: "Koloa",
     island: "Kauai",
     bedrooms: 5,
-    guests: 12,
+    guests: 14,
     bathrooms: 5,
     lowPrice: 1518,
     highPrice: 2227,
@@ -562,13 +563,13 @@ const properties: Property[] = [
   },
   {
     id: 29,
-    name: "Ocean view 7 bedrooms for 14 above Anini Beach!",
+    name: "Ocean view 7 bedrooms for 18 above Anini Beach!",
     community: "Kaiulani of Princeville",
     pricingArea: "Princeville",
     location: "Princeville",
     island: "Kauai",
     bedrooms: 7,
-    guests: 14,
+    guests: 18,
     bathrooms: 4,
     lowPrice: 1518,
     highPrice: 2897,
@@ -578,13 +579,13 @@ const properties: Property[] = [
   },
   {
     id: 32,
-    name: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
+    name: "Gorgeous Poipu Townhomes for 14 with AC! 5 Bedrooms.",
     community: "Pili Mai",
     pricingArea: "Pili Mai",
     location: "Poipu",
     island: "Kauai",
     bedrooms: 5,
-    guests: 12,
+    guests: 14,
     bathrooms: 5,
     lowPrice: null,
     highPrice: null,
@@ -1482,14 +1483,13 @@ function AdminDashboard() {
   const allProperties = useMemo(
     () =>
       [...activeProperties, ...draftsAsProperties].map((p) => {
-        // Derive "Guests" (sleeps) from the occupancy formula instead of the
-        // old hardcoded/inferred numbers, which never reflected the corrected
-        // Guesty values: bedrooms x2 + one double sleeper sofa (x2) per condo.
-        // unitCount is the condo count (units.length for active rows, 1/2 for
-        // single/combo drafts), so this matches what we write to Guesty
-        // accommodates and keeps the dashboard column in sync.
-        const condos = p.unitCount && p.unitCount > 0 ? p.unitCount : p.multiUnit ? 2 : 1;
-        return p.bedrooms > 0 ? { ...p, guests: p.bedrooms * 2 + condos * 2 } : p;
+        // Derive "Guests" (sleeps) from the single headline occupancy rule
+        // (occupancyForBedrooms) keyed ONLY on the bedroom count, so the
+        // dashboard column always matches the listing title, the summary, and
+        // the Guesty `accommodates` we push. Anchors: 2→6, 4→12, 5→14, 6→16,
+        // 7→18 (3→10, 8→20). This replaces the old bedrooms*2 + condos*2
+        // formula, which gave a different number for 3-condo combos.
+        return p.bedrooms > 0 ? { ...p, guests: occupancyForBedrooms(p.bedrooms) } : p;
       }),
     [activeProperties, draftsAsProperties],
   );

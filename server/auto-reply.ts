@@ -6,6 +6,7 @@
 import { guestyRequest } from "./guesty-sync";
 import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
+import { occupancyForBedrooms } from "../shared/occupancy";
 import { fallbackWalkForResort } from "../shared/walking-distance";
 import { resolveIslandRegion } from "../shared/area-identity";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
@@ -782,7 +783,12 @@ async function runTool(name: string, input: any): Promise<unknown> {
         // propertyTypeNote above for accessibility questions.
         accessibilityNote: prop.accessibilityNote ?? null,
         totalBedrooms: prop.units.reduce((s, u) => s + u.bedrooms, 0),
-        totalSleeps: prop.units.reduce((s, u) => s + u.maxGuests, 0),
+        // Listing-level capacity follows the single headline occupancy rule
+        // keyed on total bedrooms (same number the title/summary/dashboard
+        // show), NOT the sum of per-unit maxGuests — so the guest-reply LLM
+        // quotes the advertised "sleeps N", not a higher raw bed total. (The
+        // per-unit `maxGuests` below stays the real per-unit bed count.)
+        totalSleeps: occupancyForBedrooms(prop.units.reduce((s, u) => s + u.bedrooms, 0)),
         units: prop.units.map((u, i) => ({
           label: `Unit ${String.fromCharCode(65 + i)}`,
           unitNumber: u.unitNumber,
