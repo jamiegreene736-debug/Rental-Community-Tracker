@@ -440,22 +440,6 @@ function communityUnitCountDisplay(property: Pick<Property, "community" | "commu
 
 const properties: Property[] = [
   {
-    id: 1,
-    name: "Poipu Kai for large groups!",
-    community: "Regency at Poipu Kai",
-    pricingArea: "Poipu Kai",
-    location: "Koloa",
-    island: "Kauai",
-    bedrooms: 7,
-    guests: 18,
-    bathrooms: 5,
-    lowPrice: 1577,
-    highPrice: 3168,
-    multiUnit: true,
-    unitDetails: "Multiple adjacent villas in Poipu Kai",
-    url: "https://thevacationrentalexperts.com/en/poipu-kai-for-large-groups",
-  },
-  {
     id: 4,
     name: "Beautiful 6 Bedroom For 16 Villa in Poipu!",
     community: "Regency at Poipu Kai",

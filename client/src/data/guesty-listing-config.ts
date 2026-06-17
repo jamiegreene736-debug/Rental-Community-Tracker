@@ -33,15 +33,6 @@ function living(...beds: GuestyBed[]): GuestyRoom {
 
 export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
   {
-    propertyId: 1,
-    publicAddress: "1941 Poipu Rd, Koloa, HI 96756",
-    units: [
-      { unitId: "unit-924", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
-      { unitId: "unit-114", rooms: [room(1, q()), room(2, k()), living(sofa())] },
-      { unitId: "unit-911", rooms: [room(1, k()), room(2, k()), living(sofa())] },
-    ],
-  },
-  {
     propertyId: 4,
     publicAddress: "1941 Poipu Rd, Unit 423, Koloa, HI 96756",
     units: [

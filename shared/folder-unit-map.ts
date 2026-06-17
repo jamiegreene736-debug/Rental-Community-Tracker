@@ -21,11 +21,10 @@
 // they false-positive on stray characters in Google snippets.
 export const FOLDER_UNIT_TOKENS: Record<string, string[]> = {
   // prop 1 — Regency at Poipu Kai (folder hints match unit numbers)
-  "unit-924": ["924"],
-  // shared: prop1:unit-114(114), prop9:unit-611(611), prop27:unit-A
+  // shared: prop9:unit-611(611), prop27:unit-A
   // ("A" dropped — too noisy)
   "unit-114": ["114", "611"],
-  // shared: prop1:unit-911(911), prop27:unit-B ("B" dropped — too
+  // shared: prop27:unit-B ("B" dropped — too
   // noisy)
   "unit-911": ["911"],
   // prop 4 — folder hints match

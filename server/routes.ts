@@ -11872,7 +11872,8 @@ Requirements:
   // tied to propertyIds that were stripped from PROPERTY_UNIT_CONFIGS.
   // Idempotent — safe to run multiple times. Returns counts per table.
   app.post("/api/admin/cleanup-removed-properties", async (_req, res) => {
-    const REMOVED_PROPERTY_IDS = [7, 10, 12, 14, 21, 26, 28, 31, 36, 37];
+    const REMOVED_PROPERTY_IDS = [1, 7, 10, 12, 14, 21, 26, 28, 31, 36, 37];
+    const REMOVED_DRAFT_IDS = [24];
     try {
       // Lazy-import drizzle helpers + tables so we don't pay the import cost
       // on every request.
@@ -12000,7 +12001,7 @@ Requirements:
 
       const draftsDeleted = await db
         .delete(communityDrafts)
-        .where(ilike(communityDrafts.name, removedNameMatch))
+        .where(or(ilike(communityDrafts.name, removedNameMatch), inArray(communityDrafts.id, REMOVED_DRAFT_IDS)))
         .returning({ id: communityDrafts.id });
 
       const photoLabelsDeleted = await db
@@ -12010,6 +12011,7 @@ Requirements:
 
       return res.json({
         removedPropertyIds: REMOVED_PROPERTY_IDS,
+        removedDraftIds: REMOVED_DRAFT_IDS,
         buyIns: buyInsDeleted.length,
         guestyPropertyMap: guestyMapsDeleted.length,
         lodgifyPropertyMap: lodgifyMapsDeleted.length,
@@ -20394,7 +20396,6 @@ Requirements:
   // Removed villa/single-family entries (7, 10, 12, 14, 21, 26, 28, 31) on
   // 2026-04 per business-model pivot.
   const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms: number }[] }> = {
-    1: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
     2: { community: "Keauhou", units: [{ bedrooms: 4 }] },
     4: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
     8: { community: "Poipu Kai", units: [{ bedrooms: 3 }, { bedrooms: 3 }] },

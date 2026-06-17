@@ -188,27 +188,6 @@ const COMMUNITY_PILI_MAI: CommunityPhoto[] = [
   { filename: "06-community.jpg", label: "Golf Course View", position: "end" },
 ];
 
-const PHOTOS_924: UnitPhoto[] = [
-  { filename: "01-living-room-overview.jpg", label: "Living Room Overview", category: "Living Areas" },
-  { filename: "02-living-room-seating.jpg", label: "Living Room Seating Area", category: "Living Areas" },
-  { filename: "03-dining-area.jpg", label: "Dining Area", category: "Living Areas" },
-  { filename: "04-kitchen-overview.jpg", label: "Kitchen Overview", category: "Kitchen" },
-  { filename: "05-great-room.jpg", label: "Great Room", category: "Living Areas" },
-  { filename: "06-living-kitchen-view.jpg", label: "Living Room and Kitchen", category: "Living Areas" },
-  { filename: "07-lanai-garden-view.jpg", label: "Lanai Garden View", category: "Exterior" },
-  { filename: "08-master-bedroom-king.jpg", label: "Master Bedroom - King Bed", category: "Bedrooms" },
-  { filename: "09-master-bathroom.jpg", label: "Master Bathroom", category: "Bathrooms" },
-  { filename: "10-master-bath-shower.jpg", label: "Master Bathroom Shower", category: "Bathrooms" },
-  { filename: "11-guest-bedroom.jpg", label: "Guest Bedroom", category: "Bedrooms" },
-  { filename: "12-guest-bedroom-2.jpg", label: "Second Guest Bedroom", category: "Bedrooms" },
-  { filename: "13-guest-bathroom.jpg", label: "Guest Bathroom", category: "Bathrooms" },
-  { filename: "14-loft-futon.jpg", label: "Loft Area with Futon", category: "Bedrooms" },
-  { filename: "15-upstairs-bedroom-queen.jpg", label: "Upstairs Bedroom - Queen Bed", category: "Bedrooms" },
-  { filename: "16-upstairs-bedroom-view.jpg", label: "Upstairs Bedroom View", category: "Bedrooms" },
-  { filename: "17-upstairs-bathroom.jpg", label: "Upstairs Bathroom", category: "Bathrooms" },
-  { filename: "18-upstairs-bath-detail.jpg", label: "Upstairs Bathroom Detail", category: "Bathrooms" },
-];
-
 const PHOTOS_114: UnitPhoto[] = [
   { filename: "01-pool-resort.jpg", label: "Resort Pool", category: "Exterior" },
   { filename: "02-welcome-entrance.jpg", label: "Welcome Entrance", category: "Exterior" },
@@ -598,102 +577,6 @@ const PHOTOS_PILI_MAI_UNIT_B: UnitPhoto[] = [
 ];
 
 export const unitBuilderData: PropertyUnitBuilder[] = [
-  {
-    propertyId: 1,
-    propertyName: "Poipu Kai for large groups!",
-    complexName: "Regency at Poipu Kai",
-    address: "1831 Poipu Rd, Bldg 8, Koloa, HI 96756",
-    bookingTitle: "Poipu Kai - 7BR Resort - Sleeps 18",
-    sampleDisclaimer: DEFAULT_DISCLAIMER,
-    combinedDescription: `This listing is comprised of three spacious condos within the Regency at Poipu Kai resort, just a short walk apart from each other within the complex. Together they offer 7 bedrooms and can accommodate up to 18 guests, making this an ideal setup for large family reunions or group vacations on Kauai's sunny south shore.
-
-Unit A is a 3-bedroom, 3-bathroom condo (~1,800 sq ft) featuring a King bed in the master suite with jetted tub and walk-in marble shower, a Queen bed in the second bedroom, 2 Twins in the loft third bedroom, and a futon for additional sleeping. Central AC and an open-concept layout with granite kitchen make this a comfortable home base.
-
-Unit B is a 2-bedroom, 2-bathroom ground-floor condo (~1,250 sq ft) with a modern renovation, Queen bed in the primary bedroom, King bed in the second bedroom, and a queen sleeper sofa. Two private balconies, stainless steel kitchen, and AC with ceiling fans throughout.
-
-Unit C is a 2-bedroom, 2-bathroom condo (~1,250 sq ft) with central AC, King beds in both bedrooms, a queen sleeper sofa, smart TVs, and a private covered lanai. The fully stocked kitchen and large dining area are perfect for group meals.
-
-All guests enjoy resort amenities including a sparkling pool, hot tub, tennis and pickleball courts, and tropical garden paths. Shipwreck Beach, Brennecke's Beach, and Poipu Beach Park are all within an easy 10-minute walk. Walking distance to Poipu Beach Park, Brennecke's Beach, and Shipwreck Beach. Nearby: Poipu Shopping Village, Kukui'ula Village (dining/shops), Spouting Horn blowhole, National Tropical Botanical Garden, Koloa Town historic district. Snorkeling at Poipu Beach, sea turtles, monk seals. Great restaurants including The Beach House, Merriman's, Tidepools.
-
-Important: This listing represents our managed portfolio of similar units within the same resort complex. Your specific unit will be confirmed prior to check-in and will match the advertised bedroom count, sleeping arrangements, and amenity standards described above. Individual unit decor and furnishings may vary.`,
-    neighborhood: "Regency at Poipu Kai is tucked into Poipu, Kauai's sunniest and most popular resort area. Poipu Beach Park — consistently ranked one of America's best beaches — is a short drive away, with excellent snorkeling, sea turtle sightings, and a sheltered swimming area. Brenneckes Beach and Shipwreck Beach are nearby for bodyboarding and bodysurfing. Koloa Town, Kauai's oldest plantation village, is 5 minutes away with boutique shops, restaurants, and the Koloa Heritage Trail. Spouting Horn blowhole, the National Tropical Botanical Garden, and Moir Gardens round out the area's attractions.",
-    transit: "A rental car is strongly recommended for exploring Kauai. Lihue Airport is approximately 25-30 minutes away. Koloa Town is 5 minutes by car. Waimea Canyon (Grand Canyon of the Pacific) is about 45 minutes west, and the North Shore is about an hour. Rideshare (Lyft) is available on Kauai but limited in frequency. The Kauai Bus provides budget public transport along main routes.",
-        taxMapKey: "420150080001",
-    tatLicense: "TA-023-450-1234-01",
-    getLicense: "GE-023-450-1234-01",
-    strPermit: "TVR-2022-048",
-    hasPhotos: true,
-    communityPhotos: COMMUNITY_REGENCY,
-    communityPhotoFolder: "community-regency-poipu-kai",
-    units: [
-      {
-        id: "unit-924",
-        unitNumber: "924",
-        bedrooms: 3,
-        bathrooms: "3",
-        sqft: "~1,800",
-        maxGuests: 7,
-        shortDescription: "Elegant 3-bedroom, 3-bath Regency condo. Features Hawaiian-style furniture, granite kitchen, central AC, jetted tub in the master bath, and a walk-in marble shower. Sleeps 7 with King, Queen, 2 Twins, and a futon in the loft.",
-        longDescription: `Welcome to this beautifully furnished 3-bedroom, 3-bathroom condominium at the Regency at Poipu Kai resort. This spacious approximately 1,800 sq ft home away from home features central air conditioning throughout and an inviting Hawaiian-style interior.
-
-The open-concept living area flows from comfortable seating through a generous dining space to the fully equipped granite kitchen. A private lanai overlooks lush tropical gardens, perfect for morning coffee or evening relaxation. The great room design ensures everyone stays connected.
-
-The gourmet kitchen features granite countertops, modern appliances, and everything you need to prepare meals for your group. A washer and dryer are conveniently located in the unit, along with beach chairs, towels, and coolers for your beach adventures.
-
-The master bedroom offers a plush King bed and en-suite bathroom with a luxurious jetted tub and walk-in marble shower. The second bedroom features a comfortable Queen bed, while the third bedroom has 2 Twin beds. An upstairs loft with futon provides additional sleeping space.
-
-Enjoy resort amenities including a sparkling swimming pool, hot tub, tennis and pickleball courts, and strolls through manicured tropical gardens. Shipwreck Beach, Brennecke's Beach, and Poipu Beach Park are all within a 10-minute walk.
-
-Poipu's sunny south shore offers world-class snorkeling, surfing, and dining. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, the National Tropical Botanical Garden, and the historic Koloa Town district. Watch for sea turtles and monk seals at the beach, and enjoy great restaurants including The Beach House, Merriman's, and Tidepools.`,
-        photoFolder: "unit-924",
-        photos: PHOTOS_924,
-      },
-      {
-        id: "unit-114",
-        unitNumber: "114",
-        bedrooms: 2,
-        bathrooms: "2",
-        sqft: "~1,250",
-        maxGuests: 6,
-        shortDescription: "Modern 2-bedroom, 2-bath ground-floor condo at the Regency at Poipu Kai. Features AC and ceiling fans, a renovated modern kitchen with stainless appliances, two private balconies, and an open floor plan. Sleeps 6 with Queen and King beds and a queen sleeper sofa.",
-        longDescription: `Welcome to this stylishly renovated 2-bedroom, 2-bathroom ground-floor condominium at the Regency at Poipu Kai resort on Kauai's coveted south shore.
-
-This approximately 1,250 sq ft condo has been thoughtfully updated with a modern aesthetic while maintaining its warm island charm. The open floor plan creates a spacious feel, with the living room flowing into the dining area and kitchen. Air conditioning and ceiling fans keep you comfortable year-round.
-
-The modern kitchen features sleek stainless steel appliances, ample counter space, and is fully stocked with everything you need for home-cooked meals. Two private balconies provide outdoor living space to enjoy the tropical breezes and garden views.
-
-The primary bedroom features a comfortable Queen bed with its own renovated en-suite bathroom with dual sinks. The second bedroom offers a King bed and is adjacent to the second full bathroom, also beautifully renovated. A queen sleeper sofa in the living area provides additional sleeping for two more guests. A convenient work area is available for those who need to stay connected.
-
-As a Regency at Poipu Kai guest, you have full access to the resort pool, hot tub, tennis and pickleball courts, and lush tropical garden paths. Three world-class Poipu beaches are just a short 10-minute walk away.
-
-From snorkeling at Poipu Beach Park to body surfing at Brennecke's Beach, or watching the sunset from Shipwreck Beach, this condo puts you in the heart of Kauai's best coastal experiences. Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, the National Tropical Botanical Garden, and the historic Koloa Town district. Great restaurants including The Beach House, Merriman's, and Tidepools are all close by.`,
-        photoFolder: "unit-114",
-        photos: PHOTOS_114,
-      },
-      {
-        id: "unit-911",
-        unitNumber: "911",
-        bedrooms: 2,
-        bathrooms: "2",
-        sqft: "~1,250",
-        maxGuests: 6,
-        shortDescription: "Comfortable 2-bedroom, 2-bath Regency condo with central AC throughout. Features King beds in both rooms, a fully stocked kitchen, large dining area, private covered lanai, and smart TVs. Sleeps 6 with two King beds and a queen sleeper sofa.",
-        longDescription: `Welcome to this well-appointed 2-bedroom, 2-bathroom condominium at the Regency at Poipu Kai resort. This unit features central air conditioning throughout for your complete comfort on Kauai's sunny south shore.
-
-The approximately 1,250 sq ft interior offers a thoughtfully designed layout with a spacious living area, large dining area that seats the whole party, and a private covered lanai perfect for al fresco dining or simply soaking in the tropical garden views. Smart TVs in the living area and bedrooms provide entertainment options.
-
-The fully stocked kitchen includes modern appliances, generous counter space, and all the cookware and utensils needed for everything from quick breakfasts to full dinners. The open layout connects the kitchen to the dining and living spaces for easy socializing.
-
-The master bedroom features a plush King bed, smart TV, and en-suite bathroom with a soaking tub and separate shower. The second bedroom also offers a comfortable King bed and is adjacent to the second full bathroom, ideal for couples traveling together. A queen sleeper sofa in the living area provides additional sleeping for two more guests.
-
-Resort amenities await just steps from your door, including a gorgeous swimming pool, relaxing hot tub, and tennis and pickleball courts surrounded by tropical gardens. Shipwreck Beach, Brennecke's Beach, and Poipu Beach Park are all an easy 10-minute stroll.
-
-Nearby you'll find Poipu Shopping Village, Kukui'ula Village for dining and shops, Spouting Horn blowhole, the National Tropical Botanical Garden, and the historic Koloa Town district. Snorkel with sea turtles and watch for monk seals, or enjoy great restaurants including The Beach House, Merriman's, and Tidepools.`,
-        photoFolder: "unit-911",
-        photos: PHOTOS_911,
-      },
-    ],
-  },
   {
     propertyId: 4,
     propertyName: "Beautiful 6 Bedroom For 16 Villa in Poipu!",

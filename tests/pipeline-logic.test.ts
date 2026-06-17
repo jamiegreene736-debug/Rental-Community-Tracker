@@ -3105,7 +3105,7 @@ assert.equal(
 );
 console.log("  ✓ Pili Mai rejects the Kiahuna 2253 Poipu Rd mismatch");
 
-const dashboardPropertyIds = new Set([1, 4, 9, 19, 20, 23, 24, 27, 29, 32, 33]);
+const dashboardPropertyIds = new Set([4, 9, 19, 20, 23, 24, 27, 29, 32, 33]);
 for (const prop of unitBuilderData.filter((p) => dashboardPropertyIds.has(p.propertyId))) {
   const check = validateCommunityStreetAddress({
     communityName: prop.complexName,

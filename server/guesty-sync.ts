@@ -91,7 +91,6 @@ export async function guestyRequest(method: string, endpoint: string, body?: unk
 }
 
 const PROPERTY_UNIT_NEEDS: Record<number, { community: string; units: { bedrooms: number }[] }> = {
-  1:  { community: "Poipu Kai",         units: [{ bedrooms: 3 }, { bedrooms: 2 }, { bedrooms: 2 }] },
   4:  { community: "Poipu Kai",         units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
   7:  { community: "Poipu Kai",         units: [{ bedrooms: 3 }, { bedrooms: 3 }, { bedrooms: 2 }] },
   8:  { community: "Poipu Kai",         units: [{ bedrooms: 3 }, { bedrooms: 3 }] },
