@@ -237,6 +237,7 @@ import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-com
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { geocode, walkBetween } from "./walking-distance";
+import { hitTextMatchesUnit } from "./listing-unit-match";
 import { fetchNearbyVacationRentalResortsFromLlm } from "./alternative-scout-llm-resorts";
 import {
   inferResortCommunityLabel,
@@ -31685,23 +31686,12 @@ Return ONLY compact JSON with this exact shape:
       return matched >= Math.min(2, terms.length);
     };
 
-    const hitMatchesUnit = (hit: any, unit: string): boolean => {
-      const normalizedUnit = normalizeSearchText(unit).replace(/\s+/g, "");
-      if (!normalizedUnit) return true;
-
-      const text = normalizeSearchText(`${hit.title || ""} ${hit.snippet || ""} ${hit.link || ""}`);
-      const unitPattern = escapeRegExp(normalizedUnit);
-
-      if (!/^\d+$/.test(normalizedUnit)) {
-        return new RegExp(`\\b${unitPattern}\\b`).test(text);
-      }
-
-      return new RegExp(
-        `\\b(?:unit|apt|apartment|condo|villa|villas|suite|regency|manualoha|makahuena|pili\\s+mai|kai\\s+nui|poipu\\s+kai|building)\\s+${unitPattern}\\b`,
-      ).test(text) || new RegExp(
-        `\\b${unitPattern}\\s+(?:unit|apt|apartment|condo|villa|villas|suite)\\b`,
-      ).test(text);
-    };
+    // Letter-coded units (Waikoloa Beach Villas "C1"/"A4"/"I4") need an ANCHORED
+    // match so a multi-unit OTA roundup snippet enumerating codes can't false-flag
+    // a clean unit as already listed; numeric units (Poipu Kai "721") are
+    // unchanged. Logic + rationale live in ./listing-unit-match (unit-tested).
+    const hitMatchesUnit = (hit: any, unit: string): boolean =>
+      hitTextMatchesUnit(unit, { title: hit?.title, snippet: hit?.snippet, link: hit?.link });
 
     async function checkOnePlatform(
       host: string,
