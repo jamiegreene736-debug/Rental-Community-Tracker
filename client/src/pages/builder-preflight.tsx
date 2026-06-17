@@ -500,10 +500,12 @@ export default function BuilderPreflight() {
     try {
       const replacingExistingPhotos = (unit.photos?.length ?? 0) > 0;
       const currentSourceUrl = await loadSourceUrl(unit.photoFolder);
-      // When a sibling already has saved photos, block its source URL so "Find
-      // different photos" cannot re-save the same listing on both units. When
-      // both units are still empty (initial find), leave sibling URLs open so
-      // sparse resorts can still surface a representative gallery.
+      // skipUrls only governs the DISCOVERY fallback (when the unit's own
+      // saved listing is dead/thin). Block sibling sources so discovery can't
+      // re-save the same listing on both units, and block this unit's own
+      // source so the fallback doesn't re-pick the dead listing the rescrape
+      // already tried. When both units are still empty (initial find), leave
+      // sibling URLs open so sparse resorts can surface a representative gallery.
       const siblingSourceUrls = (await Promise.all(
         property.units
           .filter((u) => u.id !== unit.id)
@@ -528,6 +530,10 @@ export default function BuilderPreflight() {
         skipUrls,
         replacingExistingPhotos,
         skipFirst: skipUrls.length === 0 && replacingExistingPhotos ? 1 : 0,
+        // "Re-pull all photos" rescrapes THIS unit's own saved listing first
+        // (full gallery), instead of discovering a different listing. Discovery
+        // only runs as a fallback if the saved source is off-market / too thin.
+        rescrapeSourceUrl: replacingExistingPhotos && currentSourceUrl ? currentSourceUrl : undefined,
       };
       photoFetchStartPayloadByUnit.current[unit.id] = startPayload;
       const resp = await apiRequest("POST", "/api/preflight/photo-fetch-jobs", startPayload);
@@ -1161,8 +1167,9 @@ export default function BuilderPreflight() {
                     Photos are already saved for every unit at{" "}
                     <strong>{property.complexName}</strong>. The Platform Check
                     can use the photos on file when you click <strong>Run check</strong>{" "}
-                    below. Use <strong>Find different photos</strong> only if the saved
-                    Zillow match looks wrong or you want to replace a unit&apos;s photo set.
+                    below. Use <strong>Re-pull all photos</strong> to rescrape this
+                    unit&apos;s own listing and refresh its full gallery. To swap in a
+                    different unit entirely, use <strong>Find / Replace a Unit</strong>.
                   </p>
                 );
               }
@@ -1170,9 +1177,9 @@ export default function BuilderPreflight() {
                 return (
                   <p className="text-sm text-muted-foreground mb-4">
                     Some units already have photos saved. Click <strong>Find Photos</strong>{" "}
-                    for any unit without photos, or <strong>Find different photos</strong>{" "}
-                    if an existing saved match looks wrong. Then click <strong>Run check</strong>{" "}
-                    on the Platform Check.
+                    for any unit without photos, or <strong>Re-pull all photos</strong>{" "}
+                    to rescrape a unit&apos;s own listing and refresh its gallery. Then click{" "}
+                    <strong>Run check</strong> on the Platform Check.
                   </p>
                 );
               }
@@ -1222,7 +1229,7 @@ export default function BuilderPreflight() {
                           Searching… {photoFetchElapsedSeconds}s
                         </>
                       ) : folderHasPhotos ? (
-                        <><RefreshCw className="h-3 w-3 mr-1" /> Find different photos</>
+                        <><RefreshCw className="h-3 w-3 mr-1" /> Re-pull all photos</>
                       ) : (
                         <><Search className="h-3 w-3 mr-1" /> Find Photos</>
                       )}

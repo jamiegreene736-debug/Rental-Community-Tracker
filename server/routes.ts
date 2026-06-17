@@ -242,6 +242,7 @@ import {
   unitGalleryMaxKeep,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
+import { isolateRedfinSubjectGallery } from "./redfin-gallery";
 import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-combo";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
@@ -4267,7 +4268,22 @@ function extractGenericRealEstateGalleryFromHtml(html: string): { urls: string[]
       pushSrcset(m[1]);
     }
 
-    return { urls, facts };
+    // Redfin listing pages embed a "Nearby similar homes" / comparable-sold
+    // carousel whose cards each carry ~3 cdn-redfin thumbnails. The loops above
+    // harvest every cdn-redfin image, so without this the folder fills with
+    // 15-17 *other* listings (the mixed/wrong-community contamination). Keep
+    // only the subject listing's own photo set (by og:image photoSetId); an
+    // off-market listing with no own gallery yields none rather than comps.
+    // See server/redfin-gallery.ts. No-op for non-Redfin pages.
+    const redfinIsolated = isolateRedfinSubjectGallery(html, urls);
+    if (redfinIsolated.isRedfin && redfinIsolated.droppedComps > 0) {
+      console.log(
+        `[redfin-gallery] subjectSetId=${redfinIsolated.subjectSetId ?? "none"} ` +
+        `kept=${redfinIsolated.urls.length} droppedComps=${redfinIsolated.droppedComps}`,
+      );
+    }
+
+    return { urls: redfinIsolated.urls, facts };
 }
 
 async function scrapeGenericRealEstateViaFetch(url: string): Promise<{ urls: string[]; facts: ListingFacts }> {
