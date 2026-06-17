@@ -2290,6 +2290,43 @@ assert.ok(
   unitReplacementSource.includes("Search finished without a replacement unit"),
   "completed replacement jobs without a unit must show an error state",
 );
+
+// ── allowOtaListed override (Waikoloa Beach Villas / STVR-saturated communities) ──
+// In a community where nearly every for-sale unit is also an active Airbnb/VRBO
+// rental, the default "clean unit" requirement rejects everything (skipped-found).
+// The operator opt-in `allowOtaListed` relaxes ONLY the unit-name OTA gate, never
+// the photo-reuse gate, and flags the accepted unit `otaListedOn`.
+assert.ok(
+  routeSource.includes("const allowOtaListed = requestedAllowOtaListed === true;"),
+  "find-unit must parse the operator allowOtaListed opt-in",
+);
+assert.ok(
+  routeSource.includes("if (foundOn && !allowOtaListed)")
+    && routeSource.includes("if (foundOn && allowOtaListed)"),
+  "allowOtaListed must bypass the unit-name skipped-found gate while leaving the default-off path intact",
+);
+assert.ok(
+  routeSource.includes("otaListedOn: otaListedHost"),
+  "an OTA-listed unit kept by allowOtaListed must be flagged otaListedOn on the returned unit",
+);
+assert.ok(
+  /verdict:\s*"skipped-photo-found"/.test(routeSource)
+    && !/allowOtaListed[\s\S]{0,160}skipped-photo-found/.test(routeSource),
+  "allowOtaListed must NOT relax the photo-reuse gate (skipped-photo-found stays enforced; PR #338 anti-feedback-loop)",
+);
+assert.ok(
+  routeSource.includes('found on ${cleanChannel ? "the enforced channel" : "Airbnb/VRBO/Booking.com"}'),
+  "the load-bearing skipped-found diagnostic substring must remain intact (append-only diagnostic hint)",
+);
+assert.ok(
+  unitReplacementSource.includes("allowOtaListed,")
+    && unitReplacementSource.includes("setAllowOtaListed"),
+  "the builder replacement flow must expose the allowOtaListed toggle and send it in the payload",
+);
+assert.ok(
+  unitReplacementSource.includes("result.otaListedOn"),
+  "the replacement result must surface otaListedOn so the green 'clean' shield never lies about an OTA-listed unit",
+);
 assert.ok(
   preflightSource.includes("replacementSourceUrl: unitOverrides[u.id]?.sourceUrl"),
   "preflight replacement flow must pass active swap URLs so follow-up searches use expanded mode",

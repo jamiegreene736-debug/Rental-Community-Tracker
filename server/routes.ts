@@ -30487,6 +30487,7 @@ Return ONLY compact JSON with this exact shape:
       targetUnitId,
       expandedSearch: requestedExpandedSearch = false,
       skipDiscovery: requestedSkipDiscovery = false,
+      allowOtaListed: requestedAllowOtaListed = false,
       resumeCandidates: requestedResumeCandidates = [],
     } = req.body as {
       communityFolder: string;
@@ -30503,6 +30504,7 @@ Return ONLY compact JSON with this exact shape:
       targetUnitId?: string;
       expandedSearch?: boolean;
       skipDiscovery?: boolean;
+      allowOtaListed?: boolean;
       resumeCandidates?: Array<{
         sourceUrl: string;
         source: "zillow" | "realtor" | "redfin" | "homes";
@@ -30516,6 +30518,16 @@ Return ONLY compact JSON with this exact shape:
     const strict = requestedStrict === true && !!cleanChannel;
     const expandedSearch = requestedExpandedSearch === true;
     const skipDiscovery = requestedSkipDiscovery === true;
+    // `allowOtaListed` (operator opt-in, default OFF) relaxes ONLY the unit-name
+    // OTA-presence gate ("skipped-found") for STVR-saturated communities where
+    // nearly every for-sale unit is also an active Airbnb/VRBO rental (e.g.
+    // Waikoloa Beach Villas — ~89 of 121 units on VRBO). It does NOT relax the
+    // photo-reuse gate ("skipped-photo-found"): a candidate's real-estate photos
+    // must still be distinct from the OTA gallery, so PR #338's anti-feedback-loop
+    // protection stays intact (we surface a zillow/redfin candidate that happens
+    // to also be OTA-listed, never OTA photos). The accepted unit is flagged
+    // `otaListedOn` so the operator sees it is already listed elsewhere.
+    const allowOtaListed = requestedAllowOtaListed === true;
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
     const normalizedBodyName = typeof bodyCommunityName === "string" ? bodyCommunityName.trim() : "";
@@ -31871,6 +31883,9 @@ Return ONLY compact JSON with this exact shape:
       }
       try {
         let { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
+        // Set when the unit-name OTA check finds this unit on an enforced channel
+        // AND allowOtaListed let it through anyway — surfaced on the accepted unit.
+        let otaListedHost: string | null = null;
         if (rejectOutsideResort(sourceUrl, source, address, unitNumber)) continue;
         const blockedUnitClaim = findReplacementBlockedUnitClaim(unitNumber, address, sameCommunityExclusions);
         if (blockedUnitClaim) {
@@ -31908,7 +31923,7 @@ Return ONLY compact JSON with this exact shape:
         // uses "bookingCom" while the API request uses "booking" —
         // map here so the body convention stays simple.
         const foundOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "found");
-        if (foundOn) {
+        if (foundOn && !allowOtaListed) {
           console.error(`[find-unit] [${source}] Unit ${unitNumber} found on ${foundOn.host} — skipping (cleanChannel=${cleanChannel ?? "all"})`);
           attempts.push({
             sourceUrl, source, address, unit: unitNumber || "?",
@@ -31917,6 +31932,13 @@ Return ONLY compact JSON with this exact shape:
             platformCheck,
           });
           continue;
+        }
+        if (foundOn && allowOtaListed) {
+          // Operator opted to include OTA-listed units (STVR-saturated community).
+          // Remember the channel and fall through — the photo-reuse gate below
+          // ("skipped-photo-found") still runs, so we never reuse OTA photos.
+          otaListedHost = foundOn.host;
+          console.error(`[find-unit] [${source}] Unit ${unitNumber} found on ${foundOn.host} — kept (allowOtaListed); real-estate photos still checked for reuse`);
         }
         if (strict) {
           const unknownOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "unknown");
@@ -32137,6 +32159,10 @@ Return ONLY compact JSON with this exact shape:
               platformCheck,
               expandedSearch,
               relaxedPhotoFloor: expandedSearch && photoCount < 5,
+              // Set only when allowOtaListed kept an OTA-listed unit; the UI flags
+              // it so the operator knows the unit is already on this channel
+              // (its real-estate photos were still verified as not reused there).
+              otaListedOn: otaListedHost,
             },
           });
         }
@@ -32209,6 +32235,14 @@ Return ONLY compact JSON with this exact shape:
       if (sourceBreakdown.homes > 0) sourceParts.push(`${sourceBreakdown.homes} Homes.com`);
       if (sourceBreakdown.vrbo > 0) sourceParts.push(`${sourceBreakdown.vrbo} VRBO`);
       diagnostic = `Checked ${totalCandidates} ${totalCandidates === 1 ? "candidate" : "candidates"} (${sourceParts.join(" + ")})${expandedSearch ? " in expanded mode" : ""} — ${parts.join(", ")}.`;
+      // Saturated-community hint: when the ONLY thing standing between the operator
+      // and a result is the OTA-presence gate, point them at the opt-in. Append-only
+      // so the test-asserted "found on …Airbnb/VRBO/Booking.com" substring above is
+      // left byte-identical.
+      if (!allowOtaListed && breakdown["skipped-found"] > 0) {
+        const n = breakdown["skipped-found"];
+        diagnostic += ` ${n} ${n === 1 ? "unit was" : "units were"} already listed on a short-term-rental platform — this community is heavily rented, so few or no fully-clean units remain. Re-run with "Include units already on Airbnb/VRBO" to use one (its real-estate photos are still checked, so duplicate photos are never reused).`;
+      }
     }
 
     const uncheckedCandidates = budgetStopped
@@ -32233,6 +32267,7 @@ Return ONLY compact JSON with this exact shape:
         strict,
         expandedSearch,
         skipDiscovery,
+        allowOtaListed,
         totalCandidates,
         sourceBreakdown,
         breakdown,
