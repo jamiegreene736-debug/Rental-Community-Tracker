@@ -26,6 +26,7 @@ import type { BuyIn } from "@shared/schema";
 import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+import { occupancyForBedrooms } from "@shared/occupancy";
 import {
   inferCombinedBedroomsFromDraft,
   positiveDraftInteger,
@@ -43057,6 +43058,10 @@ Return ONLY compact JSON with this exact shape:
     const combinedBedrooms = singleListing
       ? unit1Bedrooms
       : unit1Bedrooms + unit2Bedrooms!;
+    // The listing's headline occupancy — the single rule keyed on total
+    // bedrooms — so the generated draft's title/bookingTitle "Sleeps N" matches
+    // the dashboard Guests column and everything else (was b*2+2, wrong for ≥3BR).
+    const listingSleeps = occupancyForBedrooms(combinedBedrooms);
 
     // Best-effort walking distance for the description. Only used for
     // combo listings — for a single standalone unit there's only one
@@ -43140,7 +43145,7 @@ Return ONLY compact JSON with this exact shape:
     });
     const resortFeeNote = formatResortFeeNote(communityName, resortFee);
 
-    const guestCapacity = combinedBedrooms * 2 + 2; // rough sleeps estimate
+    const guestCapacity = listingSleeps; // headline occupancy rule (occupancyForBedrooms)
 
     const fallbackUnitDraft = (unit: { bedrooms: number }): {
       bedrooms: number;
@@ -43152,7 +43157,7 @@ Return ONLY compact JSON with this exact shape:
       longDescription: string;
     } => {
       const bedrooms = unit.bedrooms || 2;
-      const maxGuests = bedrooms * 2 + 2;
+      const maxGuests = occupancyForBedrooms(bedrooms);
       return {
         bedrooms,
         bathrooms: bedrooms >= 3 ? "2.5" : "2",
@@ -43289,8 +43294,8 @@ ${resortFeeNote ? `- Resort fee note to include exactly once in summary or space
 OUTPUT — return ONLY valid JSON with this exact shape:
 
 {
-  "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. Examples: 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 14 near Disney!', 'Beautiful 4BR for 10 in Kissimmee!'. Always end with !. Use only commas and hyphens for punctuation — Airbnb prefers them over em dashes (—). Count characters and STAY UNDER 50.",
-  "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. Examples: 'Poipu Kai - 7BR Resort - Sleeps 16', 'Princeville - 5BR Condos - Sleeps 14', 'Windsor Hills - 4BR Condos - Sleeps 10'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
+  "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. For the <sleeps> number use EXACTLY ${listingSleeps}. Examples: 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 16 near Disney!', 'Beautiful 4BR for 12 in Kissimmee!'. Always end with !. Use only commas and hyphens for punctuation — Airbnb prefers them over em dashes (—). Count characters and STAY UNDER 50.",
+  "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. For <X> use EXACTLY ${listingSleeps}. Examples: 'Poipu Kai - 7BR Resort - Sleeps 18', 'Princeville - 5BR Condos - Sleeps 14', 'Windsor Hills - 4BR Condos - Sleeps 12'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
   "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
   "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point (proximity, sleeps N, key amenity). Do NOT mention 'two separate units' or 'individually owned' or 'representative accommodations' here — the builder adds combo setup at the top and unit-assignment language at the bottom.",
   "space": "1-2 paragraphs describing the combined property layout — bedroom count across both units, what guests get, why it works for a large group. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance. Do NOT include any disclosure / 'two separate units' / 'individually owned' / unit-assignment language; the builder adds those separately.",
@@ -43396,6 +43401,14 @@ CONSTRAINTS
         parsedTransit ? `GETTING AROUND\n\n${parsedTransit}` : null,
       ].filter(Boolean).join("\n\n");
 
+      // Pin the "Sleeps N" / "for N" occupancy token in the LLM-written titles
+      // to the headline rule. The model is given a format but picks its own
+      // number, which drifted (e.g. 6BR→14); this guarantees a generated draft
+      // can't publish a title that disagrees with the dashboard/summary.
+      const syncTitleOccupancy = (t: string) =>
+        t.replace(/\bSleeps\s+\d+/i, `Sleeps ${listingSleeps}`)
+         .replace(/\bfor\s+\d+\b/i, `for ${listingSleeps}`);
+
       return res.json({
         // Airbnb truncates titles past 50 chars. Booking.com / VRBO
         // tolerate longer but active properties keep both under 50
@@ -43403,8 +43416,8 @@ CONSTRAINTS
         // bookingTitle. Hard-cap both at 50 so a Claude overshoot
         // doesn't silently push a truncated headline downstream —
         // operator can edit on Step 5.
-        title: String(parsed.title ?? "").slice(0, 50),
-        bookingTitle: String(parsed.bookingTitle ?? parsed.title ?? "").slice(0, 50),
+        title: syncTitleOccupancy(String(parsed.title ?? "")).slice(0, 50),
+        bookingTitle: syncTitleOccupancy(String(parsed.bookingTitle ?? parsed.title ?? "")).slice(0, 50),
         propertyType: parsed.propertyType ?? "Condominium",
         description,
         summary: summaryWithFee,

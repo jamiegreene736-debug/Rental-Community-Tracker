@@ -11,7 +11,7 @@ import {
   buildGuestyListingRooms as buildBeddingListingRooms,
   totalBedrooms as totalBeddingBedrooms,
   totalBathrooms as totalBeddingBathrooms,
-  totalSleeps as totalBeddingSleeps,
+  headlineSleeps as headlineBeddingSleeps,
 } from "@/data/bedding-config";
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
@@ -1181,10 +1181,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   } | null>(null);
 
   useEffect(() => {
-    // Show the title with its "Sleeps N" already synced to the bed-derived
-    // occupancy, so the builder doesn't display a stale count (guarded: a
-    // 0/not-yet-loaded bedding config leaves the title untouched).
-    const initSleeps = typeof propertyId === "number" ? totalBeddingSleeps(loadBuilderBeddingConfig(propertyId)) : 0;
+    // Show the title with its "Sleeps N" already synced to the headline
+    // occupancy rule (occupancyForBedrooms), so the builder doesn't display a
+    // stale count (guarded: a 0/not-yet-loaded bedding config leaves the title
+    // untouched).
+    const initSleeps = typeof propertyId === "number" ? headlineBeddingSleeps(propertyId, loadBuilderBeddingConfig(propertyId)) : 0;
     setEditableTitle(syncSleepsInTitle(propertyData?.descriptions?.title ?? "", initSleeps));
   }, [propertyData?.descriptions?.title, propertyId]);
 
@@ -1263,11 +1264,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const withCompliance = { ...propertyData, ...complianceOverrides };
     if (!propertyData.descriptions) return withCompliance;
     // Sync the occupancy numbers baked into the description prose ("Sleep up to
-    // 14 guests", "accommodate up to 14 guests") to the bed-derived sleeps so
-    // the Descriptions tab + the Guesty push stop showing a stale count. Only
+    // 14 guests", "accommodate up to 14 guests") to the headline occupancy rule
+    // so the Descriptions tab + the Guesty push stop showing a stale count. Only
     // listing-level "... N guests" phrases are rewritten (bedroom counts/sqft
     // and per-unit "Sleeps N with <beds>" sentences are left alone).
-    const sleeps = typeof propertyId === "number" ? totalBeddingSleeps(loadBuilderBeddingConfig(propertyId)) : 0;
+    const sleeps = typeof propertyId === "number" ? headlineBeddingSleeps(propertyId, loadBuilderBeddingConfig(propertyId)) : 0;
     const d = propertyData.descriptions;
     const fix = <T extends string | undefined>(s: T): T => (s ? (syncSleepsInDescription(s, sleeps) as T) : s);
     return {
@@ -2852,10 +2853,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
     setDescPushState("pushing");
     setDescPushError(null);
-    // Keep the title's "Sleeps N" in sync with the bed-derived occupancy so the
-    // Guesty title/nickname can't drift from the actual sleeping capacity (the
-    // operator hit a title saying "Sleeps 14" while the beds sleep 16).
-    const sleeps = typeof propertyId === "number" ? totalBeddingSleeps(loadBuilderBeddingConfig(propertyId)) : 0;
+    // Keep the title's "Sleeps N" in sync with the headline occupancy rule so
+    // the Guesty title/nickname can't drift from the listing's advertised
+    // occupancy (the operator hit titles/summaries/dashboard showing three
+    // different numbers).
+    const sleeps = typeof propertyId === "number" ? headlineBeddingSleeps(propertyId, loadBuilderBeddingConfig(propertyId)) : 0;
     const descriptions = {
       ...effectivePropertyData.descriptions,
       title: syncSleepsInTitle(effectivePropertyData.descriptions.title ?? "", sleeps),
@@ -2902,7 +2904,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       : effectivePropertyData?.areaSquareFeet ?? 0;
     const beds = totalBeddingBedrooms(beddingConfig) || propData?.units.reduce((s, u) => s + u.bedrooms, 0) || 0;
     const baths = totalBeddingBathrooms(beddingConfig) || propData?.units.reduce((s, u) => s + parseFloat(u.bathrooms), 0) || 0;
-    const sleeps = totalBeddingSleeps(beddingConfig);
+    // Guesty `accommodates` follows the headline occupancy rule, NOT the literal
+    // bed capacity, so it matches the title/summary/dashboard exactly.
+    const sleeps = headlineBeddingSleeps(propertyId, beddingConfig);
 
     await guestyService.updateListingDetails(selectedId, {
       areaSquareFeet: sqft || undefined,

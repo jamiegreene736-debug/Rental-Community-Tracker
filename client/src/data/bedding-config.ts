@@ -41,6 +41,10 @@ import {
   type GuestyRoom,
 } from "./guesty-listing-config";
 import { getUnitBuilderByPropertyId } from "./unit-builder-data";
+// Single source of truth for the headline occupancy rule, shared with the
+// server (auto-reply capacity + generated draft titles). Relative path (not the
+// @shared alias) so the tsx test runner resolves it.
+import { occupancyForBedrooms } from "../../../shared/occupancy";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -318,6 +322,38 @@ export function totalSleeps(config: PropertyBeddingConfig): number {
     }
   }
   return total;
+}
+
+// ── Headline occupancy rule ──────────────────────────────────────────────────
+// The guest-facing "Sleeps N" — listing TITLE, SUMMARY, the Guesty
+// `accommodates` field, and the dashboard "Guests" column — is a FIXED business
+// rule keyed ONLY on the listing's bedroom count, NOT the literal bed capacity
+// returned by totalSleeps(). The rule lives in shared/occupancy.ts (shared with
+// the server) and is re-exported here so existing "@/data/bedding-config"
+// importers keep working. Anything that displays or pushes a headline occupancy
+// MUST route through it, never totalSleeps().
+export { occupancyForBedrooms };
+
+// The bedroom count the headline rule keys on for a given listing. Prefer the
+// marketing bedroom count declared in the builder bookingTitle ("… - 7BR …"),
+// which is the operator-authoritative count and can intentionally differ from
+// the live bed config (e.g. listing #20 is advertised 7BR while its bed config
+// still has 2 units / 6 rooms pending a 3rd unit). Falls back to the bed-config
+// bedroom total for community drafts (negative ids — no bookingTitle).
+export function headlineBedrooms(propertyId: number, config: PropertyBeddingConfig): number {
+  if (propertyId > 0) {
+    const title = getUnitBuilderByPropertyId(propertyId)?.bookingTitle ?? "";
+    const m = title.match(/(\d+)\s*BR\b/i);
+    if (m) return parseInt(m[1], 10);
+  }
+  return totalBedrooms(config);
+}
+
+// Convenience: the headline "Sleeps N" for a loaded bedding config. This is what
+// the builder (title/description sync + the Guesty accommodates push) calls
+// instead of totalSleeps().
+export function headlineSleeps(propertyId: number, config: PropertyBeddingConfig): number {
+  return occupancyForBedrooms(headlineBedrooms(propertyId, config));
 }
 
 export function buildGuestyListingRooms(config: PropertyBeddingConfig): GuestyRoom[] {
