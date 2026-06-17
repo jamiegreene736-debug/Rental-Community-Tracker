@@ -938,11 +938,9 @@ async function buildBulkGuestySeasonalPlan(
   } else {
     const draft = await storage.getCommunityDraft(Math.abs(propertyId));
     if (!draft) return null;
-    const isSingle = (draft as any).singleListing === true;
-    const resolved = resolveComboUnitBedrooms(draft);
-    units = isSingle
-      ? [{ bedrooms: resolved.unit1 }]
-      : [{ bedrooms: resolved.unit1 }, { bedrooms: resolved.unit2 }];
+    const unitSlots = unitSlotsForCommunityDraft(draft);
+    if (unitSlots.length === 0) return null;
+    units = unitSlots.map((slot) => ({ bedrooms: slot.bedrooms }));
     community = communityKeyForDraft(draft);
   }
 
@@ -1041,16 +1039,21 @@ async function pushBulkGuestyPricingAfterRefresh(
   // a successful price push or fail the whole pricing item.
   const reconcileBlackouts = async (): Promise<PricingBlackoutReconcile> => {
     try {
-      const { reconcilePricingBlackoutBlocks } = await import("./sync-scanner-blocks");
+      const { reopenAllPricingBlackoutBlocks, reconcilePricingBlackoutBlocks } = await import("./sync-scanner-blocks");
+      const reopened = await reopenAllPricingBlackoutBlocks(propertyId);
       const result = await reconcilePricingBlackoutBlocks({
         propertyId,
-        desired: plan.blackoutWindows
-          .filter((w) => w.checkIn && w.checkOut)
-          .map((w) => ({ startDate: w.checkIn, endDate: w.checkOut, reason: w.reason })),
+        desired: [],
         confirmedOpenMonths: plan.monthlyRates.map((r) => r.yearMonth),
         dryRun: false,
       });
-      return { created: result.created, removed: result.removed, wouldCreate: result.wouldCreate, wouldRemove: result.wouldRemove, failures: result.failures };
+      return {
+        created: result.created,
+        removed: (reopened.removed ?? 0) + result.removed,
+        wouldCreate: result.wouldCreate,
+        wouldRemove: result.wouldRemove,
+        failures: [...(reopened.failures ?? []), ...result.failures],
+      };
     } catch (e: any) {
       console.warn(`[bulk-pricing] pricing-blackout calendar reconcile failed for property ${propertyId}: ${e?.message ?? e}`);
       return null;
@@ -1058,17 +1061,12 @@ async function pushBulkGuestyPricingAfterRefresh(
   };
 
   if (plan.monthlyRates.length === 0) {
-    // Every month was blacked out — nothing to price, but we still close the
-    // windows on Guesty so the listing isn't bookable at stale/unverifiable rates.
     const blackout = await reconcileBlackouts();
-    const closed = blackout?.created ?? 0;
     return {
       skipped: true,
       listingId: plan.listingId,
       blackout,
-      reason: plan.blackoutWindows.length
-        ? `All ${plan.blackoutWindows.length} sampled window(s) blacked out (no confident comps); ${closed} closed on the Guesty calendar.`
-        : "No valid monthly pricing plan was generated.",
+      reason: "No valid monthly pricing plan was generated.",
     };
   }
 
@@ -5195,8 +5193,11 @@ function unitSlotsForCommunityDraft(draft: any, sourceListingId?: string): Array
   adHoc: boolean;
 }> {
   const community = communityKeyForDraft(draft);
-  const isSingle = draft?.singleListing === true;
   const resolved = resolveComboUnitBedrooms(draft);
+  const hasUnit2Config = positiveDraftInteger(draft?.unit2Bedrooms) != null
+    || String(draft?.unit2Address ?? "").trim().length > 0;
+  const isSingle = draft?.singleListing === true
+    || (!hasUnit2Config && resolved.unit1 > 0 && (resolved.unit2 <= 0 || resolved.combined === resolved.unit1));
 
   if (isSingle) {
     return resolved.unit1 > 0

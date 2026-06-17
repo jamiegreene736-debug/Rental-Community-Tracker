@@ -570,7 +570,7 @@ assert.ok(
   "season summary medians must bucket by sampled stay demand tier, not calendar season map (Hawaii has no HOLIDAY months in HAWAII_SEASONS)",
 );
 assert.ok(
-  hybridPricingSource.includes('[hybrid-pricing] monthly scan ok'),
+  hybridPricingSource.includes("monthly scan ok") && hybridPricingSource.includes("[hybrid-pricing]"),
   "each calendar month scan should log to Railway/server logs",
 );
 assert.ok(
@@ -596,36 +596,33 @@ assert.equal(
   false,
   "market pricing must use all-inclusive checkout totals, not per-night display prices",
 );
-assert.equal(
-  hybridPricingSource.includes("staticFallbackMonthlyRates"),
-  false,
-  "market-rate refresh must not fall back to static buy-in rates",
+assert.ok(
+  hybridPricingSource.includes("staticMarketRateBasis") && hybridPricingSource.includes("getBuyInRate("),
+  "thin/no-comp months must fall back to static seasonal buy-in instead of blacking out the calendar",
 );
 assert.ok(
   hybridPricingSource.includes("deletePropertyMarketRate(args.propertyId, bedrooms)"),
   "a genuinely unworkable scan (no eligible window / month-count integrity failure) should still clear the stale market-rate row",
 );
 assert.ok(
+  hybridPricingSource.includes('blackouts: []'),
+  "market-rate refresh must not return blackout windows",
+);
+assert.ok(
   hybridPricingSource.includes('airbnb.confidence.level === "red"'),
-  "red market-rate confidence must still be detected (it now triggers a month blackout instead of pricing the window)",
-);
-// Blackout behavior (2026-06-15): a red/no-comp month no longer aborts the
-// whole property — it blacks out that window and the scan continues.
-assert.ok(
-  hybridPricingSource.includes("recordMonthBlackout") && hybridPricingSource.includes("blackout: true"),
-  "a red/no-comp month must be recorded as a blackout and the scan must continue, not throw",
+  "red market-rate confidence must still be detected but the month is priced (not blacked out)",
 );
 assert.ok(
-  hybridPricingSource.includes("onMonthBlackout") && hybridPricingSource.includes("blackouts: HybridBlackoutWindow[]"),
-  "the scan must emit blackout events and return the blacked-out windows to the caller",
+  routesSource.includes("reopenAllPricingBlackoutBlocks") && routesSource.includes("reconcilePricingBlackoutBlocks"),
+  "the Guesty push must reopen legacy pricing-blackout blocks on re-run",
 );
 assert.ok(
-  routesSource.includes("reconcilePricingBlackoutBlocks"),
-  "the Guesty push must close blacked-out windows on the calendar (and reopen ones that became priceable)",
+  routesSource.includes("unitSlotsForCommunityDraft") && routesSource.includes("hasUnit2Config"),
+  "single-unit drafts must use one unit slot so Guesty push does not double the rate",
 );
 assert.ok(
-  routesSource.includes("blackoutWindows") && routesSource.includes("entry?.blackout"),
-  "the seasonal plan builder must skip blacked-out months (not treat them as a missing-data error)",
+  routesSource.includes("entry?.blackout"),
+  "the seasonal plan builder must still honor legacy blackout rows via static buy-in fallback",
 );
 assert.ok(
   hybridPricingSource.includes("monthOffset >= AIRBNB_MARKET_RATE_SEARCH_MONTHS"),

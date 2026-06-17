@@ -215,6 +215,44 @@ export const PRICING_BLACKOUT_SOURCE = "pricing-blackout";
 
 const monthKeyOf = (date: string) => String(date).slice(0, 7);
 
+export async function reopenAllPricingBlackoutBlocks(propertyId: number): Promise<SyncResult> {
+  const guestyListingId = await storage.getGuestyListingId(propertyId);
+  if (!guestyListingId) {
+    return {
+      success: false, propertyId, guestyListingId: null,
+      created: 0, removed: 0, unchanged: 0, failures: [],
+      reason: `No Guesty listing mapped for property ${propertyId}`,
+    };
+  }
+
+  const calPath = `/availability-pricing/api/calendar/listings/${guestyListingId}`;
+  const active = (await storage.getActiveScannerBlocks(propertyId))
+    .filter((b) => b.source === PRICING_BLACKOUT_SOURCE);
+  const failures: SyncResult["failures"] = [];
+  let removed = 0;
+
+  for (const block of active) {
+    try {
+      await guestyCalendarPutWithRetry(calPath, { startDate: block.startDate, endDate: block.endDate, status: "available" });
+      await storage.markScannerBlockRemoved(block.id);
+      removed++;
+      await sleep(750);
+    } catch (e: any) {
+      failures.push({ action: "remove", startDate: block.startDate, error: e?.message ?? String(e) });
+    }
+  }
+
+  return {
+    success: failures.length === 0,
+    propertyId,
+    guestyListingId,
+    created: 0,
+    removed,
+    unchanged: Math.max(0, active.length - removed),
+    failures,
+  };
+}
+
 export async function reconcilePricingBlackoutBlocks(args: {
   propertyId: number;
   desired: Array<{ startDate: string; endDate: string; reason: string }>;
