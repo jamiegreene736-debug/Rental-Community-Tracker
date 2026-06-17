@@ -1310,16 +1310,16 @@ Kapaa town is minutes away with its bike path, shopping, and diverse dining opti
     // still hold the old Lae Nani values and must be replaced with
     // the real Makahuena records before this listing re-publishes
     // to any OTA.
-    propertyName: "Gorgeous 5 bedroom condos for 12 at Makahuena Poipu!",
+    propertyName: "Gorgeous 5 bedroom condos for 14 at Makahuena Poipu!",
     complexName: "Makahuena at Poipu",
     address: "1661 Pe'e Rd, Koloa, HI 96756",
-    bookingTitle: "Makahuena at Poipu - 5BR Oceanfront - Sleeps 12",
+    bookingTitle: "Makahuena at Poipu - 5BR Oceanfront - Sleeps 14",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Makahuena at Poipu. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
-    combinedDescription: `This listing is comprised of two oceanfront condos within Makahuena at Poipu, a resort community at the southernmost point of Kauai, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 12 guests, with dramatic ocean views and direct access to rugged Makahuena Point.
+    combinedDescription: `This listing is comprised of two oceanfront condos within Makahuena at Poipu, a resort community at the southernmost point of Kauai, just a short walk apart from each other within the complex. Together they offer 5 bedrooms and can accommodate up to 14 guests, with dramatic ocean views and direct access to rugged Makahuena Point.
 
 Unit A is an oceanfront 3-bedroom, 2-bathroom corner condo (~1,500 sq ft) with expansive ocean views, a full kitchen, and a private lanai. Sleeps 8 with a King master, Queen second bedroom, a third bedroom with two twin beds, and a queen sleeper sofa. AC and ceiling fans throughout.
 
-Unit B is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set within the tropical resort grounds with ocean views, a full kitchen, and a private lanai. Sleeps 4 with a King master, Queen second bedroom. AC and ceiling fans included.
+Unit B is a charming 2-bedroom, 2-bathroom condo (~1,100 sq ft) set within the tropical resort grounds with ocean views, a full kitchen, and a private lanai. Sleeps 6 with a King master, Queen second bedroom, and a queen sleeper sofa. AC and ceiling fans included.
 
 Makahuena at Poipu sits on a dramatic volcanic point with sweeping Pacific views. The resort pool, BBQ area, and landscaped grounds round out the amenities. Walk to Shipwreck Beach, Poipu Beach Park, and Brennecke's Beach — three of Kauai's best south-shore beaches. Koloa Town's historic plantation district is 5 minutes away with boutique shops and restaurants. Poipu Shopping Village and Kukui'ula Village (dining/shops) are nearby, along with Spouting Horn blowhole and the National Tropical Botanical Garden.
 

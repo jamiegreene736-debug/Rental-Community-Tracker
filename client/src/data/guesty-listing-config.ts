@@ -146,8 +146,13 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
     propertyId: 24,
     publicAddress: "Makahuena at Poipu, 1661 Pe'e Rd, Koloa, HI 96756",
     units: [
-      { unitId: "prop24-3br", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
-      { unitId: "prop24-2br", rooms: [room(1, k()), room(2, q()), living(sofa())] },
+      // unitId MUST match the unit `id` in unit-builder-data.ts (prop24-mk-*) —
+      // buildDefaultBeddingConfig() joins the two on unitId===id. The 2026-04-24
+      // Lae Nani→Makahuena rewrite renamed the unit ids to *-mk-* but left these
+      // stale, orphaning the bed layout so the bedding fell back to all-queens/
+      // no-sofa defaults (6+4=10) instead of the real 8+6=14. Keep them aligned.
+      { unitId: "prop24-mk-3br", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
+      { unitId: "prop24-mk-2br", rooms: [room(1, k()), room(2, q()), living(sofa())] },
     ],
   },
   {
