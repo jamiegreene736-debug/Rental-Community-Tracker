@@ -407,10 +407,27 @@ assert.match(
   /photoCountForUnit\(u\.id, u\.photos/,
   "preflight must only block sibling source URLs when that sibling already has saved photos",
 );
-assert.doesNotMatch(
+// "Re-pull all photos" rescrapes the unit's OWN saved listing first (the
+// operator wants the full original gallery, not a discovery wander to a
+// different/wrong-community listing). Safe because the Redfin comp-carousel
+// isolation below guarantees the rescrape returns only the subject listing.
+assert.match(
   preflightSource,
-  /rescrapeSourceUrl/,
-  "preflight Find different photos must discover a new listing instead of rescraping the saved source URL",
+  /rescrapeSourceUrl: replacingExistingPhotos && currentSourceUrl/,
+  "preflight Re-pull all photos must rescrape the unit's own saved source first",
+);
+assert.match(
+  preflightJobsSource,
+  /rescrapeSourceUrl[\s\S]*MIN_INDEPENDENT_UNIT_PHOTOS[\s\S]*photos = nextPhotos/,
+  "preflight photo job must rescrape the saved source, then fall back to discovery when it yields fewer than MIN_INDEPENDENT_UNIT_PHOTOS",
+);
+// Root-cause guard: the Redfin gallery extractor must isolate the subject
+// listing's photo set so a unit folder never fills with the nearby/comparable
+// homes carousel (the mixed-photos / wrong-community contamination).
+assert.match(
+  routesSource,
+  /isolateRedfinSubjectGallery\(html, urls\)/,
+  "Redfin gallery scrape must isolate the subject listing and drop the comparable-homes carousel",
 );
 assert.match(
   preflightSource,
