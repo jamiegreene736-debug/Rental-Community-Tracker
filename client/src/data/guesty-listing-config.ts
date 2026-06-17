@@ -136,7 +136,10 @@ export const GUESTY_PROPERTY_CONFIGS: GuestyPropertyConfig[] = [
     publicAddress: "Kaha Lani Resort, 4460 Nehe Rd, Kapaa, HI 96746",
     units: [
       { unitId: "prop23-3br", rooms: [room(1, k()), room(2, q()), room(3, tw()), living(sofa())] },
-      { unitId: "prop23-2br", rooms: [room(1, k()), room(2, q())] },
+      // Unit B sleeps 6 (King + Queen + sofa sleeper) per its description /
+      // maxGuests:6, so the combo sleeps 14. The sofa was missing here, which
+      // under-derived occupancy to 12 and synced the title/prose down to "Sleeps 12".
+      { unitId: "prop23-2br", rooms: [room(1, k()), room(2, q()), living(sofa())] },
     ],
   },
   {
