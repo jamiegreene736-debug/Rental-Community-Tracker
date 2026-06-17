@@ -173,6 +173,7 @@ import {
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "@shared/bulk-combo-queue-progress";
+import { discoverCommunityStreetAddress } from "./community-address-discovery";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import {
@@ -11736,6 +11737,98 @@ Requirements:
     } catch (err: any) {
       console.error("[buy-in-estimate] error:", err);
       res.status(500).json({ error: "Failed to compute buy-in estimate", message: err.message });
+    }
+  });
+
+  // POST /api/inbox/buy-in-search  { listingId, checkIn, checkOut }
+  //
+  // The LIVE counterpart to the static /api/inbox/buy-in-estimate above. From a
+  // guest inquiry in the inbox, run the EXACT SAME buy-in search the Operations tab
+  // runs when you click "Auto-fill cheapest" — the full escalation ladder (resort
+  // find-buy-in → home-city VRBO → nearby-city expansion → per-slot single-unit
+  // fallback), driving the local Chrome sidecar and finding the cheapest
+  // same-community combos — EXCEPT it attaches nothing. It starts the auto-fill job
+  // in DRY-RUN mode (server/auto-fill-job.ts): the would-be cheapest combo lands in
+  // the job's `attached` array (buyInId=null) and `comboOptions`/`cityEconomics`
+  // carry the alternatives + per-city ladder, all for read-only display. The client
+  // polls the normal GET /api/operations/auto-fill/:jobId for progress + results.
+  //
+  // Because it reuses the operations job verbatim (just gated to skip persistence),
+  // it inherits every load-bearing rule for free — VRBO sight+click, the geo
+  // guards, same-community pairing, the deploy-survival poll. The profit gate is
+  // intentionally DISABLED (expectedRevenue=0, the documented inquiry degrade-safe
+  // path) so the operator simply sees the cheapest options found, not a "would lose
+  // money, left empty" verdict — an inquiry has no committed revenue to gate on.
+  app.post("/api/inbox/buy-in-search", async (req: Request, res: Response) => {
+    try {
+      const listingId = String(req.body?.listingId ?? "").trim();
+      const checkIn = String(req.body?.checkIn ?? "").trim();
+      const checkOut = String(req.body?.checkOut ?? "").trim();
+      if (!listingId || !checkIn || !checkOut) {
+        return res.status(400).json({ ok: false, error: "listingId, checkIn, checkOut required" });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ ok: false, error: "checkIn and checkOut must be YYYY-MM-DD" });
+      }
+
+      // Same listingId → propertyId mapping the static estimate uses.
+      const propMap = await storage.getGuestyPropertyMap();
+      const mapping = propMap.find((m) => m.guestyListingId === listingId);
+      if (!mapping) {
+        return res.json({ ok: false, reason: "Listing not connected to a local property" });
+      }
+      const propertyId = mapping.propertyId;
+      // The auto-fill ladder keys everything off PROPERTY_UNIT_CONFIGS (community,
+      // per-unit bedroom plan). Only configured combo/single properties can run the
+      // city stages, so the live search is scoped to them — same scope as the static
+      // estimate's getUnitBuilderByPropertyId gate.
+      const config = PROPERTY_UNIT_CONFIGS[propertyId];
+      if (!config || !Array.isArray(config.units) || config.units.length === 0) {
+        return res.json({ ok: false, reason: "Property is not configured for live buy-in search" });
+      }
+      const slots = config.units.map((u) => ({
+        unitId: u.unitId,
+        unitLabel: u.unitLabel,
+        bedrooms: u.bedrooms,
+      }));
+      const propertyName = getUnitBuilderByPropertyId(propertyId)?.complexName || config.community;
+
+      const { startAutoFillJob } = await import("./auto-fill-job");
+      const started = startAutoFillJob({
+        // Synthetic, dry-run-only reservation key: namespaced so it can NEVER
+        // collide with a real reservation's auto-fill job. Stable across re-clicks
+        // for the same inquiry+dates, so the single-flight guard reuses an in-flight
+        // search instead of starting a duplicate.
+        reservationId: `inbox-search:${listingId}:${checkIn}:${checkOut}`,
+        propertyId,
+        listingId,
+        propertyName,
+        community: config.community,
+        checkIn,
+        checkOut,
+        slots,
+        // No ground-floor signal from an inquiry; no profit gate (read-only triage).
+        groundFloorBedrooms: [],
+        expectedRevenue: 0,
+        silent: true,
+        dryRun: true,
+        owner: "row",
+      });
+      return res.status(202).json({
+        ok: true,
+        jobId: started.jobId,
+        reused: started.reused,
+        propertyId,
+        propertyName,
+        community: config.community,
+        unitCount: slots.length,
+        bedroomPlan: slots.map((s) => s.bedrooms),
+      });
+    } catch (e: any) {
+      const { AutoFillValidationError } = await import("./auto-fill-job");
+      if (e instanceof AutoFillValidationError) return res.status(400).json({ ok: false, error: e.message });
+      console.error("[inbox-buy-in-search] start error:", e?.message ?? e);
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
   });
 
@@ -33904,6 +33997,22 @@ Return ONLY compact JSON with this exact shape:
         .where(and(eq(bulkComboListingJobItemRows.jobId, job.id), eq(bulkComboListingJobItemRows.itemKey, item.id)));
     }
   };
+  // Persist a discovered/backfilled street into the item's payload so it survives a
+  // worker restart and shows up in diagnostics. persistBulkComboListingSnapshot does
+  // NOT write payload, so this is a targeted merge-write for the one item.
+  const persistBulkComboItemStreetAddress = async (jobId: string, itemKey: string, street: string) => {
+    const [row] = await db
+      .select({ payload: bulkComboListingJobItemRows.payload })
+      .from(bulkComboListingJobItemRows)
+      .where(and(eq(bulkComboListingJobItemRows.jobId, jobId), eq(bulkComboListingJobItemRows.itemKey, itemKey)))
+      .limit(1);
+    const payload = (row?.payload && typeof row.payload === "object" ? { ...(row.payload as Record<string, unknown>) } : {}) as Record<string, unknown>;
+    payload.streetAddress = street;
+    await db
+      .update(bulkComboListingJobItemRows)
+      .set({ payload, updatedAt: new Date() })
+      .where(and(eq(bulkComboListingJobItemRows.jobId, jobId), eq(bulkComboListingJobItemRows.itemKey, itemKey)));
+  };
   const loadBulkComboListingJob = async (jobId: string): Promise<BulkComboListingJob | null> => {
     const [jobRow] = await db.select().from(bulkComboListingJobRows).where(eq(bulkComboListingJobRows.id, jobId)).limit(1);
     if (!jobRow) return null;
@@ -34619,16 +34728,44 @@ Return ONLY compact JSON with this exact shape:
             if (!item.draftId) {
               hydrateBulkComboListingItem(item);
               const community = item.community || {};
-              const addrPrecheck = validateCommunityStreetAddress({
+              let addrPrecheck = validateCommunityStreetAddress({
                 communityName: community.name,
                 city: community.city,
                 state: community.state,
                 streetAddress: item.streetAddress,
               });
+              // No curated/hint/operator street resolved — try LIVE discovery before
+              // failing. Only when there is NO curated rule: a curated mismatch
+              // ("should use X") must surface, not be papered over by a map lookup.
+              if (!addrPrecheck.ok && !communityAddressRuleForName(community.name)) {
+                const discovered = await discoverCommunityStreetAddress({
+                  communityName: community.name,
+                  city: community.city,
+                  state: community.state,
+                }).catch((e: any) => {
+                  console.warn(`[bulk-combo-listings] address discovery failed for "${community.name}": ${e?.message ?? e}`);
+                  return null;
+                });
+                if (discovered?.street) {
+                  item.streetAddress = discovered.street;
+                  await persistBulkComboItemStreetAddress(job.id, item.id, discovered.street).catch(() => {});
+                  await queueEvent("bulk-combo-listing", job.id, "address-discovered", `Discovered street address "${discovered.street}" for "${community.name ?? "this community"}"`, {
+                    itemKey: item.id,
+                    meta: { street: discovered.street, fullAddress: discovered.fullAddress, matchedTitle: discovered.matchedTitle, query: discovered.query },
+                  });
+                  addrPrecheck = validateCommunityStreetAddress({
+                    communityName: community.name,
+                    city: community.city,
+                    state: community.state,
+                    streetAddress: item.streetAddress,
+                  });
+                }
+              }
               if (!addrPrecheck.ok) {
                 item.status = "failed";
                 item.phase = "failed";
-                item.message = `No usable street address for "${community.name ?? "this community"}" — add one before queuing (skipped before searching photos). ${addrPrecheck.error}`;
+                const couldDiscover = !communityAddressRuleForName(community.name);
+                item.message = `No usable street address for "${community.name ?? "this community"}"${couldDiscover ? " (curated rules + live map lookup both came up empty)" : ""} — add one before queuing (skipped before searching photos). ${addrPrecheck.error}`;
                 item.error = item.message;
                 item.finishedAt = Date.now();
                 job.updatedAt = Date.now();
