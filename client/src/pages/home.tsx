@@ -79,6 +79,7 @@ import { cn } from "@/lib/utils";
 import type { CommunityDraft, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
+import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { usePortalSession } from "@/lib/auth";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -188,6 +189,11 @@ type BulkPricingJob = {
       rejectedCandidates?: number;
       blackoutCount?: number;
       blackoutClosed?: number;
+      rateChanges?: Array<{
+        bedrooms: number;
+        oldRate: string | number | null;
+        newRate: string | number | null;
+      }>;
     } | null;
     error: string | null;
   }>;
@@ -3623,6 +3629,7 @@ function AdminDashboard() {
                             const confidenceScore = typeof confidence?.score === "number" ? Math.round(confidence.score) : null;
                             const blackoutCount = typeof item.progress?.blackoutCount === "number" ? item.progress.blackoutCount : 0;
                             const blackoutClosed = typeof item.progress?.blackoutClosed === "number" ? item.progress.blackoutClosed : 0;
+                            const rateChanges = Array.isArray(item.progress?.rateChanges) ? item.progress.rateChanges : [];
                             return (
                               <div key={`${item.propertyId}-${index}`} className="border-b px-3 py-3 last:border-b-0">
                                 <div className="flex items-start justify-between gap-3">
@@ -3661,6 +3668,17 @@ function AdminDashboard() {
                                             {confidence.rejectedCandidates} rejected
                                           </span>
                                         )}
+                                      </div>
+                                    )}
+                                    {rateChanges.length > 0 && (
+                                      <div className="mt-2 rounded border bg-background px-2 py-1.5">
+                                        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                          Rate change
+                                        </p>
+                                        <RateChangesList
+                                          changes={rateChanges}
+                                          itemClassName="text-[11px]"
+                                        />
                                       </div>
                                     )}
                                   </div>
@@ -4629,27 +4647,21 @@ function BulkPricingChangesSummary({ job }: { job: BulkPricingJob }) {
   return (
     <div className="rounded-md border" data-testid="bulk-pricing-changes">
       <div className="border-b bg-muted/40 px-3 py-2 text-xs font-semibold">
-        What changed — old rate → new rate (market basis per bedroom)
+        What changed — strikethrough old rate, green ↑ / red ↓ on new rate
       </div>
       <div className="max-h-64 overflow-y-auto">
         {groups.map((g) => (
           <div key={g.name} className="border-b px-3 py-2 last:border-b-0">
             <p className="truncate text-sm font-medium">{g.name}</p>
-            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs">
-              {Array.from(g.rows.entries()).sort((a, b) => a[0] - b[0]).map(([br, l]) => {
-                const oldN = l.oldRate != null ? Number(l.oldRate) : null;
-                const newN = l.newRate != null ? Number(l.newRate) : null;
-                const delta = oldN != null && newN != null && oldN > 0 ? (newN - oldN) / oldN : null;
-                const tone = delta == null ? "text-muted-foreground" : delta > 0 ? "text-amber-700" : delta < 0 ? "text-green-700" : "text-muted-foreground";
-                return (
-                  <span key={br} className={tone}>
-                    <span className="font-semibold">{br}BR</span>{" "}
-                    {oldN != null ? `$${Math.round(oldN).toLocaleString()}` : "—"} →{" "}
-                    <span className="font-semibold">{newN != null ? `$${Math.round(newN).toLocaleString()}` : "—"}</span>
-                    {delta != null && <span> ({delta > 0 ? "+" : ""}{(delta * 100).toFixed(1)}%)</span>}
-                  </span>
-                );
-              })}
+            <div className="mt-1">
+              <RateChangesList
+                changes={Array.from(g.rows.entries()).sort((a, b) => a[0] - b[0]).map(([br, l]) => ({
+                  bedrooms: br,
+                  oldRate: l.oldRate,
+                  newRate: l.newRate,
+                }))}
+                itemClassName="text-xs"
+              />
             </div>
           </div>
         ))}

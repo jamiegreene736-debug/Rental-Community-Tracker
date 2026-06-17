@@ -17,6 +17,7 @@ import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
 import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
+import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { sampleLicensesForLocation } from "@/data/adapt-draft";
 import { useToast } from "@/hooks/use-toast";
@@ -675,7 +676,7 @@ function MarketRateChangeSummary({ propertyId }: { propertyId?: number }) {
       if (!r.ok) throw new Error(`pricing logs ${r.status}`);
       return r.json();
     },
-    enabled: typeof propertyId === "number" && propertyId > 0,
+    enabled: typeof propertyId === "number" && propertyId !== 0,
     staleTime: 30_000,
   });
   const logs = data?.logs ?? [];
@@ -688,25 +689,16 @@ function MarketRateChangeSummary({ propertyId }: { propertyId?: number }) {
   return (
     <div style={{ marginBottom: 8, padding: 8, background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, fontSize: 11 }} data-testid="market-rate-change-summary">
       <div style={{ fontWeight: 600, color: "#334155", marginBottom: 4 }}>
-        Market rate (basis) — old → new{latestAt ? ` · last updated ${new Date(latestAt).toLocaleString()}` : ""}
+        Market rate (basis) — change summary{latestAt ? ` · last updated ${new Date(latestAt).toLocaleString()}` : ""}
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-        {rows.map((r) => {
-          const oldN = r.oldRate != null ? Number(r.oldRate) : null;
-          const newN = r.newRate != null ? Number(r.newRate) : null;
-          const delta = oldN != null && newN != null && oldN > 0 ? (newN - oldN) / oldN : null;
-          const color = delta == null ? "#6b7280" : delta > 0 ? "#b45309" : delta < 0 ? "#166534" : "#6b7280";
-          return (
-            <span key={r.bedrooms} style={{ color }}>
-              <b>{r.bedrooms}BR</b>{" "}
-              {oldN != null ? `$${Math.round(oldN).toLocaleString()}` : "—"}
-              {" → "}
-              <b>{newN != null ? `$${Math.round(newN).toLocaleString()}` : "—"}</b>
-              {delta != null && <span> ({delta > 0 ? "+" : ""}{(delta * 100).toFixed(1)}%)</span>}
-            </span>
-          );
-        })}
-      </div>
+      <RateChangesList
+        changes={rows.map((r) => ({
+          bedrooms: r.bedrooms,
+          oldRate: r.oldRate,
+          newRate: r.newRate,
+        }))}
+        itemClassName="text-[11px]"
+      />
     </div>
   );
 }
@@ -6415,8 +6407,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               ) : (
                                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                                   {pricingUpdateLogs.slice(0, 8).map((log) => {
-                                    const oldRate = log.oldRate != null ? Number(log.oldRate) : null;
-                                    const newRate = log.newRate != null ? Number(log.newRate) : null;
                                     const layers = Array.isArray(log.layersJson) ? log.layersJson : [];
                                     const created = new Date(log.createdAt);
                                     return (
@@ -6424,8 +6414,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         <summary style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                                           <span style={{ minWidth: 118, color: "#6b7280" }}>{Number.isNaN(created.getTime()) ? log.createdAt : created.toLocaleString()}</span>
                                           <span style={{ fontWeight: 700 }}>{log.triggerType}</span>
-                                          <span>{log.bedrooms}BR</span>
-                                          <span>{oldRate ? `$${Math.round(oldRate).toLocaleString()}` : "none"} -&gt; {newRate ? `$${Math.round(newRate).toLocaleString()}` : "none"}</span>
+                                          <RateChangeDisplay
+                                            bedrooms={log.bedrooms}
+                                            oldRate={log.oldRate}
+                                            newRate={log.newRate}
+                                            showPercent
+                                          />
                                           <span style={{ padding: "1px 6px", borderRadius: 4, background: log.status === "ok" ? "#dcfce7" : "#fee2e2", color: log.status === "ok" ? "#166534" : "#991b1b", fontWeight: 700 }}>
                                             {log.status}
                                           </span>
@@ -6601,20 +6595,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       </td>
                                       <td>
                                         {row.previousBuyInTotal != null && row.previousBuyInTotal !== buyIn ? (
-                                          <span
-                                            title={`Market rate changed from $${row.previousBuyInTotal.toLocaleString()} to $${buyIn.toLocaleString()} on the most recent refresh (${buyIn >= row.previousBuyInTotal ? "+" : ""}${(((buyIn - row.previousBuyInTotal) / row.previousBuyInTotal) * 100).toFixed(1)}%).`}
-                                          >
-                                            <span style={{ color: "#dc2626", textDecoration: "line-through", fontWeight: 500 }}>
-                                              ${row.previousBuyInTotal.toLocaleString()}
-                                            </span>
-                                            <span style={{ color: "#9ca3af" }}> / </span>
-                                            <span style={{ color: "#16a34a", fontWeight: 700 }}>
-                                              ${buyIn.toLocaleString()}
-                                            </span>
-                                            <span style={{ color: buyIn >= row.previousBuyInTotal ? "#b45309" : "#166534", fontSize: 9, marginLeft: 4, fontWeight: 600 }}>
-                                              {buyIn >= row.previousBuyInTotal ? "▲" : "▼"}{Math.abs(Math.round(((buyIn - row.previousBuyInTotal) / row.previousBuyInTotal) * 100))}%
-                                            </span>
-                                          </span>
+                                          <RateChangeDisplay
+                                            oldRate={row.previousBuyInTotal}
+                                            newRate={buyIn}
+                                            showBedrooms={false}
+                                            showPercent
+                                          />
                                         ) : (
                                           <>${buyIn.toLocaleString()}</>
                                         )}

@@ -1217,6 +1217,20 @@ async function refreshPricingTabMarketRates(propertyId: number, label: string, c
   return { pricingResult, guestyPush };
 }
 
+function summarizePricingRateChanges(logs: Array<{ bedrooms?: number | null; oldRate?: string | number | null; newRate?: string | number | null }>) {
+  const byBR = new Map<number, { bedrooms: number; oldRate: string | number | null; newRate: string | number | null }>();
+  for (const log of logs) {
+    const bedrooms = Number(log.bedrooms);
+    if (!Number.isFinite(bedrooms)) continue;
+    byBR.set(bedrooms, {
+      bedrooms,
+      oldRate: log.oldRate ?? null,
+      newRate: log.newRate ?? null,
+    });
+  }
+  return Array.from(byBR.values()).sort((a, b) => a.bedrooms - b.bedrooms);
+}
+
 async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): Promise<void> {
   item.status = "running";
   item.startedAt = item.startedAt ?? Date.now();
@@ -1323,6 +1337,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       shouldCancel,
     });
   const blackoutWindows: HybridBlackoutWindow[] = Array.isArray(pricingResult.blackouts) ? pricingResult.blackouts : [];
+  const rateChanges = summarizePricingRateChanges(pricingResult.logs);
   const confidenceSummary = summarizeMarketRateProgressConfidence(pricingResult.rows);
   const pricingRecipe = (item.progress as any)?.pricingRecipe ?? null;
   item.progress = {
@@ -1332,6 +1347,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     rows: pricingResult.rows.length,
     confidence: confidenceSummary,
     pricingRecipe,
+    rateChanges,
   };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
@@ -1407,6 +1423,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       pricingRecipe,
       blackoutCount: blackoutWindows.length,
       blackoutClosed,
+      rateChanges,
     };
     await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-skipped", `Guesty pricing push skipped for ${item.label}: ${guestyPush.reason ?? "not mapped"}`, {
       itemKey: item.id,
@@ -1423,6 +1440,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       pricingRecipe,
       blackoutCount: blackoutWindows.length,
       blackoutClosed,
+      rateChanges,
     };
     await topQueueEvent("bulk-pricing", job.id, "item-guesty-pushed", `Pushed Guesty base rates plus lead-time scarcity pricing for ${item.label}`, {
       itemKey: item.id,
