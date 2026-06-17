@@ -961,28 +961,25 @@ function GuestyRatePushCard({
 // the server's PhotoCommunityCheckResult (server/photo-community-check.ts) —
 // kept as a local type so the client bundle doesn't import server code.
 type CommunityCheckFlag = { id: string; caption?: string; reason: string };
+type CommunityCheckPhotoVerdict = { id: string; caption?: string; match: "yes" | "no"; reason: string };
 type CommunityCheckGroup = {
   role: "community" | "unit";
   label: string;
   folder: string;
   photosChecked: number;
   photosTotal: number;
-  identifiedCommunity: string;
-  // Binary by design — the server answers each folder yes/no, never "uncertain"
-  // (see asYesNo in server/photo-community-check.ts). The operator wants a
-  // definite verdict, not a maybe.
+  interiorPhotosChecked?: number;
+  identifiedCommunity?: string;
+  communityFingerprint?: string;
   matchesExpected?: "yes" | "no";
   matchReason?: string;
   sameAsCommunity?: "yes" | "no";
   reason?: string;
   allSameCommunity?: boolean;
   allSameUnit?: boolean;
+  photoVerdicts?: CommunityCheckPhotoVerdict[];
   outliers: CommunityCheckFlag[];
   junk: CommunityCheckFlag[];
-  // Community-only: photos a Phase-B batch could not analyze (vision error).
-  // Surfaced so "checked X/Y" never hides a gap — the operator wants every
-  // community photo verified, not silently passed.
-  unchecked?: CommunityCheckFlag[];
   confidence: number;
 };
 type CommunityCheckDuplicate = {
@@ -997,7 +994,8 @@ type PhotoCommunityCheckResult = {
   expectedCommunity: string;
   summary: string;
   concerns: string[];
-  allSameCommunity: "yes" | "no" | "uncertain";
+  allSameCommunity: "yes" | "no";
+  unitsSameCommunity?: "yes" | "no" | "n/a";
   community: CommunityCheckGroup | null;
   units: CommunityCheckGroup[];
   duplicates: CommunityCheckDuplicate[];
@@ -7177,14 +7175,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     {communityCheckPhase === "running" ? "🔎 Checking photos…" : "🔎 Check photo community"}
                                   </button>
                                   <span style={{ fontSize: 11, color: "#64748b", flex: 1, minWidth: 220 }}>
-                                    Checks EVERY community-folder photo (one by one) plus ~5 photos of each unit to confirm they're all the SAME community, and flags junk / mis-filed photos and the same photo appearing in two folders.
+                                    Builds a community profile from the folder photos, then checks 5+ interior photos per unit against it. Every answer is Yes or No.
                                   </span>
                                 </div>
 
                                 {communityCheckPhase === "running" && (
                                   <div style={{ fontSize: 11, color: "#0e7490", marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
                                     <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#06b6d4", animation: "glb-blink 1s infinite" }} />
-                                    Analyzing every community photo with AI vision — usually 30-90 seconds…
+                                    Analyzing community folder, then 5+ interior photos per unit — usually 30-60 seconds…
                                   </div>
                                 )}
 
@@ -7224,6 +7222,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         </ul>
                                       </div>
                                     ) : null;
+                                  const photoVerdictList = (verdicts: CommunityCheckPhotoVerdict[] | undefined) =>
+                                    verdicts && verdicts.length > 0 ? (
+                                      <div style={{ marginTop: 4 }}>
+                                        <span style={{ fontSize: 11, fontWeight: 600, color: "#334155" }}>Per-photo votes:</span>
+                                        <ul style={{ margin: "2px 0 0 0", paddingLeft: 18, fontSize: 11, color: "#475569" }}>
+                                          {verdicts.map((v, i) => (
+                                            <li key={i}>
+                                              <code style={{ color: "#0e7490" }}>{v.id}</code>
+                                              <span style={{ ...badge(yn(v.match)), marginLeft: 6 }}>{yn(v.match).label}</span>
+                                              {v.caption ? ` "${v.caption}"` : ""} — {v.reason}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    ) : null;
                                   const crossDupes = r.duplicates.filter((d) => d.scope === "cross-folder");
 
                                   // ── Same-community roll-up (the operator's core question) ──────
@@ -7256,7 +7269,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   if (r.community) {
                                     rosterRows.push({
                                       label: r.community.label,
-                                      identified: r.community.identifiedCommunity,
+                                      identified: r.community.identifiedCommunity || r.community.communityFingerprint || "community folder",
                                       status: r.community.matchesExpected,
                                       vsLabel: r.expectedCommunity ? `vs UI “${r.expectedCommunity}”` : "reference set",
                                     });
@@ -7264,7 +7277,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   for (const u of r.units) {
                                     rosterRows.push({
                                       label: u.label,
-                                      identified: u.identifiedCommunity,
+                                      identified: u.sameAsCommunity === "yes"
+                                        ? (r.community?.identifiedCommunity || r.expectedCommunity || "same community")
+                                        : (u.reason || "different community"),
                                       status: u.sameAsCommunity,
                                       vsLabel: r.community ? "vs community folder" : "vs other units",
                                     });
@@ -7306,6 +7321,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
                                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                         <span style={{ ...badge(vStyle), fontSize: 12, padding: "2px 10px" }}>{vStyle.label}</span>
+                                        <span style={{ ...badge(yn(r.allSameCommunity)), fontSize: 11, padding: "1px 8px" }}>
+                                          All same community: {yn(r.allSameCommunity).label}
+                                        </span>
+                                        {r.unitsSameCommunity && r.unitsSameCommunity !== "n/a" && (
+                                          <span style={{ ...badge(yn(r.unitsSameCommunity)), fontSize: 11, padding: "1px 8px" }}>
+                                            Units match each other: {yn(r.unitsSameCommunity).label}
+                                          </span>
+                                        )}
                                         <span style={{ fontSize: 12, color: "#334155", flex: 1, minWidth: 200 }}>{r.summary}</span>
                                       </div>
 
@@ -7322,16 +7345,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                             <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>{r.community.photosChecked}/{r.community.photosTotal} checked</span>
                                           </div>
                                           <div style={rowS}>Identified as: <b>{r.community.identifiedCommunity}</b></div>
+                                          {r.community.communityFingerprint && (
+                                            <div style={{ ...rowS, fontSize: 11, color: "#64748b" }}>Profile: {r.community.communityFingerprint}</div>
+                                          )}
                                           <div style={rowS}>
                                             Matches expected{r.expectedCommunity ? ` ("${r.expectedCommunity}")` : ""}: <span style={badge(yn(r.community.matchesExpected))}>{yn(r.community.matchesExpected).label}</span>
                                             {r.community.matchReason ? <span style={muted}> — {r.community.matchReason}</span> : null}
                                           </div>
-                                          {!r.community.allSameCommunity && (
-                                            <div style={{ ...rowS, color: "#b45309" }}>⚠ Not all community photos look like the same place.</div>
-                                          )}
-                                          {flagList(r.community.outliers, "Possible different-community photos", "#b45309")}
+                                          <div style={rowS}>
+                                            All community photos same place: <span style={badge(yn(r.community.allSameCommunity ? "yes" : "no"))}>{yn(r.community.allSameCommunity ? "yes" : "no").label}</span>
+                                          </div>
+                                          {photoVerdictList(r.community.photoVerdicts)}
+                                          {flagList(r.community.outliers, "Different-community photos", "#b45309")}
                                           {flagList(r.community.junk, "Junk / mis-filed", "#b45309")}
-                                          {flagList(r.community.unchecked ?? [], "Not analyzed (vision error — re-run)", "#b45309")}
                                         </div>
                                       )}
 
@@ -7341,13 +7367,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           <div key={i} style={card}>
                                             <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                                               <span style={{ fontWeight: 600, fontSize: 12, color: "#0f172a" }}>{u.label}</span>
-                                              <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>{u.photosChecked}/{u.photosTotal} checked</span>
+                                              <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>
+                                                {u.photosChecked}/{u.photosTotal} checked
+                                                {typeof u.interiorPhotosChecked === "number" ? ` · ${u.interiorPhotosChecked} interior` : ""}
+                                              </span>
                                             </div>
-                                            <div style={rowS}>Identified as: <b>{u.identifiedCommunity}</b></div>
                                             <div style={rowS}>
-                                              Same community as community photos: <span style={badge(t)}>{t.label}</span>
+                                              Same community as community folder: <span style={badge(t)}>{t.label}</span>
                                               {u.reason ? <span style={muted}> — {u.reason}</span> : null}
                                             </div>
+                                            {photoVerdictList(u.photoVerdicts)}
                                             {u.allSameUnit === false && (
                                               <div style={{ ...rowS, color: "#b45309" }}>⚠ Not all photos look like the same unit.</div>
                                             )}

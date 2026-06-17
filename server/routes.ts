@@ -27164,15 +27164,9 @@ Return ONLY compact JSON with this exact shape:
   // Body: { guestyListingId: string }  OR  { all: true }  (iterates every mapped listing)
   // Streams NDJSON events: {type:"listing-start",id,name}, {type:"photo",...},
   //   {type:"listing-done",id,fixedCount,totalCount}, {type:"all-done",listingCount,...}
-  // Photo Community Check — operator-clicked QA from the photos tab. Confirms
-  // the community-folder photos match the property's expected community, that
-  // they're all of that one community, and that each unit set is the SAME
-  // community as the community photos. Also flags junk/mis-filed photos and
-  // cross-folder duplicates. Engine lives in server/photo-community-check.ts
-  // (single Claude vision call + deterministic dHash dup detection). The
-  // client sends the curated folders/filenames it actually shows, so the check
-  // matches what will be pushed (and works for static props, drafts, and
-  // single listings alike — this route is property-agnostic on purpose).
+  // Photo Community Check — operator-clicked QA from the photos tab. Two-pass
+  // vision analysis (community fingerprint + 5+ interior photos per unit) with
+  // deterministic yes/no verdicts. Engine: server/photo-community-check.ts.
   app.post("/api/builder/photo-community-check", async (req, res) => {
     try {
       const body = (req.body ?? {}) as PhotoCommunityCheckRequest;
