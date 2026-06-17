@@ -229,7 +229,7 @@ import {
   summarizeUnitPhotoProof,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
-import { remixBedroomSplits } from "@shared/community-combo";
+import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-combo";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { geocode, walkBetween } from "./walking-distance";
@@ -32583,6 +32583,15 @@ Return ONLY compact JSON with this exact shape:
   // No 5BR condos exist in these communities — cap each re-mixed half at 4BR.
   const COMBO_REMIX_MAX_UNIT_BEDROOMS = Math.max(1, Number(process.env.COMBO_REMIX_MAX_UNIT_BEDROOMS) || 4);
   const COMBO_REMIX_MAX_SPLITS = Math.max(1, Number(process.env.COMBO_REMIX_MAX_SPLITS) || 2);
+  // STRICT mode (bulk combo listing queue): when a combo can't source two
+  // DISTINCT, independently-photographed units, try OTHER combination types
+  // ("keep beds high, then step down": same-total re-mix -> smaller totals ->
+  // 2BR+2BR floor) and, if none yield photos, SKIP the resort (never save a
+  // listing without real photos for both units). Photo-reuse is force-OFF here.
+  const COMBO_FALLBACK_MAX_LADDER = Math.max(1, Number(process.env.COMBO_FALLBACK_MAX_LADDER) || 5);
+  // Floor each strict-fallback half at 2BR (the operator's "two 2BR condos") —
+  // never drop a strict listing to a 1BR unit.
+  const COMBO_FALLBACK_MIN_UNIT_BEDROOMS = Math.max(1, Number(process.env.COMBO_FALLBACK_MIN_UNIT_BEDROOMS) || 2);
   const toQueueMs = (value: Date | string | number | null | undefined): number | null => {
     if (!value) return null;
     if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -32941,7 +32950,13 @@ Return ONLY compact JSON with this exact shape:
     onProgress?: (item: ComboPhotoFetchItem) => Promise<void> | void,
     abortKey?: string,
     signal?: AbortSignal,
+    options: { strictDistinctBothUnits?: boolean } = {},
   ) => {
+    // STRICT mode (bulk combo listing queue): require two DISTINCT, photographed
+    // units. Walk a wider combination-type ladder (same-total re-mix -> smaller
+    // totals -> 2BR+2BR), NEVER reuse Unit A's photos for Unit B, and THROW (no
+    // dashboard save) if no combination type yields photos for both halves.
+    const strictDistinctBothUnits = options.strictDistinctBothUnits === true;
     const persistProgress = async () => {
       item.heartbeatAt = Date.now();
       job.updatedAt = Date.now();
@@ -33024,46 +33039,77 @@ Return ONLY compact JSON with this exact shape:
       await persistProgress();
     }
 
-    // ── Re-mix fallback ───────────────────────────────────────────────────────
-    // If the same-size second unit came back starved (no DISTINCT listing for
-    // this community at that bedroom count), try alternative same-total bedroom
-    // SPLITS (3+3 -> 4+2) so each half draws from a different inventory pool, and
-    // re-search BOTH halves. Only commit a split when BOTH return real, distinct
-    // galleries — otherwise the original Unit A result is preserved for reuse.
+    // ── Combination-type fallback ladder ──────────────────────────────────────
+    // If a unit came back starved (no DISTINCT listing for this community at that
+    // bedroom count), try alternative bedroom combination types and re-search
+    // BOTH halves. Only commit a candidate when BOTH return real, distinct
+    // galleries — otherwise the original result is preserved.
+    //   • non-strict (photos-tab combo fetch): same-total SPLITS only (3+3 -> 4+2).
+    //   • STRICT (bulk listing queue): the wider "keep beds high, then step down"
+    //     ladder — same-total re-mix, then smaller totals down to 2BR+2BR — so a
+    //     resort that can't fill a 6BR can still be saved as a photographed 4BR
+    //     rather than skipped (and is skipped only when NOTHING photographs).
     const unitsAreSearchMode = !item.unit1?.url && !item.unit2?.url;
     let remixApplied = false;
     let unit2PhotosReused = false;
+    // Every combination type we attempted (the requested combo + each fallback we
+    // walked) — surfaced in the STRICT failure message so the operator can see
+    // exactly what was tried before the resort was skipped.
+    const triedComboTypes: string[] = [];
+    if (typeof item.unit1?.bedrooms === "number" && typeof item.unit2?.bedrooms === "number") {
+      triedComboTypes.push(`${item.unit1.bedrooms}BR+${item.unit2.bedrooms}BR`);
+    }
+    const unit1Starved = item.unit1Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS;
+    const unit2Starved = item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS;
+    const unitsLookDuplicate = strictDistinctBothUnits
+      && !unit1Starved && !unit2Starved
+      && photoSetLooksSameForComboPhotoJob(item.unit1Photos, item.unit2Photos);
+    const needsFallbackCombo = strictDistinctBothUnits
+      ? (unit1Starved || unit2Starved || unitsLookDuplicate)
+      : unit2Starved;
     if (
       COMBO_REMIX_ENABLED
       && unitsAreSearchMode
-      && item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS
+      && needsFallbackCombo
       && canComboPhotoFetchUnit(item, item.unit1)
       && canComboPhotoFetchUnit(item, item.unit2)
       && typeof item.unit1?.bedrooms === "number"
       && typeof item.unit2?.bedrooms === "number"
     ) {
+      const origUnit1Beds = item.unit1.bedrooms;
       const origUnit2Beds = item.unit2.bedrooms;
-      const splits = remixBedroomSplits(item.unit1.bedrooms, item.unit2.bedrooms, {
-        maxUnitBeds: COMBO_REMIX_MAX_UNIT_BEDROOMS,
-        limit: COMBO_REMIX_MAX_SPLITS,
-      });
-      for (const split of splits) {
+      const origTotal = origUnit1Beds + origUnit2Beds;
+      const fallbackSplits = strictDistinctBothUnits
+        ? comboFallbackPairings(origUnit1Beds, origUnit2Beds, {
+            maxUnitBeds: COMBO_REMIX_MAX_UNIT_BEDROOMS,
+            minUnitBeds: COMBO_FALLBACK_MIN_UNIT_BEDROOMS,
+            sameTotalLimit: COMBO_REMIX_MAX_SPLITS,
+            limit: COMBO_FALLBACK_MAX_LADDER,
+          })
+        : remixBedroomSplits(origUnit1Beds, origUnit2Beds, {
+            maxUnitBeds: COMBO_REMIX_MAX_UNIT_BEDROOMS,
+            limit: COMBO_REMIX_MAX_SPLITS,
+          });
+      for (const split of fallbackSplits) {
         if (job.cancelRequested) break;
+        triedComboTypes.push(`${split.unit1Beds}BR+${split.unit2Beds}BR`);
+        const splitTotal = split.unit1Beds + split.unit2Beds;
+        const totalNote = splitTotal === origTotal ? `${splitTotal}BR` : `smaller ${splitTotal}BR`;
         const remixUnit1: ComboPhotoFetchUnit = { ...item.unit1, bedrooms: split.unit1Beds, title: `Unit A — ${split.unit1Beds}BR` };
         const remixUnit2: ComboPhotoFetchUnit = { ...item.unit2, bedrooms: split.unit2Beds, title: `Unit B — ${split.unit2Beds}BR` };
         const reA = await runWithHeartbeat(
-          `No distinct ${origUnit2Beds}BR second unit — re-mixing to ${split.unit1Beds}BR + ${split.unit2Beds}BR (searching ${split.unit1Beds}BR)`,
+          `No distinct ${origUnit1Beds}BR+${origUnit2Beds}BR units — trying a ${totalNote} ${split.unit1Beds}BR + ${split.unit2Beds}BR combo (searching ${split.unit1Beds}BR)`,
           () => fetchComboPhotosForUnit(job, item, remixUnit1, [], [], abortKey, signal, otaProgress),
         );
         if (reA.photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) continue;
         const reB = await runWithHeartbeat(
-          `Re-mix ${split.unit1Beds}BR + ${split.unit2Beds}BR — searching a distinct ${split.unit2Beds}BR second unit`,
+          `${totalNote} ${split.unit1Beds}BR + ${split.unit2Beds}BR combo — searching a distinct ${split.unit2Beds}BR second unit`,
           () => fetchComboPhotosForUnit(job, item, remixUnit2, reA.sourceUrl ? [reA.sourceUrl] : [], reA.photos, abortKey, signal, otaProgress),
         );
         let reBPhotos = reB.photos;
         if (reA.photos.length > 0 && photoSetLooksSameForComboPhotoJob(reA.photos, reBPhotos)) reBPhotos = [];
         if (reBPhotos.length < MIN_INDEPENDENT_UNIT_PHOTOS) continue;
-        // Both halves sourced & distinct — commit the re-mix.
+        // Both halves sourced & distinct — commit this combination type.
         item.unit1Photos = reA.photos;
         item.unit1SourceUrl = reA.sourceUrl;
         item.unit1Proof = reA.proof;
@@ -33074,7 +33120,7 @@ Return ONLY compact JSON with this exact shape:
           : buildUnitPhotoResolverProof({ photos: reBPhotos, sourceUrl: reB.sourceUrl, requestedBedrooms: split.unit2Beds, relaxedSearch: reB.relaxed });
         item.unit1 = remixUnit1;
         item.unit2 = remixUnit2;
-        item.message = `Re-mixed to ${split.unit1Beds}BR + ${split.unit2Beds}BR (${reA.photos.length} + ${reBPhotos.length} photos)`;
+        item.message = `Re-mixed to ${split.unit1Beds}BR + ${split.unit2Beds}BR (${totalNote} combo; ${reA.photos.length} + ${reBPhotos.length} photos)`;
         remixApplied = true;
         await persistProgress();
         break;
@@ -33084,8 +33130,11 @@ Return ONLY compact JSON with this exact shape:
     // ── Photo-reuse fallback (final safety net) ───────────────────────────────
     // If the second unit is STILL starved, reuse Unit A's photos for Unit B so a
     // combo is never saved with a blank second unit. Original sizes are kept.
+    // SKIPPED in STRICT mode: the bulk listing queue must never save a listing
+    // whose two units share photos — it fails (and skips the resort) instead.
     if (
-      COMBO_PHOTO_REUSE_ENABLED
+      !strictDistinctBothUnits
+      && COMBO_PHOTO_REUSE_ENABLED
       && !item.unit2?.url
       && item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS
       && item.unit1Photos.length >= MIN_INDEPENDENT_UNIT_PHOTOS
@@ -33136,7 +33185,15 @@ Return ONLY compact JSON with this exact shape:
     item.message = total > 0 ? `${total} photos fetched` : "No photos were found";
     await persistProgress();
     if (proofFailures.length > 0) {
-      throw new Error(`Photo discovery failed proof checks: ${proofFailures.join(" | ")}`);
+      if (strictDistinctBothUnits && triedComboTypes.length > 0) {
+        proofFailures.push(`no combination type produced two independently-photographed units (tried ${Array.from(new Set(triedComboTypes)).join(", ")})`);
+      }
+      const err = new Error(`Photo discovery failed proof checks: ${proofFailures.join(" | ")}`) as Error & { bulkComboNoRetry?: boolean };
+      // STRICT: ladder-exhaustion is deterministic — re-running the same combos
+      // just burns another 12-min photo budget, so fail FAST (no retry) and let
+      // the bulk queue skip this resort instead of saving a photo-less listing.
+      if (strictDistinctBothUnits) err.bulkComboNoRetry = true;
+      throw err;
     }
   };
   const runComboPhotoFetchJob = async (jobId: string) => {
@@ -34123,6 +34180,11 @@ Return ONLY compact JSON with this exact shape:
 
     for (const draft of drafts as any[]) {
       if (draft.singleListing) continue;
+      // Only reuse a FULLY-PHOTOGRAPHED draft. A photo-less draft (e.g. one left
+      // by a run interrupted between save and persist) must NOT be treated as a
+      // finished combo — otherwise the queue would short-circuit to "done" on a
+      // listing that has no photos.
+      if (!draft.unit1PhotoFolder || !draft.unit2PhotoFolder) continue;
       if (normalizeQueueText(draft.name) !== expectedName) continue;
       if (expectedCity && normalizeQueueText(draft.city) !== expectedCity) continue;
       if (expectedState && normalizeQueueText(draft.state) !== expectedState) continue;
@@ -34152,16 +34214,54 @@ Return ONLY compact JSON with this exact shape:
       eff.totalBeds || "",
     ].join(":");
   };
+  // A combo photo gate failure (no photographed combination, or photos couldn't be
+  // persisted for both units) — tagged so the bulk queue skips the resort WITHOUT
+  // burning retries and never leaves a photo-less listing behind.
+  const makeComboPhotoGateError = (msg: string) =>
+    Object.assign(new Error(msg), { bulkComboNoRetry: true }) as Error & { bulkComboNoRetry: boolean };
   const runBulkComboListingItem = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
     hydrateBulkComboListingItem(item);
+    // Resume short-circuit: only treat the item as done when its draft actually
+    // has photos persisted for BOTH units. A draftId alone is NOT proof of photos
+    // — a run interrupted between /api/community/save and the persist step leaves
+    // a photo-less draft with draftId set. If the draft is NOT fully photographed,
+    // DROP it and re-run from scratch (clearing item.draftId), rather than trying
+    // to re-persist into the same id. Re-running fresh keeps the retry path clean
+    // (a transient pre-persist error can still retry because item.draftId is null)
+    // and means persist always targets a freshly-created draft — so we never
+    // report a photo-less or non-existent draft as a completed listing.
     if (item.draftId) {
-      item.status = "completed";
-      item.phase = "done";
-      item.message = `Draft #${item.draftId} already saved to dashboard`;
-      item.finishedAt = item.finishedAt ?? Date.now();
+      // A THROWN read error must NOT be read as "draft missing" — that would
+      // delete a possibly-good (already-photographed) draft. Only the SUCCESSFUL
+      // read of a missing / photo-less draft triggers the drop-and-rerun. On a
+      // transient DB read error, clear the in-memory draftId (so the item is
+      // retryable — the retry guard keys off `!item.draftId`) and rethrow WITHOUT
+      // deleting: the draft row is left intact and re-found by
+      // findExistingBulkComboDraftId on the retry if it is photographed.
+      let existingDraft: Awaited<ReturnType<typeof storage.getCommunityDraft>>;
+      try {
+        existingDraft = await storage.getCommunityDraft(item.draftId);
+      } catch (e: any) {
+        const staleId = item.draftId;
+        item.draftId = null;
+        throw new Error(`Could not verify draft #${staleId} on resume (transient DB read): ${e?.message ?? e}`);
+      }
+      if (existingDraft?.unit1PhotoFolder && existingDraft?.unit2PhotoFolder) {
+        item.status = "completed";
+        item.phase = "done";
+        item.message = `Draft #${item.draftId} already saved to dashboard`;
+        item.finishedAt = item.finishedAt ?? Date.now();
+        job.updatedAt = Date.now();
+        await persistBulkComboListingSnapshot(job);
+        return;
+      }
+      const droppedDraftId = item.draftId;
+      await storage.deleteCommunityDraft(droppedDraftId).catch((e: any) =>
+        console.warn(`[bulk-combo-listings] could not drop interrupted photo-less draft ${droppedDraftId}: ${e?.message ?? e}`));
+      item.draftId = null;
+      item.message = `Re-running ${item.label} from scratch (a previous run was interrupted before photos saved)`;
       job.updatedAt = Date.now();
       await persistBulkComboListingSnapshot(job);
-      return;
     }
     const community = item.community || {};
     const pairing = item.pairing;
@@ -34211,32 +34311,22 @@ Return ONLY compact JSON with this exact shape:
     await persistBulkComboListingSnapshot(job);
     const abortKey = `bulk-combo-listing:${job.id}`;
     await runBulkComboListingStep(job, item, "photos", "Fetching unit photos", async () => {
-      try {
-        await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
-          item.unit1Photos = updatedPhotoItem.unit1Photos;
-          item.unit2Photos = updatedPhotoItem.unit2Photos;
-          item.unit1SourceUrl = updatedPhotoItem.unit1SourceUrl;
-          item.unit2SourceUrl = updatedPhotoItem.unit2SourceUrl;
-          item.message = updatedPhotoItem.message || item.message;
-          item.heartbeatAt = Date.now();
-          job.updatedAt = Date.now();
-          await persistBulkComboListingSnapshot(job);
-        }, abortKey);
-      } catch (e: any) {
-        if (job.cancelRequested || e?.cancelled || isBulkComboListingTimeout(e)) throw e;
-        const message = e?.message ?? String(e);
-        if (!/Photo discovery failed proof checks|No photos were found|no-unit-photo-source|missing-source-url/i.test(message)) throw e;
-        item.unit1Photos = photoItem.unit1Photos;
-        item.unit2Photos = photoItem.unit2Photos;
-        item.unit1SourceUrl = photoItem.unit1SourceUrl;
-        item.unit2SourceUrl = photoItem.unit2SourceUrl;
-        item.message = "Photo discovery needs manual review; continuing draft save";
-        await queueEvent("bulk-combo-listing", job.id, "photos-review", item.message, {
-          itemKey: item.id,
-          level: "warn",
-          meta: { error: message },
-        });
-      }
+      // STRICT: require two DISTINCT, independently-photographed units. Photo
+      // discovery walks the combination-type ladder (same-total re-mix -> smaller
+      // totals -> 2BR+2BR) and, if NOTHING photographs both halves, THROWS. We no
+      // longer swallow that failure to "continue the draft save" — a combo listing
+      // is NEVER saved to the dashboard without real photos for both units; the
+      // throw fails this item so the queue skips the resort and moves on.
+      await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
+        item.unit1Photos = updatedPhotoItem.unit1Photos;
+        item.unit2Photos = updatedPhotoItem.unit2Photos;
+        item.unit1SourceUrl = updatedPhotoItem.unit1SourceUrl;
+        item.unit2SourceUrl = updatedPhotoItem.unit2SourceUrl;
+        item.message = updatedPhotoItem.message || item.message;
+        item.heartbeatAt = Date.now();
+        job.updatedAt = Date.now();
+        await persistBulkComboListingSnapshot(job);
+      }, abortKey, undefined, { strictDistinctBothUnits: true });
     });
     item.unit1Photos = photoItem.unit1Photos;
     item.unit2Photos = photoItem.unit2Photos;
@@ -34254,13 +34344,45 @@ Return ONLY compact JSON with this exact shape:
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
     if (item.remixApplied) {
+      const requestedTotal = pairing.unit1Beds + pairing.unit2Beds;
+      const totalNote = effTotalBeds === requestedTotal
+        ? `${effTotalBeds}BR preserved`
+        : `stepped down to a ${effTotalBeds}BR combo`;
       await queueEvent("bulk-combo-listing", job.id, "remix",
-        `No distinct ${pairing.unit2Beds}BR second unit — re-mixed ${pairing.unit1Beds}BR + ${pairing.unit2Beds}BR -> ${effUnit1Beds}BR + ${effUnit2Beds}BR`,
+        `Could not photograph the requested ${pairing.unit1Beds}BR+${pairing.unit2Beds}BR — switched to ${effUnit1Beds}BR+${effUnit2Beds}BR (${totalNote})`,
         { itemKey: item.id, level: "info", meta: { from: [pairing.unit1Beds, pairing.unit2Beds], to: [effUnit1Beds, effUnit2Beds] } });
     } else if (item.unit2PhotosReused) {
       await queueEvent("bulk-combo-listing", job.id, "photo-reuse",
         "No distinct second unit found — reused Unit A photos for Unit B",
         { itemKey: item.id, level: "warn", meta: { unit1Beds: effUnit1Beds, unit2Beds: effUnit2Beds } });
+    }
+
+    // A re-mix that STEPPED DOWN to a different combo type (e.g. 3+3 -> 2+2) can
+    // collide with another combo already saved or queued for this community. The
+    // enqueue occupied-key guard only ever saw the REQUESTED key, so re-check the
+    // EFFECTIVE key now and skip-as-duplicate rather than mint a second listing
+    // for the same community+size.
+    const requestedComboKey = comboKeyForBeds(pairing.unit1Beds, pairing.unit2Beds);
+    const effectiveComboKey = comboKeyForBeds(effUnit1Beds, effUnit2Beds);
+    if (effectiveComboKey && effectiveComboKey !== requestedComboKey) {
+      const inventory = await getComboInventoryForCommunity({
+        communityName: community.name,
+        city: community.city,
+        state: community.state,
+      }).catch(() => null);
+      if (inventory?.occupiedKeys.has(effectiveComboKey)) {
+        item.phase = "done";
+        item.status = "completed";
+        item.message = `Skipped — a ${comboLabelForKey(effectiveComboKey)} combo already exists or is queued for ${community.name || "this community"} (the requested ${requestedComboKey ? comboLabelForKey(requestedComboKey) : "combo"} had no photos and re-mixed onto an existing combo)`;
+        item.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+        await queueEvent("bulk-combo-listing", job.id, "duplicate-skip", item.message, {
+          itemKey: item.id, level: "info",
+          meta: { requested: requestedComboKey, effective: effectiveComboKey },
+        });
+        await persistBulkComboListingSnapshot(job);
+        return;
+      }
     }
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
@@ -34289,9 +34411,15 @@ Return ONLY compact JSON with this exact shape:
     item.streetAddress = validatedStreet;
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
-    let draftId = await findExistingBulkComboDraftId(item, generated, validatedStreet);
     const idempotencyKey = bulkComboIdempotencyKey(job.id, item);
-    if (draftId) {
+    // `reusedExistingDraft` = a DIFFERENT, already-fully-photographed draft we
+    // dedup onto (it keeps its own photos, so its persist stays best-effort).
+    // `findExistingBulkComboDraftId` only returns fully-photographed drafts, so a
+    // freshly-saved draft (the else branch) always gets the hard photo gate +
+    // roll-back below.
+    let draftId: number | null = await findExistingBulkComboDraftId(item, generated, validatedStreet);
+    const reusedExistingDraft = !!(draftId && draftId > 0);
+    if (reusedExistingDraft) {
       item.draftId = draftId;
       item.message = `Using existing draft #${draftId}; skipping duplicate dashboard save`;
       job.updatedAt = Date.now();
@@ -34345,22 +34473,59 @@ Return ONLY compact JSON with this exact shape:
       }, { abortKey, timeoutMs: 120_000 }));
       draftId = Number(saveData?.id);
     }
-    if (!Number.isFinite(draftId) || draftId <= 0) {
+    if (draftId == null || !Number.isFinite(draftId) || draftId <= 0) {
       throw new Error("Dashboard save step failed: save did not return a draft id");
     }
     item.draftId = draftId;
-    await runBulkComboListingStep(job, item, "persist", "Persisting photos and starting pricing", async () => {
-      if (item.unit1Photos.length > 0 || item.unit2Photos.length > 0) {
-        await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
-          unit1Photos: item.unit1Photos.map((p) => p.url),
-          unit2Photos: item.unit2Photos.map((p) => p.url),
-          unit1SourceUrl: item.unit1SourceUrl,
-          unit2SourceUrl: item.unit2SourceUrl,
-        }, { abortKey, timeoutMs: 120_000 }).catch((e: any) => {
-          item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`;
-        });
+    // HARD photo gate: actually DOWNLOAD + persist the discovered photos for both
+    // units. Discovery only proved that photo URLs exist; persist-photos re-fetches
+    // them and 409s if either unit ends with < MIN real photos or the two sets are
+    // duplicates. For a freshly-saved or interrupted-own draft we must NEVER leave a
+    // photo-less row on the dashboard, so on failure we ROLL BACK the draft and fail
+    // the item (the queue then skips the resort). A reused, already-photographed
+    // draft keeps its existing photos, so its persist stays best-effort.
+    try {
+      await runBulkComboListingStep(job, item, "persist", "Persisting photos and starting pricing", async () => {
+        if (item.unit1Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS || item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
+          if (reusedExistingDraft) return;
+          throw makeComboPhotoGateError(`fewer than ${MIN_INDEPENDENT_UNIT_PHOTOS} discovered photos for one or both units`);
+        }
+        let persistData: any;
+        try {
+          persistData = await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
+            unit1Photos: item.unit1Photos.map((p) => p.url),
+            unit2Photos: item.unit2Photos.map((p) => p.url),
+            unit1SourceUrl: item.unit1SourceUrl,
+            unit2SourceUrl: item.unit2SourceUrl,
+          }, { abortKey, timeoutMs: 120_000 });
+        } catch (e: any) {
+          if (job.cancelRequested || e?.cancelled) throw e;
+          if (reusedExistingDraft) { item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`; return; }
+          // Transient timeouts/aborts retry the whole item; only a deterministic
+          // save failure (409 < MIN / duplicate) becomes a no-retry resort skip.
+          if (/timed out|abort/i.test(String(e?.message ?? e))) throw e;
+          throw makeComboPhotoGateError(`photos could not be saved for both units (${e?.message ?? e})`);
+        }
+        if (!reusedExistingDraft) {
+          const u1Saved = Number(persistData?.unit1?.saved ?? 0);
+          const u2Saved = Number(persistData?.unit2?.saved ?? 0);
+          if (!persistData?.ok || u1Saved < MIN_INDEPENDENT_UNIT_PHOTOS || u2Saved < MIN_INDEPENDENT_UNIT_PHOTOS) {
+            throw makeComboPhotoGateError(`only ${u1Saved}/${MIN_INDEPENDENT_UNIT_PHOTOS} Unit A and ${u2Saved}/${MIN_INDEPENDENT_UNIT_PHOTOS} Unit B photos could be saved`);
+          }
+        }
+      });
+    } catch (e: any) {
+      if (!reusedExistingDraft && !(job.cancelRequested || e?.cancelled)) {
+        // Never leave a photo-less draft on the dashboard — roll it back so the
+        // resort is simply skipped (no listing) instead of saved without photos.
+        await storage.deleteCommunityDraft(draftId).catch((delErr: any) =>
+          console.warn(`[bulk-combo-listings] could not roll back photo-less draft ${draftId}: ${delErr?.message ?? delErr}`));
+        item.draftId = null;
+        job.updatedAt = Date.now();
+        await persistBulkComboListingSnapshot(job).catch(() => {});
       }
-    });
+      throw e;
+    }
     fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
     void runPhotoListingCheckForFolders([
       `draft-${draftId}-unit-a`,
@@ -34506,11 +34671,17 @@ Return ONLY compact JSON with this exact shape:
                   break;
                 }
                 item.error = queueErrorLabel(e, "Bulk combo listing failed");
-                const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId;
+                // `bulkComboNoRetry`: a STRICT photo-ladder exhaustion (no
+                // combination type could photograph both units) is deterministic
+                // — retrying just re-walks the same combos and burns another
+                // 12-min photo budget. Fail fast and skip the resort instead.
+                const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId && !e?.bulkComboNoRetry;
                 if (!canRetry) {
                   item.status = "failed";
                   item.phase = "failed";
-                  item.message = item.error || "Bulk combo listing failed";
+                  item.message = e?.bulkComboNoRetry
+                    ? `Skipped — could not create a fully-photographed listing for this resort. ${item.error || ""}`.trim()
+                    : (item.error || "Bulk combo listing failed");
                   break;
                 }
                 const backoffMs = BULK_COMBO_LISTING_RETRY_BACKOFF_MS[Math.min(item.attemptCount - 1, BULK_COMBO_LISTING_RETRY_BACKOFF_MS.length - 1)] ?? 60_000;
@@ -35864,10 +36035,15 @@ Return ONLY compact JSON with this exact shape:
       console.log(`[community-drafts] backfilled Guesty photos for imported draft(s): ${photoBackfills.map((b) => `${b.draftId}:${b.saved}`).join(", ")}`);
       drafts = await storage.getCommunityDrafts();
     }
-    if (deletedIds.length === 0) {
-      return res.json(drafts);
-    }
-    res.json(drafts.filter((draft: any) => !deletedIds.includes(Number(draft.id))));
+    // Hide bulk-queue combo drafts that aren't fully photographed yet (or a
+    // rolled-back photo-less zombie): a combo listing only appears on the dashboard
+    // once it has real photos for BOTH units. Scoped to queue-created drafts
+    // (queueIdempotencyKey present) so manual, in-progress drafts are unaffected.
+    const visibleDrafts = drafts.filter((draft: any) =>
+      !deletedIds.includes(Number(draft.id))
+      && !(draft.queueIdempotencyKey && draft.singleListing !== true && (!draft.unit1PhotoFolder || !draft.unit2PhotoFolder)),
+    );
+    res.json(visibleDrafts);
   });
 
   app.post("/api/community/import-guesty-listing", async (req, res) => {
@@ -39774,6 +39950,12 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/community/:id/persist-photos", async (req, res) => {
     const draftId = parseInt(req.params.id, 10);
     if (!Number.isFinite(draftId)) return res.status(400).json({ error: "Invalid id" });
+    // The draft MUST exist before we download/attach photos. Without this guard a
+    // persist into a deleted id would `updateCommunityDraft` zero rows yet still
+    // return ok:true with saved counts — making a caller (e.g. the bulk combo
+    // queue's photo gate) report a phantom "completed" listing that doesn't exist.
+    const existingDraftForPersist = await storage.getCommunityDraft(draftId).catch(() => null);
+    if (!existingDraftForPersist) return res.status(404).json({ error: `Community draft ${draftId} not found` });
 
     const body = req.body as {
       unit1Photos?: string[];
@@ -40252,6 +40434,11 @@ Return ONLY compact JSON with this exact shape:
       for (const draft of drafts as any[]) {
         const status = String(draft.status || "");
         if (draft.singleListing || /archiv|delete|cancel/i.test(status)) continue;
+        // A bulk-queue combo draft that isn't fully photographed yet (or a
+        // photo-less zombie left by a rolled-back run whose delete failed) is NOT
+        // a real combo — don't let it occupy its combo slot (which would falsely
+        // dedup-skip a later legitimate item).
+        if (draft.queueIdempotencyKey && (!draft.unit1PhotoFolder || !draft.unit2PhotoFolder)) continue;
         if (!comboCommunityMatches({ name: draft.name, city: draft.city, state: draft.state }, target)) continue;
         const key = comboKeyForBeds(draft.unit1Bedrooms, draft.unit2Bedrooms);
         if (!key) continue;
