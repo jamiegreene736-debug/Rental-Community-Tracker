@@ -1,5 +1,17 @@
 export const MIN_INDEPENDENT_UNIT_PHOTOS = 3;
 export const UNIT_PHOTO_DUPLICATE_OVERLAP_RATIO = 0.8;
+// How many scraped unit-gallery photos to keep on disk (replacement swap,
+// alert remediate, rescrape). The old 25 cap truncated large Zillow galleries
+// and dropped bedroom shots that appear later in the listing order.
+export const UNIT_GALLERY_MAX_KEEP = (() => {
+  const n = Number(process.env.UNIT_GALLERY_MAX_KEEP);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 150;
+})();
+
+export function unitGalleryMaxKeep(scrapedCount: number): number {
+  const count = Math.max(0, Math.floor(scrapedCount));
+  return Math.min(count, UNIT_GALLERY_MAX_KEEP);
+}
 
 export type UnitPhotoResolverStatus = "accepted" | "review" | "rejected";
 
