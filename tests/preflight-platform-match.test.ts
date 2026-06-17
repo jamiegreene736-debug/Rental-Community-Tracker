@@ -83,4 +83,42 @@ check(
   ) === true,
 );
 
+check(
+  "rejects Runaway Bay VRBO listing for The Cliffs at Princeville",
+  evaluatePreflightSearchResult(
+    {
+      title: "Runaway Bay Resort 3BR · Unit A",
+      snippet: "Jamaica beachfront vacation rental with pool",
+      link: "https://www.vrbo.com/1234567",
+    },
+    "vrbo",
+    buildPreflightMatchContext({
+      complexName: "The Cliffs at Princeville",
+      city: "Princeville",
+      unitNumber: "A",
+      address: "3811 Edward Rd, Kilauea, Hawaii, Unit A",
+      bedrooms: 3,
+    }),
+  ) === null,
+);
+
+check(
+  "accepts letter unit A when community, city, and unit marker align",
+  evaluatePreflightSearchResult(
+    {
+      title: "The Cliffs at Princeville · Unit A",
+      snippet: "3 bedroom condo at The Cliffs at Princeville, 3811 Edward Rd, Princeville",
+      link: "https://www.vrbo.com/7654321",
+    },
+    "vrbo",
+    buildPreflightMatchContext({
+      complexName: "The Cliffs at Princeville",
+      city: "Princeville",
+      unitNumber: "A",
+      address: "3811 Edward Rd, Kilauea, Hawaii, Unit A",
+      bedrooms: 3,
+    }),
+  )?.status === "confirmed",
+);
+
 console.log("preflight-platform-match tests passed");

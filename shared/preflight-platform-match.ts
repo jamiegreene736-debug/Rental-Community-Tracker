@@ -161,6 +161,31 @@ function resortDictKeysForText(text: string): Set<string> {
   return new Set(keys.filter((key) => key.startsWith("dict:")).map((key) => key.slice(5)));
 }
 
+const INCOMPATIBLE_FOREIGN_LOCATION_PATTERNS = [
+  /\brunaway\s+bay\b/i,
+  /\bmontego\s+bay\b/i,
+  /\bnegril\b/i,
+  /\bocho\s+rios\b/i,
+  /\bjamaica\b/i,
+  /\bcancun\b/i,
+  /\baruba\b/i,
+];
+
+export function listingHaystackIncompatibleWithCommunity(
+  haystack: string,
+  complexName: string,
+  city = "",
+): boolean {
+  const hay = normalizePreflightSearchText(haystack);
+  if (!hay) return false;
+  if (listingIsOutOfArea(haystack)) return true;
+  const rule = communityAddressRuleForName(complexName);
+  const hawaiiTarget = (rule?.state || "").toUpperCase() === "HI"
+    || /\b(hawaii|kauai|princeville|hanalei|kilauea)\b/i.test(`${complexName} ${city}`);
+  if (hawaiiTarget && INCOMPATIBLE_FOREIGN_LOCATION_PATTERNS.some((re) => re.test(hay))) return true;
+  return false;
+}
+
 export function communityEvidenceInResult(result: PreflightSearchResult, complexName: string): boolean {
   const hay = resultHaystack(result);
   if (textMatchesResortPhrase(hay, complexName)) return true;
@@ -255,6 +280,9 @@ export function evaluatePreflightSearchResult(
   if (!link || !isPreflightListingUrl(link, platform)) return null;
 
   const hay = resultHaystack(result);
+  if (listingHaystackIncompatibleWithCommunity(hay, context.complexName, context.city)) {
+    return null;
+  }
   if (listingIsOutOfArea(hay)) {
     return null;
   }

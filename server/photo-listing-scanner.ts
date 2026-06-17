@@ -55,6 +55,11 @@ import {
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch } from "./photo-match-guardrails";
+import {
+  communityEvidenceInResult,
+  listingHaystackIncompatibleWithCommunity,
+} from "@shared/preflight-platform-match";
+import { communityAddressRuleForName } from "@shared/community-addresses";
 import { isDuplicateHash } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
@@ -217,6 +222,38 @@ async function dynamicVerificationTokensForFolder(folder: string): Promise<strin
 
   const tokens = unitVerificationClaims(swap.newUnitLabel ?? "", swap.newAddress ?? "");
   return tokens.length > 0 ? Array.from(new Set(tokens)) : null;
+}
+
+type FolderCommunityContext = { complexName: string; city: string };
+
+async function folderCommunityContext(folder: string): Promise<FolderCommunityContext | null> {
+  const builder = unitBuilderData.find((b) =>
+    b.communityPhotoFolder === folder || b.units.some((u) => u.photoFolder === folder),
+  );
+  if (builder?.complexName) {
+    const rule = communityAddressRuleForName(builder.complexName);
+    return { complexName: builder.complexName, city: rule?.city || builder.address?.split(",")[1]?.trim() || "" };
+  }
+  const ref = draftPhotoFolderRef(folder) ?? replacementPhotoFolderRef(folder);
+  if (ref?.propertyId && ref.propertyId < 0) {
+    const draft = await storage.getCommunityDraft(Math.abs(ref.propertyId));
+    if (draft?.name) {
+      return { complexName: String(draft.name), city: String(draft.city ?? "") };
+    }
+  }
+  return null;
+}
+
+function listingMatchesFolderCommunity(
+  title: string,
+  source: string,
+  link: string,
+  ctx: FolderCommunityContext | null,
+): boolean {
+  if (!ctx?.complexName) return true;
+  const haystack = `${title} ${source} ${link}`;
+  if (listingHaystackIncompatibleWithCommunity(haystack, ctx.complexName, ctx.city)) return false;
+  return communityEvidenceInResult({ title, snippet: source, link }, ctx.complexName);
 }
 
 function compactErrorDetail(text: string): string {
@@ -449,6 +486,7 @@ export async function runPhotoListingCheckForFolder(
   }
   const allowUnverifiedStandalone = rawVerifyTokens.includes(STANDALONE_DRAFT_NO_UNIT_TOKEN);
   const verifyTokens = rawVerifyTokens.filter((token) => token !== STANDALONE_DRAFT_NO_UNIT_TOKEN);
+  const communityCtx = await folderCommunityContext(folder);
 
   // Capture the prior status row BEFORE upserting so we can emit
   // state-worsen alerts after the new row lands. Null → never scanned.
@@ -556,9 +594,10 @@ export async function runPhotoListingCheckForFolder(
   // tally threshold is ≥ 2 photos matching anyway.
   const MAX_VERIFY_PER_HOST_PER_PHOTO = 3;
 
-  const verify = async (listingUrl: string): Promise<boolean> => {
+  const verify = async (listingUrl: string, title = "", source = ""): Promise<boolean> => {
+    if (!listingMatchesFolderCommunity(title, source, listingUrl, communityCtx)) return false;
     if (allowUnverifiedStandalone) return true;
-    if (!verifyTokens || verifyTokens.length === 0) return true; // can't verify, accept
+    if (!verifyTokens || verifyTokens.length === 0) return false;
     const cached = verifyCache.get(listingUrl);
     if (cached !== undefined) return cached;
     // Accept if the URL's page mentions ANY of the unit tokens. Stop
@@ -606,7 +645,7 @@ export async function runPhotoListingCheckForFolder(
       for (const h of hits.slice(0, MAX_VERIFY_PER_HOST_PER_PHOTO)) {
         const link = String(h.link || "");
         if (!link) continue;
-        const ok = await verify(link);
+        const ok = await verify(link, String(h.title || ""), String(h.source || ""));
         if (!ok) continue;
         verifiedHits.push({
           photoUrl,

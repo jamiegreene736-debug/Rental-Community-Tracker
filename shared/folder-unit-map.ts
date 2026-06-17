@@ -102,6 +102,11 @@ export function extractMarkedUnitClaims(value: string): string[] {
     seen.add(normalized);
     claims.push(normalized);
   }
+  const letterOnly = value.match(/\bunit\s+([a-z])\b/i);
+  if (letterOnly) {
+    const normalized = normalizeUnitClaim(letterOnly[1]);
+    if (normalized && !seen.has(normalized)) claims.push(normalized);
+  }
   return claims;
 }
 
@@ -118,7 +123,7 @@ export function unitVerificationClaims(
   const out: string[] = [];
   const add = (value: string) => {
     const normalized = normalizeUnitClaim(value);
-    if (!normalized || !/\d/.test(normalized)) return;
+    if (!normalized || (!/\d/.test(normalized) && !/^[A-Z]$/.test(normalized))) return;
     if (seen.has(normalized)) return;
     seen.add(normalized);
     out.push(normalized);
@@ -140,6 +145,8 @@ export function unitVerificationClaims(
     if (!hasCompoundUnitNumberClaim) {
       for (const token of extractUnitTokens(unitNumber)) add(token);
     }
+    const bareLetter = normalizeUnitClaim(unitNumber);
+    if (/^[A-Z]$/.test(bareLetter)) add(bareLetter);
   }
 
   return out;
