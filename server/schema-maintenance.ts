@@ -371,6 +371,8 @@ export async function ensureRuntimeSchema(): Promise<void> {
       city text NOT NULL,
       state text NOT NULL,
       tag text,
+      four_bedroom_possible boolean NOT NULL DEFAULT false,
+      five_bedroom_possible boolean NOT NULL DEFAULT false,
       six_bedroom_possible boolean NOT NULL DEFAULT false,
       seven_eight_bedroom_possible boolean NOT NULL DEFAULT false,
       qualifying_count integer NOT NULL DEFAULT 0,
@@ -379,6 +381,13 @@ export async function ensureRuntimeSchema(): Promise<void> {
       scanned_at timestamp NOT NULL DEFAULT now(),
       updated_at timestamp NOT NULL DEFAULT now()
     )
+  `);
+  // Existing deploys created the table before the 4BR/5BR combo flags existed —
+  // CREATE TABLE IF NOT EXISTS won't add the new columns, so add them explicitly.
+  await db.execute(sql`
+    ALTER TABLE top_market_scan_cache
+      ADD COLUMN IF NOT EXISTS four_bedroom_possible boolean NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS five_bedroom_possible boolean NOT NULL DEFAULT false
   `);
   console.log("[schema] ensured top_market_scan_cache table");
 

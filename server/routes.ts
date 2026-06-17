@@ -112,7 +112,9 @@ import {
   researchCommunitiesForCity,
   TOP_MARKET_SEEDS,
   fetchAmortizedNightlyByBR,
-  filterTopScanSixBedroomComboCandidates,
+  filterTopScanComboCandidates,
+  hasFourBedroomComboPotential,
+  hasFiveBedroomComboPotential,
   hasSixBedroomComboPotential,
   hasSevenEightBedroomComboPotential,
   medianRate,
@@ -40687,6 +40689,8 @@ Return ONLY compact JSON with this exact shape:
     tag?: string;
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
+    fourBedroomPossible?: boolean;
+    fiveBedroomPossible?: boolean;
     sixBedroomPossible?: boolean;
     sevenEightBedroomPossible?: boolean;
     status: "pending" | "running" | "done" | "error" | "cancelled";
@@ -40845,7 +40849,9 @@ Return ONLY compact JSON with this exact shape:
               annotateCommunitiesWithComboInventory(researched, market.city, market.state),
               `${market.city}, ${market.state} combo inventory`,
             );
-          const communities = filterTopScanSixBedroomComboCandidates(annotatedCommunities as any[]);
+          const communities = filterTopScanComboCandidates(annotatedCommunities as any[]);
+          market.fourBedroomPossible = communities.some(hasFourBedroomComboPotential);
+          market.fiveBedroomPossible = communities.some(hasFiveBedroomComboPotential);
           market.sixBedroomPossible = communities.some(hasSixBedroomComboPotential);
           market.sevenEightBedroomPossible = communities.some(hasSevenEightBedroomComboPotential);
           market.status = "done";
@@ -40987,7 +40993,7 @@ Return ONLY compact JSON with this exact shape:
           city,
           state,
         );
-        const communities = filterTopScanSixBedroomComboCandidates(annotatedCommunities as any[]);
+        const communities = filterTopScanComboCandidates(annotatedCommunities as any[]);
         totalCommunities += communities.length;
         for (const c of communities) {
           const score = c.confidenceScore + (c.combinabilityScore ?? 50);
@@ -40995,9 +41001,11 @@ Return ONLY compact JSON with this exact shape:
             topCommunity = { score, data: { ...c, tag } };
           }
         }
+        const fourBedroomPossible = communities.some(hasFourBedroomComboPotential);
+        const fiveBedroomPossible = communities.some(hasFiveBedroomComboPotential);
         const sixBedroomPossible = communities.some(hasSixBedroomComboPotential);
         const sevenEightBedroomPossible = communities.some(hasSevenEightBedroomComboPotential);
-        emit({ type: "market-done", city, state, tag, estimatedComboLow, estimatedComboHigh, sixBedroomPossible, sevenEightBedroomPossible, count: communities.length, communities });
+        emit({ type: "market-done", city, state, tag, estimatedComboLow, estimatedComboHigh, fourBedroomPossible, fiveBedroomPossible, sixBedroomPossible, sevenEightBedroomPossible, count: communities.length, communities });
         console.log(`[scan-top-markets] ${city}, ${state}: ${communities.length} qualifying`);
         try {
           await upsertTopMarketScanCache({ city, state, tag, communities });
@@ -41056,6 +41064,8 @@ Return ONLY compact JSON with this exact shape:
         if (!row) return seed;
         return {
           ...seed,
+          fourBedroomPossible: row.fourBedroomPossible,
+          fiveBedroomPossible: row.fiveBedroomPossible,
           sixBedroomPossible: row.sixBedroomPossible,
           sevenEightBedroomPossible: row.sevenEightBedroomPossible,
           qualifyingCount: row.qualifyingCount,

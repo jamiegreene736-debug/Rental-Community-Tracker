@@ -230,6 +230,14 @@ function formatResortUnitMix(community: CommunityResult): string | null {
   return bedroomMix ? `Bedroom mix: ${bedroomMix}` : null;
 }
 
+function hasFourBedroomComboPotential(community: CommunityResult): boolean {
+  return hasBedroomPairPotential(community, [[2, 2]]);
+}
+
+function hasFiveBedroomComboPotential(community: CommunityResult): boolean {
+  return hasBedroomPairPotential(community, [[2, 3]]);
+}
+
 function hasSixBedroomComboPotential(community: CommunityResult): boolean {
   return hasBedroomPairPotential(community, [[3, 3]]);
 }
@@ -280,36 +288,54 @@ type SeedComboBadge = {
   icon: "yes" | "no" | "pending";
 };
 
-function seedComboBadge(possible: boolean | undefined, kind: "six" | "sevenEight"): SeedComboBadge {
-  const prefix = kind === "six" ? "6BR combo" : "7/8BR combo";
+type ComboBadgeKind = "four" | "five" | "six" | "sevenEight";
+
+const COMBO_BADGE_META: Record<ComboBadgeKind, {
+  prefix: string;
+  yesClassName: string;
+  yesTitle: string;
+  noTitle: string;
+  pendingTitle: string;
+}> = {
+  four: {
+    prefix: "4BR combo",
+    yesClassName: "bg-fuchsia-50 text-fuchsia-700",
+    yesTitle: "Cached scan: two 2BR units can combine into a 4BR combo",
+    noTitle: "Cached scan: no two-2BR 4BR combo potential",
+    pendingTitle: "Run the market scan to verify 4BR combo potential",
+  },
+  five: {
+    prefix: "5BR combo",
+    yesClassName: "bg-indigo-50 text-indigo-700",
+    yesTitle: "Cached scan: a 2BR + 3BR can combine into a 5BR combo",
+    noTitle: "Cached scan: no 2BR+3BR 5BR combo potential",
+    pendingTitle: "Run the market scan to verify 5BR combo potential",
+  },
+  six: {
+    prefix: "6BR combo",
+    yesClassName: "bg-emerald-50 text-emerald-700",
+    yesTitle: "Cached scan: two 3BR units can combine into a 6BR combo",
+    noTitle: "Cached scan: no two-3BR 6BR combo potential",
+    pendingTitle: "Run the market scan to verify 6BR combo potential",
+  },
+  sevenEight: {
+    prefix: "7/8BR combo",
+    yesClassName: "bg-sky-50 text-sky-700",
+    yesTitle: "Cached scan: 7BR/8BR combo potential confirmed",
+    noTitle: "Cached scan: no 7BR/8BR combo potential",
+    pendingTitle: "Run the market scan to verify 7BR/8BR combo potential",
+  },
+};
+
+function seedComboBadge(possible: boolean | undefined, kind: ComboBadgeKind): SeedComboBadge {
+  const meta = COMBO_BADGE_META[kind];
   if (possible === true) {
-    return {
-      className: kind === "six" ? "bg-emerald-50 text-emerald-700" : "bg-sky-50 text-sky-700",
-      title: kind === "six"
-        ? "Cached scan: two 3BR units can combine into a 6BR combo"
-        : "Cached scan: 7BR/8BR combo potential confirmed",
-      label: `${prefix}: yes`,
-      icon: "yes",
-    };
+    return { className: meta.yesClassName, title: meta.yesTitle, label: `${meta.prefix}: yes`, icon: "yes" };
   }
   if (possible === false) {
-    return {
-      className: "bg-slate-100 text-slate-600",
-      title: kind === "six"
-        ? "Cached scan: no two-3BR 6BR combo potential"
-        : "Cached scan: no 7BR/8BR combo potential",
-      label: `${prefix}: no`,
-      icon: "no",
-    };
+    return { className: "bg-slate-100 text-slate-600", title: meta.noTitle, label: `${meta.prefix}: no`, icon: "no" };
   }
-  return {
-    className: "bg-amber-50 text-amber-700",
-    title: kind === "six"
-      ? "Run the market scan to verify 6BR combo potential"
-      : "Run the market scan to verify 7BR/8BR combo potential",
-    label: `${prefix}: scan needed`,
-    icon: "pending",
-  };
+  return { className: "bg-amber-50 text-amber-700", title: meta.pendingTitle, label: `${meta.prefix}: scan needed`, icon: "pending" };
 }
 
 function formatMinimumStay(community: CommunityResult): { label: string; tone: "ok" | "warn" | "unknown"; evidence?: string } {
@@ -461,6 +487,8 @@ export default function AddCommunity() {
     tag?: string;
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
+    fourBedroomPossible?: boolean;
+    fiveBedroomPossible?: boolean;
     sixBedroomPossible?: boolean;
     sevenEightBedroomPossible?: boolean;
     status: "pending" | "running" | "done" | "error" | "cancelled";
@@ -503,6 +531,8 @@ export default function AddCommunity() {
     tag: string;
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
+    fourBedroomPossible?: boolean;
+    fiveBedroomPossible?: boolean;
     sixBedroomPossible?: boolean;
     sevenEightBedroomPossible?: boolean;
     qualifyingCount?: number;
@@ -632,6 +662,12 @@ export default function AddCommunity() {
     setSweepJobId(job.id);
     setSweepMarkets((job.markets || []).map((market) => ({
       ...market,
+      fourBedroomPossible: market.status === "done"
+        ? (market.communities ?? []).some(hasFourBedroomComboPotential)
+        : market.fourBedroomPossible,
+      fiveBedroomPossible: market.status === "done"
+        ? (market.communities ?? []).some(hasFiveBedroomComboPotential)
+        : market.fiveBedroomPossible,
       sixBedroomPossible: market.status === "done"
         ? (market.communities ?? []).some(hasSixBedroomComboPotential)
         : market.sixBedroomPossible,
@@ -1213,6 +1249,8 @@ export default function AddCommunity() {
             if (!fresh || (fresh.status !== "done" && fresh.status !== "error")) return seed;
             return {
               ...seed,
+              fourBedroomPossible: fresh.fourBedroomPossible ?? (fresh.communities ?? []).some(hasFourBedroomComboPotential),
+              fiveBedroomPossible: fresh.fiveBedroomPossible ?? (fresh.communities ?? []).some(hasFiveBedroomComboPotential),
               sixBedroomPossible: fresh.sixBedroomPossible ?? (fresh.communities ?? []).some(hasSixBedroomComboPotential),
               sevenEightBedroomPossible: fresh.sevenEightBedroomPossible ?? (fresh.communities ?? []).some(hasSevenEightBedroomComboPotential),
               qualifyingCount: fresh.count,
@@ -2659,8 +2697,12 @@ export default function AddCommunity() {
                                   {markets.map((m) => {
                                     const k = keyFor(m);
                                     const checked = selectedMarkets.has(k);
-                                    const sixBedroomCombo = seedComboBadge(m.sixBedroomPossible, "six");
-                                    const sevenEightBedroomCombo = seedComboBadge(m.sevenEightBedroomPossible, "sevenEight");
+                                    const comboBadges = [
+                                      seedComboBadge(m.fourBedroomPossible, "four"),
+                                      seedComboBadge(m.fiveBedroomPossible, "five"),
+                                      seedComboBadge(m.sixBedroomPossible, "six"),
+                                      seedComboBadge(m.sevenEightBedroomPossible, "sevenEight"),
+                                    ];
                                     return (
                                       <label
                                         key={k}
@@ -2679,32 +2721,22 @@ export default function AddCommunity() {
                                             {m.city}, {m.state}
                                           </span>
                                           <span className="mt-1 flex flex-wrap gap-1">
-                                            <span
-                                              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${sixBedroomCombo.className}`}
-                                              title={sixBedroomCombo.title}
-                                            >
-                                              {sixBedroomCombo.icon === "yes" ? (
-                                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                                              ) : sixBedroomCombo.icon === "no" ? (
-                                                <XCircle className="h-3 w-3 mr-1" />
-                                              ) : (
-                                                <Search className="h-3 w-3 mr-1" />
-                                              )}
-                                              {sixBedroomCombo.label}
-                                            </span>
-                                            <span
-                                              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${sevenEightBedroomCombo.className}`}
-                                              title={sevenEightBedroomCombo.title}
-                                            >
-                                              {sevenEightBedroomCombo.icon === "yes" ? (
-                                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                                              ) : sevenEightBedroomCombo.icon === "no" ? (
-                                                <XCircle className="h-3 w-3 mr-1" />
-                                              ) : (
-                                                <Search className="h-3 w-3 mr-1" />
-                                              )}
-                                              {sevenEightBedroomCombo.label}
-                                            </span>
+                                            {comboBadges.map((badge) => (
+                                              <span
+                                                key={badge.label}
+                                                className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}
+                                                title={badge.title}
+                                              >
+                                                {badge.icon === "yes" ? (
+                                                  <CheckCircle2 className="h-3 w-3 mr-1" />
+                                                ) : badge.icon === "no" ? (
+                                                  <XCircle className="h-3 w-3 mr-1" />
+                                                ) : (
+                                                  <Search className="h-3 w-3 mr-1" />
+                                                )}
+                                                {badge.label}
+                                              </span>
+                                            ))}
                                           </span>
                                           <span className="mt-1 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
                                             <DollarSign className="h-3 w-3" />
@@ -2781,18 +2813,44 @@ export default function AddCommunity() {
                       icon: "checking" as const,
                     };
                   };
-                  const sixBedroomCombo = comboBadgeState(
-                    m.sixBedroomPossible,
-                    "border-emerald-200 bg-emerald-50 text-emerald-700",
-                    "Has evidence for a 6BR combo using two 3BR condo/townhome units",
-                    "Completed scan found no two-3BR 6BR combo potential for this market",
-                  );
-                  const sevenEightBedroomCombo = comboBadgeState(
-                    m.sevenEightBedroomPossible,
-                    "border-sky-200 bg-sky-50 text-sky-700",
-                    "Has evidence for 7BR/8BR combo potential using 3BR+4BR or 4BR+4BR attached inventory (requires 4BR units)",
-                    "Completed scan found no 7BR/8BR combo potential for this market",
-                  );
+                  const comboBadges = [
+                    {
+                      label: "4BR combo",
+                      state: comboBadgeState(
+                        m.fourBedroomPossible,
+                        "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700",
+                        "Has evidence for a 4BR combo using two 2BR condo units",
+                        "Completed scan found no two-2BR 4BR combo potential for this market",
+                      ),
+                    },
+                    {
+                      label: "5BR combo",
+                      state: comboBadgeState(
+                        m.fiveBedroomPossible,
+                        "border-indigo-200 bg-indigo-50 text-indigo-700",
+                        "Has evidence for a 5BR combo using a 2BR + 3BR condo",
+                        "Completed scan found no 2BR+3BR 5BR combo potential for this market",
+                      ),
+                    },
+                    {
+                      label: "6BR combo",
+                      state: comboBadgeState(
+                        m.sixBedroomPossible,
+                        "border-emerald-200 bg-emerald-50 text-emerald-700",
+                        "Has evidence for a 6BR combo using two 3BR condo/townhome units",
+                        "Completed scan found no two-3BR 6BR combo potential for this market",
+                      ),
+                    },
+                    {
+                      label: "7/8BR combo",
+                      state: comboBadgeState(
+                        m.sevenEightBedroomPossible,
+                        "border-sky-200 bg-sky-50 text-sky-700",
+                        "Has evidence for 7BR/8BR combo potential using 3BR+4BR or 4BR+4BR attached inventory (requires 4BR units)",
+                        "Completed scan found no 7BR/8BR combo potential for this market",
+                      ),
+                    },
+                  ];
                   return (
                     <Card
                       key={`${m.city}-${m.state}`}
@@ -2808,34 +2866,23 @@ export default function AddCommunity() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="font-semibold text-sm">{m.city}, {m.state}</p>
                             {m.tag && <Badge variant="outline" className="text-[10px]">{m.tag}</Badge>}
-                            <Badge
-                              variant="outline"
-                              className={`text-[10px] ${sixBedroomCombo.className}`}
-                              title={sixBedroomCombo.title}
-                            >
-                              {sixBedroomCombo.icon === "checking" ? (
-                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                              ) : sixBedroomCombo.icon === "yes" ? (
-                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                              ) : (
-                                <XCircle className="h-3 w-3 mr-1" />
-                              )}
-                              6BR combo: {sixBedroomCombo.label}
-                            </Badge>
-                            <Badge
-                              variant="outline"
-                              className={`text-[10px] ${sevenEightBedroomCombo.className}`}
-                              title={sevenEightBedroomCombo.title}
-                            >
-                              {sevenEightBedroomCombo.icon === "checking" ? (
-                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                              ) : sevenEightBedroomCombo.icon === "yes" ? (
-                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                              ) : (
-                                <XCircle className="h-3 w-3 mr-1" />
-                              )}
-                              7/8BR combo: {sevenEightBedroomCombo.label}
-                            </Badge>
+                            {comboBadges.map(({ label, state }) => (
+                              <Badge
+                                key={label}
+                                variant="outline"
+                                className={`text-[10px] ${state.className}`}
+                                title={state.title}
+                              >
+                                {state.icon === "checking" ? (
+                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                ) : state.icon === "yes" ? (
+                                  <CheckCircle2 className="h-3 w-3 mr-1" />
+                                ) : (
+                                  <XCircle className="h-3 w-3 mr-1" />
+                                )}
+                                {label}: {state.label}
+                              </Badge>
+                            ))}
                             <Badge variant="outline" className="text-[10px] border-emerald-200 bg-emerald-50 text-emerald-700">
                               <DollarSign className="h-3 w-3 mr-1" />
                               {formatComboRange(m.estimatedComboLow, m.estimatedComboHigh)}
