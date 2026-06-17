@@ -8,7 +8,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   auditTopMarketSevenEightFromCuratedSeeds,
+  filterTopScanComboCandidates,
+  hasAnyTopScanComboPotential,
+  hasFourBedroomComboPotential,
+  hasFiveBedroomComboPotential,
+  hasSixBedroomComboPotential,
   hasSevenEightBedroomComboPotential,
+  isTopScanComboCandidate,
   parseCommunityResearchJsonArray,
   researchCommunitiesForCity,
   TOP_MARKET_SEEDS,
@@ -1898,7 +1904,10 @@ try {
   assert.ok(hasSevenEightBedroomComboPotential(regency!), "Regency 3BR+4BR should qualify for 7/8BR market badge");
   const piliMai = poipuSeeds.find((c) => c.name === "Pili Mai");
   assert.ok(piliMai && !hasSevenEightBedroomComboPotential(piliMai!), "Pili Mai (2/3BR only) should not claim 7/8BR");
+  assert.ok(piliMai && hasFiveBedroomComboPotential(piliMai!), "Pili Mai (2BR+3BR) should support a 5BR combo");
+  assert.ok(regency && hasFiveBedroomComboPotential(regency!), "Regency (2BR+3BR) should support a 5BR combo");
   console.log("  ✓ 7/8BR combo potential requires 4BR inventory");
+  console.log("  ✓ 4BR/5BR combos surface from existing 2BR/3BR curated inventory");
 
   const princeville = await researchCommunitiesForCity("Princeville", "Hawaii");
   const kaiulani = princeville.find((c) => c.name === "Kaiulani of Princeville");
@@ -1912,6 +1921,57 @@ try {
   else process.env.SEARCHAPI_API_KEY = originalSearchKey;
   if (originalAnthropicKey == null) delete process.env.ANTHROPIC_API_KEY;
   else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+}
+
+// --- Top-market sweep: 4BR (2+2) and 5BR (2+3) combo detection -------------
+// The sweep used to gate purely on the 6BR (two-3BR) pair, which hid condo
+// communities whose 2BR/3BR mix only makes a 4BR or 5BR combo. These pure
+// synthetic checks lock the new pair semantics + the widened candidate filter
+// (no network — only availableBedrooms / estimatedBedroomUnitCounts matter).
+{
+  const mk = (availableBedrooms: number[], counts?: Record<string, number>) => ({
+    name: "Test Resort",
+    unitTypes: "condo",
+    researchSummary: "Individually owned condo vacation rentals listed on Airbnb and VRBO.",
+    availableBedrooms,
+    estimatedBedroomUnitCounts: counts,
+  } as any);
+
+  // 2BR + 3BR: 5BR (2+3) yes, 4BR (2+2, unknown count) yes, 6BR (3+3, unknown
+  // count) yes, but 7/8BR no (needs a 4BR unit).
+  const twoThree = mk([2, 3]);
+  assert.ok(hasFiveBedroomComboPotential(twoThree), "2BR+3BR supports a 5BR combo");
+  assert.ok(hasFourBedroomComboPotential(twoThree), "2BR present (unknown count) allows a 4BR combo");
+  assert.ok(!hasSevenEightBedroomComboPotential(twoThree), "2BR/3BR cannot make a 7/8BR combo");
+
+  // 2BR only: 4BR (2+2) yes; 5BR/6BR/7-8BR no.
+  const twoOnly = mk([2]);
+  assert.ok(hasFourBedroomComboPotential(twoOnly), "two 2BR units make a 4BR combo");
+  assert.ok(!hasFiveBedroomComboPotential(twoOnly), "2BR-only cannot make a 5BR combo");
+  assert.ok(!hasSixBedroomComboPotential(twoOnly), "2BR-only cannot make a 6BR combo");
+
+  // Same-size 2+2 needs at least two 2BR units when unit counts are known.
+  assert.ok(!hasFourBedroomComboPotential(mk([2], { "2BR": 1 })), "a single 2BR unit cannot make a 4BR combo");
+  assert.ok(hasFourBedroomComboPotential(mk([2], { "2BR": 2 })), "two 2BR units make a 4BR combo");
+
+  // The behavior change this feature is about: a 2BR-only condo community is now
+  // a sweep candidate (via the 4BR combo) even though it has NO 6BR potential —
+  // it would previously have been filtered out entirely.
+  assert.ok(hasAnyTopScanComboPotential(twoOnly), "2BR-only community has 4BR combo potential");
+  assert.ok(!hasSixBedroomComboPotential(twoOnly), "...and explicitly no 6BR potential");
+  assert.ok(isTopScanComboCandidate(mk([2], { "2BR": 4 })), "2BR-only condo community is a top-scan combo candidate");
+  assert.equal(
+    filterTopScanComboCandidates([mk([2], { "2BR": 4 })]).length,
+    1,
+    "a 2BR-only condo community now passes the sweep candidate filter",
+  );
+  // Detached / single-family inventory is still rejected even with a valid pair.
+  assert.equal(
+    filterTopScanComboCandidates([{ ...mk([2, 3]), unitTypes: "detached single family homes" }]).length,
+    0,
+    "detached homes are excluded from the sweep regardless of bedroom mix",
+  );
+  console.log("  ✓ sweep surfaces 4BR (2+2) and 5BR (2+3) combos, not just 6BR/7-8BR");
 }
 
 const routeSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");

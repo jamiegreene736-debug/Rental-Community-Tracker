@@ -1073,30 +1073,55 @@ export function knownComboSeedsForCity(city: string, state: string): ResearchedC
     }));
 }
 
-export function hasSixBedroomComboPotential(
-  community: Pick<ResearchedCommunity, "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">,
-): boolean {
+type ComboBedroomFields = Pick<ResearchedCommunity, "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">;
+type ComboCandidateFields = Pick<ResearchedCommunity, "unitTypes" | "researchSummary" | "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">;
+
+export function hasFourBedroomComboPotential(community: ComboBedroomFields): boolean {
+  // 4BR combos pair two 2BR condos (2+2) — the most plentiful inventory tier.
+  return hasBedroomPairComboPotential(community, [[2, 2]]);
+}
+
+export function hasFiveBedroomComboPotential(community: ComboBedroomFields): boolean {
+  // 5BR combos pair a 2BR + a 3BR condo (2+3).
+  return hasBedroomPairComboPotential(community, [[2, 3]]);
+}
+
+export function hasSixBedroomComboPotential(community: ComboBedroomFields): boolean {
+  // 6BR combos pair two 3BR condos (3+3).
   return hasBedroomPairComboPotential(community, [[3, 3]]);
 }
 
-export function isTopScanSixBedroomComboCandidate(
-  community: Pick<ResearchedCommunity, "unitTypes" | "researchSummary" | "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">,
-): boolean {
-  const typeCheck = checkCommunityType(community.unitTypes, community.researchSummary);
-  return typeCheck.eligible && hasSixBedroomComboPotential(community);
-}
-
-export function filterTopScanSixBedroomComboCandidates<T extends Pick<ResearchedCommunity, "unitTypes" | "researchSummary" | "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">>(
-  communities: T[],
-): T[] {
-  return communities.filter(isTopScanSixBedroomComboCandidate);
-}
-
-export function hasSevenEightBedroomComboPotential(
-  community: Pick<ResearchedCommunity, "availableBedrooms" | "estimatedBedroomUnitCounts" | "combinedBedroomsTypical" | "bedroomMix">,
-): boolean {
+export function hasSevenEightBedroomComboPotential(community: ComboBedroomFields): boolean {
   // 7BR/8BR combos require a 4BR attached unit (3+4 or 4+4). Do not infer from 2+5 or 3+5.
   return hasBedroomPairComboPotential(community, [[3, 4], [4, 4]]);
+}
+
+// Every two-unit combo size the top-market sweep surfaces: 4BR (2+2), 5BR (2+3),
+// 6BR (3+3), 7BR (3+4), 8BR (4+4). A market qualifies if it can support ANY of
+// these. The sweep previously gated purely on the 6BR (two-3BR) pair, which hid
+// communities whose plentiful 2BR/3BR mix only makes a 4BR or 5BR combo — those
+// now surface too (each size is reported independently via its own flag/badge).
+const TOP_SCAN_COMBO_PAIRS: Array<[number, number]> = [
+  [2, 2],
+  [2, 3],
+  [3, 3],
+  [3, 4],
+  [4, 4],
+];
+
+export function hasAnyTopScanComboPotential(community: ComboBedroomFields): boolean {
+  return hasBedroomPairComboPotential(community, TOP_SCAN_COMBO_PAIRS);
+}
+
+export function isTopScanComboCandidate(community: ComboCandidateFields): boolean {
+  const typeCheck = checkCommunityType(community.unitTypes, community.researchSummary);
+  return typeCheck.eligible && hasAnyTopScanComboPotential(community);
+}
+
+export function filterTopScanComboCandidates<T extends ComboCandidateFields>(
+  communities: T[],
+): T[] {
+  return communities.filter(isTopScanComboCandidate);
 }
 
 function getComboBedroomCounts(

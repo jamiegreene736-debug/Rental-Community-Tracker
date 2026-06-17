@@ -141,6 +141,8 @@ export const topMarketScanCache = pgTable("top_market_scan_cache", {
   city: text("city").notNull(),
   state: text("state").notNull(),
   tag: text("tag"),
+  fourBedroomPossible: boolean("four_bedroom_possible").notNull().default(false),
+  fiveBedroomPossible: boolean("five_bedroom_possible").notNull().default(false),
   sixBedroomPossible: boolean("six_bedroom_possible").notNull().default(false),
   sevenEightBedroomPossible: boolean("seven_eight_bedroom_possible").notNull().default(false),
   qualifyingCount: integer("qualifying_count").notNull().default(0),

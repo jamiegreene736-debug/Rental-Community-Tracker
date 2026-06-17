@@ -1,14 +1,18 @@
 import { topMarketScanCache as topMarketScanCacheRows } from "@shared/schema";
 import {
+  hasFourBedroomComboPotential,
+  hasFiveBedroomComboPotential,
   hasSevenEightBedroomComboPotential,
   hasSixBedroomComboPotential,
-  filterTopScanSixBedroomComboCandidates,
+  filterTopScanComboCandidates,
 } from "./community-research";
 import { db } from "./db";
 import { eq } from "drizzle-orm";
 
 /** Bump when combo-badge logic changes so cached market flags are recomputed. */
-export const TOP_MARKET_SCAN_CACHE_LOGIC_VERSION = 4;
+// v5: candidate filter widened from 6BR-only to any 4BR/5BR/6BR/7-8BR combo, and
+// four/five-bedroom flags added — recompute flags + qualifyingCount on deploy.
+export const TOP_MARKET_SCAN_CACHE_LOGIC_VERSION = 5;
 
 const TOP_MARKET_SCAN_CACHE_VERSION_KEY = "__top_market_scan_cache_logic_version__";
 
@@ -54,9 +58,11 @@ export async function upsertTopMarketScanCache(params: {
 }): Promise<void> {
   const now = new Date();
   const marketKey = topMarketScanCacheKey(params.city, params.state);
-  const communities = filterTopScanSixBedroomComboCandidates(
+  const communities = filterTopScanComboCandidates(
     (Array.isArray(params.communities) ? params.communities : []) as any[],
   );
+  const fourBedroomPossible = communities.some((c) => hasFourBedroomComboPotential(c as any));
+  const fiveBedroomPossible = communities.some((c) => hasFiveBedroomComboPotential(c as any));
   const sixBedroomPossible = communities.some((c) => hasSixBedroomComboPotential(c as any));
   const sevenEightBedroomPossible = communities.some((c) => hasSevenEightBedroomComboPotential(c as any));
   try {
@@ -65,6 +71,8 @@ export async function upsertTopMarketScanCache(params: {
       city: params.city.trim(),
       state: params.state.trim(),
       tag: params.tag ?? null,
+      fourBedroomPossible,
+      fiveBedroomPossible,
       sixBedroomPossible,
       sevenEightBedroomPossible,
       qualifyingCount: communities.length,
@@ -78,6 +86,8 @@ export async function upsertTopMarketScanCache(params: {
         city: params.city.trim(),
         state: params.state.trim(),
         tag: params.tag ?? null,
+        fourBedroomPossible,
+        fiveBedroomPossible,
         sixBedroomPossible,
         sevenEightBedroomPossible,
         qualifyingCount: communities.length,
@@ -108,18 +118,22 @@ export async function clearTopMarketScanCache(): Promise<void> {
   }
 }
 
-/** Recompute six/7-8 flags from stored community JSON (no SearchAPI). */
+/** Recompute 4BR/5BR/6BR/7-8BR combo flags from stored community JSON (no SearchAPI). */
 export async function refreshTopMarketScanCacheComboFlags(): Promise<number> {
   try {
     const rows = await db.select().from(topMarketScanCacheRows);
     let updated = 0;
     for (const row of rows) {
-      const communities = filterTopScanSixBedroomComboCandidates(
+      const communities = filterTopScanComboCandidates(
         (Array.isArray(row.communities) ? row.communities : []) as any[],
       );
+      const fourBedroomPossible = communities.some((c) => hasFourBedroomComboPotential(c as any));
+      const fiveBedroomPossible = communities.some((c) => hasFiveBedroomComboPotential(c as any));
       const sixBedroomPossible = communities.some((c) => hasSixBedroomComboPotential(c as any));
       const sevenEightBedroomPossible = communities.some((c) => hasSevenEightBedroomComboPotential(c as any));
       if (
+        row.fourBedroomPossible === fourBedroomPossible &&
+        row.fiveBedroomPossible === fiveBedroomPossible &&
         row.sixBedroomPossible === sixBedroomPossible &&
         row.sevenEightBedroomPossible === sevenEightBedroomPossible &&
         row.qualifyingCount === communities.length
@@ -127,6 +141,8 @@ export async function refreshTopMarketScanCacheComboFlags(): Promise<number> {
         continue;
       }
       await db.update(topMarketScanCacheRows).set({
+        fourBedroomPossible,
+        fiveBedroomPossible,
         sixBedroomPossible,
         sevenEightBedroomPossible,
         qualifyingCount: communities.length,
@@ -185,6 +201,8 @@ export function serializeTopMarketScanCacheRow(row: TopMarketScanCacheRow) {
     city: row.city,
     state: row.state,
     tag: row.tag,
+    fourBedroomPossible: row.fourBedroomPossible,
+    fiveBedroomPossible: row.fiveBedroomPossible,
     sixBedroomPossible: row.sixBedroomPossible,
     sevenEightBedroomPossible: row.sevenEightBedroomPossible,
     qualifyingCount: row.qualifyingCount,
