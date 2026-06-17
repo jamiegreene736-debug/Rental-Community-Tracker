@@ -146,6 +146,8 @@ export type StartPreflightPhotoFetchInput = {
   skipUrls?: string[];
   replacingExistingPhotos?: boolean;
   skipFirst?: number;
+  /** When set (promoted-draft "Find different photos"), rescrape this listing URL directly. */
+  rescrapeSourceUrl?: string;
 };
 
 export function startPreflightPhotoFetchJob(input: StartPreflightPhotoFetchInput): PreflightPhotoFetchJob {
@@ -183,6 +185,9 @@ async function runPreflightPhotoFetchJob(
   activePhotoFetchJobIds.add(job.id);
   const base = loopbackBaseUrl();
   const replacingExistingPhotos = input.replacingExistingPhotos === true;
+  const rescrapeSourceUrl = typeof input.rescrapeSourceUrl === "string" && /^https?:\/\//i.test(input.rescrapeSourceUrl)
+    ? input.rescrapeSourceUrl.trim()
+    : null;
   const attempts = preflightPhotoDiscoveryAttempts(input.bedrooms, replacingExistingPhotos);
   let reservedProof: UnitPhotoResolverProof | null = null;
   try {
@@ -201,7 +206,43 @@ async function runPreflightPhotoFetchJob(
     let lastProof: UnitPhotoResolverProof | null = null;
     let lastDiagnostic: Record<string, unknown> | null = null;
 
-    for (let i = 0; i < attempts.length; i += 1) {
+    if (rescrapeSourceUrl) {
+      touchPhotoJob(job, {
+        phase: "searching",
+        message: "Rescraping photos from the saved listing",
+        progress: 42,
+      });
+      const fetchData = await postJson(`${base}/api/community/fetch-unit-photos`, {
+        url: rescrapeSourceUrl,
+        bedrooms: input.bedrooms,
+      }, 120_000);
+      lastNote = typeof fetchData?.note === "string" ? fetchData.note : undefined;
+      const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
+      const nextSourceUrl: string | null = fetchData?.sourceUrl ?? rescrapeSourceUrl;
+      const nextProof = fetchData?.resolverProof && typeof fetchData.resolverProof === "object"
+        ? fetchData.resolverProof as UnitPhotoResolverProof
+        : buildUnitPhotoResolverProof({
+            photos: nextPhotos,
+            sourceUrl: nextSourceUrl,
+            foundVia: typeof fetchData?.foundVia === "string" ? fetchData.foundVia : "url",
+            requestedBedrooms: input.bedrooms,
+            facts: fetchData?.facts && typeof fetchData.facts === "object" ? fetchData.facts : null,
+          });
+      lastProof = nextProof;
+      lastDiagnostic = fetchData?.diagnostic && typeof fetchData.diagnostic === "object"
+        ? fetchData.diagnostic as Record<string, unknown>
+        : null;
+      touchPhotoJob(job, {
+        proof: nextProof,
+        diagnostic: lastDiagnostic,
+      });
+      if (nextPhotos.length > 0 && nextProof.status !== "rejected") {
+        photos = nextPhotos;
+        sourceUrl = nextSourceUrl;
+      }
+    }
+
+    for (let i = 0; photos.length === 0 && i < attempts.length; i += 1) {
       const attempt = attempts[i];
       touchPhotoJob(job, {
         phase: "searching",

@@ -28359,7 +28359,9 @@ Return ONLY compact JSON with this exact shape:
       // photos first, labels them, then keeps the top N by category priority
       // (Bedrooms > Bathrooms > Living > Dining > Kitchen > ...) — so we
       // never drop a bedroom just because it was late in Apify's list.
-      const maxKeep = Math.max(1, Math.min(40, limit ?? 25));
+      const maxKeep = Number.isFinite(Number(limit)) && Number(limit) > 0
+        ? Math.min(Math.floor(Number(limit)), unitGalleryMaxKeep(scraped.length))
+        : unitGalleryMaxKeep(scraped.length);
       const anthropicKey = process.env.ANTHROPIC_API_KEY;
       // Expected bed/bath counts. The Zillow listing's own structured data
       // (listingFacts) is authoritative when available — the scraper pulled
@@ -29997,6 +29999,7 @@ Return ONLY compact JSON with this exact shape:
       skipUrls?: string[];
       replacingExistingPhotos?: boolean;
       skipFirst?: number;
+      rescrapeSourceUrl?: string;
     };
     const draftId = Number(body.draftId);
     const propertyId = Number(body.propertyId);
@@ -30022,6 +30025,7 @@ Return ONLY compact JSON with this exact shape:
       skipUrls: body.skipUrls,
       replacingExistingPhotos: body.replacingExistingPhotos === true,
       skipFirst: body.skipFirst,
+      rescrapeSourceUrl: typeof body.rescrapeSourceUrl === "string" ? body.rescrapeSourceUrl : undefined,
     });
     res.status(202).json({ job });
   });
