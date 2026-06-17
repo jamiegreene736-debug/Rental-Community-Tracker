@@ -44,6 +44,47 @@ export function decideAvailabilitySourceability(
   return { decision: "block", reason: `Airbnb has no available unit set for these dates (${scan.detail ?? "0 sets"})` };
 }
 
+// ── Profit-aware decision (operator direction 2026-06-17) ────────────────────
+// Availability rarely binds in a liquid market; the real pain is PROFIT — a week
+// sold far out that now costs more to source than we sold it for. This extends
+// the availability decision with a loss branch driven by an assumed buy-in cost
+// (the HIGH END of same-community Airbnb rates) vs our actual Guesty sell price.
+//
+// LOAD-BEARING fail-safes (revenue-preserving, same asymmetry as above):
+//  - failed search ⇒ skip; no available set ⇒ block (unchanged availability rule).
+//  - sourceable but cost/sell NOT assessable (no priced comps / no calendar
+//    price) ⇒ OPEN, never block — we never close a window on missing profit data.
+export type ProfitInputs = {
+  assumedCost: number | null;   // high-end assumed buy-in cost for the combo, or null if unpriceable
+  sellPrice: number | null;     // our real Guesty sell price for the window, or null if unavailable
+  minMargin: number;            // require sell to beat cost by this fraction (0 = block only on an outright loss)
+};
+
+export function decideSourceabilityWithProfit(
+  scan: AvailabilityScan,
+  profit: ProfitInputs,
+): { decision: SourceabilityDecision; reason: string } {
+  if (!scan.ok) {
+    return { decision: "skip", reason: "Airbnb search unavailable — fail-safe, no calendar change" };
+  }
+  if (scan.setsAvailable < 1) {
+    return { decision: "block", reason: `Unsourceable: Airbnb has no available unit set (${scan.detail ?? "0 sets"})` };
+  }
+  const { assumedCost, sellPrice, minMargin } = profit;
+  if (assumedCost == null || sellPrice == null || !(sellPrice > 0)) {
+    return {
+      decision: "open",
+      reason: `Sourceable (${scan.detail ?? "available"}); profit not assessable (cost=${assumedCost ?? "?"}, sell=${sellPrice ?? "?"}) — open`,
+    };
+  }
+  const ceiling = sellPrice * (1 - Math.max(0, minMargin));
+  if (assumedCost > ceiling) {
+    const marginNote = minMargin > 0 ? ` (−${Math.round(minMargin * 100)}% margin → $${Math.round(ceiling)})` : "";
+    return { decision: "block", reason: `Loss: assumed buy-in $${Math.round(assumedCost)} > sell $${Math.round(sellPrice)}${marginNote}` };
+  }
+  return { decision: "open", reason: `Profitable: assumed buy-in $${Math.round(assumedCost)} ≤ sell $${Math.round(sellPrice)} (${scan.detail ?? "available"})` };
+}
+
 /** Weekly 7-night windows from now+minLead out to now+horizon (UTC, YYYY-MM-DD). */
 export function generateWeeklyWindows(
   now: Date,
