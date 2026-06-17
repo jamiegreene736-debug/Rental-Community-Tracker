@@ -29,6 +29,7 @@ import {
   inferCommunityStreetAddress,
   parseCityFromMailingAddress,
 } from "@shared/community-addresses";
+import { mergeUnitVerdict, DEEP_PHOTO_MIN } from "@shared/preflight-verdict";
 
 type PreflightPhotoFetchJob = {
   id: string;
@@ -69,6 +70,10 @@ type UnitPlatformResult = {
   status: "confirmed" | "photo-confirmed" | "photo-only" | "unconfirmed" | "not-listed" | "error";
   url: string | null;
   detection: string;
+  // Why a text result is "unconfirmed": "generic-unit" = only the RESORT was matched (a deep clean
+  // photo scan may resolve it to Clear); "unit-pinned"/"bedroom-conflict" = a real per-unit listing
+  // was located but not fully confirmed (kept on Review even with clean photos). See mergeUnitVerdict.
+  reason?: "generic-unit" | "unit-pinned" | "bedroom-conflict";
 };
 
 type UnitCheckResult = {
@@ -255,6 +260,9 @@ type PhotoCheckRow = {
   airbnbMatches?: Array<{ listingUrl?: string; title?: string }>;
   vrboMatches?: Array<{ listingUrl?: string; title?: string }>;
   bookingMatches?: Array<{ listingUrl?: string; title?: string }>;
+  // How many photos this scan reverse-image-searched. The deep Full-unit-audit scans the whole
+  // gallery; the background scheduler only scans 3. Used to decide whether a "clean" is decisive.
+  photosChecked?: number;
   checkedAt?: string;
   error?: string | null;
 };
@@ -585,10 +593,15 @@ export default function BuilderPreflight() {
   const [swapsCommitted, setSwapsCommitted] = useState(false);
   const [committing, setCommitting] = useState(false);
   const autoRunFired = useRef(false);
+  // Set on unmount so the long deep-photo poll loop (up to ~9 min) stops promptly when the operator
+  // navigates away, instead of polling + setState on an unmounted component.
+  const pollAbortedRef = useRef(false);
+  useEffect(() => () => { pollAbortedRef.current = true; }, []);
 
   // Photo cross-check (credit-aware scanner via /api/preflight/photo-check).
   const [photoChecks, setPhotoChecks] = useState<Record<string, PhotoCheckRow>>({});
-  const [photoBudget, setPhotoBudget] = useState<{ used: number; cap: number; remaining: number } | null>(null);
+  // cap/remaining are null when the daily photo-check cap is removed (the default) — "unlimited".
+  const [photoBudget, setPhotoBudget] = useState<{ used: number; cap: number | null; remaining: number | null } | null>(null);
   const [photoScanning, setPhotoScanning] = useState(false);
 
   // Maps old unit ID → replacement unit data
@@ -924,7 +937,7 @@ export default function BuilderPreflight() {
     } catch { /* non-fatal — photo signal just won't show */ }
   };
 
-  // On-demand DEEP check: spends credits (5 interior photos/unit), skips folders checked
+  // On-demand DEEP check: spends credits (every interior photo/unit), skips folders checked
   // < 24h ago, refuses past the daily cap, then polls the read path until results land.
   const runDeepPhotoCheck = async () => {
     const folders = photoFoldersForUnits();
@@ -950,11 +963,15 @@ export default function BuilderPreflight() {
         return;
       }
       const scanning: string[] = data.scanning ?? folders;
-      toast({ title: "Deep photo check started", description: `Reverse-image-searching ${scanning.length} unit(s) — this takes ~30-60s each.` });
+      toast({ title: "Deep photo check started", description: `Reverse-image-searching every interior photo for ${scanning.length} unit(s) — this can take 1-3 min each.` });
       const before: Record<string, string | undefined> = {};
       for (const f of scanning) before[f] = photoChecks[f]?.checkedAt;
-      for (let i = 0; i < 30; i++) {
+      // Poll up to ~9 min (90 × 6s): a full-gallery scan of several units is slower than the old
+      // 5-photo sample. If it outruns the poll the background job still finishes and the page-load
+      // effect picks up the result on the next visit. Bails immediately if the page unmounts.
+      for (let i = 0; i < 90; i++) {
         await new Promise((r) => setTimeout(r, 6000));
+        if (pollAbortedRef.current) return;
         let d2: any;
         try {
           const resp2 = await fetch("/api/preflight/photo-check", {
@@ -1313,7 +1330,7 @@ export default function BuilderPreflight() {
                     onClick={runFullUnitAudit}
                     disabled={photoScanning}
                     className="h-7 px-2 text-xs flex-shrink-0"
-                    title="Text search + reverse-image photo check (5 interior photos/unit) against Airbnb / VRBO / Booking. Uses SearchAPI credits; photo results cached 24h."
+                    title="Text search + reverse-image photo check (every interior photo per unit) against Airbnb / VRBO / Booking. The photo scan is the decisive signal: a match = Listed, a thorough clean scan = Clear. Results cached 24h."
                   >
                     {photoScanning ? (
                       <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Auditing photos…</>
@@ -1348,7 +1365,9 @@ export default function BuilderPreflight() {
                     className="self-center text-[10px] text-muted-foreground"
                     title="SearchAPI credits used today for photo checks (resets daily)"
                   >
-                    {photoBudget.used}/{photoBudget.cap} photo credits today
+                    {photoBudget.cap == null
+                      ? `${photoBudget.used} photo checks today`
+                      : `${photoBudget.used}/${photoBudget.cap} photo credits today`}
                   </span>
                 )}
               </div>
@@ -1361,7 +1380,7 @@ export default function BuilderPreflight() {
           </p>
           {lastCheckWasFullAudit && hasAnyResults && (
             <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300">
-              Full unit audit complete — each unit was checked by text search and by reverse-image photo match against Airbnb, VRBO, and Booking.com. Photo matches appear per platform below (cached 24h). A unit whose number can't be confirmed by text shows “Possible Match — Check Manually”; the photo match is the reliable signal there.
+              Full unit audit complete — each unit was checked by text search and by a reverse-image scan of <strong>every interior photo</strong> against Airbnb, VRBO, and Booking.com (cached 24h). Each platform shows a decisive verdict: <strong>Listed</strong> (text confirmed it, or the unit's photos were found on a live listing) or <strong>Clear</strong> (a full photo scan found no listing of this unit). A unit stays on <strong>Review</strong> only when neither signal could decide — text found a possible listing it couldn't pin, or there were no/too-few photos to scan.
             </div>
           )}
 
@@ -1737,7 +1756,16 @@ export default function BuilderPreflight() {
 
                       <div className="grid flex-1 grid-cols-1 gap-2 sm:grid-cols-3">
                         {PLATFORM_LIST.map(({ key, label }) => {
-                          const r = unitResult?.platforms[key];
+                          const folder = (unit as any).photoFolder as string | undefined;
+                          const pc = folder ? photoChecks[folder] : undefined;
+                          // Per-platform photo verdict for this folder, only once the folder was scanned.
+                          const ps = (pc && pc.scanned ? pc[key as "airbnb" | "vrbo" | "booking"] : undefined) as PhotoMatchStatus | undefined;
+                          // A "clean" only decides the verdict when it came from a DEEP scan (full
+                          // gallery), not a shallow 3-photo background row — else we'd assert a false NO.
+                          const photoDeep = !!pc && pc.scanned && (Number(pc.photosChecked) || 0) >= DEEP_PHOTO_MIN;
+                          // Decisive badge = text result merged with the photo result (verified photo
+                          // match → YES; deep clean → NO; shallow/unknown photo never overrides text).
+                          const r = mergeUnitVerdict(unitResult?.platforms[key], ps, photoDeep);
                           return (
                             <div key={key} id={`check-${key}-${unit.id}`} className="rounded border border-border/60 bg-muted/20 px-2.5 py-2">
                               <div className="flex items-center justify-between gap-2">
@@ -1765,10 +1793,7 @@ export default function BuilderPreflight() {
                                 </p>
                               )}
                               {(() => {
-                                const folder = (unit as any).photoFolder as string | undefined;
                                 if (!folder) return null;
-                                const pc = photoChecks[folder];
-                                const ps = pc?.[key as "airbnb" | "vrbo" | "booking"];
                                 const matches = (pc as any)?.[`${key}Matches`] as Array<{ listingUrl?: string }> | undefined;
                                 const matchUrl = matches?.find((m) => m?.listingUrl)?.listingUrl;
                                 if (photoScanning && (!pc || ps === undefined)) {
@@ -1824,10 +1849,9 @@ export default function BuilderPreflight() {
           {/* Status legend */}
           {hasAnyResults && (
             <div className="mt-4 pt-4 border-t border-border/60 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
-              <span className="flex items-center gap-1"><CheckCircle2 className="h-3 w-3 text-green-600" /> Listed &amp; verified</span>
-              <span className="flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-orange-500" /> Likely listed — review recommended</span>
-              <span className="flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-yellow-500" /> Possible match — check manually</span>
-              <span className="flex items-center gap-1"><XCircle className="h-3 w-3 text-red-500" /> Not found — safe to use</span>
+              <span className="flex items-center gap-1"><CheckCircle2 className="h-3 w-3 text-green-600" /> Listed — already on this platform (don't use)</span>
+              <span className="flex items-center gap-1"><XCircle className="h-3 w-3 text-red-500" /> Clear — no listing of this unit found</span>
+              <span className="flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-yellow-500" /> Review — couldn't decide (text found a possible listing, or no/too-few photos to scan)</span>
             </div>
           )}
         </Card>

@@ -216,7 +216,7 @@ import {
   scanSeasonalAvailabilityCapacity,
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
-import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget } from "./photo-listing-scanner";
+import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest } from "./photo-community-check";
 import {
   MIN_DISTINCT_STRONG_PHOTO_MATCHES,
@@ -29072,7 +29072,9 @@ Return ONLY compact JSON with this exact shape:
 
   // Platform check: searches Google for the property on Airbnb, VRBO, and Booking.com
   app.get("/api/preflight/platform-check", async (req, res) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
+    // Resolve to the first available SearchAPI key (handles primary empty/dead → SEARCHAPI_API_KEY_2);
+    // the global fetch fallback rotates keys on a 429 from there.
+    const apiKey = getSearchApiKey();
     const imgbbKey = process.env.IMGBB_API_KEY;
 
     const name = (req.query.name as string || "").trim();
@@ -29143,7 +29145,7 @@ Return ONLY compact JSON with this exact shape:
       complexName: string,
       singleListing: boolean,
       expectedBedrooms?: number,
-    ): Promise<{ status: "confirmed" | "unconfirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
+    ): Promise<{ status: "confirmed" | "unconfirmed" | "not-listed" | "error"; url: string | null; detection: string; reason?: "generic-unit" | "unit-pinned" | "bedroom-conflict" }> => {
       const bareUnit = String(unitNumber || "").trim();
       const uLower = bareUnit.toLowerCase();
       // ── Discriminating vs non-discriminating unit identifiers ───────────────────────
@@ -29248,7 +29250,7 @@ Return ONLY compact JSON with this exact shape:
         // Best fallback when we can't outright CONFIRM: a result that proves the community/
         // building is listed but not this exact unit (or a bedroom-count conflict). Surfaced as
         // "Possible match — verify manually" (yellow), never green "Listed".
-        let bestUnconfirmed: { url: string | null; detection: string } | null = null;
+        let bestUnconfirmed: { url: string | null; detection: string; reason: "generic-unit" | "unit-pinned" | "bedroom-conflict" } | null = null;
         for (const q of queries) {
           const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "5" });
           const ctrl = new AbortController();
@@ -29290,18 +29292,27 @@ Return ONLY compact JSON with this exact shape:
               (unitPinned && (bedroomConflict || !strong)) ||
               (nonDiscriminatingUnit && !singleListing && weak);
             if (flagReview && !bestUnconfirmed) {
+              // reviewKind distinguishes a result that PINNED this unit (real per-unit listing the
+              // client must keep on "Review" with its link, even after a clean photo scan) from a
+              // "generic-unit" hit that only proves the RESORT is listed (the client may resolve that
+              // one to "Clear" if a deep photo scan finds no listing of this unit). See mergeUnitVerdict.
+              const reviewKind: "generic-unit" | "unit-pinned" | "bedroom-conflict" = bedroomConflict
+                ? "bedroom-conflict"
+                : (nonDiscriminatingUnit && !singleListing)
+                ? "generic-unit"
+                : "unit-pinned";
               const reason = bedroomConflict
                 ? `Found a listing but it's ${listingBeds}BR vs this unit's ${expectedBedrooms}BR — likely a different unit; verify manually`
                 : (nonDiscriminatingUnit && !singleListing)
                 ? `Found "${complexName}" listed but can't confirm ${unitLabel} by text (too generic to pin a specific unit) — verify by photos`
                 : `Found a possible match but couldn't confirm it's ${singleListing ? "this property" : unitLabel} at "${complexName}" — verify manually`;
-              bestUnconfirmed = { url: r.link, detection: `${reason}: ${snippet}` };
+              bestUnconfirmed = { url: r.link, detection: `${reason}: ${snippet}`, reason: reviewKind };
             }
           }
           await new Promise((rr) => setTimeout(rr, 250));
         }
         if (bestUnconfirmed) {
-          return { status: "unconfirmed" as const, url: bestUnconfirmed.url, detection: bestUnconfirmed.detection };
+          return { status: "unconfirmed" as const, url: bestUnconfirmed.url, detection: bestUnconfirmed.detection, reason: bestUnconfirmed.reason };
         }
         return { status: "not-listed", url: null, detection: "No matching listing found in Google results" };
       } catch (err: any) {
@@ -41645,23 +41656,42 @@ Return ONLY compact JSON with this exact shape:
       if (!body.run) {
         return res.json({ checks, budget, started: false });
       }
-      // run:true — DEEP check. Refuse if the daily budget is spent.
-      if (budget.remaining <= 0) {
+      // run:true — DEEP check. Refuse only if a FINITE daily cap is configured AND it's spent.
+      // budget.remaining === null means the cap was removed (the default) → never budget-blocked.
+      if (budget.remaining != null && budget.remaining <= 0) {
         return res.json({ checks, budget, started: false, budgetReached: true });
       }
       // Skip-if-fresh: a folder scanned conclusively (clean/found, not unknown/error) in the
       // last 24h is reused — re-opening the page never re-burns credits. force:true overrides
       // (use after changing a unit's photos).
+      // BUT a "clean" verdict is only trustworthy from a DEEP (full-gallery) scan. The hourly
+      // background scheduler writes 3-photo rows; a 3-photo "clean" can miss the one room shot that's
+      // on a live listing, so the deep audit must RE-SCAN it rather than reuse it (the client likewise
+      // only treats a deep clean as a decisive "Clear"). A "found" row is a strong positive at any
+      // depth, so it stays fresh regardless. DEEP_AUDIT_MIN_PHOTOS mirrors the client's DEEP_PHOTO_MIN.
       const FRESH_MS = 24 * 60 * 60 * 1000;
-      const isFresh = (c: any) =>
-        c.scanned && c.checkedAt && (Date.now() - new Date(c.checkedAt).getTime() < FRESH_MS) &&
-        [c.airbnb, c.vrbo, c.booking].every((s) => s === "clean" || s === "found");
+      const DEEP_AUDIT_MIN_PHOTOS = 4;
+      const isFresh = (c: any) => {
+        if (!c.scanned || !c.checkedAt) return false;
+        if (Date.now() - new Date(c.checkedAt).getTime() >= FRESH_MS) return false;
+        const statuses = [c.airbnb, c.vrbo, c.booking];
+        if (!statuses.every((s) => s === "clean" || s === "found")) return false;
+        // A shallow "clean" is not conclusive — re-scan it deep.
+        if (statuses.some((s) => s === "clean") && (Number(c.photosChecked) || 0) < DEEP_AUDIT_MIN_PHOTOS) return false;
+        return true;
+      };
       const toScan = body.force ? folders : checks.filter((c) => !isFresh(c)).map((c) => c.folder);
       if (toScan.length === 0) {
         return res.json({ checks, budget, started: false, allFresh: true });
       }
-      // 5 distinct interior photos/unit; the batch stops if it crosses the daily cap.
-      void runPhotoListingCheckForFolders(toScan, { maxPhotos: 5, budgetCap: budget.cap });
+      // Thorough on-demand audit: scan the WHOLE deduped interior gallery per unit (clamped to
+      // PHOTO_AUDIT_MAX_PHOTOS in the scanner), so a clean result is a confident NO and a listed unit
+      // gets every chance to surface its ≥2 matches. budgetCap is passed only when a finite cap is
+      // configured (cap === null → unlimited, the default after the 200/day limit was removed).
+      void runPhotoListingCheckForFolders(toScan, {
+        maxPhotos: PHOTO_AUDIT_MAX_PHOTOS,
+        ...(budget.cap != null ? { budgetCap: budget.cap } : {}),
+      });
       return res.json({ checks, budget, started: true, scanning: toScan });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? "Photo check failed" });
