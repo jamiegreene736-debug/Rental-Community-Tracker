@@ -476,7 +476,6 @@ const PILI_MAI = [
 // ─────────────────────────────────────────────────────────────────────────────
 const PROPERTY_AMENITY_MAP: Record<number, string[]> = {
   // Regency at Poipu Kai
-  1:  REGENCY_POIPU_KAI,
   4:  REGENCY_POIPU_KAI,
   7:  REGENCY_POIPU_KAI,
   8:  REGENCY_POIPU_KAI,

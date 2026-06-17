@@ -62,7 +62,7 @@ for (const p of unitBuilderData) {
   );
   checked++;
 }
-assert.ok(checked >= 17, `expected to check ≥17 listings, only saw ${checked}`);
+assert.ok(checked >= 16, `expected to check ≥16 listings, only saw ${checked}`);
 console.log(`  ✓ all ${checked} builder titles + summaries match the rule`);
 
 // ── headlineBedrooms / headlineSleeps key off the advertised bookingTitle ────

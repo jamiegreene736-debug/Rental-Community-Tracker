@@ -239,7 +239,7 @@ const PRINCEVILLE_DEFAULTS = [
 ];
 
 export function getDefaultAmenities(propertyId: number): string[] {
-  const regencyIds = [1, 4, 7, 8, 33, 34];
+  const regencyIds = [4, 7, 8, 33, 34];
   if (regencyIds.includes(propertyId)) return REGENCY_DEFAULTS;
 
   const kekaha = [9, 10, 12];
