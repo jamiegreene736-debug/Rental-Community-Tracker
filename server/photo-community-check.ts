@@ -26,6 +26,7 @@ import {
   communityNamesMatch,
   computeCommunityCohesion,
   computeUnitVerdict,
+  filterUnitOutliers,
   isInteriorPhoto,
   pickInteriorPhotos,
 } from "../shared/photo-community-check-logic";
@@ -342,7 +343,11 @@ function buildUnitPassInstruction(
     `Each unit MUST have at least ${minInterior} interior photo verdicts.`,
     "Do NOT use uncertain/unclear — every match is yes or no.",
     "",
-    "Also flag junk and photos that look like a different unit within the same community (outliers).",
+    "Outliers = photos that appear to be a DIFFERENT UNIT's interior (incompatible kitchen/bedroom/bath finishes, layout, or furniture vs the majority of that unit's interior shots).",
+    "DO NOT flag as outliers — these are normal in scraped unit galleries:",
+    "  - Resort/community amenity or exterior shots: pool, spa, beach, tennis, grounds, building exterior, lobby, shared walkways, ocean views from common areas.",
+    "  - Lanai/balcony/patio photos showing community landscaping, pool, ocean, or building exteriors (even though they are not interior rooms).",
+    "Only flag an outlier when the photo shows a clearly different unit INTERIOR.",
     "",
     "Respond with ONLY minified JSON:",
     '{"units":[{"group":"unit label","photoVerdicts":[{"id":"U1-1","match":"yes|no","reason":"short"}],"allSameUnit":true,"outliers":[{"id":"U1-3","reason":"short"}],"junk":[]}]}',
@@ -606,6 +611,7 @@ export async function runPhotoCommunityCheck(
           interiorVerdicts.map((p) => ({ match: p.match, reason: p.reason })),
           UNIT_INTERIOR_MIN,
         );
+        const outliers = filterUnitOutliers(asFlags(u.outliers, r.sampled));
         return {
           role: "unit" as const,
           label: r.input.label,
@@ -616,8 +622,8 @@ export async function runPhotoCommunityCheck(
           sameAsCommunity: computed.sameAsCommunity,
           reason: computed.reason,
           photoVerdicts: interiorVerdicts,
-          allSameUnit: u.allSameUnit !== false,
-          outliers: asFlags(u.outliers, r.sampled),
+          allSameUnit: outliers.length === 0,
+          outliers,
           junk: asFlags(u.junk, r.sampled),
           confidence: computed.confidence,
         };
