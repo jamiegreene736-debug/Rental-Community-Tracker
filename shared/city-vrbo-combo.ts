@@ -150,6 +150,8 @@ const KAUAI_COMPLEX_DICTIONARY: Array<{ canonical: string; match: RegExp; aliase
   { canonical: "alii kai", match: /\balii kai\b|\bali'?i kai\b/, aliases: ["alii kai princeville"] },
   { canonical: "hanalei colony resort", match: /\bhanalei colony\b/ },
   { canonical: "mauna kai", match: /\bmauna kai\b/, aliases: ["mauna kai princeville"] },
+  { canonical: "kaiulani", match: /\bkaiulani\b|\bka'?iulani\b/, aliases: ["kaiulani of princeville", "ka'iulani of princeville"] },
+  { canonical: "jupiter bay", match: /\bjupiter bay\b/, aliases: ["jupiter bay princeville"] },
   { canonical: "the cliffs at princeville", match: /\bcliffs?\s+(?:at\s+|of\s+)?princeville\b|\bprinceville\s+cliffs?\b|\bcliffs?\s+club\b/ },
   // Kapaa / east side
   { canonical: "kaha lani", match: /\bkaha lani\b/, aliases: ["kahalani", "kaha lani resort"] },

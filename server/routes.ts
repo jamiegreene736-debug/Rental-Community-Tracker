@@ -169,6 +169,13 @@ import {
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "@shared/bulk-combo-queue-progress";
+import {
+  buildPreflightMatchContext,
+  buildPreflightSearchQueries,
+  evaluatePreflightSearchResult,
+  notListedVerdict,
+  type PreflightPlatformKey,
+} from "@shared/preflight-platform-match";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import {
@@ -28770,7 +28777,7 @@ Return ONLY compact JSON with this exact shape:
     const unitsParam = (req.query.units as string || "[]");
     if (!name) return res.status(400).json({ error: "name is required" });
 
-    let units: { unitId: string; unitNumber: string; address: string; photoFolder?: string }[] = [];
+    let units: { unitId: string; unitNumber: string; address: string; photoFolder?: string; bedrooms?: number }[] = [];
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
     const city = normalizePlatformCheckCity(String(req.query.city ?? ""), units[0]?.address);
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
@@ -28802,94 +28809,32 @@ Return ONLY compact JSON with this exact shape:
       return res.json({ units: offUnits, photoMode: "disabled" });
     }
 
-    const PREFLIGHT_PLATFORM_DOMAINS = [
-      { key: "airbnb",  domain: "airbnb.com" },
-      { key: "vrbo",    domain: "vrbo.com" },
-      { key: "booking", domain: "booking.com" },
-    ] as const;
+    const PREFLIGHT_PLATFORMS: PreflightPlatformKey[] = ["airbnb", "vrbo", "booking"];
 
-    // Street portion = before the first comma (or the whole string). The richer
-    // address helpers live in the legacy Lens path below (unreachable), so this is
-    // kept self-contained.
-    const preflightStreetOf = (addr: string): string => {
-      const a = String(addr || "").trim();
-      if (!a) return "";
-      if (a.includes(",")) return a.split(",")[0].trim();
-      // No-comma form (common for Hawaii addresses like "68 3553 Malina St Waikoloa HI"):
-      // take through the last street-type token so we search the STREET, not the whole
-      // "street + city + state" phrase (quoting that over-constrains the query → 0 results).
-      const m = a.match(/^(.*?\b(?:rd|road|st|street|ave|avenue|dr|drive|blvd|boulevard|ln|lane|way|ct|court|pl|place|ter|terrace|cir|circle|pkwy|parkway|hwy|highway))\b/i);
-      return (m ? m[1] : a).trim();
-    };
-
-    const checkPlatformTextOnly = async (
-      domain: string,
-      street: string,
-      unitNumber: string,
-      complexName: string,
-    ): Promise<{ status: "confirmed" | "unconfirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
-      const bareUnit = String(unitNumber || "").trim();
-      const uLower = bareUnit.toLowerCase();
-      // Short / ambiguous unit numbers (1-2 bare digits) appear in almost any listing
-      // snippet — prices, bed counts, ratings, building numbers — so a bare substring
-      // match false-positives constantly (e.g. unit "1" "matched" every Waikoloa listing
-      // that mentions a "1"). For these, require an explicit unit MARKER in BOTH the query
-      // and the snippet ("Unit 1" / "#1" / "Apt 1" / "Suite 1"). 3+ digit or alphanumeric
-      // unit numbers (e.g. "3553", "13B") are specific enough to match bare. This mirrors
-      // the short-unit gating in the legacy (Lens) handler's isShortUnitNumber/unitQueryTerm.
-      const ambiguousUnit = /^\d{1,2}$/.test(bareUnit);
-      const unitQueryFragment = !bareUnit
-        ? ""
-        : ambiguousUnit
-        // For an ambiguous 1-2 digit unit, only retrieve pages that reference it WITH a
-        // unit-type word — never a bare "#1" (which floods in from marketing "ranked #1").
-        ? `(${["Unit", "Apt", "Apartment", "Suite", "Villa", "Townhome", "Building"].map((w) => `"${w} ${bareUnit}"`).join(" OR ")})`
-        : `"${bareUnit}"`;
-      // Snippet validation. For an ambiguous unit the number MUST be immediately preceded by
-      // a unit-type word (optionally with "#"/"No."), so "Unit 1" / "Villa 1" / "Apt #1"
-      // confirm, but "ranked #1", "No. 1 rated", "1 king bed", "$1,200", "1 of 6", "sleeps 12"
-      // do NOT. \b on the number keeps "1" from matching "10"/"12"/"1A".
-      // Only WHOLE-UNIT words — deliberately NOT "suite"/"room"/"bedroom" (those label a
-      // unit's INTERNAL rooms: "Suite #1", "Bedroom 1" appear in almost every multi-room
-      // listing) and NOT plural "villas"/"units" (the resort name "…Beach Villas 1 bedroom"
-      // would collide). Even so, an ambiguous match is only ever flagged for REVIEW below,
-      // never asserted as "Listed".
-      const unitMarkerRe = ambiguousUnit
-        ? new RegExp(`\\b(?:unit|apt|apt\\.|apartment|villa|townhome|townhouse|building|bldg|cottage|casita)\\s*(?:#|no\\.?\\s*)?\\s*${uLower}\\b`, "i")
-        : null;
-      const unitMentioned = (text: string): boolean => {
-        if (!bareUnit) return true;
-        if (ambiguousUnit) return unitMarkerRe!.test(text);
-        return text.includes(uLower) || text.includes(`#${uLower}`);
-      };
-      // Only trust a result that is an INDIVIDUAL LISTING page — not a region / search /
-      // category roundup. Those directory pages mention many properties at once, so a unit
-      // marker in the snippet can belong to a DIFFERENT property (e.g. a booking.com
-      // /budget/region page listing "Mountain View Retreat Unit 1" while also name-dropping
-      // "Waikoloa Beach Villas"). Mirrors the legacy isListingUrl patterns.
-      const isPreflightListingUrl = (url: string): boolean => {
-        const lu = String(url || "").toLowerCase();
-        if (!lu) return false;
-        if (domain === "airbnb.com") return lu.includes("airbnb.com/rooms/") || lu.includes("airbnb.com/h/");
-        if (domain === "vrbo.com") {
-          if (/vrbo\.com\/\d+[a-z]{0,3}(?:[\/?#]|$)/.test(lu)) return true;   // /1234567, /1234567ha
-          if (/vrbo\.com\/[a-z]{2}-[a-z]{2}\/p\d+/.test(lu)) return true;     // /en-us/p12345
-          if (/vrbo\.com\/vacation-rental\/p\d+/.test(lu)) return true;       // /vacation-rental/p12345
-          return false;                                                       // reject search/region/category
-        }
-        if (domain === "booking.com") return lu.includes("booking.com/hotel/") || lu.includes("booking.com/apartments/");
-        return lu.includes(domain);
-      };
-      const queries = Array.from(new Set([
-        street ? `site:${domain} "${street}" ${unitQueryFragment}`.trim() : "",
-        complexName ? `site:${domain} "${complexName}" ${unitQueryFragment}`.trim() : "",
-      ].filter(Boolean)));
+    const checkPlatformStrict = async (
+      platform: PreflightPlatformKey,
+      unit: { unitNumber: string; address: string; bedrooms?: number },
+    ): Promise<{ status: "listed" | "not-listed" | "error"; url: string | null; detection: string }> => {
+      const matchContext = buildPreflightMatchContext({
+        complexName: name,
+        city,
+        unitNumber: unit.unitNumber,
+        address: unit.address,
+        bedrooms: unit.bedrooms,
+      });
+      const queries = buildPreflightSearchQueries({
+        platform,
+        street: matchContext.street,
+        complexName: name,
+        city,
+        unitNumber: unit.unitNumber,
+      });
       if (queries.length === 0) {
         return { status: "error", url: null, detection: "No address or community name to search" };
       }
       try {
         for (const q of queries) {
-          const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "5" });
+          const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "8" });
           const ctrl = new AbortController();
           const timer = setTimeout(() => ctrl.abort(), 12_000);
           const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, { signal: ctrl.signal })
@@ -28897,25 +28842,16 @@ Return ONLY compact JSON with this exact shape:
           if (!resp.ok) continue;
           const data = await resp.json() as any;
           for (const r of (data.organic_results || []) as any[]) {
-            const link = String(r.link || "").toLowerCase();
-            const text = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
-            if (isPreflightListingUrl(link) && unitMentioned(text)) {
-              const snippet = `${r.title || ""} — ${r.snippet || ""}`.replace(/\s+/g, " ").trim().slice(0, 200);
-              // A 1-2 digit unit number can't be CONFIRMED by text — "Unit 1" / "Apt 1" also
-              // appear as internal room labels and at other units — so surface it as a
-              // manual-review flag, not a "Listed" assertion. Specific units confirm normally.
-              return ambiguousUnit
-                ? {
-                    status: "unconfirmed" as const,
-                    url: r.link,
-                    detection: `Possible match — verify manually (unit "${bareUnit}" is too short to confirm by text): ${snippet}`,
-                  }
-                : { status: "confirmed" as const, url: r.link, detection: snippet };
-            }
+            const verdict = evaluatePreflightSearchResult(
+              { title: r.title, snippet: r.snippet, link: r.link },
+              platform,
+              matchContext,
+            );
+            if (verdict) return verdict;
           }
           await new Promise((rr) => setTimeout(rr, 250));
         }
-        return { status: "not-listed", url: null, detection: "No matching listing found in Google results" };
+        return notListedVerdict();
       } catch (err: any) {
         return {
           status: "error",
@@ -28927,9 +28863,8 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       const checkedUnits = await Promise.all(units.map(async (unit) => {
-        const street = preflightStreetOf(unit.address);
         const [airbnb, vrbo, booking] = await Promise.all(
-          PREFLIGHT_PLATFORM_DOMAINS.map((p) => checkPlatformTextOnly(p.domain, street, unit.unitNumber, name)),
+          PREFLIGHT_PLATFORMS.map((platform) => checkPlatformStrict(platform, unit)),
         );
         return {
           unitId: unit.unitId,
