@@ -160,6 +160,19 @@ export type StartAutoFillInput = {
   // orchestrator's single-flight and could forceRestart it mid-search. See
   // AGENTS.md "Bulk buy-in queue is a SERVER-SIDE background job" (B1).
   owner?: "row" | "bulk";
+  // READ-ONLY dry-run (the guest-inbox "Do buy-in search" button). Runs the EXACT
+  // same escalation ladder but persists NOTHING: attachPick records the would-be
+  // pick in job.attached with buyInId=null and skips the create + attach POSTs, so
+  // the operator just SEES the cheapest combo/options without committing anything
+  // to a reservation. Every detach/re-attach site is already guarded by
+  // `buyInId != null`, so a null id makes them all no-ops — the control flow
+  // (slots fill → ladder terminates, running-total profit gate, all-or-nothing
+  // rollback) is byte-identical to a real run. The reservation-keyed durability
+  // writes (markAutoFillSearchStarted / upsertAutoFillLossOptions) AND the
+  // SIGTERM interrupted-stamp are skipped for dry-run jobs (they'd pollute the
+  // real reservation's row / enroll the search in boot-resume). See AGENTS.md
+  // "Read-only inbox buy-in search (dry-run auto-fill)".
+  dryRun?: boolean;
   // BOOT-RESUME ONLY (server/auto-fill-resume.ts): re-register the job under
   // the SAME id the dead process used, so an operator's still-open poller
   // (polling /api/operations/auto-fill/:jobId) survives the redeploy without a
@@ -295,6 +308,8 @@ type AutoFillJob = {
   // "bulk" when started by the server-side bulk queue, "row" (default) for a
   // direct "Auto-fill cheapest" click. Lets row-level rediscovery skip bulk jobs.
   owner: "row" | "bulk";
+  // Read-only inbox search: skip every persist + attach (see StartAutoFillInput.dryRun).
+  dryRun: boolean;
 };
 
 export type AutoFillJobStatus = {
@@ -318,6 +333,9 @@ export type AutoFillJobStatus = {
   expectedRevenue: number;
   expectedProfit: number | null;
   error: string | null;
+  // True for the read-only inbox "Do buy-in search" run — nothing was attached or
+  // persisted; `attached` is the would-be cheapest combo, for display only.
+  dryRun: boolean;
   timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
 };
 
@@ -350,7 +368,10 @@ const isTerminal = (s: JobStatus) => TERMINAL.has(s);
 // picks these rows up (along with hard-killed "running" rows) and restarts the
 // search on the new process. Shared coordinator: see server/shutdown.ts.
 onShutdown(async () => {
-  const active = Array.from(autoFillJobs.values()).filter((j) => !isTerminal(j.status));
+  // Skip dry-run inbox searches: they're read-only/ephemeral and not boot-resumed,
+  // and stamping "interrupted" on a synthetic inbox reservationId would corrupt the
+  // real reservation's last-search row.
+  const active = Array.from(autoFillJobs.values()).filter((j) => !isTerminal(j.status) && !j.dryRun);
   await Promise.allSettled(active.map((j) =>
     storage.markAutoFillSearchInterrupted(
       j.reservationId,
@@ -517,6 +538,10 @@ function finalize(job: AutoFillJob): void {
     activeJobByReservation.delete(job.reservationId);
   }
   touch(job);
+  // DRY-RUN inbox searches persist nothing — see startAutoFillJob. (A synthetic
+  // inbox reservationId could otherwise overwrite a real reservation's durable
+  // loss-options row.)
+  if (job.dryRun) return;
   // DURABLY persist this search's over-budget combos + per-city economics, keyed
   // by reservation (latest search wins). Survives the 2h in-memory TTL AND a
   // redeploy, so the operator can review/attach the loss options anytime. Always
@@ -873,6 +898,34 @@ async function attachPick(args: {
   if (actualBedrooms < searchedBedrooms) { skip(`skipped ${actualBedrooms}BR result for ${searchedBedrooms}BR search`); return false; }
   if (!airbnbPick && pick.verified !== "yes") { skip(`skipped unverified ${pick.sourceLabel} result`); return false; }
   if (hasUsedListingIdentity(used, pick)) { skip("skipped duplicate physical listing"); return false; }
+
+  // DRY-RUN (read-only inbox "Do buy-in search"): the validity gating above is the
+  // SAME (so the surfaced pick is a real fillable unit), but we persist NOTHING —
+  // no /api/buy-ins record, no attach-buy-in link. Record the would-be pick in
+  // job.attached with buyInId=null so all downstream control flow (slots fill →
+  // ladder terminates, committedCost running total, swap/all-or-nothing rollback)
+  // is identical to a real run; every detach/re-attach site is guarded by
+  // `buyInId != null`, so the null id makes them no-ops automatically. The inbox
+  // renders job.attached as "cheapest combo found". See AGENTS.md "Read-only inbox
+  // buy-in search (dry-run auto-fill)".
+  if (job.dryRun) {
+    addUsedListingIdentity(used, pick);
+    job.attached.push({
+      unitId: slot.unitId,
+      unitLabel: slot.unitLabel,
+      bedrooms: actualBedrooms,
+      buyInId: null,
+      title: pick.title,
+      sourceLabel: pick.sourceLabel,
+      url: pick.url,
+      totalPrice: finalCost,
+      airbnbPick,
+      stage,
+    });
+    recomputeTotals(job);
+    touch(job);
+    return true;
+  }
 
   const ci = job.checkIn;
   const co = job.checkOut;
@@ -2180,6 +2233,7 @@ export function serializeAutoFillJob(job: AutoFillJob): AutoFillJobStatus {
     expectedRevenue: job.expectedRevenue,
     expectedProfit: jobExpectedProfit(job),
     error: job.error,
+    dryRun: job.dryRun,
     timestamps: { createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt },
   };
 }
@@ -2266,6 +2320,7 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
     error: null,
     canceled: false,
     owner: input.owner === "bulk" ? "bulk" : "row",
+    dryRun: input.dryRun === true,
   };
   autoFillJobs.set(id, job);
   activeJobByReservation.set(reservationId, id);
@@ -2276,15 +2331,21 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
   // since the FULL request is persisted alongside, what lets the boot resume
   // (server/auto-fill-resume.ts) restart the search on the new process.
   // finalize() overwrites it on any terminal path.
-  void storage.markAutoFillSearchStarted({
-    reservationId,
-    propertyId: job.propertyId,
-    slotsTotal: job.slots.length,
-    request: { ...input, resumeJobId: undefined, resumeAttempt: undefined },
-    jobId: id,
-    owner: job.owner,
-    resumeAttempts: input.resumeAttempt ?? 0,
-  }).catch(() => { /* best effort */ });
+  // DRY-RUN inbox searches are read-only and ephemeral: never write the durable
+  // reservation row (it would clobber the real reservation's last-search record
+  // and enroll a throwaway search in boot-resume). If the process dies mid-run the
+  // operator just re-clicks.
+  if (!job.dryRun) {
+    void storage.markAutoFillSearchStarted({
+      reservationId,
+      propertyId: job.propertyId,
+      slotsTotal: job.slots.length,
+      request: { ...input, resumeJobId: undefined, resumeAttempt: undefined },
+      jobId: id,
+      owner: job.owner,
+      resumeAttempts: input.resumeAttempt ?? 0,
+    }).catch(() => { /* best effort */ });
+  }
   void runAutoFillJob(job).catch((err) => {
     job.status = "failed";
     job.error = String(err?.message ?? err);
