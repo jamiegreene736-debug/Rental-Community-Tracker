@@ -540,6 +540,16 @@ assert.match(
 );
 assert.match(
   routesSource,
+  /unitGalleryMaxKeep\(rawPhotos\.length\)/,
+  "bulk combo photo fetch must not hard-cap galleries at 25",
+);
+assert.match(
+  routesSource,
+  /const MAX_PER_UNIT = UNIT_GALLERY_MAX_KEEP/,
+  "persist-photos must keep every scraped unit photo up to UNIT_GALLERY_MAX_KEEP",
+);
+assert.match(
+  routesSource,
   /contentFingerprint: `sha256:/,
   "persist-photos must stamp post-download content hashes into resolver proof",
 );
