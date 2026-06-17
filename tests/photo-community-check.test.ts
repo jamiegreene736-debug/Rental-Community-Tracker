@@ -2,6 +2,7 @@ import assert from "node:assert";
 import {
   communityNamesMatch,
   computeUnitVerdict,
+  filterUnitOutliers,
   isInteriorPhoto,
   pickInteriorPhotos,
   isStrongContradiction,
@@ -60,6 +61,17 @@ check("computeUnitVerdict fails on strong contradiction",
 
 check("isStrongContradiction detects resort signage mismatch",
   isStrongContradiction("Different resort signage visible on pool towel"));
+
+check("filterUnitOutliers drops community pool/lanai shots from unit gallery",
+  filterUnitOutliers([
+    { id: "U1-3", caption: "Oceanfront Pool", reason: "shows resort pool not unit interior" },
+    { id: "U1-7", caption: "Lanai View", reason: "exterior lanai" },
+  ]).length === 0);
+
+check("filterUnitOutliers keeps mismatched interior outliers",
+  filterUnitOutliers([
+    { id: "U1-2", caption: "Updated Kitchen", reason: "different kitchen finishes than other unit photos" },
+  ]).length === 1);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -117,3 +117,31 @@ export function computeCommunityCohesion(
   }
   return { allSameCommunity: outliers.length === 0, outliers };
 }
+
+// Community amenity / exterior shots often appear in unit galleries (Zillow/VRBO
+// scrape). These are NOT "wrong unit" outliers — only mismatched interiors are.
+const COMMUNITY_AMENITY_CATEGORIES = new Set([
+  "Pool & Spa", "Beach Access", "Grounds & Landscaping", "Building Exterior",
+  "Common Areas", "Dining", "Activities", "Views",
+]);
+
+const COMMUNITY_EXTERIOR_CAPTION_RE =
+  /\b(pool|spa|beach|tennis|golf|resort|grounds|amenit|common area|lobby|exterior|oceanfront|hot tub|jacuzzi|bbq|grill|fitness|gym|path|garden|courtyard|entrance|walkway|shoreline|shore)\b/i;
+
+const COMMUNITY_EXTERIOR_REASON_RE =
+  /\b(community|resort|shared|common)\s+(amenity|photo|pool|exterior|grounds|area)|resort\s+pool|exterior\s+shot|outdoor\s+amenit|not\s+(a\s+)?different\s+unit|same\s+community|building\s+exterior|grounds\s+and\s+landscap/i;
+
+export function isCommunityExteriorInUnitGallery(caption?: string, reason?: string): boolean {
+  if (caption) {
+    if (Array.from(COMMUNITY_AMENITY_CATEGORIES).some((c) => caption.includes(c))) return true;
+    if (COMMUNITY_EXTERIOR_CAPTION_RE.test(caption)) return true;
+    // Lanai/balcony shots showing resort grounds, pool, or ocean are normal in unit sets.
+    if (/\b(lanai|balcony|patio|deck)\b/i.test(caption)) return true;
+  }
+  if (reason && COMMUNITY_EXTERIOR_REASON_RE.test(reason)) return true;
+  return false;
+}
+
+export function filterUnitOutliers(outliers: FlaggedPhoto[]): FlaggedPhoto[] {
+  return outliers.filter((o) => !isCommunityExteriorInUnitGallery(o.caption, o.reason));
+}
