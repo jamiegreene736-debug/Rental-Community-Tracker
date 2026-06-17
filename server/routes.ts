@@ -238,6 +238,7 @@ import {
   compareUnitPhotoProofs,
   MIN_INDEPENDENT_UNIT_PHOTOS,
   summarizeUnitPhotoProof,
+  unitGalleryMaxKeep,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
 import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-combo";
@@ -32279,7 +32280,7 @@ Return ONLY compact JSON with this exact shape:
         folder: stagingFolder,
         folderPath: stagingPath,
         scrapedUrls: scraped.map((s) => s.url),
-        maxKeep: 25,
+        maxKeep: unitGalleryMaxKeep(scraped.length),
         anthropicKey: process.env.ANTHROPIC_API_KEY,
         kind: inferKindFromFolder(folder),
         requiredBedrooms: listingFacts.bedrooms ?? swap.newBedrooms ?? swap.oldBedrooms ?? undefined,
@@ -41992,7 +41993,7 @@ Return ONLY compact JSON with this exact shape:
         folder,
         folderPath,
         scrapedUrls: scraped.map((s) => s.url),
-        maxKeep: 25,
+        maxKeep: unitGalleryMaxKeep(scraped.length),
         anthropicKey: process.env.ANTHROPIC_API_KEY,
         kind: inferKindFromFolder(folder),
         requiredBedrooms: listingFacts.bedrooms ?? candidate.bedrooms ?? lead.bedrooms,

@@ -66,6 +66,8 @@ import {
   buildUnitPhotoResolverProof,
   compareUnitPhotoProofs,
   MIN_INDEPENDENT_UNIT_PHOTOS,
+  UNIT_GALLERY_MAX_KEEP,
+  unitGalleryMaxKeep,
 } from "../server/unit-photo-resolver";
 
 // ---------- Import the internals we want to test ----------
@@ -388,6 +390,13 @@ const relaxedUnitProof = buildUnitPhotoResolverProof({
 });
 assert.equal(relaxedUnitProof.status, "review", "relaxed bedroom fallback proof must not be marked fully accepted");
 assert.equal(MIN_INDEPENDENT_UNIT_PHOTOS, 3, "photo proof minimum should remain aligned with combo/preflight acceptance");
+assert.equal(unitGalleryMaxKeep(114), 114, "114-photo replacement gallery should keep all scraped photos");
+assert.equal(unitGalleryMaxKeep(200), UNIT_GALLERY_MAX_KEEP, "unit gallery keep should cap at UNIT_GALLERY_MAX_KEEP");
+assert.match(
+  routesSource,
+  /unitGalleryMaxKeep\(scraped\.length\)/,
+  "unit replacement photo hydrate must not hard-cap galleries at 25",
+);
 assert.match(
   preflightSource,
   /replacingExistingPhotos[\s\S]*siblingSourceUrls/,
