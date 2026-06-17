@@ -54,7 +54,7 @@ check(
     },
     "airbnb",
     kaiulaniContext,
-  )?.status === "listed",
+  )?.status === "confirmed",
 );
 
 check(

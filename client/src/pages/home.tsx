@@ -69,6 +69,7 @@ import {
   Play,
 } from "lucide-react";
 import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { occupancyForBedrooms } from "@/data/bedding-config";
 import { isScannableFolder } from "@shared/photo-folder-utils";
 import { useToast } from "@/hooks/use-toast";
 import { extractBRList } from "@/data/quality-score";
@@ -472,7 +473,7 @@ const properties: Property[] = [
     location: "Koloa",
     island: "Kauai",
     bedrooms: 5,
-    guests: 12,
+    guests: 14,
     bathrooms: 4,
     lowPrice: 1313,
     highPrice: 2237,
@@ -482,13 +483,13 @@ const properties: Property[] = [
   },
   {
     id: 19,
-    name: "Fabulous 5 bedroom for 10 townhome above Anini Beach!",
+    name: "Fabulous 5 bedroom for 14 townhome above Anini Beach!",
     community: "Mauna Kai Princeville",
     pricingArea: "Princeville",
     location: "Princeville",
     island: "Kauai",
     bedrooms: 5,
-    guests: 10,
+    guests: 14,
     bathrooms: 3,
     lowPrice: 1225,
     highPrice: 2092,
@@ -498,13 +499,13 @@ const properties: Property[] = [
   },
   {
     id: 20,
-    name: "Fabulous 7 bedrooms for 16 above Anini Beach!",
+    name: "Fabulous 7 bedrooms for 18 above Anini Beach!",
     community: "Mauna Kai Princeville",
     pricingArea: "Princeville",
     location: "Princeville",
     island: "Kauai",
     bedrooms: 7,
-    guests: 16,
+    guests: 18,
     bathrooms: 5,
     lowPrice: 2035,
     highPrice: 2970,
@@ -514,13 +515,13 @@ const properties: Property[] = [
   },
   {
     id: 23,
-    name: "Gorgeous 5 br for 12 in Kapaa - Beachfront!",
+    name: "Gorgeous 5 br for 14 in Kapaa - Beachfront!",
     community: "Kaha Lani Resort",
     pricingArea: "Kapaa Beachfront",
     location: "Kapaa",
     island: "Kauai",
     bedrooms: 5,
-    guests: 11,
+    guests: 14,
     bathrooms: 5,
     lowPrice: 1577,
     highPrice: 1973,
@@ -530,13 +531,13 @@ const properties: Property[] = [
   },
   {
     id: 24,
-    name: "Wonderful 5 br 12 Poipu ocean view! Oceanfront complex!",
+    name: "Wonderful 5 br 14 Poipu ocean view! Oceanfront complex!",
     community: "Makahuena at Poipu",
     pricingArea: "Poipu Oceanfront",
     location: "Koloa",
     island: "Kauai",
     bedrooms: 5,
-    guests: 12,
+    guests: 14,
     bathrooms: 5,
     lowPrice: 1518,
     highPrice: 2227,
@@ -562,13 +563,13 @@ const properties: Property[] = [
   },
   {
     id: 29,
-    name: "Ocean view 7 bedrooms for 14 above Anini Beach!",
+    name: "Ocean view 7 bedrooms for 18 above Anini Beach!",
     community: "Kaiulani of Princeville",
     pricingArea: "Princeville",
     location: "Princeville",
     island: "Kauai",
     bedrooms: 7,
-    guests: 14,
+    guests: 18,
     bathrooms: 4,
     lowPrice: 1518,
     highPrice: 2897,
@@ -578,13 +579,13 @@ const properties: Property[] = [
   },
   {
     id: 32,
-    name: "Gorgeous Poipu Townhomes for 12 with AC! 5 Bedrooms.",
+    name: "Gorgeous Poipu Townhomes for 14 with AC! 5 Bedrooms.",
     community: "Pili Mai",
     pricingArea: "Pili Mai",
     location: "Poipu",
     island: "Kauai",
     bedrooms: 5,
-    guests: 12,
+    guests: 14,
     bathrooms: 5,
     lowPrice: null,
     highPrice: null,
@@ -1480,7 +1481,16 @@ function AdminDashboard() {
   // Active properties first so they sort to the top by default;
   // drafts append below until the user changes sort order.
   const allProperties = useMemo(
-    () => [...activeProperties, ...draftsAsProperties],
+    () =>
+      [...activeProperties, ...draftsAsProperties].map((p) => {
+        // Derive "Guests" (sleeps) from the single headline occupancy rule
+        // (occupancyForBedrooms) keyed ONLY on the bedroom count, so the
+        // dashboard column always matches the listing title, the summary, and
+        // the Guesty `accommodates` we push. Anchors: 2→6, 4→12, 5→14, 6→16,
+        // 7→18 (3→10, 8→20). This replaces the old bedrooms*2 + condos*2
+        // formula, which gave a different number for 3-condo combos.
+        return p.bedrooms > 0 ? { ...p, guests: occupancyForBedrooms(p.bedrooms) } : p;
+      }),
     [activeProperties, draftsAsProperties],
   );
 
@@ -2929,30 +2939,129 @@ function AdminDashboard() {
               </div>
             </DialogContent>
           </Dialog>
-          <Card className="p-4" data-testid="card-booking-revenue">
-            <div className="flex items-start gap-2 mb-1 min-h-8">
-              <Wallet className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground font-medium">Revenue, past 30 days</span>
-            </div>
-            <p className="text-2xl font-bold" data-testid="text-booking-revenue-30">
-              {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue ?? 0)}
-            </p>
-            <p className="mt-1 text-xs leading-snug text-muted-foreground">
-              {revenueSummary?.bookingCount ?? 0} booking{(revenueSummary?.bookingCount ?? 0) === 1 ? "" : "s"} made
-            </p>
-            <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-booking-revenue-48">
-              48 hours: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue48Hours ?? 0)}
-              {revenueSummary ? ` · ${revenueSummary.bookingCount48Hours ?? 0} booking${(revenueSummary.bookingCount48Hours ?? 0) === 1 ? "" : "s"}` : ""}
-            </p>
-            <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-booking-revenue-5d">
-              Past 5 days: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue5Days ?? 0)}
-              {revenueSummary ? ` · ${revenueSummary.bookingCount5Days ?? 0} booking${(revenueSummary.bookingCount5Days ?? 0) === 1 ? "" : "s"}` : ""}
-            </p>
-            <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-booking-revenue-forecast">
-              12-mo forecast: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenueAnnualProjection ?? 0)}
-              <span className="font-normal text-muted-foreground"> · 3-day avg {formatCurrency(Math.round(revenueSummary?.revenueDailyAvg3Days ?? 0))}/day</span>
-            </p>
-          </Card>
+          {/* Revenue, past 30 days — clickable tile that opens a modal with the
+              line-by-line booking revenue detail. Mirrors the "Funds collected"
+              dialog above; the data (revenueSummary.bookings) is already loaded
+              and sums exactly to the `revenue` headline, so this is a UI-only
+              affordance (no new endpoint). */}
+          <Dialog>
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className="shadcn-card rounded-xl border bg-card border-card-border p-4 text-left text-card-foreground shadow-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                data-testid="card-booking-revenue"
+              >
+                <div className="flex items-start gap-2 mb-1 min-h-8">
+                  <Wallet className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-xs text-muted-foreground font-medium">Revenue, past 30 days</span>
+                </div>
+                <p className="text-2xl font-bold" data-testid="text-booking-revenue-30">
+                  {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue ?? 0)}
+                </p>
+                <p className="mt-1 text-xs leading-snug text-muted-foreground">
+                  {revenueSummary?.bookingCount ?? 0} booking{(revenueSummary?.bookingCount ?? 0) === 1 ? "" : "s"} made
+                </p>
+                <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-booking-revenue-48">
+                  48 hours: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue48Hours ?? 0)}
+                  {revenueSummary ? ` · ${revenueSummary.bookingCount48Hours ?? 0} booking${(revenueSummary.bookingCount48Hours ?? 0) === 1 ? "" : "s"}` : ""}
+                </p>
+                <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-booking-revenue-5d">
+                  Past 5 days: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenue5Days ?? 0)}
+                  {revenueSummary ? ` · ${revenueSummary.bookingCount5Days ?? 0} booking${(revenueSummary.bookingCount5Days ?? 0) === 1 ? "" : "s"}` : ""}
+                </p>
+                <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-booking-revenue-forecast">
+                  12-mo forecast: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenueAnnualProjection ?? 0)}
+                  <span className="font-normal text-muted-foreground"> · 3-day avg {formatCurrency(Math.round(revenueSummary?.revenueDailyAvg3Days ?? 0))}/day</span>
+                </p>
+              </button>
+            </DialogTrigger>
+            <DialogContent className="max-h-[85vh] w-[calc(100vw-2rem)] max-w-5xl overflow-hidden p-0">
+              <div className="max-h-[85vh] overflow-y-auto p-6">
+              <DialogHeader>
+                <DialogTitle>Revenue, past 30 days</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span className="text-muted-foreground">
+                    {revenueSummary?.windowLabel ?? "Rolling past 30 days"}
+                    {revenueSummary ? ` · ${formatShortDate(revenueSummary.startDate)} to ${formatShortDate(revenueSummary.endDate)}` : ""}
+                  </span>
+                  <span className="font-semibold">
+                    {formatCurrency(revenueSummary?.revenue ?? 0)} from {revenueSummary?.bookingCount ?? 0} booking{(revenueSummary?.bookingCount ?? 0) === 1 ? "" : "s"} made
+                  </span>
+                </div>
+                <div className="grid gap-2 text-sm sm:grid-cols-4">
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Revenue, 48 hours</p>
+                    <p className="mt-1 text-lg font-semibold">{formatCurrency(revenueSummary?.revenue48Hours ?? 0)}</p>
+                    <p className="text-xs text-muted-foreground">{revenueSummary?.bookingCount48Hours ?? 0} booking{(revenueSummary?.bookingCount48Hours ?? 0) === 1 ? "" : "s"}</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Revenue, past 5 days</p>
+                    <p className="mt-1 text-lg font-semibold">{formatCurrency(revenueSummary?.revenue5Days ?? 0)}</p>
+                    <p className="text-xs text-muted-foreground">{revenueSummary?.bookingCount5Days ?? 0} booking{(revenueSummary?.bookingCount5Days ?? 0) === 1 ? "" : "s"}</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">12-mo forecast</p>
+                    <p className="mt-1 text-lg font-semibold">{formatCurrency(revenueSummary?.revenueAnnualProjection ?? 0)}</p>
+                    <p className="text-xs text-muted-foreground">3-day avg {formatCurrency(Math.round(revenueSummary?.revenueDailyAvg3Days ?? 0))}/day</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Revenue basis</p>
+                    <p className="mt-1 text-sm font-semibold">Gross fare of bookings made</p>
+                    <p className="text-xs text-muted-foreground">By booking date; excludes cancelled/declined/inquiry</p>
+                  </div>
+                </div>
+                {revenueSummaryLoading ? (
+                  <p className="text-sm text-muted-foreground">Loading booking details...</p>
+                ) : revenueSummary?.bookings?.length ? (
+                  <div className="max-w-full overflow-x-auto rounded-md border" data-testid="block-booking-revenue-feed">
+                    <div className="border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
+                      Bookings made in this 30-day window — newest first
+                    </div>
+                    <Table className="min-w-[960px] table-fixed">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[130px]">Booked</TableHead>
+                          <TableHead className="w-[170px]">Guest</TableHead>
+                          <TableHead className="w-[220px]">Listing</TableHead>
+                          <TableHead className="w-[150px]">Stay</TableHead>
+                          <TableHead className="w-[120px]">Channel</TableHead>
+                          <TableHead className="w-[100px]">Status</TableHead>
+                          <TableHead className="w-[110px] text-right">Amount</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {revenueSummary.bookings.map((booking) => (
+                          <TableRow key={booking.id || `${booking.guestName}-${booking.bookedAt}`} data-testid={`row-booking-revenue-${booking.id}`}>
+                            <TableCell className="whitespace-nowrap align-top">{formatShortDateTime(booking.bookedAt)}</TableCell>
+                            <TableCell className="align-top">
+                              <Link href={operationsHrefForBooking(booking)} className="font-medium text-sky-600 underline hover:text-sky-700 dark:text-sky-400">
+                                {booking.guestName}
+                              </Link>
+                              {booking.confirmationCode && (
+                                <div className="text-xs text-muted-foreground">{booking.confirmationCode}</div>
+                              )}
+                            </TableCell>
+                            <TableCell className="align-top">{booking.listingName}</TableCell>
+                            <TableCell className="whitespace-nowrap align-top">
+                              {formatShortDate(booking.checkIn)} - {formatShortDate(booking.checkOut)}
+                            </TableCell>
+                            <TableCell className="align-top">{booking.source}</TableCell>
+                            <TableCell className="align-top">{booking.status || "N/A"}</TableCell>
+                            <TableCell className="whitespace-nowrap text-right align-top font-medium">{formatCurrency(booking.amount)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No bookings were made in this rolling 30-day window.</p>
+                )}
+              </div>
+              </div>
+            </DialogContent>
+          </Dialog>
           <Dialog>
             <DialogTrigger asChild>
               <button
@@ -3499,6 +3608,7 @@ function AdminDashboard() {
                             <p className="truncate text-sm font-semibold">{bulkPricingJob.lockedBy || "—"}</p>
                           </div>
                         </div>
+                        {bulkPricingJob.startedAt && <BulkPricingChangesSummary job={bulkPricingJob} />}
                         <div className="max-h-80 overflow-y-auto rounded-md border">
                           {bulkPricingJob.items.map((item, index) => {
                             const statusTone =
@@ -4474,6 +4584,76 @@ function AdminDashboard() {
         open={connectTarget !== null}
         onOpenChange={(open) => { if (!open) setConnectTarget(null); }}
       />
+    </div>
+  );
+}
+
+// ─── Bulk pricing: "what changed" old→new summary ─────────────────────────────
+// After a bulk MARKET-RATE update, surface the previous vs current basis per
+// property/bedroom from pricing_update_logs (GET /api/pricing/update-logs),
+// filtered to the logs this run produced (propertyId in the job + createdAt
+// since the run started).
+type PricingLogEntry = {
+  propertyId: number;
+  propertyName: string;
+  bedrooms: number;
+  oldRate: string | null;
+  newRate: string | null;
+  createdAt: string;
+};
+function BulkPricingChangesSummary({ job }: { job: BulkPricingJob }) {
+  const { data } = useQuery<{ ok: boolean; logs: PricingLogEntry[] }>({
+    queryKey: ["bulk-pricing-changes", job.id, job.status],
+    queryFn: async () => {
+      const r = await fetch(`/api/pricing/update-logs?limit=250`, { credentials: "include" });
+      if (!r.ok) throw new Error(`pricing logs ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: job.status === "running" ? 8000 : false,
+    staleTime: 4000,
+  });
+  const propertyIds = new Set(job.items.map((i) => i.propertyId));
+  const sinceMs = job.startedAt ? new Date(job.startedAt).getTime() - 60_000 : 0;
+  const logs = (data?.logs ?? []).filter(
+    (l) => propertyIds.has(l.propertyId) && new Date(l.createdAt).getTime() >= sinceMs,
+  );
+  if (logs.length === 0) return null;
+  // group by property → latest row per bedroom (logs newest-first)
+  const byProp = new Map<number, { name: string; rows: Map<number, PricingLogEntry> }>();
+  for (const l of logs) {
+    if (!byProp.has(l.propertyId)) byProp.set(l.propertyId, { name: l.propertyName, rows: new Map() });
+    const g = byProp.get(l.propertyId)!;
+    if (!g.rows.has(l.bedrooms)) g.rows.set(l.bedrooms, l);
+  }
+  const groups = Array.from(byProp.values()).sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <div className="rounded-md border" data-testid="bulk-pricing-changes">
+      <div className="border-b bg-muted/40 px-3 py-2 text-xs font-semibold">
+        What changed — old rate → new rate (market basis per bedroom)
+      </div>
+      <div className="max-h-64 overflow-y-auto">
+        {groups.map((g) => (
+          <div key={g.name} className="border-b px-3 py-2 last:border-b-0">
+            <p className="truncate text-sm font-medium">{g.name}</p>
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+              {Array.from(g.rows.entries()).sort((a, b) => a[0] - b[0]).map(([br, l]) => {
+                const oldN = l.oldRate != null ? Number(l.oldRate) : null;
+                const newN = l.newRate != null ? Number(l.newRate) : null;
+                const delta = oldN != null && newN != null && oldN > 0 ? (newN - oldN) / oldN : null;
+                const tone = delta == null ? "text-muted-foreground" : delta > 0 ? "text-amber-700" : delta < 0 ? "text-green-700" : "text-muted-foreground";
+                return (
+                  <span key={br} className={tone}>
+                    <span className="font-semibold">{br}BR</span>{" "}
+                    {oldN != null ? `$${Math.round(oldN).toLocaleString()}` : "—"} →{" "}
+                    <span className="font-semibold">{newN != null ? `$${Math.round(newN).toLocaleString()}` : "—"}</span>
+                    {delta != null && <span> ({delta > 0 ? "+" : ""}{(delta * 100).toFixed(1)}%)</span>}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

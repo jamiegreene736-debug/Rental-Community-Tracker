@@ -1,3 +1,5 @@
+import { dedupeListingRoomsByNumber, sanitizeListingRoomsForGuesty } from "@/data/guesty-listing-config";
+
 const GUESTY_API_BASE = "/api/guesty-proxy";
 
 export type GuestyAddress = {
@@ -189,12 +191,30 @@ class GuestyService {
 
     if (!res.ok) {
       if (res.status === 429) throw new Error("RATE_LIMITED");
-      const err = await res.json().catch(() => ({})) as { message?: string; error?: string | { message?: string; code?: string } };
-      const msg =
+      // Capture the RAW body, not just `.message`. Guesty often returns a
+      // generic "Unknown error when updating listing" while the real cause
+      // (validation errors / field codes) sits in `errors`/`details`/`code`.
+      // Swallowing those left the operator with an unactionable toast.
+      const raw = await res.text().catch(() => "");
+      let err: any = {};
+      try { err = raw ? JSON.parse(raw) : {}; } catch { err = {}; }
+      const base =
         err.message ||
         (typeof err.error === "object" ? err.error?.message : err.error) ||
         `Guesty API ${res.status}: ${endpoint}`;
-      throw new Error(msg);
+      const extra: string[] = [];
+      const code = (err && typeof err.error === "object" ? (err.error as any)?.code : undefined) ?? err.code;
+      if (code) extra.push(`code ${code}`);
+      const detail =
+        err.details ?? err.errors ?? err.validation ??
+        (err && typeof err.error === "object" ? ((err.error as any)?.details ?? (err.error as any)?.errors) : undefined);
+      if (detail) extra.push(typeof detail === "string" ? detail : JSON.stringify(detail));
+      // Last resort: a generic message with no structured detail — attach the
+      // raw body so the actual reason is visible in the toast.
+      if (!extra.length && /unknown error/i.test(base) && raw && raw.length <= 1500 && raw.trim() !== base) {
+        extra.push(raw);
+      }
+      throw new Error(extra.length ? `${base} — ${extra.join("; ")}` : base);
     }
 
     if (res.status === 204) return { success: true } as T;
@@ -266,12 +286,24 @@ class GuestyService {
     return this.request<{ _id: string }>("POST", "/listings", payload);
   }
 
-  async updateListingDetails(id: string, details: { areaSquareFeet?: number; bedrooms?: number; bathrooms?: number; listingRooms?: GuestyRoom[] }) {
+  async updateListingDetails(id: string, details: { areaSquareFeet?: number; bedrooms?: number; bathrooms?: number; accommodates?: number; listingRooms?: GuestyRoom[] }) {
     const payload: Record<string, unknown> = {};
     if (details.areaSquareFeet) payload.areaSquareFeet = details.areaSquareFeet;
     if (details.bedrooms) payload.bedrooms = details.bedrooms;
     if (details.bathrooms) payload.bathrooms = details.bathrooms;
-    if (details.listingRooms && details.listingRooms.length > 0) payload.listingRooms = details.listingRooms;
+    // accommodates = bed-derived occupancy. Without this Guesty keeps a stale
+    // "sleeps" count (e.g. 12) that disagrees with the bedding + the title.
+    if (details.accommodates) payload.accommodates = details.accommodates;
+    if (details.listingRooms && details.listingRooms.length > 0) {
+      // Coerce bed types to Guesty's accepted enum FIRST — a single invalid
+      // type (e.g. a legacy "TWIN_BED"/"FULL_BED" in stale config) makes the
+      // whole update fail with "Unknown error when updating listing". Then
+      // collapse duplicate roomNumbers into one shared space (cleaner; Guesty
+      // accepts dups either way).
+      payload.listingRooms = dedupeListingRoomsByNumber(
+        sanitizeListingRoomsForGuesty(details.listingRooms),
+      );
+    }
     return this.request("PUT", `/listings/${id}`, payload);
   }
 

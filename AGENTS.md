@@ -561,6 +561,198 @@ runs inside the server job) but left in place; don't wire it back to the button.
    cache-only ladder stages); without this the 5-min grace could lapse and the Mac
    sleep mid-queue. This too is a DAEMON change (cp supervisor.mjs + kickstart).
 
+### Read-only inbox buy-in search (dry-run auto-fill) (Load-Bearing, 2026-06-17)
+
+The guest inbox's **"Do buy-in search"** button (`client/src/pages/inbox.tsx`, on an
+inquiry's right panel, next to the static "Buy-in estimate") runs the EXACT same
+search the Operations tab runs on **"Auto-fill cheapest"** — the full escalation
+ladder (resort find-buy-in → home-city VRBO → nearby-city expansion → per-slot
+single-unit fallback), driving the local Chrome sidecar and finding the cheapest
+same-community combos — but it **attaches/persists NOTHING**. It exists so the
+operator can see live market options for an inquiry's dates before deciding to take
+it. Operator ask 2026-06-17: "run a buy-in search there and then … fire the exact
+same search … utilize the sidecar and find cheapest combinations … it doesn't need
+to attach the buy, it just needs to show me the results."
+
+The implementation is a **`dryRun` mode on the existing auto-fill job**
+(`server/auto-fill-job.ts`), NOT a re-implementation — so it inherits every
+load-bearing rule for free (VRBO sight+click, the geo guards, same-community
+pairing, the deploy-survival poll). Load-bearing choices — don't "simplify" them:
+
+1. **`dryRun` is a flag on `StartAutoFillInput`/`AutoFillJob`; default false →
+   existing behavior is byte-identical.** The whole feature is additive and gated.
+2. **`attachPick` is the ONLY attach boundary, and the dry-run short-circuit lives
+   there.** After the SAME validity/dedup gating (price valid, bedrooms match,
+   verified, not-a-dup — so the surfaced pick is a real fillable unit), a dry-run
+   run records the would-be pick in `job.attached` with **`buyInId: null`** and
+   returns true WITHOUT the two loopback POSTs (`/api/buy-ins` create +
+   `/attach-buy-in`). The control flow downstream is then IDENTICAL to a real run
+   (slots fill → ladder terminates at the cheapest stage, `committedCost()` running
+   total, the resort↔home-city swap, the all-or-nothing rollback), because **every
+   `storage.detachBuyIn` / rollback-reattach site is already guarded by
+   `buyInId != null`** — a null id makes them all no-ops automatically. So the only
+   code that had to change is the create+attach in `attachPick`. The expansion
+   child job (`city-vrbo-expansion.ts`) is search-only and never attaches, so it
+   needs no change. Locked by `tests/inbox-buy-in-search.test.ts` (asserts the
+   short-circuit precedes the create POST AND that every detach site stays guarded).
+3. **Reservation-keyed persistence is skipped for dry-run jobs.** The inbox passes a
+   SYNTHETIC `reservationId` (`inbox-search:<listingId>:<checkIn>:<checkOut>`,
+   namespaced so it can never collide with a real reservation). `finalize()`
+   early-returns before `upsertAutoFillLossOptions`, `startAutoFillJob` skips
+   `markAutoFillSearchStarted`, and the SIGTERM interrupted-stamp filters out
+   dry-run jobs — otherwise a throwaway inbox search would clobber a real
+   reservation's durable last-search row and enroll itself in boot-resume. A dry-run
+   job that dies on redeploy is simply re-clicked (the client treats a poll 404 as a
+   terminal "run it again" state).
+4. **The profit gate is intentionally DISABLED (`expectedRevenue: 0`).** That's the
+   documented inquiry degrade-safe path (see "Auto-fill is PROFITABILITY-GATED"):
+   an inquiry has no committed revenue to gate on, and the operator wants to SEE the
+   cheapest options, not a "would lose money, left empty" verdict. The static
+   estimate block right above already gives the margin-vs-quoted hint.
+5. **Scope = `PROPERTY_UNIT_CONFIGS` properties only** (the city stages require a
+   config), same scope as the static `/api/inbox/buy-in-estimate`. Unmapped /
+   unconfigured listings return `{ok:false, reason}` (a toast), not a broken search.
+6. **Server entry `POST /api/inbox/buy-in-search`** resolves the inquiry
+   (guestyPropertyMap → propertyId → PROPERTY_UNIT_CONFIGS slots+community) and
+   starts the dry-run job; the client polls the NORMAL `GET
+   /api/operations/auto-fill/:jobId` and renders `attached` (cheapest combo found),
+   `comboOptions` (other walkable combos), and `cityEconomics` (the per-city ladder)
+   read-only via `InboxBuyInSearchResults`. No attach UI anywhere in that panel.
+
+### Preflight replacement-find job survives a server restart (Load-Bearing, 2026-06-15)
+
+The unit-replacement flow (`client/src/components/unit-replacement-flow.tsx`,
+the "Find a New Unit" panel in builder-preflight) runs find-unit as a SERVER-SIDE
+job (`server/preflight-background-jobs.ts` `replacementFindJobs` Map) and the
+client polls `GET /api/preflight/replacement-find-jobs/:jobId`. That job is
+IN-MEMORY only and a find-unit run is LONG (up to 8 continuation passes ×
+~350s). Railway recycles the process on every deploy / idle-cycle / crash, which
+evicts the in-flight job, so the poll 404s — even though the UI promises **"Safe
+to leave this tab — search continues on server"**. The operator hit this:
+a red dead-end "Replacement search session expired … run Find Replacement Unit
+again." (screenshot, 2026-06-15).
+
+Fix (CLIENT-ONLY transparent restart — same philosophy as Auto-fill #6/#8 above:
+ephemeral job + client re-launch, not a Postgres-backed job). Built + hardened
+via two adversarial review Workflows (9 findings confirmed + all fixed — the
+"don't simplify these back" list below IS those fixes):
+
+1. **Persist the start PAYLOAD** in the localStorage ref (`ReplacementJobRef`),
+   not just `{jobId, targetUnitId}`. All of `payload`/`startedAt`/`lastAliveAt`/
+   `resumeCount` are optional so a ref written by an older client still parses;
+   the mount restore effect rehydrates `lastSearchPayloadRef` from it.
+2. **On a poll 404, `attemptAutoResume(evictedJobId)`** re-POSTs the SAME payload
+   to start a fresh job, saves the new ref, `setReplacementJobId(newId)` (which
+   starts a new poll loop), and sets the old poll's `cancelled=true`. It returns a
+   **TRI-STATE** — `"resumed"` / `"in-progress"` / `"cannot"` — and ONLY `"cannot"`
+   falls through to the original "session expired" error (string preserved —
+   `tests/pipeline-logic.test.ts` greps it).
+3. **The tri-state is load-bearing (fixes the concurrency bug).** The 2s poll
+   `setInterval` has no in-flight guard, so two `poll()`s can hit the same 404
+   concurrently. `attemptAutoResume` claims the evicted jobId in `autoResumedFromRef`
+   (per-mount Set) SYNCHRONOUSLY before its await; a 2nd concurrent call (or a tick
+   in the post-success re-render window where the old jobId is still polled) gets
+   `"in-progress"` and returns WITHOUT touching the error setters — otherwise it
+   would clobber the resume with the very dead-end this fix removes. The claim is
+   KEPT on success but **RELEASED on a failed start-POST** (the `!data.job.id` and
+   `catch` paths `delete` it) — otherwise a resume POST that fails while the effect
+   resubscribed mid-flight (so the failing tick's `cancelled` re-check swallows its
+   error) would strand the UI on a permanent `"in-progress"` spinner with no error
+   and no retry button. The poll also re-checks `cancelled` AFTER the resume await
+   before any state mutation (incl. the localStorage clear), so a teardown
+   mid-resume can't wipe the ref.
+4. **Bounds are DURABLE, not per-mount (don't weaken — find-unit burns SearchAPI
+   budget):** the restart cap reads `stored.resumeCount` from localStorage and
+   increments it ONLY on a confirmed successful start-POST (cap
+   `MAX_REPLACEMENT_AUTO_RESUMES` = 3) — so it survives the close/reopen REMOUNT
+   (the component is conditionally rendered, refs reset on remount) and a failed
+   POST doesn't erode the budget. A fresh operator `search()` / remediation resets
+   `resumeCount` to 0. The freshness window (`REPLACEMENT_AUTO_RESUME_WINDOW_MS`,
+   45 min) is keyed on `lastAliveAt` — refreshed by `markReplacementJobRefAlive`
+   on every successful (queued/running) poll — NOT on `startedAt`, so a long search
+   the operator is actively watching never ages out, while a days-stale reopen
+   still does. `startedAt` is carried forward across resumes (informational). A
+   completed/failed job clears the ref on terminal, so a finished search never
+   spuriously resumes.
+5. **Auto-resume is a FULL RESTART, not a progress-preserving resume.** The evicted
+   job's `diagnostic` (uncheckedCandidates) died with the process, so unlike the
+   `OperationFailureActions` "continue-search" playbook we re-run discovery from
+   scratch. The progress bar resets — so a sky "Server restarted — your search
+   resumed automatically" banner (`resumedAfterRestart`) renders in the searching
+   stage so the reset reads as recovery, not regression.
+
+NOTE: `PreflightPhotoFetchJob` in the same file shares the in-memory pattern but
+is NOT auto-resumed here (its "Find Photos" UX dead-ends less painfully and a
+re-click is cheap) — a sibling candidate if the operator reports it.
+
+### `allowOtaListed` opt-in for STVR-saturated replacement search (Load-Bearing, 2026-06-17)
+
+The builder "Find a New Unit" flow (`POST /api/replacement/find-unit`) requires a
+**clean** unit — one NOT already listed on Airbnb/VRBO/Booking.com — so the
+replacement's real-estate photos don't feed the photo-listing scanner's
+re-detection loop. In a **short-term-rental-saturated** community (e.g. Waikoloa
+Beach Villas: ~121 units, ~89 on VRBO alone) almost every discoverable for-sale
+unit is ALSO an active OTA rental, so `checkAllPlatforms` marks them all
+`skipped-found` and the route returns "No eligible replacement units found" even
+though the community has plenty of inventory. (Diagnosed via a workflow that
+replayed discovery with live web search + an adversarial code trace: discovery
+~24 usable candidates, resort-street gate 11/11 PASS, unit-extraction fine — the
+bottleneck is the OTA gate doing its job on a saturated community, NOT a config
+or matcher break.)
+
+`allowOtaListed` (request body, **default OFF**) is the operator escape hatch.
+Load-bearing constraints — don't loosen them:
+
+1. **It relaxes ONLY the unit-name OTA gate (`skipped-found`), NEVER the
+   photo-reuse gate (`skipped-photo-found`).** When `foundOn` is set and
+   `allowOtaListed` is true, the candidate falls through with
+   `otaListedHost = foundOn.host` instead of `continue`-ing — but the downstream
+   reverse-image `skipped-photo-found` check still runs unconditionally. So an
+   accepted unit may be *listed* on an OTA, but its real-estate photos are still
+   verified as NOT reused on that OTA. This keeps PR #338's anti-feedback-loop
+   protection intact: candidate URLs + photos remain sourced exclusively from
+   zillow/redfin/homes/realtor; we never pull OTA photos.
+2. **The accepted unit is flagged `otaListedOn: <host>`** on the returned `unit`,
+   and the client (`unit-replacement-flow.tsx`) renders an amber "already listed
+   on <host>" banner and forces the header tone off green — so the "Clean on
+   Airbnb, VRBO, and Booking.com" shield can never lie about an OTA-listed pick.
+3. **The default-OFF path is byte-equivalent to prior behavior** (`if (foundOn &&
+   !allowOtaListed)` is the unchanged skip), so Kauai / non-saturated communities
+   are unaffected. The job layer (`preflight-background-jobs.ts`) is a pass-through
+   — it forwards the whole body — so no change was needed there.
+4. **Diagnostic reword is APPEND-ONLY.** The empty-result message gained a clause
+   naming the `skipped-found` count and pointing at the toggle, appended AFTER the
+   existing `diagnostic` assignment. The `parts.push(\`… found on \${cleanChannel
+   ? "the enforced channel" : "Airbnb/VRBO/Booking.com"}\`)` line is asserted
+   verbatim by `tests/pipeline-logic.test.ts` and was left byte-identical.
+
+FOLLOW-UP (a) — SHIPPED 2026-06-17 (PR after #718). The OTA matcher's
+**letter-branch** false-`found` is fixed. A web check found a genuinely-clean,
+for-sale, never-rented 3BR (Waikoloa Beach Villas **O1**, $1.69M) that the tool
+was wrongly dropping: `site:vrbo.com "Waikoloa Beach Villas" "O1"` returns
+multi-unit **roundup** pages whose snippets enumerate codes ("…C1, A4, I4…"), and
+the old bare `\bcode\b` over title+snippet+link flagged O1 as already-listed. The
+matcher moved to the pure, unit-tested **`server/listing-unit-match.ts`**
+(`hitTextMatchesUnit`): a letter code now matches ONLY when ANCHORED — (i) a
+bounded token in the hit **TITLE** (a real single listing titles its unit; a
+roundup title is generic), OR (ii) adjacent to a **generic** unit-designator
+keyword (`unit|apt|apartment|condo|suite|bldg|building`) anywhere in the text. The
+keyword set deliberately **excludes** the resort/"villas" word so a roundup
+snippet "…Beach Villas C1, A4…" cannot anchor via "villas c1". **The numeric
+branch (Poipu Kai "721") is byte-identical** — Kauai unaffected. **Safe because
+the reverse-image photo-reuse gate (`skipped-photo-found`) is the backstop:** any
+unit that slips through the (now looser) name match but reuses OTA photos is still
+rejected, so this never reintroduces the photo-feedback loop. `tests/listing-unit-match.test.ts`
+(17) locks the roundup-false-positive kills, single-listing recall, boundary
+precision (O1≠O2, J2≠J22), and the unchanged numeric branch. Don't re-inline the
+matcher into the route or add the resort name to the letter keyword set.
+
+FOLLOW-UP (b) — STILL OPEN. Genuinely-clean *off-market* 3BR units (e.g. A4, I4 —
+when not on any OTA) can die at the photo-count/vision gate because off-market
+Zillow pages carry few interior photos. Active for-sale listings (like O1) are
+photo-rich and unaffected; this only bites units that are sold/off-market.
+Unverifiable without running the live search.
+
 ### Bulk buy-in queue is a SERVER-SIDE background job (Load-Bearing, 2026-06-09)
 
 The bookings-page **bulk buy-in queue** ("Run bulk buy-ins" over many selected
@@ -945,10 +1137,34 @@ established it so you can read the rationale in the commit message.
     - **Sonnet (`claude-sonnet-4-6`), not Haiku, on purpose.** This is
       cross-folder visual reasoning + named-resort world knowledge, not the
       short noun-phrase labeling `photo-labeler.ts` does. Haiku over-flags.
-    - **ONE vision call with every sampled photo inlined**, delimited by text
-      markers (`--- GROUP: … · photo C1 · caption … ---`), so the model judges
-      community ↔ unit-A ↔ unit-B consistency holistically. Per-folder sample
-      caps (community 10, unit 6, total 24) bound cost/latency (~$0.10, 20-40s).
+    - ~~**ONE vision call with every sampled photo inlined** … Per-folder
+      sample caps (community 10, unit 6, total 24).~~ **REPLACED by the
+      EXHAUSTIVE two-phase engine (PR #720, 2026-06-17)** — the operator wanted
+      to be 100% sure EVERY community photo belongs, and a 10-photo sample of a
+      30-photo folder missed outliers in the unsampled 20. Now:
+      - **Phase A — Anchor + Units (one call):** identify the canonical
+        community from a small even-spread REFERENCE sample (≤6) of the
+        community folder + judge each UNIT (~5 photos each, the operator's ask)
+        against that reference. This is the cross-folder holistic judgment the
+        single call used to do — community-↔-unit consistency, `matchesExpected`,
+        per-unit `sameAsCommunity`.
+      - **Phase B — Exhaustive community (batched, ≤3 concurrent calls):**
+        verify EVERY community photo (no cap below `COMMUNITY_HARD_MAX=150`), in
+        batches of `COMMUNITY_BATCH_SIZE=9`, each batch grounded by ≤3 TRUSTED
+        reference anchors (Phase-A anchors minus any the model flagged) + the
+        Phase-A identity. Per-photo verdict `same|different|junk`.
+      - **The two phases are INDEPENDENT** — a unit-call failure still yields the
+        exhaustive community result, and vice-versa.
+      - **`unchecked` is load-bearing — never silently pass a photo.** A photo a
+        batch could not analyze (vision error) is reported in
+        `community.unchecked` and degrades the verdict to warn; the UI shows
+        `photosChecked/photosTotal` so a coverage gap is visible. Do NOT default
+        an un-analyzed photo to "same" — that would re-introduce the false
+        confidence this rework removed.
+      - Deterministic folds (`summarizeCommunityVerdicts`, `synthesizeVerdict`,
+        `chunk`, `evenSampleIndices`) are pure + locked by
+        `tests/photo-community-check.test.ts`. Cost/latency ≈ $0.20-0.40, 30-90s
+        for a 30-photo community + 2 units.
     - **The prompt reserves a cross-community "no" for POSITIVE
       contradictions** (different named resort on signage, wrong climate,
       incompatible building type/view, distinct architecture); generic-but-
@@ -1050,11 +1266,200 @@ established it so you can read the rationale in the commit message.
     only costs one SearchAPI call + one Nominatim call (or zero, on a
     cache hit).
 
+### Sourceability gate + last-minute pricing (Load-Bearing, 2026-06-15)
+
+The buy-in model sells inventory we don't own yet. These two mechanisms protect
+margin on the SELL side (pricing) and the SOURCING side (the gate). PRs #663
+(pricing) + #664/#665/#666 (gate). Don't "fix" any of these cold:
+
+- **Last-minute markup is a single FLAT +15% within 14 days — NOT the old
+  per-season-band escalation.** `server/availability-policy.ts`
+  `LAST_MINUTE_MARKUP_DAYS` (14) / `LAST_MINUTE_MARKUP_PCT` (0.15) +
+  `lastMinuteMarkupForDaysUntilArrival` / `lastMinuteDemandFactor`. The old
+  scheme (+15/25/40/50% across 45/75/90/120 days by season band) priced us above
+  market for near-term dates where our buy cost had not risen — measured from 479
+  of our own VRBO scrapes, unit cost is flat until ~14 days out then ~+13%. The
+  band functions (`demandFactorForPolicyBand`) are RETAINED but
+  deprecated-for-pricing. The availability scanner's 45/75/90/120 lead horizons
+  and the inventory-scarcity verdict markup are SEPARATE concerns and unchanged.
+  The pushed near-term rate (`pushLeadTimePolicyPricesToGuesty`) is
+  `setCost × lastMinuteDemandFactor(days) × (1+targetMargin)`.
+
+- **The rate fed to Guesty is the desired NET disbursement; do NOT gross up for
+  commission in code.** `cleanBaseRateFromBuyInServer` = `(1+targetMargin) ×
+  cost`. Operator decision: Guesty is configured to apply the per-channel markup
+  that recovers each channel's fee (Airbnb ~+18.3%, Booking.com ~+20.5%, VRBO
+  ~+8.7%) and disburse this rate net. Adding a code gross-up would double-count.
+  `CHANNEL_HOST_FEE` / `computeChannelMarkups` (`shared/pricing-rates.ts`) are
+  CLIENT-DISPLAY ONLY and are never pushed to Guesty. (If those Guesty markups are
+  ever turned off, the rate would net `(1+margin)×(1−commission)` instead — that's
+  a Guesty-config issue, not a code change.)
+
+- **The sourceability gate FAIL-SAFE IS OPEN.** `server/sourceability-gate.ts`
+  daily sweep, env-gated (`SOURCEABILITY_GATE_ENABLED` / `SOURCEABILITY_GATE_ENFORCE`,
+  both default OFF → a deploy is INERT until flipped). Per near-term window it runs
+  `runCityVrboInventoryScan` and decides block/open/skip (`decideSourceability` in
+  `sourceability-gate-core.ts`): it BLOCKS only when a CONFIRMED real pool's cheapest
+  same-community combo costs more than `sellableRevenue × (1+minMargin)` (or no combo
+  exists in a real pool). An offline/errored/EMPTY scan → "skip": neither block nor
+  unblock. A false block silently kills real revenue, so the asymmetry is deliberate.
+  `reconcileSourceabilityBlocks` (`sync-scanner-blocks.ts`) PUTs Guesty status
+  unavailable/available and touches ONLY `source="sourceability-gate"` scanner_blocks
+  (never human/legacy blocks). The sweep is single-flight, yields the sidecar to the
+  operator's bulk queue, is scan-budget-capped, and only covers the near-term horizon.
+
+- **Blocks/unblocks require N CONSECUTIVE agreeing sweeps (default 2) — the
+  confirmation guard.** Live validation caught the same Poipu Kai week reading
+  −$8,664 then +$5,045 minutes apart (partial scrape). `applyConfirmation` /
+  `confirmedAction` (`sourceability-gate-core.ts`) + per-window streaks persisted in
+  the NEW `sourceability_observations` table (so confirmation survives redeploys —
+  in-memory would reset every deploy). A "skip" is NEUTRAL: it leaves the streak (it
+  never resets nor counts toward a confirmation). DRY-RUN sweeps STILL build the
+  streaks (only the Guesty reconcile is gated by enforce), so the safe rollout is
+  dry-run a couple nights → review → flip ENFORCE; the next sweep then acts on the
+  already-confirmed windows. Tune via `SOURCEABILITY_GATE_CONFIRM_SWEEPS`.
+
+- **UI:** the Sourceability Gate card on `/availability-scanner`
+  (`SourceabilityGateCard`) reads `GET /api/availability/sourceability-observations`
+  (`classifyObservation` → "Loss flagged 1/2 — 1 more sweep to block" / "Blocked on
+  Guesty" / "Sourceable"). `sourceability_observations` is a NEW CREATE TABLE (boot
+  db:push creates it; also applied directly via psql per the db:push-skips-ALTER
+  caveat below).
+
+- **Profit-aware blackout via the Airbnb HIGH-END rate (PR #717, 2026-06-17,
+  `SOURCEABILITY_GATE_PROFIT_ENABLED` default OFF → INERT).** NOTE the bullets ABOVE
+  this one still describe the pre-#694 VRBO/profit gate (`runCityVrboInventoryScan` /
+  `decideSourceability`) and are STALE: since PR #694 the gate decides blackout by pure
+  Airbnb AVAILABILITY (`checkAirbnbAvailabilityForPlan`, town-level dated `engine=airbnb`;
+  block only if the unit sizes can't be supplied). This PR adds an OPTIONAL profit layer:
+  when on, a SOURCEABLE window is ALSO blocked when the assumed buy-in cost beats our real
+  Guesty sell price. `analyzeAirbnbPlanForProfit` (`availability-search.ts`) derives BOTH
+  availability AND the high-end cost from the SAME fetch (no sidecar, no new API surface):
+  exact-BR from `accommodations` (engine=airbnb has NO `bedrooms` field — always null),
+  same-community ALIAS membership (`BUY_IN_MARKETS[c].aliases` — a geo radius CANNOT mean
+  "same community" in the overlapping Koloa cluster: Poipu Kai/Makahuena/Brenneckes/Pili
+  Mai are 0.5-0.9mi apart, all "Koloa, Hawaii"), OWN-LISTINGS EXCLUDED (`isOwnListing` —
+  ours surface at our own price and would pin cost≈sell, masking every loss), trimmed-p90
+  nightly (`trimmedPercentile` — p90 is noisy run-to-run; one luxury listing swung it
+  $31.5k→$11.8k, so the small-n top-trim + the 2-sweep guard are load-bearing).
+  `assumedComboCost` = cheapest of [Σ slot high-ends, single total-size high-end] × nights;
+  sell = sum of 7 Guesty calendar `price` (`sellPriceForWindow`).
+  `decideSourceabilityWithProfit` (`sourceability-gate-core.ts`) blocks on
+  `cost > sell×(1−minMargin)`. FAIL-SAFE unchanged: missing cost/sell ⇒ OPEN (never block
+  on missing profit data); unsourceable still BLOCKS; the 2-sweep confirm +
+  `reconcileSourceabilityBlocks` source-scoping reused unchanged. Town-keyed in-memory
+  dedup cache (`clearAirbnbCellCache` at sweep start, 6h TTL) so same-community properties
+  share one SearchApi fetch per (town,size,week). Env: `_PROFIT_ENABLED` (off),
+  `_COST_PERCENTILE` (0.90), `_MIN_MARGIN` (0). Validated live on Poipu Kai 6BR (1/13 weeks
+  blocked at p90: Aug29 −$14, real sell prices). DON'T re-enable a profit block without
+  confirming own-listing exclusion is wired — the cost is self-referential without it. Full
+  methodology + the 90-day simulations in `docs/availability-blackout-methodology.md`.
+
+49. **Market-rate refresh WIDENS the Airbnb search when a resort footprint has
+    no priced comps — it never falls back to static data.** `fetchAirbnbMedianNightly`
+    (`server/hybrid-pricing.ts`) scans one 7-night Airbnb window per calendar month
+    across the 24-month horizon and the refresh HARD-FAILS the whole property the
+    moment any month returns zero usable exact-BR samples (`deletePropertyMarketRate`
+    + throw "no usable exact-NBR samples"). Thin in-footprint markets — gated
+    golf/country-club communities like **Bonita National**, or tiny resort footprints
+    like **Santa Maria Resort** — have ~zero exact-BR entire-home Airbnb inventory
+    INSIDE their curated club bounding box, so the refresh used to abort. The sampler
+    now runs ordered passes: PASS 0 is the PRIMARY constraint (curated bounds →
+    center-radius → none) with the curated query list — **byte-identical** to before,
+    returning on the first query with samples (exactly ONE SearchAPI request for
+    healthy markets; locked by the Poipu Kai single-request test). PASSES 1+ are
+    geographic-widening FALLBACKS that run ONLY after every primary query returned
+    **rates.length===0** (NOT on red confidence — escalating on red would break the
+    single-request guarantee for legitimately-thin markets). Each widened pass uses a
+    progressively larger **center-radius** box (~6.6km then ~16km, `halfDeg` 0.06/0.15
+    around `BUY_IN_MARKET_LOCATIONS[community]`) with **city anchors first**
+    (`"Bonita Springs, FL"` etc.) so a healthy nearby-comp set wins before a thin 1-2
+    sample resort-name hit can short-circuit at red. LOAD-BEARING invariants: (a)
+    `geoConstraintForMarket` / `airbnbSearchGeoParamsForMarket` are UNCHANGED (curated
+    bounds stay primary; locked by the bounds tests); the override threads ONLY through
+    `fetchAirbnbMedianNightlyForQuery`. (b) Widened passes keep a center-radius box
+    (NEVER kind `"none"`) so confidence caps at 84 → a healthy widened month can still
+    reach yellow and clear the non-red save/push gate; the scorer is NOT loosened, so a
+    genuinely-empty market still fails closed with the real message (and a real HTTP
+    error still propagates — it is not swallowed as "no samples"). (c) Markets with no
+    mapped center never widen. Kill switch `MARKET_RATE_GEO_WIDENING=0/false/off/no`
+    reverts to the old hard-fail (default ON; widening can only improve a refresh that
+    would otherwise throw). Don't move the widening into `geoConstraintForMarket`, and
+    don't escalate on red confidence. PR #684; design + adversarial review via two
+    multi-agent workflows (0 confirmed blockers).
+
+50. **The bulk combo-listing queue NEVER saves a combo without real, distinct
+    photos for BOTH units — it tries other combination types, then skips the
+    resort (2026-06-16).** This is the strict, BULK-QUEUE-ONLY photo contract;
+    it REVERSES the 2026-06-15 "photo reuse" safety net (operator changed his
+    mind — see that Decision Log line). The standalone photos-tab combo fetch
+    (`runComboPhotoFetchJob`) is the NON-strict path and is unchanged. Pieces, all
+    load-bearing:
+    - **Strict discovery gate.** `runComboPhotoFetchItem(..., {strictDistinctBothUnits:true})`
+      walks `comboFallbackPairings` (`shared/community-combo.ts`): same-total
+      re-mix FIRST (3+3→4+2, keeps the bedroom count) then progressively SMALLER
+      totals down to the abundant 2BR+2BR floor (→3+2→2+2). Order is operator-chosen
+      ("keep beds high, then step down") — `result[0]` must stay the same-total
+      re-mix. Halves are floored at 2BR (`COMBO_FALLBACK_MIN_UNIT_BEDROOMS`) and
+      capped at 4BR; the requested split + duplicate keys are excluded. Strict mode
+      does NOT run the photo-reuse block; on ladder exhaustion it THROWS an error
+      tagged `bulkComboNoRetry` (deterministic → the queue must NOT burn 3× the
+      ~12-min photo budget retrying the same combos). Locked by
+      `tests/combo-remix.test.ts`.
+    - **No swallow.** `runBulkComboListingItem` no longer catches the photo-failure
+      to "continue the draft save" — the throw fails the item and the queue skips
+      the resort.
+    - **Persist is a HARD gate, with roll-back.** Discovery only proves photo URLs
+      exist; `/api/community/:id/persist-photos` actually downloads them and 409s if
+      either unit saves `< MIN_INDEPENDENT_UNIT_PHOTOS` or the sets are duplicates.
+      For a freshly-saved draft, a persist failure ROLLS BACK the draft
+      (`storage.deleteCommunityDraft`) + clears `item.draftId` + fails the item, so
+      NO photo-less row is left behind. A reused, already-photographed draft keeps
+      best-effort persist (it has its own photos). Transient timeouts/aborts are
+      rethrown UN-tagged so they retry; only deterministic `<MIN`/dup is no-retry.
+    - **Resume is drop-and-rerun-fresh.** The top short-circuit marks an item
+      "completed" ONLY when its draft has BOTH `unit*PhotoFolder`s; otherwise it
+      DELETES the photo-less draft and re-runs from scratch (so persist always
+      targets a freshly-created draft — no re-persist into a stale id, no phantom
+      "completed"). A THROWN draft-read error is NOT treated as "missing" (that would
+      delete a good draft on a DB blip): it clears in-memory `item.draftId` and
+      retries with the row intact (re-found by `findExistingBulkComboDraftId`, which
+      only returns fully-photographed drafts).
+    - **Read-path backstop.** `GET /api/community/drafts` AND
+      `getComboInventoryForCommunity` HIDE/skip a bulk-queue combo draft
+      (`queueIdempotencyKey` set, `singleListing !== true`) that is missing either
+      photo folder — so a transient mid-persist draft or a delete-failure zombie can
+      NEVER appear as a dashboard listing or falsely occupy a combo slot. Scoped to
+      queue-created drafts so MANUAL in-progress drafts are unaffected — don't widen
+      this filter to all drafts. `persist-photos` also 404s on a missing draft.
+    - **Re-mix dup-skip.** A combo re-mixed onto a DIFFERENT total re-checks the
+      EFFECTIVE combo key against `getComboInventoryForCommunity` occupiedKeys and
+      skips-as-duplicate rather than minting a 2nd listing for the same community+size.
+    Env: `COMBO_FALLBACK_MAX_LADDER=5`, `COMBO_FALLBACK_MIN_UNIT_BEDROOMS=2` (plus
+    existing `COMBO_REMIX_*`). Built + hardened via THREE adversarial review
+    workflows (10 confirmed findings fixed). See the 2026-06-16 Decision Log line.
+
 ### Database & deploy
 
-15. **Schema migrations run via `npm run db:push` on Railway boot.**
-    See `Dockerfile` `CMD`. Adding a column = bump `shared/schema.ts`;
-    Drizzle handles the rest. Do NOT write bespoke migration SQL.
+15. **Schema sync on Railway boot: `ensureRuntimeSchema()` is authoritative;
+    boot `npm run db:push` is a NON-INTERACTIVE backstop.** See `Dockerfile`
+    `CMD` + `server/schema-maintenance.ts`. `ensureRuntimeSchema` (runs in
+    `server/index.ts` on boot) does idempotent `CREATE TABLE` / `ADD COLUMN` /
+    `CREATE INDEX IF NOT EXISTS` — THIS is where new tables/columns/indexes
+    actually land, because boot `db:push` SILENTLY SKIPS `ADD COLUMN` on
+    existing tables (new `CREATE TABLE` does work). The boot CMD runs
+    `( timeout -k 10 120 npm run db:push </dev/null && echo ok || echo skip );
+    exec node …` — non-interactive (stdin denied), bounded, NON-BLOCKING.
+    DON'T revert the `;` back to `&&`, and DON'T switch to `drizzle-kit push
+    --force`: a data-loss diff (e.g. adding a unique constraint to a populated
+    table) makes drizzle-kit prompt, which in the non-TTY container wedged every
+    deploy ~15-20 min; `--force` "fixes" the wait by auto-TRUNCATING the table
+    (PR #677, Decision Log 2026-06-15). `shared/schema.ts` declares NO indexes,
+    so a cleanly-completing push DROPS the ~16 `*_idx` ensureRuntimeSchema
+    creates and boot recreates them (churn — and running push against prod from
+    a laptop drops them live until the next boot). Apply genuinely destructive
+    DDL by hand via the Postgres public proxy; keep `shared/schema.ts` +
+    `server/schema-maintenance.ts` in sync.
 
 16. **Railway auto-deploys on push to `main`.** No `railway up`
     equivalent needed. Server changes don't change the client bundle
@@ -1813,12 +2218,14 @@ established it so you can read the rationale in the commit message.
     ScrapingBee secondary → sidecar tertiary (heartbeat-gated).
     The sidecar's `zillow_photo_scrape` op type extracts photos
     AND facts from the rendered DOM, so a sidecar success short-
-    circuits the find-clean-unit HTML-fallback step. Operator
-    needs to add `handleZillowPhotoScrape` to their local
-    `worker.mjs` per `docs/sidecar-worker-deltas/zillow-photo-
-    scrape.md` — until they do, sidecar requests time out
-    gracefully (90s wallet) and the chain falls through to its
-    existing behavior. PR #361.
+    circuits the find-clean-unit HTML-fallback step. PR #361.
+    **UPDATE (Load-Bearing #45, 2026-06-15):** the worker handler
+    that #41 said the operator must hand-add now SHIPS in the repo
+    `daemon/vrbo-sidecar/worker.mjs` — `zillow_photo_scrape` is
+    routed to the generic `processListingGalleryScrape`, so this
+    tier is no longer a phantom. The old delta doc
+    (`docs/sidecar-worker-deltas/zillow-photo-scrape.md`) is
+    superseded. See #45 for the full Redfin/Homes/Zillow tier.
 
 42. **find-clean-unit uses verify-then-discover prefiltering: OTA
     address index built BEFORE Zillow candidates get scraped.**
@@ -1917,6 +2324,40 @@ established it so you can read the rationale in the commit message.
     **Do NOT** skip `scrapeListingPhotos` because search results include
     thumbnail URLs. **Do NOT** remove Apify/RentCast/Google legs — RealtyAPI
     is the primary Realtor URL harvester, not the only discovery source.
+
+45. **Redfin / Homes.com / Zillow have a residential-IP sidecar scrape
+    tier of last resort (`listing_gallery_scrape`).** Redfin and Homes.com
+    are richly DISCOVERED (SearchAPI `site:` queries) but their server-side
+    scrape chain is fetch → ScrapingBee with no Apify and no sidecar, so on
+    Railway's datacenter IP they frequently bot-wall down to a single
+    og:image and fail the downstream photo-count gate. The Redfin/Homes
+    branch of `scrapeListingPhotos` now falls back — ONLY when fetch +
+    ScrapingBee returned **0** photos — to `scrapeListingGalleryViaSidecar`
+    (a generic, host-agnostic gallery scrape via the operator's home-IP
+    Chrome). The same worker handler (`processListingGalleryScrape`) also
+    backs the previously-phantom `zillow_photo_scrape` caller (#41).
+
+    - **Sequential fallback only — never union** (Load-Bearing #5). It fires
+      solely on `result.urls.length === 0` and REPLACES the (empty) photo
+      set; it does not merge with or reorder fetch/ScrapingBee photos.
+    - **Real-estate hosts only** (PR #338). It lives inside the
+      `redfin.com|homes.com` branch, so no OTA host (VRBO/Airbnb/Booking)
+      can flow through it for replacement/find-unit photos.
+    - **Naturally inert** when the worker is offline (`workerOnline:false`)
+      and gated to non-zero wallets — `SCRAPE_WITHOUT_SIDECAR`
+      (`sidecarWalletMs:0`, used by `fetch-unit-photos`) skips it, so only
+      the find-unit / find-clean-unit paths use it. Kill switch:
+      `SIDECAR_GALLERY_SCRAPE_ENABLED=0`.
+    - **`makeRequestKey` MUST stay URL-keyed** for this op (sidecar
+      request-key exhaustiveness regression — a prior bug collided distinct
+      listings onto one dedup key).
+    - **DEPLOY:** the worker handler lives in the daemon (`worker.mjs`). A
+      Railway deploy ships the SERVER only — it does NOT activate the
+      handler. Run `cp daemon/vrbo-sidecar/worker.mjs
+      ~/.vrbo-sidecar-daemon/worker.mjs && launchctl kickstart -k
+      gui/$(id -u)/com.vrbosidecar.worker`. Until then the live (old) worker
+      hits `default: unknown opType`, the op fails, and the server tier
+      degrades to its existing 0-photo behavior — safe, just no benefit.
 
 ### Inbox auto-reply
 
@@ -2254,6 +2695,26 @@ Examples:
 2026-06-15 · Jamie: "plan out the ultimate AI agent for the entire platform … a chat I can speak with … sitting on the dashboard … ask it about pricing basically anything in the system." · ACCEPTED, Phase 0 shipped (`claude/platform-ai-agent-design-n4uk3r`) · New dashboard chat agent "Magical" — a Claude `tool_use` orchestrator (generalization of `server/auto-reply.ts`'s loop, model `claude-opus-4-8` via env `ASSISTANT_MODEL`) that answers operator questions by calling existing endpoints as TOOLS over in-process loopback (`server/assistant/{tools,agent,store,routes}.ts`; floating `client/src/components/AssistantDock.tsx` mounted in `App.tsx`, SSE-streamed). **LOAD-BEARING — the agent NEVER touches DB/Guesty/VRBO directly; every tool is a thin wrapper over an existing HTTP endpoint via `loopbackRequestHeaders()` + `http://127.0.0.1:${PORT}` (same pattern as `auto-fill-job.ts`), so it inherits every existing guard (VRBO sight+click, $100 profit gate, geo guards, no-double-attach) for free. Don't add tools that bypass the endpoints.** Phase 0 is READ-ONLY (`get_dashboard`, `list_bookings`, `get_reports`, `get_buy_in_estimate`); tools carry a `kind:"read"|"write"` tag so the planned confirm-before-act gate for write/outward tools (attach/send/reprice) is a one-line check in `agent.ts`. Ships DARK behind `PLATFORM_ASSISTANT_ENABLED` (+`ANTHROPIC_API_KEY`); `GET /api/assistant/status` gates the dock, admin-only. Persistence `assistant_sessions`/`assistant_messages` (fail-soft; auto-create via `schema-maintenance.ts` + `db:push`). Full design + phased roadmap in `docs/platform-assistant.md` + the "Platform AI assistant" Load-Bearing subsection. Verified: `tests/assistant-tools.test.ts` 12/0, `npm run build` clean (client+server), `npm run check` adds 0 new TS errors in touched files (baseline 287). Could NOT live-smoke (no DB/ANTHROPIC creds in the cloud session) — code-path + build verified. FOLLOW-UPS (same day): Phases 1/1.5/2/3/4 shipped + merged (PRs #668–#672) — live buy-in/city-combo/pricing read tools, confirm-before-act gate + `start_auto_fill`/`check_auto_fill`, photo find/alerts/status, guest inbox read + confirm-gated `send_guest_message`/`send_payment_receipt`, prompt caching + session-history UI + nudges. 17 tools total.
 2026-06-15 · Jamie: "add that variable for me [on] the platform" (enable the assistant) · ACCEPTED, REVERSES the same-day "ships DARK behind `PLATFORM_ASSISTANT_ENABLED`" rollout decision · Could not set Railway env vars from the cloud session (no Railway tool/creds), so instead made the assistant ON BY DEFAULT in code: `assistantEnabled()` (`server/assistant/routes.ts`) returns true unless `PLATFORM_ASSISTANT_DISABLED=1` (or legacy `PLATFORM_ASSISTANT_ENABLED=0/false`). Still needs `ANTHROPIC_API_KEY` (already set for other AI features) and renders admin-only. Updated the Load-Bearing "Platform AI assistant" #3 bullet (REPLACED) + docs. Verified: `tests/assistant-tools.test.ts` 65/0, `npm run build` clean, `npm run check` 0 new errors.
 2026-06-15 · Jamie reported "the sidecar randomly going off" · DIAGNOSED + KILLED (operational); NO in-repo code fix is possible (PR #674 = docs only) · Root cause: an UNATTENDED inventory-feed sweep — every Kauai city (Koloa/Princeville/Poipu Beach/Wailua…) × consecutive weekly windows × full-city `cityWideInventory` export, each city firing BOTH a `vrbo_search` and a `hometogo_search` — enqueued onto the prod sidecar queue at ALL HOURS (bursts across Jun 11–15 incl. overnight 00:00–08:00 UTC), so the operator's LOCAL Chrome sidecar (8 workers polling `admin.vacationrentalexpertz.com`) drove itself unprompted for hours. SEPARATE from the already-gated Monday-3am `WEEKLY_AVAILABILITY_SCAN` sweep. **The feed scheduler is OFF-REPO** — it is in NO branch, NO worktree, NO local cron / Claude scheduled-task / `/loop`, and NOT on disk; it exists only as the deployed Railway artifact (prod runs code ahead of git — likely `railway up`'d from an uncommitted tree). **DO NOT try to gate it in-repo (this is the trap):** HomeToGo is NOT feed-only — as of the concurrent main merge it's a LEGIT second inventory source called from the shared city-scan core (`server/city-vrbo-inventory.ts` `runCityScanCore` → `searchHometogoViaSidecar`), so EVERY real operator scan (auto-fill / find-buy-in / bulk queue / expansion) now emits the SAME `vrbo_search` + `hometogo_search` cityWide pair. Feed jobs and operator jobs are therefore BYTE-IDENTICAL (same opType, same `cityWideInventory:true`, `bedrooms:1`, null queue context) at every layer this repo controls — a `hometogo_search` (or cityWide-1BR) kill-switch would silently degrade the operator's own buy-in coverage AND still wouldn't stop the VRBO half. An earlier draft of this PR added exactly that guard; it was REMOVED for this reason. Immediate kill (done): `POST /api/vrbo-sidecar/stop` paused the live queue (cancels active + blocks new → stops BOTH halves; worker idles, heartbeat stays green); `POST /api/vrbo-sidecar/start` re-enables. DURABLE FIX (operator, off-repo): disable the prod feed scheduler at its source, OR redeploy prod cleanly from git — current `main` contains NO feed scheduler (every city-scan caller is an on-demand operator flow), so a git-based deploy drops it while KEEPING HomeToGo as a legit source — then un-pause. Until then the sweep resumes the instant the queue is un-paused.
+2026-06-15 · Jamie asked to fix last-minute buy-in pricing (he believed late-arriving bookings lost money because the markup wasn't high enough) + account for VRBO/Booking/Airbnb commission, targeting "20% clean after fees" · ACCEPTED, but the data redirected the fix (PR #663) · Analysis of 23 committed reservations + 479 of our own VRBO scrapes: median booking lead ~200 days (almost no true last-minute bookings) and unit cost is FLAT until ~14 days out then ~+13% — so the old escalating per-season-band lead-time markup (+15/25/40/50% across 45/75/90/120 days) was PRICING US OUT of near-term dates where cost hadn't risen. Replaced it with a single FLAT +15% within 14 days (`server/availability-policy.ts` LAST_MINUTE_MARKUP_DAYS/PCT). Commission: operator confirmed Guesty applies the per-channel markup and disburses the fed rate NET, so `cleanBaseRateFromBuyInServer` stays the clean net target (cost×(1+margin)) with NO code gross-up — adding one would double-count. The real margin thinness is the sell-early/buy-late spread + Booking.com commission, NOT last-minute underpricing. See the "Sourceability gate + last-minute pricing" Load-Bearing subsection.
+2026-06-15 · Jamie asked to auto-block the Guesty calendar (near-immediately) for windows we can't source a buy-in for at a profit ("sell now, can't source later"), then — after live validation caught wild VRBO scan noise — a confirmation guard, then a UI showing each window's progress toward a block · ACCEPTED · Three PRs: (#664) sourceability gate — a daily sweep runs the existing buy-in scan per near-term window and blocks/unblocks via Guesty, tracking only our `source="sourceability-gate"` scanner_blocks; FAIL-SAFE IS OPEN (never block on a failed/empty scan). (#665) 2-sweep confirmation guard — the same Poipu Kai week read −$8,664 then +$5,045 minutes apart, so a window needs the SAME decision in N CONSECUTIVE sweeps (default 2) before the calendar moves; streaks persist in the new `sourceability_observations` table; a "skip" is neutral. (#666) the Sourceability Gate card on `/availability-scanner` (`GET /api/availability/sourceability-observations` → "Loss flagged 1/2 — 1 more sweep to block"). Env-gated + INERT on deploy; operator flipped SOURCEABILITY_GATE_ENABLED+ENFORCE on this day. Validated LIVE filtering real scan noise (a window hit 2/2 blocks then an open read reset it → never false-blocked). See the "Sourceability gate + last-minute pricing" Load-Bearing subsection.
+2026-06-15 · Jamie: "add an email alias for the 2nd unit buy-in — at the moment there's only the option to make an alias for the first buy-in." · ACCEPTED · SimpleLogin buy-in aliases are now PER-UNIT, not per-reservation. Root cause: `reservation_aliases.reservation_id UNIQUE` (one row/reservation, no `buy_in_id`) + the UI gating the "Create alias" button to `firstBuyInId` in `bookings.tsx`. Changes: (1) nullable `buy_in_id` added to `reservation_aliases` (`shared/schema.ts`); `schema-maintenance.ts` backfills legacy rows to the reservation's earliest buy-in, DROPs `reservation_aliases_reservation_id_key`, and adds `UNIQUE INDEX (reservation_id, buy_in_id)`. (2) `getOrCreateReservationAlias` takes optional `buyInId` (look up / insert per reservation+unit); `getOrCreateVendorContact` + `POST /api/bookings/:id/simplelogin/alias` thread it and validate the buy-in belongs to the reservation. (3) `GET .../buy-in-communications` returns `aliases[]` (per-unit) + back-compat `alias`. (4) UI shows the alias control on EVERY attached unit; each panel reads `aliases.find(a => a.buyInId === buyIn.id)` and POSTs `{ buyInId }`; label "Booking email alias" → "Unit email alias". Verified: `npm run build` clean, full `npm test` green, `npm run check` 0 new TS errors (baseline 287). SimpleLogin live-smoke pending on deploy.
+2026-06-15 · Jamie reported every Railway deploy stalling ~15-20 min in DEPLOYING because boot `npm run db:push` hit an interactive truncate-prompt in the non-TTY container · FIXED (PR #677) · Root cause was a constraint-NAME mismatch: prod's `guest_receipts` token/dedup_key UNIQUE were Postgres-default-named (`*_key`) because `ensureRuntimeSchema` created the table with inline `UNIQUE`, but drizzle-kit matches constraints by NAME and wanted `*_unique`, so push prompted to "add" them every deploy. Renamed the two prod constraints to `guest_receipts_token_unique` / `guest_receipts_dedup_key_unique` (psql; verified no dup/null tokens). Durable guard: boot CMD now runs `timeout -k 10 120 npm run db:push </dev/null` then `; exec node` (non-interactive + bounded + non-blocking) — NOT `--force` (it auto-truncates). Verified live: post-merge deploy reached SUCCESS in ~3 min with `[✓] Changes applied` + `[boot] db:push completed` and zero prompt text in logs. Lesson: when a table is created by ensureRuntimeSchema raw SQL AND declared `.unique()` in schema.ts, name the raw-SQL constraint `<table>_<col>_unique`. See Load-Bearing #15.
+2026-06-15 · Jamie (angry): "every time I open the Operations tab a search pops up and starts the sidecar — I didn't start this." · DIAGNOSED + shipped a global pause switch · Verified the committed Operations page (`/bookings`) does NOT start any sidecar search on navigation — find-buy-in needs an expanded slot + click, the city-scan `autoScanTrigger` is dead (`cityInventoryScanTrigger` is never set), and the on-mount auto-fill/bulk rediscovery is READ-ONLY (the bulk 404 re-POST is guarded by an in-session `bulkPayloadsRef` that's empty on a fresh load). The unattended scans come from SERVER automation: the Sourceability Gate sweep (operator enabled `SOURCEABILITY_GATE_ENABLED` earlier today; up to `SCAN_BUDGET`=12 sidecar scans/sweep/property) and/or the off-repo inventory-feed sweep — the Operations page just SURFACES them in the sidecar panel. SHIPPED a single global kill-switch `server/sidecar-automation.ts` (`isSidecarAutomationPaused`/`setSidecarAutomationPaused`): env `SIDECAR_AUTOMATION_PAUSED=1/0` hard override, else a persisted `app_settings` toggle (`sidecar.automation_paused.v1`). Gated the two in-repo automated drivers (`runSourceabilitySweepAllEnabled` + the weekly Monday-3am OTA scan in `availability-scanner.ts`); operator-initiated HTTP searches are NEVER affected. Endpoints `GET /api/admin/sidecar-automation` + `POST .../toggle`; a "Pause/Resume automated scans" button on the Operations sidecar control. CANNOT stop the off-repo feed (not in this codebase) — that still needs a clean redeploy from `main`. Verified: `npm run build` clean, full `npm test` green, `npm run check` 0 new TS errors (baseline 287).
+2026-06-15 · Jamie hit "Update market pricing" and the bulk queue failed on "Sunny 2BR Condo at Bonita National!" with "SearchAPI Airbnb returned no usable exact-2BR samples for Bonita National Golf and Country Club, Bonita Springs, FL 2026-06" · FIXED (geographic-widening fallback) · Root cause: Bonita National is a gated golf community with ~zero exact-2BR entire-home Airbnb inventory inside its curated club bounding box (the box is correct — the resort center is inside it — the inventory is just thin), and the 24-month market-rate refresh hard-fails the moment any one month finds zero priced 2BR comps, with no geographic fallback. Fix: `fetchAirbnbMedianNightly` (`server/hybrid-pricing.ts`) now escalates to progressively wider center-radius boxes (~6.6km → ~16km around the community center) anchored on city-level queries ("Bonita Springs, FL"), but ONLY after every primary curated-box query returns zero usable samples — so healthy markets stay byte-identical (one SearchAPI request, curated box) and the Poipu single-request test holds. Real-data only (no static/seasonal fallback); a fully-empty widened search still fails closed; widened passes keep a center-radius box so confidence caps at 84 (yellow) and can clear the non-red gate. Also unblocks the other tight Florida footprints (Santa Maria Resort, Southern Dunes). Kill switch `MARKET_RATE_GEO_WIDENING=0`. Built + reviewed via two multi-agent workflows (3-lens design validation → GO-with-changes; 4-lens adversarial review → 0 confirmed blockers). 6 new tests; `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors in touched files. See Load-Bearing #49.
+2026-06-15 · Jamie: the bulk add-combo-listing queue kept producing combos with a BLANK second unit (Unit A 25 photos, Unit B 0) because both halves are the same community + same bedroom count and the resolver excludes Unit A's listing for Unit B — so when only one good listing exists, Unit B starves. "I like taking the same unit photos if it can't find a 2nd unit but… switch the combo to a [4] bedroom and find a 2 bedroom unit instead." · ACCEPTED + shipped (bedroom re-mix fallback) · `runComboPhotoFetchItem` (`server/routes.ts`) now escalates when the same-size second unit comes back < `MIN_INDEPENDENT_UNIT_PHOTOS`: (1) **re-mix** — `remixBedroomSplits` (`shared/community-combo.ts`) proposes same-TOTAL different-SIZE splits capped at 4BR (no 5BR condos; 3+3→4+2, 2+2→3+1, 4+4→none) and re-searches BOTH halves, committing only when both return real distinct galleries; (2) **photo reuse** (final safety net) — reuse Unit A's photos for Unit B so a combo is never saved blank. The effective (re-mixed) sizes flow into `generate-listing` copy + `/api/community/save` (`unit1Bedrooms`/`unit2Bedrooms`/`combinedBedrooms`) and the dedup/idempotency helpers (`effectiveBulkComboBeds`), so a re-mixed item finds its own draft on retry. Tracked durably via 4 new `bulk_combo_listing_job_items` columns (`ensureRuntimeSchema`, NOT db:push), a `remix`/`photo-reuse` queue event, and per-item UI badges + Unit A/B photo counts on the queue (`add-community.tsx`). Env: `COMBO_REMIX_ENABLED`/`COMBO_PHOTO_REUSE_ENABLED`/`COMBO_REMIX_MAX_UNIT_BEDROOMS=4` (default ON). LOAD-BEARING: the proof's duplicate-overlap check is SKIPPED when `unit2PhotosReused` (reused photos are identical by design); `effUnit*Beds` (not `pairing.unit*Beds`) must feed copy/save/dedup or a re-mixed draft mismatches + duplicates on retry. Built; new `tests/combo-remix.test.ts` (11) green, `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors (baseline 287); 3-lens adversarial review → 0 confirmed bugs. NOTE: separately surfaced two NON-photo blockers in the same live batch (not fixed here) — items fail on a missing community street address (`validateCommunityStreetAddress`) and on heartbeat-stale drops during long phases.
+2026-06-15 · Jamie hit "Replacement search session expired (server restarted or job not found)" while finding a replacement unit (screenshot) · ACCEPTED, client-only · The find-unit job is in-memory (`server/preflight-background-jobs.ts`) and a run is long (≤8×~350s); a Railway restart mid-run evicts it and the poll 404s, breaking the UI's "Safe to leave this tab — search continues on server" promise. Rather than a Postgres-backed job (the result isn't applied until the operator confirms, so there's nothing to durably persist — unlike auto-fill picks), `unit-replacement-flow.tsx` now persists the start PAYLOAD in localStorage and TRANSPARENTLY re-launches the same search on a 404 (`attemptAutoResume`, tri-state `resumed`/`in-progress`/`cannot`). Bounds are DURABLE: a `resumeCount` in the localStorage ref (cap 3, survives the close/reopen remount, incremented only on a confirmed start-POST) + a `lastAliveAt`-keyed 45-min freshness window (refreshed each successful poll) so it can't spin SearchAPI in a crash loop yet a long actively-watched search never ages out. Falls back to the original error (string preserved for the grep test) only when resume is truly impossible. Same ephemeral-job + client-relaunch philosophy as Auto-fill #6/#8. Built + hardened via TWO adversarial review Workflows (9 findings confirmed + fixed: concurrent-poll error-clobber [high], post-await cancel re-check, per-mount→durable cap, freshness re-anchor, budget-before-POST, transient flash, no resume signal/full-restart, long-run window age-out, claim-on-failure stuck-spinner). See the "Preflight replacement-find job survives a server restart" Load-Bearing subsection. Verified: full `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors in the touched file.
+2026-06-15 · Jamie: "fix the address issue as well and the heartbeat going stale on long phases" (the two NON-photo blockers flagged after the re-mix fix) · ACCEPTED + shipped · TWO fixes to the bulk add-combo-listing queue. (A) ADDRESS FAIL-FAST: `validateCommunityStreetAddress` (`shared/community-addresses.ts`) hard-rejects a community with no real numbered street, but only at the SAVE step — AFTER 10-15 min of photo work (Wailea Ekahi died here). Added a pre-check in the `runBulkComboListingJob` per-item loop (after the cancel check, before the max-attempts guard): `hydrateBulkComboListingItem` + `validateCommunityStreetAddress`, and on failure mark the item failed + `continue` (skips the retry loop entirely — no photos, no attempts burned, clear "add a street address" message + `address-precheck` event). Also added 3 curated resort addresses to `COMMUNITY_ADDRESS_RULES` (Wailea Elua Village 3600 Wailea Alanui Dr, Wailea Ekahi Village 3300 Wailea Alanui Dr, Grand Champions Villas 155 Wailea Ike Pl — all Kihei/Wailea HI, web-verified) so the operator's current batch resolves. (B) HEARTBEAT INTERRUPTION REPRIEVE: items were hard-dropped ("heartbeat went stale after 3 attempts") when a deploy/restart killed the worker mid-item at attemptCount=3 (the now-#691-rarer photo retries used to push items to att 3). KEY INSIGHT: a "running" item in `recoverStaleBulkComboListingJob` was ALWAYS interrupted (genuine failures exit the retry loop as status="failed", never "running"), so don't permanently drop it — give up to `BULK_COMBO_LISTING_MAX_INTERRUPTIONS=3` bounded reprieves (interruptions++, attemptCount=MAX-1 = one more genuine attempt, status="queued"). New persisted `interruptions` column (`ensureRuntimeSchema`, NOT db:push) bounds it across restarts. LOAD-BEARING: the reprieve relies on genuine failures never leaving an item "running"; the bound MUST persist (else a deploy storm loops forever). Built; new `tests/community-addresses.test.ts` (16) + full `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors (baseline 287); 2-lens adversarial review.
+2026-06-15 · Jamie disabled RealtyAPI (it burned metered API budget for low marginal value) and asked for OTHER ways to find unit photos · ACCEPTED · An architecture-mapping workflow found the real gap is SCRAPE-side, not discovery-side: Redfin/Homes.com are richly DISCOVERED but their scrape chain is fetch → ScrapingBee with no Apify and no sidecar tier, so on Railway's datacenter IP they bot-wall to a single og:image and fail the photo-count gate; and the `zillow_photo_scrape` sidecar op was a PHANTOM (server fully wired it but the repo `worker.mjs` had no handler — it hit `default: unknown opType` and failed silently; #41 had flagged this as an operator-TODO). Shipped ONE zero-marginal-cost change reusing the FREE Mac sidecar (no new paid API — the explicit anti-goal after the RealtyAPI overspend): a generic `listing_gallery_scrape` op (`processListingGalleryScrape` in `worker.mjs`, host-agnostic gallery + JSON-LD-facts harvest, gallery-container-scoped to avoid "similar homes" pollution) wired as a SEQUENTIAL last-resort tier in `scrapeListingPhotos`' Redfin/Homes branch (fires only on 0 photos from fetch+ScrapingBee → never unions, Load-Bearing #5); the same handler also backs the phantom `zillow_photo_scrape` caller. Gated `SIDECAR_GALLERY_SCRAPE_ENABLED` (default on) + inert when the worker is offline + skipped by `SCRAPE_WITHOUT_SIDECAR` (so `fetch-unit-photos` never fires it; the pipeline-logic meta-assertion holds). URL-keyed `makeRequestKey` (request-key exhaustiveness regression). Built + adversarially reviewed via two multi-agent workflows (architecture map → 4-lens review + verify). Verified: full `npm test` green (+2 new sidecar-gallery tests), `npm run build` clean, `npm run check` 0 new TS errors (baseline-diffed: queue.ts 15→15, routes.ts 172→172). DEPLOY: Railway ships the server; the worker handler needs `cp daemon/vrbo-sidecar/worker.mjs ~/.vrbo-sidecar-daemon/ && launchctl kickstart -k gui/$(id -u)/com.vrbosidecar.worker`. See Load-Bearing #45.
+2026-06-16 · Jamie: the bulk add-combo-listing queue still "sometimes adds the listing to the dashboard even without photos … if it can't find photos for unit a and unit b then it needs to stop, don't use that combination type, and instead try to find another combination type … e.g. a 6BR (two 3BR) → switch to a 4BR (two 2BR) … then if that fails, move on from that resort." · ACCEPTED + shipped — REVERSES the photo-reuse half of the 2026-06-15 re-mix decision (operator no longer wants Unit-B-reuses-Unit-A; a combo MUST have real, distinct photos for BOTH units or it is NOT created). Strict gate is BULK-QUEUE-ONLY (the standalone photos-tab combo fetch is byte-unchanged). Changes (all `server/routes.ts` unless noted): (1) `runComboPhotoFetchItem` takes `{strictDistinctBothUnits}`; strict mode walks a wider COMBINATION-TYPE ladder via new `comboFallbackPairings` (`shared/community-combo.ts` — same-total re-mix FIRST [3+3→4+2, preserves beds] then progressively smaller totals down to the abundant 2BR+2BR floor [→3+2→2+2]; halves floored at 2BR, capped at 4BR; requested split + dup keys excluded), SKIPS photo-reuse entirely, and on exhaustion THROWS tagged `bulkComboNoRetry` (deterministic → no wasteful 3× retry of the 12-min discovery). (2) `runBulkComboListingItem` no longer SWALLOWS the photo failure to "continue the draft save" — the throw fails the item so the queue skips the resort. (3) PERSIST IS A HARD GATE: `/api/community/:id/persist-photos` is no longer fail-soft for a fresh draft — if it doesn't confirm ≥`MIN_INDEPENDENT_UNIT_PHOTOS` real saved photos for BOTH units (409 / `<MIN` / duplicate), the just-saved draft is ROLLED BACK (`deleteCommunityDraft`) + the item fails (no photo-less row left behind); only a reused already-photographed draft keeps best-effort persist. (4) RESUME: the short-circuit only marks "completed" when the draft has BOTH `unit*PhotoFolder`s; otherwise it DROPS the photo-less draft and re-runs FRESH (a THROWN read error is NOT read as "missing" — clears in-memory draftId + retries so a good draft is never deleted on a DB blip). (5) RE-MIX DUP-SKIP: a combo re-mixed onto a DIFFERENT total re-checks `getComboInventoryForCommunity` occupiedKeys on the EFFECTIVE key and skips-as-duplicate instead of minting a 2nd listing. (6) READ-PATH BACKSTOP: `GET /api/community/drafts` + `getComboInventoryForCommunity` hide a bulk-queue combo draft (`queueIdempotencyKey` set, non-singleListing) missing either photo folder — so a transient mid-persist draft or a delete-failure zombie can never appear as a listing (manual drafts unaffected). (7) `persist-photos` 404s on a missing draft (no phantom ok:true). Env: `COMBO_FALLBACK_MAX_LADDER=5` / `COMBO_FALLBACK_MIN_UNIT_BEDROOMS=2` (plus existing `COMBO_REMIX_*`). Built + hardened via THREE adversarial review Workflows (round1: discovery-swallow+reuse; round2: persist-swallow + resume-trusts-draftId + re-mix-dup [3 high, all fixed]; round2-rereview: resume-orphan/no-retry + phantom-completed + delete-zombie [3, fixed by SIMPLIFYING resume to delete-and-rerun-fresh + read-path backstop]; round3: 1 low transient-DB-read deletes good draft [fixed]). 12 new `comboFallbackPairings` tests in `tests/combo-remix.test.ts` (23 total); full `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors (baseline 287). LOAD-BEARING: never re-enable photo-reuse for the bulk queue; the persist gate's roll-back + the read-path photo-folder filter together are what guarantee "no photo-less combo listing"; `comboFallbackPairings` element ordering (same-total first) is operator-chosen ("keep beds high, then step down"). See Load-Bearing #50.
+2026-06-16 · Jamie: "update the top market sweep so it will also look for 4 bedroom and/or 5 bedroom combinations as well … at the moment it only looks for 6 bedroom or 7/8 bedroom combinations." · ACCEPTED + shipped · The Top Markets Sweep (Add-a-Community wizard) flagged only 6BR (two 3BR = 3+3) and 7/8BR (3+4 / 4+4) two-unit combos, and — LOAD-BEARING — its candidate filter `filterTopScanSixBedroomComboCandidates` GATED each market's surfaced communities on 6BR potential, so a community whose plentiful 2BR/3BR inventory only makes a 4BR or 5BR combo was dropped entirely. Added 4BR (two 2BR = 2+2) and 5BR (2BR+3BR = 2+3) as first-class combo sizes: `server/community-research.ts` new `hasFourBedroomComboPotential`/`hasFiveBedroomComboPotential` + `TOP_SCAN_COMBO_PAIRS`=[[2,2],[2,3],[3,3],[3,4],[4,4]] + `hasAnyTopScanComboPotential`, and the candidate filter was WIDENED + renamed `isTopScanComboCandidate`/`filterTopScanComboCandidates` (eligible && ANY of 4/5/6/7-8BR) — markets now surface on any of the four sizes, each reported independently. Persisted via two new `top_market_scan_cache` columns (`four_bedroom_possible`/`five_bedroom_possible`, `shared/schema.ts` + `server/schema-maintenance.ts` CREATE + `ALTER TABLE ADD COLUMN IF NOT EXISTS` for existing prod tables) and `TOP_MARKET_SCAN_CACHE_LOGIC_VERSION` 4→5 — the bump CLEARS the cache on boot (a re-scan, NOT `refreshTopMarketScanCacheComboFlags`, because old rows were stored under the narrow 6BR-only filter so recompute-from-stored-JSON can't recover the newly-qualifying 4/5BR-only communities). Boot-safe: `ensureRuntimeSchema` (the ALTER) runs at index.ts:98 BEFORE the version-clear's Drizzle `select(*)` at :99. `server/routes.ts` job + NDJSON stream + `/api/community/top-markets/seeds` all emit the four flags; `client/src/pages/add-community.tsx` mirrors the two predicates and renders four combo badges (4BR violet / 5BR indigo / 6BR emerald / 7-8BR sky) in both the seed-picker grid and the live per-market cards (`seedComboBadge` refactored to a `COMBO_BADGE_META` map). INTENTIONAL DEFERRAL (nit from the adversarial review): the market-level static "Est. combo rental {range}" badge (`TOP_MARKET_SEEDS` `estimatedComboLow/High`) is calibrated to large combos and can overstate revenue for a 4/5BR-only market — left as-is (it's pre-existing display, the four yes/no badges + per-resort ranges disambiguate, and the actually-queued combo gets its own server-computed sell rate). Verified: full `npm test` green (+ new synthetic & real-seed combo assertions in `tests/pipeline-logic.test.ts`), `npm run build` clean, `npm run check` 0 new TS errors (baseline 287, stash-diffed); 4-dimension adversarial review (combo semantics / filter-widening side-effects / deploy-migration-cache / client-server parity) → 0 real bugs, 2 nits (stale comment fixed; the est-range deferral above).
+2026-06-17 · Jamie asked whether SearchApi Airbnb counts could drive a daily 7-night Guesty blackout per listing 2 years out, then steered it to PROFIT-aware blocking using the Airbnb HIGH-END rate as the assumed buy-in cost · ACCEPTED + shipped (PR #717, INERT) · Live calibration (engine=airbnb + real Guesty calendar prices) found: engine=airbnb has NO `bedrooms` field (parse `accommodations`); `bedrooms=N` is a MIN filter; `q=` returns an ISLAND-WIDE pool so "same community" needs the alias regex, not geo (the Koloa cluster — Poipu Kai/Makahuena/Brenneckes/Pili Mai — is 0.5-0.9mi apart, all "Koloa, Hawaii"); 2yr-out returns 0 (Airbnb ~12mo listing-cliff — kills the "2 years out" availability goal, far-future stays on buy-early cost-lock); and OUR OWN listing appears in results at our own price (must be excluded or cost≈sell). Two 90-day Poipu Kai sims showed availability ~never binds in a liquid market, so the real lever is profit. Shipped an OPTIONAL profit layer on the #694 availability gate (`SOURCEABILITY_GATE_PROFIT_ENABLED`, default OFF): assumedCost = trimmed-p90 of same-community own-excluded Airbnb nightly (cheapest of combo vs single-unit path) computed FREE from the same fetch; sell = Guesty calendar; block if cost > sell×(1−minMargin); fail-safe-OPEN on missing cost/sell; 2-sweep confirm + source-scoped reconcile reused. Validated live: Poipu Kai 6BR (Guesty listing 69e14c…) blocked 1/13 weeks at p90 (Aug29 −$14). New `tests/sourceability-profit.test.ts` (6 groups) green; existing sourceability/availability suites green; `npm run build` clean; `npm run check` 0 new TS errors (baseline 287). Methodology + sims in `docs/availability-blackout-methodology.md`. The "Sourceability gate" Load-Bearing bullets predate #694 and still describe the VRBO/profit gate — STALE; the new "Profit-aware blackout" bullet is current. OPS: I leaked ADMIN_SECRET into the session transcript via a bad shell expansion — operator should ROTATE it.
+2026-06-17 · Jamie: "the most recent bulk combo listing tool failed to find an address — see why; if it's SearchAPI it's already fixed, else diagnose + fix." · DIAGNOSED (NOT SearchAPI) + shipped two fixes · Pulled the prod queue from the DB (job `bcj_mqhk76d6_obuy3u`, a Kauai Top-Markets-Sweep batch): 4 items hard-failed the `address-precheck` — Lae Nani, Puu Poa, Hanalei Bay Resort, Waipouli Beach Resort — each queued with EMPTY `streetAddress`/`addressHint`/`community.address` and a WRONG sweep-assigned mailing city ("Puhi"/"Kilauea"), and none in `COMMUNITY_ADDRESS_RULES`. ROOT CAUSE: the address path (`resolveBulkComboListingStreet`→`inferCommunityStreetAddress`) is PURE (curated rule + operator hint only) with NO discovery, so any non-curated swept resort fails the gate before a single photo — SearchAPI being dead never even touched it (the operator's hypothesis was wrong). Separately found a WRONG-address bug in the SAME batch: "Alii Kai" (Princeville, Kauai) saved Draft #26 against `69-1029 Nawahine Pl` — the Big-Island Halii Kai address — because `communityAddressRuleForName` used raw substring matching and `"halii kai".includes("alii kai")`. FIX 1 (systematic, the "find an address" answer): new `server/community-address-discovery.ts` `discoverCommunityStreetAddress()` — SearchAPI `google_maps` (same engine `walking-distance.ts` geocodes with), multi-variant queries (name / name+resort / name+condominium / name+state — robust to the wrong city), lifts a real numbered street from `place_results`+`local_results`. LOAD-BEARING — PRECISION OVER RECALL (a wrong address publishes a real listing at the wrong place): a candidate is accepted ONLY when `isLikelyStreetAddress(streetRootFromAddress(addr))` AND `titleMatchesResort` (every distinctive, non-generic resort token present as a WHOLE WORD in the maps title — rejects the streetless "Lae Nani Beach" POI and the wrong-resort Halii Kai hit); a streetless/unmatched result yields null → the item fails the pre-check exactly as before (no regression, just an extra chance). Wired into the `runBulkComboListingJob` pre-check ONLY when validate fails AND there is NO curated rule (a curated mismatch must still surface, not be papered over); on success sets+persists `item.streetAddress` into the item payload (new targeted `persistBulkComboItemStreetAddress` — `persistBulkComboListingSnapshot` does NOT write payload), emits an `address-discovered` event, re-validates. LOAD-BEARING: discovery negative-caches ONLY a DEFINITIVE no-match — a transient throw/timeout/non-2xx (now thrown, not `[]`) leaves it uncached so a retry can re-attempt (no one-blip-skips-the-resort poisoning). Env `BULK_COMBO_ADDRESS_DISCOVERY=0` kills it. FIX 2: `communityAddressRuleForName` now matches on WORD BOUNDARIES (pad both normalized strings with spaces) so "alii kai" no longer matches inside "halii kai" while legit partials hold ("grand champions" ⊂ "wailea grand champions", "poipu kai" ⊂ "kahala at poipu kai", bare "kaiulani"); Alii Kai now falls through to discovery → its correct `3830 Edward Rd, Princeville`. Did NOT hardcode the 4 Kauai addresses (discovery covers them + the long tail; avoids wrong-hardcode risk). Verified: `npm run build` clean; full `npm test` green incl. new `tests/community-address-discovery.test.ts` (17) + extended `tests/community-addresses.test.ts` (30, +Alii Kai/word-boundary locks); `npm run check` 0 new TS errors (stash-diffed, baseline 131-unique); LIVE end-to-end `discoverCommunityStreetAddress` resolved all 4 failed resorts + Alii Kai correctly from their exact garbage inputs, and a fake resort → null. NOTE: the automated multi-agent adversarial review fan-out was blocked by a sustained Anthropic-side 529 overload (3 attempts, all 4 agents); a thorough MANUAL 4-dimension adversarial pass stood in and caught the cache-poisoning issue (fixed above). The existing wrong-address Draft #26 (Alii Kai) is stale data — operator should re-queue it to pick up the correct address. Separately observed (NOT fixed, out of scope): the Top Markets Sweep assigns garbage mailing cities to resorts (Lae Nani→"Puhi"); discovery is robust to it, but photo-discovery city terms could still be improved later.
+2026-06-17 · Jamie: "find more locations and subsequent resorts in Hawaii that we can list, then implement them into the top sweeps market tool." · ACCEPTED + shipped · Expanded the Top Markets Sweep's two Hawaii data layers in `server/community-research.ts`: (a) +6 location seeds in `TOP_MARKET_SEEDS` (Mahinahina, Spreckelsville [Maui]; Kahaluu-Keauhou, Waikoloa Village [Big Island]; Kaluakoi, Ualapue [Molokai]) → Hawaii seeds 68→74, total 100→106; (b) +120 curated condo/townhome resorts in `KNOWN_COMBO_COMMUNITY_SEEDS` (the `knownComboSeedsForCity` dictionary that powers the per-market resort breakdown #708/#709) — e.g. Princeville +7, Kihei +20, Poipu/Koloa +11, Kona/Keauhou +15, West Maui +21, Waikoloa coast +10, plus 4 new named city-pattern constants (`MAUI_NORTH_SHORE_CITY_PATTERN`, `WAIKOLOA_VILLAGE_CITY_PATTERN`, `HILO_CITY_PATTERN`, `MOLOKAI_CITY_PATTERN`) and `mahinahina` added to `MAUI_WEST_CITY_PATTERN`. Discovered + adversarially verified via a 13-segment (per-island) research Workflow (discover → skeptical verify → synthesize, 27 agents); only individually-owned condos/townhomes survive (`checkCommunityType`-eligible: hotels/condotels/timeshares/vacation-clubs/branded-operators/detached-villas/SFR all excluded). **LOAD-BEARING — the cross-island cache-key collision trap:** the sweep caches each market on `state|city` lowercased and the curated-resort dictionary keys on anchored `city` regexes, so Hawaii's reused place names WILL collide if added naively. Three deliberate collision-avoidance choices: (1) `Kahaluu-Keauhou` uses the DASHED string (not bare `Kahaluu`) to avoid colliding with Oahu's no-STR Kahaluu, and reuses the existing Kona pattern (which already lists `kahaluu-keauhou`) so bare "Kahaluu" attaches 0 resorts; (2) `Waikoloa Village` uses the FULL string + its OWN `/^waikoloa village$/i` pattern — the anchored `BIG_ISLAND_RESORT_CITY_PATTERN` (`/^(waikoloa|…)$/`) does NOT match "waikoloa village", so the inland village condos and the coastal Waikoloa Beach resort condos stay disjoint (verified: 0 overlap); (3) `Mahinahina`/`Spreckelsville`/`Kaluakoi`/`Ualapue` are unique to their island (no same-named town elsewhere). Claude's own final precision/sensitivity filter DROPPED 10 of the 130 verified candidates: the Lahaina-TOWN fire-zone complexes (Puamana/Lahaina Shores/Puunoa — Aug-2023 fire), condotel hybrids (Mana Kai Maui, Pohailani, Napili Shores), legality-questionable Oahu residential condos (Royal Kuhio, Royal Garden, Ilikai Marina), and a receivership-history Hilo complex (Waiakea Villas). Oahu kept deliberately conservative — only clearly resort-zoned/NUC pockets (Turtle Bay/Kuilima, Makaha oceanfront). NO cache version bump (logic unchanged; new markets scan fresh, existing markets surface new resorts on their next scan/refresh — a global clear would force a heavy full re-sweep for no correctness gain). Pure additive data change: no UI change (the sweep grid groups by `tag` dynamically), no schema/cache-key change. Verified: full `npm test` green (`pipeline-logic` top-market audit now 106 markets; `TOP_MARKET_SEEDS.length>=86` holds), `npm run build` clean (client+server), `npm run check` 0 new TS errors (baseline 287, stash-diffed), and a runtime assertion confirmed 0 `state|city` collisions + correct resort attachment via the real regexes.
+2026-06-17 · Jamie: "when a guest sends an inquiry … run a buy-in search there and then by clicking a button … fire the exact same search as the Operations tab's 'find cheapest choice' … utilize the sidecar and find cheapest combinations … it doesn't need to attach the buy, it just needs to show me the results." · ACCEPTED + shipped (`claude/inbox-buy-in-search`) · New "Do buy-in search" button on a guest inquiry's inbox right panel (next to the static "Buy-in estimate") runs the EXACT Operations "Auto-fill cheapest" escalation ladder (resort find-buy-in → home-city VRBO → nearby-city expansion → per-slot single-unit fallback, driving the local Chrome sidecar + cheapest same-community combos) and DISPLAYS the results read-only — it attaches/persists NOTHING. Implemented as an additive, default-false `dryRun` mode on the EXISTING auto-fill job (`server/auto-fill-job.ts`), not a re-implementation, so it inherits every load-bearing rule (VRBO sight+click, geo guards, same-community pairing, deploy-survival poll) for free. KEY INSIGHT that made it a tiny diff: `attachPick` is the only attach boundary, and every detach/rollback site is already guarded by `buyInId != null` — so a dry-run that records the would-be pick with `buyInId:null` and skips the two create/attach POSTs leaves ALL downstream control flow (slots fill → ladder terminates, running-total profit gate, swap, all-or-nothing rollback) byte-identical with zero other server changes. Reservation-keyed persistence (`markAutoFillSearchStarted`/`upsertAutoFillLossOptions`/SIGTERM interrupted-stamp) is skipped for dry-run (synthetic `inbox-search:` reservationId never touches a real reservation's durable rows / boot-resume). Profit gate disabled (`expectedRevenue:0`, the documented inquiry degrade-safe path) so it shows the cheapest options, not a "would lose money" verdict. New `POST /api/inbox/buy-in-search` resolves the inquiry (guestyPropertyMap → PROPERTY_UNIT_CONFIGS slots+community, same scope as the static estimate) and starts the job; client polls the normal `GET /api/operations/auto-fill/:jobId` and renders `attached`/`comboOptions`/`cityEconomics` via `InboxBuyInSearchResults`. Verified: new `tests/inbox-buy-in-search.test.ts` (20 checks) green, full `npm test` green, `npm run build` clean (client+server), `npm run check` 0 new TS errors in touched files (baseline 287). See the "Read-only inbox buy-in search (dry-run auto-fill)" Load-Bearing subsection.
+2026-06-17 · Jamie: builder "Find a New Unit" can't find an alternative replacement for "Sunny 6BR for 12 at Waikoloa Villas!" (Waikoloa Beach Villas, Big Island; backed by two 3BR condos) — "there's a lot of properties in that community so it should be able to find them but it can't." · ACCEPTED + shipped · An evidence-grounded multi-agent Workflow (live-web discovery replay + adversarial code trace + 2 refuters) proved the config is COMPLETE and not the bug: the `Waikoloa Beach Villas` community-address rule, discovery cities/queries/`discoveryUnitLabels`, the resort-street gate (every `69-180 Waikoloa Beach Dr APT/UNIT/# …` URL parses to root `69 180 waikoloa beach dr` and PASSES), and unit extraction (letter-coded C1/I4/M23) all work; Zillow/Redfin/Homes surface ~24 usable 3BR-or-unknown candidates. The REAL cause is that Waikoloa Beach Villas is a ~121-unit STVR-saturated complex (~89 units on VRBO alone) so almost every discoverable for-sale unit is ALSO an active Airbnb/VRBO rental → the default "clean unit" requirement correctly drops them all as `skipped-found` (the operator sees "a lot of properties" but nearly none are clean). Fix = an OPERATOR OPT-IN `allowOtaListed` (default OFF) that relaxes ONLY the unit-name OTA gate, never the photo-reuse gate (`skipped-photo-found` stays enforced — PR #338 anti-feedback-loop intact, photos still sourced only from zillow/redfin/homes/realtor), flags the kept unit `otaListedOn` (client surfaces an amber "already listed on <host>" banner so the green "clean" shield never lies), plus an APPEND-ONLY diagnostic line that names the skipped-found count and points the operator at the toggle (the test-asserted `found on …Airbnb/VRBO/Booking.com` substring left byte-identical). Two implementation landmines the refuters caught and I avoided: (a) the OTA matcher's letter-branch roundup-snippet false-positives and the photo-gate loss of off-market clean 3BR were left as documented FOLLOW-UPS — not a blind matcher tweak, which risks double-listings — because tuning needs live SearchAPI data I can't run here; (b) the diagnostic reword is append-only. `server/routes.ts` + `client/src/components/unit-replacement-flow.tsx` (job layer is a pass-through, no change). Verified: full `npm test` green (+8 new source-lock assertions in `tests/pipeline-logic.test.ts`), `npm run build` clean, `npm run check` 0 new TS errors (baseline 287, stash-diffed). See the "`allowOtaListed` opt-in for STVR-saturated replacement search" Load-Bearing subsection.
+2026-06-17 · Jamie (follow-up to the Waikoloa #718 fix): "at what point can we say this is not fixable and there is no legitimate replacement?" · ANSWERED (not unfixable) + shipped FOLLOW-UP (a) · A live web check of the actual 3BR inventory at 69-180 Waikoloa Beach Dr found a genuinely-clean, active, NEVER-RENTED for-sale 3BR — Waikoloa Beach Villas **O1** ($1.69M) — that the tool was WRONGLY dropping, so "no legitimate replacement" was FALSE. Root cause = the deferred letter-branch false-positive: `site:vrbo.com "Waikoloa Beach Villas" "O1"` returns multi-unit ROUNDUP pages whose snippets enumerate codes ("…C1, A4, I4…"), and `hitMatchesUnit`'s old bare `\bcode\b` over title+snippet+link flagged clean O1 as already-listed (skipped-found). Fix: extracted the matcher to the pure, unit-tested `server/listing-unit-match.ts` (`hitTextMatchesUnit`) and ANCHORED the letter branch — a letter code matches only when it's a bounded token in the hit TITLE, or adjacent to a GENERIC unit-designator keyword (`unit|apt|apartment|condo|suite|bldg|building`); the keyword set EXCLUDES the resort/"villas" word so a roundup snippet "…Beach Villas C1, A4…" can't anchor via "villas c1". NUMERIC branch (Poipu Kai "721") byte-identical → Kauai unaffected. SAFE because the reverse-image `skipped-photo-found` gate is the backstop (a looser name-match that lets an OTA unit through is still rejected if its photos are reused → no photo-feedback loop). `tests/listing-unit-match.test.ts` (17) locks roundup-kill + single-listing recall + O1≠O2/J2≠J22 boundary precision + the unchanged numeric branch. Also delivered the operator a decision-framework for declaring a community genuinely exhausted (run with Include-OTA + Expand ON, read the verdict breakdown; terminal = all candidates skipped-photo-found / too-few-photos / vision-rejected / internal-duplicate). FOLLOW-UP (b) (sparse-photo off-market clean 3BR dying at the photo gate) STILL OPEN — but active for-sale units like O1 are photo-rich and now recoverable. Built in a fresh worktree off `main` (the shared `claude/city-research-dedup-and-radius` checkout has concurrent uncommitted edits). Verified: full `npm test` green (incl. the 17 new behavioral tests), `npm run build` clean, `npm run check` 0 new TS errors (baseline 287). See the updated FOLLOW-UP (a)/(b) note in the "`allowOtaListed` opt-in for STVR-saturated replacement search" Load-Bearing subsection. COULDN'T live-confirm O1 now surfaces (no SearchAPI/Railway here) — the matcher fix is unit-proven; if O1 still doesn't appear after deploy, next suspect is discovery ranking / its for-sale page being on a non-allowlisted brokerage site (hawaiiliving etc.).
+2026-06-17 · Jamie: builder "Check photo community" button must check EVERY community-folder photo (confirm each is in that community or not) + ~5 photos of each unit (confirm each unit is the same community) — "100% sure that every community photo is a part of the community" and as close to 100% as possible on the units · ACCEPTED + shipped (PR #720) · DIAGNOSIS: the existing check sampled the community folder at `COMMUNITY_SAMPLE_CAP=10` in ONE vision call; real folders run 16-30 photos (mauna-kai-6a=30, kaiulani-52=28), so 20 photos were never looked at — an outlier in the unsampled tail was invisible, defeating the 100% goal. FIX: reworked `server/photo-community-check.ts` into a TWO-PHASE engine (replaces the single-call/caps design in Load-Bearing #45, marked superseded there). Phase A (one call) identifies the canonical community from a small even-spread REFERENCE sample (≤6) + judges each UNIT (~5 photos each) against it — the cross-folder holistic judgment the single call did. Phase B verifies EVERY community photo (no cap below `COMMUNITY_HARD_MAX=150`), in `COMMUNITY_BATCH_SIZE=9` batches run ≤3 concurrent, each grounded by ≤3 TRUSTED reference anchors (Phase-A anchors minus any the model flagged) + the Phase-A identity; per-photo verdict `same|different|junk`. The two phases are INDEPENDENT (a unit-call failure still yields the exhaustive community result, and vice-versa). LOAD-BEARING `unchecked`: a photo a batch couldn't analyze is surfaced in `community.unchecked` + degrades the verdict to warn (UI shows `photosChecked/photosTotal` so a gap is visible) — never defaulted to "same", which would re-introduce the false confidence this removed. Kept AGENTS #45's other constraints verbatim (client-driven/property-agnostic groups, Sonnet, positive-contradiction-only "different/no", deterministic dHash dup detection over the FULL community set). Pure folds (`summarizeCommunityVerdicts`/`synthesizeVerdict`/`chunk`/`evenSampleIndices`) extracted + locked by new `tests/photo-community-check.test.ts` (22). Client: type gains `unchecked`, the community card renders it, button copy + latency hint updated (30-90s). Verified: full `npm test` green (22 new), `npm run build` clean, `npm run check` 0 new TS errors (baseline 287, stash-diffed). COULDN'T live-smoke the vision leg (no ANTHROPIC_API_KEY / photo volume in the cloud session) — build + 22 pure tests + code-path verified; confirm live by clicking the button on a listing with a community folder + 2 units.
+2026-06-17 · Jamie (Waikoloa "Full unit audit" screenshot): "I keep getting false positives — make it a definitive YES or NO, not a maybe; remove the 200 photo-check-a-day limit if needed" · SHIPPED on `claude/unit-audit-yes-no` (PR #721) · The builder Pre-Flight "Full unit audit" rendered TWO unmerged signals per platform — a TEXT badge (`/api/preflight/platform-check`) and a separate PHOTO sub-line — so a short/letter/empty-numbered unit was a DOUBLE maybe: text can only reach "unconfirmed" (finds the resort, can't pin the unit) and the photo scan kept returning "inconclusive" because the **200/day Lens cap** stopped the batch before the folder was scanned and it only sampled 5 photos. Three changes: (1) `PHOTO_CHECK_DAILY_CAP` default null = UNLIMITED (`server/photo-listing-scanner.ts`; still env-overridable; 0 hard-disables; circuit-breaker only fires when a finite cap is set); (2) the deep audit now reverse-image-scans the WHOLE deduped gallery (`PHOTO_AUDIT_MAX_PHOTOS`=30, was a fixed 5) so a clean result is trustworthy; (3) NEW pure `shared/preflight-verdict.ts` `mergeUnitVerdict()` merges text+photo into ONE decisive badge — text-confirmed OR ≥2-verified-photo-`found` → **Listed**; a DEEP `clean` → **Clear**; shallow/unknown → keep the honest text verdict. **LOAD-BEARING revision of #695/#696's "a community-listed unit degrades to unconfirmed, NEVER a false not-listed/Clear":** a GENERIC-UNIT unconfirmed (resort matched, unit unpinnable — the screenshot case) + a DEEP clean photo scan now resolves to **Clear** (honest copy: "the resort itself is listed, as always, but this specific unit was not"). This is the operator's explicit "YES or NO" ask and a full-gallery clean is the strongest available signal. Reviewed by a 13-agent adversarial Workflow; ALL its false-NO guards are implemented: a SHALLOW 3-photo background "clean" never overrides text (gated on `photosChecked >= DEEP_PHOTO_MIN`=4, both in the merge and in the endpoint's skip-if-fresh so the deep audit re-scans shallow rows), and a `unit-pinned`/`bedroom-conflict` unconfirmed (text located a REAL per-unit listing) is KEPT on Review WITH its link — only `generic-unit` is resolvable (server now tags the unconfirmed `reason`). Key resolution switched to `getSearchApiKeys()[0]`/`getSearchApiKey()` so an empty primary env with a live `SEARCHAPI_API_KEY_2` works. `tests/preflight-verdict.test.ts` (20) locks the merge incl. no-false-Clear + pinned-URL preservation. Verified: full `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors (total 287→284). Couldn't live-smoke (no SearchAPI/Railway in this session) — verify by running a Full unit audit on a short-numbered unit and confirming it lands on Listed/Clear, not Review.
 ```
 
 (Populate on first dispute.)

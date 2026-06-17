@@ -15,6 +15,7 @@ import {
 import { getPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
 import { getGuestyAmenities } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft } from "@/data/guesty-listing-config";
+import { occupancyForBedrooms } from "@/data/bedding-config";
 import { usePhotoLabels } from "@/hooks/use-photo-labels";
 import { loadDraftFullDataByNegativeId } from "@/data/adapt-draft";
 import type { GuestyPropertyData } from "@/services/guestyService";
@@ -403,7 +404,12 @@ export default function Builder() {
         zipcode: parsedAddr.zipcode,
         country: parsedAddr.country,
       },
-      accommodates: totalGuests,
+      // On creation, `accommodates` follows the single headline occupancy rule
+      // (occupancyForBedrooms) keyed on bedroom count, so a new listing matches
+      // the title/summary/dashboard — NOT the sum of per-unit maxGuests, which
+      // drifted higher (e.g. 7+6+6=19 vs the rule's 18). Falls back to the
+      // maxGuests sum only if bedroom count is somehow 0.
+      accommodates: occupancyForBedrooms(totalBedrooms) || totalGuests,
       bedrooms: totalBedrooms || undefined,
       bathrooms: totalBathrooms || undefined,
       // Pull from per-property config in unit-builder-data.ts. Fallback

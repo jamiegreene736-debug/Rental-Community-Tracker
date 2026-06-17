@@ -38,6 +38,34 @@ export async function ensureRuntimeSchema(): Promise<void> {
     ALTER TABLE reservation_aliases
       ADD COLUMN IF NOT EXISTS expires_at timestamp
   `);
+  // Per-unit buy-in aliases: each attached buy-in (unit) can have its own alias.
+  // Add buy_in_id, backfill legacy reservation-level rows to the reservation's
+  // earliest buy-in, then replace the UNIQUE(reservation_id) constraint with a
+  // UNIQUE(reservation_id, buy_in_id) index so unit B can hold a 2nd alias.
+  await db.execute(sql`
+    ALTER TABLE reservation_aliases
+      ADD COLUMN IF NOT EXISTS buy_in_id integer
+  `);
+  await db.execute(sql`
+    UPDATE reservation_aliases ra
+      SET buy_in_id = sub.bid
+      FROM (
+        SELECT guesty_reservation_id AS rid, MIN(id) AS bid
+        FROM buy_ins
+        WHERE guesty_reservation_id IS NOT NULL
+        GROUP BY guesty_reservation_id
+      ) sub
+      WHERE ra.buy_in_id IS NULL AND ra.reservation_id = sub.rid
+  `);
+  await db.execute(sql`
+    ALTER TABLE reservation_aliases
+      DROP CONSTRAINT IF EXISTS reservation_aliases_reservation_id_key
+  `);
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS reservation_aliases_resv_buyin_idx
+      ON reservation_aliases (reservation_id, buy_in_id)
+  `);
+  console.log("[schema] ensured reservation_aliases per-buy-in alias support");
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS buy_in_vendor_contacts (
       id serial PRIMARY KEY,
@@ -343,6 +371,8 @@ export async function ensureRuntimeSchema(): Promise<void> {
       city text NOT NULL,
       state text NOT NULL,
       tag text,
+      four_bedroom_possible boolean NOT NULL DEFAULT false,
+      five_bedroom_possible boolean NOT NULL DEFAULT false,
       six_bedroom_possible boolean NOT NULL DEFAULT false,
       seven_eight_bedroom_possible boolean NOT NULL DEFAULT false,
       qualifying_count integer NOT NULL DEFAULT 0,
@@ -351,6 +381,13 @@ export async function ensureRuntimeSchema(): Promise<void> {
       scanned_at timestamp NOT NULL DEFAULT now(),
       updated_at timestamp NOT NULL DEFAULT now()
     )
+  `);
+  // Existing deploys created the table before the 4BR/5BR combo flags existed —
+  // CREATE TABLE IF NOT EXISTS won't add the new columns, so add them explicitly.
+  await db.execute(sql`
+    ALTER TABLE top_market_scan_cache
+      ADD COLUMN IF NOT EXISTS four_bedroom_possible boolean NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS five_bedroom_possible boolean NOT NULL DEFAULT false
   `);
   console.log("[schema] ensured top_market_scan_cache table");
 
@@ -449,4 +486,16 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ON assistant_sessions (last_active_at DESC)
   `);
   console.log("[schema] ensured assistant chat tables");
+
+  // Bedroom re-mix / photo-reuse tracking + worker-interruption counter on bulk
+  // combo listing queue items.
+  await db.execute(sql`
+    ALTER TABLE bulk_combo_listing_job_items
+      ADD COLUMN IF NOT EXISTS effective_unit1_beds integer,
+      ADD COLUMN IF NOT EXISTS effective_unit2_beds integer,
+      ADD COLUMN IF NOT EXISTS remix_applied boolean NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS unit2_photos_reused boolean NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS interruptions integer NOT NULL DEFAULT 0
+  `);
+  console.log("[schema] ensured bulk_combo_listing_job_items re-mix + interruption columns");
 }

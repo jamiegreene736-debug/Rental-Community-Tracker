@@ -14,7 +14,7 @@ import {
 
 export type PreflightPlatformKey = "airbnb" | "vrbo" | "booking";
 
-export type PreflightMatchStatus = "listed" | "not-listed";
+export type PreflightMatchStatus = "confirmed" | "not-listed";
 
 export type PreflightSearchResult = {
   title?: string | null;
@@ -279,7 +279,7 @@ export function evaluatePreflightSearchResult(
 
   const snippet = `${result.title || ""} — ${result.snippet || ""}`.replace(/\s+/g, " ").trim().slice(0, 200);
   return {
-    status: "listed",
+    status: "confirmed",
     url: link,
     detection: snippet || "Listing matched community, location, and unit",
   };

@@ -34,23 +34,78 @@ type PreflightReplacementFindJob = {
 };
 
 const replacementJobStorageKey = (propertyId: number) => `preflight.replacementFindJob.v1:${propertyId}`;
-const loadReplacementJobRef = (propertyId: number): { jobId: string; targetUnitId: string } | null => {
+// NOTE FOR CODEX: the find-unit job lives ONLY in server memory
+// (preflight-background-jobs.ts `replacementFindJobs` Map). Railway recycles the
+// process on every deploy / idle-cycle / crash, which evicts the in-flight job —
+// the poll then 404s even though the UI promised "Safe to leave this tab — search
+// continues on server". So we persist the START PAYLOAD alongside the jobId so a
+// 404 can transparently re-launch the SAME search instead of dead-ending the
+// operator. `lastAliveAt` (refreshed on every successful poll) anchors the
+// freshness window — NOT `startedAt` — so an actively-watched long search stays
+// resumable while a days-stale reopen ages out. `resumeCount` is DURABLE (lives
+// in localStorage, not a per-mount ref) so the restart cap survives the
+// close/reopen remount and a crash-looping server can't keep earning fresh
+// budget. All of payload/startedAt/lastAliveAt/resumeCount are optional so a ref
+// written by an older client still parses.
+//   NOTE: auto-resume is a FULL RESTART, not a progress-preserving resume — the
+//   evicted job's `diagnostic` (uncheckedCandidates) died with the process, so
+//   unlike the OperationFailureActions "continue-search" playbook we re-run
+//   discovery from scratch; the operator sees the bar reset (we surface a
+//   "resuming after server restart" line so it doesn't read as a regression).
+type ReplacementJobRef = {
+  jobId: string;
+  targetUnitId: string;
+  payload?: Record<string, unknown>;
+  startedAt?: number;
+  lastAliveAt?: number;
+  resumeCount?: number;
+};
+const loadReplacementJobRef = (propertyId: number): ReplacementJobRef | null => {
   try {
     const raw = localStorage.getItem(replacementJobStorageKey(propertyId));
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { jobId?: string; targetUnitId?: string };
-    if (parsed?.jobId && parsed?.targetUnitId) return { jobId: parsed.jobId, targetUnitId: parsed.targetUnitId };
+    const parsed = JSON.parse(raw) as Partial<ReplacementJobRef>;
+    if (parsed?.jobId && parsed?.targetUnitId) {
+      return {
+        jobId: parsed.jobId,
+        targetUnitId: parsed.targetUnitId,
+        payload: parsed.payload && typeof parsed.payload === "object" ? parsed.payload : undefined,
+        startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : undefined,
+        lastAliveAt: typeof parsed.lastAliveAt === "number" ? parsed.lastAliveAt : undefined,
+        resumeCount: typeof parsed.resumeCount === "number" ? parsed.resumeCount : undefined,
+      };
+    }
     return null;
   } catch {
     return null;
   }
 };
-const saveReplacementJobRef = (propertyId: number, ref: { jobId: string; targetUnitId: string } | null) => {
+const saveReplacementJobRef = (propertyId: number, ref: ReplacementJobRef | null) => {
   try {
     if (!ref) localStorage.removeItem(replacementJobStorageKey(propertyId));
     else localStorage.setItem(replacementJobStorageKey(propertyId), JSON.stringify(ref));
   } catch { /* ignore */ }
 };
+// Refresh the persisted "last known alive" stamp on every successful poll so the
+// freshness window measures time-since-last-alive, not time-since-first-click —
+// a long search the operator is actively watching never ages out of resumability.
+const markReplacementJobRefAlive = (propertyId: number) => {
+  const ref = loadReplacementJobRef(propertyId);
+  if (!ref) return;
+  saveReplacementJobRef(propertyId, { ...ref, lastAliveAt: Date.now() });
+};
+
+// Only auto-resume a recently-alive search. A stale localStorage ref (e.g. the
+// operator reopens the flow days later) must NOT silently launch a fresh,
+// SearchAPI-billed search — show the expired error and let them re-click.
+const REPLACEMENT_AUTO_RESUME_WINDOW_MS = 45 * 60 * 1000;
+// Hard cap on transparent restarts for ONE search (durable via `resumeCount`, so
+// it survives close/reopen remounts) — a crash-looping server can't keep driving
+// find-unit + its SearchAPI budget. A fresh operator-initiated search() resets it.
+const MAX_REPLACEMENT_AUTO_RESUMES = 3;
+// attemptAutoResume outcome: a concurrent poll that finds the eviction already
+// being handled must NOT surface the dead-end — it's "in-progress", not "cannot".
+type AutoResumeOutcome = "resumed" | "in-progress" | "cannot";
 
 function isTransientReplacementJobPollStatus(status: number): boolean {
   return status === 429 || status === 502 || status === 503 || status === 504;
@@ -119,6 +174,10 @@ export type ReplacementUnitData = {
   // as proof the listing actually has interior photography.
   sampledCategories?: string[];
   platformCheck?: PlatformCheck;
+  // Set when the operator opted into "Include units already on Airbnb/VRBO"
+  // (allowOtaListed) and this unit was kept despite being listed on that host.
+  // Its real-estate photos were still verified as not reused on the OTA.
+  otaListedOn?: string | null;
 };
 
 export function UnitReplacementFlow({
@@ -152,6 +211,11 @@ export function UnitReplacementFlow({
   const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "replacing" | "error">("idle");
   const [result, setResult] = useState<ReplacementUnitData | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
+  // Operator opt-in for STVR-saturated communities (e.g. Waikoloa Beach Villas):
+  // include units that are already listed on Airbnb/VRBO/Booking.com instead of
+  // requiring a fully-clean unit. Photos are still sourced only from real-estate
+  // sites and checked for OTA reuse, so this never reuses OTA photos.
+  const [allowOtaListed, setAllowOtaListed] = useState(false);
   const [searchStartedAt, setSearchStartedAt] = useState<number | null>(null);
   const [progressTick, setProgressTick] = useState(0);
   const [lastSearchExpanded, setLastSearchExpanded] = useState(false);
@@ -163,6 +227,14 @@ export function UnitReplacementFlow({
   );
   const [replacementJob, setReplacementJob] = useState<PreflightReplacementFindJob | null>(null);
   const lastSearchPayloadRef = useRef<Record<string, unknown> | null>(null);
+  // Per-mount guard: which evicted jobIds we've already begun resuming from, so
+  // overlapping poll ticks (and the post-success re-render window where the old
+  // jobId is still in the effect closure) don't double-launch. The DURABLE
+  // spend cap lives in the localStorage ref's `resumeCount`, not here.
+  const autoResumedFromRef = useRef<Set<string>>(new Set());
+  // True only for the brief window after a transparent restart, so the searching
+  // UI can reassure the operator instead of looking like the search reset itself.
+  const [resumedAfterRestart, setResumedAfterRestart] = useState(false);
 
   const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
   const hasActiveReplacement = allUnits.some(u => Boolean(u.replacementSourceUrl));
@@ -202,10 +274,77 @@ export function UnitReplacementFlow({
     const stored = loadReplacementJobRef(propertyId);
     if (!stored?.jobId) return;
     if (stored.targetUnitId !== selectedUnitId) return;
+    // Rehydrate the payload so a 404 (or the error-state remediation) can
+    // re-launch the same search after a remount, not just within the session
+    // that called search().
+    if (stored.payload && !lastSearchPayloadRef.current) {
+      lastSearchPayloadRef.current = stored.payload;
+    }
     setReplacementJobId(stored.jobId);
     setSearchStartedAt((prev) => prev ?? Date.now());
     setStage("searching");
   }, [propertyId, selectedUnitId]);
+
+  // Transparent restart: the persisted job was evicted by a server restart
+  // (poll 404). Re-launch the SAME search from the persisted payload so the
+  // operator never sees a dead "session expired" screen — bounded by a freshness
+  // window (keyed on last-known-alive) and a DURABLE restart cap.
+  //   "resumed"     — a fresh job took over; caller should stop the old poll.
+  //   "in-progress" — this eviction is already being resumed (a concurrent tick,
+  //                   or the post-success window); caller must NOT show the error.
+  //   "cannot"      — resume is impossible (stale/cap/no-payload/POST failed);
+  //                   caller falls through to the dead-end error.
+  const attemptAutoResume = async (evictedJobId: string): Promise<AutoResumeOutcome> => {
+    // Synchronous claim BEFORE any await: serialises overlapping poll ticks and
+    // the brief re-render window where the old jobId is still polled, so a given
+    // eviction launches at most once. The claim is KEPT on success (to block the
+    // post-success-window double-launch) but RELEASED on failure below, so a
+    // failed start-POST can't strand the UI on a permanent "in-progress" spinner.
+    if (autoResumedFromRef.current.has(evictedJobId)) return "in-progress";
+
+    const stored = loadReplacementJobRef(propertyId);
+    const payload = lastSearchPayloadRef.current ?? stored?.payload ?? null;
+    if (!payload || !payload.communityFolder) return "cannot";
+    const aliveAt = stored?.lastAliveAt ?? stored?.startedAt ?? Date.now();
+    if (Date.now() - aliveAt > REPLACEMENT_AUTO_RESUME_WINDOW_MS) return "cannot";
+    const priorResumes = stored?.resumeCount ?? 0;
+    if (priorResumes >= MAX_REPLACEMENT_AUTO_RESUMES) return "cannot";
+
+    autoResumedFromRef.current.add(evictedJobId);
+    try {
+      const resp = await apiRequest("POST", "/api/preflight/replacement-find-jobs", payload);
+      const data = await resp.json();
+      // Only spend a resume slot on a CONFIRMED restart — a failed start POST
+      // (transient 502 mid-redeploy) must not erode the durable cap. Release the
+      // claim so the next poll tick can re-attempt or fall through to the error,
+      // rather than being stuck on "in-progress" forever.
+      if (!data?.job?.id) {
+        autoResumedFromRef.current.delete(evictedJobId);
+        return "cannot";
+      }
+      const targetUnitId = typeof payload.targetUnitId === "string" ? payload.targetUnitId : selectedUnit.id;
+      saveReplacementJobRef(propertyId, {
+        jobId: data.job.id,
+        targetUnitId,
+        payload,
+        startedAt: stored?.startedAt ?? Date.now(), // carry forward original click time
+        lastAliveAt: Date.now(),
+        resumeCount: priorResumes + 1,              // durable; incremented only on success
+      });
+      setSwapError(null);
+      setResult(null);
+      setResumedAfterRestart(true);
+      setStage("searching");
+      setSearchStartedAt(Date.now());
+      setProgressTick(0);
+      setReplacementJobId(data.job.id as string);
+      applyReplacementJob(data.job as PreflightReplacementFindJob);
+      return "resumed";
+    } catch {
+      autoResumedFromRef.current.delete(evictedJobId);
+      return "cannot";
+    }
+  };
 
   useEffect(() => {
     if (!replacementJobId) return;
@@ -219,21 +358,46 @@ export function UnitReplacementFlow({
           // Railway can return 502/503/504 while find-unit holds the process for
           // several minutes; the in-memory job keeps running — keep polling.
           if (isTransientReplacementJobPollStatus(resp.status)) return;
-          if (!cancelled) {
-            saveReplacementJobRef(propertyId, null);
-            setReplacementJobId(null);
-            setSearchStartedAt(null);
-            setStage("error");
-            setSwapError(
-              resp.status === 404
-                ? "Replacement search session expired (server restarted or job not found). Please run Find Replacement Unit again."
-                : `Could not check search status (HTTP ${resp.status}). Please try again.`,
-            );
+          if (cancelled) return;
+          // 404 == the server-memory job is gone (restart/idle-cycle/crash).
+          // Try to transparently re-launch the same search before surfacing the
+          // dead-end.
+          if (resp.status === 404) {
+            const outcome = await attemptAutoResume(replacementJobId);
+            if (cancelled) return;          // effect torn down during the resume POST
+            if (outcome === "resumed") {
+              // The new jobId starts its own poll loop; neutralise this (old) one
+              // so a stale tick can't clobber the resume with an error.
+              cancelled = true;
+              return;
+            }
+            // A concurrent tick is already resuming this eviction — keep waiting,
+            // do NOT surface the dead-end (it would race the in-flight resume).
+            if (outcome === "in-progress") return;
+            // outcome === "cannot" → fall through to the error below.
           }
+          saveReplacementJobRef(propertyId, null);
+          setReplacementJobId(null);
+          setSearchStartedAt(null);
+          setStage("error");
+          setSwapError(
+            resp.status === 404
+              ? "Replacement search session expired (server restarted or job not found). Please run Find Replacement Unit again."
+              : `Could not check search status (HTTP ${resp.status}). Please try again.`,
+          );
           return;
         }
         const data = await resp.json();
-        if (!cancelled && data.job) applyReplacementJob(data.job as PreflightReplacementFindJob);
+        if (cancelled) return;
+        if (data.job) {
+          const job = data.job as PreflightReplacementFindJob;
+          // Refresh the freshness anchor while the job is genuinely alive, so a
+          // long actively-watched search never ages out of auto-resume.
+          if (job.status === "queued" || job.status === "running") {
+            markReplacementJobRefAlive(propertyId);
+          }
+          applyReplacementJob(job);
+        }
       } catch {
         // keep polling
       }
@@ -258,8 +422,12 @@ export function UnitReplacementFlow({
 
   async function search(opts: { extraSkip?: string; expanded?: boolean } = {}) {
     const expanded = opts.expanded === true;
+    // A fresh operator-initiated search resets the durable resume budget and the
+    // per-mount eviction guard, so a new search gets its own restart allowance.
+    autoResumedFromRef.current = new Set();
     setResult(null);
     setSwapError(null);
+    setResumedAfterRestart(false);
     setLastSearchExpanded(expanded);
     setSearchStartedAt(Date.now());
     setProgressTick(0);
@@ -278,6 +446,7 @@ export function UnitReplacementFlow({
       requiredBedrooms: selectedUnit.bedrooms,
       skipUrls: [...skipUrls, ...nextExtra],
       expandedSearch: expanded,
+      allowOtaListed,
     };
     lastSearchPayloadRef.current = startPayload;
     try {
@@ -285,7 +454,14 @@ export function UnitReplacementFlow({
       const data = await resp.json();
       if (!data?.job?.id) throw new Error("Replacement search did not start");
       setReplacementJobId(data.job.id as string);
-      saveReplacementJobRef(propertyId, { jobId: data.job.id, targetUnitId: selectedUnit.id });
+      saveReplacementJobRef(propertyId, {
+        jobId: data.job.id,
+        targetUnitId: selectedUnit.id,
+        payload: startPayload,
+        startedAt: Date.now(),
+        lastAliveAt: Date.now(),
+        resumeCount: 0,
+      });
       applyReplacementJob(data.job as PreflightReplacementFindJob);
     } catch (err) {
       setStage("error");
@@ -397,19 +573,47 @@ export function UnitReplacementFlow({
           </div>
 
           {stage === "idle" && (
-            <Button
-              size="sm"
-              className="w-full"
-              onClick={() => search({ expanded: hasActiveReplacement })}
-              data-testid="button-start-unit-search"
-            >
-              <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
-              Find Replacement Unit
-            </Button>
+            <div className="space-y-2">
+              <Button
+                size="sm"
+                className="w-full"
+                onClick={() => search({ expanded: hasActiveReplacement })}
+                data-testid="button-start-unit-search"
+              >
+                <SearchIcon className="h-3.5 w-3.5 mr-1.5" />
+                Find Replacement Unit
+              </Button>
+              <label
+                className="flex items-start gap-1.5 text-[11px] text-muted-foreground cursor-pointer select-none"
+                data-testid="toggle-allow-ota-listed"
+              >
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-3 w-3 cursor-pointer accent-primary"
+                  checked={allowOtaListed}
+                  onChange={(e) => setAllowOtaListed(e.target.checked)}
+                />
+                <span>
+                  Include units already on Airbnb/VRBO
+                  <span className="block text-[10px] opacity-80">
+                    For heavily-rented communities (e.g. Waikoloa Beach Villas) where most units are already short-term rentals. Photos still come only from real-estate sites and are checked for reuse.
+                  </span>
+                </span>
+              </label>
+            </div>
           )}
 
           {(stage === "searching" || stage === "checking") && (
             <div className="space-y-2">
+              {resumedAfterRestart && (
+                <div
+                  className="flex items-start gap-1.5 rounded border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] text-sky-800 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-300"
+                  data-testid="replacement-resumed-after-restart"
+                >
+                  <RefreshCw className="h-3 w-3 mt-0.5 flex-shrink-0" />
+                  <span>Server restarted — your search resumed automatically (it restarts from the top, so the progress bar reset).</span>
+                </div>
+              )}
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                 <span>
@@ -492,8 +696,18 @@ export function UnitReplacementFlow({
               onRemediated={({ job }) => {
                 if (job && typeof job === "object" && "id" in job) {
                   const next = job as PreflightReplacementFindJob;
+                  // Operator-initiated retry: fresh resume budget + eviction guard.
+                  autoResumedFromRef.current = new Set();
+                  setResumedAfterRestart(false);
                   setReplacementJobId(next.id);
-                  saveReplacementJobRef(propertyId, { jobId: next.id, targetUnitId: selectedUnit.id });
+                  saveReplacementJobRef(propertyId, {
+                    jobId: next.id,
+                    targetUnitId: selectedUnit.id,
+                    payload: lastSearchPayloadRef.current ?? undefined,
+                    startedAt: Date.now(),
+                    lastAliveAt: Date.now(),
+                    resumeCount: 0,
+                  });
                   applyReplacementJob(next, false);
                   setStage("searching");
                   setSearchStartedAt(Date.now());
@@ -517,20 +731,26 @@ export function UnitReplacementFlow({
         // "clean" for a full green shield. Any "unknown" downgrades to
         // amber (SearchAPI couldn't confirm on that platform, so the
         // user should treat the result as "probably clean, not proven").
-        // We never surface "found" — the server filters those out.
+        // Normally we never surface "found" — but when the operator opted into
+        // "Include units already on Airbnb/VRBO" (allowOtaListed), the server
+        // returns an OTA-listed unit flagged via `otaListedOn`; surface that
+        // distinctly so the green "clean" shield never lies.
         const pc = result.platformCheck;
+        const otaListedHost = result.otaListedOn;
         const statuses: Array<[label: string, key: keyof PlatformCheck]> = [
           ["Airbnb",      "airbnb"],
           ["VRBO",        "vrbo"],
           ["Booking.com", "bookingCom"],
         ];
-        const allClean = pc ? statuses.every(([, k]) => pc[k] === "clean") : false;
+        const allClean = !otaListedHost && (pc ? statuses.every(([, k]) => pc[k] === "clean") : false);
         const anyUnknown = pc ? statuses.some(([, k]) => pc[k] === "unknown") : true;
-        const headerTone = allClean
-          ? "green"
-          : anyUnknown
-            ? "amber"
-            : "green"; // no platformCheck field at all → treat as old-behavior green
+        const headerTone = otaListedHost
+          ? "amber"
+          : allClean
+            ? "green"
+            : anyUnknown
+              ? "amber"
+              : "green"; // no platformCheck field at all → treat as old-behavior green
         return (
         <div className="space-y-2.5">
           <div className="space-y-1.5">
@@ -546,12 +766,19 @@ export function UnitReplacementFlow({
               ) : (
                 <ShieldAlert className="h-3.5 w-3.5" />
               )}
-              {allClean
-                ? "Clean on Airbnb, VRBO, and Booking.com"
-                : anyUnknown
-                  ? "Partial check — one or more platforms couldn't be verified"
-                  : "Clean replacement found"}
+              {otaListedHost
+                ? `Already listed on ${otaListedHost} — kept by your "include OTA-listed" setting`
+                : allClean
+                  ? "Clean on Airbnb, VRBO, and Booking.com"
+                  : anyUnknown
+                    ? "Partial check — one or more platforms couldn't be verified"
+                    : "Clean replacement found"}
             </p>
+            {otaListedHost && (
+              <p className="text-[11px] text-amber-700 dark:text-amber-400" data-testid="replacement-ota-listed-note">
+                This unit is already a short-term rental on {otaListedHost}. Its real-estate photos were verified as not reused on the OTA, so they're safe to use.
+              </p>
+            )}
             {pc && (
               <div className="flex items-center gap-1 flex-wrap">
                 {statuses.map(([label, key]) => {

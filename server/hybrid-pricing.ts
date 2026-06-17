@@ -612,6 +612,61 @@ export function airbnbSearchGeoParamsForMarket(community: string): Record<string
   return geoConstraintForMarket(community).params;
 }
 
+// ── Geographic-widening fallback for thin in-footprint markets ──────────────
+// Some curated markets (gated golf/country-club communities like Bonita National,
+// or tiny resort footprints like Santa Maria Resort) have almost no exact-BR
+// entire-home Airbnb inventory INSIDE the resort bounding box. The market-rate
+// refresh scans 24 months and HARD-FAILS the whole property the moment one month
+// returns zero usable samples ("SearchAPI Airbnb returned no usable exact-NBR
+// samples …"). When that happens we widen the search to progressively larger
+// center-radius boxes around the community center (and broaden the query anchor to
+// the surrounding city) so the basis is drawn from real, same-area Airbnb comps
+// instead of failing. This is a FALLBACK only — it never runs while the primary
+// (curated) box still yields samples, so healthy markets are byte-identical and
+// make exactly one SearchAPI request. Real-data only: no static/seasonal fallback.
+const MARKET_RATE_WIDENING_HALF_DEGREES = [0.06, 0.15] as const; // ≈ 6.6km then ≈ 16km
+
+// Kill switch (default ON): MARKET_RATE_GEO_WIDENING=0/false/off/no reverts to the
+// old hard-fail-on-thin-footprint behavior without a redeploy. Widening can only
+// improve a refresh that would otherwise throw, so it is safe to leave enabled.
+function marketRateGeoWideningEnabled(): boolean {
+  const flag = process.env.MARKET_RATE_GEO_WIDENING;
+  return flag == null || !/^(0|false|off|no)$/i.test(flag.trim());
+}
+
+// A wider center-radius box around the community's mapped center. Always
+// kind "center-radius" (never "none"), so the confidence scorer still credits a
+// geographic constraint (center-radius caps at 84 → a healthy widened month can
+// still reach yellow and clear the save/push gate). Returns null when the market
+// has no mapped center, so unmapped/empty markets never widen.
+function centerRadiusGeoConstraint(community: string, halfDeg: number): ReturnType<typeof geoConstraintForMarket> | null {
+  const location = BUY_IN_MARKET_LOCATIONS[community];
+  if (!location || !Number.isFinite(location.lat) || !Number.isFinite(location.lng)) return null;
+  const km = Math.round(halfDeg * 111);
+  return {
+    kind: "center-radius",
+    params: {
+      sw_lat: String(location.lat - halfDeg),
+      sw_lng: String(location.lng - halfDeg),
+      ne_lat: String(location.lat + halfDeg),
+      ne_lng: String(location.lng + halfDeg),
+    },
+    description: `widened ~${km}km center-radius fallback box (resort footprint had no priced comps)`,
+  };
+}
+
+// City-level query anchors used only at the widened tiers. A tight resort q can
+// itself starve Airbnb's result set, so broadening the box AND the query (e.g.
+// "Bonita Springs, FL") is what actually surfaces nearby same-area comps.
+function cityAnchorQueriesForMarket(community: string): string[] {
+  const market = BUY_IN_MARKETS[community];
+  const location = BUY_IN_MARKET_LOCATIONS[community];
+  const anchors: string[] = [];
+  if (market?.platformSearch?.booking) anchors.push(market.platformSearch.booking);
+  if (location?.city) anchors.push(location.state ? `${location.city}, ${location.state}` : location.city);
+  return Array.from(new Set(anchors.map((q) => q.trim()).filter(Boolean)));
+}
+
 async function fetchAirbnbMedianNightlyForQuery(args: {
   community: string;
   bedrooms: number;
@@ -620,8 +675,14 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
   query: string;
   apiKey: string;
   nights: number;
+  // When omitted the query runs against the market's PRIMARY constraint (curated
+  // bounds → center-radius → none) exactly as before. A widening fallback passes
+  // an override to broaden the geographic box without touching geoConstraintForMarket
+  // (which is locked by the curated-bounds tests). The override drives the SearchAPI
+  // request params, the candidateGeoMatch post-filter, and the evidence kind alike.
+  geoConstraintOverride?: ReturnType<typeof geoConstraintForMarket>;
 }): Promise<{ rates: number[]; evidence: MarketRateEvidence; confidence: MarketRateConfidence | null; noResultsError: string | null }> {
-  const geoConstraint = geoConstraintForMarket(args.community);
+  const geoConstraint = args.geoConstraintOverride ?? geoConstraintForMarket(args.community);
   const params: Record<string, string> = {
     engine: "airbnb",
     q: args.query,
@@ -738,38 +799,70 @@ export async function fetchAirbnbMedianNightly(args: {
   const apiKey = process.env.SEARCHAPI_API_KEY;
   if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
   const nights = nightsBetween(args.checkIn, args.checkOut);
-  const queries = curatedAirbnbSearchQueries(args.community, args.searchName);
+  const primaryQueries = curatedAirbnbSearchQueries(args.community, args.searchName);
   const notes: string[] = [];
   let lastNoResults: string | null = null;
 
-  for (const query of queries) {
-    const { rates, evidence, confidence, noResultsError } = await fetchAirbnbMedianNightlyForQuery({
-      community: args.community,
-      bedrooms: args.bedrooms,
-      checkIn: args.checkIn,
-      checkOut: args.checkOut,
-      query,
-      apiKey,
-      nights,
-    });
-    if (noResultsError) {
-      lastNoResults = noResultsError;
-      notes.push(`${noResultsError} (q="${query}")`);
-      continue;
+  // Ordered search passes. Pass 0 uses the PRIMARY constraint (curated bounds →
+  // center-radius → none) and the curated query list — identical to the previous
+  // behavior, returning on the first query with samples (one SearchAPI request for
+  // healthy markets). Passes 1+ are geographic-widening FALLBACKS that run ONLY
+  // after every primary query came back with zero usable samples — the exact
+  // condition that used to hard-fail the whole property refresh for thin
+  // in-footprint markets. Each widened pass keeps a center-radius box and adds
+  // city-level query anchors. Live SearchAPI scans throughout; no static fallback.
+  type SearchPass = { widened: boolean; queries: string[]; geoConstraintOverride?: ReturnType<typeof geoConstraintForMarket> };
+  const passes: SearchPass[] = [{ widened: false, queries: primaryQueries }];
+  if (marketRateGeoWideningEnabled()) {
+    // City anchors FIRST at the widened tiers: a city-level query ("Bonita Springs,
+    // FL") is what actually surfaces a healthy nearby-comp set, whereas the tight
+    // resort-name query at a wider box tends to return 0–2 listings. Because we only
+    // escalate on rates.length===0 (NOT on red confidence — that would break the
+    // single-request guarantee for legitimately-thin markets like the Poipu test),
+    // a thin 1–2 sample resort-name hit would short-circuit at red and abort before
+    // the city anchor's yellow-clearing sample. Trying the city anchor first avoids
+    // that and uses fewer requests.
+    const widenedQueries = Array.from(new Set([...cityAnchorQueriesForMarket(args.community), ...primaryQueries]));
+    for (const halfDeg of MARKET_RATE_WIDENING_HALF_DEGREES) {
+      const override = centerRadiusGeoConstraint(args.community, halfDeg);
+      if (override) passes.push({ widened: true, queries: widenedQueries, geoConstraintOverride: override });
     }
-    if (rates.length > 0) {
-      const basis = marketPricingBasis(rates, args.avoidNightlyBasis);
-      return {
-        medianNightly: basis.basis,
-        sampleCount: rates.length,
-        evidence,
-        confidence: confidence ?? undefined,
-        notes: [
-          `SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s) for q="${query}"; ${marketPricingBasisNotes(basis)}; confidence ${confidence?.score ?? 0}%.`,
-        ],
-      };
+  }
+
+  for (const pass of passes) {
+    for (const query of pass.queries) {
+      const { rates, evidence, confidence, noResultsError } = await fetchAirbnbMedianNightlyForQuery({
+        community: args.community,
+        bedrooms: args.bedrooms,
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+        query,
+        apiKey,
+        nights,
+        geoConstraintOverride: pass.geoConstraintOverride,
+      });
+      if (noResultsError) {
+        lastNoResults = noResultsError;
+        notes.push(`${noResultsError} (q="${query}"${pass.widened ? `; ${evidence.geoConstraint.description}` : ""})`);
+        continue;
+      }
+      if (rates.length > 0) {
+        const basis = marketPricingBasis(rates, args.avoidNightlyBasis);
+        const widenNote = pass.widened
+          ? ` Geo-widened: the resort footprint returned no priced exact-${args.bedrooms}BR comps, so this basis is from nearby same-area Airbnb inventory (${evidence.geoConstraint.description}).`
+          : "";
+        return {
+          medianNightly: basis.basis,
+          sampleCount: rates.length,
+          evidence,
+          confidence: confidence ?? undefined,
+          notes: [
+            `SearchAPI Airbnb returned ${rates.length} usable exact-${args.bedrooms}BR all-in checkout sample(s) for q="${query}"; ${marketPricingBasisNotes(basis)}; confidence ${confidence?.score ?? 0}%.${widenNote}`,
+          ],
+        };
+      }
+      notes.push(`q="${query}" returned 0 usable exact-${args.bedrooms}BR priced samples${pass.widened ? ` (${evidence.geoConstraint.description})` : ""}`);
     }
-    notes.push(`q="${query}" returned 0 usable exact-${args.bedrooms}BR priced samples`);
   }
 
   if (lastNoResults) {

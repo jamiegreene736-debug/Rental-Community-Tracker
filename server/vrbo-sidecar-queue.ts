@@ -55,6 +55,7 @@ export type SidecarOpType =
   | "hometogo_search"
   | "vrbo_photo_scrape"
   | "zillow_photo_scrape"
+  | "listing_gallery_scrape"
   | "booking_search"
   | "google_serp"
   | "pm_site_search"
@@ -178,6 +179,22 @@ export type SidecarZillowPhotoScrapeResult = {
     photoCount?: number;
   };
 };
+
+// Generic real-estate listing gallery scrape via the operator's local Chrome.
+// Same {photos, facts} shape as the Zillow scrape, but host-agnostic: it serves
+// Redfin / Homes.com (richly DISCOVERED, but their server-side fetch+ScrapingBee
+// chain degrades to a single og:image on Railway's datacenter IP) and also backs
+// the previously-phantom `zillow_photo_scrape` caller. The residential Mac IP
+// bypasses the datacenter anti-bot wall. Last-resort tier only — see Load-Bearing
+// #45 and scrapeListingGalleryViaSidecar below.
+export type SidecarListingGalleryScrapeParams = {
+  url: string;
+  maxPhotos?: number;
+  /** Diagnostic-only hint ("Redfin" | "Homes.com" | "Zillow" | hostname). */
+  host?: string;
+};
+
+export type SidecarListingGalleryScrapeResult = SidecarZillowPhotoScrapeResult;
 
 export type SidecarBookingParams = {
   destination: string;
@@ -357,6 +374,7 @@ export type SidecarParamsByOp = {
   vrbo_search: SidecarVrboParams;
   vrbo_photo_scrape: SidecarVrboPhotoScrapeParams;
   zillow_photo_scrape: SidecarZillowPhotoScrapeParams;
+  listing_gallery_scrape: SidecarListingGalleryScrapeParams;
   booking_search: SidecarBookingParams;
   google_serp: SidecarGoogleSerpParams;
   pm_site_search: SidecarPmSiteSearchParams;
@@ -549,6 +567,7 @@ export type SidecarRequest = {
     | SidecarHometogoParams
     | SidecarVrboPhotoScrapeParams
     | SidecarZillowPhotoScrapeParams
+    | SidecarListingGalleryScrapeParams
     | SidecarBookingParams
     | SidecarGoogleSerpParams
     | SidecarPmSiteSearchParams
@@ -1819,6 +1838,14 @@ export function makeRequestKey(
       const p = params as SidecarZillowPhotoScrapeParams;
       return `zillow_photo_scrape|${p.url}|${p.maxPhotos ?? 40}`;
     }
+    case "listing_gallery_scrape": {
+      // LOAD-BEARING: key on the URL. Without an explicit case this falls to the
+      // safety default, which is fine here — but keep it explicit so two distinct
+      // listing URLs never collide on one dedup key (the sidecar-request-key
+      // exhaustiveness bug; see memory sidecar-request-key-exhaustiveness.md).
+      const p = params as SidecarListingGalleryScrapeParams;
+      return `listing_gallery_scrape|${p.url}|${p.maxPhotos ?? 40}`;
+    }
     case "google_serp": {
       const p = params as SidecarGoogleSerpParams;
       return `google_serp|${p.query.toLowerCase().trim()}|${p.maxResults ?? 20}`;
@@ -1896,6 +1923,7 @@ export function enqueueOp(
     | { opType: "hometogo_search"; params: SidecarHometogoParams }
     | { opType: "vrbo_photo_scrape"; params: SidecarVrboPhotoScrapeParams }
     | { opType: "zillow_photo_scrape"; params: SidecarZillowPhotoScrapeParams }
+    | { opType: "listing_gallery_scrape"; params: SidecarListingGalleryScrapeParams }
     | { opType: "booking_search"; params: SidecarBookingParams }
     | { opType: "google_serp"; params: SidecarGoogleSerpParams }
     | { opType: "pm_site_search"; params: SidecarPmSiteSearchParams }
@@ -2277,6 +2305,7 @@ function describeSidecarRequest(r: SidecarRequest): SidecarStatusRequest {
       case "vrbo_book": return "VRBO";
       case "booking_upload_photos": return "Booking.com";
       case "zillow_photo_scrape": return "Zillow";
+      case "listing_gallery_scrape": return "Listing photos";
       case "guesty_disconnect_channel": return "Guesty";
       default: return r.opType;
     }
@@ -2293,6 +2322,7 @@ function describeSidecarRequest(r: SidecarRequest): SidecarStatusRequest {
       case "vrbo_book": return "VRBO booking";
       case "vrbo_photo_scrape": return "VRBO photo scrape";
       case "zillow_photo_scrape": return "Zillow photo scrape";
+      case "listing_gallery_scrape": return "Listing gallery scrape";
       case "vrbo_upload_photos": return "VRBO photo upload";
       case "booking_upload_photos": return "Booking.com photo upload";
       case "guesty_disconnect_channel": return `Guesty ${p.channel ?? ""} disconnect`.trim();
@@ -2383,6 +2413,7 @@ export function getStatus(): {
     hometogo_search: 0,
     vrbo_photo_scrape: 0,
     zillow_photo_scrape: 0,
+    listing_gallery_scrape: 0,
     booking_search: 0,
     google_serp: 0,
     pm_site_search: 0,
@@ -2545,6 +2576,7 @@ function labelForOpType(opType: string): string {
     case "vrbo_book": return "VRBO booking";
     case "vrbo_photo_scrape": return "VRBO photo scrape";
     case "zillow_photo_scrape": return "Zillow photo scrape";
+    case "listing_gallery_scrape": return "Listing gallery scrape";
     case "vrbo_upload_photos": return "VRBO photo upload";
     case "booking_upload_photos": return "Booking.com photo upload";
     case "guesty_disconnect_channel": return "Guesty disconnect";
@@ -2843,6 +2875,58 @@ export async function scrapeZillowPhotosViaSidecar(opts: {
     signal: opts.signal,
   });
   const result = r.results as SidecarZillowPhotoScrapeResult | undefined;
+  return {
+    photos: result?.photos ?? [],
+    facts: result?.facts,
+    workerOnline: r.workerOnline,
+    durationMs: r.durationMs,
+    reason: r.reason,
+  };
+}
+
+// Generic real-estate listing gallery scrape via the operator's home-IP Chrome.
+// Host-agnostic sibling of scrapeZillowPhotosViaSidecar: accepts ANY http(s) URL
+// (Redfin / Homes.com / broker galleries) so the residential IP can recover a full
+// gallery when the server-side fetch+ScrapingBee chain bot-walls to og:image-only
+// on Railway's datacenter IP. Wired as the LAST-RESORT tier in scrapeListingPhotos'
+// Redfin/Homes branch (Load-Bearing #45) — only fires when the cheaper tiers
+// returned 0 photos, so it never unions with / reorders an existing photo set
+// (Load-Bearing #5). Naturally inert when the worker is offline (workerOnline:false).
+export async function scrapeListingGalleryViaSidecar(opts: {
+  url: string;
+  host?: string;
+  maxPhotos?: number;
+  pollIntervalMs?: number;
+  walletBudgetMs?: number;
+  signal?: AbortSignal;
+  stopGeneration?: number;
+}): Promise<{
+  photos: string[];
+  facts: SidecarListingGalleryScrapeResult["facts"];
+  workerOnline: boolean;
+  durationMs: number;
+  reason: string;
+}> {
+  if (!opts.url || !/^https?:\/\//i.test(opts.url)) {
+    return {
+      photos: [],
+      facts: undefined,
+      workerOnline: false,
+      durationMs: 0,
+      reason: "valid url required",
+    };
+  }
+  const r = await awaitOpResult({
+    enqueueArgs: {
+      opType: "listing_gallery_scrape",
+      params: { url: opts.url, host: opts.host, maxPhotos: opts.maxPhotos ?? 40 },
+    },
+    pollIntervalMs: opts.pollIntervalMs,
+    walletBudgetMs: opts.walletBudgetMs ?? 90_000,
+    signal: opts.signal,
+    stopGeneration: opts.stopGeneration,
+  });
+  const result = r.results as SidecarListingGalleryScrapeResult | undefined;
   return {
     photos: result?.photos ?? [],
     facts: result?.facts,

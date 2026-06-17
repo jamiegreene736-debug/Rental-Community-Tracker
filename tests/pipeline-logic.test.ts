@@ -8,12 +8,19 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   auditTopMarketSevenEightFromCuratedSeeds,
+  filterTopScanComboCandidates,
+  hasAnyTopScanComboPotential,
+  hasFourBedroomComboPotential,
+  hasFiveBedroomComboPotential,
+  hasSixBedroomComboPotential,
   hasSevenEightBedroomComboPotential,
+  isTopScanComboCandidate,
   parseCommunityResearchJsonArray,
   researchCommunitiesForCity,
   TOP_MARKET_SEEDS,
 } from "../server/community-research";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
+import { dedupeListingRoomsByNumber, normalizeGuestyBedType, sanitizeListingRoomsForGuesty, syncSleepsInTitle, syncSleepsInDescription } from "../client/src/data/guesty-listing-config";
 import {
   discoveryCityForPhotoSearch,
   discoverySearchCitiesForPhotoSearch,
@@ -1897,7 +1904,10 @@ try {
   assert.ok(hasSevenEightBedroomComboPotential(regency!), "Regency 3BR+4BR should qualify for 7/8BR market badge");
   const piliMai = poipuSeeds.find((c) => c.name === "Pili Mai");
   assert.ok(piliMai && !hasSevenEightBedroomComboPotential(piliMai!), "Pili Mai (2/3BR only) should not claim 7/8BR");
+  assert.ok(piliMai && hasFiveBedroomComboPotential(piliMai!), "Pili Mai (2BR+3BR) should support a 5BR combo");
+  assert.ok(regency && hasFiveBedroomComboPotential(regency!), "Regency (2BR+3BR) should support a 5BR combo");
   console.log("  ✓ 7/8BR combo potential requires 4BR inventory");
+  console.log("  ✓ 4BR/5BR combos surface from existing 2BR/3BR curated inventory");
 
   const princeville = await researchCommunitiesForCity("Princeville", "Hawaii");
   const kaiulani = princeville.find((c) => c.name === "Kaiulani of Princeville");
@@ -1911,6 +1921,57 @@ try {
   else process.env.SEARCHAPI_API_KEY = originalSearchKey;
   if (originalAnthropicKey == null) delete process.env.ANTHROPIC_API_KEY;
   else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+}
+
+// --- Top-market sweep: 4BR (2+2) and 5BR (2+3) combo detection -------------
+// The sweep used to gate purely on the 6BR (two-3BR) pair, which hid condo
+// communities whose 2BR/3BR mix only makes a 4BR or 5BR combo. These pure
+// synthetic checks lock the new pair semantics + the widened candidate filter
+// (no network — only availableBedrooms / estimatedBedroomUnitCounts matter).
+{
+  const mk = (availableBedrooms: number[], counts?: Record<string, number>) => ({
+    name: "Test Resort",
+    unitTypes: "condo",
+    researchSummary: "Individually owned condo vacation rentals listed on Airbnb and VRBO.",
+    availableBedrooms,
+    estimatedBedroomUnitCounts: counts,
+  } as any);
+
+  // 2BR + 3BR: 5BR (2+3) yes, 4BR (2+2, unknown count) yes, 6BR (3+3, unknown
+  // count) yes, but 7/8BR no (needs a 4BR unit).
+  const twoThree = mk([2, 3]);
+  assert.ok(hasFiveBedroomComboPotential(twoThree), "2BR+3BR supports a 5BR combo");
+  assert.ok(hasFourBedroomComboPotential(twoThree), "2BR present (unknown count) allows a 4BR combo");
+  assert.ok(!hasSevenEightBedroomComboPotential(twoThree), "2BR/3BR cannot make a 7/8BR combo");
+
+  // 2BR only: 4BR (2+2) yes; 5BR/6BR/7-8BR no.
+  const twoOnly = mk([2]);
+  assert.ok(hasFourBedroomComboPotential(twoOnly), "two 2BR units make a 4BR combo");
+  assert.ok(!hasFiveBedroomComboPotential(twoOnly), "2BR-only cannot make a 5BR combo");
+  assert.ok(!hasSixBedroomComboPotential(twoOnly), "2BR-only cannot make a 6BR combo");
+
+  // Same-size 2+2 needs at least two 2BR units when unit counts are known.
+  assert.ok(!hasFourBedroomComboPotential(mk([2], { "2BR": 1 })), "a single 2BR unit cannot make a 4BR combo");
+  assert.ok(hasFourBedroomComboPotential(mk([2], { "2BR": 2 })), "two 2BR units make a 4BR combo");
+
+  // The behavior change this feature is about: a 2BR-only condo community is now
+  // a sweep candidate (via the 4BR combo) even though it has NO 6BR potential —
+  // it would previously have been filtered out entirely.
+  assert.ok(hasAnyTopScanComboPotential(twoOnly), "2BR-only community has 4BR combo potential");
+  assert.ok(!hasSixBedroomComboPotential(twoOnly), "...and explicitly no 6BR potential");
+  assert.ok(isTopScanComboCandidate(mk([2], { "2BR": 4 })), "2BR-only condo community is a top-scan combo candidate");
+  assert.equal(
+    filterTopScanComboCandidates([mk([2], { "2BR": 4 })]).length,
+    1,
+    "a 2BR-only condo community now passes the sweep candidate filter",
+  );
+  // Detached / single-family inventory is still rejected even with a valid pair.
+  assert.equal(
+    filterTopScanComboCandidates([{ ...mk([2, 3]), unitTypes: "detached single family homes" }]).length,
+    0,
+    "detached homes are excluded from the sweep regardless of bedroom mix",
+  );
+  console.log("  ✓ sweep surfaces 4BR (2+2) and 5BR (2+3) combos, not just 6BR/7-8BR");
 }
 
 const routeSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
@@ -2228,6 +2289,43 @@ assert.ok(
 assert.ok(
   unitReplacementSource.includes("Search finished without a replacement unit"),
   "completed replacement jobs without a unit must show an error state",
+);
+
+// ── allowOtaListed override (Waikoloa Beach Villas / STVR-saturated communities) ──
+// In a community where nearly every for-sale unit is also an active Airbnb/VRBO
+// rental, the default "clean unit" requirement rejects everything (skipped-found).
+// The operator opt-in `allowOtaListed` relaxes ONLY the unit-name OTA gate, never
+// the photo-reuse gate, and flags the accepted unit `otaListedOn`.
+assert.ok(
+  routeSource.includes("const allowOtaListed = requestedAllowOtaListed === true;"),
+  "find-unit must parse the operator allowOtaListed opt-in",
+);
+assert.ok(
+  routeSource.includes("if (foundOn && !allowOtaListed)")
+    && routeSource.includes("if (foundOn && allowOtaListed)"),
+  "allowOtaListed must bypass the unit-name skipped-found gate while leaving the default-off path intact",
+);
+assert.ok(
+  routeSource.includes("otaListedOn: otaListedHost"),
+  "an OTA-listed unit kept by allowOtaListed must be flagged otaListedOn on the returned unit",
+);
+assert.ok(
+  /verdict:\s*"skipped-photo-found"/.test(routeSource)
+    && !/allowOtaListed[\s\S]{0,160}skipped-photo-found/.test(routeSource),
+  "allowOtaListed must NOT relax the photo-reuse gate (skipped-photo-found stays enforced; PR #338 anti-feedback-loop)",
+);
+assert.ok(
+  routeSource.includes('found on ${cleanChannel ? "the enforced channel" : "Airbnb/VRBO/Booking.com"}'),
+  "the load-bearing skipped-found diagnostic substring must remain intact (append-only diagnostic hint)",
+);
+assert.ok(
+  unitReplacementSource.includes("allowOtaListed,")
+    && unitReplacementSource.includes("setAllowOtaListed"),
+  "the builder replacement flow must expose the allowOtaListed toggle and send it in the payload",
+);
+assert.ok(
+  unitReplacementSource.includes("result.otaListedOn"),
+  "the replacement result must surface otaListedOn so the green 'clean' shield never lies about an OTA-listed unit",
 );
 assert.ok(
   preflightSource.includes("replacementSourceUrl: unitOverrides[u.id]?.sourceUrl"),
@@ -3483,3 +3581,182 @@ assert.ok(
   "VRBO sidecar worker should still support map_bounds deep harvest for legacy callers only",
 );
 console.log("  ✓ city VRBO inventory export + combo pairing");
+
+// ── Bedding push: dedupe duplicate roomNumber (combo "Unknown error") ──────
+// A 2-unit combo (e.g. Ko Olina 6BR = two 3BR units) numbers bedrooms with a
+// running counter (1..6, unique) but emits one roomNumber-0 "Living Room" per
+// unit. Guesty's PUT /listings rejects two rooms sharing a roomNumber with a
+// generic "Unknown error when updating listing"; dedupeListingRoomsByNumber
+// must collapse them into ONE shared space carrying the summed sofa beds.
+{
+  const comboRooms = [
+    { roomNumber: 1, name: "Master Bedroom", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 2, name: "Bedroom 2", beds: [{ type: "QUEEN_BED", quantity: 1 }] },
+    { roomNumber: 3, name: "Bedroom 3", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 0, name: "Living Room", beds: [{ type: "SOFA_BED", quantity: 1 }] },
+    { roomNumber: 4, name: "Bedroom 4", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 5, name: "Bedroom 5", beds: [{ type: "QUEEN_BED", quantity: 1 }] },
+    { roomNumber: 6, name: "Bedroom 6", beds: [{ type: "QUEEN_BED", quantity: 1 }] },
+    { roomNumber: 0, name: "Living Room", beds: [{ type: "SOFA_BED", quantity: 1 }] },
+  ];
+  const deduped = dedupeListingRoomsByNumber(comboRooms);
+
+  const roomNumbers = deduped.map((r) => r.roomNumber);
+  assert.equal(deduped.length, 7, "combo rooms should collapse 8 -> 7 (two living rooms merge)");
+  assert.equal(
+    new Set(roomNumbers).size,
+    roomNumbers.length,
+    "every roomNumber must be unique after dedupe (no duplicate roomNumber 0)",
+  );
+  assert.equal(
+    roomNumbers.filter((n) => n === 0).length,
+    1,
+    "exactly one shared-space room (roomNumber 0) after dedupe",
+  );
+  const sharedSpace = deduped.find((r) => r.roomNumber === 0)!;
+  assert.equal(
+    sharedSpace.beds.find((b) => b.type === "SOFA_BED")?.quantity,
+    2,
+    "the merged shared space carries both units' sofa beds (SOFA_BED x2)",
+  );
+  // Insertion order preserved: roomNumber 0 stays where it first appeared.
+  assert.deepEqual(roomNumbers, [1, 2, 3, 0, 4, 5, 6], "first-seen order preserved");
+  // Bedrooms are untouched.
+  assert.equal(deduped.find((r) => r.roomNumber === 1)?.beds[0]?.quantity, 1);
+
+  // Single shared space (single-unit listing) is unchanged / idempotent.
+  const singleUnit = [
+    { roomNumber: 1, name: "Master Bedroom", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 0, name: "Living Room", beds: [{ type: "SOFA_BED", quantity: 1 }] },
+  ];
+  assert.deepEqual(
+    dedupeListingRoomsByNumber(singleUnit),
+    singleUnit,
+    "single-unit rooms (one roomNumber 0) pass through unchanged",
+  );
+  // Does not mutate the caller's array/objects.
+  assert.equal(comboRooms.length, 8, "input array is not mutated");
+  assert.equal(comboRooms[3].beds[0].quantity, 1, "input room objects are not mutated");
+}
+console.log("  ✓ bedding listingRooms dedupe (combo duplicate roomNumber 0)");
+
+// ── Bedding push: bed-type sanitization (the REAL "Unknown error") ─────────
+// VERIFIED against live Guesty (2026-06-16): PUT /listings 500s with
+// "Unknown error when updating listing" when ANY bed.type is not an accepted
+// enum (TWIN_BED, FULL_BED, FUTON, MURPHY_BED, a bare "KING", null, …). One
+// bad bed in a stale/legacy config sinks the whole bedding push. The sanitizer
+// must coerce known aliases to a valid enum and drop the unmappable.
+{
+  // Accepted enums pass through unchanged.
+  for (const t of ["KING_BED", "QUEEN_BED", "DOUBLE_BED", "SINGLE_BED", "SOFA_BED", "BUNK_BED", "COUCH", "CRIB"]) {
+    assert.equal(normalizeGuestyBedType(t), t, `${t} should be accepted as-is`);
+  }
+  // Legacy / shorthand / mixed-case → nearest valid enum.
+  assert.equal(normalizeGuestyBedType("TWIN_BED"), "SINGLE_BED");
+  assert.equal(normalizeGuestyBedType("TWIN"), "SINGLE_BED");
+  assert.equal(normalizeGuestyBedType("FULL_BED"), "DOUBLE_BED");
+  assert.equal(normalizeGuestyBedType("FUTON"), "SOFA_BED");
+  assert.equal(normalizeGuestyBedType("MURPHY_BED"), "QUEEN_BED");
+  assert.equal(normalizeGuestyBedType("King"), "KING_BED");
+  assert.equal(normalizeGuestyBedType("queen bed"), "QUEEN_BED");
+  // Unmappable / invalid → null (caller drops the bed).
+  assert.equal(normalizeGuestyBedType("XYZ"), null);
+  assert.equal(normalizeGuestyBedType(""), null);
+  assert.equal(normalizeGuestyBedType(null), null);
+  assert.equal(normalizeGuestyBedType(undefined), null);
+
+  // sanitizeListingRoomsForGuesty coerces in place and drops unmappable beds.
+  const rooms = [
+    { roomNumber: 1, name: "Master Bedroom", beds: [{ type: "KING_BED", quantity: 1 }] },
+    { roomNumber: 3, name: "Bedroom 3", beds: [{ type: "TWIN_BED", quantity: 2 }] },
+    { roomNumber: 0, name: "Living Room", beds: [{ type: "FUTON", quantity: 1 }] },
+    { roomNumber: 4, name: "Bogus", beds: [{ type: "WHATEVER", quantity: 1 }, { type: "QUEEN_BED", quantity: 1 }] },
+  ];
+  const clean = sanitizeListingRoomsForGuesty(rooms);
+  const allTypes = clean.flatMap((r) => r.beds.map((b) => b.type));
+  const VALID = new Set(["KING_BED", "QUEEN_BED", "DOUBLE_BED", "SINGLE_BED", "SOFA_BED", "BUNK_BED", "AIR_MATTRESS", "FLOOR_MATTRESS", "WATER_BED", "TODDLER_BED", "CRIB", "COUCH"]);
+  assert.ok(allTypes.every((t) => VALID.has(t)), `all bed types must be valid Guesty enums; got ${allTypes.join(",")}`);
+  assert.equal(clean[1].beds[0].type, "SINGLE_BED", "TWIN_BED coerced to SINGLE_BED");
+  assert.equal(clean[1].beds[0].quantity, 2, "quantity preserved through coercion");
+  assert.equal(clean[2].beds[0].type, "SOFA_BED", "FUTON coerced to SOFA_BED");
+  assert.equal(clean[3].beds.length, 1, "unmappable bed dropped, valid sibling kept");
+  assert.equal(clean[3].beds[0].type, "QUEEN_BED");
+  // Original input is not mutated.
+  assert.equal(rooms[1].beds[0].type, "TWIN_BED", "sanitizer does not mutate the input");
+}
+console.log("  ✓ bedding bed-type sanitization (invalid type -> coerce/drop, the real Guesty 500)");
+
+// ── Title "Sleeps N" stays in sync with the bed-derived occupancy ──────────
+// The operator hit a listing whose title said "Sleeps 14" while Guesty said 12
+// and the beds sleep 16. syncSleepsInTitle rewrites ONLY an existing "Sleeps N"
+// token to the bed-derived count (the source of truth), leaving everything else.
+{
+  assert.equal(
+    syncSleepsInTitle("Ko Olina - 6BR Condos - Sleeps 14", 16),
+    "Ko Olina - 6BR Condos - Sleeps 16",
+    "stale Sleeps 14 -> 16; the 6BR token is untouched",
+  );
+  // Case of the word is preserved.
+  assert.equal(syncSleepsInTitle("Cozy condo, sleeps 8", 10), "Cozy condo, sleeps 10");
+  // No "Sleeps N" token -> returned unchanged (never appended).
+  assert.equal(syncSleepsInTitle("Ko Olina 6BR Condos", 16), "Ko Olina 6BR Condos");
+  // Non-positive / empty -> unchanged (guards a not-yet-loaded bedding config).
+  assert.equal(syncSleepsInTitle("Resort - Sleeps 14", 0), "Resort - Sleeps 14");
+  assert.equal(syncSleepsInTitle("", 16), "");
+  // Multi-digit + already-correct are both fine (idempotent).
+  assert.equal(syncSleepsInTitle("Villa - Sleeps 22", 16), "Villa - Sleeps 16");
+  assert.equal(syncSleepsInTitle("Villa - Sleeps 16", 16), "Villa - Sleeps 16");
+}
+console.log("  ✓ title Sleeps token sync (occupancy consistency: title == beds == accommodates)");
+
+// ── Description body occupancy sync (the Descriptions-tab "N guests" prose) ─
+// The AI summary said "Sleep up to 14 guests ... accommodate up to 14 guests"
+// after the title/accommodates were corrected to 16. syncSleepsInDescription
+// rewrites only the listing-level "... N guests" phrases, never bedroom counts,
+// sqft, or per-unit "Sleeps N with <beds>" sentences.
+{
+  const summary =
+    "Sleep up to 14 guests in two side-by-side 3-bedroom condos at Coconut Plantation. " +
+    "Typical bedding across the two units can accommodate up to 14 guests comfortably, " +
+    "with a mix of king, queen, and twin beds plus sleeper sofa options.";
+  const fixed = syncSleepsInDescription(summary, 16);
+  assert.ok(fixed.includes("Sleep up to 16 guests"), "leading 'Sleep up to N guests' -> 16");
+  assert.ok(fixed.includes("accommodate up to 16 guests"), "'accommodate up to N guests' -> 16");
+  assert.ok(!fixed.includes(" 14 guests"), "no stale '14 guests' remains");
+  assert.ok(fixed.includes("two side-by-side 3-bedroom condos"), "bedroom count is untouched");
+
+  // Per-unit "Sleeps N with <beds>" has no 'guests' token -> left alone.
+  const perUnit = "Sleeps 8 with a King bed, Queen bed, 2 Twins, and a queen sleeper sofa.";
+  assert.equal(syncSleepsInDescription(perUnit, 16), perUnit, "per-unit bed sentence untouched");
+
+  // sqft / bedroom numbers untouched.
+  assert.equal(
+    syncSleepsInDescription("~1,800 sq ft condo with 6 bedrooms.", 16),
+    "~1,800 sq ft condo with 6 bedrooms.",
+    "sqft and bedroom counts untouched (no 'guests' token)",
+  );
+  // Idempotent + guards.
+  assert.equal(syncSleepsInDescription("accommodate up to 16 guests", 16), "accommodate up to 16 guests");
+  assert.equal(syncSleepsInDescription("Sleep up to 12 guests", 0), "Sleep up to 12 guests", "0 sleeps -> unchanged");
+  assert.equal(syncSleepsInDescription("", 16), "");
+}
+console.log("  ✓ description body occupancy sync (prose 'N guests' -> listing sleeps)");
+
+// ── ImgBB photo-push resilience (the failed Photos push) ───────────────────
+// A free-tier ImgBB quota error (a 4xx saying "limit"/"exceeded", not just
+// "rate limit") must be treated as retryable so a transient blip doesn't
+// cascade the whole multi-photo push into a hard failure.
+assert.ok(
+  /function isImgBbRateLimit/.test(routesSource) &&
+    /quota|exceeded|limit reached/i.test(
+      routesSource.slice(routesSource.indexOf("function isImgBbRateLimit"), routesSource.indexOf("function isImgBbRateLimit") + 400),
+    ),
+  "isImgBbRateLimit should flag quota/limit-exceeded bodies as retryable, not only 'rate limit'",
+);
+assert.ok(
+  routesSource.includes("uploadBufferToImgBbWithRetry") &&
+    /transientNetwork/.test(routesSource) &&
+    /ECONNRESET|ETIMEDOUT|fetch failed/.test(routesSource),
+  "ImgBB upload retry should also retry transient network failures (no HTTP status)",
+);
+console.log("  ✓ ImgBB photo-push retry resilience (quota + transient network)");

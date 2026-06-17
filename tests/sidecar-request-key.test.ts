@@ -59,6 +59,7 @@ const OP_PARAMS: Array<[string, any]> = [
   ["booking_search", { destination: "x", searchTerm: "x", checkIn: "2026-06-13", checkOut: "2026-06-20", bedrooms: 3 }],
   ["vrbo_photo_scrape", { url: "https://www.vrbo.com/1" }],
   ["zillow_photo_scrape", { url: "https://www.zillow.com/1" }],
+  ["listing_gallery_scrape", { url: "https://www.redfin.com/HI/Koloa/1-Pili-Mai/home/1" }],
   ["google_serp", { query: "q" }],
   ["pm_site_search", { sites: ["a"], searchTerm: "x", checkIn: "2026-06-13", checkOut: "2026-06-20", bedrooms: 3 }],
   ["pm_url_check", { url: "https://x", checkIn: "2026-06-13", checkOut: "2026-06-20" }],

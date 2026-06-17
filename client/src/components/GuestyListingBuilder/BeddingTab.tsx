@@ -16,7 +16,7 @@ import {
   buildSpaceDescription,
   totalBedrooms,
   totalBathrooms,
-  totalSleeps,
+  headlineSleeps,
   describeUnitBedding,
 } from "@/data/bedding-config";
 import type { GuestyBedType } from "@/data/guesty-listing-config";
@@ -96,9 +96,13 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
   const totals = useMemo(() => ({
     bedrooms: totalBedrooms(config),
     bathrooms: totalBathrooms(config),
-    sleeps: totalSleeps(config),
+    // "Sleeps" / the Guesty `accommodates` we push follow the single headline
+    // occupancy rule (occupancyForBedrooms), NOT the literal bed capacity, so
+    // this tab agrees with the listing title, summary, and dashboard. (Per-unit
+    // "· sleeps N" lines below stay literal bed counts.)
+    sleeps: headlineSleeps(propertyId, config),
     rooms: buildGuestyListingRooms(config).length,
-  }), [config]);
+  }), [config, propertyId]);
 
   // ── Mutators ────────────────────────────────────────────────────────────
   const updateUnit = useCallback((unitId: string, fn: (u: UnitBeddingConfig) => UnitBeddingConfig) => {
@@ -141,6 +145,7 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
       await guestyService.updateListingDetails(guestyListingId, {
         bedrooms: totals.bedrooms || undefined,
         bathrooms: totals.bathrooms || undefined,
+        accommodates: totals.sleeps || undefined,
         listingRooms: buildGuestyListingRooms(config),
       });
       const message = `Bedding updated: ${totals.bedrooms} BR, ${totals.bathrooms} bath, sleeps ${totals.sleeps}`;

@@ -29,6 +29,7 @@ import {
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
   FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
+  Search, Loader2, ExternalLink,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -39,6 +40,7 @@ import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { usePortalSession } from "@/lib/auth";
+import { useAssistantContext } from "@/lib/assistant-context";
 
 type ArrivalUnitDetail = {
   id: number;
@@ -2171,6 +2173,151 @@ function InboxBuyInPanel({
   );
 }
 
+// ─── Live buy-in search results (read-only) ─────────────────────────────────────
+// Renders the serialized auto-fill job status (AutoFillJobStatus) from a DRY-RUN
+// run started by POST /api/inbox/buy-in-search. This is the SAME search the
+// Operations "Auto-fill cheapest" runs (sidecar + cheapest same-community combos),
+// but attaches nothing — so this panel is purely informational. `attached` holds
+// the would-be cheapest combo; `comboOptions` the other walkable combos; and the
+// per-city ladder / summary explain what was found. NO attach buttons by design.
+function InboxBuyInSearchResults({ status }: { status: any }) {
+  const money = (n: any) =>
+    typeof n === "number" && Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const running = !status?.done;
+  const attached: any[] = Array.isArray(status?.attached) ? status.attached : [];
+  const comboOptions: any[] = Array.isArray(status?.comboOptions) ? status.comboOptions : [];
+  // Alternatives = surfaced walkable combos that were NOT the chosen cheapest.
+  const alternatives = comboOptions.filter((o) => o && Array.isArray(o.picks) && o.picks.length > 0);
+  const cityEconomics: any[] = Array.isArray(status?.cityEconomics) ? status.cityEconomics : [];
+  const skipped: any[] = Array.isArray(status?.skipped) ? status.skipped : [];
+  const progress = Math.max(0, Math.min(100, Number(status?.progress) || 0));
+
+  const PickRow = ({ label, sub, price, url }: { label: string; sub?: string; price: any; url?: string }) => (
+    <div className="flex justify-between items-start gap-2 px-2.5 py-1.5">
+      <span className="text-muted-foreground min-w-0">
+        {url ? (
+          <a href={url} target="_blank" rel="noreferrer" className="hover:underline inline-flex items-center gap-1 break-words">
+            {label}
+            <ExternalLink className="h-3 w-3 shrink-0 opacity-60" />
+          </a>
+        ) : (
+          label
+        )}
+        {sub ? <span className="block text-[10px] text-muted-foreground/70 truncate">{sub}</span> : null}
+      </span>
+      <span className="whitespace-nowrap">{money(price)}</span>
+    </div>
+  );
+
+  return (
+    <div className="space-y-2">
+      {/* Live status line */}
+      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        {running ? <Loader2 className="h-3 w-3 animate-spin shrink-0" /> : <CheckCircle className="h-3 w-3 text-green-600 shrink-0" />}
+        <span className="truncate">{status?.message || (running ? "Searching…" : "Search complete")}</span>
+      </div>
+      {running && (
+        <div className="h-1 w-full rounded bg-muted overflow-hidden">
+          <div className="h-full bg-blue-500 transition-all" style={{ width: `${progress}%` }} />
+        </div>
+      )}
+
+      {/* Cheapest combo found (the would-be attach) */}
+      {attached.length > 0 && (
+        <div className="border rounded-lg divide-y text-xs">
+          <div className="px-2.5 py-1.5 text-[10px] uppercase tracking-wider text-green-800 bg-green-50 dark:bg-green-950/20 font-medium">
+            Cheapest option found
+          </div>
+          {attached.map((a, i) => (
+            <PickRow
+              key={i}
+              label={`${a.unitLabel} · ${a.bedrooms}BR · ${a.sourceLabel}`}
+              sub={a.title}
+              price={a.totalPrice}
+              url={a.url}
+            />
+          ))}
+          {typeof status?.totalCost === "number" && (
+            <div className="flex justify-between px-2.5 py-2 bg-green-50 dark:bg-green-950/20 font-semibold">
+              <span className="text-green-900">Total buy-in cost</span>
+              <span className="text-green-900">{money(status.totalCost)}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Other walkable combos surfaced from the same / nearby pools */}
+      {alternatives.length > 0 && (
+        <div className="border rounded-lg divide-y text-xs">
+          <div className="px-2.5 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+            Other options found ({alternatives.length})
+          </div>
+          {alternatives.slice(0, 6).map((o, i) => (
+            <div key={i} className="px-2.5 py-1.5">
+              <div className="flex justify-between items-center gap-2">
+                <span className="font-medium truncate">{o.label || "Combo"}</span>
+                <span className="whitespace-nowrap">{money(o.totalCost)}</span>
+              </div>
+              <div className="mt-0.5 space-y-0.5">
+                {(o.picks as any[]).map((p, j) => (
+                  <div key={j} className="flex justify-between items-center gap-2 text-[11px] text-muted-foreground">
+                    {p.url ? (
+                      <a href={p.url} target="_blank" rel="noreferrer" className="hover:underline inline-flex items-center gap-1 min-w-0 truncate">
+                        {p.bedrooms}BR · {p.sourceLabel || p.source}
+                        <ExternalLink className="h-3 w-3 shrink-0 opacity-60" />
+                      </a>
+                    ) : (
+                      <span className="min-w-0 truncate">{p.bedrooms}BR · {p.sourceLabel || p.source}</span>
+                    )}
+                    <span className="whitespace-nowrap">{money(p.totalPrice)}</span>
+                  </div>
+                ))}
+              </div>
+              {o.isLoss && typeof o.lossProfit === "number" && (
+                <div className="mt-0.5 text-[10px] text-red-700">Would lose {money(Math.abs(o.lossProfit))} at the quoted rate</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Per-city ladder — what each searched city/area offered */}
+      {cityEconomics.length > 0 && (
+        <details className="text-[11px]">
+          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+            Cities searched ({cityEconomics.length})
+          </summary>
+          <div className="mt-1 border rounded-lg divide-y">
+            {cityEconomics.map((c, i) => (
+              <div key={i} className="px-2.5 py-1.5">
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground truncate">{c.label}</span>
+                  <span className="whitespace-nowrap">{money(c.comboCost)}</span>
+                </div>
+                {c.reason ? <div className="text-[10px] text-muted-foreground/70 mt-0.5">{c.reason}</div> : null}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+
+      {/* Done with nothing surfaced — explain */}
+      {!running && attached.length === 0 && alternatives.length === 0 && (
+        <div className="text-[11px] text-muted-foreground italic px-2 py-1.5 border rounded-lg">
+          {status?.message || "No buy-in combinations were found for these dates."}
+          {skipped.length > 0 && (
+            <ul className="mt-1 list-disc pl-4 not-italic">
+              {skipped.slice(0, 4).map((s, i) => (
+                <li key={i}>{s.reason}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function InboxPage() {
@@ -2459,6 +2606,23 @@ export default function InboxPage() {
   const selectedConvRaw = conversations.find(c => c._id === selectedConvId) ?? null;
   const selectedConv = selectedConvRaw ? applyLocalReplyOverride(selectedConvRaw) : null;
 
+  // Publish the open conversation to the dashboard assistant ("Magical") so a
+  // request like "draft a reply to this guest" acts on the thread on screen.
+  useAssistantContext({
+    page: "Guest inbox",
+    description: selectedConv
+      ? "Operator is viewing a guest conversation thread."
+      : "Operator is in the guest inbox.",
+    data: selectedConv
+      ? {
+          conversationId: selectedConvId,
+          guestName: (selectedConv as any).guestName ?? null,
+          reservationId: (selectedConv as any).reservationId ?? null,
+          listingId: (selectedConv as any).listingId ?? null,
+        }
+      : undefined,
+  });
+
   // Conversation metadata (assignee, priority, integration, etc.)
   const { data: threadData, isLoading: threadLoading } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId],
@@ -2729,6 +2893,58 @@ export default function InboxPage() {
     },
     staleTime: 60_000,
   });
+
+  // ── Live buy-in search ("Do buy-in search" button on an inquiry) ──
+  // Fires the EXACT same search the Operations "Auto-fill cheapest" runs (the
+  // server escalation ladder + local Chrome sidecar + cheapest same-community
+  // combos) in DRY-RUN mode — it attaches NOTHING, it just surfaces results. We
+  // start the job server-side (POST /api/inbox/buy-in-search) then poll the normal
+  // auto-fill status endpoint. Jobs are tracked PER CONVERSATION so switching
+  // threads keeps each inquiry's in-flight / last search; the search keeps running
+  // server-side even if the operator navigates away (same deploy-survival design as
+  // the bookings page). Search can take 1–several minutes (the sidecar walk +
+  // nearby-city expansion).
+  const [buyInSearchJobByConv, setBuyInSearchJobByConv] = useState<Record<string, string>>({});
+  const activeBuyInJobId = selectedConvId ? buyInSearchJobByConv[selectedConvId] ?? null : null;
+
+  const startBuyInSearch = useMutation({
+    mutationFn: async (vars: { convId: string; listingId: string; checkIn: string; checkOut: string }) => {
+      const r = await apiRequest("POST", "/api/inbox/buy-in-search", {
+        listingId: vars.listingId, checkIn: vars.checkIn, checkOut: vars.checkOut,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || data?.ok === false) throw new Error(data?.error || data?.reason || `HTTP ${r.status}`);
+      return { ...data, convId: vars.convId } as { jobId: string; convId: string };
+    },
+    onSuccess: (data) => {
+      if (data?.jobId && data?.convId) {
+        setBuyInSearchJobByConv((prev) => ({ ...prev, [data.convId]: data.jobId }));
+      }
+    },
+    onError: (e: any) =>
+      toast({ title: "Buy-in search didn't start", description: String(e?.message ?? e), variant: "destructive" }),
+  });
+
+  const { data: buyInSearchStatus } = useQuery<any>({
+    queryKey: ["/api/operations/auto-fill", activeBuyInJobId],
+    enabled: isAdmin && !!activeBuyInJobId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/operations/auto-fill/${activeBuyInJobId}`);
+      if (!r.ok) {
+        // 404 = job evicted (server restart / 2h TTL). Surface as a terminal,
+        // re-runnable state rather than spinning forever.
+        if (r.status === 404) return { jobId: activeBuyInJobId, done: true, status: "failed", message: "Search ended (server restarted) — run it again.", attached: [], comboOptions: [], cityEconomics: [], skipped: [] };
+        throw new Error(`HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    // Poll while the job is running; stop once it's terminal.
+    refetchInterval: (query) => {
+      const d: any = query.state.data;
+      return d && d.done ? false : 2500;
+    },
+  });
+  const buyInSearchRunning = startBuyInSearch.isPending || (!!buyInSearchStatus && !buyInSearchStatus.done);
 
   const draftArrivalDetails = ({
     title = "14-day arrival details",
@@ -4910,6 +5126,53 @@ export default function InboxPage() {
                       )}
                       {!isAgent && phase === "inquiry" && !buyInEstimate && buyInEstimateLoading && (
                         <div className="text-[11px] text-muted-foreground italic">Loading buy-in estimate…</div>
+                      )}
+
+                      {/* Live buy-in search — INQUIRIES ONLY.
+                          The LIVE counterpart to the static estimate above: one
+                          click runs the EXACT same search the Operations tab runs on
+                          "Auto-fill cheapest" — the full escalation ladder driving
+                          the local Chrome sidecar, finding the cheapest
+                          same-community combos. It attaches NOTHING (dry-run); it
+                          just shows the operator the real market options for the
+                          guest's dates so they can decide whether to take the
+                          inquiry. Runs server-side + survives leaving the tab; the
+                          search can take 1–several minutes. */}
+                      {!isAgent && phase === "inquiry" && selectedConvId && estimateListingId && estimateCheckIn && estimateCheckOut && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+                            Live buy-in search
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="w-full h-8 text-xs"
+                            disabled={buyInSearchRunning}
+                            onClick={() => startBuyInSearch.mutate({
+                              convId: selectedConvId,
+                              listingId: String(estimateListingId),
+                              checkIn: String(estimateCheckIn),
+                              checkOut: String(estimateCheckOut),
+                            })}
+                            data-testid="button-inbox-buy-in-search"
+                          >
+                            {buyInSearchRunning ? (
+                              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Searching live market…</>
+                            ) : (
+                              <><Search className="h-3.5 w-3.5 mr-1.5" /> {buyInSearchStatus ? "Search again" : "Do buy-in search"}</>
+                            )}
+                          </Button>
+                          {(buyInSearchStatus || startBuyInSearch.isPending) && (
+                            <div className="mt-2">
+                              <InboxBuyInSearchResults
+                                status={buyInSearchStatus ?? { done: false, message: "Starting search…", progress: 4, attached: [], comboOptions: [], cityEconomics: [], skipped: [] }}
+                              />
+                            </div>
+                          )}
+                          <div className="text-[10px] text-muted-foreground/70 mt-1">
+                            Same sidecar search as Operations “Auto-fill cheapest” — finds the cheapest same-community combos. Nothing is attached.
+                          </div>
+                        </div>
                       )}
 
                       {/* Financials — only for booked reservations */}

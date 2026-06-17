@@ -26,6 +26,7 @@ import type { BuyIn } from "@shared/schema";
 import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+import { occupancyForBedrooms } from "@shared/occupancy";
 import {
   inferCombinedBedroomsFromDraft,
   positiveDraftInteger,
@@ -99,6 +100,7 @@ import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./a
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts, setAutoSendConfig, runAutoSendQueue } from "./auto-reply";
 import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { registerAssistantRoutes } from "./assistant/routes";
+import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar-automation";
 import { formatReceiptMoney, formatReceiptLongDate } from "@shared/receipt-message";
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
@@ -110,7 +112,9 @@ import {
   researchCommunitiesForCity,
   TOP_MARKET_SEEDS,
   fetchAmortizedNightlyByBR,
-  filterTopScanSixBedroomComboCandidates,
+  filterTopScanComboCandidates,
+  hasFourBedroomComboPotential,
+  hasFiveBedroomComboPotential,
   hasSixBedroomComboPotential,
   hasSevenEightBedroomComboPotential,
   medianRate,
@@ -176,6 +180,7 @@ import {
   notListedVerdict,
   type PreflightPlatformKey,
 } from "@shared/preflight-platform-match";
+import { discoverCommunityStreetAddress } from "./community-address-discovery";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import {
@@ -218,7 +223,7 @@ import {
   scanSeasonalAvailabilityCapacity,
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
-import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget } from "./photo-listing-scanner";
+import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest } from "./photo-community-check";
 import {
   MIN_DISTINCT_STRONG_PHOTO_MATCHES,
@@ -235,9 +240,11 @@ import {
   summarizeUnitPhotoProof,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
+import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-combo";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { geocode, walkBetween } from "./walking-distance";
+import { hitTextMatchesUnit } from "./listing-unit-match";
 import { fetchNearbyVacationRentalResortsFromLlm } from "./alternative-scout-llm-resorts";
 import {
   inferResortCommunityLabel,
@@ -944,9 +951,10 @@ async function buildBulkGuestySeasonalPlan(
   for (const row of rows) rowByBR.set(row.bedrooms, row);
   const region = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
   const missingMonthlyRates = new Set<string>();
-  // Months a unit was intentionally blacked out (no confident exact-bedroom
-  // comp) — surfaced here so the push can CLOSE those windows on Guesty rather
-  // than treating them as a missing-data error.
+  // Kept (always empty now) so the pricing-blackout reconcile still REMOVES any
+  // legacy "pricing-blackout" Guesty blocks: with no desired blackouts and every
+  // month in confirmedOpenMonths, reconcilePricingBlackoutBlocks reopens them.
+  // See the THIN-COMP STATIC FALLBACK note below for why we no longer black out.
   const blackoutWindows: Array<{ yearMonth: string; checkIn: string; checkOut: string; reason: string }> = [];
   const monthlyRates = build24MonthPricingWindow().map(({ yearMonth }) => {
     const season = getSeasonForMonth(yearMonth, region);
@@ -954,41 +962,39 @@ async function buildBulkGuestySeasonalPlan(
     let price = 0;
     let checkIn: string | undefined;
     let checkOut: string | undefined;
-    let blackout: { checkIn: string; checkOut: string; reason: string } | null = null;
+    // Track this month's genuinely-missing units (no row / no stored entry — a
+    // data error) so unexplained gaps still fail the push loudly.
+    const missingKeysThisMonth: string[] = [];
     for (const unit of units) {
       const row = rowByBR.get(unit.bedrooms);
       const entry = row?.monthlyRates && typeof row.monthlyRates === "object"
         ? (row.monthlyRates as Record<string, any>)[yearMonth]
         : null;
       if (entry?.checkIn && entry?.checkOut) { checkIn = entry.checkIn; checkOut = entry.checkOut; }
-      const unitBuyIn = marketRateBasisForMonth({ community, bedrooms: unit.bedrooms, yearMonth, season, row });
+      let unitBuyIn = marketRateBasisForMonth({ community, bedrooms: unit.bedrooms, yearMonth, season, row });
+      // THIN-COMP STATIC FALLBACK (operator directive 2026-06-15): when the live
+      // market scan couldn't gather a confident exact-bedroom comp basis it used
+      // to BLACK OUT the calendar month (source "pricing-blackout") — which
+      // black-holed ~2 years of a thin-3BR resort like Kaha Lani / Kapaa. The
+      // operator's rule now: NEVER black out the calendar for thin comps. Price
+      // the month from the operator-validated static seasonal basis (BUY_IN_RATES
+      // via getBuyInRate) so the window stays OPEN and sellable. Calendar
+      // black-outs are owned SOLELY by the Airbnb-availability gate
+      // (server/sourceability-gate.ts). A GENUINELY missing unit (no stored entry
+      // at all — a data bug, not a thin-comp blackout) still hard-errors below.
+      if (unitBuyIn == null && entry?.blackout) {
+        const staticBasis = getBuyInRate(community, unit.bedrooms, propertyId > 0 ? propertyId : undefined, season, yearMonth);
+        if (staticBasis > 0) unitBuyIn = staticBasis;
+      }
       if (unitBuyIn == null) {
-        if (entry?.blackout) {
-          // Intentional blackout for this unit/month — close, don't price or error.
-          if (!blackout && entry.checkIn && entry.checkOut) {
-            blackout = {
-              checkIn: entry.checkIn,
-              checkOut: entry.checkOut,
-              reason: typeof entry.blackoutReason === "string" ? entry.blackoutReason : `no confident exact-${unit.bedrooms}BR comps`,
-            };
-          }
-        } else {
-          missingMonthlyRates.add(`${yearMonth} ${unit.bedrooms}BR`);
-        }
+        missingKeysThisMonth.push(`${yearMonth} ${unit.bedrooms}BR`);
         continue;
       }
       buyIn += unitBuyIn;
       // Match the pricing table: ceil margin per unit, then sum (not ceil on combined buy-in).
       price += cleanBaseRateFromBuyInServer(unitBuyIn, targetMargin);
     }
-    // A month is a listing-level blackout if ANY configured unit was blacked
-    // out: a combo can't be priced/sold with only part of it covered. Close
-    // that window and drop the month from the price push (filtered below).
-    if (blackout) {
-      for (const unit of units) missingMonthlyRates.delete(`${yearMonth} ${unit.bedrooms}BR`);
-      blackoutWindows.push({ yearMonth, checkIn: blackout.checkIn, checkOut: blackout.checkOut, reason: blackout.reason });
-      return { yearMonth, buyIn: 0, price: 0, checkIn, checkOut };
-    }
+    for (const key of missingKeysThisMonth) missingMonthlyRates.add(key);
     return { yearMonth, buyIn, price, checkIn, checkOut };
   }).filter((row) => row.buyIn > 0 && row.price > 0);
 
@@ -1381,6 +1387,18 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   const blackoutSuffix = blackoutWindows.length > 0 || blackoutClosed > 0 || blackoutReopened > 0
     ? ` · ${blackoutWindows.length} blacked out (${blackoutClosed} closed/${blackoutReopened} reopened on Guesty)`
     : "";
+  // Calendar reconcile is non-fatal (prices already landed), so a Guesty
+  // calendar failure must not be silent: surface it as a warn event so the
+  // operator knows some windows didn't close/reopen (next scan will retry).
+  const blackoutReconcileFailed = blackoutWindows.length > 0 && !guestyPush.blackout;
+  const blackoutFailures = guestyPush.blackout?.failures?.length ?? 0;
+  if (blackoutReconcileFailed || blackoutFailures > 0) {
+    await topQueueEvent("bulk-pricing", job.id, "item-blackout-sync-failed", `${item.label}: Guesty calendar blackout sync incomplete (${blackoutReconcileFailed ? "reconcile errored" : `${blackoutFailures} window change(s) failed`}); will retry on the next scan`, {
+      itemKey: item.id,
+      level: "warn",
+      meta: { propertyId: item.propertyId, blackoutWindows: blackoutWindows.length, failures: guestyPush.blackout?.failures ?? "reconcile-threw" },
+    });
+  }
   if (guestyPush.skipped) {
     item.progress = {
       phase: "done",
@@ -1639,7 +1657,11 @@ function assertPricingRefreshNotCancelled(propertyKey: number, cancelGeneration:
 }
 
 function isImgBbRateLimit(status: number, body: string): boolean {
-  return status === 429 || /rate limit|too many requests/i.test(body);
+  // ImgBB free-tier quota/rate errors come back as 429 OR as a 4xx whose body
+  // says "limit"/"quota"/"exceeded" (not just "rate limit"). Treat all of those
+  // as retryable so a transient quota blip backs off instead of hard-failing the
+  // whole multi-photo push (which then cascades every photo to the fallback).
+  return status === 429 || /rate.?limit|too many requests|quota|exceeded|limit reached|slow down|try again/i.test(body);
 }
 
 function isGuestyCalendarRetryableError(error: any): boolean {
@@ -1723,7 +1745,13 @@ async function uploadBufferToImgBbWithRetry(
     try {
       return await uploadBufferToImgBb(imgbbKey, buffer);
     } catch (e: any) {
-      const retryable = e?.rateLimited || e?.status === 429 || e?.status >= 500;
+      const status = Number(e?.status ?? 0);
+      // Retry rate/quota limits (now incl. 4xx quota via isImgBbRateLimit),
+      // server errors, AND transient network failures (no HTTP status). An
+      // auth/bad-key 4xx (no quota keywords) stays non-retryable — retrying
+      // wouldn't help — and falls back to app-hosting as before.
+      const transientNetwork = !status && /ECONNRESET|ETIMEDOUT|EAI_AGAIN|timeout|fetch failed|network|socket/i.test(String(e?.message ?? ""));
+      const retryable = e?.rateLimited || status === 429 || status >= 500 || transientNetwork;
       if (!retryable || attempt >= waits.length) throw e;
       const waitMs = waits[attempt];
       onRetry(attempt + 1, waitMs, e);
@@ -2225,6 +2253,14 @@ const COMMUNITY_SOURCE_URLS: Record<string, { primary: string; fallback?: string
   "Paniolo Hale": {
     primary: "https://www.zillow.com/b/paniolo-hale-maunaloa-hi-9NxCHL/",
   },
+  // Ko Olina Beach Villas (draft 14) — scrape the operator's own listing page
+  // directly (the draft.sourceUrl) so the draft's auto community-photo fetch
+  // gets real Ko Olina Beach Villas photos instead of a generic name search.
+  // scrapeListingPhotos routes a non-real-estate host through its generic
+  // real-estate / headless og:image branch.
+  "Ko Olina Beach Villas": {
+    primary: "https://www.olaproperties.com/ko-olina-beach-villas/",
+  },
 };
 
 // Maps communityPhotoFolder folder names to their display community names
@@ -2242,6 +2278,7 @@ const COMMUNITY_FOLDER_TO_NAME: Record<string, string> = {
   "community-pili-mai": "Pili Mai",
   "community-menehune-shores": "Menehune Shores",
   "community-coconut-plantation-at-ko-olina": "Coconut Plantation at Ko Olina",
+  "community-ko-olina-beach-villas": "Ko Olina Beach Villas",
 };
 
 // Street address fragment for each community — used to find individual
@@ -2261,6 +2298,7 @@ const COMMUNITY_FOLDER_TO_ADDRESS: Record<string, string> = {
   "community-pili-mai": "2611 Kiahuna Plantation Dr",       // Pili Mai at Poipu
   "community-menehune-shores": "760 S Kihei Rd",            // Menehune Shores
   "community-coconut-plantation-at-ko-olina": "92-1070 Olani St", // Coconut Plantation at Ko Olina
+  "community-ko-olina-beach-villas": "92-102 Waialii Pl",         // Ko Olina Beach Villas (Kapolei) — NOT Coconut Plantation's Olani St
 };
 
 interface ScrapedPhoto {
@@ -4486,6 +4524,52 @@ async function scrapeListingPhotos(
     if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
       console.log(`[scrapeGenericRealEstate] fetch returned 0, trying ScrapingBee for ${primaryUrl}`);
       result = await scrapeGenericRealEstateViaScrapingBee(primaryUrl, options?.scrapingBeeTimeoutMs);
+    }
+    // Last-resort tier: the operator's home-IP Chrome sidecar. Railway's
+    // datacenter IP frequently bot-walls Redfin/Homes down to a single
+    // og:image (the failure described above), so when the cheaper datacenter
+    // tiers returned 0 photos AND the sidecar is online, recover the full
+    // gallery from a residential IP. SEQUENTIAL fallback only — fires solely
+    // on result.urls.length === 0, so it never unions with or reorders an
+    // existing photo set (Load-Bearing #5). Naturally inert when the worker is
+    // offline; env SIDECAR_GALLERY_SCRAPE_ENABLED=0 kills it (Load-Bearing #45).
+    const galleryScrapeEnabled =
+      String(process.env.SIDECAR_GALLERY_SCRAPE_ENABLED ?? "1").trim() !== "0";
+    const gallerySidecarWalletMs = options?.sidecarWalletMs ?? 90_000;
+    if (galleryScrapeEnabled && gallerySidecarWalletMs > 0 && result.urls.length === 0) {
+      try {
+        const { getHeartbeat, scrapeListingGalleryViaSidecar } = await import("./vrbo-sidecar-queue");
+        const heartbeat = getHeartbeat();
+        if (heartbeat.isOnline) {
+          const sidecarHost = /redfin\.com/i.test(primaryUrl) ? "Redfin" : "Homes.com";
+          console.log(`[scrapeGenericRealEstate] sidecar fallback (0 photos from fetch/ScrapingBee) host=${sidecarHost} wallet=${gallerySidecarWalletMs}ms`);
+          const sidecar = await scrapeListingGalleryViaSidecar({
+            url: primaryUrl,
+            host: sidecarHost,
+            walletBudgetMs: gallerySidecarWalletMs,
+          });
+          if (sidecar.photos.length > 0) {
+            console.log(`[scrapeGenericRealEstate] sidecar recovered ${sidecar.photos.length} photos in ${sidecar.durationMs}ms (facts ${sidecar.facts ? "yes" : "no"})`);
+            result = {
+              urls: sidecar.photos,
+              facts: {
+                bedrooms: result.facts.bedrooms ?? sidecar.facts?.bedrooms,
+                bathrooms: result.facts.bathrooms ?? sidecar.facts?.bathrooms,
+                homeType: result.facts.homeType ?? sidecar.facts?.homeType,
+                homeStatus: result.facts.homeStatus ?? sidecar.facts?.homeStatus,
+                propertySubType: result.facts.propertySubType ?? sidecar.facts?.propertySubType,
+                photoCount: result.facts.photoCount ?? sidecar.facts?.photoCount,
+              },
+            };
+          } else {
+            console.log(`[scrapeGenericRealEstate] sidecar returned 0 photos in ${sidecar.durationMs}ms (reason: ${sidecar.reason})`);
+          }
+        } else {
+          console.log(`[scrapeGenericRealEstate] sidecar offline (heartbeat ageMs=${heartbeat.ageMs ?? "—"}); skipping`);
+        }
+      } catch (e: any) {
+        console.warn(`[scrapeGenericRealEstate] sidecar fallback errored: ${e?.message ?? e}`);
+      }
     }
     if (listingFacts) {
       if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
@@ -7879,11 +7963,25 @@ export async function registerRoutes(
       }
 
       const contentType = guestyRes.headers.get("content-type") || "";
+      // Capture the real Guesty rejection for listing writes — the client only
+      // sees a generic "Unknown error when updating listing", so log the actual
+      // response body + the payload we sent (bedding/listingRooms pushes, etc.).
+      const isListingWrite = req.method !== "GET" && /^\/listings\b/.test(guestyPath);
       if (contentType.includes("application/json")) {
         const data = await guestyRes.json();
+        if (!guestyRes.ok && isListingWrite) {
+          console.error(
+            `[guesty-proxy] ${req.method} ${guestyPath} -> ${guestyRes.status}: ${JSON.stringify(data).slice(0, 1200)} | payload: ${JSON.stringify(req.body).slice(0, 1800)}`,
+          );
+        }
         return res.status(guestyRes.status).json(data);
       } else {
         const text = await guestyRes.text();
+        if (!guestyRes.ok && isListingWrite) {
+          console.error(
+            `[guesty-proxy] ${req.method} ${guestyPath} -> ${guestyRes.status} (non-json): ${text.slice(0, 1200)} | payload: ${JSON.stringify(req.body).slice(0, 1800)}`,
+          );
+        }
         return res.status(guestyRes.status).send(text);
       }
     } catch (err: any) {
@@ -11025,11 +11123,24 @@ Requirements:
     reservationId: string;
     guestName?: string | null;
     buyIns?: Array<{ checkOut?: unknown }>;
+    // When provided, the alias is scoped to this specific buy-in (unit), so a
+    // combo booking can have a distinct alias per unit. Omitted = legacy
+    // reservation-level lookup (matches the earliest existing alias row).
+    buyInId?: number | null;
+    unitLabel?: string | null;
   }) {
+    const hasBuyInId = typeof input.buyInId === "number" && Number.isFinite(input.buyInId);
     const existing = await db
       .select()
       .from(reservationAliases)
-      .where(eq(reservationAliases.reservationId, input.reservationId))
+      .where(
+        hasBuyInId
+          ? and(
+              eq(reservationAliases.reservationId, input.reservationId),
+              eq(reservationAliases.buyInId, input.buyInId as number),
+            )
+          : eq(reservationAliases.reservationId, input.reservationId),
+      )
       .limit(1);
     if (existing[0]) {
       const alias = await ensureReservationAliasExpiresAt(existing[0], input.buyIns ?? []);
@@ -11039,7 +11150,7 @@ Requirements:
     const payload = await createSimpleLoginAlias({
       prefix: aliasPrefixForGuest(input.guestName, input.reservationId),
       guestName: input.guestName,
-      note: `Buy-in communication alias for Guesty reservation ${input.reservationId}`,
+      note: `Buy-in communication alias for Guesty reservation ${input.reservationId}${input.unitLabel ? ` — ${input.unitLabel}` : ""}`,
     });
     const aliasEmail = extractSimpleLoginAliasEmail(payload);
     const simpleloginAliasId = extractSimpleLoginAliasId(payload);
@@ -11049,6 +11160,7 @@ Requirements:
       .insert(reservationAliases)
       .values({
         reservationId: input.reservationId,
+        buyInId: hasBuyInId ? (input.buyInId as number) : null,
         guestName: input.guestName ?? null,
         aliasEmail,
         simpleloginAliasId,
@@ -11082,6 +11194,8 @@ Requirements:
       reservationId: input.reservationId,
       guestName: input.guestName,
       buyIns: [buyIn],
+      buyInId: input.buyInId,
+      unitLabel: buyIn.unitLabel ?? null,
     });
     if (!alias.simpleloginAliasId) throw new Error("Saved SimpleLogin alias is missing its alias id");
 
@@ -11216,12 +11330,19 @@ Requirements:
     try {
       const reservationId = req.params.reservationId;
       const buyIns = await storage.getBuyInsByReservation(reservationId);
-      const [rawAlias] = await db
+      const rawAliases = await db
         .select()
         .from(reservationAliases)
-        .where(eq(reservationAliases.reservationId, reservationId))
-        .limit(1);
-      const alias = rawAlias ? await ensureReservationAliasExpiresAt(rawAlias, buyIns) : null;
+        .where(eq(reservationAliases.reservationId, reservationId));
+      // Per-unit: refresh each alias's expiry against its own buy-in (fallback to
+      // all buy-ins for legacy reservation-level rows with no buyInId).
+      const aliases = await Promise.all(
+        rawAliases.map((row) =>
+          ensureReservationAliasExpiresAt(row, row.buyInId ? buyIns.filter((b) => b.id === row.buyInId) : buyIns),
+        ),
+      );
+      // Back-compat: `alias` is the reservation-level / earliest row.
+      const alias = aliases.find((a) => a.buyInId == null) ?? aliases[0] ?? null;
       const contacts = await db
         .select()
         .from(buyInVendorContacts)
@@ -11232,7 +11353,7 @@ Requirements:
         .where(eq(buyInEmails.reservationId, reservationId))
         .orderBy(desc(buyInEmails.sentAt))
         .limit(100);
-      res.json({ reservationId, alias: alias ?? null, buyIns, contacts, emails });
+      res.json({ reservationId, alias: alias ?? null, aliases, buyIns, contacts, emails });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch buy-in communications", message: err.message });
     }
@@ -11242,8 +11363,20 @@ Requirements:
     try {
       const reservationId = req.params.reservationId;
       const guestName = String(req.body?.guestName ?? "").trim() || null;
+      const rawBuyInId = req.body?.buyInId;
+      const buyInId = Number.isFinite(Number(rawBuyInId)) ? Number(rawBuyInId) : null;
       const buyIns = await storage.getBuyInsByReservation(reservationId);
-      const result = await getOrCreateReservationAlias({ reservationId, guestName, buyIns });
+      // When a buyInId is given, scope the alias to that unit (and validate it
+      // belongs to this reservation). Otherwise fall back to reservation-level.
+      let scopedBuyIns = buyIns;
+      let unitLabel: string | null = null;
+      if (buyInId != null) {
+        const target = buyIns.find((b) => b.id === buyInId);
+        if (!target) return res.status(404).json({ error: "Buy-in not found for this reservation" });
+        scopedBuyIns = [target];
+        unitLabel = target.unitLabel ?? null;
+      }
+      const result = await getOrCreateReservationAlias({ reservationId, guestName, buyIns: scopedBuyIns, buyInId, unitLabel });
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to create SimpleLogin alias", message: err.message });
@@ -11612,6 +11745,98 @@ Requirements:
     } catch (err: any) {
       console.error("[buy-in-estimate] error:", err);
       res.status(500).json({ error: "Failed to compute buy-in estimate", message: err.message });
+    }
+  });
+
+  // POST /api/inbox/buy-in-search  { listingId, checkIn, checkOut }
+  //
+  // The LIVE counterpart to the static /api/inbox/buy-in-estimate above. From a
+  // guest inquiry in the inbox, run the EXACT SAME buy-in search the Operations tab
+  // runs when you click "Auto-fill cheapest" — the full escalation ladder (resort
+  // find-buy-in → home-city VRBO → nearby-city expansion → per-slot single-unit
+  // fallback), driving the local Chrome sidecar and finding the cheapest
+  // same-community combos — EXCEPT it attaches nothing. It starts the auto-fill job
+  // in DRY-RUN mode (server/auto-fill-job.ts): the would-be cheapest combo lands in
+  // the job's `attached` array (buyInId=null) and `comboOptions`/`cityEconomics`
+  // carry the alternatives + per-city ladder, all for read-only display. The client
+  // polls the normal GET /api/operations/auto-fill/:jobId for progress + results.
+  //
+  // Because it reuses the operations job verbatim (just gated to skip persistence),
+  // it inherits every load-bearing rule for free — VRBO sight+click, the geo
+  // guards, same-community pairing, the deploy-survival poll. The profit gate is
+  // intentionally DISABLED (expectedRevenue=0, the documented inquiry degrade-safe
+  // path) so the operator simply sees the cheapest options found, not a "would lose
+  // money, left empty" verdict — an inquiry has no committed revenue to gate on.
+  app.post("/api/inbox/buy-in-search", async (req: Request, res: Response) => {
+    try {
+      const listingId = String(req.body?.listingId ?? "").trim();
+      const checkIn = String(req.body?.checkIn ?? "").trim();
+      const checkOut = String(req.body?.checkOut ?? "").trim();
+      if (!listingId || !checkIn || !checkOut) {
+        return res.status(400).json({ ok: false, error: "listingId, checkIn, checkOut required" });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return res.status(400).json({ ok: false, error: "checkIn and checkOut must be YYYY-MM-DD" });
+      }
+
+      // Same listingId → propertyId mapping the static estimate uses.
+      const propMap = await storage.getGuestyPropertyMap();
+      const mapping = propMap.find((m) => m.guestyListingId === listingId);
+      if (!mapping) {
+        return res.json({ ok: false, reason: "Listing not connected to a local property" });
+      }
+      const propertyId = mapping.propertyId;
+      // The auto-fill ladder keys everything off PROPERTY_UNIT_CONFIGS (community,
+      // per-unit bedroom plan). Only configured combo/single properties can run the
+      // city stages, so the live search is scoped to them — same scope as the static
+      // estimate's getUnitBuilderByPropertyId gate.
+      const config = PROPERTY_UNIT_CONFIGS[propertyId];
+      if (!config || !Array.isArray(config.units) || config.units.length === 0) {
+        return res.json({ ok: false, reason: "Property is not configured for live buy-in search" });
+      }
+      const slots = config.units.map((u) => ({
+        unitId: u.unitId,
+        unitLabel: u.unitLabel,
+        bedrooms: u.bedrooms,
+      }));
+      const propertyName = getUnitBuilderByPropertyId(propertyId)?.complexName || config.community;
+
+      const { startAutoFillJob } = await import("./auto-fill-job");
+      const started = startAutoFillJob({
+        // Synthetic, dry-run-only reservation key: namespaced so it can NEVER
+        // collide with a real reservation's auto-fill job. Stable across re-clicks
+        // for the same inquiry+dates, so the single-flight guard reuses an in-flight
+        // search instead of starting a duplicate.
+        reservationId: `inbox-search:${listingId}:${checkIn}:${checkOut}`,
+        propertyId,
+        listingId,
+        propertyName,
+        community: config.community,
+        checkIn,
+        checkOut,
+        slots,
+        // No ground-floor signal from an inquiry; no profit gate (read-only triage).
+        groundFloorBedrooms: [],
+        expectedRevenue: 0,
+        silent: true,
+        dryRun: true,
+        owner: "row",
+      });
+      return res.status(202).json({
+        ok: true,
+        jobId: started.jobId,
+        reused: started.reused,
+        propertyId,
+        propertyName,
+        community: config.community,
+        unitCount: slots.length,
+        bedroomPlan: slots.map((s) => s.bedrooms),
+      });
+    } catch (e: any) {
+      const { AutoFillValidationError } = await import("./auto-fill-job");
+      if (e instanceof AutoFillValidationError) return res.status(400).json({ ok: false, error: e.message });
+      console.error("[inbox-buy-in-search] start error:", e?.message ?? e);
+      return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
   });
 
@@ -24876,6 +25101,26 @@ Return ONLY compact JSON with this exact shape:
     return res.json({ ok: true, paused: false, ...result });
   });
 
+  // Global pause for AUTOMATED (scheduler-driven) sidecar scans — the
+  // sourceability gate sweep + the weekly OTA scan. Operator-initiated searches
+  // are never affected. See server/sidecar-automation.ts.
+  app.get("/api/admin/sidecar-automation", async (_req, res) => {
+    try {
+      res.json(await getSidecarAutomationState());
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to read sidecar automation state", message: err?.message });
+    }
+  });
+  app.post("/api/admin/sidecar-automation/toggle", async (req, res) => {
+    try {
+      const paused = req.body?.paused === true || req.body?.paused === "true";
+      await setSidecarAutomationPaused(paused);
+      res.json(await getSidecarAutomationState());
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to set sidecar automation state", message: err?.message });
+    }
+  });
+
   // ── Sidecar cookie sync (Chrome extension → daemon bridge) ─────────
   //
   // The Chrome extension at ~/Downloads/vrbo-sidecar-cookie-extension/
@@ -26736,6 +26981,70 @@ Return ONLY compact JSON with this exact shape:
       const { runSourceabilitySweepForProperty } = await import("./sourceability-gate");
       const report = await runSourceabilitySweepForProperty(propertyId, { force: true, enforce: !!enforce });
       res.json(report);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // Operator unblock: REMOVE every auto-created calendar block (the VRBO-era
+  // "sourceability-gate" blocks AND the thin-comp "pricing-blackout" blocks) for
+  // a property and reset the gate's confirmation streaks. Used after the
+  // 2026-06-15 switch to Airbnb-availability-only black-outs to clear legacy
+  // blocks immediately instead of waiting for the next pricing push / sweep to
+  // reconcile them away. Reuses the existing reconcile helpers (Guesty PUT
+  // available + scanner_blocks markRemoved), so it only ever touches OUR blocks,
+  // never human/legacy ones. DRY-RUN with ?dryRun=1. ADMIN-gated.
+  app.post("/api/availability/release-auto-blocks/:propertyId", async (req, res) => {
+    const propertyId = parseInt(req.params.propertyId, 10);
+    if (isNaN(propertyId)) return res.status(400).json({ error: "invalid propertyId" });
+    const dryRun = req.query.dryRun === "1" || req.query.dryRun === "true";
+    try {
+      const {
+        reconcileSourceabilityBlocks,
+        reconcilePricingBlackoutBlocks,
+        SOURCEABILITY_GATE_SOURCE,
+        PRICING_BLACKOUT_SOURCE,
+      } = await import("./sync-scanner-blocks");
+      const active = await storage.getActiveScannerBlocks(propertyId);
+      const gateActive = active.filter((b) => b.source === SOURCEABILITY_GATE_SOURCE);
+      const pbActive = active.filter((b) => b.source === PRICING_BLACKOUT_SOURCE);
+
+      // desired:[] + every active window in confirmedOpen ⇒ both reconcilers
+      // reopen (and untrack) all of OUR blocks for this property.
+      const gateSync = await reconcileSourceabilityBlocks({
+        propertyId,
+        desired: [],
+        confirmedOpen: gateActive.map((b) => ({ startDate: b.startDate, endDate: b.endDate })),
+        dryRun,
+      });
+      const pbSync = await reconcilePricingBlackoutBlocks({
+        propertyId,
+        desired: [],
+        confirmedOpenMonths: pbActive.map((b) => b.startDate.slice(0, 7)),
+        dryRun,
+      });
+
+      // Reset gate confirmation streaks so a stale block streak can't instantly
+      // re-block before the new Airbnb-availability sweep re-evaluates.
+      if (!dryRun) {
+        for (const b of gateActive) {
+          await storage.upsertSourceabilityObservation({
+            propertyId, startDate: b.startDate, endDate: b.endDate,
+            consecutiveBlocks: 0, consecutiveOpens: 0,
+            lastDecision: "open", lastCheapestCost: null, lastSellableRevenue: null,
+            lastReason: "released by operator (Airbnb-availability switch)",
+          }).catch(() => {});
+        }
+      }
+
+      res.json({
+        propertyId,
+        dryRun,
+        found: { sourceabilityGate: gateActive.length, pricingBlackout: pbActive.length },
+        removed: { sourceabilityGate: gateSync.removed, pricingBlackout: pbSync.removed },
+        wouldRemove: { sourceabilityGate: gateSync.wouldRemove, pricingBlackout: pbSync.wouldRemove },
+        failures: [...gateSync.failures, ...pbSync.failures],
+      });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? String(e) });
     }
@@ -28770,7 +29079,9 @@ Return ONLY compact JSON with this exact shape:
 
   // Platform check: searches Google for the property on Airbnb, VRBO, and Booking.com
   app.get("/api/preflight/platform-check", async (req, res) => {
-    const apiKey = process.env.SEARCHAPI_API_KEY;
+    // Resolve to the first available SearchAPI key (handles primary empty/dead → SEARCHAPI_API_KEY_2);
+    // the global fetch fallback rotates keys on a 429 from there.
+    const apiKey = getSearchApiKey();
     const imgbbKey = process.env.IMGBB_API_KEY;
 
     const name = (req.query.name as string || "").trim();
@@ -28781,6 +29092,11 @@ Return ONLY compact JSON with this exact shape:
     try { units = JSON.parse(unitsParam); } catch { return res.status(400).json({ error: "Invalid units JSON" }); }
     const city = normalizePlatformCheckCity(String(req.query.city ?? ""), units[0]?.address);
     if (units.length === 0) return res.status(400).json({ error: "units array is required" });
+    // Whole-home single listing (the client sends this when the property has exactly one unit and
+    // no unit number to disambiguate). For these the street/community IS the unit, so a STRONG
+    // property match can confirm without a unit token. (Named singleHomeMode to avoid clashing with
+    // the legacy path's own `singleListingMode` const further down this handler.)
+    const singleHomeMode = ["1", "true", "yes"].includes(String(req.query.singleListing ?? req.query.standalone ?? "").toLowerCase());
     // ── Text-only platform check ────────────────────────────────────────────────
     // The expensive Google Lens REVERSE-IMAGE probes stay disabled (045b2c5, to
     // preserve SearchAPI quota) — the legacy Lens handler below is intentionally left
@@ -28814,7 +29130,7 @@ Return ONLY compact JSON with this exact shape:
     const checkPlatformStrict = async (
       platform: PreflightPlatformKey,
       unit: { unitNumber: string; address: string; bedrooms?: number },
-    ): Promise<{ status: "listed" | "not-listed" | "error"; url: string | null; detection: string }> => {
+    ): Promise<{ status: "confirmed" | "not-listed" | "error"; url: string | null; detection: string }> => {
       const matchContext = buildPreflightMatchContext({
         complexName: name,
         city,
@@ -30034,6 +30350,7 @@ Return ONLY compact JSON with this exact shape:
       targetUnitId,
       expandedSearch: requestedExpandedSearch = false,
       skipDiscovery: requestedSkipDiscovery = false,
+      allowOtaListed: requestedAllowOtaListed = false,
       resumeCandidates: requestedResumeCandidates = [],
     } = req.body as {
       communityFolder: string;
@@ -30050,6 +30367,7 @@ Return ONLY compact JSON with this exact shape:
       targetUnitId?: string;
       expandedSearch?: boolean;
       skipDiscovery?: boolean;
+      allowOtaListed?: boolean;
       resumeCandidates?: Array<{
         sourceUrl: string;
         source: "zillow" | "realtor" | "redfin" | "homes";
@@ -30063,6 +30381,16 @@ Return ONLY compact JSON with this exact shape:
     const strict = requestedStrict === true && !!cleanChannel;
     const expandedSearch = requestedExpandedSearch === true;
     const skipDiscovery = requestedSkipDiscovery === true;
+    // `allowOtaListed` (operator opt-in, default OFF) relaxes ONLY the unit-name
+    // OTA-presence gate ("skipped-found") for STVR-saturated communities where
+    // nearly every for-sale unit is also an active Airbnb/VRBO rental (e.g.
+    // Waikoloa Beach Villas — ~89 of 121 units on VRBO). It does NOT relax the
+    // photo-reuse gate ("skipped-photo-found"): a candidate's real-estate photos
+    // must still be distinct from the OTA gallery, so PR #338's anti-feedback-loop
+    // protection stays intact (we surface a zillow/redfin candidate that happens
+    // to also be OTA-listed, never OTA photos). The accepted unit is flagged
+    // `otaListedOn` so the operator sees it is already listed elsewhere.
+    const allowOtaListed = requestedAllowOtaListed === true;
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
     const normalizedBodyName = typeof bodyCommunityName === "string" ? bodyCommunityName.trim() : "";
@@ -30704,22 +31032,46 @@ Return ONLY compact JSON with this exact shape:
         `"${communityName}" "${communityAddress}" condo`,
       );
     }
-    if (/olani|waialii|ko\s*olina|coconut\s*plantation/i.test(`${communityName} ${communityAddress} ${canonicalStreet}`)) {
+    const koOlinaHaystack = `${communityName} ${communityAddress} ${canonicalStreet}`;
+    if (/olani|waialii|ko\s*olina|coconut\s*plantation/i.test(koOlinaHaystack)) {
       const koOlinaCity = communityLocForQueries?.city ?? "Kapolei";
       const koOlinaState = communityLocForQueries?.state ?? "Hawaii";
       const hawaiiStreetPair = (communityAddress || canonicalStreet).match(/\b(\d{1,2})-(\d{2,5})\b/);
       const streetPairTerm = hawaiiStreetPair ? `"${hawaiiStreetPair[1]}-${hawaiiStreetPair[2]}"` : "";
-      searchQueries.unshift(
-        ...(streetPairTerm ? [
-          `site:zillow.com ${streetPairTerm} Olani ${koOlinaCity}`,
-          `site:realtor.com ${streetPairTerm} Olani`,
-          `site:redfin.com ${streetPairTerm} Olani ${koOlinaCity}`,
-        ] : []),
-        `site:zillow.com Olani St "${koOlinaCity}" "${koOlinaState}"`,
-        `site:realtor.com "Coconut Plantation" "${koOlinaCity}"`,
-        `site:redfin.com Olani St "${koOlinaCity}" condo`,
-        `site:zillow.com "Coconut Plantation" Ko Olina condo`,
-      );
+      // Two DISTINCT Ko Olina resorts share the "Ko Olina"/Kapolei tokens but sit on
+      // DIFFERENT streets: Coconut Plantation at Ko Olina (Olani St) vs Ko Olina Beach
+      // Villas (Waialii Pl). Branch so we never pair one resort's hyphenated street
+      // NUMBER with the other's street NAME — doing so prepends top-priority wrong-resort
+      // queries and risks putting Coconut photos on a Beach Villas listing (or vice versa).
+      const isBeachVillas = /waialii|beach\s*villas/i.test(koOlinaHaystack);
+      if (isBeachVillas) {
+        searchQueries.unshift(
+          ...(streetPairTerm ? [
+            `site:zillow.com ${streetPairTerm} Waialii ${koOlinaCity}`,
+            `site:realtor.com ${streetPairTerm} Waialii`,
+            `site:redfin.com ${streetPairTerm} Waialii ${koOlinaCity}`,
+          ] : []),
+          `site:zillow.com Waialii Pl "${koOlinaCity}" "${koOlinaState}"`,
+          `site:realtor.com "Ko Olina Beach Villas" "${koOlinaCity}"`,
+          `site:redfin.com Waialii Pl "${koOlinaCity}" condo`,
+          `site:zillow.com "Ko Olina Beach Villas" Ko Olina condo`,
+        );
+      } else {
+        // Coconut Plantation at Ko Olina (Olani St). Also the fallback for a bare
+        // "Ko Olina" match with no Beach-Villas marker (the only Ko Olina community
+        // wired before Beach Villas was added).
+        searchQueries.unshift(
+          ...(streetPairTerm ? [
+            `site:zillow.com ${streetPairTerm} Olani ${koOlinaCity}`,
+            `site:realtor.com ${streetPairTerm} Olani`,
+            `site:redfin.com ${streetPairTerm} Olani ${koOlinaCity}`,
+          ] : []),
+          `site:zillow.com Olani St "${koOlinaCity}" "${koOlinaState}"`,
+          `site:realtor.com "Coconut Plantation" "${koOlinaCity}"`,
+          `site:redfin.com Olani St "${koOlinaCity}" condo`,
+          `site:zillow.com "Coconut Plantation" Ko Olina condo`,
+        );
+      }
     }
     // PR #338: VRBO query branch removed (operator directive).
     // Replacement photos must come from real-estate sources only —
@@ -31196,23 +31548,12 @@ Return ONLY compact JSON with this exact shape:
       return matched >= Math.min(2, terms.length);
     };
 
-    const hitMatchesUnit = (hit: any, unit: string): boolean => {
-      const normalizedUnit = normalizeSearchText(unit).replace(/\s+/g, "");
-      if (!normalizedUnit) return true;
-
-      const text = normalizeSearchText(`${hit.title || ""} ${hit.snippet || ""} ${hit.link || ""}`);
-      const unitPattern = escapeRegExp(normalizedUnit);
-
-      if (!/^\d+$/.test(normalizedUnit)) {
-        return new RegExp(`\\b${unitPattern}\\b`).test(text);
-      }
-
-      return new RegExp(
-        `\\b(?:unit|apt|apartment|condo|villa|villas|suite|regency|manualoha|makahuena|pili\\s+mai|kai\\s+nui|poipu\\s+kai|building)\\s+${unitPattern}\\b`,
-      ).test(text) || new RegExp(
-        `\\b${unitPattern}\\s+(?:unit|apt|apartment|condo|villa|villas|suite)\\b`,
-      ).test(text);
-    };
+    // Letter-coded units (Waikoloa Beach Villas "C1"/"A4"/"I4") need an ANCHORED
+    // match so a multi-unit OTA roundup snippet enumerating codes can't false-flag
+    // a clean unit as already listed; numeric units (Poipu Kai "721") are
+    // unchanged. Logic + rationale live in ./listing-unit-match (unit-tested).
+    const hitMatchesUnit = (hit: any, unit: string): boolean =>
+      hitTextMatchesUnit(unit, { title: hit?.title, snippet: hit?.snippet, link: hit?.link });
 
     async function checkOnePlatform(
       host: string,
@@ -31394,6 +31735,9 @@ Return ONLY compact JSON with this exact shape:
       }
       try {
         let { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
+        // Set when the unit-name OTA check finds this unit on an enforced channel
+        // AND allowOtaListed let it through anyway — surfaced on the accepted unit.
+        let otaListedHost: string | null = null;
         if (rejectOutsideResort(sourceUrl, source, address, unitNumber)) continue;
         const blockedUnitClaim = findReplacementBlockedUnitClaim(unitNumber, address, sameCommunityExclusions);
         if (blockedUnitClaim) {
@@ -31431,7 +31775,7 @@ Return ONLY compact JSON with this exact shape:
         // uses "bookingCom" while the API request uses "booking" —
         // map here so the body convention stays simple.
         const foundOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "found");
-        if (foundOn) {
+        if (foundOn && !allowOtaListed) {
           console.error(`[find-unit] [${source}] Unit ${unitNumber} found on ${foundOn.host} — skipping (cleanChannel=${cleanChannel ?? "all"})`);
           attempts.push({
             sourceUrl, source, address, unit: unitNumber || "?",
@@ -31440,6 +31784,13 @@ Return ONLY compact JSON with this exact shape:
             platformCheck,
           });
           continue;
+        }
+        if (foundOn && allowOtaListed) {
+          // Operator opted to include OTA-listed units (STVR-saturated community).
+          // Remember the channel and fall through — the photo-reuse gate below
+          // ("skipped-photo-found") still runs, so we never reuse OTA photos.
+          otaListedHost = foundOn.host;
+          console.error(`[find-unit] [${source}] Unit ${unitNumber} found on ${foundOn.host} — kept (allowOtaListed); real-estate photos still checked for reuse`);
         }
         if (strict) {
           const unknownOn = platformHosts.find((p) => enforcedKeys.includes(p.key) && platformCheck[p.key] === "unknown");
@@ -31660,6 +32011,10 @@ Return ONLY compact JSON with this exact shape:
               platformCheck,
               expandedSearch,
               relaxedPhotoFloor: expandedSearch && photoCount < 5,
+              // Set only when allowOtaListed kept an OTA-listed unit; the UI flags
+              // it so the operator knows the unit is already on this channel
+              // (its real-estate photos were still verified as not reused there).
+              otaListedOn: otaListedHost,
             },
           });
         }
@@ -31732,6 +32087,14 @@ Return ONLY compact JSON with this exact shape:
       if (sourceBreakdown.homes > 0) sourceParts.push(`${sourceBreakdown.homes} Homes.com`);
       if (sourceBreakdown.vrbo > 0) sourceParts.push(`${sourceBreakdown.vrbo} VRBO`);
       diagnostic = `Checked ${totalCandidates} ${totalCandidates === 1 ? "candidate" : "candidates"} (${sourceParts.join(" + ")})${expandedSearch ? " in expanded mode" : ""} — ${parts.join(", ")}.`;
+      // Saturated-community hint: when the ONLY thing standing between the operator
+      // and a result is the OTA-presence gate, point them at the opt-in. Append-only
+      // so the test-asserted "found on …Airbnb/VRBO/Booking.com" substring above is
+      // left byte-identical.
+      if (!allowOtaListed && breakdown["skipped-found"] > 0) {
+        const n = breakdown["skipped-found"];
+        diagnostic += ` ${n} ${n === 1 ? "unit was" : "units were"} already listed on a short-term-rental platform — this community is heavily rented, so few or no fully-clean units remain. Re-run with "Include units already on Airbnb/VRBO" to use one (its real-estate photos are still checked, so duplicate photos are never reused).`;
+      }
     }
 
     const uncheckedCandidates = budgetStopped
@@ -31756,6 +32119,7 @@ Return ONLY compact JSON with this exact shape:
         strict,
         expandedSearch,
         skipDiscovery,
+        allowOtaListed,
         totalCandidates,
         sourceBreakdown,
         breakdown,
@@ -32162,6 +32526,13 @@ Return ONLY compact JSON with this exact shape:
     error: string | null;
     attemptCount: number;
     heartbeatAt: number | null;
+    // Bedroom sizes actually used to source each unit after any re-mix fallback
+    // (equal to the requested sizes when no re-mix happened). Drives the bulk
+    // listing copy/save so a re-mixed 3BR+3BR -> 4BR+2BR is recorded correctly.
+    resolvedUnit1Bedrooms?: number | null;
+    resolvedUnit2Bedrooms?: number | null;
+    remixApplied?: boolean;
+    unit2PhotosReused?: boolean;
   };
   type ComboPhotoFetchJob = {
     id: string;
@@ -32185,6 +32556,25 @@ Return ONLY compact JSON with this exact shape:
   const COMBO_PHOTO_FETCH_HEARTBEAT_MS = 15_000;
   const COMBO_PHOTO_FETCH_STALE_HEARTBEAT_MS = 2 * 60 * 1000;
   const COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS = 12_000;
+  // Bedroom re-mix fallback: when a same-size combo (e.g. 3BR + 3BR) can't find
+  // two DISTINCT units, re-mix to a same-total different-size split (3+3 -> 4+2)
+  // so each half draws from a different inventory pool. Photo reuse is the final
+  // safety net (reuse Unit A's photos for Unit B) so a combo is never saved with
+  // a blank second unit. All env-tunable; default ON per operator request.
+  const COMBO_REMIX_ENABLED = process.env.COMBO_REMIX_ENABLED !== "0";
+  const COMBO_PHOTO_REUSE_ENABLED = process.env.COMBO_PHOTO_REUSE_ENABLED !== "0";
+  // No 5BR condos exist in these communities — cap each re-mixed half at 4BR.
+  const COMBO_REMIX_MAX_UNIT_BEDROOMS = Math.max(1, Number(process.env.COMBO_REMIX_MAX_UNIT_BEDROOMS) || 4);
+  const COMBO_REMIX_MAX_SPLITS = Math.max(1, Number(process.env.COMBO_REMIX_MAX_SPLITS) || 2);
+  // STRICT mode (bulk combo listing queue): when a combo can't source two
+  // DISTINCT, independently-photographed units, try OTHER combination types
+  // ("keep beds high, then step down": same-total re-mix -> smaller totals ->
+  // 2BR+2BR floor) and, if none yield photos, SKIP the resort (never save a
+  // listing without real photos for both units). Photo-reuse is force-OFF here.
+  const COMBO_FALLBACK_MAX_LADDER = Math.max(1, Number(process.env.COMBO_FALLBACK_MAX_LADDER) || 5);
+  // Floor each strict-fallback half at 2BR (the operator's "two 2BR condos") —
+  // never drop a strict listing to a 1BR unit.
+  const COMBO_FALLBACK_MIN_UNIT_BEDROOMS = Math.max(1, Number(process.env.COMBO_FALLBACK_MIN_UNIT_BEDROOMS) || 2);
   const toQueueMs = (value: Date | string | number | null | undefined): number | null => {
     if (!value) return null;
     if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -32543,7 +32933,13 @@ Return ONLY compact JSON with this exact shape:
     onProgress?: (item: ComboPhotoFetchItem) => Promise<void> | void,
     abortKey?: string,
     signal?: AbortSignal,
+    options: { strictDistinctBothUnits?: boolean } = {},
   ) => {
+    // STRICT mode (bulk combo listing queue): require two DISTINCT, photographed
+    // units. Walk a wider combination-type ladder (same-total re-mix -> smaller
+    // totals -> 2BR+2BR), NEVER reuse Unit A's photos for Unit B, and THROW (no
+    // dashboard save) if no combination type yields photos for both halves.
+    const strictDistinctBothUnits = options.strictDistinctBothUnits === true;
     const persistProgress = async () => {
       item.heartbeatAt = Date.now();
       job.updatedAt = Date.now();
@@ -32626,6 +33022,123 @@ Return ONLY compact JSON with this exact shape:
       await persistProgress();
     }
 
+    // ── Combination-type fallback ladder ──────────────────────────────────────
+    // If a unit came back starved (no DISTINCT listing for this community at that
+    // bedroom count), try alternative bedroom combination types and re-search
+    // BOTH halves. Only commit a candidate when BOTH return real, distinct
+    // galleries — otherwise the original result is preserved.
+    //   • non-strict (photos-tab combo fetch): same-total SPLITS only (3+3 -> 4+2).
+    //   • STRICT (bulk listing queue): the wider "keep beds high, then step down"
+    //     ladder — same-total re-mix, then smaller totals down to 2BR+2BR — so a
+    //     resort that can't fill a 6BR can still be saved as a photographed 4BR
+    //     rather than skipped (and is skipped only when NOTHING photographs).
+    const unitsAreSearchMode = !item.unit1?.url && !item.unit2?.url;
+    let remixApplied = false;
+    let unit2PhotosReused = false;
+    // Every combination type we attempted (the requested combo + each fallback we
+    // walked) — surfaced in the STRICT failure message so the operator can see
+    // exactly what was tried before the resort was skipped.
+    const triedComboTypes: string[] = [];
+    if (typeof item.unit1?.bedrooms === "number" && typeof item.unit2?.bedrooms === "number") {
+      triedComboTypes.push(`${item.unit1.bedrooms}BR+${item.unit2.bedrooms}BR`);
+    }
+    const unit1Starved = item.unit1Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS;
+    const unit2Starved = item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS;
+    const unitsLookDuplicate = strictDistinctBothUnits
+      && !unit1Starved && !unit2Starved
+      && photoSetLooksSameForComboPhotoJob(item.unit1Photos, item.unit2Photos);
+    const needsFallbackCombo = strictDistinctBothUnits
+      ? (unit1Starved || unit2Starved || unitsLookDuplicate)
+      : unit2Starved;
+    if (
+      COMBO_REMIX_ENABLED
+      && unitsAreSearchMode
+      && needsFallbackCombo
+      && canComboPhotoFetchUnit(item, item.unit1)
+      && canComboPhotoFetchUnit(item, item.unit2)
+      && typeof item.unit1?.bedrooms === "number"
+      && typeof item.unit2?.bedrooms === "number"
+    ) {
+      const origUnit1Beds = item.unit1.bedrooms;
+      const origUnit2Beds = item.unit2.bedrooms;
+      const origTotal = origUnit1Beds + origUnit2Beds;
+      const fallbackSplits = strictDistinctBothUnits
+        ? comboFallbackPairings(origUnit1Beds, origUnit2Beds, {
+            maxUnitBeds: COMBO_REMIX_MAX_UNIT_BEDROOMS,
+            minUnitBeds: COMBO_FALLBACK_MIN_UNIT_BEDROOMS,
+            sameTotalLimit: COMBO_REMIX_MAX_SPLITS,
+            limit: COMBO_FALLBACK_MAX_LADDER,
+          })
+        : remixBedroomSplits(origUnit1Beds, origUnit2Beds, {
+            maxUnitBeds: COMBO_REMIX_MAX_UNIT_BEDROOMS,
+            limit: COMBO_REMIX_MAX_SPLITS,
+          });
+      for (const split of fallbackSplits) {
+        if (job.cancelRequested) break;
+        triedComboTypes.push(`${split.unit1Beds}BR+${split.unit2Beds}BR`);
+        const splitTotal = split.unit1Beds + split.unit2Beds;
+        const totalNote = splitTotal === origTotal ? `${splitTotal}BR` : `smaller ${splitTotal}BR`;
+        const remixUnit1: ComboPhotoFetchUnit = { ...item.unit1, bedrooms: split.unit1Beds, title: `Unit A — ${split.unit1Beds}BR` };
+        const remixUnit2: ComboPhotoFetchUnit = { ...item.unit2, bedrooms: split.unit2Beds, title: `Unit B — ${split.unit2Beds}BR` };
+        const reA = await runWithHeartbeat(
+          `No distinct ${origUnit1Beds}BR+${origUnit2Beds}BR units — trying a ${totalNote} ${split.unit1Beds}BR + ${split.unit2Beds}BR combo (searching ${split.unit1Beds}BR)`,
+          () => fetchComboPhotosForUnit(job, item, remixUnit1, [], [], abortKey, signal, otaProgress),
+        );
+        if (reA.photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) continue;
+        const reB = await runWithHeartbeat(
+          `${totalNote} ${split.unit1Beds}BR + ${split.unit2Beds}BR combo — searching a distinct ${split.unit2Beds}BR second unit`,
+          () => fetchComboPhotosForUnit(job, item, remixUnit2, reA.sourceUrl ? [reA.sourceUrl] : [], reA.photos, abortKey, signal, otaProgress),
+        );
+        let reBPhotos = reB.photos;
+        if (reA.photos.length > 0 && photoSetLooksSameForComboPhotoJob(reA.photos, reBPhotos)) reBPhotos = [];
+        if (reBPhotos.length < MIN_INDEPENDENT_UNIT_PHOTOS) continue;
+        // Both halves sourced & distinct — commit this combination type.
+        item.unit1Photos = reA.photos;
+        item.unit1SourceUrl = reA.sourceUrl;
+        item.unit1Proof = reA.proof;
+        item.unit2Photos = reBPhotos;
+        item.unit2SourceUrl = reB.sourceUrl;
+        item.unit2Proof = reBPhotos.length === reB.photos.length
+          ? reB.proof
+          : buildUnitPhotoResolverProof({ photos: reBPhotos, sourceUrl: reB.sourceUrl, requestedBedrooms: split.unit2Beds, relaxedSearch: reB.relaxed });
+        item.unit1 = remixUnit1;
+        item.unit2 = remixUnit2;
+        item.message = `Re-mixed to ${split.unit1Beds}BR + ${split.unit2Beds}BR (${totalNote} combo; ${reA.photos.length} + ${reBPhotos.length} photos)`;
+        remixApplied = true;
+        await persistProgress();
+        break;
+      }
+    }
+
+    // ── Photo-reuse fallback (final safety net) ───────────────────────────────
+    // If the second unit is STILL starved, reuse Unit A's photos for Unit B so a
+    // combo is never saved with a blank second unit. Original sizes are kept.
+    // SKIPPED in STRICT mode: the bulk listing queue must never save a listing
+    // whose two units share photos — it fails (and skips the resort) instead.
+    if (
+      !strictDistinctBothUnits
+      && COMBO_PHOTO_REUSE_ENABLED
+      && !item.unit2?.url
+      && item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS
+      && item.unit1Photos.length >= MIN_INDEPENDENT_UNIT_PHOTOS
+    ) {
+      item.unit2Photos = item.unit1Photos.map((p) => ({ ...p }));
+      item.unit2SourceUrl = item.unit1SourceUrl;
+      item.unit2Proof = buildUnitPhotoResolverProof({
+        photos: item.unit2Photos,
+        sourceUrl: item.unit2SourceUrl,
+        requestedBedrooms: item.unit2?.bedrooms ?? null,
+      });
+      unit2PhotosReused = true;
+      item.message = "Reused Unit A photos for Unit B (no distinct second unit found)";
+      await persistProgress();
+    }
+
+    item.resolvedUnit1Bedrooms = item.unit1?.bedrooms ?? null;
+    item.resolvedUnit2Bedrooms = item.unit2?.bedrooms ?? null;
+    item.remixApplied = remixApplied;
+    item.unit2PhotosReused = unit2PhotosReused;
+
     item.phase = "done";
     const total = item.unit1Photos.length + item.unit2Photos.length;
     const proofFailures: string[] = [];
@@ -32646,7 +33159,7 @@ Return ONLY compact JSON with this exact shape:
     if (item.unit1Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS || item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
       proofFailures.push(`one or both units had fewer than ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos`);
     }
-    if (item.unit1Proof && item.unit2Proof) {
+    if (item.unit1Proof && item.unit2Proof && !item.unit2PhotosReused) {
       const comparison = compareUnitPhotoProofs(item.unit1Proof, item.unit2Proof);
       if (comparison.duplicate) {
         proofFailures.push(`Unit A and Unit B are not independent (${comparison.issues.join(", ") || "duplicate-photo-overlap"}; overlap ${comparison.overlapCount}, ratio ${comparison.overlapRatio.toFixed(2)})`);
@@ -32655,7 +33168,15 @@ Return ONLY compact JSON with this exact shape:
     item.message = total > 0 ? `${total} photos fetched` : "No photos were found";
     await persistProgress();
     if (proofFailures.length > 0) {
-      throw new Error(`Photo discovery failed proof checks: ${proofFailures.join(" | ")}`);
+      if (strictDistinctBothUnits && triedComboTypes.length > 0) {
+        proofFailures.push(`no combination type produced two independently-photographed units (tried ${Array.from(new Set(triedComboTypes)).join(", ")})`);
+      }
+      const err = new Error(`Photo discovery failed proof checks: ${proofFailures.join(" | ")}`) as Error & { bulkComboNoRetry?: boolean };
+      // STRICT: ladder-exhaustion is deterministic — re-running the same combos
+      // just burns another 12-min photo budget, so fail FAST (no retry) and let
+      // the bulk queue skip this resort instead of saving a photo-less listing.
+      if (strictDistinctBothUnits) err.bulkComboNoRetry = true;
+      throw err;
     }
   };
   const runComboPhotoFetchJob = async (jobId: string) => {
@@ -33207,6 +33728,15 @@ Return ONLY compact JSON with this exact shape:
     error: string | null;
     attemptCount: number;
     heartbeatAt: number | null;
+    // Re-mix / photo-reuse tracking (durable; surfaced in the queue UI + history).
+    // effectiveUnit*Beds are the bedroom sizes actually sourced + saved (after any
+    // re-mix); they equal the requested pairing sizes when no re-mix happened.
+    effectiveUnit1Beds?: number | null;
+    effectiveUnit2Beds?: number | null;
+    remixApplied?: boolean;
+    unit2PhotosReused?: boolean;
+    // Worker restarts/interruptions that stopped this item mid-run (bounded reprieve).
+    interruptions?: number | null;
   };
   type BulkComboListingJob = {
     id: string;
@@ -33226,6 +33756,11 @@ Return ONLY compact JSON with this exact shape:
   };
   const activeBulkComboListingJobIds = new Set<string>();
   const BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS = 3;
+  // A "running" item recovered by recoverStaleBulkComboListingJob was ALWAYS
+  // interrupted (genuine failures exit as status="failed", never "running"), so a
+  // deploy/restart mid-listing gets up to this many fresh restarts before we give
+  // up — instead of permanently dropping a viable listing at max attempts.
+  const BULK_COMBO_LISTING_MAX_INTERRUPTIONS = 3;
   const BULK_COMBO_LISTING_STALE_MS = 5 * 60 * 1000;
   const BULK_COMBO_LISTING_RESUME_INTERVAL_MS = 60 * 1000;
   const BULK_COMBO_LISTING_RETRY_BACKOFF_MS = [15_000, 45_000];
@@ -33336,6 +33871,11 @@ Return ONLY compact JSON with this exact shape:
           error: item.error,
           attemptCount: item.attemptCount,
           heartbeatAt: bulkComboDate(item.heartbeatAt),
+          effectiveUnit1Beds: item.effectiveUnit1Beds ?? null,
+          effectiveUnit2Beds: item.effectiveUnit2Beds ?? null,
+          remixApplied: item.remixApplied ?? false,
+          unit2PhotosReused: item.unit2PhotosReused ?? false,
+          interruptions: item.interruptions ?? 0,
           sortOrder,
           startedAt: bulkComboDate(item.startedAt),
           finishedAt: bulkComboDate(item.finishedAt),
@@ -33343,6 +33883,22 @@ Return ONLY compact JSON with this exact shape:
         })
         .where(and(eq(bulkComboListingJobItemRows.jobId, job.id), eq(bulkComboListingJobItemRows.itemKey, item.id)));
     }
+  };
+  // Persist a discovered/backfilled street into the item's payload so it survives a
+  // worker restart and shows up in diagnostics. persistBulkComboListingSnapshot does
+  // NOT write payload, so this is a targeted merge-write for the one item.
+  const persistBulkComboItemStreetAddress = async (jobId: string, itemKey: string, street: string) => {
+    const [row] = await db
+      .select({ payload: bulkComboListingJobItemRows.payload })
+      .from(bulkComboListingJobItemRows)
+      .where(and(eq(bulkComboListingJobItemRows.jobId, jobId), eq(bulkComboListingJobItemRows.itemKey, itemKey)))
+      .limit(1);
+    const payload = (row?.payload && typeof row.payload === "object" ? { ...(row.payload as Record<string, unknown>) } : {}) as Record<string, unknown>;
+    payload.streetAddress = street;
+    await db
+      .update(bulkComboListingJobItemRows)
+      .set({ payload, updatedAt: new Date() })
+      .where(and(eq(bulkComboListingJobItemRows.jobId, jobId), eq(bulkComboListingJobItemRows.itemKey, itemKey)));
   };
   const loadBulkComboListingJob = async (jobId: string): Promise<BulkComboListingJob | null> => {
     const [jobRow] = await db.select().from(bulkComboListingJobRows).where(eq(bulkComboListingJobRows.id, jobId)).limit(1);
@@ -33371,6 +33927,11 @@ Return ONLY compact JSON with this exact shape:
         error: row.error ?? null,
         attemptCount: row.attemptCount ?? 0,
         heartbeatAt: toBulkComboMs(row.heartbeatAt),
+        effectiveUnit1Beds: row.effectiveUnit1Beds ?? null,
+        effectiveUnit2Beds: row.effectiveUnit2Beds ?? null,
+        remixApplied: Boolean(row.remixApplied),
+        unit2PhotosReused: Boolean(row.unit2PhotosReused),
+        interruptions: row.interruptions ?? 0,
       };
     });
     for (const item of items) hydrateBulkComboListingItem(item);
@@ -33403,18 +33964,34 @@ Return ONLY compact JSON with this exact shape:
     let dropped = 0;
     for (const item of job.items) {
       if (item.status !== "running" || (!leaseExpired && !isBulkComboListingStale(item))) continue;
+      // A "running" item here was INTERRUPTED (deploy/restart/crash) — genuine
+      // failures exit the retry loop as status="failed", never "running". So don't
+      // permanently drop it just because the interruption consumed its last attempt;
+      // give it a bounded number of fresh restarts (one more genuine attempt each).
       if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
-        item.status = "failed";
-        item.phase = "failed";
-        item.message = `Worker heartbeat went stale after ${BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS} attempts; dropping this listing`;
-        item.error = item.message;
-        item.finishedAt = now;
-        item.heartbeatAt = now;
-        dropped += 1;
+        if ((item.interruptions ?? 0) < BULK_COMBO_LISTING_MAX_INTERRUPTIONS) {
+          item.interruptions = (item.interruptions ?? 0) + 1;
+          item.attemptCount = BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS - 1; // one more genuine attempt
+          item.status = "queued";
+          item.phase = "retrying";
+          item.message = `Worker stopped mid-listing (restart ${item.interruptions}/${BULK_COMBO_LISTING_MAX_INTERRUPTIONS}); re-queued for another attempt`;
+          item.error = null;
+          item.finishedAt = null;
+          item.heartbeatAt = null;
+          reset += 1;
+        } else {
+          item.status = "failed";
+          item.phase = "failed";
+          item.message = `Dropped after ${BULK_COMBO_LISTING_MAX_INTERRUPTIONS} worker restarts mid-listing without completing`;
+          item.error = item.message;
+          item.finishedAt = now;
+          item.heartbeatAt = now;
+          dropped += 1;
+        }
       } else {
         item.status = "queued";
         item.phase = "retrying";
-        item.message = "Previous worker heartbeat went stale; retrying this listing";
+        item.message = "Worker stopped mid-listing; re-queued to retry";
         item.error = null;
         item.finishedAt = null;
         item.heartbeatAt = null;
@@ -33563,9 +34140,17 @@ Return ONLY compact JSON with this exact shape:
       .replace(/[^a-z0-9]+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
+  // Bedroom sizes actually saved for this item — the re-mixed sizes when a
+  // re-mix happened, otherwise the requested pairing. Idempotency/dedup must key
+  // off these so a re-mixed item still finds its own draft on a retry.
+  const effectiveBulkComboBeds = (item: BulkComboListingItem) => {
+    const pairing = item.pairing || ({} as BulkComboListingItem["pairing"]);
+    const unit1Beds = Number(item.effectiveUnit1Beds ?? pairing?.unit1Beds ?? 0);
+    const unit2Beds = Number(item.effectiveUnit2Beds ?? pairing?.unit2Beds ?? 0);
+    return { unit1Beds, unit2Beds, totalBeds: unit1Beds + unit2Beds };
+  };
   const draftBedroomsMatchBulkComboItem = (draft: any, item: BulkComboListingItem) => {
-    const unit1Beds = Number(item.pairing?.unit1Beds || 0);
-    const unit2Beds = Number(item.pairing?.unit2Beds || 0);
+    const { unit1Beds, unit2Beds } = effectiveBulkComboBeds(item);
     const draft1Beds = Number(draft?.unit1Bedrooms || 0);
     const draft2Beds = Number(draft?.unit2Bedrooms || 0);
     return (draft1Beds === unit1Beds && draft2Beds === unit2Beds) || (draft1Beds === unit2Beds && draft2Beds === unit1Beds);
@@ -33584,7 +34169,7 @@ Return ONLY compact JSON with this exact shape:
     streetAddress: string | null | undefined,
   ): Promise<number | null> => {
     const community = item.community || {};
-    const expectedBedrooms = Number(item.pairing?.totalBeds || (item.pairing?.unit1Beds || 0) + (item.pairing?.unit2Beds || 0));
+    const expectedBedrooms = effectiveBulkComboBeds(item).totalBeds;
     const expectedName = normalizeQueueText(community.name);
     const expectedCity = normalizeQueueText(community.city);
     const expectedState = normalizeQueueText(community.state);
@@ -33594,6 +34179,11 @@ Return ONLY compact JSON with this exact shape:
 
     for (const draft of drafts as any[]) {
       if (draft.singleListing) continue;
+      // Only reuse a FULLY-PHOTOGRAPHED draft. A photo-less draft (e.g. one left
+      // by a run interrupted between save and persist) must NOT be treated as a
+      // finished combo — otherwise the queue would short-circuit to "done" on a
+      // listing that has no photos.
+      if (!draft.unit1PhotoFolder || !draft.unit2PhotoFolder) continue;
       if (normalizeQueueText(draft.name) !== expectedName) continue;
       if (expectedCity && normalizeQueueText(draft.city) !== expectedCity) continue;
       if (expectedState && normalizeQueueText(draft.state) !== expectedState) continue;
@@ -33610,7 +34200,7 @@ Return ONLY compact JSON with this exact shape:
   };
   const bulkComboIdempotencyKey = (jobId: string, item: BulkComboListingItem) => {
     const community = item.community || {};
-    const pairing = item.pairing || {};
+    const eff = effectiveBulkComboBeds(item);
     return [
       "bulk-combo",
       jobId,
@@ -33618,21 +34208,59 @@ Return ONLY compact JSON with this exact shape:
       normalizeQueueText(community.name),
       normalizeQueueText(community.city),
       normalizeQueueText(community.state),
-      pairing.unit1Beds ?? "",
-      pairing.unit2Beds ?? "",
-      pairing.totalBeds ?? "",
+      eff.unit1Beds || "",
+      eff.unit2Beds || "",
+      eff.totalBeds || "",
     ].join(":");
   };
+  // A combo photo gate failure (no photographed combination, or photos couldn't be
+  // persisted for both units) — tagged so the bulk queue skips the resort WITHOUT
+  // burning retries and never leaves a photo-less listing behind.
+  const makeComboPhotoGateError = (msg: string) =>
+    Object.assign(new Error(msg), { bulkComboNoRetry: true }) as Error & { bulkComboNoRetry: boolean };
   const runBulkComboListingItem = async (job: BulkComboListingJob, item: BulkComboListingItem) => {
     hydrateBulkComboListingItem(item);
+    // Resume short-circuit: only treat the item as done when its draft actually
+    // has photos persisted for BOTH units. A draftId alone is NOT proof of photos
+    // — a run interrupted between /api/community/save and the persist step leaves
+    // a photo-less draft with draftId set. If the draft is NOT fully photographed,
+    // DROP it and re-run from scratch (clearing item.draftId), rather than trying
+    // to re-persist into the same id. Re-running fresh keeps the retry path clean
+    // (a transient pre-persist error can still retry because item.draftId is null)
+    // and means persist always targets a freshly-created draft — so we never
+    // report a photo-less or non-existent draft as a completed listing.
     if (item.draftId) {
-      item.status = "completed";
-      item.phase = "done";
-      item.message = `Draft #${item.draftId} already saved to dashboard`;
-      item.finishedAt = item.finishedAt ?? Date.now();
+      // A THROWN read error must NOT be read as "draft missing" — that would
+      // delete a possibly-good (already-photographed) draft. Only the SUCCESSFUL
+      // read of a missing / photo-less draft triggers the drop-and-rerun. On a
+      // transient DB read error, clear the in-memory draftId (so the item is
+      // retryable — the retry guard keys off `!item.draftId`) and rethrow WITHOUT
+      // deleting: the draft row is left intact and re-found by
+      // findExistingBulkComboDraftId on the retry if it is photographed.
+      let existingDraft: Awaited<ReturnType<typeof storage.getCommunityDraft>>;
+      try {
+        existingDraft = await storage.getCommunityDraft(item.draftId);
+      } catch (e: any) {
+        const staleId = item.draftId;
+        item.draftId = null;
+        throw new Error(`Could not verify draft #${staleId} on resume (transient DB read): ${e?.message ?? e}`);
+      }
+      if (existingDraft?.unit1PhotoFolder && existingDraft?.unit2PhotoFolder) {
+        item.status = "completed";
+        item.phase = "done";
+        item.message = `Draft #${item.draftId} already saved to dashboard`;
+        item.finishedAt = item.finishedAt ?? Date.now();
+        job.updatedAt = Date.now();
+        await persistBulkComboListingSnapshot(job);
+        return;
+      }
+      const droppedDraftId = item.draftId;
+      await storage.deleteCommunityDraft(droppedDraftId).catch((e: any) =>
+        console.warn(`[bulk-combo-listings] could not drop interrupted photo-less draft ${droppedDraftId}: ${e?.message ?? e}`));
+      item.draftId = null;
+      item.message = `Re-running ${item.label} from scratch (a previous run was interrupted before photos saved)`;
       job.updatedAt = Date.now();
       await persistBulkComboListingSnapshot(job);
-      return;
     }
     const community = item.community || {};
     const pairing = item.pairing;
@@ -33682,47 +34310,87 @@ Return ONLY compact JSON with this exact shape:
     await persistBulkComboListingSnapshot(job);
     const abortKey = `bulk-combo-listing:${job.id}`;
     await runBulkComboListingStep(job, item, "photos", "Fetching unit photos", async () => {
-      try {
-        await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
-          item.unit1Photos = updatedPhotoItem.unit1Photos;
-          item.unit2Photos = updatedPhotoItem.unit2Photos;
-          item.unit1SourceUrl = updatedPhotoItem.unit1SourceUrl;
-          item.unit2SourceUrl = updatedPhotoItem.unit2SourceUrl;
-          item.message = updatedPhotoItem.message || item.message;
-          item.heartbeatAt = Date.now();
-          job.updatedAt = Date.now();
-          await persistBulkComboListingSnapshot(job);
-        }, abortKey);
-      } catch (e: any) {
-        if (job.cancelRequested || e?.cancelled || isBulkComboListingTimeout(e)) throw e;
-        const message = e?.message ?? String(e);
-        if (!/Photo discovery failed proof checks|No photos were found|no-unit-photo-source|missing-source-url/i.test(message)) throw e;
-        item.unit1Photos = photoItem.unit1Photos;
-        item.unit2Photos = photoItem.unit2Photos;
-        item.unit1SourceUrl = photoItem.unit1SourceUrl;
-        item.unit2SourceUrl = photoItem.unit2SourceUrl;
-        item.message = "Photo discovery needs manual review; continuing draft save";
-        await queueEvent("bulk-combo-listing", job.id, "photos-review", item.message, {
-          itemKey: item.id,
-          level: "warn",
-          meta: { error: message },
-        });
-      }
+      // STRICT: require two DISTINCT, independently-photographed units. Photo
+      // discovery walks the combination-type ladder (same-total re-mix -> smaller
+      // totals -> 2BR+2BR) and, if NOTHING photographs both halves, THROWS. We no
+      // longer swallow that failure to "continue the draft save" — a combo listing
+      // is NEVER saved to the dashboard without real photos for both units; the
+      // throw fails this item so the queue skips the resort and moves on.
+      await runComboPhotoFetchItem(job as unknown as ComboPhotoFetchJob, photoItem, async (updatedPhotoItem) => {
+        item.unit1Photos = updatedPhotoItem.unit1Photos;
+        item.unit2Photos = updatedPhotoItem.unit2Photos;
+        item.unit1SourceUrl = updatedPhotoItem.unit1SourceUrl;
+        item.unit2SourceUrl = updatedPhotoItem.unit2SourceUrl;
+        item.message = updatedPhotoItem.message || item.message;
+        item.heartbeatAt = Date.now();
+        job.updatedAt = Date.now();
+        await persistBulkComboListingSnapshot(job);
+      }, abortKey, undefined, { strictDistinctBothUnits: true });
     });
     item.unit1Photos = photoItem.unit1Photos;
     item.unit2Photos = photoItem.unit2Photos;
     item.unit1SourceUrl = photoItem.unit1SourceUrl;
     item.unit2SourceUrl = photoItem.unit2SourceUrl;
+    // Adopt any bedroom re-mix decided during photo discovery so the listing copy
+    // and the saved draft reflect the units we actually sourced (e.g. 3+3 -> 4+2).
+    item.effectiveUnit1Beds = photoItem.resolvedUnit1Bedrooms ?? pairing.unit1Beds;
+    item.effectiveUnit2Beds = photoItem.resolvedUnit2Bedrooms ?? pairing.unit2Beds;
+    item.remixApplied = photoItem.remixApplied ?? false;
+    item.unit2PhotosReused = photoItem.unit2PhotosReused ?? false;
+    const effUnit1Beds = Number(item.effectiveUnit1Beds) || pairing.unit1Beds;
+    const effUnit2Beds = Number(item.effectiveUnit2Beds) || pairing.unit2Beds;
+    const effTotalBeds = effUnit1Beds + effUnit2Beds;
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
+    if (item.remixApplied) {
+      const requestedTotal = pairing.unit1Beds + pairing.unit2Beds;
+      const totalNote = effTotalBeds === requestedTotal
+        ? `${effTotalBeds}BR preserved`
+        : `stepped down to a ${effTotalBeds}BR combo`;
+      await queueEvent("bulk-combo-listing", job.id, "remix",
+        `Could not photograph the requested ${pairing.unit1Beds}BR+${pairing.unit2Beds}BR — switched to ${effUnit1Beds}BR+${effUnit2Beds}BR (${totalNote})`,
+        { itemKey: item.id, level: "info", meta: { from: [pairing.unit1Beds, pairing.unit2Beds], to: [effUnit1Beds, effUnit2Beds] } });
+    } else if (item.unit2PhotosReused) {
+      await queueEvent("bulk-combo-listing", job.id, "photo-reuse",
+        "No distinct second unit found — reused Unit A photos for Unit B",
+        { itemKey: item.id, level: "warn", meta: { unit1Beds: effUnit1Beds, unit2Beds: effUnit2Beds } });
+    }
+
+    // A re-mix that STEPPED DOWN to a different combo type (e.g. 3+3 -> 2+2) can
+    // collide with another combo already saved or queued for this community. The
+    // enqueue occupied-key guard only ever saw the REQUESTED key, so re-check the
+    // EFFECTIVE key now and skip-as-duplicate rather than mint a second listing
+    // for the same community+size.
+    const requestedComboKey = comboKeyForBeds(pairing.unit1Beds, pairing.unit2Beds);
+    const effectiveComboKey = comboKeyForBeds(effUnit1Beds, effUnit2Beds);
+    if (effectiveComboKey && effectiveComboKey !== requestedComboKey) {
+      const inventory = await getComboInventoryForCommunity({
+        communityName: community.name,
+        city: community.city,
+        state: community.state,
+      }).catch(() => null);
+      if (inventory?.occupiedKeys.has(effectiveComboKey)) {
+        item.phase = "done";
+        item.status = "completed";
+        item.message = `Skipped — a ${comboLabelForKey(effectiveComboKey)} combo already exists or is queued for ${community.name || "this community"} (the requested ${requestedComboKey ? comboLabelForKey(requestedComboKey) : "combo"} had no photos and re-mixed onto an existing combo)`;
+        item.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+        await queueEvent("bulk-combo-listing", job.id, "duplicate-skip", item.message, {
+          itemKey: item.id, level: "info",
+          meta: { requested: requestedComboKey, effective: effectiveComboKey },
+        });
+        await persistBulkComboListingSnapshot(job);
+        return;
+      }
+    }
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
     const generated = await runBulkComboListingStep(job, item, "copy", "Generating listing draft", () => fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/generate-listing`, {
       communityName: community.name,
       city: community.city,
       state: community.state,
-      unit1: { bedrooms: pairing.unit1Beds, url: "", address: undefined },
-      unit2: { bedrooms: pairing.unit2Beds, url: "", address: undefined },
+      unit1: { bedrooms: effUnit1Beds, url: "", address: undefined },
+      unit2: { bedrooms: effUnit2Beds, url: "", address: undefined },
       suggestedRate: pairing.estimatedSellRate,
     }, { abortKey, timeoutMs: 120_000 }));
 
@@ -33742,9 +34410,15 @@ Return ONLY compact JSON with this exact shape:
     item.streetAddress = validatedStreet;
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
-    let draftId = await findExistingBulkComboDraftId(item, generated, validatedStreet);
     const idempotencyKey = bulkComboIdempotencyKey(job.id, item);
-    if (draftId) {
+    // `reusedExistingDraft` = a DIFFERENT, already-fully-photographed draft we
+    // dedup onto (it keeps its own photos, so its persist stays best-effort).
+    // `findExistingBulkComboDraftId` only returns fully-photographed drafts, so a
+    // freshly-saved draft (the else branch) always gets the hard photo gate +
+    // roll-back below.
+    let draftId: number | null = await findExistingBulkComboDraftId(item, generated, validatedStreet);
+    const reusedExistingDraft = !!(draftId && draftId > 0);
+    if (reusedExistingDraft) {
       item.draftId = draftId;
       item.message = `Using existing draft #${draftId}; skipping duplicate dashboard save`;
       job.updatedAt = Date.now();
@@ -33765,7 +34439,7 @@ Return ONLY compact JSON with this exact shape:
         minimumStayEvidence: community.minimumStayEvidence ?? null,
         minimumStaySourceUrl: community.minimumStaySourceUrl ?? null,
         unit1Url: item.unit1SourceUrl,
-        unit1Bedrooms: pairing.unit1Beds,
+        unit1Bedrooms: effUnit1Beds,
         unit1Bathrooms: generated.unitA?.bathrooms ?? null,
         unit1Sqft: generated.unitA?.sqft ?? null,
         unit1MaxGuests: generated.unitA?.maxGuests ?? null,
@@ -33773,14 +34447,14 @@ Return ONLY compact JSON with this exact shape:
         unit1ShortDescription: generated.unitA?.shortDescription ?? null,
         unit1LongDescription: generated.unitA?.longDescription ?? null,
         unit2Url: item.unit2SourceUrl,
-        unit2Bedrooms: pairing.unit2Beds,
+        unit2Bedrooms: effUnit2Beds,
         unit2Bathrooms: generated.unitB?.bathrooms ?? null,
         unit2Sqft: generated.unitB?.sqft ?? null,
         unit2MaxGuests: generated.unitB?.maxGuests ?? null,
         unit2Bedding: generated.unitB?.bedding ?? null,
         unit2ShortDescription: generated.unitB?.shortDescription ?? null,
         unit2LongDescription: generated.unitB?.longDescription ?? null,
-        combinedBedrooms: pairing.totalBeds || pairing.unit1Beds + pairing.unit2Beds,
+        combinedBedrooms: effTotalBeds,
         suggestedRate: pairing.estimatedSellRate,
         listingTitle: generated.title ?? null,
         bookingTitle: generated.bookingTitle ?? generated.title ?? null,
@@ -33798,22 +34472,59 @@ Return ONLY compact JSON with this exact shape:
       }, { abortKey, timeoutMs: 120_000 }));
       draftId = Number(saveData?.id);
     }
-    if (!Number.isFinite(draftId) || draftId <= 0) {
+    if (draftId == null || !Number.isFinite(draftId) || draftId <= 0) {
       throw new Error("Dashboard save step failed: save did not return a draft id");
     }
     item.draftId = draftId;
-    await runBulkComboListingStep(job, item, "persist", "Persisting photos and starting pricing", async () => {
-      if (item.unit1Photos.length > 0 || item.unit2Photos.length > 0) {
-        await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
-          unit1Photos: item.unit1Photos.map((p) => p.url),
-          unit2Photos: item.unit2Photos.map((p) => p.url),
-          unit1SourceUrl: item.unit1SourceUrl,
-          unit2SourceUrl: item.unit2SourceUrl,
-        }, { abortKey, timeoutMs: 120_000 }).catch((e: any) => {
-          item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`;
-        });
+    // HARD photo gate: actually DOWNLOAD + persist the discovered photos for both
+    // units. Discovery only proved that photo URLs exist; persist-photos re-fetches
+    // them and 409s if either unit ends with < MIN real photos or the two sets are
+    // duplicates. For a freshly-saved or interrupted-own draft we must NEVER leave a
+    // photo-less row on the dashboard, so on failure we ROLL BACK the draft and fail
+    // the item (the queue then skips the resort). A reused, already-photographed
+    // draft keeps its existing photos, so its persist stays best-effort.
+    try {
+      await runBulkComboListingStep(job, item, "persist", "Persisting photos and starting pricing", async () => {
+        if (item.unit1Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS || item.unit2Photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
+          if (reusedExistingDraft) return;
+          throw makeComboPhotoGateError(`fewer than ${MIN_INDEPENDENT_UNIT_PHOTOS} discovered photos for one or both units`);
+        }
+        let persistData: any;
+        try {
+          persistData = await fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, {
+            unit1Photos: item.unit1Photos.map((p) => p.url),
+            unit2Photos: item.unit2Photos.map((p) => p.url),
+            unit1SourceUrl: item.unit1SourceUrl,
+            unit2SourceUrl: item.unit2SourceUrl,
+          }, { abortKey, timeoutMs: 120_000 });
+        } catch (e: any) {
+          if (job.cancelRequested || e?.cancelled) throw e;
+          if (reusedExistingDraft) { item.message = `Draft saved; photo persistence warning: ${e?.message ?? e}`; return; }
+          // Transient timeouts/aborts retry the whole item; only a deterministic
+          // save failure (409 < MIN / duplicate) becomes a no-retry resort skip.
+          if (/timed out|abort/i.test(String(e?.message ?? e))) throw e;
+          throw makeComboPhotoGateError(`photos could not be saved for both units (${e?.message ?? e})`);
+        }
+        if (!reusedExistingDraft) {
+          const u1Saved = Number(persistData?.unit1?.saved ?? 0);
+          const u2Saved = Number(persistData?.unit2?.saved ?? 0);
+          if (!persistData?.ok || u1Saved < MIN_INDEPENDENT_UNIT_PHOTOS || u2Saved < MIN_INDEPENDENT_UNIT_PHOTOS) {
+            throw makeComboPhotoGateError(`only ${u1Saved}/${MIN_INDEPENDENT_UNIT_PHOTOS} Unit A and ${u2Saved}/${MIN_INDEPENDENT_UNIT_PHOTOS} Unit B photos could be saved`);
+          }
+        }
+      });
+    } catch (e: any) {
+      if (!reusedExistingDraft && !(job.cancelRequested || e?.cancelled)) {
+        // Never leave a photo-less draft on the dashboard — roll it back so the
+        // resort is simply skipped (no listing) instead of saved without photos.
+        await storage.deleteCommunityDraft(draftId).catch((delErr: any) =>
+          console.warn(`[bulk-combo-listings] could not roll back photo-less draft ${draftId}: ${delErr?.message ?? delErr}`));
+        item.draftId = null;
+        job.updatedAt = Date.now();
+        await persistBulkComboListingSnapshot(job).catch(() => {});
       }
-    });
+      throw e;
+    }
     fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
     void runPhotoListingCheckForFolders([
       `draft-${draftId}-unit-a`,
@@ -33872,7 +34583,10 @@ Return ONLY compact JSON with this exact shape:
           for (let i = 0; i < job.items.length; i += 1) {
             job.currentIndex = i;
             const item = job.items[i];
-            if (item.status === "completed" || item.status === "cancelled") continue;
+            // Skip terminal items. "failed" included so a deterministic failure (e.g.
+            // the address pre-check below, which leaves attemptCount at 0) is not
+            // re-processed — and its finishedAt not clobbered — on a job resume.
+            if (item.status === "completed" || item.status === "cancelled" || item.status === "failed") continue;
             if (item.status === "running" && isBulkComboListingStale(item)) {
               item.status = "queued";
               item.phase = "retrying";
@@ -33892,6 +34606,64 @@ Return ONLY compact JSON with this exact shape:
               job.updatedAt = Date.now();
               await persistBulkComboListingSnapshot(job);
               continue;
+            }
+            // Fail FAST on a missing/unresolvable street address: the save step
+            // hard-rejects without a real numbered street, so reject here BEFORE
+            // spending 10-15 min on photo discovery. hydrate first so curated
+            // COMMUNITY_ADDRESS_RULES + addressHint are applied. A missing address
+            // is deterministic, so don't burn retry attempts on it.
+            if (!item.draftId) {
+              hydrateBulkComboListingItem(item);
+              const community = item.community || {};
+              let addrPrecheck = validateCommunityStreetAddress({
+                communityName: community.name,
+                city: community.city,
+                state: community.state,
+                streetAddress: item.streetAddress,
+              });
+              // No curated/hint/operator street resolved — try LIVE discovery before
+              // failing. Only when there is NO curated rule: a curated mismatch
+              // ("should use X") must surface, not be papered over by a map lookup.
+              if (!addrPrecheck.ok && !communityAddressRuleForName(community.name)) {
+                const discovered = await discoverCommunityStreetAddress({
+                  communityName: community.name,
+                  city: community.city,
+                  state: community.state,
+                }).catch((e: any) => {
+                  console.warn(`[bulk-combo-listings] address discovery failed for "${community.name}": ${e?.message ?? e}`);
+                  return null;
+                });
+                if (discovered?.street) {
+                  item.streetAddress = discovered.street;
+                  await persistBulkComboItemStreetAddress(job.id, item.id, discovered.street).catch(() => {});
+                  await queueEvent("bulk-combo-listing", job.id, "address-discovered", `Discovered street address "${discovered.street}" for "${community.name ?? "this community"}"`, {
+                    itemKey: item.id,
+                    meta: { street: discovered.street, fullAddress: discovered.fullAddress, matchedTitle: discovered.matchedTitle, query: discovered.query },
+                  });
+                  addrPrecheck = validateCommunityStreetAddress({
+                    communityName: community.name,
+                    city: community.city,
+                    state: community.state,
+                    streetAddress: item.streetAddress,
+                  });
+                }
+              }
+              if (!addrPrecheck.ok) {
+                item.status = "failed";
+                item.phase = "failed";
+                const couldDiscover = !communityAddressRuleForName(community.name);
+                item.message = `No usable street address for "${community.name ?? "this community"}"${couldDiscover ? " (curated rules + live map lookup both came up empty)" : ""} — add one before queuing (skipped before searching photos). ${addrPrecheck.error}`;
+                item.error = item.message;
+                item.finishedAt = Date.now();
+                job.updatedAt = Date.now();
+                await queueEvent("bulk-combo-listing", job.id, "address-precheck", item.message, {
+                  itemKey: item.id,
+                  level: "error",
+                  meta: { error: addrPrecheck.error, expectedStreet: (addrPrecheck as any).expectedStreet ?? null },
+                });
+                await persistBulkComboListingSnapshot(job);
+                continue;
+              }
             }
             if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
               item.status = "failed";
@@ -33926,11 +34698,17 @@ Return ONLY compact JSON with this exact shape:
                   break;
                 }
                 item.error = queueErrorLabel(e, "Bulk combo listing failed");
-                const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId;
+                // `bulkComboNoRetry`: a STRICT photo-ladder exhaustion (no
+                // combination type could photograph both units) is deterministic
+                // — retrying just re-walks the same combos and burns another
+                // 12-min photo budget. Fail fast and skip the resort instead.
+                const canRetry = item.attemptCount < BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId && !e?.bulkComboNoRetry;
                 if (!canRetry) {
                   item.status = "failed";
                   item.phase = "failed";
-                  item.message = item.error || "Bulk combo listing failed";
+                  item.message = e?.bulkComboNoRetry
+                    ? `Skipped — could not create a fully-photographed listing for this resort. ${item.error || ""}`.trim()
+                    : (item.error || "Bulk combo listing failed");
                   break;
                 }
                 const backoffMs = BULK_COMBO_LISTING_RETRY_BACKOFF_MS[Math.min(item.attemptCount - 1, BULK_COMBO_LISTING_RETRY_BACKOFF_MS.length - 1)] ?? 60_000;
@@ -34201,6 +34979,7 @@ Return ONLY compact JSON with this exact shape:
       item.finishedAt = null;
       item.heartbeatAt = null;
       item.attemptCount = 0;
+      item.interruptions = 0; // operator retry gets a fresh restart budget too
       reset += 1;
     }
     if (reset > 0) {
@@ -35283,10 +36062,15 @@ Return ONLY compact JSON with this exact shape:
       console.log(`[community-drafts] backfilled Guesty photos for imported draft(s): ${photoBackfills.map((b) => `${b.draftId}:${b.saved}`).join(", ")}`);
       drafts = await storage.getCommunityDrafts();
     }
-    if (deletedIds.length === 0) {
-      return res.json(drafts);
-    }
-    res.json(drafts.filter((draft: any) => !deletedIds.includes(Number(draft.id))));
+    // Hide bulk-queue combo drafts that aren't fully photographed yet (or a
+    // rolled-back photo-less zombie): a combo listing only appears on the dashboard
+    // once it has real photos for BOTH units. Scoped to queue-created drafts
+    // (queueIdempotencyKey present) so manual, in-progress drafts are unaffected.
+    const visibleDrafts = drafts.filter((draft: any) =>
+      !deletedIds.includes(Number(draft.id))
+      && !(draft.queueIdempotencyKey && draft.singleListing !== true && (!draft.unit1PhotoFolder || !draft.unit2PhotoFolder)),
+    );
+    res.json(visibleDrafts);
   });
 
   app.post("/api/community/import-guesty-listing", async (req, res) => {
@@ -39193,6 +39977,12 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/community/:id/persist-photos", async (req, res) => {
     const draftId = parseInt(req.params.id, 10);
     if (!Number.isFinite(draftId)) return res.status(400).json({ error: "Invalid id" });
+    // The draft MUST exist before we download/attach photos. Without this guard a
+    // persist into a deleted id would `updateCommunityDraft` zero rows yet still
+    // return ok:true with saved counts — making a caller (e.g. the bulk combo
+    // queue's photo gate) report a phantom "completed" listing that doesn't exist.
+    const existingDraftForPersist = await storage.getCommunityDraft(draftId).catch(() => null);
+    if (!existingDraftForPersist) return res.status(404).json({ error: `Community draft ${draftId} not found` });
 
     const body = req.body as {
       unit1Photos?: string[];
@@ -39671,6 +40461,11 @@ Return ONLY compact JSON with this exact shape:
       for (const draft of drafts as any[]) {
         const status = String(draft.status || "");
         if (draft.singleListing || /archiv|delete|cancel/i.test(status)) continue;
+        // A bulk-queue combo draft that isn't fully photographed yet (or a
+        // photo-less zombie left by a rolled-back run whose delete failed) is NOT
+        // a real combo — don't let it occupy its combo slot (which would falsely
+        // dedup-skip a later legitimate item).
+        if (draft.queueIdempotencyKey && (!draft.unit1PhotoFolder || !draft.unit2PhotoFolder)) continue;
         if (!comboCommunityMatches({ name: draft.name, city: draft.city, state: draft.state }, target)) continue;
         const key = comboKeyForBeds(draft.unit1Bedrooms, draft.unit2Bedrooms);
         if (!key) continue;
@@ -39918,6 +40713,8 @@ Return ONLY compact JSON with this exact shape:
     tag?: string;
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
+    fourBedroomPossible?: boolean;
+    fiveBedroomPossible?: boolean;
     sixBedroomPossible?: boolean;
     sevenEightBedroomPossible?: boolean;
     status: "pending" | "running" | "done" | "error" | "cancelled";
@@ -40076,7 +40873,9 @@ Return ONLY compact JSON with this exact shape:
               annotateCommunitiesWithComboInventory(researched, market.city, market.state),
               `${market.city}, ${market.state} combo inventory`,
             );
-          const communities = filterTopScanSixBedroomComboCandidates(annotatedCommunities as any[]);
+          const communities = filterTopScanComboCandidates(annotatedCommunities as any[]);
+          market.fourBedroomPossible = communities.some(hasFourBedroomComboPotential);
+          market.fiveBedroomPossible = communities.some(hasFiveBedroomComboPotential);
           market.sixBedroomPossible = communities.some(hasSixBedroomComboPotential);
           market.sevenEightBedroomPossible = communities.some(hasSevenEightBedroomComboPotential);
           market.status = "done";
@@ -40218,7 +41017,7 @@ Return ONLY compact JSON with this exact shape:
           city,
           state,
         );
-        const communities = filterTopScanSixBedroomComboCandidates(annotatedCommunities as any[]);
+        const communities = filterTopScanComboCandidates(annotatedCommunities as any[]);
         totalCommunities += communities.length;
         for (const c of communities) {
           const score = c.confidenceScore + (c.combinabilityScore ?? 50);
@@ -40226,9 +41025,11 @@ Return ONLY compact JSON with this exact shape:
             topCommunity = { score, data: { ...c, tag } };
           }
         }
+        const fourBedroomPossible = communities.some(hasFourBedroomComboPotential);
+        const fiveBedroomPossible = communities.some(hasFiveBedroomComboPotential);
         const sixBedroomPossible = communities.some(hasSixBedroomComboPotential);
         const sevenEightBedroomPossible = communities.some(hasSevenEightBedroomComboPotential);
-        emit({ type: "market-done", city, state, tag, estimatedComboLow, estimatedComboHigh, sixBedroomPossible, sevenEightBedroomPossible, count: communities.length, communities });
+        emit({ type: "market-done", city, state, tag, estimatedComboLow, estimatedComboHigh, fourBedroomPossible, fiveBedroomPossible, sixBedroomPossible, sevenEightBedroomPossible, count: communities.length, communities });
         console.log(`[scan-top-markets] ${city}, ${state}: ${communities.length} qualifying`);
         try {
           await upsertTopMarketScanCache({ city, state, tag, communities });
@@ -40287,6 +41088,8 @@ Return ONLY compact JSON with this exact shape:
         if (!row) return seed;
         return {
           ...seed,
+          fourBedroomPossible: row.fourBedroomPossible,
+          fiveBedroomPossible: row.fiveBedroomPossible,
           sixBedroomPossible: row.sixBedroomPossible,
           sevenEightBedroomPossible: row.sevenEightBedroomPossible,
           qualifyingCount: row.qualifyingCount,
@@ -40704,23 +41507,42 @@ Return ONLY compact JSON with this exact shape:
       if (!body.run) {
         return res.json({ checks, budget, started: false });
       }
-      // run:true — DEEP check. Refuse if the daily budget is spent.
-      if (budget.remaining <= 0) {
+      // run:true — DEEP check. Refuse only if a FINITE daily cap is configured AND it's spent.
+      // budget.remaining === null means the cap was removed (the default) → never budget-blocked.
+      if (budget.remaining != null && budget.remaining <= 0) {
         return res.json({ checks, budget, started: false, budgetReached: true });
       }
       // Skip-if-fresh: a folder scanned conclusively (clean/found, not unknown/error) in the
       // last 24h is reused — re-opening the page never re-burns credits. force:true overrides
       // (use after changing a unit's photos).
+      // BUT a "clean" verdict is only trustworthy from a DEEP (full-gallery) scan. The hourly
+      // background scheduler writes 3-photo rows; a 3-photo "clean" can miss the one room shot that's
+      // on a live listing, so the deep audit must RE-SCAN it rather than reuse it (the client likewise
+      // only treats a deep clean as a decisive "Clear"). A "found" row is a strong positive at any
+      // depth, so it stays fresh regardless. DEEP_AUDIT_MIN_PHOTOS mirrors the client's DEEP_PHOTO_MIN.
       const FRESH_MS = 24 * 60 * 60 * 1000;
-      const isFresh = (c: any) =>
-        c.scanned && c.checkedAt && (Date.now() - new Date(c.checkedAt).getTime() < FRESH_MS) &&
-        [c.airbnb, c.vrbo, c.booking].every((s) => s === "clean" || s === "found");
+      const DEEP_AUDIT_MIN_PHOTOS = 4;
+      const isFresh = (c: any) => {
+        if (!c.scanned || !c.checkedAt) return false;
+        if (Date.now() - new Date(c.checkedAt).getTime() >= FRESH_MS) return false;
+        const statuses = [c.airbnb, c.vrbo, c.booking];
+        if (!statuses.every((s) => s === "clean" || s === "found")) return false;
+        // A shallow "clean" is not conclusive — re-scan it deep.
+        if (statuses.some((s) => s === "clean") && (Number(c.photosChecked) || 0) < DEEP_AUDIT_MIN_PHOTOS) return false;
+        return true;
+      };
       const toScan = body.force ? folders : checks.filter((c) => !isFresh(c)).map((c) => c.folder);
       if (toScan.length === 0) {
         return res.json({ checks, budget, started: false, allFresh: true });
       }
-      // 5 distinct interior photos/unit; the batch stops if it crosses the daily cap.
-      void runPhotoListingCheckForFolders(toScan, { maxPhotos: 5, budgetCap: budget.cap });
+      // Thorough on-demand audit: scan the WHOLE deduped interior gallery per unit (clamped to
+      // PHOTO_AUDIT_MAX_PHOTOS in the scanner), so a clean result is a confident NO and a listed unit
+      // gets every chance to surface its ≥2 matches. budgetCap is passed only when a finite cap is
+      // configured (cap === null → unlimited, the default after the 200/day limit was removed).
+      void runPhotoListingCheckForFolders(toScan, {
+        maxPhotos: PHOTO_AUDIT_MAX_PHOTOS,
+        ...(budget.cap != null ? { budgetCap: budget.cap } : {}),
+      });
       return res.json({ checks, budget, started: true, scanning: toScan });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? "Photo check failed" });
@@ -42476,6 +43298,10 @@ Return ONLY compact JSON with this exact shape:
     const combinedBedrooms = singleListing
       ? unit1Bedrooms
       : unit1Bedrooms + unit2Bedrooms!;
+    // The listing's headline occupancy — the single rule keyed on total
+    // bedrooms — so the generated draft's title/bookingTitle "Sleeps N" matches
+    // the dashboard Guests column and everything else (was b*2+2, wrong for ≥3BR).
+    const listingSleeps = occupancyForBedrooms(combinedBedrooms);
 
     // Best-effort walking distance for the description. Only used for
     // combo listings — for a single standalone unit there's only one
@@ -42559,7 +43385,7 @@ Return ONLY compact JSON with this exact shape:
     });
     const resortFeeNote = formatResortFeeNote(communityName, resortFee);
 
-    const guestCapacity = combinedBedrooms * 2 + 2; // rough sleeps estimate
+    const guestCapacity = listingSleeps; // headline occupancy rule (occupancyForBedrooms)
 
     const fallbackUnitDraft = (unit: { bedrooms: number }): {
       bedrooms: number;
@@ -42571,7 +43397,7 @@ Return ONLY compact JSON with this exact shape:
       longDescription: string;
     } => {
       const bedrooms = unit.bedrooms || 2;
-      const maxGuests = bedrooms * 2 + 2;
+      const maxGuests = occupancyForBedrooms(bedrooms);
       return {
         bedrooms,
         bathrooms: bedrooms >= 3 ? "2.5" : "2",
@@ -42708,8 +43534,8 @@ ${resortFeeNote ? `- Resort fee note to include exactly once in summary or space
 OUTPUT — return ONLY valid JSON with this exact shape:
 
 {
-  "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. Examples: 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 14 near Disney!', 'Beautiful 4BR for 10 in Kissimmee!'. Always end with !. Use only commas and hyphens for punctuation — Airbnb prefers them over em dashes (—). Count characters and STAY UNDER 50.",
-  "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. Examples: 'Poipu Kai - 7BR Resort - Sleeps 16', 'Princeville - 5BR Condos - Sleeps 14', 'Windsor Hills - 4BR Condos - Sleeps 10'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
+  "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. For the <sleeps> number use EXACTLY ${listingSleeps}. Examples: 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 16 near Disney!', 'Beautiful 4BR for 12 in Kissimmee!'. Always end with !. Use only commas and hyphens for punctuation — Airbnb prefers them over em dashes (—). Count characters and STAY UNDER 50.",
+  "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. For <X> use EXACTLY ${listingSleeps}. Examples: 'Poipu Kai - 7BR Resort - Sleeps 18', 'Princeville - 5BR Condos - Sleeps 14', 'Windsor Hills - 4BR Condos - Sleeps 12'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
   "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
   "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point (proximity, sleeps N, key amenity). Do NOT mention 'two separate units' or 'individually owned' or 'representative accommodations' here — the builder adds combo setup at the top and unit-assignment language at the bottom.",
   "space": "1-2 paragraphs describing the combined property layout — bedroom count across both units, what guests get, why it works for a large group. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance. Do NOT include any disclosure / 'two separate units' / 'individually owned' / unit-assignment language; the builder adds those separately.",
@@ -42815,6 +43641,14 @@ CONSTRAINTS
         parsedTransit ? `GETTING AROUND\n\n${parsedTransit}` : null,
       ].filter(Boolean).join("\n\n");
 
+      // Pin the "Sleeps N" / "for N" occupancy token in the LLM-written titles
+      // to the headline rule. The model is given a format but picks its own
+      // number, which drifted (e.g. 6BR→14); this guarantees a generated draft
+      // can't publish a title that disagrees with the dashboard/summary.
+      const syncTitleOccupancy = (t: string) =>
+        t.replace(/\bSleeps\s+\d+/i, `Sleeps ${listingSleeps}`)
+         .replace(/\bfor\s+\d+\b/i, `for ${listingSleeps}`);
+
       return res.json({
         // Airbnb truncates titles past 50 chars. Booking.com / VRBO
         // tolerate longer but active properties keep both under 50
@@ -42822,8 +43656,8 @@ CONSTRAINTS
         // bookingTitle. Hard-cap both at 50 so a Claude overshoot
         // doesn't silently push a truncated headline downstream —
         // operator can edit on Step 5.
-        title: String(parsed.title ?? "").slice(0, 50),
-        bookingTitle: String(parsed.bookingTitle ?? parsed.title ?? "").slice(0, 50),
+        title: syncTitleOccupancy(String(parsed.title ?? "")).slice(0, 50),
+        bookingTitle: syncTitleOccupancy(String(parsed.bookingTitle ?? parsed.title ?? "")).slice(0, 50),
         propertyType: parsed.propertyType ?? "Condominium",
         description,
         summary: summaryWithFee,

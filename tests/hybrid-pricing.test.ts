@@ -362,6 +362,174 @@ try {
   else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
 }
 
+// ── Geographic-widening fallback for thin in-footprint markets ──────────────
+// Bonita National (a gated golf community) has near-zero exact-2BR entire-home
+// Airbnb inventory inside its curated club box, which used to hard-fail the whole
+// market-rate refresh with "no usable exact-2BR samples". The refresh now widens
+// to a center-radius box (and city-level query anchor) when the resort footprint
+// comes back empty — real Airbnb data only, no static fallback.
+const BONITA_CURATED_SW_LAT = "26.31"; // String(BUY_IN_MARKET_BOUNDS["Bonita National"].sw_lat)
+function bonitaWidenedListings(count: number): unknown[] {
+  return Array.from({ length: count }, (_, index) => ({
+    name: `2 Bedroom condo near Bonita Springs #${index + 1}`,
+    bedrooms: 2,
+    gps_coordinates: { latitude: 26.32, longitude: -81.67 }, // inside the widened center-radius box
+    price: { extracted_total_price: 2100 + index * 140 },
+  }));
+}
+
+// (A) Widen succeeds AND clears the confidence gate: the curated club box returns
+// nothing, then the wider center-radius box returns exact-2BR comps.
+process.env.SEARCHAPI_API_KEY = "test-key";
+{
+  const seen: Array<{ swLat: string | null; q: string | null }> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    const swLat = url.searchParams.get("sw_lat");
+    seen.push({ swLat, q: url.searchParams.get("q") });
+    const properties = swLat === BONITA_CURATED_SW_LAT ? [] : bonitaWidenedListings(6);
+    return new Response(JSON.stringify({ properties }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const widened = await fetchAirbnbMedianNightly({
+      community: "Bonita National",
+      bedrooms: 2,
+      checkIn: "2026-06-08",
+      checkOut: "2026-06-15",
+    });
+    assert.ok((widened.medianNightly ?? 0) > 0, "widening should produce a real nearby-comp basis when the footprint is empty");
+    assert.equal(widened.sampleCount, 6);
+    assert.equal(widened.evidence?.geoConstraint.kind, "center-radius", "a widened basis must report the center-radius tier it came from");
+    assert.equal(widened.confidence?.level, "yellow", "a healthy widened month should clear the non-red save/push gate");
+    assert.ok(
+      (widened.confidence?.score ?? 0) >= 75 && (widened.confidence?.score ?? 0) <= 84,
+      "center-radius widening must stay capped at the yellow tier, not be inflated to green",
+    );
+    assert.ok(/Geo-widened/.test(widened.notes[0] ?? ""), "the basis note must surface that widening was applied");
+    assert.ok(seen.some((r) => r.swLat === BONITA_CURATED_SW_LAT), "the curated footprint must be tried first");
+    assert.ok(seen.some((r) => r.swLat !== BONITA_CURATED_SW_LAT && r.swLat != null), "a wider center-radius box must be tried after the footprint is empty");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+    else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+  }
+}
+
+// (B) Primary-wins regression: when the curated footprint DOES yield samples, the
+// refresh returns on the first request and never widens (one SearchAPI call, the
+// curated-bounds tier) — the byte-identical guarantee for healthy markets.
+process.env.SEARCHAPI_API_KEY = "test-key";
+{
+  const seen: Array<string | null> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    seen.push(new URL(String(input)).searchParams.get("sw_lat"));
+    return new Response(JSON.stringify({
+      properties: Array.from({ length: 6 }, (_, index) => ({
+        name: `Bonita National 2 bedroom condo #${index + 1}`,
+        bedrooms: 2,
+        gps_coordinates: { latitude: 26.325, longitude: -81.67 }, // inside the curated club box
+        price: { extracted_total_price: 2100 + index * 140 },
+      })),
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const primary = await fetchAirbnbMedianNightly({
+      community: "Bonita National",
+      bedrooms: 2,
+      checkIn: "2026-06-08",
+      checkOut: "2026-06-15",
+    });
+    assert.equal(primary.sampleCount, 6);
+    assert.equal(seen.length, 1, "a market whose footprint yields samples must make exactly one SearchAPI request");
+    assert.equal(seen[0], BONITA_CURATED_SW_LAT, "the single request must use the curated club bounds, not a widened box");
+    assert.equal(primary.evidence?.geoConstraint.kind, "curated-bounds");
+    assert.ok(!/Geo-widened/.test(primary.notes[0] ?? ""), "a footprint hit must not be labeled as widened");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+    else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+  }
+}
+
+// (C) Widening still fails closed: if every tier (footprint + widened) comes back
+// empty, the basis is null so the caller still throws — no fabricated rate.
+process.env.SEARCHAPI_API_KEY = "test-key";
+{
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: "Airbnb didn't return any results.",
+  }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+  try {
+    const failClosed = await fetchAirbnbMedianNightly({
+      community: "Bonita National",
+      bedrooms: 2,
+      checkIn: "2026-06-08",
+      checkOut: "2026-06-15",
+    });
+    assert.equal(failClosed.medianNightly, null, "an all-empty widened search must still fail closed, not fabricate a rate");
+    assert.equal(failClosed.sampleCount, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+    else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+  }
+}
+
+// (D) Unmapped markets (no mapped center) never widen: only the bounds-less "none"
+// requests fire — no center-radius box is ever issued.
+process.env.SEARCHAPI_API_KEY = "test-key";
+{
+  const sawGeoBox: boolean[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    sawGeoBox.push(new URL(String(input)).searchParams.get("sw_lat") != null);
+    return new Response(JSON.stringify({ properties: [] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const unmapped = await fetchAirbnbMedianNightly({
+      community: "Unmapped Confidence Resort",
+      bedrooms: 3,
+      checkIn: "2027-11-01",
+      checkOut: "2027-11-08",
+    });
+    assert.equal(unmapped.medianNightly, null);
+    assert.ok(!sawGeoBox.some(Boolean), "an unmapped market has no center to widen around, so no geo-boxed request must be issued");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+    else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+  }
+}
+
+// (E) Generality: the same widening unblocks the other tight Florida footprints
+// (Santa Maria Resort), proving the fix is not a Bonita one-off.
+const SANTA_MARIA_CURATED_SW_LAT = "26.408"; // String(BUY_IN_MARKET_BOUNDS["Santa Maria Resort"].sw_lat)
+process.env.SEARCHAPI_API_KEY = "test-key";
+{
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const swLat = new URL(String(input)).searchParams.get("sw_lat");
+    const properties = swLat === SANTA_MARIA_CURATED_SW_LAT ? [] : Array.from({ length: 6 }, (_, index) => ({
+      name: `2 Bedroom Fort Myers Beach condo #${index + 1}`,
+      bedrooms: 2,
+      gps_coordinates: { latitude: 26.411, longitude: -81.899 },
+      price: { extracted_total_price: 2450 + index * 140 },
+    }));
+    return new Response(JSON.stringify({ properties }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const santaMaria = await fetchAirbnbMedianNightly({
+      community: "Santa Maria Resort",
+      bedrooms: 2,
+      checkIn: "2026-06-08",
+      checkOut: "2026-06-15",
+    });
+    assert.ok((santaMaria.medianNightly ?? 0) > 0, "Santa Maria's tight footprint should also widen to nearby comps");
+    assert.equal(santaMaria.evidence?.geoConstraint.kind, "center-radius");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+    else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+  }
+}
+
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
   hybridPricingSource.includes('source: "airbnb"'),

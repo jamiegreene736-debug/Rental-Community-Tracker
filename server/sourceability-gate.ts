@@ -1,45 +1,54 @@
-// Sourceability gate — auto-block windows we can't source at a profit.
+// Sourceability gate — auto-block windows Airbnb can't supply the units for.
 //
 // THE PROBLEM (operator, 2026-06-15): the buy-in model sells inventory we
-// don't own yet. A guest books a peak week far out at a fair price; by the
-// time we try to source the real unit, the cheap same-community inventory is
-// gone and the cheapest combo costs MORE than we sold for (e.g. a Poipu Kai
-// 6BR sold for $12,187 whose cheapest sourceable combo is now $18,617 = a
-// $6,430 loss). A higher SELL price can't fix that — guests won't pay above
-// market. The honest fix is to STOP SELLING windows we can't source
-// profitably, i.e. BLOCK them on the Guesty calendar.
+// don't own yet. If, by the time we try to source the real units, the unit
+// sizes the listing is built from simply aren't available, we've sold a stay
+// we can't fulfil. The honest fix is to STOP SELLING windows we can't source,
+// i.e. BLOCK them on the Guesty calendar.
+//
+// THE RULE (operator directive, supersedes the original VRBO/profit gate): the
+// black-out is decided PURELY by live Airbnb availability. Per near-term
+// window we run ONE SearchAPI Airbnb search per required bedroom size for the
+// exact dates (checkAirbnbAvailabilityForPlan). If Airbnb has at least one of
+// EVERY required size (a 5BR = 3BR + 2BR needs an available 3BR AND an
+// available 2BR), the window stays OPEN; only when a size is unavailable do we
+// block. No VRBO, no profit/combo math, no pricing-comp confidence.
 //
 // THIS MODULE: a scheduled sweep that, per property, walks the near-term
-// windows, runs the existing buy-in scan (runCityVrboInventoryScan), and
-// decides block / open / skip per window, then reconciles those decisions to
-// Guesty via sync-scanner-blocks (PUT unavailable / available), tracking only
-// the blocks WE create.
+// windows, runs the Airbnb availability check, decides block / open / skip per
+// window, then reconciles those decisions to Guesty via sync-scanner-blocks
+// (PUT unavailable / available), tracking only the blocks WE create.
 //
-// LOAD-BEARING SAFETY — fail-safe is OPEN. A scan that is offline, errored,
-// timed out, or returned an empty pool yields "skip": we neither block nor
-// unblock that window. We only BLOCK on a CONFIRMED real VRBO pool whose
-// cheapest sourceable combo is a confirmed loss. The asymmetry is deliberate:
-// a false block silently kills real revenue, so we never block on doubt.
+// LOAD-BEARING SAFETY — fail-safe is OPEN. A search that is keyless, errored,
+// or rate-limited yields "skip": we neither block nor unblock that window. We
+// only BLOCK on a SUCCESSFUL Airbnb search that confirms a required size is
+// unavailable. The asymmetry is deliberate: a false block silently kills real
+// revenue, so we never block on doubt.
 
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
-import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
-import { runCityVrboInventoryScan } from "./city-vrbo-inventory";
-import { reconcileSourceabilityBlocks, type SyncResult } from "./sync-scanner-blocks";
-import { getLatestBulkAutoFillJob } from "./bulk-auto-fill-job";
-import { storage } from "./storage";
 import {
-  decideSourceability,
+  checkAirbnbAvailabilityForPlan,
+  analyzeAirbnbPlanForProfit,
+  assumedComboCost,
+  clearAirbnbCellCache,
+} from "./availability-search";
+import { reconcileSourceabilityBlocks, type SyncResult } from "./sync-scanner-blocks";
+import { storage } from "./storage";
+import { guestyRequest } from "./guesty-sync";
+import {
+  decideAvailabilitySourceability,
+  decideSourceabilityWithProfit,
   generateWeeklyWindows,
   applyConfirmation,
   confirmedAction,
   DEFAULT_CONFIRM_SWEEPS,
-  type SourceabilityScan,
+  type AvailabilityScan,
   type SourceabilityDecision,
 } from "./sourceability-gate-core";
 
 // Re-export the pure decision core so existing importers keep working.
-export { decideSourceability, generateWeeklyWindows, applyConfirmation, confirmedAction } from "./sourceability-gate-core";
-export type { SourceabilityScan, SourceabilityDecision } from "./sourceability-gate-core";
+export { decideAvailabilitySourceability, generateWeeklyWindows, applyConfirmation, confirmedAction } from "./sourceability-gate-core";
+export type { AvailabilityScan, SourceabilityDecision } from "./sourceability-gate-core";
 
 // ── Config (env-tunable; defaults are conservative) ──────────────────────────
 const num = (v: string | undefined, d: number) => {
@@ -60,13 +69,72 @@ export function isSourceabilityGateEnforced(): boolean {
 const HORIZON_DAYS = () => num(process.env.SOURCEABILITY_GATE_HORIZON_DAYS, 90);
 const MIN_LEAD_DAYS = () => num(process.env.SOURCEABILITY_GATE_MIN_LEAD_DAYS, 3);
 const SCAN_BUDGET = () => num(process.env.SOURCEABILITY_GATE_SCAN_BUDGET, 12);
-/** Required margin as a fraction of cost. 0 ⇒ block only on an actual loss
- *  (revenue < cost). Set 0.2 to block anything under a 20% clean margin. */
-const MIN_MARGIN = () => num(process.env.SOURCEABILITY_GATE_MIN_MARGIN, 0);
-const DEFAULT_TARGET_MARGIN = () => num(process.env.SOURCEABILITY_GATE_TARGET_MARGIN, 0.20);
 /** How many CONSECUTIVE sweeps must agree before we block/unblock Guesty. ≥2
- *  makes the gate immune to a single noisy/partial VRBO scrape. */
+ *  makes the gate immune to a single noisy/partial Airbnb search. */
 const CONFIRM_SWEEPS = () => Math.max(1, num(process.env.SOURCEABILITY_GATE_CONFIRM_SWEEPS, DEFAULT_CONFIRM_SWEEPS));
+
+// ── Profit-aware gate (operator direction 2026-06-17; default OFF — inert) ────
+// When enabled, the gate also blocks SOURCEABLE windows whose assumed buy-in
+// cost (the HIGH END of same-community Airbnb rates, computed FREE from the same
+// availability fetch) beats our real Guesty sell price. Default OFF so the
+// deploy changes nothing until the operator reviews a dry-run and flips it on.
+export function isSourceabilityProfitEnabled(): boolean {
+  return flag(process.env.SOURCEABILITY_GATE_PROFIT_ENABLED);
+}
+/** "High end" percentile for the assumed buy-in cost (operator's pick: p90). */
+const COST_PERCENTILE = () => {
+  const n = num(process.env.SOURCEABILITY_GATE_COST_PERCENTILE, 0.9);
+  return n > 0 && n <= 1 ? n : 0.9;
+};
+/** Require sell to beat cost by this fraction. 0 ⇒ block only on an outright loss. */
+const MIN_MARGIN = () => Math.max(0, num(process.env.SOURCEABILITY_GATE_MIN_MARGIN, 0));
+
+// Our own Guesty listing names (nicknames + titles), fetched once and cached, so
+// the cost pool can EXCLUDE our own listings (they surface in the Airbnb results
+// at our own asking price and would pin assumedCost ≈ sellPrice).
+let _ownNamesCache: { at: number; names: string[] } | null = null;
+async function getOwnListingNames(): Promise<string[]> {
+  if (_ownNamesCache && Date.now() - _ownNamesCache.at < 60 * 60 * 1000) return _ownNamesCache.names;
+  try {
+    const data: any = await guestyRequest("GET", "/listings?limit=200&fields=_id%20title%20nickname");
+    const rows: any[] = Array.isArray(data?.results) ? data.results : Array.isArray(data) ? data : [];
+    const names = rows
+      .flatMap((r) => [r?.nickname, r?.title])
+      .filter((s): s is string => typeof s === "string" && s.trim().length > 0);
+    _ownNamesCache = { at: Date.now(), names };
+    return names;
+  } catch (e: any) {
+    console.warn(`[sourceability-gate] own-listing names fetch failed: ${e?.message ?? e}`);
+    return _ownNamesCache?.names ?? [];
+  }
+}
+
+// Our real sell price for a window = sum of the per-night Guesty calendar
+// `price` over the 7 nights. null on any error / missing day ⇒ caller treats
+// profit as not-assessable and fail-safe-OPENs (never blocks on a missing price).
+async function sellPriceForWindow(listingId: string, startDate: string, endDate: string): Promise<number | null> {
+  try {
+    const data: any = await guestyRequest(
+      "GET",
+      `/availability-pricing/api/calendar/listings/${listingId}?startDate=${startDate}&endDate=${endDate}`,
+    );
+    const days: any[] = Array.isArray(data?.days) ? data.days
+      : Array.isArray(data?.data?.days) ? data.data.days
+      : Array.isArray(data) ? data : [];
+    let total = 0, counted = 0;
+    for (const d of days) {
+      const date = String(d?.date ?? "").slice(0, 10);
+      if (date >= startDate && date < endDate) {
+        const price = Number(d?.price);
+        if (Number.isFinite(price) && price > 0) { total += price; counted++; }
+      }
+    }
+    return counted > 0 ? total : null;
+  } catch (e: any) {
+    console.warn(`[sourceability-gate] sell price fetch failed (${listingId} ${startDate}): ${e?.message ?? e}`);
+    return null;
+  }
+}
 
 // ── The sweep (IO) ───────────────────────────────────────────────────────────
 export type SourceabilitySweepReport = {
@@ -102,8 +170,10 @@ export async function runSourceabilitySweepForProperty(
      *  to the SOURCEABILITY_GATE_ENFORCE env. */
     enforce?: boolean;
     now?: Date;
-    targetMargin?: number;
     scanBudget?: number;
+    /** Our own Guesty listing names to exclude from the profit cost pool.
+     *  Prefetched once by the all-sweep; lazily fetched here if omitted. */
+    ownNames?: string[];
   } = {},
 ): Promise<SourceabilitySweepReport> {
   const enabled = isSourceabilityGateEnabled();
@@ -122,11 +192,16 @@ export async function runSourceabilitySweepForProperty(
 
   const community = config.community;
   const units = config.units.map((u) => ({ bedrooms: u.bedrooms }));
-  const bedroomPlan = units.map((u) => u.bedrooms);
-  const targetMargin = opts.targetMargin ?? DEFAULT_TARGET_MARGIN();
-  const minMargin = MIN_MARGIN();
   const budget = opts.scanBudget ?? SCAN_BUDGET();
   const windows = generateWeeklyWindows(opts.now ?? new Date(), MIN_LEAD_DAYS(), HORIZON_DAYS());
+
+  // Profit-aware mode (default OFF): resolve the cost pool exclusions, this
+  // listing's id for the sell-price lookup, and the cost knobs once per property.
+  const profitOn = isSourceabilityProfitEnabled();
+  const ownNames = profitOn ? (opts.ownNames ?? (await getOwnListingNames())) : [];
+  const guestyListingId = profitOn ? await storage.getGuestyListingId(propertyId).catch(() => null) : null;
+  const costPct = COST_PERCENTILE();
+  const minMargin = MIN_MARGIN();
 
   const toBlock: Array<{ startDate: string; endDate: string; reason: string }> = [];
   const confirmedOpen: Array<{ startDate: string; endDate: string }> = [];
@@ -139,39 +214,46 @@ export async function runSourceabilitySweepForProperty(
       continue;
     }
 
-    let scan: SourceabilityScan;
+    let scan: AvailabilityScan;
+    let d: { decision: SourceabilityDecision; reason: string };
+    let obsCost: number | null = null;
+    let obsSell: number | null = null;
     try {
-      const result = await runCityVrboInventoryScan({
-        community,
-        checkIn: w.startDate,
-        checkOut: w.endDate,
-        bedroomPlan,
-        skipDetailEnrich: true, // automated path: never drive per-listing detail scrapes
-      });
-      scans++;
-      const ok = result.sidecar.workerOnline === true && result.rawListings.length > 0;
-      const cheapestCost = result.suggestedPairs[0]?.totalCost ?? null;
-      scan = { ok, cheapestCost };
+      if (profitOn) {
+        // Profit-aware: ONE analysis derives both availability AND the high-end
+        // assumed buy-in cost from the same fetch; the sell price comes from our
+        // Guesty calendar. Cost/sell missing ⇒ the decision fail-safe-OPENs.
+        const analysis = await analyzeAirbnbPlanForProfit({
+          community, unitSlots: units, checkIn: w.startDate, checkOut: w.endDate,
+          ownNames, costPercentile: costPct,
+        });
+        scans++;
+        scan = { ok: analysis.ok, setsAvailable: analysis.setsAvailable, detail: analysis.detail };
+        if (analysis.ok) {
+          obsCost = assumedComboCost(units, analysis.highEndNightlyBySize, w.nights);
+          obsSell = guestyListingId ? await sellPriceForWindow(guestyListingId, w.startDate, w.endDate) : null;
+        }
+        d = decideSourceabilityWithProfit(scan, { assumedCost: obsCost, sellPrice: obsSell, minMargin });
+      } else {
+        const avail = await checkAirbnbAvailabilityForPlan({
+          community,
+          unitSlots: units,
+          checkIn: w.startDate,
+          checkOut: w.endDate,
+        });
+        scans++;
+        scan = { ok: avail.ok, setsAvailable: avail.setsAvailable, detail: avail.detail };
+        d = decideAvailabilitySourceability(scan);
+      }
     } catch (e: any) {
-      // Scan threw → fail-safe skip (neither block nor unblock).
-      decisions.push({ startDate: w.startDate, endDate: w.endDate, decision: "skip", reason: `scan error: ${(e?.message ?? String(e)).slice(0, 120)}` });
+      // Search threw → fail-safe skip (neither block nor unblock).
+      decisions.push({ startDate: w.startDate, endDate: w.endDate, decision: "skip", reason: `airbnb search error: ${(e?.message ?? String(e)).slice(0, 120)}` });
       continue;
     }
 
-    const monthKey = w.startDate.slice(0, 7);
-    const nightlyBasis = totalNightlyBuyInForMonth(community, units, monthKey, propertyId);
-    const sellableRevenue = nightlyBasis > 0 ? nightlyBasis * (1 + targetMargin) * w.nights : 0;
-    if (!(sellableRevenue > 0)) {
-      // No priced basis ⇒ we can't judge profitability ⇒ fail-safe skip.
-      decisions.push({ startDate: w.startDate, endDate: w.endDate, decision: "skip", reason: "no priced basis for window" });
-      continue;
-    }
-
-    const d = decideSourceability({ scan, sellableRevenue, minMargin });
-
-    // CONFIRMATION GUARD: fold this scan's decision into the persisted streak,
+    // CONFIRMATION GUARD: fold this search's decision into the persisted streak,
     // and only act on Guesty once the SAME decision has repeated `confirmThreshold`
-    // times in a row — so a single noisy/partial scrape can't move the calendar.
+    // times in a row — so a single noisy/partial search can't move the calendar.
     const prev = await storage.getSourceabilityObservation(propertyId, w.startDate, w.endDate).catch(() => null);
     const nextState = applyConfirmation(
       { consecutiveBlocks: prev?.consecutiveBlocks ?? 0, consecutiveOpens: prev?.consecutiveOpens ?? 0 },
@@ -180,8 +262,8 @@ export async function runSourceabilitySweepForProperty(
     await storage.upsertSourceabilityObservation({
       propertyId, startDate: w.startDate, endDate: w.endDate,
       consecutiveBlocks: nextState.consecutiveBlocks, consecutiveOpens: nextState.consecutiveOpens,
-      lastDecision: d.decision, lastCheapestCost: scan.cheapestCost,
-      lastSellableRevenue: Math.round(sellableRevenue), lastReason: d.reason,
+      lastDecision: d.decision, lastCheapestCost: obsCost,
+      lastSellableRevenue: obsSell, lastReason: d.reason,
     }).catch((e) => console.error(`[sourceability-gate] persist obs failed (${propertyId} ${w.startDate}):`, e?.message ?? e));
 
     const action = confirmedAction(nextState, confirmThreshold);
@@ -226,19 +308,16 @@ export function getLastSourceabilitySweepReport() {
 }
 
 /**
- * Sweep every real (positive-id) property that has a Guesty listing mapped,
- * SEQUENTIALLY so we never run two sidecar scans at once, and YIELDING the
- * single sidecar to the operator's bulk buy-in queue when it's running. Guarded
- * by a single-flight latch so a fast scheduler tick can't stack sweeps.
+ * Sweep every real (positive-id) property that has a Guesty listing mapped.
+ * The black-out check is pure SearchAPI Airbnb (no sidecar), so the sweep runs
+ * independently of the operator's buy-in queue. Guarded by a single-flight
+ * latch so a fast scheduler tick can't stack sweeps.
  */
 export async function runSourceabilitySweepAllEnabled(
   opts: { enforce?: boolean; now?: Date } = {},
 ): Promise<{ ran: boolean; reason?: string; reports: SourceabilitySweepReport[] }> {
   if (!isSourceabilityGateEnabled()) return { ran: false, reason: "disabled", reports: [] };
   if (_sweepInFlight) return { ran: false, reason: "already running", reports: [] };
-  if (getLatestBulkAutoFillJob()?.status === "running") {
-    return { ran: false, reason: "operator bulk queue active — yielding sidecar", reports: [] };
-  }
 
   _sweepInFlight = true;
   const reports: SourceabilitySweepReport[] = [];
@@ -246,14 +325,17 @@ export async function runSourceabilitySweepAllEnabled(
     // Tidy: drop confirmation rows for windows that have already passed.
     const todayIso = (opts.now ?? new Date()).toISOString().slice(0, 10);
     await storage.deleteSourceabilityObservationsEndingBefore(todayIso).catch(() => {});
+    // Fresh fetches per sweep (so each sweep is an independent observation for the
+    // 2-sweep guard), but shared WITHIN the sweep so same-community properties
+    // dedup to one SearchApi call per (town, size, week).
+    clearAirbnbCellCache();
+    const ownNames = isSourceabilityProfitEnabled() ? await getOwnListingNames().catch(() => []) : undefined;
     const propertyIds = Object.keys(PROPERTY_UNIT_CONFIGS).map(Number).filter((id) => id > 0);
     for (const propertyId of propertyIds) {
       const listingId = await storage.getGuestyListingId(propertyId).catch(() => null);
       if (!listingId) continue;
-      // Re-check mid-sweep: bail out and hand the sidecar back if the operator starts a queue.
-      if (getLatestBulkAutoFillJob()?.status === "running") break;
       try {
-        reports.push(await runSourceabilitySweepForProperty(propertyId, { enforce: opts.enforce, now: opts.now }));
+        reports.push(await runSourceabilitySweepForProperty(propertyId, { enforce: opts.enforce, now: opts.now, ownNames }));
       } catch (e: any) {
         console.error(`[sourceability-gate] property ${propertyId} sweep failed:`, e?.message ?? e);
       }

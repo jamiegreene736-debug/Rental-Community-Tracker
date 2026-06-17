@@ -230,6 +230,14 @@ function formatResortUnitMix(community: CommunityResult): string | null {
   return bedroomMix ? `Bedroom mix: ${bedroomMix}` : null;
 }
 
+function hasFourBedroomComboPotential(community: CommunityResult): boolean {
+  return hasBedroomPairPotential(community, [[2, 2]]);
+}
+
+function hasFiveBedroomComboPotential(community: CommunityResult): boolean {
+  return hasBedroomPairPotential(community, [[2, 3]]);
+}
+
 function hasSixBedroomComboPotential(community: CommunityResult): boolean {
   return hasBedroomPairPotential(community, [[3, 3]]);
 }
@@ -280,36 +288,54 @@ type SeedComboBadge = {
   icon: "yes" | "no" | "pending";
 };
 
-function seedComboBadge(possible: boolean | undefined, kind: "six" | "sevenEight"): SeedComboBadge {
-  const prefix = kind === "six" ? "6BR combo" : "7/8BR combo";
+type ComboBadgeKind = "four" | "five" | "six" | "sevenEight";
+
+const COMBO_BADGE_META: Record<ComboBadgeKind, {
+  prefix: string;
+  yesClassName: string;
+  yesTitle: string;
+  noTitle: string;
+  pendingTitle: string;
+}> = {
+  four: {
+    prefix: "4BR combo",
+    yesClassName: "bg-fuchsia-50 text-fuchsia-700",
+    yesTitle: "Cached scan: two 2BR units can combine into a 4BR combo",
+    noTitle: "Cached scan: no two-2BR 4BR combo potential",
+    pendingTitle: "Run the market scan to verify 4BR combo potential",
+  },
+  five: {
+    prefix: "5BR combo",
+    yesClassName: "bg-indigo-50 text-indigo-700",
+    yesTitle: "Cached scan: a 2BR + 3BR can combine into a 5BR combo",
+    noTitle: "Cached scan: no 2BR+3BR 5BR combo potential",
+    pendingTitle: "Run the market scan to verify 5BR combo potential",
+  },
+  six: {
+    prefix: "6BR combo",
+    yesClassName: "bg-emerald-50 text-emerald-700",
+    yesTitle: "Cached scan: two 3BR units can combine into a 6BR combo",
+    noTitle: "Cached scan: no two-3BR 6BR combo potential",
+    pendingTitle: "Run the market scan to verify 6BR combo potential",
+  },
+  sevenEight: {
+    prefix: "7/8BR combo",
+    yesClassName: "bg-sky-50 text-sky-700",
+    yesTitle: "Cached scan: 7BR/8BR combo potential confirmed",
+    noTitle: "Cached scan: no 7BR/8BR combo potential",
+    pendingTitle: "Run the market scan to verify 7BR/8BR combo potential",
+  },
+};
+
+function seedComboBadge(possible: boolean | undefined, kind: ComboBadgeKind): SeedComboBadge {
+  const meta = COMBO_BADGE_META[kind];
   if (possible === true) {
-    return {
-      className: kind === "six" ? "bg-emerald-50 text-emerald-700" : "bg-sky-50 text-sky-700",
-      title: kind === "six"
-        ? "Cached scan: two 3BR units can combine into a 6BR combo"
-        : "Cached scan: 7BR/8BR combo potential confirmed",
-      label: `${prefix}: yes`,
-      icon: "yes",
-    };
+    return { className: meta.yesClassName, title: meta.yesTitle, label: `${meta.prefix}: yes`, icon: "yes" };
   }
   if (possible === false) {
-    return {
-      className: "bg-slate-100 text-slate-600",
-      title: kind === "six"
-        ? "Cached scan: no two-3BR 6BR combo potential"
-        : "Cached scan: no 7BR/8BR combo potential",
-      label: `${prefix}: no`,
-      icon: "no",
-    };
+    return { className: "bg-slate-100 text-slate-600", title: meta.noTitle, label: `${meta.prefix}: no`, icon: "no" };
   }
-  return {
-    className: "bg-amber-50 text-amber-700",
-    title: kind === "six"
-      ? "Run the market scan to verify 6BR combo potential"
-      : "Run the market scan to verify 7BR/8BR combo potential",
-    label: `${prefix}: scan needed`,
-    icon: "pending",
-  };
+  return { className: "bg-amber-50 text-amber-700", title: meta.pendingTitle, label: `${meta.prefix}: scan needed`, icon: "pending" };
 }
 
 function formatMinimumStay(community: CommunityResult): { label: string; tone: "ok" | "warn" | "unknown"; evidence?: string } {
@@ -461,6 +487,8 @@ export default function AddCommunity() {
     tag?: string;
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
+    fourBedroomPossible?: boolean;
+    fiveBedroomPossible?: boolean;
     sixBedroomPossible?: boolean;
     sevenEightBedroomPossible?: boolean;
     status: "pending" | "running" | "done" | "error" | "cancelled";
@@ -474,6 +502,15 @@ export default function AddCommunity() {
   const [sweepDone, setSweepDone] = useState(false);
   const [sweepJobId, setSweepJobId] = useState<string | null>(null);
   const ignoredSweepJobIdsRef = useRef<Set<string>>(new Set());
+  // Cross-market resort breakdown: after a sweep finishes, the operator can
+  // tick resorts grouped under EACH scanned market and bulk-queue them all at
+  // once (rather than loading one market into Step 2 at a time). Keyed by
+  // `${marketIndex}:${communityIndex}` so each checkbox is independent even when
+  // the same resort surfaces under two adjacent towns (e.g. Pili Mai shows under
+  // both Koloa and Poipu); the queue builder de-dupes by resort name+state.
+  const [sweepResortSelection, setSweepResortSelection] = useState<Set<string>>(new Set());
+  const [sweepQueueStarting, setSweepQueueStarting] = useState(false);
+  const [sweepQueueProgress, setSweepQueueProgress] = useState<{ done: number; total: number } | null>(null);
   const [draftRestored, setDraftRestored] = useState(false);
   const draftHydratedRef = useRef(false);
   const [draftAutosaveReady, setDraftAutosaveReady] = useState(false);
@@ -494,6 +531,8 @@ export default function AddCommunity() {
     tag: string;
     estimatedComboLow?: number;
     estimatedComboHigh?: number;
+    fourBedroomPossible?: boolean;
+    fiveBedroomPossible?: boolean;
     sixBedroomPossible?: boolean;
     sevenEightBedroomPossible?: boolean;
     qualifyingCount?: number;
@@ -576,6 +615,13 @@ export default function AddCommunity() {
       etaSeconds?: number | null;
       unit1Photos?: Array<{ url: string }>;
       unit2Photos?: Array<{ url: string }>;
+      unit1SourceUrl?: string | null;
+      unit2SourceUrl?: string | null;
+      effectiveUnit1Beds?: number | null;
+      effectiveUnit2Beds?: number | null;
+      remixApplied?: boolean;
+      unit2PhotosReused?: boolean;
+      pairing?: { unit1Beds: number; unit2Beds: number; totalBeds: number };
     }>;
   };
   type QueueJobEventPayload = {
@@ -616,6 +662,12 @@ export default function AddCommunity() {
     setSweepJobId(job.id);
     setSweepMarkets((job.markets || []).map((market) => ({
       ...market,
+      fourBedroomPossible: market.status === "done"
+        ? (market.communities ?? []).some(hasFourBedroomComboPotential)
+        : market.fourBedroomPossible,
+      fiveBedroomPossible: market.status === "done"
+        ? (market.communities ?? []).some(hasFiveBedroomComboPotential)
+        : market.fiveBedroomPossible,
       sixBedroomPossible: market.status === "done"
         ? (market.communities ?? []).some(hasSixBedroomComboPotential)
         : market.sixBedroomPossible,
@@ -1123,6 +1175,12 @@ export default function AddCommunity() {
     setSweepDone(false);
     setSweepMarkets([]);
     setSweepPhase("setup");
+    // The resort selection is keyed by POSITION (`${marketIndex}:${communityIndex}`)
+    // into the current sweep's markets, so it MUST be dropped whenever the market
+    // set is torn down — otherwise leftover keys silently re-apply to whatever
+    // resorts land at those positions in the next sweep.
+    setSweepResortSelection(new Set());
+    setSweepQueueProgress(null);
   }, [sweepJobId]);
 
   const loadTopMarketSeeds = useCallback(async () => {
@@ -1191,6 +1249,8 @@ export default function AddCommunity() {
             if (!fresh || (fresh.status !== "done" && fresh.status !== "error")) return seed;
             return {
               ...seed,
+              fourBedroomPossible: fresh.fourBedroomPossible ?? (fresh.communities ?? []).some(hasFourBedroomComboPotential),
+              fiveBedroomPossible: fresh.fiveBedroomPossible ?? (fresh.communities ?? []).some(hasFiveBedroomComboPotential),
               sixBedroomPossible: fresh.sixBedroomPossible ?? (fresh.communities ?? []).some(hasSixBedroomComboPotential),
               sevenEightBedroomPossible: fresh.sevenEightBedroomPossible ?? (fresh.communities ?? []).some(hasSevenEightBedroomComboPotential),
               qualifyingCount: fresh.count,
@@ -1254,6 +1314,10 @@ export default function AddCommunity() {
     setSweepPhase("running");
     setSweepRunning(true);
     setSweepDone(false);
+    // Fresh sweep ⇒ fresh market ordering, so any prior positional resort
+    // selection is now meaningless — clear it before seeding the new markets.
+    setSweepResortSelection(new Set());
+    setSweepQueueProgress(null);
     setSweepMarkets(picked.map((m) => ({
       city: m.city,
       state: m.state,
@@ -1419,38 +1483,56 @@ export default function AddCommunity() {
   // combo type for a resort (auto-picks via alreadyExists flag + matchScore sort).
   // This lets operator search a city, then bulk-add variants across many resorts
   // with almost zero per-resort clicking (no manual combo type choice).
+  // Shared "research a resort and build one bulk-combo queue item" step used by
+  // every path that queues a community's best unused combo (the per-card quick
+  // queue, the Step 2 multi-select, and the cross-market sweep breakdown). Runs
+  // search-units, picks the largest UNUSED pairing, and returns a ready queue
+  // item — or null when the resort has no available combo left (all used).
+  const buildBulkComboItemForCommunity = useCallback(async (
+    community: CommunityResult,
+    idSeed: string,
+  ): Promise<Record<string, any> | null> => {
+    const street = inferCommunityStreetAddress({
+      communityName: community.name,
+      city: community.city,
+      state: community.state,
+      addressHint: (community as any).addressHint,
+    });
+    const res = await apiRequest("POST", "/api/community/search-units", {
+      communityName: community.name,
+      city: community.city,
+      state: community.state,
+      unitTypes: community.unitTypes,
+      streetAddress: street,
+      availableBedrooms: community.availableBedrooms,
+      bedroomMix: community.bedroomMix,
+    });
+    const data = await res.json();
+    const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
+    const best = pickBestAvailableComboPairing(pairings);
+    if (!best) return null;
+    const pricingArea = suggestPricingArea(community.city, community.state, community.name);
+    return {
+      id: `${idSeed}_${Math.random().toString(36).slice(2, 8)}`,
+      community,
+      pairing: best,
+      streetAddress: street,
+      pricingArea,
+      strPermit: null,
+      dbprLicense: null,
+      touristTaxAccount: null,
+    };
+  }, []);
+
   const quickQueueBestCombo = useCallback(async (community: CommunityResult) => {
     try {
-      const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state, addressHint: (community as any).addressHint });
-      const res = await apiRequest("POST", "/api/community/search-units", {
-        communityName: community.name,
-        city: community.city,
-        state: community.state,
-        unitTypes: community.unitTypes,
-        streetAddress: street,
-        availableBedrooms: community.availableBedrooms,
-        bedroomMix: community.bedroomMix,
-      });
-      const data = await res.json();
-      const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
-      const best = pickBestAvailableComboPairing(pairings);
-      if (!best) {
+      const item = await buildBulkComboItemForCommunity(community, "quick");
+      if (!item) {
         toast({ title: "All combos already used", description: "Open the community and choose Queue duplicate anyway if you intentionally want another listing.", variant: "destructive" });
         return;
       }
-      const pricingArea = suggestPricingArea(community.city, community.state, community.name);
-      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", {
-        items: [{
-          id: `quick_${Date.now().toString(36)}`,
-          community,
-          pairing: best,
-          streetAddress: street,
-          pricingArea,
-          strPermit: null,
-          dbprLicense: null,
-          touristTaxAccount: null,
-        }],
-      });
+      const best = item.pairing as SuggestedPairing;
+      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", { items: [item] });
       const jobData = await resp.json();
       setBulkComboJob(jobData.job);
       setBulkComboJobId(jobData.job.id);
@@ -1460,7 +1542,7 @@ export default function AddCommunity() {
     } catch (e: any) {
       toast({ title: "Quick queue failed", description: e?.message || "See console", variant: "destructive" });
     }
-  }, [toast]);
+  }, [toast, buildBulkComboItemForCommunity]);
 
   const toggleBulkCommunity = useCallback((index: number) => {
     setBulkCommunityIndexes((prev) => {
@@ -1481,31 +1563,8 @@ export default function AddCommunity() {
       const items: any[] = [];
       for (const community of selected) {
         try {
-          const street = inferCommunityStreetAddress({ communityName: community.name, city: community.city, state: community.state, addressHint: (community as any).addressHint });
-          const res = await apiRequest("POST", "/api/community/search-units", {
-            communityName: community.name,
-            city: community.city,
-            state: community.state,
-            unitTypes: community.unitTypes,
-            streetAddress: street,
-            availableBedrooms: community.availableBedrooms,
-            bedroomMix: community.bedroomMix,
-          });
-          const data = await res.json();
-          const pairings: SuggestedPairing[] = Array.isArray(data.suggestedPairings) ? data.suggestedPairings : [];
-          const best = pickBestAvailableComboPairing(pairings);
-          if (!best) continue;
-          const pricingArea = suggestPricingArea(community.city, community.state, community.name);
-          items.push({
-            id: `bcomm_${Date.now().toString(36)}_${items.length}`,
-            community,
-            pairing: best,
-            streetAddress: street,
-            pricingArea,
-            strPermit: null,
-            dbprLicense: null,
-            touristTaxAccount: null,
-          });
+          const item = await buildBulkComboItemForCommunity(community, `bcomm_${items.length}`);
+          if (item) items.push(item);
         } catch {
           // skip one on error; continue others
         }
@@ -1528,7 +1587,138 @@ export default function AddCommunity() {
     } finally {
       setBulkComboStarting(false);
     }
-  }, [communities, toast]);
+  }, [communities, toast, buildBulkComboItemForCommunity]);
+
+  // ── Cross-market sweep resort breakdown helpers ──────────────
+  // De-dupe key: the same resort can surface under two adjacent towns (Koloa /
+  // Poipu both return Pili Mai), and the bulk endpoint keys duplicates by
+  // name|city|state — so two different cities would NOT collapse server-side and
+  // would mint two identical drafts. Collapse by normalized name + state here.
+  const resortDedupKey = useCallback((c: CommunityResult) => {
+    const name = String(c.name || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const state = String(c.state || "").trim().toLowerCase();
+    return `${name}|${state}`;
+  }, []);
+
+  const toggleSweepResort = useCallback((key: string) => {
+    setSweepResortSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  // Unique communities behind the current sweep selection (deduped by resort).
+  const sweepSelectedCommunities = useMemo(() => {
+    const out: CommunityResult[] = [];
+    const seen = new Set<string>();
+    sweepMarkets.forEach((m, mi) => {
+      (m.communities ?? []).forEach((c, ci) => {
+        if (!sweepResortSelection.has(`${mi}:${ci}`)) return;
+        const dk = resortDedupKey(c);
+        if (seen.has(dk)) return;
+        seen.add(dk);
+        out.push(c);
+      });
+    });
+    return out;
+  }, [sweepMarkets, sweepResortSelection, resortDedupKey]);
+
+  const selectAllEligibleSweepResorts = useCallback(() => {
+    const next = new Set<string>();
+    sweepMarkets.forEach((m, mi) => {
+      (m.communities ?? []).forEach((c, ci) => {
+        if (checkCommunityType(c.unitTypes, c.researchSummary).eligible) next.add(`${mi}:${ci}`);
+      });
+    });
+    setSweepResortSelection(next);
+  }, [sweepMarkets]);
+
+  const clearSweepResorts = useCallback(() => setSweepResortSelection(new Set()), []);
+
+  // Queue every resort the operator ticked across all scanned markets. Respects
+  // the server's 12-item-per-batch cap (warns on overflow) and skips resorts
+  // whose combos are all already built/queued.
+  const BULK_COMBO_BATCH_MAX = 12;
+  const queueSelectedSweepResorts = useCallback(async () => {
+    const selected = sweepSelectedCommunities;
+    if (selected.length === 0) return;
+    const capped = selected.slice(0, BULK_COMBO_BATCH_MAX);
+    const overflow = selected.length - capped.length;
+    setSweepQueueStarting(true);
+    setSweepQueueProgress({ done: 0, total: capped.length });
+    try {
+      const items: any[] = [];
+      let skipped = 0;
+      for (const community of capped) {
+        try {
+          const item = await buildBulkComboItemForCommunity(community, `sweep_${items.length}`);
+          if (item) items.push(item);
+          else skipped += 1;
+        } catch {
+          skipped += 1; // research failed for this resort; keep going
+        }
+        setSweepQueueProgress((p) => (p ? { done: p.done + 1, total: p.total } : p));
+      }
+      if (items.length === 0) {
+        toast({
+          title: "No combos queued",
+          description: "The selected resorts have no available combo left (all built or queued already).",
+          variant: "destructive",
+        });
+        return;
+      }
+      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", { items });
+      const jobData = await resp.json();
+      if (jobData.job) {
+        setBulkComboJob(jobData.job);
+        setBulkComboJobId(jobData.job.id);
+        setBulkComboEvents([]);
+        // Drop ONLY the resorts this batch consumed (queued + all-combos-used
+        // skips) so any >12 overflow stays ticked and "run again for the rest"
+        // is a single click — never a re-tick.
+        const consumed = new Set(capped.map(resortDedupKey));
+        setSweepResortSelection((prev) => {
+          const next = new Set<string>();
+          sweepMarkets.forEach((m, mi) => {
+            (m.communities ?? []).forEach((c, ci) => {
+              const k = `${mi}:${ci}`;
+              if (prev.has(k) && !consumed.has(resortDedupKey(c))) next.add(k);
+            });
+          });
+          return next;
+        });
+        setBulkComboOpen(true);
+        if (overflow > 0) {
+          // Keep the sweep panel open behind the live queue so the operator can
+          // close it and queue the remaining resorts.
+          toast({
+            title: "Bulk queued from sweep",
+            description: `${items.length} queued${skipped > 0 ? ` · ${skipped} skipped (all combos used)` : ""} · ${overflow} still selected — close the queue and click Queue again for the rest`,
+          });
+        } else {
+          setSweepOpen(false);
+          const parts = [`${items.length} resort${items.length === 1 ? "" : "s"} queued`];
+          if (skipped > 0) parts.push(`${skipped} skipped (all combos used)`);
+          toast({ title: "Bulk queued from sweep", description: parts.join(" · ") });
+        }
+      }
+    } catch (e: any) {
+      const msg = String(e?.message || "");
+      const isDuplicate = msg.startsWith("409") || /already (exists|has|active)|already queue/i.test(msg);
+      toast({
+        title: "Bulk queue failed",
+        description: isDuplicate
+          ? "A selected resort already has that combo built or queued, so nothing was queued. Un-tick resorts badged “Existing” and try again."
+          : (msg || "See console"),
+        variant: "destructive",
+      });
+    } finally {
+      setSweepQueueStarting(false);
+      setSweepQueueProgress(null);
+    }
+  }, [sweepSelectedCommunities, sweepMarkets, resortDedupKey, buildBulkComboItemForCommunity, toast]);
 
   const toggleBulkPairing = useCallback((index: number) => {
     setBulkPairingIndexes((prev) => {
@@ -2507,8 +2697,12 @@ export default function AddCommunity() {
                                   {markets.map((m) => {
                                     const k = keyFor(m);
                                     const checked = selectedMarkets.has(k);
-                                    const sixBedroomCombo = seedComboBadge(m.sixBedroomPossible, "six");
-                                    const sevenEightBedroomCombo = seedComboBadge(m.sevenEightBedroomPossible, "sevenEight");
+                                    const comboBadges = [
+                                      seedComboBadge(m.fourBedroomPossible, "four"),
+                                      seedComboBadge(m.fiveBedroomPossible, "five"),
+                                      seedComboBadge(m.sixBedroomPossible, "six"),
+                                      seedComboBadge(m.sevenEightBedroomPossible, "sevenEight"),
+                                    ];
                                     return (
                                       <label
                                         key={k}
@@ -2527,32 +2721,22 @@ export default function AddCommunity() {
                                             {m.city}, {m.state}
                                           </span>
                                           <span className="mt-1 flex flex-wrap gap-1">
-                                            <span
-                                              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${sixBedroomCombo.className}`}
-                                              title={sixBedroomCombo.title}
-                                            >
-                                              {sixBedroomCombo.icon === "yes" ? (
-                                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                                              ) : sixBedroomCombo.icon === "no" ? (
-                                                <XCircle className="h-3 w-3 mr-1" />
-                                              ) : (
-                                                <Search className="h-3 w-3 mr-1" />
-                                              )}
-                                              {sixBedroomCombo.label}
-                                            </span>
-                                            <span
-                                              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${sevenEightBedroomCombo.className}`}
-                                              title={sevenEightBedroomCombo.title}
-                                            >
-                                              {sevenEightBedroomCombo.icon === "yes" ? (
-                                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                                              ) : sevenEightBedroomCombo.icon === "no" ? (
-                                                <XCircle className="h-3 w-3 mr-1" />
-                                              ) : (
-                                                <Search className="h-3 w-3 mr-1" />
-                                              )}
-                                              {sevenEightBedroomCombo.label}
-                                            </span>
+                                            {comboBadges.map((badge) => (
+                                              <span
+                                                key={badge.label}
+                                                className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}
+                                                title={badge.title}
+                                              >
+                                                {badge.icon === "yes" ? (
+                                                  <CheckCircle2 className="h-3 w-3 mr-1" />
+                                                ) : badge.icon === "no" ? (
+                                                  <XCircle className="h-3 w-3 mr-1" />
+                                                ) : (
+                                                  <Search className="h-3 w-3 mr-1" />
+                                                )}
+                                                {badge.label}
+                                              </span>
+                                            ))}
                                           </span>
                                           <span className="mt-1 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
                                             <DollarSign className="h-3 w-3" />
@@ -2592,12 +2776,17 @@ export default function AddCommunity() {
               </div>
               )}
 
-              {/* Per-market list (running/done phase) */}
+              {/* Per-market list (running/done phase). Once a market finishes,
+                  its researched resorts list inline with checkboxes so the
+                  operator can tick resorts ACROSS every scanned market and
+                  bulk-queue them in one action (the global footer below). */}
               {sweepPhase === "running" && (
               <div className="space-y-2">
-                {sweepMarkets.map((m) => {
+                {sweepMarkets.map((m, mi) => {
                   const best = m.communities?.[0];
                   const bestScore = best ? best.confidenceScore + (best.combinabilityScore ?? 50) : 0;
+                  const marketResorts = m.communities ?? [];
+                  const showResortBreakdown = m.status === "done" && marketResorts.length > 0;
                   const comboBadgeState = (
                     possible: boolean | undefined,
                     yesClassName: string,
@@ -2624,62 +2813,76 @@ export default function AddCommunity() {
                       icon: "checking" as const,
                     };
                   };
-                  const sixBedroomCombo = comboBadgeState(
-                    m.sixBedroomPossible,
-                    "border-emerald-200 bg-emerald-50 text-emerald-700",
-                    "Has evidence for a 6BR combo using two 3BR condo/townhome units",
-                    "Completed scan found no two-3BR 6BR combo potential for this market",
-                  );
-                  const sevenEightBedroomCombo = comboBadgeState(
-                    m.sevenEightBedroomPossible,
-                    "border-sky-200 bg-sky-50 text-sky-700",
-                    "Has evidence for 7BR/8BR combo potential using 3BR+4BR or 4BR+4BR attached inventory (requires 4BR units)",
-                    "Completed scan found no 7BR/8BR combo potential for this market",
-                  );
+                  const comboBadges = [
+                    {
+                      label: "4BR combo",
+                      state: comboBadgeState(
+                        m.fourBedroomPossible,
+                        "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700",
+                        "Has evidence for a 4BR combo using two 2BR condo units",
+                        "Completed scan found no two-2BR 4BR combo potential for this market",
+                      ),
+                    },
+                    {
+                      label: "5BR combo",
+                      state: comboBadgeState(
+                        m.fiveBedroomPossible,
+                        "border-indigo-200 bg-indigo-50 text-indigo-700",
+                        "Has evidence for a 5BR combo using a 2BR + 3BR condo",
+                        "Completed scan found no 2BR+3BR 5BR combo potential for this market",
+                      ),
+                    },
+                    {
+                      label: "6BR combo",
+                      state: comboBadgeState(
+                        m.sixBedroomPossible,
+                        "border-emerald-200 bg-emerald-50 text-emerald-700",
+                        "Has evidence for a 6BR combo using two 3BR condo/townhome units",
+                        "Completed scan found no two-3BR 6BR combo potential for this market",
+                      ),
+                    },
+                    {
+                      label: "7/8BR combo",
+                      state: comboBadgeState(
+                        m.sevenEightBedroomPossible,
+                        "border-sky-200 bg-sky-50 text-sky-700",
+                        "Has evidence for 7BR/8BR combo potential using 3BR+4BR or 4BR+4BR attached inventory (requires 4BR units)",
+                        "Completed scan found no 7BR/8BR combo potential for this market",
+                      ),
+                    },
+                  ];
                   return (
                     <Card
                       key={`${m.city}-${m.state}`}
                       className={`p-3 ${
-                        m.status === "done" && (m.count ?? 0) > 0 ? "border-green-200 bg-green-50/40 hover:border-green-500 cursor-pointer" :
+                        m.status === "done" && (m.count ?? 0) > 0 ? "border-green-200 bg-green-50/40" :
                         m.status === "error" ? "border-red-200 bg-red-50/30" :
                         m.status === "running" ? "border-blue-300 bg-blue-50/30" :
                         "opacity-60"
                       }`}
-                      onClick={() => m.status === "done" && (m.count ?? 0) > 0 && selectSweepCity(m)}
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="font-semibold text-sm">{m.city}, {m.state}</p>
                             {m.tag && <Badge variant="outline" className="text-[10px]">{m.tag}</Badge>}
-                            <Badge
-                              variant="outline"
-                              className={`text-[10px] ${sixBedroomCombo.className}`}
-                              title={sixBedroomCombo.title}
-                            >
-                              {sixBedroomCombo.icon === "checking" ? (
-                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                              ) : sixBedroomCombo.icon === "yes" ? (
-                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                              ) : (
-                                <XCircle className="h-3 w-3 mr-1" />
-                              )}
-                              6BR combo: {sixBedroomCombo.label}
-                            </Badge>
-                            <Badge
-                              variant="outline"
-                              className={`text-[10px] ${sevenEightBedroomCombo.className}`}
-                              title={sevenEightBedroomCombo.title}
-                            >
-                              {sevenEightBedroomCombo.icon === "checking" ? (
-                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                              ) : sevenEightBedroomCombo.icon === "yes" ? (
-                                <CheckCircle2 className="h-3 w-3 mr-1" />
-                              ) : (
-                                <XCircle className="h-3 w-3 mr-1" />
-                              )}
-                              7/8BR combo: {sevenEightBedroomCombo.label}
-                            </Badge>
+                            {comboBadges.map(({ label, state }) => (
+                              <Badge
+                                key={label}
+                                variant="outline"
+                                className={`text-[10px] ${state.className}`}
+                                title={state.title}
+                              >
+                                {state.icon === "checking" ? (
+                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                ) : state.icon === "yes" ? (
+                                  <CheckCircle2 className="h-3 w-3 mr-1" />
+                                ) : (
+                                  <XCircle className="h-3 w-3 mr-1" />
+                                )}
+                                {label}: {state.label}
+                              </Badge>
+                            ))}
                             <Badge variant="outline" className="text-[10px] border-emerald-200 bg-emerald-50 text-emerald-700">
                               <DollarSign className="h-3 w-3 mr-1" />
                               {formatComboRange(m.estimatedComboLow, m.estimatedComboHigh)}
@@ -2713,29 +2916,165 @@ export default function AddCommunity() {
                           )}
                         </div>
                         {m.status === "done" && (m.count ?? 0) > 0 && (
-                          <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0 mt-1" />
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="shrink-0 h-7 px-2 text-xs"
+                            onClick={(e) => { e.stopPropagation(); selectSweepCity(m); }}
+                            data-testid={`button-open-market-${mi}`}
+                            title="Drill into just this market in Step 2"
+                          >
+                            Open in Step 2 <ArrowRight className="h-3.5 w-3.5 ml-1" />
+                          </Button>
                         )}
                       </div>
+
+                      {/* Resort breakdown for this market — tick resorts to bulk-queue */}
+                      {showResortBreakdown && (
+                        <div className="mt-3 border-t pt-2.5 space-y-1.5">
+                          {marketResorts.map((c, ci) => {
+                            const selKey = `${mi}:${ci}`;
+                            const elig = checkCommunityType(c.unitTypes, c.researchSummary);
+                            const checked = sweepResortSelection.has(selKey);
+                            const comboLabel = formatTypicalComboLabel(inferTypicalComboPair(c));
+                            const alreadyQueued = (c.existingComboLabels?.length || c.reservedComboLabels?.length) ? true : false;
+                            // True when we already have a listing/draft (or a queued combo) in this
+                            // resort — surfaced as an icon next to the combo badge so the operator
+                            // can see at a glance which resorts they already cover.
+                            const hasListing = c.hasExistingListing === true || alreadyQueued;
+                            const listingTooltip = `You already have a listing in this resort${
+                              c.existingComboLabels?.length ? ` — ${c.existingComboLabels.join(", ")} built` : ""
+                            }${
+                              c.reservedComboLabels?.length ? ` · ${c.reservedComboLabels.join(", ")} queued` : ""
+                            }`;
+                            // Ticking is enabled only once the WHOLE sweep is done — until
+                            // then a finished market's resorts render as a read-only preview
+                            // (the queue footer that acts on them doesn't exist yet either).
+                            const selectable = elig.eligible && sweepDone;
+                            return (
+                              <label
+                                key={`${selKey}-${c.name}`}
+                                className={`flex items-start gap-2 rounded border px-2 py-1.5 text-xs transition-colors ${
+                                  !elig.eligible
+                                    ? "opacity-60 cursor-not-allowed border-dashed bg-muted/20"
+                                    : !selectable
+                                      ? "border-muted bg-muted/10"
+                                      : checked
+                                        ? "border-primary bg-primary/5 cursor-pointer"
+                                        : "cursor-pointer hover:border-muted-foreground/40"
+                                }`}
+                                title={!elig.eligible ? (elig.reason ?? "Only condo/townhome communities are supported") : !sweepDone ? "Available to select once the whole sweep finishes" : undefined}
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="accent-primary mt-0.5"
+                                  checked={checked}
+                                  disabled={!selectable}
+                                  onChange={() => toggleSweepResort(selKey)}
+                                  data-testid={`checkbox-sweep-resort-${mi}-${ci}`}
+                                />
+                                <span className="min-w-0 flex-1">
+                                  <span className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-medium text-foreground">{c.name}</span>
+                                    {typeof c.combinabilityScore === "number" && (
+                                      <span
+                                        className={`inline-flex items-center rounded px-1 py-0.5 text-[10px] font-semibold ${
+                                          c.combinabilityScore >= 70 ? "bg-green-600 text-white"
+                                          : c.combinabilityScore >= 50 ? "bg-amber-500 text-white"
+                                          : "bg-red-500 text-white"
+                                        }`}
+                                      >
+                                        <BedDouble className="h-2.5 w-2.5 mr-0.5" />
+                                        {c.combinabilityScore}{comboLabel}
+                                      </span>
+                                    )}
+                                    {hasListing && (
+                                      <span
+                                        className="inline-flex items-center rounded bg-blue-600 px-1 py-0.5 text-[10px] font-semibold text-white"
+                                        title={listingTooltip}
+                                        data-testid={`badge-sweep-existing-listing-${mi}-${ci}`}
+                                      >
+                                        <CheckCircle2 className="h-2.5 w-2.5 mr-0.5" />
+                                        Listed
+                                      </span>
+                                    )}
+                                    {!elig.eligible && (
+                                      <span className="inline-flex items-center rounded border border-red-300 bg-red-50 px-1 py-0.5 text-[10px] text-red-700">
+                                        Not supported
+                                      </span>
+                                    )}
+                                  </span>
+                                  <span className="mt-0.5 block text-muted-foreground">
+                                    {c.bedroomMix && <span className="italic">{c.bedroomMix} · </span>}
+                                    {(c.estimatedLowRate || c.estimatedHighRate)
+                                      ? `resort est. ${formatComboRange(c.estimatedLowRate, c.estimatedHighRate)}`
+                                      : c.unitTypes}
+                                  </span>
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
                     </Card>
                   );
                 })}
               </div>
               )}
 
-              {sweepPhase === "running" && sweepDone && (
-                <div className="mt-4 flex items-center justify-between gap-3 flex-wrap">
-                  <div className="text-xs text-muted-foreground">
-                    Click any green market to load its results into Step 2.
+              {/* ── Cross-market resort queue footer (done phase) ── */}
+              {sweepPhase === "running" && sweepDone && (() => {
+                const uniqueSelected = sweepSelectedCommunities.length;
+                const rawSelected = sweepResortSelection.size;
+                const collapsed = rawSelected - uniqueSelected;
+                const marketsTouched = new Set(
+                  Array.from(sweepResortSelection).map((k) => k.split(":")[0]),
+                ).size;
+                const queueLabel = sweepQueueProgress
+                  ? `Preparing ${sweepQueueProgress.done}/${sweepQueueProgress.total}…`
+                  : `Queue ${Math.min(uniqueSelected, BULK_COMBO_BATCH_MAX)} selected resort${uniqueSelected === 1 ? "" : "s"} (best combo each)`;
+                return (
+                  <div className="mt-4 space-y-2 border-t pt-3">
+                    <div className="text-xs text-muted-foreground">
+                      Tick resorts under any market to bulk-queue them, or use <span className="font-medium">Open in Step 2</span> to drill into one market.
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button size="sm" variant="outline" onClick={selectAllEligibleSweepResorts}>
+                        Select all eligible
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={clearSweepResorts} disabled={rawSelected === 0}>
+                        Clear
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={resetSweepToMarketPicker}>
+                        ← Scan different markets
+                      </Button>
+                      <span className="text-xs text-muted-foreground ml-auto">
+                        {uniqueSelected} resort{uniqueSelected === 1 ? "" : "s"} selected
+                        {marketsTouched > 0 ? ` across ${marketsTouched} market${marketsTouched === 1 ? "" : "s"}` : ""}
+                        {collapsed > 0 ? ` · ${collapsed} duplicate collapsed` : ""}
+                      </span>
+                    </div>
+                    {uniqueSelected > BULK_COMBO_BATCH_MAX && !sweepQueueProgress && (
+                      <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
+                        Up to {BULK_COMBO_BATCH_MAX} resorts queue per batch — the first {BULK_COMBO_BATCH_MAX} are queued now (the remaining {uniqueSelected - BULK_COMBO_BATCH_MAX} stay selected; click Queue again for the rest).
+                      </div>
+                    )}
+                    <Button
+                      className="w-full sm:w-auto"
+                      onClick={queueSelectedSweepResorts}
+                      disabled={uniqueSelected === 0 || sweepQueueStarting}
+                      data-testid="button-queue-sweep-resorts"
+                    >
+                      {sweepQueueStarting ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <Plus className="h-4 w-4 mr-2" />
+                      )}
+                      {queueLabel}
+                    </Button>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={resetSweepToMarketPicker}
-                  >
-                    ← Scan different markets
-                  </Button>
-                </div>
-              )}
+                );
+              })()}
             </div>
           </div>
         )}
@@ -2881,6 +3220,23 @@ export default function AddCommunity() {
                               </p>
                               {item.draftId && (
                                 <p className="mt-0.5 text-xs text-emerald-700">Saved as dashboard draft #{item.draftId}</p>
+                              )}
+                              {(item.unit1Photos || item.unit2Photos || item.status === "running" || item.status === "completed") && (
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                  Photos — Unit A: <span className="tabular-nums">{item.unit1Photos?.length ?? 0}</span>
+                                  {" · "}Unit B: <span className="tabular-nums">{item.unit2Photos?.length ?? 0}</span>
+                                  {item.unit2PhotosReused ? " (reused from Unit A)" : ""}
+                                </p>
+                              )}
+                              {item.remixApplied && item.effectiveUnit1Beds && item.effectiveUnit2Beds && (
+                                <span className="mt-1 inline-flex w-fit items-center gap-1 rounded-sm border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                                  🔀 Re-mixed{item.pairing ? ` ${item.pairing.unit1Beds}BR+${item.pairing.unit2Beds}BR` : ""} → {item.effectiveUnit1Beds}BR+{item.effectiveUnit2Beds}BR for a distinct 2nd unit
+                                </span>
+                              )}
+                              {item.unit2PhotosReused && !item.remixApplied && (
+                                <span className="mt-1 inline-flex w-fit items-center gap-1 rounded-sm border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                                  ♻︎ Reused Unit A photos for Unit B
+                                </span>
                               )}
                             </div>
                             <div className="flex shrink-0 flex-col items-end gap-1">

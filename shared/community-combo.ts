@@ -103,6 +103,123 @@ export function formatTypicalComboLabel(pair: TypicalComboPair | null | undefine
   return ` · 2×${pair.unitBeds}BR=${pair.totalBeds}BR`;
 }
 
+export type RemixSplit = { unit1Beds: number; unit2Beds: number };
+
+/**
+ * When a same-size combo (e.g. 3BR + 3BR) cannot source two DISTINCT units in a
+ * community, propose alternative bedroom SPLITS of the SAME total using two
+ * DIFFERENT unit sizes — so each half draws from a different inventory pool and
+ * is far more likely to resolve to a genuine second unit.
+ *
+ * Rules (operator-driven):
+ * - Preserves the combined bedroom total (a 6BR combo stays 6BR: 3+3 -> 4+2).
+ * - Caps each half at `maxUnitBeds` (default 4 — there is no 5BR condo in these
+ *   communities) and floors at `minUnitBeds` (default 1).
+ * - Both halves must be DIFFERENT sizes (the whole point), and the original
+ *   split is excluded.
+ * - The larger half is returned as `unit1Beds` (Unit A), the smaller as
+ *   `unit2Beds` (Unit B). Ordered most-balanced-first and capped to `limit`.
+ *
+ * Examples (maxUnitBeds=4): 3+3 -> [{4,2}]; 2+2 -> [{3,1}]; 4+4 -> [] (no valid
+ * same-total split under the 4BR cap) -> caller falls back to photo reuse.
+ */
+export function remixBedroomSplits(
+  unit1Beds: number,
+  unit2Beds: number,
+  opts: { maxUnitBeds?: number; minUnitBeds?: number; limit?: number } = {},
+): RemixSplit[] {
+  const a0 = Math.round(Number(unit1Beds) || 0);
+  const b0 = Math.round(Number(unit2Beds) || 0);
+  const total = a0 + b0;
+  const maxUnitBeds = Math.max(1, Math.round(opts.maxUnitBeds ?? 4));
+  const minUnitBeds = Math.max(1, Math.round(opts.minUnitBeds ?? 1));
+  const limit = Math.max(0, Math.round(opts.limit ?? 3));
+  if (total <= 0 || limit === 0) return [];
+  const out: RemixSplit[] = [];
+  // `big` = larger half: from the cap down to just above half (so big > small).
+  for (let big = Math.min(maxUnitBeds, total - minUnitBeds); big * 2 > total; big -= 1) {
+    const small = total - big;
+    if (small < minUnitBeds || small > maxUnitBeds) continue;
+    if (big === small) continue; // must be two DIFFERENT sizes
+    if ((big === a0 && small === b0) || (big === b0 && small === a0)) continue; // skip original
+    out.push({ unit1Beds: big, unit2Beds: small });
+  }
+  // Most-balanced first (smallest larger-half), then cap.
+  out.sort((x, y) => x.unit1Beds - y.unit1Beds);
+  return out.slice(0, limit);
+}
+
+/**
+ * Ordered ladder of FALLBACK combination types to try, in order, when the
+ * requested combo (`unit1Beds + unit2Beds`) cannot source two DISTINCT,
+ * independently-photographed units in a community. Used by the bulk combo
+ * listing queue's STRICT photo mode so a combo is NEVER saved to the dashboard
+ * with a missing or duplicate second unit — when this ladder is exhausted the
+ * resort is skipped (no listing created) instead of saving photo-less.
+ *
+ * Operator intent ("keep beds high, then step down"):
+ *   1. Same-total re-mixes FIRST so the requested bedroom count is preserved
+ *      when possible (a 6BR stays 6BR: 3+3 -> 4+2). Each half draws from a
+ *      different inventory pool, so a starved same-size pair often resolves.
+ *   2. Then progressively SMALLER totals, largest-total-first, down to the
+ *      abundant 2BR+2BR floor (6BR -> 5BR -> 4BR), since 2BR condos are the most
+ *      plentiful and the most likely to yield two distinct, photographed units.
+ *
+ * Every split keeps both halves within [minUnitBeds, maxUnitBeds] (default 2..4
+ * — no 1BR combo units, no 5BR condos in these communities). The requested split
+ * and any duplicate combo key are excluded; the larger half is `unit1Beds`.
+ * Ordered most-preferred first and capped to `limit`.
+ *
+ * Examples (max 4, min 2): 3+3 -> [4+2, 3+2, 2+2]; 4+4 -> [4+3, 4+2, 3+3, 3+2,
+ * 2+2]; 2+2 -> [] (already the floor — nothing smaller to try).
+ */
+export function comboFallbackPairings(
+  unit1Beds: number,
+  unit2Beds: number,
+  opts: { maxUnitBeds?: number; minUnitBeds?: number; sameTotalLimit?: number; limit?: number } = {},
+): RemixSplit[] {
+  const a0 = Math.round(Number(unit1Beds) || 0);
+  const b0 = Math.round(Number(unit2Beds) || 0);
+  const maxUnitBeds = Math.max(1, Math.round(opts.maxUnitBeds ?? 4));
+  const minUnitBeds = Math.max(1, Math.round(opts.minUnitBeds ?? 2));
+  const sameTotalLimit = Math.max(0, Math.round(opts.sameTotalLimit ?? 2));
+  const limit = Math.max(0, Math.round(opts.limit ?? 6));
+  const requestedTotal = a0 + b0;
+  if (requestedTotal <= 0 || limit === 0) return [];
+
+  const out: RemixSplit[] = [];
+  const seen = new Set<string>();
+  const keyOf = (x: number, y: number) => (x <= y ? `${x}+${y}` : `${y}+${x}`);
+  seen.add(keyOf(a0, b0)); // the requested split is never a "fallback"
+
+  const push = (rawBig: number, rawSmall: number) => {
+    if (out.length >= limit) return;
+    const big = Math.max(rawBig, rawSmall);
+    const small = Math.min(rawBig, rawSmall);
+    if (small < minUnitBeds || big > maxUnitBeds) return;
+    const k = keyOf(big, small);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ unit1Beds: big, unit2Beds: small });
+  };
+
+  // 1. Same-total re-mixes (preserve the requested bedroom count).
+  for (const split of remixBedroomSplits(a0, b0, { maxUnitBeds, minUnitBeds, limit: sameTotalLimit })) {
+    push(split.unit1Beds, split.unit2Beds);
+  }
+
+  // 2. Smaller totals, largest-total-first, down to the 2BR floor. Within a
+  //    total, prefer the larger big-half (keeps one bigger unit while leaning on
+  //    an abundant small unit) — e.g. for 6BR, 4+2 before 3+3.
+  for (let total = requestedTotal - 1; total >= minUnitBeds * 2; total -= 1) {
+    for (let big = Math.min(maxUnitBeds, total - minUnitBeds); big >= Math.ceil(total / 2); big -= 1) {
+      push(big, total - big);
+    }
+  }
+
+  return out.slice(0, limit);
+}
+
 export function normalizeCombinedBedroomsTypical(community: TypicalComboBedroomFields): number | undefined {
   const inferred = inferTypicalComboPair(community);
   if (inferred) return inferred.totalBeds;

@@ -45,6 +45,9 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Manualoha at Poipu Kai"], street: "2371 Ho'ohu Road", city: "Koloa", state: "HI" },
   { names: ["Honua Kai Resort", "Honua Kai", "Honua Kai Resort & Spa"], street: "130 Kai Malina Pkwy", city: "Lahaina", cityAliases: ["Kaanapali", "Ka'anapali", "Kapalua", "Napili", "Honokowai"], state: "HI" },
   { names: ["Kaanapali Alii", "Kaanapali Ali'i"], street: "50 Nohea Kai Dr", city: "Lahaina", cityAliases: ["Kaanapali", "Ka'anapali"], state: "HI" },
+  { names: ["Wailea Elua Village", "Wailea Elua"], street: "3600 Wailea Alanui Dr", city: "Kihei", cityAliases: ["Wailea"], state: "HI" },
+  { names: ["Wailea Ekahi Village", "Wailea Ekahi"], street: "3300 Wailea Alanui Dr", city: "Kihei", cityAliases: ["Wailea"], state: "HI" },
+  { names: ["Grand Champions Villas", "Wailea Grand Champions"], street: "155 Wailea Ike Pl", city: "Kihei", cityAliases: ["Wailea"], state: "HI" },
   { names: ["Ko Olina Beach Villas", "Beach Villas at Ko Olina", "Beach Villas Ko Olina"], street: "92-102 Waialii Pl", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
   { names: ["Coconut Plantation at Ko Olina", "Coconut Plantation", "Coconut Plantation Ko Olina"], street: "92-1070 Olani St", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
 ];
@@ -83,13 +86,26 @@ function stateAbbrev(value: string): string {
   return value.trim().toUpperCase();
 }
 
+// One normalized name contains the other ON WORD BOUNDARIES. Padding both sides
+// with a space means "alii kai" no longer matches inside "halii kai" (the suffix
+// of "halii" is not a whole word) while legitimate partials like "grand champions"
+// ⊂ "wailea grand champions" and "poipu kai" ⊂ "kahala at poipu kai" still match.
+// LOAD-BEARING: a raw substring match here silently saved a Kauai "Alii Kai" combo
+// listing against the Big-Island "Halii Kai" address — keep this boundary-aware.
+function nameTokensContain(haystack: string, needle: string): boolean {
+  if (!haystack || !needle) return false;
+  if (haystack === needle) return true;
+  return ` ${haystack} `.includes(` ${needle} `);
+}
+
 export function communityAddressRuleForName(name: string | null | undefined): CommunityAddressRule | null {
   const n = normalizeCommunityAddressToken(String(name ?? ""));
   if (!n) return null;
   return COMMUNITY_ADDRESS_RULES.find((rule) =>
     rule.names.some((candidate) => {
       const c = normalizeCommunityAddressToken(candidate);
-      return n === c || n.includes(c) || c.includes(n);
+      if (!c) return false;
+      return n === c || nameTokensContain(n, c) || nameTokensContain(c, n);
     }),
   ) ?? null;
 }

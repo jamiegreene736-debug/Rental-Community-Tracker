@@ -141,6 +141,8 @@ export const topMarketScanCache = pgTable("top_market_scan_cache", {
   city: text("city").notNull(),
   state: text("state").notNull(),
   tag: text("tag"),
+  fourBedroomPossible: boolean("four_bedroom_possible").notNull().default(false),
+  fiveBedroomPossible: boolean("five_bedroom_possible").notNull().default(false),
   sixBedroomPossible: boolean("six_bedroom_possible").notNull().default(false),
   sevenEightBedroomPossible: boolean("seven_eight_bedroom_possible").notNull().default(false),
   qualifyingCount: integer("qualifying_count").notNull().default(0),
@@ -229,6 +231,9 @@ export type ManualReservation = typeof manualReservations.$inferSelect;
 export const reservationAliases = pgTable("reservation_aliases", {
   id: serial("id").primaryKey(),
   reservationId: text("reservation_id").notNull(),
+  // Per-unit: each attached buy-in (unit) gets its own alias. NULL = a legacy
+  // reservation-level alias (pre per-unit). Uniqueness is (reservation_id, buy_in_id).
+  buyInId: integer("buy_in_id"),
   guestName: text("guest_name"),
   aliasEmail: text("alias_email").notNull(),
   simpleloginAliasId: integer("simplelogin_alias_id"),
@@ -635,6 +640,14 @@ export const bulkComboListingJobItems = pgTable("bulk_combo_listing_job_items", 
   error: text("error"),
   attemptCount: integer("attempt_count").notNull().default(0),
   heartbeatAt: timestamp("heartbeat_at"),
+  // Bedroom re-mix / photo-reuse tracking (sizes actually sourced + saved).
+  effectiveUnit1Beds: integer("effective_unit1_beds"),
+  effectiveUnit2Beds: integer("effective_unit2_beds"),
+  remixApplied: boolean("remix_applied").notNull().default(false),
+  unit2PhotosReused: boolean("unit2_photos_reused").notNull().default(false),
+  // Count of worker restarts/interruptions that stopped this item mid-run (bounded
+  // reprieve so a deploy mid-listing doesn't permanently drop a viable listing).
+  interruptions: integer("interruptions").notNull().default(0),
   sortOrder: integer("sort_order").notNull().default(0),
   startedAt: timestamp("started_at"),
   finishedAt: timestamp("finished_at"),
