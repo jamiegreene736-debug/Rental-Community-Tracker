@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import {
   calculateBlendedRate,
+  extrapolateYearTwoMarketRate,
   fetchAirbnbMedianNightly,
   airbnbSearchGeoParamsForMarket,
   curatedAirbnbSearchQueries,
   hybridPricingWindowForMonth,
   hybridPricingWindowForSeason,
   isSearchApiAirbnbNoResultsError,
+  AIRBNB_MARKET_RATE_SEARCH_MONTHS,
+  YEAR_TWO_MARKET_RATE_GROWTH,
 } from "../server/hybrid-pricing";
 import { readFileSync } from "node:fs";
 
@@ -72,8 +75,18 @@ assert.equal(julyPeakWindow.checkOut, "2026-07-08");
 
 const decemberHolidayWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 7, 7, () => 0);
 assert.equal(decemberHolidayWindow.yearMonth, "2026-12");
-assert.equal(decemberHolidayWindow.checkIn, "2026-12-15");
-assert.equal(decemberHolidayWindow.checkOut, "2026-12-22");
+assert.equal(decemberHolidayWindow.checkIn, "2026-12-01");
+assert.equal(decemberHolidayWindow.checkOut, "2026-12-08");
+
+const midJulyWindow = hybridPricingWindowForMonth(new Date("2026-05-27T23:47:00Z"), 2, 7, () => 0.5);
+assert.equal(midJulyWindow.yearMonth, "2026-07");
+assert.ok(midJulyWindow.checkIn >= "2026-07-01" && midJulyWindow.checkIn <= "2026-07-25");
+assert.equal(midJulyWindow.checkOut.slice(0, 7), "2026-07");
+
+assert.equal(extrapolateYearTwoMarketRate(200), 206);
+assert.equal(extrapolateYearTwoMarketRate(0), 0);
+assert.equal(AIRBNB_MARKET_RATE_SEARCH_MONTHS, 12);
+assert.equal(YEAR_TWO_MARKET_RATE_GROWTH, 0.03);
 
 const lowSeasonWindow = hybridPricingWindowForSeason(new Date("2026-05-27T23:47:00Z"), "LOW", 7, () => 0);
 assert.equal(lowSeasonWindow.season, "LOW");
@@ -541,8 +554,12 @@ assert.equal(
   "market-rate refresh must not run hybrid layered markup on sampled medians",
 );
 assert.ok(
-  hybridPricingSource.includes("hybridPricingWindowForMonth(asOf, monthOffset, stayNights)"),
-  "market-rate refresh should run one SearchAPI Airbnb scan per calendar month",
+  hybridPricingSource.includes("hybridPricingWindowForMonth(") && hybridPricingSource.includes("monthScanRng"),
+  "market-rate refresh should pick a random 7-night window per calendar month",
+);
+assert.ok(
+  hybridPricingSource.includes("monthOffset >= AIRBNB_MARKET_RATE_SEARCH_MONTHS"),
+  "months 13–24 extrapolate instead of calling SearchAPI",
 );
 assert.ok(
   hybridPricingSource.includes("for (let monthOffset = 0; monthOffset < horizonMonths; monthOffset += 1)"),
@@ -611,8 +628,21 @@ assert.ok(
   "the seasonal plan builder must skip blacked-out months (not treat them as a missing-data error)",
 );
 assert.ok(
-  !hybridPricingSource.includes("sampled once"),
-  "hybrid pricing logs should not claim month rows were extrapolated from one Airbnb sample",
+  hybridPricingSource.includes("monthOffset >= AIRBNB_MARKET_RATE_SEARCH_MONTHS"),
+  "months beyond the Airbnb dated-search horizon must extrapolate from the same calendar month in year 1",
+);
+assert.ok(
+  hybridPricingSource.includes("extrapolateYearTwoMarketRate"),
+  "year-2 months must apply the configured growth rate to the prior-year SearchAPI basis",
+);
+assert.equal(
+  hybridPricingSource.includes("avoidNightlyBasis: previousBasis"),
+  false,
+  "monthly scan must not nudge P40 to avoid matching the prior month",
+);
+assert.ok(
+  !hybridPricingSource.includes("demandRank(resolveSeasonTier"),
+  "monthly windows must be a random 7-night sample, not demand-biased peak days",
 );
 
 console.log("hybrid pricing suite passed");
