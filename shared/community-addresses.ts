@@ -86,13 +86,26 @@ function stateAbbrev(value: string): string {
   return value.trim().toUpperCase();
 }
 
+// One normalized name contains the other ON WORD BOUNDARIES. Padding both sides
+// with a space means "alii kai" no longer matches inside "halii kai" (the suffix
+// of "halii" is not a whole word) while legitimate partials like "grand champions"
+// ⊂ "wailea grand champions" and "poipu kai" ⊂ "kahala at poipu kai" still match.
+// LOAD-BEARING: a raw substring match here silently saved a Kauai "Alii Kai" combo
+// listing against the Big-Island "Halii Kai" address — keep this boundary-aware.
+function nameTokensContain(haystack: string, needle: string): boolean {
+  if (!haystack || !needle) return false;
+  if (haystack === needle) return true;
+  return ` ${haystack} `.includes(` ${needle} `);
+}
+
 export function communityAddressRuleForName(name: string | null | undefined): CommunityAddressRule | null {
   const n = normalizeCommunityAddressToken(String(name ?? ""));
   if (!n) return null;
   return COMMUNITY_ADDRESS_RULES.find((rule) =>
     rule.names.some((candidate) => {
       const c = normalizeCommunityAddressToken(candidate);
-      return n === c || n.includes(c) || c.includes(n);
+      if (!c) return false;
+      return n === c || nameTokensContain(n, c) || nameTokensContain(c, n);
     }),
   ) ?? null;
 }
