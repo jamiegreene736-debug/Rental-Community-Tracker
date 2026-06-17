@@ -56,9 +56,16 @@ import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch } from "./photo-match-guardrails";
 import { isDuplicateHash } from "./photo-hashing";
+import { getSearchApiKeys } from "./searchapi";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 
-const SEARCHAPI_KEY = process.env.SEARCHAPI_API_KEY;
+// Resolve to the FIRST available SearchAPI key (SEARCHAPI_API_KEY, then _2 / _SECONDARY). The
+// global fetch fallback (installSearchApiFetchFallback) rotates to the other keys on a 429/quota
+// response, so a dead primary key self-heals automatically. Reading via the resolver — instead of
+// `process.env.SEARCHAPI_API_KEY` directly — fixes the case where the primary env is empty/dead
+// but SEARCHAPI_API_KEY_2 holds the live key: the presence check and the initial request key both
+// pick the live key. (A dead primary used to make every Lens call 429 → "photos inconclusive".)
+const SEARCHAPI_KEY = getSearchApiKeys()[0] ?? "";
 // The dashboard "Photos" match column depends on Google Lens reverse-image
 // search. It was hard-disabled to preserve SearchAPI quota, which left every
 // icon greyed ("unknown"). Re-enabled by default so the column works; the
@@ -81,14 +88,31 @@ const HOSTS: Array<{ key: "airbnb" | "vrbo" | "booking"; host: string }> = [
 
 const PHOTOS_PER_FOLDER = 3;
 const MIN_MATCHES = 2;
-// Daily SearchAPI/Lens budget for photo-listing checks (circuit-breaker). Counted as the
-// sum of lensCalls across today's photo_listing_checks rows. The on-demand preflight deep
-// check refuses to start past this; the background scheduler is unaffected (it passes no cap).
-const PHOTO_CHECK_DAILY_CAP = (() => {
-  // 0 is a valid value (hard-disables the on-demand deep check — read path still works),
-  // so don't use `|| 200` (which would treat 0 as unset).
-  const n = Number(process.env.PHOTO_CHECK_DAILY_CAP);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 200;
+// Daily SearchAPI/Lens budget for the on-demand preflight deep check (circuit-breaker). Counted as
+// the sum of lensCalls across today's photo_listing_checks rows.
+//
+// 2026-06-17 (operator ask — "remove our 200 photo check limit a day"): the old 200/day cap was the
+// thing leaving units stuck on "photos inconclusive" — once the day's audits crossed 200 Lens calls
+// the batch stopped before scanning a folder, so its row never resolved to clean/found and the audit
+// stayed a "maybe". The cap is now UNLIMITED by default (null). Set PHOTO_CHECK_DAILY_CAP to a finite
+// number to re-impose a ceiling; 0 still hard-disables the on-demand deep check (the read path keeps
+// working). The background scheduler is unaffected (it passes no cap).
+const PHOTO_CHECK_DAILY_CAP: number | null = (() => {
+  const raw = String(process.env.PHOTO_CHECK_DAILY_CAP ?? "").trim();
+  if (!raw) return null; // unset → no daily cap
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+})();
+// The on-demand "Full unit audit" deep check reverse-image-searches EVERY distinct interior photo
+// (after dHash de-dup), not just a small sample. A thorough clean scan is exactly what lets the
+// verdict be a confident NO ("not found — safe") instead of "inconclusive", and gives a listed unit
+// every chance to surface the ≥2 matches that make a confident YES. Bounded so a pathological folder
+// can't fire hundreds of Lens calls. The background scheduler still uses the cheap PHOTOS_PER_FOLDER.
+export const PHOTO_AUDIT_MAX_PHOTOS = (() => {
+  const n = Number(process.env.PREFLIGHT_PHOTO_AUDIT_MAX_PHOTOS);
+  // 30 effectively covers the whole gallery (interior photos dedupe to ~10-15 distinct rooms), while
+  // bounding the worst-case Lens spend on a pathologically large folder.
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 30;
 })();
 const LENS_TIMEOUT_MS = 45_000;
 const VERIFY_TIMEOUT_MS = 20_000;
@@ -391,9 +415,10 @@ export async function runPhotoListingCheckForFolder(
   folder: string,
   opts: { maxPhotos?: number } = {},
 ): Promise<ScanResult> {
-  // How many DISTINCT interior photos to reverse-image (1 Lens call each). Background
-  // scheduler uses the cheap default (3); the on-demand preflight deep check passes 5.
-  const maxPhotos = Math.max(1, Math.min(10, Math.floor(opts.maxPhotos ?? PHOTOS_PER_FOLDER)));
+  // How many DISTINCT interior photos to reverse-image (1 Lens call each). Background scheduler uses
+  // the cheap default (3); the on-demand preflight deep check passes a large number so it scans the
+  // whole deduped gallery (clamped to PHOTO_AUDIT_MAX_PHOTOS).
+  const maxPhotos = Math.max(1, Math.min(PHOTO_AUDIT_MAX_PHOTOS, Math.floor(opts.maxPhotos ?? PHOTOS_PER_FOLDER)));
   console.error(`[photo-listing-scanner] ${folder}: starting (maxPhotos=${maxPhotos})`);
   const result: ScanResult = {
     folder,
@@ -752,8 +777,11 @@ export async function getLensCallsUsedToday(): Promise<number> {
   }
 }
 
-export async function getPhotoCheckBudget(): Promise<{ used: number; cap: number; remaining: number }> {
+export async function getPhotoCheckBudget(): Promise<{ used: number; cap: number | null; remaining: number | null }> {
   const used = await getLensCallsUsedToday();
+  // cap === null → unlimited (the default since the 200/day cap was removed). remaining null means
+  // "no ceiling", which the endpoint and client treat as "never budget-blocked".
+  if (PHOTO_CHECK_DAILY_CAP == null) return { used, cap: null, remaining: null };
   return { used, cap: PHOTO_CHECK_DAILY_CAP, remaining: Math.max(0, PHOTO_CHECK_DAILY_CAP - used) };
 }
 
