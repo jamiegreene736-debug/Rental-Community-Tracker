@@ -238,6 +238,7 @@ import {
   compareUnitPhotoProofs,
   MIN_INDEPENDENT_UNIT_PHOTOS,
   summarizeUnitPhotoProof,
+  UNIT_GALLERY_MAX_KEEP,
   unitGalleryMaxKeep,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
@@ -32955,7 +32956,8 @@ Return ONLY compact JSON with this exact shape:
           continue;
         }
         const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
-        const photos = ((data?.photos || []) as Array<{ url: string; label?: string }>).slice(0, 25);
+        const rawPhotos = (data?.photos || []) as Array<{ url: string; label?: string }>;
+        const photos = rawPhotos.slice(0, unitGalleryMaxKeep(rawPhotos.length));
         const proof = normalizeUnitPhotoProofFromFetchResponse(data, photos, sourceUrl, body, attempt.relaxed);
         const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => canonicalListingKey(u) === canonicalListingKey(sourceUrl));
         const duplicatePhotos = avoidPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(avoidPhotos, photos);
@@ -40039,8 +40041,7 @@ Return ONLY compact JSON with this exact shape:
   //
   // Best-effort: a single bad URL is logged and skipped; the
   // response reports the saved count per unit so the wizard can
-  // surface it. Caps at 25 photos/unit to mirror the wizard's
-  // existing display cap.
+  // surface it. Keeps every scraped URL up to UNIT_GALLERY_MAX_KEEP.
   app.post("/api/community/:id/persist-photos", async (req, res) => {
     const draftId = parseInt(req.params.id, 10);
     if (!Number.isFinite(draftId)) return res.status(400).json({ error: "Invalid id" });
@@ -40137,7 +40138,7 @@ Return ONLY compact JSON with this exact shape:
       if (siblingProof && duplicatePersistResponse("Unit B", unit2Proof, "Unit A", siblingProof)) return;
     }
 
-    const MAX_PER_UNIT = 25;
+    const MAX_PER_UNIT = UNIT_GALLERY_MAX_KEEP;
 
     const downloadOne = async (
       url: string,
