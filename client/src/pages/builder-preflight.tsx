@@ -808,7 +808,10 @@ export default function BuilderPreflight() {
           // finally clears it from checkingUnitIds.
           const ctrl = new AbortController();
           const timer = setTimeout(() => ctrl.abort(), 45_000);
-          const resp = await fetch(`/api/preflight/platform-check?${params.toString()}`, { signal: ctrl.signal })
+          const resp = await fetch(`/api/preflight/platform-check?${params.toString()}`, {
+            signal: ctrl.signal,
+            ...(fullPhotoAudit ? { cache: "no-store" as const } : {}),
+          })
             .finally(() => clearTimeout(timer));
           if (resp.ok) {
             const data = await resp.json();
@@ -872,14 +875,14 @@ export default function BuilderPreflight() {
 
   // The full unit audit is the ONE comprehensive button: it runs the text platform check AND
   // the real reverse-image photo scan (the only reliable signal for units whose number can't be
-  // confirmed by text). It subsumes the old standalone "Deep photo check" button. The photo scan
-  // is budget-capped + 24h-cached inside runDeepPhotoCheck, so a re-run won't re-burn credits.
+  // confirmed by text). It subsumes the old standalone "Deep photo check" button.
   const runFullUnitAudit = async () => {
     setPlatformDone(false);
     setResults({});
+    setPhotoChecks({});
     await runPlatformCheck(effectiveUnits, { fullPhotoAudit: true });
     if (photoFoldersForUnits().length > 0) {
-      await runDeepPhotoCheck();
+      await runDeepPhotoCheck({ force: true });
     }
   };
 
@@ -907,7 +910,7 @@ export default function BuilderPreflight() {
 
   // On-demand DEEP check: spends credits (every interior photo/unit), skips folders checked
   // < 24h ago, refuses past the daily cap, then polls the read path until results land.
-  const runDeepPhotoCheck = async () => {
+  const runDeepPhotoCheck = async (opts: { force?: boolean } = {}) => {
     const folders = photoFoldersForUnits();
     if (folders.length === 0) {
       toast({ title: "No unit photos to check", description: "Use Find Photos to add interior photos first." });
@@ -917,7 +920,8 @@ export default function BuilderPreflight() {
     try {
       const resp = await fetch("/api/preflight/photo-check", {
         method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
-        body: JSON.stringify({ folders, run: true }),
+        cache: opts.force ? "no-store" : "default",
+        body: JSON.stringify({ folders, run: true, ...(opts.force ? { force: true } : {}) }),
       });
       const data = await resp.json().catch(() => ({} as any));
       if (data.budget) setPhotoBudget(data.budget);
