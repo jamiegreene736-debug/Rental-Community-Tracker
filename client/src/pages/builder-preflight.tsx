@@ -500,16 +500,19 @@ export default function BuilderPreflight() {
     try {
       const replacingExistingPhotos = (unit.photos?.length ?? 0) > 0;
       const currentSourceUrl = await loadSourceUrl(unit.photoFolder);
-      const siblingSourceUrls = replacingExistingPhotos
-        ? []
-        : (await Promise.all(
-            property.units
-              .filter((u) => u.id !== unit.id)
-              .map((u) => loadSourceUrl(u.photoFolder)),
-          )).filter((u): u is string => !!u);
+      // When a sibling already has saved photos, block its source URL so "Find
+      // different photos" cannot re-save the same listing on both units. When
+      // both units are still empty (initial find), leave sibling URLs open so
+      // sparse resorts can still surface a representative gallery.
+      const siblingSourceUrls = (await Promise.all(
+        property.units
+          .filter((u) => u.id !== unit.id)
+          .filter((u) => !replacingExistingPhotos || photoCountForUnit(u.id, u.photos?.length ?? 0) > 0)
+          .map((u) => loadSourceUrl(u.photoFolder)),
+      )).filter((u): u is string => !!u);
       const skipUrls = Array.from(new Set([
         ...(skippedUrlsByUnit[unit.id] ?? []),
-        ...(currentSourceUrl ? [currentSourceUrl] : []),
+        ...(replacingExistingPhotos && currentSourceUrl ? [currentSourceUrl] : []),
         ...siblingSourceUrls,
       ]));
       const startPayload = {
@@ -525,7 +528,6 @@ export default function BuilderPreflight() {
         skipUrls,
         replacingExistingPhotos,
         skipFirst: skipUrls.length === 0 && replacingExistingPhotos ? 1 : 0,
-        rescrapeSourceUrl: replacingExistingPhotos ? (currentSourceUrl ?? undefined) : undefined,
       };
       photoFetchStartPayloadByUnit.current[unit.id] = startPayload;
       const resp = await apiRequest("POST", "/api/preflight/photo-fetch-jobs", startPayload);

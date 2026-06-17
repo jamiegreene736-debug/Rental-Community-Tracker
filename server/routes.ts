@@ -4170,8 +4170,15 @@ async function scrapeListingPhotosDualSource(
   return { photos: [], sourceUrl: fallbackUrl, platform: listingScrapePlatform(fallbackUrl) };
 }
 
-function listingClusterKey(url: string, streetRootFn: (url: string) => string | null): string {
-  return streetRootFn(url) ?? `__url:${url}`;
+function listingClusterKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+    const path = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+    return `${host}${path}`;
+  } catch {
+    return url.trim().toLowerCase().replace(/[?#].*$/, "").replace(/\/+$/, "");
+  }
 }
 
 function extractGenericRealEstateGalleryFromHtml(html: string): { urls: string[]; facts: ListingFacts } {
@@ -29999,7 +30006,6 @@ Return ONLY compact JSON with this exact shape:
       skipUrls?: string[];
       replacingExistingPhotos?: boolean;
       skipFirst?: number;
-      rescrapeSourceUrl?: string;
     };
     const draftId = Number(body.draftId);
     const propertyId = Number(body.propertyId);
@@ -30025,7 +30031,6 @@ Return ONLY compact JSON with this exact shape:
       skipUrls: body.skipUrls,
       replacingExistingPhotos: body.replacingExistingPhotos === true,
       skipFirst: body.skipFirst,
-      rescrapeSourceUrl: typeof body.rescrapeSourceUrl === "string" ? body.rescrapeSourceUrl : undefined,
     });
     res.status(202).json({ job });
   });
@@ -35745,12 +35750,10 @@ Return ONLY compact JSON with this exact shape:
           );
           continue;
         }
-        const clusterKey = listingClusterKey(candidate.url, listingStreetRoot);
+        const clusterKey = listingClusterKey(candidate.url);
         if (triedListingClusters.has(clusterKey)) continue;
         triedListingClusters.add(clusterKey);
-        const clusterUrls = candidatesToTry
-          .filter((c) => listingClusterKey(c.url, listingStreetRoot) === clusterKey)
-          .map((c) => c.url);
+        const clusterUrls = [candidate.url];
         for (const clusterUrl of clusterUrls) {
           if (!triedCandidateUrls.includes(clusterUrl)) triedCandidateUrls.push(clusterUrl);
         }
