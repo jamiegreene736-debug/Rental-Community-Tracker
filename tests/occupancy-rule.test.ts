@@ -66,12 +66,10 @@ assert.ok(checked >= 17, `expected to check ≥17 listings, only saw ${checked}`
 console.log(`  ✓ all ${checked} builder titles + summaries match the rule`);
 
 // ── headlineBedrooms / headlineSleeps key off the advertised bookingTitle ────
-// Listing #20 is the operator-resolved conflict: advertised 7BR (sleeps 18)
-// even though its bed config still has 2 units. The headline must follow the
-// title's "7BR", not the bed-config total.
+// Listing #20 is two 3BR Mauna Kai condos (6BR total, sleeps 16).
 const emptyCfg = { propertyId: 20, units: [] };
-assert.equal(headlineBedrooms(20, emptyCfg), 7, "prop 20 headline bedrooms should be the advertised 7BR");
-assert.equal(headlineSleeps(20, emptyCfg), 18, "prop 20 headline sleeps should be 18");
+assert.equal(headlineBedrooms(20, emptyCfg), 6, "prop 20 headline bedrooms should be the advertised 6BR");
+assert.equal(headlineSleeps(20, emptyCfg), 16, "prop 20 headline sleeps should be 16");
 // A draft (negative id, no bookingTitle) falls back to the bed-config total.
 assert.equal(headlineBedrooms(-99, { propertyId: -99, units: [] }), 0);
 console.log("  ✓ headlineBedrooms/headlineSleeps prefer the advertised bookingTitle, fall back for drafts");

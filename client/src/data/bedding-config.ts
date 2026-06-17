@@ -335,10 +335,9 @@ export function totalSleeps(config: PropertyBeddingConfig): number {
 export { occupancyForBedrooms };
 
 // The bedroom count the headline rule keys on for a given listing. Prefer the
-// marketing bedroom count declared in the builder bookingTitle ("… - 7BR …"),
+// marketing bedroom count declared in the builder bookingTitle ("… - 6BR …"),
 // which is the operator-authoritative count and can intentionally differ from
-// the live bed config (e.g. listing #20 is advertised 7BR while its bed config
-// still has 2 units / 6 rooms pending a 3rd unit). Falls back to the bed-config
+// the live bed config when units are still being finalized. Falls back to the bed-config
 // bedroom total for community drafts (negative ids — no bookingTitle).
 export function headlineBedrooms(propertyId: number, config: PropertyBeddingConfig): number {
   if (propertyId > 0) {

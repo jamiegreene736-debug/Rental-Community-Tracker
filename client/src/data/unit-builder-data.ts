@@ -1157,13 +1157,13 @@ Explore the golden sands of Hideaways Beach, snorkel at Queen's Bath, or venture
   },
   {
     propertyId: 20,
-    propertyName: "Gorgeous Princeville 6 bedroom condos for 18!",
+    propertyName: "Gorgeous Princeville 6 bedroom condos for 16!",
     complexName: "Mauna Kai Princeville",
     // Unique within Mauna Kai by representative unit 7B (see prop 19).
     address: "3920 Wyllie Rd, Unit 7B, Princeville, HI 96722",
-    bookingTitle: "Princeville - 7BR Condos - Sleeps 18",
+    bookingTitle: "Princeville - 6BR Condos - Sleeps 16",
     sampleDisclaimer: "This listing represents a managed portfolio of similar units within Mauna Kai. The specific unit assigned will be confirmed prior to check-in and will match the advertised bedroom count and amenity standards. Photos are representative and individual unit decor and furnishings may vary.",
-    combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 7 bedrooms and can accommodate up to 18 guests, perfect for large groups looking to experience Kauai's breathtaking North Shore.
+    combinedDescription: `This listing is comprised of two spacious 3-bedroom condos within the Mauna Kai resort community in Princeville, just a short walk apart from each other within the complex. Together they offer 6 bedrooms and can accommodate up to 16 guests, perfect for large groups looking to experience Kauai's breathtaking North Shore.
 
 Unit A is a 3-bedroom, 3-bathroom two-story condo (~1,600 sq ft) with central AC, a King master suite, Queen second and third bedrooms, a loft sleeping area, and a queen sleeper sofa. The open-concept living area opens to a covered lanai with tropical breezes and garden views.
 
