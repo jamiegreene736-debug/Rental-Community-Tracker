@@ -131,6 +131,7 @@ import {
   getCommunityRegion,
   getBuyInRate,
   getSeasonForMonth,
+  MARKET_RATE_TARGET_MARGIN,
   suggestPricingArea,
   type SeasonType,
 } from "@shared/pricing-rates";
@@ -881,16 +882,6 @@ const parsePositivePricingRate = (value: unknown): number | null => {
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 
-const parseTargetMargin = (value: unknown): number | null => {
-  const n = typeof value === "number"
-    ? value
-    : typeof value === "string"
-      ? Number.parseFloat(value)
-      : NaN;
-  if (!Number.isFinite(n)) return null;
-  return Math.max(-0.99, Math.min(1, n));
-};
-
 const build24MonthPricingWindow = (): Array<{ yearMonth: string; season: SeasonType }> => {
   const now = new Date();
   const months: Array<{ yearMonth: string; season: SeasonType }> = [];
@@ -1023,9 +1014,12 @@ async function pushBulkGuestyPricingAfterRefresh(
   leadTime?: Awaited<ReturnType<typeof pushLeadTimePolicyPricesToGuesty>>;
   blackout?: PricingBlackoutReconcile;
 }> {
-  const schedule = await storage.getScannerSchedule(propertyId).catch(() => null);
-  const configuredMargin = parseTargetMargin(schedule?.targetMargin);
-  const targetMargin = configuredMargin != null ? configuredMargin : 0.20;
+  // Operator directive 2026-06-18: the market-rate update queue applies a FLAT
+  // 15% markup to every property (MARKET_RATE_TARGET_MARGIN). We intentionally
+  // do NOT read the per-property scanner_schedules.target_margin here — legacy
+  // rows carry the old 0.2000 default, and the operator wants every queue update
+  // to push at 15% uniformly. Retune via the single shared constant.
+  const targetMargin = MARKET_RATE_TARGET_MARGIN;
   const plan = await buildBulkGuestySeasonalPlan(propertyId, targetMargin);
   if (!plan) {
     return { skipped: true, reason: "No mapped Guesty listing or pricing configuration found for this property." };
@@ -1431,7 +1425,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     item.progress = {
       phase: "done",
       percent: 100,
-      label: `Market rates saved; Guesty base rates and ${guestyPush.leadTime?.pushed ?? 0}/${guestyPush.leadTime?.total ?? 0} lead-time windows pushed at ${Math.round((guestyPush.targetMargin ?? 0.2) * 100)}% margin${blackoutSuffix}`,
+      label: `Market rates saved; Guesty base rates and ${guestyPush.leadTime?.pushed ?? 0}/${guestyPush.leadTime?.total ?? 0} lead-time windows pushed at ${Math.round((guestyPush.targetMargin ?? MARKET_RATE_TARGET_MARGIN) * 100)}% margin${blackoutSuffix}`,
       guestyPush,
       confidence: confidenceSummary,
       pricingRecipe,
@@ -27029,7 +27023,7 @@ Return ONLY compact JSON with this exact shape:
       runInventory: body.runInventory ?? existing?.runInventory ?? true,
       runPricing: body.runPricing ?? existing?.runPricing ?? true,
       runSyncBlocks: body.runSyncBlocks ?? existing?.runSyncBlocks ?? false,
-      targetMargin: String(body.targetMargin ?? (existing ? parseFloat(String(existing.targetMargin)) : 0.2)),
+      targetMargin: String(body.targetMargin ?? (existing ? parseFloat(String(existing.targetMargin)) : MARKET_RATE_TARGET_MARGIN)),
       minSets: body.minSets ?? existing?.minSets ?? 3,
       tightMarkup: String(body.tightMarkup ?? (existing?.tightMarkup != null ? parseFloat(String(existing.tightMarkup)) : DEFAULT_TIGHT_SCARCITY_MARKUP)),
       criticalMarkup: String(body.criticalMarkup ?? (existing?.criticalMarkup != null ? parseFloat(String(existing.criticalMarkup)) : DEFAULT_CRITICAL_SCARCITY_MARKUP)),
@@ -27103,7 +27097,7 @@ Return ONLY compact JSON with this exact shape:
     const windows = body.windows ?? [];
     if (windows.length === 0) return res.status(400).json({ error: "windows required — run scan first" });
     const { totalNightlyBuyInForMonth } = await import("@shared/pricing-rates");
-    const targetMargin = typeof body.targetMargin === "number" ? body.targetMargin : 0.20;
+    const targetMargin = typeof body.targetMargin === "number" ? body.targetMargin : MARKET_RATE_TARGET_MARGIN;
     // Cache baseNightly per month-key so we only look it up once per month.
     const baseByMonth = new Map<string, number>();
     const rows = windows.map((w) => {
