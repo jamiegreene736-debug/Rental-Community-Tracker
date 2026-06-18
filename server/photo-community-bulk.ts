@@ -4,6 +4,11 @@
 
 import { randomUUID } from "crypto";
 import {
+  BULK_PHOTO_COMMUNITY_PROPERTY_TIMEOUT_MS,
+  shouldFailStaleBulkPhotoCommunityItem,
+  shouldReclaimBulkPhotoCommunityItem,
+} from "../shared/photo-community-bulk-logic";
+import {
   derivePhotoCommunityRowStatus,
   type PhotoCommunityRowStatus,
 } from "../shared/photo-community-status-logic";
@@ -13,6 +18,7 @@ import { runPhotoCommunityCheck } from "./photo-community-check";
 
 const STATUS_SETTING_KEY = "photo_community_check.status_by_property";
 const JOB_SETTING_KEY = "photo_community_check.active_job";
+const BULK_PHOTO_COMMUNITY_RESUME_INTERVAL_MS = 60 * 1000;
 
 export type BulkPhotoCommunityItemStatus = "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled";
 
@@ -82,18 +88,54 @@ async function loadStatusesOnce(): Promise<void> {
 async function loadPersistedJobOnce(): Promise<void> {
   if (jobLoaded) return;
   jobLoaded = true;
+  await reloadActiveJobFromStorage();
+}
+
+async function reloadActiveJobFromStorage(): Promise<BulkPhotoCommunityJob | null> {
   try {
     const raw = await storage.getSetting(JOB_SETTING_KEY);
-    if (!raw?.trim()) return;
+    if (!raw?.trim()) {
+      activeJobId = null;
+      return null;
+    }
     const job = JSON.parse(raw) as BulkPhotoCommunityJob;
-    if (!job?.id || !Array.isArray(job.items)) return;
+    if (!job?.id || !Array.isArray(job.items)) {
+      await storage.setSetting(JOB_SETTING_KEY, "");
+      activeJobId = null;
+      return null;
+    }
     jobs.set(job.id, job);
     if (job.status === "queued" || job.status === "running") {
       activeJobId = job.id;
+    } else {
+      activeJobId = null;
     }
+    await refreshJobCounts(job);
+    return job;
   } catch {
     await storage.setSetting(JOB_SETTING_KEY, "");
+    activeJobId = null;
+    return null;
   }
+}
+
+function propertyCheckTimedOut(ms: number): Promise<never> {
+  return new Promise((_, reject) => {
+    setTimeout(
+      () => reject(new Error(`Photo community check timed out after ${Math.round(ms / 60_000)} minutes`)),
+      ms,
+    );
+  });
+}
+
+async function runPropertyPhotoCommunityCheck(
+  request: Parameters<typeof runPhotoCommunityCheck>[0],
+  apiKey: string,
+): Promise<Awaited<ReturnType<typeof runPhotoCommunityCheck>>> {
+  return Promise.race([
+    runPhotoCommunityCheck(request, apiKey, Date.now()),
+    propertyCheckTimedOut(BULK_PHOTO_COMMUNITY_PROPERTY_TIMEOUT_MS),
+  ]);
 }
 
 async function ensureJobsHydrated(): Promise<void> {
@@ -157,6 +199,7 @@ async function refreshJobCounts(job: BulkPhotoCommunityJob): Promise<void> {
 async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: string): Promise<void> {
   if (runningJobIds.has(job.id)) return;
   runningJobIds.add(job.id);
+  const workerSessionStartedAt = Date.now();
   try {
   job.status = "running";
   job.startedAt = job.startedAt ?? Date.now();
@@ -168,8 +211,42 @@ async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: stri
       item.status = "cancelled";
       continue;
     }
+
+    if (shouldFailStaleBulkPhotoCommunityItem(item)) {
+      item.status = "failed";
+      item.finishedAt = Date.now();
+      item.error = "Photo community check timed out (stale running item recovered)";
+      statusByProperty.set(item.propertyId, {
+        propertyId: item.propertyId,
+        checkedAt: new Date().toISOString(),
+        bedroomsOk: null,
+        communityFolderOk: null,
+        sameCommunityOk: null,
+        overall: "fail",
+        bedroomsFound: null,
+        bedroomsExpected: null,
+        communityPhotosChecked: null,
+        communityPhotosTotal: null,
+        communityAuditComplete: null,
+        summary: null,
+        error: item.error,
+      });
+      await refreshJobCounts(job);
+      await persistStatuses();
+      await persistJob(job);
+      continue;
+    }
+
+    if (shouldReclaimBulkPhotoCommunityItem(item, workerSessionStartedAt)) {
+      console.warn(
+        `[photo-community-bulk] reclaiming stale running item property ${item.propertyId} (${item.label})`,
+      );
+      item.startedAt = undefined;
+      item.error = undefined;
+    }
+
     item.status = "running";
-    item.startedAt = item.startedAt ?? Date.now();
+    item.startedAt = Date.now();
     statusByProperty.set(item.propertyId, {
       propertyId: item.propertyId,
       checkedAt: null,
@@ -212,7 +289,7 @@ async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: stri
         });
         continue;
       }
-      const result = await runPhotoCommunityCheck(built.request, apiKey, Date.now());
+      const result = await runPropertyPhotoCommunityCheck(built.request, apiKey);
       const row = derivePhotoCommunityRowStatus(item.propertyId, result, new Date().toISOString());
       statusByProperty.set(item.propertyId, row);
       item.status = "completed";
@@ -303,12 +380,12 @@ export async function isPropertyEligibleForPhotoCommunityCheck(propertyId: numbe
   return built != null;
 }
 
-/** Resume a queued/running job after server restart. Safe to call repeatedly. */
+/** Resume a queued/running job after server restart or worker loss. Safe to call repeatedly. */
 export async function resumeBulkPhotoCommunityJobs(): Promise<void> {
-  await ensureJobsHydrated();
-  if (!activeJobId) return;
-  const job = jobs.get(activeJobId);
+  await loadStatusesOnce();
+  const job = await reloadActiveJobFromStorage();
   if (!job || (job.status !== "queued" && job.status !== "running")) return;
+  if (runningJobIds.has(job.id)) return;
   const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
   if (!apiKey) {
     console.warn("[photo-community-bulk] cannot resume — ANTHROPIC_API_KEY not configured");
@@ -321,5 +398,7 @@ export async function resumeBulkPhotoCommunityJobs(): Promise<void> {
 export function scheduleBulkPhotoCommunityResume(): void {
   if (resumeScheduled) return;
   resumeScheduled = true;
-  setTimeout(() => void resumeBulkPhotoCommunityJobs(), 4_000).unref?.();
+  const tick = () => void resumeBulkPhotoCommunityJobs();
+  setTimeout(tick, 4_000).unref?.();
+  setInterval(tick, BULK_PHOTO_COMMUNITY_RESUME_INTERVAL_MS).unref?.();
 }
