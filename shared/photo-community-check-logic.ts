@@ -1,7 +1,6 @@
 // Pure logic for photo community check — no DB or vision dependencies (testable).
 
 export const UNIT_INTERIOR_MIN = 5;
-export const MATCH_THRESHOLD_RATIO = 0.8;
 
 const INTERIOR_CATEGORIES = new Set([
   "Bedrooms", "Bathrooms", "Kitchen", "Living Areas", "Dining", "Outdoor & Lanai",
@@ -81,7 +80,8 @@ export function computeUnitVerdict(
     };
   }
   const yes = photoVerdicts.filter((p) => p.match === "yes").length;
-  const strongNo = photoVerdicts.filter((p) => p.match === "no" && isStrongContradiction(p.reason));
+  const nos = photoVerdicts.filter((p) => p.match === "no");
+  const strongNo = nos.filter((p) => isStrongContradiction(p.reason));
   if (strongNo.length > 0) {
     return {
       sameAsCommunity: "no",
@@ -89,20 +89,17 @@ export function computeUnitVerdict(
       confidence: 0.95,
     };
   }
-  const threshold = Math.max(minInteriorPhotos, Math.ceil(n * MATCH_THRESHOLD_RATIO));
-  if (yes >= threshold) {
+  if (nos.length > 0) {
     return {
-      sameAsCommunity: "yes",
-      reason: `${yes}/${n} interior photos match the community profile.`,
-      confidence: Math.min(0.99, 0.7 + (yes / n) * 0.25),
+      sameAsCommunity: "no",
+      reason: nos[0].reason || `${nos.length} interior photo(s) do not match the community profile.`,
+      confidence: 0.9,
     };
   }
-  const weakNo = photoVerdicts.find((p) => p.match === "no");
   return {
-    sameAsCommunity: "no",
-    reason: weakNo?.reason
-      || `Only ${yes}/${n} interior photos match — need at least ${threshold} matching to confirm.`,
-    confidence: 0.85,
+    sameAsCommunity: "yes",
+    reason: `${yes}/${n} interior photos match the community profile (unanimous).`,
+    confidence: Math.min(0.99, 0.75 + (yes / n) * 0.2),
   };
 }
 
