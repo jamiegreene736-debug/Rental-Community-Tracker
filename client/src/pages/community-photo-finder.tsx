@@ -30,6 +30,7 @@ const COMMUNITY_FOLDERS: Record<string, string> = {
   "Mauna Kai Princeville": "community-mauna-kai",
   "Kaha Lani Resort": "community-kaha-lani",
   "Lae Nani Resort": "community-lae-nani",
+  "Makahuena at Poipu": "community-makahuena",
   "Poipu Brenneckes Beachside": "community-poipu-beachside",
   "Kaiulani of Princeville": "community-kaiulani",
   "Poipu Brenneckes Oceanfront": "community-poipu-oceanfront",

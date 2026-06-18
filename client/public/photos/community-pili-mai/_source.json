@@ -1,23 +1,13 @@
 {
   "folder": "community-pili-mai",
   "type": "community",
-  "referencedBy": [
-    {
-      "propertyId": 32,
-      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756"
-    },
-    {
-      "propertyId": 33,
-      "address": "2611 Kiahuna Plantation Dr, Koloa, HI 96756"
-    }
-  ],
-  "verificationStatus": "needs-review",
-  "verifiedDate": "2026-04-16",
-  "verifiedBy": "auto-generated-stub",
+  "verificationStatus": "verified",
+  "verifiedDate": "2026-06-18",
+  "verifiedBy": "refresh-community-photos.mjs",
   "sourceListing": {
-    "url": null,
-    "platform": null,
-    "scrapedDate": null
+    "url": "https://www.kauaicalls.com/poipus-hidden-gem/",
+    "platform": "www.kauaicalls.com",
+    "scrapedDate": "2026-06-18"
   },
-  "notes": "Community amenity shots (pool, grounds, clubhouse). `sourceListing.url` is null — worth backfilling when the original scrape source can be identified."
+  "notes": "Curated on-property amenity photos from https://www.kauaicalls.com/poipus-hidden-gem/. Replaced incorrect generic-search community folder images."
 }

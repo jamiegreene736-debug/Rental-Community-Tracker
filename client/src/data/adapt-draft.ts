@@ -18,6 +18,7 @@ import { buildDraftBeddingConfig } from "@/data/draft-bedding";
 import { registerDraftBeddingDefaults, type PropertyBeddingConfig } from "@/data/bedding-config";
 import { registerDraftPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
+import { resolveCanonicalCommunityPhotoFolder } from "@shared/community-photo-folders";
 
 // Sample license placeholders for promoted drafts. Active properties
 // in unit-builder-data have hand-curated values for the four
@@ -440,7 +441,7 @@ export function adaptDraftToPropertyUnitBuilder(
     // into the opener block before unit A — a sensible default for
     // drafts that don't have hand-curated position metadata.
     communityPhotos: [],
-    communityPhotoFolder: `community-draft-${draft.id}`,
+    communityPhotoFolder: resolveCanonicalCommunityPhotoFolder(draft.name) ?? `community-draft-${draft.id}`,
     // CODEX NOTE (2026-05-04, claude/single-listing): standalone drafts
     // emit a one-element units[] array. Combo drafts keep the existing
     // two-element shape. Builder tabs (Bedding, Pricing, etc.) iterate
@@ -522,7 +523,7 @@ export async function loadDraftFullDataByNegativeId(
   const drafts = (await r.json()) as CommunityDraft[];
   const match = drafts.find((d) => d.id === draftId);
   if (!match) return null;
-  const communityFolder = `community-draft-${draftId}`;
+  const communityFolder = resolveCanonicalCommunityPhotoFolder(match.name) ?? `community-draft-${draftId}`;
   const folders = [match.unit1PhotoFolder, match.unit2PhotoFolder, communityFolder]
     .filter((f): f is string => !!f);
   const filesByFolder: Record<string, string[]> = {};

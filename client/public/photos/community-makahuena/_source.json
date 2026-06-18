@@ -1,0 +1,13 @@
+{
+  "folder": "community-makahuena",
+  "type": "community",
+  "verificationStatus": "verified",
+  "verifiedDate": "2026-06-18",
+  "verifiedBy": "refresh-community-photos.mjs",
+  "sourceListing": {
+    "url": "https://www.parrishkauai.com/kauai-condos/makahuena-at-poipu/",
+    "platform": "www.parrishkauai.com",
+    "scrapedDate": "2026-06-18"
+  },
+  "notes": "Curated on-property amenity photos from https://www.parrishkauai.com/kauai-condos/makahuena-at-poipu/. Replaced incorrect generic-search community folder images."
+}

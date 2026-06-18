@@ -1,23 +1,13 @@
 {
   "folder": "community-mauna-kai",
   "type": "community",
-  "referencedBy": [
-    {
-      "propertyId": 19,
-      "address": "3920 Wyllie Rd, Princeville, HI 96722"
-    },
-    {
-      "propertyId": 20,
-      "address": "3920 Wyllie Rd, Princeville, HI 96722"
-    }
-  ],
-  "verificationStatus": "needs-review",
-  "verifiedDate": "2026-04-16",
-  "verifiedBy": "auto-generated-stub",
+  "verificationStatus": "verified",
+  "verifiedDate": "2026-06-18",
+  "verifiedBy": "refresh-community-photos.mjs",
   "sourceListing": {
-    "url": null,
-    "platform": null,
-    "scrapedDate": null
+    "url": "https://www.hawaiigaga.com/kauai/condos/mauna-kai.aspx",
+    "platform": "www.hawaiigaga.com",
+    "scrapedDate": "2026-06-18"
   },
-  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+  "notes": "Curated on-property amenity photos from https://www.hawaiigaga.com/kauai/condos/mauna-kai.aspx. Replaced incorrect generic-search community folder images."
 }
