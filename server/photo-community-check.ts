@@ -7,16 +7,14 @@
 //      (Requires 5+ interior photos per unit; each photo is voted individually.)
 //   3. Are Unit A and Unit B (etc.) in the same community as each other?
 //
-// Methodology (two vision passes + deterministic aggregation):
-//   Pass A — Community profile: sample up to 12 community photos, build a
-//            visual fingerprint, per-photo same-place votes, junk/outlier flags.
-//   Pass B — Unit verification: for each unit, sample 5–8 INTERIOR photos
-//            (prioritized by label/category), include 2 community anchor
-//            photos, vote each interior photo against the fingerprint.
-//   Server-side rules convert votes into binary yes/no — the model cannot
-//            leave a unit as "unclear".
-//
-// Extras: cross-folder duplicate detection via perceptual hash (deterministic).
+// Methodology:
+//   Pass A — Community folder: dHash pre-screen + batched vision audit of
+//            EVERY photo in the folder (up to cap), not a one-time sample.
+//   Pass B — Unit verification: sample 5–8 INTERIOR photos per unit against
+//            the community fingerprint + anchor photos.
+//   Bedroom pass — all bedroom-tagged unit photos, dHash de-dupe, vision on
+//            distinct rooms.
+//   Server-side rules convert votes into binary yes/no.
 
 import fs from "fs";
 import path from "path";
@@ -39,12 +37,20 @@ import {
   summarizeBedroomCluster,
   type ListingBedroomCoverage,
 } from "../shared/photo-bedroom-coverage-logic";
+import {
+  chunkArray,
+  detectLikelyMixedCommunityFolder,
+  mergeCommunityPhotoVerdicts,
+} from "../shared/photo-community-folder-logic";
 
 const MODEL = "claude-sonnet-4-6";
 
-const COMMUNITY_SAMPLE_CAP = 12;
+/** Max community photos to load and vision-audit per folder. */
+const COMMUNITY_FULL_FOLDER_CAP = 50;
+const COMMUNITY_BATCH_SIZE = 10;
 const UNIT_INTERIOR_TARGET = 8;
 const COMMUNITY_ANCHOR_COUNT = 2;
+/** Vision image budget for unit pass only — community audit is separate. */
 const TOTAL_IMAGE_CAP = 32;
 const BEDROOM_FOLDER_CAP = 150;
 const BEDROOM_VISION_MAX = 10;
@@ -223,6 +229,177 @@ async function resolveGroupFiles(
   const total = ordered.length;
   const idxs = evenSampleIndices(total, cap);
   return { total, chosen: idxs.map((i) => ordered[i]) };
+}
+
+async function resolveAllGroupFiles(
+  group: CheckGroupInput,
+  maxFiles: number,
+): Promise<{ total: number; chosen: Array<{ filename: string; caption?: string }> }> {
+  const dir = publicPhotoDir(group.folder);
+  let diskFiles: string[] = [];
+  try {
+    diskFiles = (await fs.promises.readdir(dir)).filter((f) => IMAGE_EXT.test(f));
+  } catch {
+    return { total: 0, chosen: [] };
+  }
+  const diskSet = new Set(diskFiles);
+  const requested = Array.isArray(group.filenames) && group.filenames.length > 0
+    ? group.filenames.map((f) => path.basename(String(f))).filter((f) => IMAGE_EXT.test(f) && diskSet.has(f))
+    : diskFiles.slice().sort();
+  const ordered = Array.from(new Set(requested)).map((filename) => ({
+    filename,
+    caption: group.captions?.[filename],
+  }));
+  const total = ordered.length;
+  return { total, chosen: ordered.slice(0, maxFiles) };
+}
+
+async function loadCommunityFolderPhotos(
+  group: CheckGroupInput,
+  groupIdx: number,
+): Promise<{ total: number; sampled: SampledPhoto[] }> {
+  const { total, chosen } = await resolveAllGroupFiles(group, COMMUNITY_FULL_FOLDER_CAP);
+  const sampled = await loadSample(groupIdx, group.folder, "C", chosen);
+  for (const s of sampled) {
+    try {
+      s.hash = await computeDhash(s.buffer);
+    } catch {
+      s.hash = undefined;
+    }
+  }
+  return { total, sampled };
+}
+
+function buildCommunityBatchInstruction(
+  fingerprint: string,
+  expectedCommunity: string,
+  batchIndex: number,
+  batchCount: number,
+): string {
+  return [
+    `Continuing FULL community-folder audit (batch ${batchIndex + 1}/${batchCount}).`,
+    `Community fingerprint from earlier batches: ${fingerprint || "(see anchor batches)"}`,
+    expectedCommunity.trim() ? `Expected community on record: "${expectedCommunity.trim()}".` : "",
+    "",
+    "For EACH photo ID in THIS batch, decide whether it depicts the SAME resort/community as the fingerprint.",
+    '  - match: "yes" if clearly the same place; "no" ONLY with positive evidence of a different place.',
+    "Do NOT use uncertain — every match is yes or no.",
+    "Flag junk: floorplans, maps, logos, screenshots, competitor watermarks.",
+    "",
+    'Respond with ONLY minified JSON: {"photoVerdicts":[{"id":"C11","match":"yes|no","reason":"short"}],"junk":[{"id":"C11","reason":"short"}]}',
+  ].join("\n");
+}
+
+function ensureVerdictsForAllPhotos(
+  samples: SampledPhoto[],
+  verdicts: PhotoVerdict[],
+): PhotoVerdict[] {
+  const byId = new Map(verdicts.map((v) => [v.id, v]));
+  const out = [...verdicts];
+  for (const s of samples) {
+    if (!byId.has(s.id)) {
+      out.push({
+        id: s.id,
+        caption: s.caption,
+        match: "no",
+        reason: "Photo was not evaluated by vision audit.",
+      });
+    }
+  }
+  return out;
+}
+
+async function auditCommunityFolderFull(
+  apiKey: string,
+  group: CheckGroupInput,
+  samples: SampledPhoto[],
+  photosTotal: number,
+  expectedCommunity: string,
+): Promise<{ community: CommunityGroupResult | null; warning?: string }> {
+  if (samples.length === 0) return { community: null };
+
+  const preScreen = detectLikelyMixedCommunityFolder(
+    samples.map((s) => s.hash).filter(Boolean) as string[],
+  );
+  const batches = chunkArray(samples, COMMUNITY_BATCH_SIZE);
+  let fingerprint = "";
+  let identifiedName = "";
+  let matchesExpected: "yes" | "no" = "no";
+  let matchReason = "";
+  let confidence = 0.5;
+  const verdictBatches: PhotoVerdict[][] = [];
+  const junkCollected: FlaggedPhoto[] = [];
+
+  for (let bi = 0; bi < batches.length; bi++) {
+    const batch = batches[bi];
+    const content: any[] = [];
+    for (const s of batch) {
+      const cap = s.caption ? ` · caption: "${s.caption}"` : "";
+      content.push({ type: "text", text: `--- COMMUNITY photo ${s.id}${cap} ---` });
+      content.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
+    }
+    content.push({
+      type: "text",
+      text: bi === 0
+        ? buildCommunityPassInstruction(expectedCommunity)
+        : buildCommunityBatchInstruction(fingerprint, expectedCommunity, bi, batches.length),
+    });
+
+    try {
+      const { parsed } = await callVisionJson(apiKey, content);
+      if (bi === 0) {
+        fingerprint = String(parsed.fingerprint ?? "").trim();
+        identifiedName = String(parsed.identifiedName ?? "").trim();
+        matchesExpected = asYesNo(parsed.matchesExpected);
+        if (expectedCommunity && identifiedName && communityNamesMatch(identifiedName, expectedCommunity)) {
+          matchesExpected = "yes";
+        }
+        matchReason = String(parsed.matchReason ?? "").trim();
+        confidence = asConfidence(parsed.confidence);
+        if (!fingerprint && identifiedName) fingerprint = identifiedName;
+      } else if (!fingerprint) {
+        fingerprint = expectedCommunity ? `Expected: ${expectedCommunity}` : "Community place profile";
+      }
+      verdictBatches.push(mapPhotoVerdicts(parsed.photoVerdicts, batch));
+      junkCollected.push(...asFlags(parsed.junk, batch));
+    } catch (e: any) {
+      return { community: null, warning: `Community audit batch ${bi + 1}/${batches.length} failed: ${e?.message ?? e}` };
+    }
+  }
+
+  const mergedVerdicts = ensureVerdictsForAllPhotos(
+    samples,
+    mergeCommunityPhotoVerdicts(verdictBatches),
+  );
+  const { allSameCommunity, outliers: cohesionOutliers } = computeCommunityCohesion(mergedVerdicts);
+  const preScreenOutliers: FlaggedPhoto[] = preScreen.mixed && preScreen.reason
+    ? [{ id: "pre-screen", reason: preScreen.reason }]
+    : [];
+  const junk = junkCollected.filter(
+    (j, i, arr) => arr.findIndex((x) => x.id === j.id) === i,
+  );
+  const outliers = [...cohesionOutliers, ...preScreenOutliers].filter(
+    (o, i, arr) => arr.findIndex((x) => x.id === o.id) === i,
+  );
+
+  return {
+    community: {
+      role: "community",
+      label: group.label,
+      folder: group.folder,
+      photosChecked: samples.length,
+      photosTotal,
+      communityFingerprint: fingerprint || identifiedName || "Community place profile",
+      identifiedCommunity: identifiedName || fingerprint.slice(0, 120) || "See fingerprint",
+      matchesExpected,
+      matchReason,
+      allSameCommunity: allSameCommunity && outliers.length === 0,
+      photoVerdicts: mergedVerdicts,
+      outliers,
+      junk,
+      confidence,
+    },
+  };
 }
 
 async function loadSample(
@@ -569,10 +746,7 @@ export async function runPhotoCommunityCheck(
 
   let communityResolvedIdx = -1;
   for (const g of Array.from(communityByFolder.values())) {
-    const cap = Math.min(COMMUNITY_SAMPLE_CAP, budget);
-    const { total, chosen } = await resolveGroupFiles(g, cap, false);
-    const sampled = await loadSample(resolved.length, g.folder, "C", chosen);
-    budget -= sampled.length;
+    const { total, sampled } = await loadCommunityFolderPhotos(g, resolved.length);
     communityResolvedIdx = resolved.length;
     resolved.push({
       input: g,
@@ -651,51 +825,21 @@ export async function runPhotoCommunityCheck(
   let units: UnitGroupResult[] = [];
   let fingerprint = "";
 
-  // ── Pass A: Community profile ─────────────────────────────────────────────
+  // ── Pass A: Full community-folder audit (batched vision) ─────────────────
   if (communityResolvedIdx >= 0) {
     const r = resolved[communityResolvedIdx];
-    const contentA: any[] = [];
-    for (const s of r.sampled) {
-      const cap = s.caption ? ` · caption: "${s.caption}"` : "";
-      contentA.push({ type: "text", text: `--- COMMUNITY photo ${s.id}${cap} ---` });
-      contentA.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
-    }
-    contentA.push({ type: "text", text: buildCommunityPassInstruction(expectedCommunity) });
-
-    try {
-      const { parsed } = await callVisionJson(apiKey, contentA);
-      fingerprint = String(parsed.fingerprint ?? "").trim();
-      const identifiedName = String(parsed.identifiedName ?? "").trim();
-      let matchesExpected = asYesNo(parsed.matchesExpected);
-      if (expectedCommunity && identifiedName && communityNamesMatch(identifiedName, expectedCommunity)) {
-        matchesExpected = "yes";
-      }
-      const photoVerdicts = mapPhotoVerdicts(parsed.photoVerdicts, r.sampled);
-      const { allSameCommunity, outliers: cohesionOutliers } = computeCommunityCohesion(photoVerdicts);
-      const modelOutliers = asFlags(parsed.outliers, r.sampled);
-      const outliers = [...cohesionOutliers, ...modelOutliers].filter(
-        (o, i, arr) => arr.findIndex((x) => x.id === o.id) === i,
-      );
-
-      community = {
-        role: "community",
-        label: r.input.label,
-        folder: r.input.folder,
-        photosChecked: r.sampled.length,
-        photosTotal: r.total,
-        communityFingerprint: fingerprint || identifiedName || "Community place profile",
-        identifiedCommunity: identifiedName || fingerprint.slice(0, 120) || "See fingerprint",
-        matchesExpected,
-        matchReason: String(parsed.matchReason ?? "").trim(),
-        allSameCommunity: allSameCommunity && outliers.length === 0,
-        photoVerdicts,
-        outliers,
-        junk: asFlags(parsed.junk, r.sampled),
-        confidence: asConfidence(parsed.confidence),
-      };
-    } catch (e: any) {
-      warning = `Community pass failed: ${e?.message ?? e}`;
-      fingerprint = expectedCommunity ? `Expected: ${expectedCommunity}` : "Community photos (analysis failed)";
+    const audit = await auditCommunityFolderFull(
+      apiKey,
+      r.input,
+      r.sampled,
+      r.total,
+      expectedCommunity,
+    );
+    community = audit.community;
+    if (audit.warning) warning = audit.warning;
+    fingerprint = community?.communityFingerprint ?? "";
+    if (!community && audit.warning) {
+      // fall through — verdict synthesis will fail community checks
     }
   }
 
@@ -821,6 +965,11 @@ export async function runPhotoCommunityCheck(
     }
     if (!community.allSameCommunity || community.outliers.length > 0) {
       fail(`Community folder has ${community.outliers.length || "some"} photo(s) from a different place.`);
+    }
+    if (community.photosTotal > community.photosChecked) {
+      warn(`Community audit checked ${community.photosChecked}/${community.photosTotal} folder photos (cap ${COMMUNITY_FULL_FOLDER_CAP}).`);
+    } else if (community.photosChecked > 0) {
+      // full-folder audit completed
     }
     if (community.junk.length > 0) warn(`Community folder has ${community.junk.length} junk/mis-filed photo(s).`);
   }

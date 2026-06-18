@@ -15,7 +15,7 @@ console.log("photo-community-status logic");
 const passAll = derivePhotoCommunityRowStatus(1, {
   verdict: "pass",
   allSameCommunity: "yes",
-  community: { matchesExpected: "yes", allSameCommunity: true },
+  community: { matchesExpected: "yes", allSameCommunity: true, photosChecked: 28, photosTotal: 28 },
   units: [{ sameAsCommunity: "yes" }, { sameAsCommunity: "yes" }],
   bedroomCoverage: { matchesListing: "yes", bedroomsFoundCombined: 6, expectedListingBedrooms: 6 },
 }, "2026-06-18T00:00:00.000Z");
@@ -23,7 +23,9 @@ check("pass when bedrooms, folder, and same-community all ok",
   passAll.bedroomsOk === true
   && passAll.communityFolderOk === true
   && passAll.sameCommunityOk === true
-  && passAll.overall === "pass");
+  && passAll.overall === "pass"
+  && passAll.communityAuditComplete === true
+  && passAll.communityPhotosChecked === 28);
 
 const badBedrooms = derivePhotoCommunityRowStatus(2, {
   verdict: "fail",
