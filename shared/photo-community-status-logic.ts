@@ -10,6 +10,9 @@ export type PhotoCommunityRowStatus = {
   overall: "pass" | "fail" | "warn" | "skipped" | null;
   bedroomsFound: number | null;
   bedroomsExpected: number | null;
+  communityPhotosChecked: number | null;
+  communityPhotosTotal: number | null;
+  communityAuditComplete: boolean | null;
   summary: string | null;
   error: string | null;
 };
@@ -20,6 +23,8 @@ type CheckLike = {
   community?: {
     matchesExpected?: "yes" | "no";
     allSameCommunity?: boolean;
+    photosChecked?: number;
+    photosTotal?: number;
   } | null;
   units?: Array<{ sameAsCommunity?: "yes" | "no" }>;
   bedroomCoverage?: {
@@ -37,6 +42,12 @@ export function derivePhotoCommunityRowStatus(
 ): PhotoCommunityRowStatus {
   const bedroomsExpected = result.bedroomCoverage?.expectedListingBedrooms ?? null;
   const bedroomsFound = result.bedroomCoverage?.bedroomsFoundCombined ?? null;
+  const communityPhotosChecked = result.community?.photosChecked ?? null;
+  const communityPhotosTotal = result.community?.photosTotal ?? null;
+  const communityAuditComplete =
+    communityPhotosTotal != null && communityPhotosTotal > 0
+      ? (communityPhotosChecked ?? 0) >= communityPhotosTotal
+      : null;
 
   let bedroomsOk: boolean | null = null;
   if (result.bedroomCoverage?.matchesListing === "yes") bedroomsOk = true;
@@ -82,6 +93,9 @@ export function derivePhotoCommunityRowStatus(
     overall,
     bedroomsFound,
     bedroomsExpected,
+    communityPhotosChecked,
+    communityPhotosTotal,
+    communityAuditComplete,
     summary: result.summary?.trim() || null,
     error: null,
   };
@@ -101,7 +115,14 @@ export function photoCommunityStatusLabel(status: PhotoCommunityRowStatus): stri
   } else if (status.bedroomsOk === true && status.bedroomsExpected) {
     parts.push(`Bedrooms ${status.bedroomsFound}/${status.bedroomsExpected} ✓`);
   }
-  if (status.communityFolderOk === false) parts.push("Community folder ✗");
+  if (status.communityFolderOk === false) {
+    const cov = status.communityPhotosChecked != null && status.communityPhotosTotal != null
+      ? ` (${status.communityPhotosChecked}/${status.communityPhotosTotal})`
+      : "";
+    parts.push(`Community folder${cov} ✗`);
+  } else if (status.communityFolderOk === true && status.communityPhotosChecked != null && status.communityPhotosTotal != null) {
+    parts.push(`Community folder ${status.communityPhotosChecked}/${status.communityPhotosTotal} ✓`);
+  }
   if (status.sameCommunityOk === false) parts.push("Same community ✗");
   if (parts.length === 0 && status.overall === "pass") return "All photo community checks passed";
   return parts.join(" · ") || status.summary || "Not checked";

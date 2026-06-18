@@ -4707,9 +4707,9 @@ function AdminDashboard() {
                           name: "Community folder",
                           ok: row?.communityFolderOk,
                           tip: row?.communityFolderOk === false
-                            ? `Community folder does not match expected resort ✗ (${stamp})`
+                            ? `Community folder does not match expected resort ✗${row?.communityPhotosChecked != null && row?.communityPhotosTotal != null ? ` (${row.communityPhotosChecked}/${row.communityPhotosTotal} audited)` : ""} (${stamp})`
                             : row?.communityFolderOk === true
-                              ? `Community folder matches expected resort ✓ (${stamp})`
+                              ? `Community folder matches expected resort ✓ — ${row?.communityPhotosChecked ?? "?"}/${row?.communityPhotosTotal ?? "?"} photos audited${row?.communityAuditComplete === false ? " (partial — folder exceeds cap)" : ""} (${stamp})`
                               : running ? "Community folder check running…" : `Community folder: not checked (${stamp})`,
                         },
                         {
@@ -4756,6 +4756,15 @@ function AdminDashboard() {
                               <RefreshCw className={`h-3 w-3 ${running ? "animate-spin" : ""}`} />
                             </Button>
                           </div>
+                          {row?.communityPhotosChecked != null && row?.communityPhotosTotal != null && row.communityPhotosTotal > 0 ? (
+                            <div
+                              className={`max-w-[100px] truncate text-center text-[9px] font-semibold leading-tight ${row.communityAuditComplete === false ? "text-amber-700" : "text-muted-foreground"}`}
+                              title={`Community folder: ${row.communityPhotosChecked}/${row.communityPhotosTotal} photos audited`}
+                              data-testid={`photo-community-c-coverage-${property.id}`}
+                            >
+                              C {row.communityPhotosChecked}/{row.communityPhotosTotal}
+                            </div>
+                          ) : null}
                           {row?.error ? (
                             <div className="max-w-[100px] truncate text-center text-[9px] font-semibold leading-tight text-red-700">
                               {row.error}

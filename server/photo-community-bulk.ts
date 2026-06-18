@@ -274,6 +274,9 @@ async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: stri
       overall: null,
       bedroomsFound: null,
       bedroomsExpected: null,
+      communityPhotosChecked: null,
+      communityPhotosTotal: null,
+      communityAuditComplete: null,
       summary: "Running photo community check…",
       error: null,
     });
@@ -294,6 +297,9 @@ async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: stri
           overall: "skipped",
           bedroomsFound: null,
           bedroomsExpected: null,
+          communityPhotosChecked: null,
+          communityPhotosTotal: null,
+          communityAuditComplete: null,
           summary: null,
           error: item.error,
         });
@@ -317,6 +323,9 @@ async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: stri
         overall: "fail",
         bedroomsFound: null,
         bedroomsExpected: null,
+        communityPhotosChecked: null,
+        communityPhotosTotal: null,
+        communityAuditComplete: null,
         summary: null,
         error: item.error,
       });
