@@ -50,10 +50,15 @@ export function derivePhotoCommunityRowStatus(
       : null;
 
   let bedroomsOk: boolean | null = null;
-  if (result.bedroomCoverage?.matchesListing === "yes") bedroomsOk = true;
-  else if (result.bedroomCoverage?.matchesListing === "no") bedroomsOk = false;
-  else if (bedroomsExpected != null && bedroomsExpected > 0 && bedroomsFound != null) {
+  // Listing-level pass: combined distinct bedrooms meet or exceed expectation.
+  // Unit-level shortfalls still warn in the check detail but should not fail B
+  // when the combined listing count is satisfied (matches builder behavior).
+  if (bedroomsExpected != null && bedroomsExpected > 0 && bedroomsFound != null) {
     bedroomsOk = bedroomsFound >= bedroomsExpected;
+  } else if (result.bedroomCoverage?.matchesListing === "yes") {
+    bedroomsOk = true;
+  } else if (result.bedroomCoverage?.matchesListing === "no") {
+    bedroomsOk = false;
   }
 
   let communityFolderOk: boolean | null = null;

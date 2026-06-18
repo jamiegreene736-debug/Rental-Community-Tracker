@@ -1,26 +1,18 @@
 // Bulk photo community check for the dashboard — one property at a time,
-// results persisted for the Community QA column.
+// results persisted for the Community QA column. Jobs persist server-side so
+// work continues after the browser tab closes or the process restarts.
 
-import fs from "fs";
-import path from "path";
 import { randomUUID } from "crypto";
-import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
-import { resolveCanonicalCommunityPhotoFolder } from "../shared/community-photo-folders";
-import { resolveDraftUnitBedrooms, positiveDraftInteger } from "../shared/draft-unit-bedrooms";
 import {
   derivePhotoCommunityRowStatus,
   type PhotoCommunityRowStatus,
 } from "../shared/photo-community-status-logic";
+import { buildPhotoCommunityCheckRequestForProperty } from "./builder-photo-groups";
 import { storage } from "./storage";
-import {
-  runPhotoCommunityCheck,
-  type CheckGroupInput,
-  type PhotoCommunityCheckRequest,
-} from "./photo-community-check";
-import type { CommunityDraft } from "../shared/schema";
+import { runPhotoCommunityCheck } from "./photo-community-check";
 
 const STATUS_SETTING_KEY = "photo_community_check.status_by_property";
-const IMAGE_EXT = /\.(?:jpe?g|png|webp|gif)$/i;
+const JOB_SETTING_KEY = "photo_community_check.active_job";
 
 export type BulkPhotoCommunityItemStatus = "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled";
 
@@ -51,144 +43,24 @@ const jobs = new Map<string, BulkPhotoCommunityJob>();
 let activeJobId: string | null = null;
 const statusByProperty = new Map<number, PhotoCommunityRowStatus>();
 let statusLoaded = false;
+let jobLoaded = false;
+let resumeScheduled = false;
+const runningJobIds = new Set<string>();
 
-function publicPhotoDir(folder: string): string {
-  const safe = folder.replace(/[^a-zA-Z0-9_-]+/g, "-");
-  return path.resolve(process.cwd(), "client/public/photos", safe);
-}
-
-async function buildGroupFromFolder(
-  role: "community" | "unit",
-  label: string,
-  folder: string,
-  expectedBedrooms?: number,
-): Promise<CheckGroupInput | null> {
-  const dir = publicPhotoDir(folder);
-  let diskFiles: string[] = [];
-  try {
-    diskFiles = (await fs.promises.readdir(dir)).filter((f) => IMAGE_EXT.test(f)).sort();
-  } catch {
-    return null;
-  }
-  if (diskFiles.length === 0) return null;
-  const labels = await storage.getPhotoLabelsByFolder(folder);
-  const captions: Record<string, string> = {};
-  for (const row of labels) {
-    const cap = row.userLabel ?? row.label;
-    if (cap) captions[row.filename] = cap;
-  }
-  return {
-    role,
-    label,
-    folder,
-    filenames: diskFiles,
-    captions,
-    expectedBedrooms,
-  };
-}
-
-function inferCombinedBedrooms(draft: CommunityDraft): number {
-  const combined = positiveDraftInteger(draft.combinedBedrooms);
-  if (combined) return combined;
-  const u1 = resolveDraftUnitBedrooms(draft, "unit1");
-  const isSingle = (draft as any).singleListing === true;
-  const u2 = isSingle ? 0 : resolveDraftUnitBedrooms(draft, "unit2");
-  return u1 + u2;
-}
-
-export async function buildPhotoCommunityCheckRequestForProperty(
-  propertyId: number,
-): Promise<{ request: PhotoCommunityCheckRequest; label: string } | null> {
-  const groups: CheckGroupInput[] = [];
-  let complexName = "";
-  let expectedListingBedrooms: number | null = null;
-
-  if (propertyId > 0) {
-    const builder = getUnitBuilderByPropertyId(propertyId);
-    if (!builder) return null;
-    complexName = builder.complexName;
-    expectedListingBedrooms = builder.units.reduce((s, u) => s + (u.bedrooms ?? 0), 0) || null;
-    const communityGroup = await buildGroupFromFolder(
-      "community",
-      `Community — ${complexName}`,
-      builder.communityPhotoFolder,
-    );
-    if (communityGroup) groups.push(communityGroup);
-    for (let i = 0; i < builder.units.length; i++) {
-      const u = builder.units[i];
-      if (!u.photoFolder) continue;
-      const letter = String.fromCharCode(65 + i);
-      const g = await buildGroupFromFolder(
-        "unit",
-        `Unit ${letter} (${u.bedrooms}BR)`,
-        u.photoFolder,
-        u.bedrooms,
-      );
-      if (g) groups.push(g);
-    }
-    return groups.length > 0
-      ? {
-          label: builder.propertyName || complexName,
-          request: {
-            expectedCommunity: complexName,
-            expectedListingBedrooms: expectedListingBedrooms ?? undefined,
-            groups,
-          },
-        }
-      : null;
-  }
-
-  const draftId = -propertyId;
-  const draft = await storage.getCommunityDraft(draftId);
-  if (!draft) return null;
-  const isSingle = (draft as any).singleListing === true;
-  complexName = draft.name;
-  const u1Br = resolveDraftUnitBedrooms(draft, "unit1");
-  const u2Br = isSingle ? 0 : resolveDraftUnitBedrooms(draft, "unit2");
-  expectedListingBedrooms = inferCombinedBedrooms(draft) || null;
-  const communityFolder =
-    resolveCanonicalCommunityPhotoFolder(draft.name) ?? `community-draft-${draft.id}`;
-  const communityGroup = await buildGroupFromFolder(
-    "community",
-    `Community — ${complexName}`,
-    communityFolder,
-  );
-  if (communityGroup) groups.push(communityGroup);
-  if (draft.unit1PhotoFolder) {
-    const g1 = await buildGroupFromFolder(
-      "unit",
-      `Unit A (${u1Br}BR)`,
-      draft.unit1PhotoFolder,
-      u1Br,
-    );
-    if (g1) groups.push(g1);
-  }
-  if (!isSingle && draft.unit2PhotoFolder) {
-    const g2 = await buildGroupFromFolder(
-      "unit",
-      `Unit B (${u2Br}BR)`,
-      draft.unit2PhotoFolder,
-      u2Br,
-    );
-    if (g2) groups.push(g2);
-  }
-  const label = draft.listingTitle || draft.name;
-  return groups.length > 0
-    ? {
-        label,
-        request: {
-          expectedCommunity: complexName,
-          expectedListingBedrooms: expectedListingBedrooms ?? undefined,
-          groups,
-        },
-      }
-    : null;
-}
+export { buildPhotoCommunityCheckRequestForProperty };
 
 async function persistStatuses(): Promise<void> {
   const obj: Record<string, PhotoCommunityRowStatus> = {};
   for (const [id, row] of statusByProperty.entries()) obj[String(id)] = row;
   await storage.setSetting(STATUS_SETTING_KEY, JSON.stringify(obj));
+}
+
+async function persistJob(job: BulkPhotoCommunityJob | null): Promise<void> {
+  if (!job || job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
+    await storage.setSetting(JOB_SETTING_KEY, "");
+    return;
+  }
+  await storage.setSetting(JOB_SETTING_KEY, JSON.stringify(job));
 }
 
 async function loadStatusesOnce(): Promise<void> {
@@ -207,18 +79,46 @@ async function loadStatusesOnce(): Promise<void> {
   }
 }
 
-export async function getPhotoCommunityStatuses(): Promise<Record<number, PhotoCommunityRowStatus>> {
+async function loadPersistedJobOnce(): Promise<void> {
+  if (jobLoaded) return;
+  jobLoaded = true;
+  try {
+    const raw = await storage.getSetting(JOB_SETTING_KEY);
+    if (!raw?.trim()) return;
+    const job = JSON.parse(raw) as BulkPhotoCommunityJob;
+    if (!job?.id || !Array.isArray(job.items)) return;
+    jobs.set(job.id, job);
+    if (job.status === "queued" || job.status === "running") {
+      activeJobId = job.id;
+    }
+  } catch {
+    await storage.setSetting(JOB_SETTING_KEY, "");
+  }
+}
+
+async function ensureJobsHydrated(): Promise<void> {
   await loadStatusesOnce();
+  await loadPersistedJobOnce();
+}
+
+function isTerminalItemStatus(status: BulkPhotoCommunityItemStatus): boolean {
+  return status === "completed" || status === "failed" || status === "skipped" || status === "cancelled";
+}
+
+export async function getPhotoCommunityStatuses(): Promise<Record<number, PhotoCommunityRowStatus>> {
+  await ensureJobsHydrated();
   const out: Record<number, PhotoCommunityRowStatus> = {};
   for (const [id, row] of statusByProperty.entries()) out[id] = row;
   return out;
 }
 
-export function getBulkPhotoCommunityJob(jobId: string): BulkPhotoCommunityJob | null {
+export async function getBulkPhotoCommunityJob(jobId: string): Promise<BulkPhotoCommunityJob | null> {
+  await ensureJobsHydrated();
   return jobs.get(jobId) ?? null;
 }
 
-export function getActiveBulkPhotoCommunityJob(): BulkPhotoCommunityJob | null {
+export async function getActiveBulkPhotoCommunityJob(): Promise<BulkPhotoCommunityJob | null> {
+  await ensureJobsHydrated();
   return activeJobId ? jobs.get(activeJobId) ?? null : null;
 }
 
@@ -255,15 +155,21 @@ async function refreshJobCounts(job: BulkPhotoCommunityJob): Promise<void> {
 }
 
 async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: string): Promise<void> {
+  if (runningJobIds.has(job.id)) return;
+  runningJobIds.add(job.id);
+  try {
   job.status = "running";
   job.startedAt = job.startedAt ?? Date.now();
+  await persistJob(job);
+
   for (const item of job.items) {
+    if (isTerminalItemStatus(item.status)) continue;
     if (job.cancelRequested) {
       item.status = "cancelled";
       continue;
     }
     item.status = "running";
-    item.startedAt = Date.now();
+    item.startedAt = item.startedAt ?? Date.now();
     statusByProperty.set(item.propertyId, {
       propertyId: item.propertyId,
       checkedAt: null,
@@ -281,6 +187,7 @@ async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: stri
       error: null,
     });
     await persistStatuses();
+    await persistJob(job);
 
     try {
       const built = await buildPhotoCommunityCheckRequestForProperty(item.propertyId);
@@ -332,11 +239,16 @@ async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: stri
     }
     await refreshJobCounts(job);
     await persistStatuses();
+    await persistJob(job);
   }
   await refreshJobCounts(job);
   job.finishedAt = Date.now();
   job.status = job.cancelRequested ? "cancelled" : job.failed > 0 ? "failed" : "completed";
   activeJobId = null;
+  await persistJob(null);
+  } finally {
+    runningJobIds.delete(job.id);
+  }
 }
 
 export async function startBulkPhotoCommunityCheck(
@@ -344,7 +256,7 @@ export async function startBulkPhotoCommunityCheck(
   labels: Record<string, string>,
   apiKey: string,
 ): Promise<BulkPhotoCommunityJob> {
-  await loadStatusesOnce();
+  await ensureJobsHydrated();
   if (activeJobId) {
     const existing = jobs.get(activeJobId);
     if (existing && (existing.status === "queued" || existing.status === "running")) {
@@ -369,21 +281,45 @@ export async function startBulkPhotoCommunityCheck(
   };
   jobs.set(job.id, job);
   activeJobId = job.id;
+  await persistJob(job);
   void runBulkPhotoCommunityJob(job, apiKey);
   return job;
 }
 
 export async function cancelBulkPhotoCommunityJob(jobId: string): Promise<BulkPhotoCommunityJob | null> {
+  await ensureJobsHydrated();
   const job = jobs.get(jobId);
   if (!job) return null;
   job.cancelRequested = true;
   for (const item of job.items) {
     if (item.status === "queued") item.status = "cancelled";
   }
+  await persistJob(job);
   return job;
 }
 
 export async function isPropertyEligibleForPhotoCommunityCheck(propertyId: number): Promise<boolean> {
   const built = await buildPhotoCommunityCheckRequestForProperty(propertyId);
   return built != null;
+}
+
+/** Resume a queued/running job after server restart. Safe to call repeatedly. */
+export async function resumeBulkPhotoCommunityJobs(): Promise<void> {
+  await ensureJobsHydrated();
+  if (!activeJobId) return;
+  const job = jobs.get(activeJobId);
+  if (!job || (job.status !== "queued" && job.status !== "running")) return;
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
+  if (!apiKey) {
+    console.warn("[photo-community-bulk] cannot resume — ANTHROPIC_API_KEY not configured");
+    return;
+  }
+  console.log(`[photo-community-bulk] resuming job ${job.id} (${job.completed}/${job.items.length} done)`);
+  void runBulkPhotoCommunityJob(job, apiKey);
+}
+
+export function scheduleBulkPhotoCommunityResume(): void {
+  if (resumeScheduled) return;
+  resumeScheduled = true;
+  setTimeout(() => void resumeBulkPhotoCommunityJobs(), 4_000).unref?.();
 }

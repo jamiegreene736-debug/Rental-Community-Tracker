@@ -1027,9 +1027,15 @@ export async function runPhotoCommunityCheck(
   }
 
   if (bedroomCoverage) {
+    const listingBedroomsPass =
+      bedroomCoverage.expectedListingBedrooms != null
+      && bedroomCoverage.expectedListingBedrooms > 0
+      && bedroomCoverage.bedroomsFoundCombined >= bedroomCoverage.expectedListingBedrooms;
     for (const u of bedroomCoverage.units) {
       if (u.matchesListing === "no") {
-        fail(`${u.label}: bedroom photos ${u.bedroomsFound}/${u.expectedBedrooms ?? "?"} — ${u.reason}`);
+        const msg = `${u.label}: bedroom photos ${u.bedroomsFound}/${u.expectedBedrooms ?? "?"} — ${u.reason}`;
+        if (listingBedroomsPass) warn(msg);
+        else fail(msg);
       } else if (u.bedroomsFound === 0 && u.expectedBedrooms) {
         warn(`${u.label}: no bedroom-tagged photos found (expected ${u.expectedBedrooms} bedrooms).`);
       }
