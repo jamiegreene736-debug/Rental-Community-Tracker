@@ -40268,9 +40268,26 @@ Return ONLY compact JSON with this exact shape:
     // Prefer the canonical community source URL over the draft's generic
     // sourceUrl — the generic name search is what historically saved
     // wrong-resort photos into the folder.
+    //
+    // Exception for draft.sourceUrl: rental aggregators / real-estate listing
+    // sites (hawaiigaga.com, vrbo.com, zillow.com, etc.) are research sources,
+    // not resort websites. Scraping them surfaces unit interior shots (bedrooms,
+    // living rooms) that contaminate the community folder. Skip them so the
+    // search falls through to the Google Images path, which has an
+    // interiorKeywords filter.
+    const RENTAL_OR_LISTING_SOURCE =
+      /(?:^|\.)(?:hawaiigaga|vrbo|airbnb|homeaway|hometogo|vacasa|evolve|redawning|tripadvisor|yelp|zillow|redfin|realtor|homes|trulia|movoto|coldwellbanker|century21|berkshirehathaway)\.com$/i;
+    let draftSourceIsListingSite = false;
+    try {
+      if (draft.sourceUrl) {
+        draftSourceIsListingSite = RENTAL_OR_LISTING_SOURCE.test(
+          new URL(draft.sourceUrl).hostname.replace(/^www\./i, ""),
+        );
+      }
+    } catch {}
     const authoritativeSource =
       COMMUNITY_SOURCE_URLS[searchCommunityName]?.primary
-      ?? (typeof draft.sourceUrl === "string" && /^https?:\/\//i.test(draft.sourceUrl) ? draft.sourceUrl : null);
+      ?? (!draftSourceIsListingSite && typeof draft.sourceUrl === "string" && /^https?:\/\//i.test(draft.sourceUrl) ? draft.sourceUrl : null);
     const draftSourceUrl = authoritativeSource
       ? `&sourceUrl=${encodeURIComponent(authoritativeSource)}`
       : "";
