@@ -394,6 +394,12 @@ export function buildRealtyApiCommunitySearchLocations(input: {
   return locations;
 }
 
+/** Default photo-discovery search types (on-market + sold, replaces RentCast). */
+export function realtyApiPhotoDiscoverySearchType(): string {
+  const override = String(process.env.REALTYAPI_SEARCH_TYPE ?? "").trim();
+  return override || "For_Sale,Sold";
+}
+
 export function buildRealtyApiSearchParams(opts: {
   location: string;
   page: number;
@@ -401,12 +407,13 @@ export function buildRealtyApiSearchParams(opts: {
   minBedrooms?: number | null;
   maxBedrooms?: number | null;
   keywords?: string | null;
+  searchType?: string;
 }): URLSearchParams {
   const qs = new URLSearchParams();
   qs.set("location", opts.location.trim());
   qs.set("page", String(Math.max(1, Math.floor(opts.page))));
   qs.set("resultCount", String(Math.max(1, Math.min(200, Math.floor(opts.resultCount)))));
-  qs.set("searchType", "Sold");
+  qs.set("searchType", opts.searchType ?? realtyApiPhotoDiscoverySearchType());
   qs.set("propertyType", "Condo,Townhome");
   qs.set("pending", "false");
   qs.set("hasPhotos", "true");

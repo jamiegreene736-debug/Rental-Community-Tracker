@@ -10,6 +10,7 @@ const {
   normalizeRealtyApiListing,
   passesRealtyApiBedroomFilter,
   realtyApiDiscoveryTuning,
+  realtyApiPhotoDiscoverySearchType,
   shouldRejectRealtyApiListing,
   zipFromAddressHint,
 } = await import("../server/realtyapi-discovery");
@@ -39,7 +40,8 @@ const qs = buildRealtyApiSearchParams({
 });
 assert.equal(qs.get("location"), "Pili Mai at Poipu");
 assert.equal(qs.get("propertyType"), "Condo,Townhome");
-assert.equal(qs.get("searchType"), "Sold");
+assert.equal(qs.get("searchType"), realtyApiPhotoDiscoverySearchType());
+assert.equal(realtyApiPhotoDiscoverySearchType(), "For_Sale,Sold");
 assert.equal(qs.get("pending"), "false");
 assert.equal(qs.get("hasPhotos"), "true");
 assert.equal(qs.get("bedsRange"), "min:2,max:2");

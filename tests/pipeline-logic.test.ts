@@ -491,28 +491,28 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /runApifyDiscovery[\s\S]*runZillowSearchApiDiscovery[\s\S]*runRentCastDiscovery[\s\S]*Promise\.all/,
-  "fetch-unit-photos must run Apify, Zillow SearchAPI, and RentCast discovery in parallel",
+  /runApifyDiscovery[\s\S]*runZillowSearchApiDiscovery[\s\S]*runRealtyApiDiscovery[\s\S]*Promise\.all/,
+  "fetch-unit-photos must run Apify, Zillow SearchAPI, and RealtyAPI discovery in parallel",
 );
 assert.match(
   routesSource,
-  /const \[\s*apifyCounts,\s*zillowSearchApiAdded,\s*rentcastCounts,\s*,\s*realtyApiCounts,\s*\] = await Promise\.all\(\[\s*runApifyDiscovery\(\),\s*runZillowSearchApiDiscovery\(\),\s*runRentCastDiscovery\(\),\s*runSupplementalSearchApiDiscovery\(\),\s*runRealtyApiDiscovery\(\),\s*\]\)/,
+  /const \[\s*apifyCounts,\s*zillowSearchApiAdded,\s*,\s*realtyApiCounts,\s*\] = await Promise\.all\(\[\s*runApifyDiscovery\(\),\s*runZillowSearchApiDiscovery\(\),\s*runSupplementalSearchApiDiscovery\(\),\s*runRealtyApiDiscovery\(\),\s*\]\)/,
   "fetch-unit-photos must not read RealtyAPI counts from the void supplemental SearchAPI promise",
 );
 assert.match(
   routesSource,
-  /harvestRentCastSaleListings[\s\S]*resolveRentCastCandidatesToPortalUrls/,
-  "fetch-unit-photos must resolve RentCast addresses to portal URLs before scrape",
+  /runRealtyApiPhotoDiscoveryLeg/,
+  "fetch-unit-photos must harvest Realtor URLs via RealtyAPI",
 );
 assert.match(
   routesSource,
-  /isRentCastDiscoveryEnabled/,
-  "fetch-unit-photos must honor RentCast discovery enablement",
+  /isRealtyApiDiscoveryEnabled/,
+  "fetch-unit-photos must honor RealtyAPI discovery enablement",
 );
 assert.match(
-  routesSource,
-  /rentCastDiscoveryTuning/,
-  "photo discovery must use shared RentCast tuning helper",
+  readFileSync("server/realtyapi-discovery.ts", "utf8"),
+  /realtyApiPhotoDiscoverySearchType[\s\S]*For_Sale,Sold/,
+  "photo discovery must use RealtyAPI For_Sale,Sold search types",
 );
 assert.match(
   routesSource,
@@ -551,18 +551,18 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /find-clean-unit[\s\S]*runApifyDiscovery[\s\S]*runZillowSearchApiDiscovery[\s\S]*runRentCastDiscovery[\s\S]*Promise\.all/,
-  "find-clean-unit must stack Apify, Zillow SearchAPI, and RentCast discovery in parallel",
+  /find-clean-unit[\s\S]*runApifyDiscovery[\s\S]*runZillowSearchApiDiscovery[\s\S]*runRealtyApiDiscovery[\s\S]*Promise\.all/,
+  "find-clean-unit must stack Apify, Zillow SearchAPI, and RealtyAPI discovery in parallel",
 );
 assert.match(
   routesSource,
-  /find-unit[\s\S]*runFindUnitStackedRentCastDiscovery[\s\S]*harvestRentCastSaleListings/,
-  "find-unit must run RentCast discovery in parallel with Apify and SearchAPI",
+  /find-unit[\s\S]*runFindUnitStackedRealtyApiDiscovery[\s\S]*runRealtyApiPhotoDiscoveryLeg/,
+  "find-unit must run RealtyAPI discovery in parallel with Apify and SearchAPI",
 );
-assert.match(
+assert.doesNotMatch(
   routesSource,
-  /find-unit[\s\S]*resolveRentCastCandidatesToPortalUrls/,
-  "find-unit must resolve RentCast addresses to portal URLs",
+  /harvestRentCastSaleListings|resolveRentCastCandidatesToPortalUrls|isRentCastDiscoveryEnabled/,
+  "photo discovery routes must not wire RentCast (RealtorAPI replaces it)",
 );
 assert.match(
   routesSource,
@@ -2213,9 +2213,9 @@ assert.ok(
   const replacementRouteEnd = routeSource.indexOf("// ============================================================\n  // Unit Swaps", replacementRouteStart);
   const replacementRouteSource = routeSource.slice(replacementRouteStart, replacementRouteEnd);
   assert.equal(
-    /RealtyAPI|realtyApi|isRealtyApiDiscoveryEnabled|harvestRealtyApi/.test(replacementRouteSource),
-    false,
-    "replacement find-unit must not spend discovery budget on RealtyAPI when SearchAPI/Apify/RentCast already provide candidates",
+    /runFindUnitStackedRealtyApiDiscovery|runRealtyApiPhotoDiscoveryLeg/.test(replacementRouteSource),
+    true,
+    "replacement find-unit must run RealtyAPI discovery (replaces RentCast for community Realtor harvest)",
   );
 }
 assert.match(
