@@ -6,6 +6,7 @@ import path from "path";
 import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "../client/src/data/unit-builder-data";
 import { resolveCanonicalCommunityPhotoFolder } from "../shared/community-photo-folders";
 import { resolveDraftUnitBedrooms, positiveDraftInteger } from "../shared/draft-unit-bedrooms";
+import { parseExpectedBedInventory } from "../shared/photo-bedroom-coverage-logic";
 import { storage } from "./storage";
 import type { CheckGroupInput, PhotoCommunityCheckRequest } from "./photo-community-check";
 import type { CommunityDraft } from "../shared/schema";
@@ -28,8 +29,18 @@ export function captionFromFilename(filename: string): string {
 type LabelRow = {
   userLabel?: string | null;
   label?: string | null;
+  userCategory?: string | null;
+  category?: string | null;
   hidden?: boolean;
+  bedroomClusterId?: string | null;
+  bedroomBedType?: string | null;
+  perceptualHash?: string | null;
 };
+
+function effectiveCategory(row: LabelRow | undefined): string | null {
+  if (!row) return null;
+  return row.userCategory ?? row.category ?? null;
+}
 
 function staticCaptionFor(
   builder: PropertyUnitBuilder,
@@ -44,6 +55,23 @@ function staticCaptionFor(
     if (u.photoFolder !== folder) continue;
     const hit = u.photos?.find((p) => p.filename === filename);
     if (hit) return hit.label;
+  }
+  return undefined;
+}
+
+function staticCategoryFor(
+  builder: PropertyUnitBuilder,
+  folder: string,
+  filename: string,
+): string | undefined {
+  if (folder === builder.communityPhotoFolder) {
+    const hit = builder.communityPhotos?.find((p) => p.filename === filename);
+    if (hit?.category) return hit.category;
+  }
+  for (const u of builder.units) {
+    if (u.photoFolder !== folder) continue;
+    const hit = u.photos?.find((p) => p.filename === filename);
+    if (hit?.category) return hit.category;
   }
   return undefined;
 }
@@ -76,6 +104,7 @@ async function buildGroupFromPublishedFolder(
   folder: string,
   builder: PropertyUnitBuilder | null,
   expectedBedrooms?: number,
+  unitDescription?: string,
 ): Promise<CheckGroupInput | null> {
   const filenames = await listPublishedFilenames(folder);
   if (filenames.length === 0) return null;
@@ -83,10 +112,26 @@ async function buildGroupFromPublishedFolder(
   const labels = await storage.getPhotoLabelsByFolder(folder);
   const byFile = new Map(labels.map((l) => [l.filename, l]));
   const captions: Record<string, string> = {};
+  const categories: Record<string, string> = {};
+  const bedroomClusterIds: Record<string, string> = {};
+  const bedroomBedTypes: Record<string, string> = {};
+  const perceptualHashes: Record<string, string> = {};
+
   for (const filename of filenames) {
+    const row = byFile.get(filename);
     const staticCap = builder ? staticCaptionFor(builder, folder, filename) : undefined;
-    captions[filename] = effectiveCaption(filename, byFile.get(filename), staticCap);
+    const staticCat = builder ? staticCategoryFor(builder, folder, filename) : undefined;
+    captions[filename] = effectiveCaption(filename, row, staticCap);
+    const cat = effectiveCategory(row) ?? staticCat ?? undefined;
+    if (cat) categories[filename] = cat;
+    if (row?.bedroomClusterId) bedroomClusterIds[filename] = row.bedroomClusterId;
+    if (row?.bedroomBedType) bedroomBedTypes[filename] = row.bedroomBedType;
+    if (row?.perceptualHash) perceptualHashes[filename] = row.perceptualHash;
   }
+
+  const expectedBedInventory = unitDescription
+    ? parseExpectedBedInventory(unitDescription)
+    : undefined;
 
   return {
     role,
@@ -94,7 +139,13 @@ async function buildGroupFromPublishedFolder(
     folder,
     filenames,
     captions,
+    categories,
+    bedroomClusterIds,
+    bedroomBedTypes,
+    perceptualHashes,
     expectedBedrooms,
+    unitDescription,
+    expectedBedInventory: expectedBedInventory?.length ? expectedBedInventory : undefined,
   };
 }
 
@@ -105,6 +156,10 @@ function inferCombinedBedrooms(draft: CommunityDraft): number {
   const isSingle = (draft as any).singleListing === true;
   const u2 = isSingle ? 0 : resolveDraftUnitBedrooms(draft, "unit2");
   return u1 + u2;
+}
+
+function unitDescriptionFromBuilder(unit: PropertyUnitBuilder["units"][number]): string {
+  return [unit.shortDescription, unit.longDescription].filter(Boolean).join(" ");
 }
 
 export async function buildPhotoCommunityCheckRequestForProperty(
@@ -136,6 +191,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
         u.photoFolder,
         builder,
         u.bedrooms,
+        unitDescriptionFromBuilder(u),
       );
       if (g) groups.push(g);
     }
@@ -168,6 +224,8 @@ export async function buildPhotoCommunityCheckRequestForProperty(
     null,
   );
   if (communityGroup) groups.push(communityGroup);
+  const draftUnitDesc = (slot: "unit1" | "unit2") =>
+    String((draft as any)[`${slot}Description`] ?? (draft as any)[`${slot}LongDescription`] ?? "");
   if (draft.unit1PhotoFolder) {
     const g1 = await buildGroupFromPublishedFolder(
       "unit",
@@ -175,6 +233,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
       draft.unit1PhotoFolder,
       null,
       u1Br,
+      draftUnitDesc("unit1"),
     );
     if (g1) groups.push(g1);
   }
@@ -185,6 +244,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
       draft.unit2PhotoFolder,
       null,
       u2Br,
+      draftUnitDesc("unit2"),
     );
     if (g2) groups.push(g2);
   }

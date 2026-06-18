@@ -1456,6 +1456,10 @@ export const photoLabels = pgTable("photo_labels", {
   // legacy rows; backfilled lazily on the first scanner tick that
   // touches the folder.
   perceptualHash: text("perceptual_hash"),
+  /** Precomputed bedroom cluster within folder (e.g. room-1) — set at ingest. */
+  bedroomClusterId: text("bedroom_cluster_id"),
+  /** Detected bed type for bedroom cluster representative (King Bed, etc.). */
+  bedroomBedType: text("bedroom_bed_type"),
   // Per-channel usage state. JSON-encoded:
   //   { airbnb:  { active: bool, lastPushedAt: ISO },
   //     vrbo:    { active: bool, lastPushedAt: ISO },
