@@ -4,6 +4,8 @@ import {
   computeListingBedroomCoverage,
   computeUnitBedroomCoverage,
   isBedroomPhotoCaption,
+  isAmbiguousBedroomCaption,
+  shouldExpandBedroomSearch,
   parseExpectedBedroomsFromLabel,
   summarizeBedroomCluster,
 } from "../shared/photo-bedroom-coverage-logic";
@@ -22,6 +24,18 @@ check("isBedroomPhotoCaption accepts King Bedroom",
 
 check("isBedroomPhotoCaption rejects kitchen",
   !isBedroomPhotoCaption("Updated Kitchen"));
+
+check("isAmbiguousBedroomCaption accepts Den and Bonus Room",
+  isAmbiguousBedroomCaption("Den") && isAmbiguousBedroomCaption("Bonus Room with View"));
+
+check("isAmbiguousBedroomCaption rejects strict bedroom captions",
+  !isAmbiguousBedroomCaption("King Bedroom"));
+
+check("isAmbiguousBedroomCaption rejects kitchen",
+  !isAmbiguousBedroomCaption("Updated Kitchen"));
+
+check("shouldExpandBedroomSearch when count is short",
+  shouldExpandBedroomSearch(1, 3) && !shouldExpandBedroomSearch(3, 3));
 
 check("parseExpectedBedroomsFromLabel parses Unit A (3BR)",
   parseExpectedBedroomsFromLabel("Unit A (3BR)") === 3);

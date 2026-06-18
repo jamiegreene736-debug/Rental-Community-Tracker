@@ -14,12 +14,32 @@ const BEDROOM_KEYWORD_RE =
 const NON_BEDROOM_RE =
   /\b(living room|kitchen|bathroom|bath\b|pool|exterior|lobby|dining room|floor\s?plan|map)\b/i;
 
+/** Captions that are often bedrooms but mislabeled in scraped galleries. */
+const AMBIGUOUS_BEDROOM_RE =
+  /\b(office|den|bonus\s+room|loft|flex\s+room|murphy|sleeping\s+nook|guest\s+room|library|studio|study|retreat|sunroom)\b/i;
+
 export function isBedroomPhotoCaption(caption?: string): boolean {
   if (!caption?.trim()) return false;
   const trimmed = caption.trim();
   if (NON_BEDROOM_RE.test(trimmed)) return false;
   if (BEDROOM_CAPTION_RE.test(trimmed)) return true;
   return BEDROOM_KEYWORD_RE.test(trimmed.toLowerCase());
+}
+
+/** Often a bedroom in VRBO/Airbnb scrapes but not captioned "Bedroom N". */
+export function isAmbiguousBedroomCaption(caption?: string): boolean {
+  if (!caption?.trim()) return false;
+  const trimmed = caption.trim();
+  if (NON_BEDROOM_RE.test(trimmed)) return false;
+  if (isBedroomPhotoCaption(trimmed)) return false;
+  return AMBIGUOUS_BEDROOM_RE.test(trimmed);
+}
+
+export function shouldExpandBedroomSearch(
+  bedroomsFound: number,
+  expectedBedrooms: number | null,
+): boolean {
+  return expectedBedrooms != null && expectedBedrooms > 0 && bedroomsFound < expectedBedrooms;
 }
 
 /** Parse "Unit A (3BR)" → 3. Returns null when not present. */
