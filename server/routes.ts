@@ -278,24 +278,18 @@ import {
   SIMPLELOGIN_MAILBOX_EMAIL,
 } from "./simplelogin";
 import { normalizeBuyInEmailAttachments, parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
+import {
+  type OtaVisibilityCandidate,
+  otaVisibilitySidecarFailureMessage,
+  pickOtaVisibilityMatch,
+  scoreOtaVisibilityCandidate,
+} from "./ota-visibility-core";
 
 const GUESTY_SUMMARY_SEPARATOR = "\n\n---\n\n";
 const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
 
 type OtaVisibilityPlatform = "booking" | "vrbo";
 type OtaVisibilityStatus = "queued" | "running" | "found" | "not_found" | "error";
-
-type OtaVisibilityCandidate = {
-  url: string;
-  title: string;
-  bedrooms?: number | null;
-  totalPrice?: number | null;
-  nightlyPrice?: number | null;
-  position: number;
-  page: number;
-  score: number;
-  reason: string;
-};
 
 type OtaVisibilityJob = {
   id: string;
@@ -337,35 +331,6 @@ function otaVisibilityKey(propertyId: number, platform: OtaVisibilityPlatform): 
 
 function touchOtaVisibilityJob(job: OtaVisibilityJob, patch: Partial<OtaVisibilityJob>) {
   Object.assign(job, patch, { updatedAt: new Date().toISOString() });
-}
-
-function normalizeVisibilityText(value: unknown): string {
-  return String(value ?? "")
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-function visibilityTokens(value: unknown): string[] {
-  const stop = new Set([
-    "and", "the", "for", "with", "near", "at", "in", "on", "of", "by", "to",
-    "unit", "units", "condo", "condos", "sleeps", "sleep", "guest", "guests",
-    "bedroom", "bedrooms", "br", "bath", "baths",
-  ]);
-  return normalizeVisibilityText(value)
-    .split(/\s+/)
-    .filter((token) => token.length >= 3 && !stop.has(token));
-}
-
-function canonicalVisibilityUrl(raw: unknown): string {
-  if (typeof raw !== "string" || !raw.trim()) return "";
-  try {
-    const parsed = new URL(raw.trim());
-    return `${parsed.hostname.toLowerCase().replace(/^www\./, "")}${decodeURIComponent(parsed.pathname).replace(/\/+$/, "").toLowerCase()}`;
-  } catch {
-    return raw.trim().replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase();
-  }
 }
 
 function parseBuilderAddress(address: string): { city: string; state: string } {
@@ -419,73 +384,6 @@ function pickChannelPublicUrl(listing: Record<string, unknown>, platform: OtaVis
     if (typeof value === "string" && /^https?:\/\//i.test(value)) return value;
   }
   return null;
-}
-
-function scoreOtaVisibilityCandidate(input: {
-  candidate: { url?: string; title?: string; snippet?: string };
-  position: number;
-  property: PropertyUnitBuilder;
-  listingTitle: string | null;
-  publicUrl: string | null;
-}): OtaVisibilityCandidate {
-  const candidateUrl = String(input.candidate.url ?? "");
-  const candidateTitle = String(input.candidate.title ?? "Untitled result");
-  const haystack = normalizeVisibilityText(`${candidateTitle} ${input.candidate.snippet ?? ""} ${candidateUrl}`);
-  const publicKey = canonicalVisibilityUrl(input.publicUrl);
-  const candidateKey = canonicalVisibilityUrl(candidateUrl);
-  let score = 0;
-  const reasons: string[] = [];
-
-  if (publicKey && candidateKey && (candidateKey === publicKey || candidateKey.includes(publicKey) || publicKey.includes(candidateKey))) {
-    score += 120;
-    reasons.push("public URL match");
-  }
-
-  const titleSources = [
-    input.property.bookingTitle,
-    input.property.propertyName,
-    input.listingTitle,
-  ].filter(Boolean);
-  for (const source of titleSources) {
-    const tokens = visibilityTokens(source).slice(0, 8);
-    if (tokens.length === 0) continue;
-    const matched = tokens.filter((token) => haystack.includes(token)).length;
-    const ratio = matched / tokens.length;
-    if (ratio >= 0.8) {
-      score += Math.round(60 * ratio);
-      reasons.push(`${matched}/${tokens.length} title tokens`);
-      break;
-    }
-    if (ratio >= 0.5) {
-      score += Math.round(30 * ratio);
-      reasons.push(`${matched}/${tokens.length} partial title tokens`);
-    }
-  }
-
-  const communityTokens = visibilityTokens(input.property.complexName).slice(0, 5);
-  const communityMatched = communityTokens.filter((token) => haystack.includes(token)).length;
-  if (communityTokens.length && communityMatched === communityTokens.length) {
-    score += 25;
-    reasons.push("community match");
-  }
-
-  const totalBedrooms = input.property.units.reduce((sum, unit) => sum + unit.bedrooms, 0);
-  if (totalBedrooms > 0 && new RegExp(`(?:^|[^0-9])${totalBedrooms}\\s*(?:br|bed)`, "i").test(haystack)) {
-    score += 15;
-    reasons.push(`${totalBedrooms}BR match`);
-  }
-
-  return {
-    url: candidateUrl,
-    title: candidateTitle,
-    bedrooms: typeof (input.candidate as any).bedrooms === "number" ? (input.candidate as any).bedrooms : null,
-    totalPrice: typeof (input.candidate as any).totalPrice === "number" ? (input.candidate as any).totalPrice : null,
-    nightlyPrice: typeof (input.candidate as any).nightlyPrice === "number" ? (input.candidate as any).nightlyPrice : null,
-    position: input.position,
-    page: 1,
-    score,
-    reason: reasons.join(", ") || "weak match",
-  };
 }
 
 function calendarDaysFromGuestyResponse(calendarResp: any): any[] {
@@ -21925,6 +21823,9 @@ Requirements:
         skipResultCache: true,
       };
       const sidecarQueue = await import("./vrbo-sidecar-queue");
+      if (!sidecarQueue.getHeartbeat().isOnline) {
+        throw new Error("Local Chrome sidecar is offline. Start the sidecar worker on your Mac, then retry.");
+      }
       const sidecar = job.platform === "booking"
         ? await sidecarQueue.searchBookingViaSidecar({
             destination: searchTerm,
@@ -21947,6 +21848,24 @@ Requirements:
             queueContext,
           });
       const rawCandidates = sidecar?.candidates ?? [];
+      const sidecarFailure = otaVisibilitySidecarFailureMessage({
+        candidateCount: rawCandidates.length,
+        workerOnline: sidecar?.workerOnline ?? false,
+        reason: sidecar?.reason ?? "",
+      });
+      if (sidecarFailure) {
+        touchOtaVisibilityJob(job, {
+          status: "error",
+          message: sidecarFailure,
+          completedAt: new Date().toISOString(),
+          error: sidecarFailure,
+          candidatesChecked: rawCandidates.length,
+          sidecarReason: sidecar?.reason ?? null,
+          durationMs: Date.now() - startedAt,
+        });
+        return;
+      }
+
       const candidates = rawCandidates
         .map((candidate, index) => scoreOtaVisibilityCandidate({
           candidate,
@@ -21954,10 +21873,8 @@ Requirements:
           property,
           listingTitle,
           publicUrl,
-        }))
-        .sort((a, b) => b.score - a.score || a.position - b.position);
-      const bestCandidate = candidates[0] ?? null;
-      const found = !!bestCandidate && bestCandidate.score >= 70;
+        }));
+      const { found, match, bestCandidate } = pickOtaVisibilityMatch(candidates);
       const positionLog = candidates
         .slice()
         .sort((a, b) => a.page - b.page || a.position - b.position)
@@ -21966,27 +21883,33 @@ Requirements:
           `page ${candidate.page} pos ${candidate.position}: score ${candidate.score} ` +
           `${candidate.title} (${candidate.reason})`
         ));
+      const platformLabel = job.platform === "booking" ? "Booking.com" : "VRBO";
       console.log(
         `[ota-visibility] done property=${property.propertyId} platform=${job.platform} ` +
         `status=${found ? "found" : "not_found"} searchedAt=${searchedAt} ` +
         `dates=${window.checkIn}->${window.checkOut} checked=${rawCandidates.length} ` +
-        `foundPage=${found ? bestCandidate.page : "-"} foundPosition=${found ? bestCandidate.position : "-"} ` +
-        `foundUrl="${found ? bestCandidate.url : ""}" positions=${JSON.stringify(positionLog.slice(0, 10))}`,
+        `foundPage=${found && match ? match.page : "-"} foundPosition=${found && match ? match.position : "-"} ` +
+        `foundUrl="${found && match ? match.url : ""}" positions=${JSON.stringify(positionLog.slice(0, 10))}`,
       );
       touchOtaVisibilityJob(job, {
         status: found ? "found" : "not_found",
-        message: found
-          ? `Found on page ${bestCandidate.page}, position ${bestCandidate.position}.`
-          : `Not found in the first visible ${job.platform === "booking" ? "Booking.com" : "VRBO"} result set.`,
+        message: found && match
+          ? `Found on page ${match.page}, position ${match.position} (result #${match.position} in ${rawCandidates.length} checked).`
+          : rawCandidates.length
+            ? `Not found among ${rawCandidates.length} ${platformLabel} results for ${window.checkIn} to ${window.checkOut}.`
+            : `Not found in ${platformLabel} search results for ${window.checkIn} to ${window.checkOut}.`,
         completedAt: new Date().toISOString(),
         found,
-        foundPage: found ? bestCandidate.page : null,
-        foundPosition: found ? bestCandidate.position : null,
-        foundUrl: found ? bestCandidate.url : null,
-        matchedTitle: found ? bestCandidate.title : null,
+        foundPage: found && match ? match.page : null,
+        foundPosition: found && match ? match.position : null,
+        foundUrl: found && match ? match.url : null,
+        matchedTitle: found && match ? match.title : null,
         candidatesChecked: rawCandidates.length,
         bestCandidate,
-        candidates: candidates.slice(0, 10),
+        candidates: candidates
+          .slice()
+          .sort((a, b) => b.score - a.score || a.position - b.position)
+          .slice(0, 10),
         positionLog,
         sidecarReason: sidecar?.reason ?? null,
         durationMs: Date.now() - startedAt,
