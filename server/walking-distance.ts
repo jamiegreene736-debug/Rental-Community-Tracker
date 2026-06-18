@@ -85,6 +85,45 @@ async function geocodeViaSearchApi(address: string): Promise<Coord | null> {
   }
 }
 
+// Reverse geocode: snap a lat/lng to a real numbered street address. Used by the
+// bulk-combo address discovery as a LAST-RESORT rescue when SearchAPI google_maps
+// knows a resort (we have its coordinates + a name-matched title) but only returns
+// its locality ("Princeville, HI") with no house number. Nominatim reverse is free
+// and no-key, and shares the same 1-req/sec throttle as forward geocoding.
+//
+// Contract: THROWS on a transient failure (network / non-2xx) so the caller treats
+// it as "try again later" rather than a definitive "no street"; returns null only on
+// a clean lookup that genuinely has no house-numbered road. Definitive results
+// (street or null) are cached; thrown transients are not.
+const reverseGeocodeCache = new Map<string, string | null>();
+
+export async function reverseGeocodeToStreetAddress(lat: number, lng: number): Promise<string | null> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const key = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+  if (reverseGeocodeCache.has(key)) return reverseGeocodeCache.get(key) ?? null;
+  await throttle();
+  const r = await fetch(
+    `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`,
+    {
+      headers: {
+        "User-Agent": "NexStay/1.0 (rental-community-tracker)",
+        "Accept-Language": "en-US,en",
+      },
+      signal: AbortSignal.timeout(10000),
+    },
+  );
+  // Non-2xx is transient (rate limit / outage) — throw so the caller does NOT
+  // negative-cache a resort's discovery on a one-off blip.
+  if (!r.ok) throw new Error(`nominatim reverse ${r.status}`);
+  const data = (await r.json()) as any;
+  const a = data?.address ?? {};
+  const houseNumber = String(a.house_number ?? "").trim();
+  const road = String(a.road ?? a.pedestrian ?? a.footway ?? a.residential ?? "").trim();
+  const street = houseNumber && road ? `${houseNumber} ${road}` : null;
+  reverseGeocodeCache.set(key, street);
+  return street;
+}
+
 export async function geocode(address: string): Promise<Coord | null> {
   const key = address.trim().toLowerCase();
   if (geocodeCache.has(key)) return geocodeCache.get(key) ?? null;
