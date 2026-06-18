@@ -1958,6 +1958,20 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)));
   }
 
+  async updatePhotoLabelBedroomPrecompute(
+    folder: string,
+    filename: string,
+    patch: { bedroomClusterId?: string | null; bedroomBedType?: string | null },
+  ): Promise<void> {
+    const set: Record<string, unknown> = {};
+    if ("bedroomClusterId" in patch) set.bedroomClusterId = patch.bedroomClusterId;
+    if ("bedroomBedType" in patch) set.bedroomBedType = patch.bedroomBedType;
+    if (Object.keys(set).length === 0) return;
+    await db.update(photoLabels)
+      .set(set)
+      .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)));
+  }
+
   // Sets photo_labels.channel_usage (JSON-encoded) for one row. Used
   // by the channel-photo-independence flow to record that a specific
   // photo is currently live on a particular channel.

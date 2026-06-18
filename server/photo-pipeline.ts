@@ -800,6 +800,28 @@ export async function downloadAndPrioritize(opts: {
     console.error(`[photo-pipeline] hashing module load failed: ${e?.message ?? e}`);
   }
 
+  // Step 7b: persist bedroom cluster ids on photo_labels for fast community checks.
+  try {
+    const bedroomFiles: Array<{ filename: string; label: string; absPath: string }> = [];
+    for (let i = 0; i < kept.length; i++) {
+      if (kept[i].category !== "Bedrooms") continue;
+      bedroomFiles.push({
+        filename: keptFilenames[i],
+        label: kept[i].label ?? "",
+        absPath: path.join(folderPath, keptFilenames[i]),
+      });
+    }
+    if (bedroomFiles.length > 0) {
+      const { persistBedroomPrecomputeForFolder } = await import("./bedroom-precompute");
+      const pre = await persistBedroomPrecomputeForFolder(folder, bedroomFiles);
+      if (pre.clusters > 0) {
+        console.log(`[photo-pipeline] ${folder}: precomputed ${pre.clusters} bedroom cluster(s) on ${pre.filesUpdated} photo(s)`);
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[photo-pipeline] bedroom precompute failed for ${folder}: ${e?.message ?? e}`);
+  }
+
   const categorySummary: Record<string, number> = {};
   for (const r of kept) {
     const key = r.category ?? "Unlabeled";

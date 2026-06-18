@@ -4659,13 +4659,23 @@ function AdminDashboard() {
                   <TableCell className="px-0.5 py-2 text-center">
                     {(() => {
                       const row = photoCommunityByProperty.get(property.id);
-                      type Tone = "ok" | "bad" | "unknown" | "running" | "na";
+                      type Tone = "ok" | "bad" | "warn" | "unknown" | "running" | "na";
                       const PAL: Record<Tone, { bg: string; glyph: string }> = {
                         ok:      { bg: "#16a34a", glyph: "✓" },
                         bad:     { bg: "#dc2626", glyph: "✗" },
+                        warn:    { bg: "#f59e0b", glyph: "!" },
                         unknown: { bg: "#9ca3af", glyph: "?" },
                         running: { bg: "#f59e0b", glyph: "…" },
                         na:      { bg: "#9ca3af", glyph: "–" },
+                      };
+                      const bedroomTone = (running: boolean): Tone => {
+                        if (running) return "running";
+                        if (row?.bedroomsTier === "pass") return "ok";
+                        if (row?.bedroomsTier === "fail") return "bad";
+                        if (row?.bedroomsTier === "warn") return "warn";
+                        if (row?.bedroomsOk === true) return "ok";
+                        if (row?.bedroomsOk === false) return "bad";
+                        return "unknown";
                       };
                       const toneFor = (ok: boolean | null | undefined, running: boolean): Tone => {
                         if (running) return "running";
@@ -4677,7 +4687,7 @@ function AdminDashboard() {
                         (item) => item.propertyId === property.id && item.status === "running",
                       );
                       const stamp = row?.checkedAt ? new Date(row.checkedAt).toLocaleDateString() : "never";
-                      const allPass = row?.bedroomsOk === true && row?.communityFolderOk === true && row?.sameCommunityOk === true;
+                      const allPass = row?.bedroomsTier === "pass" && row?.communityFolderOk === true && row?.sameCommunityOk === true;
                       if (allPass && !running) {
                         return (
                           <div className="flex justify-center" data-testid={`photo-community-${property.id}`}>
@@ -4691,21 +4701,23 @@ function AdminDashboard() {
                           </div>
                         );
                       }
-                      const items: Array<{ letter: string; name: string; ok: boolean | null | undefined; tip: string }> = [
+                      const items: Array<{ letter: string; name: string; tone: Tone; tip: string }> = [
                         {
                           letter: "B",
                           name: "Bedrooms",
-                          ok: row?.bedroomsOk,
-                          tip: row?.bedroomsOk === false
+                          tone: bedroomTone(running),
+                          tip: row?.bedroomsTier === "fail"
                             ? `Bedroom photos: ${row?.bedroomsFound ?? "?"}/${row?.bedroomsExpected ?? "?"} ✗ (${stamp})`
-                            : row?.bedroomsOk === true
-                              ? `Bedroom photos: ${row?.bedroomsFound}/${row?.bedroomsExpected} ✓ (${stamp})`
-                              : running ? "Bedroom check running…" : `Bedroom photos: not checked (${stamp})`,
+                            : row?.bedroomsTier === "warn"
+                              ? `Bedroom photos: ${row?.bedroomsFound}/${row?.bedroomsExpected} ⚠ review unit breakdown (${stamp})`
+                              : row?.bedroomsTier === "pass"
+                                ? `Bedroom photos: ${row?.bedroomsFound}/${row?.bedroomsExpected} ✓ (${stamp})`
+                                : running ? "Bedroom check running…" : `Bedroom photos: not checked (${stamp})`,
                         },
                         {
                           letter: "C",
                           name: "Community folder",
-                          ok: row?.communityFolderOk,
+                          tone: toneFor(row?.communityFolderOk, running),
                           tip: row?.communityFolderOk === false
                             ? `Community folder does not match expected resort ✗${row?.communityPhotosChecked != null && row?.communityPhotosTotal != null ? ` (${row.communityPhotosChecked}/${row.communityPhotosTotal} audited)` : ""} (${stamp})`
                             : row?.communityFolderOk === true
@@ -4715,7 +4727,7 @@ function AdminDashboard() {
                         {
                           letter: "M",
                           name: "Same community",
-                          ok: row?.sameCommunityOk,
+                          tone: toneFor(row?.sameCommunityOk, running),
                           tip: row?.sameCommunityOk === false
                             ? `Community folder and unit photos are not all the same community ✗ (${stamp})`
                             : row?.sameCommunityOk === true
@@ -4728,8 +4740,7 @@ function AdminDashboard() {
                         <div className="flex flex-col items-center gap-0.5" data-testid={`photo-community-${property.id}`}>
                           <div className="flex gap-[1px] justify-center items-center">
                             {items.map((it) => {
-                              const tone = toneFor(it.ok, running);
-                              const p = PAL[tone];
+                              const p = PAL[it.tone];
                               return (
                                 <span
                                   key={it.letter}

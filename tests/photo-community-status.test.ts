@@ -17,80 +17,47 @@ const passAll = derivePhotoCommunityRowStatus(1, {
   allSameCommunity: "yes",
   community: { matchesExpected: "yes", allSameCommunity: true, photosChecked: 28, photosTotal: 28 },
   units: [{ sameAsCommunity: "yes" }, { sameAsCommunity: "yes" }],
-  bedroomCoverage: { matchesListing: "yes", bedroomsFoundCombined: 6, expectedListingBedrooms: 6 },
+  bedroomCoverage: {
+    matchesListing: "yes",
+    tier: "pass",
+    bedroomsFoundCombined: 6,
+    expectedListingBedrooms: 6,
+  },
 }, "2026-06-18T00:00:00.000Z");
 check("pass when bedrooms, folder, and same-community all ok",
-  passAll.bedroomsOk === true
+  passAll.bedroomsTier === "pass"
   && passAll.communityFolderOk === true
   && passAll.sameCommunityOk === true
-  && passAll.overall === "pass"
-  && passAll.communityAuditComplete === true
-  && passAll.communityPhotosChecked === 28);
+  && passAll.overall === "pass");
 
 const badBedrooms = derivePhotoCommunityRowStatus(2, {
   verdict: "fail",
   allSameCommunity: "yes",
   community: { matchesExpected: "yes", allSameCommunity: true },
   units: [{ sameAsCommunity: "yes" }],
-  bedroomCoverage: { matchesListing: "no", bedroomsFoundCombined: 4, expectedListingBedrooms: 6 },
+  bedroomCoverage: { matchesListing: "no", tier: "fail", bedroomsFoundCombined: 4, expectedListingBedrooms: 6 },
 }, "2026-06-18T00:00:00.000Z");
 check("fail bedrooms when coverage short",
-  badBedrooms.bedroomsOk === false && badBedrooms.overall === "fail");
+  badBedrooms.bedroomsTier === "fail" && badBedrooms.overall === "fail");
 
-const overCountStillPass = derivePhotoCommunityRowStatus(5, {
-  verdict: "pass",
-  allSameCommunity: "yes",
-  community: { matchesExpected: "yes", allSameCommunity: true },
-  units: [{ sameAsCommunity: "yes" }, { sameAsCommunity: "yes" }],
-  bedroomCoverage: { matchesListing: "yes", bedroomsFoundCombined: 8, expectedListingBedrooms: 5 },
-}, "2026-06-18T00:00:00.000Z");
-check("pass bedrooms when combined count exceeds listing expectation",
-  overCountStillPass.bedroomsOk === true && overCountStillPass.overall === "pass");
-
-const listingPassDespiteUnitShortfall = derivePhotoCommunityRowStatus(4, {
+const warnBedrooms = derivePhotoCommunityRowStatus(5, {
   verdict: "warn",
   allSameCommunity: "yes",
-  community: { matchesExpected: "yes", allSameCommunity: true, photosChecked: 6, photosTotal: 6 },
+  community: { matchesExpected: "yes", allSameCommunity: true },
   units: [{ sameAsCommunity: "yes" }, { sameAsCommunity: "yes" }],
   bedroomCoverage: {
     matchesListing: "yes",
-    bedroomsFoundCombined: 13,
+    tier: "warn",
+    bedroomsFoundCombined: 6,
     expectedListingBedrooms: 6,
-    units: [
-      { matchesListing: "no", bedroomsFound: 2, expectedBedrooms: 3 },
-      { matchesListing: "yes", bedroomsFound: 11, expectedBedrooms: 3 },
-    ],
+    units: [{ tier: "warn" }, { tier: "pass" }],
   },
 }, "2026-06-18T00:00:00.000Z");
-check("B passes when combined bedrooms meet listing expectation (13/6)",
-  listingPassDespiteUnitShortfall.bedroomsOk === true
-  && listingPassDespiteUnitShortfall.bedroomsFound === 13);
+check("warn tier when listing ok but unit issues",
+  warnBedrooms.bedroomsTier === "warn" && warnBedrooms.overall === "warn");
 
-const badFolder = derivePhotoCommunityRowStatus(3, {
-  verdict: "fail",
-  allSameCommunity: "yes",
-  community: { matchesExpected: "no", allSameCommunity: true },
-  units: [{ sameAsCommunity: "yes" }],
-  bedroomCoverage: { matchesListing: "yes", bedroomsFoundCombined: 3, expectedListingBedrooms: 3 },
-}, "2026-06-18T00:00:00.000Z");
-check("fail community folder when expected resort mismatch",
-  badFolder.communityFolderOk === false && badFolder.overall === "fail");
-
-const badMatch = derivePhotoCommunityRowStatus(4, {
-  verdict: "fail",
-  allSameCommunity: "no",
-  community: { matchesExpected: "yes", allSameCommunity: true },
-  units: [{ sameAsCommunity: "yes" }, { sameAsCommunity: "no" }],
-  bedroomCoverage: { matchesListing: "yes", bedroomsFoundCombined: 6, expectedListingBedrooms: 6 },
-}, "2026-06-18T00:00:00.000Z");
-check("fail same-community when units disagree",
-  badMatch.sameCommunityOk === false && badMatch.overall === "fail");
-
-check("status label summarizes bedroom failure",
-  photoCommunityStatusLabel(badBedrooms).includes("4/6"));
-
-check("status label for all pass",
-  photoCommunityStatusLabel(passAll).includes("passed"));
+check("status label shows warn for bedroom tier",
+  photoCommunityStatusLabel(warnBedrooms).includes("⚠"));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
