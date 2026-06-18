@@ -2548,11 +2548,16 @@ function AdminDashboard() {
     onError: (e: any) => toast({ title: "Photo scan failed", description: e.message, variant: "destructive" }),
   });
 
-  const startBulkPhotoCommunityCheck = async (propertyIds?: number[]) => {
-    const targets = propertyIds && propertyIds.length > 0
-      ? allProperties.filter((p) => propertyIds.includes(p.id))
-      : allProperties.filter((p) => p.draftStatus !== "researching" && p.draftStatus !== "draft_ready");
-    if (targets.length === 0) return;
+  const startBulkPhotoCommunityCheck = async (propertyIds: number[]) => {
+    const targets = allProperties.filter((p) => propertyIds.includes(p.id));
+    if (targets.length === 0) {
+      toast({
+        title: "No properties selected",
+        description: "Select one or more properties with the checkboxes, then run Check photo community.",
+        variant: "destructive",
+      });
+      return;
+    }
     setBulkPhotoCommunityStarting(true);
     try {
       const labels = Object.fromEntries(targets.map((p) => [String(p.id), p.name]));
@@ -3611,6 +3616,24 @@ function AdminDashboard() {
               Showing {filtered.length} of {dashboardRowCount} properties
             </p>
             <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 gap-1.5"
+                disabled={selectedBulkPricingCount === 0 || bulkPhotoCommunityStarting || bulkPhotoCommunityActive}
+                onClick={() => void startBulkPhotoCommunityCheck(selectedBulkPricingProperties.map((p) => p.id))}
+                data-testid="button-bulk-photo-community-check"
+                title={selectedBulkPricingCount === 0 ? "Select properties with the checkboxes first" : "Run photo community check on selected properties"}
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${bulkPhotoCommunityStarting || bulkPhotoCommunityActive ? "animate-spin" : ""}`} />
+                Check photo community
+                {selectedBulkPricingCount > 0 && (
+                  <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-[10px]">
+                    {selectedBulkPricingCount}
+                  </Badge>
+                )}
+              </Button>
               <Dialog open={bulkPricingOpen} onOpenChange={setBulkPricingOpen}>
                 <DialogTrigger asChild>
                   <Button
@@ -4194,8 +4217,8 @@ function AdminDashboard() {
                     className="h-7 w-7"
                     disabled={visibleBulkPricingIds.length === 0}
                     onClick={toggleVisibleBulkPricingRows}
-                    title={allVisibleBulkPricingSelected ? "Clear visible bulk selections" : "Select visible properties for bulk pricing or availability"}
-                    aria-label={allVisibleBulkPricingSelected ? "Clear visible bulk selections" : "Select visible properties for bulk pricing or availability"}
+                    title={allVisibleBulkPricingSelected ? "Clear visible bulk selections" : "Select visible properties for bulk pricing, availability, or photo community check"}
+                    aria-label={allVisibleBulkPricingSelected ? "Clear visible bulk selections" : "Select visible properties for bulk pricing, availability, or photo community check"}
                     data-testid="button-select-visible-pricing"
                   >
                     {allVisibleBulkPricingSelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
@@ -4237,22 +4260,7 @@ function AdminDashboard() {
                   </div>
                 </TableHead>
                 <TableHead className="w-[104px] text-center px-1" title="Photo community QA: B = bedroom photo coverage, C = community folder matches resort, M = all folders same community">
-                  <div className="flex items-center justify-center gap-1">
-                    <span>Comm QA</span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6"
-                      title={bulkPhotoCommunityActive ? "Bulk photo community check running" : "Run photo community check for all listings"}
-                      aria-label="Run bulk photo community check"
-                      disabled={bulkPhotoCommunityStarting || bulkPhotoCommunityActive}
-                      onClick={() => void startBulkPhotoCommunityCheck()}
-                      data-testid="button-run-bulk-photo-community-check"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${bulkPhotoCommunityStarting || bulkPhotoCommunityActive ? "animate-spin" : ""}`} />
-                    </Button>
-                  </div>
+                  Comm QA
                 </TableHead>
                 <TableHead className="w-[190px] max-w-[190px] px-1">
                   <Button
@@ -4392,8 +4400,8 @@ function AdminDashboard() {
                       className="h-7 w-7"
                       disabled={!isBulkPricingSelectable(property)}
                       onClick={() => toggleBulkPricingRow(property.id)}
-                      title={isBulkPricingSelectable(property) ? "Select for bulk pricing or availability" : "Publish this draft before bulk actions"}
-                      aria-label={`Select ${property.name} for bulk pricing or availability`}
+                      title={isBulkPricingSelectable(property) ? "Select for bulk pricing, availability, or photo community check" : "Publish this draft before bulk actions"}
+                      aria-label={`Select ${property.name} for bulk pricing, availability, or photo community check`}
                       data-testid={`button-select-pricing-${property.id}`}
                     >
                       {selectedPricingIds.has(property.id) ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
