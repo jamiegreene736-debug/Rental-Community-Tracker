@@ -86,7 +86,7 @@ export function stateToAbbrevForRentCast(state: string): string {
 export function isRentCastDiscoveryEnabled(): boolean {
   const key = String(process.env.RENTCAST_API_KEY ?? "").trim();
   if (!key) return false;
-  const flag = String(process.env.RENTCAST_DISCOVERY_ENABLED ?? "1").trim().toLowerCase();
+  const flag = String(process.env.RENTCAST_DISCOVERY_ENABLED ?? "0").trim().toLowerCase();
   return flag !== "0" && flag !== "false" && flag !== "no";
 }
 

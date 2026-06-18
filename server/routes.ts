@@ -184,12 +184,6 @@ import { discoverCommunityStreetAddress } from "./community-address-discovery";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize } from "./photo-pipeline";
 import {
-  harvestRentCastSaleListings,
-  isRentCastDiscoveryEnabled,
-  rentCastDiscoveryTuning,
-  resolveRentCastCandidatesToPortalUrls,
-} from "./rentcast-discovery";
-import {
   harvestRealtyApiCommunityListings,
   isRealtyApiDiscoveryEnabled,
   runRealtyApiPhotoDiscoveryLeg,
@@ -31427,19 +31421,9 @@ Return ONLY compact JSON with this exact shape:
       );
     };
 
-    const runFindUnitStackedRentCastDiscovery = async (): Promise<void> => {
+    const runFindUnitStackedRealtyApiDiscovery = async (): Promise<void> => {
       const communityLoc = communityLocForQueries;
-      if (!communityLoc || !isRentCastDiscoveryEnabled() || !searchApiKey) return;
-      const rentcastCities = [...new Set(discoverySearchCitiesForPhotoSearch({
-        city: bodyLocation?.city ?? communityLoc.city,
-        communityName,
-        streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
-      }))].slice(0, 3);
-      if (rentcastCities.length === 0) return;
-      const rentcastBudgetMs = Math.min(
-        15_000,
-        Math.max(6_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
-      );
+      if (!communityLoc || !isRealtyApiDiscoveryEnabled()) return;
       const allowedRoots = repeatedCandidateRoots();
       if (directRoot) allowedRoots.add(directRoot);
       for (const root of communityAddressRoots) allowedRoots.add(root);
@@ -31449,68 +31433,49 @@ Return ONLY compact JSON with this exact shape:
         : allowedRoots.size > 0
           ? allowedRoots
           : directAllowedRoots;
-      const findUnitRentcastTune = rentCastDiscoveryTuning(expandedSearch ? "standard" : "findUnit");
-      const harvest = await withStepTimeout(
-        harvestRentCastSaleListings({
-          cities: rentcastCities,
+      const realtyApiBudgetMs = Math.min(
+        20_000,
+        Math.max(6_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
+      );
+      const beforeRealtyApi = candidates.length;
+      const counts = await withStepTimeout(
+        runRealtyApiPhotoDiscoveryLeg({
+          communityName,
+          streetAddress: canonicalStreet || normalizedStreetAddress || addressStreet,
+          city: communityLoc.city,
           state: communityLoc.state,
+          profile: expandedSearch ? "standard" : "findUnit",
           minBedrooms: requiredBedroomCount,
           maxBedrooms: requiredBedroomCount,
-          limitPerCity: findUnitRentcastTune.limitPerCity,
-          timeoutMs: Math.min(rentcastBudgetMs, findUnitRentcastTune.requestTimeoutMs),
           allowedStreetRoots: suppliedStreetRoot ? new Set([suppliedStreetRoot]) : undefined,
-          includeInactiveListings: true,
+          strictCommunityAnchor: true,
+          addRealtorUrl: (url, title) => addCandidateUrl(url, "realtor", title ?? "", "", filterRoots),
         }),
-        rentcastBudgetMs,
-        { candidates: [], rawCount: 0, filteredCount: 0, citiesQueried: [], errors: [] },
-        "stacked RentCast discovery",
+        realtyApiBudgetMs,
+        { raw: 0, kept: 0, added: 0, pages: 0, locations: 0 },
+        "stacked RealtyAPI discovery",
       );
-      if (harvest.candidates.length === 0) {
-        console.error(
-          `[find-unit] stacked RentCast discovery: raw=${harvest.rawCount} kept=0 (no resolve)`,
-        );
-        return;
-      }
-      const resolved = await withStepTimeout(
-        resolveRentCastCandidatesToPortalUrls({
-          listings: harvest.candidates,
-          searchApiKey,
-          maxLookups: expandedSearch
-            ? Math.max(findUnitRentcastTune.maxResolverLookups, 45)
-            : findUnitRentcastTune.maxResolverLookups,
-          timeoutMs: findUnitRentcastTune.requestTimeoutMs,
-        }),
-        12_000,
-        { resolvedZillow: 0, resolvedRealtor: 0, lookupsRun: 0, urls: [] },
-        "RentCast portal resolve",
-      );
-      const beforeRentCast = candidates.length;
-      for (const row of resolved.urls) {
-        if (row.zillow) addCandidateUrl(row.zillow, "zillow", "", "", filterRoots);
-        if (row.realtor) addCandidateUrl(row.realtor, "realtor", "", "", filterRoots);
-      }
       console.error(
-        `[find-unit] stacked RentCast discovery: cities=${rentcastCities.join("|")}, ` +
-        `raw=${harvest.rawCount} kept=${harvest.filteredCount} ` +
-        `resolvedZ=${resolved.resolvedZillow} resolvedR=${resolved.resolvedRealtor} ` +
-        `added=${candidates.length - beforeRentCast}`,
+        `[find-unit] stacked RealtyAPI discovery: raw=${counts.raw} kept=${counts.kept} ` +
+        `pages=${counts.pages} locations=${counts.locations} ` +
+        `added=${candidates.length - beforeRealtyApi}`,
       );
     };
 
     let apifyDiscoveryPromise: Promise<void> | null = null;
-    let rentcastDiscoveryPromise: Promise<void> | null = null;
+    let realtyApiDiscoveryPromise: Promise<void> | null = null;
     if (!skipDiscovery && communityLocForQueries) {
       apifyDiscoveryPromise = runFindUnitStackedApifyDiscovery().catch((e: any) => {
         console.error(`[find-unit] stacked Apify discovery failed: ${e?.message ?? e}`);
       });
-      if (isRentCastDiscoveryEnabled() && searchApiKey) {
-        rentcastDiscoveryPromise = runFindUnitStackedRentCastDiscovery().catch((e: any) => {
-          console.error(`[find-unit] stacked RentCast discovery failed: ${e?.message ?? e}`);
+      if (isRealtyApiDiscoveryEnabled()) {
+        realtyApiDiscoveryPromise = runFindUnitStackedRealtyApiDiscovery().catch((e: any) => {
+          console.error(`[find-unit] stacked RealtyAPI discovery failed: ${e?.message ?? e}`);
         });
       }
       console.error(
         "[find-unit] stacked Apify discovery started in parallel with SearchAPI/Google discovery" +
-        (rentcastDiscoveryPromise ? " (+ RentCast leg)" : ""),
+        (realtyApiDiscoveryPromise ? " (+ RealtyAPI leg)" : ""),
       );
     }
 
@@ -31615,10 +31580,10 @@ Return ONLY compact JSON with this exact shape:
       } else if (!skipDiscovery && communityLocForQueries && process.env.APIFY_API_TOKEN) {
         await runFindUnitStackedApifyDiscovery();
       }
-      if (rentcastDiscoveryPromise) {
-        await rentcastDiscoveryPromise;
-      } else if (!skipDiscovery && communityLocForQueries && isRentCastDiscoveryEnabled() && searchApiKey) {
-        await runFindUnitStackedRentCastDiscovery();
+      if (realtyApiDiscoveryPromise) {
+        await realtyApiDiscoveryPromise;
+      } else if (!skipDiscovery && communityLocForQueries && isRealtyApiDiscoveryEnabled()) {
+        await runFindUnitStackedRealtyApiDiscovery();
       }
     }
 
@@ -35461,16 +35426,15 @@ Return ONLY compact JSON with this exact shape:
       }
       const searchApiKey = process.env.SEARCHAPI_API_KEY;
       const hasApifyDiscovery = !!process.env.APIFY_API_TOKEN;
-      const hasRentCastDiscovery = isRentCastDiscoveryEnabled();
       const hasRealtyApiDiscovery = isRealtyApiDiscoveryEnabled();
-      if (!searchApiKey && !hasApifyDiscovery && !hasRentCastDiscovery && !hasRealtyApiDiscovery) {
+      if (!searchApiKey && !hasApifyDiscovery && !hasRealtyApiDiscovery) {
         return res.status(503).json({
-          error: "Discovery requires APIFY_API_TOKEN, SEARCHAPI_API_KEY, REALTYAPI_API_KEY, and/or RENTCAST_API_KEY (only direct url calls work without any)",
+          error: "Discovery requires APIFY_API_TOKEN, SEARCHAPI_API_KEY, and/or REALTYAPI_API_KEY (only direct url calls work without any)",
         });
       }
       // Stacked discovery (parallel): Apify native Zillow/Realtor search,
-      // SearchAPI Zillow site: queries, RentCast sale listings (resolved to
-      // portal URLs via SearchAPI), plus supplemental Realtor/Redfin/Homes.
+      // SearchAPI Zillow site: queries, RealtyAPI community Realtor harvest,
+      // plus supplemental Realtor/Redfin/Homes.
       const listingKey = (raw: string): string => {
         try {
           const u = new URL(raw);
@@ -35699,83 +35663,6 @@ Return ONLY compact JSON with this exact shape:
         ]);
       };
 
-      const rentcastTune = rentCastDiscoveryTuning(isBoundedDiscovery ? "bounded" : "standard");
-      const rentcastLimitPerCity = isBoundedDiscovery
-        ? Math.max(rentcastTune.limitPerCity, Math.min(80, (candidateLimit ?? 8) * 6))
-        : rentcastTune.limitPerCity;
-      const rentcastMaxResolverLookups = rentcastTune.maxResolverLookups;
-      const rentcastTimeoutMs = rentcastTune.requestTimeoutMs;
-
-      const runRentCastDiscovery = async (): Promise<{
-        raw: number;
-        kept: number;
-        resolvedZillow: number;
-        resolvedRealtor: number;
-      }> => {
-        if (!hasRentCastDiscovery || !state || discoveryCities.length === 0) {
-          return { raw: 0, kept: 0, resolvedZillow: 0, resolvedRealtor: 0 };
-        }
-        const allowedRoots = isBoundedDiscovery && suppliedStreetRoot
-          ? new Set([suppliedStreetRoot])
-          : undefined;
-        const harvest = await harvestRentCastSaleListings({
-          cities: discoveryCities.slice(0, 3),
-          state,
-          minBedrooms: requestedBedrooms ?? minimumBedrooms ?? undefined,
-          maxBedrooms: requestedBedrooms ?? undefined,
-          limitPerCity: rentcastLimitPerCity,
-          timeoutMs: rentcastTimeoutMs,
-          allowedStreetRoots: allowedRoots,
-          includeInactiveListings: true,
-        });
-        if (!searchApiKey || harvest.candidates.length === 0) {
-          return {
-            raw: harvest.rawCount,
-            kept: harvest.filteredCount,
-            resolvedZillow: 0,
-            resolvedRealtor: 0,
-          };
-        }
-        const resolved = await resolveRentCastCandidatesToPortalUrls({
-          listings: harvest.candidates,
-          searchApiKey,
-          maxLookups: rentcastMaxResolverLookups,
-          timeoutMs: rentcastTimeoutMs,
-        });
-        const rootsAfterSearch = repeatedRoots();
-        const filterRoots = isBoundedDiscovery && suppliedStreetRoot
-          ? new Set([suppliedStreetRoot])
-          : rootsAfterSearch.size > 0
-            ? rootsAfterSearch
-            : suppliedStreetRoot
-              ? new Set([suppliedStreetRoot])
-              : undefined;
-        for (const row of resolved.urls) {
-          if (row.zillow) {
-            if (isBoundedDiscovery && suppliedStreetRoot) {
-              if (listingStreetRoot(row.zillow) === suppliedStreetRoot) addCandidate(row.zillow, "zillow");
-            } else if (filterRoots && filterRoots.size > 0) {
-              addCandidate(row.zillow, "zillow", "", "", filterRoots);
-            } else {
-              addCandidate(row.zillow, "zillow");
-            }
-          }
-          if (row.realtor) {
-            if (filterRoots && filterRoots.size > 0) {
-              addCandidate(row.realtor, "realtor", "", "", filterRoots);
-            } else {
-              addCandidate(row.realtor, "realtor");
-            }
-          }
-        }
-        return {
-          raw: harvest.rawCount,
-          kept: harvest.filteredCount,
-          resolvedZillow: resolved.resolvedZillow,
-          resolvedRealtor: resolved.resolvedRealtor,
-        };
-      };
-
       const realtyApiProfile = isBoundedDiscovery ? "bounded" : "standard";
       const realtyApiAllowedRoots = isBoundedDiscovery && suppliedStreetRoot
         ? new Set([suppliedStreetRoot])
@@ -35801,13 +35688,11 @@ Return ONLY compact JSON with this exact shape:
       const [
         apifyCounts,
         zillowSearchApiAdded,
-        rentcastCounts,
         ,
         realtyApiCounts,
       ] = await Promise.all([
         runApifyDiscovery(),
         runZillowSearchApiDiscovery(),
-        runRentCastDiscovery(),
         runSupplementalSearchApiDiscovery(),
         runRealtyApiDiscovery(),
       ]);
@@ -35815,8 +35700,6 @@ Return ONLY compact JSON with this exact shape:
         `[fetch-unit-photos] stacked discovery for "${communityName}": ` +
         `apify(zillow=${apifyCounts.zillow} realtor=${apifyCounts.realtor}) ` +
         `zillowSearchApi=+${zillowSearchApiAdded} ` +
-        `rentcast(raw=${rentcastCounts.raw} kept=${rentcastCounts.kept} ` +
-        `resolvedZ=${rentcastCounts.resolvedZillow} resolvedR=${rentcastCounts.resolvedRealtor}) ` +
         `realtyapi(raw=${realtyApiCounts.raw} kept=${realtyApiCounts.kept} added=${realtyApiCounts.added} ` +
         `pages=${realtyApiCounts.pages} locations=${realtyApiCounts.locations}) ` +
         `total=${candidateUrls.length}`,
@@ -37293,70 +37176,6 @@ Return ONLY compact JSON with this exact shape:
       ]);
     };
 
-    const discoveryCitiesForRentCast = isCityWide
-      ? [city]
-      : [...new Set(discoverySearchCitiesForPhotoSearch({ city, communityName }))].slice(0, 3);
-    const rentcastTune = rentCastDiscoveryTuning(isCityWide ? "cityWide" : "standard");
-    const rentcastLimitPerCity = rentcastTune.limitPerCity;
-    const rentcastMaxResolverLookups = rentcastTune.maxResolverLookups;
-
-    const runRentCastDiscovery = async (): Promise<{
-      raw: number;
-      kept: number;
-      resolvedZillow: number;
-      resolvedRealtor: number;
-    }> => {
-      if (!isRentCastDiscoveryEnabled() || discoveryCitiesForRentCast.length === 0) {
-        return { raw: 0, kept: 0, resolvedZillow: 0, resolvedRealtor: 0 };
-      }
-      const harvest = await harvestRentCastSaleListings({
-        cities: discoveryCitiesForRentCast,
-        state,
-        minBedrooms: !isAnyBedroom && numericBedrooms ? numericBedrooms : undefined,
-        maxBedrooms: !isAnyBedroom && numericBedrooms ? numericBedrooms : undefined,
-        limitPerCity: rentcastLimitPerCity,
-        timeoutMs: rentcastTune.requestTimeoutMs,
-        includeInactiveListings: true,
-      });
-      if (harvest.candidates.length === 0) {
-        return {
-          raw: harvest.rawCount,
-          kept: harvest.filteredCount,
-          resolvedZillow: 0,
-          resolvedRealtor: 0,
-        };
-      }
-      const resolved = await resolveRentCastCandidatesToPortalUrls({
-        listings: harvest.candidates,
-        searchApiKey: apiKey,
-        maxLookups: rentcastMaxResolverLookups,
-        timeoutMs: rentcastTune.requestTimeoutMs,
-      });
-      const addressRootSet = repeatedHarvestRoots();
-      for (const row of resolved.urls) {
-        if (row.zillow) {
-          if (!isCityWide && addressRootSet.size > 0) {
-            addApifyCandidateUrls([row.zillow], "zillow", { addressRoots: addressRootSet });
-          } else {
-            addApifyCandidateUrls([row.zillow], "zillow");
-          }
-        }
-        if (row.realtor) {
-          if (!isCityWide && addressRootSet.size > 0) {
-            addApifyCandidateUrls([row.realtor], "realtor", { addressRoots: addressRootSet });
-          } else {
-            addApifyCandidateUrls([row.realtor], "realtor");
-          }
-        }
-      }
-      return {
-        raw: harvest.rawCount,
-        kept: harvest.filteredCount,
-        resolvedZillow: resolved.resolvedZillow,
-        resolvedRealtor: resolved.resolvedRealtor,
-      };
-    };
-
     const runRealtyApiDiscovery = async (): Promise<{
       raw: number;
       kept: number;
@@ -37390,18 +37209,15 @@ Return ONLY compact JSON with this exact shape:
       };
     };
 
-    // Stacked discovery: Apify + Zillow SearchAPI + RentCast + RealtyAPI (+ Realtor/Redfin/brokerage) in parallel.
-    const [rentcastCounts, realtyApiCounts] = await Promise.all([
+    // Stacked discovery: Apify + Zillow SearchAPI + RealtyAPI (+ Realtor/Redfin/brokerage) in parallel.
+    const realtyApiCounts = await Promise.all([
       runApifyDiscovery(),
       runZillowSearchApiDiscovery(),
-      runRentCastDiscovery(),
       runSupplementalSearchApiDiscovery(),
       runRealtyApiDiscovery(),
-    ]).then(([, , rentcast, , realty]) => [rentcast, realty] as const);
+    ]).then(([, , , realty]) => realty);
     console.log(
       `[find-clean-unit] stacked discovery for "${communityName ?? city}": ` +
-      `rentcast(raw=${rentcastCounts.raw} kept=${rentcastCounts.kept} ` +
-      `resolvedZ=${rentcastCounts.resolvedZillow} resolvedR=${rentcastCounts.resolvedRealtor}) ` +
       `realtyapi(raw=${realtyApiCounts.raw} kept=${realtyApiCounts.kept} added=${realtyApiCounts.added}) ` +
       `total=${candidateUrls.length}`,
     );
