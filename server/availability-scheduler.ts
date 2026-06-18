@@ -13,6 +13,7 @@ import { guestyRequest } from "./guesty-sync";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import {
   getCommunityRegion,
+  MARKET_RATE_TARGET_MARGIN,
   totalNightlyBuyInForMonth,
 } from "@shared/pricing-rates";
 import {
@@ -411,7 +412,10 @@ async function tick() {
       try {
         const summary = await runFullScanForProperty(row.propertyId, {
           minSets: row.minSets,
-          targetMargin: parseFloat(String(row.targetMargin)),
+          // Flat 15% market markup (see MARKET_RATE_TARGET_MARGIN). The weekly
+          // pass must match the dashboard bulk queue, else it would re-push the
+          // legacy per-property 20% and undo a 15% queue update.
+          targetMargin: MARKET_RATE_TARGET_MARGIN,
           runInventory: row.runInventory,
           runPricing: row.runPricing,
           runSyncBlocks: row.runSyncBlocks,
@@ -472,7 +476,9 @@ export async function runFullScanNow(propertyId: number): Promise<{ summary: str
     const sched = await storage.getScannerSchedule(propertyId);
     const summary = await runFullScanForProperty(propertyId, {
       minSets: sched?.minSets ?? 3,
-      targetMargin: sched ? parseFloat(String(sched.targetMargin)) : 0.2,
+      // Flat 15% market markup (see MARKET_RATE_TARGET_MARGIN), matching the
+      // dashboard bulk queue regardless of any legacy per-property margin.
+      targetMargin: MARKET_RATE_TARGET_MARGIN,
       runInventory: sched?.runInventory ?? true,
       runPricing: sched?.runPricing ?? true,
       runSyncBlocks: sched?.runSyncBlocks ?? false,

@@ -13,6 +13,17 @@
 
 import { resolveBuyInMarket } from "./buy-in-market";
 
+// Business markup applied to the buy-in cost basis when we push base rates to
+// Guesty (the dashboard "Update market pricing" bulk queue + the weekly
+// availability scan). 0.15 = a flat 15% markup over cost.
+//
+// Operator directive 2026-06-18: the market-rate update queue must ALWAYS apply
+// a 15% markup. This is the single source of truth for that business margin —
+// the server market-rate pushes use it directly, overriding any legacy
+// per-property `scanner_schedules.target_margin` (which carried the old 0.2000
+// default). Change this one constant to retune the global markup.
+export const MARKET_RATE_TARGET_MARGIN = 0.15;
+
 export type SeasonType = "HIGH" | "LOW" | "HOLIDAY";
 export type RegionType = "hawaii" | "florida";
 
