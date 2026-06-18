@@ -22049,7 +22049,40 @@ Requirements:
       ? req.body.platform as OtaVisibilityPlatform
       : null;
     if (!platform) return res.status(400).json({ error: "platform must be 'booking' or 'vrbo'" });
-    const property = getUnitBuilderByPropertyId(propertyId);
+    let property: PropertyUnitBuilder | undefined = getUnitBuilderByPropertyId(propertyId);
+    if (!property && propertyId < 0) {
+      const draft = await storage.getCommunityDraft(Math.abs(propertyId));
+      if (draft) {
+        const unitSlots = unitSlotsForCommunityDraft(draft);
+        const draftName = String(draft.name ?? "").trim();
+        const draftAddress = [draft.streetAddress ?? draft.unit1Address, draft.city, draft.state]
+          .filter(Boolean).join(", ");
+        property = {
+          propertyId,
+          propertyName: String(draft.listingTitle ?? draft.name ?? "").trim(),
+          complexName: draftName || communityKeyForDraft(draft),
+          address: draftAddress,
+          bookingTitle: String(draft.bookingTitle ?? draft.listingTitle ?? draft.name ?? "").trim(),
+          sampleDisclaimer: "",
+          combinedDescription: "",
+          units: unitSlots.map((slot) => ({
+            id: slot.unitId,
+            unitNumber: "",
+            bedrooms: slot.bedrooms,
+            bathrooms: "",
+            sqft: "",
+            maxGuests: 0,
+            shortDescription: "",
+            longDescription: "",
+            photos: [],
+            photoFolder: "",
+          })),
+          hasPhotos: false,
+          communityPhotos: [],
+          communityPhotoFolder: "",
+        };
+      }
+    }
     if (!property) return res.status(404).json({ error: `No unit-builder property ${propertyId}` });
     const id = `ota-vis-${propertyId}-${platform}-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
     const now = new Date().toISOString();
