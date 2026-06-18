@@ -46,8 +46,18 @@ const fourYesOneNo = [
   ...Array.from({ length: 4 }, () => ({ match: "yes" as const, reason: "ok" })),
   { match: "no" as const, reason: "weak mismatch" },
 ];
-check("computeUnitVerdict fails with 4/5 yes votes",
+check("computeUnitVerdict fails with 4/5 yes votes (unanimous required)",
   computeUnitVerdict(fourYesOneNo, 5).sameAsCommunity === "no");
+
+const sevenYesOneNo = [
+  ...Array.from({ length: 7 }, () => ({ match: "yes" as const, reason: "ok" })),
+  { match: "no" as const, reason: "weak mismatch" },
+];
+check("computeUnitVerdict fails with 7/8 yes votes (unanimous required)",
+  computeUnitVerdict(sevenYesOneNo, 5).sameAsCommunity === "no");
+
+check("computeUnitVerdict passes with 8/8 unanimous yes votes",
+  computeUnitVerdict(Array.from({ length: 8 }, () => ({ match: "yes" as const, reason: "ok" })), 5).sameAsCommunity === "yes");
 
 check("computeUnitVerdict fails when fewer than 5 photos",
   computeUnitVerdict(fiveYes.slice(0, 3), 5).sameAsCommunity === "no");

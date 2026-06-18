@@ -10,8 +10,8 @@
 // Methodology:
 //   Pass A — Community folder: dHash pre-screen + batched vision audit of
 //            EVERY photo in the folder (up to cap), not a one-time sample.
-//   Pass B — Unit verification: sample 5–8 INTERIOR photos per unit against
-//            the community fingerprint + anchor photos.
+//   Pass B — Unit verification: one vision call PER unit (up to 12 interior
+//            photos each), 3 community anchors, unanimous match required.
 //   Bedroom pass — all bedroom-tagged unit photos, dHash de-dupe, vision on
 //            distinct rooms.
 //   Server-side rules convert votes into binary yes/no.
@@ -48,10 +48,9 @@ const MODEL = "claude-sonnet-4-6";
 /** Max community photos to load and vision-audit per folder. */
 const COMMUNITY_FULL_FOLDER_CAP = 50;
 const COMMUNITY_BATCH_SIZE = 10;
-const UNIT_INTERIOR_TARGET = 8;
-const COMMUNITY_ANCHOR_COUNT = 2;
-/** Vision image budget for unit pass only — community audit is separate. */
-const TOTAL_IMAGE_CAP = 32;
+/** Interior photos sent to vision per unit (each unit gets its own call). */
+const UNIT_INTERIOR_TARGET = 12;
+const COMMUNITY_ANCHOR_COUNT = 3;
 const BEDROOM_FOLDER_CAP = 150;
 const BEDROOM_VISION_MAX = 10;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -513,37 +512,33 @@ function buildCommunityPassInstruction(expectedCommunity: string): string {
   ].join("\n");
 }
 
-function buildUnitPassInstruction(
+function buildSingleUnitPassInstruction(
   fingerprint: string,
   expectedCommunity: string,
-  unitLabels: string[],
+  unitLabel: string,
   minInterior: number,
 ): string {
   return [
-    "You are verifying UNIT interior photos belong to the SAME community as the community folder.",
+    "You are verifying ONE unit's interior photos belong to the SAME community as the community folder.",
     "",
     `Community visual fingerprint: ${fingerprint}`,
     expectedCommunity.trim() ? `Expected community: "${expectedCommunity.trim()}".` : "",
     "",
-    "Each unit section has INTERIOR photos (bedrooms, kitchen, living, bath, private lanai) plus reference community anchor photos labeled ANCHOR.",
+    `Unit: ${unitLabel}.`,
+    "ANCHOR photos show the verified community. INTERIOR photos are from this unit's folder.",
     "",
     `For EACH unit interior photo (NOT anchors), vote match: "yes" or "no":`,
     "  - yes: finishes, window/lanai views, balcony railings, exterior glimpses, building style, landscaping visible outside are COMPATIBLE with the fingerprint.",
     "  - no: ONLY with POSITIVE contradiction — different resort signage/towels/keycards, incompatible climate/architecture/view that cannot be the same resort.",
     "",
-    `Units (in order): ${unitLabels.join(" | ") || "none"}.`,
-    `Each unit MUST have at least ${minInterior} interior photo verdicts.`,
+    `Return verdicts for at least ${minInterior} interior photos. Every interior photo must match for a pass.`,
     "Do NOT use uncertain/unclear — every match is yes or no.",
     "",
-    "Outliers = photos that appear to be a DIFFERENT UNIT's interior (incompatible kitchen/bedroom/bath finishes, layout, or furniture vs the majority of that unit's interior shots).",
-    "DO NOT flag as outliers — these are normal in scraped unit galleries:",
-    "  - Resort/community amenity or exterior shots: pool, spa, beach, tennis, grounds, building exterior, lobby, shared walkways, ocean views from common areas.",
-    "  - Lanai/balcony/patio photos showing community landscaping, pool, ocean, or building exteriors (even though they are not interior rooms).",
-    "Only flag an outlier when the photo shows a clearly different unit INTERIOR.",
+    "Outliers = photos that appear to be a DIFFERENT UNIT's interior (incompatible kitchen/bedroom/bath finishes vs the majority).",
+    "DO NOT flag as outliers — resort pool, beach, grounds, building exterior, or lanai views showing community landscaping.",
     "",
     "Respond with ONLY minified JSON:",
-    '{"units":[{"group":"unit label","photoVerdicts":[{"id":"U1-1","match":"yes|no","reason":"short"}],"allSameUnit":true,"outliers":[{"id":"U1-3","reason":"short"}],"junk":[]}]}',
-    "Return units in the SAME ORDER as listed.",
+    '{"photoVerdicts":[{"id":"U1-1","match":"yes|no","reason":"short"}],"allSameUnit":true,"outliers":[{"id":"U1-3","reason":"short"}],"junk":[]}',
   ].join("\n");
 }
 
@@ -578,6 +573,67 @@ function mapPhotoVerdicts(v: unknown, samples: SampledPhoto[]): PhotoVerdict[] {
     });
   }
   return out;
+}
+
+async function verifyUnitAgainstCommunity(
+  apiKey: string,
+  r: ResolvedGroup,
+  anchors: SampledPhoto[],
+  fingerprint: string,
+  expectedCommunity: string,
+): Promise<UnitGroupResult> {
+  const content: any[] = [];
+  for (const a of anchors) {
+    const cap = a.caption ? ` · caption: "${a.caption}"` : "";
+    content.push({ type: "text", text: `--- ANCHOR community photo ${a.id}${cap} ---` });
+    content.push({ type: "image", source: { type: "base64", media_type: a.mime, data: a.buffer.toString("base64") } });
+  }
+  content.push({
+    type: "text",
+    text: `=== UNIT: ${r.input.label} (${r.interiorSampled} interior-classified of ${r.sampled.length} photos) ===`,
+  });
+  for (const s of r.sampled) {
+    const cap = s.caption ? ` · caption: "${s.caption}"` : "";
+    const kind = s.isInterior ? "INTERIOR" : "OTHER";
+    content.push({ type: "text", text: `--- ${kind} photo ${s.id}${cap} ---` });
+    content.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
+  }
+  content.push({
+    type: "text",
+    text: buildSingleUnitPassInstruction(fingerprint, expectedCommunity, r.input.label, UNIT_INTERIOR_MIN),
+  });
+
+  const { parsed } = await callVisionJson(apiKey, content);
+  const rawUnit = Array.isArray(parsed.units) ? parsed.units[0] : parsed;
+  const photoVerdicts = mapPhotoVerdicts(rawUnit?.photoVerdicts ?? parsed.photoVerdicts, r.sampled);
+  const interiorVerdicts = photoVerdicts.length > 0
+    ? photoVerdicts
+    : r.sampled.map((s) => ({
+        id: s.id,
+        caption: s.caption,
+        match: "no" as const,
+        reason: "No vision verdict returned for this photo.",
+      }));
+  const computed = computeUnitVerdict(
+    interiorVerdicts.map((p) => ({ match: p.match, reason: p.reason })),
+    UNIT_INTERIOR_MIN,
+  );
+  const outliers = filterUnitOutliers(asFlags(rawUnit?.outliers, r.sampled));
+  return {
+    role: "unit",
+    label: r.input.label,
+    folder: r.input.folder,
+    photosChecked: r.sampled.length,
+    photosTotal: r.total,
+    interiorPhotosChecked: r.interiorSampled,
+    sameAsCommunity: computed.sameAsCommunity,
+    reason: computed.reason,
+    photoVerdicts: interiorVerdicts,
+    allSameUnit: outliers.length === 0,
+    outliers,
+    junk: asFlags(rawUnit?.junk, r.sampled),
+    confidence: computed.confidence,
+  };
 }
 
 function asFlags(v: unknown, samples: SampledPhoto[]): FlaggedPhoto[] {
@@ -731,7 +787,6 @@ export async function runPhotoCommunityCheck(
   const unitInputs = rawGroups.filter((g) => g?.role === "unit" && g?.folder);
 
   const resolved: ResolvedGroup[] = [];
-  let budget = TOTAL_IMAGE_CAP;
 
   const communityByFolder = new Map<string, CheckGroupInput>();
   for (const g of communityInputs) {
@@ -759,14 +814,9 @@ export async function runPhotoCommunityCheck(
 
   const unitResolvedIdxs: number[] = [];
   for (let u = 0; u < unitInputs.length; u++) {
-    const remainingUnits = unitInputs.length - u;
-    const fairShare = Math.max(UNIT_INTERIOR_TARGET, Math.floor(budget / remainingUnits));
-    const cap = Math.min(UNIT_INTERIOR_TARGET, fairShare, budget);
-    if (cap <= 0) break;
     const g = unitInputs[u];
-    const { total, chosen } = await resolveGroupFiles(g, cap, true);
+    const { total, chosen } = await resolveGroupFiles(g, UNIT_INTERIOR_TARGET, true);
     const sampled = await loadSample(resolved.length, g.folder, `U${u + 1}-`, chosen);
-    budget -= sampled.length;
     unitResolvedIdxs.push(resolved.length);
     resolved.push({
       input: g,
@@ -843,82 +893,20 @@ export async function runPhotoCommunityCheck(
     }
   }
 
-  // ── Pass B: Unit verification ─────────────────────────────────────────────
+  // ── Pass B: Per-unit verification (one vision call each) ─────────────────
   if (unitResolvedIdxs.length > 0) {
-    const contentB: any[] = [];
     const communityGroup = communityResolvedIdx >= 0 ? resolved[communityResolvedIdx] : null;
     const anchors = communityGroup?.sampled.slice(0, COMMUNITY_ANCHOR_COUNT) ?? [];
+    const fp = fingerprint || community?.communityFingerprint || expectedCommunity || "the community folder";
 
-    for (const a of anchors) {
-      const cap = a.caption ? ` · caption: "${a.caption}"` : "";
-      contentB.push({ type: "text", text: `--- ANCHOR community photo ${a.id}${cap} ---` });
-      contentB.push({ type: "image", source: { type: "base64", media_type: a.mime, data: a.buffer.toString("base64") } });
-    }
-
-    const unitLabels: string[] = [];
-    for (let i = 0; i < unitResolvedIdxs.length; i++) {
-      const r = resolved[unitResolvedIdxs[i]];
-      unitLabels.push(r.input.label);
-      contentB.push({ type: "text", text: `=== UNIT GROUP: ${r.input.label} (${r.interiorSampled} interior-classified of ${r.sampled.length} photos) ===` });
-      for (const s of r.sampled) {
-        const cap = s.caption ? ` · caption: "${s.caption}"` : "";
-        const kind = s.isInterior ? "INTERIOR" : "OTHER";
-        contentB.push({ type: "text", text: `--- ${kind} photo ${s.id}${cap} ---` });
-        contentB.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
-      }
-    }
-
-    contentB.push({
-      type: "text",
-      text: buildUnitPassInstruction(
-        fingerprint || community?.communityFingerprint || expectedCommunity || "the community folder",
-        expectedCommunity,
-        unitLabels,
-        UNIT_INTERIOR_MIN,
-      ),
-    });
-
-    try {
-      const { parsed } = await callVisionJson(apiKey, contentB);
-      const visionUnits = Array.isArray(parsed.units) ? parsed.units : [];
-      units = unitResolvedIdxs.map((resolvedIdx, i) => {
-        const r = resolved[resolvedIdx];
-        const u = visionUnits[i] ?? {};
-        const photoVerdicts = mapPhotoVerdicts(u.photoVerdicts, r.sampled);
-        const interiorVerdicts = photoVerdicts.length > 0
-          ? photoVerdicts
-          : r.sampled.map((s) => ({
-              id: s.id,
-              caption: s.caption,
-              match: "no" as const,
-              reason: "No vision verdict returned for this photo.",
-            }));
-        const computed = computeUnitVerdict(
-          interiorVerdicts.map((p) => ({ match: p.match, reason: p.reason })),
-          UNIT_INTERIOR_MIN,
-        );
-        const outliers = filterUnitOutliers(asFlags(u.outliers, r.sampled));
-        return {
-          role: "unit" as const,
-          label: r.input.label,
-          folder: r.input.folder,
-          photosChecked: r.sampled.length,
-          photosTotal: r.total,
-          interiorPhotosChecked: r.interiorSampled,
-          sameAsCommunity: computed.sameAsCommunity,
-          reason: computed.reason,
-          photoVerdicts: interiorVerdicts,
-          allSameUnit: outliers.length === 0,
-          outliers,
-          junk: asFlags(u.junk, r.sampled),
-          confidence: computed.confidence,
-        };
-      });
-    } catch (e: any) {
-      warning = warning ? `${warning}; unit pass: ${e?.message ?? e}` : `Unit pass failed: ${e?.message ?? e}`;
-      units = unitResolvedIdxs.map((resolvedIdx) => {
-        const r = resolved[resolvedIdx];
-        return {
+    for (const resolvedIdx of unitResolvedIdxs) {
+      const r = resolved[resolvedIdx];
+      try {
+        units.push(await verifyUnitAgainstCommunity(apiKey, r, anchors, fp, expectedCommunity));
+      } catch (e: any) {
+        const errMsg = e?.message ?? String(e);
+        warning = warning ? `${warning}; ${r.input.label}: ${errMsg}` : `${r.input.label} verification failed: ${errMsg}`;
+        units.push({
           role: "unit" as const,
           label: r.input.label,
           folder: r.input.folder,
@@ -926,14 +914,14 @@ export async function runPhotoCommunityCheck(
           photosTotal: r.total,
           interiorPhotosChecked: r.interiorSampled,
           sameAsCommunity: "no" as const,
-          reason: warning ?? "Unit verification failed.",
+          reason: errMsg,
           photoVerdicts: [],
           allSameUnit: true,
           outliers: [],
           junk: [],
           confidence: 0,
-        };
-      });
+        });
+      }
     }
   }
 
