@@ -8386,7 +8386,7 @@ async function processListingGalleryScrape(id, params) {
     .catch(() => {});
   await page.waitForTimeout(600);
 
-  const photos = await page.evaluate(({ maxPhotos }) => {
+  let photos = await page.evaluate(({ maxPhotos }) => {
     const seen = new Set();
     const galleryHits = [];
     const pageHits = [];
@@ -8475,6 +8475,33 @@ async function processListingGalleryScrape(id, params) {
     }
     return chosen.slice(0, cap);
   }, { maxPhotos });
+
+  // Redfin comp-carousel isolation. An off-market/sold Redfin detail page
+  // renders a "Nearby similar homes" carousel — each comp card carries ~3
+  // cdn-redfin thumbnails from OTHER units, so the page-level harvest (tier 2)
+  // captures them when the subject has no own scoped gallery. Mirror the
+  // server-side isolateRedfinSubjectGallery logic: the subject's photoSetId is
+  // the run of digits before `_<index>.<ext>` in og:image. Keep only cdn-redfin
+  // photos whose setId matches; if og:image has no setId (off-market, no own
+  // gallery) drop ALL cdn-redfin photos — they are all comps.
+  if (/redfin\.com/i.test(url)) {
+    const ogImageUrl = await page.evaluate(() => {
+      const el = document.querySelector('meta[property="og:image"]');
+      return el ? (el.getAttribute("content") || "") : "";
+    }).catch(() => "");
+    const setIdMatch = ogImageUrl.match(/(?:^|[./])(\d{4,})_\d+(?:_\d+)?\.(?:jpe?g|png|webp)(?:[?#]|$)/i);
+    const subjectSetId = setIdMatch ? setIdMatch[1] : null;
+    const beforeIsolation = photos.length;
+    photos = photos.filter((u) => {
+      if (!/cdn-redfin\.com/i.test(u)) return true;
+      if (!subjectSetId) return false;
+      const m = u.match(/(?:^|[./])(\d{4,})_\d+(?:_\d+)?\.(?:jpe?g|png|webp)(?:[?#]|$)/i);
+      return m ? m[1] === subjectSetId : false;
+    });
+    if (beforeIsolation !== photos.length) {
+      log(`listing_gallery_scrape ${id}: redfin isolation subjectSetId=${subjectSetId ?? "none"}, kept ${photos.length}/${beforeIsolation} photos`);
+    }
+  }
 
   const facts = await page
     .evaluate(() => {

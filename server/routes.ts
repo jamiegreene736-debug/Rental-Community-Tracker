@@ -243,7 +243,7 @@ import {
   unitGalleryMaxKeep,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
-import { isolateRedfinSubjectGallery } from "./redfin-gallery";
+import { isolateRedfinSubjectGallery, redfinPhotoSetId } from "./redfin-gallery";
 import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-combo";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
@@ -4558,8 +4558,30 @@ async function scrapeListingPhotos(
           });
           if (sidecar.photos.length > 0) {
             console.log(`[scrapeGenericRealEstate] sidecar recovered ${sidecar.photos.length} photos in ${sidecar.durationMs}ms (facts ${sidecar.facts ? "yes" : "no"})`);
+            // Defence-in-depth: if the sidecar returned photos from multiple
+            // cdn-redfin photo-set ids, the "Nearby similar homes" carousel
+            // leaked through. Keep only the dominant set-id group.
+            let sidecarUrls = sidecar.photos;
+            if (/redfin\.com/i.test(primaryUrl)) {
+              const setIdCounts: Record<string, number> = {};
+              for (const u of sidecarUrls) {
+                const sid = redfinPhotoSetId(u);
+                if (sid) setIdCounts[sid] = (setIdCounts[sid] ?? 0) + 1;
+              }
+              const setIds = Object.keys(setIdCounts);
+              if (setIds.length > 1) {
+                const dominantSetId = setIds.reduce((a, b) => setIdCounts[a] >= setIdCounts[b] ? a : b);
+                const before = sidecarUrls.length;
+                sidecarUrls = sidecarUrls.filter((u) => {
+                  if (!/cdn-redfin\.com/i.test(u)) return true;
+                  const sid = redfinPhotoSetId(u);
+                  return sid === dominantSetId;
+                });
+                console.log(`[scrapeGenericRealEstate] redfin sidecar isolation: dominantSetId=${dominantSetId}, kept ${sidecarUrls.length}/${before} photos`);
+              }
+            }
             result = {
-              urls: sidecar.photos,
+              urls: sidecarUrls,
               facts: {
                 bedrooms: result.facts.bedrooms ?? sidecar.facts?.bedrooms,
                 bathrooms: result.facts.bathrooms ?? sidecar.facts?.bathrooms,
