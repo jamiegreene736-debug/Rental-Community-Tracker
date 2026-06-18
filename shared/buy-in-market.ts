@@ -62,6 +62,9 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Kekaha Beachfront",
     aliases: [/\b(?:kekaha|waimea|hanapepe)\b/i],
     searchLocation: "Kekaha, Kauai, Hawaii",
+    platformSearch: {
+      airbnb: "Kekaha, Kauai, HI",
+    },
     location: { searchName: "Kekaha Beachfront", city: "Kekaha", state: "Hawaii", streetAddress: "8497 Kekaha Rd", lat: 21.9678, lng: -159.7464 },
     bounds: { sw_lat: 21.955, sw_lng: -159.758, ne_lat: 21.978, ne_lng: -159.733 },
   },
@@ -69,6 +72,13 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Keauhou",
     aliases: [/\b(?:na\s+hale\s+o\s+keauhou|keauhou|kailua[\s-]*kona|kona)\b/i],
     searchLocation: "Keauhou, Kailua-Kona, Big Island, Hawaii",
+    // Curated Airbnb market-rate query (clean "Place, City, ST" form). Without
+    // this the bulk pricing scan falls back to `searchLocation`, whose verbose
+    // "…, Big Island, Hawaii" tail is meant for VRBO/Booking/find-buy-in, not the
+    // Airbnb engine. See curatedAirbnbSearchQueries + hybrid-pricing.test.ts.
+    platformSearch: {
+      airbnb: "Keauhou, Kailua-Kona, HI",
+    },
     location: { searchName: "Keauhou Estates", city: "Kailua-Kona", state: "Hawaii", streetAddress: "78-6855 Ali'i Dr", lat: 19.5493, lng: -155.9704 },
     bounds: { sw_lat: 19.528, sw_lng: -155.992, ne_lat: 19.558, ne_lng: -155.966 },
   },
@@ -76,6 +86,12 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Princeville",
     aliases: [/\b(?:princeville|mauna\s+kai|hanalei|haena)\b/i],
     searchLocation: "Princeville, Kauai, Hawaii",
+    // Community-level Airbnb market-rate query: this market spans several
+    // Princeville resorts (Mauna Kai, Kaiulani), so comps are drawn from the
+    // Princeville community (geo-bounded below), not a single resort.
+    platformSearch: {
+      airbnb: "Princeville, Kauai, HI",
+    },
     location: { searchName: "Mauna Kai Princeville", city: "Princeville", state: "Hawaii", streetAddress: "3920 Wyllie Rd", lat: 22.2218, lng: -159.4849 },
     bounds: { sw_lat: 22.210, sw_lng: -159.498, ne_lat: 22.235, ne_lng: -159.468 },
   },
@@ -83,6 +99,10 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Kapaa Beachfront",
     aliases: [/\b(?:kaha\s+lani|kapaa|kapa'?a|wailua|lihue|anahola)\b/i],
     searchLocation: "Kaha Lani Resort, Wailua, Kauai, Hawaii",
+    // Curated Airbnb market-rate query — the resort name in clean form.
+    platformSearch: {
+      airbnb: "Kaha Lani Resort, Wailua, HI",
+    },
     location: { searchName: "Kaha Lani Resort", city: "Wailua", state: "Hawaii", lat: 22.0360, lng: -159.3370 },
     bounds: { sw_lat: 22.021, sw_lng: -159.352, ne_lat: 22.051, ne_lng: -159.322 },
   },
@@ -90,6 +110,12 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Poipu Oceanfront",
     aliases: [/\b(?:poipu\s+oceanfront|brennecke|ho'?one|makahuena)\b/i],
     searchLocation: "Poipu Beach, Koloa, Kauai, Hawaii",
+    // Community-level Airbnb market-rate query: this oceanfront market spans
+    // several small Poipu Beach resorts (Makahuena, Brennecke's, Ho'one), so
+    // comps are drawn from the geo-bounded Poipu Beach oceanfront strip.
+    platformSearch: {
+      airbnb: "Poipu Beach, Koloa, HI",
+    },
     location: { searchName: "Poipu Brenneckes Oceanfront", city: "Koloa", state: "Hawaii", streetAddress: "2298 Ho'one Rd", lat: 21.8744, lng: -159.4538 },
     bounds: { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
   },
@@ -97,6 +123,9 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Poipu Brenneckes",
     aliases: [/\b(?:poipu\s+brenneckes|brenneckes)\b/i],
     searchLocation: "Brenneckes Beach, Poipu, Kauai, Hawaii",
+    platformSearch: {
+      airbnb: "Brennecke's Beach, Poipu, Koloa, HI",
+    },
     location: { searchName: "Poipu Brenneckes", city: "Koloa", state: "Hawaii", streetAddress: "2298 Ho'one Rd", lat: 21.8744, lng: -159.4538 },
     bounds: { sw_lat: 21.872, sw_lng: -159.462, ne_lat: 21.882, ne_lng: -159.448 },
   },
@@ -104,6 +133,9 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Makahuena",
     aliases: [/\b(?:makahuena|ma\s*kahuena)\b/i],
     searchLocation: "Makahuena at Poipu, Koloa, Kauai, Hawaii",
+    platformSearch: {
+      airbnb: "Makahuena at Poipu, Koloa, HI",
+    },
     location: { searchName: "Makahuena at Poipu", city: "Koloa", state: "Hawaii", streetAddress: "1661 Pe'e Rd", lat: 21.8735, lng: -159.4482 },
     bounds: { sw_lat: 21.870, sw_lng: -159.456, ne_lat: 21.878, ne_lng: -159.442 },
   },
@@ -111,6 +143,10 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Pili Mai",
     aliases: [/\bpili\s+mai\b/i],
     searchLocation: "Pili Mai at Poipu, Koloa, Kauai, Hawaii",
+    // Curated Airbnb market-rate query — the resort name in clean form.
+    platformSearch: {
+      airbnb: "Pili Mai at Poipu, Koloa, HI",
+    },
     location: { searchName: "Pili Mai at Poipu", city: "Koloa", state: "Hawaii", streetAddress: "2611 Kiahuna Plantation Dr", lat: 21.8865, lng: -159.4729 },
     bounds: { sw_lat: 21.882, sw_lng: -159.483, ne_lat: 21.899, ne_lng: -159.468 },
   },
@@ -118,6 +154,9 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Menehune Shores",
     aliases: [/\bmenehune\s+shores\b/i],
     searchLocation: "Menehune Shores, Kihei, Hawaii",
+    platformSearch: {
+      airbnb: "Menehune Shores, Kihei, HI",
+    },
     location: { searchName: "Menehune Shores", city: "Kihei", state: "Hawaii", streetAddress: "760 S Kihei Rd", lat: 20.7638, lng: -156.4594 },
     bounds: { sw_lat: 20.7615, sw_lng: -156.4615, ne_lat: 20.7655, ne_lng: -156.4570 },
   },
@@ -138,6 +177,9 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     key: "Windsor Hills",
     aliases: [/\b(?:windsor\s+hills|kissimmee|orlando)\b/i],
     searchLocation: "Windsor Hills Resort, Kissimmee, Florida",
+    platformSearch: {
+      airbnb: "Windsor Hills Resort, Kissimmee, FL",
+    },
     location: { searchName: "Windsor Hills Resort", city: "Kissimmee", state: "Florida", streetAddress: "2600 N Old Lake Wilson Rd", lat: 28.3222, lng: -81.5961 },
     bounds: { sw_lat: 28.305, sw_lng: -81.615, ne_lat: 28.340, ne_lng: -81.575 },
   },

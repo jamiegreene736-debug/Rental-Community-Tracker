@@ -12,6 +12,8 @@ import {
   YEAR_TWO_MARKET_RATE_GROWTH,
 } from "../server/hybrid-pricing";
 import { readFileSync } from "node:fs";
+import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
+import { BUY_IN_MARKETS } from "@shared/buy-in-market";
 
 const july = calculateBlendedRate({
   airbnbMedianNightly: 500,
@@ -641,5 +643,71 @@ assert.ok(
   !hybridPricingSource.includes("demandRank(resolveSeasonTier"),
   "monthly windows must be a random 7-night sample, not demand-biased peak days",
 );
+
+// ── End-to-end: every dashboard property's bulk-pricing scan must query Airbnb
+// with the correct curated resort/community name ───────────────────────────────
+// The bulk market-pricing queue runs one property at a time and, for each, scans
+// SearchAPI Airbnb via curatedAirbnbSearchQueries(community)[0]. For configured
+// properties the community is PROPERTY_UNIT_CONFIGS[id].community. This block
+// guarantees every configured community resolves to a curated, clean
+// "Place/Resort, City, ST" Airbnb query (not the verbose, channel-shared
+// searchLocation tail like "…, Kauai, Hawaii"), so the operator never
+// accidentally prices a property off a generic town/area search.
+const EXPECTED_AIRBNB_PRICING_QUERY: Record<string, string> = {
+  "Poipu Kai": "Poipu Kai Resort, Koloa, HI",
+  "Keauhou": "Keauhou, Kailua-Kona, HI",
+  "Princeville": "Princeville, Kauai, HI",
+  "Kapaa Beachfront": "Kaha Lani Resort, Wailua, HI",
+  "Poipu Oceanfront": "Poipu Beach, Koloa, HI",
+  "Pili Mai": "Pili Mai at Poipu, Koloa, HI",
+};
+
+const configuredCommunities = new Set(
+  Object.values(PROPERTY_UNIT_CONFIGS).map((cfg) => cfg.community),
+);
+for (const community of configuredCommunities) {
+  const expected = EXPECTED_AIRBNB_PRICING_QUERY[community];
+  assert.ok(
+    expected,
+    `configured community "${community}" has no expected curated Airbnb pricing query — add one (and a curated platformSearch.airbnb in shared/buy-in-market.ts)`,
+  );
+  assert.equal(
+    BUY_IN_MARKETS[community]?.platformSearch?.airbnb,
+    expected,
+    `market "${community}" must carry a curated platformSearch.airbnb so bulk pricing searches Airbnb by the correct resort/community name`,
+  );
+}
+
+// Assert per-property (every id the bulk queue can run) and reject any verbose
+// "Kauai, Hawaii" / "Big Island, Hawaii" tail leaking into the Airbnb query.
+for (const [idStr, cfg] of Object.entries(PROPERTY_UNIT_CONFIGS)) {
+  const query = curatedAirbnbSearchQueries(cfg.community)[0];
+  assert.equal(
+    query,
+    EXPECTED_AIRBNB_PRICING_QUERY[cfg.community],
+    `property #${idStr} (${cfg.community}) must price off the correct curated Airbnb query`,
+  );
+  assert.doesNotMatch(
+    query,
+    /,\s*(?:Kauai|Big Island|Maui|Oahu),\s*Hawaii$/i,
+    `property #${idStr} Airbnb pricing query must not use the verbose island+Hawaii searchLocation tail (got "${query}")`,
+  );
+}
+
+// Every curated market that backs the dashboard (Hawaii + Florida resorts) should
+// expose a clean ", ST" Airbnb term so drafts that resolve to them are also correct.
+for (const [key, market] of Object.entries(BUY_IN_MARKETS)) {
+  if (key === "Florida Generic") continue; // generic statewide fallback, no resort
+  const airbnbQuery = market.platformSearch?.airbnb;
+  assert.ok(
+    airbnbQuery,
+    `market "${key}" should carry a curated platformSearch.airbnb for the bulk-pricing Airbnb search`,
+  );
+  assert.match(
+    airbnbQuery!,
+    /,\s*[A-Z]{2}$/,
+    `market "${key}" curated Airbnb query "${airbnbQuery}" must end in a 2-letter state code`,
+  );
+}
 
 console.log("hybrid pricing suite passed");
