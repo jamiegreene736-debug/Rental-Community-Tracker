@@ -10,13 +10,9 @@
 
 const RENTCAST_API_BASE = "https://api.rentcast.io/v1";
 
-/** Listing statuses we reject before portal URL resolution (stub / off-market). */
+/** In-flight sale statuses we reject before portal URL resolution. */
 const REJECTED_LISTING_STATUSES = new Set([
   "pending",
-  "sold",
-  "closed",
-  "off market",
-  "off-market",
   "withdrawn",
   "expired",
   "cancelled",
@@ -24,6 +20,8 @@ const REJECTED_LISTING_STATUSES = new Set([
   "contingent",
   "under contract",
 ]);
+
+export type RentCastListingQueryStatus = "Active" | "Inactive";
 
 export type RentCastListingCandidate = {
   id: string;
@@ -55,6 +53,13 @@ export type RentCastDiscoveryOptions = {
   allowedStreetRoots?: Set<string>;
   /** Condo + townhouse only (vacation-market default). */
   propertyTypes?: string[];
+  /**
+   * RentCast query status. Photo discovery also harvests `Inactive`
+   * (sold / off-market) when `includeInactiveListings` is true.
+   */
+  listingStatus?: RentCastListingQueryStatus;
+  /** When true, run a parallel Inactive harvest (sold/off-market inventory). */
+  includeInactiveListings?: boolean;
 };
 
 export type RentCastDiscoveryResult = {
@@ -231,11 +236,12 @@ export function buildRentCastSaleListingsQuery(params: {
   minBedrooms?: number | null;
   maxBedrooms?: number | null;
   propertyTypes?: string[];
+  listingStatus?: RentCastListingQueryStatus;
 }): URLSearchParams {
   const qs = new URLSearchParams();
   qs.set("city", params.city.trim());
   qs.set("state", stateToAbbrevForRentCast(params.state));
-  qs.set("status", "Active");
+  qs.set("status", params.listingStatus ?? "Active");
   qs.set("limit", String(Math.max(1, Math.min(500, Math.floor(params.limit)))));
   if (params.offset != null && params.offset > 0) {
     qs.set("offset", String(Math.floor(params.offset)));
@@ -285,11 +291,10 @@ async function fetchRentCastSaleListingsPage(
   }
 }
 
-/**
- * Search active sale listings across one or more cities (RentCast discovery leg).
- */
-export async function harvestRentCastSaleListings(
+async function harvestRentCastSaleListingsForStatus(
   options: RentCastDiscoveryOptions,
+  listingStatus: RentCastListingQueryStatus,
+  limitPerCity: number,
 ): Promise<RentCastDiscoveryResult> {
   const apiKey = String(process.env.RENTCAST_API_KEY ?? "").trim();
   if (!apiKey || !isRentCastDiscoveryEnabled()) {
@@ -302,9 +307,7 @@ export async function harvestRentCastSaleListings(
     return { candidates: [], rawCount: 0, filteredCount: 0, citiesQueried: [], errors: ["missing city or state"] };
   }
 
-  const tuning = rentCastDiscoveryTuning("standard");
-  const limitPerCity = Math.max(1, Math.min(500, options.limitPerCity ?? tuning.limitPerCity));
-  const timeoutMs = Math.max(3_000, Math.min(30_000, options.timeoutMs ?? tuning.requestTimeoutMs));
+  const timeoutMs = Math.max(3_000, Math.min(30_000, options.timeoutMs ?? rentCastDiscoveryTuning("standard").requestTimeoutMs));
   const propertyTypes = options.propertyTypes ?? ["Condo", "Townhouse"];
   const errors: string[] = [];
   const seenIds = new Set<string>();
@@ -319,11 +322,12 @@ export async function harvestRentCastSaleListings(
       minBedrooms: options.minBedrooms,
       maxBedrooms: options.maxBedrooms,
       propertyTypes,
+      listingStatus,
     });
     const { items, error } = await fetchRentCastSaleListingsPage(query, apiKey, timeoutMs);
     if (error) {
-      errors.push(`${city}: ${error}`);
-      console.warn(`[rentcast-discovery] ${city}, ${stateToAbbrevForRentCast(state)}: ${error}`);
+      errors.push(`${city}(${listingStatus}): ${error}`);
+      console.warn(`[rentcast-discovery] ${city}, ${stateToAbbrevForRentCast(state)} status=${listingStatus}: ${error}`);
       return;
     }
     rawCount += items.length;
@@ -342,16 +346,69 @@ export async function harvestRentCastSaleListings(
     }
   }));
 
-  console.log(
-    `[rentcast-discovery] cities=${cities.join("|")} state=${stateToAbbrevForRentCast(state)} ` +
-    `raw=${rawCount} kept=${candidates.length} errors=${errors.length}`,
-  );
-
   return {
     candidates,
     rawCount,
     filteredCount: candidates.length,
     citiesQueried: cities,
+    errors,
+  };
+}
+
+/**
+ * Search sale listings across one or more cities (RentCast discovery leg).
+ * Photo flows pass `includeInactiveListings: true` to also harvest sold/off-market.
+ */
+export async function harvestRentCastSaleListings(
+  options: RentCastDiscoveryOptions,
+): Promise<RentCastDiscoveryResult> {
+  const tuning = rentCastDiscoveryTuning("standard");
+  const limitPerCity = Math.max(1, Math.min(500, options.limitPerCity ?? tuning.limitPerCity));
+  const includeInactive = options.includeInactiveListings === true;
+  const activeStatus = options.listingStatus ?? "Active";
+
+  if (!includeInactive && activeStatus === "Active") {
+    const result = await harvestRentCastSaleListingsForStatus(options, "Active", limitPerCity);
+    console.log(
+      `[rentcast-discovery] cities=${result.citiesQueried.join("|")} state=${stateToAbbrevForRentCast(options.state)} ` +
+      `status=Active raw=${result.rawCount} kept=${result.filteredCount} errors=${result.errors.length}`,
+    );
+    return result;
+  }
+
+  const inactiveLimit = Math.max(1, Math.ceil(limitPerCity / 2));
+  const activeLimit = activeStatus === "Inactive" ? limitPerCity : Math.max(1, limitPerCity - inactiveLimit);
+  const legs: Promise<RentCastDiscoveryResult>[] = [];
+  if (activeStatus !== "Inactive") {
+    legs.push(harvestRentCastSaleListingsForStatus(options, "Active", activeLimit));
+  }
+  if (includeInactive || activeStatus === "Inactive") {
+    legs.push(harvestRentCastSaleListingsForStatus(options, "Inactive", inactiveLimit));
+  }
+  const results = await Promise.all(legs);
+  const seenIds = new Set<string>();
+  const candidates: RentCastListingCandidate[] = [];
+  const errors: string[] = [];
+  let rawCount = 0;
+  for (const result of results) {
+    rawCount += result.rawCount;
+    errors.push(...result.errors);
+    for (const candidate of result.candidates) {
+      if (seenIds.has(candidate.id)) continue;
+      seenIds.add(candidate.id);
+      candidates.push(candidate);
+    }
+  }
+  const citiesQueried = results[0]?.citiesQueried ?? [];
+  console.log(
+    `[rentcast-discovery] cities=${citiesQueried.join("|")} state=${stateToAbbrevForRentCast(options.state)} ` +
+    `status=Active+Inactive raw=${rawCount} kept=${candidates.length} errors=${errors.length}`,
+  );
+  return {
+    candidates,
+    rawCount,
+    filteredCount: candidates.length,
+    citiesQueried,
     errors,
   };
 }

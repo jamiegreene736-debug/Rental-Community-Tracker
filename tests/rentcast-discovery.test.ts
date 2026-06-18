@@ -30,6 +30,13 @@ const qs = buildRentCastSaleListingsQuery({
 assert.equal(qs.get("city"), "Fort Myers Beach");
 assert.equal(qs.get("state"), "FL");
 assert.equal(qs.get("status"), "Active");
+const inactiveQs = buildRentCastSaleListingsQuery({
+  city: "Koloa",
+  state: "HI",
+  limit: 40,
+  listingStatus: "Inactive",
+});
+assert.equal(inactiveQs.get("status"), "Inactive");
 assert.equal(qs.get("bedrooms"), "2");
 assert.equal(qs.get("propertyType"), "Condo,Townhouse");
 assert.equal(qs.get("limit"), "80");
@@ -82,6 +89,7 @@ const activeListing = {
 } as const;
 
 assert.equal(shouldRejectRentCastListing(activeListing), null);
+assert.equal(shouldRejectRentCastListing({ ...activeListing, status: "Sold" }), null);
 assert.equal(shouldRejectRentCastListing({ ...activeListing, status: "Pending" }), "status:Pending");
 assert.equal(passesRentCastBedroomFilter(activeListing, 2, 2), true);
 assert.equal(passesRentCastBedroomFilter(activeListing, 3, null), false);

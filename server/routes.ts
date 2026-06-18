@@ -3577,7 +3577,72 @@ function extractUrlsFromApifyDataset(items: any[], pattern: RegExp): string[] {
 type ApifySearchHarvestOptions = {
   minBedrooms?: number | null;
   streetAddress?: string | null;
+  /** When true, also harvest recently-sold portal search URLs (split item budget). */
+  includeSoldListings?: boolean;
 };
+
+function zillowSoldSearchUrl(city: string, state: string): string {
+  const slug = citySlugForZillow(city, state);
+  return `https://www.zillow.com/${slug}/condos/sold/`;
+}
+
+function realtorSoldSearchUrl(city: string, state: string): string {
+  const slug = citySlugForRealtor(city, state);
+  return `https://www.realtor.com/realestateandhomes-search/${slug}/show-recently-sold/type-condo-townhome-row-home-co-op`;
+}
+
+/** Sold/off-market discovery queries for SearchAPI Google harvest. */
+function soldListingDiscoveryQueries(input: {
+  communityName?: string;
+  streetAddress?: string;
+  city?: string;
+  state?: string;
+  discoveryCities?: string[];
+  bedroomHint?: string;
+}): string[] {
+  const names = input.communityName
+    ? Array.from(new Set([input.communityName, ...discoveryCommunityNameAliases(input.communityName)]))
+    : [];
+  const cities = input.discoveryCities?.length
+    ? input.discoveryCities
+    : input.city
+      ? [input.city]
+      : [];
+  const state = String(input.state ?? "").trim();
+  const street = String(input.streetAddress ?? "").trim();
+  const brHint = input.bedroomHint?.trim() ?? "";
+  const queries: string[] = [];
+  const push = (q: string) => {
+    const normalized = q.replace(/\s+/g, " ").trim();
+    if (normalized) queries.push(normalized);
+  };
+  for (const name of names) {
+    push(`site:zillow.com "${name}" "recently sold"`);
+    push(`site:zillow.com "${name}" sold`);
+    push(`site:realtor.com "${name}" "recently sold"`);
+    push(`site:realtor.com "${name}" sold`);
+    push(`site:redfin.com "${name}" sold`);
+    push(`site:homes.com "${name}" sold`);
+    for (const searchCity of cities) {
+      if (brHint) {
+        push(`site:zillow.com "${name}" "${searchCity}" ${state} ${brHint} sold`);
+        push(`site:realtor.com "${name}" "${searchCity}" ${state} ${brHint} sold`);
+      }
+      push(`site:zillow.com "${name}" "${searchCity}" ${state} sold`);
+      push(`site:realtor.com "${name}" "${searchCity}" ${state} sold`);
+      push(`site:redfin.com "${name}" "${searchCity}" ${state} sold`);
+    }
+  }
+  if (street) {
+    push(`site:zillow.com/homedetails "${street}" sold`);
+    push(`site:realtor.com/realestateandhomes-detail "${street}" sold`);
+    push(`site:redfin.com "${street}" sold`);
+    for (const searchCity of cities) {
+      push(`site:zillow.com/homedetails "${street}" "${searchCity}" "${state}" sold`);
+    }
+  }
+  return queries;
+}
 
 function zillowStreetSearchUrl(streetAddress: string, city: string, state: string): string {
   const st = stateToAbbrev(state).toLowerCase();
@@ -3775,25 +3840,16 @@ function buildRealtorSearchActorInput(searchUrl: string, maxItems: number): Reco
   };
 }
 
-async function harvestZillowUrlsViaApifySearch(
-  city: string,
-  state: string,
-  maxItems: number = 500,
-  timeoutMs = 180_000,
-  options?: ApifySearchHarvestOptions,
+async function harvestZillowUrlsViaApifySearchForUrl(
+  searchUrl: string,
+  maxItems: number,
+  timeoutMs: number,
+  options: ApifySearchHarvestOptions | undefined,
+  actor: string,
+  token: string,
+  label: string,
 ): Promise<string[]> {
-  const token = process.env.APIFY_API_TOKEN;
-  if (!token) {
-    console.warn(`[harvestZillow:Apify] APIFY_API_TOKEN not set — falling back to Google`);
-    return [];
-  }
-  const actor = (process.env.APIFY_ZILLOW_SEARCH_ACTOR || "igolaizola~zillow-scraper-ppe").replace("/", "~");
-  const slug = citySlugForZillow(city, state);
-  const street = String(options?.streetAddress ?? "").trim();
-  const searchUrl = street
-    ? zillowStreetSearchUrl(street, city, state)
-    : `https://www.zillow.com/${slug}/condos/`;
-  const input = buildZillowSearchActorInput(actor, city, state, searchUrl, maxItems);
+  const input = buildZillowSearchActorInput(actor, "", "", searchUrl, maxItems);
   const zillowDetailPattern = /^https?:\/\/(www\.)?zillow\.com\/homedetails\//i;
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
@@ -3814,18 +3870,18 @@ async function harvestZillowUrlsViaApifySearch(
       ? extractListingUrlsFromApifyItems(items, zillowDetailPattern, options)
       : extractUrlsFromApifyDataset(items, zillowDetailPattern);
     console.log(
-      `[harvestZillow:Apify] ${actor} ${searchUrl} → ${items.length} dataset items, ` +
+      `[harvestZillow:Apify] ${label} ${actor} ${searchUrl} → ${items.length} dataset items, ` +
       `${urls.length} unique homedetails URLs` +
       (options?.minBedrooms ? ` (≥${options.minBedrooms}BR filter)` : ""),
     );
     return urls;
   } catch (e: any) {
-    console.warn(`[harvestZillow:Apify] error: ${e?.message ?? e}`);
+    console.warn(`[harvestZillow:Apify] ${label} error: ${e?.message ?? e}`);
     return [];
   }
 }
 
-async function harvestRealtorUrlsViaApifySearch(
+async function harvestZillowUrlsViaApifySearch(
   city: string,
   state: string,
   maxItems: number = 500,
@@ -3833,13 +3889,48 @@ async function harvestRealtorUrlsViaApifySearch(
   options?: ApifySearchHarvestOptions,
 ): Promise<string[]> {
   const token = process.env.APIFY_API_TOKEN;
-  if (!token) return [];
-  const actor = (process.env.APIFY_REALTOR_SEARCH_ACTOR || "dz_omar~realtor-scraper").replace("/", "~");
-  const slug = citySlugForRealtor(city, state);
+  if (!token) {
+    console.warn(`[harvestZillow:Apify] APIFY_API_TOKEN not set — falling back to Google`);
+    return [];
+  }
+  const actor = (process.env.APIFY_ZILLOW_SEARCH_ACTOR || "igolaizola~zillow-scraper-ppe").replace("/", "~");
+  const slug = citySlugForZillow(city, state);
   const street = String(options?.streetAddress ?? "").trim();
-  const searchUrl = street
-    ? realtorStreetSearchUrl(street, city, state)
-    : `https://www.realtor.com/realestateandhomes-search/${slug}/type-condo-townhome-row-home-co-op`;
+  const includeSold = options?.includeSoldListings === true && !street;
+  const forSaleMax = includeSold ? Math.max(10, Math.ceil(maxItems * 0.55)) : maxItems;
+  const soldMax = includeSold ? Math.max(10, maxItems - forSaleMax) : 0;
+  const forSaleUrl = street
+    ? zillowStreetSearchUrl(street, city, state)
+    : `https://www.zillow.com/${slug}/condos/`;
+  const legs = [
+    harvestZillowUrlsViaApifySearchForUrl(forSaleUrl, forSaleMax, timeoutMs, options, actor, token, "for-sale"),
+  ];
+  if (includeSold && soldMax > 0) {
+    legs.push(
+      harvestZillowUrlsViaApifySearchForUrl(
+        zillowSoldSearchUrl(city, state),
+        soldMax,
+        timeoutMs,
+        options,
+        actor,
+        token,
+        "sold",
+      ),
+    );
+  }
+  const batches = await Promise.all(legs);
+  return [...new Set(batches.flat())];
+}
+
+async function harvestRealtorUrlsViaApifySearchForUrl(
+  searchUrl: string,
+  maxItems: number,
+  timeoutMs: number,
+  options: ApifySearchHarvestOptions | undefined,
+  actor: string,
+  token: string,
+  label: string,
+): Promise<string[]> {
   const input = buildRealtorSearchActorInput(searchUrl, maxItems);
   const realtorDetailPattern = /^https?:\/\/(www\.)?realtor\.com\/realestateandhomes-detail\//i;
   try {
@@ -3861,15 +3952,53 @@ async function harvestRealtorUrlsViaApifySearch(
       ? extractListingUrlsFromApifyItems(items, realtorDetailPattern, options)
       : extractUrlsFromApifyDataset(items, realtorDetailPattern);
     console.log(
-      `[harvestRealtor:Apify] ${actor} ${searchUrl} → ${items.length} dataset items, ` +
+      `[harvestRealtor:Apify] ${label} ${actor} ${searchUrl} → ${items.length} dataset items, ` +
       `${urls.length} unique detail URLs` +
       (options?.minBedrooms ? ` (≥${options.minBedrooms}BR filter)` : ""),
     );
     return urls;
   } catch (e: any) {
-    console.warn(`[harvestRealtor:Apify] error: ${e?.message ?? e}`);
+    console.warn(`[harvestRealtor:Apify] ${label} error: ${e?.message ?? e}`);
     return [];
   }
+}
+
+async function harvestRealtorUrlsViaApifySearch(
+  city: string,
+  state: string,
+  maxItems: number = 500,
+  timeoutMs = 180_000,
+  options?: ApifySearchHarvestOptions,
+): Promise<string[]> {
+  const token = process.env.APIFY_API_TOKEN;
+  if (!token) return [];
+  const actor = (process.env.APIFY_REALTOR_SEARCH_ACTOR || "dz_omar~realtor-scraper").replace("/", "~");
+  const slug = citySlugForRealtor(city, state);
+  const street = String(options?.streetAddress ?? "").trim();
+  const includeSold = options?.includeSoldListings === true && !street;
+  const forSaleMax = includeSold ? Math.max(10, Math.ceil(maxItems * 0.55)) : maxItems;
+  const soldMax = includeSold ? Math.max(10, maxItems - forSaleMax) : 0;
+  const forSaleUrl = street
+    ? realtorStreetSearchUrl(street, city, state)
+    : `https://www.realtor.com/realestateandhomes-search/${slug}/type-condo-townhome-row-home-co-op`;
+  const legs = [
+    harvestRealtorUrlsViaApifySearchForUrl(forSaleUrl, forSaleMax, timeoutMs, options, actor, token, "for-sale"),
+  ];
+  if (includeSold && soldMax > 0) {
+    legs.push(
+      harvestRealtorUrlsViaApifySearchForUrl(
+        realtorSoldSearchUrl(city, state),
+        soldMax,
+        timeoutMs,
+        options,
+        actor,
+        token,
+        "sold",
+      ),
+    );
+  }
+  const batches = await Promise.all(legs);
+  return [...new Set(batches.flat())];
 }
 
 // Primary listing discovery — native Zillow/Realtor search APIs via Apify.
@@ -3885,9 +4014,13 @@ async function harvestApifyPhotoDiscoveryBatch(opts: {
   if (!process.env.APIFY_API_TOKEN || cities.length === 0 || !String(state ?? "").trim()) {
     return { zillow: [], realtor: [] };
   }
+  const apifyHarvestOptions: ApifySearchHarvestOptions = {
+    ...(harvestOptions ?? {}),
+    includeSoldListings: harvestOptions?.includeSoldListings !== false,
+  };
   const [zillowByCity, realtorByCity] = await Promise.all([
-    Promise.all(cities.map((c) => harvestZillowUrlsViaApifySearch(c, state, maxItemsPerCity, timeoutMs, harvestOptions))),
-    Promise.all(cities.map((c) => harvestRealtorUrlsViaApifySearch(c, state, maxItemsPerCity, timeoutMs, harvestOptions))),
+    Promise.all(cities.map((c) => harvestZillowUrlsViaApifySearch(c, state, maxItemsPerCity, timeoutMs, apifyHarvestOptions))),
+    Promise.all(cities.map((c) => harvestRealtorUrlsViaApifySearch(c, state, maxItemsPerCity, timeoutMs, apifyHarvestOptions))),
   ]);
   return {
     zillow: [...new Set(zillowByCity.flat())],
@@ -31166,6 +31299,16 @@ Return ONLY compact JSON with this exact shape:
         );
       }
     }
+    searchQueries.push(
+      ...soldListingDiscoveryQueries({
+        communityName,
+        streetAddress: communityAddress || canonicalStreet,
+        city: communityLocForQueries?.city,
+        state: queryState,
+        discoveryCities,
+        bedroomHint: requiredBedroomCount ? `${requiredBedroomCount} bedroom` : "",
+      }),
+    );
     // PR #338: VRBO query branch removed (operator directive).
     // Replacement photos must come from real-estate sources only —
     // OTA photos create a feedback loop with the photo-listing
@@ -31316,6 +31459,7 @@ Return ONLY compact JSON with this exact shape:
           limitPerCity: findUnitRentcastTune.limitPerCity,
           timeoutMs: Math.min(rentcastBudgetMs, findUnitRentcastTune.requestTimeoutMs),
           allowedStreetRoots: suppliedStreetRoot ? new Set([suppliedStreetRoot]) : undefined,
+          includeInactiveListings: true,
         }),
         rentcastBudgetMs,
         { candidates: [], rawCount: 0, filteredCount: 0, citiesQueried: [], errors: [] },
@@ -35533,12 +35677,25 @@ Return ONLY compact JSON with this exact shape:
         return candidateUrls.length - before;
       };
 
+      const soldQueries = soldListingDiscoveryQueries({
+        communityName,
+        streetAddress,
+        city,
+        state,
+        discoveryCities,
+        bedroomHint: brHint,
+      });
+
       const runSupplementalSearchApiDiscovery = async (): Promise<void> => {
         if (!searchApiKey) return;
         await Promise.all([
           runDiscoveryQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
           runDiscoveryQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
           runDiscoveryQueries(homesQueries, /homes\.com\/property\//i, "homes"),
+          runDiscoveryQueries(soldQueries, /zillow\.com\/homedetails\//i, "zillow"),
+          runDiscoveryQueries(soldQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
+          runDiscoveryQueries(soldQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
+          runDiscoveryQueries(soldQueries, /homes\.com\/property\//i, "homes"),
         ]);
       };
 
@@ -35569,6 +35726,7 @@ Return ONLY compact JSON with this exact shape:
           limitPerCity: rentcastLimitPerCity,
           timeoutMs: rentcastTimeoutMs,
           allowedStreetRoots: allowedRoots,
+          includeInactiveListings: true,
         });
         if (!searchApiKey || harvest.candidates.length === 0) {
           return {
@@ -36945,6 +37103,13 @@ Return ONLY compact JSON with this exact shape:
     const zillowQueries = buildZillowQueries().map((q) => q.replace(/\s+/g, " ").trim());
     const realtorQueries = buildRealtorQueries().map((q) => q.replace(/\s+/g, " ").trim());
     const redfinQueries = buildRedfinQueries().map((q) => q.replace(/\s+/g, " ").trim());
+    const soldQueries = soldListingDiscoveryQueries({
+      communityName: communityName ?? city,
+      city,
+      state,
+      discoveryCities: isCityWide ? [city] : discoverySearchCitiesForPhotoSearch({ city, communityName }),
+      bedroomHint: brTerm,
+    });
     const brokerageQueries = isCityWide
       ? []
       : [
@@ -37122,6 +37287,9 @@ Return ONLY compact JSON with this exact shape:
         harvestQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
         harvestQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
         harvestQueries(brokerageQueries, /^https?:\/\//i, "brokerage"),
+        harvestQueries(soldQueries, /zillow\.com\/homedetails\//i, "zillow"),
+        harvestQueries(soldQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
+        harvestQueries(soldQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
       ]);
     };
 
@@ -37148,6 +37316,7 @@ Return ONLY compact JSON with this exact shape:
         maxBedrooms: !isAnyBedroom && numericBedrooms ? numericBedrooms : undefined,
         limitPerCity: rentcastLimitPerCity,
         timeoutMs: rentcastTune.requestTimeoutMs,
+        includeInactiveListings: true,
       });
       if (harvest.candidates.length === 0) {
         return {
