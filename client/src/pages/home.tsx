@@ -78,6 +78,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import type { CommunityDraft, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
+import { photoCommunityStatusLabel, type PhotoCommunityRowStatus } from "@shared/photo-community-status-logic";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { usePortalSession } from "@/lib/auth";
@@ -134,6 +135,29 @@ type Property = {
   communityUnitCountRangeHigh?: number | null;
   unitDetails: string;
   url: string;
+};
+
+type BulkPhotoCommunityItemStatus = "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled";
+type BulkPhotoCommunityJob = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  cancelRequested: boolean;
+  total: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+  cancelled: number;
+  items: Array<{
+    propertyId: number;
+    label: string;
+    status: BulkPhotoCommunityItemStatus;
+    startedAt: string | null;
+    finishedAt: string | null;
+    error?: string;
+  }>;
 };
 
 type BulkPricingItemStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -1228,6 +1252,9 @@ function AdminDashboard() {
   const [bulkAvailabilityAction, setBulkAvailabilityAction] = useState<"clear" | "pause" | "resume" | "cancel" | null>(null);
   const [bulkAvailabilityQueue, setBulkAvailabilityQueue] = useState<BulkAvailabilityQueue | null>(null);
   const [photoScanPollUntil, setPhotoScanPollUntil] = useState(0);
+  const [bulkPhotoCommunityJob, setBulkPhotoCommunityJob] = useState<BulkPhotoCommunityJob | null>(null);
+  const [bulkPhotoCommunityStarting, setBulkPhotoCommunityStarting] = useState(false);
+  const [bulkPhotoCommunityCancelling, setBulkPhotoCommunityCancelling] = useState(false);
   const [selectedCancellationId, setSelectedCancellationId] = useState<number | null>(null);
 
   // Pull community drafts up here (early in the render) because
@@ -1998,6 +2025,59 @@ function AdminDashboard() {
     refetchInterval: () => Date.now() < photoScanPollUntil ? 10_000 : false,
   });
 
+  type PhotoCommunityStatusResponse = {
+    statuses: Record<string, PhotoCommunityRowStatus>;
+    activeJob: BulkPhotoCommunityJob | null;
+  };
+  const bulkPhotoCommunityActive =
+    bulkPhotoCommunityJob?.status === "queued" || bulkPhotoCommunityJob?.status === "running";
+  const { data: photoCommunityStatusData } = useQuery<PhotoCommunityStatusResponse>({
+    queryKey: ["/api/builder/photo-community-status"],
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchInterval: bulkPhotoCommunityActive ? 8_000 : false,
+  });
+  const photoCommunityByProperty = useMemo(() => {
+    const map = new Map<number, PhotoCommunityRowStatus>();
+    for (const [k, v] of Object.entries(photoCommunityStatusData?.statuses ?? {})) {
+      const id = Number(k);
+      if (Number.isFinite(id)) map.set(id, v);
+    }
+    return map;
+  }, [photoCommunityStatusData]);
+
+  useEffect(() => {
+    const active = photoCommunityStatusData?.activeJob;
+    if (active && !bulkPhotoCommunityJob?.id) {
+      setBulkPhotoCommunityJob(active);
+    }
+  }, [photoCommunityStatusData?.activeJob, bulkPhotoCommunityJob?.id]);
+
+  useEffect(() => {
+    if (!bulkPhotoCommunityJob?.id || !bulkPhotoCommunityActive) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/builder/bulk-photo-community-check/${bulkPhotoCommunityJob.id}`, { credentials: "include" });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (cancelled) return;
+        setBulkPhotoCommunityJob(data.job);
+        if (data.job.status === "completed" || data.job.status === "failed" || data.job.status === "cancelled") {
+          queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
+        }
+      } catch {
+        // best-effort poll
+      }
+    };
+    void poll();
+    const timer = window.setInterval(poll, 8_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [bulkPhotoCommunityJob?.id, bulkPhotoCommunityActive, queryClient]);
+
   // PR #318: photo-listing alerts UI moved into the listing builder's
   // PhotoSyncStatusPanel (per channel row). The dashboard banner +
   // its master-sync-only "Replace & push" button were ripped out
@@ -2467,6 +2547,48 @@ function AdminDashboard() {
     },
     onError: (e: any) => toast({ title: "Photo scan failed", description: e.message, variant: "destructive" }),
   });
+
+  const startBulkPhotoCommunityCheck = async (propertyIds?: number[]) => {
+    const targets = propertyIds && propertyIds.length > 0
+      ? allProperties.filter((p) => propertyIds.includes(p.id))
+      : allProperties.filter((p) => p.draftStatus !== "researching" && p.draftStatus !== "draft_ready");
+    if (targets.length === 0) return;
+    setBulkPhotoCommunityStarting(true);
+    try {
+      const labels = Object.fromEntries(targets.map((p) => [String(p.id), p.name]));
+      const response = await apiRequest("POST", "/api/builder/bulk-photo-community-check", {
+        propertyIds: targets.map((p) => p.id),
+        labels,
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setBulkPhotoCommunityJob(data.job);
+      queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
+      toast({
+        title: "Bulk photo community check queued",
+        description: `${targets.length} propert${targets.length === 1 ? "y" : "ies"} will run one at a time (~1 min each).`,
+      });
+    } catch (e: any) {
+      toast({ title: "Bulk photo community check failed", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkPhotoCommunityStarting(false);
+    }
+  };
+
+  const cancelBulkPhotoCommunityCheck = async () => {
+    if (!bulkPhotoCommunityJob?.id) return;
+    setBulkPhotoCommunityCancelling(true);
+    try {
+      const response = await apiRequest("POST", `/api/builder/bulk-photo-community-check/${bulkPhotoCommunityJob.id}/cancel`);
+      const data = await response.json();
+      setBulkPhotoCommunityJob(data.job);
+      toast({ title: "Cancellation requested", description: "Queued items will be skipped." });
+    } catch (e: any) {
+      toast({ title: "Cancel failed", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkPhotoCommunityCancelling(false);
+    }
+  };
 
   // Highlight south-shore (Poipu) properties with the primary badge tone.
   // Keys off pricingArea — the styling decision is per-area, not per the
@@ -4019,8 +4141,31 @@ function AdminDashboard() {
               </Badge>
             </div>
           </div>
+          {bulkPhotoCommunityJob && bulkPhotoCommunityActive && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm" data-testid="bulk-photo-community-progress">
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin text-amber-700" />
+                <span>
+                  Photo community check: {bulkPhotoCommunityJob.completed} / {bulkPhotoCommunityJob.total} complete
+                  {bulkPhotoCommunityJob.items.find((item) => item.status === "running")
+                    ? ` — running ${bulkPhotoCommunityJob.items.find((item) => item.status === "running")!.label}`
+                    : ""}
+                </span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={bulkPhotoCommunityCancelling}
+                onClick={() => void cancelBulkPhotoCommunityCheck()}
+              >
+                {bulkPhotoCommunityCancelling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
+                Cancel
+              </Button>
+            </div>
+          )}
           <div className="overflow-x-auto overscroll-x-contain [&>div]:overflow-visible">
-          <Table id="list-properties" className="min-w-[1280px] table-fixed">
+          <Table id="list-properties" className="min-w-[1340px] table-fixed">
             <colgroup>
               <col style={{ width: "2.2%" }} />
               <col style={{ width: "5.5%" }} />
@@ -4029,7 +4174,8 @@ function AdminDashboard() {
               <col style={{ width: "5.6%" }} />
               <col style={{ width: "6.5%" }} />
               <col style={{ width: "7.5%" }} />
-              <col style={{ width: "11%" }} />
+              <col style={{ width: "6.5%" }} />
+              <col style={{ width: "10.5%" }} />
               <col style={{ width: "24.4%" }} />
               <col style={{ width: "9.2%" }} />
               <col style={{ width: "7.6%" }} />
@@ -4087,6 +4233,24 @@ function AdminDashboard() {
                       data-testid="button-run-photo-match-scan"
                     >
                       <RefreshCw className={`h-3.5 w-3.5 ${photoScanMutation.isPending ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                </TableHead>
+                <TableHead className="w-[104px] text-center px-1" title="Photo community QA: B = bedroom photo coverage, C = community folder matches resort, M = all folders same community">
+                  <div className="flex items-center justify-center gap-1">
+                    <span>Comm QA</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      title={bulkPhotoCommunityActive ? "Bulk photo community check running" : "Run photo community check for all listings"}
+                      aria-label="Run bulk photo community check"
+                      disabled={bulkPhotoCommunityStarting || bulkPhotoCommunityActive}
+                      onClick={() => void startBulkPhotoCommunityCheck()}
+                      data-testid="button-run-bulk-photo-community-check"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${bulkPhotoCommunityStarting || bulkPhotoCommunityActive ? "animate-spin" : ""}`} />
                     </Button>
                   </div>
                 </TableHead>
@@ -4478,6 +4642,119 @@ function AdminDashboard() {
                           {matchedSummary.length > 0 ? (
                             <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-match-units-${property.id}`}>
                               {matchedSummary.join(" · ")}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
+                  </TableCell>
+                  <TableCell className="px-0.5 py-2 text-center">
+                    {(() => {
+                      const row = photoCommunityByProperty.get(property.id);
+                      type Tone = "ok" | "bad" | "unknown" | "running" | "na";
+                      const PAL: Record<Tone, { bg: string; glyph: string }> = {
+                        ok:      { bg: "#16a34a", glyph: "✓" },
+                        bad:     { bg: "#dc2626", glyph: "✗" },
+                        unknown: { bg: "#9ca3af", glyph: "?" },
+                        running: { bg: "#f59e0b", glyph: "…" },
+                        na:      { bg: "#9ca3af", glyph: "–" },
+                      };
+                      const toneFor = (ok: boolean | null | undefined, running: boolean): Tone => {
+                        if (running) return "running";
+                        if (ok === true) return "ok";
+                        if (ok === false) return "bad";
+                        return "unknown";
+                      };
+                      const running = !!row?.running || bulkPhotoCommunityJob?.items.some(
+                        (item) => item.propertyId === property.id && item.status === "running",
+                      );
+                      const stamp = row?.checkedAt ? new Date(row.checkedAt).toLocaleDateString() : "never";
+                      const allPass = row?.bedroomsOk === true && row?.communityFolderOk === true && row?.sameCommunityOk === true;
+                      if (allPass && !running) {
+                        return (
+                          <div className="flex justify-center" data-testid={`photo-community-${property.id}`}>
+                            <span
+                              title={`All photo community checks passed (${stamp})`}
+                              className="inline-flex items-center justify-center h-[18px] px-1.5 rounded text-[9px] font-bold leading-none"
+                              style={{ background: "#16a34a", color: "white", minWidth: 24 }}
+                            >
+                              ✓
+                            </span>
+                          </div>
+                        );
+                      }
+                      const items: Array<{ letter: string; name: string; ok: boolean | null | undefined; tip: string }> = [
+                        {
+                          letter: "B",
+                          name: "Bedrooms",
+                          ok: row?.bedroomsOk,
+                          tip: row?.bedroomsOk === false
+                            ? `Bedroom photos: ${row?.bedroomsFound ?? "?"}/${row?.bedroomsExpected ?? "?"} ✗ (${stamp})`
+                            : row?.bedroomsOk === true
+                              ? `Bedroom photos: ${row?.bedroomsFound}/${row?.bedroomsExpected} ✓ (${stamp})`
+                              : running ? "Bedroom check running…" : `Bedroom photos: not checked (${stamp})`,
+                        },
+                        {
+                          letter: "C",
+                          name: "Community folder",
+                          ok: row?.communityFolderOk,
+                          tip: row?.communityFolderOk === false
+                            ? `Community folder does not match expected resort ✗ (${stamp})`
+                            : row?.communityFolderOk === true
+                              ? `Community folder matches expected resort ✓ (${stamp})`
+                              : running ? "Community folder check running…" : `Community folder: not checked (${stamp})`,
+                        },
+                        {
+                          letter: "M",
+                          name: "Same community",
+                          ok: row?.sameCommunityOk,
+                          tip: row?.sameCommunityOk === false
+                            ? `Community folder and unit photos are not all the same community ✗ (${stamp})`
+                            : row?.sameCommunityOk === true
+                              ? `All photo folders match the same community ✓ (${stamp})`
+                              : running ? "Same-community check running…" : `Same community: not checked (${stamp})`,
+                        },
+                      ];
+                      const summary = row ? photoCommunityStatusLabel(row) : null;
+                      return (
+                        <div className="flex flex-col items-center gap-0.5" data-testid={`photo-community-${property.id}`}>
+                          <div className="flex gap-[1px] justify-center items-center">
+                            {items.map((it) => {
+                              const tone = toneFor(it.ok, running);
+                              const p = PAL[tone];
+                              return (
+                                <span
+                                  key={it.letter}
+                                  title={it.tip}
+                                  className="inline-flex items-center justify-center h-[18px] px-0.5 rounded text-[8px] font-bold leading-none"
+                                  style={{ background: p.bg, color: "white", minWidth: 20 }}
+                                  data-testid={`photo-community-${it.letter.toLowerCase()}-${property.id}`}
+                                >
+                                  {it.letter}{p.glyph}
+                                </span>
+                              );
+                            })}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="ml-0.5 h-[18px] w-[18px] rounded"
+                              title={`Run photo community check for ${property.name}`}
+                              aria-label={`Run photo community check for ${property.name}`}
+                              disabled={bulkPhotoCommunityStarting || running}
+                              onClick={() => void startBulkPhotoCommunityCheck([property.id])}
+                              data-testid={`button-run-photo-community-check-${property.id}`}
+                            >
+                              <RefreshCw className={`h-3 w-3 ${running ? "animate-spin" : ""}`} />
+                            </Button>
+                          </div>
+                          {row?.error ? (
+                            <div className="max-w-[100px] truncate text-center text-[9px] font-semibold leading-tight text-red-700">
+                              {row.error}
+                            </div>
+                          ) : summary && row?.overall === "fail" ? (
+                            <div className="max-w-[100px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" title={summary}>
+                              {summary}
                             </div>
                           ) : null}
                         </div>

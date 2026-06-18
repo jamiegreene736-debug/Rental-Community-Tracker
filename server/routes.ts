@@ -227,6 +227,14 @@ import {
 import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest } from "./photo-community-check";
 import {
+  cancelBulkPhotoCommunityJob,
+  getActiveBulkPhotoCommunityJob,
+  getBulkPhotoCommunityJob,
+  getPhotoCommunityStatuses,
+  serializeBulkPhotoCommunityJob,
+  startBulkPhotoCommunityCheck,
+} from "./photo-community-bulk";
+import {
   MIN_DISTINCT_STRONG_PHOTO_MATCHES,
   isCommunityOrSharedPhotoCandidate,
   isStrongLensMatch,
@@ -27282,6 +27290,51 @@ Return ONLY compact JSON with this exact shape:
       console.error("[photo-community-check]", err?.message ?? err);
       return res.status(500).json({ ok: false, error: err?.message ?? "photo community check failed" });
     }
+  });
+
+  app.get("/api/builder/photo-community-status", async (_req, res) => {
+    try {
+      const statuses = await getPhotoCommunityStatuses();
+      const activeJob = getActiveBulkPhotoCommunityJob();
+      return res.json({
+        statuses,
+        activeJob: activeJob ? serializeBulkPhotoCommunityJob(activeJob) : null,
+      });
+    } catch (err: any) {
+      console.error("[photo-community-status]", err?.message ?? err);
+      return res.status(500).json({ ok: false, error: err?.message ?? "photo community status failed" });
+    }
+  });
+
+  app.post("/api/builder/bulk-photo-community-check", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { propertyIds?: number[]; labels?: Record<string, string> };
+      const propertyIds = Array.isArray(body.propertyIds) ? body.propertyIds : [];
+      if (propertyIds.length === 0) {
+        return res.status(400).json({ ok: false, error: "propertyIds[] required" });
+      }
+      const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
+      if (!apiKey) {
+        return res.status(500).json({ ok: false, error: "ANTHROPIC_API_KEY not configured" });
+      }
+      const job = await startBulkPhotoCommunityCheck(propertyIds, body.labels ?? {}, apiKey);
+      return res.json({ ok: true, job: serializeBulkPhotoCommunityJob(job) });
+    } catch (err: any) {
+      console.error("[bulk-photo-community-check]", err?.message ?? err);
+      return res.status(500).json({ ok: false, error: err?.message ?? "bulk photo community check failed" });
+    }
+  });
+
+  app.get("/api/builder/bulk-photo-community-check/:jobId", async (req, res) => {
+    const job = getBulkPhotoCommunityJob(String(req.params.jobId));
+    if (!job) return res.status(404).json({ ok: false, error: "job not found" });
+    return res.json({ ok: true, job: serializeBulkPhotoCommunityJob(job) });
+  });
+
+  app.post("/api/builder/bulk-photo-community-check/:jobId/cancel", async (req, res) => {
+    const job = await cancelBulkPhotoCommunityJob(String(req.params.jobId));
+    if (!job) return res.status(404).json({ ok: false, error: "job not found" });
+    return res.json({ ok: true, job: serializeBulkPhotoCommunityJob(job) });
   });
 
   app.post("/api/builder/normalize-photos", async (req, res) => {
