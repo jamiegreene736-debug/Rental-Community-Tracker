@@ -1,19 +1,13 @@
 {
   "folder": "community-kaha-lani",
   "type": "community",
-  "referencedBy": [
-    {
-      "propertyId": 23,
-      "address": "4460 Nehe Rd, Lihue, HI 96766"
-    }
-  ],
-  "verificationStatus": "needs-review",
-  "verifiedDate": "2026-04-16",
-  "verifiedBy": "auto-generated-stub",
+  "verificationStatus": "verified",
+  "verifiedDate": "2026-06-18",
+  "verifiedBy": "refresh-community-photos.mjs",
   "sourceListing": {
-    "url": null,
-    "platform": null,
-    "scrapedDate": null
+    "url": "https://www.castleresorts.com/kauai/kaha-lani-resort/",
+    "platform": "www.castleresorts.com",
+    "scrapedDate": "2026-06-18"
   },
-  "notes": "Auto-generated stub. Set verificationStatus to 'verified' once each photo has been confirmed against sourceListing.url. See replit.md → Unit Photo Verification Methodology."
+  "notes": "Curated on-property amenity photos from https://www.castleresorts.com/kauai/kaha-lani-resort/. Replaced incorrect generic-search community folder images."
 }

@@ -173,6 +173,12 @@ import {
   resolveBulkComboListingStreet,
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
+import {
+  COMMUNITY_FOLDER_TO_ADDRESS,
+  COMMUNITY_FOLDER_TO_NAME,
+  COMMUNITY_SOURCE_URLS,
+  resolveCanonicalCommunityPhotoFolder,
+} from "@shared/community-photo-folders";
 import { bulkComboProgressPercent, bulkComboRemainingMs } from "@shared/bulk-combo-queue-progress";
 import {
   buildPreflightMatchContext,
@@ -2249,64 +2255,6 @@ async function fetchGuestyMfaCodeFromGmail(
     await client.logout().catch(() => {});
   }
 }
-
-// Hardcoded listing URLs per community. Primary is scraped first; fallback is tried if primary fails.
-// All other communities fall back to Google Images search.
-const COMMUNITY_SOURCE_URLS: Record<string, { primary: string; fallback?: string }> = {
-  "Regency at Poipu Kai": {
-    primary: "https://www.zillow.com/homedetails/1831-Poipu-Rd-APT-823-Koloa-HI-96756/80152954_zpid/",
-    fallback: "https://www.homes.com/property/1831-poipu-rd-koloa-hi-unit-720/gy46glh43cckm/",
-  },
-  "Paniolo Hale": {
-    primary: "https://www.zillow.com/b/paniolo-hale-maunaloa-hi-9NxCHL/",
-  },
-  // Ko Olina Beach Villas (draft 14) — scrape the operator's own listing page
-  // directly (the draft.sourceUrl) so the draft's auto community-photo fetch
-  // gets real Ko Olina Beach Villas photos instead of a generic name search.
-  // scrapeListingPhotos routes a non-real-estate host through its generic
-  // real-estate / headless og:image branch.
-  "Ko Olina Beach Villas": {
-    primary: "https://www.olaproperties.com/ko-olina-beach-villas/",
-  },
-};
-
-// Maps communityPhotoFolder folder names to their display community names
-const COMMUNITY_FOLDER_TO_NAME: Record<string, string> = {
-  "community-regency-poipu-kai": "Regency at Poipu Kai",
-  "community-kekaha-estate": "Kekaha Beachfront Estate",
-  "community-keauhou-estates": "Keauhou Estates",
-  "community-mauna-kai": "Mauna Kai Princeville",
-  "community-kaha-lani": "Kaha Lani Resort",
-  "community-lae-nani": "Lae Nani Resort",
-  "community-makahuena": "Makahuena at Poipu",
-  "community-poipu-beachside": "Poipu Brenneckes Beachside",
-  "community-kaiulani": "Kaiulani of Princeville",
-  "community-poipu-oceanfront": "Poipu Brenneckes Oceanfront",
-  "community-pili-mai": "Pili Mai",
-  "community-menehune-shores": "Menehune Shores",
-  "community-coconut-plantation-at-ko-olina": "Coconut Plantation at Ko Olina",
-  "community-ko-olina-beach-villas": "Ko Olina Beach Villas",
-};
-
-// Street address fragment for each community — used to find individual
-// Zillow unit listings via Google Images. Kept in sync with the
-// address: field on each unit-builder-data.ts entry.
-const COMMUNITY_FOLDER_TO_ADDRESS: Record<string, string> = {
-  "community-regency-poipu-kai": "1831 Poipu Rd",           // Regency at Poipu Kai
-  "community-kekaha-estate": "8497 Kekaha Rd",              // Kekaha Beachfront Estate
-  "community-keauhou-estates": "78-6855 Ali'i Dr",          // Keauhou Estates
-  "community-mauna-kai": "3920 Wyllie Rd",                  // Mauna Kai Princeville
-  "community-kaha-lani": "4460 Nehe Rd",                    // Kaha Lani Resort
-  "community-lae-nani": "410 Papaloa Rd",                   // Lae Nani Resort
-  "community-makahuena": "1661 Pe'e Rd",                    // Makahuena at Poipu
-  "community-poipu-beachside": "2298 Ho'one Rd",            // Poipu Brenneckes Beachside
-  "community-kaiulani": "4100 Queen Emma's Dr",             // Kaiulani of Princeville
-  "community-poipu-oceanfront": "2350 Ho'one Rd",           // Poipu Brenneckes Oceanfront
-  "community-pili-mai": "2611 Kiahuna Plantation Dr",       // Pili Mai at Poipu
-  "community-menehune-shores": "760 S Kihei Rd",            // Menehune Shores
-  "community-coconut-plantation-at-ko-olina": "92-1070 Olani St", // Coconut Plantation at Ko Olina
-  "community-ko-olina-beach-villas": "92-102 Waialii Pl",         // Ko Olina Beach Villas (Kapolei) — NOT Coconut Plantation's Olani St
-};
 
 interface ScrapedPhoto {
   url: string;
@@ -40359,24 +40307,32 @@ Return ONLY compact JSON with this exact shape:
     const draft = await storage.getCommunityDraft(draftId);
     if (!draft) return res.status(404).json({ error: "Draft not found" });
 
-    const folder = `community-draft-${draftId}`;
+    // Known communities share the canonical `community-<slug>` folder so bulk
+    // combo drafts don't accumulate wrong-resort photos in per-draft folders.
+    const canonicalFolder = resolveCanonicalCommunityPhotoFolder(draft.name);
+    const folder = canonicalFolder ?? `community-draft-${draftId}`;
+    const searchCommunityName = canonicalFolder
+      ? (COMMUNITY_FOLDER_TO_NAME[canonicalFolder] ?? draft.name)
+      : draft.name;
     const port = process.env.PORT || "5000";
     const base = `http://127.0.0.1:${port}`;
 
     // Search step. The existing endpoint runs five Google Images
     // queries in parallel + scoring; reuse it via an in-process HTTP
     // call rather than copy-pasting ~170 lines of search/scoring code.
-    // Pass the draft's OWN source URL so the search scrapes the authoritative
-    // community site first instead of a generic name search — the generic
-    // search is what historically saved wrong-resort photos into the folder.
-    const draftSourceUrl =
-      typeof draft.sourceUrl === "string" && /^https?:\/\//i.test(draft.sourceUrl)
-        ? `&sourceUrl=${encodeURIComponent(draft.sourceUrl)}`
-        : "";
+    // Prefer the canonical community source URL over the draft's generic
+    // sourceUrl — the generic name search is what historically saved
+    // wrong-resort photos into the folder.
+    const authoritativeSource =
+      COMMUNITY_SOURCE_URLS[searchCommunityName]?.primary
+      ?? (typeof draft.sourceUrl === "string" && /^https?:\/\//i.test(draft.sourceUrl) ? draft.sourceUrl : null);
+    const draftSourceUrl = authoritativeSource
+      ? `&sourceUrl=${encodeURIComponent(authoritativeSource)}`
+      : "";
     let topUrls: string[] = [];
     try {
       const searchResp = await fetch(
-        `${base}/api/community-photos/search?communityName=${encodeURIComponent(draft.name)}${draftSourceUrl}`,
+        `${base}/api/community-photos/search?communityName=${encodeURIComponent(searchCommunityName)}${draftSourceUrl}`,
         { signal: AbortSignal.timeout(45_000) },
       );
       if (!searchResp.ok) {

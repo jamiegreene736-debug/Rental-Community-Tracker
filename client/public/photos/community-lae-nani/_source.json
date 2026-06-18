@@ -1,19 +1,13 @@
 {
   "folder": "community-lae-nani",
   "type": "community",
-  "referencedBy": [
-    {
-      "propertyId": 24,
-      "address": "1661 Pe'e Rd, Koloa, HI 96756"
-    }
-  ],
-  "verificationStatus": "needs-audit",
-  "verifiedDate": "2026-04-16",
-  "verifiedBy": "auto-generated-stub",
+  "verificationStatus": "unused",
+  "verifiedDate": "2026-06-18",
+  "verifiedBy": "refresh-community-photo-folders",
   "sourceListing": {
-    "url": null,
-    "platform": null,
+    "url": "https://www.hawaiigaga.com/lae-nani-rentals.aspx",
+    "platform": "hawaiigaga.com",
     "scrapedDate": null
   },
-  "notes": "Folder is mis-named. PropertyId 24 has been corrected from Lae Nani Resort (Kapaa) to Makahuena at Poipu (Koloa, 1661 Pe'e Rd) on 2026-04-24. Audit these amenity shots: if they're Lae Nani pool/grounds photos, rescrape from a Makahuena source and rename the folder to community-makahuena."
+  "notes": "Deprecated folder. Property 24 (Makahuena at Poipu) now uses community-makahuena. Retained for historical reference; not referenced in unit-builder-data.ts."
 }
