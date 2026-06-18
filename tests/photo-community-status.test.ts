@@ -37,6 +37,35 @@ const badBedrooms = derivePhotoCommunityRowStatus(2, {
 check("fail bedrooms when coverage short",
   badBedrooms.bedroomsOk === false && badBedrooms.overall === "fail");
 
+const overCountStillPass = derivePhotoCommunityRowStatus(5, {
+  verdict: "pass",
+  allSameCommunity: "yes",
+  community: { matchesExpected: "yes", allSameCommunity: true },
+  units: [{ sameAsCommunity: "yes" }, { sameAsCommunity: "yes" }],
+  bedroomCoverage: { matchesListing: "yes", bedroomsFoundCombined: 8, expectedListingBedrooms: 5 },
+}, "2026-06-18T00:00:00.000Z");
+check("pass bedrooms when combined count exceeds listing expectation",
+  overCountStillPass.bedroomsOk === true && overCountStillPass.overall === "pass");
+
+const listingPassDespiteUnitShortfall = derivePhotoCommunityRowStatus(4, {
+  verdict: "warn",
+  allSameCommunity: "yes",
+  community: { matchesExpected: "yes", allSameCommunity: true, photosChecked: 6, photosTotal: 6 },
+  units: [{ sameAsCommunity: "yes" }, { sameAsCommunity: "yes" }],
+  bedroomCoverage: {
+    matchesListing: "yes",
+    bedroomsFoundCombined: 13,
+    expectedListingBedrooms: 6,
+    units: [
+      { matchesListing: "no", bedroomsFound: 2, expectedBedrooms: 3 },
+      { matchesListing: "yes", bedroomsFound: 11, expectedBedrooms: 3 },
+    ],
+  },
+}, "2026-06-18T00:00:00.000Z");
+check("B passes when combined bedrooms meet listing expectation (13/6)",
+  listingPassDespiteUnitShortfall.bedroomsOk === true
+  && listingPassDespiteUnitShortfall.bedroomsFound === 13);
+
 const badFolder = derivePhotoCommunityRowStatus(3, {
   verdict: "fail",
   allSameCommunity: "yes",

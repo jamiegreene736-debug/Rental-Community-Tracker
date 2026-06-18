@@ -231,6 +231,7 @@ import {
   getActiveBulkPhotoCommunityJob,
   getBulkPhotoCommunityJob,
   getPhotoCommunityStatuses,
+  scheduleBulkPhotoCommunityResume,
   serializeBulkPhotoCommunityJob,
   startBulkPhotoCommunityCheck,
 } from "./photo-community-bulk";
@@ -27295,7 +27296,7 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/builder/photo-community-status", async (_req, res) => {
     try {
       const statuses = await getPhotoCommunityStatuses();
-      const activeJob = getActiveBulkPhotoCommunityJob();
+      const activeJob = await getActiveBulkPhotoCommunityJob();
       return res.json({
         statuses,
         activeJob: activeJob ? serializeBulkPhotoCommunityJob(activeJob) : null,
@@ -27326,7 +27327,7 @@ Return ONLY compact JSON with this exact shape:
   });
 
   app.get("/api/builder/bulk-photo-community-check/:jobId", async (req, res) => {
-    const job = getBulkPhotoCommunityJob(String(req.params.jobId));
+    const job = await getBulkPhotoCommunityJob(String(req.params.jobId));
     if (!job) return res.status(404).json({ ok: false, error: "job not found" });
     return res.json({ ok: true, job: serializeBulkPhotoCommunityJob(job) });
   });
@@ -35267,6 +35268,7 @@ Return ONLY compact JSON with this exact shape:
     }
   };
   setTimeout(() => void resumeBulkPricingJobs(), 3_500).unref?.();
+  scheduleBulkPhotoCommunityResume();
 
   const cleanupStaleServerQueues = async () => {
     const staleBefore = new Date(Date.now() - 45 * 60 * 1000);
