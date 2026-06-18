@@ -30,6 +30,15 @@ import {
   isInteriorPhoto,
   pickInteriorPhotos,
 } from "../shared/photo-community-check-logic";
+import {
+  clusterBedroomPhotosByHash,
+  computeListingBedroomCoverage,
+  computeUnitBedroomCoverage,
+  isBedroomPhotoCaption,
+  parseExpectedBedroomsFromLabel,
+  summarizeBedroomCluster,
+  type ListingBedroomCoverage,
+} from "../shared/photo-bedroom-coverage-logic";
 
 const MODEL = "claude-sonnet-4-6";
 
@@ -37,6 +46,8 @@ const COMMUNITY_SAMPLE_CAP = 12;
 const UNIT_INTERIOR_TARGET = 8;
 const COMMUNITY_ANCHOR_COUNT = 2;
 const TOTAL_IMAGE_CAP = 32;
+const BEDROOM_FOLDER_CAP = 150;
+const BEDROOM_VISION_MAX = 10;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ANTHROPIC_TIMEOUT_MS = 90_000;
 
@@ -48,10 +59,13 @@ export type CheckGroupInput = {
   folder: string;
   filenames?: string[];
   captions?: Record<string, string>;
+  expectedBedrooms?: number;
 };
 
 export type PhotoCommunityCheckRequest = {
   expectedCommunity?: string;
+  /** Combined listing bedroom count (e.g. 6 for two 3BR units). */
+  expectedListingBedrooms?: number;
   groups: CheckGroupInput[];
 };
 
@@ -114,6 +128,7 @@ export type PhotoCommunityCheckResult = {
   unitsSameCommunity: "yes" | "no" | "n/a";
   community: CommunityGroupResult | null;
   units: UnitGroupResult[];
+  bedroomCoverage: ListingBedroomCoverage | null;
   duplicates: DuplicateFinding[];
   model: string;
   photosChecked: number;
@@ -401,6 +416,127 @@ function asFlags(v: unknown, samples: SampledPhoto[]): FlaggedPhoto[] {
   return out;
 }
 
+type BedroomPhotoSample = {
+  id: string;
+  filename: string;
+  caption?: string;
+  buffer: Buffer;
+  mime: string;
+  hash?: string;
+};
+
+function pickClusterRepresentative(cluster: BedroomPhotoSample[]): BedroomPhotoSample {
+  const nonAlt = cluster.find((p) => !/alt view/i.test(p.caption ?? ""));
+  return nonAlt ?? cluster[0];
+}
+
+function buildBedroomVisionInstruction(unitLabel: string): string {
+  return [
+    `You are identifying DISTINCT BEDROOMS in unit photos for "${unitLabel}".`,
+    "Each photo ID is ONE representative shot of a visually distinct bedroom.",
+    "Multiple angles of the SAME room were already merged — treat each ID as a separate room.",
+    "",
+    "For EACH photo ID, return:",
+    '  - bedDescription: concise bedding summary (e.g. "Two Twin Beds", "King Bed", "Queen Bed + Bunk").',
+    '  - isBedroom: "yes" if this is clearly a bedroom; "no" if mislabeled (living room, office, etc.).',
+    "",
+    "Respond with ONLY minified JSON:",
+    '{"rooms":[{"id":"BR1","bedDescription":"Two Twin Beds","isBedroom":"yes"}]}',
+  ].join("\n");
+}
+
+async function visionBedroomDescriptions(
+  apiKey: string,
+  unitLabel: string,
+  representatives: BedroomPhotoSample[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!apiKey || representatives.length === 0) return out;
+  const content: any[] = [];
+  for (const s of representatives) {
+    const cap = s.caption ? ` · caption: "${s.caption}"` : "";
+    content.push({ type: "text", text: `--- BEDROOM representative ${s.id}${cap} ---` });
+    content.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
+  }
+  content.push({ type: "text", text: buildBedroomVisionInstruction(unitLabel) });
+  try {
+    const { parsed } = await callVisionJson(apiKey, content);
+    const rows = Array.isArray(parsed.rooms) ? parsed.rooms : [];
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const id = String((row as any).id ?? "").trim();
+      if (!id) continue;
+      if (asYesNo((row as any).isBedroom) === "no") continue;
+      const desc = String((row as any).bedDescription ?? "").trim();
+      if (desc) out.set(id, desc);
+    }
+  } catch {
+    // caption-only fallback
+  }
+  return out;
+}
+
+async function loadBedroomPhotosForUnit(
+  group: CheckGroupInput,
+  idPrefix: string,
+): Promise<BedroomPhotoSample[]> {
+  const { chosen } = await resolveGroupFiles(group, BEDROOM_FOLDER_CAP, false);
+  const bedroomFiles = chosen.filter((f) => isBedroomPhotoCaption(f.caption));
+  const dir = publicPhotoDir(group.folder);
+  const out: BedroomPhotoSample[] = [];
+  let n = 0;
+  for (const f of bedroomFiles) {
+    n += 1;
+    const abs = path.join(dir, f.filename);
+    try {
+      const buffer = await fs.promises.readFile(abs);
+      if (buffer.length === 0 || buffer.length > MAX_IMAGE_BYTES) continue;
+      out.push({
+        id: `${idPrefix}${n}`,
+        filename: f.filename,
+        caption: f.caption,
+        buffer,
+        mime: mimeForBuffer(buffer, f.filename),
+      });
+    } catch {
+      // skip unreadable
+    }
+  }
+  for (const s of out) {
+    try {
+      s.hash = await computeDhash(s.buffer);
+    } catch {
+      s.hash = undefined;
+    }
+  }
+  return out;
+}
+
+async function analyzeBedroomCoverage(
+  apiKey: string,
+  unitInputs: CheckGroupInput[],
+  expectedListingBedrooms: number | null,
+): Promise<ListingBedroomCoverage> {
+  const unitResults = [];
+  for (let u = 0; u < unitInputs.length; u++) {
+    const g = unitInputs[u];
+    const samples = await loadBedroomPhotosForUnit(g, `BR${u + 1}-`);
+    const clusters = clusterBedroomPhotosByHash(samples);
+    const representatives = clusters.map(pickClusterRepresentative).slice(0, BEDROOM_VISION_MAX);
+    const visionDesc = await visionBedroomDescriptions(apiKey, g.label, representatives);
+    const rooms = clusters.map((cluster, i) => {
+      const rep = pickClusterRepresentative(cluster);
+      return summarizeBedroomCluster(cluster, i, visionDesc.get(rep.id));
+    });
+    const expected =
+      typeof g.expectedBedrooms === "number" && g.expectedBedrooms > 0
+        ? g.expectedBedrooms
+        : parseExpectedBedroomsFromLabel(g.label);
+    unitResults.push(computeUnitBedroomCoverage(g.label, g.folder, rooms, expected));
+  }
+  return computeListingBedroomCoverage(unitResults, expectedListingBedrooms);
+}
+
 // ── Main entry ──────────────────────────────────────────────────────────────
 
 export async function runPhotoCommunityCheck(
@@ -409,6 +545,10 @@ export async function runPhotoCommunityCheck(
   startedAt: number,
 ): Promise<PhotoCommunityCheckResult> {
   const expectedCommunity = String(request.expectedCommunity ?? "").trim();
+  const expectedListingBedrooms =
+    typeof request.expectedListingBedrooms === "number" && request.expectedListingBedrooms > 0
+      ? request.expectedListingBedrooms
+      : null;
   const rawGroups = Array.isArray(request.groups) ? request.groups : [];
   const communityInputs = rawGroups.filter((g) => g?.role === "community" && g?.folder);
   const unitInputs = rawGroups.filter((g) => g?.role === "unit" && g?.folder);
@@ -477,6 +617,7 @@ export async function runPhotoCommunityCheck(
       unitsSameCommunity: unitInputs.length >= 2 ? "no" : "n/a",
       community: null,
       units: [],
+      bedroomCoverage: null,
       duplicates,
       model: MODEL,
       photosChecked: 0,
@@ -496,6 +637,7 @@ export async function runPhotoCommunityCheck(
       unitsSameCommunity: unitInputs.length >= 2 ? "no" : "n/a",
       community: null,
       units: [],
+      bedroomCoverage: null,
       duplicates,
       model: MODEL,
       photosChecked,
@@ -651,6 +793,18 @@ export async function runPhotoCommunityCheck(
     }
   }
 
+  // ── Bedroom coverage (all unit bedroom photos, dHash de-dupe) ─────────────
+  let bedroomCoverage: ListingBedroomCoverage | null = null;
+  if (unitInputs.length > 0) {
+    try {
+      bedroomCoverage = await analyzeBedroomCoverage(apiKey, unitInputs, expectedListingBedrooms);
+    } catch (e: any) {
+      warning = warning
+        ? `${warning}; bedroom coverage: ${e?.message ?? e}`
+        : `Bedroom coverage failed: ${e?.message ?? e}`;
+    }
+  }
+
   // ── Verdict synthesis ─────────────────────────────────────────────────────
   const concerns: string[] = [];
   let hasFail = false;
@@ -682,6 +836,24 @@ export async function runPhotoCommunityCheck(
     if (u.junk.length > 0) warn(`${u.label} has ${u.junk.length} junk/mis-filed photo(s).`);
   }
 
+  if (bedroomCoverage) {
+    for (const u of bedroomCoverage.units) {
+      if (u.matchesListing === "no") {
+        fail(`${u.label}: bedroom photos ${u.bedroomsFound}/${u.expectedBedrooms ?? "?"} — ${u.reason}`);
+      } else if (u.bedroomsFound === 0 && u.expectedBedrooms) {
+        warn(`${u.label}: no bedroom-tagged photos found (expected ${u.expectedBedrooms} bedrooms).`);
+      }
+    }
+    if (bedroomCoverage.matchesListing === "no") {
+      fail(`Listing bedroom photos: ${bedroomCoverage.bedroomsFoundCombined}/${bedroomCoverage.expectedListingBedrooms} — ${bedroomCoverage.reason}`);
+    } else if (
+      bedroomCoverage.expectedListingBedrooms != null
+      && bedroomCoverage.bedroomsFoundCombined < bedroomCoverage.expectedListingBedrooms
+    ) {
+      warn(bedroomCoverage.reason);
+    }
+  }
+
   const crossDupes = duplicates.filter((d) => d.scope === "cross-folder");
   if (crossDupes.length > 0) warn(`${crossDupes.length} photo(s) appear in more than one folder.`);
 
@@ -707,14 +879,21 @@ export async function runPhotoCommunityCheck(
   const verdict: "pass" | "warn" | "fail" = hasFail ? "fail" : hasWarn ? "warn" : "pass";
 
   let summary: string;
+  const bedroomHeadline = bedroomCoverage?.expectedListingBedrooms
+    ? ` Bedroom photos: ${bedroomCoverage.bedroomsFoundCombined}/${bedroomCoverage.expectedListingBedrooms}.`
+    : bedroomCoverage && bedroomCoverage.bedroomsFoundCombined > 0
+    ? ` ${bedroomCoverage.bedroomsFoundCombined} distinct bedroom(s) detected across units.`
+    : "";
   if (verdict === "pass") {
     summary = units.length >= 2
-      ? `Confirmed: community folder and all ${units.length} units are the same community (${expectedCommunity || community?.identifiedCommunity || "verified"}).`
-      : `Confirmed: community folder and unit photos are the same community.`;
+      ? `Confirmed: community folder and all ${units.length} units are the same community (${expectedCommunity || community?.identifiedCommunity || "verified"}).${bedroomHeadline}`
+      : `Confirmed: community folder and unit photos are the same community.${bedroomHeadline}`;
   } else if (hasFail) {
-    summary = "Problem found — one or more photo sets are NOT the same community. Review details below.";
+    summary = bedroomCoverage?.matchesListing === "no"
+      ? `Problem found — bedroom photo coverage is incomplete (${bedroomCoverage.bedroomsFoundCombined}/${bedroomCoverage.expectedListingBedrooms} listing bedrooms). Review details below.`
+      : "Problem found — one or more photo sets are NOT the same community. Review details below.";
   } else {
-    summary = "Passed core community check with minor warnings — review flagged items.";
+    summary = `Passed core community check with minor warnings — review flagged items.${bedroomHeadline}`;
   }
 
   return {
@@ -727,6 +906,7 @@ export async function runPhotoCommunityCheck(
     unitsSameCommunity,
     community,
     units,
+    bedroomCoverage,
     duplicates,
     model: MODEL,
     photosChecked,
