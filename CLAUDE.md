@@ -43,6 +43,29 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-18 (bulk combo listings: "always find and apply an address" — reverse-geocode
+  rescue): Operator reported bulk add-combo-listing jobs frequently FAIL the address
+  pre-check ("No usable street address"). Diagnosed as a recall gap in the
+  2026-06-17 `discoverCommunityStreetAddress` (SearchAPI google_maps): it only
+  accepted a candidate whose map `address` already had a numbered street, but
+  google_maps usually returns a resort's correct `gps_coordinates` + name-matched
+  title with the `address` as just the locality ("Princeville, HI") → direct street
+  path found nothing → fail. FIX (surgical, additive, on branch
+  `claude/combo-listings-address-resolution-vivwg9`): a precision-safe reverse-geocode
+  RESCUE. New pure `selectCoordinateFallbackCandidate` (in
+  `server/community-address-discovery.ts`) surfaces the first title-matched (SAME
+  whole-word gate that keeps Alii Kai ≠ Halii Kai) streetless place that exposes
+  coordinates; when no direct street hit is found across all queries,
+  `reverseGeocodeToStreetAddress` (NEW in `server/walking-distance.ts`, Nominatim
+  reverse, free/no-key, shares the existing 1-req/sec throttle) snaps those
+  coordinates to a real numbered street. A real direct street always wins; the title
+  gate having already confirmed the resort makes the coordinates trustworthy, so the
+  rescue can't apply a wrong-resort street. Discovery still runs ONLY for non-curated
+  resorts so a curated rule is never overridden. Verified:
+  `tests/community-address-discovery.test.ts` 21/0 (+4 new), full `npm test` green,
+  `npm run build` clean, `npm run check` 0 new TS errors. Could NOT live-smoke (no
+  SEARCHAPI key in the cloud session) — confirm on the next bulk sweep.
+
 - 2026-06-17 (guest inbox: "Do buy-in search" button — live read-only buy-in
   search on an inquiry): Operator asked to run the EXACT Operations "Auto-fill
   cheapest" search from inside a guest inquiry (sidecar + cheapest combos) and just

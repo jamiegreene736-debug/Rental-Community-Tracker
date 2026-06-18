@@ -5,6 +5,7 @@
 // captured 2026-06-17 for the resorts that failed the live sweep.
 import {
   selectDiscoveredStreet,
+  selectCoordinateFallbackCandidate,
   titleMatchesResort,
   distinctiveResortTokens,
   type MapsAddressCandidate,
@@ -89,6 +90,40 @@ check("no usable street → null",
 // numbered business near the resort).
 check("matching street but wrong title → null",
   selectDiscoveredStreet([{ title: "Joe's Coffee Shack", address: "123 Main St, Princeville, HI 96722" }], "Puu Poa", "q") === null);
+
+// ── selectCoordinateFallbackCandidate: the reverse-geocode rescue input ────────
+// The COMMON miss: google_maps knows the resort (name-matched title + coordinates)
+// but returns only the locality, no street. That place must be surfaced as a
+// coordinate fallback so the caller can reverse-geocode it.
+const streetless: MapsAddressCandidate[] = [
+  { title: "Alii Kai Princeville condo", address: "Princeville, HI 96722", gps_coordinates: { latitude: 22.222, longitude: -159.486 } },
+];
+const cf = selectCoordinateFallbackCandidate(streetless, "Alii Kai");
+check("streetless name-matched place yields a coordinate fallback",
+  cf?.lat === 22.222 && cf?.lng === -159.486, cf);
+
+// A WRONG-resort streetless place is rejected by the same title gate (no Halii-Kai
+// coordinates leak into an Alii Kai lookup).
+check("wrong-resort streetless place is rejected",
+  selectCoordinateFallbackCandidate(
+    [{ title: "Halii Kai at Waikoloa", address: "Waikoloa, HI 96738", gps_coordinates: { latitude: 19.9, longitude: -155.8 } }],
+    "Alii Kai",
+  ) === null);
+
+// A place that ALREADY has a usable street is NOT a coordinate fallback — the
+// direct street path owns it (so we never reverse-geocode when we have a real street).
+check("candidate with a real street is not a coordinate fallback",
+  selectCoordinateFallbackCandidate(
+    [{ title: "Puu Poa Condos", address: "5454 Ka Haku Rd, Princeville, HI 96722", gps_coordinates: { latitude: 22.2, longitude: -159.5 } }],
+    "Puu Poa",
+  ) === null);
+
+// No coordinates → no fallback (nothing to reverse-geocode).
+check("streetless place without coordinates yields null",
+  selectCoordinateFallbackCandidate(
+    [{ title: "Some Resort", address: "Princeville, HI 96722" }],
+    "Some Resort",
+  ) === null);
 
 console.log(`\ncommunity-address-discovery: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

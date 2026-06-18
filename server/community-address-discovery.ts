@@ -15,6 +15,15 @@
 // resorts OSM/Nominatim doesn't. It is NOT a substitute for a curated rule — a
 // curated rule still wins (and is still validated) upstream.
 //
+// REVERSE-GEOCODE RESCUE (added because the map address is OFTEN just a locality):
+// google_maps frequently knows a resort's exact location — we get correct
+// coordinates and a name-matched title — but returns its `address` as the bare town
+// ("Princeville, HI 96722") with no house number, so the direct street path finds
+// nothing and the item failed. When that happens we now take the coordinates of the
+// title-matched place and reverse-geocode them (Nominatim, free) into a real numbered
+// street. This is the lever that lets discovery resolve nearly every real resort
+// rather than only the minority whose map card already carries a street.
+//
 // PRECISION over recall: a WRONG address is worse than a missing one (it would save
 // a real listing pointing at the wrong place — see the Alii Kai/Halii Kai mix-up
 // that motivated the `communityAddressRuleForName` word-boundary fix). So a
@@ -29,6 +38,7 @@ import {
   normalizeCommunityAddressToken,
   streetRootFromAddress,
 } from "@shared/community-addresses";
+import { reverseGeocodeToStreetAddress } from "./walking-distance";
 
 export type DiscoveredStreetAddress = {
   street: string;
@@ -37,7 +47,19 @@ export type DiscoveredStreetAddress = {
   query: string;
 };
 
-export type MapsAddressCandidate = { title?: string | null; address?: string | null };
+export type MapsAddressCandidate = {
+  title?: string | null;
+  address?: string | null;
+  gps_coordinates?: { latitude?: number | null; longitude?: number | null } | null;
+};
+
+/** A name-matched map place that carries coordinates but NO usable street. */
+export type CoordinateFallbackCandidate = {
+  lat: number;
+  lng: number;
+  matchedTitle: string;
+  fullAddress: string;
+};
 
 // Generic descriptors that carry no identifying signal on their own. Stripped from
 // the resort name before token-matching so "Waipouli Beach Resort" keys off
@@ -96,6 +118,37 @@ export function selectDiscoveredStreet(
   return null;
 }
 
+/**
+ * Pick the first map candidate whose TITLE matches the resort (same precision gate
+ * as `selectDiscoveredStreet`) but whose `address` is NOT a usable numbered street,
+ * provided it exposes GPS coordinates. This is the input to the reverse-geocode
+ * rescue: google_maps very often knows a resort's location (so we have correct
+ * coordinates + a name-matched title) yet only returns its locality ("Princeville,
+ * HI") with no house number — the single most common discovery miss. Because the
+ * title gate has ALREADY confirmed the resort identity, the coordinates belong to
+ * the correct place, so reverse-geocoding them is precision-safe (a streetless
+ * wrong-resort hit is still rejected by the title gate, exactly as before).
+ *
+ * Pure / no network so it stays unit-testable. Candidates already carrying a real
+ * street are skipped here — those are handled by `selectDiscoveredStreet`.
+ */
+export function selectCoordinateFallbackCandidate(
+  candidates: MapsAddressCandidate[],
+  resortName: string,
+): CoordinateFallbackCandidate | null {
+  for (const c of candidates) {
+    if (!titleMatchesResort(c?.title, resortName)) continue;
+    const fullAddress = String(c?.address ?? "").trim();
+    const street = streetRootFromAddress(fullAddress);
+    if (street && isLikelyStreetAddress(street)) continue; // street path owns this one
+    const lat = Number(c?.gps_coordinates?.latitude);
+    const lng = Number(c?.gps_coordinates?.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    return { lat, lng, matchedTitle: String(c?.title ?? "").trim(), fullAddress };
+  }
+  return null;
+}
+
 function buildQueries(communityName: string, city: string, state: string): string[] {
   const name = String(communityName ?? "").trim();
   const c = String(city ?? "").trim();
@@ -125,10 +178,20 @@ async function fetchMapsCandidates(query: string, apiKey: string): Promise<MapsA
   const data = (await r.json()) as any;
   const out: MapsAddressCandidate[] = [];
   // `place_results` = a single exact hit; `local_results` = ranked POI list. Both
-  // carry `title` + `address`. Scan place_results first, then the list in order.
-  if (data?.place_results) out.push({ title: data.place_results.title, address: data.place_results.address });
+  // carry `title` + `address` + `gps_coordinates` (the coords feed the reverse-geocode
+  // rescue for streetless-but-name-matched places). Scan place_results first, then
+  // the list in order.
+  if (data?.place_results) {
+    out.push({
+      title: data.place_results.title,
+      address: data.place_results.address,
+      gps_coordinates: data.place_results.gps_coordinates,
+    });
+  }
   if (Array.isArray(data?.local_results)) {
-    for (const lr of data.local_results) out.push({ title: lr?.title, address: lr?.address });
+    for (const lr of data.local_results) {
+      out.push({ title: lr?.title, address: lr?.address, gps_coordinates: lr?.gps_coordinates });
+    }
   }
   return out;
 }
@@ -159,6 +222,11 @@ export async function discoverCommunityStreetAddress(input: {
 
   let found: DiscoveredStreetAddress | null = null;
   let anyTransientError = false;
+  // Best streetless-but-name-matched place seen across all queries; reverse-geocoded
+  // into a real street only if NO direct street hit is found (a real street always
+  // wins). Captured from the most-specific query that surfaced it.
+  let coordsFallback: CoordinateFallbackCandidate | null = null;
+  let coordsQuery = "";
   for (const query of buildQueries(communityName, city, state)) {
     let candidates: MapsAddressCandidate[] = [];
     try {
@@ -170,6 +238,33 @@ export async function discoverCommunityStreetAddress(input: {
     }
     const hit = selectDiscoveredStreet(candidates, communityName, query);
     if (hit) { found = hit; break; }
+    if (!coordsFallback) {
+      const cf = selectCoordinateFallbackCandidate(candidates, communityName);
+      if (cf) { coordsFallback = cf; coordsQuery = query; }
+    }
+  }
+
+  // RESCUE: no direct numbered-street hit, but a correctly-named place exposed
+  // coordinates — reverse-geocode the resort's own location into a real street. This
+  // is precision-safe (the title gate already confirmed the resort) and converts the
+  // most common miss (google_maps returns only the locality) into a usable address.
+  // A reverse-geocode throw is transient (don't negative-cache); a clean null just
+  // means the centroid has no house-numbered road and we fail exactly as before.
+  if (!found && coordsFallback) {
+    try {
+      const street = await reverseGeocodeToStreetAddress(coordsFallback.lat, coordsFallback.lng);
+      if (street && isLikelyStreetAddress(street)) {
+        found = {
+          street: streetRootFromAddress(street),
+          fullAddress: coordsFallback.fullAddress || street,
+          matchedTitle: coordsFallback.matchedTitle,
+          query: `${coordsQuery} (reverse-geocoded)`,
+        };
+      }
+    } catch (e: any) {
+      anyTransientError = true;
+      console.warn(`[address-discovery] reverse-geocode "${communityName}": ${e?.message ?? e}`);
+    }
   }
 
   // Only cache a DEFINITIVE outcome: a hit, or a clean "no match" where every
