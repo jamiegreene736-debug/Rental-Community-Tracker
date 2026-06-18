@@ -990,6 +990,28 @@ type PhotoCommunityCheckResult = {
   unitsSameCommunity?: "yes" | "no" | "n/a";
   community: CommunityCheckGroup | null;
   units: CommunityCheckGroup[];
+  bedroomCoverage?: {
+    expectedListingBedrooms: number | null;
+    bedroomsFoundCombined: number;
+    matchesListing: "yes" | "no" | "n/a";
+    reason: string;
+    units: Array<{
+      label: string;
+      folder: string;
+      expectedBedrooms: number | null;
+      bedroomsFound: number;
+      bedroomPhotosTotal: number;
+      matchesListing: "yes" | "no" | "n/a";
+      reason: string;
+      rooms: Array<{
+        name: string;
+        description: string;
+        photoCount: number;
+        photoIds: string[];
+        altViewCount: number;
+      }>;
+    }>;
+  } | null;
   duplicates: CommunityCheckDuplicate[];
   model: string;
   photosChecked: number;
@@ -3193,7 +3215,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           return m ? { folder: m[1], filename: m[2] } : null;
         } catch { return null; }
       };
-      type ReqGroup = { role: "community" | "unit"; label: string; folder: string; filenames: string[]; captions: Record<string, string> };
+      type ReqGroup = {
+        role: "community" | "unit";
+        label: string;
+        folder: string;
+        filenames: string[];
+        captions: Record<string, string>;
+        expectedBedrooms?: number;
+      };
       const byFolder = new Map<string, ReqGroup>();
       let expectedCommunity = "";
       for (const p of photos) {
@@ -3212,6 +3241,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         if (!g.filenames.includes(parsed.filename)) g.filenames.push(parsed.filename);
         if (p.caption) g.captions[parsed.filename] = p.caption;
       }
+      for (const g of byFolder.values()) {
+        if (g.role !== "unit") continue;
+        const m = g.label.match(/\((\d+)\s*BR\)/i);
+        if (m) g.expectedBedrooms = Number(m[1]);
+      }
       const groups = Array.from(byFolder.values())
         .sort((a, b) => (a.role === b.role ? a.label.localeCompare(b.label) : a.role === "community" ? -1 : 1));
       if (groups.length === 0) {
@@ -3219,10 +3253,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         setCommunityCheckPhase("error");
         return;
       }
+      const expectedListingBedrooms =
+        typeof propertyData?.bedrooms === "number" && propertyData.bedrooms > 0
+          ? propertyData.bedrooms
+          : groups
+              .filter((g) => g.role === "unit" && g.expectedBedrooms)
+              .reduce((s, g) => s + (g.expectedBedrooms ?? 0), 0) || undefined;
       const resp = await fetch("/api/builder/photo-community-check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ propertyId, expectedCommunity, groups }),
+        body: JSON.stringify({ propertyId, expectedCommunity, expectedListingBedrooms, groups }),
       });
       const data = await resp.json().catch(() => null) as PhotoCommunityCheckResult | { error?: string } | null;
       if (!resp.ok || !data) {
@@ -3236,7 +3276,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setCommunityCheckError(e?.message ?? String(e));
       setCommunityCheckPhase("error");
     }
-  }, [photos, propertyId]);
+  }, [photos, propertyId, propertyData?.bedrooms]);
 
   const amenities = propertyData?.amenities || [];
   const descriptions = effectivePropertyData?.descriptions;
@@ -7161,14 +7201,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     {communityCheckPhase === "running" ? "🔎 Checking photos…" : "🔎 Check photo community"}
                                   </button>
                                   <span style={{ fontSize: 11, color: "#64748b", flex: 1, minWidth: 220 }}>
-                                    Builds a community profile from the folder photos, then checks 5+ interior photos per unit against it. Every answer is Yes or No.
+                                    Confirms same community, then counts distinct bedrooms per unit (merges duplicate angles) and compares to the listing bedroom count.
                                   </span>
                                 </div>
 
                                 {communityCheckPhase === "running" && (
                                   <div style={{ fontSize: 11, color: "#0e7490", marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
                                     <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#06b6d4", animation: "glb-blink 1s infinite" }} />
-                                    Analyzing community folder, then 5+ interior photos per unit — usually 30-60 seconds…
+                                    Analyzing community folder, unit community match, and bedroom photo coverage per unit — usually 30-90 seconds…
                                   </div>
                                 )}
 
@@ -7304,6 +7344,64 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         ) : null}
                                       </div>
                                       )}
+
+                                      {/* Bedroom photo coverage — the operator's x/x listing bedrooms question */}
+                                      {r.bedroomCoverage && r.bedroomCoverage.units.length > 0 && (() => {
+                                        const bc = r.bedroomCoverage!;
+                                        const expected = bc.expectedListingBedrooms;
+                                        const found = bc.bedroomsFoundCombined;
+                                        const covStyle =
+                                          bc.matchesListing === "yes"
+                                            ? { bg: "#dcfce7", fg: "#15803d", label: expected ? `✓ ${found}/${expected} bedroom photos` : `✓ ${found} bedroom(s) detected` }
+                                            : bc.matchesListing === "no"
+                                            ? { bg: "#fee2e2", fg: "#b91c1c", label: expected ? `✗ ${found}/${expected} bedroom photos` : `✗ Incomplete bedroom coverage` }
+                                            : { bg: "#f1f5f9", fg: "#475569", label: `${found} bedroom(s) detected` };
+                                        return (
+                                          <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px", marginBottom: 8 }}>
+                                            <div style={{ fontSize: 10.5, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>
+                                              Bedroom photo coverage
+                                            </div>
+                                            <span style={{ ...badge(covStyle), fontSize: 13, padding: "3px 12px", borderRadius: 12 }}>{covStyle.label}</span>
+                                            <div style={{ fontSize: 11.5, color: "#64748b", marginTop: 6 }}>{bc.reason}</div>
+                                            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                                              {bc.units.map((u, ui) => {
+                                                const uStyle =
+                                                  u.matchesListing === "yes"
+                                                    ? { bg: "#dcfce7", fg: "#15803d" }
+                                                    : u.matchesListing === "no"
+                                                    ? { bg: "#fee2e2", fg: "#b91c1c" }
+                                                    : { bg: "#f1f5f9", fg: "#475569" };
+                                                const uLabel = u.expectedBedrooms
+                                                  ? `${u.bedroomsFound}/${u.expectedBedrooms} bedrooms`
+                                                  : `${u.bedroomsFound} bedroom(s)`;
+                                                return (
+                                                  <div key={ui} style={{ borderTop: ui > 0 ? "1px solid #f1f5f9" : undefined, paddingTop: ui > 0 ? 8 : 0 }}>
+                                                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+                                                      <span style={{ fontWeight: 600, fontSize: 12, color: "#0f172a" }}>{u.label}</span>
+                                                      <span style={{ ...badge(uStyle), fontSize: 10.5 }}>{uLabel}</span>
+                                                      <span style={{ fontSize: 10, color: "#94a3b8" }}>{u.bedroomPhotosTotal} bedroom photo{u.bedroomPhotosTotal === 1 ? "" : "s"}</span>
+                                                    </div>
+                                                    {u.rooms.length > 0 ? (
+                                                      <ul style={{ margin: "4px 0 0 0", paddingLeft: 18, fontSize: 11.5, color: "#334155" }}>
+                                                        {u.rooms.map((room, ri) => (
+                                                          <li key={ri}>
+                                                            <b>{room.name}:</b> {room.description}
+                                                            {room.photoCount > 1 ? (
+                                                              <span style={{ color: "#94a3b8" }}> ({room.photoCount} photos — same room)</span>
+                                                            ) : null}
+                                                          </li>
+                                                        ))}
+                                                      </ul>
+                                                    ) : (
+                                                      <div style={{ fontSize: 11, color: "#b45309", marginTop: 4 }}>No bedroom-tagged photos found in this unit folder.</div>
+                                                    )}
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
+                                          </div>
+                                        );
+                                      })()}
 
                                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                         <span style={{ ...badge(vStyle), fontSize: 12, padding: "2px 10px" }}>{vStyle.label}</span>
