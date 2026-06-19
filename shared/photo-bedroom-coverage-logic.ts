@@ -93,6 +93,10 @@ export function detectBedTypeFromCaption(caption: string): string | null {
   if (/\bking beds\b/.test(lower)) return "Two King Beds";
   if (/\bdouble beds\b/.test(lower)) return "Two Double Beds";
   if (/\bfull beds\b/.test(lower)) return "Two Full Beds";
+  // "Queen Bedroom With Two Beds" = two queens, not one queen + generic beds.
+  if (/\bqueen\b/.test(lower) && /\btwo\s+beds\b/.test(lower)) return "Two Queen Beds";
+  if (/\bking\b/.test(lower) && /\btwo\s+beds\b/.test(lower)) return "Two King Beds";
+  if (/\btwin\b/.test(lower) && /\btwo\s+beds\b/.test(lower)) return "Two Twin Beds";
   if (/\bbunk\b/.test(lower)) return "Bunk Beds";
   if (/\bking\b/.test(lower)) return "King Bed";
   if (/\bqueen\b/.test(lower)) return "Queen Bed";
@@ -308,6 +312,34 @@ export function bedroomClustersSameRoom<T extends BedroomClusterInput>(a: T[], b
   if (bMulti && !aType && clusterMentionsMultipleBeds(a)) return true;
 
   return false;
+}
+
+/**
+ * Merge ALL bedroom clusters that are confidently the same physical room.
+ * Unlike mergeBedroomClustersByCaption, this is not bounded by expected count —
+ * used when assigning Master Bedroom / Alt View labels after vision relabel.
+ */
+export function mergeBedroomClustersSameRoom<T extends BedroomClusterInput>(
+  clusters: T[][],
+): { clusters: T[][]; mergedCount: number } {
+  const groups = clusters.map((c) => [...c]);
+  let mergedCount = 0;
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    outer: for (let i = 0; i < groups.length; i++) {
+      for (let j = i + 1; j < groups.length; j++) {
+        if (bedroomClustersSameRoom(groups[i], groups[j])) {
+          groups[i] = [...groups[i], ...groups[j]];
+          groups.splice(j, 1);
+          mergedCount += 1;
+          progressed = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return { clusters: groups, mergedCount };
 }
 
 /**
