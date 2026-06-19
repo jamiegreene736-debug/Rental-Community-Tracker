@@ -409,7 +409,7 @@ async function callVisionJson(
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "google_lens+claude",
+      model: MODEL,
       max_tokens: 3000,
       messages: [{ role: "user", content }],
     }),
@@ -468,19 +468,49 @@ function sampleFor(samples: SampledPhoto[], id: string): SampledPhoto | undefine
   return samples.find((s) => s.id === id);
 }
 
+/** Map a vision JSON row id back to a sampled photo (ordinal + caption fallbacks). */
+function resolveSampleForVisionRow(
+  id: string,
+  rowIndex: number,
+  samples: SampledPhoto[],
+): SampledPhoto | undefined {
+  const direct = sampleFor(samples, id);
+  if (direct) return direct;
+
+  const ordinal = id.match(/^U(\d+)-(\d+)$/i);
+  if (ordinal) {
+    const idx = Number(ordinal[2]) - 1;
+    if (idx >= 0 && idx < samples.length) return samples[idx];
+  }
+
+  const idNorm = id.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (idNorm) {
+    const captionHit = samples.find((s) => {
+      const cap = (s.caption ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      return cap && (cap.includes(idNorm) || idNorm.includes(cap));
+    });
+    if (captionHit) return captionHit;
+  }
+
+  if (rowIndex >= 0 && rowIndex < samples.length) return samples[rowIndex];
+  return undefined;
+}
+
 function mapPhotoVerdicts(v: unknown, samples: SampledPhoto[]): PhotoVerdict[] {
   if (!Array.isArray(v)) return [];
   const out: PhotoVerdict[] = [];
-  for (const row of v) {
+  for (let i = 0; i < v.length; i++) {
+    const row = v[i];
     if (!row || typeof row !== "object") continue;
-    const id = String((row as any).id ?? "").trim();
+    const id = String((row as any).id ?? samples[i]?.id ?? "").trim();
     if (!id) continue;
-    const sample = sampleFor(samples, id);
+    const sample = resolveSampleForVisionRow(id, i, samples);
+    if (!sample) continue;
     out.push({
-      id,
-      folder: sample?.folder,
-      filename: sample?.filename,
-      caption: sample?.caption ?? captionFor(samples, id),
+      id: sample.id,
+      folder: sample.folder,
+      filename: sample.filename,
+      caption: sample.caption ?? captionFor(samples, id),
       match: asYesNo((row as any).match ?? (row as any).samePlace),
       reason: String((row as any).reason ?? "").trim() || "flagged",
     });
@@ -578,14 +608,31 @@ async function verifyUnitAgainstCommunity(
 function asFlags(v: unknown, samples: SampledPhoto[]): FlaggedPhoto[] {
   if (!Array.isArray(v)) return [];
   const out: FlaggedPhoto[] = [];
-  for (const row of v) {
+  for (let i = 0; i < v.length; i++) {
+    const row = v[i];
     if (!row || typeof row !== "object") continue;
     const id = String((row as any).id ?? "").trim();
     const reason = String((row as any).reason ?? "").trim();
     if (!id) continue;
-    out.push({ id, caption: captionFor(samples, id), reason: reason || "flagged" });
+    const sample = resolveSampleForVisionRow(id, i, samples);
+    out.push({
+      id: sample?.id ?? id,
+      caption: sample?.caption ?? captionFor(samples, id),
+      reason: reason || "flagged",
+    });
   }
   return out;
+}
+
+function unitFailureVerdicts(samples: SampledPhoto[], reason: string): PhotoVerdict[] {
+  return samples.map((s) => ({
+    id: s.id,
+    folder: s.folder,
+    filename: s.filename,
+    caption: s.caption,
+    match: "uncertain" as const,
+    reason: `Unit check failed: ${reason}`,
+  }));
 }
 
 // ── Main entry ──────────────────────────────────────────────────────────────
@@ -757,7 +804,7 @@ export async function runPhotoCommunityCheck(
           interiorPhotosChecked: r.interiorSampled,
           sameAsCommunity: "no" as const,
           reason: errMsg,
-          photoVerdicts: [],
+          photoVerdicts: unitFailureVerdicts(r.sampled, errMsg),
           allSameUnit: true,
           outliers: [],
           junk: [],

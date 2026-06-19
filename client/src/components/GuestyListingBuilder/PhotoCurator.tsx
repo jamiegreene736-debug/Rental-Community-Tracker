@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { RotateCcw, RotateCw } from "lucide-react";
+import { normalizePhotoVerdictKey, photoVerdictKeyFromUrl } from "@shared/photo-verdict-keys";
 
 type PhotoIn = { url: string; caption?: string; source?: string };
 export type CoverCollageSelection = { left: PhotoIn; right: PhotoIn };
@@ -741,7 +742,9 @@ export default function PhotoCurator({
               gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
             }}>
               {section.photos.map((tile, tileIdx) => {
-                const verdictKey = tile.folder && tile.filename ? `${tile.folder}/${tile.filename}` : null;
+                const verdictKey =
+                  photoVerdictKeyFromUrl(tile.url)
+                  ?? (tile.folder && tile.filename ? normalizePhotoVerdictKey(tile.folder, tile.filename) : null);
                 const photoVerdict = verdictKey ? communityPhotoVerdicts?.[verdictKey] : undefined;
                 return (
                 <PhotoTile
