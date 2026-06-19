@@ -2262,6 +2262,53 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
   }, [selectedId, lastPushedPictures]);
 
+  // ── Photo reorder: persist the operator's drag-to-reorder for one gallery ──
+  // A gallery = one folder (a unit, or the community folder). The new order is
+  // saved on photo_labels.sort_order; refreshing the labels rebuilds
+  // propertyData.photos in that order — which is exactly the order the Guesty
+  // push sends WITHIN the gallery (across galleries it's Unit A → Unit B → …
+  // → Community, with the cover collage pushed separately as the first/cover
+  // picture). See shared/photo-order.ts + server reorder route.
+  const reorderSection = useCallback(
+    async (folder: string, ordered: Array<{ filename: string; label: string }>) => {
+      try {
+        const resp = await fetch(`/api/photo-labels/${encodeURIComponent(folder)}/reorder`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ order: ordered }),
+        });
+        if (!resp.ok) {
+          const err = (await resp.json().catch(() => ({}))) as any;
+          throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+        onPhotoOverridesChanged?.();
+      } catch (e: any) {
+        toast({ title: "Couldn't save photo order", description: e.message, variant: "destructive" });
+      }
+    },
+    [onPhotoOverridesChanged, toast],
+  );
+
+  const resetSectionOrder = useCallback(
+    async (folder: string) => {
+      try {
+        const resp = await fetch(`/api/photo-labels/${encodeURIComponent(folder)}/reorder`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reset: true }),
+        });
+        if (!resp.ok) {
+          const err = (await resp.json().catch(() => ({}))) as any;
+          throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+        onPhotoOverridesChanged?.();
+      } catch (e: any) {
+        toast({ title: "Couldn't reset photo order", description: e.message, variant: "destructive" });
+      }
+    },
+    [onPhotoOverridesChanged, toast],
+  );
+
   type PhotoPushResult = { successCount: number; total: number; shortfall: number; error?: string };
 
   const upscaleAndUpload = useCallback(async (photos: GuestyPropertyData["photos"], withUpscale: boolean): Promise<PhotoPushResult> => {
@@ -7707,6 +7754,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           photos={photos}
                           sourceUrlsByFolder={sourceUrlsByFolder}
                           onOverridesChanged={onPhotoOverridesChanged}
+                          onReorderSection={reorderSection}
+                          onResetSectionOrder={resetSectionOrder}
                           communityPhotoVerdicts={communityPhotoVerdicts}
                           coverCollageEnabled={photos.length >= 2}
                           coverCollageDisabledReason={!selectedId ? "Select a Guesty listing above to push the collage as cover." : null}

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { fallbackWalkForResort, type WalkResult } from "@shared/walking-distance";
+import { orderGallery } from "@shared/photo-order";
 import { useParams, useLocation } from "wouter";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -211,7 +212,7 @@ export default function Builder() {
     for (const u of property.units) if (u.photoFolder) folders.add(u.photoFolder);
     return Array.from(folders);
   }, [property]);
-  const { labelFor, isHidden, refresh: refreshPhotoLabels } = usePhotoLabels(allFolders);
+  const { labelFor, isHidden, categoryFor, sortOrderFor, refresh: refreshPhotoLabels } = usePhotoLabels(allFolders);
 
   // Walking-distance between units. Only meaningful for multi-unit
   // properties. Uses the shared fallback (per-resort minute defaults)
@@ -323,73 +324,67 @@ export default function Builder() {
       return undefined;
     };
 
-    const photos: Array<{ url: string; caption: string; source: string }> = [];
+    // Assemble the push/display photo order the operator asked for
+    // (2026-06-19): cover collage (pushed separately as the Guesty cover) →
+    // Unit A → Unit B → … → Community. WITHIN each gallery the photos default
+    // to a hero-first order (living / view / kitchen → bedrooms → baths → …
+    // for a unit; pool / beach / exterior → grounds → amenities → … for the
+    // community) and the operator can drag to reorder on the Photos tab — a
+    // manual order (photo_labels.sort_order) wins over the heuristic. The
+    // grouping (units-then-community) intentionally replaces the older
+    // community-opener / between-units interleave. See shared/photo-order.ts.
+    const getCategory = typeof categoryFor === "function" ? categoryFor : (() => null);
+    const getSortOrder = typeof sortOrderFor === "function" ? sortOrderFor : (() => null);
 
-    // Community photo bucket. Split into begin / end based on the static
-    // position hint (when we have one) and partition the "begin" list so we
-    // can thread one community tile between each unit's run — the published
-    // channels render better with a visual break between unit A and unit B.
-    const communityFolderFiles = folderFiles[property.communityPhotoFolder];
-    const communityFiles = Array.isArray(communityFolderFiles)
-      ? communityFolderFiles
-      : communityPhotos.map((p) => p.filename);
-    const knownComm = new Map(communityPhotos.map((p) => [p.filename, p]));
-    const communityBeginAll = communityFiles.filter((f) => (knownComm.get(f)?.position ?? "beginning") === "beginning");
-    const communityEnd      = communityFiles.filter((f) =>  knownComm.get(f)?.position === "end");
-    const communityBeginVisible = communityBeginAll.filter((f) => !hidden(property.communityPhotoFolder, f));
-
-    // Reserve N-1 tiles to sit between units (one separator per gap), and
-    // put the rest up-front as the "community opener" block. For the common
-    // 2-unit case with 6 community photos, that's 5 opener + 1 separator.
-    const unitCount = property.units.length;
-    const separatorsNeeded = Math.max(0, unitCount - 1);
-    const communityOpenerCount = Math.max(0, communityBeginVisible.length - separatorsNeeded);
-    const communityOpener    = communityBeginVisible.slice(0, communityOpenerCount);
-    const communitySeparators = communityBeginVisible.slice(communityOpenerCount);
-
-    const pushCommunity = (filename: string, bandLabel: string) => {
-      photos.push({
-        url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
-        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? captionFromFilename(filename),
-        source: bandLabel,
-      });
+    type PhotoEntry = {
+      url: string;
+      caption: string;
+      source: string;
+      text: string;            // ranking signal for the hero-first default
+      sortOrder: number | null;
+    };
+    const entryFor = (folder: string, filename: string, source: string): PhotoEntry => {
+      const caption = getLabel(folder, filename) ?? staticLabelFor(folder, filename) ?? captionFromFilename(filename);
+      return {
+        url: `${origin}/photos/${folder}/${filename}`,
+        caption,
+        source,
+        // Combine caption + labeler category + filename for the best chance
+        // at a meaningful category match in the hero-first default sort.
+        text: [caption, getCategory(folder, filename), filename].filter(Boolean).join(" "),
+        sortOrder: getSortOrder(folder, filename),
+      };
+    };
+    // Prefer the live folder listing (what's actually on disk after any
+    // rescrape), fall back to the static array. Hidden photos are dropped.
+    const visibleFiles = (folder: string, fallback: string[]): string[] => {
+      const live = folderFiles[folder];
+      return (Array.isArray(live) ? live : fallback).filter((f) => !hidden(folder, f));
     };
 
-    // Opener: community photos before the first unit.
-    for (const filename of communityOpener) {
-      pushCommunity(filename, `Community — ${property.complexName}`);
-    }
+    const photos: Array<{ url: string; caption: string; source: string }> = [];
 
+    // Units first, in unit order (A, B, …). Each unit gallery is ordered
+    // independently (hero-first by default; a manual drag wins).
     units.forEach((u, i) => {
-      // Prefer the live folder listing (what's actually on disk after any
-      // rescrape), fall back to the static u.photos array.
-      const unitFolderFiles = folderFiles[u.photoFolder];
+      const source = `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`;
       const unitPhotos = Array.isArray(u.photos) ? u.photos : [];
-      const files = Array.isArray(unitFolderFiles)
-        ? unitFolderFiles
-        : unitPhotos.map((p) => p.filename);
-      for (const filename of files) {
-        if (hidden(u.photoFolder, filename)) continue;
-        photos.push({
-          url: `${origin}/photos/${u.photoFolder}/${filename}`,
-          caption: getLabel(u.photoFolder, filename) ?? staticLabelFor(u.photoFolder, filename) ?? captionFromFilename(filename),
-          source: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
-        });
-      }
-      // After each unit (except the last one), insert one community
-      // separator so the published feed has a visual break between units.
-      if (i < units.length - 1 && communitySeparators[i]) {
-        pushCommunity(communitySeparators[i], `Community — ${property.complexName}`);
+      const files = visibleFiles(u.photoFolder, unitPhotos.map((p) => p.filename));
+      const entries = files.map((f) => entryFor(u.photoFolder, f, source));
+      for (const e of orderGallery(entries, "unit")) {
+        photos.push({ url: e.url, caption: e.caption, source: e.source });
       }
     });
 
-    for (const filename of communityEnd) {
-      if (hidden(property.communityPhotoFolder, filename)) continue;
-      photos.push({
-        url: `${origin}/photos/${property.communityPhotoFolder}/${filename}`,
-        caption: getLabel(property.communityPhotoFolder, filename) ?? staticLabelFor(property.communityPhotoFolder, filename) ?? captionFromFilename(filename),
-        source: `Community — ${property.complexName}`,
-      });
+    // Community last — one gallery, ordered the same way.
+    const communityFolder = property.communityPhotoFolder;
+    if (communityFolder) {
+      const communitySource = `Community — ${property.complexName}`;
+      const files = visibleFiles(communityFolder, communityPhotos.map((p) => p.filename));
+      const entries = files.map((f) => entryFor(communityFolder, f, communitySource));
+      for (const e of orderGallery(entries, "community")) {
+        photos.push({ url: e.url, caption: e.caption, source: e.source });
+      }
     }
 
     const parsedAddr = parseAddress(property.address);
@@ -474,7 +469,7 @@ export default function Builder() {
         instantBooking: true,
       },
     };
-  }, [property, pricing, propertyId, labelFor, isHidden, folderFiles, walkResult]);
+  }, [property, pricing, propertyId, labelFor, isHidden, categoryFor, sortOrderFor, folderFiles, walkResult]);
 
   if (!property) {
     if (draftLoading) {
