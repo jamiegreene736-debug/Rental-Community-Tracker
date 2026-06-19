@@ -2386,6 +2386,12 @@ export function getLastAutoFillJobForReservation(reservationId: string): AutoFil
   return id ? autoFillJobs.get(id) ?? null : null;
 }
 
+/** Drop the durable "last search" panel for a reservation (operator dismiss). */
+export function clearLastAutoFillSearchForReservation(reservationId: string): void {
+  cleanupStaleJobs();
+  lastJobByReservation.delete(reservationId);
+}
+
 export function cancelAutoFillJob(jobId: string): boolean {
   const job = autoFillJobs.get(jobId);
   if (!job) return false;
