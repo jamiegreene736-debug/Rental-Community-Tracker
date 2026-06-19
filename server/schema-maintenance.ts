@@ -498,4 +498,11 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS interruptions integer NOT NULL DEFAULT 0
   `);
   console.log("[schema] ensured bulk_combo_listing_job_items re-mix + interruption columns");
+
+  await db.execute(sql`
+    ALTER TABLE photo_labels
+      ADD COLUMN IF NOT EXISTS bedroom_cluster_id text,
+      ADD COLUMN IF NOT EXISTS bedroom_bed_type text
+  `);
+  console.log("[schema] ensured photo_labels bedroom cluster precompute columns");
 }
