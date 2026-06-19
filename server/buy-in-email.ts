@@ -66,49 +66,133 @@ export function normalizeBuyInEmailAttachments(raw: unknown): BuyInEmailAttachme
   return normalized;
 }
 
+export function stripHtmlForEmailParse(input: string): string {
+  return String(input ?? "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<\/tr>/gi, "\n")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&[a-z]+;/gi, " ")
+    .replace(/\r/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+export function looksLikeHtmlGarbage(value: string): boolean {
+  const v = String(value ?? "");
+  return /<\/?[a-z][^>]*>/i.test(v)
+    || /&nbsp;|style\s*=|display\s*:\s*inline|text-indent\s*:/i.test(v)
+    || /^\s*<\/?span/i.test(v);
+}
+
+const BLOCKLISTED_ADDRESS_RES = [
+  /131\s+continental\s+drive/i,
+  /newark,?\s*de\s*19702/i,
+  /expedia\s+group/i,
+  /110\s+se\s+yam\s+street/i, // VRBO Austin office
+];
+
+export function isBlocklistedPropertyAddress(address: string): boolean {
+  const v = String(address ?? "").trim();
+  if (!v) return false;
+  return BLOCKLISTED_ADDRESS_RES.some((re) => re.test(v));
+}
+
+export function isUsableArrivalField(key: string, value: string): boolean {
+  const v = String(value ?? "").trim();
+  if (!v) return false;
+  if (looksLikeHtmlGarbage(v)) return false;
+  if (key === "unitAddress") {
+    if (isBlocklistedPropertyAddress(v)) return false;
+    if (v.length < 8 || !/\d/.test(v)) return false;
+  }
+  if (key === "wifiName" || key === "wifiPassword") {
+    if (/guideline|unsubscribe|click here|view (?:in|online)|http/i.test(v)) return false;
+    if (v.length > 80) return false;
+  }
+  if (key === "accessCode") {
+    if (/never share|secure code|verification/i.test(v) && v.length > 24) return false;
+    const code = v.replace(/[^\dA-Za-z#-]/g, "");
+    if (!code || code.length > 20) return false;
+  }
+  if (key === "parkingInfo" && v.length > 500) return false;
+  return true;
+}
+
+function sanitizePickedValue(key: string, raw: string): string {
+  const cleaned = stripHtmlForEmailParse(raw).replace(/\s+/g, " ").trim();
+  if (!cleaned || !isUsableArrivalField(key, cleaned)) return "";
+  return cleaned.slice(0, key === "arrivalNotes" ? 2000 : 500);
+}
+
 export function parseArrivalDetailsFromText(body: string): Record<string, string> {
-  const text = body.replace(/\r/g, "");
-  const pick = (patterns: RegExp[]): string => {
+  const text = stripHtmlForEmailParse(body);
+  const pick = (key: string, patterns: RegExp[]): string => {
     for (const pattern of patterns) {
       const match = text.match(pattern);
-      if (match?.[1]) return match[1].trim().replace(/\s+/g, " ").slice(0, 500);
+      if (match?.[1]) {
+        const value = sanitizePickedValue(key, match[1]);
+        if (value) return value;
+      }
     }
     return "";
   };
 
-  const gateCode = pick([
+  const gateCode = pick("accessCode", [
     /(?:gate\s*(?:code|#|passcode)?|community\s*gate|resort\s*gate)\s*[:\-]\s*([^\n]+)/i,
   ]);
-  const elevatorCode = pick([
+  const elevatorCode = pick("accessCode", [
     /(?:elevator\s*(?:code|#|passcode)?|lift\s*code)\s*[:\-]\s*([^\n]+)/i,
   ]);
-  const doorCode = pick([
+  const doorCode = pick("accessCode", [
     /(?:door\s*(?:code|#|passcode)?|unit\s*(?:code|door code)|lockbox\s*code|keypad\s*code)\s*[:\-]\s*([^\n]+)/i,
     /(?:access code|entry code)\s*[:\-]\s*([^\n]+)/i,
+    /(?:your\s+secure\s+code\s+is|secure\s+code)\s*[:\-]?\s*(\d{4,8})\b/i,
   ]);
 
-  let unitAddress = pick([
-    /(?:property address|unit address|rental address|address|location|where you['']?ll stay)\s*[:\-]\s*([^\n]+)/i,
+  let unitAddress = pick("unitAddress", [
+    /(?:property address|rental address|unit address|where you['']?ll stay|where you'll stay)\s*[:\-]\s*([^\n]+)/i,
     /(?:check-?in(?: location)?|arrival(?: location)?)\s*[:\-]\s*([^\n]+)/i,
   ]);
   if (!unitAddress) {
     const streetMatch = text.match(
       /\b(\d{1,6}\s+[A-Za-z0-9.\s#'/-]{3,90}(?:,\s*[A-Za-z .'-]+){0,4}(?:,\s*[A-Z]{2})?\s+\d{5}(?:-\d{4})?)\b/,
     );
-    if (streetMatch?.[1]) unitAddress = streetMatch[1].trim().replace(/\s+/g, " ").slice(0, 500);
+    if (streetMatch?.[1]) {
+      unitAddress = sanitizePickedValue("unitAddress", streetMatch[1]);
+    }
   }
 
-  const accessCode = doorCode || pick([/(?:access code|door code|lockbox code|entry code|keypad code)\s*[:\-]\s*([^\n]+)/i]);
-  const wifiName = pick([/(?:wi-?fi(?: name)?|network|ssid)\s*[:\-]\s*([^\n]+)/i]);
-  const wifiPassword = pick([/(?:wi-?fi password|network password|password)\s*[:\-]\s*([^\n]+)/i]);
-  const parkingInfo = pick([/(?:parking|parking info|parking instructions|assigned parking)\s*[:\-]\s*([\s\S]{0,500})(?:\n\s*\n|$)/i]);
+  const accessCode = doorCode || pick("accessCode", [
+    /(?:access code|door code|lockbox code|entry code|keypad code)\s*[:\-]\s*([^\n]+)/i,
+    /(?:your\s+secure\s+code\s+is|secure\s+code)\s*[:\-]?\s*(\d{4,8})\b/i,
+  ]);
+  const wifiName = pick("wifiName", [
+    /(?:wi-?fi(?:\s*network)?(?:\s*name)?|network name|ssid)\s*[:\-]\s*([^\n]+)/i,
+  ]);
+  const wifiPassword = pick("wifiPassword", [
+    /(?:wi-?fi\s*password|network\s*password)\s*[:\-]\s*([^\n]+)/i,
+  ]);
+  const parkingInfo = pick("parkingInfo", [
+    /(?:parking|parking info|parking instructions|assigned parking)\s*[:\-]\s*([\s\S]{0,500})(?:\n\s*\n|$)/i,
+  ]);
 
   const noteLines: string[] = [];
   if (gateCode && gateCode !== accessCode) noteLines.push(`Gate code: ${gateCode}`);
   if (elevatorCode) noteLines.push(`Elevator code: ${elevatorCode}`);
-  const checkInTime = pick([/(?:check-?in time|arrival time|check-?in begins)\s*[:\-]\s*([^\n]+)/i]);
+  const checkInTime = pick("arrivalNotes", [/(?:check-?in time|arrival time|check-?in begins)\s*[:\-]\s*([^\n]+)/i]);
   if (checkInTime) noteLines.push(`Check-in: ${checkInTime}`);
-  const arrivalBlock = pick([
+  const arrivalBlock = pick("arrivalNotes", [
     /(?:arrival details|arrival instructions|check-?in instructions|getting (?:there|in)|access instructions)\s*[:\-]\s*([\s\S]{0,1000})(?:\n\s*\n|$)/i,
   ]);
   if (arrivalBlock) noteLines.push(arrivalBlock);
