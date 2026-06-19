@@ -3287,11 +3287,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }
       setCommunityCheckResult(data as PhotoCommunityCheckResult);
       setCommunityCheckPhase("done");
+      await queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
     } catch (e: any) {
       setCommunityCheckError(e?.message ?? String(e));
       setCommunityCheckPhase("error");
     }
-  }, [photos, propertyId, propertyData?.bedrooms]);
+  }, [photos, propertyId, propertyData?.bedrooms, queryClient]);
 
   const communityPhotoVerdicts = useMemo(() => {
     const verdicts = communityCheckResult?.community?.photoVerdicts;

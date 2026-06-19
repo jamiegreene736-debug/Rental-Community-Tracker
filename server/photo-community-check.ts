@@ -76,6 +76,8 @@ export type CheckGroupInput = {
 };
 
 export type PhotoCommunityCheckRequest = {
+  /** When set, server uses the same request builder as bulk/dashboard checks and persists the result. */
+  propertyId?: number;
   expectedCommunity?: string;
   /** Combined listing bedroom count (e.g. 6 for two 3BR units). */
   expectedListingBedrooms?: number;

@@ -227,10 +227,12 @@ import {
 import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest } from "./photo-community-check";
 import {
+  buildPhotoCommunityCheckRequestForProperty,
   cancelBulkPhotoCommunityJob,
   getActiveBulkPhotoCommunityJob,
   getBulkPhotoCommunityJob,
   getPhotoCommunityStatuses,
+  savePhotoCommunityCheckResult,
   scheduleBulkPhotoCommunityResume,
   serializeBulkPhotoCommunityJob,
   startBulkPhotoCommunityCheck,
@@ -27278,14 +27280,36 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/builder/photo-community-check", async (req, res) => {
     try {
       const body = (req.body ?? {}) as PhotoCommunityCheckRequest;
-      if (!Array.isArray(body.groups) || body.groups.length === 0) {
-        return res.status(400).json({ ok: false, error: "groups[] required" });
+      const propertyId =
+        typeof body.propertyId === "number" && Number.isFinite(body.propertyId)
+          ? body.propertyId
+          : null;
+
+      let request: PhotoCommunityCheckRequest;
+      const built = propertyId != null ? await buildPhotoCommunityCheckRequestForProperty(propertyId) : null;
+      if (built) {
+        request = built.request;
+      } else {
+        if (!Array.isArray(body.groups) || body.groups.length === 0) {
+          return res.status(400).json({ ok: false, error: "groups[] required" });
+        }
+        request = {
+          expectedCommunity: body.expectedCommunity,
+          expectedListingBedrooms: body.expectedListingBedrooms,
+          groups: body.groups,
+        };
       }
+
       const result = await runPhotoCommunityCheck(
-        body,
+        request,
         process.env.ANTHROPIC_API_KEY ?? "",
         Date.now(),
       );
+
+      if (propertyId != null) {
+        await savePhotoCommunityCheckResult(propertyId, result);
+      }
+
       return res.json(result);
     } catch (err: any) {
       console.error("[photo-community-check]", err?.message ?? err);
