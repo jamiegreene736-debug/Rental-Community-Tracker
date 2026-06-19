@@ -43,6 +43,22 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-19 (Check photo community, Poipu Kai 6BR: use the Google Lens AI Overview to
+  confirm community photos): the tennis-court photo stayed "unconfirmed" even though a
+  manual Google reverse-image AI Overview says "These are the tennis courts at the Poipu
+  Kai Resort." Root cause: the Lens call already captured the AI Overview (`extraTexts`)
+  but `judgeCommunityPhotoFromLensCore` scanned per-row conflicts first and short-circuited
+  to "no" on the sibling "Poipu Sands" organic title before the overview's positive ID was
+  used (then PR #771's same-area deferral → inconclusive → vision neutral → unconfirmed).
+  FIX (`claude/lens-ai-overview`, PR #TBD): new `analyzeAiOverviewForCommunity` consulted
+  at the TOP of the judge — overview names/supports expected → confirmed (green ✓) even
+  over a sibling organic hit; overview names a different-AREA resort → hard no; same-area
+  sibling → fall through to vision. `sharedResortPhraseKeys` takes a `{title,…}` object,
+  not a string (legacy string calls silently return nothing). Verified: lens-logic 16/0
+  (+5), full `npm test` green, build clean, `npm run check` 308 = baseline (0 new).
+  Couldn't live-smoke (no SEARCHAPI key) — confirm by re-running the check; tennis court
+  should flip to green. Full rationale: AGENTS.md #45 + the 2026-06-19 Decision Log line.
+
 - 2026-06-19 (Check photo community, Poipu Kai 5BR = Regency at Poipu Kai: false
   community-amenity mismatches + same-room photos not clustering): FOUR fixes on
   `claude/photo-community-cluster-lens` (PR #TBD). (1) Shared/sibling Poipu resorts

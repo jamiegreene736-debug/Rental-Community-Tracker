@@ -173,6 +173,43 @@ export function judgeCommunityPhotoFromLens(
   return judgeCommunityPhotoFromLensCore(expectedCommunity, rows, extraTexts, city);
 }
 
+/**
+ * Google Lens AI Overview = Gemini's own analysis of the image ("These are the
+ * tennis courts at the Poipu Kai Resort"). It is far more authoritative than a
+ * noisy reverse-image organic title that happens to name a sibling resort, so we
+ * consult it FIRST: a positive identification of the expected community confirms
+ * the photo even when an organic hit names a different sibling; a different-area
+ * resort named by the overview contradicts. A same-area sibling named by the
+ * overview is ambiguous (shared amenity photos) → fall through to vision.
+ */
+export function analyzeAiOverviewForCommunity(
+  aiTexts: string[],
+  expectedCommunity: string,
+  city = "",
+): { outcome: "confirms" | "contradicts" | "inconclusive"; identified?: string } {
+  const expected = expectedCommunity.trim();
+  const texts = aiTexts.filter((t) => typeof t === "string" && t.trim());
+  if (!expected || texts.length === 0) return { outcome: "inconclusive" };
+
+  for (const text of texts) {
+    if (communityHaystackSupportsExpected(text, expected)) {
+      return { outcome: "confirms", identified: expected };
+    }
+  }
+  for (const text of texts) {
+    // sharedResortPhraseKeys reads the candidate's title — pass the AI Overview
+    // line as a title-only candidate (not a bare string, which it can't read).
+    const keys = sharedResortPhraseKeys({ title: text, sourceLabel: "", snippet: "", complexName: "" });
+    for (const key of keys) {
+      if (communityNamesMatch(key, expected)) return { outcome: "confirms", identified: expected };
+      if (!communitySharesGeoArea(key, expected, city)) {
+        return { outcome: "contradicts", identified: key };
+      }
+    }
+  }
+  return { outcome: "inconclusive" };
+}
+
 function judgeCommunityPhotoFromLensCore(
   expectedCommunity: string,
   rows: LensEvidenceRow[],
@@ -194,6 +231,26 @@ function judgeCommunityPhotoFromLensCore(
     return {
       match: "no",
       reason: "Reverse image search returned no usable matches to verify this photo.",
+    };
+  }
+
+  // Google Lens AI Overview is the strongest signal — Gemini analysed the image
+  // itself. Consult it BEFORE the per-row conflict scan so a real community photo
+  // is not hard-failed by a sibling-resort organic title when the overview clearly
+  // names the expected resort.
+  const ai = analyzeAiOverviewForCommunity(extraTexts, expected, city);
+  if (ai.outcome === "confirms") {
+    return {
+      match: "yes",
+      reason: `Google Lens AI Overview identifies this as ${expected}.`,
+      identifiedCommunity: expected,
+    };
+  }
+  if (ai.outcome === "contradicts") {
+    return {
+      match: "no",
+      reason: `Google Lens AI Overview identifies a different resort (${ai.identified}).`,
+      identifiedCommunity: ai.identified,
     };
   }
 

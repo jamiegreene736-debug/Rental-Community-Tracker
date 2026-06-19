@@ -3,6 +3,7 @@ import {
   judgeCommunityPhotoFromLens,
   classifyCommunityPhotoFromLens,
   communitySharesGeoArea,
+  analyzeAiOverviewForCommunity,
 } from "../shared/community-photo-lens-logic";
 
 let passed = 0;
@@ -140,6 +141,46 @@ check(
     [],
     "Koloa",
   ).outcome === "contradicted",
+);
+
+// ── Google Lens AI Overview is authoritative (the operator's tennis court) ──
+const tennisRows = [
+  { title: "Poipu Sands at Poipu Kai #234", snippet: "poipu sands at poipu kai", link: "https://x.com/poipu-sands", source: "organic", position: 1 },
+  { title: "Poipu Kai Resort Vacation Rentals | Parrish Kauai", snippet: "Discover Poipu Kai vacation rentals", link: "https://x.com/poipu-kai", source: "organic", position: 2 },
+];
+const tennisAiOverview = [
+  "These are the tennis courts at the Poipu Kai Resort in Kauai.",
+  "The tennis club features eight total courts.",
+];
+
+check(
+  "analyzeAiOverviewForCommunity confirms when overview names the expected resort",
+  analyzeAiOverviewForCommunity(tennisAiOverview, regency, "Koloa").outcome === "confirms",
+);
+
+check(
+  "AI Overview naming Poipu Kai CONFIRMS the photo despite a sibling-resort organic conflict",
+  classifyCommunityPhotoFromLens(regency, tennisRows, tennisAiOverview, "Koloa").outcome === "confirmed",
+);
+
+check(
+  "without the AI Overview, the sibling conflict still defers to vision (inconclusive)",
+  classifyCommunityPhotoFromLens(regency, tennisRows, [], "Koloa").outcome === "inconclusive",
+);
+
+check(
+  "AI Overview naming a DIFFERENT-area resort still hard-contradicts",
+  classifyCommunityPhotoFromLens(
+    regency,
+    [],
+    ["This is the pool at Hanalei Bay Resort in Princeville."],
+    "Koloa",
+  ).outcome === "contradicted",
+);
+
+check(
+  "analyzeAiOverviewForCommunity: empty overview is inconclusive",
+  analyzeAiOverviewForCommunity([], regency, "Koloa").outcome === "inconclusive",
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);
