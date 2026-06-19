@@ -505,4 +505,11 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS bedroom_bed_type text
   `);
   console.log("[schema] ensured photo_labels bedroom cluster precompute columns");
+
+  // Operator-defined photo order within a gallery (Photos-tab drag-to-reorder).
+  await db.execute(sql`
+    ALTER TABLE photo_labels
+      ADD COLUMN IF NOT EXISTS sort_order integer
+  `);
+  console.log("[schema] ensured photo_labels sort_order column");
 }

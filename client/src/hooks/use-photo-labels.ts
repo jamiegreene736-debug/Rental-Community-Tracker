@@ -15,6 +15,7 @@ type LabelMeta = {
   userLabel?: string | null;
   userCategory?: string | null;
   hidden?: boolean;
+  sortOrder?: number | null;
 };
 type FolderLabels = Record<string, LabelMeta>;
 type LabelsMap = Record<string, FolderLabels>;
@@ -36,6 +37,16 @@ export function usePhotoLabels(folders: readonly string[]): {
   labelFor: (folder: string, filename: string) => string | null;
   /** True when the user marked this photo as hidden in the curator. */
   isHidden: (folder: string, filename: string) => boolean;
+  /**
+   * The labeler's category for a photo (e.g. "Bedroom", "Kitchen"), or null
+   * when unknown. Used as extra signal for the hero-first default order.
+   */
+  categoryFor: (folder: string, filename: string) => string | null;
+  /**
+   * The operator's manual order index for a photo within its folder, or null
+   * when no manual order is set (→ hero-first category default).
+   */
+  sortOrderFor: (folder: string, filename: string) => number | null;
   /**
    * Re-fetch labels for the currently-tracked folders. Callers (e.g. the
    * PhotoCurator delete button) invoke this after a server-side mutation
@@ -108,6 +119,15 @@ export function usePhotoLabels(folders: readonly string[]): {
   const isHidden = (folder: string, filename: string): boolean => {
     return !!labels[folder]?.[filename]?.hidden;
   };
+  const categoryFor = (folder: string, filename: string): string | null => {
+    const row = labels[folder]?.[filename];
+    if (!row) return null;
+    return row.userCategory || row.category || null;
+  };
+  const sortOrderFor = (folder: string, filename: string): number | null => {
+    const v = labels[folder]?.[filename]?.sortOrder;
+    return typeof v === "number" ? v : null;
+  };
 
-  return { labels, loading, labelFor, isHidden, refresh };
+  return { labels, loading, labelFor, isHidden, categoryFor, sortOrderFor, refresh };
 }
