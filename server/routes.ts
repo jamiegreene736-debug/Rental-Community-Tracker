@@ -11652,6 +11652,32 @@ Requirements:
     }
   });
 
+  // POST /api/buy-ins/:id/traveler-email
+  // Mint (or reuse) the per-guest VRBO booking email without starting checkout.
+  // Used when manually attaching VRBO buy-ins so arrival confirmations land in
+  // the Operations guest thread before "Buy this unit in" is clicked.
+  app.post("/api/buy-ins/:id/traveler-email", async (req, res) => {
+    try {
+      const buyInId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(buyInId)) return res.status(400).json({ error: "Invalid buy-in id" });
+      const { ensureTravelerEmailForBuyIn, CheckoutValidationError } = await import("./buy-in-checkout-job");
+      const email = await ensureTravelerEmailForBuyIn({
+        buyInId,
+        reservationId: String(req.body?.reservationId ?? "").trim() || null,
+        guestFirstName: req.body?.guestFirstName ?? null,
+        guestLastName: req.body?.guestLastName ?? null,
+      });
+      const buyIn = await storage.getBuyIn(buyInId);
+      res.json({ ok: true, email, buyIn });
+    } catch (err: any) {
+      const { CheckoutValidationError } = await import("./buy-in-checkout-job");
+      if (err instanceof CheckoutValidationError) {
+        return res.status(400).json({ error: err.message });
+      }
+      res.status(500).json({ error: "Failed to create booking email", message: err?.message ?? String(err) });
+    }
+  });
+
   // GET /api/inbox/buy-in-estimate?listingId=X&checkIn=YYYY-MM-DD&checkOut=YYYY-MM-DD&cleaningFeePerUnit=N
   //
   // Inquiry-time estimator for the Guest Inbox right panel. Given a Guesty

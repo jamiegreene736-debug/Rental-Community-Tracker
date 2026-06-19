@@ -4626,6 +4626,118 @@ type GuestInboxMessageClient = {
   receivedAt: string;
 };
 
+function guestNamePartsFromReservation(reservation: GuestyReservation): { firstName: string; lastName: string } {
+  const fullName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "";
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  return {
+    firstName: reservation.guest?.firstName || parts[0] || "",
+    lastName: parts.length > 1 ? parts.slice(1).join(" ") : "",
+  };
+}
+
+function isVrboListingUrl(url: string | null | undefined): boolean {
+  return /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(String(url ?? "").trim());
+}
+
+/** Inline VRBO guest booking thread — shows arrival emails in Operations. */
+function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservation: GuestyReservation }) {
+  const { toast } = useToast();
+  if (!isVrboListingUrl(buyIn.airbnbListingUrl)) return null;
+
+  const { firstName: guestFirstName, lastName: guestLastName } = guestNamePartsFromReservation(reservation);
+  const email = buyIn.travelerEmail;
+
+  const { data, isLoading, refetch } = useQuery<{ aliasEmail: string | null; guestName: string | null; messages: GuestInboxMessageClient[] }>({
+    queryKey: ["/api/guest-inbox", buyIn.id],
+    queryFn: () => apiGetJson(`/api/guest-inbox?buyInId=${buyIn.id}`),
+    enabled: !!email,
+    refetchInterval: email ? 30_000 : false,
+  });
+
+  const createEmail = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/buy-ins/${buyIn.id}/traveler-email`, {
+        reservationId: reservation._id,
+        guestFirstName,
+        guestLastName,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
+      return body as { ok: true; email: string };
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      toast({
+        title: "Booking email ready",
+        description: `Use ${result.email} as the VRBO traveler email. Arrival messages will appear here.`,
+      });
+      void refetch();
+    },
+    onError: (e: any) => toast({ title: "Could not create booking email", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+
+  const messages = data?.messages ?? [];
+  const displayEmail = email ?? data?.aliasEmail;
+
+  return (
+    <div className="border-t bg-sky-50/40 px-3 py-2.5 space-y-2 dark:bg-sky-950/20" data-testid={`guest-thread-${buyIn.id}`}>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <Mail className="h-3.5 w-3.5 text-sky-700 dark:text-sky-300" />
+        <span className="font-medium text-sky-900 dark:text-sky-100">VRBO guest thread</span>
+        {displayEmail ? (
+          <Badge variant="outline" className="font-mono text-[10px]">{displayEmail}</Badge>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 text-[10px]"
+            disabled={createEmail.isPending || !guestFirstName || !guestLastName}
+            onClick={() => createEmail.mutate()}
+            data-testid={`button-create-booking-email-${buyIn.id}`}
+            title={!guestFirstName || !guestLastName ? "Guest needs first and last name on the reservation" : "Create the alias email for VRBO booking"}
+          >
+            {createEmail.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+            Create booking email
+          </Button>
+        )}
+        {displayEmail && messages.length > 0 && (
+          <Badge className="text-[10px] bg-sky-600">{messages.length} message{messages.length === 1 ? "" : "s"}</Badge>
+        )}
+      </div>
+      {!displayEmail && (
+        <p className="text-[11px] text-muted-foreground">
+          Create the alias email, then use it as the traveler email when booking on VRBO. VRBO arrival details will show here automatically.
+        </p>
+      )}
+      {displayEmail && isLoading && messages.length === 0 && (
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground py-1">
+          <Loader2 className="h-3 w-3 animate-spin" /> Loading messages…
+        </div>
+      )}
+      {displayEmail && !isLoading && messages.length === 0 && (
+        <p className="text-[11px] text-muted-foreground">
+          No messages yet — VRBO confirmations and arrival details sent to {displayEmail} will appear here.
+        </p>
+      )}
+      {messages.length > 0 && (
+        <div className="space-y-2 max-h-64 overflow-y-auto">
+          {messages.map((m) => (
+            <div key={m.id} className="rounded border bg-background p-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium truncate">{m.subject}</span>
+                <span className="text-[10px] text-muted-foreground whitespace-nowrap">{fmtDate(m.receivedAt)}</span>
+              </div>
+              <div className="text-[10px] text-muted-foreground truncate">From: {m.fromEmail}</div>
+              <div className="mt-1 whitespace-pre-wrap break-words text-[11px] line-clamp-6">{String(m.body || "").slice(0, 4000)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GuestInboxButton({ buyIn }: { buyIn: BuyIn }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -10434,6 +10546,12 @@ export default function Bookings() {
                               showAliasControls
                             />
                           )}
+                          {slot.buyIn && (
+                            <BuyInGuestThreadPanel
+                              reservation={r}
+                              buyIn={slot.buyIn}
+                            />
+                          )}
                           {slotIsExpanded && selectedBuyInPropertyId && (
                             <div className="border-t bg-muted/20 px-3 py-3">
                               <LiveSearchSection
@@ -11175,6 +11293,11 @@ export default function Bookings() {
           propertyName={manualBuyInTarget.propertyName}
           slot={manualBuyInTarget.slot}
           onClose={() => setManualBuyInTarget(null)}
+          onAllUnitsAttached={(reservation) => {
+            if (!isManualReservation(reservation)) {
+              setRelocateGuestTarget({ reservation });
+            }
+          }}
         />
       )}
 
@@ -15620,12 +15743,14 @@ function ManualBuyInDialog({
   propertyName,
   slot,
   onClose,
+  onAllUnitsAttached,
 }: {
   reservation: GuestyReservation;
   propertyId: number;
   propertyName: string;
   slot: SlotInfo;
   onClose: () => void;
+  onAllUnitsAttached?: (reservation: GuestyReservation) => void;
 }) {
   const { toast } = useToast();
   const toDateOnly = (s: string | undefined): string => {
@@ -15661,7 +15786,8 @@ function ManualBuyInDialog({
     ) ?? null;
   }, [listingUrl, notes, photoUrls, reservation.slots, slot.unitId]);
   const parsedCost = Number(costPaid);
-  const canSave = Number.isFinite(parsedCost) && parsedCost > 0 && !!listingUrl.trim() && !duplicateSlot;
+  const effectiveCost = Number.isFinite(parsedCost) && parsedCost > 0 ? parsedCost : 1;
+  const canSave = !!listingUrl.trim() && !duplicateSlot;
 
   const createAndAttach = useMutation({
     mutationFn: async () => {
@@ -15669,7 +15795,7 @@ function ManualBuyInDialog({
         throw new Error("Manual buy-in needs valid check-in/check-out dates.");
       }
       if (!canSave) {
-        throw new Error("Enter a positive total cost and a listing URL before saving.");
+        throw new Error("Enter a listing URL before saving.");
       }
       const noteParts = [
         `Manually recorded buy-in for ${slot.unitLabel}.`,
@@ -15683,7 +15809,7 @@ function ManualBuyInDialog({
         unitLabel: slot.unitLabel,
         checkIn,
         checkOut,
-        costPaid: parsedCost.toFixed(2),
+        costPaid: effectiveCost.toFixed(2),
         airbnbConfirmation: confirmation.trim() || null,
         airbnbListingUrl: listingUrl.trim(),
         unitAddress: unitAddress.trim() || null,
@@ -15699,13 +15825,42 @@ function ManualBuyInDialog({
         buyInId: created.id,
       }).then((r) => r.json());
       if (!attach?.id) throw new Error(attach?.error || "Attach failed");
-      return created;
+
+      if (isVrboListingUrl(listingUrl)) {
+        const { firstName, lastName } = guestNamePartsFromReservation(reservation);
+        if (firstName && lastName) {
+          try {
+            const emailRes = await apiRequest("POST", `/api/buy-ins/${created.id}/traveler-email`, {
+              reservationId: reservation._id,
+              guestFirstName: firstName,
+              guestLastName: lastName,
+            });
+            if (!emailRes.ok) {
+              const err = await emailRes.json().catch(() => ({}));
+              console.warn("[manual-buy-in] traveler email:", err?.error || err?.message);
+            }
+          } catch (e) {
+            console.warn("[manual-buy-in] traveler email failed:", e);
+          }
+        }
+      }
+
+      return { created, attach, vrboUrl: isVrboListingUrl(listingUrl) };
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
+      const total = reservation.slotsTotal ?? reservation.slots.length;
+      const filledBefore = reservation.slots.filter((s) => s.buyIn).length;
+      const allFilled = filledBefore + 1 >= total;
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-      toast({ title: "Manual buy-in recorded and attached" });
+      toast({
+        title: "Manual buy-in recorded and attached",
+        description: result.vrboUrl
+          ? "VRBO unit attached — booking email created when possible. Use it on VRBO checkout."
+          : undefined,
+      });
       onClose();
+      if (allFilled) onAllUnitsAttached?.(reservation);
     },
     onError: (e: any) => toast({ title: "Save failed", description: e.message, variant: "destructive" }),
   });
@@ -15716,14 +15871,14 @@ function ManualBuyInDialog({
         <DialogHeader>
           <DialogTitle>Manually add buy-in for {slot.unitLabel}</DialogTitle>
           <DialogDescription>
-            {reservation.guest?.fullName ?? "Guest"} · {fmtDate(checkIn)} → {fmtDate(checkOut)} · {propertyName}
+            Paste the VRBO listing URL to attach this unit. When every unit slot is filled, the guest page and message draft open automatically so you can send the options to the guest.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
           <div className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <Label htmlFor="manualCostPaid" className="text-xs">Total cost paid (USD)</Label>
+                <Label htmlFor="manualCostPaid" className="text-xs">Total cost paid (USD, optional)</Label>
                 <Input
                   id="manualCostPaid"
                   type="number"
@@ -15746,12 +15901,12 @@ function ManualBuyInDialog({
               </div>
             </div>
             <div>
-              <Label htmlFor="manualListingUrl" className="text-xs">Listing URL</Label>
+              <Label htmlFor="manualListingUrl" className="text-xs">Listing URL (required)</Label>
               <Input
                 id="manualListingUrl"
                 value={listingUrl}
                 onChange={(e) => setListingUrl(e.target.value)}
-                placeholder="https://..."
+                placeholder="https://www.vrbo.com/..."
                 data-testid="input-manual-buyin-listing-url"
               />
               {duplicateSlot && (
@@ -15851,7 +16006,7 @@ function ManualBuyInDialog({
             disabled={!canSave || createAndAttach.isPending}
             data-testid="button-save-manual-buy-in"
           >
-            {createAndAttach.isPending ? "Saving…" : "Save & attach"}
+            {createAndAttach.isPending ? "Saving…" : "Attach buy-in"}
           </Button>
         </DialogFooter>
       </DialogContent>
