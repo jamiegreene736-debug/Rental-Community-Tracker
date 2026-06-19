@@ -44,6 +44,52 @@ export function guestEmailLocalPart(firstName: string | null | undefined, lastNa
   return [f, l].filter(Boolean).join(".") || "guest";
 }
 
+export type EnsureTravelerEmailInput = {
+  buyInId: number;
+  reservationId?: string | null;
+  guestFirstName?: string | null;
+  guestLastName?: string | null;
+};
+
+/** Mint or reuse the per-guest VRBO booking email (SimpleLogin alias). */
+export async function ensureTravelerEmailForBuyIn(input: EnsureTravelerEmailInput): Promise<string> {
+  const buyInId = Number(input.buyInId);
+  if (!Number.isFinite(buyInId) || buyInId <= 0) {
+    throw new CheckoutValidationError("buyInId required");
+  }
+  const buyIn = await storage.getBuyIn(buyInId);
+  if (!buyIn) throw new CheckoutValidationError(`Buy-in ${buyInId} not found`);
+
+  const existing = String(buyIn.travelerEmail ?? "").trim().toLowerCase();
+  if (existing) return existing;
+
+  const firstName = String(input.guestFirstName ?? "").trim();
+  const lastName = String(input.guestLastName ?? "").trim();
+  if (!firstName || !lastName) {
+    throw new CheckoutValidationError("Guest first and last name are required for the booking email");
+  }
+
+  const localPart = guestEmailLocalPart(firstName, lastName);
+  let email = `${localPart}@${BUYIN_TRAVELER_EMAIL_DOMAIN}`;
+  try {
+    const alias = await createSimpleLoginAlias({
+      prefix: localPart,
+      domain: BUYIN_TRAVELER_EMAIL_DOMAIN,
+      guestName: `${firstName} ${lastName}`.trim(),
+      note: `Buy-in guest inbox · ${firstName} ${lastName}${input.reservationId ? ` · reservation ${input.reservationId}` : ""}`,
+    });
+    email = extractSimpleLoginAliasEmail(alias) || email;
+  } catch (e: any) {
+    const msg = String(e?.message ?? e).toLowerCase();
+    if (!/already|in use|exist|duplicate|taken/.test(msg)) {
+      throw new Error(`Could not create the guest booking email (${email}): ${String(e?.message ?? e)}`);
+    }
+  }
+
+  await storage.updateBuyIn(buyInId, { travelerEmail: email });
+  return email;
+}
+
 type CheckoutStatus = "queued" | "running" | "awaiting_payment" | "completed" | "failed";
 const TERMINAL = new Set<CheckoutStatus>(["completed", "failed"]);
 const isTerminal = (s: CheckoutStatus) => TERMINAL.has(s);
@@ -204,33 +250,13 @@ async function runCheckoutJob(job: CheckoutJob): Promise<void> {
     setStatus(job, "running", "Creating a unique booking email for this unit…");
     await storage.updateBuyIn(job.buyInId, { bookingStatus: "in_progress", bookingError: null });
 
-    // Per-guest booking email: firstname.lastname@emailprivaccy.com. Deterministic,
-    // never deleted, reused across the guest's units/bookings (shared inbox).
-    let email = buyIn.travelerEmail;
-    if (!email) {
-      const localPart = guestEmailLocalPart(firstName, lastName);
-      email = `${localPart}@${BUYIN_TRAVELER_EMAIL_DOMAIN}`;
-      try {
-        const alias = await createSimpleLoginAlias({
-          prefix: localPart,
-          domain: BUYIN_TRAVELER_EMAIL_DOMAIN,
-          guestName: `${firstName} ${lastName}`.trim(),
-          note: `Buy-in guest inbox · ${firstName} ${lastName} · reservation ${job.reservationId}`,
-        });
-        email = extractSimpleLoginAliasEmail(alias) || email;
-      } catch (e: any) {
-        // Same guest already has this address → reuse it (the address is
-        // deterministic, so we already know it). Any OTHER failure (e.g. the
-        // domain isn't a verified SimpleLogin custom domain) is fatal.
-        const msg = String(e?.message ?? e).toLowerCase();
-        if (!/already|in use|exist|duplicate|taken/.test(msg)) {
-          throw new Error(`Could not create the guest booking email (${email}): ${String(e?.message ?? e)}`);
-        }
-      }
-    }
-    if (!email) throw new Error("Could not resolve a guest booking email for this unit");
+    const email = await ensureTravelerEmailForBuyIn({
+      buyInId: job.buyInId,
+      reservationId: job.reservationId,
+      guestFirstName: firstName,
+      guestLastName: lastName,
+    });
     job.travelerEmail = email;
-    await storage.updateBuyIn(job.buyInId, { travelerEmail: email });
 
     setStatus(job, "running", "Opening VRBO and filling traveler details…");
 
