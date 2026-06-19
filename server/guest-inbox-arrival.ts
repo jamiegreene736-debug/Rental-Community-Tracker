@@ -1,7 +1,7 @@
 // Extract arrival details (address, codes, Wi‑Fi, parking) from VRBO guest-thread
 // emails and merge them onto the matching buy_in row.
 
-import { parseArrivalDetailsFromText } from "./buy-in-email";
+import { parseArrivalDetailsFromText, isUsableArrivalField } from "./buy-in-email";
 import type { BuyIn } from "@shared/schema";
 
 const ARRIVAL_SCALAR_FIELDS = [
@@ -14,6 +14,12 @@ const ARRIVAL_SCALAR_FIELDS = [
 
 type ArrivalScalarField = typeof ARRIVAL_SCALAR_FIELDS[number];
 
+function cleanExistingArrivalValue(key: ArrivalScalarField | "arrivalNotes", value: string | null | undefined): string {
+  const v = String(value ?? "").trim();
+  if (!v) return "";
+  return isUsableArrivalField(key, v) ? v : "";
+}
+
 /** Merge parsed arrival fields onto existing buy-in values (fill blanks; enrich address/notes). */
 export function mergeArrivalDetailsIntoBuyIn(
   existing: Pick<BuyIn, ArrivalScalarField | "arrivalNotes">,
@@ -23,9 +29,15 @@ export function mergeArrivalDetailsIntoBuyIn(
 
   for (const key of ARRIVAL_SCALAR_FIELDS) {
     const next = String(parsed[key] ?? "").trim();
-    if (!next) continue;
-    const cur = String(existing[key] ?? "").trim();
-    if (!cur) {
+    const cur = cleanExistingArrivalValue(key, existing[key]);
+    const curRaw = String(existing[key] ?? "").trim();
+    const curCorrupt = !!curRaw && !cur;
+
+    if (!next) {
+      if (curCorrupt) updates[key] = "";
+      continue;
+    }
+    if (!cur || curCorrupt) {
       updates[key] = next;
       continue;
     }
@@ -36,16 +48,21 @@ export function mergeArrivalDetailsIntoBuyIn(
   }
 
   const newNotes = String(parsed.arrivalNotes ?? "").trim();
+  const curNotes = cleanExistingArrivalValue("arrivalNotes", existing.arrivalNotes);
+  const curNotesRaw = String(existing.arrivalNotes ?? "").trim();
+  const notesCorrupt = !!curNotesRaw && !curNotes;
+
   if (newNotes) {
-    const cur = String(existing.arrivalNotes ?? "").trim();
-    if (!cur) {
+    if (!curNotes || notesCorrupt) {
       updates.arrivalNotes = newNotes;
     } else {
-      const merged = [...cur.split("\n"), ...newNotes.split("\n")]
+      const merged = [...curNotes.split("\n"), ...newNotes.split("\n")]
         .map((line) => line.trim())
         .filter(Boolean);
       updates.arrivalNotes = [...new Set(merged)].join("\n").slice(0, 2000);
     }
+  } else if (notesCorrupt) {
+    updates.arrivalNotes = "";
   }
 
   return updates;
@@ -63,7 +80,7 @@ function buyInArrivalPatch(
   for (const key of [...ARRIVAL_SCALAR_FIELDS, "arrivalNotes"] as const) {
     const next = String(after[key] ?? "").trim();
     const prev = String(before[key] ?? "").trim();
-    if (next && next !== prev) patch[key] = next;
+    if (next !== prev) patch[key] = next || null;
   }
   return patch;
 }
@@ -85,12 +102,12 @@ export async function applyArrivalDetailsFromGuestInbox(aliasEmail: string): Pro
   if (!messages.length) return { updated: false, buyInId: buyIn.id, fields: [] };
 
   let working: Pick<BuyIn, ArrivalScalarField | "arrivalNotes"> = {
-    unitAddress: buyIn.unitAddress,
-    accessCode: buyIn.accessCode,
-    wifiName: buyIn.wifiName,
-    wifiPassword: buyIn.wifiPassword,
-    parkingInfo: buyIn.parkingInfo,
-    arrivalNotes: buyIn.arrivalNotes,
+    unitAddress: cleanExistingArrivalValue("unitAddress", buyIn.unitAddress),
+    accessCode: cleanExistingArrivalValue("accessCode", buyIn.accessCode),
+    wifiName: cleanExistingArrivalValue("wifiName", buyIn.wifiName),
+    wifiPassword: cleanExistingArrivalValue("wifiPassword", buyIn.wifiPassword),
+    parkingInfo: cleanExistingArrivalValue("parkingInfo", buyIn.parkingInfo),
+    arrivalNotes: cleanExistingArrivalValue("arrivalNotes", buyIn.arrivalNotes),
   };
 
   for (const msg of [...messages].reverse()) {

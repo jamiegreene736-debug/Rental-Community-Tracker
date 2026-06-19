@@ -4657,14 +4657,33 @@ type GuestInboxResponse = {
   arrivalFieldsUpdated?: string[];
 };
 
+function sanitizeArrivalDisplayValue(value: string | null | undefined): string {
+  return String(value ?? "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isDisplayableArrivalValue(value: string | null | undefined): boolean {
+  const v = sanitizeArrivalDisplayValue(value);
+  if (!v) return false;
+  if (/style\s*=|display\s*:\s*inline|text-indent\s*:/i.test(String(value ?? ""))) return false;
+  if (/131\s+continental\s+drive|newark,?\s*de\s*19702/i.test(v)) return false;
+  if (/guideline|unsubscribe|click here/i.test(v) && v.length < 40) return false;
+  return true;
+}
+
 function buyInHasArrivalDetails(buyIn: Pick<BuyIn, "unitAddress" | "accessCode" | "wifiName" | "wifiPassword" | "parkingInfo" | "arrivalNotes">): boolean {
   return !!(
-    buyIn.unitAddress?.trim()
-    || buyIn.accessCode?.trim()
-    || buyIn.wifiName?.trim()
-    || buyIn.wifiPassword?.trim()
-    || buyIn.parkingInfo?.trim()
-    || buyIn.arrivalNotes?.trim()
+    isDisplayableArrivalValue(buyIn.unitAddress)
+    || isDisplayableArrivalValue(buyIn.accessCode)
+    || isDisplayableArrivalValue(buyIn.wifiName)
+    || isDisplayableArrivalValue(buyIn.wifiPassword)
+    || isDisplayableArrivalValue(buyIn.parkingInfo)
+    || isDisplayableArrivalValue(buyIn.arrivalNotes)
   );
 }
 
@@ -4673,12 +4692,18 @@ function BuyInArrivalSummary({ buyIn, onEdit }: { buyIn: BuyIn; onEdit: () => vo
   if (!buyInHasArrivalDetails(buyIn)) return null;
 
   const rows: Array<{ label: string; value: string; mono?: boolean }> = [
-    { label: "Address", value: buyIn.unitAddress ?? "" },
-    { label: "Door / access code", value: buyIn.accessCode ?? "", mono: true },
-    { label: "Wi‑Fi", value: [buyIn.wifiName, buyIn.wifiPassword].filter(Boolean).join(" · ") },
-    { label: "Parking", value: buyIn.parkingInfo ?? "" },
-    { label: "Gate / elevator / notes", value: buyIn.arrivalNotes ?? "" },
-  ].filter((row) => row.value.trim());
+    { label: "Address", value: sanitizeArrivalDisplayValue(buyIn.unitAddress) },
+    { label: "Door / access code", value: sanitizeArrivalDisplayValue(buyIn.accessCode), mono: true },
+    {
+      label: "Wi‑Fi",
+      value: [buyIn.wifiName, buyIn.wifiPassword]
+        .map((v) => sanitizeArrivalDisplayValue(v))
+        .filter(isDisplayableArrivalValue)
+        .join(" · "),
+    },
+    { label: "Parking", value: sanitizeArrivalDisplayValue(buyIn.parkingInfo) },
+    { label: "Gate / elevator / notes", value: sanitizeArrivalDisplayValue(buyIn.arrivalNotes) },
+  ].filter((row) => isDisplayableArrivalValue(row.value));
 
   return (
     <div className="border-t bg-emerald-50/40 px-3 py-2.5 space-y-2 dark:bg-emerald-950/20" data-testid={`buy-in-arrival-${buyIn.id}`}>

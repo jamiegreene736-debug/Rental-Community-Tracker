@@ -75,7 +75,7 @@ import {
   parseEmailHeaders,
   parseGuestInboxEmailFromRaw,
 } from "../server/guest-inbox-sync";
-import { parseArrivalDetailsFromText } from "../server/buy-in-email";
+import { parseArrivalDetailsFromText, stripHtmlForEmailParse, isBlocklistedPropertyAddress, looksLikeHtmlGarbage } from "../server/buy-in-email";
 import { mergeArrivalDetailsIntoBuyIn } from "../server/guest-inbox-arrival";
 
 // ---------- Import the internals we want to test ----------
@@ -3941,4 +3941,12 @@ assert.ok(
     bookingsSource.includes("from VRBO email"),
   "guest inbox should extract arrival details and show them inline on the buy-in",
 );
+const htmlGlitchSample = 'Address: </span><span style="width:1.38pt">131 Continental Drive <br />Newark<br />DE 19702</span>';
+const cleanedGlitch = stripHtmlForEmailParse(htmlGlitchSample);
+assert.ok(!looksLikeHtmlGarbage(cleanedGlitch), "HTML glitch sample should strip to plain text");
+assert.ok(isBlocklistedPropertyAddress("131 Continental Drive, Newark, DE 19702"), "Expedia HQ address should be blocklisted");
+const parsedGlitch = parseArrivalDetailsFromText(htmlGlitchSample);
+assert.equal(parsedGlitch.unitAddress, "", "blocklisted corporate address should not populate unitAddress");
+const parsedSecureCode = parseArrivalDetailsFromText("Your secure code is 933195 - never share this code.");
+assert.equal(parsedSecureCode.accessCode, "933195");
 console.log("  ✓ guest inbox arrival extraction (address, codes, Wi‑Fi → buy-in fields)");
