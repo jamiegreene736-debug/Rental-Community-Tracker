@@ -958,9 +958,11 @@ type CommunityCheckPhotoVerdict = {
   folder?: string;
   filename?: string;
   caption?: string;
-  match: "yes" | "no";
+  match: "yes" | "no" | "uncertain";
   reason: string;
   lensIdentifiedCommunity?: string;
+  status?: "verified" | "likely" | "unconfirmed" | "mismatch";
+  confidenceScore?: number;
 };
 type CommunityCheckGroup = {
   role: "community" | "unit";
@@ -981,6 +983,9 @@ type CommunityCheckGroup = {
   outliers: CommunityCheckFlag[];
   junk: CommunityCheckFlag[];
   confidence: number;
+  overallStatus?: "verified" | "likely" | "unconfirmed" | "mismatch";
+  recommendation?: string;
+  confidenceScore?: number;
 };
 type CommunityCheckDuplicate = {
   scope: "cross-folder" | "within-folder";
@@ -1947,6 +1952,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [communityCheckPhase, setCommunityCheckPhase] = useState<CommunityCheckPhase>("idle");
   const [communityCheckResult, setCommunityCheckResult] = useState<PhotoCommunityCheckResult | null>(null);
   const [communityCheckError, setCommunityCheckError] = useState<string | null>(null);
+  const [communityCheckManualVerified, setCommunityCheckManualVerified] = useState(false);
 
   // Persisted last-push summary (survives refresh)
   type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number };
@@ -3215,6 +3221,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setCommunityCheckPhase("running");
     setCommunityCheckError(null);
     setCommunityCheckResult(null);
+    setCommunityCheckManualVerified(false);
     try {
       const parse = (url: string): { folder: string; filename: string } | null => {
         try {
@@ -3289,10 +3296,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const communityPhotoVerdicts = useMemo(() => {
     const verdicts = communityCheckResult?.community?.photoVerdicts;
     if (!verdicts?.length) return undefined;
-    const map: Record<string, { match: "yes" | "no"; reason?: string }> = {};
+    const map: Record<string, { match: "yes" | "no" | "uncertain"; reason?: string; status?: CommunityCheckPhotoVerdict["status"] }> = {};
     for (const v of verdicts) {
       if (v.folder && v.filename) {
-        map[`${v.folder}/${v.filename}`] = { match: v.match, reason: v.reason };
+        map[`${v.folder}/${v.filename}`] = { match: v.match, reason: v.reason, status: v.status };
       }
     }
     return Object.keys(map).length > 0 ? map : undefined;
@@ -7221,14 +7228,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     {communityCheckPhase === "running" ? "🔎 Checking photos…" : "🔎 Check photo community"}
                                   </button>
                                   <span style={{ fontSize: 11, color: "#64748b", flex: 1, minWidth: 220 }}>
-                                    Reverse-image-searches every community-folder photo (✓ good / ✕ wrong on each tile), then checks unit bedrooms.
+                                    Multi-signal check: reverse image search + visual analysis + captions on each community photo.
                                   </span>
                                 </div>
 
                                 {communityCheckPhase === "running" && (
                                   <div style={{ fontSize: 11, color: "#0e7490", marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
                                     <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#06b6d4", animation: "glb-blink 1s infinite" }} />
-                                    Analyzing community folder via Google reverse image search (one call per photo), then unit match and bedroom coverage — may take several minutes for large folders…
+                                    Analyzing community folder (reverse image search + Claude vision on unconfirmed photos), then unit match and bedroom coverage — may take several minutes for large folders…
                                   </div>
                                 )}
 
@@ -7238,18 +7245,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
                                 {communityCheckPhase === "done" && communityCheckResult && (() => {
                                   const r = communityCheckResult;
-                                  const vStyle = r.verdict === "pass"
-                                    ? { bg: "#dcfce7", fg: "#15803d", label: "✓ Pass" }
-                                    : r.verdict === "fail"
-                                    ? { bg: "#fee2e2", fg: "#b91c1c", label: "✗ Problem found" }
-                                    : { bg: "#fef9c3", fg: "#92400e", label: "⚠ Review needed" };
-                                  // Binary badge for the same-community axis — never "Uncertain".
-                                  // Defaults to Yes (no positive contradiction = same community),
-                                  // mirroring the server's asYesNo() mapping so the operator always
-                                  // gets a definite yes/no, not a maybe.
+                                  const communityStatus = r.community?.overallStatus;
+                                  const effectiveStatus = communityCheckManualVerified ? "verified" : communityStatus;
+                                  const vStyle =
+                                    communityCheckManualVerified || r.verdict === "pass"
+                                    ? { bg: "#dcfce7", fg: "#15803d", label: communityCheckManualVerified ? "✓ Verified (manual)" : "✓ Pass" }
+                                    : effectiveStatus === "mismatch" || r.verdict === "fail"
+                                    ? { bg: "#fef3c7", fg: "#b45309", label: "⚠ Mismatch — review photos" }
+                                    : effectiveStatus === "unconfirmed"
+                                    ? { bg: "#fef9c3", fg: "#92400e", label: "ⓘ Unconfirmed — manual review recommended" }
+                                    : effectiveStatus === "likely"
+                                    ? { bg: "#ecfdf5", fg: "#047857", label: "✓ Likely match" }
+                                    : r.verdict === "warn"
+                                    ? { bg: "#fef9c3", fg: "#92400e", label: "⚠ Review needed" }
+                                    : { bg: "#dcfce7", fg: "#15803d", label: "✓ Pass" };
                                   const yn = (s?: "yes" | "no") =>
                                     s === "no" ? { bg: "#fee2e2", fg: "#b91c1c", label: "No" }
                                     : { bg: "#dcfce7", fg: "#15803d", label: "Yes" };
+                                  const photoStatusBadge = (v: CommunityCheckPhotoVerdict) => {
+                                    const st = v.status ?? (v.match === "no" ? "mismatch" : v.match === "uncertain" ? "unconfirmed" : "verified");
+                                    if (st === "mismatch") return { bg: "#fee2e2", fg: "#b91c1c", label: "Mismatch" };
+                                    if (st === "unconfirmed") return { bg: "#fef9c3", fg: "#92400e", label: "Unconfirmed" };
+                                    if (st === "likely") return { bg: "#ecfdf5", fg: "#047857", label: "Likely" };
+                                    return { bg: "#dcfce7", fg: "#15803d", label: "Verified" };
+                                  };
                                   const badge = (c: { bg: string; fg: string }): CSSProperties => ({
                                     display: "inline-block", fontSize: 10.5, fontWeight: 600, padding: "1px 7px",
                                     borderRadius: 10, background: c.bg, color: c.fg,
@@ -7273,13 +7292,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       <div style={{ marginTop: 4 }}>
                                         <span style={{ fontSize: 11, fontWeight: 600, color: "#334155" }}>Per-photo votes:</span>
                                         <ul style={{ margin: "2px 0 0 0", paddingLeft: 18, fontSize: 11, color: "#475569" }}>
-                                          {verdicts.map((v, i) => (
+                                          {verdicts.map((v, i) => {
+                                            const pb = photoStatusBadge(v);
+                                            return (
                                             <li key={i}>
                                               <code style={{ color: "#0e7490" }}>{v.id}</code>
-                                              <span style={{ ...badge(yn(v.match)), marginLeft: 6 }}>{yn(v.match).label}</span>
+                                              <span style={{ ...badge(pb), marginLeft: 6 }}>{pb.label}</span>
+                                              {v.confidenceScore != null ? (
+                                                <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: 4 }}>({v.confidenceScore}%)</span>
+                                              ) : null}
                                               {v.caption ? ` "${v.caption}"` : ""} — {v.reason}
                                             </li>
-                                          ))}
+                                          );})}
                                         </ul>
                                       </div>
                                     ) : null;
@@ -7299,13 +7323,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   const unitMatches = r.units.map((u) => u.sameAsCommunity);
                                   const comparableSets = (r.community ? 1 : 0) + r.units.length;
                                   const anyDifferent =
-                                    communityMatch === "no" ||
-                                    unitMatches.some((m) => m === "no") ||
-                                    r.allSameCommunity === "no";
+                                    !communityCheckManualVerified && (
+                                      effectiveStatus === "mismatch"
+                                      || communityMatch === "no"
+                                      || unitMatches.some((m) => m === "no")
+                                      || (r.allSameCommunity === "no" && effectiveStatus !== "unconfirmed" && effectiveStatus !== "likely")
+                                    );
                                   const nothingToCompare = !anyDifferent && comparableSets < 2;
                                   const sameStyle =
-                                    anyDifferent
-                                      ? { bg: "#fee2e2", fg: "#b91c1c", label: "✗ FAILED — NOT all the same community" }
+                                    communityCheckManualVerified
+                                      ? { bg: "#dcfce7", fg: "#15803d", label: "✓ YES — marked verified by admin" }
+                                      : anyDifferent
+                                      ? { bg: "#fef3c7", fg: "#b45309", label: "⚠ Review — possible community mismatch" }
+                                      : effectiveStatus === "unconfirmed"
+                                      ? { bg: "#fef9c3", fg: "#92400e", label: "ⓘ Unconfirmed — photos look consistent but not indexed online" }
+                                      : effectiveStatus === "likely"
+                                      ? { bg: "#ecfdf5", fg: "#047857", label: "✓ Likely — same community" }
                                       : nothingToCompare
                                       ? { bg: "#f1f5f9", fg: "#475569", label: "ⓘ Only one photo set — attach units to compare" }
                                       : { bg: "#dcfce7", fg: "#15803d", label: "✓ YES — all the same community" };
@@ -7428,6 +7461,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         <span style={{ ...badge(yn(r.allSameCommunity)), fontSize: 11, padding: "1px 8px" }}>
                                           All same community: {yn(r.allSameCommunity).label}
                                         </span>
+                                        {r.community?.overallStatus && (
+                                          <span style={{ fontSize: 11, color: "#64748b" }}>
+                                            Status: <b>{r.community.overallStatus}</b>
+                                            {r.community.confidenceScore != null ? ` · ${r.community.confidenceScore}% confidence` : ""}
+                                          </span>
+                                        )}
+                                        {(r.community?.overallStatus === "unconfirmed" || r.community?.overallStatus === "likely" || r.verdict === "warn") && !communityCheckManualVerified && (
+                                          <button
+                                            type="button"
+                                            className="glb-btn"
+                                            onClick={() => setCommunityCheckManualVerified(true)}
+                                            style={{ fontSize: 11, background: "#ecfdf5", color: "#047857", border: "1px solid #bbf7d0" }}
+                                          >
+                                            Mark as verified anyway
+                                          </button>
+                                        )}
                                         {r.unitsSameCommunity && r.unitsSameCommunity !== "n/a" && (
                                           <span style={{ ...badge(yn(r.unitsSameCommunity)), fontSize: 11, padding: "1px 8px" }}>
                                             Units match each other: {yn(r.unitsSameCommunity).label}
@@ -7449,8 +7498,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                             <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>{r.community.photosChecked}/{r.community.photosTotal} checked</span>
                                           </div>
                                           <div style={rowS}>Identified as: <b>{r.community.identifiedCommunity}</b></div>
-                                          {r.community.communityFingerprint && (
-                                            <div style={{ ...rowS, fontSize: 11, color: "#64748b" }}>Profile: {r.community.communityFingerprint}</div>
+                                          {r.community.recommendation && (
+                                            <div style={{ ...rowS, color: "#64748b", fontStyle: "italic" }}>{r.community.recommendation}</div>
                                           )}
                                           <div style={rowS}>
                                             Matches expected{r.expectedCommunity ? ` ("${r.expectedCommunity}")` : ""}: <span style={badge(yn(r.community.matchesExpected))}>{yn(r.community.matchesExpected).label}</span>

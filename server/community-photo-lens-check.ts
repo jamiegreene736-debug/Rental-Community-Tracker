@@ -117,6 +117,9 @@ async function callGoogleLens(imageUrl: string, apiKey: string): Promise<LensCal
   }
 }
 
+/** Exported for multi-signal verify module. */
+export const callGoogleLensInternal = callGoogleLens;
+
 export async function auditCommunityFolderViaLens(
   samples: CommunityLensSample[],
   photosTotal: number,

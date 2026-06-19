@@ -53,8 +53,9 @@ function parseLocalPath(url: string): { folder: string; filename: string } | nul
 }
 
 export type CommunityPhotoVerdict = {
-  match: "yes" | "no";
+  match: "yes" | "no" | "uncertain";
   reason?: string;
+  status?: "verified" | "likely" | "unconfirmed" | "mismatch";
 };
 
 export type PhotoCuratorProps = {
@@ -843,17 +844,25 @@ function PhotoTile({
         }}>{index}</div>
         {communityVerdict && (
           <div
-            title={communityVerdict.reason || (communityVerdict.match === "yes" ? "Confirmed for this community" : "Does not belong in this community folder")}
+            title={communityVerdict.reason || (
+              communityVerdict.match === "yes" ? "Confirmed for this community"
+              : communityVerdict.match === "uncertain" ? "Unconfirmed — not indexed online but no strong mismatch"
+              : "Does not belong in this community folder"
+            )}
             style={{
               position: "absolute", top: 4, right: 4,
               width: 22, height: 22, borderRadius: "50%",
               display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 13, fontWeight: 800, lineHeight: 1,
-              background: communityVerdict.match === "yes" ? "#16a34a" : "#dc2626",
+              fontSize: communityVerdict.match === "uncertain" ? 11 : 13,
+              fontWeight: 800, lineHeight: 1,
+              background:
+                communityVerdict.match === "yes" ? "#16a34a"
+                : communityVerdict.match === "uncertain" ? "#d97706"
+                : "#dc2626",
               color: "#fff",
               boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
             }}
-          >{communityVerdict.match === "yes" ? "✓" : "✕"}</div>
+          >{communityVerdict.match === "yes" ? "✓" : communityVerdict.match === "uncertain" ? "?" : "✕"}</div>
         )}
         {hidden && (
           <div style={{

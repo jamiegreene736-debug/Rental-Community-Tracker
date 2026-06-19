@@ -23,6 +23,12 @@ export type CommunityLensVerdict = {
   identifiedCommunity?: string;
 };
 
+export type CommunityLensClassification = {
+  outcome: "confirmed" | "contradicted" | "generic_amenity" | "inconclusive";
+  reason: string;
+  identifiedCommunity?: string;
+};
+
 function toSearchResult(row: LensEvidenceRow): PreflightSearchResult {
   return {
     title: row.title ?? "",
@@ -46,7 +52,42 @@ export function lensHaystackIsGenericAmenity(text: string): boolean {
     && !/\b(at|in)\s+[a-z]{4,}/i.test(hay);
 }
 
+/** Classify Lens hits without collapsing inconclusive results to a hard "no". */
+export function classifyCommunityPhotoFromLens(
+  expectedCommunity: string,
+  rows: LensEvidenceRow[],
+  extraTexts: string[] = [],
+  city = "",
+): CommunityLensClassification {
+  const verdict = judgeCommunityPhotoFromLensCore(expectedCommunity, rows, extraTexts, city);
+  if (verdict.match === "yes") {
+    const generic = verdict.reason.includes("Generic resort amenity");
+    return {
+      outcome: generic ? "generic_amenity" : "confirmed",
+      reason: verdict.reason,
+      identifiedCommunity: verdict.identifiedCommunity,
+    };
+  }
+  const inconclusive =
+    verdict.reason.includes("no usable matches")
+    || verdict.reason.includes("could not confirm");
+  return {
+    outcome: inconclusive ? "inconclusive" : "contradicted",
+    reason: verdict.reason,
+    identifiedCommunity: verdict.identifiedCommunity,
+  };
+}
+
 export function judgeCommunityPhotoFromLens(
+  expectedCommunity: string,
+  rows: LensEvidenceRow[],
+  extraTexts: string[] = [],
+  city = "",
+): CommunityLensVerdict {
+  return judgeCommunityPhotoFromLensCore(expectedCommunity, rows, extraTexts, city);
+}
+
+function judgeCommunityPhotoFromLensCore(
   expectedCommunity: string,
   rows: LensEvidenceRow[],
   extraTexts: string[] = [],

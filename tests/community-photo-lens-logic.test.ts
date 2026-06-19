@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { judgeCommunityPhotoFromLens } from "../shared/community-photo-lens-logic";
+import { judgeCommunityPhotoFromLens, classifyCommunityPhotoFromLens } from "../shared/community-photo-lens-logic";
 
 let passed = 0;
 let failed = 0;
@@ -55,8 +55,8 @@ check(
 );
 
 check(
-  "empty lens results fail closed",
-  judgeCommunityPhotoFromLens(bonitaNational, []).match === "no",
+  "classifyCommunityPhotoFromLens marks empty results inconclusive",
+  classifyCommunityPhotoFromLens(bonitaNational, []).outcome === "inconclusive",
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

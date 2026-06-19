@@ -29,6 +29,7 @@ type CheckLike = {
     allSameCommunity?: boolean;
     photosChecked?: number;
     photosTotal?: number;
+    overallStatus?: "verified" | "likely" | "unconfirmed" | "mismatch";
   } | null;
   units?: Array<{ sameAsCommunity?: "yes" | "no" }>;
   bedroomCoverage?: {
@@ -79,9 +80,11 @@ export function derivePhotoCommunityRowStatus(
 
   let communityFolderOk: boolean | null = null;
   if (result.community) {
+    const st = result.community.overallStatus;
     const folderOk =
-      result.community.matchesExpected === "yes"
-      && result.community.allSameCommunity !== false;
+      st !== "mismatch"
+      && result.community.allSameCommunity !== false
+      && (result.community.matchesExpected === "yes" || st === "likely" || st === "unconfirmed");
     communityFolderOk = folderOk;
   } else if ((result.units?.length ?? 0) > 0) {
     communityFolderOk = false;
