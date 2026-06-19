@@ -75,6 +75,8 @@ import {
   parseEmailHeaders,
   parseGuestInboxEmailFromRaw,
 } from "../server/guest-inbox-sync";
+import { parseArrivalDetailsFromText } from "../server/buy-in-email";
+import { mergeArrivalDetailsIntoBuyIn } from "../server/guest-inbox-arrival";
 
 // ---------- Import the internals we want to test ----------
 // The sanity check and fact extractors aren't exported, so we
@@ -3907,3 +3909,36 @@ assert.match(parsedGuest!.body, /reservation is confirmed/i);
 assert.equal(parseEmailHeaders(sampleGuestEmailRaw)["x-simplelogin-envelope-to"], "cecilio.marquez@emailprivacy.com");
 assert.match(extractBodyFromRawEmail(sampleGuestEmailRaw), /Townhome A/);
 console.log("  ✓ guest inbox mailbox sync (SimpleLogin envelope headers + IMAP pull on fetch)");
+
+// ── Guest inbox → buy-in arrival extraction ────────────────────────────────
+const vrboArrivalSample = [
+  "Property address: 2253 Poipu Rd, Unit B, Koloa, HI 96756",
+  "Door code: 4821",
+  "Gate code: 9912",
+  "Elevator code: 4455",
+  "Wi-Fi name: GuestNetwork",
+  "Wi-Fi password: stay2026",
+  "Parking: Stall #12 in the garage",
+  "Check-in time: 4:00 PM",
+].join("\n");
+const parsedArrival = parseArrivalDetailsFromText(vrboArrivalSample);
+assert.equal(parsedArrival.unitAddress, "2253 Poipu Rd, Unit B, Koloa, HI 96756");
+assert.equal(parsedArrival.accessCode, "4821");
+assert.match(parsedArrival.arrivalNotes ?? "", /Gate code: 9912/);
+assert.match(parsedArrival.arrivalNotes ?? "", /Elevator code: 4455/);
+assert.equal(parsedArrival.wifiName, "GuestNetwork");
+assert.equal(parsedArrival.wifiPassword, "stay2026");
+const mergedArrival = mergeArrivalDetailsIntoBuyIn(
+  { unitAddress: "", accessCode: "", wifiName: "", wifiPassword: "", parkingInfo: "", arrivalNotes: "" },
+  parsedArrival,
+);
+assert.equal(mergedArrival.unitAddress, parsedArrival.unitAddress);
+assert.equal(mergedArrival.accessCode, "4821");
+assert.ok(
+  routesSource.includes("applyArrivalDetailsFromGuestInbox") &&
+    routesSource.includes("guest-inbox-arrival") &&
+    bookingsSource.includes("BuyInArrivalSummary") &&
+    bookingsSource.includes("from VRBO email"),
+  "guest inbox should extract arrival details and show them inline on the buy-in",
+);
+console.log("  ✓ guest inbox arrival extraction (address, codes, Wi‑Fi → buy-in fields)");

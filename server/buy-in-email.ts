@@ -75,13 +75,51 @@ export function parseArrivalDetailsFromText(body: string): Record<string, string
     }
     return "";
   };
+
+  const gateCode = pick([
+    /(?:gate\s*(?:code|#|passcode)?|community\s*gate|resort\s*gate)\s*[:\-]\s*([^\n]+)/i,
+  ]);
+  const elevatorCode = pick([
+    /(?:elevator\s*(?:code|#|passcode)?|lift\s*code)\s*[:\-]\s*([^\n]+)/i,
+  ]);
+  const doorCode = pick([
+    /(?:door\s*(?:code|#|passcode)?|unit\s*(?:code|door code)|lockbox\s*code|keypad\s*code)\s*[:\-]\s*([^\n]+)/i,
+    /(?:access code|entry code)\s*[:\-]\s*([^\n]+)/i,
+  ]);
+
+  let unitAddress = pick([
+    /(?:property address|unit address|rental address|address|location|where you['']?ll stay)\s*[:\-]\s*([^\n]+)/i,
+    /(?:check-?in(?: location)?|arrival(?: location)?)\s*[:\-]\s*([^\n]+)/i,
+  ]);
+  if (!unitAddress) {
+    const streetMatch = text.match(
+      /\b(\d{1,6}\s+[A-Za-z0-9.\s#'/-]{3,90}(?:,\s*[A-Za-z .'-]+){0,4}(?:,\s*[A-Z]{2})?\s+\d{5}(?:-\d{4})?)\b/,
+    );
+    if (streetMatch?.[1]) unitAddress = streetMatch[1].trim().replace(/\s+/g, " ").slice(0, 500);
+  }
+
+  const accessCode = doorCode || pick([/(?:access code|door code|lockbox code|entry code|keypad code)\s*[:\-]\s*([^\n]+)/i]);
+  const wifiName = pick([/(?:wi-?fi(?: name)?|network|ssid)\s*[:\-]\s*([^\n]+)/i]);
+  const wifiPassword = pick([/(?:wi-?fi password|network password|password)\s*[:\-]\s*([^\n]+)/i]);
+  const parkingInfo = pick([/(?:parking|parking info|parking instructions|assigned parking)\s*[:\-]\s*([\s\S]{0,500})(?:\n\s*\n|$)/i]);
+
+  const noteLines: string[] = [];
+  if (gateCode && gateCode !== accessCode) noteLines.push(`Gate code: ${gateCode}`);
+  if (elevatorCode) noteLines.push(`Elevator code: ${elevatorCode}`);
+  const checkInTime = pick([/(?:check-?in time|arrival time|check-?in begins)\s*[:\-]\s*([^\n]+)/i]);
+  if (checkInTime) noteLines.push(`Check-in: ${checkInTime}`);
+  const arrivalBlock = pick([
+    /(?:arrival details|arrival instructions|check-?in instructions|getting (?:there|in)|access instructions)\s*[:\-]\s*([\s\S]{0,1000})(?:\n\s*\n|$)/i,
+  ]);
+  if (arrivalBlock) noteLines.push(arrivalBlock);
+
   return {
-    unitAddress: pick([/(?:address|unit address|property address)\s*[:\-]\s*([^\n]+)/i]),
-    accessCode: pick([/(?:access code|door code|lockbox code|entry code|keypad code)\s*[:\-]\s*([^\n]+)/i]),
-    wifiName: pick([/(?:wi-?fi(?: name)?|network|ssid)\s*[:\-]\s*([^\n]+)/i]),
-    wifiPassword: pick([/(?:wi-?fi password|password)\s*[:\-]\s*([^\n]+)/i]),
-    parkingInfo: pick([/(?:parking|parking info|parking instructions)\s*[:\-]\s*([\s\S]{0,500})(?:\n\s*\n|$)/i]),
-    arrivalNotes: pick([/(?:arrival details|arrival instructions|check-?in instructions)\s*[:\-]\s*([\s\S]{0,1000})(?:\n\s*\n|$)/i]),
+    unitAddress,
+    accessCode,
+    wifiName,
+    wifiPassword,
+    parkingInfo,
+    arrivalNotes: noteLines.join("\n").slice(0, 2000),
   };
 }
 

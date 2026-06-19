@@ -11673,6 +11673,12 @@ Requirements:
           providerMessageId,
           rawPayload: JSON.stringify(req.body ?? {}),
         });
+        try {
+          const { applyArrivalDetailsFromGuestMessage } = await import("./guest-inbox-arrival");
+          await applyArrivalDetailsFromGuestMessage({ aliasEmail: toEmail, subject, body });
+        } catch (extractErr: any) {
+          console.warn("[guest-inbox] arrival extract failed:", extractErr?.message ?? extractErr);
+        }
         return res.json({ guestInboxMessage: stored });
       }
 
@@ -11745,12 +11751,14 @@ Requirements:
   app.get("/api/guest-inbox", async (req, res) => {
     try {
       let aliasEmail = String(req.query.aliasEmail ?? "").trim().toLowerCase();
-      const buyInId = Number(req.query.buyInId);
-      if (!aliasEmail && Number.isFinite(buyInId) && buyInId > 0) {
-        const buyIn = await storage.getBuyIn(buyInId);
+      const queryBuyInId = Number(req.query.buyInId);
+      if (!aliasEmail && Number.isFinite(queryBuyInId) && queryBuyInId > 0) {
+        const buyIn = await storage.getBuyIn(queryBuyInId);
         aliasEmail = String(buyIn?.travelerEmail ?? "").trim().toLowerCase();
       }
-      if (!aliasEmail) return res.json({ aliasEmail: null, guestName: null, messages: [] });
+      if (!aliasEmail) {
+        return res.json({ aliasEmail: null, guestName: null, messages: [], arrivalDetails: null, arrivalExtracted: false, arrivalFieldsUpdated: [] });
+      }
       // Pull VRBO confirmations from the SimpleLogin forwarding mailbox when the
       // inbound webhook hasn't recorded them yet (common after manual buy-in).
       try {
@@ -11759,12 +11767,41 @@ Requirements:
       } catch (syncErr: any) {
         console.warn("[guest-inbox] mailbox sync failed:", syncErr?.message ?? syncErr);
       }
+      let arrivalExtract: { updated: boolean; buyInId: number | null; fields: string[] } = {
+        updated: false,
+        buyInId: null,
+        fields: [],
+      };
+      try {
+        const { applyArrivalDetailsFromGuestInbox } = await import("./guest-inbox-arrival");
+        arrivalExtract = await applyArrivalDetailsFromGuestInbox(aliasEmail);
+      } catch (extractErr: any) {
+        console.warn("[guest-inbox] arrival extract failed:", extractErr?.message ?? extractErr);
+      }
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
       const messages = await storage.getGuestInboxMessages(aliasEmail, limit);
+      const resolvedBuyInId = Number.isFinite(queryBuyInId) && queryBuyInId > 0
+        ? queryBuyInId
+        : arrivalExtract.buyInId ?? (await storage.getBuyInByTravelerEmail(aliasEmail))?.id ?? null;
+      const buyIn = resolvedBuyInId ? await storage.getBuyIn(resolvedBuyInId) : null;
       const guestName = messages.find((m) => m.guestName)?.guestName
         ?? ((aliasEmail.split("@")[0] || "").split(/[._]+/).filter(Boolean)
           .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || null);
-      res.json({ aliasEmail, guestName, messages });
+      res.json({
+        aliasEmail,
+        guestName,
+        messages,
+        arrivalDetails: buyIn ? {
+          unitAddress: buyIn.unitAddress ?? "",
+          accessCode: buyIn.accessCode ?? "",
+          wifiName: buyIn.wifiName ?? "",
+          wifiPassword: buyIn.wifiPassword ?? "",
+          parkingInfo: buyIn.parkingInfo ?? "",
+          arrivalNotes: buyIn.arrivalNotes ?? "",
+        } : null,
+        arrivalExtracted: arrivalExtract.updated,
+        arrivalFieldsUpdated: arrivalExtract.fields,
+      });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch guest inbox", message: err?.message ?? String(err) });
     }
