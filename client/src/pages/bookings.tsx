@@ -43,6 +43,7 @@ import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
+import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
@@ -4727,6 +4728,187 @@ function BuyInArrivalSummary({ buyIn, onEdit }: { buyIn: BuyIn; onEdit: () => vo
   );
 }
 
+function arrivalUnitDetailForMessage(unit: ArrivalUnitDetail): ArrivalUnitDetail {
+  const pick = (value?: string | null) => {
+    const cleaned = sanitizeArrivalDisplayValue(value);
+    return isDisplayableArrivalValue(cleaned) ? cleaned : undefined;
+  };
+  return {
+    unitLabel: unit.unitLabel,
+    unitAddress: pick(unit.unitAddress),
+    accessCode: pick(unit.accessCode),
+    wifiName: pick(unit.wifiName),
+    wifiPassword: pick(unit.wifiPassword),
+    parkingInfo: pick(unit.parkingInfo),
+    managementCompany: pick(unit.managementCompany),
+    managementContact: pick(unit.managementContact),
+    arrivalNotes: pick(unit.arrivalNotes),
+  };
+}
+
+function hasArrivalDetailContent(unit: ArrivalUnitDetail): boolean {
+  const normalized = arrivalUnitDetailForMessage(unit);
+  return !!(
+    normalized.unitAddress
+    || normalized.accessCode
+    || normalized.wifiName
+    || normalized.wifiPassword
+    || normalized.parkingInfo
+    || normalized.managementCompany
+    || normalized.managementContact
+    || normalized.arrivalNotes
+  );
+}
+
+/** Draft + send arrival details from attached buy-ins through the booking channel. */
+function ArrivalDetailsMessageDialog({
+  reservation,
+  onClose,
+}: {
+  reservation: GuestyReservation;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const channel = channelKindOf(reservation);
+  const channelLabel =
+    channel === "booking" ? "Booking.com"
+      : channel === "vrbo" ? "VRBO"
+      : channel === "airbnb" ? "Airbnb"
+      : "the booking channel";
+  const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
+  const firstName = guestName.split(/\s+/)[0] || "there";
+  const propertyName = reservation.propertyName
+    ?? reservation.slots.find((s) => s.buyIn)?.buyIn?.propertyName
+    ?? "";
+
+  const { data, isLoading, refetch, isFetching } = useQuery<{ units: ArrivalUnitDetail[] }>({
+    queryKey: ["/api/bookings", reservation._id, "arrival-details"],
+    queryFn: ({ signal }) => apiGetJson(`/api/bookings/${encodeURIComponent(reservation._id)}/arrival-details`, signal),
+  });
+
+  const [message, setMessage] = useState("");
+  const [sent, setSent] = useState(false);
+
+  useEffect(() => {
+    if (!data) return;
+    const units = (data.units ?? []).map(arrivalUnitDetailForMessage);
+    setMessage(buildArrivalDetailsGuestMessage({
+      guestFirstName: firstName,
+      propertyName,
+      checkInIso: checkInOf(reservation),
+      units,
+    }));
+  }, [data, firstName, propertyName, reservation]);
+
+  const sendMessage = useMutation({
+    mutationFn: async () => {
+      if (!message.trim()) throw new Error("The message is empty.");
+      const response = await apiRequest("POST", "/api/booking-alternatives/send-guest-message", {
+        reservationId: reservation._id,
+        body: message,
+        channel,
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body?.ok !== true) {
+        throw new Error(body?.message || body?.error || `Guesty returned HTTP ${response.status}`);
+      }
+      return body as { ok: true; conversationId: string };
+    },
+    onSuccess: () => {
+      setSent(true);
+      toast({ title: "Arrival details sent", description: `Delivered through ${channelLabel}.` });
+    },
+    onError: (e: any) => toast({ title: "Message send failed", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+
+  const copyMessage = async () => {
+    if (!message.trim()) return;
+    try { await navigator.clipboard?.writeText(message); toast({ title: "Message copied" }); }
+    catch { toast({ title: "Copy failed", variant: "destructive" }); }
+  };
+
+  const unitsWithDetails = (data?.units ?? []).filter(hasArrivalDetailContent);
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Message AD (Arrival Details)</DialogTitle>
+          <DialogDescription>
+            Drafts a message with arrival details from each attached buy-in unit (address, access codes, Wi-Fi, parking)
+            and sends it to {guestName.split(/\s+/)[0] || "the guest"} through {channelLabel}.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="rounded border bg-muted/30 p-3 text-xs">
+            <p className="font-medium">{guestName} · <span className="text-muted-foreground">{channelLabel}</span></p>
+            <p className="text-muted-foreground">
+              {fmtDate(checkInOf(reservation))} → {fmtDate(checkOutOf(reservation))}
+              {" · "}
+              {unitsWithDetails.length} unit{unitsWithDetails.length === 1 ? "" : "s"} with arrival details
+            </p>
+          </div>
+          {(isLoading || isFetching) && !data ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground py-6 justify-center">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading arrival details…
+            </div>
+          ) : (
+            <>
+              {unitsWithDetails.length === 0 && (
+                <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+                  No saved arrival details yet — the draft notes that details are still being confirmed. Add details in each unit&apos;s
+                  Arrival details panel or wait for VRBO emails to populate them, then click Refresh.
+                </div>
+              )}
+              <div className="flex justify-end">
+                <Button type="button" size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => void refetch()}>
+                  <RefreshCw className="h-3 w-3 mr-1" /> Refresh details
+                </Button>
+              </div>
+              <div>
+                <Label htmlFor="arrivalDetailsMessage" className="text-xs">Message to guest</Label>
+                <Textarea
+                  id="arrivalDetailsMessage"
+                  rows={14}
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  className="text-sm font-mono"
+                  data-testid="input-arrival-details-message"
+                />
+              </div>
+              {sent && (
+                <div className="rounded border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-xs text-emerald-950">
+                  Sent through {channelLabel}.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          <Button type="button" variant="outline" onClick={copyMessage} disabled={!message.trim()}>
+            <Copy className="mr-1 h-3.5 w-3.5" /> Copy
+          </Button>
+          <Button
+            type="button"
+            onClick={() => sendMessage.mutate()}
+            disabled={!message.trim() || sendMessage.isPending || sent || isLoading}
+            data-testid="button-send-arrival-details-message"
+          >
+            {sendMessage.isPending ? (
+              <><Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> Sending…</>
+            ) : sent ? (
+              <><CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Sent</>
+            ) : (
+              <><Send className="mr-1 h-3.5 w-3.5" /> Send through {channelLabel}</>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /** Inline VRBO guest booking thread — shows arrival emails in Operations. */
 function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservation: GuestyReservation }) {
   const { toast } = useToast();
@@ -6602,6 +6784,10 @@ export default function Bookings() {
     | null
   >(null);
   const [relocateGuestTarget, setRelocateGuestTarget] = useState<
+    | { reservation: GuestyReservation }
+    | null
+  >(null);
+  const [arrivalDetailsMessageTarget, setArrivalDetailsMessageTarget] = useState<
     | { reservation: GuestyReservation }
     | null
   >(null);
@@ -10611,15 +10797,27 @@ export default function Bookings() {
                                     Guest page
                                   </Button>
                                   {!isManualReservation(r) && (
-                                    <Button
-                                      size="sm"
-                                      onClick={(e) => { e.stopPropagation(); setRelocateGuestTarget({ reservation: r }); }}
-                                      data-testid={`button-relocate-guest-${r._id}-${slot.unitId}`}
-                                      title={`Draft + send the guest an apology with the alternative Guest Page link, through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "their booking channel"} (the channel they booked with), and track whether they open it`}
-                                    >
-                                      <Send className="h-3.5 w-3.5 mr-1" />
-                                      Message guest
-                                    </Button>
+                                    <>
+                                      <Button
+                                        size="sm"
+                                        onClick={(e) => { e.stopPropagation(); setRelocateGuestTarget({ reservation: r }); }}
+                                        data-testid={`button-relocate-guest-${r._id}-${slot.unitId}`}
+                                        title={`Draft + send the guest an apology with the alternative Guest Page link, through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "their booking channel"} (the channel they booked with), and track whether they open it`}
+                                      >
+                                        <Send className="h-3.5 w-3.5 mr-1" />
+                                        Alternative Unit
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="secondary"
+                                        onClick={(e) => { e.stopPropagation(); setArrivalDetailsMessageTarget({ reservation: r }); }}
+                                        data-testid={`button-message-ad-${r._id}-${slot.unitId}`}
+                                        title="Draft + send arrival details (address, codes, Wi-Fi, parking) from all attached units through the booking channel"
+                                      >
+                                        <FileText className="h-3.5 w-3.5 mr-1" />
+                                        Message AD
+                                      </Button>
+                                    </>
                                   )}
                                   {/* Persistent confirmation that the relocation message was already
                                       sent for this reservation (rendered once, on the first filled
@@ -11507,6 +11705,12 @@ export default function Bookings() {
         <RelocateGuestDialog
           reservation={relocateGuestTarget.reservation}
           onClose={() => setRelocateGuestTarget(null)}
+        />
+      )}
+      {arrivalDetailsMessageTarget && (
+        <ArrivalDetailsMessageDialog
+          reservation={arrivalDetailsMessageTarget.reservation}
+          onClose={() => setArrivalDetailsMessageTarget(null)}
         />
       )}
 
@@ -15712,7 +15916,7 @@ function RelocateGuestDialog({
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Message guest about the move</DialogTitle>
+          <DialogTitle>Alternative unit message</DialogTitle>
           <DialogDescription>
             Drafts an apology that we've moved {guestName.split(/\s+/)[0] || "the guest"} to a comparable
             property, includes the new listing's guest page link, and sends it through {channelLabel} (the
