@@ -27272,9 +27272,9 @@ Return ONLY compact JSON with this exact shape:
   // Body: { guestyListingId: string }  OR  { all: true }  (iterates every mapped listing)
   // Streams NDJSON events: {type:"listing-start",id,name}, {type:"photo",...},
   //   {type:"listing-done",id,fixedCount,totalCount}, {type:"all-done",listingCount,...}
-  // Photo Community Check — operator-clicked QA from the photos tab. Two-pass
-  // vision analysis (community fingerprint + 5+ interior photos per unit) with
-  // deterministic yes/no verdicts. Engine: server/photo-community-check.ts.
+  // Photo Community Check — operator-clicked QA from the photos tab. Community
+  // folder photos verified via Google Lens reverse image search; unit interiors
+  // via vision. Engine: server/photo-community-check.ts.
   app.post("/api/builder/photo-community-check", async (req, res) => {
     try {
       const body = (req.body ?? {}) as PhotoCommunityCheckRequest;
@@ -27315,8 +27315,12 @@ Return ONLY compact JSON with this exact shape:
         return res.status(400).json({ ok: false, error: "propertyIds[] required" });
       }
       const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
+      const searchApiKey = process.env.SEARCHAPI_API_KEY ?? process.env.SEARCHAPI_API_KEY_2 ?? "";
+      if (!searchApiKey.trim()) {
+        return res.status(500).json({ ok: false, error: "SEARCHAPI_API_KEY not configured" });
+      }
       if (!apiKey) {
-        return res.status(500).json({ ok: false, error: "ANTHROPIC_API_KEY not configured" });
+        return res.status(500).json({ ok: false, error: "ANTHROPIC_API_KEY not configured (required for unit verification)" });
       }
       const job = await startBulkPhotoCommunityCheck(propertyIds, body.labels ?? {}, apiKey);
       return res.json({ ok: true, job: serializeBulkPhotoCommunityJob(job) });

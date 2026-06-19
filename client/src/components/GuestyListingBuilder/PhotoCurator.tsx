@@ -52,6 +52,11 @@ function parseLocalPath(url: string): { folder: string; filename: string } | nul
   }
 }
 
+export type CommunityPhotoVerdict = {
+  match: "yes" | "no";
+  reason?: string;
+};
+
 export type PhotoCuratorProps = {
   photos: PhotoIn[];
   // folder → source URL on Zillow/Airbnb/VRBO. Populated by the parent
@@ -86,6 +91,8 @@ export type PhotoCuratorProps = {
     preview?: string | null;
     picks?: { community: string; patio: string } | null;
   };
+  /** Per community-folder photo verdict from Check photo community (folder/filename key). */
+  communityPhotoVerdicts?: Record<string, CommunityPhotoVerdict>;
 };
 
 export default function PhotoCurator({
@@ -97,6 +104,7 @@ export default function PhotoCurator({
   coverCollageCurrentUrl,
   onRequestCoverCollage,
   coverCollageStatus,
+  communityPhotoVerdicts,
 }: PhotoCuratorProps) {
   const [meta, setMeta] = useState<Map<string, LabelMeta>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -731,7 +739,11 @@ export default function PhotoCurator({
               display: "grid", gap: 8,
               gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
             }}>
-              {section.photos.map((tile, tileIdx) => (
+              {section.photos.map((tile, tileIdx) => {
+                const verdictKey = tile.folder && tile.filename ? `${tile.folder}/${tile.filename}` : null;
+                const communityVerdict = verdictKey ? communityPhotoVerdicts?.[verdictKey] : undefined;
+                const isCommunitySection = /^Community\s/i.test(section.source);
+                return (
                 <PhotoTile
                   key={tile.key}
                   tile={tile}
@@ -739,6 +751,7 @@ export default function PhotoCurator({
                   saving={savingKey === tile.key}
                   rotating={rotatingKey === tile.key}
                   cacheBust={cacheBusters.get(tile.key)}
+                  communityVerdict={isCommunitySection ? communityVerdict : undefined}
                   onEditCaption={(caption) => {
                     if (!tile.folder || !tile.filename) return;
                     patchLabel(tile.folder, tile.filename, { userLabel: caption.trim() || null });
@@ -752,7 +765,7 @@ export default function PhotoCurator({
                     rotatePhoto(tile.folder, tile.filename, degrees);
                   }}
                 />
-              ))}
+              );})}
             </div>
           </div>
         );
@@ -776,6 +789,7 @@ function PhotoTile({
   onEditCaption,
   onDelete,
   onRotate,
+  communityVerdict,
 }: {
   tile: {
     key: string;
@@ -792,6 +806,7 @@ function PhotoTile({
   onEditCaption: (caption: string) => void;
   onDelete: () => void;
   onRotate: (degrees: 90 | 270) => void;
+  communityVerdict?: CommunityPhotoVerdict;
 }) {
   // Effective caption — user override wins, else labeler output, else
   // whatever the parent passed in (static label fallback), else blank.
@@ -826,6 +841,20 @@ function PhotoTile({
           background: "rgba(17,24,39,0.7)", color: "white", fontSize: 10, fontWeight: 600,
           padding: "2px 6px", borderRadius: 3,
         }}>{index}</div>
+        {communityVerdict && (
+          <div
+            title={communityVerdict.reason || (communityVerdict.match === "yes" ? "Confirmed for this community" : "Does not belong in this community folder")}
+            style={{
+              position: "absolute", top: 4, right: 4,
+              width: 22, height: 22, borderRadius: "50%",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 13, fontWeight: 800, lineHeight: 1,
+              background: communityVerdict.match === "yes" ? "#16a34a" : "#dc2626",
+              color: "#fff",
+              boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
+            }}
+          >{communityVerdict.match === "yes" ? "✓" : "✕"}</div>
+        )}
         {hidden && (
           <div style={{
             position: "absolute", inset: 0, display: "flex",

@@ -953,7 +953,15 @@ function GuestyRatePushCard({
 // the server's PhotoCommunityCheckResult (server/photo-community-check.ts) —
 // kept as a local type so the client bundle doesn't import server code.
 type CommunityCheckFlag = { id: string; caption?: string; reason: string };
-type CommunityCheckPhotoVerdict = { id: string; caption?: string; match: "yes" | "no"; reason: string };
+type CommunityCheckPhotoVerdict = {
+  id: string;
+  folder?: string;
+  filename?: string;
+  caption?: string;
+  match: "yes" | "no";
+  reason: string;
+  lensIdentifiedCommunity?: string;
+};
 type CommunityCheckGroup = {
   role: "community" | "unit";
   label: string;
@@ -3277,6 +3285,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setCommunityCheckPhase("error");
     }
   }, [photos, propertyId, propertyData?.bedrooms]);
+
+  const communityPhotoVerdicts = useMemo(() => {
+    const verdicts = communityCheckResult?.community?.photoVerdicts;
+    if (!verdicts?.length) return undefined;
+    const map: Record<string, { match: "yes" | "no"; reason?: string }> = {};
+    for (const v of verdicts) {
+      if (v.folder && v.filename) {
+        map[`${v.folder}/${v.filename}`] = { match: v.match, reason: v.reason };
+      }
+    }
+    return Object.keys(map).length > 0 ? map : undefined;
+  }, [communityCheckResult]);
 
   const amenities = propertyData?.amenities || [];
   const descriptions = effectivePropertyData?.descriptions;
@@ -7201,14 +7221,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     {communityCheckPhase === "running" ? "🔎 Checking photos…" : "🔎 Check photo community"}
                                   </button>
                                   <span style={{ fontSize: 11, color: "#64748b", flex: 1, minWidth: 220 }}>
-                                    Confirms same community, then counts distinct bedrooms per unit (merges duplicate angles) and compares to the listing bedroom count.
+                                    Reverse-image-searches every community-folder photo (✓ good / ✕ wrong on each tile), then checks unit bedrooms.
                                   </span>
                                 </div>
 
                                 {communityCheckPhase === "running" && (
                                   <div style={{ fontSize: 11, color: "#0e7490", marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
                                     <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#06b6d4", animation: "glb-blink 1s infinite" }} />
-                                    Analyzing community folder, unit community match, and bedroom photo coverage per unit — usually 30-90 seconds…
+                                    Analyzing community folder via Google reverse image search (one call per photo), then unit match and bedroom coverage — may take several minutes for large folders…
                                   </div>
                                 )}
 
@@ -7599,6 +7619,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           photos={photos}
                           sourceUrlsByFolder={sourceUrlsByFolder}
                           onOverridesChanged={onPhotoOverridesChanged}
+                          communityPhotoVerdicts={communityPhotoVerdicts}
                           coverCollageEnabled={photos.length >= 2}
                           coverCollageDisabledReason={!selectedId ? "Select a Guesty listing above to push the collage as cover." : null}
                           coverCollageCurrentUrl={guestyCoverCollageUrl}
