@@ -2713,6 +2713,14 @@ for (const col of ["single_listing", "booking_title", "property_type", "unit1_ba
 }
 console.log("  ✓ runtime schema guard covers community_drafts listing draft columns");
 
+for (const col of ["bedroom_cluster_id", "bedroom_bed_type"]) {
+  assert.ok(
+    schemaMaintenanceSource.includes(`ADD COLUMN IF NOT EXISTS ${col}`),
+    `runtime schema maintenance must ensure photo_labels.${col}`,
+  );
+}
+console.log("  ✓ runtime schema guard covers photo_labels bedroom cluster columns");
+
 // ---------- Community address guards ----------
 console.log("\ncommunity address guard suite");
 
