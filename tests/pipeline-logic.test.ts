@@ -69,6 +69,12 @@ import {
   UNIT_GALLERY_MAX_KEEP,
   unitGalleryMaxKeep,
 } from "../server/unit-photo-resolver";
+import {
+  extractBodyFromRawEmail,
+  isGuestBookingAliasEmail,
+  parseEmailHeaders,
+  parseGuestInboxEmailFromRaw,
+} from "../server/guest-inbox-sync";
 
 // ---------- Import the internals we want to test ----------
 // The sanity check and fact extractors aren't exported, so we
@@ -3869,3 +3875,35 @@ assert.ok(
   "ImgBB upload retry should also retry transient network failures (no HTTP status)",
 );
 console.log("  ✓ ImgBB photo-push retry resilience (quota + transient network)");
+
+// ── Guest inbox mailbox sync (VRBO guest thread) ───────────────────────────
+const sampleGuestEmailRaw = [
+  "From: VRBO <noreply@vrbo.com>",
+  "To: cecilio.marquez@emailprivacy.com",
+  "X-SimpleLogin-Envelope-To: cecilio.marquez@emailprivacy.com",
+  "X-SimpleLogin-Envelope-From: noreply@vrbo.com",
+  "Subject: Your reservation is confirmed",
+  "Message-ID: <vrbo-test-123@vrbo.com>",
+  "Date: Thu, 19 Jun 2026 17:00:00 +0000",
+  "Content-Type: text/plain; charset=utf-8",
+  "",
+  "Your VRBO reservation is confirmed for Townhome A.",
+].join("\r\n");
+
+assert.ok(
+  routesSource.includes("syncGuestInboxForAlias") &&
+    routesSource.includes("./guest-inbox-sync"),
+  "GET /api/guest-inbox should sync from SimpleLogin mailbox before reading DB",
+);
+assert.ok(isGuestBookingAliasEmail("cecilio.marquez@emailprivacy.com"), "emailprivacy.com should match guest alias domains");
+assert.ok(isGuestBookingAliasEmail("cecilio.marquez2@emailprivaccy.com"), "configured traveler domain should match");
+assert.ok(!isGuestBookingAliasEmail("noreply@vrbo.com"), "non-alias addresses should not match");
+const parsedGuest = parseGuestInboxEmailFromRaw(sampleGuestEmailRaw);
+assert.ok(parsedGuest, "should parse SimpleLogin-forwarded guest email");
+assert.equal(parsedGuest!.aliasEmail, "cecilio.marquez@emailprivacy.com");
+assert.equal(parsedGuest!.fromEmail, "noreply@vrbo.com");
+assert.equal(parsedGuest!.subject, "Your reservation is confirmed");
+assert.match(parsedGuest!.body, /reservation is confirmed/i);
+assert.equal(parseEmailHeaders(sampleGuestEmailRaw)["x-simplelogin-envelope-to"], "cecilio.marquez@emailprivacy.com");
+assert.match(extractBodyFromRawEmail(sampleGuestEmailRaw), /Townhome A/);
+console.log("  ✓ guest inbox mailbox sync (SimpleLogin envelope headers + IMAP pull on fetch)");
