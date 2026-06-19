@@ -99,8 +99,66 @@ const BLOCKLISTED_ADDRESS_RES = [
   /131\s+continental\s+drive/i,
   /newark,?\s*de\s*19702/i,
   /expedia\s+group/i,
-  /110\s+se\s+yam\s+street/i, // VRBO Austin office
+  /110\s+se\s+yam\s+street/i, // VRBO Austin office (old)
+  /11920\s+alterra\s+(?:parkway|pkwy)/i, // Expedia / VRBO Austin HQ
+  /austin,?\s*tx\s*78758/i,
+  /1111\s+expedia\s+group\s+way/i, // Seattle HQ
+  /seattle,?\s*wa\s*98119/i,
 ];
+
+export function extractUsStateFromAddress(address: string): string | null {
+  const m = String(address ?? "").match(/,\s*([A-Z]{2})\s+\d{5}\b/);
+  return m?.[1]?.toUpperCase() ?? null;
+}
+
+export function expectedStateHintFromBuyIn(
+  buyIn?: { propertyName?: string | null; notes?: string | null; unitLabel?: string | null } | null,
+  communityState?: string | null,
+): string | null {
+  const fromCommunity = String(communityState ?? "").trim().toUpperCase();
+  if (/^[A-Z]{2}$/.test(fromCommunity)) return fromCommunity;
+  const blob = `${buyIn?.propertyName ?? ""} ${buyIn?.unitLabel ?? ""} ${buyIn?.notes ?? ""}`.toLowerCase();
+  if (/\b(hawaii|kauai|oahu|maui|molokai|lanai|princeville|poipu|koloa|lihue|kapaa|waikoloa|honolulu|kailua|kihei|lahaina)\b/.test(blob)) {
+    return "HI";
+  }
+  if (/\b(florida|naples|bonita springs|destin|miami|orlando)\b/.test(blob)) return "FL";
+  if (/\b(arizona|scottsdale|phoenix|sedona)\b/.test(blob)) return "AZ";
+  if (/\b(colorado|denver|breckenridge|vail)\b/.test(blob)) return "CO";
+  return null;
+}
+
+export function isPlausiblePropertyAddressForBuyIn(
+  address: string,
+  buyIn?: { propertyName?: string | null; notes?: string | null; unitLabel?: string | null } | null,
+  communityState?: string | null,
+): boolean {
+  if (!isUsableArrivalField("unitAddress", address)) return false;
+  const expected = expectedStateHintFromBuyIn(buyIn, communityState);
+  const addrState = extractUsStateFromAddress(address);
+  if (expected && addrState && expected !== addrState) return false;
+  return true;
+}
+
+const US_STREET_ADDRESS_RE = /\b(\d{1,6}\s+[A-Za-z0-9.\s#'/-]{3,90}(?:,\s*[A-Za-z .'-]+){0,4}(?:,\s*[A-Z]{2})?\s+\d{5}(?:-\d{4})?)\b/g;
+
+export function pickBestPropertyAddressFromText(
+  body: string,
+  buyIn?: { propertyName?: string | null; notes?: string | null; unitLabel?: string | null } | null,
+  communityState?: string | null,
+): string {
+  const cleaned = stripHtmlForEmailParse(body);
+  const candidates: string[] = [];
+  for (const match of cleaned.matchAll(US_STREET_ADDRESS_RE)) {
+    const value = String(match[1] ?? "").trim().replace(/\s+/g, " ");
+    if (value) candidates.push(value);
+  }
+  for (const candidate of candidates) {
+    if (isPlausiblePropertyAddressForBuyIn(candidate, buyIn, communityState)) {
+      return candidate.slice(0, 500);
+    }
+  }
+  return "";
+}
 
 export function isBlocklistedPropertyAddress(address: string): boolean {
   const v = String(address ?? "").trim();
@@ -135,7 +193,13 @@ function sanitizePickedValue(key: string, raw: string): string {
   return cleaned.slice(0, key === "arrivalNotes" ? 2000 : 500);
 }
 
-export function parseArrivalDetailsFromText(body: string): Record<string, string> {
+export function parseArrivalDetailsFromText(
+  body: string,
+  opts?: {
+    buyIn?: { propertyName?: string | null; notes?: string | null; unitLabel?: string | null } | null;
+    communityState?: string | null;
+  },
+): Record<string, string> {
   const text = stripHtmlForEmailParse(body);
   const pick = (key: string, patterns: RegExp[]): string => {
     for (const pattern of patterns) {
@@ -164,13 +228,11 @@ export function parseArrivalDetailsFromText(body: string): Record<string, string
     /(?:property address|rental address|unit address|where you['']?ll stay|where you'll stay)\s*[:\-]\s*([^\n]+)/i,
     /(?:check-?in(?: location)?|arrival(?: location)?)\s*[:\-]\s*([^\n]+)/i,
   ]);
+  if (unitAddress && !isPlausiblePropertyAddressForBuyIn(unitAddress, opts?.buyIn, opts?.communityState)) {
+    unitAddress = "";
+  }
   if (!unitAddress) {
-    const streetMatch = text.match(
-      /\b(\d{1,6}\s+[A-Za-z0-9.\s#'/-]{3,90}(?:,\s*[A-Za-z .'-]+){0,4}(?:,\s*[A-Z]{2})?\s+\d{5}(?:-\d{4})?)\b/,
-    );
-    if (streetMatch?.[1]) {
-      unitAddress = sanitizePickedValue("unitAddress", streetMatch[1]);
-    }
+    unitAddress = pickBestPropertyAddressFromText(text, opts?.buyIn, opts?.communityState);
   }
 
   const accessCode = doorCode || pick("accessCode", [

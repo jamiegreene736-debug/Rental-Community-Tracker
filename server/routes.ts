@@ -290,7 +290,7 @@ import {
   getSimpleLoginStatus,
   SIMPLELOGIN_MAILBOX_EMAIL,
 } from "./simplelogin";
-import { normalizeBuyInEmailAttachments, parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
+import { isPlausiblePropertyAddressForBuyIn, normalizeBuyInEmailAttachments, parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
 import {
   type OtaVisibilityCandidate,
   otaVisibilitySidecarFailureMessage,
@@ -2618,7 +2618,9 @@ function buildAddressGuess(
     }
   })();
   const unitToken = extractUnitTokenFromText(`${title} ${urlSlug}`);
-  if (saved) return { address: saved, source: "saved", title, unitToken };
+  if (saved && isPlausiblePropertyAddressForBuyIn(saved, buyIn, loc?.state ?? null)) {
+    return { address: saved, source: "saved", title, unitToken };
+  }
   if (loc?.streetAddress && unitToken) {
     return {
       address: `${loc.streetAddress} #${unitToken}, ${loc.city}, ${loc.state}`,

@@ -4671,7 +4671,7 @@ function isDisplayableArrivalValue(value: string | null | undefined): boolean {
   const v = sanitizeArrivalDisplayValue(value);
   if (!v) return false;
   if (/style\s*=|display\s*:\s*inline|text-indent\s*:/i.test(String(value ?? ""))) return false;
-  if (/131\s+continental\s+drive|newark,?\s*de\s*19702/i.test(v)) return false;
+  if (/131\s+continental\s+drive|newark,?\s*de\s*19702|11920\s+alterra|austin,?\s*tx\s*78758/i.test(v)) return false;
   if (/guideline|unsubscribe|click here/i.test(v) && v.length < 40) return false;
   return true;
 }
@@ -4746,6 +4746,7 @@ function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservati
     if (!data?.arrivalExtracted) return;
     queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
     queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings"], predicate: (q) => String(q.queryKey[2] ?? "") === "unit-proximity" });
   }, [data?.arrivalExtracted, data?.arrivalFieldsUpdated?.join(",")]);
 
   const createEmail = useMutation({
