@@ -152,6 +152,53 @@ check(
   ).outcome === "contradicts",
 );
 
+// ── Regency pool: top hit Regency beats lower Villas sibling (user report) ──
+const regencyPoolRows = [
+  {
+    title: "Regency at Poipu Kai #821 (3BD)",
+    snippet: "The Parrish Collection Kauai — resort pool with lounge chairs",
+    link: "https://www.parrishkauai.com/kauai-condos/regency-at-poipu-kai/",
+    position: 1,
+  },
+  {
+    title: "Garden Villas in Kauai, Hawaii - Villas At Poipu Kai",
+    snippet: "Villas at Poipu Kai pool and tropical landscaping",
+    link: "https://www.villasatpoipukai.com/",
+    position: 2,
+  },
+];
+const regencyPoolAiOverview = [
+  "This image showcases the pool area at the Regency at Poipu Kai resort on Kauai, featuring tropical foliage, lounge chairs, and a paved patio surrounding the pool.",
+];
+
+check(
+  "Regency #821 at position 1 confirms despite Villas sibling at position 2",
+  judgeCommunityPhotoFromLens(regency, regencyPoolRows).match === "yes",
+);
+
+check(
+  "classifyCommunityPhotoFromLens confirms Regency pool when top organic hit names Regency",
+  classifyCommunityPhotoFromLens(regency, regencyPoolRows, [], "Koloa").outcome === "confirmed",
+);
+
+check(
+  "AI Overview naming Regency confirms pool photo despite Villas organic hit",
+  classifyCommunityPhotoFromLens(regency, regencyPoolRows, regencyPoolAiOverview, "Koloa").outcome === "confirmed",
+);
+
+check(
+  "Parrish Collection snippet on Regency listing does not false-flag sibling conflict",
+  judgeCommunityPhotoFromLens(
+    regency,
+    [{
+      title: "Regency at Poipu Kai #821 (3BD)",
+      snippet: "The Parrish Collection Kauai vacation rentals",
+      link: "https://www.parrishkauai.com/kauai-condos/regency-at-poipu-kai/",
+      position: 1,
+    }],
+  ).match === "yes",
+);
+
 // ── Same-area sibling-resort cross-matches defer to vision (Poipu) ──────────
 check(
   "communitySharesGeoArea: sibling Poipu resort shares area",

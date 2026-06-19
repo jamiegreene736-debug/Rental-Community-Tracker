@@ -20,8 +20,8 @@ check("expectedIsRegencyAtPoipuKai recognizes Regency folder",
 check("mentionsKnownNonRegencyPoipuKaiComplex catches Villas at Poipu Kai",
   mentionsKnownNonRegencyPoipuKaiComplex("The Villas at Poipu Kai pool amenities") === "Villas at Poipu Kai");
 
-check("mentionsKnownNonRegencyPoipuKaiComplex catches Parrish Collection",
-  mentionsKnownNonRegencyPoipuKaiComplex("The Parrish Collection Kauai vacation rentals") === "The Villas at Poipu Kai (Parrish Collection)");
+check("mentionsKnownNonRegencyPoipuKaiComplex ignores Parrish Collection (manages Regency and Villas)",
+  mentionsKnownNonRegencyPoipuKaiComplex("The Parrish Collection Kauai vacation rentals") == null);
 
 check(
   "communityPhotoSiblingConflict flags Villas pool for Regency expected",

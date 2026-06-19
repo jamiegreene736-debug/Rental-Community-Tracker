@@ -18,7 +18,6 @@ export function mentionsDecisiveNonRegencyPoipuKaiSibling(haystack: string): str
     { re: /\bvillas?\s+at\s+poipu\s+kai\b/, label: "Villas at Poipu Kai" },
     { re: /\bpoipu\s+kai\s+villas?\b/, label: "Villas at Poipu Kai" },
     { re: /\bthe\s+villas\s+at\s+poipu\s+kai\b/, label: "The Villas at Poipu Kai" },
-    { re: /\bparrish\s+collection\b/, label: "The Villas at Poipu Kai (Parrish Collection)" },
     { re: /\baston\b/, label: "Aston at Poipu Kai" },
     { re: /\bmanualoha\b/, label: "Manualoha" },
     { re: /\b(kahala|makanui)\b/, label: "Kahala at Poipu Kai" },

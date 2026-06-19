@@ -234,12 +234,10 @@ function judgeCommunityPhotoFromLensCore(
   }
 
   const ordered = [...rows].sort((a, b) => (a.position ?? 999) - (b.position ?? 999));
-  const candidates: PreflightSearchResult[] = [
-    ...ordered.slice(0, 12).map(toSearchResult),
-    ...extraTexts.filter(Boolean).map((text) => ({ title: text, snippet: "", link: "" })),
-  ];
+  const rowSlice = ordered.slice(0, 12);
+  const rowCandidates = rowSlice.map(toSearchResult);
 
-  if (candidates.length === 0) {
+  if (rowCandidates.length === 0 && extraTexts.filter(Boolean).length === 0) {
     return {
       match: "no",
       reason: "Reverse image search returned no usable matches to verify this photo.",
@@ -266,35 +264,46 @@ function judgeCommunityPhotoFromLensCore(
     };
   }
 
-  const conflicts: Array<{ reason: string; text: string }> = [];
-  const evidence: Array<{ text: string }> = [];
+  const conflicts: Array<{ reason: string; text: string; position: number }> = [];
+  const evidence: Array<{ text: string; position: number }> = [];
 
-  for (const result of candidates) {
+  for (let idx = 0; idx < rowCandidates.length; idx++) {
+    const result = rowCandidates[idx];
     const hay = haystackFromResult(result);
     if (!hay.trim()) continue;
 
+    const position = rowSlice[idx]?.position ?? idx + 1;
+
     const siblingConflict = communityPhotoSiblingConflict(hay, expected);
     if (siblingConflict) {
-      conflicts.push({ reason: siblingConflict.reason, text: hay });
+      conflicts.push({ reason: siblingConflict.reason, text: hay, position });
       continue;
     }
 
     const conflict = communityConflictsWithResult(result, expected);
     if (conflict) {
-      conflicts.push({ reason: conflict, text: hay });
+      conflicts.push({ reason: conflict, text: hay, position });
       continue;
     }
     if (communityHaystackSupportsExpected(hay, expected)) {
-      evidence.push({ text: hay });
+      evidence.push({ text: hay, position });
     }
   }
+
+  const bestEvidencePosition = evidence.reduce((min, hit) => Math.min(min, hit.position), Infinity);
+  const earliestConflictPosition = conflicts.reduce((min, hit) => Math.min(min, hit.position), Infinity);
 
   // Strongest signal: a top visual match names a different resort. Prefer the
   // resort key the CONFLICT detector found ("Different resort detected (X)") —
   // it uses the full resort dictionary, whereas extractIdentifiedCommunityName
   // only sees a narrower phrase set and often returns nothing.
-  if (conflicts.length > 0) {
-    const top = conflicts[0];
+  // When BOTH support and sibling noise appear (common in the Poipu Kai umbrella),
+  // the higher-ranked hit wins — e.g. Regency #821 at position 1 beats Villas at 2.
+  if (
+    conflicts.length > 0
+    && (evidence.length === 0 || earliestConflictPosition < bestEvidencePosition)
+  ) {
+    const top = conflicts.sort((a, b) => a.position - b.position)[0];
     const fromReason = top.reason.match(/\(([^)]+)\)\s*$/)?.[1]?.trim();
     const identified = fromReason || extractIdentifiedCommunityName(top.text);
     return {
@@ -312,8 +321,16 @@ function judgeCommunityPhotoFromLensCore(
     };
   }
 
+  const extraCandidates: PreflightSearchResult[] = extraTexts
+    .filter(Boolean)
+    .map((text) => ({ title: text, snippet: "", link: "" }));
+
   // Generic amenity hits (pool/lounge) with no resort name are OK for community folders.
-  const allGeneric = candidates.every((r) => lensHaystackIsGenericAmenity(haystackFromResult(r)));
+  const allHaystacks = [
+    ...rowCandidates.map((r) => haystackFromResult(r)),
+    ...extraCandidates.map((r) => haystackFromResult(r)),
+  ];
+  const allGeneric = allHaystacks.every((hay) => lensHaystackIsGenericAmenity(hay));
   if (allGeneric) {
     return {
       match: "yes",
@@ -323,7 +340,9 @@ function judgeCommunityPhotoFromLensCore(
   }
 
   // Named a community in results but not ours — treat as mismatch.
-  for (const result of candidates.slice(0, 5)) {
+  const fallbackCandidates = [...rowCandidates, ...extraCandidates];
+  for (let idx = 0; idx < Math.min(5, fallbackCandidates.length); idx++) {
+    const result = fallbackCandidates[idx];
     const hay = haystackFromResult(result);
     const siblingConflict = communityPhotoSiblingConflict(hay, expected);
     if (siblingConflict) {
