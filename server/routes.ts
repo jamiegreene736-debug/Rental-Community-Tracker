@@ -11751,6 +11751,14 @@ Requirements:
         aliasEmail = String(buyIn?.travelerEmail ?? "").trim().toLowerCase();
       }
       if (!aliasEmail) return res.json({ aliasEmail: null, guestName: null, messages: [] });
+      // Pull VRBO confirmations from the SimpleLogin forwarding mailbox when the
+      // inbound webhook hasn't recorded them yet (common after manual buy-in).
+      try {
+        const { syncGuestInboxForAlias } = await import("./guest-inbox-sync");
+        await syncGuestInboxForAlias(aliasEmail);
+      } catch (syncErr: any) {
+        console.warn("[guest-inbox] mailbox sync failed:", syncErr?.message ?? syncErr);
+      }
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
       const messages = await storage.getGuestInboxMessages(aliasEmail, limit);
       const guestName = messages.find((m) => m.guestName)?.guestName
