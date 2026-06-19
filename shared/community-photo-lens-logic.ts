@@ -222,6 +222,19 @@ export function analyzeAiOverviewForCommunity(
   return { outcome: "inconclusive" };
 }
 
+/** Dict-key conflicts for same-area sibling resorts are cross-match noise, not hard fails. */
+function isDecisiveLensConflict(
+  conflict: { reason: string; text: string },
+  expectedCommunity: string,
+  city: string,
+): boolean {
+  if (conflict.reason.includes("different complex within Poipu Kai")) return true;
+  const fromReason = conflict.reason.match(/\(([^)]+)\)\s*$/)?.[1]?.trim();
+  const identified = fromReason || extractIdentifiedCommunityName(conflict.text);
+  if (!identified) return true;
+  return !communitySharesGeoArea(identified, expectedCommunity, city);
+}
+
 function judgeCommunityPhotoFromLensCore(
   expectedCommunity: string,
   rows: LensEvidenceRow[],
@@ -291,7 +304,11 @@ function judgeCommunityPhotoFromLensCore(
   }
 
   const bestEvidencePosition = evidence.reduce((min, hit) => Math.min(min, hit.position), Infinity);
-  const earliestConflictPosition = conflicts.reduce((min, hit) => Math.min(min, hit.position), Infinity);
+  const decisiveConflicts = conflicts.filter((c) => isDecisiveLensConflict(c, expected, city));
+  const earliestDecisiveConflictPosition = decisiveConflicts.reduce(
+    (min, hit) => Math.min(min, hit.position),
+    Infinity,
+  );
 
   // Strongest signal: a top visual match names a different resort. Prefer the
   // resort key the CONFLICT detector found ("Different resort detected (X)") —
@@ -299,11 +316,12 @@ function judgeCommunityPhotoFromLensCore(
   // only sees a narrower phrase set and often returns nothing.
   // When BOTH support and sibling noise appear (common in the Poipu Kai umbrella),
   // the higher-ranked hit wins — e.g. Regency #821 at position 1 beats Villas at 2.
+  // Same-area soft siblings (Poipu Sands/Kapili) do not override Regency evidence.
   if (
-    conflicts.length > 0
-    && (evidence.length === 0 || earliestConflictPosition < bestEvidencePosition)
+    decisiveConflicts.length > 0
+    && (evidence.length === 0 || earliestDecisiveConflictPosition < bestEvidencePosition)
   ) {
-    const top = conflicts.sort((a, b) => a.position - b.position)[0];
+    const top = decisiveConflicts.sort((a, b) => a.position - b.position)[0];
     const fromReason = top.reason.match(/\(([^)]+)\)\s*$/)?.[1]?.trim();
     const identified = fromReason || extractIdentifiedCommunityName(top.text);
     return {
@@ -318,6 +336,18 @@ function judgeCommunityPhotoFromLensCore(
       match: "yes",
       reason: `Reverse image search confirms ${expected}.`,
       identifiedCommunity: expected,
+    };
+  }
+
+  // Same-area sibling noise with no confirming hit — defer to vision, not generic pass.
+  if (conflicts.length > 0 && decisiveConflicts.length === 0) {
+    const top = conflicts.sort((a, b) => a.position - b.position)[0];
+    const fromReason = top.reason.match(/\(([^)]+)\)\s*$/)?.[1]?.trim();
+    const identified = fromReason || extractIdentifiedCommunityName(top.text);
+    return {
+      match: "no",
+      reason: top.reason || `Photo appears to depict a different community (${identified || "not the expected resort"}).`,
+      identifiedCommunity: identified,
     };
   }
 

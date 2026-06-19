@@ -263,8 +263,31 @@ check(
 );
 
 check(
-  "without the AI Overview, the sibling conflict still defers to vision (inconclusive)",
-  classifyCommunityPhotoFromLens(regency, tennisRows, [], "Koloa").outcome === "inconclusive",
+  "without the AI Overview, Poipu Sands noise still defers when no Regency/Poipu Kai evidence",
+  classifyCommunityPhotoFromLens(
+    regency,
+    [{ title: "Poipu Sands at Poipu Kai #234", snippet: "poipu sands at poipu kai", link: "https://x.com/poipu-sands", source: "organic", position: 1 }],
+    [],
+    "Koloa",
+  ).outcome === "inconclusive",
+);
+
+check(
+  "Poipu Kai umbrella organic hit confirms tennis court despite Poipu Sands at position 1",
+  classifyCommunityPhotoFromLens(regency, tennisRows, [], "Koloa").outcome === "confirmed",
+);
+
+check(
+  "Regency organic hit at position 2 confirms despite Poipu Sands at position 1",
+  classifyCommunityPhotoFromLens(
+    regency,
+    [
+      { title: "Poipu Sands at Poipu Kai #234", snippet: "poipu sands at poipu kai", link: "https://x.com/poipu-sands", position: 1 },
+      { title: "Regency at Poipu Kai - Tennis Court Complex", snippet: "tennis courts at Regency at Poipu Kai", link: "https://x.com/regency", position: 2 },
+    ],
+    [],
+    "Koloa",
+  ).outcome === "confirmed",
 );
 
 check(
