@@ -14,7 +14,7 @@ import {
 } from "../shared/photo-community-status-logic";
 import { buildPhotoCommunityCheckRequestForProperty } from "./builder-photo-groups";
 import { storage } from "./storage";
-import { runPhotoCommunityCheck } from "./photo-community-check";
+import { runPhotoCommunityCheck, type PhotoCommunityCheckResult } from "./photo-community-check";
 
 const STATUS_SETTING_KEY = "photo_community_check.status_by_property";
 const JOB_SETTING_KEY = "photo_community_check.active_job";
@@ -152,6 +152,18 @@ export async function getPhotoCommunityStatuses(): Promise<Record<number, PhotoC
   const out: Record<number, PhotoCommunityRowStatus> = {};
   for (const [id, row] of statusByProperty.entries()) out[id] = row;
   return out;
+}
+
+/** Persist a single listing check so the dashboard Community QA column matches the photos tab. */
+export async function savePhotoCommunityCheckResult(
+  propertyId: number,
+  result: PhotoCommunityCheckResult,
+): Promise<PhotoCommunityRowStatus> {
+  await ensureJobsHydrated();
+  const row = derivePhotoCommunityRowStatus(propertyId, result, new Date().toISOString());
+  statusByProperty.set(propertyId, row);
+  await persistStatuses();
+  return row;
 }
 
 export async function getBulkPhotoCommunityJob(jobId: string): Promise<BulkPhotoCommunityJob | null> {
