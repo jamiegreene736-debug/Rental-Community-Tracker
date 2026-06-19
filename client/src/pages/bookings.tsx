@@ -6153,7 +6153,10 @@ function paymentLooksScheduled(p: GuestyPayment): boolean {
 }
 
 function getBuyInCost(r: GuestyReservation): number {
-  return r.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
+  return (Array.isArray(r.slots) ? r.slots : []).reduce(
+    (s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)),
+    0,
+  );
 }
 
 function getGrossRevenue(r: GuestyReservation): number {
@@ -6752,6 +6755,12 @@ export default function Bookings() {
     refetchInterval: 120_000,
   });
 
+  const refreshBookingsAfterBuyInChange = () => {
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+  };
+
   const globalReservations = useMemo(() => {
     if (!isGlobalView) return [];
     return globalBookingsQuery.data?.reservations ?? [];
@@ -6786,7 +6795,7 @@ export default function Bookings() {
     return map;
   }, [bookingsData?.reservations, globalBookingsQuery.data?.reservations, isGlobalView, listingNameById, selectedMapping]);
 
-  const globalBookingsLoading = isGlobalView && (globalBookingsQuery.isLoading || globalBookingsQuery.isFetching);
+  const globalBookingsLoading = isGlobalView && globalBookingsQuery.isLoading && !globalBookingsQuery.data;
   const globalBookingsError = isGlobalView && globalBookingsQuery.isError;
   const globalBookingsErr = globalBookingsQuery.error;
   const bookingsLoading = isGlobalView ? globalBookingsLoading : (selectedBookingsLoading || selectedBookingsFetching);
@@ -6894,8 +6903,8 @@ export default function Bookings() {
             return (a.money?.hostPayout ?? 0) - (b.money?.hostPayout ?? 0);
           }
           case "buyIn": {
-            const ac = a.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
-            const bc = b.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
+            const ac = getBuyInCost(a);
+            const bc = getBuyInCost(b);
             return ac - bc;
           }
           case "profit": {
@@ -6903,8 +6912,8 @@ export default function Bookings() {
             if (!a.fullyLinked && !b.fullyLinked) return 0;
             if (!a.fullyLinked) return 1;
             if (!b.fullyLinked) return -1;
-            const ap = (a.money?.hostPayout ?? 0) - a.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
-            const bp = (b.money?.hostPayout ?? 0) - b.slots.reduce((s, sl) => s + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0);
+            const ap = (a.money?.hostPayout ?? 0) - getBuyInCost(a);
+            const bp = (b.money?.hostPayout ?? 0) - getBuyInCost(b);
             return ap - bp;
           }
           case "status": {
@@ -7002,7 +7011,7 @@ export default function Bookings() {
         notes: payload.notes,
       }).then((r) => r.json()),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      refreshBookingsAfterBuyInChange();
       setManualDialogOpen(false);
       setManualForm(emptyManualReservationForm());
       toast({ title: "Manual reservation added" });
@@ -7017,8 +7026,7 @@ export default function Bookings() {
     mutationFn: ({ reservationId, buyInId, force, overrideNote }: { reservationId: string; buyInId: number; force?: boolean; overrideNote?: string }) =>
       apiRequest("POST", `/api/bookings/${reservationId}/attach-buy-in`, { buyInId, force, overrideNote }).then((r) => r.json()),
     onSuccess: (_data, vars) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
-      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      refreshBookingsAfterBuyInChange();
       setPicker(null);
       setForceDialog(null);
       setForceConfirming(false);
@@ -7144,8 +7152,7 @@ export default function Bookings() {
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
-      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      refreshBookingsAfterBuyInChange();
       toast({ title: "Buy-in detached" });
     },
     onError: (e: any) => toast({ title: "Detach failed", description: e.message, variant: "destructive" }),
@@ -7225,10 +7232,7 @@ export default function Bookings() {
       return { reservation, option, created };
     },
     onSuccess: ({ reservation, option }) => {
-      const listingId = reservation.operationsListingId ?? reservation.listingId ?? selectedListingId;
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", listingId] });
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      refreshBookingsAfterBuyInChange();
       setLastAutoFillCombos((prev) => ({
         ...prev,
         [reservation._id]: (prev[reservation._id] ?? []).map((combo) => ({
@@ -8463,7 +8467,7 @@ export default function Bookings() {
     // Only count fully-linked bookings' buy-in costs to keep profit math honest
     const linkedCost = reservations
       .filter((r) => r.fullyLinked)
-      .reduce((s, r) => s + r.slots.reduce((ss, sl) => ss + parseFloat(String(sl.buyIn?.costPaid ?? 0)), 0), 0);
+      .reduce((s, r) => s + getBuyInCost(r), 0);
     const linkedRevenue = reservations
       .filter((r) => r.fullyLinked)
       .reduce((s, r) => s + getNetRevenue(r), 0);
@@ -15937,6 +15941,7 @@ function ManualBuyInDialog({
       const filledBefore = reservation.slots.filter((s) => s.buyIn).length;
       const allFilled = filledBefore + 1 >= total;
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
       toast({
         title: "Manual buy-in recorded and attached",

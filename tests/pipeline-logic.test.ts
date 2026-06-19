@@ -3601,6 +3601,12 @@ assert.ok(
   "multi-unit VRBO buy-ins should suffix the guest booking email local-part per unit",
 );
 assert.ok(
+  bookingsSource.includes("refreshBookingsAfterBuyInChange") &&
+    bookingsSource.includes('queryKey: ["/api/bookings/guesty-all"]') &&
+    bookingsSource.includes("globalBookingsQuery.isLoading && !globalBookingsQuery.data"),
+  "detach/attach should refresh the global guesty-all summary and avoid blocking the page on background refetch",
+);
+assert.ok(
   bookingsSource.includes("vrbo-payment-schedule") &&
     bookingsSource.includes("manually recorded buy-in") &&
     bookingsSource.includes("usableGuestAlternativeCommunity(listingTitle) ? listingTitle : \"\""),

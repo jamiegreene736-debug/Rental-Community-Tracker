@@ -19896,21 +19896,26 @@ Requirements:
 
       const missingListingIds = new Set<string>();
       const enrichmentPromises = Array.from(seenReservations.values()).map(async (reservation) => {
-        let listingId = guestyListingIdFromReservation(reservation);
-        let target = listingId ? targetByListingId.get(listingId) : undefined;
-        if (!target) {
-          const embeddedListing = reservation?.listing ?? {};
-          listingId = listingId || firstNonEmptyString(embeddedListing?._id, embeddedListing?.id);
-          if (listingId) {
-            target = await operationsListingTargetFor(listingId, embeddedListing, mappingByListingId.get(listingId) ?? null);
-            targetByListingId.set(listingId, target);
+        try {
+          let listingId = guestyListingIdFromReservation(reservation);
+          let target = listingId ? targetByListingId.get(listingId) : undefined;
+          if (!target) {
+            const embeddedListing = reservation?.listing ?? {};
+            listingId = listingId || firstNonEmptyString(embeddedListing?._id, embeddedListing?.id);
+            if (listingId) {
+              target = await operationsListingTargetFor(listingId, embeddedListing, mappingByListingId.get(listingId) ?? null);
+              targetByListingId.set(listingId, target);
+            }
           }
-        }
-        if (!target) {
-          missingListingIds.add(firstNonEmptyString(reservation?.listingId, reservation?.listing?._id, reservation?.listing?.id, "unknown"));
+          if (!target) {
+            missingListingIds.add(firstNonEmptyString(reservation?.listingId, reservation?.listing?._id, reservation?.listing?.id, "unknown"));
+            return null;
+          }
+          return await enrichGuestyReservationForOperations(reservation, target);
+        } catch (e: any) {
+          console.warn("[guesty-all] reservation enrich failed:", e?.message ?? e);
           return null;
         }
-        return await enrichGuestyReservationForOperations(reservation, target);
       });
       const enrichedResults = await Promise.all(enrichmentPromises);
       const enriched = enrichedResults.filter((r): r is any => r != null);
