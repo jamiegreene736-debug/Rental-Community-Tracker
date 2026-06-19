@@ -95,6 +95,17 @@ export function detectBedTypeFromCaption(caption: string): string | null {
   return null;
 }
 
+/** Prefer explicit bed types from operator captions over vision (vision often misreads queen/king). */
+export function bedTypeFromClusterCaptions(captions: string[]): string | null {
+  const types = captions
+    .map((c) => detectBedTypeFromCaption(c))
+    .filter((t): t is string => Boolean(t));
+  if (types.length === 0) return null;
+  if (types.some((t) => /queen/i.test(t))) return types.find((t) => /queen/i.test(t)) ?? types[0];
+  if (types.some((t) => /king/i.test(t))) return types.find((t) => /king/i.test(t)) ?? types[0];
+  return types[0];
+}
+
 /** Parse listing/unit copy into expected bed types (e.g. King, Queen, Two Twins). */
 export function parseExpectedBedInventory(text: string): string[] {
   const lower = String(text ?? "").toLowerCase();
@@ -302,8 +313,18 @@ export function summarizeBedroomCluster(
 ): BedroomRoomSummary {
   const name = index === 0 ? "Bedroom 1" : `Bedroom ${index + 1}`;
   const captions = cluster.map((c) => c.caption?.trim()).filter(Boolean) as string[];
-  let description = visionDescription?.trim() || "";
+  const captionBed = bedTypeFromClusterCaptions(captions);
+  let description = "";
   let bedType: string | null = null;
+
+  if (captionBed) {
+    description = captionBed;
+    bedType = captionBed;
+  } else if (visionDescription?.trim()) {
+    description = visionDescription.trim();
+    bedType = detectBedTypeFromCaption(description);
+  }
+
   if (!description) {
     for (const cap of captions) {
       const bt = detectBedTypeFromCaption(cap);
@@ -313,8 +334,6 @@ export function summarizeBedroomCluster(
         break;
       }
     }
-  } else {
-    bedType = detectBedTypeFromCaption(description);
   }
   if (!description) {
     const primary = captions.find((c) => !/alt view/i.test(c)) ?? captions[0];

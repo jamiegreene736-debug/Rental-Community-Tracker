@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import {
   clusterBedroomPhotosByHash,
+  compareBedInventory,
   computeListingBedroomCoverage,
   computeUnitBedroomCoverage,
   isBedroomPhotoCaption,
@@ -57,6 +58,39 @@ const room = summarizeBedroomCluster(
 );
 check("summarizeBedroomCluster names Bedroom 1 with bed type",
   room.name === "Bedroom 1" && room.description === "Twin Bed" && room.photoCount === 2);
+
+check(
+  "summarizeBedroomCluster prefers Queen caption over vision King misread",
+  (() => {
+    const queenRoom = summarizeBedroomCluster(
+      [{ id: "1", caption: "Queen Bedroom", filename: "photo_16.jpg" }],
+      1,
+      "King Bed",
+    );
+    return queenRoom.bedType === "Queen Bed" && queenRoom.description === "Queen Bed";
+  })(),
+);
+
+check(
+  "compareBedInventory passes King+Queen when captions supply Queen",
+  (() => {
+    const kingRoom = summarizeBedroomCluster(
+      [{ id: "1", caption: "King Bedroom With Ocean View" }],
+      0,
+      "King Bed",
+    );
+    const queenRoom = summarizeBedroomCluster(
+      [{ id: "2", caption: "Queen Bedroom" }],
+      1,
+      "King Bed",
+    );
+    const inv = compareBedInventory(
+      ["King Bed", "Queen Bed"],
+      [kingRoom.bedType!, queenRoom.bedType!],
+    );
+    return inv.matches === "yes";
+  })(),
+);
 
 const unitOk = computeUnitBedroomCoverage("Unit A (3BR)", "unit-a", [
   { name: "Bedroom 1", description: "King Bed", photoCount: 2, photoIds: ["1", "2"], altViewCount: 1 },
