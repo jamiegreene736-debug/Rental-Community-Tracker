@@ -85,6 +85,14 @@ export function detectBedTypeFromCaption(caption: string): string | null {
   if (/\btwo queens?\b/.test(lower)) return "Two Queen Beds";
   if (/\btwo kings?\b/.test(lower)) return "Two King Beds";
   if (/\btwo doubles?\b/.test(lower)) return "Two Double Beds";
+  // Plural bed phrase ("twin beds", "queen beds") = two of that type — a room
+  // captioned "Guest Bedroom With Twin Beds" has two twins, NOT one. Must run
+  // before the singular checks below, which would otherwise read it as one bed.
+  if (/\btwin beds\b/.test(lower)) return "Two Twin Beds";
+  if (/\bqueen beds\b/.test(lower)) return "Two Queen Beds";
+  if (/\bking beds\b/.test(lower)) return "Two King Beds";
+  if (/\bdouble beds\b/.test(lower)) return "Two Double Beds";
+  if (/\bfull beds\b/.test(lower)) return "Two Full Beds";
   if (/\bbunk\b/.test(lower)) return "Bunk Beds";
   if (/\bking\b/.test(lower)) return "King Bed";
   if (/\bqueen\b/.test(lower)) return "Queen Bed";
@@ -251,6 +259,95 @@ export function clusterBedTypeLabel<T extends BedroomClusterInput>(cluster: T[])
     if (bt) return bt;
   }
   return null;
+}
+
+function clusterCaptions<T extends BedroomClusterInput>(cluster: T[]): string[] {
+  return cluster.map((c) => c.caption ?? "").filter(Boolean);
+}
+
+/** master/primary vs guest, from the cluster's captions (null = unknown). */
+function clusterRoomRole<T extends BedroomClusterInput>(cluster: T[]): "master" | "guest" | null {
+  const joined = clusterCaptions(cluster).join(" ").toLowerCase();
+  if (/\b(master|primary|principal)\b/.test(joined)) return "master";
+  if (/\bguest\b/.test(joined)) return "guest";
+  return null;
+}
+
+/** True when a multi-bed type (two of a kind / bunk). */
+function isMultiBedType(bedType: string | null): boolean {
+  return !!bedType && (/^two\b/i.test(bedType) || /\bbunk\b/i.test(bedType));
+}
+
+/** Caption generically mentions more than one bed (e.g. "Two Beds", "twin beds"). */
+function clusterMentionsMultipleBeds<T extends BedroomClusterInput>(cluster: T[]): boolean {
+  const joined = clusterCaptions(cluster).join(" ").toLowerCase();
+  return /\b(two|both)\s+beds\b/.test(joined)
+    || /\b(twin|queen|king|double|full)\s+beds\b/.test(joined);
+}
+
+/** Are two bedroom clusters confidently the SAME physical room (different angles)? */
+export function bedroomClustersSameRoom<T extends BedroomClusterInput>(a: T[], b: T[]): boolean {
+  const aRole = clusterRoomRole(a);
+  const bRole = clusterRoomRole(b);
+  // Never merge a master with a guest room.
+  if (aRole && bRole && aRole !== bRole) return false;
+
+  // Two "master"/"primary" shots are almost always the same master bedroom.
+  if (aRole === "master" && bRole === "master") return true;
+
+  const aType = clusterBedTypeLabel(a);
+  const bType = clusterBedTypeLabel(b);
+  // Identical specific bed type → same room (e.g. both "Two Twin Beds").
+  if (aType && bType && aType.toLowerCase() === bType.toLowerCase()) return true;
+
+  // One side names a specific multi-bed type, the other generically says it has
+  // multiple beds ("Two Beds") — the common "Twin Beds" + "Two Beds" pairing.
+  const aMulti = isMultiBedType(aType);
+  const bMulti = isMultiBedType(bType);
+  if (aMulti && !bType && clusterMentionsMultipleBeds(b)) return true;
+  if (bMulti && !aType && clusterMentionsMultipleBeds(a)) return true;
+
+  return false;
+}
+
+/**
+ * Merge bedroom clusters that are clearly the SAME room before trimming.
+ *
+ * Hash clustering splits different-angle shots of one bedroom into separate
+ * clusters (a master from two angles, a twin room captioned "Twin Beds" once and
+ * "Two Beds" once), inflating the room count → false "extra clusters trimmed" +
+ * bed-inventory mismatches. This caption-aware pass folds confident same-room
+ * pairs back together. It is bounded: it only runs when there are MORE clusters
+ * than the listing's bedroom count, and it never merges below that count — so a
+ * unit with genuinely distinct bedrooms is left untouched.
+ */
+export function mergeBedroomClustersByCaption<T extends BedroomClusterInput>(
+  clusters: T[][],
+  expectedBedrooms: number | null,
+): { clusters: T[][]; mergedCount: number } {
+  if (expectedBedrooms == null || expectedBedrooms <= 0 || clusters.length <= expectedBedrooms) {
+    return { clusters, mergedCount: 0 };
+  }
+  const groups = clusters.map((c) => [...c]);
+  let mergedCount = 0;
+  // Greedily merge the first confident same-room pair, then re-scan, until we
+  // reach the expected count or no confident pair remains.
+  let progressed = true;
+  while (groups.length > expectedBedrooms && progressed) {
+    progressed = false;
+    outer: for (let i = 0; i < groups.length; i++) {
+      for (let j = i + 1; j < groups.length; j++) {
+        if (bedroomClustersSameRoom(groups[i], groups[j])) {
+          groups[i] = [...groups[i], ...groups[j]];
+          groups.splice(j, 1);
+          mergedCount += 1;
+          progressed = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return { clusters: groups, mergedCount };
 }
 
 /**

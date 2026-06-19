@@ -68,6 +68,29 @@ function haystackContainsDistinctiveCommunityTokens(hay: string, expectedCommuni
   return tokens.every((token) => normalized.includes(token));
 }
 
+/**
+ * Whether a reverse-image-identified resort sits in the SAME geographic area as
+ * the expected community (shares a place token like "poipu" / "princeville").
+ *
+ * Shared/sibling resorts in one complex (Regency at Poipu Kai, Poipu Sands,
+ * Poipu Kapili…) reuse near-identical pool/tennis/grounds photos, so Google Lens
+ * routinely cross-matches a real community photo to a sibling resort. A same-area
+ * "different resort" hit is therefore NOT decisive evidence of a wrong photo.
+ */
+export function communitySharesGeoArea(
+  identified: string,
+  expectedCommunity: string,
+  city = "",
+): boolean {
+  const idTokens = new Set(distinctiveCommunityTokens(identified));
+  if (idTokens.size === 0) return false;
+  const areaTokens = [
+    ...distinctiveCommunityTokens(expectedCommunity),
+    ...distinctiveCommunityTokens(city),
+  ];
+  return areaTokens.some((token) => idTokens.has(token));
+}
+
 /** Whether Lens/AI text supports the expected community (dict, phrase, or fuzzy name). */
 export function communityHaystackSupportsExpected(hay: string, expectedCommunity: string): boolean {
   const text = hay.trim();
@@ -118,6 +141,22 @@ export function classifyCommunityPhotoFromLens(
   const inconclusive =
     verdict.reason.includes("no usable matches")
     || verdict.reason.includes("could not confirm");
+
+  // A "different resort" hit that names a SAME-AREA sibling resort (shared
+  // pool/tennis/grounds photos cross-match between Poipu resorts) is not decisive
+  // — defer to vision instead of hard-failing a real community amenity photo.
+  if (
+    !inconclusive
+    && verdict.identifiedCommunity
+    && communitySharesGeoArea(verdict.identifiedCommunity, expectedCommunity, city)
+  ) {
+    return {
+      outcome: "inconclusive",
+      reason: `${verdict.reason} Same-area resort — needs visual confirmation.`,
+      identifiedCommunity: verdict.identifiedCommunity,
+    };
+  }
+
   return {
     outcome: inconclusive ? "inconclusive" : "contradicted",
     reason: verdict.reason,
@@ -175,10 +214,14 @@ function judgeCommunityPhotoFromLensCore(
     }
   }
 
-  // Strongest signal: a top visual match names a different resort.
+  // Strongest signal: a top visual match names a different resort. Prefer the
+  // resort key the CONFLICT detector found ("Different resort detected (X)") —
+  // it uses the full resort dictionary, whereas extractIdentifiedCommunityName
+  // only sees a narrower phrase set and often returns nothing.
   if (conflicts.length > 0) {
     const top = conflicts[0];
-    const identified = extractIdentifiedCommunityName(top.text);
+    const fromReason = top.reason.match(/\(([^)]+)\)\s*$/)?.[1]?.trim();
+    const identified = fromReason || extractIdentifiedCommunityName(top.text);
     return {
       match: "no",
       reason: top.reason || `Photo appears to depict a different community (${identified || "not the expected resort"}).`,
