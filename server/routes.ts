@@ -21610,13 +21610,34 @@ Requirements:
       return res.status(400).json({ error: "guestyListingId and photos[] are required" });
     }
 
+    // Pin an existing Cover Collage to the FRONT of the listing. The PUTs below
+    // REPLACE the listing's entire pictures array, so without this a re-push
+    // would wipe a collage the operator set as the cover. We read it once up
+    // front and re-prepend it on every PUT so the live Guesty order stays
+    //   Cover Collage → Unit A → Unit B → … → Community.
+    // (No collage yet → the push is just the photos; make one via "Make Cover
+    // Collage" and it lands first.) Best-effort — a read failure just skips it.
+    let pinnedCollage: { original: string; caption: string } | null = null;
+    try {
+      const current = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
+      const pics = Array.isArray(current?.pictures) ? current.pictures : [];
+      const existing = pics.find((p: any) => (p?.caption || "") === "Cover Collage");
+      const collageUrl = existing?.original || existing?.url;
+      if (collageUrl) pinnedCollage = { original: String(collageUrl), caption: "Cover Collage" };
+    } catch (e: any) {
+      console.warn(`[push-photos] could not read existing collage (continuing without pin): ${e?.message ?? e}`);
+    }
+    const pinnedCount = pinnedCollage ? 1 : 0;
+
     // Keep the Guesty master/Airbnb source set up to Airbnb's published
     // 100-photo cap. VRBO (50) and Booking.com (30) are channel caps, not
     // Guesty-master caps; the Photos tab surfaces those warnings separately
     // so the operator can decide whether to curate before publishing there.
+    // Reserve one slot for the pinned cover collage so the total stays <=100.
     const MAX_GUESTY_PHOTOS = 100;
-    const photos = rawPhotos.length > MAX_GUESTY_PHOTOS
-      ? rawPhotos.slice(0, MAX_GUESTY_PHOTOS)
+    const photoCap = MAX_GUESTY_PHOTOS - pinnedCount;
+    const photos = rawPhotos.length > photoCap
+      ? rawPhotos.slice(0, photoCap)
       : rawPhotos;
     const trimmedCount = rawPhotos.length - photos.length;
 
@@ -21632,6 +21653,20 @@ Requirements:
     };
 
     let upscaledCount = 0;
+
+    if (pinnedCollage) {
+      emit({ type: "collage-pinned", url: pinnedCollage.original });
+      console.log(`[push-photos] pinning existing Cover Collage first: ${pinnedCollage.original}`);
+    }
+
+    // Build the pictures array for a PUT: the pinned cover collage first (if
+    // any), then the photos collected so far (Unit A → Unit B → … → Community,
+    // in the order the Photos tab assembled them). The defensive filter keeps a
+    // stray "Cover Collage"-captioned photo from doubling up the cover.
+    const picturesForPut = () =>
+      pinnedCollage
+        ? [pinnedCollage, ...collected.filter((p) => p.caption !== "Cover Collage")]
+        : collected;
 
     // Phase 1: Upload each photo to ImgBB (stream per-photo progress).
     // Collect successful { original, caption } objects for a single Guesty PUT at the end.
@@ -21781,8 +21816,8 @@ Requirements:
       if (collected.length > 0 && collected.length % CHECKPOINT_EVERY === 0) {
         emit({ type: "checkpoint", saved: collected.length, total: photos.length });
         try {
-          await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: collected });
-          console.log(`[push-photos] ✓ Checkpoint Guesty PUT — ${collected.length} photos committed`);
+          await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: picturesForPut() });
+          console.log(`[push-photos] ✓ Checkpoint Guesty PUT — ${collected.length} photos committed${pinnedCollage ? " (+ pinned collage)" : ""}`);
         } catch (e: any) {
           console.error(`[push-photos] ✗ Checkpoint Guesty PUT failed: ${e.message}`);
           // Non-fatal: keep uploading remaining photos, try final PUT at end
@@ -21797,9 +21832,9 @@ Requirements:
     if (collected.length > 0) {
       emit({ type: "saving", count: collected.length });
       try {
-        await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: collected });
+        await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: picturesForPut() });
         successCount = collected.length;
-        console.log(`[push-photos] ✓ Guesty PUT — ${successCount} photos saved to listing ${guestyListingId}`);
+        console.log(`[push-photos] ✓ Guesty PUT — ${successCount} photos saved to listing ${guestyListingId}${pinnedCollage ? " (cover collage pinned first)" : ""}`);
       } catch (e: any) {
         console.error(`[push-photos] ✗ Guesty PUT failed: ${e.message}`);
         emit({ type: "done", successCount: 0, upscaledCount, total: photos.length, trimmed: trimmedCount, maxPhotos: MAX_GUESTY_PHOTOS, guestyError: e.message });
@@ -21819,7 +21854,10 @@ Requirements:
     // Retry ladder: wait 3s, verify, retry if short. Wait 6s, verify,
     // retry. Wait 10s, verify. Give up after that and report the final
     // observed count so the UI doesn't lie.
-    let verifiedCount = successCount;
+    // Guesty's stored array includes the pinned collage, so compare against
+    // collected + pinned and report photo counts net of the collage.
+    const expectedTotal = collected.length + pinnedCount;
+    let verifiedTotal = successCount + pinnedCount;
     if (collected.length > 0) {
       const waits = [3000, 6000, 10000];
       for (let attempt = 0; attempt < waits.length; attempt++) {
@@ -21827,22 +21865,22 @@ Requirements:
         try {
           const listing = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
           const savedLen = Array.isArray(listing?.pictures) ? listing.pictures.length : 0;
-          emit({ type: "verify", attempt: attempt + 1, expected: collected.length, got: savedLen });
-          console.log(`[push-photos] Verify #${attempt + 1}: expected ${collected.length}, Guesty has ${savedLen}`);
-          if (savedLen >= collected.length) {
-            verifiedCount = savedLen;
+          emit({ type: "verify", attempt: attempt + 1, expected: expectedTotal, got: savedLen });
+          console.log(`[push-photos] Verify #${attempt + 1}: expected ${expectedTotal}, Guesty has ${savedLen}`);
+          if (savedLen >= expectedTotal) {
+            verifiedTotal = savedLen;
             break;
           }
           // Under-count — re-PUT and loop. Don't early-break on success
           // because some later attempts might succeed once the CDN
           // settles.
           try {
-            await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: collected });
-            console.log(`[push-photos] Retry PUT #${attempt + 1} — re-pushed ${collected.length} pictures after short-count verify`);
+            await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: picturesForPut() });
+            console.log(`[push-photos] Retry PUT #${attempt + 1} — re-pushed ${expectedTotal} pictures after short-count verify`);
           } catch (e: any) {
             console.error(`[push-photos] Retry PUT #${attempt + 1} failed: ${e.message}`);
           }
-          verifiedCount = savedLen;
+          verifiedTotal = savedLen;
         } catch (e: any) {
           console.error(`[push-photos] Verify #${attempt + 1} GET failed: ${e.message}`);
           // Don't break — a transient GET failure shouldn't abort the loop
@@ -21850,6 +21888,7 @@ Requirements:
       }
     }
 
+    const verifiedCount = Math.max(0, verifiedTotal - pinnedCount);
     const shortfall = collected.length - verifiedCount;
     emit({
       type: "done",
@@ -21860,6 +21899,7 @@ Requirements:
       total: photos.length,
       trimmed: trimmedCount,
       maxPhotos: MAX_GUESTY_PHOTOS,
+      collagePinned: pinnedCount > 0,
     });
     console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, verified ${verifiedCount} on Guesty${shortfall > 0 ? ` (shortfall ${shortfall} — Guesty silently dropped them)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
     res.end();
@@ -28851,6 +28891,7 @@ Return ONLY compact JSON with this exact shape:
         userLabel: string | null;
         userCategory: string | null;
         hidden: boolean;
+        sortOrder: number | null;
       }> = {};
       for (const r of rows) {
         labels[r.filename] = {
@@ -28860,6 +28901,7 @@ Return ONLY compact JSON with this exact shape:
           userLabel: r.userLabel,
           userCategory: r.userCategory,
           hidden: r.hidden,
+          sortOrder: r.sortOrder,
         };
       }
       return res.json({ folder, labels, count: rows.length, ...(autoLabel ? { autoLabel } : {}) });
@@ -28879,7 +28921,7 @@ Return ONLY compact JSON with this exact shape:
       return res.status(400).json({ error: "invalid filename" });
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const patch: { userLabel?: string | null; userCategory?: string | null; hidden?: boolean } = {};
+    const patch: { userLabel?: string | null; userCategory?: string | null; hidden?: boolean; sortOrder?: number | null } = {};
     if ("userLabel" in body) {
       patch.userLabel = body.userLabel == null ? null : String(body.userLabel).slice(0, 200);
     }
@@ -28889,6 +28931,12 @@ Return ONLY compact JSON with this exact shape:
     if ("hidden" in body) {
       patch.hidden = Boolean(body.hidden);
     }
+    if ("sortOrder" in body) {
+      patch.sortOrder = body.sortOrder == null ? null : Math.trunc(Number(body.sortOrder));
+      if (patch.sortOrder != null && !Number.isFinite(patch.sortOrder)) {
+        return res.status(400).json({ error: "sortOrder must be a number or null" });
+      }
+    }
     if (Object.keys(patch).length === 0) {
       return res.status(400).json({ error: "no override fields in body" });
     }
@@ -28896,6 +28944,58 @@ Return ONLY compact JSON with this exact shape:
       const row = await storage.updatePhotoLabelOverrides(folder, filename, patch);
       if (!row) return res.status(404).json({ error: "photo label not found — rescrape first?" });
       return res.json({ ok: true, row });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Persist (or clear) the operator's manual photo order for one gallery —
+  // a single unit folder, or the community folder. The Photos tab calls this
+  // after a drag-to-reorder or a "Best order" / "Reset order" click. Setting
+  // an order writes `sort_order = index` for each filename; the builder
+  // assembly then renders + pushes that gallery in this exact sequence
+  // (across-gallery order Unit A → Unit B → … → Community is fixed
+  // separately). Pass `{ reset: true }` to drop the manual order and revert
+  // to the hero-first category default.
+  //
+  // Body: { order?: Array<{ filename: string; label?: string }>, reset?: boolean }
+  app.post("/api/photo-labels/:folder/reorder", async (req, res) => {
+    const { folder } = req.params;
+    if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
+    const body = (req.body ?? {}) as { order?: unknown; reset?: unknown };
+
+    if (body.reset === true) {
+      try {
+        const cleared = await storage.resetPhotoOrder(folder);
+        return res.json({ ok: true, reset: true, cleared });
+      } catch (err: any) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+
+    if (!Array.isArray(body.order) || body.order.length === 0) {
+      return res.status(400).json({ error: "order[] is required (or pass { reset: true })" });
+    }
+
+    const fnameRe = /^[\w.-]+\.(jpe?g|png|webp)$/i;
+    const seen = new Set<string>();
+    const order: Array<{ filename: string; label?: string | null }> = [];
+    for (const raw of body.order as unknown[]) {
+      const item = (raw ?? {}) as { filename?: unknown; label?: unknown };
+      const filename = typeof item.filename === "string" ? item.filename : "";
+      if (!fnameRe.test(filename)) {
+        return res.status(400).json({ error: `invalid filename in order[]: ${filename}` });
+      }
+      if (seen.has(filename)) {
+        return res.status(400).json({ error: `duplicate filename in order[]: ${filename}` });
+      }
+      seen.add(filename);
+      order.push({ filename, label: typeof item.label === "string" ? item.label : null });
+    }
+
+    try {
+      const count = await storage.reorderPhotosInFolder(folder, order);
+      return res.json({ ok: true, ordered: count });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }

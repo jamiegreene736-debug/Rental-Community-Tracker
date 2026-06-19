@@ -6,6 +6,9 @@ import {
   computeUnitBedroomCoverage,
   dedupeCrossUnitBedroomClusters,
   deriveBedroomListingTier,
+  detectBedTypeFromCaption,
+  bedroomClustersSameRoom,
+  mergeBedroomClustersByCaption,
   isBedroomCategory,
   parseExpectedBedInventory,
   batchBedroomVisionRepresentatives,
@@ -46,6 +49,37 @@ const clusters = [
 ];
 const capped = capBedroomClustersToExpected(clusters, 3);
 check("hard cap trims to 3 clusters", capped.clusters.length === 3 && capped.trimmedCount === 1);
+
+// Regression: a 2BR with two King clusters (split angles) + one Queen must keep
+// the Queen, not drop it for a duplicate King (false "missing Queen Bed").
+const kingKingQueen = [
+  [{ id: "k1", caption: "King Bedroom With Ocean View", hash: "a".repeat(16) }],
+  [{ id: "k2", caption: "King Bedroom With Ocean View", hash: "b".repeat(16) }],
+  [{ id: "q1", caption: "Queen Bedroom", hash: "c".repeat(16) }],
+];
+const keptInv = capBedroomClustersToExpected(kingKingQueen, 2, {
+  expectedBedInventory: ["King Bed", "Queen Bed"],
+});
+const keptHasQueen = keptInv.clusters.some((c) => /queen/i.test(c[0].caption ?? ""));
+const keptHasKing = keptInv.clusters.some((c) => /king/i.test(c[0].caption ?? ""));
+check("cap keeps the unique Queen over a duplicate King (inventory-aware)",
+  keptInv.clusters.length === 2 && keptInv.trimmedCount === 1 && keptHasQueen && keptHasKing);
+
+// Even with no expected inventory, diversity should keep distinct bed types.
+const keptDiverse = capBedroomClustersToExpected(kingKingQueen, 2);
+check("cap keeps the Queen via diversity when no inventory is supplied",
+  keptDiverse.clusters.some((c) => /queen/i.test(c[0].caption ?? ""))
+  && keptDiverse.clusters.some((c) => /king/i.test(c[0].caption ?? "")));
+
+// A trim that still matches the bed inventory is a clean duplicate merge — pass, not warn.
+const cleanTrim = computeUnitBedroomCoverage("Unit A (2BR)", "a", [
+  { name: "Bedroom 1", description: "King Bed", bedType: "King Bed", photoCount: 1, photoIds: ["1"], altViewCount: 0 },
+  { name: "Bedroom 2", description: "Queen Bed", bedType: "Queen Bed", photoCount: 1, photoIds: ["2"], altViewCount: 0 },
+], 2, { trimmedClusterCount: 1, bedInventoryMatch: "yes" });
+check("clean trim with matching inventory → pass (no warn)",
+  cleanTrim.tier === "pass" && cleanTrim.matchesListing === "yes" && /merged/.test(cleanTrim.reason));
+check("clean trim does not raise a listing warn",
+  deriveBedroomListingTier(cleanTrim.matchesListing, [cleanTrim]) === "pass");
 
 const dedupe = dedupeCrossUnitBedroomClusters([
   {
@@ -94,6 +128,70 @@ check("listing tier warn when trim on unit",
 
 check("vision batches split 14 into 3 batches of 6",
   batchBedroomVisionRepresentatives(Array.from({ length: 14 }, (_, i) => i)).length === 3);
+
+// ── Plural bed phrases = two of that type ──────────────────────────────────
+check("'Guest Bedroom With Twin Beds' → Two Twin Beds",
+  detectBedTypeFromCaption("Guest Bedroom With Twin Beds") === "Two Twin Beds");
+check("'King Bedroom' (singular) stays King Bed",
+  detectBedTypeFromCaption("King Bedroom") === "King Bed");
+check("'Queen Beds' → Two Queen Beds",
+  detectBedTypeFromCaption("Bedroom With Queen Beds") === "Two Queen Beds");
+
+// ── Same-room cluster merge (the operator's Poipu Kai 3BR) ──────────────────
+check("bedroomClustersSameRoom: two Master shots merge",
+  bedroomClustersSameRoom(
+    [{ id: "a", caption: "Master Bedroom With Canopy Bed" }],
+    [{ id: "b", caption: "Master Bedroom With Balcony" }],
+  ));
+check("bedroomClustersSameRoom: Twin Beds + Two Beds merge",
+  bedroomClustersSameRoom(
+    [{ id: "c", caption: "Guest Bedroom With Twin Beds" }],
+    [{ id: "d", caption: "Guest Bedroom With Two Beds" }],
+  ));
+check("bedroomClustersSameRoom: master never merges with guest",
+  !bedroomClustersSameRoom(
+    [{ id: "a", caption: "Master Bedroom" }],
+    [{ id: "e", caption: "Guest Bedroom With Shutters" }],
+  ));
+check("bedroomClustersSameRoom: two distinct guest rooms do NOT merge",
+  !bedroomClustersSameRoom(
+    [{ id: "e", caption: "Guest Bedroom With Shutters" }],
+    [{ id: "c", caption: "Guest Bedroom With Twin Beds" }],
+  ));
+
+const mergeRes = mergeBedroomClustersByCaption(
+  [
+    [{ id: "a", caption: "Master Bedroom With Canopy Bed" }],
+    [{ id: "b", caption: "Master Bedroom With Balcony" }],
+    [{ id: "c", caption: "Guest Bedroom With Twin Beds" }],
+    [{ id: "d", caption: "Guest Bedroom With Two Beds" }],
+    [{ id: "e", caption: "Guest Bedroom With Shutters" }],
+  ],
+  3,
+);
+check("mergeBedroomClustersByCaption folds 5 → 3 (master+master, twin+two, shutters)",
+  mergeRes.clusters.length === 3 && mergeRes.mergedCount === 2);
+
+check("mergeBedroomClustersByCaption is a no-op at/under expected count",
+  mergeBedroomClustersByCaption(
+    [[{ id: "a", caption: "Master Bedroom" }], [{ id: "b", caption: "Guest Bedroom With Twin Beds" }]],
+    3,
+  ).mergedCount === 0);
+
+// Over-count with a duplicate King: merge the dup King, never the distinct types.
+const mergeKeepsDistinct = mergeBedroomClustersByCaption(
+  [
+    [{ id: "a", caption: "Bedroom 1 King" }],
+    [{ id: "b", caption: "Bedroom 2 Queen" }],
+    [{ id: "c", caption: "Bedroom 3 Twin Bed" }],
+    [{ id: "d", caption: "Bedroom 4 King" }],
+  ],
+  3,
+);
+check("mergeBedroomClustersByCaption stops at expected and keeps distinct bed types",
+  mergeKeepsDistinct.clusters.length === 3
+  && mergeKeepsDistinct.clusters.some((c) => /queen/i.test(c.map((x) => x.caption).join(" ")))
+  && mergeKeepsDistinct.clusters.some((c) => /twin/i.test(c.map((x) => x.caption).join(" "))));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

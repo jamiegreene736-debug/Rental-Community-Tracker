@@ -85,6 +85,14 @@ export function detectBedTypeFromCaption(caption: string): string | null {
   if (/\btwo queens?\b/.test(lower)) return "Two Queen Beds";
   if (/\btwo kings?\b/.test(lower)) return "Two King Beds";
   if (/\btwo doubles?\b/.test(lower)) return "Two Double Beds";
+  // Plural bed phrase ("twin beds", "queen beds") = two of that type — a room
+  // captioned "Guest Bedroom With Twin Beds" has two twins, NOT one. Must run
+  // before the singular checks below, which would otherwise read it as one bed.
+  if (/\btwin beds\b/.test(lower)) return "Two Twin Beds";
+  if (/\bqueen beds\b/.test(lower)) return "Two Queen Beds";
+  if (/\bking beds\b/.test(lower)) return "Two King Beds";
+  if (/\bdouble beds\b/.test(lower)) return "Two Double Beds";
+  if (/\bfull beds\b/.test(lower)) return "Two Full Beds";
   if (/\bbunk\b/.test(lower)) return "Bunk Beds";
   if (/\bking\b/.test(lower)) return "King Bed";
   if (/\bqueen\b/.test(lower)) return "Queen Bed";
@@ -238,25 +246,172 @@ export function pickMasterClusterIndex<T extends BedroomClusterInput>(clusters: 
   return best;
 }
 
-/** Drop smallest non-master clusters when over expected count (photo-pipeline parity). */
+/** Best-effort bed type for a cluster (captions first, then explicit bedType). */
+export function clusterBedTypeLabel<T extends BedroomClusterInput>(cluster: T[]): string | null {
+  const captions = cluster.map((c) => c.caption ?? "").filter(Boolean);
+  const fromCaptions = bedTypeFromClusterCaptions(captions);
+  if (fromCaptions) return normalizeBedType(fromCaptions);
+  for (const c of cluster) {
+    if (c.bedType) return normalizeBedType(c.bedType);
+  }
+  for (const cap of captions) {
+    const bt = detectBedTypeFromCaption(cap);
+    if (bt) return bt;
+  }
+  return null;
+}
+
+function clusterCaptions<T extends BedroomClusterInput>(cluster: T[]): string[] {
+  return cluster.map((c) => c.caption ?? "").filter(Boolean);
+}
+
+/** master/primary vs guest, from the cluster's captions (null = unknown). */
+function clusterRoomRole<T extends BedroomClusterInput>(cluster: T[]): "master" | "guest" | null {
+  const joined = clusterCaptions(cluster).join(" ").toLowerCase();
+  if (/\b(master|primary|principal)\b/.test(joined)) return "master";
+  if (/\bguest\b/.test(joined)) return "guest";
+  return null;
+}
+
+/** True when a multi-bed type (two of a kind / bunk). */
+function isMultiBedType(bedType: string | null): boolean {
+  return !!bedType && (/^two\b/i.test(bedType) || /\bbunk\b/i.test(bedType));
+}
+
+/** Caption generically mentions more than one bed (e.g. "Two Beds", "twin beds"). */
+function clusterMentionsMultipleBeds<T extends BedroomClusterInput>(cluster: T[]): boolean {
+  const joined = clusterCaptions(cluster).join(" ").toLowerCase();
+  return /\b(two|both)\s+beds\b/.test(joined)
+    || /\b(twin|queen|king|double|full)\s+beds\b/.test(joined);
+}
+
+/** Are two bedroom clusters confidently the SAME physical room (different angles)? */
+export function bedroomClustersSameRoom<T extends BedroomClusterInput>(a: T[], b: T[]): boolean {
+  const aRole = clusterRoomRole(a);
+  const bRole = clusterRoomRole(b);
+  // Never merge a master with a guest room.
+  if (aRole && bRole && aRole !== bRole) return false;
+
+  // Two "master"/"primary" shots are almost always the same master bedroom.
+  if (aRole === "master" && bRole === "master") return true;
+
+  const aType = clusterBedTypeLabel(a);
+  const bType = clusterBedTypeLabel(b);
+  // Identical specific bed type → same room (e.g. both "Two Twin Beds").
+  if (aType && bType && aType.toLowerCase() === bType.toLowerCase()) return true;
+
+  // One side names a specific multi-bed type, the other generically says it has
+  // multiple beds ("Two Beds") — the common "Twin Beds" + "Two Beds" pairing.
+  const aMulti = isMultiBedType(aType);
+  const bMulti = isMultiBedType(bType);
+  if (aMulti && !bType && clusterMentionsMultipleBeds(b)) return true;
+  if (bMulti && !aType && clusterMentionsMultipleBeds(a)) return true;
+
+  return false;
+}
+
+/**
+ * Merge bedroom clusters that are clearly the SAME room before trimming.
+ *
+ * Hash clustering splits different-angle shots of one bedroom into separate
+ * clusters (a master from two angles, a twin room captioned "Twin Beds" once and
+ * "Two Beds" once), inflating the room count → false "extra clusters trimmed" +
+ * bed-inventory mismatches. This caption-aware pass folds confident same-room
+ * pairs back together. It is bounded: it only runs when there are MORE clusters
+ * than the listing's bedroom count, and it never merges below that count — so a
+ * unit with genuinely distinct bedrooms is left untouched.
+ */
+export function mergeBedroomClustersByCaption<T extends BedroomClusterInput>(
+  clusters: T[][],
+  expectedBedrooms: number | null,
+): { clusters: T[][]; mergedCount: number } {
+  if (expectedBedrooms == null || expectedBedrooms <= 0 || clusters.length <= expectedBedrooms) {
+    return { clusters, mergedCount: 0 };
+  }
+  const groups = clusters.map((c) => [...c]);
+  let mergedCount = 0;
+  // Greedily merge the first confident same-room pair, then re-scan, until we
+  // reach the expected count or no confident pair remains.
+  let progressed = true;
+  while (groups.length > expectedBedrooms && progressed) {
+    progressed = false;
+    outer: for (let i = 0; i < groups.length; i++) {
+      for (let j = i + 1; j < groups.length; j++) {
+        if (bedroomClustersSameRoom(groups[i], groups[j])) {
+          groups[i] = [...groups[i], ...groups[j]];
+          groups.splice(j, 1);
+          mergedCount += 1;
+          progressed = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return { clusters: groups, mergedCount };
+}
+
+/**
+ * Trim extra clusters when over the expected room count.
+ *
+ * Load-bearing: when a unit has more distinct bedroom photo-clusters than the
+ * listing has bedrooms (e.g. two angles of a King bedroom that hash-split into
+ * two clusters PLUS a Queen bedroom), the trim must KEEP a diverse set of bed
+ * types — never drop a unique Queen to keep a duplicate King. The old size-only
+ * trim biased toward King (via pickMasterClusterIndex's +100) and produced false
+ * "missing Queen Bed" inventory mismatches. Selection priority: (1) cover bed
+ * types the listing expects, (2) prefer distinct bed types over duplicates,
+ * (3) fill remaining slots by cluster size.
+ */
 export function capBedroomClustersToExpected<T extends BedroomClusterInput>(
   clusters: T[][],
   maxRooms: number | null,
+  opts?: { expectedBedInventory?: string[] },
 ): { clusters: T[][]; trimmedCount: number } {
   if (maxRooms == null || maxRooms <= 0 || clusters.length <= maxRooms) {
     return { clusters, trimmedCount: 0 };
   }
   const masterIdx = pickMasterClusterIndex(clusters);
-  const indexed = clusters.map((c, i) => ({
-    i,
-    size: c.length,
-    isMaster: i === masterIdx,
-  }));
-  const keep = new Set<number>([masterIdx >= 0 ? masterIdx : 0]);
-  const others = indexed
-    .filter((x) => !x.isMaster)
-    .sort((a, b) => b.size - a.size);
-  for (const o of others.slice(0, maxRooms - 1)) keep.add(o.i);
+  const startIdx = masterIdx >= 0 ? masterIdx : 0;
+  const keep = new Set<number>([startIdx]);
+
+  const expectedRemaining = new Map<string, number>();
+  for (const t of opts?.expectedBedInventory ?? []) {
+    const k = normalizeBedType(t).toLowerCase();
+    expectedRemaining.set(k, (expectedRemaining.get(k) ?? 0) + 1);
+  }
+  const keptTypes = new Set<string>();
+  const consume = (idx: number) => {
+    const t = clusterBedTypeLabel(clusters[idx]);
+    if (!t) return;
+    const k = t.toLowerCase();
+    keptTypes.add(k);
+    const left = expectedRemaining.get(k);
+    if (left && left > 0) expectedRemaining.set(k, left - 1);
+  };
+  consume(startIdx);
+
+  const meta = clusters
+    .map((c, i) => ({ i, size: c.length, type: clusterBedTypeLabel(c) }))
+    .filter((x) => !keep.has(x.i));
+
+  const fill = (predicate: (x: { i: number; size: number; type: string | null }) => boolean) => {
+    while (keep.size < maxRooms) {
+      const candidate = meta
+        .filter((x) => !keep.has(x.i) && predicate(x))
+        .sort((a, b) => b.size - a.size)[0];
+      if (!candidate) break;
+      keep.add(candidate.i);
+      consume(candidate.i);
+    }
+  };
+
+  // 1) Cover bed types the listing expects but we have not kept yet.
+  fill((x) => !!x.type && (expectedRemaining.get(x.type.toLowerCase()) ?? 0) > 0);
+  // 2) Prefer distinct bed types over duplicates (diversity).
+  fill((x) => !!x.type && !keptTypes.has(x.type.toLowerCase()));
+  // 3) Fill any remaining slots, largest cluster first.
+  fill(() => true);
+
   const capped = clusters.filter((_, i) => keep.has(i));
   return { clusters: capped, trimmedCount: clusters.length - capped.length };
 }
@@ -391,8 +546,10 @@ export function deriveBedroomListingTier(
 ): BedroomListingTier {
   if (listingMatches === "no") return "fail";
   const anyUnitFail = units.some((u) => u.matchesListing === "no");
+  // Drive warns off each unit's own tier — a trim that still matched the bed
+  // inventory leaves the unit at "pass" and must not re-raise a listing warn.
   const anyWarn =
-    units.some((u) => u.tier === "warn" || u.trimmedClusterCount)
+    units.some((u) => u.tier === "warn")
     || (bedInventoryMatch === "no");
   if (listingMatches === "yes" && (anyUnitFail || anyWarn)) return "warn";
   if (listingMatches === "yes") return "pass";
@@ -456,8 +613,13 @@ export function computeUnitBedroomCoverage(
   if (expectedBedrooms != null && expectedBedrooms > 0) {
     if (bedroomsFound >= expectedBedrooms) {
       matchesListing = "yes";
+      // A trim whose bed inventory still matches the listing only removed
+      // duplicate views of a kept bed type — say so and don't warn on it.
+      const cleanTrim = opts?.bedInventoryMatch === "yes";
       const trimNote = opts?.trimmedClusterCount
-        ? ` (${opts.trimmedClusterCount} extra cluster${opts.trimmedClusterCount === 1 ? "" : "s"} trimmed).`
+        ? cleanTrim
+          ? ` (${opts.trimmedClusterCount} duplicate bedroom view${opts.trimmedClusterCount === 1 ? "" : "s"} merged).`
+          : ` (${opts.trimmedClusterCount} extra cluster${opts.trimmedClusterCount === 1 ? "" : "s"} trimmed).`
         : "";
       reason =
         bedroomsFound === expectedBedrooms
@@ -466,7 +628,7 @@ export function computeUnitBedroomCoverage(
       if (opts?.bedInventoryMatch === "no") {
         tier = "warn";
         reason += ` Bed inventory mismatch: ${opts.bedInventoryReason ?? "review bed types"}.`;
-      } else if (opts?.trimmedClusterCount) {
+      } else if (opts?.trimmedClusterCount && !cleanTrim) {
         tier = "warn";
       }
     } else {

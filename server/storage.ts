@@ -1682,18 +1682,55 @@ export class DatabaseStorage implements IStorage {
   async updatePhotoLabelOverrides(
     folder: string,
     filename: string,
-    patch: { userLabel?: string | null; userCategory?: string | null; hidden?: boolean },
+    patch: { userLabel?: string | null; userCategory?: string | null; hidden?: boolean; sortOrder?: number | null },
   ): Promise<PhotoLabel | null> {
     const set: Record<string, unknown> = {};
     if ("userLabel" in patch) set.userLabel = patch.userLabel;
     if ("userCategory" in patch) set.userCategory = patch.userCategory;
     if ("hidden" in patch) set.hidden = patch.hidden;
+    if ("sortOrder" in patch) set.sortOrder = patch.sortOrder;
     if (Object.keys(set).length === 0) return null;
     const [row] = await db.update(photoLabels)
       .set(set)
       .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)))
       .returning();
     return row ?? null;
+  }
+
+  // Persist the operator's manual photo order for a single folder (a unit
+  // gallery or the community gallery). `order` is the new front-to-back
+  // sequence; each filename's `sort_order` is set to its index. Photos that
+  // don't have a label row yet get one created (label falls back to the
+  // caption the client is showing, else the filename) so the order sticks
+  // even before the AI labeler has run. Filenames are assumed pre-validated
+  // by the route. Returns the number of photos ordered.
+  async reorderPhotosInFolder(
+    folder: string,
+    order: Array<{ filename: string; label?: string | null }>,
+  ): Promise<number> {
+    for (let i = 0; i < order.length; i++) {
+      const { filename, label } = order[i];
+      const updated = await db.update(photoLabels)
+        .set({ sortOrder: i })
+        .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)))
+        .returning();
+      if (updated.length === 0) {
+        const fallbackLabel = label && label.trim() ? label.trim().slice(0, 200) : filename;
+        await db.insert(photoLabels).values({ folder, filename, label: fallbackLabel, sortOrder: i });
+      }
+    }
+    return order.length;
+  }
+
+  // Clear the manual order for a folder so the Photos tab reverts to the
+  // hero-first category default (shared/photo-order.ts). Leaves every other
+  // override (userLabel / hidden / labels) untouched.
+  async resetPhotoOrder(folder: string): Promise<number> {
+    const rows = await db.update(photoLabels)
+      .set({ sortOrder: null })
+      .where(eq(photoLabels.folder, folder))
+      .returning();
+    return rows.length;
   }
 
   async getPhotoLabelsByFolder(folder: string): Promise<PhotoLabel[]> {

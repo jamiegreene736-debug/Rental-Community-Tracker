@@ -69,6 +69,29 @@ function haystackContainsDistinctiveCommunityTokens(hay: string, expectedCommuni
   return tokens.every((token) => normalized.includes(token));
 }
 
+/**
+ * Whether a reverse-image-identified resort sits in the SAME geographic area as
+ * the expected community (shares a place token like "poipu" / "princeville").
+ *
+ * Shared/sibling resorts in one complex (Regency at Poipu Kai, Poipu Sands,
+ * Poipu Kapili…) reuse near-identical pool/tennis/grounds photos, so Google Lens
+ * routinely cross-matches a real community photo to a sibling resort. A same-area
+ * "different resort" hit is therefore NOT decisive evidence of a wrong photo.
+ */
+export function communitySharesGeoArea(
+  identified: string,
+  expectedCommunity: string,
+  city = "",
+): boolean {
+  const idTokens = new Set(distinctiveCommunityTokens(identified));
+  if (idTokens.size === 0) return false;
+  const areaTokens = [
+    ...distinctiveCommunityTokens(expectedCommunity),
+    ...distinctiveCommunityTokens(city),
+  ];
+  return areaTokens.some((token) => idTokens.has(token));
+}
+
 /** Whether Lens/AI text supports the expected community (dict, phrase, or fuzzy name). */
 export function communityHaystackSupportsExpected(hay: string, expectedCommunity: string): boolean {
   const text = hay.trim();
@@ -121,6 +144,25 @@ export function classifyCommunityPhotoFromLens(
   const inconclusive =
     verdict.reason.includes("no usable matches")
     || verdict.reason.includes("could not confirm");
+
+  // A "different resort" hit that names a SAME-AREA sibling resort (shared
+  // pool/tennis/grounds photos cross-match between Poipu resorts) is not decisive
+  // — defer to vision instead of hard-failing a real community amenity photo.
+  // Hard sibling conflicts (e.g. Regency vs Villas at Poipu Kai) stay contradicted.
+  const hardSiblingConflict = verdict.reason.includes("different complex within Poipu Kai");
+  if (
+    !inconclusive
+    && verdict.identifiedCommunity
+    && !hardSiblingConflict
+    && communitySharesGeoArea(verdict.identifiedCommunity, expectedCommunity, city)
+  ) {
+    return {
+      outcome: "inconclusive",
+      reason: `${verdict.reason} Same-area resort — needs visual confirmation.`,
+      identifiedCommunity: verdict.identifiedCommunity,
+    };
+  }
+
   return {
     outcome: inconclusive ? "inconclusive" : "contradicted",
     reason: verdict.reason,
@@ -135,6 +177,49 @@ export function judgeCommunityPhotoFromLens(
   city = "",
 ): CommunityLensVerdict {
   return judgeCommunityPhotoFromLensCore(expectedCommunity, rows, extraTexts, city);
+}
+
+/**
+ * Google Lens AI Overview = Gemini's own analysis of the image ("These are the
+ * tennis courts at the Poipu Kai Resort"). It is far more authoritative than a
+ * noisy reverse-image organic title that happens to name a sibling resort, so we
+ * consult it FIRST: a positive identification of the expected community confirms
+ * the photo even when an organic hit names a different sibling; a different-area
+ * resort named by the overview contradicts. A same-area sibling named by the
+ * overview is ambiguous (shared amenity photos) → fall through to vision.
+ */
+export function analyzeAiOverviewForCommunity(
+  aiTexts: string[],
+  expectedCommunity: string,
+  city = "",
+): { outcome: "confirms" | "contradicts" | "inconclusive"; identified?: string } {
+  const expected = expectedCommunity.trim();
+  const texts = aiTexts.filter((t) => typeof t === "string" && t.trim());
+  if (!expected || texts.length === 0) return { outcome: "inconclusive" };
+
+  for (const text of texts) {
+    if (communityHaystackSupportsExpected(text, expected)) {
+      return { outcome: "confirms", identified: expected };
+    }
+  }
+  for (const text of texts) {
+    const sibling = communityPhotoSiblingConflict(text, expected);
+    if (sibling) {
+      return { outcome: "contradicts", identified: sibling.identifiedCommunity };
+    }
+  }
+  for (const text of texts) {
+    // sharedResortPhraseKeys reads the candidate's title — pass the AI Overview
+    // line as a title-only candidate (not a bare string, which it can't read).
+    const keys = sharedResortPhraseKeys({ title: text, sourceLabel: "", snippet: "", complexName: "" });
+    for (const key of keys) {
+      if (communityNamesMatch(key, expected)) return { outcome: "confirms", identified: expected };
+      if (!communitySharesGeoArea(key, expected, city)) {
+        return { outcome: "contradicts", identified: key };
+      }
+    }
+  }
+  return { outcome: "inconclusive" };
 }
 
 function judgeCommunityPhotoFromLensCore(
@@ -161,6 +246,26 @@ function judgeCommunityPhotoFromLensCore(
     };
   }
 
+  // Google Lens AI Overview is the strongest signal — Gemini analysed the image
+  // itself. Consult it BEFORE the per-row conflict scan so a real community photo
+  // is not hard-failed by a sibling-resort organic title when the overview clearly
+  // names the expected resort.
+  const ai = analyzeAiOverviewForCommunity(extraTexts, expected, city);
+  if (ai.outcome === "confirms") {
+    return {
+      match: "yes",
+      reason: `Google Lens AI Overview identifies this as ${expected}.`,
+      identifiedCommunity: expected,
+    };
+  }
+  if (ai.outcome === "contradicts") {
+    return {
+      match: "no",
+      reason: `Google Lens AI Overview identifies a different resort (${ai.identified}).`,
+      identifiedCommunity: ai.identified,
+    };
+  }
+
   const conflicts: Array<{ reason: string; text: string }> = [];
   const evidence: Array<{ text: string }> = [];
 
@@ -184,10 +289,14 @@ function judgeCommunityPhotoFromLensCore(
     }
   }
 
-  // Strongest signal: a top visual match names a different resort.
+  // Strongest signal: a top visual match names a different resort. Prefer the
+  // resort key the CONFLICT detector found ("Different resort detected (X)") —
+  // it uses the full resort dictionary, whereas extractIdentifiedCommunityName
+  // only sees a narrower phrase set and often returns nothing.
   if (conflicts.length > 0) {
     const top = conflicts[0];
-    const identified = extractIdentifiedCommunityName(top.text);
+    const fromReason = top.reason.match(/\(([^)]+)\)\s*$/)?.[1]?.trim();
+    const identified = fromReason || extractIdentifiedCommunityName(top.text);
     return {
       match: "no",
       reason: top.reason || `Photo appears to depict a different community (${identified || "not the expected resort"}).`,

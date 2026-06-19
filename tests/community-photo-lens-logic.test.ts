@@ -1,5 +1,10 @@
 import assert from "node:assert";
-import { judgeCommunityPhotoFromLens, classifyCommunityPhotoFromLens } from "../shared/community-photo-lens-logic";
+import {
+  judgeCommunityPhotoFromLens,
+  classifyCommunityPhotoFromLens,
+  communitySharesGeoArea,
+  analyzeAiOverviewForCommunity,
+} from "../shared/community-photo-lens-logic";
 
 let passed = 0;
 let failed = 0;
@@ -93,12 +98,13 @@ check(
   ).match === "yes",
 );
 
-const regencyPoipuKai = "Regency at Poipu Kai";
+// ── Regency at Poipu Kai: decisive sibling conflicts (Villas, etc.) ─────────
+const regency = "Regency at Poipu Kai";
 
 check(
   "flags Villas at Poipu Kai pool as wrong community for Regency",
   judgeCommunityPhotoFromLens(
-    regencyPoipuKai,
+    regency,
     [{
       title: "Kauai Vacation Rentals - The Villas at Poipu Kai",
       snippet: "The Parrish Collection Kauai — tropical pool area with palm trees",
@@ -114,7 +120,7 @@ check(
 check(
   "classifyCommunityPhotoFromLens marks Villas-at-Poipu-Kai hit as contradicted for Regency",
   classifyCommunityPhotoFromLens(
-    regencyPoipuKai,
+    regency,
     [{
       title: "Luxury Kauai Vacation Rentals | Villas at Poipu Kai",
       snippet: "Resort pool and spa at Villas at Poipu Kai",
@@ -127,7 +133,7 @@ check(
 check(
   "confirms Regency pool when Lens names Regency at Poipu Kai",
   judgeCommunityPhotoFromLens(
-    regencyPoipuKai,
+    regency,
     [{
       title: "Regency at Poipu Kai Resort Pool - Koloa",
       snippet: "Regency at Poipu Kai swimming pool and tennis courts",
@@ -135,6 +141,98 @@ check(
       position: 1,
     }],
   ).match === "yes",
+);
+
+check(
+  "AI Overview naming Villas at Poipu Kai contradicts Regency (not dict-key confirm)",
+  analyzeAiOverviewForCommunity(
+    ["This image showcases the amenities at The Villas at Poipu Kai, featuring a tropical pool area."],
+    regency,
+    "Koloa",
+  ).outcome === "contradicts",
+);
+
+// ── Same-area sibling-resort cross-matches defer to vision (Poipu) ──────────
+check(
+  "communitySharesGeoArea: sibling Poipu resort shares area",
+  communitySharesGeoArea("poipu sands", regency, "Koloa")
+  && communitySharesGeoArea("Poipu Kapili", regency, "Koloa"),
+);
+
+check(
+  "communitySharesGeoArea: different area does not share",
+  !communitySharesGeoArea("Mauna Kai Princeville", regency, "Koloa")
+  && !communitySharesGeoArea("Hanalei Bay Resort", regency, "Koloa"),
+);
+
+check(
+  "same-area Poipu Sands hit defers to vision (inconclusive, not contradicted)",
+  classifyCommunityPhotoFromLens(
+    regency,
+    [{ title: "Vacation rental at Poipu Sands", snippet: "poipu sands resort pool", link: "https://x.com", position: 1 }],
+    [],
+    "Koloa",
+  ).outcome === "inconclusive",
+);
+
+check(
+  "same-area Poipu Kapili hit defers to vision",
+  classifyCommunityPhotoFromLens(
+    regency,
+    [{ title: "Poipu Kapili condo", snippet: "poipu kapili pool and spa", link: "https://y.com", position: 1 }],
+    [],
+    "Koloa",
+  ).outcome === "inconclusive",
+);
+
+check(
+  "different-area Princeville hit still hard-contradicts",
+  classifyCommunityPhotoFromLens(
+    regency,
+    [{ title: "stay at Mauna Kai Princeville", snippet: "mauna kai princeville", link: "https://z.com", position: 1 }],
+    [],
+    "Koloa",
+  ).outcome === "contradicted",
+);
+
+// ── Google Lens AI Overview is authoritative (the operator's tennis court) ──
+const tennisRows = [
+  { title: "Poipu Sands at Poipu Kai #234", snippet: "poipu sands at poipu kai", link: "https://x.com/poipu-sands", source: "organic", position: 1 },
+  { title: "Poipu Kai Resort Vacation Rentals | Parrish Kauai", snippet: "Discover Poipu Kai vacation rentals", link: "https://x.com/poipu-kai", source: "organic", position: 2 },
+];
+const tennisAiOverview = [
+  "These are the tennis courts at the Poipu Kai Resort in Kauai.",
+  "The tennis club features eight total courts.",
+];
+
+check(
+  "analyzeAiOverviewForCommunity confirms when overview names the expected resort",
+  analyzeAiOverviewForCommunity(tennisAiOverview, regency, "Koloa").outcome === "confirms",
+);
+
+check(
+  "AI Overview naming Poipu Kai CONFIRMS the photo despite a sibling-resort organic conflict",
+  classifyCommunityPhotoFromLens(regency, tennisRows, tennisAiOverview, "Koloa").outcome === "confirmed",
+);
+
+check(
+  "without the AI Overview, the sibling conflict still defers to vision (inconclusive)",
+  classifyCommunityPhotoFromLens(regency, tennisRows, [], "Koloa").outcome === "inconclusive",
+);
+
+check(
+  "AI Overview naming a DIFFERENT-area resort still hard-contradicts",
+  classifyCommunityPhotoFromLens(
+    regency,
+    [],
+    ["This is the pool at Hanalei Bay Resort in Princeville."],
+    "Koloa",
+  ).outcome === "contradicted",
+);
+
+check(
+  "analyzeAiOverviewForCommunity: empty overview is inconclusive",
+  analyzeAiOverviewForCommunity([], regency, "Koloa").outcome === "inconclusive",
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

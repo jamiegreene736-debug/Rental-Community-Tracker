@@ -11,8 +11,8 @@ function norm(haystack: string): string {
   return normalizeCommunityName(haystack);
 }
 
-/** Sibling complexes that are NOT Regency at Poipu Kai (mirrors buy-in guards). */
-export function mentionsKnownNonRegencyPoipuKaiComplex(haystack: string): string | null {
+/** Decisive siblings — distinct complexes whose amenity photos must not pass as Regency. */
+export function mentionsDecisiveNonRegencyPoipuKaiSibling(haystack: string): string | null {
   const n = norm(haystack);
   const siblings: Array<{ re: RegExp; label: string }> = [
     { re: /\bvillas?\s+at\s+poipu\s+kai\b/, label: "Villas at Poipu Kai" },
@@ -23,7 +23,6 @@ export function mentionsKnownNonRegencyPoipuKaiComplex(haystack: string): string
     { re: /\bmanualoha\b/, label: "Manualoha" },
     { re: /\b(kahala|makanui)\b/, label: "Kahala at Poipu Kai" },
     { re: /\bnihi\s+kai\b/, label: "Nihi Kai" },
-    { re: /\bpoipu\s+sands\b/, label: "Poipu Sands" },
     { re: /\bpili\s+mai\b/, label: "Pili Mai" },
     { re: /\bkiahuna\b/, label: "Kiahuna Plantation" },
     { re: /\bmakahuena\b/, label: "Makahuena" },
@@ -32,6 +31,15 @@ export function mentionsKnownNonRegencyPoipuKaiComplex(haystack: string): string
   for (const { re, label } of siblings) {
     if (re.test(n)) return label;
   }
+  return null;
+}
+
+/** Sibling complexes that are NOT Regency at Poipu Kai (includes soft geo-area siblings). */
+export function mentionsKnownNonRegencyPoipuKaiComplex(haystack: string): string | null {
+  const decisive = mentionsDecisiveNonRegencyPoipuKaiSibling(haystack);
+  if (decisive) return decisive;
+  const n = norm(haystack);
+  if (/\bpoipu\s+sands\b/.test(n)) return "Poipu Sands";
   return null;
 }
 
@@ -64,7 +72,7 @@ export function communityPhotoSiblingConflict(
   if (!hay || !expected) return null;
 
   if (expectedIsRegencyAtPoipuKai(expected)) {
-    const sibling = mentionsKnownNonRegencyPoipuKaiComplex(hay);
+    const sibling = mentionsDecisiveNonRegencyPoipuKaiSibling(hay);
     if (sibling && !mentionsRegencyAtPoipuKai(hay)) {
       return {
         identifiedCommunity: sibling,

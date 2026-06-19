@@ -14,6 +14,7 @@ import {
   isAmbiguousBedroomCaption,
   isBedroomCategory,
   isBedroomPhotoCaption,
+  mergeBedroomClustersByCaption,
   parseExpectedBedInventory,
   parseExpectedBedroomsFromLabel,
   shouldExpandBedroomSearch,
@@ -349,7 +350,19 @@ async function analyzeUnitBedrooms(
     }
   }
 
-  const { clusters: cappedClusters, trimmedCount } = capBedroomClustersToExpected(clusters, expected);
+  // Fold same-room shots that hash-split (a master from two angles, a twin room
+  // captioned "Twin Beds" + "Two Beds") back together BEFORE trimming, so the
+  // room count and bed inventory reflect the real bedrooms — not duplicate views.
+  const { clusters: mergedClusters } = mergeBedroomClustersByCaption(clusters, expected);
+  clusters = mergedClusters;
+
+  // Expected bed inventory steers the cap so a unique bed type (e.g. a Queen)
+  // is never trimmed in favour of a duplicate (e.g. a second King).
+  const expectedBedInventory =
+    g.expectedBedInventory ?? (g.unitDescription ? parseExpectedBedInventory(g.unitDescription) : []);
+  const { clusters: cappedClusters, trimmedCount } = capBedroomClustersToExpected(clusters, expected, {
+    expectedBedInventory,
+  });
   clusters = cappedClusters;
 
   const representatives = clusters.map(pickClusterRepresentative);

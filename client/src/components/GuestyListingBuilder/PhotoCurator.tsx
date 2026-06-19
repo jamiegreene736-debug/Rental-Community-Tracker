@@ -18,7 +18,7 @@
 // field each photo carries.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { RotateCcw, RotateCw } from "lucide-react";
+import { RotateCcw, RotateCw, ChevronLeft, ChevronRight, GripVertical } from "lucide-react";
 import { normalizePhotoVerdictKey, photoVerdictKeyFromUrl } from "@shared/photo-verdict-keys";
 
 type PhotoIn = { url: string; caption?: string; source?: string };
@@ -95,6 +95,15 @@ export type PhotoCuratorProps = {
   };
   /** Per photo verdict from Check photo community (`folder/filename` key). */
   communityPhotoVerdicts?: Record<string, CommunityPhotoVerdict>;
+
+  // Drag-to-reorder hookup. A gallery = one folder (a unit, or the community
+  // folder). `onReorderSection` persists the operator's new front-to-back
+  // order for that folder (drives both display and the Guesty push order
+  // within the gallery); `onResetSectionOrder` clears it back to the
+  // hero-first default. Both are optional — when absent the tiles render
+  // read-only with no reorder controls.
+  onReorderSection?: (folder: string, ordered: Array<{ filename: string; label: string }>) => void;
+  onResetSectionOrder?: (folder: string) => void;
 };
 
 export default function PhotoCurator({
@@ -107,6 +116,8 @@ export default function PhotoCurator({
   onRequestCoverCollage,
   coverCollageStatus,
   communityPhotoVerdicts,
+  onReorderSection,
+  onResetSectionOrder,
 }: PhotoCuratorProps) {
   const [meta, setMeta] = useState<Map<string, LabelMeta>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -115,6 +126,16 @@ export default function PhotoCurator({
   const [cacheBusters, setCacheBusters] = useState<Map<string, number>>(new Map());
   const [collagePickerOpen, setCollagePickerOpen] = useState(false);
   const [collageSelection, setCollageSelection] = useState<string[]>([]);
+  // Optimistic reorder overlay — folder → new filename order. Applied on top
+  // of the incoming `photos` so a drag/move feels instant; cleared for a
+  // folder once the parent re-renders with the persisted order (below).
+  const [optimisticOrder, setOptimisticOrder] = useState<Map<string, string[]>>(new Map());
+  // Tile key currently being dragged + the tile it's hovering over, for
+  // visual feedback during a native HTML5 drag.
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [dragOverKey, setDragOverKey] = useState<string | null>(null);
+
+  const reorderEnabled = !!onReorderSection;
 
   const localFolders = useMemo(() => {
     const set = new Set<string>();
@@ -216,30 +237,124 @@ export default function PhotoCurator({
     [onOverridesChanged],
   );
 
-  // Build the render sections. Each consecutive run of photos with the
-  // same `source` becomes one section. Hidden photos are excluded from
-  // the displayed count but still render (dimmed) so the user can
-  // unhide them.
-  type Section = { source: string; photos: Array<PhotoIn & { key: string; folder: string | null; filename: string | null; meta: LabelMeta | null }> };
-  const sections: Section[] = [];
-  let current: Section | null = null;
-  for (const p of photos) {
-    const parsed = parseLocalPath(p.url);
-    const key = parsed ? `${parsed.folder}/${parsed.filename}` : `ext:${p.url.slice(-80)}`;
-    const m = parsed ? meta.get(key) ?? null : null;
-    const src = p.source || "Other";
-    if (!current || current.source !== src) {
-      current = { source: src, photos: [] };
-      sections.push(current);
-    }
-    current.photos.push({
-      ...p,
-      key,
-      folder: parsed?.folder ?? null,
-      filename: parsed?.filename ?? null,
-      meta: m,
+  // Once the parent re-renders with the persisted order (or the overlay would
+  // be a no-op), drop the optimistic overlay for that folder so we go back to
+  // a single source of truth (the incoming `photos` order).
+  useEffect(() => {
+    setOptimisticOrder((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Map(prev);
+      let changed = false;
+      prev.forEach((order, folder) => {
+        const incoming = photos
+          .map((p) => parseLocalPath(p.url))
+          .filter((x): x is { folder: string; filename: string } => !!x && x.folder === folder)
+          .map((x) => x.filename);
+        if (incoming.length === order.length && incoming.every((f, i) => f === order[i])) {
+          next.delete(folder);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
     });
+  }, [photos]);
+
+  // Build the render sections. Each consecutive run of photos with the same
+  // `source` becomes one section (= one folder: a unit gallery, or the
+  // community gallery). Hidden photos are already excluded upstream by the
+  // builder assembly, so every rendered tile is reorderable.
+  type Tile = PhotoIn & { key: string; folder: string | null; filename: string | null; meta: LabelMeta | null };
+  type Section = { source: string; photos: Tile[] };
+  const rawSections: Section[] = [];
+  {
+    let current: Section | null = null;
+    for (const p of photos) {
+      const parsed = parseLocalPath(p.url);
+      const key = parsed ? `${parsed.folder}/${parsed.filename}` : `ext:${p.url.slice(-80)}`;
+      const m = parsed ? meta.get(key) ?? null : null;
+      const src = p.source || "Other";
+      if (!current || current.source !== src) {
+        current = { source: src, photos: [] };
+        rawSections.push(current);
+      }
+      current.photos.push({
+        ...p,
+        key,
+        folder: parsed?.folder ?? null,
+        filename: parsed?.filename ?? null,
+        meta: m,
+      });
+    }
   }
+  // Apply the optimistic reorder overlay so a just-dropped/moved photo shows
+  // in its new slot immediately, before the persisted order round-trips back
+  // through the parent's propertyData rebuild.
+  const sections: Section[] = rawSections.map((section) => {
+    const folder = section.photos.find((p) => p.folder)?.folder ?? null;
+    const order = folder ? optimisticOrder.get(folder) : undefined;
+    if (!folder || !order) return section;
+    const byName = new Map(section.photos.map((p) => [p.filename, p] as const));
+    const reordered: Tile[] = [];
+    for (const fn of order) {
+      const t = byName.get(fn);
+      if (t) { reordered.push(t); byName.delete(fn); }
+    }
+    // Defensive: append any tile the overlay didn't cover, in original order.
+    for (const p of section.photos) if (p.filename && byName.has(p.filename)) reordered.push(p);
+    return reordered.length === section.photos.length ? { ...section, photos: reordered } : section;
+  });
+
+  const sectionFolder = (section: Section): string | null =>
+    section.photos.find((p) => p.folder)?.folder ?? null;
+
+  // Persist a new front-to-back order (by tile key) for one gallery and show
+  // it immediately via the optimistic overlay.
+  const applySectionOrder = (section: Section, orderedKeys: string[]) => {
+    const folder = sectionFolder(section);
+    if (!folder || !onReorderSection) return;
+    const byKey = new Map(section.photos.map((p) => [p.key, p] as const));
+    const ordered = orderedKeys
+      .map((k) => byKey.get(k))
+      .filter((p): p is Tile => !!p && !!p.filename);
+    if (ordered.length !== section.photos.length) return;
+    const filenames = ordered.map((p) => p.filename as string);
+    setOptimisticOrder((prev) => new Map(prev).set(folder, filenames));
+    onReorderSection(
+      folder,
+      ordered.map((p) => ({
+        filename: p.filename as string,
+        label: p.meta?.userLabel || p.caption || p.meta?.label || "",
+      })),
+    );
+  };
+
+  // Move the tile at `fromIdx` to `toIdx` within its section.
+  const moveWithinSection = (section: Section, fromIdx: number, toIdx: number) => {
+    if (fromIdx === toIdx || toIdx < 0 || fromIdx < 0 || toIdx >= section.photos.length || fromIdx >= section.photos.length) return;
+    const keys = section.photos.map((p) => p.key);
+    const [moved] = keys.splice(fromIdx, 1);
+    keys.splice(toIdx, 0, moved);
+    applySectionOrder(section, keys);
+  };
+
+  // Native HTML5 drag drop: move the dragged tile to just before the drop
+  // target (both must be in the same section/folder).
+  const handleTileDrop = (section: Section, targetKey: string) => {
+    if (!dragKey || dragKey === targetKey) { setDragKey(null); setDragOverKey(null); return; }
+    const fromIdx = section.photos.findIndex((p) => p.key === dragKey);
+    const toIdx = section.photos.findIndex((p) => p.key === targetKey);
+    setDragKey(null);
+    setDragOverKey(null);
+    if (fromIdx < 0 || toIdx < 0) return;  // cross-section drag — ignore
+    moveWithinSection(section, fromIdx, toIdx);
+  };
+
+  const resetSectionOrder = (section: Section) => {
+    const folder = sectionFolder(section);
+    if (!folder) return;
+    setOptimisticOrder((prev) => { const n = new Map(prev); n.delete(folder); return n; });
+    onResetSectionOrder?.(folder);
+  };
 
   // Tally visible photos (all sections combined, excluding hidden). The
   // banner at the top compares this against each channel's cap.
@@ -701,13 +816,17 @@ export default function PhotoCurator({
         </div>
       )}
 
-      {/* Sections — one block per contiguous run of same-source photos. */}
+      {/* Sections — one block per gallery (a unit folder, or community). The
+          galleries render top-to-bottom in the exact order they're pushed to
+          Guesty (Unit A → Unit B → … → Community, with the cover collage set
+          separately as the first/cover picture). */}
       {sections.map((section, i) => {
-        // All photos in this section should share a folder, but parsed
-        // URLs handle the edge case of mixed sources gracefully.
+        // All photos in this section share a folder; parsed URLs handle the
+        // edge case of mixed sources gracefully.
         const firstFolder = section.photos.find((p) => p.folder)?.folder ?? null;
         const sourceUrl = firstFolder ? sourceUrlsByFolder?.[firstFolder] : undefined;
         const sectionVisible = section.photos.filter((p) => !p.meta?.hidden).length;
+        const canReorder = reorderEnabled && !!firstFolder && section.photos.length > 1;
 
         return (
           <div key={`${section.source}-${i}`} style={{ marginBottom: 20 }}>
@@ -736,6 +855,28 @@ export default function PhotoCurator({
                   ↗ View source listing
                 </a>
               )}
+              {canReorder && (
+                <>
+                  <span style={{
+                    fontSize: 11, color: "#9ca3af", display: "inline-flex",
+                    alignItems: "center", gap: 4,
+                  }}>
+                    <GripVertical size={12} /> Drag, or use ◀ ▶, to reorder
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => resetSectionOrder(section)}
+                    title="Revert this gallery to the suggested best-first order"
+                    style={{
+                      fontSize: 11, color: "#6d28d9", textDecoration: "none",
+                      padding: "2px 8px", background: "#f5f3ff", border: "1px solid #ddd6fe",
+                      borderRadius: 3, cursor: "pointer", fontWeight: 600,
+                    }}
+                  >
+                    ↺ Reset to best order
+                  </button>
+                </>
+              )}
             </div>
             <div style={{
               display: "grid", gap: 8,
@@ -755,6 +896,17 @@ export default function PhotoCurator({
                   rotating={rotatingKey === tile.key}
                   cacheBust={cacheBusters.get(tile.key)}
                   photoVerdict={photoVerdict}
+                  reorderable={canReorder}
+                  isDragging={dragKey === tile.key}
+                  isDragOver={dragOverKey === tile.key && dragKey !== tile.key}
+                  canMoveLeft={tileIdx > 0}
+                  canMoveRight={tileIdx < section.photos.length - 1}
+                  onDragStartTile={() => { setDragKey(tile.key); setDragOverKey(null); }}
+                  onDragOverTile={() => { if (dragKey && dragKey !== tile.key) setDragOverKey(tile.key); }}
+                  onDropTile={() => handleTileDrop(section, tile.key)}
+                  onDragEndTile={() => { setDragKey(null); setDragOverKey(null); }}
+                  onMoveLeft={() => moveWithinSection(section, tileIdx, tileIdx - 1)}
+                  onMoveRight={() => moveWithinSection(section, tileIdx, tileIdx + 1)}
                   onEditCaption={(caption) => {
                     if (!tile.folder || !tile.filename) return;
                     patchLabel(tile.folder, tile.filename, { userLabel: caption.trim() || null });
@@ -793,6 +945,17 @@ function PhotoTile({
   onDelete,
   onRotate,
   photoVerdict,
+  reorderable,
+  isDragging,
+  isDragOver,
+  canMoveLeft,
+  canMoveRight,
+  onDragStartTile,
+  onDragOverTile,
+  onDropTile,
+  onDragEndTile,
+  onMoveLeft,
+  onMoveRight,
 }: {
   tile: {
     key: string;
@@ -810,6 +973,17 @@ function PhotoTile({
   onDelete: () => void;
   onRotate: (degrees: 90 | 270) => void;
   photoVerdict?: CommunityPhotoVerdict;
+  reorderable?: boolean;
+  isDragging?: boolean;
+  isDragOver?: boolean;
+  canMoveLeft?: boolean;
+  canMoveRight?: boolean;
+  onDragStartTile?: () => void;
+  onDragOverTile?: () => void;
+  onDropTile?: () => void;
+  onDragEndTile?: () => void;
+  onMoveLeft?: () => void;
+  onMoveRight?: () => void;
 }) {
   // Effective caption — user override wins, else labeler output, else
   // whatever the parent passed in (static label fallback), else blank.
@@ -821,22 +995,32 @@ function PhotoTile({
 
   const hidden = !!tile.meta?.hidden;
   const cannotEdit = !tile.folder;
+  const canReorder = !!reorderable && !!tile.folder;
   const displayUrl = cacheBust
     ? `${tile.url}${tile.url.includes("?") ? "&" : "?"}v=${cacheBust}`
     : tile.url;
 
   return (
-    <div style={{
-      position: "relative",
-      border: tile.meta?.userLabel ? "2px solid #16a34a" : "1px solid #e5e7eb",
-      borderRadius: 6, background: "#fff",
-      overflow: "hidden", opacity: hidden ? 0.4 : 1,
-    }}>
+    <div
+      draggable={canReorder && !editing}
+      onDragStart={canReorder ? (e) => { e.dataTransfer.effectAllowed = "move"; onDragStartTile?.(); } : undefined}
+      onDragOver={canReorder ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; onDragOverTile?.(); } : undefined}
+      onDrop={canReorder ? (e) => { e.preventDefault(); onDropTile?.(); } : undefined}
+      onDragEnd={canReorder ? () => onDragEndTile?.() : undefined}
+      style={{
+        position: "relative",
+        border: isDragOver ? "2px solid #6d28d9" : tile.meta?.userLabel ? "2px solid #16a34a" : "1px solid #e5e7eb",
+        borderRadius: 6, background: "#fff",
+        overflow: "hidden", opacity: hidden ? 0.4 : isDragging ? 0.45 : 1,
+        cursor: canReorder && !editing ? "grab" : "default",
+        boxShadow: isDragOver ? "0 0 0 2px rgba(109,40,217,0.25)" : undefined,
+      }}>
       <div style={{ position: "relative", aspectRatio: "4/3", background: "#f3f4f6" }}>
         <img
           src={displayUrl}
           alt={effectiveCaption}
           loading="lazy"
+          draggable={false}
           style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
         />
         <div style={{
@@ -922,6 +1106,38 @@ function PhotoTile({
           }}
         >{hidden ? "↺ restore" : "✕ delete"}</button>
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          {canReorder && (
+            <>
+              <button
+                disabled={!canMoveLeft}
+                onClick={onMoveLeft}
+                title="Move earlier in this gallery"
+                aria-label="Move photo earlier"
+                style={{
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  width: 26, height: 24, background: "#f5f3ff", color: "#6d28d9",
+                  border: 0, borderRadius: 3, cursor: canMoveLeft ? "pointer" : "not-allowed",
+                  opacity: canMoveLeft ? 1 : 0.4,
+                }}
+              >
+                <ChevronLeft size={14} />
+              </button>
+              <button
+                disabled={!canMoveRight}
+                onClick={onMoveRight}
+                title="Move later in this gallery"
+                aria-label="Move photo later"
+                style={{
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  width: 26, height: 24, background: "#f5f3ff", color: "#6d28d9",
+                  border: 0, borderRadius: 3, cursor: canMoveRight ? "pointer" : "not-allowed",
+                  opacity: canMoveRight ? 1 : 0.4,
+                }}
+              >
+                <ChevronRight size={14} />
+              </button>
+            </>
+          )}
           <button
             disabled={cannotEdit || saving || rotating}
             onClick={() => onRotate(270)}
