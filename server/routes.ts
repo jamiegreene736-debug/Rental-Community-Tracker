@@ -14134,6 +14134,21 @@ Requirements:
     }
   });
 
+  // POST /api/operations/auto-fill/last/clear  body: { reservationId }
+  // Operator dismisses stale last-search results (loss combos + scan message).
+  app.post("/api/operations/auto-fill/last/clear", async (req: Request, res: Response) => {
+    try {
+      const reservationId = String(req.body?.reservationId ?? "").trim();
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      const { clearLastAutoFillSearchForReservation } = await import("./auto-fill-job");
+      clearLastAutoFillSearchForReservation(reservationId);
+      await storage.deleteAutoFillLossOptions(reservationId);
+      return res.json({ ok: true, reservationId });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   app.get("/api/operations/auto-fill/:jobId", async (req: Request, res: Response) => {
     try {
       const { getAutoFillJob, serializeAutoFillJob } = await import("./auto-fill-job");

@@ -4890,6 +4890,8 @@ function LastBuyInSearchPanel({
   attachingComboLabel,
   scanStatus,
   scanMessage,
+  reservationId,
+  onClearResults,
 }: {
   lossCombos: AutoFillComboOption[];
   lossLog: LossLogEntry[];
@@ -4903,8 +4905,25 @@ function LastBuyInSearchPanel({
   // economics), which now survives redeploys.
   scanStatus?: string | null;
   scanMessage?: string | null;
+  reservationId?: string;
+  onClearResults?: () => void;
 }) {
+  const { toast } = useToast();
   const interrupted = scanStatus === "interrupted";
+  const clearResults = useMutation({
+    mutationFn: async () => {
+      if (!reservationId) throw new Error("No reservation to clear");
+      const res = await apiRequest("POST", "/api/operations/auto-fill/last/clear", { reservationId });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
+      return body;
+    },
+    onSuccess: () => {
+      onClearResults?.();
+      toast({ title: "Search results cleared" });
+    },
+    onError: (e: any) => toast({ title: "Could not clear results", description: e?.message ?? String(e), variant: "destructive" }),
+  });
   if (lossCombos.length === 0 && lossLog.length === 0 && !interrupted && !scanMessage) return null;
   return (
     <div className="rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs" data-testid="last-buy-in-search-panel">
@@ -4912,9 +4931,29 @@ function LastBuyInSearchPanel({
         <p className="font-medium text-amber-900">
           Last buy-in search{lossCombos.length > 0 ? " · over-budget combinations" : ""}
         </p>
-        {finishedAt ? (
-          <span className="text-[10px] text-amber-700">{new Date(finishedAt).toLocaleString()}</span>
-        ) : null}
+        <div className="flex items-center gap-2">
+          {finishedAt ? (
+            <span className="text-[10px] text-amber-700">{new Date(finishedAt).toLocaleString()}</span>
+          ) : null}
+          {reservationId && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-[10px] text-amber-900 hover:bg-amber-100"
+              disabled={clearResults.isPending}
+              onClick={(e) => {
+                e.stopPropagation();
+                clearResults.mutate();
+              }}
+              data-testid={`button-clear-last-search-${reservationId}`}
+              title="Dismiss these search results"
+            >
+              {clearResults.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3 mr-0.5" />}
+              Clear
+            </Button>
+          )}
+        </div>
       </div>
       {interrupted && (
         <p
@@ -10202,6 +10241,14 @@ export default function Bookings() {
                             finishedAt={lastSearch?.timestamps?.finishedAt ?? null}
                             scanStatus={lastSearch?.status ?? null}
                             scanMessage={lastSearch?.done ? (lastSearch?.message || null) : null}
+                            reservationId={r._id}
+                            onClearResults={() => {
+                              setLastSearchByReservation((prev) => {
+                                const next = { ...prev };
+                                delete next[r._id];
+                                return next;
+                              });
+                            }}
                             onAttachCombo={(option) => attachComboMutation.mutate({ reservation: r, option })}
                             attachingComboLabel={attachComboMutation.isPending ? attachComboMutation.variables?.option.label ?? null : null}
                           />
@@ -11076,6 +11123,19 @@ export default function Bookings() {
                             <LastBuyInSearchPanel
                               lossCombos={itemLossCombos}
                               lossLog={itemLossLog}
+                              reservationId={item.reservationId}
+                              onClearResults={() => {
+                                setLastSearchByReservation((prev) => {
+                                  const next = { ...prev };
+                                  delete next[item.reservationId];
+                                  return next;
+                                });
+                                setBulkBuyInQueueItems((prev) => prev.map((it) => (
+                                  it.reservationId === item.reservationId
+                                    ? { ...it, lossCombos: [], lossLog: [] }
+                                    : it
+                                )));
+                              }}
                               onAttachCombo={(option) => {
                                 const r = reservations.find((x) => x._id === item.reservationId);
                                 if (r) attachComboMutation.mutate({ reservation: r, option });

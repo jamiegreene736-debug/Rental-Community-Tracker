@@ -244,6 +244,7 @@ export interface IStorage {
   getSetting(key: string): Promise<string | undefined>;
   setSetting(key: string, value: string): Promise<void>;
   getAutoFillLossOptions(reservationId: string): Promise<AutoFillLossOptions | undefined>;
+  deleteAutoFillLossOptions(reservationId: string): Promise<void>;
   upsertAutoFillLossOptions(row: {
     reservationId: string;
     propertyId?: number | null;
@@ -1149,6 +1150,14 @@ export class DatabaseStorage implements IStorage {
     } catch (e) {
       // Non-fatal: persistence is a convenience layer over the in-memory store.
       console.warn(`[auto-fill] could not persist loss options for ${row.reservationId}: ${(e as Error).message}`);
+    }
+  }
+
+  async deleteAutoFillLossOptions(reservationId: string): Promise<void> {
+    try {
+      await db.delete(autoFillLossOptions).where(eq(autoFillLossOptions.reservationId, reservationId));
+    } catch (e) {
+      console.warn(`[auto-fill] could not delete loss options for ${reservationId}: ${(e as Error).message}`);
     }
   }
 
