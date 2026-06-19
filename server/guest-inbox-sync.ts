@@ -206,6 +206,16 @@ async function importParsedEmail(parsed: ParsedRawEmail, filterAlias?: string): 
     (values as InsertGuestInboxMessage & { receivedAt?: Date }).receivedAt = parsed.receivedAt;
   }
   await storage.createGuestInboxMessage(values);
+  try {
+    const { applyArrivalDetailsFromGuestMessage } = await import("./guest-inbox-arrival");
+    await applyArrivalDetailsFromGuestMessage({
+      aliasEmail,
+      subject: parsed.subject,
+      body: parsed.body,
+    });
+  } catch (err: any) {
+    console.warn("[guest-inbox] arrival extract failed:", err?.message ?? err);
+  }
   return true;
 }
 

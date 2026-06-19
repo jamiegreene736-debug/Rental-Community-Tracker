@@ -4639,6 +4639,69 @@ function isVrboListingUrl(url: string | null | undefined): boolean {
   return /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(String(url ?? "").trim());
 }
 
+type GuestInboxArrivalDetails = {
+  unitAddress: string;
+  accessCode: string;
+  wifiName: string;
+  wifiPassword: string;
+  parkingInfo: string;
+  arrivalNotes: string;
+};
+
+type GuestInboxResponse = {
+  aliasEmail: string | null;
+  guestName: string | null;
+  messages: GuestInboxMessageClient[];
+  arrivalDetails?: GuestInboxArrivalDetails | null;
+  arrivalExtracted?: boolean;
+  arrivalFieldsUpdated?: string[];
+};
+
+function buyInHasArrivalDetails(buyIn: Pick<BuyIn, "unitAddress" | "accessCode" | "wifiName" | "wifiPassword" | "parkingInfo" | "arrivalNotes">): boolean {
+  return !!(
+    buyIn.unitAddress?.trim()
+    || buyIn.accessCode?.trim()
+    || buyIn.wifiName?.trim()
+    || buyIn.wifiPassword?.trim()
+    || buyIn.parkingInfo?.trim()
+    || buyIn.arrivalNotes?.trim()
+  );
+}
+
+/** Parsed arrival details pulled from VRBO guest-thread emails — shown inline on the buy-in. */
+function BuyInArrivalSummary({ buyIn, onEdit }: { buyIn: BuyIn; onEdit: () => void }) {
+  if (!buyInHasArrivalDetails(buyIn)) return null;
+
+  const rows: Array<{ label: string; value: string; mono?: boolean }> = [
+    { label: "Address", value: buyIn.unitAddress ?? "" },
+    { label: "Door / access code", value: buyIn.accessCode ?? "", mono: true },
+    { label: "Wi‑Fi", value: [buyIn.wifiName, buyIn.wifiPassword].filter(Boolean).join(" · ") },
+    { label: "Parking", value: buyIn.parkingInfo ?? "" },
+    { label: "Gate / elevator / notes", value: buyIn.arrivalNotes ?? "" },
+  ].filter((row) => row.value.trim());
+
+  return (
+    <div className="border-t bg-emerald-50/40 px-3 py-2.5 space-y-2 dark:bg-emerald-950/20" data-testid={`buy-in-arrival-${buyIn.id}`}>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <MapPin className="h-3.5 w-3.5 text-emerald-700 dark:text-emerald-300" />
+        <span className="font-medium text-emerald-900 dark:text-emerald-100">Arrival details</span>
+        <Badge variant="secondary" className="text-[10px]">from VRBO email</Badge>
+        <Button size="sm" variant="ghost" className="h-6 text-[10px] ml-auto" onClick={onEdit}>
+          Edit
+        </Button>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
+        {rows.map((row) => (
+          <div key={row.label} className={row.label === "Address" || row.label === "Gate / elevator / notes" ? "md:col-span-2" : ""}>
+            <span className="text-muted-foreground">{row.label}: </span>
+            <span className={row.mono ? "font-mono" : ""}>{row.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** Inline VRBO guest booking thread — shows arrival emails in Operations. */
 function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservation: GuestyReservation }) {
   const { toast } = useToast();
@@ -4647,12 +4710,18 @@ function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservati
   const { firstName: guestFirstName, lastName: guestLastName } = guestNamePartsFromReservation(reservation);
   const email = buyIn.travelerEmail;
 
-  const { data, isLoading, refetch } = useQuery<{ aliasEmail: string | null; guestName: string | null; messages: GuestInboxMessageClient[] }>({
+  const { data, isLoading, refetch } = useQuery<GuestInboxResponse>({
     queryKey: ["/api/guest-inbox", buyIn.id],
     queryFn: () => apiGetJson(`/api/guest-inbox?buyInId=${buyIn.id}`),
     enabled: !!email,
     refetchInterval: email ? 30_000 : false,
   });
+
+  useEffect(() => {
+    if (!data?.arrivalExtracted) return;
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+  }, [data?.arrivalExtracted, data?.arrivalFieldsUpdated?.join(",")]);
 
   const createEmail = useMutation({
     mutationFn: async () => {
@@ -10631,6 +10700,12 @@ export default function Bookings() {
                             <BuyInGuestThreadPanel
                               reservation={r}
                               buyIn={slot.buyIn}
+                            />
+                          )}
+                          {slot.buyIn && (
+                            <BuyInArrivalSummary
+                              buyIn={slot.buyIn}
+                              onEdit={() => setArrivalEditor(slot.buyIn!)}
                             />
                           )}
                           {slotIsExpanded && selectedBuyInPropertyId && (
