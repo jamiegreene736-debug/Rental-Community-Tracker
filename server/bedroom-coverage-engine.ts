@@ -349,7 +349,13 @@ async function analyzeUnitBedrooms(
     }
   }
 
-  const { clusters: cappedClusters, trimmedCount } = capBedroomClustersToExpected(clusters, expected);
+  // Expected bed inventory steers the cap so a unique bed type (e.g. a Queen)
+  // is never trimmed in favour of a duplicate (e.g. a second King).
+  const expectedBedInventory =
+    g.expectedBedInventory ?? (g.unitDescription ? parseExpectedBedInventory(g.unitDescription) : []);
+  const { clusters: cappedClusters, trimmedCount } = capBedroomClustersToExpected(clusters, expected, {
+    expectedBedInventory,
+  });
   clusters = cappedClusters;
 
   const representatives = clusters.map(pickClusterRepresentative);

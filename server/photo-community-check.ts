@@ -50,8 +50,16 @@ const MODEL = "claude-sonnet-4-6";
 
 /** Max community photos to load and vision-audit per folder. */
 const COMMUNITY_FULL_FOLDER_CAP = 50;
-/** Interior photos sent to vision per unit (each unit gets its own call). */
-const UNIT_INTERIOR_TARGET = 12;
+/**
+ * Photos sampled per unit for the community-match pass. High enough to cover a
+ * whole unit folder so EVERY interior photo gets a verdict badge (green ✓ /
+ * red ✕ / amber ?), not just the first dozen. Sent to vision in batches.
+ */
+const UNIT_PHOTO_CAP = 60;
+/** Unit photos per vision call (each batch also carries the community anchors). */
+const UNIT_VISION_BATCH_SIZE = 9;
+/** Concurrent unit vision batches (keeps latency down without flooding the API). */
+const UNIT_VISION_CONCURRENCY = 3;
 const COMMUNITY_ANCHOR_COUNT = 3;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ANTHROPIC_TIMEOUT_MS = 90_000;
@@ -443,7 +451,7 @@ function buildSingleUnitPassInstruction(
     "  - yes: finishes, window/lanai views, balcony railings, exterior glimpses, building style, landscaping visible outside are COMPATIBLE with the fingerprint.",
     "  - no: ONLY with POSITIVE contradiction — different resort signage/towels/keycards, incompatible climate/architecture/view that cannot be the same resort.",
     "",
-    `Return verdicts for at least ${minInterior} interior photos. Every interior photo must match for a pass.`,
+    `Return a verdict for EVERY unit photo shown above (need at least ${minInterior} interior photos). Every interior photo must match for a pass.`,
     "Do NOT use uncertain/unclear — every match is yes or no.",
     "",
     "Outliers = photos that appear to be a DIFFERENT UNIT's interior (incompatible kitchen/bedroom/bath finishes vs the majority).",
@@ -518,8 +526,19 @@ function mapPhotoVerdicts(v: unknown, samples: SampledPhoto[]): PhotoVerdict[] {
   return out;
 }
 
-/** Merge vision verdicts with every sampled photo so UI can badge folder/filename keys. */
-function mergeUnitPhotoVerdicts(visionVerdicts: PhotoVerdict[], samples: SampledPhoto[]): PhotoVerdict[] {
+/**
+ * Merge vision verdicts with every sampled photo so the UI badges every tile.
+ * `coveredIds` (when given) is the set of photo ids a vision batch actually
+ * looked at: a photo whose batch FAILED is marked "uncertain" (amber ?) rather
+ * than silently defaulted to "yes", so a coverage gap never reads as a pass.
+ * A photo the model simply did not vote on inside a successful batch stays "yes"
+ * (compatible) — the prompt only emits "no" on a positive contradiction.
+ */
+function mergeUnitPhotoVerdicts(
+  visionVerdicts: PhotoVerdict[],
+  samples: SampledPhoto[],
+  coveredIds?: Set<string>,
+): PhotoVerdict[] {
   const byId = new Map(visionVerdicts.map((v) => [v.id, v]));
   return samples.map((s) => {
     const vision = byId.get(s.id);
@@ -529,6 +548,16 @@ function mergeUnitPhotoVerdicts(visionVerdicts: PhotoVerdict[], samples: Sampled
         folder: s.folder,
         filename: s.filename,
         caption: vision.caption ?? s.caption,
+      };
+    }
+    if (coveredIds && !coveredIds.has(s.id)) {
+      return {
+        id: s.id,
+        folder: s.folder,
+        filename: s.filename,
+        caption: s.caption,
+        match: "uncertain" as const,
+        reason: "Vision check did not return a verdict for this photo — review manually.",
       };
     }
     return {
@@ -542,6 +571,30 @@ function mergeUnitPhotoVerdicts(visionVerdicts: PhotoVerdict[], samples: Sampled
   });
 }
 
+/** Run async tasks with a fixed concurrency limit, preserving result order. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length || 1) }, async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function chunkSamples<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += Math.max(1, size)) out.push(items.slice(i, i + size));
+  return out;
+}
+
 async function verifyUnitAgainstCommunity(
   apiKey: string,
   r: ResolvedGroup,
@@ -549,45 +602,80 @@ async function verifyUnitAgainstCommunity(
   fingerprint: string,
   expectedCommunity: string,
 ): Promise<UnitGroupResult> {
-  const content: any[] = [];
-  for (const a of anchors) {
-    const cap = a.caption ? ` · caption: "${a.caption}"` : "";
-    content.push({ type: "text", text: `--- ANCHOR community photo ${a.id}${cap} ---` });
-    content.push({ type: "image", source: { type: "base64", media_type: a.mime, data: a.buffer.toString("base64") } });
-  }
-  content.push({
-    type: "text",
-    text: `=== UNIT: ${r.input.label} (${r.interiorSampled} interior-classified of ${r.sampled.length} photos) ===`,
-  });
-  for (const s of r.sampled) {
-    const cap = s.caption ? ` · caption: "${s.caption}"` : "";
-    const kind = s.isInterior ? "INTERIOR" : "OTHER";
-    content.push({ type: "text", text: `--- ${kind} photo ${s.id}${cap} ---` });
-    content.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
-  }
-  content.push({
-    type: "text",
-    text: buildSingleUnitPassInstruction(fingerprint, expectedCommunity, r.input.label, UNIT_INTERIOR_MIN),
+  // Batch the whole unit folder (not just the first dozen) so EVERY photo gets
+  // a verdict badge. Each batch repeats the community anchors so it can judge
+  // community-match independently; results are folded back together below.
+  const batches = chunkSamples(r.sampled, UNIT_VISION_BATCH_SIZE);
+  const batchResults = await mapWithConcurrency(batches, UNIT_VISION_CONCURRENCY, async (batch) => {
+    const content: any[] = [];
+    for (const a of anchors) {
+      const cap = a.caption ? ` · caption: "${a.caption}"` : "";
+      content.push({ type: "text", text: `--- ANCHOR community photo ${a.id}${cap} ---` });
+      content.push({ type: "image", source: { type: "base64", media_type: a.mime, data: a.buffer.toString("base64") } });
+    }
+    content.push({
+      type: "text",
+      text: `=== UNIT: ${r.input.label} (${r.interiorSampled} interior-classified of ${r.sampled.length} total photos; this batch ${batch.length}) ===`,
+    });
+    for (const s of batch) {
+      const cap = s.caption ? ` · caption: "${s.caption}"` : "";
+      const kind = s.isInterior ? "INTERIOR" : "OTHER";
+      content.push({ type: "text", text: `--- ${kind} photo ${s.id}${cap} ---` });
+      content.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
+    }
+    content.push({
+      type: "text",
+      text: buildSingleUnitPassInstruction(fingerprint, expectedCommunity, r.input.label, UNIT_INTERIOR_MIN),
+    });
+    try {
+      const { parsed } = await callVisionJson(apiKey, content);
+      const rawUnit = Array.isArray(parsed.units) ? parsed.units[0] : parsed;
+      const rows = Array.isArray(rawUnit?.photoVerdicts)
+        ? rawUnit.photoVerdicts
+        : Array.isArray(parsed.photoVerdicts) ? parsed.photoVerdicts : [];
+      return {
+        ok: true,
+        rows: rows as any[],
+        outliers: Array.isArray(rawUnit?.outliers) ? (rawUnit.outliers as any[]) : [],
+        junk: Array.isArray(rawUnit?.junk) ? (rawUnit.junk as any[]) : [],
+        ids: batch.map((s) => s.id),
+        error: undefined as string | undefined,
+      };
+    } catch (e: any) {
+      return {
+        ok: false,
+        rows: [] as any[],
+        outliers: [] as any[],
+        junk: [] as any[],
+        ids: batch.map((s) => s.id),
+        error: e?.message ?? String(e),
+      };
+    }
   });
 
-  const { parsed } = await callVisionJson(apiKey, content);
-  const rawUnit = Array.isArray(parsed.units) ? parsed.units[0] : parsed;
-  const visionVerdicts = mapPhotoVerdicts(rawUnit?.photoVerdicts ?? parsed.photoVerdicts, r.sampled);
-  const interiorVerdicts = visionVerdicts.length > 0
-    ? mergeUnitPhotoVerdicts(visionVerdicts, r.sampled)
-    : r.sampled.map((s) => ({
-        id: s.id,
-        folder: s.folder,
-        filename: s.filename,
-        caption: s.caption,
-        match: "no" as const,
-        reason: "No vision verdict returned for this photo.",
-      }));
-  const computed = computeUnitVerdict(
-    interiorVerdicts.map((p) => ({ match: p.match, reason: p.reason })),
-    UNIT_INTERIOR_MIN,
-  );
-  const outliers = filterUnitOutliers(asFlags(rawUnit?.outliers, r.sampled));
+  const anyOk = batchResults.some((b) => b.ok);
+  if (!anyOk) {
+    throw new Error(batchResults.find((b) => !b.ok)?.error ?? "unit vision returned no verdicts");
+  }
+
+  // A photo counts as "covered" only if its batch succeeded AND returned at
+  // least one verdict — a successful-but-empty batch did not actually judge its
+  // photos, so they fall through to "uncertain" rather than a default green.
+  const coveredIds = new Set<string>();
+  for (const b of batchResults) if (b.ok && b.rows.length > 0) for (const id of b.ids) coveredIds.add(id);
+  const verdictRows = batchResults.flatMap((b) => b.rows);
+  const outlierRows = batchResults.flatMap((b) => b.outliers);
+  const junkRows = batchResults.flatMap((b) => b.junk);
+
+  const visionVerdicts = mapPhotoVerdicts(verdictRows, r.sampled);
+  const photoVerdicts = mergeUnitPhotoVerdicts(visionVerdicts, r.sampled, coveredIds);
+  // Decide same-community only on photos with a real yes/no vote — an
+  // "uncertain" (failed-batch) photo must not count as a pass or a fail.
+  const decisive = photoVerdicts
+    .filter((p) => p.match === "yes" || p.match === "no")
+    .map((p) => ({ match: p.match as "yes" | "no", reason: p.reason }));
+  const computed = computeUnitVerdict(decisive, UNIT_INTERIOR_MIN);
+  const outliers = filterUnitOutliers(asFlags(outlierRows, r.sampled));
   return {
     role: "unit",
     label: r.input.label,
@@ -597,10 +685,10 @@ async function verifyUnitAgainstCommunity(
     interiorPhotosChecked: r.interiorSampled,
     sameAsCommunity: computed.sameAsCommunity,
     reason: computed.reason,
-    photoVerdicts: interiorVerdicts,
+    photoVerdicts,
     allSameUnit: outliers.length === 0,
     outliers,
-    junk: asFlags(rawUnit?.junk, r.sampled),
+    junk: asFlags(junkRows, r.sampled),
     confidence: computed.confidence,
   };
 }
@@ -680,7 +768,7 @@ export async function runPhotoCommunityCheck(
   const unitResolvedIdxs: number[] = [];
   for (let u = 0; u < unitInputs.length; u++) {
     const g = unitInputs[u];
-    const { total, chosen } = await resolveGroupFiles(g, UNIT_INTERIOR_TARGET, true);
+    const { total, chosen } = await resolveGroupFiles(g, UNIT_PHOTO_CAP, true);
     const sampled = await loadSample(resolved.length, g.folder, `U${u + 1}-`, chosen);
     unitResolvedIdxs.push(resolved.length);
     resolved.push({
