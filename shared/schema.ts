@@ -1447,6 +1447,14 @@ export const photoLabels = pgTable("photo_labels", {
   userLabel: text("user_label"),             // human override of caption — wins over `label`
   userCategory: text("user_category"),       // human override of category — wins over `category`
   hidden: boolean("hidden").default(false).notNull(), // user soft-delete — skipped on push-photos
+  // Operator-defined display/push order WITHIN a folder (a unit gallery or the
+  // community gallery), set by the Photos-tab drag-to-reorder. Null = no manual
+  // order → the tab falls back to the hero-first category default
+  // (shared/photo-order.ts). When the operator drags photos around, every photo
+  // in that folder gets an explicit index here and the manual order wins. The
+  // across-gallery order (Unit A → Unit B → … → Community) is fixed by the
+  // builder assembly, not by this column.
+  sortOrder: integer("sort_order"),
   model: text("model"),                      // claude model used, for auditing
   // Perceptual hash (dHash, 64-bit → 16-char hex) computed by
   // server/photo-hashing.ts. Lets the photo-listing scanner detect

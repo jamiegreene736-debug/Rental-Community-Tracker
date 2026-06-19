@@ -28851,6 +28851,7 @@ Return ONLY compact JSON with this exact shape:
         userLabel: string | null;
         userCategory: string | null;
         hidden: boolean;
+        sortOrder: number | null;
       }> = {};
       for (const r of rows) {
         labels[r.filename] = {
@@ -28860,6 +28861,7 @@ Return ONLY compact JSON with this exact shape:
           userLabel: r.userLabel,
           userCategory: r.userCategory,
           hidden: r.hidden,
+          sortOrder: r.sortOrder,
         };
       }
       return res.json({ folder, labels, count: rows.length, ...(autoLabel ? { autoLabel } : {}) });
@@ -28879,7 +28881,7 @@ Return ONLY compact JSON with this exact shape:
       return res.status(400).json({ error: "invalid filename" });
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const patch: { userLabel?: string | null; userCategory?: string | null; hidden?: boolean } = {};
+    const patch: { userLabel?: string | null; userCategory?: string | null; hidden?: boolean; sortOrder?: number | null } = {};
     if ("userLabel" in body) {
       patch.userLabel = body.userLabel == null ? null : String(body.userLabel).slice(0, 200);
     }
@@ -28889,6 +28891,12 @@ Return ONLY compact JSON with this exact shape:
     if ("hidden" in body) {
       patch.hidden = Boolean(body.hidden);
     }
+    if ("sortOrder" in body) {
+      patch.sortOrder = body.sortOrder == null ? null : Math.trunc(Number(body.sortOrder));
+      if (patch.sortOrder != null && !Number.isFinite(patch.sortOrder)) {
+        return res.status(400).json({ error: "sortOrder must be a number or null" });
+      }
+    }
     if (Object.keys(patch).length === 0) {
       return res.status(400).json({ error: "no override fields in body" });
     }
@@ -28896,6 +28904,58 @@ Return ONLY compact JSON with this exact shape:
       const row = await storage.updatePhotoLabelOverrides(folder, filename, patch);
       if (!row) return res.status(404).json({ error: "photo label not found — rescrape first?" });
       return res.json({ ok: true, row });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Persist (or clear) the operator's manual photo order for one gallery —
+  // a single unit folder, or the community folder. The Photos tab calls this
+  // after a drag-to-reorder or a "Best order" / "Reset order" click. Setting
+  // an order writes `sort_order = index` for each filename; the builder
+  // assembly then renders + pushes that gallery in this exact sequence
+  // (across-gallery order Unit A → Unit B → … → Community is fixed
+  // separately). Pass `{ reset: true }` to drop the manual order and revert
+  // to the hero-first category default.
+  //
+  // Body: { order?: Array<{ filename: string; label?: string }>, reset?: boolean }
+  app.post("/api/photo-labels/:folder/reorder", async (req, res) => {
+    const { folder } = req.params;
+    if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
+    const body = (req.body ?? {}) as { order?: unknown; reset?: unknown };
+
+    if (body.reset === true) {
+      try {
+        const cleared = await storage.resetPhotoOrder(folder);
+        return res.json({ ok: true, reset: true, cleared });
+      } catch (err: any) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+
+    if (!Array.isArray(body.order) || body.order.length === 0) {
+      return res.status(400).json({ error: "order[] is required (or pass { reset: true })" });
+    }
+
+    const fnameRe = /^[\w.-]+\.(jpe?g|png|webp)$/i;
+    const seen = new Set<string>();
+    const order: Array<{ filename: string; label?: string | null }> = [];
+    for (const raw of body.order as unknown[]) {
+      const item = (raw ?? {}) as { filename?: unknown; label?: unknown };
+      const filename = typeof item.filename === "string" ? item.filename : "";
+      if (!fnameRe.test(filename)) {
+        return res.status(400).json({ error: `invalid filename in order[]: ${filename}` });
+      }
+      if (seen.has(filename)) {
+        return res.status(400).json({ error: `duplicate filename in order[]: ${filename}` });
+      }
+      seen.add(filename);
+      order.push({ filename, label: typeof item.label === "string" ? item.label : null });
+    }
+
+    try {
+      const count = await storage.reorderPhotosInFolder(folder, order);
+      return res.json({ ok: true, ordered: count });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
