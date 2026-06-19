@@ -22,6 +22,7 @@ import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { sampleLicensesForLocation } from "@/data/adapt-draft";
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
+import { normalizePhotoVerdictKey, photoVerdictKeyFromUrl } from "@shared/photo-verdict-keys";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -1021,8 +1022,13 @@ type PhotoCommunityCheckResult = {
         description: string;
         photoCount: number;
         photoIds: string[];
+        filenames?: string[];
         altViewCount: number;
+        bedType?: string | null;
       }>;
+      bedInventoryMatch?: "yes" | "no" | "n/a";
+      bedInventoryReason?: string;
+      tier?: "pass" | "warn" | "fail";
     }>;
   } | null;
   duplicates: CommunityCheckDuplicate[];
@@ -3297,14 +3303,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const communityPhotoVerdicts = useMemo(() => {
     const map: Record<string, { match: "yes" | "no" | "uncertain"; reason?: string; status?: CommunityCheckPhotoVerdict["status"] }> = {};
 
-    const addVerdict = (v: CommunityCheckPhotoVerdict) => {
+    const addVerdict = (v: CommunityCheckPhotoVerdict, preferNo = false) => {
       if (!v.folder || !v.filename) return;
-      const key = `${v.folder}/${v.filename}`;
-      map[key] = {
+      const key = normalizePhotoVerdictKey(v.folder, v.filename);
+      const next = {
         match: v.match,
         reason: v.reason,
         status: v.status,
       };
+      const existing = map[key];
+      if (!existing || preferNo || (next.match === "no" && existing.match !== "no")) {
+        map[key] = next;
+      }
     };
 
     for (const v of communityCheckResult?.community?.photoVerdicts ?? []) {
@@ -3313,23 +3323,65 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
     for (const u of communityCheckResult?.units ?? []) {
       for (const v of u.photoVerdicts ?? []) {
-        addVerdict({ ...v, folder: v.folder ?? u.folder });
+        addVerdict({ ...v, folder: v.folder ?? u.folder }, v.match === "no");
       }
       for (const o of u.outliers ?? []) {
         const hit = u.photoVerdicts?.find((p) => p.id === o.id);
         const folder = hit?.folder ?? u.folder;
         const filename = hit?.filename;
         if (folder && filename) {
-          map[`${folder}/${filename}`] = {
+          addVerdict({
+            id: o.id,
+            folder,
+            filename,
             match: "no",
             reason: o.reason || hit?.reason || "Possible mismatch with other unit photos.",
-          };
+          }, true);
+        }
+      }
+    }
+
+    for (const u of communityCheckResult?.bedroomCoverage?.units ?? []) {
+      const folder = u.folder;
+      const invReason = u.bedInventoryReason ?? u.reason;
+      const missingQueen = /missing queen/i.test(invReason ?? "");
+      const inventoryMismatch = u.bedInventoryMatch === "no" || u.tier === "warn";
+
+      if (inventoryMismatch && folder) {
+        for (const room of u.rooms ?? []) {
+          const roomText = `${room.description} ${room.bedType ?? ""}`;
+          const looksKing = /king/i.test(roomText);
+          if (missingQueen && looksKing) {
+            for (const fn of room.filenames ?? []) {
+              addVerdict({
+                id: `${room.name}/${fn}`,
+                folder,
+                filename: fn,
+                match: "no",
+                reason: invReason ?? `Bed inventory mismatch: listing expects Queen Bed but photos show ${room.description}.`,
+              }, true);
+            }
+          }
+        }
+
+        if (missingQueen) {
+          for (const p of photos) {
+            const key = photoVerdictKeyFromUrl(p.url);
+            if (!key || !key.startsWith(`${folder}/`)) continue;
+            const cap = p.caption ?? "";
+            if (/\bqueen\b/i.test(cap)) {
+              map[key] = {
+                match: "no",
+                reason: invReason ?? "Queen Bedroom caption — listing inventory expects a Queen Bed photo but vision only confirmed King beds.",
+              };
+            }
+          }
         }
       }
     }
 
     return Object.keys(map).length > 0 ? map : undefined;
-  }, [communityCheckResult]);
+  }, [communityCheckResult, photos]);
 
   const amenities = propertyData?.amenities || [];
   const descriptions = effectivePropertyData?.descriptions;

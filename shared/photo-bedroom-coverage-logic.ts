@@ -156,6 +156,7 @@ export type BedroomClusterInput = {
   id: string;
   caption?: string;
   hash?: string;
+  filename?: string;
   clusterSize?: number;
   bedType?: string | null;
 };
@@ -286,6 +287,8 @@ export type BedroomRoomSummary = {
   description: string;
   photoCount: number;
   photoIds: string[];
+  /** Filenames in this bedroom cluster (for UI verdict badges). */
+  filenames?: string[];
   altViewCount: number;
   bedType?: string | null;
   source?: BedroomPhotoSource;
@@ -319,11 +322,15 @@ export function summarizeBedroomCluster(
     bedType = detectBedTypeFromCaption(description);
   }
   const altViewCount = captions.filter((c) => /alt view/i.test(c)).length;
+  const filenames = cluster
+    .map((c) => c.filename)
+    .filter((f): f is string => Boolean(f?.trim()));
   return {
     name,
     description,
     photoCount: cluster.length,
     photoIds: cluster.map((c) => c.id),
+    filenames: filenames.length > 0 ? filenames : undefined,
     altViewCount: altViewCount || Math.max(0, cluster.length - 1),
     bedType,
     source,
