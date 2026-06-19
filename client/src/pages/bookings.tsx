@@ -6364,6 +6364,38 @@ function checkOutOf(r: { checkOut?: string; checkOutDateLocalized?: string }): s
   return r.checkOutDateLocalized ?? r.checkOut;
 }
 
+/** Re-read attached buy-ins from the server so combo guest pages include every unit. */
+async function fetchAttachedBuyInSlots(
+  reservation: GuestyReservation,
+): Promise<Array<SlotInfo & { buyIn: BuyIn }>> {
+  const stale = reservation.slots.filter(
+    (s): s is SlotInfo & { buyIn: BuyIn } => !!s.buyIn,
+  );
+  const listingId = reservation.operationsListingId ?? reservation.listingId;
+  const propertyId = reservation.operationsPropertyId;
+  if (!listingId || !propertyId) return stale;
+  try {
+    const params = new URLSearchParams({
+      propertyId: String(propertyId),
+      includePast: "true",
+      includeCanceled: "true",
+    });
+    const data = await apiRequest(
+      "GET",
+      `/api/bookings/listing/${encodeURIComponent(listingId)}?${params.toString()}`,
+    ).then((r) => r.json());
+    const fresh = (data?.reservations ?? []).find(
+      (row: GuestyReservation) => row._id === reservation._id,
+    );
+    const slots = (fresh?.slots ?? []).filter(
+      (s: SlotInfo & { buyIn?: BuyIn | null }) => !!s.buyIn,
+    ) as Array<SlotInfo & { buyIn: BuyIn }>;
+    return slots.length > 0 ? slots : stale;
+  } catch {
+    return stale;
+  }
+}
+
 function operationsLaunchParams() {
   const params = typeof window === "undefined"
     ? new URLSearchParams()
@@ -7065,9 +7097,7 @@ export default function Bookings() {
       // refers to "the properties in this combination." Each unit carries its
       // own VRBO listing photos (from the Manual photo URLs marker) and gets an
       // AI-written description server-side.
-      const attachedSlots = reservation.slots.filter(
-        (s): s is SlotInfo & { buyIn: BuyIn } => !!s.buyIn,
-      );
+      const attachedSlots = await fetchAttachedBuyInSlots(reservation);
       const slotsForPage = attachedSlots.length
         ? attachedSlots
         : [{ ...slot, buyIn }];
@@ -15462,6 +15492,7 @@ function RelocateGuestDialog({
 
   const createPage = useMutation({
     mutationFn: async () => {
+      const attachedSlots = await fetchAttachedBuyInSlots(reservation);
       if (attachedSlots.length === 0) throw new Error("Attach at least one buy-in unit before messaging the guest.");
       // Best-effort: pull the walk minutes + the units' real resort name so the
       // message can name the community and the walking distance.

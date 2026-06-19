@@ -3601,6 +3601,18 @@ assert.ok(
   "multi-unit VRBO buy-ins should suffix the guest booking email local-part per unit",
 );
 assert.ok(
+  routesSource.includes("sharedVrboResortPhotos") &&
+    routesSource.includes("isBrandingVrboPhotoUrl") &&
+    routesSource.includes("pageCommunityPhotos") &&
+    routesSource.includes("vacation rental option"),
+  "booking alternatives should derive community photos from shared VRBO resort shots and reject generic scrape titles",
+);
+assert.ok(
+  bookingsSource.includes("fetchAttachedBuyInSlots") &&
+    bookingsSource.includes("fetchAttachedBuyInSlots(reservation)"),
+  "guest page builders should re-fetch all attached buy-ins before composing combo alternatives",
+);
+assert.ok(
   bookingsSource.includes("refreshBookingsAfterBuyInChange") &&
     bookingsSource.includes('queryKey: ["/api/bookings/guesty-all"]') &&
     bookingsSource.includes("globalBookingsQuery.isLoading && !globalBookingsQuery.data"),
@@ -3618,7 +3630,8 @@ assert.ok(
     routesSource.includes("scrapeVrboAlternativeDetails(sourceUrl)") &&
     routesSource.includes("isUnusableAlternativeTitle") &&
     routesSource.includes("manualBuyInPhotoUrlsFromNotes") &&
-    routesSource.includes("vrboCommunityPhotos") &&
+    routesSource.includes("pageCommunityPhotos") &&
+    routesSource.includes("sharedVrboResortPhotos") &&
     routesSource.includes("photoSource") &&
     routesSource.includes("photoScrapeReason"),
   "booking alternatives route should scrape attached VRBO URLs when buy-in notes do not already carry a gallery",
