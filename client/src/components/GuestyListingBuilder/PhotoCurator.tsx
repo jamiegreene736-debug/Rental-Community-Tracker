@@ -134,6 +134,8 @@ export default function PhotoCurator({
   // visual feedback during a native HTML5 drag.
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
+  const [relabelingFolder, setRelabelingFolder] = useState<string | null>(null);
+  const [relabelProgress, setRelabelProgress] = useState<{ done: number; total: number } | null>(null);
 
   const reorderEnabled = !!onReorderSection;
 
@@ -146,34 +148,38 @@ export default function PhotoCurator({
     return Array.from(set);
   }, [photos]);
 
-  useEffect(() => {
-    let cancelled = false;
-    if (localFolders.length === 0) {
+  const loadFolderLabels = useCallback(async (folders: string[]) => {
+    if (folders.length === 0) {
       setMeta(new Map());
       setLoading(false);
       return;
     }
     setLoading(true);
-    Promise.all(
-      localFolders.map((folder) =>
+    const results = await Promise.all(
+      folders.map((folder) =>
         fetch(`/api/photo-labels/${encodeURIComponent(folder)}`)
           .then((r) => r.json().then((j) => ({ folder, ok: r.ok, body: j })))
           .catch(() => ({ folder, ok: false, body: {} })),
       ),
-    ).then((results) => {
-      if (cancelled) return;
-      const next = new Map<string, LabelMeta>();
-      for (const r of results) {
-        if (!r.ok || !r.body?.labels) continue;
-        for (const [filename, row] of Object.entries(r.body.labels as Record<string, LabelMeta>)) {
-          next.set(`${r.folder}/${filename}`, row);
-        }
+    );
+    const next = new Map<string, LabelMeta>();
+    for (const r of results) {
+      if (!r.ok || !r.body?.labels) continue;
+      for (const [filename, row] of Object.entries(r.body.labels as Record<string, LabelMeta>)) {
+        next.set(`${r.folder}/${filename}`, row);
       }
-      setMeta(next);
-      setLoading(false);
+    }
+    setMeta(next);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadFolderLabels(localFolders).then(() => {
+      if (cancelled) return;
     });
     return () => { cancelled = true; };
-  }, [localFolders.join("|")]);  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [localFolders.join("|"), loadFolderLabels]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const patchLabel = useCallback(
     async (folder: string, filename: string, patch: Partial<Pick<LabelMeta, "userLabel" | "hidden">>) => {
@@ -354,6 +360,56 @@ export default function PhotoCurator({
     if (!folder) return;
     setOptimisticOrder((prev) => { const n = new Map(prev); n.delete(folder); return n; });
     onResetSectionOrder?.(folder);
+  };
+
+  const relabelSection = async (section: Section) => {
+    const folder = sectionFolder(section);
+    if (!folder || relabelingFolder) return;
+    const confirmed = window.confirm(
+      `Re-label all ${section.photos.length} photo(s) in this gallery?\n\n`
+      + "Claude vision will re-caption each photo and merge duplicate bedroom views "
+      + "(e.g. Bedroom 6 → Master Bedroom — Alt View). Manual caption edits in this gallery will be cleared.",
+    );
+    if (!confirmed) return;
+
+    setRelabelingFolder(folder);
+    setRelabelProgress({ done: 0, total: section.photos.length });
+    try {
+      const resp = await fetch(`/api/photo-labels/${encodeURIComponent(folder)}/relabel`, {
+        method: "POST",
+      });
+      if (!resp.ok || !resp.body) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error((body as { error?: string })?.error || `HTTP ${resp.status}`);
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const evt = JSON.parse(line) as { type?: string; done?: number; total?: number; error?: string };
+          if (evt.type === "photo" && typeof evt.done === "number" && typeof evt.total === "number") {
+            setRelabelProgress({ done: evt.done, total: evt.total });
+          } else if (evt.type === "error") {
+            throw new Error(evt.error || "Relabel failed");
+          }
+        }
+      }
+      await loadFolderLabels(localFolders);
+      onOverridesChanged?.();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Relabel failed: ${msg}`);
+    } finally {
+      setRelabelingFolder(null);
+      setRelabelProgress(null);
+    }
   };
 
   // Tally visible photos (all sections combined, excluding hidden). The
@@ -874,6 +930,27 @@ export default function PhotoCurator({
                     }}
                   >
                     ↺ Reset to best order
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => relabelSection(section)}
+                    disabled={!!relabelingFolder}
+                    title="Re-run Claude vision on every photo and merge duplicate bedroom views into Alt View labels"
+                    style={{
+                      fontSize: 11,
+                      color: relabelingFolder === firstFolder ? "#0369a1" : "#0c4a6e",
+                      padding: "2px 8px",
+                      background: relabelingFolder === firstFolder ? "#e0f2fe" : "#f0f9ff",
+                      border: "1px solid #bae6fd",
+                      borderRadius: 3,
+                      cursor: relabelingFolder ? "wait" : "pointer",
+                      fontWeight: 600,
+                      opacity: relabelingFolder && relabelingFolder !== firstFolder ? 0.5 : 1,
+                    }}
+                  >
+                    {relabelingFolder === firstFolder && relabelProgress
+                      ? `🏷 Relabeling ${relabelProgress.done}/${relabelProgress.total}…`
+                      : "🏷 Relabel all photos"}
                   </button>
                 </>
               )}

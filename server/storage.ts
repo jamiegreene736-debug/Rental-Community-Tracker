@@ -1677,6 +1677,30 @@ export class DatabaseStorage implements IStorage {
     return row;
   }
 
+  /** Operator-initiated relabel — replaces model labels and clears caption overrides. */
+  async applyRelabeledPhotoLabel(data: InsertPhotoLabel): Promise<PhotoLabel> {
+    const existing = await db.select().from(photoLabels)
+      .where(and(eq(photoLabels.folder, data.folder), eq(photoLabels.filename, data.filename)))
+      .limit(1);
+    if (existing.length > 0) {
+      const [row] = await db.update(photoLabels)
+        .set({
+          label: data.label,
+          category: data.category ?? null,
+          confidence: data.confidence ?? null,
+          model: data.model ?? null,
+          userLabel: null,
+          userCategory: null,
+          generatedAt: new Date(),
+        })
+        .where(eq(photoLabels.id, existing[0].id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(photoLabels).values(data).returning();
+    return row;
+  }
+
   // Write a human override onto a single photo. Fields left undefined are
   // preserved. Pass null explicitly to clear an override.
   async updatePhotoLabelOverrides(

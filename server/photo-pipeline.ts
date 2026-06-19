@@ -23,7 +23,8 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import sharp from "sharp";
-import { labelPhoto } from "./photo-labeler";
+import { inferKindFromFolder, labelPhoto, listPhotoFiles } from "./photo-labeler";
+import { backfillBedroomPrecomputeForFolder } from "./bedroom-precompute";
 import { storage } from "./storage";
 
 // Category priority. Lower index = higher priority (kept first).
@@ -878,4 +879,86 @@ export async function downloadAndPrioritize(opts: {
     keptSourceUrls: kept.map((photo) => photo.url),
     keptContentFingerprints: kept.map((photo) => photo.contentFingerprint),
   };
+}
+
+export type RelabelFolderProgress = {
+  done: number;
+  total: number;
+  filename: string;
+  ok: boolean;
+  label?: string;
+};
+
+/** Re-run Claude vision labels for every photo in a folder, then re-cluster bedrooms/bathrooms. */
+export async function relabelFolderPhotos(
+  folder: string,
+  folderPath: string,
+  anthropicKey: string,
+  opts: { onProgress?: (evt: RelabelFolderProgress) => void } = {},
+): Promise<{ relabeled: number; failed: number; total: number }> {
+  const files = await listPhotoFiles(folderPath);
+  const kind = inferKindFromFolder(folder);
+  const sleepMs = 1400;
+
+  type Row = LabeledResult & { filename: string; model: string };
+  const rows: Row[] = [];
+  let failed = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const filename = files[i];
+    const abs = path.join(folderPath, filename);
+    const result = await labelPhoto(abs, kind, anthropicKey);
+    if (!result || result.category === REJECT_CATEGORY) {
+      failed++;
+      opts.onProgress?.({ done: i + 1, total: files.length, filename, ok: false });
+    } else {
+      rows.push({
+        filename,
+        tempName: filename,
+        url: "",
+        originalIndex: i,
+        contentFingerprint: "",
+        label: result.label,
+        category: result.category,
+        confidence: result.confidence,
+        model: result.model,
+      });
+      opts.onProgress?.({
+        done: i + 1,
+        total: files.length,
+        filename,
+        ok: true,
+        label: result.label,
+      });
+    }
+    if (i < files.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, sleepMs));
+    }
+  }
+
+  const bedroomItems = rows.filter((r) => r.category === "Bedrooms");
+  const bathroomItems = rows.filter((r) => r.category === "Bathrooms");
+  const relabeledBedrooms = await labelBedroomsInPlace(bedroomItems, folderPath);
+  const relabeledBathrooms = labelBathroomsInPlace(bathroomItems);
+  const labelByName = new Map<string, LabeledResult>();
+  for (const r of [...relabeledBedrooms, ...relabeledBathrooms]) labelByName.set(r.tempName, r);
+
+  let relabeled = 0;
+  for (const row of rows) {
+    const final = labelByName.get(row.tempName) ?? row;
+    if (!final.label || !final.category) continue;
+    await storage.applyRelabeledPhotoLabel({
+      folder,
+      filename: row.filename,
+      label: final.label,
+      category: final.category,
+      confidence: final.confidence ?? null,
+      model: row.model,
+    });
+    relabeled++;
+  }
+
+  await backfillBedroomPrecomputeForFolder(folder, folderPath);
+
+  return { relabeled, failed, total: files.length };
 }
