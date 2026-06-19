@@ -36,9 +36,14 @@ import {
   detectLikelyMixedCommunityFolder,
 } from "../shared/photo-community-folder-logic";
 import {
-  auditCommunityFolderViaLens,
-  type CommunityLensSample,
-} from "./community-photo-lens-check";
+  type CommunityPhotoOverallStatus,
+  type CommunityPhotoSignal,
+  overallStatusToVerdict,
+} from "../shared/community-photo-verify-logic";
+import {
+  verifyCommunityPhotos,
+  type CommunityPhotoSample,
+} from "./community-photo-verify";
 import { getSearchApiKey } from "./searchapi";
 
 const MODEL = "claude-sonnet-4-6";
@@ -84,9 +89,13 @@ export type PhotoVerdict = {
   folder?: string;
   filename?: string;
   caption?: string;
-  match: "yes" | "no";
+  match: "yes" | "no" | "uncertain";
   reason: string;
   lensIdentifiedCommunity?: string;
+  /** Multi-signal status (verified / likely / unconfirmed / mismatch). */
+  status?: CommunityPhotoOverallStatus;
+  confidenceScore?: number;
+  signals?: CommunityPhotoSignal[];
 };
 
 export type CommunityGroupResult = {
@@ -104,7 +113,11 @@ export type CommunityGroupResult = {
   outliers: FlaggedPhoto[];
   junk: FlaggedPhoto[];
   confidence: number;
-  verificationMethod?: "google_lens" | "vision";
+  verificationMethod?: "google_lens" | "vision" | "google_lens+vision";
+  overallStatus?: CommunityPhotoOverallStatus;
+  confidenceScore?: number;
+  recommendation?: string;
+  signals?: CommunityPhotoSignal[];
 };
 
 export type UnitGroupResult = {
@@ -281,6 +294,7 @@ async function auditCommunityFolderFull(
   samples: SampledPhoto[],
   photosTotal: number,
   expectedCommunity: string,
+  anthropicApiKey: string,
 ): Promise<{ community: CommunityGroupResult | null; warning?: string }> {
   if (samples.length === 0) return { community: null };
 
@@ -288,18 +302,21 @@ async function auditCommunityFolderFull(
     samples.map((s) => s.hash).filter(Boolean) as string[],
   );
 
-  const lensSamples: CommunityLensSample[] = samples.map((s) => ({
+  const verifySamples: CommunityPhotoSample[] = samples.map((s) => ({
     id: s.id,
     folder: s.folder,
     filename: s.filename,
     caption: s.caption,
+    buffer: s.buffer,
+    mime: s.mime,
   }));
 
-  const audit = await auditCommunityFolderViaLens(
-    lensSamples,
+  const audit = await verifyCommunityPhotos(
+    verifySamples,
     photosTotal,
     expectedCommunity,
     { label: group.label, folder: group.folder },
+    { searchApiKey: getSearchApiKey(), anthropicApiKey },
   );
 
   if (!audit.community) return audit;
@@ -307,6 +324,7 @@ async function auditCommunityFolderFull(
   if (preScreen.mixed && preScreen.reason) {
     audit.community.outliers.push({ id: "pre-screen", reason: preScreen.reason });
     audit.community.allSameCommunity = false;
+    audit.community.overallStatus = "mismatch";
     if (audit.community.matchesExpected === "yes") {
       audit.community.matchesExpected = "no";
     }
@@ -672,6 +690,7 @@ export async function runPhotoCommunityCheck(
       r.sampled,
       r.total,
       expectedCommunity,
+      apiKey,
     );
     community = audit.community;
     if (audit.warning) warning = audit.warning;
@@ -740,11 +759,28 @@ export async function runPhotoCommunityCheck(
     fail("Could not analyze community folder photos.");
   }
   if (community) {
-    if (community.matchesExpected === "no") {
+    const communityStatus = community.overallStatus;
+    const communityHardFail = communityStatus === "mismatch"
+      || (community.matchesExpected === "no" && communityStatus !== "unconfirmed" && communityStatus !== "likely");
+
+    if (community.matchesExpected === "no" && communityHardFail) {
       fail(`Community photos do NOT match "${expectedCommunity || "expected community"}" (${community.identifiedCommunity}).`);
+    } else if (community.matchesExpected === "no") {
+      warn(`Community name match uncertain for "${expectedCommunity}". ${community.recommendation ?? community.matchReason}`);
     }
+
     if (!community.allSameCommunity || community.outliers.length > 0) {
-      fail(`Community folder has ${community.outliers.length || "some"} photo(s) from a different place.`);
+      if (communityStatus === "mismatch" || community.outliers.some((o) => o.id !== "pre-screen")) {
+        fail(`Community folder has ${community.outliers.length || "some"} photo(s) from a different place.`);
+      } else if (community.outliers.length > 0) {
+        warn(`Community folder: ${community.outliers.length} photo(s) flagged for review.`);
+      }
+    }
+
+    if (communityStatus === "unconfirmed") {
+      warn(community.recommendation ?? "Reverse image search could not confirm all community photos — manual review recommended.");
+    } else if (communityStatus === "likely") {
+      warn(community.recommendation ?? "Most community photos look consistent; some could not be confirmed online.");
     }
     if (community.photosTotal > community.photosChecked) {
       warn(`Community audit checked ${community.photosChecked}/${community.photosTotal} folder photos (cap ${COMMUNITY_FULL_FOLDER_CAP}).`);
@@ -798,9 +834,13 @@ export async function runPhotoCommunityCheck(
   if (crossDupes.length > 0) warn(`${crossDupes.length} photo(s) appear in more than one folder.`);
 
   const allUnitsYes = units.length > 0 && units.every((u) => u.sameAsCommunity === "yes");
-  const communityOk = !community || (community.matchesExpected === "yes" && community.allSameCommunity);
+  const communityOk = !community || (
+    community.overallStatus !== "mismatch"
+    && community.allSameCommunity
+    && (community.matchesExpected === "yes" || community.overallStatus === "likely" || community.overallStatus === "unconfirmed")
+  );
   const allSameCommunity: "yes" | "no" = communityOk && allUnitsYes && units.length > 0 ? "yes"
-    : communityOk && units.length === 0 ? (community?.matchesExpected === "yes" && community.allSameCommunity ? "yes" : "no")
+    : communityOk && units.length === 0 ? (community?.overallStatus !== "mismatch" ? "yes" : "no")
     : "no";
 
   let unitsSameCommunity: "yes" | "no" | "n/a" = "n/a";
@@ -812,11 +852,16 @@ export async function runPhotoCommunityCheck(
     }
   }
 
-  if (allSameCommunity === "no" && !hasFail) {
-    fail("Photo sets do not all belong to the same community.");
+  if (allSameCommunity === "no" && !hasFail && community?.overallStatus === "unconfirmed") {
+    // Unconfirmed alone is not a hard fail — surfaced as warn above.
+  } else if (allSameCommunity === "no" && !hasFail) {
+    warn("Photo sets could not be fully confirmed as the same community — review recommended.");
   }
 
-  const verdict: "pass" | "warn" | "fail" = hasFail ? "fail" : hasWarn ? "warn" : "pass";
+  let verdict: "pass" | "warn" | "fail" = hasFail ? "fail" : hasWarn ? "warn" : "pass";
+  if (!hasFail && community?.overallStatus && overallStatusToVerdict(community.overallStatus) === "warn" && verdict === "pass") {
+    verdict = "warn";
+  }
 
   let summary: string;
   const bedroomHeadline = bedroomCoverage?.expectedListingBedrooms
@@ -831,7 +876,13 @@ export async function runPhotoCommunityCheck(
   } else if (hasFail) {
     summary = bedroomCoverage?.matchesListing === "no"
       ? `Problem found — bedroom photo coverage is incomplete (${bedroomCoverage.bedroomsFoundCombined}/${bedroomCoverage.expectedListingBedrooms} listing bedrooms). Review details below.`
+      : community?.overallStatus === "mismatch"
+      ? "Mismatch — one or more community photos appear to be from a different place. Review details below."
       : "Problem found — one or more photo sets are NOT the same community. Review details below.";
+  } else if (community?.overallStatus === "unconfirmed") {
+    summary = community.recommendation ?? `Community photos unconfirmed — manual review recommended for ${expectedCommunity || "this community"}.`;
+  } else if (community?.overallStatus === "likely") {
+    summary = community.recommendation ?? `Likely match — most community photos appear consistent with ${expectedCommunity || "the expected community"}.`;
   } else {
     summary = `Passed core community check with minor warnings — review flagged items.${bedroomHeadline}`;
   }
