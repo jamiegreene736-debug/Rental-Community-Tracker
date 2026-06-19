@@ -189,7 +189,7 @@ import {
 } from "@shared/preflight-platform-match";
 import { discoverCommunityStreetAddress } from "./community-address-discovery";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
-import { downloadAndPrioritize } from "./photo-pipeline";
+import { downloadAndPrioritize, relabelFolderPhotos } from "./photo-pipeline";
 import {
   harvestRealtyApiCommunityListings,
   isRealtyApiDiscoveryEnabled,
@@ -28998,6 +28998,43 @@ Return ONLY compact JSON with this exact shape:
       return res.json({ ok: true, ordered: count });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Re-run Claude vision labels for every photo in one gallery folder, then
+  // re-cluster bedrooms/bathrooms (Master Bedroom, Bedroom 2 — Alt View, etc.).
+  // Streams NDJSON progress. Clears userLabel overrides so new captions show.
+  app.post("/api/photo-labels/:folder/relabel", async (req, res) => {
+    const { folder } = req.params;
+    if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
+
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
+
+    const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+    try {
+      await fs.promises.access(folderPath);
+    } catch {
+      return res.status(404).json({ error: "folder not found" });
+    }
+
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    const emit = (obj: Record<string, unknown>) => { res.write(JSON.stringify(obj) + "\n"); };
+
+    try {
+      const files = await listPhotoFiles(folderPath);
+      emit({ type: "start", folder, total: files.length });
+      const result = await relabelFolderPhotos(folder, folderPath, anthropicKey, {
+        onProgress: (evt) => emit({ type: "photo", ...evt }),
+      });
+      emit({ type: "done", folder, ...result });
+      res.end();
+    } catch (err: any) {
+      emit({ type: "error", error: err.message });
+      res.end();
     }
   });
 
