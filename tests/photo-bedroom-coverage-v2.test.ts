@@ -47,6 +47,37 @@ const clusters = [
 const capped = capBedroomClustersToExpected(clusters, 3);
 check("hard cap trims to 3 clusters", capped.clusters.length === 3 && capped.trimmedCount === 1);
 
+// Regression: a 2BR with two King clusters (split angles) + one Queen must keep
+// the Queen, not drop it for a duplicate King (false "missing Queen Bed").
+const kingKingQueen = [
+  [{ id: "k1", caption: "King Bedroom With Ocean View", hash: "a".repeat(16) }],
+  [{ id: "k2", caption: "King Bedroom With Ocean View", hash: "b".repeat(16) }],
+  [{ id: "q1", caption: "Queen Bedroom", hash: "c".repeat(16) }],
+];
+const keptInv = capBedroomClustersToExpected(kingKingQueen, 2, {
+  expectedBedInventory: ["King Bed", "Queen Bed"],
+});
+const keptHasQueen = keptInv.clusters.some((c) => /queen/i.test(c[0].caption ?? ""));
+const keptHasKing = keptInv.clusters.some((c) => /king/i.test(c[0].caption ?? ""));
+check("cap keeps the unique Queen over a duplicate King (inventory-aware)",
+  keptInv.clusters.length === 2 && keptInv.trimmedCount === 1 && keptHasQueen && keptHasKing);
+
+// Even with no expected inventory, diversity should keep distinct bed types.
+const keptDiverse = capBedroomClustersToExpected(kingKingQueen, 2);
+check("cap keeps the Queen via diversity when no inventory is supplied",
+  keptDiverse.clusters.some((c) => /queen/i.test(c[0].caption ?? ""))
+  && keptDiverse.clusters.some((c) => /king/i.test(c[0].caption ?? "")));
+
+// A trim that still matches the bed inventory is a clean duplicate merge — pass, not warn.
+const cleanTrim = computeUnitBedroomCoverage("Unit A (2BR)", "a", [
+  { name: "Bedroom 1", description: "King Bed", bedType: "King Bed", photoCount: 1, photoIds: ["1"], altViewCount: 0 },
+  { name: "Bedroom 2", description: "Queen Bed", bedType: "Queen Bed", photoCount: 1, photoIds: ["2"], altViewCount: 0 },
+], 2, { trimmedClusterCount: 1, bedInventoryMatch: "yes" });
+check("clean trim with matching inventory → pass (no warn)",
+  cleanTrim.tier === "pass" && cleanTrim.matchesListing === "yes" && /merged/.test(cleanTrim.reason));
+check("clean trim does not raise a listing warn",
+  deriveBedroomListingTier(cleanTrim.matchesListing, [cleanTrim]) === "pass");
+
 const dedupe = dedupeCrossUnitBedroomClusters([
   {
     label: "Unit A",

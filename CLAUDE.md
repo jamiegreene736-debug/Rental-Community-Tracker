@@ -43,6 +43,24 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-19 (Check photo community: false "missing Queen Bed" + badge all interior
+  photos): Bonita National 2BR showed a "Queen Bedroom" photo but the check reported
+  "Bed inventory mismatch: missing Queen Bed", and only the first ~12 interior photos
+  got a green ✓. TWO fixes on `claude/cranky-swartz-6cd6ae` (PR #TBD): (1)
+  `capBedroomClustersToExpected` (`shared/photo-bedroom-coverage-logic.ts`) is now
+  bed-type-diversity + `expectedBedInventory` aware — when there are more bedroom
+  clusters than listing bedrooms it keeps DISTINCT bed types (covering the listing's
+  inventory first) instead of the old size+master-King ranking that kept two Kings and
+  dropped the unique Queen; a trim that still matches inventory is a clean duplicate
+  merge (unit tier stays `pass`, no warn), so the review clears. (2)
+  `verifyUnitAgainstCommunity` (`server/photo-community-check.ts`) now samples the
+  whole unit folder (`UNIT_PHOTO_CAP=60`) and batches the vision call
+  (`UNIT_VISION_BATCH_SIZE=9`, concurrency 3, anchors per batch) so EVERY tile gets a
+  ✓/✕; a failed/empty batch yields `uncertain` (amber ?), never a default green. Full
+  rationale in AGENTS.md Load-Bearing #45 + the 2026-06-19 Decision Log line. Verified:
+  `npm test` green (+5 new bedroom tests), `npm run build` clean, `npm run check` net
+  −1 error. Couldn't live-smoke the vision leg (no ANTHROPIC_API_KEY in session).
+
 - 2026-06-18 (bulk combo listings: "always find and apply an address" — reverse-geocode
   rescue): Operator reported bulk add-combo-listing jobs frequently FAIL the address
   pre-check ("No usable street address"). Diagnosed as a recall gap in the
