@@ -3388,6 +3388,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }
     }
 
+    // Bedroom inventory concerns → amber "review" badge on that unit's bedroom
+    // photos, so a flagged bed (e.g. "missing Two Twin Beds") points at a tile
+    // instead of living only in the summary text. Never overrides a community
+    // "no" (a wrong-community mismatch is the more important signal).
+    for (const u of communityCheckResult?.bedroomCoverage?.units ?? []) {
+      if (u.bedInventoryMatch !== "no") continue;
+      const reason = u.bedInventoryReason
+        ? `Bedroom inventory mismatch: ${u.bedInventoryReason} — review this unit's bedrooms.`
+        : `Bedroom inventory needs review (${u.reason}).`;
+      for (const room of u.rooms ?? []) {
+        for (const filename of room.filenames ?? []) {
+          if (!u.folder || !filename) continue;
+          const key = normalizePhotoVerdictKey(u.folder, filename);
+          if (map[key]?.match === "no") continue;
+          map[key] = { match: "uncertain", reason, status: map[key]?.status };
+        }
+      }
+    }
+
     return Object.keys(map).length > 0 ? map : undefined;
   }, [communityCheckResult]);
 

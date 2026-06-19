@@ -43,6 +43,28 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-19 (Check photo community, Poipu Kai 5BR = Regency at Poipu Kai: false
+  community-amenity mismatches + same-room photos not clustering): FOUR fixes on
+  `claude/photo-community-cluster-lens` (PR #TBD). (1) Shared/sibling Poipu resorts
+  reuse pool/tennis/grounds photos → Google Lens cross-matched REAL community photos to
+  "poipu sands"/"poipu kapili" and hard-flagged them red. `classifyCommunityPhotoFromLens`
+  (`shared/community-photo-lens-logic.ts`) now downgrades a `contradicted` verdict to
+  `inconclusive` (defer to vision) when the identified resort shares a geo-area token
+  with the expected community/city (`communitySharesGeoArea`); different-area conflicts
+  (Princeville/Hanalei) still hard-fail. Also derives `identifiedCommunity` from the
+  conflict reason's `(key)` (full dict) so the same-area check actually fires. (2)
+  `detectBedTypeFromCaption` maps plural "twin beds"→"Two Twin Beds" (was singular →
+  "missing Two Twin Beds"). (3) `mergeBedroomClustersByCaption` (`shared/`, called in
+  `bedroom-coverage-engine.ts` before the cap) folds hash-split same-room shots (two
+  "Master" angles; "Twin Beds"+"Two Beds") back together, bounded by the expected
+  bedroom count. (4) Client `communityPhotoVerdicts` badges a unit's bedroom tiles amber
+  "?" when `bedInventoryMatch==="no"`. Full rationale in AGENTS.md #45 + the 2026-06-19
+  Decision Log line. Verified: bedroom-v2 25/0, lens-logic 11/0, full `npm test` green,
+  `npm run build` clean, `npm run check` 0 new TS errors (baseline 308). Couldn't
+  live-smoke Lens/vision (no SEARCHAPI/ANTHROPIC key) — limitation noted: this removes
+  false REDS on shared amenities; a false GREEN on a genuinely-wrong shared pool isn't
+  fully solvable via reverse-image (vision is the backstop).
+
 - 2026-06-19 (Check photo community: false "missing Queen Bed" + badge all interior
   photos): Bonita National 2BR showed a "Queen Bedroom" photo but the check reported
   "Bed inventory mismatch: missing Queen Bed", and only the first ~12 interior photos
