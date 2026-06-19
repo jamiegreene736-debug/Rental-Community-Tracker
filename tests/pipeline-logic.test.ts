@@ -75,7 +75,7 @@ import {
   parseEmailHeaders,
   parseGuestInboxEmailFromRaw,
 } from "../server/guest-inbox-sync";
-import { parseArrivalDetailsFromText, stripHtmlForEmailParse, isBlocklistedPropertyAddress, looksLikeHtmlGarbage } from "../server/buy-in-email";
+import { parseArrivalDetailsFromText, stripHtmlForEmailParse, isBlocklistedPropertyAddress, looksLikeHtmlGarbage, isPlausiblePropertyAddressForBuyIn, pickBestPropertyAddressFromText } from "../server/buy-in-email";
 import { mergeArrivalDetailsIntoBuyIn } from "../server/guest-inbox-arrival";
 
 // ---------- Import the internals we want to test ----------
@@ -3949,4 +3949,24 @@ const parsedGlitch = parseArrivalDetailsFromText(htmlGlitchSample);
 assert.equal(parsedGlitch.unitAddress, "", "blocklisted corporate address should not populate unitAddress");
 const parsedSecureCode = parseArrivalDetailsFromText("Your secure code is 933195 - never share this code.");
 assert.equal(parsedSecureCode.accessCode, "933195");
+const paymentEmailSample = [
+  "Billing address: 11920 Alterra Pkwy Austin, TX 78758",
+  "Property address: 3830 Edward Rd 13C, Princeville, HI 96722",
+].join("\n");
+assert.equal(
+  parseArrivalDetailsFromText(paymentEmailSample, {
+    buyIn: { propertyName: "Townhome B", unitLabel: "Townhome B", notes: "Princeville Kauai" },
+    communityState: "HI",
+  }).unitAddress,
+  "3830 Edward Rd 13C, Princeville, HI 96722",
+);
+assert.equal(
+  pickBestPropertyAddressFromText(paymentEmailSample, { propertyName: "Townhome B", notes: "Princeville" }, "HI"),
+  "3830 Edward Rd 13C, Princeville, HI 96722",
+);
+assert.ok(!isPlausiblePropertyAddressForBuyIn("11920 Alterra Pkwy Austin, TX 78758", { propertyName: "Townhome B", notes: "Princeville" }, "HI"));
+assert.ok(
+  routesSource.includes("isPlausiblePropertyAddressForBuyIn(saved, buyIn"),
+  "walking-distance address guess should ignore untrusted saved unitAddress values",
+);
 console.log("  ✓ guest inbox arrival extraction (address, codes, Wi‑Fi → buy-in fields)");

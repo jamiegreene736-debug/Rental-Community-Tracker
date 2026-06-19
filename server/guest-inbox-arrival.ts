@@ -1,7 +1,13 @@
 // Extract arrival details (address, codes, Wi‑Fi, parking) from VRBO guest-thread
 // emails and merge them onto the matching buy_in row.
 
-import { parseArrivalDetailsFromText, isUsableArrivalField } from "./buy-in-email";
+import {
+  expectedStateHintFromBuyIn,
+  isPlausiblePropertyAddressForBuyIn,
+  isUsableArrivalField,
+  parseArrivalDetailsFromText,
+} from "./buy-in-email";
+import { BUY_IN_MARKET_LOCATIONS, resolveBuyInMarket } from "@shared/buy-in-market";
 import type { BuyIn } from "@shared/schema";
 
 const ARRIVAL_SCALAR_FIELDS = [
@@ -14,9 +20,26 @@ const ARRIVAL_SCALAR_FIELDS = [
 
 type ArrivalScalarField = typeof ARRIVAL_SCALAR_FIELDS[number];
 
-function cleanExistingArrivalValue(key: ArrivalScalarField | "arrivalNotes", value: string | null | undefined): string {
+type ArrivalBuyInContext = Pick<BuyIn, "propertyName" | "unitLabel" | "notes" | "propertyId">;
+
+function communityStateForBuyIn(buyIn: ArrivalBuyInContext): string | null {
+  const marketKey = resolveBuyInMarket(buyIn.propertyName)
+    ?? resolveBuyInMarket(buyIn.unitLabel);
+  const fromMarket = marketKey ? BUY_IN_MARKET_LOCATIONS[marketKey]?.state : null;
+  return expectedStateHintFromBuyIn(buyIn, fromMarket);
+}
+
+function cleanExistingArrivalValue(
+  key: ArrivalScalarField | "arrivalNotes",
+  value: string | null | undefined,
+  buyIn?: ArrivalBuyInContext | null,
+  communityState?: string | null,
+): string {
   const v = String(value ?? "").trim();
   if (!v) return "";
+  if (key === "unitAddress") {
+    return isPlausiblePropertyAddressForBuyIn(v, buyIn, communityState) ? v : "";
+  }
   return isUsableArrivalField(key, v) ? v : "";
 }
 
@@ -24,14 +47,21 @@ function cleanExistingArrivalValue(key: ArrivalScalarField | "arrivalNotes", val
 export function mergeArrivalDetailsIntoBuyIn(
   existing: Pick<BuyIn, ArrivalScalarField | "arrivalNotes">,
   parsed: Record<string, string>,
+  buyIn?: ArrivalBuyInContext | null,
+  communityState?: string | null,
 ): Partial<Pick<BuyIn, ArrivalScalarField | "arrivalNotes">> {
   const updates: Partial<Pick<BuyIn, ArrivalScalarField | "arrivalNotes">> = {};
 
   for (const key of ARRIVAL_SCALAR_FIELDS) {
     const next = String(parsed[key] ?? "").trim();
-    const cur = cleanExistingArrivalValue(key, existing[key]);
+    const cur = cleanExistingArrivalValue(key, existing[key], buyIn, communityState);
     const curRaw = String(existing[key] ?? "").trim();
     const curCorrupt = !!curRaw && !cur;
+
+    if (key === "unitAddress" && next && !isPlausiblePropertyAddressForBuyIn(next, buyIn, communityState)) {
+      if (curCorrupt) updates[key] = "";
+      continue;
+    }
 
     if (!next) {
       if (curCorrupt) updates[key] = "";
@@ -68,8 +98,17 @@ export function mergeArrivalDetailsIntoBuyIn(
   return updates;
 }
 
-export function parseArrivalDetailsFromGuestEmail(subject: string, body: string): Record<string, string> {
-  return parseArrivalDetailsFromText(`${String(subject ?? "").trim()}\n${String(body ?? "")}`);
+export function parseArrivalDetailsFromGuestEmail(
+  subject: string,
+  body: string,
+  buyIn?: ArrivalBuyInContext | null,
+  communityState?: string | null,
+): Record<string, string> {
+  const state = communityState ?? (buyIn ? communityStateForBuyIn(buyIn) : null);
+  return parseArrivalDetailsFromText(`${String(subject ?? "").trim()}\n${String(body ?? "")}`, {
+    buyIn,
+    communityState: state,
+  });
 }
 
 function buyInArrivalPatch(
@@ -98,21 +137,29 @@ export async function applyArrivalDetailsFromGuestInbox(aliasEmail: string): Pro
   const buyIn = await storage.getBuyInByTravelerEmail(alias);
   if (!buyIn) return { updated: false, buyInId: null, fields: [] };
 
+  const communityState = communityStateForBuyIn(buyIn);
   const messages = await storage.getGuestInboxMessages(alias, 100);
-  if (!messages.length) return { updated: false, buyInId: buyIn.id, fields: [] };
+  if (!messages.length) {
+    const staleAddress = String(buyIn.unitAddress ?? "").trim();
+    if (staleAddress && !isPlausiblePropertyAddressForBuyIn(staleAddress, buyIn, communityState)) {
+      await storage.updateBuyIn(buyIn.id, { unitAddress: null });
+      return { updated: true, buyInId: buyIn.id, fields: ["unitAddress"] };
+    }
+    return { updated: false, buyInId: buyIn.id, fields: [] };
+  }
 
   let working: Pick<BuyIn, ArrivalScalarField | "arrivalNotes"> = {
-    unitAddress: cleanExistingArrivalValue("unitAddress", buyIn.unitAddress),
-    accessCode: cleanExistingArrivalValue("accessCode", buyIn.accessCode),
-    wifiName: cleanExistingArrivalValue("wifiName", buyIn.wifiName),
-    wifiPassword: cleanExistingArrivalValue("wifiPassword", buyIn.wifiPassword),
-    parkingInfo: cleanExistingArrivalValue("parkingInfo", buyIn.parkingInfo),
-    arrivalNotes: cleanExistingArrivalValue("arrivalNotes", buyIn.arrivalNotes),
+    unitAddress: cleanExistingArrivalValue("unitAddress", buyIn.unitAddress, buyIn, communityState),
+    accessCode: cleanExistingArrivalValue("accessCode", buyIn.accessCode, buyIn, communityState),
+    wifiName: cleanExistingArrivalValue("wifiName", buyIn.wifiName, buyIn, communityState),
+    wifiPassword: cleanExistingArrivalValue("wifiPassword", buyIn.wifiPassword, buyIn, communityState),
+    parkingInfo: cleanExistingArrivalValue("parkingInfo", buyIn.parkingInfo, buyIn, communityState),
+    arrivalNotes: cleanExistingArrivalValue("arrivalNotes", buyIn.arrivalNotes, buyIn, communityState),
   };
 
   for (const msg of [...messages].reverse()) {
-    const parsed = parseArrivalDetailsFromGuestEmail(msg.subject, msg.body);
-    const merged = mergeArrivalDetailsIntoBuyIn(working, parsed);
+    const parsed = parseArrivalDetailsFromGuestEmail(msg.subject, msg.body, buyIn, communityState);
+    const merged = mergeArrivalDetailsIntoBuyIn(working, parsed, buyIn, communityState);
     working = { ...working, ...merged };
   }
 
@@ -138,8 +185,9 @@ export async function applyArrivalDetailsFromGuestMessage(input: {
   const buyIn = await storage.getBuyInByTravelerEmail(alias);
   if (!buyIn) return { updated: false, buyInId: null, fields: [] };
 
-  const parsed = parseArrivalDetailsFromGuestEmail(input.subject, input.body);
-  const patch = mergeArrivalDetailsIntoBuyIn(buyIn, parsed);
+  const communityState = communityStateForBuyIn(buyIn);
+  const parsed = parseArrivalDetailsFromGuestEmail(input.subject, input.body, buyIn, communityState);
+  const patch = mergeArrivalDetailsIntoBuyIn(buyIn, parsed, buyIn, communityState);
   if (!Object.keys(patch).length) {
     return { updated: false, buyInId: buyIn.id, fields: [] };
   }
