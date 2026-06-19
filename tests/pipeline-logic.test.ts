@@ -3267,6 +3267,7 @@ assert.equal(
 console.log("  ✓ resort vs listing title guards");
 
 const bookingsSource = readFileSync("client/src/pages/bookings.tsx", "utf8");
+const buyInCheckoutSource = readFileSync("server/buy-in-checkout-job.ts", "utf8");
 const vrboWorkerSource = readFileSync("daemon/vrbo-sidecar/worker.mjs", "utf8");
 
 assert.ok(
@@ -3594,9 +3595,24 @@ assert.ok(
   "buy-in Guest Page action should parse combo community names from the saved label without using the operational note prefix",
 );
 assert.ok(
+  buyInCheckoutSource.includes("unitEmailIndexForBuyIn") &&
+    buyInCheckoutSource.includes("guestEmailLocalPart(firstName, lastName, unitIndex)") &&
+    buyInCheckoutSource.includes("`${l}${unitIndex}`"),
+  "multi-unit VRBO buy-ins should suffix the guest booking email local-part per unit",
+);
+assert.ok(
+  bookingsSource.includes("vrbo-payment-schedule") &&
+    bookingsSource.includes("manually recorded buy-in") &&
+    bookingsSource.includes("usableGuestAlternativeCommunity(listingTitle) ? listingTitle : \"\""),
+  "manual VRBO buy-in attach should read checkout total and defer guest-page titles to server VRBO scrape",
+);
+assert.ok(
   routesSource.includes("MIN_GUEST_ALTERNATIVE_GALLERY_PHOTOS = 10") &&
-    routesSource.includes("const vrboDetails = isVrboAlternativeUrl(sourceUrl)") &&
+    routesSource.includes("const vrboDetailsList = await Promise.all") &&
     routesSource.includes("scrapeVrboAlternativeDetails(sourceUrl)") &&
+    routesSource.includes("isUnusableAlternativeTitle") &&
+    routesSource.includes("manualBuyInPhotoUrlsFromNotes") &&
+    routesSource.includes("vrboCommunityPhotos") &&
     routesSource.includes("photoSource") &&
     routesSource.includes("photoScrapeReason"),
   "booking alternatives route should scrape attached VRBO URLs when buy-in notes do not already carry a gallery",

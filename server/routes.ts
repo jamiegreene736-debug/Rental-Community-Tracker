@@ -8265,9 +8265,28 @@ export async function registerRoutes(
   const usableCommunityContext = (value: unknown): string => {
     const label = normalizeCommunityContext(value);
     if (!label || label.length < 4) return "";
-    if (/manually attached from combo|auto-filled from|selected from saved|manual photo urls/i.test(label)) return "";
+    if (/manually attached from combo|auto-filled from|selected from saved|manual photo urls|manually recorded buy-in/i.test(label)) return "";
     if (/^\d+\s*(?:br|bd|bedrooms?)?\b/i.test(label)) return "";
     return label;
+  };
+
+  const MANUAL_BUY_IN_PHOTO_MARKER = "Manual photo URLs:";
+  const manualBuyInPhotoUrlsFromNotes = (notes: unknown): string[] => {
+    const raw = String(notes ?? "");
+    if (!raw.includes(MANUAL_BUY_IN_PHOTO_MARKER)) return [];
+    const afterMarker = raw.split(MANUAL_BUY_IN_PHOTO_MARKER).slice(1).join(MANUAL_BUY_IN_PHOTO_MARKER);
+    return Array.from(new Set(
+      afterMarker.match(/https?:\/\/[^\s,;]+/gi)?.map((url) => url.trim()).filter(Boolean) ?? [],
+    )).slice(0, 12);
+  };
+
+  const isUnusableAlternativeTitle = (value: unknown): boolean => {
+    const title = normalizeAlternativeText(value, 200).toLowerCase();
+    if (!title || title.length < 4) return true;
+    if (/^manually recorded buy-in\b/.test(title)) return true;
+    if (/^manually attached\b/.test(title)) return true;
+    if (/^auto-filled from\b/.test(title)) return true;
+    return false;
   };
 
   const sameCommunityContext = (a: string, b: string): boolean =>
@@ -9659,33 +9678,50 @@ Requirements:
       };
       const originalCommunity = normalizeCommunityContext(req.body?.originalCommunity);
       const areaName = normalizeCommunityContext(req.body?.areaName);
+      // Scrape VRBO listings up front so community names + photos resolve from the
+      // real listing title/gallery even when manual buy-in notes only carry a
+      // placeholder ("Manually recorded buy-in for Townhome A").
+      const vrboDetailsList = await Promise.all(alternatives.map((item: any) => {
+        const sourceUrl = normalizeAlternativeUrl(item?.url);
+        return isVrboAlternativeUrl(sourceUrl)
+          ? scrapeVrboAlternativeDetails(sourceUrl).catch(() => null)
+          : Promise.resolve(null);
+      }));
+      const titlesForCommunityExtract = alternatives.map((item: any, index: number) => {
+        const clientTitle = String(item?.title ?? "");
+        const scrapedTitle = vrboDetailsList[index]?.title;
+        return isUnusableAlternativeTitle(clientTitle) && scrapedTitle
+          ? scrapedTitle
+          : clientTitle;
+      });
       // Resolve the NEW community from the attached units' own titles/notes
       // ("Villas of Kamalii"), never the client-sent or original label. Drives the
       // persisted community label, the relocation message, AND the guest-facing AI
       // descriptions. Never returns the guest's original community.
       const cleanNewCommunity = usableCommunityContext(extractNewCommunityFromUnits(
-        alternatives.map((a: any) => a?.title),
+        titlesForCommunityExtract,
         alternatives.map((a: any) => a?.notes),
         req.body?.originalCommunity,
       ) ?? "") || "";
       const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any, index: number) => {
         const sourceUrl = normalizeAlternativeUrl(item?.url);
+        const manualUnitPhotos = manualBuyInPhotoUrlsFromNotes(item?.notes);
         const initialPhotos = Array.from(new Set([
+          ...manualUnitPhotos,
           normalizeAlternativeUrl(item?.image),
           ...(Array.isArray(item?.photos) ? item.photos.map((url: unknown) => normalizeAlternativeUrl(url)) : []),
         ].filter(Boolean))).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
-        // Always scrape the full VRBO listing gallery (+ bed/room text) for VRBO
-        // URLs so the guest page shows ALL the listing's photos and real bed
-        // types — not just the ~12 thumbnails captured on the SRP card at attach
-        // time. The scraped photos are MERGED with the stored ones, so a sidecar
-        // miss degrades gracefully to whatever was already on the buy-in.
-        const vrboDetails = isVrboAlternativeUrl(sourceUrl)
-          ? await scrapeVrboAlternativeDetails(sourceUrl).catch(() => null)
-          : null;
-        const mergedPhotos = Array.from(new Set([
-          ...initialPhotos,
-          ...(vrboDetails?.photos ?? []),
-        ].filter(Boolean))).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
+        const vrboDetails = vrboDetailsList[index];
+        const vrboScrapePhotos = vrboDetails?.photos ?? [];
+        // Manual submissions paste unit-specific photos in buy-in notes; the VRBO
+        // gallery supplies resort/community shots for the page header gallery.
+        const unitPhotoCandidates = manualUnitPhotos.length > 0
+          ? manualUnitPhotos
+          : Array.from(new Set([
+            ...initialPhotos,
+            ...vrboScrapePhotos,
+          ].filter(Boolean))).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
+        const mergedPhotos = unitPhotoCandidates;
         // Vision screen: drop photos that would let the guest identify the exact
         // listing (legible building/unit number, address, or PM logo) or that are
         // maps/screenshots/docs. Runs once here (build time), per unit, and the
@@ -9696,14 +9732,20 @@ Requirements:
         const photos = photoFilter.kept;
         const photosVisionFiltered = photoFilter.filtered;
         const photosVisionVersion = photoFilter.filtered ? UNIT_PHOTO_VISION_VERSION : 0;
+        const clientTitle = normalizeAlternativeText(item?.title, 160);
         const title = normalizeAlternativeText(
-          item?.title || vrboDetails?.title || item?.community || "Alternative stay",
+          !isUnusableAlternativeTitle(clientTitle)
+            ? clientTitle
+            : vrboDetails?.title || clientTitle || item?.community || "Alternative stay",
           160,
         );
         const alternativeCommunity =
           usableCommunityContext(item?.alternativeCommunity) ||
+          usableCommunityContext(cleanNewCommunity) ||
+          communityFromAlternativeTitle(vrboDetails?.title || title) ||
           usableCommunityContext(item?.community) ||
           communityFromAlternativeTitle(title);
+        const vrboCommunityPhotos = vrboScrapePhotos.slice(0, 8);
         const extractedFacts = extractAlternativeFactsFromText([
           title,
           item?.notes,
@@ -9743,12 +9785,16 @@ Requirements:
           sourceLabel: normalizeAlternativeText(item?.sourceLabel, 80),
           notes: normalizeAlternativeText(item?.notes, 1000),
           showSourceLink: item?.showSourceLink === true,
-          communityPhotos: await communityPhotosFor(
-            alternativeCommunity,
-            item?.community,
-            item?.alternativeCommunity,
-            originalCommunity,
-          ),
+          communityPhotos: vrboCommunityPhotos.length > 0
+            ? vrboCommunityPhotos
+            : await communityPhotosFor(
+              alternativeCommunity,
+              cleanNewCommunity,
+              item?.community,
+              item?.alternativeCommunity,
+              vrboDetails?.title,
+              originalCommunity,
+            ),
           photoSource: vrboDetails?.photoSource ?? (initialPhotos.length > 0 ? "provided" : "none"),
           photoScrapeReason: vrboDetails?.scrapeReason ?? "",
         };

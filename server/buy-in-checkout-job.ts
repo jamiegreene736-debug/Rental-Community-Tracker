@@ -38,10 +38,31 @@ function sanitizeNamePart(s: string | null | undefined): string {
 
 // firstname.lastname (operator scheme). Falls back gracefully for single-name
 // guests. The "." separator matches the operator's example jamie.greene.
-export function guestEmailLocalPart(firstName: string | null | undefined, lastName: string | null | undefined): string {
+// Multi-unit reservations append the unit index to the last name (marquez2) so
+// each VRBO buy-in gets a distinct SimpleLogin alias.
+export function guestEmailLocalPart(
+  firstName: string | null | undefined,
+  lastName: string | null | undefined,
+  unitIndex = 1,
+): string {
   const f = sanitizeNamePart(firstName);
-  const l = sanitizeNamePart(lastName);
+  let l = sanitizeNamePart(lastName);
+  if (unitIndex > 1 && l) l = `${l}${unitIndex}`;
   return [f, l].filter(Boolean).join(".") || "guest";
+}
+
+async function unitEmailIndexForBuyIn(buyInId: number, reservationId: string | null | undefined): Promise<number> {
+  const rid = String(reservationId ?? "").trim();
+  if (!rid) return 1;
+  const siblings = await storage.getBuyInsByReservation(rid);
+  if (siblings.length <= 1) return 1;
+  const sorted = [...siblings].sort((a, b) => {
+    const la = String(a.unitLabel ?? a.unitId ?? "");
+    const lb = String(b.unitLabel ?? b.unitId ?? "");
+    return la.localeCompare(lb, undefined, { numeric: true }) || a.id - b.id;
+  });
+  const idx = sorted.findIndex((row) => row.id === buyInId);
+  return idx >= 0 ? idx + 1 : 1;
 }
 
 export type EnsureTravelerEmailInput = {
@@ -69,7 +90,8 @@ export async function ensureTravelerEmailForBuyIn(input: EnsureTravelerEmailInpu
     throw new CheckoutValidationError("Guest first and last name are required for the booking email");
   }
 
-  const localPart = guestEmailLocalPart(firstName, lastName);
+  const unitIndex = await unitEmailIndexForBuyIn(buyInId, input.reservationId);
+  const localPart = guestEmailLocalPart(firstName, lastName, unitIndex);
   let email = `${localPart}@${BUYIN_TRAVELER_EMAIL_DOMAIN}`;
   try {
     const alias = await createSimpleLoginAlias({

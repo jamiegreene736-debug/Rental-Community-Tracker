@@ -1211,7 +1211,7 @@ function cleanGuestAlternativeLabel(value: string | null | undefined): string {
 function usableGuestAlternativeCommunity(value: string | null | undefined): string {
   const label = cleanGuestAlternativeLabel(value);
   if (!label || label.length < 4) return "";
-  if (/manually attached from combo|auto-filled from|selected from saved|manual photo urls/i.test(label)) return "";
+  if (/manually attached from combo|auto-filled from|selected from saved|manual photo urls|manually recorded buy-in/i.test(label)) return "";
   if (/^\d+\s*(?:br|bd|bedrooms?)?\b/i.test(label)) return "";
   return label;
 }
@@ -7083,10 +7083,10 @@ export default function Bookings() {
           || sharedAlternativeCommunity
           || cleanGuestAlternativeLabel(b.propertyName);
         return {
-          title: listingTitle,
-          community: alternativeCommunity,
+          title: usableGuestAlternativeCommunity(listingTitle) ? listingTitle : "",
+          community: usableGuestAlternativeCommunity(alternativeCommunity) ? alternativeCommunity : "",
           originalCommunity: originalCommunityName || originalCommunity,
-          alternativeCommunity,
+          alternativeCommunity: usableGuestAlternativeCommunity(alternativeCommunity) ? alternativeCommunity : "",
           url: b.airbnbListingUrl,
           image: photoUrls[0] ?? "",
           photos: photoUrls,
@@ -15484,8 +15484,8 @@ function RelocateGuestDialog({
         const photoUrls = manualBuyInPhotoUrlsFromNotes(b.notes);
         const listingTitle = titleFromBuyInNotes(b.notes);
         return {
-          title: listingTitle || `${b.propertyName} - ${b.unitLabel}`,
-          community: b.propertyName,
+          title: usableGuestAlternativeCommunity(listingTitle) ? listingTitle : "",
+          community: "",
           url: b.airbnbListingUrl,
           image: photoUrls[0] ?? "",
           photos: photoUrls,
@@ -15846,7 +15846,7 @@ function ManualBuyInDialog({
     ) ?? null;
   }, [listingUrl, notes, photoUrls, reservation.slots, slot.unitId]);
   const parsedCost = Number(costPaid);
-  const effectiveCost = Number.isFinite(parsedCost) && parsedCost > 0 ? parsedCost : 1;
+  const hasManualCost = Number.isFinite(parsedCost) && parsedCost > 0;
   const canSave = !!listingUrl.trim() && !duplicateSlot;
 
   const createAndAttach = useMutation({
@@ -15856,6 +15856,31 @@ function ManualBuyInDialog({
       }
       if (!canSave) {
         throw new Error("Enter a listing URL before saving.");
+      }
+      let resolvedCost = hasManualCost ? parsedCost : 0;
+      const vrboUrl = isVrboListingUrl(listingUrl);
+      if (vrboUrl && !hasManualCost) {
+        try {
+          const psRes = await apiRequest("POST", "/api/operations/vrbo-payment-schedule", {
+            listingUrl: listingUrl.trim(),
+            checkIn,
+            checkOut,
+          });
+          const psData = await psRes.json().catch(() => ({}));
+          const total = Number(psData?.paymentSchedule?.total);
+          if (psData?.ok && Number.isFinite(total) && total > 0) {
+            resolvedCost = total;
+          }
+        } catch (e) {
+          console.warn("[manual-buy-in] VRBO payment schedule:", e);
+        }
+      }
+      if (!Number.isFinite(resolvedCost) || resolvedCost <= 0) {
+        throw new Error(
+          vrboUrl
+            ? "Could not read the VRBO checkout total for these dates. Enter the total cost paid, or try again in a minute."
+            : "Enter the total cost paid before saving.",
+        );
       }
       const noteParts = [
         `Manually recorded buy-in for ${slot.unitLabel}.`,
@@ -15869,7 +15894,7 @@ function ManualBuyInDialog({
         unitLabel: slot.unitLabel,
         checkIn,
         checkOut,
-        costPaid: effectiveCost.toFixed(2),
+        costPaid: resolvedCost.toFixed(2),
         airbnbConfirmation: confirmation.trim() || null,
         airbnbListingUrl: listingUrl.trim(),
         unitAddress: unitAddress.trim() || null,
@@ -15938,7 +15963,7 @@ function ManualBuyInDialog({
           <div className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <Label htmlFor="manualCostPaid" className="text-xs">Total cost paid (USD, optional)</Label>
+                <Label htmlFor="manualCostPaid" className="text-xs">Total cost paid (USD, optional — auto-read from VRBO when blank)</Label>
                 <Input
                   id="manualCostPaid"
                   type="number"
@@ -16066,7 +16091,9 @@ function ManualBuyInDialog({
             disabled={!canSave || createAndAttach.isPending}
             data-testid="button-save-manual-buy-in"
           >
-            {createAndAttach.isPending ? "Saving…" : "Attach buy-in"}
+            {createAndAttach.isPending
+              ? (isVrboListingUrl(listingUrl) && !hasManualCost ? "Reading VRBO checkout…" : "Saving…")
+              : "Attach buy-in"}
           </Button>
         </DialogFooter>
       </DialogContent>
