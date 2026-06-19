@@ -93,5 +93,49 @@ check(
   ).match === "yes",
 );
 
+const regencyPoipuKai = "Regency at Poipu Kai";
+
+check(
+  "flags Villas at Poipu Kai pool as wrong community for Regency",
+  judgeCommunityPhotoFromLens(
+    regencyPoipuKai,
+    [{
+      title: "Kauai Vacation Rentals - The Villas at Poipu Kai",
+      snippet: "The Parrish Collection Kauai — tropical pool area with palm trees",
+      link: "https://www.parrishkauai.com/kauai-vacation-rentals/villas-at-poipu-kai/",
+      position: 1,
+    }],
+    [
+      "This image showcases the amenities at The Villas at Poipu Kai, featuring a tropical pool area with lush palm trees and volcanic rock features.",
+    ],
+  ).match === "no",
+);
+
+check(
+  "classifyCommunityPhotoFromLens marks Villas-at-Poipu-Kai hit as contradicted for Regency",
+  classifyCommunityPhotoFromLens(
+    regencyPoipuKai,
+    [{
+      title: "Luxury Kauai Vacation Rentals | Villas at Poipu Kai",
+      snippet: "Resort pool and spa at Villas at Poipu Kai",
+      link: "https://www.villasatpoipukai.com/",
+      position: 1,
+    }],
+  ).outcome === "contradicted",
+);
+
+check(
+  "confirms Regency pool when Lens names Regency at Poipu Kai",
+  judgeCommunityPhotoFromLens(
+    regencyPoipuKai,
+    [{
+      title: "Regency at Poipu Kai Resort Pool - Koloa",
+      snippet: "Regency at Poipu Kai swimming pool and tennis courts",
+      link: "https://www.parrishkauai.com/kauai-condos/regency-at-poipu-kai/",
+      position: 1,
+    }],
+  ).match === "yes",
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

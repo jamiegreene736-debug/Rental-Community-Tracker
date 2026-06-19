@@ -6,6 +6,7 @@
 
 import { communityNamesMatch, normalizeCommunityName } from "./photo-community-check-logic";
 import { sharedResortPhraseKeys } from "./city-vrbo-combo";
+import { communityPhotoSiblingConflict } from "./community-photo-subcommunity";
 
 export type CommunityPhotoOverallStatus = "verified" | "likely" | "unconfirmed" | "mismatch";
 
@@ -102,6 +103,16 @@ export function analyzeCaptionForCommunity(
     };
   }
   // Named a different resort in caption?
+  const captionHay = `${caption ?? ""} ${filename ?? ""}`;
+  const siblingConflict = communityPhotoSiblingConflict(captionHay, expected);
+  if (siblingConflict) {
+    return {
+      name: "caption",
+      result: "contradict",
+      weight: 0.35,
+      detail: siblingConflict.reason,
+    };
+  }
   const keys = sharedResortPhraseKeys(hay);
   if (keys.size > 0) {
     const named = Array.from(keys)[0];

@@ -9,6 +9,7 @@ import {
 import { textMatchesResortPhrase } from "./buy-in-market";
 import { communityNamesMatch, normalizeCommunityName } from "./photo-community-check-logic";
 import { sharedResortPhraseKeys } from "./city-vrbo-combo";
+import { communityPhotoSiblingConflict } from "./community-photo-subcommunity";
 
 export type LensEvidenceRow = {
   title?: string | null;
@@ -73,6 +74,8 @@ export function communityHaystackSupportsExpected(hay: string, expectedCommunity
   const text = hay.trim();
   const expected = expectedCommunity.trim();
   if (!text || !expected) return false;
+
+  if (communityPhotoSiblingConflict(text, expected)) return false;
 
   const asResult: PreflightSearchResult = { title: text, snippet: "", link: "" };
   if (communityEvidenceInResult(asResult, expected)) return true;
@@ -165,6 +168,12 @@ function judgeCommunityPhotoFromLensCore(
     const hay = haystackFromResult(result);
     if (!hay.trim()) continue;
 
+    const siblingConflict = communityPhotoSiblingConflict(hay, expected);
+    if (siblingConflict) {
+      conflicts.push({ reason: siblingConflict.reason, text: hay });
+      continue;
+    }
+
     const conflict = communityConflictsWithResult(result, expected);
     if (conflict) {
       conflicts.push({ reason: conflict, text: hay });
@@ -207,6 +216,14 @@ function judgeCommunityPhotoFromLensCore(
   // Named a community in results but not ours — treat as mismatch.
   for (const result of candidates.slice(0, 5)) {
     const hay = haystackFromResult(result);
+    const siblingConflict = communityPhotoSiblingConflict(hay, expected);
+    if (siblingConflict) {
+      return {
+        match: "no",
+        reason: siblingConflict.reason,
+        identifiedCommunity: siblingConflict.identifiedCommunity,
+      };
+    }
     const keys = sharedResortPhraseKeys(hay);
     if (keys.size === 0) continue;
     const named = Array.from(keys)[0];
