@@ -59,5 +59,39 @@ check(
   classifyCommunityPhotoFromLens(bonitaNational, []).outcome === "inconclusive",
 );
 
+check(
+  "AI overview naming Bonita National confirms expected community",
+  judgeCommunityPhotoFromLens(
+    bonitaNational,
+    [],
+    [
+      "The image depicts the resort-style pool area at the Bonita National Golf & Country Club in Naples, Florida.",
+    ],
+  ).match === "yes",
+);
+
+check(
+  "generic visual hits plus VRBO organic naming row still confirms",
+  judgeCommunityPhotoFromLens(
+    bonitaNational,
+    [
+      {
+        title: "Resort pool with lounge chairs",
+        snippet: "Heated swimming pool and spa amenities",
+        link: "https://example.com/pool-photo",
+        source: "visual",
+        position: 1,
+      },
+      {
+        title: "927 Bonita National Condo - Naples | Vrbo",
+        snippet: "Bonita National Golf and Country Club resort pool area",
+        link: "https://www.vrbo.com/12345",
+        source: "organic",
+        position: 2,
+      },
+    ],
+  ).match === "yes",
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

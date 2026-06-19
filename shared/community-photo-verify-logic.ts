@@ -187,6 +187,12 @@ export function synthesizePerPhotoVerdict(input: CommunityPhotoPerPhotoInput): C
   let reason: string;
 
   const strongContradict = signals.some((s) => s.result === "contradict" && s.weight >= 0.4);
+  const visionRescue =
+    visionSig?.result === "support"
+    && (input.visionConfidence ?? 0) >= 65
+    && contradict === 0
+    && input.lens !== "contradicted";
+
   if (strongContradict && contradict >= 0.45) {
     status = "mismatch";
     reason = signals.find((s) => s.result === "contradict")?.detail ?? "Multiple signals indicate the wrong community.";
@@ -199,6 +205,9 @@ export function synthesizePerPhotoVerdict(input: CommunityPhotoPerPhotoInput): C
   } else if (contradict >= 0.35 && support < 0.25) {
     status = "mismatch";
     reason = signals.find((s) => s.result === "contradict")?.detail ?? "Signals point to a different community.";
+  } else if (visionRescue) {
+    status = "likely";
+    reason = visionSig?.detail ?? "Visual analysis supports the expected community; reverse image search was inconclusive.";
   } else {
     status = "unconfirmed";
     reason = "Reverse image search did not confirm this photo, but nothing strongly contradicts the expected community.";
