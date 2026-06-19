@@ -9,6 +9,7 @@ import {
 import { textMatchesResortPhrase } from "./buy-in-market";
 import { communityNamesMatch, normalizeCommunityName } from "./photo-community-check-logic";
 import { sharedResortPhraseKeys } from "./city-vrbo-combo";
+import { communityPhotoSiblingConflict } from "./community-photo-subcommunity";
 
 export type LensEvidenceRow = {
   title?: string | null;
@@ -97,6 +98,8 @@ export function communityHaystackSupportsExpected(hay: string, expectedCommunity
   const expected = expectedCommunity.trim();
   if (!text || !expected) return false;
 
+  if (communityPhotoSiblingConflict(text, expected)) return false;
+
   const asResult: PreflightSearchResult = { title: text, snippet: "", link: "" };
   if (communityEvidenceInResult(asResult, expected)) return true;
 
@@ -145,9 +148,12 @@ export function classifyCommunityPhotoFromLens(
   // A "different resort" hit that names a SAME-AREA sibling resort (shared
   // pool/tennis/grounds photos cross-match between Poipu resorts) is not decisive
   // — defer to vision instead of hard-failing a real community amenity photo.
+  // Hard sibling conflicts (e.g. Regency vs Villas at Poipu Kai) stay contradicted.
+  const hardSiblingConflict = verdict.reason.includes("different complex within Poipu Kai");
   if (
     !inconclusive
     && verdict.identifiedCommunity
+    && !hardSiblingConflict
     && communitySharesGeoArea(verdict.identifiedCommunity, expectedCommunity, city)
   ) {
     return {
@@ -194,6 +200,12 @@ export function analyzeAiOverviewForCommunity(
   for (const text of texts) {
     if (communityHaystackSupportsExpected(text, expected)) {
       return { outcome: "confirms", identified: expected };
+    }
+  }
+  for (const text of texts) {
+    const sibling = communityPhotoSiblingConflict(text, expected);
+    if (sibling) {
+      return { outcome: "contradicts", identified: sibling.identifiedCommunity };
     }
   }
   for (const text of texts) {
@@ -261,6 +273,12 @@ function judgeCommunityPhotoFromLensCore(
     const hay = haystackFromResult(result);
     if (!hay.trim()) continue;
 
+    const siblingConflict = communityPhotoSiblingConflict(hay, expected);
+    if (siblingConflict) {
+      conflicts.push({ reason: siblingConflict.reason, text: hay });
+      continue;
+    }
+
     const conflict = communityConflictsWithResult(result, expected);
     if (conflict) {
       conflicts.push({ reason: conflict, text: hay });
@@ -307,6 +325,14 @@ function judgeCommunityPhotoFromLensCore(
   // Named a community in results but not ours — treat as mismatch.
   for (const result of candidates.slice(0, 5)) {
     const hay = haystackFromResult(result);
+    const siblingConflict = communityPhotoSiblingConflict(hay, expected);
+    if (siblingConflict) {
+      return {
+        match: "no",
+        reason: siblingConflict.reason,
+        identifiedCommunity: siblingConflict.identifiedCommunity,
+      };
+    }
     const keys = sharedResortPhraseKeys(hay);
     if (keys.size === 0) continue;
     const named = Array.from(keys)[0];

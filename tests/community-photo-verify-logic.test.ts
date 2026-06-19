@@ -152,5 +152,27 @@ check(
   classifyLens(bonitaNational, []).outcome === "inconclusive",
 );
 
+const regencyPoipuKai = "Regency at Poipu Kai";
+
+check(
+  "lens Villas at Poipu Kai for Regency folder → mismatch (not likely)",
+  (() => {
+    const r = verifyCommunityPhotosFromInputs(
+      [{
+        id: "C1",
+        expectedCommunity: regencyPoipuKai,
+        lens: "contradicted",
+        lensReason: 'Reverse image search identified "Villas at Poipu Kai" — a different complex within Poipu Kai, not Regency at Poipu Kai.',
+        lensIdentifiedCommunity: "Villas at Poipu Kai",
+        caption: "Resort Pool Area",
+        visionConfidence: 78,
+        visionReason: "Tropical pool with palm trees",
+      }],
+      regencyPoipuKai,
+    );
+    return r.photoResults[0].status === "mismatch" && r.overallStatus === "mismatch";
+  })(),
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

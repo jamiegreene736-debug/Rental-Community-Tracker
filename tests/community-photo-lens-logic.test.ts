@@ -98,9 +98,61 @@ check(
   ).match === "yes",
 );
 
-// ── Same-area sibling-resort cross-matches defer to vision (Poipu) ──────────
+// ── Regency at Poipu Kai: decisive sibling conflicts (Villas, etc.) ─────────
 const regency = "Regency at Poipu Kai";
 
+check(
+  "flags Villas at Poipu Kai pool as wrong community for Regency",
+  judgeCommunityPhotoFromLens(
+    regency,
+    [{
+      title: "Kauai Vacation Rentals - The Villas at Poipu Kai",
+      snippet: "The Parrish Collection Kauai — tropical pool area with palm trees",
+      link: "https://www.parrishkauai.com/kauai-vacation-rentals/villas-at-poipu-kai/",
+      position: 1,
+    }],
+    [
+      "This image showcases the amenities at The Villas at Poipu Kai, featuring a tropical pool area with lush palm trees and volcanic rock features.",
+    ],
+  ).match === "no",
+);
+
+check(
+  "classifyCommunityPhotoFromLens marks Villas-at-Poipu-Kai hit as contradicted for Regency",
+  classifyCommunityPhotoFromLens(
+    regency,
+    [{
+      title: "Luxury Kauai Vacation Rentals | Villas at Poipu Kai",
+      snippet: "Resort pool and spa at Villas at Poipu Kai",
+      link: "https://www.villasatpoipukai.com/",
+      position: 1,
+    }],
+  ).outcome === "contradicted",
+);
+
+check(
+  "confirms Regency pool when Lens names Regency at Poipu Kai",
+  judgeCommunityPhotoFromLens(
+    regency,
+    [{
+      title: "Regency at Poipu Kai Resort Pool - Koloa",
+      snippet: "Regency at Poipu Kai swimming pool and tennis courts",
+      link: "https://www.parrishkauai.com/kauai-condos/regency-at-poipu-kai/",
+      position: 1,
+    }],
+  ).match === "yes",
+);
+
+check(
+  "AI Overview naming Villas at Poipu Kai contradicts Regency (not dict-key confirm)",
+  analyzeAiOverviewForCommunity(
+    ["This image showcases the amenities at The Villas at Poipu Kai, featuring a tropical pool area."],
+    regency,
+    "Koloa",
+  ).outcome === "contradicts",
+);
+
+// ── Same-area sibling-resort cross-matches defer to vision (Poipu) ──────────
 check(
   "communitySharesGeoArea: sibling Poipu resort shares area",
   communitySharesGeoArea("poipu sands", regency, "Koloa")
