@@ -77,6 +77,7 @@ import {
 } from "../server/guest-inbox-sync";
 import { parseArrivalDetailsFromText, stripHtmlForEmailParse, isBlocklistedPropertyAddress, looksLikeHtmlGarbage, isPlausiblePropertyAddressForBuyIn, pickBestPropertyAddressFromText } from "../server/buy-in-email";
 import { mergeArrivalDetailsIntoBuyIn } from "../server/guest-inbox-arrival";
+import { buildArrivalDetailsGuestMessage } from "../shared/arrival-details-message";
 
 // ---------- Import the internals we want to test ----------
 // The sanity check and fact extractors aren't exported, so we
@@ -3970,3 +3971,25 @@ assert.ok(
   "walking-distance address guess should ignore untrusted saved unitAddress values",
 );
 console.log("  ✓ guest inbox arrival extraction (address, codes, Wi‑Fi → buy-in fields)");
+
+// ── Operations guest messaging (Alternative Unit + Message AD) ─────────────
+const adDraft = buildArrivalDetailsGuestMessage({
+  guestFirstName: "Cecilio",
+  propertyName: "Princeville Townhomes",
+  checkInIso: "2026-06-20",
+  units: [
+    { unitLabel: "Townhome A", unitAddress: "3830 Edward Rd, Princeville, HI 96722", accessCode: "1234" },
+    { unitLabel: "Townhome B", unitAddress: "3831 Edward Rd, Princeville, HI 96722", accessCode: "933195" },
+  ],
+});
+assert.match(adDraft, /Townhome A/);
+assert.match(adDraft, /Townhome B/);
+assert.match(adDraft, /933195/);
+assert.ok(
+  bookingsSource.includes("Alternative Unit") &&
+    bookingsSource.includes("Message AD") &&
+    bookingsSource.includes("ArrivalDetailsMessageDialog") &&
+    bookingsSource.includes("/arrival-details"),
+  "Operations should offer Alternative Unit + Message AD arrival-details draft/send",
+);
+console.log("  ✓ Operations Alternative Unit + Message AD guest messaging");
