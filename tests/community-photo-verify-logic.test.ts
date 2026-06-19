@@ -89,6 +89,44 @@ check(
 );
 
 check(
+  "vision 72% with inconclusive lens → likely, not unconfirmed",
+  (() => {
+    const r = verifyCommunityPhotosFromInputs(
+      [{
+        id: "C2",
+        expectedCommunity: bonitaNational,
+        lens: "inconclusive",
+        lensReason: "Reverse image search could not confirm this photo belongs to Bonita National.",
+        caption: "Resort Pool Area",
+        visionConfidence: 72,
+        visionReason: "Resort pool with rock waterfall matches Bonita National amenities",
+      }],
+      bonitaNational,
+    );
+    return r.photoResults[0].status === "likely" && r.photoResults[0].match === "yes";
+  })(),
+);
+
+check(
+  "lens confirmed from AI overview alone → verified or likely",
+  (() => {
+    const r = verifyCommunityPhotosFromInputs(
+      [{
+        id: "C2",
+        expectedCommunity: bonitaNational,
+        lens: "confirmed",
+        lensReason: "Reverse image search confirms Bonita National Golf & Country Club Condominiums.",
+        caption: "Resort Pool Area",
+        visionConfidence: 72,
+      }],
+      bonitaNational,
+    );
+    return (r.photoResults[0].status === "verified" || r.photoResults[0].status === "likely")
+      && r.photoResults[0].match === "yes";
+  })(),
+);
+
+check(
   "majority unconfirmed folder → unconfirmed overall, not mismatch",
   (() => {
     const rows = Array.from({ length: 6 }, (_, i) => ({

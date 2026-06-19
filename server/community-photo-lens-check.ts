@@ -3,7 +3,6 @@
 import fs from "fs";
 import path from "path";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
-import { isStrongLensMatch } from "./photo-match-guardrails";
 import { describeSearchApiHttpError } from "./photo-listing-scanner";
 import {
   judgeCommunityPhotoFromLens,
@@ -40,6 +39,61 @@ function publicPhotoUrl(folder: string, filename: string): string | null {
   return `${PUBLIC_HOST}/photos/${safeFolder}/${encodeURIComponent(safeFile)}`;
 }
 
+function collectAiOverviewTexts(ai: unknown): string[] {
+  const texts: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value !== "string") return;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    texts.push(trimmed);
+  };
+
+  const walk = (node: unknown, depth = 0) => {
+    if (depth > 5 || node == null) return;
+    if (typeof node === "string") {
+      add(node);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, depth + 1);
+      return;
+    }
+    if (typeof node !== "object") return;
+    const obj = node as Record<string, unknown>;
+    for (const key of ["text", "markdown", "title", "snippet", "description", "content"]) {
+      add(obj[key]);
+    }
+    for (const value of Object.values(obj)) {
+      if (typeof value === "object" && value != null) walk(value, depth + 1);
+    }
+  };
+
+  walk(ai);
+  return texts;
+}
+
+/** Keep naming/organic hits plus top visual matches — do not drop VRBO titles for generic pool thumbnails. */
+function selectRowsForCommunityLensJudge(rows: LensEvidenceRow[]): LensEvidenceRow[] {
+  const namingSources = new Set(["organic", "page", "knowledge_graph", "image"]);
+  const naming = rows.filter((row) => namingSources.has(row.source ?? ""));
+  const visual = rows
+    .filter((row) => (row.source ?? "") === "visual")
+    .sort((a, b) => (a.position ?? 999) - (b.position ?? 999))
+    .slice(0, 8);
+  const merged = [...naming, ...visual, ...rows];
+  const seen = new Set<string>();
+  const deduped: LensEvidenceRow[] = [];
+  for (const row of merged) {
+    const key = `${row.link ?? ""}|${row.title ?? ""}|${row.snippet ?? ""}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+  return deduped.slice(0, 20);
+}
+
 function rowsFromLensPayload(data: any): { rows: LensEvidenceRow[]; extraTexts: string[] } {
   const rowsFrom = (source: string, list: any[] | undefined): LensEvidenceRow[] =>
     Array.isArray(list)
@@ -70,18 +124,7 @@ function rowsFromLensPayload(data: any): { rows: LensEvidenceRow[]; extraTexts: 
     });
   }
 
-  const extraTexts: string[] = [];
-  const ai = data?.ai_overview;
-  if (ai) {
-    if (typeof ai.text === "string") extraTexts.push(ai.text);
-    if (typeof ai.markdown === "string") extraTexts.push(ai.markdown);
-    if (Array.isArray(ai.snippets)) {
-      for (const s of ai.snippets) {
-        if (typeof s?.text === "string") extraTexts.push(s.text);
-        else if (typeof s === "string") extraTexts.push(s);
-      }
-    }
-  }
+  const extraTexts: string[] = collectAiOverviewTexts(data?.ai_overview);
 
   return { rows, extraTexts };
 }
@@ -101,14 +144,7 @@ async function callGoogleLens(imageUrl: string, apiKey: string): Promise<LensCal
     }
     const data = await resp.json();
     const { rows, extraTexts } = rowsFromLensPayload(data);
-    const strong = rows.filter((row, idx) =>
-      isStrongLensMatch(
-        { title: row.title, link: row.link, snippet: row.snippet },
-        row.source ?? "visual",
-        row.position ?? idx + 1,
-      ),
-    );
-    return { ok: true, rows: strong.length > 0 ? strong : rows.slice(0, 15), extraTexts };
+    return { ok: true, rows: selectRowsForCommunityLensJudge(rows), extraTexts };
   } catch (e: any) {
     const msg = e?.name === "AbortError"
       ? `Google Lens timed out after ${Math.round(LENS_TIMEOUT_MS / 1000)}s`

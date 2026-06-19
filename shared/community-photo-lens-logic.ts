@@ -6,7 +6,8 @@ import {
   communityEvidenceInResult,
   type PreflightSearchResult,
 } from "./preflight-platform-match";
-import { communityNamesMatch } from "./photo-community-check-logic";
+import { textMatchesResortPhrase } from "./buy-in-market";
+import { communityNamesMatch, normalizeCommunityName } from "./photo-community-check-logic";
 import { sharedResortPhraseKeys } from "./city-vrbo-combo";
 
 export type LensEvidenceRow = {
@@ -39,6 +40,52 @@ function toSearchResult(row: LensEvidenceRow): PreflightSearchResult {
 
 function haystackFromResult(result: PreflightSearchResult): string {
   return `${result.title ?? ""} ${result.snippet ?? ""} ${result.link ?? ""}`.trim();
+}
+
+/** Core resort name without trailing condo/community suffixes (common in AI overviews). */
+function coreCommunityLabel(name: string): string {
+  return name
+    .replace(/\b(condominiums|condos|condo units?|community)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Distinctive tokens for fuzzy name matching (excludes generic resort words). */
+function distinctiveCommunityTokens(name: string): string[] {
+  const stop = new Set([
+    "club", "country", "golf", "resort", "condominiums", "condo", "condos",
+    "community", "the", "and", "tennis", "beach",
+  ]);
+  return normalizeCommunityName(name)
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !stop.has(word));
+}
+
+function haystackContainsDistinctiveCommunityTokens(hay: string, expectedCommunity: string): boolean {
+  const tokens = distinctiveCommunityTokens(expectedCommunity);
+  if (tokens.length === 0) return false;
+  const normalized = normalizeCommunityName(hay);
+  return tokens.every((token) => normalized.includes(token));
+}
+
+/** Whether Lens/AI text supports the expected community (dict, phrase, or fuzzy name). */
+export function communityHaystackSupportsExpected(hay: string, expectedCommunity: string): boolean {
+  const text = hay.trim();
+  const expected = expectedCommunity.trim();
+  if (!text || !expected) return false;
+
+  const asResult: PreflightSearchResult = { title: text, snippet: "", link: "" };
+  if (communityEvidenceInResult(asResult, expected)) return true;
+
+  const core = coreCommunityLabel(expected);
+  if (core && textMatchesResortPhrase(text, core)) return true;
+
+  if (haystackContainsDistinctiveCommunityTokens(text, expected)) return true;
+
+  const extracted = extractIdentifiedCommunityName(text);
+  if (extracted && communityNamesMatch(extracted, expected)) return true;
+
+  return false;
 }
 
 /** True when Lens text names a resort but carries no dict keys (generic VRBO title). */
@@ -123,7 +170,7 @@ function judgeCommunityPhotoFromLensCore(
       conflicts.push({ reason: conflict, text: hay });
       continue;
     }
-    if (communityEvidenceInResult(result, expected)) {
+    if (communityHaystackSupportsExpected(hay, expected)) {
       evidence.push({ text: hay });
     }
   }
