@@ -8,8 +8,9 @@
 //   3. Are Unit A and Unit B (etc.) in the same community as each other?
 //
 // Methodology:
-//   Pass A — Community folder: dHash pre-screen + batched vision audit of
-//            EVERY photo in the folder (up to cap), not a one-time sample.
+//   Pass A — Community folder: Google Lens reverse-image search on EVERY
+//            photo in the folder (up to cap), confirming each belongs to the
+//            expected community or flagging mismatches (e.g. wrong resort pool).
 //   Pass B — Unit verification: one vision call PER unit (up to 12 interior
 //            photos each), 3 community anchors, unanimous match required.
 //   Bedroom pass — bedroom-tagged photos first; if count is short, also scan
@@ -22,7 +23,6 @@ import { computeDhash, hammingDistance, DUPLICATE_DISTANCE } from "./photo-hashi
 import {
   UNIT_INTERIOR_MIN,
   communityNamesMatch,
-  computeCommunityCohesion,
   computeUnitVerdict,
   filterUnitOutliers,
   isInteriorPhoto,
@@ -33,16 +33,18 @@ import {
 } from "../shared/photo-bedroom-coverage-logic";
 import { analyzeBedroomCoverage } from "./bedroom-coverage-engine";
 import {
-  chunkArray,
   detectLikelyMixedCommunityFolder,
-  mergeCommunityPhotoVerdicts,
 } from "../shared/photo-community-folder-logic";
+import {
+  auditCommunityFolderViaLens,
+  type CommunityLensSample,
+} from "./community-photo-lens-check";
+import { getSearchApiKey } from "./searchapi";
 
 const MODEL = "claude-sonnet-4-6";
 
 /** Max community photos to load and vision-audit per folder. */
 const COMMUNITY_FULL_FOLDER_CAP = 50;
-const COMMUNITY_BATCH_SIZE = 10;
 /** Interior photos sent to vision per unit (each unit gets its own call). */
 const UNIT_INTERIOR_TARGET = 12;
 const COMMUNITY_ANCHOR_COUNT = 3;
@@ -79,9 +81,12 @@ type FlaggedPhoto = { id: string; caption?: string; reason: string };
 
 export type PhotoVerdict = {
   id: string;
+  folder?: string;
+  filename?: string;
   caption?: string;
   match: "yes" | "no";
   reason: string;
+  lensIdentifiedCommunity?: string;
 };
 
 export type CommunityGroupResult = {
@@ -99,6 +104,7 @@ export type CommunityGroupResult = {
   outliers: FlaggedPhoto[];
   junk: FlaggedPhoto[];
   confidence: number;
+  verificationMethod?: "google_lens" | "vision";
 };
 
 export type UnitGroupResult = {
@@ -270,47 +276,7 @@ async function loadCommunityFolderPhotos(
   return { total, sampled };
 }
 
-function buildCommunityBatchInstruction(
-  fingerprint: string,
-  expectedCommunity: string,
-  batchIndex: number,
-  batchCount: number,
-): string {
-  return [
-    `Continuing FULL community-folder audit (batch ${batchIndex + 1}/${batchCount}).`,
-    `Community fingerprint from earlier batches: ${fingerprint || "(see anchor batches)"}`,
-    expectedCommunity.trim() ? `Expected community on record: "${expectedCommunity.trim()}".` : "",
-    "",
-    "For EACH photo ID in THIS batch, decide whether it depicts the SAME resort/community as the fingerprint.",
-    '  - match: "yes" if clearly the same place; "no" ONLY with positive evidence of a different place.',
-    "Do NOT use uncertain — every match is yes or no.",
-    "Flag junk: floorplans, maps, logos, screenshots, competitor watermarks.",
-    "",
-    'Respond with ONLY minified JSON: {"photoVerdicts":[{"id":"C11","match":"yes|no","reason":"short"}],"junk":[{"id":"C11","reason":"short"}]}',
-  ].join("\n");
-}
-
-function ensureVerdictsForAllPhotos(
-  samples: SampledPhoto[],
-  verdicts: PhotoVerdict[],
-): PhotoVerdict[] {
-  const byId = new Map(verdicts.map((v) => [v.id, v]));
-  const out = [...verdicts];
-  for (const s of samples) {
-    if (!byId.has(s.id)) {
-      out.push({
-        id: s.id,
-        caption: s.caption,
-        match: "no",
-        reason: "Photo was not evaluated by vision audit.",
-      });
-    }
-  }
-  return out;
-}
-
 async function auditCommunityFolderFull(
-  apiKey: string,
   group: CheckGroupInput,
   samples: SampledPhoto[],
   photosTotal: number,
@@ -321,85 +287,32 @@ async function auditCommunityFolderFull(
   const preScreen = detectLikelyMixedCommunityFolder(
     samples.map((s) => s.hash).filter(Boolean) as string[],
   );
-  const batches = chunkArray(samples, COMMUNITY_BATCH_SIZE);
-  let fingerprint = "";
-  let identifiedName = "";
-  let matchesExpected: "yes" | "no" = "no";
-  let matchReason = "";
-  let confidence = 0.5;
-  const verdictBatches: PhotoVerdict[][] = [];
-  const junkCollected: FlaggedPhoto[] = [];
 
-  for (let bi = 0; bi < batches.length; bi++) {
-    const batch = batches[bi];
-    const content: any[] = [];
-    for (const s of batch) {
-      const cap = s.caption ? ` · caption: "${s.caption}"` : "";
-      content.push({ type: "text", text: `--- COMMUNITY photo ${s.id}${cap} ---` });
-      content.push({ type: "image", source: { type: "base64", media_type: s.mime, data: s.buffer.toString("base64") } });
-    }
-    content.push({
-      type: "text",
-      text: bi === 0
-        ? buildCommunityPassInstruction(expectedCommunity)
-        : buildCommunityBatchInstruction(fingerprint, expectedCommunity, bi, batches.length),
-    });
+  const lensSamples: CommunityLensSample[] = samples.map((s) => ({
+    id: s.id,
+    folder: s.folder,
+    filename: s.filename,
+    caption: s.caption,
+  }));
 
-    try {
-      const { parsed } = await callVisionJson(apiKey, content);
-      if (bi === 0) {
-        fingerprint = String(parsed.fingerprint ?? "").trim();
-        identifiedName = String(parsed.identifiedName ?? "").trim();
-        matchesExpected = asYesNo(parsed.matchesExpected);
-        if (expectedCommunity && identifiedName && communityNamesMatch(identifiedName, expectedCommunity)) {
-          matchesExpected = "yes";
-        }
-        matchReason = String(parsed.matchReason ?? "").trim();
-        confidence = asConfidence(parsed.confidence);
-        if (!fingerprint && identifiedName) fingerprint = identifiedName;
-      } else if (!fingerprint) {
-        fingerprint = expectedCommunity ? `Expected: ${expectedCommunity}` : "Community place profile";
-      }
-      verdictBatches.push(mapPhotoVerdicts(parsed.photoVerdicts, batch));
-      junkCollected.push(...asFlags(parsed.junk, batch));
-    } catch (e: any) {
-      return { community: null, warning: `Community audit batch ${bi + 1}/${batches.length} failed: ${e?.message ?? e}` };
+  const audit = await auditCommunityFolderViaLens(
+    lensSamples,
+    photosTotal,
+    expectedCommunity,
+    { label: group.label, folder: group.folder },
+  );
+
+  if (!audit.community) return audit;
+
+  if (preScreen.mixed && preScreen.reason) {
+    audit.community.outliers.push({ id: "pre-screen", reason: preScreen.reason });
+    audit.community.allSameCommunity = false;
+    if (audit.community.matchesExpected === "yes") {
+      audit.community.matchesExpected = "no";
     }
   }
 
-  const mergedVerdicts = ensureVerdictsForAllPhotos(
-    samples,
-    mergeCommunityPhotoVerdicts(verdictBatches),
-  );
-  const { allSameCommunity, outliers: cohesionOutliers } = computeCommunityCohesion(mergedVerdicts);
-  const preScreenOutliers: FlaggedPhoto[] = preScreen.mixed && preScreen.reason
-    ? [{ id: "pre-screen", reason: preScreen.reason }]
-    : [];
-  const junk = junkCollected.filter(
-    (j, i, arr) => arr.findIndex((x) => x.id === j.id) === i,
-  );
-  const outliers = [...cohesionOutliers, ...preScreenOutliers].filter(
-    (o, i, arr) => arr.findIndex((x) => x.id === o.id) === i,
-  );
-
-  return {
-    community: {
-      role: "community",
-      label: group.label,
-      folder: group.folder,
-      photosChecked: samples.length,
-      photosTotal,
-      communityFingerprint: fingerprint || identifiedName || "Community place profile",
-      identifiedCommunity: identifiedName || fingerprint.slice(0, 120) || "See fingerprint",
-      matchesExpected,
-      matchReason,
-      allSameCommunity: allSameCommunity && outliers.length === 0,
-      photoVerdicts: mergedVerdicts,
-      outliers,
-      junk,
-      confidence,
-    },
-  };
+  return audit;
 }
 
 async function loadSample(
@@ -476,7 +389,7 @@ async function callVisionJson(
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: MODEL,
+      model: "google_lens+claude",
       max_tokens: 3000,
       messages: [{ role: "user", content }],
     }),
@@ -489,28 +402,6 @@ async function callVisionJson(
   const match = cleaned.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("vision response was not JSON");
   return { parsed: JSON.parse(match[0]) };
-}
-
-function buildCommunityPassInstruction(expectedCommunity: string): string {
-  const expected = expectedCommunity.trim() || "(not provided)";
-  return [
-    "You are QA-reviewing the COMMUNITY photo folder for a vacation-rental listing.",
-    "These photos should ALL depict the SAME resort/community (amenities, grounds, exteriors, views).",
-    "",
-    `Expected community name on the property record: "${expected}".`,
-    "",
-    "For EACH photo (by ID), decide:",
-    '  - samePlace: "yes" if this photo is clearly the same resort/community as the majority; "no" ONLY with positive contradictory evidence (different resort signage, incompatible architecture/climate/view).',
-    "Build a detailed visual fingerprint of the place (architecture, materials, landscaping, climate, views, building style).",
-    "",
-    `matchesExpected: "yes" if the photos positively depict "${expected}" OR a clearly matching sub-name/alias; "no" ONLY if positive evidence of a DIFFERENT named resort.`,
-    "Do NOT use uncertain/unclear — every field is yes or no.",
-    "",
-    "Flag junk: floorplans, maps, logos, screenshots, competitor watermarks, person-as-subject.",
-    "",
-    "Respond with ONLY minified JSON:",
-    '{"fingerprint":"detailed place description","identifiedName":"resort name if readable else short place-type description","matchesExpected":"yes|no","matchReason":"short","photoVerdicts":[{"id":"C1","match":"yes|no","reason":"short"}],"junk":[{"id":"C5","reason":"short"}],"confidence":0.0}',
-  ].join("\n");
 }
 
 function buildSingleUnitPassInstruction(
@@ -547,12 +438,6 @@ function asYesNo(v: unknown): "yes" | "no" {
   const s = String(v ?? "").trim().toLowerCase();
   if (s === "yes" || s === "true") return "yes";
   return "no";
-}
-
-function asConfidence(v: unknown): number {
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return 0.5;
-  return Math.max(0, Math.min(1, n > 1 ? n / 100 : n));
 }
 
 function captionFor(samples: SampledPhoto[], id: string): string | undefined {
@@ -723,14 +608,38 @@ export async function runPhotoCommunityCheck(
       units: [],
       bedroomCoverage: null,
       duplicates,
-      model: MODEL,
+      model: "google_lens+claude",
       photosChecked: 0,
       elapsedMs: Date.now() - startedAt,
       warning: "no-photos",
     };
   }
 
-  if (!apiKey) {
+  const searchApiKey = getSearchApiKey();
+  const needsCommunityLens = communityResolvedIdx >= 0;
+  const needsUnitVision = unitInputs.length > 0 || expectedListingBedrooms != null;
+
+  if (needsCommunityLens && !searchApiKey) {
+    return {
+      ok: false,
+      verdict: "fail",
+      expectedCommunity,
+      summary: "SEARCHAPI_API_KEY is required for community photo reverse-image search.",
+      concerns: ["SEARCHAPI_API_KEY not configured."],
+      allSameCommunity: "no",
+      unitsSameCommunity: unitInputs.length >= 2 ? "no" : "n/a",
+      community: null,
+      units: [],
+      bedroomCoverage: null,
+      duplicates,
+      model: "google_lens+claude",
+      photosChecked,
+      elapsedMs: Date.now() - startedAt,
+      warning: "SEARCHAPI_API_KEY not configured",
+    };
+  }
+
+  if (needsUnitVision && !apiKey) {
     return {
       ok: false,
       verdict: "fail",
@@ -743,7 +652,7 @@ export async function runPhotoCommunityCheck(
       units: [],
       bedroomCoverage: null,
       duplicates,
-      model: MODEL,
+      model: "google_lens+claude",
       photosChecked,
       elapsedMs: Date.now() - startedAt,
       warning: "ANTHROPIC_API_KEY not configured",
@@ -755,11 +664,10 @@ export async function runPhotoCommunityCheck(
   let units: UnitGroupResult[] = [];
   let fingerprint = "";
 
-  // ── Pass A: Full community-folder audit (batched vision) ─────────────────
+  // ── Pass A: Full community-folder audit (Google Lens per photo) ───────────
   if (communityResolvedIdx >= 0) {
     const r = resolved[communityResolvedIdx];
     const audit = await auditCommunityFolderFull(
-      apiKey,
       r.input,
       r.sampled,
       r.total,
@@ -940,7 +848,7 @@ export async function runPhotoCommunityCheck(
     units,
     bedroomCoverage,
     duplicates,
-    model: MODEL,
+    model: "google_lens+claude",
     photosChecked,
     elapsedMs: Date.now() - startedAt,
     warning,
