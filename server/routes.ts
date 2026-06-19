@@ -8286,7 +8286,54 @@ export async function registerRoutes(
     if (/^manually recorded buy-in\b/.test(title)) return true;
     if (/^manually attached\b/.test(title)) return true;
     if (/^auto-filled from\b/.test(title)) return true;
+    if (/^vacation rental option$/i.test(title)) return true;
+    if (/^alternative stay$/i.test(title)) return true;
+    if (/^vacation rental$/i.test(title)) return true;
     return false;
+  };
+
+  const normalizeVrboPhotoKey = (url: unknown): string =>
+    String(url ?? "").trim().split("?")[0].toLowerCase();
+
+  const isBrandingVrboPhotoUrl = (url: unknown): boolean => {
+    const hay = normalizeAlternativeText(url, 500).toLowerCase();
+    return /\b(logo|realty|realtor|watermark|avatar|icon|sprite|profile|broker|property[- ]management)\b/i.test(hay);
+  };
+
+  const isLikelyVrboCommunityPhotoUrl = (url: unknown): boolean => {
+    if (isBrandingVrboPhotoUrl(url)) return false;
+    const hay = normalizeAlternativeText(url, 500).toLowerCase();
+    return /\b(pool|spa|hot[- ]?tub|beach|ocean|view|resort|grounds|garden|landscap|exterior|building|aerial|drone|clubhouse|tennis|pickleball|amenity|amenities|complex|walkway|entrance|driveway|lanai|patio|bbq|grill|fitness|gym|lobby|courtyard|putting)\b/i.test(hay);
+  };
+
+  // Resort/community shots on VRBO usually appear in EVERY unit listing gallery
+  // for the same complex; unit-specific interiors do not. Intersection works well
+  // for 2+ unit combo buy-ins (manual or auto-filled).
+  const sharedVrboResortPhotos = (galleries: Array<Array<string | null | undefined>>): string[] => {
+    const usable = galleries
+      .map((gallery) => Array.from(new Set(
+        (gallery ?? []).map((url) => normalizeAlternativeUrl(url)).filter(Boolean).filter((url) => !isBrandingVrboPhotoUrl(url)),
+      )))
+      .filter((gallery) => gallery.length > 0);
+    if (usable.length < 2) return [];
+    const minShare = usable.length;
+    const counts = new Map<string, { url: string; count: number }>();
+    for (const gallery of usable) {
+      const seen = new Set<string>();
+      for (const url of gallery) {
+        const key = normalizeVrboPhotoKey(url);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const row = counts.get(key) ?? { url, count: 0 };
+        row.count += 1;
+        counts.set(key, row);
+      }
+    }
+    return Array.from(counts.values())
+      .filter((row) => row.count >= minShare)
+      .sort((a, b) => b.count - a.count)
+      .map((row) => row.url)
+      .slice(0, 12);
   };
 
   const sameCommunityContext = (a: string, b: string): boolean =>
@@ -9690,10 +9737,12 @@ Requirements:
       const titlesForCommunityExtract = alternatives.map((item: any, index: number) => {
         const clientTitle = String(item?.title ?? "");
         const scrapedTitle = vrboDetailsList[index]?.title;
-        return isUnusableAlternativeTitle(clientTitle) && scrapedTitle
-          ? scrapedTitle
+        const usableScraped = scrapedTitle && !isUnusableAlternativeTitle(scrapedTitle) ? scrapedTitle : "";
+        return isUnusableAlternativeTitle(clientTitle) && usableScraped
+          ? usableScraped
           : clientTitle;
       });
+      const bodyAlternativeCommunity = usableCommunityContext(req.body?.alternativeCommunity);
       // Resolve the NEW community from the attached units' own titles/notes
       // ("Villas of Kamalii"), never the client-sent or original label. Drives the
       // persisted community label, the relocation message, AND the guest-facing AI
@@ -9702,7 +9751,25 @@ Requirements:
         titlesForCommunityExtract,
         alternatives.map((a: any) => a?.notes),
         req.body?.originalCommunity,
-      ) ?? "") || "";
+      ) ?? "") || bodyAlternativeCommunity || "";
+      const allVrboGalleries = vrboDetailsList.map((detail) => detail?.photos ?? []);
+      const sharedResortPhotos = sharedVrboResortPhotos(allVrboGalleries);
+      const keywordCommunityPhotos = Array.from(new Set(
+        allVrboGalleries.flat().filter((url) => isLikelyVrboCommunityPhotoUrl(url)),
+      ));
+      let pageCommunityPhotos = sharedResortPhotos.length >= 2
+        ? sharedResortPhotos.slice(0, 8)
+        : keywordCommunityPhotos.slice(0, 8);
+      if (pageCommunityPhotos.length < 3) {
+        const localCommunityPhotos = await communityPhotosFor(
+          cleanNewCommunity,
+          bodyAlternativeCommunity,
+          vrboDetailsList.find((detail) => detail?.title)?.title,
+          req.body?.originalCommunity,
+        );
+        if (localCommunityPhotos.length > 0) pageCommunityPhotos = localCommunityPhotos;
+      }
+      const sharedCommunityPhotoKeys = new Set(pageCommunityPhotos.map(normalizeVrboPhotoKey));
       const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any, index: number) => {
         const sourceUrl = normalizeAlternativeUrl(item?.url);
         const manualUnitPhotos = manualBuyInPhotoUrlsFromNotes(item?.notes);
@@ -9712,14 +9779,17 @@ Requirements:
           ...(Array.isArray(item?.photos) ? item.photos.map((url: unknown) => normalizeAlternativeUrl(url)) : []),
         ].filter(Boolean))).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
         const vrboDetails = vrboDetailsList[index];
-        const vrboScrapePhotos = vrboDetails?.photos ?? [];
-        // Manual submissions paste unit-specific photos in buy-in notes; the VRBO
-        // gallery supplies resort/community shots for the page header gallery.
+        const vrboScrapePhotos = (vrboDetails?.photos ?? []).filter((url) => !isBrandingVrboPhotoUrl(url));
+        // Manual submissions paste unit-specific photos in buy-in notes; shared VRBO
+        // resort shots feed the page-level community gallery (computed above).
+        const unitOnlyVrboPhotos = vrboScrapePhotos.filter(
+          (url) => !sharedCommunityPhotoKeys.has(normalizeVrboPhotoKey(url)),
+        );
         const unitPhotoCandidates = manualUnitPhotos.length > 0
           ? manualUnitPhotos
           : Array.from(new Set([
             ...initialPhotos,
-            ...vrboScrapePhotos,
+            ...unitOnlyVrboPhotos,
           ].filter(Boolean))).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
         const mergedPhotos = unitPhotoCandidates;
         // Vision screen: drop photos that would let the guest identify the exact
@@ -9733,10 +9803,14 @@ Requirements:
         const photosVisionFiltered = photoFilter.filtered;
         const photosVisionVersion = photoFilter.filtered ? UNIT_PHOTO_VISION_VERSION : 0;
         const clientTitle = normalizeAlternativeText(item?.title, 160);
+        const scrapedTitle = normalizeAlternativeText(vrboDetails?.title, 160);
         const title = normalizeAlternativeText(
           !isUnusableAlternativeTitle(clientTitle)
             ? clientTitle
-            : vrboDetails?.title || clientTitle || item?.community || "Alternative stay",
+            : (!isUnusableAlternativeTitle(scrapedTitle) ? scrapedTitle : "")
+              || clientTitle
+              || item?.community
+              || "Alternative stay",
           160,
         );
         const alternativeCommunity =
@@ -9745,7 +9819,6 @@ Requirements:
           communityFromAlternativeTitle(vrboDetails?.title || title) ||
           usableCommunityContext(item?.community) ||
           communityFromAlternativeTitle(title);
-        const vrboCommunityPhotos = vrboScrapePhotos.slice(0, 8);
         const extractedFacts = extractAlternativeFactsFromText([
           title,
           item?.notes,
@@ -9785,16 +9858,7 @@ Requirements:
           sourceLabel: normalizeAlternativeText(item?.sourceLabel, 80),
           notes: normalizeAlternativeText(item?.notes, 1000),
           showSourceLink: item?.showSourceLink === true,
-          communityPhotos: vrboCommunityPhotos.length > 0
-            ? vrboCommunityPhotos
-            : await communityPhotosFor(
-              alternativeCommunity,
-              cleanNewCommunity,
-              item?.community,
-              item?.alternativeCommunity,
-              vrboDetails?.title,
-              originalCommunity,
-            ),
+          communityPhotos: pageCommunityPhotos,
           photoSource: vrboDetails?.photoSource ?? (initialPhotos.length > 0 ? "provided" : "none"),
           photoScrapeReason: vrboDetails?.scrapeReason ?? "",
         };
