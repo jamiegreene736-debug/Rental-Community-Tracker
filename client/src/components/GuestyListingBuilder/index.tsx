@@ -3295,14 +3295,39 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, [photos, propertyId, propertyData?.bedrooms, queryClient]);
 
   const communityPhotoVerdicts = useMemo(() => {
-    const verdicts = communityCheckResult?.community?.photoVerdicts;
-    if (!verdicts?.length) return undefined;
     const map: Record<string, { match: "yes" | "no" | "uncertain"; reason?: string; status?: CommunityCheckPhotoVerdict["status"] }> = {};
-    for (const v of verdicts) {
-      if (v.folder && v.filename) {
-        map[`${v.folder}/${v.filename}`] = { match: v.match, reason: v.reason, status: v.status };
+
+    const addVerdict = (v: CommunityCheckPhotoVerdict) => {
+      if (!v.folder || !v.filename) return;
+      const key = `${v.folder}/${v.filename}`;
+      map[key] = {
+        match: v.match,
+        reason: v.reason,
+        status: v.status,
+      };
+    };
+
+    for (const v of communityCheckResult?.community?.photoVerdicts ?? []) {
+      addVerdict(v);
+    }
+
+    for (const u of communityCheckResult?.units ?? []) {
+      for (const v of u.photoVerdicts ?? []) {
+        addVerdict({ ...v, folder: v.folder ?? u.folder });
+      }
+      for (const o of u.outliers ?? []) {
+        const hit = u.photoVerdicts?.find((p) => p.id === o.id);
+        const folder = hit?.folder ?? u.folder;
+        const filename = hit?.filename;
+        if (folder && filename) {
+          map[`${folder}/${filename}`] = {
+            match: "no",
+            reason: o.reason || hit?.reason || "Possible mismatch with other unit photos.",
+          };
+        }
       }
     }
+
     return Object.keys(map).length > 0 ? map : undefined;
   }, [communityCheckResult]);
 

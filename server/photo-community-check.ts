@@ -464,6 +464,10 @@ function captionFor(samples: SampledPhoto[], id: string): string | undefined {
   return samples.find((s) => s.id === id)?.caption;
 }
 
+function sampleFor(samples: SampledPhoto[], id: string): SampledPhoto | undefined {
+  return samples.find((s) => s.id === id);
+}
+
 function mapPhotoVerdicts(v: unknown, samples: SampledPhoto[]): PhotoVerdict[] {
   if (!Array.isArray(v)) return [];
   const out: PhotoVerdict[] = [];
@@ -471,14 +475,41 @@ function mapPhotoVerdicts(v: unknown, samples: SampledPhoto[]): PhotoVerdict[] {
     if (!row || typeof row !== "object") continue;
     const id = String((row as any).id ?? "").trim();
     if (!id) continue;
+    const sample = sampleFor(samples, id);
     out.push({
       id,
-      caption: captionFor(samples, id),
+      folder: sample?.folder,
+      filename: sample?.filename,
+      caption: sample?.caption ?? captionFor(samples, id),
       match: asYesNo((row as any).match ?? (row as any).samePlace),
       reason: String((row as any).reason ?? "").trim() || "flagged",
     });
   }
   return out;
+}
+
+/** Merge vision verdicts with every sampled photo so UI can badge folder/filename keys. */
+function mergeUnitPhotoVerdicts(visionVerdicts: PhotoVerdict[], samples: SampledPhoto[]): PhotoVerdict[] {
+  const byId = new Map(visionVerdicts.map((v) => [v.id, v]));
+  return samples.map((s) => {
+    const vision = byId.get(s.id);
+    if (vision) {
+      return {
+        ...vision,
+        folder: s.folder,
+        filename: s.filename,
+        caption: vision.caption ?? s.caption,
+      };
+    }
+    return {
+      id: s.id,
+      folder: s.folder,
+      filename: s.filename,
+      caption: s.caption,
+      match: "yes" as const,
+      reason: "No explicit vision vote — treated as compatible with the community.",
+    };
+  });
 }
 
 async function verifyUnitAgainstCommunity(
@@ -511,11 +542,13 @@ async function verifyUnitAgainstCommunity(
 
   const { parsed } = await callVisionJson(apiKey, content);
   const rawUnit = Array.isArray(parsed.units) ? parsed.units[0] : parsed;
-  const photoVerdicts = mapPhotoVerdicts(rawUnit?.photoVerdicts ?? parsed.photoVerdicts, r.sampled);
-  const interiorVerdicts = photoVerdicts.length > 0
-    ? photoVerdicts
+  const visionVerdicts = mapPhotoVerdicts(rawUnit?.photoVerdicts ?? parsed.photoVerdicts, r.sampled);
+  const interiorVerdicts = visionVerdicts.length > 0
+    ? mergeUnitPhotoVerdicts(visionVerdicts, r.sampled)
     : r.sampled.map((s) => ({
         id: s.id,
+        folder: s.folder,
+        filename: s.filename,
         caption: s.caption,
         match: "no" as const,
         reason: "No vision verdict returned for this photo.",

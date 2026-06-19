@@ -92,7 +92,7 @@ export type PhotoCuratorProps = {
     preview?: string | null;
     picks?: { community: string; patio: string } | null;
   };
-  /** Per community-folder photo verdict from Check photo community (folder/filename key). */
+  /** Per photo verdict from Check photo community (`folder/filename` key). */
   communityPhotoVerdicts?: Record<string, CommunityPhotoVerdict>;
 };
 
@@ -742,8 +742,7 @@ export default function PhotoCurator({
             }}>
               {section.photos.map((tile, tileIdx) => {
                 const verdictKey = tile.folder && tile.filename ? `${tile.folder}/${tile.filename}` : null;
-                const communityVerdict = verdictKey ? communityPhotoVerdicts?.[verdictKey] : undefined;
-                const isCommunitySection = /^Community\s/i.test(section.source);
+                const photoVerdict = verdictKey ? communityPhotoVerdicts?.[verdictKey] : undefined;
                 return (
                 <PhotoTile
                   key={tile.key}
@@ -752,7 +751,7 @@ export default function PhotoCurator({
                   saving={savingKey === tile.key}
                   rotating={rotatingKey === tile.key}
                   cacheBust={cacheBusters.get(tile.key)}
-                  communityVerdict={isCommunitySection ? communityVerdict : undefined}
+                  photoVerdict={photoVerdict}
                   onEditCaption={(caption) => {
                     if (!tile.folder || !tile.filename) return;
                     patchLabel(tile.folder, tile.filename, { userLabel: caption.trim() || null });
@@ -790,7 +789,7 @@ function PhotoTile({
   onEditCaption,
   onDelete,
   onRotate,
-  communityVerdict,
+  photoVerdict,
 }: {
   tile: {
     key: string;
@@ -807,7 +806,7 @@ function PhotoTile({
   onEditCaption: (caption: string) => void;
   onDelete: () => void;
   onRotate: (degrees: 90 | 270) => void;
-  communityVerdict?: CommunityPhotoVerdict;
+  photoVerdict?: CommunityPhotoVerdict;
 }) {
   // Effective caption — user override wins, else labeler output, else
   // whatever the parent passed in (static label fallback), else blank.
@@ -842,27 +841,27 @@ function PhotoTile({
           background: "rgba(17,24,39,0.7)", color: "white", fontSize: 10, fontWeight: 600,
           padding: "2px 6px", borderRadius: 3,
         }}>{index}</div>
-        {communityVerdict && (
+        {photoVerdict && (
           <div
-            title={communityVerdict.reason || (
-              communityVerdict.match === "yes" ? "Confirmed for this community"
-              : communityVerdict.match === "uncertain" ? "Unconfirmed — not indexed online but no strong mismatch"
-              : "Does not belong in this community folder"
+            title={photoVerdict.reason || (
+              photoVerdict.match === "yes" ? "Matches the expected community"
+              : photoVerdict.match === "uncertain" ? "Unconfirmed — not indexed online but no strong mismatch"
+              : "Flagged — does not match the community folder"
             )}
             style={{
               position: "absolute", top: 4, right: 4,
               width: 22, height: 22, borderRadius: "50%",
               display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: communityVerdict.match === "uncertain" ? 11 : 13,
+              fontSize: photoVerdict.match === "uncertain" ? 11 : 13,
               fontWeight: 800, lineHeight: 1,
               background:
-                communityVerdict.match === "yes" ? "#16a34a"
-                : communityVerdict.match === "uncertain" ? "#d97706"
+                photoVerdict.match === "yes" ? "#16a34a"
+                : photoVerdict.match === "uncertain" ? "#d97706"
                 : "#dc2626",
               color: "#fff",
               boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
             }}
-          >{communityVerdict.match === "yes" ? "✓" : communityVerdict.match === "uncertain" ? "?" : "✕"}</div>
+          >{photoVerdict.match === "yes" ? "✓" : photoVerdict.match === "uncertain" ? "?" : "✕"}</div>
         )}
         {hidden && (
           <div style={{
