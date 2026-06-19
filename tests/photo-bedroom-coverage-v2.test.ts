@@ -9,6 +9,7 @@ import {
   detectBedTypeFromCaption,
   bedroomClustersSameRoom,
   mergeBedroomClustersByCaption,
+  mergeBedroomClustersSameRoom,
   isBedroomCategory,
   parseExpectedBedInventory,
   batchBedroomVisionRepresentatives,
@@ -192,6 +193,22 @@ check("mergeBedroomClustersByCaption stops at expected and keeps distinct bed ty
   mergeKeepsDistinct.clusters.length === 3
   && mergeKeepsDistinct.clusters.some((c) => /queen/i.test(c.map((x) => x.caption).join(" ")))
   && mergeKeepsDistinct.clusters.some((c) => /twin/i.test(c.map((x) => x.caption).join(" "))));
+
+const sameRoomMerge = mergeBedroomClustersSameRoom([
+  [{ id: "a", caption: "Two Queens Bedroom" }],
+  [{ id: "b", caption: "Queen Bedroom With Two Beds" }],
+  [{ id: "c", caption: "Twin Bedroom" }],
+]);
+check("mergeBedroomClustersSameRoom folds duplicate Two Queens clusters",
+  sameRoomMerge.clusters.length === 2 && sameRoomMerge.mergedCount === 1);
+
+const kingAngles = mergeBedroomClustersSameRoom([
+  [{ id: "a", caption: "King Bedroom" }],
+  [{ id: "b", caption: "King Bedroom With View" }],
+  [{ id: "c", caption: "Queen Bedroom" }],
+]);
+check("mergeBedroomClustersSameRoom folds duplicate King clusters",
+  kingAngles.clusters.length === 2 && kingAngles.mergedCount === 1);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

@@ -25,6 +25,10 @@ import crypto from "crypto";
 import sharp from "sharp";
 import { inferKindFromFolder, labelPhoto, listPhotoFiles } from "./photo-labeler";
 import { backfillBedroomPrecomputeForFolder } from "./bedroom-precompute";
+import {
+  mergeBedroomClustersByCaption,
+  mergeBedroomClustersSameRoom,
+} from "../shared/photo-bedroom-coverage-logic";
 import { storage } from "./storage";
 
 // Category priority. Lower index = higher priority (kept first).
@@ -462,7 +466,11 @@ function coalesceBathrooms(items: LabeledResult[]): LabeledResult[] {
 // else largest cluster), and re-captions each photo as "Master Bedroom",
 // "Bedroom 2", etc. with the bed type appended when detected. Unlike
 // coalesceBedrooms this keeps every photo — user curates manually.
-async function labelBedroomsInPlace(items: LabeledResult[], folderPath: string): Promise<LabeledResult[]> {
+async function labelBedroomsInPlace(
+  items: LabeledResult[],
+  folderPath: string,
+  opts: { expectedBedrooms?: number | null } = {},
+): Promise<LabeledResult[]> {
   if (items.length === 0) return items;
   const hashes = await Promise.all(
     items.map((it) => computeDHash(path.join(folderPath, it.tempName)))
@@ -475,32 +483,54 @@ async function labelBedroomsInPlace(items: LabeledResult[], folderPath: string):
     if (!clusters.has(c)) { clusters.set(c, []); clusterOrder.push(c); }
     clusters.get(c)!.push(items[i]);
   }
-  const clusterBedType = (c: number): string | null => {
-    for (const it of clusters.get(c) ?? []) {
-      const bt = detectBedType(it.label ?? "");
+
+  type BedroomRef = { id: string; caption: string; item: LabeledResult };
+  let bedroomGroups: BedroomRef[][] = clusterOrder.map((c) =>
+    (clusters.get(c) ?? []).map((it) => ({
+      id: it.tempName,
+      caption: it.label ?? "",
+      item: it,
+    })),
+  );
+
+  // dHash splits different angles of one room — fold same-room pairs first.
+  bedroomGroups = mergeBedroomClustersSameRoom(bedroomGroups).clusters;
+  if (opts.expectedBedrooms != null && opts.expectedBedrooms > 0
+    && bedroomGroups.length > opts.expectedBedrooms) {
+    bedroomGroups = mergeBedroomClustersByCaption(
+      bedroomGroups,
+      opts.expectedBedrooms,
+    ).clusters;
+  }
+
+  const clusterBedType = (group: BedroomRef[]): string | null => {
+    for (const ref of group) {
+      const bt = detectBedType(ref.caption);
       if (bt) return bt;
     }
     return null;
   };
-  const clusterSize = (c: number) => (clusters.get(c)?.length ?? 0);
-  const kingCluster = clusterOrder.find((c) => clusterBedType(c) === "King");
-  const twoKings = clusterOrder.find((c) => clusterBedType(c) === "Two Kings");
-  const masterCluster = kingCluster ?? twoKings ??
-    clusterOrder.slice().sort((a, b) => clusterSize(b) - clusterSize(a))[0];
+  const clusterSize = (group: BedroomRef[]) => group.length;
+  const kingClusterIdx = bedroomGroups.findIndex((g) => clusterBedType(g) === "King");
+  const twoKingsIdx = bedroomGroups.findIndex((g) => clusterBedType(g) === "Two Kings");
+  const masterClusterIdx = kingClusterIdx >= 0 ? kingClusterIdx
+    : twoKingsIdx >= 0 ? twoKingsIdx
+    : bedroomGroups
+      .map((g, i) => ({ i, size: clusterSize(g) }))
+      .sort((a, b) => b.size - a.size)[0]?.i ?? 0;
 
   const renderType = (bt: string | null) => bt ? ` — ${bt}` : "";
-  const labelCluster = (c: number, name: string) => {
-    const bt = clusterBedType(c);
-    const slice = clusters.get(c) ?? [];
-    slice.forEach((it, i) => {
-      it.label = i === 0 ? `${name}${renderType(bt)}` : `${name} — Alt View`;
+  const labelCluster = (group: BedroomRef[], name: string) => {
+    const bt = clusterBedType(group);
+    group.forEach((ref, i) => {
+      ref.item.label = i === 0 ? `${name}${renderType(bt)}` : `${name} — Alt View`;
     });
   };
-  labelCluster(masterCluster, "Master Bedroom");
+  labelCluster(bedroomGroups[masterClusterIdx] ?? [], "Master Bedroom");
   let bedroomNum = 2;
-  for (const c of clusterOrder) {
-    if (c === masterCluster) continue;
-    labelCluster(c, `Bedroom ${bedroomNum}`);
+  for (let idx = 0; idx < bedroomGroups.length; idx++) {
+    if (idx === masterClusterIdx) continue;
+    labelCluster(bedroomGroups[idx], `Bedroom ${bedroomNum}`);
     bedroomNum++;
   }
   // Return every item (not just masters) — labels mutated in place above.
@@ -714,7 +744,9 @@ export async function downloadAndPrioritize(opts: {
   // survive are Zillow's own doing, and the user wants to see them.
   const bedroomItems = survivors.filter((r) => r.category === "Bedrooms");
   const bathroomItems = survivors.filter((r) => r.category === "Bathrooms");
-  const relabeledBedrooms = await labelBedroomsInPlace(bedroomItems, folderPath);
+  const relabeledBedrooms = await labelBedroomsInPlace(bedroomItems, folderPath, {
+    expectedBedrooms: opts.requiredBedrooms ?? null,
+  });
   const relabeledBathrooms = labelBathroomsInPlace(bathroomItems);
   // Rebuild survivors by overlaying the re-labeled bedrooms/bathrooms
   // into their original positions — labels change, order doesn't.
@@ -889,6 +921,23 @@ export type RelabelFolderProgress = {
   label?: string;
 };
 
+async function readFolderExpectedBedrooms(folderPath: string): Promise<number | null> {
+  try {
+    const raw = await fs.promises.readFile(path.join(folderPath, "_source.json"), "utf8");
+    const data = JSON.parse(raw) as {
+      bedrooms?: unknown;
+      referencedBy?: Array<{ bedrooms?: unknown }>;
+    };
+    const direct = Number(data?.bedrooms);
+    if (Number.isFinite(direct) && direct > 0 && direct <= 12) return direct;
+    const fromRef = Number(data?.referencedBy?.[0]?.bedrooms);
+    if (Number.isFinite(fromRef) && fromRef > 0 && fromRef <= 12) return fromRef;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Re-run Claude vision labels for every photo in a folder, then re-cluster bedrooms/bathrooms. */
 export async function relabelFolderPhotos(
   folder: string,
@@ -938,7 +987,8 @@ export async function relabelFolderPhotos(
 
   const bedroomItems = rows.filter((r) => r.category === "Bedrooms");
   const bathroomItems = rows.filter((r) => r.category === "Bathrooms");
-  const relabeledBedrooms = await labelBedroomsInPlace(bedroomItems, folderPath);
+  const expectedBedrooms = await readFolderExpectedBedrooms(folderPath);
+  const relabeledBedrooms = await labelBedroomsInPlace(bedroomItems, folderPath, { expectedBedrooms });
   const relabeledBathrooms = labelBathroomsInPlace(bathroomItems);
   const labelByName = new Map<string, LabeledResult>();
   for (const r of [...relabeledBedrooms, ...relabeledBathrooms]) labelByName.set(r.tempName, r);
