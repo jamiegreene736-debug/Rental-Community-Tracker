@@ -24,6 +24,7 @@
 
 import { randomBytes } from "crypto";
 import { guestyRequest } from "./guesty-sync";
+import { findGuestyConversationById, sendGuestyConversationMessage, deliveryOutcome } from "./guesty-ota-messaging";
 import { storage } from "./storage";
 import {
   buildPaymentReceiptBody,
@@ -126,12 +127,6 @@ function conversationIdForReservation(reservation: any): string | null {
   return id ? String(id) : null;
 }
 
-async function sendGuestyMessage(conversationId: string, body: string, channelType: string): Promise<void> {
-  // Guesty's /send-message rejects extra module keys, so send only `type`.
-  const module: Record<string, unknown> = { type: channelType || "email" };
-  await guestyRequest("POST", `/communication/conversations/${conversationId}/send-message`, { body, module });
-}
-
 type PendingTxn = { kind: ReceiptKind; txn: ReceiptTransaction; reservation: any };
 
 export async function runGuestReceipts(): Promise<NonNullable<typeof _lastRunResult>> {
@@ -230,7 +225,7 @@ export async function runGuestReceipts(): Promise<NonNullable<typeof _lastRunRes
   return _lastRunResult;
 }
 
-async function processTransaction(item: PendingTxn, now: number): Promise<{ outcome: "sent" | "skipped" | "error"; body?: string; reason?: string }> {
+async function processTransaction(item: PendingTxn, now: number, opts?: { allowResend?: boolean }): Promise<{ outcome: "sent" | "skipped" | "error"; body?: string; reason?: string }> {
   const { kind, txn, reservation } = item;
   const reservationId = String(reservation?._id ?? reservation?.id ?? "");
   const dedupKey = receiptDedupKey({ reservationId, kind, dateIso: txn.dateIso, amount: txn.amount });
@@ -242,9 +237,23 @@ async function processTransaction(item: PendingTxn, now: number): Promise<{ outc
   // misconfigured longer token would silently swallow real channels.
   if (SKIP_CHANNELS.some((s) => channelLc.includes(s))) return { outcome: "skipped", reason: `channel ${channel} is muted` };
 
-  // Already sent? done. (A pending/error row is reused below to retry.)
+  // Already handled? done. "sent" = delivery confirmed; "unconfirmed" = posted
+  // but not confirmed; "misroute" = filed off the guest's OTA channel. For the
+  // 5-min SCHEDULER all three are TERMINAL — the message was already posted to
+  // Guesty once, so re-posting would pile up duplicate receipts on the thread.
+  // (A "pending"/"error" row is still reused below to retry a not-yet-posted
+  // send.) The operator's manual force-send (`allowResend`) may deliberately
+  // retry a non-confirmed send (e.g. after fixing the channel) — only a "sent"
+  // row blocks it, matching the pre-hardening manual behavior.
+  const terminalStatuses = opts?.allowResend ? ["sent"] : ["sent", "unconfirmed", "misroute"];
   const existing = await storage.getGuestReceiptByDedupKey(dedupKey);
-  if (existing && existing.status === "sent") return { outcome: "skipped", reason: "already sent", body: existing.messageBody ?? undefined };
+  if (existing && terminalStatuses.includes(existing.status)) {
+    const reason =
+      existing.status === "sent" ? "already sent"
+        : existing.status === "unconfirmed" ? "already posted (delivery unconfirmed) — not resending"
+          : "previously misrouted off the guest channel — not resending";
+    return { outcome: "skipped", reason, body: existing.messageBody ?? undefined };
+  }
 
   // Need a conversation to post into. If none yet, do NOT write a row — retry
   // on a later tick once Guesty has a conversation for the reservation.
@@ -360,12 +369,54 @@ async function processTransaction(item: PendingTxn, now: number): Promise<{ outc
     await storage.updateGuestReceiptContent(token, { messageBody: body, payload, conversationId }).catch(() => {});
   }
 
-  // Post the message, then mark the row's send outcome.
+  // Post the message through the delivery-verified OTA path (the same hardened
+  // path as Message AD / the inbox compose box): resolve the proven-delivering
+  // module from the reservation's integration.platform, send ONCE, and confirm
+  // the channel actually accepted it via module.externalId. A bare Guesty
+  // `pending` post is NOT proof the guest received the receipt — see AGENTS.md
+  // #51 and the guesty-bookingcom-delivery-externalid memory.
   try {
-    await sendGuestyMessage(conversationId, body, channel);
-    await storage.markGuestReceiptSent(token, conversationId, channel);
-    console.log(`[guest-receipts] sent ${kind} receipt $${txn.amount.toFixed(2)} to reservation ${reservationId} (${channel})`);
-    return { outcome: "sent", body };
+    const conversation = await findGuestyConversationById(conversationId, reservationId, channel);
+    const module = conversation?.module ?? { type: channel || "email" };
+    const delivery = await sendGuestyConversationMessage({
+      conversationId: conversation?.id ?? conversationId,
+      body,
+      module,
+      reservation: conversation?.reservation ?? reservation,
+      channelHint: channel,
+      logPrefix: "guest-receipts",
+    });
+    const deliveredChannel = delivery.deliveryModuleType || delivery.deliveredVia || channel;
+    const resolvedConversationId = conversation?.id ?? conversationId;
+
+    switch (deliveryOutcome(delivery)) {
+      case "delivered":
+        await storage.markGuestReceiptSent(token, resolvedConversationId, deliveredChannel);
+        console.log(`[guest-receipts] sent ${kind} receipt $${txn.amount.toFixed(2)} to reservation ${reservationId} (${deliveredChannel})`);
+        return { outcome: "sent", body };
+      case "misroute":
+        // HARD non-delivery: Guesty filed the receipt off the guest's booking
+        // channel (e.g. on email). Do NOT write a "sent" ledger row — record a
+        // terminal misroute (so the scheduler stops re-posting email copies) and
+        // surface it for the operator.
+        // If this terminal mark fails the row stays non-terminal and the next
+        // tick would re-post — log loudly rather than swallowing silently.
+        await storage.markGuestReceiptMisrouted(token, delivery.reason ?? `not delivered to the ${deliveredChannel} guest channel`)
+          .catch((markErr) => console.error(`[guest-receipts] failed to mark misroute for reservation ${reservationId}: ${markErr?.message ?? markErr}`));
+        console.warn(`[guest-receipts] ${kind} receipt MISROUTE for reservation ${reservationId} (${deliveredChannel}): ${delivery.reason ?? ""}`);
+        return { outcome: "error", body, reason: delivery.reason ?? "misrouted off the guest channel" };
+      default:
+        // "unconfirmed": posted to the OTA channel but not confirmed within the
+        // verify window. The message WAS posted exactly once — record a terminal
+        // "unconfirmed" so the 5-minute scheduler never posts a duplicate
+        // receipt, but don't claim a clean delivery.
+        // If this terminal mark fails the row stays "pending" and the next tick
+        // would re-post — log loudly rather than swallowing silently.
+        await storage.markGuestReceiptUnconfirmed(token, resolvedConversationId, deliveredChannel, delivery.reason ?? "delivery not confirmed yet")
+          .catch((markErr) => console.error(`[guest-receipts] failed to mark unconfirmed for reservation ${reservationId}: ${markErr?.message ?? markErr}`));
+        console.warn(`[guest-receipts] ${kind} receipt POSTED but ${deliveredChannel} delivery unconfirmed for reservation ${reservationId} — not resending: ${delivery.reason ?? ""}`);
+        return { outcome: "sent", body };
+    }
   } catch (e: any) {
     await storage.markGuestReceiptError(token, e?.message ?? String(e)).catch(() => {});
     console.error(`[guest-receipts] send failed (${kind}, reservation ${reservationId}): ${e?.message ?? e}`);
@@ -442,7 +493,9 @@ export async function sendReceiptForReservation(opts: {
   const results: Array<{ kind: ReceiptKind; amount: number; outcome: string; reason?: string; body?: string }> = [];
   for (const item of pending) {
     try {
-      const { outcome, body, reason } = await processTransaction(item, now);
+      // Manual operator force-send: allow retrying a non-confirmed
+      // (unconfirmed/misroute) prior send; only a confirmed "sent" row blocks.
+      const { outcome, body, reason } = await processTransaction(item, now, { allowResend: true });
       results.push({ kind: item.kind, amount: item.txn.amount, outcome, reason, body });
     } catch (e: any) {
       results.push({ kind: item.kind, amount: item.txn.amount, outcome: "error", reason: e?.message ?? String(e) });

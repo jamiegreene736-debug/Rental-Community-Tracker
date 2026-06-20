@@ -184,6 +184,36 @@ export function postDeliveryState(post: Record<string, unknown>): "delivered" | 
   return "pending";
 }
 
+/**
+ * Collapse a `sendGuestyConversationMessage` result into the single action a
+ * BACKGROUND sender (auto-reply auto-send, booking confirmations, guest
+ * receipts) should take:
+ *
+ *   - `delivered`   → the channel confirmed delivery (module.externalId /
+ *                     completed). Record it as sent.
+ *   - `misroute`    → a HARD non-delivery: Guesty filed our message off the
+ *                     guest's OTA channel (e.g. on email), so the guest never
+ *                     got it on the channel they booked with. Do NOT record it
+ *                     as sent. (`pending === false` is the explicit misroute
+ *                     signal from verifyOtaHostPostDelivered.)
+ *   - `unconfirmed` → posted to the OTA channel but not confirmed within the
+ *                     verify window. The message WAS posted exactly once, so the
+ *                     caller must record it terminally to avoid a duplicate
+ *                     re-send on the next tick — but never as a clean delivery.
+ *
+ * Note `pending` is only a misroute when EXPLICITLY false. A missing/undefined
+ * `pending` (verified false, pending not set) is treated as `unconfirmed`, never
+ * a hard misroute — we never suppress a record or flag a thread on an ambiguous
+ * verdict.
+ */
+export function deliveryOutcome(
+  result: { verified?: boolean; pending?: boolean } | null | undefined,
+): "delivered" | "unconfirmed" | "misroute" {
+  if (result?.verified) return "delivered";
+  if (result?.pending === false) return "misroute";
+  return "unconfirmed";
+}
+
 export function verifyOtaHostPostDelivered(
   posts: unknown[],
   sentBody: string,

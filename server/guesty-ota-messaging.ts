@@ -16,6 +16,7 @@ import {
 
 export {
   buildOtaSendModuleAttempts,
+  deliveryOutcome,
   guestyChannelLabel,
   guestyModuleTypeLooksOta,
   guestySendMessageModule,

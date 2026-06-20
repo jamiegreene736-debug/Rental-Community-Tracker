@@ -7790,7 +7790,10 @@ export async function registerRoutes(
       try {
         const receiptRows = await storage.getRecentGuestReceipts(300);
         for (const row of receiptRows) {
-          if (row.status !== "sent") continue;
+          // "unconfirmed" = posted to the guest's OTA channel exactly once
+          // (delivery just not confirmed within the verify window) — count it as
+          // sent. "misroute"/"error"/"pending" did NOT reach the guest channel.
+          if (row.status !== "sent" && row.status !== "unconfirmed") continue;
           const sentRaw = row.messageSentAt ?? row.createdAt;
           if (!sentRaw) continue;
           const sentDate = new Date(sentRaw as any);
@@ -10334,7 +10337,10 @@ Requirements:
         const rows: any[] = await storage.getGuestReceiptsByReservationIds(reservationIds).catch(() => []);
         const byReservation = new Map<string, any[]>();
         for (const r of rows) {
-          if (r.status !== "sent") continue;
+          // "unconfirmed" = posted to the guest channel once (delivery not yet
+          // confirmed) — show the "Receipt sent" badge so the operator doesn't
+          // re-send a duplicate. "misroute"/"error"/"pending" stay hidden.
+          if (r.status !== "sent" && r.status !== "unconfirmed") continue;
           const list = byReservation.get(r.reservationId) ?? [];
           list.push(r);
           byReservation.set(r.reservationId, list);

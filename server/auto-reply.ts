@@ -4,6 +4,7 @@
 // attempt is persisted to autoReplyLog.
 
 import { guestyRequest } from "./guesty-sync";
+import { findGuestyConversationById, sendGuestyConversationMessage, deliveryOutcome } from "./guesty-ota-messaging";
 import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { occupancyForBedrooms } from "../shared/occupancy";
@@ -702,6 +703,46 @@ async function sendReply(conversationId: string, body: string, moduleField: { ty
     body,
     module: mod,
   });
+}
+
+// Delivery-verified send for the AUTO-SEND engine (runAutoSendQueue). Routes
+// through the same hardened path as Message AD / the inbox compose box: resolve
+// the proven-delivering OTA module from the reservation's integration.platform,
+// send ONCE, and confirm the channel actually accepted it via module.externalId.
+// A bare Guesty `pending` post is NOT proof the guest received it — see
+// AGENTS.md #51 and the guesty-bookingcom-delivery-externalid memory. Returns
+// the verdict so the caller never marks a thread "replied" on a hard misroute.
+// (The manual operator banner send uses sendReply above — it's interactive and
+// out of this scope.)
+async function deliverGuestyReply(args: {
+  conversationId: string;
+  body: string;
+  channel?: string | null;
+  reservationId?: string | null;
+}): Promise<{ verified: boolean; pending: boolean; deliveredVia: string; deliveryModuleType?: string; reason?: string }> {
+  const conversation = await findGuestyConversationById(
+    args.conversationId,
+    args.reservationId ?? null,
+    args.channel ?? null,
+  );
+  // If the conversation can't be resolved (Guesty hiccup), fall back to a bare
+  // channel module so a clean draft still attempts delivery.
+  const module = conversation?.module ?? { type: args.channel || "email" };
+  const result = await sendGuestyConversationMessage({
+    conversationId: conversation?.id ?? args.conversationId,
+    body: args.body,
+    module,
+    reservation: conversation?.reservation ?? null,
+    channelHint: args.channel ?? null,
+    logPrefix: "auto-reply-send",
+  });
+  return {
+    verified: result.verified,
+    pending: result.pending === true,
+    deliveredVia: result.deliveredVia,
+    deliveryModuleType: result.deliveryModuleType,
+    reason: result.reason,
+  };
 }
 
 // --- Context gathering (Claude tool-use) ---------------------------------
@@ -1515,10 +1556,38 @@ export async function runAutoSendQueue(): Promise<{ due: number; sent: number; i
             intercepted++;
             continue;
           }
-          await sendReply(fresh.conversationId, draft, fresh.channel ? { type: fresh.channel } : undefined);
+          const delivery = await deliverGuestyReply({
+            conversationId: fresh.conversationId,
+            body: draft,
+            channel: fresh.channel,
+            reservationId: fresh.reservationId,
+          });
+          if (deliveryOutcome(delivery) === "misroute") {
+            // HARD MISROUTE: Guesty filed our reply off the guest's OTA channel
+            // (e.g. on email) so the guest never received it on the channel they
+            // booked with. Do NOT mark the thread replied — flag it for the
+            // operator instead of silently claiming a delivery.
+            await storage.updateAutoReplyLog(fresh.id, {
+              replyDraft: draft,
+              status: "flagged",
+              flagReason: `Auto-send not delivered: ${delivery.reason ?? `landed off the ${delivery.deliveredVia} guest channel`}`,
+              sendAfter: null,
+            });
+            intercepted++;
+            console.warn(`[auto-reply] auto-send MISROUTE for draft ${fresh.id} (conversation ${fresh.conversationId}): ${delivery.reason ?? ""}`);
+            continue;
+          }
+          // Delivered (externalId confirmed) OR posted-but-unconfirmed
+          // ("pending"): the message was posted EXACTLY ONCE, so mark it sent so
+          // the queue never re-posts a duplicate. `pending` is logged as
+          // unconfirmed rather than silently treated as a clean delivery.
           await storage.updateAutoReplyLog(fresh.id, { replyDraft: draft, replySent: true, status: "sent", autoSent: true, errorMessage: null, sendAfter: null });
           sent++;
-          console.log(`[auto-reply] AUTO-SENT draft ${fresh.id} (conversation ${fresh.conversationId})`);
+          if (delivery.verified) {
+            console.log(`[auto-reply] AUTO-SENT draft ${fresh.id} (conversation ${fresh.conversationId}, delivered via ${delivery.deliveredVia})`);
+          } else {
+            console.warn(`[auto-reply] AUTO-SENT draft ${fresh.id} POSTED but ${delivery.deliveredVia} delivery unconfirmed — not resending: ${delivery.reason ?? ""}`);
+          }
         } catch (err) {
           errors++;
           await storage.updateAutoReplyLog(queuedLog.id, { status: "flagged", flagReason: `Auto-send failed: ${(err as Error).message}`, sendAfter: null }).catch(() => {});
