@@ -255,7 +255,12 @@ import {
   unitGalleryMaxKeep,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
-import { isolateRedfinSubjectGallery, redfinPhotoSetId } from "./redfin-gallery";
+import {
+  isolateRedfinSubjectGallery,
+  redfinPhotoSetId,
+  subjectGalleryFromJsonLd,
+  MIN_JSONLD_SUBJECT_GALLERY,
+} from "./redfin-gallery";
 import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-combo";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
@@ -4273,6 +4278,29 @@ function extractGenericRealEstateGalleryFromHtml(html: string): { urls: string[]
         `[redfin-gallery] subjectSetId=${redfinIsolated.subjectSetId ?? "none"} ` +
         `kept=${redfinIsolated.urls.length} droppedComps=${redfinIsolated.droppedComps}`,
       );
+    }
+
+    // Host-agnostic subject-gallery isolation. Redfin's photoSetId guard above
+    // only protects Redfin; Homes.com and every other portal also render a
+    // "Nearby similar homes" carousel whose thumbnails the greedy harvest above
+    // sweeps into the unit folder (the "jumbled photos from multiple units" the
+    // operator reported on re-pull). A listing page's JSON-LD `image` array is
+    // the SUBJECT unit's own authoritative gallery — the comp carousel lives in a
+    // separate ItemList node and is never part of it. When structured data gives
+    // us a substantial subject gallery, trust ONLY it and drop the page-wide
+    // harvest. Redfin JSON-LD is typically sparse (< the threshold), so Redfin
+    // keeps relying on the photoSetId isolation above — no behavior change there.
+    // See server/redfin-gallery.ts.
+    const jsonLdGallery = subjectGalleryFromJsonLd(html);
+    if (jsonLdGallery.length >= MIN_JSONLD_SUBJECT_GALLERY) {
+      // Belt-and-suspenders: re-run Redfin isolation on the structured-data set
+      // (no-op for non-Redfin and for an already-clean subject gallery).
+      const isolated = isolateRedfinSubjectGallery(html, jsonLdGallery);
+      console.log(
+        `[listing-gallery] using JSON-LD subject gallery: kept=${isolated.urls.length} ` +
+        `(page harvest had ${redfinIsolated.urls.length})`,
+      );
+      return { urls: isolated.urls, facts };
     }
 
     return { urls: redfinIsolated.urls, facts };

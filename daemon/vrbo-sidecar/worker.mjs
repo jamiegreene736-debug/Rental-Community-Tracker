@@ -8388,6 +8388,7 @@ async function processListingGalleryScrape(id, params) {
 
   let photos = await page.evaluate(({ maxPhotos }) => {
     const seen = new Set();
+    const jsonLdHits = [];
     const galleryHits = [];
     const pageHits = [];
     const scriptHits = [];
@@ -8429,11 +8430,42 @@ async function processListingGalleryScrape(id, params) {
       });
     }
 
-    // Harvest in priority order; the shared `seen` makes the three buckets
-    // disjoint (a URL is claimed by the highest-priority source that sees it).
-    // 1) Scoped gallery/carousel containers — purest: the subject listing's own
-    //    gallery, which lives in a DIFFERENT container than "similar homes"/
-    //    neighborhood/agent sections, so those are structurally excluded.
+    // Harvest in priority order; the shared `seen` makes the buckets disjoint
+    // (a URL is claimed by the highest-priority source that sees it).
+    // 0) JSON-LD structured data — the SUBJECT unit's own image array. A listing
+    //    page's structured data describes the subject unit; the "Nearby similar
+    //    homes" carousel lives in a SEPARATE ItemList node, so the subject's
+    //    image array can never include comps. This is the most reliable
+    //    "only this unit's photos" source on portals (esp. Homes.com) whose
+    //    scoped-gallery markup the container selectors below don't match — the
+    //    case where the page-level harvest used to bleed other units' thumbnails
+    //    into one folder. Mirrors server/redfin-gallery.ts subjectGalleryFromJsonLd;
+    //    skips ItemList / breadcrumb / org / site subtrees so a comp carousel or
+    //    a logo set can't masquerade as the gallery.
+    const LD_SKIP_TYPE = /(?:ItemList|BreadcrumbList|SiteNavigationElement|Organization|WebSite|WebPage|Person|RealEstateAgent)/i;
+    const LD_SUBJECT_TYPE = /(?:Residence|House|Apartment|Accommodation|Product|Place|RealEstateListing|SingleFamilyResidence|LodgingBusiness|Offer|Home|Property)/i;
+    const ldTypeStr = (n) => (Array.isArray(n && n["@type"]) ? n["@type"].join(" ") : String((n && n["@type"]) || ""));
+    const visitLd = (node, depth, withinSubject) => {
+      if (!node || depth > 8) return;
+      if (Array.isArray(node)) { node.forEach((v) => visitLd(v, depth + 1, withinSubject)); return; }
+      if (typeof node !== "object") return;
+      const ts = ldTypeStr(node);
+      if (LD_SKIP_TYPE.test(ts)) return;
+      const isSubject = withinSubject || LD_SUBJECT_TYPE.test(ts);
+      if (isSubject && node.image != null) {
+        const imgs = Array.isArray(node.image) ? node.image : [node.image];
+        imgs.forEach((i) => accept(typeof i === "string" ? i : (i && (i.url || i.contentUrl)), jsonLdHits));
+      }
+      Object.values(node).forEach((v) => visitLd(v, depth + 1, isSubject));
+    };
+    document.querySelectorAll('script[type="application/ld+json"]').forEach((s) => {
+      try { visitLd(JSON.parse(s.textContent || "null"), 0, false); } catch { /* malformed block */ }
+    });
+
+    // 1) Scoped gallery/carousel containers — purest DOM source: the subject
+    //    listing's own gallery, which lives in a DIFFERENT container than
+    //    "similar homes"/neighborhood/agent sections, so those are structurally
+    //    excluded.
     const containerSel = [
       ".photo-gallery", "[data-rf-test-name='MediaCarousel']", ".InlinePhotoPreview",
       ".photos-container", "[data-testid='hollywood-image-tile']", "ul.media-stream",
@@ -8461,16 +8493,21 @@ async function processListingGalleryScrape(id, params) {
     const cap = Math.max(1, Math.min(120, Number(maxPhotos) || 40));
     const MIN_TRUSTED = 4;
     let chosen;
-    if (galleryHits.length >= MIN_TRUSTED) {
-      // A substantial scoped gallery exists → return ONLY it (purest provenance,
-      // excludes page-level "similar homes" thumbnails and script comps).
+    if (jsonLdHits.length >= MIN_TRUSTED) {
+      // A substantial structured-data subject gallery exists → return ONLY it.
+      // This is the strongest isolation: comps live in a separate ItemList node
+      // and are excluded by construction, so no "similar homes" thumbnails leak.
+      chosen = jsonLdHits;
+    } else if (galleryHits.length >= MIN_TRUSTED) {
+      // A substantial scoped gallery exists → return ONLY it (purest DOM
+      // provenance, excludes page-level "similar homes" thumbnails and comps).
       chosen = galleryHits;
     } else {
-      // Scoped gallery sparse/absent (portal markup didn't match, or a tiny
-      // widget): union the few gallery photos with the rest of the on-page
-      // images so a 1-2 image widget doesn't suppress a full page of photos.
-      // Fall to script-mined JSON ONLY when nothing was displayed at all.
-      const displayed = galleryHits.concat(pageHits);
+      // Both trusted sources sparse/absent (portal markup didn't match, or a tiny
+      // widget): union the few structured/scoped photos with the rest of the
+      // on-page images so a 1-2 image widget doesn't suppress a full page of
+      // photos. Fall to script-mined JSON ONLY when nothing was displayed at all.
+      const displayed = jsonLdHits.concat(galleryHits, pageHits);
       chosen = displayed.length > 0 ? displayed : scriptHits;
     }
     return chosen.slice(0, cap);
