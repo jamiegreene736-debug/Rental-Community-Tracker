@@ -9065,15 +9065,25 @@ Requirements:
     return channel.includes("booking") ? sanitizeForBookingChannel(body) : body;
   };
 
-  const cleanGuestyConversationModule = (mod: any): Record<string, unknown> => {
+  const parseGuestyConversationModule = (mod: any): Record<string, unknown> => {
     const clean: Record<string, unknown> = {};
     if (mod && typeof mod === "object") {
-      for (const key of ["type", "channelId", "platform", "integrationId"] as const) {
-        if (mod[key] !== undefined) clean[key] = mod[key];
+      for (const key of ["type", "channelId"] as const) {
+        const val = mod[key];
+        if (val !== undefined && val !== null && val !== "") clean[key] = val;
       }
     }
     if (!clean.type) clean.type = "email";
     return clean;
+  };
+
+  // Guesty POST /send-message rejects platform, integrationId, templateValues, etc.
+  // Only `type` (+ optional `channelId`) — same shape as guest-receipts.ts.
+  const guestySendMessageModule = (mod: Record<string, unknown>): Record<string, unknown> => {
+    const parsed = parseGuestyConversationModule(mod);
+    const out: Record<string, unknown> = { type: parsed.type ?? "email" };
+    if (parsed.channelId !== undefined) out.channelId = parsed.channelId;
+    return out;
   };
 
   const guestyModuleTypeLooksOta = (type: string): boolean => {
@@ -9118,13 +9128,7 @@ Requirements:
     const needsType = !guestyModuleTypeLooksOta(currentType) || currentType === "email";
     const next: Record<string, unknown> = { ...module };
     if (needsType) next.type = otaType;
-    if (!next.integrationId && reservation?.integration?._id) {
-      next.integrationId = reservation.integration._id;
-    }
-    if (!next.platform && reservation?.integration?.platform) {
-      next.platform = reservation.integration.platform;
-    }
-    return cleanGuestyConversationModule(next);
+    return parseGuestyConversationModule(next);
   };
 
   const moduleFromConversationPosts = async (conversationId: string): Promise<Record<string, unknown> | null> => {
@@ -9138,12 +9142,12 @@ Requirements:
       for (const post of [...posts].reverse()) {
         const mod = post?.module;
         if (mod && typeof mod === "object" && guestyModuleTypeLooksOta(String(mod.type ?? ""))) {
-          return cleanGuestyConversationModule(mod);
+          return parseGuestyConversationModule(mod);
         }
       }
       for (const post of [...posts].reverse()) {
         if (post?.module && typeof post.module === "object") {
-          return cleanGuestyConversationModule(post.module);
+          return parseGuestyConversationModule(post.module);
         }
       }
     } catch (postsErr: any) {
@@ -9158,7 +9162,7 @@ Requirements:
     reservation: any,
     channelHint?: string | null,
   ): Promise<Record<string, unknown>> => {
-    let module = cleanGuestyConversationModule(rawModule ?? {});
+    let module = parseGuestyConversationModule(rawModule ?? {});
     const type = String(module.type ?? "").toLowerCase();
     const missingChannelId = module.channelId === undefined || module.channelId === null || module.channelId === "";
 
@@ -9215,7 +9219,7 @@ Requirements:
     }
     if (!conversationId) return null;
 
-    if (!rawModule || !guestyModuleTypeLooksOta(String(cleanGuestyConversationModule(rawModule).type ?? ""))) {
+    if (!rawModule || !guestyModuleTypeLooksOta(String(parseGuestyConversationModule(rawModule).type ?? ""))) {
       try {
         const conv = await guestyRequest(
           "GET",
@@ -9229,7 +9233,7 @@ Requirements:
 
     const module = reservation
       ? await finalizeGuestyConversationModule(conversationId, rawModule, reservation, channelHint)
-      : cleanGuestyConversationModule(rawModule ?? {});
+      : parseGuestyConversationModule(rawModule ?? {});
 
     if (guestyModuleTypeLooksOta(String(module.type ?? "")) && !module.channelId) {
       console.warn(
@@ -9254,26 +9258,36 @@ Requirements:
     logPrefix?: string;
   }): Promise<{ deliveredVia: string }> => {
     const { conversationId, body, module, channelHint, logPrefix = "booking-alternatives" } = args;
-    const cleanModule = cleanGuestyConversationModule(module);
+    const sendModule = guestySendMessageModule(module);
     const send = (mod: Record<string, unknown>) =>
       guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversationId)}/send-message`, {
         body,
-        module: cleanGuestyConversationModule(mod),
+        module: guestySendMessageModule(mod),
       });
 
-    try {
-      await send(cleanModule);
-      return { deliveredVia: guestyChannelLabel(cleanModule) };
-    } catch (sendErr: any) {
-      const modType = String(cleanModule.type ?? "email").toLowerCase();
-      if (modType === "email" || !otaChannelRequested(cleanModule, channelHint)) throw sendErr;
-      console.error(`[${logPrefix}] OTA channel send failed — not falling back to email:`, sendErr?.message ?? sendErr);
-      const channelLabel = guestyChannelLabel(cleanModule);
-      const channelIdNote = cleanModule.channelId ? "" : " (Guesty conversation module is missing channelId)";
-      throw new Error(
-        `Could not deliver through ${channelLabel}${channelIdNote}: ${sendErr?.message ?? sendErr}. Message was not sent via email.`,
-      );
+    let lastErr: any = null;
+    const attempts: Record<string, unknown>[] = [sendModule];
+    const modType = String(sendModule.type ?? "email").toLowerCase();
+    if (sendModule.channelId && guestyModuleTypeLooksOta(modType)) {
+      attempts.push({ type: sendModule.type });
     }
+
+    for (const attempt of attempts) {
+      try {
+        await send(attempt);
+        return { deliveredVia: guestyChannelLabel(attempt) };
+      } catch (sendErr: any) {
+        lastErr = sendErr;
+      }
+    }
+
+    const modTypeFinal = String(sendModule.type ?? "email").toLowerCase();
+    if (modTypeFinal === "email" || !otaChannelRequested(sendModule, channelHint)) throw lastErr;
+    console.error(`[${logPrefix}] OTA channel send failed — not falling back to email:`, lastErr?.message ?? lastErr);
+    const channelLabel = guestyChannelLabel(sendModule);
+    throw new Error(
+      `Could not deliver through ${channelLabel}: ${lastErr?.message ?? lastErr}. Message was not sent via email.`,
+    );
   };
 
   // ── Lazy photo re-screen for already-built guest pages ──────────────────

@@ -4009,8 +4009,10 @@ assert.ok(
     routesSource.includes("SEND_GUEST_MESSAGE_TIMEOUT_MS") &&
     routesSource.includes("isBookingChannel(channelHint)") &&
     routesSource.includes("moduleFromConversationPosts") &&
+    routesSource.includes("guestySendMessageModule") &&
+    routesSource.includes('["type", "channelId"]') &&
     routesSource.includes("not falling back to email") &&
     routesSource.includes("deliveredVia"),
-  "send-guest-message should resolve real Guesty OTA module (with channelId), not silently email-fallback, and report delivery channel",
+  "send-guest-message should send only Guesty-allowed module keys (type/channelId), not platform/integrationId",
 );
 console.log("  ✓ Operations Alternative Unit + Message AD guest messaging");
