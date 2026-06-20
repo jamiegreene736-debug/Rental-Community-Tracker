@@ -243,5 +243,9 @@ export function verifyOtaHostPostDelivered(
       reason: `Guesty saved the message on ${sawWrongChannel} instead of the OTA guest channel, so it was NOT delivered to the guest's booking channel`,
     };
   }
-  return { verified: false, reason: "No matching host post found on the conversation after send" };
+  // The POST succeeded but no body-matching host post surfaced in the window —
+  // most likely sync lag, or the channel re-wrapped the body past the strict
+  // matcher. This is UNCONFIRMED, not a wrong-channel misroute: report `pending`
+  // (queued — don't resend) rather than a hard "saved on email" failure.
+  return { verified: false, pending: true, reason: "Message was posted but delivery is not confirmed yet" };
 }

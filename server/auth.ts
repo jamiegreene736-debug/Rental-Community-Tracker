@@ -226,6 +226,9 @@ function agentApiMethodAllowed(req: Request): boolean {
   if (method === "GET" && path === "/api/inbox/templates") return true;
   if (method === "GET" && path.startsWith("/api/inbox/sms/conversations/")) return true;
   if (method === "POST" && /^\/api\/inbox\/sms\/conversations\/[^/]+\/send$/.test(path)) return true;
+  // Verified Guesty send (replaces the client-direct guesty-proxy /send-message
+  // at line ~220 for inbox replies + receipts) — agent-role inbox users send too.
+  if (method === "POST" && /^\/api\/inbox\/conversations\/[^/]+\/send$/.test(path)) return true;
   if ((method === "PUT" || method === "PATCH") && /^\/api\/inbox\/sms\/conversations\/[^/]+\/(phone|links)$/.test(path)) return true;
   if (method === "GET" && path.startsWith("/api/inbox/calls/")) return true;
   if (method === "POST" && /^\/api\/inbox\/calls\/(\d+|conversations\/[^/]+)\/acknowledge$/.test(path)) return true;
