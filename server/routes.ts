@@ -87,6 +87,7 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
+import { findGuestyConversationForReservation, sendGuestyConversationMessage } from "./guesty-ota-messaging";
 import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress, lookupHawaiiStatewideTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
   acquireSidecarLane,
@@ -9065,231 +9066,6 @@ Requirements:
     return channel.includes("booking") ? sanitizeForBookingChannel(body) : body;
   };
 
-  const parseGuestyConversationModule = (mod: any): Record<string, unknown> => {
-    const clean: Record<string, unknown> = {};
-    if (mod && typeof mod === "object") {
-      for (const key of ["type", "channelId"] as const) {
-        const val = mod[key];
-        if (val !== undefined && val !== null && val !== "") clean[key] = val;
-      }
-    }
-    if (!clean.type) clean.type = "email";
-    return clean;
-  };
-
-  // Guesty POST /send-message rejects platform, integrationId, templateValues, etc.
-  // Only `type` (+ optional `channelId`) — same shape as guest-receipts.ts.
-  const guestySendMessageModule = (mod: Record<string, unknown>): Record<string, unknown> => {
-    const parsed = parseGuestyConversationModule(mod);
-    const out: Record<string, unknown> = { type: parsed.type ?? "email" };
-    if (parsed.channelId !== undefined) out.channelId = parsed.channelId;
-    return out;
-  };
-
-  const guestyModuleTypeLooksOta = (type: string): boolean => {
-    const t = String(type ?? "").toLowerCase();
-    return t.includes("booking") || t.includes("airbnb") || t.includes("homeaway") || t.includes("vrbo");
-  };
-
-  const otaModuleTypeFromReservation = (reservation: any, channelHint?: string | null): string | null => {
-    const hint = String(channelHint ?? "").toLowerCase();
-    if (hint.includes("booking")) return "bookingCom";
-    if (hint.includes("airbnb")) return "airbnb2";
-    if (hint.includes("vrbo") || hint.includes("homeaway")) return "homeaway";
-
-    const platform = String(reservation?.integration?.platform ?? "").trim();
-    if (platform && platform.toLowerCase() !== "email") return platform;
-
-    const sourceText = normalizeAlternativeText(reservation?.source, 80).toLowerCase();
-    if (/booking\.?com/.test(sourceText)) return "bookingCom";
-    if (/airbnb/.test(sourceText)) return "airbnb2";
-    if (/vrbo|homeaway|expedia/.test(sourceText)) return "homeaway";
-    return null;
-  };
-
-  const guestyChannelLabel = (module: Record<string, unknown>): string => {
-    const t = String(module.type ?? "email").toLowerCase();
-    if (t.includes("booking")) return "Booking.com";
-    if (t.includes("airbnb")) return "Airbnb";
-    if (t.includes("homeaway") || t.includes("vrbo")) return "VRBO";
-    if (t === "email") return "email";
-    return String(module.type ?? "unknown");
-  };
-
-  const mergeOtaModuleFromReservation = (
-    module: Record<string, unknown>,
-    reservation: any,
-    channelHint?: string | null,
-  ): Record<string, unknown> => {
-    const otaType = otaModuleTypeFromReservation(reservation, channelHint);
-    if (!otaType) return module;
-
-    const currentType = String(module.type ?? "").toLowerCase();
-    const needsType = !guestyModuleTypeLooksOta(currentType) || currentType === "email";
-    const next: Record<string, unknown> = { ...module };
-    if (needsType) next.type = otaType;
-    return parseGuestyConversationModule(next);
-  };
-
-  const moduleFromConversationPosts = async (conversationId: string): Promise<Record<string, unknown> | null> => {
-    try {
-      const postsData = await guestyRequest(
-        "GET",
-        `/communication/conversations/${encodeURIComponent(conversationId)}/posts?limit=30`,
-      ) as any;
-      const posts = postsData?.data?.posts ?? postsData?.posts ?? postsData?.results ?? [];
-      if (!Array.isArray(posts)) return null;
-      for (const post of [...posts].reverse()) {
-        const mod = post?.module;
-        if (mod && typeof mod === "object" && guestyModuleTypeLooksOta(String(mod.type ?? ""))) {
-          return parseGuestyConversationModule(mod);
-        }
-      }
-      for (const post of [...posts].reverse()) {
-        if (post?.module && typeof post.module === "object") {
-          return parseGuestyConversationModule(post.module);
-        }
-      }
-    } catch (postsErr: any) {
-      console.warn("[booking-alternatives] posts module lookup failed:", postsErr?.message ?? postsErr);
-    }
-    return null;
-  };
-
-  const finalizeGuestyConversationModule = async (
-    conversationId: string,
-    rawModule: Record<string, unknown> | null | undefined,
-    reservation: any,
-    channelHint?: string | null,
-  ): Promise<Record<string, unknown>> => {
-    let module = parseGuestyConversationModule(rawModule ?? {});
-    const type = String(module.type ?? "").toLowerCase();
-    const missingChannelId = module.channelId === undefined || module.channelId === null || module.channelId === "";
-
-    if (!guestyModuleTypeLooksOta(type) || missingChannelId) {
-      const postsModule = await moduleFromConversationPosts(conversationId);
-      if (postsModule) {
-        const postsType = String(postsModule.type ?? "").toLowerCase();
-        if (guestyModuleTypeLooksOta(postsType) || (!guestyModuleTypeLooksOta(type) && postsType !== "email")) {
-          module = postsModule;
-        }
-      }
-    }
-
-    return mergeOtaModuleFromReservation(module, reservation, channelHint);
-  };
-
-  const findGuestyConversationForReservation = async (
-    reservationId: string,
-    channelHint?: string | null,
-  ): Promise<{ id: string; module: Record<string, unknown> } | null> => {
-    const rid = String(reservationId ?? "").trim();
-    if (!rid) return null;
-
-    const reservation = await guestyRequest(
-      "GET",
-      `/reservations/${encodeURIComponent(rid)}?fields=${encodeURIComponent("conversationId conversation integration source")}`,
-    ).catch(() => null) as any;
-
-    let conversationId = "";
-    let rawModule: Record<string, unknown> | null = null;
-
-    try {
-      const data = await guestyRequest(
-        "GET",
-        `/communication/conversations?reservationId=${encodeURIComponent(rid)}&limit=1&fields=`,
-      ) as any;
-      const rows = data?.data?.conversations ?? data?.conversations ?? data?.results ?? [];
-      if (Array.isArray(rows) && rows.length > 0) {
-        const c = rows[0];
-        conversationId = String(c?._id ?? c?.id ?? "").trim();
-        rawModule = c?.module ?? c?.lastPost?.module ?? c?.lastMessage?.module ?? null;
-      }
-    } catch (searchErr: any) {
-      console.warn("[booking-alternatives] conversation search failed, falling back to reservation doc:", searchErr?.message ?? searchErr);
-    }
-
-    if (!conversationId && reservation) {
-      conversationId = String(
-        reservation?.conversationId
-        ?? reservation?.conversation?._id
-        ?? reservation?.conversation?.id
-        ?? "",
-      ).trim();
-    }
-    if (!conversationId) return null;
-
-    if (!rawModule || !guestyModuleTypeLooksOta(String(parseGuestyConversationModule(rawModule).type ?? ""))) {
-      try {
-        const conv = await guestyRequest(
-          "GET",
-          `/communication/conversations/${encodeURIComponent(conversationId)}?fields=${encodeURIComponent("module")}`,
-        ) as any;
-        if (conv?.module) rawModule = conv.module;
-      } catch {
-        /* posts fallback inside finalize */
-      }
-    }
-
-    const module = reservation
-      ? await finalizeGuestyConversationModule(conversationId, rawModule, reservation, channelHint)
-      : parseGuestyConversationModule(rawModule ?? {});
-
-    if (guestyModuleTypeLooksOta(String(module.type ?? "")) && !module.channelId) {
-      console.warn(
-        `[booking-alternatives] OTA module for reservation ${rid} is missing channelId (type=${String(module.type)}) — send may fail`,
-      );
-    }
-
-    return { id: conversationId, module };
-  };
-
-  const otaChannelRequested = (module: Record<string, unknown>, channelHint?: string | null): boolean => {
-    if (guestyModuleTypeLooksOta(String(module.type ?? ""))) return true;
-    const hint = String(channelHint ?? "").toLowerCase();
-    return /airbnb|booking|vrbo|homeaway/.test(hint);
-  };
-
-  const sendGuestyConversationMessage = async (args: {
-    conversationId: string;
-    body: string;
-    module: Record<string, unknown>;
-    channelHint?: string | null;
-    logPrefix?: string;
-  }): Promise<{ deliveredVia: string }> => {
-    const { conversationId, body, module, channelHint, logPrefix = "booking-alternatives" } = args;
-    const sendModule = guestySendMessageModule(module);
-    const send = (mod: Record<string, unknown>) =>
-      guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversationId)}/send-message`, {
-        body,
-        module: guestySendMessageModule(mod),
-      });
-
-    let lastErr: any = null;
-    const attempts: Record<string, unknown>[] = [sendModule];
-    const modType = String(sendModule.type ?? "email").toLowerCase();
-    if (sendModule.channelId && guestyModuleTypeLooksOta(modType)) {
-      attempts.push({ type: sendModule.type });
-    }
-
-    for (const attempt of attempts) {
-      try {
-        await send(attempt);
-        return { deliveredVia: guestyChannelLabel(attempt) };
-      } catch (sendErr: any) {
-        lastErr = sendErr;
-      }
-    }
-
-    const modTypeFinal = String(sendModule.type ?? "email").toLowerCase();
-    if (modTypeFinal === "email" || !otaChannelRequested(sendModule, channelHint)) throw lastErr;
-    console.error(`[${logPrefix}] OTA channel send failed — not falling back to email:`, lastErr?.message ?? lastErr);
-    const channelLabel = guestyChannelLabel(sendModule);
-    throw new Error(
-      `Could not deliver through ${channelLabel}: ${lastErr?.message ?? lastErr}. Message was not sent via email.`,
-    );
-  };
-
   // ── Lazy photo re-screen for already-built guest pages ──────────────────
   // The vision screen runs at build time, but pages built before it existed (or
   // by an older/weaker pass) keep their identifying photos. These helpers
@@ -10351,11 +10127,13 @@ Requirements:
         return res.status(400).json({ error: "message body required" });
       }
 
-      const { deliveredVia } = await sendGuestyConversationMessage({
+      const { deliveredVia, verified, deliveryModuleType } = await sendGuestyConversationMessage({
         conversationId: conversation.id,
         body,
         module: conversation.module,
+        reservation: conversation.reservation,
         channelHint,
+        logPrefix: "booking-alternatives",
       });
       if (token) {
         await storage.markBookingAlternativePageSent(token, channelHint).catch((e) =>
@@ -10364,7 +10142,13 @@ Requirements:
       if (responded) return;
       responded = true;
       clearTimeout(timer);
-      return res.json({ ok: true, conversationId: conversation.id, deliveredVia });
+      return res.json({
+        ok: true,
+        conversationId: conversation.id,
+        deliveredVia,
+        verified,
+        deliveryModuleType: deliveryModuleType ?? null,
+      });
     } catch (err: any) {
       if (responded) return;
       responded = true;
@@ -10465,6 +10249,7 @@ Requirements:
         conversationId: conversation.id,
         body,
         module: conversation.module,
+        reservation: conversation.reservation,
         channelHint: channel,
         logPrefix: "cancellation-notice",
       });
