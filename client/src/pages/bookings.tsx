@@ -44,6 +44,7 @@ import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log"
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
+import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
@@ -4848,11 +4849,18 @@ function ArrivalDetailsMessageDialog({
   useEffect(() => {
     if (!data || messageEditedRef.current) return;
     const units = (data.units ?? []).map(arrivalUnitDetailForMessage);
+    // Aloha/Mahalo for Hawaii listings, Hi/Thanks for mainland (e.g. Florida).
+    // Region is resolved from the unit address(es), falling back to the property
+    // name, then to Hawaii (the current portfolio) when nothing resolves.
+    const regionSource = units.map((u) => u.unitAddress).filter(Boolean).join(" ") || propertyName || "";
+    const region = resolveIslandRegion(regionSource);
+    const isHawaii = region ? !/\bflorida\b/i.test(region) : true;
     setMessage(buildArrivalDetailsGuestMessage({
       guestFirstName: firstName,
       propertyName,
       checkInIso: checkInOf(reservation),
       units,
+      isHawaii,
     }));
   }, [data, firstName, propertyName, reservation]);
 
