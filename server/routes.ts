@@ -4028,8 +4028,19 @@ type ScrapeOptions = {
 };
 
 // Preflight photo fetch, builder rescrape, and replacement find-unit run on
-// Railway — opening the operator's local Chrome is unexpected there.
+// Railway — opening the operator's local Chrome is unexpected there, and the
+// synchronous wizard callers (add-single-listing / add-community) must never
+// hang the UI on a 90s sidecar. They all run SCRAPE_WITHOUT_SIDECAR.
 const SCRAPE_WITHOUT_SIDECAR: ScrapeOptions = { sidecarWalletMs: 0 };
+// EXCEPTION (2026-06-20, claude/festive-kilby): the "Re-pull all photos"
+// background job (preflight photo-fetch-jobs, Stage 1 — rescrape of the unit's
+// OWN saved listing) opts INTO the residential-IP sidecar tier so a
+// Redfin/Homes/Zillow listing that bot-walls to a single og:image on Railway's
+// datacenter IP is still fully recovered (this was the documented gap that left
+// re-pulled galleries missing bedroom photos). Safe because it's a background
+// job (no UI latency budget) and the sidecar fires only when datacenter
+// scraping came up short, merging — never clobbering (Load-Bearing #5, #45).
+const SCRAPE_WITH_SIDECAR: ScrapeOptions = { sidecarWalletMs: 90_000 };
 
 function listingScrapePlatform(url: string): "realtor" | "zillow" | "redfin" | "homes" | "other" {
   if (/realtor\.com\/realestateandhomes-detail/i.test(url)) return "realtor";
@@ -35707,7 +35718,7 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
@@ -35724,7 +35735,15 @@ Return ONLY compact JSON with this exact shape:
       // preflight "Find different photos" action can ask discovery to jump
       // past the top candidate once.
       skipFirst?: number;
+      // Opt INTO the residential-IP Chrome sidecar tier for the DIRECT
+      // (`url`) rescrape. Only the "Re-pull all photos" background job sets
+      // this — synchronous wizard callers omit it and stay sidecar-free so
+      // the UI never hangs on a 90s sidecar. See SCRAPE_WITH_SIDECAR / LB #45.
+      useSidecar?: boolean;
     };
+    // Direct-url rescrape scrape options: sidecar ON only when the background
+    // re-pull explicitly opts in, otherwise the long-standing no-sidecar path.
+    const directScrapeOptions = useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR;
 
     let listingUrl: string | undefined = url || undefined;
     let foundVia: "url" | "search" = "url";
@@ -36349,7 +36368,7 @@ Return ONLY compact JSON with this exact shape:
       // wizard ignores facts so this is additive (combo always returns
       // an empty facts object — no behavior change for combo).
       const facts: ListingFacts = {};
-      const photos = await scrapeListingPhotos(listingUrl, undefined, facts, SCRAPE_WITHOUT_SIDECAR);
+      const photos = await scrapeListingPhotos(listingUrl, undefined, facts, directScrapeOptions);
       const scrapedBR = facts.bedrooms ?? null;
       const bedroomMismatch = scrapedBR !== null && (
         requestedBedrooms ? scrapedBR !== requestedBedrooms : !!minimumBedrooms && scrapedBR < minimumBedrooms

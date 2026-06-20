@@ -2428,7 +2428,28 @@ assert.ok(
 );
 assert.ok(
   routeSource.includes("...SCRAPE_WITHOUT_SIDECAR"),
-  "fetch-unit-photos must not enqueue zillow_photo_scrape on the local sidecar",
+  "fetch-unit-photos discovery path must stay sidecar-free (only the opt-in direct rescrape may use the sidecar)",
+);
+// "Re-pull all photos" (preflight background job, Stage 1 — rescrape of the
+// unit's OWN saved listing) opts INTO the residential-IP sidecar so a
+// Redfin/Homes/Zillow listing that bot-walls to a single og:image on Railway's
+// datacenter IP is still fully recovered instead of re-pulling thin. Synchronous
+// wizard callers omit the flag and stay sidecar-free. See Load-Bearing #45.
+assert.ok(
+  routeSource.includes("const SCRAPE_WITH_SIDECAR: ScrapeOptions = { sidecarWalletMs: 90_000 }"),
+  "the background re-pull path must define a sidecar-enabled scrape option",
+);
+assert.ok(
+  routeSource.includes("const directScrapeOptions = useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR"),
+  "fetch-unit-photos direct rescrape must enable the sidecar ONLY when the caller opts in",
+);
+assert.ok(
+  routeSource.includes("scrapeListingPhotos(listingUrl, undefined, facts, directScrapeOptions)"),
+  "fetch-unit-photos direct rescrape must use the opt-in (sidecar-aware) scrape options",
+);
+assert.ok(
+  preflightJobsSource.includes("useSidecar: true"),
+  "Re-pull all photos (own-listing rescrape) must opt into the residential-IP sidecar",
 );
 assert.ok(
   routeSource.includes("scrapeListingPhotosDualSource(clusterUrls, candidateFacts, SCRAPE_WITHOUT_SIDECAR)"),

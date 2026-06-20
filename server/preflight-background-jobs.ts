@@ -251,7 +251,17 @@ async function runPreflightPhotoFetchJob(
           // No bedroom gate: this IS the unit's own listing — never reject it on
           // a scraped-bedroom mismatch (resort condos often mis-parse).
           bedrooms: "any",
-        }, 120_000);
+          // Opt into the residential-IP sidecar: a Redfin/Homes/Zillow listing
+          // whose datacenter scrape returns 0 usable gallery photos (bot-wall /
+          // block page) is otherwise re-pulled thin (missing bedrooms). This is
+          // a background job, so the extra sidecar latency is invisible to the
+          // UI. The 300s timeout gives headroom for the worst realistic chain —
+          // Apify (180s ceiling) then a 90s sidecar wallet — so a genuinely slow
+          // re-pull isn't silently dropped into discovery; if it still overruns
+          // it fails soft to the discovery loop below (current behavior). The
+          // sidecar is inert/fast when the worker is offline. See LB #45.
+          useSidecar: true,
+        }, 300_000);
         lastNote = typeof fetchData?.note === "string" ? fetchData.note : lastNote;
         const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
         const nextSourceUrl: string | null = fetchData?.sourceUrl ?? rescrapeSourceUrl;
