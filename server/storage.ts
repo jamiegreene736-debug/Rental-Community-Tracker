@@ -301,6 +301,13 @@ export interface IStorage {
   getGuestReceiptByDedupKey(dedupKey: string): Promise<GuestReceipt | undefined>;
   getGuestReceiptByToken(token: string): Promise<GuestReceipt | undefined>;
   markGuestReceiptSent(token: string, conversationId: string | null, channel: string | null): Promise<void>;
+  // Posted to the OTA channel but delivery not confirmed within the verify
+  // window — terminal so the scheduler never re-posts a duplicate receipt, but
+  // recorded as "unconfirmed", NOT a clean "sent".
+  markGuestReceiptUnconfirmed(token: string, conversationId: string | null, channel: string | null, reason: string): Promise<void>;
+  // Hard misroute — Guesty filed the receipt off the guest's booking channel
+  // (e.g. on email). Terminal (so we stop re-posting copies) and NOT "sent".
+  markGuestReceiptMisrouted(token: string, reason: string): Promise<void>;
   markGuestReceiptError(token: string, errorMessage: string): Promise<void>;
   updateGuestReceiptContent(token: string, fields: { messageBody: string; payload: unknown; conversationId?: string | null }): Promise<void>;
   recordGuestReceiptOpen(token: string): Promise<void>;
@@ -1435,6 +1442,23 @@ export class DatabaseStorage implements IStorage {
       channel: channel ?? null,
       errorMessage: null,
       messageSentAt: new Date(),
+    }).where(eq(guestReceipts.token, token));
+  }
+
+  async markGuestReceiptUnconfirmed(token: string, conversationId: string | null, channel: string | null, reason: string): Promise<void> {
+    await db.update(guestReceipts).set({
+      status: "unconfirmed",
+      conversationId: conversationId ?? null,
+      channel: channel ?? null,
+      errorMessage: reason.slice(0, 1000),
+      messageSentAt: new Date(),
+    }).where(eq(guestReceipts.token, token));
+  }
+
+  async markGuestReceiptMisrouted(token: string, reason: string): Promise<void> {
+    await db.update(guestReceipts).set({
+      status: "misroute",
+      errorMessage: reason.slice(0, 1000),
     }).where(eq(guestReceipts.token, token));
   }
 

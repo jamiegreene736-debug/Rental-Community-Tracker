@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   buildOtaSendModuleAttempts,
+  deliveryOutcome,
   mergeOtaModuleFromReservation,
   otaModuleTypeFromReservation,
   postDeliveryState,
@@ -176,5 +177,20 @@ const noMatch = verifyOtaHostPostDelivered(
 );
 assert.equal(noMatch.verified, false);
 assert.equal(noMatch.pending, true, "no body-matching post = unconfirmed/pending, not a hard misroute");
+
+// ── deliveryOutcome: the contract the BACKGROUND senders (auto-reply auto-send,
+// booking confirmations, guest receipts) act on. This is what keeps a stuck
+// `pending` post from being recorded as a clean delivery, and a hard misroute
+// from being recorded as "sent" at all.
+assert.equal(deliveryOutcome({ verified: true }), "delivered");
+assert.equal(deliveryOutcome({ verified: true, pending: true }), "delivered", "verified wins even if a pending flag is set");
+assert.equal(deliveryOutcome({ verified: false, pending: true }), "unconfirmed", "posted to OTA but not confirmed = unconfirmed (record terminally, don't claim delivery)");
+assert.equal(deliveryOutcome({ verified: false, pending: false }), "misroute", "pending:false is the explicit hard-misroute signal");
+// SAFETY: an ambiguous verdict (verified false, pending unset) must NOT be a
+// hard misroute — a misroute suppresses the sent record / flags the thread, so
+// we only do it on an EXPLICIT pending:false.
+assert.equal(deliveryOutcome({ verified: false }), "unconfirmed", "missing pending must not be treated as a misroute");
+assert.equal(deliveryOutcome({}), "unconfirmed");
+assert.equal(deliveryOutcome(null), "unconfirmed", "null result is conservatively unconfirmed, never a misroute");
 
 console.log("  ✓ guesty OTA send module resolution + delivery-confirmed verification");

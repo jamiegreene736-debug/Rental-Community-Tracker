@@ -1035,7 +1035,7 @@ export const bookingConfirmations = pgTable("booking_confirmations", {
   listingNickname: text("listing_nickname"),
   channel: text("channel"),
   messageBody: text("message_body").notNull(),
-  status: text("status").notNull(), // "sent" | "error"
+  status: text("status").notNull(), // "sent" (delivery confirmed) | "pending" (posted, delivery not confirmed) | "misroute" (filed off the guest's OTA channel) | "error"
   errorMessage: text("error_message"),
   sentAt: timestamp("sent_at").defaultNow().notNull(),
 });
@@ -1101,7 +1101,7 @@ export const guestReceipts = pgTable("guest_receipts", {
   channel: text("channel"),                                     // resolved send channel: bookingCom | airbnb2 | homeaway | email
   messageBody: text("message_body").notNull(),
   payload: jsonb("payload").notNull(),                          // render data for the /receipt page
-  status: text("status").notNull().default("pending"),         // "pending" | "sent" | "error"
+  status: text("status").notNull().default("pending"),         // "pending" (not yet sent) | "sent" (delivery confirmed) | "unconfirmed" (posted, delivery not confirmed) | "misroute" (filed off the guest's OTA channel) | "error" (send threw)
   errorMessage: text("error_message"),
   expiresAt: timestamp("expires_at"),
   messageSentAt: timestamp("message_sent_at"),
