@@ -3992,4 +3992,10 @@ assert.ok(
     bookingsSource.includes("/arrival-details"),
   "Operations should offer Alternative Unit + Message AD arrival-details draft/send",
 );
+assert.ok(
+  bookingsSource.includes("invalidateArrivalDetailsQueries") &&
+    bookingsSource.includes('refetchOnMount: "always"') &&
+    bookingsSource.includes("staleTime: 0"),
+  "Message AD should refetch arrival details after manual edits (not serve stale Infinity cache)",
+);
 console.log("  ✓ Operations Alternative Unit + Message AD guest messaging");

@@ -887,6 +887,16 @@ async function apiGetJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** Drop cached `/api/bookings/:id/arrival-details` rows after manual edits or VRBO extraction. */
+function invalidateArrivalDetailsQueries() {
+  queryClient.invalidateQueries({
+    predicate: (q) =>
+      Array.isArray(q.queryKey)
+      && q.queryKey[0] === "/api/bookings"
+      && q.queryKey[2] === "arrival-details",
+  });
+}
+
 // Accepts both pure date strings ("2026-10-17") and full ISO timestamps
 // ("2026-10-18T01:00:00.000Z"). Guesty returns the former as
 // `checkInDateLocalized` and the latter as `checkIn`.
@@ -4784,6 +4794,10 @@ function ArrivalDetailsMessageDialog({
   const { data, isLoading, refetch, isFetching } = useQuery<{ units: ArrivalUnitDetail[] }>({
     queryKey: ["/api/bookings", reservation._id, "arrival-details"],
     queryFn: ({ signal }) => apiGetJson(`/api/bookings/${encodeURIComponent(reservation._id)}/arrival-details`, signal),
+    // Global queryClient uses staleTime: Infinity — without this override, opening
+    // Message AD after a manual edit reuses the pre-edit cached payload.
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   const [message, setMessage] = useState("");
@@ -4928,6 +4942,7 @@ function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservati
     if (!data?.arrivalExtracted) return;
     queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
     queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+    invalidateArrivalDetailsQueries();
     queryClient.invalidateQueries({ queryKey: ["/api/bookings"], predicate: (q) => String(q.queryKey[2] ?? "") === "unit-proximity" });
   }, [data?.arrivalExtracted, data?.arrivalFieldsUpdated?.join(",")]);
 
@@ -7572,6 +7587,7 @@ export default function Bookings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing", selectedListingId] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      invalidateArrivalDetailsQueries();
       setArrivalEditor(null);
       toast({ title: "Arrival details saved" });
     },
