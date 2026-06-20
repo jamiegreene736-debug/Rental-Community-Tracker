@@ -101,7 +101,7 @@ import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply
 import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { registerAssistantRoutes } from "./assistant/routes";
 import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar-automation";
-import { formatReceiptMoney, formatReceiptLongDate } from "@shared/receipt-message";
+import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel } from "@shared/receipt-message";
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
@@ -9077,26 +9077,52 @@ Requirements:
   };
 
   const findGuestyConversationForReservation = async (reservationId: string): Promise<{ id: string; module: Record<string, unknown> } | null> => {
-    // Guesty's Open API does NOT accept `?reservationId=` on
-    // /communication/conversations — it 400s with VALIDATION_ERROR
-    // ("reservationId" is not allowed), which threw and surfaced to the
-    // operator as a 500 "Failed to send guest message". The reservation
-    // document itself carries the conversationId, and its integration.platform
-    // is the channel to reply through. (Verified live 2026-06-07.)
+    const rid = String(reservationId ?? "").trim();
+    if (!rid) return null;
+
+    // Prefer the conversations search endpoint — it returns the REAL module
+    // (including channelId) that Guesty expects on /send-message. Synthesizing
+    // only { type: "bookingCom" } from reservation.source can leave sends
+    // rejected or wedged when channelId is required.
+    try {
+      const data = await guestyRequest(
+        "GET",
+        `/communication/conversations?reservationId=${encodeURIComponent(rid)}&limit=1&fields=`,
+      ) as any;
+      const rows = data?.data?.conversations ?? data?.conversations ?? data?.results ?? [];
+      if (Array.isArray(rows) && rows.length > 0) {
+        const c = rows[0];
+        const id = String(c?._id ?? c?.id ?? "").trim();
+        if (id) {
+          const rawMod = c?.module ?? c?.lastPost?.module ?? c?.lastMessage?.module ?? null;
+          return { id, module: cleanGuestyConversationModule(rawMod ?? {}) };
+        }
+      }
+    } catch (searchErr: any) {
+      console.warn("[booking-alternatives] conversation search failed, falling back to reservation doc:", searchErr?.message ?? searchErr);
+    }
+
     const reservation = await guestyRequest(
       "GET",
-      `/reservations/${encodeURIComponent(reservationId)}?fields=${encodeURIComponent("conversationId integration source")}`,
+      `/reservations/${encodeURIComponent(rid)}?fields=${encodeURIComponent("conversationId integration source")}`,
     ) as any;
     const id = reservation?.conversationId
       ?? reservation?.conversation?._id
       ?? reservation?.conversation?.id;
     if (!id) return null;
-    // Reply on the channel the guest booked with (Booking.com → bookingCom,
-    // Airbnb → airbnb2, Vrbo → homeaway). Guesty's send-message `module.type`
-    // expects this platform string. Prefer the integration's platform; fall
-    // back to mapping the reservation source so routing still works when the
-    // integration object isn't expanded. cleanGuestyConversationModule
-    // whitelists the safe fields and defaults to type "email" when unknown.
+
+    try {
+      const conv = await guestyRequest(
+        "GET",
+        `/communication/conversations/${encodeURIComponent(String(id))}?fields=${encodeURIComponent("module")}`,
+      ) as any;
+      if (conv?.module) {
+        return { id: String(id), module: cleanGuestyConversationModule(conv.module) };
+      }
+    } catch {
+      /* fall through to synthesized module */
+    }
+
     const sourceText = normalizeAlternativeText(reservation?.source, 60);
     const platformFromSource =
       /booking\.?com/i.test(sourceText) ? "bookingCom"
@@ -10130,16 +10156,43 @@ Requirements:
   });
 
   app.post("/api/booking-alternatives/send-guest-message", async (req, res) => {
+    const SEND_GUEST_MESSAGE_TIMEOUT_MS = 55_000;
+    let responded = false;
+    const timer = setTimeout(() => {
+      if (responded) return;
+      responded = true;
+      res.status(504).json({
+        error: "Failed to send guest message",
+        message: "Guest message send timed out after 55s — try again or copy the message manually",
+      });
+    }, SEND_GUEST_MESSAGE_TIMEOUT_MS);
     try {
       const reservationId = normalizeAlternativeText(req.body?.reservationId, 120);
       const token = String(req.body?.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
-      const channel = normalizeAlternativeText(req.body?.channel, 40) || null;
-      const body = sanitizeForChatText(String(req.body?.body ?? ""), { maxLength: 4_000 }).trim();
-      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
-      if (!body) return res.status(400).json({ error: "message body required" });
+      const channelHint = normalizeAlternativeText(req.body?.channel, 40) || null;
+      if (!reservationId) {
+        responded = true;
+        clearTimeout(timer);
+        return res.status(400).json({ error: "reservationId required" });
+      }
 
       const conversation = await findGuestyConversationForReservation(reservationId);
-      if (!conversation) return res.status(404).json({ error: "No Guesty conversation found for this reservation" });
+      if (!conversation) {
+        responded = true;
+        clearTimeout(timer);
+        return res.status(404).json({ error: "No Guesty conversation found for this reservation" });
+      }
+
+      let body = sanitizeForChatText(String(req.body?.body ?? ""), { maxLength: 4_000 }).trim();
+      const moduleType = String(conversation.module?.type ?? "");
+      if (isBookingChannel(channelHint) || moduleType.toLowerCase().includes("booking")) {
+        body = sanitizeForBookingChannel(body);
+      }
+      if (!body) {
+        responded = true;
+        clearTimeout(timer);
+        return res.status(400).json({ error: "message body required" });
+      }
 
       // The conversation's module carries the channel the guest booked through,
       // so Guesty routes this to VRBO/Booking.com/Airbnb accordingly. If the
@@ -10158,11 +10211,17 @@ Requirements:
         await sendGuestMessage({ type: "email" });
       }
       if (token) {
-        await storage.markBookingAlternativePageSent(token, channel).catch((e) =>
+        await storage.markBookingAlternativePageSent(token, channelHint).catch((e) =>
           console.error("[booking-alternatives] mark-sent failed:", e?.message ?? e));
       }
+      if (responded) return;
+      responded = true;
+      clearTimeout(timer);
       return res.json({ ok: true, conversationId: conversation.id });
     } catch (err: any) {
+      if (responded) return;
+      responded = true;
+      clearTimeout(timer);
       return res.status(500).json({ error: "Failed to send guest message", message: err?.message ?? String(err) });
     }
   });

@@ -3998,4 +3998,16 @@ assert.ok(
     bookingsSource.includes("staleTime: 0"),
   "Message AD should refetch arrival details after manual edits (not serve stale Infinity cache)",
 );
+assert.ok(
+  bookingsSource.includes("messageEditedRef") &&
+    bookingsSource.includes("apiPostJsonWithTimeout") &&
+    bookingsSource.includes("AbortController"),
+  "Message AD send should not overwrite user edits and should time out instead of spinning forever",
+);
+assert.ok(
+  routesSource.includes("/communication/conversations?reservationId=") &&
+    routesSource.includes("SEND_GUEST_MESSAGE_TIMEOUT_MS") &&
+    routesSource.includes("isBookingChannel(channelHint)"),
+  "send-guest-message should resolve real Guesty conversation module, enforce timeout, and sanitize Booking.com bodies",
+);
 console.log("  ✓ Operations Alternative Unit + Message AD guest messaging");
