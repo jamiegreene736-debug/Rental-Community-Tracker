@@ -3,6 +3,7 @@ import {
   buildOtaSendModuleAttempts,
   mergeOtaModuleFromReservation,
   otaModuleTypeFromReservation,
+  postDeliveryState,
   verifyOtaHostPostDelivered,
 } from "../shared/guesty-ota-send";
 
@@ -44,34 +45,122 @@ assert.ok(
   "send attempts must not include forbidden Guesty module keys",
 );
 
+// ── Delivery-state classification ──────────────────────────────────────────
+// A bare outbound post (status pending, no externalId) is NOT delivered; only a
+// channel-stamped externalId or a completed/sent status counts.
+assert.equal(postDeliveryState({ module: { type: "bookingCom" }, status: "pending" }), "pending");
+assert.equal(postDeliveryState({ module: { type: "bookingCom" } }), "pending");
+assert.equal(postDeliveryState({ module: { type: "bookingCom", externalId: "abc-123" }, status: "pending" }), "delivered");
+assert.equal(postDeliveryState({ module: { type: "bookingCom" }, status: "completed" }), "delivered");
+assert.equal(postDeliveryState({ module: { type: "bookingCom" }, status: "failed" }), "failed");
+
+// A delivered OTA host post (externalId present) verifies. The synced copy is
+// whitespace-reformatted by the channel (live: 1793 vs our 1801 chars) — the
+// strict matcher must tolerate that while still confirming the SAME message.
+const SENT_HI = "Hi Cecilio,\n\nYour stay at Alii Kai is coming up.\n\nAccess code: 1234";
 const verified = verifyOtaHostPostDelivered(
   [
     {
       sentBy: "host",
-      body: "Hi Cecilio,\n\nYour stay at Alii Kai is coming up.",
-      module: { type: "bookingCom2" },
+      body: "Hi Cecilio, Your stay at Alii Kai is coming up. Access code: 1234",
+      module: { type: "bookingCom2", externalId: "53157650-6cb2-11f1" },
       sentAt: "2026-06-20T16:00:00.000Z",
     },
   ],
-  "Hi Cecilio,\n\nYour stay at Alii Kai is coming up.\n\nAccess code: 1234",
+  SENT_HI,
   true,
 );
 assert.equal(verified.verified, true);
 assert.equal(verified.deliveryModuleType, "bookingcom2");
 
+// A still-pending OTA host post (no externalId) is NOT verified — it reports
+// pending so the caller can surface "queued, don't resend" instead of a false
+// success. This is the core fix (stuck Booking.com arrival messages, 2026-06-20).
+const SENT_AD = "Aloha Cecilio,\n\nPlease see the below access details.\n\nAccess code: 1234";
+const pendingOnly = verifyOtaHostPostDelivered(
+  [
+    {
+      sentBy: "host",
+      from: { type: "user", fullName: "Magical-island-rentals-v2" },
+      body: SENT_AD,
+      module: { type: "bookingCom" },
+      status: "pending",
+      createdAt: "2026-06-20T14:13:48.648Z",
+    },
+  ],
+  SENT_AD,
+  true,
+);
+assert.equal(pendingOnly.verified, false);
+assert.equal(pendingOnly.pending, true);
+
+// When BOTH a pending outbound copy and a delivered synced copy exist, the
+// delivered one wins (this is exactly the live shape: from=user pending +
+// from=null externalId).
+const pendingPlusDelivered = verifyOtaHostPostDelivered(
+  [
+    {
+      sentBy: "host",
+      body: SENT_AD,
+      module: { type: "bookingCom", externalId: "53157650-6cb2-11f1" },
+      createdAt: "2026-06-20T14:14:17.000Z",
+    },
+    {
+      sentBy: "host",
+      body: SENT_AD,
+      module: { type: "bookingCom" },
+      status: "pending",
+      createdAt: "2026-06-20T14:13:48.648Z",
+    },
+  ],
+  SENT_AD,
+  true,
+);
+assert.equal(pendingPlusDelivered.verified, true);
+
+// REGRESSION (review finding): an EDITED resend (corrected access code) must NOT
+// be falsely "confirmed" by a STALE delivered copy of the OLD message. The
+// greeting + signature are byte-identical (lenient head/tail match would pass),
+// so only the strict body matcher prevents a false green showing the wrong code.
+const correctedSent = "Aloha Guest,\n\nYour door access code is 5678.\n\nMahalo,\nJohn Carpenter";
+const staleVsCorrected = verifyOtaHostPostDelivered(
+  [
+    {
+      sentBy: "host",
+      body: correctedSent, // newest: corrected copy, still pending (no externalId)
+      module: { type: "bookingCom" },
+      status: "pending",
+      createdAt: "2026-06-20T15:10:00.000Z",
+    },
+    {
+      sentBy: "host",
+      body: "Aloha Guest,\n\nYour door access code is 1234.\n\nMahalo,\nJohn Carpenter", // STALE original, delivered
+      module: { type: "bookingCom", externalId: "old-delivered-1" },
+      createdAt: "2026-06-20T15:00:00.000Z",
+    },
+  ],
+  correctedSent,
+  true,
+);
+assert.equal(staleVsCorrected.verified, false, "edited resend must not verify against a stale delivered copy");
+assert.equal(staleVsCorrected.pending, true, "the corrected copy is still pending");
+
+// Wrong-channel (email) misroute is a HARD non-delivery, not "pending".
 const emailOnly = verifyOtaHostPostDelivered(
   [
     {
       sentBy: "host",
-      body: "Hi Cecilio,\n\nYour stay at Alii Kai is coming up.",
-      module: { type: "email" },
+      body: "Hi Cecilio, Your stay at Alii Kai is coming up. Access code: 1234",
+      module: { type: "email", externalId: "email-1" },
+      status: "completed",
       sentAt: "2026-06-20T16:00:00.000Z",
     },
   ],
-  "Hi Cecilio,\n\nYour stay at Alii Kai is coming up.",
+  SENT_HI,
   true,
 );
 assert.equal(emailOnly.verified, false);
+assert.equal(emailOnly.pending, false, "email misroute must NOT be reported as pending");
 assert.match(String(emailOnly.reason), /OTA guest channel/i);
 
-console.log("  ✓ guesty OTA send module resolution + post-send verification");
+console.log("  ✓ guesty OTA send module resolution + delivery-confirmed verification");
