@@ -10127,7 +10127,7 @@ Requirements:
         return res.status(400).json({ error: "message body required" });
       }
 
-      const { deliveredVia, verified, deliveryModuleType } = await sendGuestyConversationMessage({
+      const { deliveredVia, verified, pending, deliveryModuleType, reason } = await sendGuestyConversationMessage({
         conversationId: conversation.id,
         body,
         module: conversation.module,
@@ -10135,7 +10135,10 @@ Requirements:
         channelHint,
         logPrefix: "booking-alternatives",
       });
-      if (token) {
+      // Only record the durable "Guest messaged ✓" badge when the message
+      // actually reached the channel (delivered) or is queued on it (pending) —
+      // a misroute (filed on email) must NOT show as messaged.
+      if (token && (verified || pending)) {
         await storage.markBookingAlternativePageSent(token, channelHint).catch((e) =>
           console.error("[booking-alternatives] mark-sent failed:", e?.message ?? e));
       }
@@ -10147,7 +10150,12 @@ Requirements:
         conversationId: conversation.id,
         deliveredVia,
         verified,
+        // `pending` = Guesty accepted the post but the OTA channel
+        // (Booking.com/Airbnb/VRBO) has not confirmed delivery yet. The client
+        // shows a "queued — don't resend" notice rather than a false success.
+        pending: pending === true,
         deliveryModuleType: deliveryModuleType ?? null,
+        deliveryReason: reason ?? null,
       });
     } catch (err: any) {
       if (responded) return;
@@ -10245,7 +10253,7 @@ Requirements:
       const conversation = await findGuestyConversationForReservation(reservationId, channel);
       if (!conversation) return res.status(404).json({ error: "No Guesty conversation found for this reservation" });
 
-      await sendGuestyConversationMessage({
+      const { verified, pending, deliveredVia, reason } = await sendGuestyConversationMessage({
         conversationId: conversation.id,
         body,
         module: conversation.module,
@@ -10253,10 +10261,14 @@ Requirements:
         channelHint: channel,
         logPrefix: "cancellation-notice",
       });
-      // Internal flag ONLY — we intentionally do not change the reservation status.
-      await storage.recordCancellationNoticeSent(reservationId, channel, body).catch((e) =>
-        console.error("[cancellation-notice] mark-sent failed:", e?.message ?? e));
-      return res.json({ ok: true, conversationId: conversation.id });
+      // A genuine misroute (posted, but neither delivered nor queued on the OTA
+      // channel) is NOT a real notice — don't record the durable "sent ✓" badge
+      // for it. Internal flag ONLY — we never change the reservation status.
+      if (verified || pending) {
+        await storage.recordCancellationNoticeSent(reservationId, channel, body).catch((e) =>
+          console.error("[cancellation-notice] mark-sent failed:", e?.message ?? e));
+      }
+      return res.json({ ok: true, conversationId: conversation.id, verified, pending: pending === true, deliveredVia, deliveryReason: reason ?? null });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to send cancellation notice", message: err?.message ?? String(err) });
     }

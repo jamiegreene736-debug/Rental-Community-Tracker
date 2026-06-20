@@ -1,11 +1,16 @@
 import { guestyRequest } from "./guesty-sync";
 import {
+  bodiesAreDuplicate,
   buildOtaSendModuleAttempts,
   guestyChannelLabel,
   guestyModuleTypeLooksOta,
+  isHostConversationPost,
   mergeOtaModuleFromReservation,
   otaChannelRequested,
   parseGuestyConversationModule,
+  postBodyText,
+  postDeliveryState,
+  postTimestamp,
   verifyOtaHostPostDelivered,
 } from "@shared/guesty-ota-send";
 
@@ -139,12 +144,25 @@ export async function findGuestyConversationForReservation(
 }
 
 async function fetchRecentConversationPosts(conversationId: string): Promise<Record<string, unknown>[]> {
+  // limit=25 so a delivered synced copy isn't pushed past the verifier's scan
+  // window by a run of pending duplicates on a busy thread.
   const postsData = await guestyRequest(
     "GET",
-    `/communication/conversations/${encodeURIComponent(conversationId)}/posts?limit=15`,
+    `/communication/conversations/${encodeURIComponent(conversationId)}/posts?limit=25`,
   );
   return unwrapPosts(postsData);
 }
+
+// OTA delivery confirmation is ASYNC: Guesty posts the message, then the channel
+// (Booking.com/Airbnb/VRBO) accepts it and Guesty stamps module.externalId /
+// flips status to completed. Live timing (2026-06-20) showed the Booking.com
+// confirmation landing ~30s after send — far past the old ~5s window, which made
+// every real Booking.com delivery look "unverified" and drove duplicate resends.
+// Poll up to ~38s, leaving headroom under the 55s send route budget for the
+// pre-check fetch + the POST + per-poll overhead (so the route returns a real
+// result instead of a 504). Tunable via env.
+const VERIFY_DEADLINE_MS = Math.max(5_000, Number(process.env.GUESTY_OTA_VERIFY_DEADLINE_MS ?? 38_000));
+const VERIFY_INTERVAL_MS = Math.max(1_000, Number(process.env.GUESTY_OTA_VERIFY_INTERVAL_MS ?? 3_000));
 
 async function waitForVerifiedHostPost(
   conversationId: string,
@@ -152,16 +170,55 @@ async function waitForVerifiedHostPost(
   requireOtaModule: boolean,
   logPrefix: string,
 ): Promise<ReturnType<typeof verifyOtaHostPostDelivered>> {
-  const delaysMs = [0, 800, 1600, 2400];
+  const start = Date.now();
   let last: ReturnType<typeof verifyOtaHostPostDelivered> = { verified: false, reason: "No matching host post found on the conversation after send" };
-  for (const delay of delaysMs) {
-    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+  let first = true;
+  while (true) {
+    if (!first) await new Promise((resolve) => setTimeout(resolve, VERIFY_INTERVAL_MS));
+    first = false;
     const posts = await fetchRecentConversationPosts(conversationId);
     last = verifyOtaHostPostDelivered(posts, body, requireOtaModule);
     if (last.verified) return last;
+    // A definitive wrong-channel misroute (our message was filed on a non-OTA
+    // channel, e.g. email) is terminal — don't burn the full window waiting for
+    // an OTA confirmation that will never come.
+    if (last.pending === false) return last;
+    if (Date.now() - start >= VERIFY_DEADLINE_MS) break;
   }
-  console.warn(`[${logPrefix}] post-send verification still pending after ${delaysMs.length} polls`);
+  console.warn(
+    `[${logPrefix}] OTA delivery still unconfirmed after ${Math.round((Date.now() - start) / 1000)}s (pending=${last.pending === true}): ${last.reason ?? ""}`,
+  );
   return last;
+}
+
+// If this exact message is already on the thread we should NOT send a duplicate.
+// Returns "delivered" (channel confirmed — idempotent success), "pending" (a
+// prior send is still in flight within the resume window — resume polling, don't
+// resend), or null (nothing matching/recent — safe to send).
+const RESUME_PENDING_WINDOW_MS = Math.max(0, Number(process.env.GUESTY_OTA_RESUME_PENDING_MS ?? 240_000));
+
+function classifyExistingSend(
+  posts: Record<string, unknown>[],
+  body: string,
+  requireOtaModule: boolean,
+): { state: "delivered"; deliveryModuleType?: string } | { state: "pending" } | null {
+  const now = Date.now();
+  let pendingMatch = false;
+  for (const post of posts) {
+    if (!isHostConversationPost(post)) continue;
+    if (!bodiesAreDuplicate(body, postBodyText(post as { body?: unknown; text?: unknown; message?: unknown }))) continue;
+    const modType = String((post.module as Record<string, unknown> | undefined)?.type ?? "").toLowerCase();
+    // A copy on a different (e.g. email) channel doesn't count as already-sent
+    // to the OTA channel — let the real send proceed.
+    if (requireOtaModule && !guestyModuleTypeLooksOta(modType)) continue;
+    const state = postDeliveryState(post);
+    if (state === "delivered") return { state: "delivered", deliveryModuleType: modType || undefined };
+    if (state === "pending" && RESUME_PENDING_WINDOW_MS > 0) {
+      const ts = postTimestamp(post);
+      if (ts > 0 && now - ts <= RESUME_PENDING_WINDOW_MS) pendingMatch = true;
+    }
+  }
+  return pendingMatch ? { state: "pending" } : null;
 }
 
 export async function sendGuestyConversationMessage(args: {
@@ -171,7 +228,7 @@ export async function sendGuestyConversationMessage(args: {
   reservation?: Record<string, unknown> | null;
   channelHint?: string | null;
   logPrefix?: string;
-}): Promise<{ deliveredVia: string; deliveryModuleType?: string; verified: boolean }> {
+}): Promise<{ deliveredVia: string; deliveryModuleType?: string; verified: boolean; pending?: boolean; reason?: string }> {
   const {
     conversationId,
     body,
@@ -189,37 +246,76 @@ export async function sendGuestyConversationMessage(args: {
       module: mod,
     });
 
-  let lastErr: unknown = null;
-  let lastVerify: ReturnType<typeof verifyOtaHostPostDelivered> | null = null;
+  // Idempotency / anti-duplicate: if this exact message is already delivered on
+  // the thread (operator re-clicked, or a prior send confirmed late) reuse it; if
+  // a prior identical send is still pending within the resume window, resume
+  // polling instead of posting a duplicate. This is what stops the stuck-pending
+  // pile-up (4 identical Booking.com copies were observed live before this fix).
+  let postedModule: Record<string, unknown> = attempts[0] ?? guestySendMessageModuleSafe(module);
+  let skipSend = false;
+  try {
+    const existing = await fetchRecentConversationPosts(conversationId);
+    const prior = classifyExistingSend(existing, body, requireOta);
+    if (prior?.state === "delivered") {
+      return { deliveredVia: guestyChannelLabel(postedModule), deliveryModuleType: prior.deliveryModuleType, verified: true };
+    }
+    if (prior?.state === "pending") {
+      console.warn(`[${logPrefix}] identical message already pending on ${conversationId} — resuming polling, not resending`);
+      skipSend = true;
+    }
+  } catch (preErr: unknown) {
+    // best-effort pre-check; fall through to a normal send
+    console.warn(`[${logPrefix}] pre-send dedup check failed:`, preErr instanceof Error ? preErr.message : String(preErr));
+  }
 
-  for (const attempt of attempts) {
-    try {
-      await send(attempt);
-      const verification = await waitForVerifiedHostPost(conversationId, body, requireOta, logPrefix);
-      if (verification.verified) {
-        return {
-          deliveredVia: guestyChannelLabel(attempt),
-          deliveryModuleType: verification.deliveryModuleType,
-          verified: true,
-        };
+  // Send ONCE. Only advance to the next module if the POST itself is rejected by
+  // Guesty — NEVER merely because delivery is not yet confirmed (that path posted
+  // a fresh guest message on every verification miss → duplicates).
+  let posted = skipSend;
+  let lastErr: unknown = null;
+  if (!skipSend) {
+    for (const attempt of attempts) {
+      try {
+        await send(attempt);
+        postedModule = attempt;
+        posted = true;
+        break;
+      } catch (sendErr: unknown) {
+        lastErr = sendErr;
       }
-      lastVerify = verification;
-      console.warn(
-        `[${logPrefix}] Guesty accepted send with module ${JSON.stringify(attempt)} but verification failed:`,
-        verification.reason,
-      );
-    } catch (sendErr: unknown) {
-      lastErr = sendErr;
     }
   }
-
-  if (requireOta) {
-    const verifyMsg = lastVerify?.reason ?? "OTA delivery could not be verified";
-    const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr ?? verifyMsg);
-    throw new Error(
-      `Could not deliver through ${guestyChannelLabel(module)}: ${errMsg}. ${verifyMsg}. Message was not sent via email.`,
-    );
+  if (!posted) {
+    if (lastErr) throw lastErr;
+    throw new Error(`Guesty rejected every send-message module for ${guestyChannelLabel(module)}`);
   }
-  if (lastErr) throw lastErr;
-  throw new Error(lastVerify?.reason ?? "Send failed");
+
+  const verification = await waitForVerifiedHostPost(conversationId, body, requireOta, logPrefix);
+  if (verification.verified) {
+    return { deliveredVia: guestyChannelLabel(postedModule), deliveryModuleType: verification.deliveryModuleType, verified: true };
+  }
+
+  // Posted to Guesty but the channel has not confirmed delivery within the
+  // window. Report honestly as `pending` rather than throwing — the old throw
+  // made the operator resend and pile up duplicate pending messages. The caller
+  // surfaces a "queued, not yet confirmed — don't resend" notice.
+  console.warn(
+    `[${logPrefix}] posted via ${guestyChannelLabel(postedModule)} but ${guestyChannelLabel(module)} delivery unconfirmed: ${verification.reason ?? ""}`,
+  );
+  return {
+    deliveredVia: guestyChannelLabel(postedModule),
+    deliveryModuleType: verification.deliveryModuleType,
+    verified: false,
+    // Only TRUE when the channel genuinely queued our message but hasn't
+    // confirmed. A wrong-channel misroute (e.g. filed on email) sets
+    // pending:false so the caller treats it as a hard non-delivery, not "queued".
+    pending: verification.pending === true,
+    reason: verification.reason
+      ?? `${guestyChannelLabel(module)} has not confirmed delivery yet`,
+  };
+}
+
+function guestySendMessageModuleSafe(module: Record<string, unknown>): Record<string, unknown> {
+  const type = String(module?.type ?? "").trim();
+  return type ? { type } : { type: "email" };
 }
