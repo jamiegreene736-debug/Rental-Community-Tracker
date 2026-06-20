@@ -9076,14 +9076,120 @@ Requirements:
     return clean;
   };
 
-  const findGuestyConversationForReservation = async (reservationId: string): Promise<{ id: string; module: Record<string, unknown> } | null> => {
+  const guestyModuleTypeLooksOta = (type: string): boolean => {
+    const t = String(type ?? "").toLowerCase();
+    return t.includes("booking") || t.includes("airbnb") || t.includes("homeaway") || t.includes("vrbo");
+  };
+
+  const otaModuleTypeFromReservation = (reservation: any, channelHint?: string | null): string | null => {
+    const hint = String(channelHint ?? "").toLowerCase();
+    if (hint.includes("booking")) return "bookingCom";
+    if (hint.includes("airbnb")) return "airbnb2";
+    if (hint.includes("vrbo") || hint.includes("homeaway")) return "homeaway";
+
+    const platform = String(reservation?.integration?.platform ?? "").trim();
+    if (platform && platform.toLowerCase() !== "email") return platform;
+
+    const sourceText = normalizeAlternativeText(reservation?.source, 80).toLowerCase();
+    if (/booking\.?com/.test(sourceText)) return "bookingCom";
+    if (/airbnb/.test(sourceText)) return "airbnb2";
+    if (/vrbo|homeaway|expedia/.test(sourceText)) return "homeaway";
+    return null;
+  };
+
+  const guestyChannelLabel = (module: Record<string, unknown>): string => {
+    const t = String(module.type ?? "email").toLowerCase();
+    if (t.includes("booking")) return "Booking.com";
+    if (t.includes("airbnb")) return "Airbnb";
+    if (t.includes("homeaway") || t.includes("vrbo")) return "VRBO";
+    if (t === "email") return "email";
+    return String(module.type ?? "unknown");
+  };
+
+  const mergeOtaModuleFromReservation = (
+    module: Record<string, unknown>,
+    reservation: any,
+    channelHint?: string | null,
+  ): Record<string, unknown> => {
+    const otaType = otaModuleTypeFromReservation(reservation, channelHint);
+    if (!otaType) return module;
+
+    const currentType = String(module.type ?? "").toLowerCase();
+    const needsType = !guestyModuleTypeLooksOta(currentType) || currentType === "email";
+    const next: Record<string, unknown> = { ...module };
+    if (needsType) next.type = otaType;
+    if (!next.integrationId && reservation?.integration?._id) {
+      next.integrationId = reservation.integration._id;
+    }
+    if (!next.platform && reservation?.integration?.platform) {
+      next.platform = reservation.integration.platform;
+    }
+    return cleanGuestyConversationModule(next);
+  };
+
+  const moduleFromConversationPosts = async (conversationId: string): Promise<Record<string, unknown> | null> => {
+    try {
+      const postsData = await guestyRequest(
+        "GET",
+        `/communication/conversations/${encodeURIComponent(conversationId)}/posts?limit=30`,
+      ) as any;
+      const posts = postsData?.data?.posts ?? postsData?.posts ?? postsData?.results ?? [];
+      if (!Array.isArray(posts)) return null;
+      for (const post of [...posts].reverse()) {
+        const mod = post?.module;
+        if (mod && typeof mod === "object" && guestyModuleTypeLooksOta(String(mod.type ?? ""))) {
+          return cleanGuestyConversationModule(mod);
+        }
+      }
+      for (const post of [...posts].reverse()) {
+        if (post?.module && typeof post.module === "object") {
+          return cleanGuestyConversationModule(post.module);
+        }
+      }
+    } catch (postsErr: any) {
+      console.warn("[booking-alternatives] posts module lookup failed:", postsErr?.message ?? postsErr);
+    }
+    return null;
+  };
+
+  const finalizeGuestyConversationModule = async (
+    conversationId: string,
+    rawModule: Record<string, unknown> | null | undefined,
+    reservation: any,
+    channelHint?: string | null,
+  ): Promise<Record<string, unknown>> => {
+    let module = cleanGuestyConversationModule(rawModule ?? {});
+    const type = String(module.type ?? "").toLowerCase();
+    const missingChannelId = module.channelId === undefined || module.channelId === null || module.channelId === "";
+
+    if (!guestyModuleTypeLooksOta(type) || missingChannelId) {
+      const postsModule = await moduleFromConversationPosts(conversationId);
+      if (postsModule) {
+        const postsType = String(postsModule.type ?? "").toLowerCase();
+        if (guestyModuleTypeLooksOta(postsType) || (!guestyModuleTypeLooksOta(type) && postsType !== "email")) {
+          module = postsModule;
+        }
+      }
+    }
+
+    return mergeOtaModuleFromReservation(module, reservation, channelHint);
+  };
+
+  const findGuestyConversationForReservation = async (
+    reservationId: string,
+    channelHint?: string | null,
+  ): Promise<{ id: string; module: Record<string, unknown> } | null> => {
     const rid = String(reservationId ?? "").trim();
     if (!rid) return null;
 
-    // Prefer the conversations search endpoint — it returns the REAL module
-    // (including channelId) that Guesty expects on /send-message. Synthesizing
-    // only { type: "bookingCom" } from reservation.source can leave sends
-    // rejected or wedged when channelId is required.
+    const reservation = await guestyRequest(
+      "GET",
+      `/reservations/${encodeURIComponent(rid)}?fields=${encodeURIComponent("conversationId conversation integration source")}`,
+    ).catch(() => null) as any;
+
+    let conversationId = "";
+    let rawModule: Record<string, unknown> | null = null;
+
     try {
       const data = await guestyRequest(
         "GET",
@@ -9092,45 +9198,82 @@ Requirements:
       const rows = data?.data?.conversations ?? data?.conversations ?? data?.results ?? [];
       if (Array.isArray(rows) && rows.length > 0) {
         const c = rows[0];
-        const id = String(c?._id ?? c?.id ?? "").trim();
-        if (id) {
-          const rawMod = c?.module ?? c?.lastPost?.module ?? c?.lastMessage?.module ?? null;
-          return { id, module: cleanGuestyConversationModule(rawMod ?? {}) };
-        }
+        conversationId = String(c?._id ?? c?.id ?? "").trim();
+        rawModule = c?.module ?? c?.lastPost?.module ?? c?.lastMessage?.module ?? null;
       }
     } catch (searchErr: any) {
       console.warn("[booking-alternatives] conversation search failed, falling back to reservation doc:", searchErr?.message ?? searchErr);
     }
 
-    const reservation = await guestyRequest(
-      "GET",
-      `/reservations/${encodeURIComponent(rid)}?fields=${encodeURIComponent("conversationId integration source")}`,
-    ) as any;
-    const id = reservation?.conversationId
-      ?? reservation?.conversation?._id
-      ?? reservation?.conversation?.id;
-    if (!id) return null;
+    if (!conversationId && reservation) {
+      conversationId = String(
+        reservation?.conversationId
+        ?? reservation?.conversation?._id
+        ?? reservation?.conversation?.id
+        ?? "",
+      ).trim();
+    }
+    if (!conversationId) return null;
 
-    try {
-      const conv = await guestyRequest(
-        "GET",
-        `/communication/conversations/${encodeURIComponent(String(id))}?fields=${encodeURIComponent("module")}`,
-      ) as any;
-      if (conv?.module) {
-        return { id: String(id), module: cleanGuestyConversationModule(conv.module) };
+    if (!rawModule || !guestyModuleTypeLooksOta(String(cleanGuestyConversationModule(rawModule).type ?? ""))) {
+      try {
+        const conv = await guestyRequest(
+          "GET",
+          `/communication/conversations/${encodeURIComponent(conversationId)}?fields=${encodeURIComponent("module")}`,
+        ) as any;
+        if (conv?.module) rawModule = conv.module;
+      } catch {
+        /* posts fallback inside finalize */
       }
-    } catch {
-      /* fall through to synthesized module */
     }
 
-    const sourceText = normalizeAlternativeText(reservation?.source, 60);
-    const platformFromSource =
-      /booking\.?com/i.test(sourceText) ? "bookingCom"
-      : /airbnb/i.test(sourceText) ? "airbnb2"
-      : /vrbo|homeaway|expedia/i.test(sourceText) ? "homeaway"
-      : "";
-    const module = cleanGuestyConversationModule({ type: reservation?.integration?.platform || platformFromSource });
-    return { id: String(id), module };
+    const module = reservation
+      ? await finalizeGuestyConversationModule(conversationId, rawModule, reservation, channelHint)
+      : cleanGuestyConversationModule(rawModule ?? {});
+
+    if (guestyModuleTypeLooksOta(String(module.type ?? "")) && !module.channelId) {
+      console.warn(
+        `[booking-alternatives] OTA module for reservation ${rid} is missing channelId (type=${String(module.type)}) — send may fail`,
+      );
+    }
+
+    return { id: conversationId, module };
+  };
+
+  const otaChannelRequested = (module: Record<string, unknown>, channelHint?: string | null): boolean => {
+    if (guestyModuleTypeLooksOta(String(module.type ?? ""))) return true;
+    const hint = String(channelHint ?? "").toLowerCase();
+    return /airbnb|booking|vrbo|homeaway/.test(hint);
+  };
+
+  const sendGuestyConversationMessage = async (args: {
+    conversationId: string;
+    body: string;
+    module: Record<string, unknown>;
+    channelHint?: string | null;
+    logPrefix?: string;
+  }): Promise<{ deliveredVia: string }> => {
+    const { conversationId, body, module, channelHint, logPrefix = "booking-alternatives" } = args;
+    const cleanModule = cleanGuestyConversationModule(module);
+    const send = (mod: Record<string, unknown>) =>
+      guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversationId)}/send-message`, {
+        body,
+        module: cleanGuestyConversationModule(mod),
+      });
+
+    try {
+      await send(cleanModule);
+      return { deliveredVia: guestyChannelLabel(cleanModule) };
+    } catch (sendErr: any) {
+      const modType = String(cleanModule.type ?? "email").toLowerCase();
+      if (modType === "email" || !otaChannelRequested(cleanModule, channelHint)) throw sendErr;
+      console.error(`[${logPrefix}] OTA channel send failed — not falling back to email:`, sendErr?.message ?? sendErr);
+      const channelLabel = guestyChannelLabel(cleanModule);
+      const channelIdNote = cleanModule.channelId ? "" : " (Guesty conversation module is missing channelId)";
+      throw new Error(
+        `Could not deliver through ${channelLabel}${channelIdNote}: ${sendErr?.message ?? sendErr}. Message was not sent via email.`,
+      );
+    }
   };
 
   // ── Lazy photo re-screen for already-built guest pages ──────────────────
@@ -10176,7 +10319,7 @@ Requirements:
         return res.status(400).json({ error: "reservationId required" });
       }
 
-      const conversation = await findGuestyConversationForReservation(reservationId);
+      const conversation = await findGuestyConversationForReservation(reservationId, channelHint);
       if (!conversation) {
         responded = true;
         clearTimeout(timer);
@@ -10194,22 +10337,12 @@ Requirements:
         return res.status(400).json({ error: "message body required" });
       }
 
-      // The conversation's module carries the channel the guest booked through,
-      // so Guesty routes this to VRBO/Booking.com/Airbnb accordingly. If the
-      // channel-typed send is rejected, retry once over email so the message
-      // still reaches the guest instead of hard-failing.
-      const sendGuestMessage = (mod: Record<string, unknown>) =>
-        guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversation.id)}/send-message`, {
-          body,
-          module: mod,
-        });
-      try {
-        await sendGuestMessage(conversation.module);
-      } catch (sendErr: any) {
-        if ((conversation.module?.type ?? "email") === "email") throw sendErr;
-        console.error("[booking-alternatives] channel send failed, retrying over email:", sendErr?.message ?? sendErr);
-        await sendGuestMessage({ type: "email" });
-      }
+      const { deliveredVia } = await sendGuestyConversationMessage({
+        conversationId: conversation.id,
+        body,
+        module: conversation.module,
+        channelHint,
+      });
       if (token) {
         await storage.markBookingAlternativePageSent(token, channelHint).catch((e) =>
           console.error("[booking-alternatives] mark-sent failed:", e?.message ?? e));
@@ -10217,7 +10350,7 @@ Requirements:
       if (responded) return;
       responded = true;
       clearTimeout(timer);
-      return res.json({ ok: true, conversationId: conversation.id });
+      return res.json({ ok: true, conversationId: conversation.id, deliveredVia });
     } catch (err: any) {
       if (responded) return;
       responded = true;
@@ -10311,24 +10444,16 @@ Requirements:
       if (!reservationId) return res.status(400).json({ error: "reservationId required" });
       if (!body) return res.status(400).json({ error: "message body required" });
 
-      const conversation = await findGuestyConversationForReservation(reservationId);
+      const conversation = await findGuestyConversationForReservation(reservationId, channel);
       if (!conversation) return res.status(404).json({ error: "No Guesty conversation found for this reservation" });
 
-      // The conversation's module carries the channel the guest booked through,
-      // so Guesty routes to VRBO/Booking.com/Airbnb. If the channel-typed send is
-      // rejected, retry once over email so the notice still reaches the guest.
-      const sendGuestMessage = (mod: Record<string, unknown>) =>
-        guestyRequest("POST", `/communication/conversations/${encodeURIComponent(conversation.id)}/send-message`, {
-          body,
-          module: mod,
-        });
-      try {
-        await sendGuestMessage(conversation.module);
-      } catch (sendErr: any) {
-        if ((conversation.module?.type ?? "email") === "email") throw sendErr;
-        console.error("[cancellation-notice] channel send failed, retrying over email:", sendErr?.message ?? sendErr);
-        await sendGuestMessage({ type: "email" });
-      }
+      await sendGuestyConversationMessage({
+        conversationId: conversation.id,
+        body,
+        module: conversation.module,
+        channelHint: channel,
+        logPrefix: "cancellation-notice",
+      });
       // Internal flag ONLY — we intentionally do not change the reservation status.
       await storage.recordCancellationNoticeSent(reservationId, channel, body).catch((e) =>
         console.error("[cancellation-notice] mark-sent failed:", e?.message ?? e));

@@ -4857,7 +4857,7 @@ function ArrivalDetailsMessageDialog({
     mutationFn: async () => {
       const text = message.trim();
       if (!text) throw new Error("The message is empty.");
-      const body = await apiPostJsonWithTimeout<{ ok?: boolean; conversationId?: string; message?: string; error?: string }>(
+      const body = await apiPostJsonWithTimeout<{ ok?: boolean; conversationId?: string; deliveredVia?: string; message?: string; error?: string }>(
         "/api/booking-alternatives/send-guest-message",
         {
           reservationId: reservation._id,
@@ -4868,11 +4868,17 @@ function ArrivalDetailsMessageDialog({
       if (body?.ok !== true) {
         throw new Error(body?.message || body?.error || "Guesty did not confirm the send");
       }
-      return body as { ok: true; conversationId: string };
+      return body as { ok: true; conversationId: string; deliveredVia?: string };
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       setSent(true);
-      toast({ title: "Arrival details sent", description: `Delivered through ${channelLabel}.` });
+      const via = data?.deliveredVia?.trim();
+      toast({
+        title: "Arrival details sent",
+        description: via
+          ? `Delivered through ${via}.`
+          : `Delivered through ${channelLabel}.`,
+      });
     },
     onError: (e: any) => toast({ title: "Message send failed", description: e?.message ?? String(e), variant: "destructive" }),
   });
