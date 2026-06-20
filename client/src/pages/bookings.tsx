@@ -897,6 +897,44 @@ function invalidateArrivalDetailsQueries() {
   });
 }
 
+async function apiPostJsonWithTimeout<T>(
+  url: string,
+  data: unknown,
+  timeoutMs = 90_000,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+      credentials: "include",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const raw = (await res.text().catch(() => "")) || res.statusText;
+      let message = raw;
+      try {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.message === "string" && parsed.message.trim()) message = parsed.message;
+        else if (typeof parsed?.error === "string" && parsed.error.trim()) message = parsed.error;
+      } catch {
+        /* plain-text error */
+      }
+      throw new Error(`${res.status}: ${sanitizeForChatText(message, { maxLength: 600 })}`);
+    }
+    return await res.json() as T;
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s — try again or copy the message manually`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Accepts both pure date strings ("2026-10-17") and full ISO timestamps
 // ("2026-10-18T01:00:00.000Z"). Guesty returns the former as
 // `checkInDateLocalized` and the latter as `checkIn`.
@@ -4802,9 +4840,10 @@ function ArrivalDetailsMessageDialog({
 
   const [message, setMessage] = useState("");
   const [sent, setSent] = useState(false);
+  const messageEditedRef = useRef(false);
 
   useEffect(() => {
-    if (!data) return;
+    if (!data || messageEditedRef.current) return;
     const units = (data.units ?? []).map(arrivalUnitDetailForMessage);
     setMessage(buildArrivalDetailsGuestMessage({
       guestFirstName: firstName,
@@ -4816,15 +4855,18 @@ function ArrivalDetailsMessageDialog({
 
   const sendMessage = useMutation({
     mutationFn: async () => {
-      if (!message.trim()) throw new Error("The message is empty.");
-      const response = await apiRequest("POST", "/api/booking-alternatives/send-guest-message", {
-        reservationId: reservation._id,
-        body: message,
-        channel,
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || body?.ok !== true) {
-        throw new Error(body?.message || body?.error || `Guesty returned HTTP ${response.status}`);
+      const text = message.trim();
+      if (!text) throw new Error("The message is empty.");
+      const body = await apiPostJsonWithTimeout<{ ok?: boolean; conversationId?: string; message?: string; error?: string }>(
+        "/api/booking-alternatives/send-guest-message",
+        {
+          reservationId: reservation._id,
+          body: text,
+          channel,
+        },
+      );
+      if (body?.ok !== true) {
+        throw new Error(body?.message || body?.error || "Guesty did not confirm the send");
       }
       return body as { ok: true; conversationId: string };
     },
@@ -4875,7 +4917,16 @@ function ArrivalDetailsMessageDialog({
                 </div>
               )}
               <div className="flex justify-end">
-                <Button type="button" size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => void refetch()}>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-[10px]"
+                  onClick={() => {
+                    messageEditedRef.current = false;
+                    void refetch();
+                  }}
+                >
                   <RefreshCw className="h-3 w-3 mr-1" /> Refresh details
                 </Button>
               </div>
@@ -4885,7 +4936,10 @@ function ArrivalDetailsMessageDialog({
                   id="arrivalDetailsMessage"
                   rows={14}
                   value={message}
-                  onChange={(e) => setMessage(e.target.value)}
+                  onChange={(e) => {
+                    messageEditedRef.current = true;
+                    setMessage(e.target.value);
+                  }}
                   className="text-sm font-mono"
                   data-testid="input-arrival-details-message"
                 />
