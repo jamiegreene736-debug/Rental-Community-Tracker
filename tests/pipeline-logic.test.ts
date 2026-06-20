@@ -4007,7 +4007,10 @@ assert.ok(
 assert.ok(
   routesSource.includes("/communication/conversations?reservationId=") &&
     routesSource.includes("SEND_GUEST_MESSAGE_TIMEOUT_MS") &&
-    routesSource.includes("isBookingChannel(channelHint)"),
-  "send-guest-message should resolve real Guesty conversation module, enforce timeout, and sanitize Booking.com bodies",
+    routesSource.includes("isBookingChannel(channelHint)") &&
+    routesSource.includes("moduleFromConversationPosts") &&
+    routesSource.includes("not falling back to email") &&
+    routesSource.includes("deliveredVia"),
+  "send-guest-message should resolve real Guesty OTA module (with channelId), not silently email-fallback, and report delivery channel",
 );
 console.log("  ✓ Operations Alternative Unit + Message AD guest messaging");
