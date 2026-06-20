@@ -87,7 +87,7 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
-import { findGuestyConversationForReservation, sendGuestyConversationMessage } from "./guesty-ota-messaging";
+import { findGuestyConversationById, findGuestyConversationForReservation, sendGuestyConversationMessage } from "./guesty-ota-messaging";
 import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress, lookupHawaiiStatewideTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
   acquireSidecarLane,
@@ -12007,6 +12007,75 @@ Requirements:
   // intentionally DISABLED (expectedRevenue=0, the documented inquiry degrade-safe
   // path) so the operator simply sees the cheapest options found, not a "would lose
   // money, left empty" verdict — an inquiry has no committed revenue to gate on.
+  // Guest-inbox "Send in Guesty" + "Send receipt" used to POST directly from the
+  // client to /api/guesty-proxy/.../send-message and treat HTTP 200 as success —
+  // but Guesty's /send-message only creates a `pending` post; the OTA channel
+  // (Booking.com/Airbnb/VRBO) confirms delivery asynchronously (~30s, stamping
+  // module.externalId / status=completed). So an inbox reply showed "Message
+  // sent!" while never reaching the guest on Booking.com (operator-reported twice).
+  // Route it through the SAME hardened, delivery-verified path as Message AD
+  // (server resolves the proven-delivering module from integration.platform,
+  // sends ONCE, verifies via externalId, and reports verified/pending/misroute).
+  app.post("/api/inbox/conversations/:conversationId/send", async (req: Request, res: Response) => {
+    const INBOX_SEND_TIMEOUT_MS = 50_000;
+    let responded = false;
+    const timer = setTimeout(() => {
+      if (responded) return;
+      responded = true;
+      res.status(504).json({
+        error: "Send timed out",
+        message: "Guesty did not confirm delivery in time — check the thread before resending.",
+      });
+    }, INBOX_SEND_TIMEOUT_MS);
+    try {
+      const conversationId = String(req.params.conversationId ?? "").trim();
+      const reservationId = req.body?.reservationId ? String(req.body.reservationId).trim() : null;
+      const channelHint = req.body?.channel ? String(req.body.channel).trim() : null;
+      // Keep the body the operator typed; only cap length. Booking.com gets an
+      // ASCII-plain pass below (matches the relocation/receipt paths).
+      let body = String(req.body?.body ?? "").slice(0, 8_000).trim();
+      if (!conversationId) { responded = true; clearTimeout(timer); return res.status(400).json({ error: "conversationId required" }); }
+      if (!body) { responded = true; clearTimeout(timer); return res.status(400).json({ error: "message body required" }); }
+
+      const conversation = await findGuestyConversationById(conversationId, reservationId, channelHint);
+      if (!conversation) { responded = true; clearTimeout(timer); return res.status(404).json({ error: "No Guesty conversation found" }); }
+
+      const moduleType = String(conversation.module?.type ?? "");
+      if (isBookingChannel(channelHint) || moduleType.toLowerCase().includes("booking")) {
+        body = sanitizeForBookingChannel(body);
+      }
+
+      const { deliveredVia, verified, pending, deliveryModuleType, reason } = await sendGuestyConversationMessage({
+        conversationId: conversation.id,
+        body,
+        module: conversation.module,
+        reservation: conversation.reservation,
+        channelHint,
+        logPrefix: "inbox-send",
+      });
+      if (responded) return;
+      responded = true;
+      clearTimeout(timer);
+      return res.json({
+        ok: true,
+        conversationId: conversation.id,
+        deliveredVia,
+        verified,
+        // pending = posted to the OTA channel but not confirmed yet (client shows
+        // "queued — confirming, don't resend"); verified=false && pending=false is
+        // a misroute (e.g. filed on email) the client surfaces as a hard error.
+        pending: pending === true,
+        deliveryModuleType: deliveryModuleType ?? null,
+        deliveryReason: reason ?? null,
+      });
+    } catch (err: any) {
+      if (responded) return;
+      responded = true;
+      clearTimeout(timer);
+      return res.status(500).json({ error: "Failed to send message", message: err?.message ?? String(err) });
+    }
+  });
+
   app.post("/api/inbox/buy-in-search", async (req: Request, res: Response) => {
     try {
       const listingId = String(req.body?.listingId ?? "").trim();

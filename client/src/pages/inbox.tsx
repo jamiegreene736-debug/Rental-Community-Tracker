@@ -3037,49 +3037,56 @@ export default function InboxPage() {
   };
 
   const sendMessage = useMutation({
-    // /posts adds a message to the thread but doesn't deliver it to the guest —
-    // /send-message does both. Guesty requires a `module` describing the channel.
+    // Routed through the server's hardened, delivery-VERIFIED send path
+    // (/api/inbox/conversations/:id/send) instead of a client-direct
+    // /send-message that trusts HTTP 200. The server resolves the
+    // proven-delivering module from the reservation's integration.platform,
+    // sends ONCE, and confirms via Guesty's module.externalId — so a Booking.com
+    // reply that only ever reaches Guesty's `pending` state (never the guest's
+    // portal) is no longer reported as a clean success.
     mutationFn: async () => {
       if (!selectedConv) throw new Error("No conversation selected");
-      const lastPostModule = [...(posts ?? [])].reverse().find(p => p.module)?.module;
-      const rawMod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
-
-      // Guesty's /send-message validator rejects extra keys on the
-      // `module` object with a 400 — specifically `templateValues`,
-      // `templateVariableNames`, and `externalId`, which show up on
-      // the module of any post that was itself sent via a Guesty
-      // template or external channel link. Reading `selectedConv.module`
-      // or `lastPostModule` carries those fields forward, and the
-      // send blows up with `"module.templateValues" is not allowed`.
-      //
-      // Whitelist only what /send-message accepts. Everything else is
-      // metadata from Guesty's read shape that the write shape doesn't
-      // tolerate.
-      const mod: GuestyModule = {};
-      const allowedKeys = ["type", "channelId", "platform", "integrationId"] as const;
-      for (const k of allowedKeys) {
-        if (rawMod[k] !== undefined) (mod as any)[k] = rawMod[k];
-      }
-      if (!mod.type) mod.type = "email";
-
       const r = await apiRequest(
         "POST",
-        `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
-        { body: normalizeGuestyManualMessageBody(replyText), module: mod },
+        `/api/inbox/conversations/${selectedConvId}/send`,
+        {
+          body: normalizeGuestyManualMessageBody(replyText),
+          reservationId: selectedConv.reservationId ?? null,
+          channel: selectedConv.module?.type ?? null,
+        },
       );
-      if (!r.ok) {
-        const errBody = await r.json().catch(() => ({}));
-        throw new Error(errBody.error ?? errBody.message ?? `Guesty returned HTTP ${r.status}`);
+      const body = await r.json().catch(() => ({} as any));
+      if (!r.ok || body?.ok !== true) {
+        throw new Error(body?.message || body?.error || `Guesty returned HTTP ${r.status}`);
       }
-      return r.json();
+      // A genuine MISROUTE (filed on a non-OTA channel, e.g. email →
+      // verified:false AND pending:false) is a hard error — it did NOT reach the
+      // guest's booking channel. A true PENDING is surfaced as a warning, not
+      // thrown (resending would pile up duplicate guest messages).
+      if (body.verified !== true && body.pending !== true) {
+        throw new Error(
+          body.deliveryReason
+            || "The message did not reach the guest's booking channel — it may have been saved on email instead. Verify on the channel's extranet.",
+        );
+      }
+      return body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string };
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       markConversationReplied(selectedConvId);
       setReplyText("");
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
-      toast({ title: "Message sent!" });
+      const via = data?.deliveredVia?.trim() || "the booking channel";
+      if (data?.verified === true) {
+        toast({ title: "Message sent!", description: `Delivered through ${via} and confirmed on the guest thread.` });
+      } else {
+        toast({
+          title: `Queued through ${via} — confirming delivery`,
+          description: `Posted to ${via}, but it hasn't confirmed delivery yet (this can take up to ~30s). It'll appear in the thread — don't resend, that can duplicate the message.`,
+          variant: "destructive",
+        });
+      }
     },
     onError: (e: any) => toast({ title: "Failed to send", description: e.message, variant: "destructive" }),
   });
@@ -3236,40 +3243,49 @@ export default function InboxPage() {
     setReceiptBodyTouched(false);
   };
 
-  // Send the receipt body through the same Guesty proxy + module
-  // whitelist `sendMessage` uses. Guesty's /send-message validator
-  // rejects extra module keys (`templateValues`, `externalId`, …) with
-  // a 400, so the same allow-list applies.
+  // Send the receipt body through the SAME hardened, delivery-verified server
+  // path as the main reply (/api/inbox/conversations/:id/send) — a receipt that
+  // only reaches Guesty's `pending` state isn't reported as delivered either.
   const sendReceipt = useMutation({
     mutationFn: async () => {
       if (!selectedConv) throw new Error("No conversation selected");
       if (!receiptBody.trim()) throw new Error("Receipt body is empty");
-      const lastPostModule = [...(posts ?? [])].reverse().find(p => p.module)?.module;
-      const rawMod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
-      const mod: GuestyModule = {};
-      const allowedKeys = ["type", "channelId", "platform", "integrationId"] as const;
-      for (const k of allowedKeys) {
-        if (rawMod[k] !== undefined) (mod as any)[k] = rawMod[k];
-      }
-      if (!mod.type) mod.type = "email";
-
       const r = await apiRequest(
         "POST",
-        `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
-        { body: receiptBody, module: mod },
+        `/api/inbox/conversations/${selectedConvId}/send`,
+        {
+          body: receiptBody,
+          reservationId: selectedConv.reservationId ?? null,
+          channel: selectedConv.module?.type ?? null,
+        },
       );
-      if (!r.ok) {
-        const errBody = await r.json().catch(() => ({}));
-        throw new Error(errBody.error ?? errBody.message ?? `Guesty returned HTTP ${r.status}`);
+      const body = await r.json().catch(() => ({} as any));
+      if (!r.ok || body?.ok !== true) {
+        throw new Error(body?.message || body?.error || `Guesty returned HTTP ${r.status}`);
       }
-      return r.json();
+      if (body.verified !== true && body.pending !== true) {
+        throw new Error(
+          body.deliveryReason
+            || "The receipt did not reach the guest's booking channel — verify on the channel's extranet.",
+        );
+      }
+      return body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string };
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       resetReceiptState();
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
-      toast({ title: "Receipt sent" });
+      const via = data?.deliveredVia?.trim() || "the booking channel";
+      if (data?.verified === true) {
+        toast({ title: "Receipt sent", description: `Delivered through ${via} and confirmed.` });
+      } else {
+        toast({
+          title: `Receipt queued through ${via} — confirming`,
+          description: `Posted to ${via}, not confirmed yet. It'll appear in the thread — don't resend.`,
+          variant: "destructive",
+        });
+      }
     },
     onError: (e: any) => toast({ title: "Failed to send receipt", description: e.message, variant: "destructive" }),
   });
@@ -4524,9 +4540,15 @@ export default function InboxPage() {
                           onClick={() => sendMessage.mutate()}
                           disabled={!replyText.trim() || sendMessage.isPending || sendTextMessage.isPending}
                           data-testid="button-send-reply"
+                          // OTA sends now block until the channel confirms delivery
+                          // (~30s for Booking.com) instead of a false instant
+                          // "sent", so surface a clear in-progress state.
+                          title={sendMessage.isPending ? "Confirming the channel actually delivered it…" : undefined}
                         >
-                          <Send className="h-3.5 w-3.5 mr-1.5" />
-                          Send in Guesty
+                          {sendMessage.isPending
+                            ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                            : <Send className="h-3.5 w-3.5 mr-1.5" />}
+                          {sendMessage.isPending ? "Confirming…" : "Send in Guesty"}
                         </Button>
                       </div>
                     </div>

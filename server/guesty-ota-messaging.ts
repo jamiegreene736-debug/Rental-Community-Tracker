@@ -143,6 +143,57 @@ export async function findGuestyConversationForReservation(
   return { id: conversationId, module, reservation };
 }
 
+/**
+ * Resolve {module, reservation} for a conversation we already have the id of
+ * (the Guest Inbox), so an inbox reply goes through the SAME hardened, delivery-
+ * verified send path as Message AD instead of a client-direct /send-message that
+ * trusts HTTP 200. The OTA module is derived from the reservation's
+ * integration.platform (the proven-delivering type) + conversation posts.
+ */
+export async function findGuestyConversationById(
+  conversationId: string,
+  reservationId?: string | null,
+  channelHint?: string | null,
+): Promise<{ id: string; module: Record<string, unknown>; reservation: Record<string, unknown> | null } | null> {
+  const cid = String(conversationId ?? "").trim();
+  if (!cid) return null;
+
+  let reservation: Record<string, unknown> | null = null;
+  const rid = String(reservationId ?? "").trim();
+  if (rid) {
+    reservation = await guestyRequest(
+      "GET",
+      `/reservations/${encodeURIComponent(rid)}?fields=${encodeURIComponent("conversationId conversation integration source")}`,
+    ).catch(() => null) as Record<string, unknown> | null;
+  }
+
+  let rawModule: Record<string, unknown> | null = null;
+  try {
+    const conv = await guestyRequest(
+      "GET",
+      `/communication/conversations/${encodeURIComponent(cid)}?fields=${encodeURIComponent("module")}`,
+    ) as Record<string, unknown>;
+    if (conv?.module) rawModule = conv.module as Record<string, unknown>;
+  } catch {
+    /* posts fallback inside finalize */
+  }
+
+  const module = await finalizeGuestyConversationModule(cid, rawModule, reservation, channelHint);
+
+  // If we couldn't load a reservation but the resolved module IS an OTA channel,
+  // synthesize a platform hint from it so the send LEADS with the proven type
+  // (otherwise buildOtaSendModuleAttempts defaults Booking.com to bookingCom2
+  // first — the live integration.platform is bookingCom, not bookingCom2).
+  if (!reservation) {
+    const t = String(module.type ?? "");
+    if (guestyModuleTypeLooksOta(t)) {
+      reservation = { integration: { platform: t }, source: t };
+    }
+  }
+
+  return { id: cid, module, reservation };
+}
+
 async function fetchRecentConversationPosts(conversationId: string): Promise<Record<string, unknown>[]> {
   // limit=25 so a delivered synced copy isn't pushed past the verifier's scan
   // window by a run of pending duplicates on a busy thread.
@@ -288,6 +339,16 @@ export async function sendGuestyConversationMessage(args: {
   if (!posted) {
     if (lastErr) throw lastErr;
     throw new Error(`Guesty rejected every send-message module for ${guestyChannelLabel(module)}`);
+  }
+
+  // Non-OTA channels (email / direct) have NO async OTA portal to confirm
+  // against — Guesty's accepted POST IS the send. Polling for an externalId would
+  // just block the full window and can FALSE-FAIL a delivered email (e.g. when
+  // the body is wrapped and the strict matcher misses our own post). Trust the
+  // 200, matching the pre-hardening behavior. Only OTA sends get the
+  // delivery-verified treatment.
+  if (!requireOta) {
+    return { deliveredVia: guestyChannelLabel(postedModule), verified: true };
   }
 
   const verification = await waitForVerifiedHostPost(conversationId, body, requireOta, logPrefix);

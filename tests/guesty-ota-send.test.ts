@@ -163,4 +163,18 @@ assert.equal(emailOnly.verified, false);
 assert.equal(emailOnly.pending, false, "email misroute must NOT be reported as pending");
 assert.match(String(emailOnly.reason), /OTA guest channel/i);
 
+// REGRESSION (inbox review): posts exist but NONE match our body (Guesty sync lag
+// or a channel body re-wrap) is UNCONFIRMED, not a wrong-channel misroute — it
+// must report pending (queued, don't resend), never a hard "saved on email" error.
+const noMatch = verifyOtaHostPostDelivered(
+  [
+    { sentBy: "guest", body: "Totally unrelated guest question", module: { type: "bookingCom" }, createdAt: "2026-06-20T17:00:00.000Z" },
+    { sentBy: "host", body: "Some earlier unrelated host reply", module: { type: "bookingCom", externalId: "x" }, createdAt: "2026-06-20T16:59:00.000Z" },
+  ],
+  "Hi Cecilio, your arrival details are below. Access code 4242.",
+  true,
+);
+assert.equal(noMatch.verified, false);
+assert.equal(noMatch.pending, true, "no body-matching post = unconfirmed/pending, not a hard misroute");
+
 console.log("  ✓ guesty OTA send module resolution + delivery-confirmed verification");
