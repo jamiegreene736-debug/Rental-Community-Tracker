@@ -438,6 +438,15 @@ assert.match(
   /isolateRedfinSubjectGallery\(html, urls\)/,
   "Redfin gallery scrape must isolate the subject listing and drop the comparable-homes carousel",
 );
+// Host-agnostic guard: the generic gallery extractor (Homes.com + other portals,
+// not just Redfin) must prefer the subject unit's JSON-LD gallery so the greedy
+// page harvest can't bleed the "Nearby similar homes" carousel of OTHER units'
+// photos into one unit folder (the jumbled-photos contamination on re-pull).
+assert.match(
+  routesSource,
+  /subjectGalleryFromJsonLd\(html\)[\s\S]*MIN_JSONLD_SUBJECT_GALLERY/,
+  "generic gallery scrape must isolate the subject unit via its JSON-LD gallery for non-Redfin portals too",
+);
 assert.match(
   preflightSource,
   /\/api\/preflight\/photo-fetch-jobs/,

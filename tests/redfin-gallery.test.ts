@@ -14,6 +14,8 @@ import {
   redfinPhotoSetId,
   redfinSubjectSetIdFromHtml,
   isolateRedfinSubjectGallery,
+  subjectGalleryFromJsonLd,
+  MIN_JSONLD_SUBJECT_GALLERY,
 } from "../server/redfin-gallery";
 
 let passed = 0;
@@ -117,6 +119,136 @@ check("non-redfin photos on a redfin page are preserved (only comps dropped)", (
   const res = isolateRedfinSubjectGallery(html, [...SUBJECT_A, broker, ...COMPS]);
   assert.ok(res.urls.includes(broker), "non-redfin broker photo kept");
   assert.deepEqual(res.urls, [...SUBJECT_A, broker]);
+});
+
+// ── subjectGalleryFromJsonLd (host-agnostic comp-carousel isolation) ───────
+//
+// The general case of the Redfin trap: a Homes.com / MLS listing page renders a
+// "Nearby similar homes" ItemList carousel whose cards carry OTHER units'
+// thumbnails. The greedy page harvest sweeps those into the unit folder. The
+// subject unit's JSON-LD `image` array, by contrast, only ever holds the subject
+// unit's own photos.
+
+const HOMES_SUBJECT = [
+  "https://images.homes.com/listings/118/subjectA-1.jpg",
+  "https://images.homes.com/listings/118/subjectA-2.jpg",
+  "https://images.homes.com/listings/118/subjectA-3.jpg",
+  "https://images.homes.com/listings/118/subjectA-4.jpg",
+  "https://images.homes.com/listings/118/subjectA-5.jpg",
+  "https://images.homes.com/listings/118/subjectA-6.jpg",
+];
+const HOMES_COMPS = [
+  "https://images.homes.com/listings/999/compB-1.jpg",
+  "https://images.homes.com/listings/888/compC-1.jpg",
+  "https://images.homes.com/listings/777/compD-1.jpg",
+];
+
+function homesHtmlWithComps(): string {
+  const subjectNode = {
+    "@context": "https://schema.org",
+    "@type": "SingleFamilyResidence",
+    name: "Subject Unit A",
+    image: HOMES_SUBJECT,
+  };
+  // The similar-homes carousel: each comp card is an ItemList element with its
+  // own image. This is exactly what must NOT bleed into the subject gallery.
+  const compList = {
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    itemListElement: HOMES_COMPS.map((img, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      item: { "@type": "Product", name: `Nearby home ${i + 1}`, image: [img] },
+    })),
+  };
+  return [
+    `<meta property="og:image" content="${HOMES_SUBJECT[0]}"/>`,
+    `<script type="application/ld+json">${JSON.stringify(subjectNode)}</script>`,
+    `<script type="application/ld+json">${JSON.stringify(compList)}</script>`,
+  ].join("\n");
+}
+
+check("JSON-LD subject gallery excludes the similar-homes ItemList carousel", () => {
+  const html = homesHtmlWithComps();
+  const urls = subjectGalleryFromJsonLd(html);
+  assert.deepEqual(urls, HOMES_SUBJECT, "only the subject node's images are returned");
+  for (const comp of HOMES_COMPS) {
+    assert.ok(!urls.includes(comp), `comp ${comp} must not leak into the subject gallery`);
+  }
+  assert.ok(urls.length >= MIN_JSONLD_SUBJECT_GALLERY, "subject gallery clears the trust threshold");
+});
+
+check("JSON-LD subject gallery drops logo / junk assets", () => {
+  const node = {
+    "@type": "Product",
+    image: [
+      "https://images.homes.com/listings/1/a.jpg",
+      "https://images.homes.com/static/logo.png",
+      "https://images.homes.com/static/equal-housing-badge.png",
+      "https://images.homes.com/listings/1/b.jpg",
+    ],
+  };
+  const html = `<script type="application/ld+json">${JSON.stringify(node)}</script>`;
+  assert.deepEqual(subjectGalleryFromJsonLd(html), [
+    "https://images.homes.com/listings/1/a.jpg",
+    "https://images.homes.com/listings/1/b.jpg",
+  ]);
+});
+
+check("JSON-LD images may be objects with a url/contentUrl field", () => {
+  const node = {
+    "@type": "Residence",
+    image: [
+      { "@type": "ImageObject", url: "https://images.homes.com/listings/2/a.jpg" },
+      { "@type": "ImageObject", contentUrl: "https://images.homes.com/listings/2/b.jpg" },
+    ],
+  };
+  const html = `<script type="application/ld+json">${JSON.stringify(node)}</script>`;
+  assert.deepEqual(subjectGalleryFromJsonLd(html), [
+    "https://images.homes.com/listings/2/a.jpg",
+    "https://images.homes.com/listings/2/b.jpg",
+  ]);
+});
+
+check("a page-chrome Organization logo array is never treated as a gallery", () => {
+  const org = {
+    "@type": "Organization",
+    name: "Homes.com",
+    image: ["https://images.homes.com/static/brand-logo.jpg"],
+    logo: "https://images.homes.com/static/brand-logo.jpg",
+  };
+  const html = `<script type="application/ld+json">${JSON.stringify(org)}</script>`;
+  assert.deepEqual(subjectGalleryFromJsonLd(html), []);
+});
+
+check("malformed JSON-LD blocks are ignored without throwing", () => {
+  const good = { "@type": "Product", image: ["https://images.homes.com/listings/3/a.jpg"] };
+  const html = [
+    `<script type="application/ld+json">{ not valid json,,, }</script>`,
+    `<script type="application/ld+json">${JSON.stringify(good)}</script>`,
+  ].join("\n");
+  assert.deepEqual(subjectGalleryFromJsonLd(html), ["https://images.homes.com/listings/3/a.jpg"]);
+});
+
+check("no JSON-LD on the page yields an empty gallery (caller falls back to greedy harvest)", () => {
+  const html = `<html><body><img src="https://images.homes.com/listings/4/a.jpg"/></body></html>`;
+  assert.deepEqual(subjectGalleryFromJsonLd(html), []);
+});
+
+check("duplicate images (size variants / repeats) are de-duplicated by base URL", () => {
+  const node = {
+    "@type": "Product",
+    image: [
+      "https://images.homes.com/listings/5/a.jpg",
+      "https://images.homes.com/listings/5/a.jpg?w=1024",
+      "https://images.homes.com/listings/5/b.jpg",
+    ],
+  };
+  const html = `<script type="application/ld+json">${JSON.stringify(node)}</script>`;
+  assert.deepEqual(subjectGalleryFromJsonLd(html), [
+    "https://images.homes.com/listings/5/a.jpg",
+    "https://images.homes.com/listings/5/b.jpg",
+  ]);
 });
 
 console.log(`\nredfin-gallery: ${passed} checks passed`);
