@@ -4857,7 +4857,15 @@ function ArrivalDetailsMessageDialog({
     mutationFn: async () => {
       const text = message.trim();
       if (!text) throw new Error("The message is empty.");
-      const body = await apiPostJsonWithTimeout<{ ok?: boolean; conversationId?: string; deliveredVia?: string; message?: string; error?: string }>(
+      const body = await apiPostJsonWithTimeout<{
+        ok?: boolean;
+        conversationId?: string;
+        deliveredVia?: string;
+        verified?: boolean;
+        deliveryModuleType?: string | null;
+        message?: string;
+        error?: string;
+      }>(
         "/api/booking-alternatives/send-guest-message",
         {
           reservationId: reservation._id,
@@ -4868,7 +4876,10 @@ function ArrivalDetailsMessageDialog({
       if (body?.ok !== true) {
         throw new Error(body?.message || body?.error || "Guesty did not confirm the send");
       }
-      return body as { ok: true; conversationId: string; deliveredVia?: string };
+      if (body.verified === false) {
+        throw new Error("Guesty accepted the send but the message was not posted on the Booking.com guest channel");
+      }
+      return body as { ok: true; conversationId: string; deliveredVia?: string; verified?: boolean };
     },
     onSuccess: (data) => {
       setSent(true);
@@ -4876,7 +4887,7 @@ function ArrivalDetailsMessageDialog({
       toast({
         title: "Arrival details sent",
         description: via
-          ? `Delivered through ${via}.`
+          ? `Delivered through ${via}${data?.verified === true ? " and verified on the guest thread" : ""}.`
           : `Delivered through ${channelLabel}.`,
       });
     },

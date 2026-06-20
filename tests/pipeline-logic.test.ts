@@ -4004,15 +4004,13 @@ assert.ok(
     bookingsSource.includes("AbortController"),
   "Message AD send should not overwrite user edits and should time out instead of spinning forever",
 );
+const guestyOtaMessagingSource = readFileSync("server/guesty-ota-messaging.ts", "utf8");
 assert.ok(
-  routesSource.includes("/communication/conversations?reservationId=") &&
-    routesSource.includes("SEND_GUEST_MESSAGE_TIMEOUT_MS") &&
-    routesSource.includes("isBookingChannel(channelHint)") &&
-    routesSource.includes("moduleFromConversationPosts") &&
-    routesSource.includes("guestySendMessageModule") &&
-    routesSource.includes('["type", "channelId"]') &&
-    routesSource.includes("not falling back to email") &&
-    routesSource.includes("deliveredVia"),
-  "send-guest-message should send only Guesty-allowed module keys (type/channelId), not platform/integrationId",
+  routesSource.includes("guesty-ota-messaging") &&
+    routesSource.includes("verified") &&
+    routesSource.includes("deliveryModuleType") &&
+    guestyOtaMessagingSource.includes("verifyOtaHostPostDelivered") &&
+    guestyOtaMessagingSource.includes("buildOtaSendModuleAttempts"),
+  "send-guest-message should verify OTA delivery via conversation posts, not trust Guesty HTTP 200 alone",
 );
 console.log("  ✓ Operations Alternative Unit + Message AD guest messaging");
