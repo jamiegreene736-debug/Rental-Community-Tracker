@@ -100,9 +100,34 @@ export function getCommunityPhotoRepullJob(jobId: string): CommunityPhotoRepullJ
 
 // ── Disk helpers ──────────────────────────────────────────────────────────────
 
+const PHOTOS_BASE_DIR = path.resolve(process.cwd(), "client/public/photos");
+
 function publicPhotoDir(folder: string): string {
-  const safe = folder.replace(/[^a-zA-Z0-9_-]+/g, "-");
-  return path.resolve(process.cwd(), "client/public/photos", safe);
+  // Strict allowlist + containment. `path.basename` strips any directory
+  // component (path-traversal sanitizer recognized by CodeQL); the regex keeps
+  // only slug characters; the prefix check confines the result to the photos
+  // base directory. Defense-in-depth on top of the route's community-* check.
+  const safe = path.basename(folder).replace(/[^a-zA-Z0-9_-]+/g, "-");
+  const dir = path.resolve(PHOTOS_BASE_DIR, safe);
+  if (dir !== PHOTOS_BASE_DIR && !dir.startsWith(PHOTOS_BASE_DIR + path.sep)) {
+    throw new Error("Invalid community photo folder");
+  }
+  return dir;
+}
+
+/**
+ * Resolve a single photo file inside a community folder, sanitizing BOTH the
+ * folder and the filename so untrusted input can never escape the folder.
+ * Returns null when the filename is not a plain image basename. Used by every
+ * filesystem read/delete sink in this module.
+ */
+function safePhotoFilePath(folder: string, filename: string): string | null {
+  const base = path.basename(filename);
+  if (!IMAGE_EXT.test(base)) return null;
+  const dir = publicPhotoDir(folder);
+  const abs = path.resolve(dir, base);
+  if (!abs.startsWith(dir + path.sep)) return null;
+  return abs;
 }
 
 function mimeForBuffer(buffer: Buffer, filename: string): string {
@@ -331,21 +356,22 @@ async function saveToFolder(communityFolder: string, imageUrls: string[]): Promi
 }
 
 async function loadFolderSamples(folder: string, filenames: string[]): Promise<CommunityPhotoSample[]> {
-  const dir = publicPhotoDir(folder);
   const out: CommunityPhotoSample[] = [];
   let n = 0;
   for (const filename of filenames) {
-    if (!IMAGE_EXT.test(filename)) continue;
+    const abs = safePhotoFilePath(folder, filename);
+    if (!abs) continue;
+    const base = path.basename(filename);
     n += 1;
     try {
-      const buffer = await fs.promises.readFile(path.join(dir, filename));
+      const buffer = await fs.promises.readFile(abs);
       if (buffer.length === 0 || buffer.length > MAX_IMAGE_BYTES) continue;
       out.push({
         id: `C${n}`,
         folder,
-        filename,
+        filename: base,
         buffer,
-        mime: mimeForBuffer(buffer, filename),
+        mime: mimeForBuffer(buffer, base),
       });
     } catch {
       // skip unreadable
@@ -471,12 +497,12 @@ async function runCommunityPhotoRepullJob(
         // inconclusive by the Lens logic, so they stay. Uncertain stays too.
         const mismatches = community.photoVerdicts.filter((p) => p.match === "no");
         for (const m of mismatches) {
-          const filename = m.filename;
-          if (!filename) continue;
-          const abs = path.join(publicPhotoDir(input.communityFolder), filename);
+          if (!m.filename) continue;
+          const abs = safePhotoFilePath(input.communityFolder, m.filename);
+          if (!abs) continue;
           try {
             await fs.promises.unlink(abs);
-            removed.push({ filename, reason: m.reason || "Identified as a different community." });
+            removed.push({ filename: path.basename(m.filename), reason: m.reason || "Identified as a different community." });
           } catch {
             // already gone / unreadable — ignore
           }
