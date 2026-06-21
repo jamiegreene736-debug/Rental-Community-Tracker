@@ -67,7 +67,6 @@ const JOB_TTL_MS = 2 * 60 * 60 * 1000;
 const MAX_CANDIDATE_URLS = 40;
 const RESEARCH_MODEL = "claude-sonnet-4-6";
 const RESEARCH_TIMEOUT_MS = 45_000;
-const IMAGE_EXT = /\.(?:jpe?g|png|webp|gif)$/i;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 /** Cap on community photos sent through the Lens+vision verifier (cost guard). */
 const VERIFY_CAP = 30;
@@ -102,17 +101,22 @@ export function getCommunityPhotoRepullJob(jobId: string): CommunityPhotoRepullJ
 
 const PHOTOS_BASE_DIR = path.resolve(process.cwd(), "client/public/photos");
 
+// Anchored allowlists used as validating GUARDS (not String.replace, which
+// CodeQL does not treat as a path-injection sanitizer). A value is only used to
+// build a path after it passes one of these tests, so untrusted input can never
+// reach the filesystem with traversal or unexpected characters.
+const SAFE_FOLDER_RE = /^community-[a-zA-Z0-9_-]+$/;
+const SAFE_FILENAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*\.(?:jpe?g|png|webp|gif)$/i;
+
 function publicPhotoDir(folder: string): string {
-  // Strict allowlist + containment. `path.basename` strips any directory
-  // component (path-traversal sanitizer recognized by CodeQL); the regex keeps
-  // only slug characters; the prefix check confines the result to the photos
-  // base directory. Defense-in-depth on top of the route's community-* check.
-  const safe = path.basename(folder).replace(/[^a-zA-Z0-9_-]+/g, "-");
-  const dir = path.resolve(PHOTOS_BASE_DIR, safe);
-  if (dir !== PHOTOS_BASE_DIR && !dir.startsWith(PHOTOS_BASE_DIR + path.sep)) {
+  // `path.basename` strips any directory component; the anchored regex guard
+  // then confines the value to a community-* slug before it is joined onto the
+  // fixed photos base directory.
+  const safe = path.basename(folder);
+  if (!SAFE_FOLDER_RE.test(safe)) {
     throw new Error("Invalid community photo folder");
   }
-  return dir;
+  return path.join(PHOTOS_BASE_DIR, safe);
 }
 
 /**
@@ -123,11 +127,8 @@ function publicPhotoDir(folder: string): string {
  */
 function safePhotoFilePath(folder: string, filename: string): string | null {
   const base = path.basename(filename);
-  if (!IMAGE_EXT.test(base)) return null;
-  const dir = publicPhotoDir(folder);
-  const abs = path.resolve(dir, base);
-  if (!abs.startsWith(dir + path.sep)) return null;
-  return abs;
+  if (!SAFE_FILENAME_RE.test(base)) return null;
+  return path.join(publicPhotoDir(folder), base);
 }
 
 function mimeForBuffer(buffer: Buffer, filename: string): string {
