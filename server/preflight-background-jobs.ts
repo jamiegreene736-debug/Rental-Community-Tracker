@@ -49,7 +49,7 @@ const JOB_TTL_MS = 2 * 60 * 60 * 1000;
 // find-unit ROUTE_BUDGET_MS is up to 285s (expanded) and may still run one
 // PHOTO_SCRAPE_TIMEOUT_MS step that started just inside the budget guard.
 const REPLACEMENT_FIND_UNIT_LOOPBACK_TIMEOUT_MS = 350_000;
-const MAX_REPLACEMENT_FIND_CONTINUATIONS = 8;
+const MAX_REPLACEMENT_FIND_CONTINUATIONS = 12;
 const photoFetchJobs = new Map<string, PreflightPhotoFetchJob>();
 const replacementFindJobs = new Map<string, PreflightReplacementFindJob>();
 const activePhotoFetchJobIds = new Set<string>();
@@ -480,13 +480,18 @@ async function runPreflightReplacementFindJob(
       if (!data?.error) break;
       const diagnostic = data.diagnostic as {
         budgetStopped?: boolean;
+        capExceeded?: boolean;
         uncheckedCandidates?: Array<Record<string, unknown>>;
         attempts?: Array<{ sourceUrl?: string }>;
       } | null;
       const unchecked = Array.isArray(diagnostic?.uncheckedCandidates)
         ? diagnostic!.uncheckedCandidates!
         : [];
-      if (!diagnostic?.budgetStopped || unchecked.length === 0) break;
+      // Continue when the route left candidates unchecked — either the route/SearchAPI
+      // budget tripped (budgetStopped) OR discovery overflowed one pass (capExceeded,
+      // the hundreds-unit case). Each continuation re-checks the leftover pool with
+      // skipDiscovery, so it drains a big community across passes without re-discovering.
+      if ((!diagnostic?.budgetStopped && !diagnostic?.capExceeded) || unchecked.length === 0) break;
       const checkedUrls = (diagnostic.attempts ?? [])
         .map((row) => String(row?.sourceUrl ?? "").trim())
         .filter(Boolean);

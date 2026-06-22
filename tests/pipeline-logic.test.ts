@@ -2402,6 +2402,69 @@ assert.ok(
   routeSource.includes('found on ${cleanChannel ? "the enforced channel" : "Airbnb/VRBO/Booking.com"}'),
   "the load-bearing skipped-found diagnostic substring must remain intact (append-only diagnostic hint)",
 );
+
+// ── Find-a-New-Unit candidate-cap fix (Tiers 1-4): deeper scan + multi-building breadth + cost guardrail ──
+assert.ok(
+  routeSource.includes("const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 120 : 70;"),
+  "Tier 2: per-pass candidate cap raised (120/70) so a bigger discovery pool can be drained",
+);
+assert.match(
+  routeSource,
+  /DISCOVERY_CANDIDATE_TARGET[\s\S]*?\?\s*80[\s\S]*?\?\s*60[\s\S]*?\?\s*48[\s\S]*?:\s*40;/,
+  "Tier 2: discovery early-stop target raised (80/60/48/40) so hundreds-unit communities surface more than ~20",
+);
+assert.ok(
+  routeSource.includes("const capExceeded = totalCandidates > MAX_CANDIDATES_TO_CHECK;")
+    && routeSource.includes("const uncheckedCandidates = (budgetStopped || capExceeded)")
+    && routeSource.includes("? candidates.slice(attempts.length).map((c) => ({"),
+  "Tier 2: cap overflow is resumable — uncheckedCandidates sourced from the FULL sorted pool on budgetStopped OR capExceeded",
+);
+assert.ok(
+  routeSource.includes("capExceeded,") && routeSource.includes("searchApiCalls,"),
+  "Tier 2/4: the diagnostic must return capExceeded + searchApiCalls (continuation trigger + observability)",
+);
+assert.ok(
+  preflightJobsSource.includes("!diagnostic?.capExceeded")
+    && preflightJobsSource.includes("MAX_REPLACEMENT_FIND_CONTINUATIONS = 12"),
+  "Tier 2: the background job continues on capExceeded (not only budgetStopped) with more passes to drain a big pool",
+);
+{
+  const sharedOpDiagnosticsSource = readFileSync("shared/operation-diagnostics.ts", "utf8");
+  assert.ok(
+    sharedOpDiagnosticsSource.includes("(budgetStopped || capExceeded) && unchecked > 0"),
+    "Tier 2: the manual continue-search remediation also offers on capExceeded",
+  );
+}
+assert.ok(
+  routeSource.includes("SEARCHAPI_CALL_BUDGET")
+    && routeSource.includes("REPLACEMENT_SEARCHAPI_CALL_BUDGET")
+    && routeSource.includes("searchApiCalls += 1;"),
+  "Tier 4: a per-pass SearchAPI call budget guards the shared plan and is counted on every Google query",
+);
+{
+  const communityAddressesSource = readFileSync("shared/community-addresses.ts", "utf8");
+  assert.ok(
+    communityAddressesSource.includes("buildingStreetRoots?: string[]"),
+    "Tier 3: CommunityAddressRule exposes buildingStreetRoots for multi-building resorts",
+  );
+}
+assert.ok(
+  routeSource.includes("?.buildingStreetRoots ?? []"),
+  "Tier 3: communityKnownAddressRoots threads curated buildingStreetRoots into the resort-street gate",
+);
+assert.ok(
+  routeSource.includes("learnedBuildingRoots") && routeSource.includes("buildingAllowedRoots"),
+  "Tier 3: the Zillow /b/ harvest auto-learns sibling building roots (>=2x on the page) to admit other buildings",
+);
+assert.ok(
+  unitReplacementSource.includes('data-testid="button-include-ota-listed-retry"')
+    && unitReplacementSource.includes("search({ allowOtaListed: true"),
+  "Tier 1: the replacement flow offers a one-click 'Include OTA-listed & retry' when skipped-found dominates",
+);
+assert.ok(
+  routeSource.includes("Found ${totalCandidates} for-sale"),
+  "Tier 1: the failure diagnostic reframes the count as the discovered for-sale pool, not a scan limit",
+);
 assert.ok(
   unitReplacementSource.includes("allowOtaListed,")
     && unitReplacementSource.includes("setAllowOtaListed"),
@@ -2485,8 +2548,10 @@ assert.ok(
   "replacement discovery should run SearchAPI queries in parallel batches",
 );
 assert.ok(
-  routeSource.includes("const filterRoots = suppliedStreetRoot"),
-  "replacement stacked Apify discovery must filter Zillow/Realtor through canonical resort street when known",
+  routeSource.includes("const filterRoots = allowedRoots.size > 0")
+    && routeSource.includes('for (const link of batch.realtor) addCandidateUrl(link, "realtor", "", "", filterRoots);')
+    && routeSource.includes('for (const link of batch.zillow) addCandidateUrl(link, "zillow", "", "", filterRoots);'),
+  "replacement stacked Apify discovery must filter Zillow/Realtor through the resort root SET (canonical + curated buildingStreetRoots + learned), not a single narrowed root",
 );
 assert.ok(
   routeSource.includes("(?:[-\\\\s]+\\\\d{1,4})?[-\\\\s]+"),
