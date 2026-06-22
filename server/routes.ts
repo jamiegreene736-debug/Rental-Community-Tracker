@@ -165,6 +165,7 @@ import {
 } from "@shared/folder-unit-map";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
+import { isSameHawaiiStreetFamily } from "@shared/hawaii-street-family";
 import { checkCommunityState, isCommunityInWrongState } from "@shared/community-location-guard";
 import { confirmCommunityLocation } from "@shared/photo-location-confirmation";
 import {
@@ -31545,12 +31546,12 @@ Return ONLY compact JSON with this exact shape:
     const escapeRegExp = (value: string): string =>
       value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-    const isSameHawaiiStreetFamily = (candidateRoot: string, allowedRoot: string): boolean => {
-      const candidate = candidateRoot.match(/^(\d{1,2})\s+\d{3,5}\s+(.+)$/i);
-      const allowed = allowedRoot.match(/^(\d{1,2})\s+\d{3,5}\s+(.+)$/i);
-      if (!candidate || !allowed) return false;
-      return candidate[1] === allowed[1] && candidate[2] === allowed[2];
-    };
+    // isSameHawaiiStreetFamily lives in @shared/hawaii-street-family so it can
+    // be unit-tested. It matches same-district + same-street roots, but on
+    // streets where the lot number distinguishes SEPARATE resorts (e.g.
+    // Waikoloa Beach Dr: 69-180 Beach Villas vs 69-555 Colony Villas) it also
+    // requires the lot number to match, so a different resort on the same
+    // street is no longer accepted as a sibling building.
 
     const candidateRootMatches = (url: string, allowedRoots: Set<string>, _contextText = ""): boolean => {
       if (allowedRoots.size === 0) return false;
