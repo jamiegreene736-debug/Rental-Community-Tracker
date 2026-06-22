@@ -1751,7 +1751,35 @@ export class DatabaseStorage implements IStorage {
       .set(set)
       .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)))
       .returning();
-    return row ?? null;
+    if (row) return row;
+    // Insert-on-miss: a photo the AI labeler hasn't captioned yet has NO
+    // photo_labels row, so the UPDATE above matches nothing. The operator can
+    // still hide / rename such a "blank" tile from the Photos tab, so seed a
+    // fresh row carrying the override instead of 404-ing the caller
+    // ("photo label not found — rescrape first?"). Mirrors
+    // reorderPhotosInFolder's insert-on-miss below. `label` (the AI caption) is
+    // NOT NULL but accepts the empty string — seed it from the typed caption
+    // when present, else "" (NOT the filename: the Photos-tab tile renders
+    // `userLabel ?? label ?? caption`, so a filename here would surface as a
+    // visible caption on the restored tile; "" falls through to the
+    // "(click to add caption)" placeholder and matches the optimistic client
+    // seed in PhotoCurator. The labeler fills the real caption on next relabel).
+    const seedLabel =
+      typeof patch.userLabel === "string" && patch.userLabel.trim()
+        ? patch.userLabel.trim().slice(0, 200)
+        : "";
+    const [inserted] = await db.insert(photoLabels)
+      .values({
+        folder,
+        filename,
+        label: seedLabel,
+        userLabel: "userLabel" in patch ? patch.userLabel : undefined,
+        userCategory: "userCategory" in patch ? patch.userCategory : undefined,
+        hidden: "hidden" in patch ? !!patch.hidden : undefined,
+        sortOrder: "sortOrder" in patch ? patch.sortOrder : undefined,
+      })
+      .returning();
+    return inserted ?? null;
   }
 
   // Persist the operator's manual photo order for a single folder (a unit
