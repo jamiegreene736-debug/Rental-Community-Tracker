@@ -514,7 +514,12 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /const \[\s*apifyCounts,\s*zillowSearchApiAdded,\s*,\s*realtyApiCounts,\s*\] = await Promise\.all\(\[\s*runApifyDiscovery\(\),\s*runZillowSearchApiDiscovery\(\),\s*runSupplementalSearchApiDiscovery\(\),\s*runRealtyApiDiscovery\(\),\s*\]\)/,
+  /runMarketReconDiscovery[\s\S]*buildMarketReconSearchQueries/,
+  "fetch-unit-photos must run a parallel market-recon aggregator sweep",
+);
+assert.match(
+  routesSource,
+  /const \[\s*marketReconAdded,\s*apifyCounts,\s*zillowSearchApiAdded,\s*,\s*realtyApiCounts,\s*\] = await Promise\.all\(\[\s*runMarketReconDiscovery\(\),\s*runApifyDiscovery\(\),\s*runZillowSearchApiDiscovery\(\),\s*runSupplementalSearchApiDiscovery\(\),\s*runRealtyApiDiscovery\(\),\s*\]\)/,
   "fetch-unit-photos must not read RealtyAPI counts from the void supplemental SearchAPI promise",
 );
 assert.match(
@@ -2225,6 +2230,11 @@ assert.ok(
 assert.ok(
   routeSource.includes("runFindUnitStackedApifyDiscovery"),
   "replacement discovery must centralize stacked Apify discovery invoked parallel with SearchAPI",
+);
+assert.match(
+  routeSource,
+  /find-unit[\s\S]*runMarketReconDiscovery[\s\S]*market-recon sweep/,
+  "replacement find-unit must run a parallel market-recon aggregator sweep before strict discovery",
 );
 {
   const replacementRouteStart = routeSource.indexOf('app.post("/api/replacement/find-unit"');

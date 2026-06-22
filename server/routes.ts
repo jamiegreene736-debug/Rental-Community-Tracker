@@ -182,6 +182,11 @@ import {
   validateCommunityStreetAddress,
 } from "@shared/community-addresses";
 import {
+  buildMarketReconSearchQueries,
+  detectMarketReconPortal,
+  marketReconLooksAnchored,
+} from "@shared/market-recon-discovery";
+import {
   COMMUNITY_FOLDER_TO_ADDRESS,
   COMMUNITY_FOLDER_TO_NAME,
   COMMUNITY_SOURCE_URLS,
@@ -31949,6 +31954,67 @@ Return ONLY compact JSON with this exact shape:
       }
     };
 
+    // Parallel "market recon" branch: Grok-style broad aggregator queries
+    // (street + bedroom + site:zillow/realtor/redfin) WITHOUT the strict
+    // resort-street URL gate. Promising hits still flow through the existing
+    // OTA + photo + vision validation pipeline downstream.
+    const MARKET_RECON_QUERY_CAP = expandedSearch ? 14 : 10;
+    const marketReconInput = {
+      streetAddress: communityAddress,
+      communityName,
+      city: communityLocForQueries?.city ?? bodyLocation?.city,
+      state: communityLocForQueries?.state ?? bodyLocation?.state,
+      bedrooms: requiredBedroomCount ?? null,
+    };
+    const runMarketReconDiscovery = async () => {
+      const queries = buildMarketReconSearchQueries(marketReconInput).slice(0, MARKET_RECON_QUERY_CAP);
+      if (queries.length === 0) return;
+      const before = candidates.length;
+      console.error(`[find-unit] market-recon sweep: ${queries.length} aggregator queries`);
+      for (let i = 0; i < queries.length; i += DISCOVERY_QUERY_CONCURRENCY) {
+        if (discoveryTargetMet() || !hasDiscoveryBudget()) break;
+        const batch = queries.slice(i, i + DISCOVERY_QUERY_CONCURRENCY);
+        await Promise.all(batch.map(async (siteQuery) => {
+          try {
+            const searchResp = await fetch(
+              `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=${expandedSearch ? 15 : 10}&api_key=${searchApiKey}`,
+              { signal: AbortSignal.timeout(DISCOVERY_SEARCH_TIMEOUT_MS) },
+            );
+            if (!searchResp.ok) {
+              console.error(`[find-unit] market-recon SearchAPI HTTP ${searchResp.status} for "${siteQuery}"`);
+              return;
+            }
+            const searchData = await searchResp.json() as any;
+            const results: any[] = searchData.organic_results || [];
+            discoveryOrganicHits += results.length;
+            for (const r of results) {
+              const link: string = r.link || "";
+              const source = detectSource(link);
+              if (!source || !detectMarketReconPortal(link)) continue;
+              const title = String(r.title ?? "");
+              const snippet = String(r.snippet ?? "");
+              if (!marketReconLooksAnchored(link, title, snippet, marketReconInput)) {
+                discoveryFilteredHits += 1;
+                continue;
+              }
+              const beforeAdd = candidates.length;
+              const thumbnail: string = r.thumbnail || r.rich_snippet?.top?.detected_extensions?.thumbnail || "";
+              addCandidateUrl(
+                link,
+                source,
+                `${title} ${snippet} market-recon`.trim(),
+                thumbnail,
+              );
+              if (candidates.length === beforeAdd) discoveryFilteredHits += 1;
+            }
+          } catch (e: any) {
+            console.error(`[find-unit] market-recon search error for "${siteQuery}": ${e?.message ?? e}`);
+          }
+        }));
+      }
+      console.error(`[find-unit] market-recon sweep added ${candidates.length - before} candidate(s)`);
+    };
+
     const runFindUnitStackedApifyDiscovery = async (): Promise<void> => {
       const communityLoc = communityLocForQueries;
       if (!communityLoc || !process.env.APIFY_API_TOKEN) return;
@@ -32067,6 +32133,7 @@ Return ONLY compact JSON with this exact shape:
     }
 
     if (!skipDiscovery) {
+      await runMarketReconDiscovery();
       for (let i = 0; i < searchQueries.length; i += DISCOVERY_QUERY_CONCURRENCY) {
         if (discoveryTargetMet()) {
           console.warn(
@@ -36277,6 +36344,46 @@ Return ONLY compact JSON with this exact shape:
         }));
       };
 
+      const marketReconInput = {
+        streetAddress,
+        communityName,
+        city: discoveryCity || city,
+        state,
+        bedrooms: requestedBedrooms,
+      };
+      const runMarketReconDiscovery = async (): Promise<number> => {
+        if (!searchApiKey) return 0;
+        const queries = buildMarketReconSearchQueries(marketReconInput).slice(0, 12);
+        if (queries.length === 0) return 0;
+        const before = candidateUrls.length;
+        console.log(`[fetch-unit-photos] market-recon sweep: ${queries.length} aggregator queries`);
+        await Promise.all(queries.map(async (q) => {
+          try {
+            const resp = await fetch(
+              `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+              { signal: AbortSignal.timeout(COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS) },
+            );
+            if (!resp.ok) return;
+            const data = await resp.json() as any;
+            const organic = (data.organic_results || []) as Array<{ link?: string; title?: string; snippet?: string }>;
+            for (const r of organic) {
+              const link = String(r.link ?? "");
+              const portal = detectMarketReconPortal(link);
+              if (!portal) continue;
+              const title = String(r.title ?? "");
+              const snippet = String(r.snippet ?? "");
+              if (!marketReconLooksAnchored(link, title, snippet, marketReconInput)) continue;
+              addCandidate(link, portal, title, snippet);
+            }
+          } catch (e: any) {
+            console.warn(`[fetch-unit-photos] market-recon search failed for "${q}": ${e?.message ?? e}`);
+          }
+        }));
+        const added = candidateUrls.length - before;
+        console.log(`[fetch-unit-photos] market-recon sweep added ${added} candidate(s)`);
+        return added;
+      };
+
       const apifyCities = [...new Set(discoverySearchCitiesForPhotoSearch({ city, communityName, streetAddress }))].slice(0, 3);
       const apifyMaxItems = candidateLimit
         ? Math.max(30, Math.min(80, candidateLimit * 8))
@@ -36379,11 +36486,13 @@ Return ONLY compact JSON with this exact shape:
       };
 
       const [
+        marketReconAdded,
         apifyCounts,
         zillowSearchApiAdded,
         ,
         realtyApiCounts,
       ] = await Promise.all([
+        runMarketReconDiscovery(),
         runApifyDiscovery(),
         runZillowSearchApiDiscovery(),
         runSupplementalSearchApiDiscovery(),
@@ -36391,6 +36500,7 @@ Return ONLY compact JSON with this exact shape:
       ]);
       console.log(
         `[fetch-unit-photos] stacked discovery for "${communityName}": ` +
+        `marketRecon=+${marketReconAdded} ` +
         `apify(zillow=${apifyCounts.zillow} realtor=${apifyCounts.realtor}) ` +
         `zillowSearchApi=+${zillowSearchApiAdded} ` +
         `realtyapi(raw=${realtyApiCounts.raw} kept=${realtyApiCounts.kept} added=${realtyApiCounts.added} ` +
