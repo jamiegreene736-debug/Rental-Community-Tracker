@@ -41476,6 +41476,12 @@ Return ONLY compact JSON with this exact shape:
       await Promise.all([u1, u2].filter((unit): unit is NonNullable<typeof unit> => !!unit).map(async (unit) => {
         await fs.promises.rm(unit.finalPath, { recursive: true, force: true });
         await fs.promises.rename(unit.stagingPath, unit.finalPath);
+        // The gallery was fully REPLACED (old files removed via rm, new files
+        // written with the same NN.jpg numbering). Clear this folder's stale photo
+        // labels so captions are regenerated for the NEW images — queueMissingPhotoLabels
+        // below only labels filenames it hasn't seen, so without this a reused NN.jpg
+        // would keep the PREVIOUS photo's caption.
+        await storage.deletePhotoLabelsByFolder(unit.folder).catch(() => {});
       }));
       const update: Record<string, string | null> = {};
       if (u1) {

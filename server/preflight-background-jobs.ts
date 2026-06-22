@@ -288,7 +288,15 @@ async function runPreflightPhotoFetchJob(
       }
     }
 
-    for (let i = 0; photos.length === 0 && i < attempts.length; i += 1) {
+    // Discovery fallback — DISABLED for "Re-pull all photos" (replacingExistingPhotos).
+    // That button rescrapes THIS unit's OWN saved listing only; if the listing can't
+    // supply at least MIN_INDEPENDENT_UNIT_PHOTOS usable photos (or there's no saved
+    // source URL at all) we KEEP the existing gallery rather than silently
+    // substituting a DIFFERENT listing's photos (which is exactly what this discovery
+    // loop does). Discovery still runs for "Find Photos" on an EMPTY unit, which is
+    // the only flow through this handler that passes replacingExistingPhotos=false.
+    const allowDiscoveryFallback = !replacingExistingPhotos;
+    for (let i = 0; allowDiscoveryFallback && photos.length === 0 && i < attempts.length; i += 1) {
       const attempt = attempts[i];
       touchPhotoJob(job, {
         phase: "searching",
@@ -342,14 +350,22 @@ async function runPreflightPhotoFetchJob(
     }
 
     if (photos.length === 0) {
+      // "Re-pull all photos" (replacingExistingPhotos) never substitutes a different
+      // listing — the discovery loop above is gated off — so the unit's existing
+      // gallery is left untouched (we never reach persist) and the message says so.
+      const replaceOnlyFailure = replacingExistingPhotos
+        ? (rescrapeSourceUrl
+            ? `This unit's saved listing didn't return at least ${MIN_INDEPENDENT_UNIT_PHOTOS} usable photos${lastNote ? ` — ${lastNote}` : ""}. Kept the existing gallery; no substitute listing was pulled.`
+            : `This unit has no saved source listing to re-pull from. Kept the existing gallery — set a source under “Photo Sources” to refresh it.`)
+        : null;
       const proofSummary = lastProof ? summarizeUnitPhotoProof("Photo search", lastProof) : null;
       touchPhotoJob(job, {
         status: "failed",
         phase: "failed",
-        message: lastNote || proofSummary || `Couldn't find another ${input.bedrooms}BR listing`,
+        message: replaceOnlyFailure || lastNote || proofSummary || `Couldn't find another ${input.bedrooms}BR listing`,
         progress: 100,
         finishedAt: Date.now(),
-        error: lastNote || proofSummary || `Couldn't find another ${input.bedrooms}BR listing at ${input.communityName}`,
+        error: replaceOnlyFailure || lastNote || proofSummary || `Couldn't find another ${input.bedrooms}BR listing at ${input.communityName}`,
         proof: lastProof,
         diagnostic: lastDiagnostic,
       });
