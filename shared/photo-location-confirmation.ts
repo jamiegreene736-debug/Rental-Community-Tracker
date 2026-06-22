@@ -129,6 +129,15 @@ export type ConfirmLocationInput = {
   communityName?: string | null;
   expectedCity?: string | null;
   expectedState?: string | null;
+  /**
+   * Other city/town names that count as the SAME place as expectedCity — e.g.
+   * the curated `cityAliases` from shared/community-addresses.ts. Resort
+   * communities routinely market under a locality different from their mailing
+   * city (Poipu Kai's mailing city is "Koloa" but it markets as "Poipu";
+   * The Cliffs at Princeville markets as Hanalei/Kilauea), so without these a
+   * benign city difference would otherwise read as a conflict.
+   */
+  expectedCityAliases?: Array<string | null | undefined> | null;
   /** A positively-observed state (e.g. from Claude research or a scraped listing). */
   observedState?: string | null;
   observedCity?: string | null;
@@ -138,8 +147,11 @@ export type ConfirmLocationInput = {
  * Confirm a community/unit's location against what we expect.
  *
  * State signals, strongest first: the curated home state (community-location-guard)
- * > the observed state. We only flag `mismatch` when a positively-known state
- * contradicts the expected state — an unknown location is never a mismatch.
+ * > the observed state. The overall `status` is STATE-driven: we only flag
+ * `mismatch` when a positively-known state contradicts the expected state — an
+ * unknown location is never a mismatch, and a city-only difference is surfaced
+ * as an informational aside (never a red verdict), because mailing-city vs
+ * marketed-town differences are pervasive (pass `expectedCityAliases`).
  */
 export function confirmCommunityLocation(input: ConfirmLocationInput): LocationConfirmation {
   const communityName = (input.communityName ?? "").trim() || null;
@@ -161,33 +173,46 @@ export function confirmCommunityLocation(input: ConfirmLocationInput): LocationC
   }
   const confirmedState = knownState ?? expectedState;
 
-  // ── City ─────────────────────────────────────────────────────────────────--
+  // ── City (a secondary signal — NEVER the red verdict; see status below) ─────
+  // observedCity counts as a match if it equals the expected city OR any curated
+  // alias (mailing-city vs marketed-town equivalences).
+  const acceptableCities = [expectedCity, ...(input.expectedCityAliases ?? [])]
+    .map((c) => (typeof c === "string" ? c.trim() : ""))
+    .filter(Boolean);
   let cityStatus: LocationMatch;
-  if (observedCity && expectedCity) {
-    cityStatus = citiesEquivalent(observedCity, expectedCity) ? "match" : "mismatch";
+  if (observedCity && acceptableCities.length > 0) {
+    cityStatus = acceptableCities.some((c) => citiesEquivalent(observedCity, c)) ? "match" : "mismatch";
   } else {
     cityStatus = "unconfirmed";
   }
   const confirmedCity = observedCity ?? expectedCity;
 
   // ── Overall + note ───────────────────────────────────────────────────────--
+  // STATE drives the verdict — that is the question the feature answers ("what
+  // state is it in?"). A city-only divergence is informational and must NOT
+  // raise a red "wrong state" alarm on a community whose state is correct,
+  // because mailing-city vs marketed-town differences are pervasive here.
   const status: LocationMatch =
-    stateStatus === "mismatch" || cityStatus === "mismatch"
+    stateStatus === "mismatch"
       ? "mismatch"
       : stateStatus === "match"
         ? "match"
         : "unconfirmed";
 
   const who = communityName ? `"${communityName}"` : "This location";
+  const cityAside =
+    cityStatus === "mismatch" && observedCity && expectedCity
+      ? ` (Reported city ${observedCity} differs from ${expectedCity} — usually the same resort area.)`
+      : "";
   let note: string;
   if (stateStatus === "mismatch") {
     note = `${who} is in ${knownState}, not ${expectedState}. ${homeState ? "Known mis-location" : "Observed location differs"} — fix the state before using these photos.`;
-  } else if (cityStatus === "mismatch") {
-    note = `${who} is in ${confirmedState ?? "an unknown state"} but the city looks like ${observedCity}, not ${expectedCity}.`;
   } else if (stateStatus === "match") {
-    note = `Confirmed in ${confirmedCity ? `${confirmedCity}, ` : ""}${confirmedState}.`;
+    note = (cityStatus === "mismatch"
+      ? `Confirmed in ${confirmedState}.`
+      : `Confirmed in ${confirmedCity ? `${confirmedCity}, ` : ""}${confirmedState}.`) + cityAside;
   } else if (expectedState) {
-    note = `Listed in ${expectedCity ? `${expectedCity}, ` : ""}${expectedState}. No state conflict detected.`;
+    note = `Listed in ${expectedCity ? `${expectedCity}, ` : ""}${expectedState}. No state conflict detected.` + cityAside;
   } else {
     note = "No state on record to confirm against.";
   }

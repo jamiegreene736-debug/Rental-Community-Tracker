@@ -467,6 +467,9 @@ async function runCommunityPhotoRepullJob(
     const locationConfirmation = confirmCommunityLocation({
       communityName: input.communityName,
       expectedCity: city || null,
+      // Curated mailing-city vs marketed-town equivalences so Claude returning
+      // "Poipu" against the mailing city "Koloa" isn't read as a city conflict.
+      expectedCityAliases: [rule?.city, ...(rule?.cityAliases ?? [])],
       expectedState: expectedState || null,
       observedState: research.confirmedState || null,
       observedCity: research.confirmedCity || null,
