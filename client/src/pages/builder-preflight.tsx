@@ -43,6 +43,8 @@ type PreflightPhotoFetchJob = {
   progress: number;
   unitId: string;
   savedCount: number | null;
+  /** What a re-pull changed on disk: "gallery already current — no changes" / "3 new, 1 removed…". */
+  changeNote?: string | null;
   sourceUrl: string | null;
   proof?: Record<string, unknown> | null;
   diagnostic?: Record<string, unknown> | null;
@@ -570,11 +572,15 @@ export default function BuilderPreflight() {
       if (job.sourceUrl) {
         try { sourceNote = ` from ${new URL(job.sourceUrl).hostname}`; } catch { /* keep blank */ }
       }
+      // Surface what the re-pull actually CHANGED — a fast re-pull of the same
+      // listing legitimately yields identical photos, so spell that out instead
+      // of leaving the operator wondering whether it ran.
+      const changeNote = typeof job.changeNote === "string" && job.changeNote ? ` — ${job.changeNote}` : "";
       recordPhotoFetchReceipt(unitId, {
         timestamp: Date.now(),
         success: true,
         title: "Photos re-pulled",
-        detail: `${job.savedCount ?? 0} photo${job.savedCount === 1 ? "" : "s"} saved${sourceNote}.`,
+        detail: `${job.savedCount ?? 0} photo${job.savedCount === 1 ? "" : "s"} re-scraped${sourceNote}${changeNote}.`,
         jobId: job.id,
       });
     } else if (job.status === "failed") {
@@ -591,11 +597,11 @@ export default function BuilderPreflight() {
         if (updated) setDraftProperty(updated);
       });
       if (!restored) {
+        const host = job.sourceUrl ? `From ${new URL(job.sourceUrl).hostname}. ` : "";
+        const changeLine = typeof job.changeNote === "string" && job.changeNote ? `${job.changeNote}. ` : "";
         toast({
-          title: `Saved ${job.savedCount ?? 0} photo${job.savedCount === 1 ? "" : "s"}`,
-          description: job.sourceUrl
-            ? `From ${new URL(job.sourceUrl).hostname}. Re-run the Platform Check to reverse-image-search them.`
-            : "Re-run the Platform Check below to reverse-image-search them.",
+          title: `Re-pulled ${job.savedCount ?? 0} photo${job.savedCount === 1 ? "" : "s"}`,
+          description: `${host}${changeLine}Re-run the Platform Check to reverse-image-search them.`,
         });
         if (job.sourceUrl) {
           setSkippedUrlsByUnit((prev) => ({

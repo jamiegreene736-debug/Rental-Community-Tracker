@@ -24,6 +24,12 @@ export type PreflightPhotoFetchJob = {
   unitId: string;
   unitIndex: 0 | 1;
   savedCount: number | null;
+  /**
+   * Human-readable summary of what a re-pull actually CHANGED on disk
+   * ("gallery already current — no changes" vs "3 new, 1 removed…"). Lets a
+   * fast re-pull of the same listing show it ran without looking like a no-op.
+   */
+  changeNote: string | null;
   sourceUrl: string | null;
   proof: UnitPhotoResolverProof | null;
   diagnostic: Record<string, unknown> | null;
@@ -193,6 +199,7 @@ export function startPreflightPhotoFetchJob(input: StartPreflightPhotoFetchInput
     unitId: input.unitId,
     unitIndex: input.unitIndex,
     savedCount: null,
+    changeNote: null,
     sourceUrl: null,
     proof: null,
     diagnostic: null,
@@ -390,18 +397,32 @@ async function runPreflightPhotoFetchJob(
       reservedProof = lastProof;
       return postJson(`${base}/api/community/${input.draftId}/persist-photos`, persistBody, 180_000);
     });
-    const saved = input.unitIndex === 0 ? persistData?.unit1?.saved : persistData?.unit2?.saved;
+    const persistedUnit = input.unitIndex === 0 ? persistData?.unit1 : persistData?.unit2;
+    const saved = persistedUnit?.saved;
     if (typeof saved === "number" && saved < MIN_INDEPENDENT_UNIT_PHOTOS) {
       throw new Error(`Only ${saved} photo${saved === 1 ? "" : "s"} saved after proof checks; at least ${MIN_INDEPENDENT_UNIT_PHOTOS} are required before replacing this unit's gallery.`);
     }
 
+    // What actually changed vs the gallery that was on disk — so a fast re-pull
+    // of the SAME listing reports "already current" instead of looking like a
+    // no-op. persist-photos returns a content-fingerprint delta per unit.
+    const delta = persistedUnit?.delta as
+      | { changed?: boolean; added?: number; removed?: number; unchanged?: number; hadPrevious?: boolean }
+      | undefined;
+    const changeNote = delta && delta.hadPrevious
+      ? (delta.changed
+          ? `${delta.added ?? 0} new, ${delta.removed ?? 0} removed, ${delta.unchanged ?? 0} unchanged`
+          : "gallery already current — no changes")
+      : null;
+
     touchPhotoJob(job, {
       status: "completed",
       phase: "completed",
-      message: `Saved ${saved ?? 0} photo${saved === 1 ? "" : "s"}`,
+      message: `Saved ${saved ?? 0} photo${saved === 1 ? "" : "s"}` + (changeNote ? ` · ${changeNote}` : ""),
       progress: 100,
       finishedAt: Date.now(),
       savedCount: typeof saved === "number" ? saved : null,
+      changeNote,
       sourceUrl,
       proof: lastProof,
       diagnostic: lastDiagnostic,
