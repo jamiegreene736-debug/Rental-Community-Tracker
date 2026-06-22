@@ -196,6 +196,31 @@ type UnitOverride = {
   swapId?: number;
 };
 
+// Friendly name for the scrape source (Zillow / Redfin / VRBO …) from the
+// stored `_source.json` platform field, falling back to the URL hostname.
+function sourcePlatformLabel(source: { url: string; platform?: string } | null | undefined): string {
+  if (!source) return "source";
+  const p = (source.platform || "").toLowerCase();
+  if (p === "zillow") return "Zillow";
+  if (p === "redfin") return "Redfin";
+  if (p === "homes.com") return "Homes.com";
+  if (p === "realtor") return "Realtor.com";
+  if (p === "vrbo") return "VRBO";
+  if (p === "airbnb") return "Airbnb";
+  try {
+    const host = new URL(source.url).hostname.replace(/^www\./, "");
+    if (/zillow/i.test(host)) return "Zillow";
+    if (/redfin/i.test(host)) return "Redfin";
+    if (/realtor/i.test(host)) return "Realtor.com";
+    if (/homes\.com/i.test(host)) return "Homes.com";
+    if (/vrbo/i.test(host)) return "VRBO";
+    if (/airbnb/i.test(host)) return "Airbnb";
+    return host;
+  } catch {
+    return "source";
+  }
+}
+
 function formatUnitDisplayLabel(unitNumber: string): string {
   const raw = String(unitNumber || "").trim();
   if (!raw) return "Unit";
@@ -986,6 +1011,50 @@ export default function BuilderPreflight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [photoFolderKey]);
 
+  // Load the original scrape source (Zillow/Redfin/etc.) for each unit's folder
+  // from its _source.json, so the Photo Sources card can show a "View source"
+  // button next to Re-pull that reveals the listing URL the photos came from.
+  // Stays ABOVE the `if (!property)` early return (stable hook count) and reads
+  // property/unitOverrides directly. Re-runs after a re-pull (receipt timestamp
+  // changes) so the URL refreshes if discovery picked a new listing.
+  const [unitSourceByFolder, setUnitSourceByFolder] = useState<Record<string, { url: string; platform?: string } | null>>({});
+  const [revealedSourceUnitIds, setRevealedSourceUnitIds] = useState<Set<string>>(new Set());
+  const toggleRevealSource = (unitId: string) => {
+    setRevealedSourceUnitIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(unitId)) next.delete(unitId); else next.add(unitId);
+      return next;
+    });
+  };
+  const sourceRefreshKey = (property?.units ?? [])
+    .map((u) => photoFetchReceipts[u.id]?.timestamp ?? 0)
+    .join("|");
+  useEffect(() => {
+    const folders = Array.from(new Set(
+      (property?.units ?? [])
+        .map((u) => (unitOverrides[u.id]?.photoFolder ?? (u as any).photoFolder) as string | undefined)
+        .filter((f): f is string => !!f),
+    ));
+    if (folders.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const map: Record<string, { url: string; platform?: string } | null> = {};
+      await Promise.all(folders.map(async (folder) => {
+        try {
+          const r = await fetch(`/api/builder/photo-source/${encodeURIComponent(folder)}`, { credentials: "include" });
+          if (!r.ok) return;
+          const data = await r.json();
+          const sl = data?.source?.sourceListing;
+          const url = typeof sl?.url === "string" && /^https?:\/\//i.test(sl.url) ? sl.url : null;
+          map[folder] = url ? { url, platform: typeof sl?.platform === "string" ? sl.platform : undefined } : null;
+        } catch { /* leave folder absent → button shows "no source on file" */ }
+      }));
+      if (!cancelled) setUnitSourceByFolder((prev) => ({ ...prev, ...map }));
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photoFolderKey, sourceRefreshKey]);
+
   if (!property) {
     if (draftLoading) {
       return (
@@ -1631,6 +1700,9 @@ export default function BuilderPreflight() {
                 const isScrapingThisUnit = isPhotoFetchActive(unit.id);
                 const unitProgress = photoFetchProgressValue(unit.id);
                 const isReplaced = !!unitOverrides[unit.id];
+                const unitFolder = (unit as any).photoFolder as string | undefined;
+                const unitSource = unitFolder ? unitSourceByFolder[unitFolder] : undefined;
+                const sourceRevealed = revealedSourceUnitIds.has(unit.id);
                 return (
                   <div key={unit.id} className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-medium w-20 flex-shrink-0">
@@ -1663,9 +1735,54 @@ export default function BuilderPreflight() {
                       )}
                     </Button>
                     {folderHasPhotos && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => toggleRevealSource(unit.id)}
+                        className="h-8 text-xs flex-shrink-0"
+                        data-testid={`button-view-source-${unit.id}`}
+                        title="Show the original listing (Zillow, Redfin, etc.) these photos were scraped from"
+                      >
+                        <ExternalLink className="h-3 w-3 mr-1" />
+                        {sourceRevealed ? "Hide source" : "View source"}
+                      </Button>
+                    )}
+                    {folderHasPhotos && (
                       <Badge variant="outline" className="text-[10px] flex-shrink-0">
                         {savedPhotoCount} on file
                       </Badge>
+                    )}
+                    {/* Reveal the original scrape source URL on demand. */}
+                    {folderHasPhotos && sourceRevealed && (
+                      <div
+                        className="basis-full rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs"
+                        data-testid={`source-panel-${unit.id}`}
+                      >
+                        {unitSource === undefined ? (
+                          <span className="inline-flex items-center gap-1 text-muted-foreground">
+                            <Loader2 className="h-3 w-3 animate-spin" /> Loading source…
+                          </span>
+                        ) : unitSource ? (
+                          <div className="flex items-start gap-1.5">
+                            <MapPin className="h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-muted-foreground" />
+                            <span className="min-w-0">
+                              <span className="font-medium">Scraped from {sourcePlatformLabel(unitSource)}:</span>{" "}
+                              <a
+                                href={unitSource.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary hover:underline break-all"
+                              >
+                                {unitSource.url}
+                              </a>
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">
+                            No original source URL on file for this unit. A re-pull will record one if it discovers a listing.
+                          </span>
+                        )}
+                      </div>
                     )}
                     {skippedCount > 0 && !folderHasPhotos && (
                       <span className="text-[10px] text-muted-foreground flex-shrink-0">
