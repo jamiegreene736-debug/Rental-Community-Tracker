@@ -90,6 +90,58 @@ function LocationConfirmationNote({ confirmation }: { confirmation: LocationConf
   );
 }
 
+// A sticky, dismissible "last processed" receipt for a long-running operation
+// (re-pulling a unit's photos, running the OTA unit audit). The operator asked
+// for a confirmation that STAYS on screen after the work finishes — telling
+// them when it last ran and whether it succeeded — until they click the × to
+// dismiss it. Green when the operation succeeded, red when it failed.
+type OperationReceipt = {
+  timestamp: number; // ms epoch
+  success: boolean;
+  title: string; // e.g. "Photos re-pulled" / "Full unit audit"
+  detail: string; // human summary or error message
+  jobId?: string; // de-dupes repeat records for the same finished job
+};
+
+function OperationReceiptNote({
+  receipt,
+  relative,
+  onDismiss,
+  testId,
+}: {
+  receipt: OperationReceipt;
+  relative: (ts: number) => string;
+  onDismiss: () => void;
+  testId?: string;
+}) {
+  const cls = receipt.success
+    ? "border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300"
+    : "border-red-200 bg-red-50 text-red-900 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200";
+  const Icon = receipt.success ? CheckCircle2 : AlertTriangle;
+  return (
+    <div
+      className={`basis-full flex items-start gap-2 rounded-md border px-2.5 py-1.5 text-[11px] ${cls}`}
+      data-testid={testId}
+    >
+      <Icon className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+      <div className="min-w-0">
+        <span className="font-medium">{receipt.title}</span>{" "}
+        <span className="opacity-90">· last run {relative(receipt.timestamp)}</span>
+        <p className="opacity-90">{receipt.detail}</p>
+      </div>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="ml-auto text-base leading-none px-1 opacity-70 hover:opacity-100"
+        aria-label="Dismiss confirmation"
+        title="Dismiss"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 const communityRepullJobStorageKey = (propertyId: number) => `preflight.communityRepullJob.v1:${propertyId}`;
 
 const photoFetchJobStorageKey = (propertyId: number) => `preflight.photoFetchJob.v1:${propertyId}`;
@@ -388,6 +440,52 @@ export default function BuilderPreflight() {
     return `${Math.floor(diff / 86_400_000)}d ago`;
   };
 
+  // ── Sticky "last processed" receipts ──────────────────────────────────────
+  // The operator asked that re-scraping a unit's photos and running the OTA
+  // unit audit each leave a confirmation that sticks (with an × to dismiss),
+  // showing when it last ran and whether it succeeded. Persisted to
+  // localStorage per property so it survives leaving and returning to the page.
+  // Photo-fetch receipts are keyed by unitId; the platform check has one.
+  const photoFetchReceiptsKey = (propertyId: number) => `preflight.photoFetchReceipts.v1:${propertyId}`;
+  const platformCheckReceiptKey = (propertyId: number) => `preflight.platformCheckReceipt.v1:${propertyId}`;
+  const [photoFetchReceipts, setPhotoFetchReceipts] = useState<Record<string, OperationReceipt>>(() => {
+    try {
+      const raw = localStorage.getItem(photoFetchReceiptsKey(id));
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
+  const recordPhotoFetchReceipt = (unitId: string, receipt: OperationReceipt) => {
+    setPhotoFetchReceipts((prev) => {
+      // Skip a repeat record for the SAME finished job (the poll loop can
+      // re-deliver a terminal job) so the timestamp doesn't churn on reload.
+      if (receipt.jobId && prev[unitId]?.jobId === receipt.jobId) return prev;
+      const next = { ...prev, [unitId]: receipt };
+      try { localStorage.setItem(photoFetchReceiptsKey(id), JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+  const dismissPhotoFetchReceipt = (unitId: string) => {
+    setPhotoFetchReceipts((prev) => {
+      const next = { ...prev };
+      delete next[unitId];
+      try { localStorage.setItem(photoFetchReceiptsKey(id), JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+  const [platformCheckReceipt, setPlatformCheckReceipt] = useState<OperationReceipt | null>(() => {
+    try {
+      const raw = localStorage.getItem(platformCheckReceiptKey(id));
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  });
+  const recordPlatformCheckReceipt = (receipt: OperationReceipt | null) => {
+    setPlatformCheckReceipt(receipt);
+    try {
+      if (receipt) localStorage.setItem(platformCheckReceiptKey(id), JSON.stringify(receipt));
+      else localStorage.removeItem(platformCheckReceiptKey(id));
+    } catch {}
+  };
+
   // ── Photo source scraper for promoted drafts ─────────────────────────────
   // Drafts whose Step 4 wizard scrape didn't find a matching Zillow listing
   // arrive at preflight with no photos persisted on the volume. Without
@@ -439,6 +537,28 @@ export default function BuilderPreflight() {
       savePhotoFetchJobIds(id, next);
       return next;
     });
+    // Leave a sticky "last processed" receipt the operator dismisses with ×.
+    if (job.status === "completed") {
+      let sourceNote = "";
+      if (job.sourceUrl) {
+        try { sourceNote = ` from ${new URL(job.sourceUrl).hostname}`; } catch { /* keep blank */ }
+      }
+      recordPhotoFetchReceipt(unitId, {
+        timestamp: Date.now(),
+        success: true,
+        title: "Photos re-pulled",
+        detail: `${job.savedCount ?? 0} photo${job.savedCount === 1 ? "" : "s"} saved${sourceNote}.`,
+        jobId: job.id,
+      });
+    } else if (job.status === "failed") {
+      recordPhotoFetchReceipt(unitId, {
+        timestamp: Date.now(),
+        success: false,
+        title: "Photo re-pull failed",
+        detail: job.error || job.message || "No photos were saved.",
+        jobId: job.id,
+      });
+    }
     if (job.status === "completed") {
       void loadDraftPropertyByNegativeId(id).then((updated) => {
         if (updated) setDraftProperty(updated);
@@ -928,6 +1048,9 @@ export default function BuilderPreflight() {
     setProgressTick(0);
     const pendingIds = new Set(unitsToCheck.map(u => u.id));
     setCheckingUnitIds(new Set(pendingIds));
+    // Tally per-unit outcomes locally so we can stamp an accurate success/fail
+    // receipt — the `results` state isn't readable here (it's set async).
+    const outcome = { ok: 0, errored: 0 };
 
     const hasPhotos = unitsToCheck.some(u => !!(u as any).photoFolder);
     if (hasPhotos) setCheckPhase("text");
@@ -970,9 +1093,13 @@ export default function BuilderPreflight() {
             const data = await resp.json();
             const unitResult: UnitCheckResult | undefined = data?.units?.[0];
             if (unitResult) {
+              outcome.ok += 1;
               setResults(prev => ({ ...prev, [unit.id]: unitResult }));
+            } else {
+              outcome.errored += 1;
             }
           } else {
+            outcome.errored += 1;
             setResults(prev => ({
               ...prev,
               [unit.id]: {
@@ -988,6 +1115,7 @@ export default function BuilderPreflight() {
             }));
           }
         } catch {
+          outcome.errored += 1;
           setResults(prev => ({
             ...prev,
             [unit.id]: {
@@ -1018,6 +1146,21 @@ export default function BuilderPreflight() {
     setCheckStartedAt(null);
     setPlatformDone(true);
     setLastCheckWasFullAudit(fullPhotoAudit);
+
+    // Sticky "last processed" receipt for the OTA unit audit (× to dismiss).
+    const total = unitsToCheck.length;
+    const unitWord = total === 1 ? "unit" : "units";
+    recordPlatformCheckReceipt({
+      timestamp: Date.now(),
+      success: outcome.ok > 0,
+      title: fullPhotoAudit ? "Full unit audit" : "OTA platform check",
+      detail:
+        outcome.ok === 0
+          ? `Couldn't verify any of ${total} ${unitWord} — Airbnb/VRBO/Booking lookups errored. Try running it again.`
+          : outcome.errored > 0
+            ? `Checked ${total} ${unitWord} against Airbnb, VRBO & Booking.com — ${outcome.errored} couldn't be verified.`
+            : `Checked all ${total} ${unitWord} against Airbnb, VRBO & Booking.com.`,
+    });
   };
 
   const rerunChecks = () => {
@@ -1524,6 +1667,16 @@ export default function BuilderPreflight() {
                         </div>
                       </div>
                     )}
+                    {/* Sticky receipt: when this unit's photos were last
+                        re-pulled and whether it worked (× dismisses). */}
+                    {!isScrapingThisUnit && photoFetchReceipts[unit.id] && (
+                      <OperationReceiptNote
+                        receipt={photoFetchReceipts[unit.id]}
+                        relative={fmtRelative}
+                        onDismiss={() => dismissPhotoFetchReceipt(unit.id)}
+                        testId={`receipt-photo-fetch-${unit.id}`}
+                      />
+                    )}
                   </div>
                 );
               })}
@@ -1597,6 +1750,18 @@ export default function BuilderPreflight() {
           {lastCheckWasFullAudit && hasAnyResults && (
             <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300">
               Full unit audit complete — each unit was checked by text search and by a reverse-image scan of <strong>every interior photo</strong> against Airbnb, VRBO, and Booking.com. Each platform shows a decisive verdict: <strong>Listed</strong> only when <strong>both</strong> text search and photo scan confirm the same unit, or <strong>Not Listed</strong> otherwise.
+            </div>
+          )}
+          {/* Sticky receipt: when the OTA unit audit last ran and whether it
+              succeeded — stays until the operator clicks × to dismiss. */}
+          {!isCheckRunning && platformCheckReceipt && (
+            <div className="mb-4">
+              <OperationReceiptNote
+                receipt={platformCheckReceipt}
+                relative={fmtRelative}
+                onDismiss={() => recordPlatformCheckReceipt(null)}
+                testId="receipt-platform-check"
+              />
             </div>
           )}
 
