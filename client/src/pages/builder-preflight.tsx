@@ -3,6 +3,7 @@ import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import {
   Loader2,
   ArrowRight,
@@ -16,6 +17,7 @@ import {
   Camera,
   Search,
   MapPin,
+  Link2,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "@/data/unit-builder-data";
 import { useAssistantContext } from "@/lib/assistant-context";
@@ -863,6 +865,9 @@ export default function BuilderPreflight() {
   const [showReplacementFlow, setShowReplacementFlow] = useState(false);
   const [replacementTargetId, setReplacementTargetId] = useState<string | null>(null);
   const [replacementSkipUrl, setReplacementSkipUrl] = useState<string | null>(null);
+  const [manualReplaceUnitId, setManualReplaceUnitId] = useState<string | null>(null);
+  const [manualReplaceUrl, setManualReplaceUrl] = useState("");
+  const [manualReplacingUnitId, setManualReplacingUnitId] = useState<string | null>(null);
   const [swapsCommitted, setSwapsCommitted] = useState(false);
   const [committing, setCommitting] = useState(false);
   const autoRunFired = useRef(false);
@@ -1434,6 +1439,47 @@ export default function BuilderPreflight() {
     runPlatformCheck(updatedUnits);
   }
 
+  async function handleManualReplaceFromUrl(unit: { id: string; unitNumber: string; bedrooms: number }) {
+    if (!property?.communityPhotoFolder) return;
+    const url = manualReplaceUrl.trim();
+    if (!url) {
+      toast({ title: "Paste a listing URL", description: "Add the Zillow, Redfin, or Realtor URL for the replacement unit.", variant: "destructive" });
+      return;
+    }
+    setManualReplacingUnitId(unit.id);
+    try {
+      const resp = await apiRequest("POST", "/api/preflight/manual-unit-replacement", {
+        propertyId: id,
+        communityFolder: property.communityPhotoFolder,
+        oldUnitId: unit.id,
+        oldUnitNumber: unit.unitNumber,
+        oldBedrooms: unit.bedrooms,
+        sourceUrl: url,
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error ?? `HTTP ${resp.status}`);
+      const swapId = Number(data?.swap?.id ?? 0);
+      const unitPayload = data?.unit as ReplacementUnitData | undefined;
+      if (!unitPayload?.url) throw new Error("Replacement saved but response was incomplete.");
+      handleUnitReplaced(unit.id, {
+        ...unitPayload,
+        photoFolder: data.photoFolder ?? unitPayload.photoFolder,
+        photoCount: data.savedPhotoCount ?? unitPayload.photoCount,
+      }, swapId || undefined);
+      setManualReplaceUnitId(null);
+      setManualReplaceUrl("");
+      toast({
+        title: "Unit replaced",
+        description: `${unitPayload.unitLabel} — ${data.savedPhotoCount ?? 0} photos scraped from your listing URL.`,
+        duration: 8000,
+      });
+    } catch (e: any) {
+      toast({ title: "Manual replacement failed", description: e.message, variant: "destructive" });
+    } finally {
+      setManualReplacingUnitId(null);
+    }
+  }
+
   const hasAnyResults = Object.keys(results).length > 0;
   const photoFetchJobForUnit = (unitId: string) => photoFetchJobsByUnit[unitId];
   const photoFetchElapsedSeconds = photoFetchTick;
@@ -1666,7 +1712,7 @@ export default function BuilderPreflight() {
                     can use the photos on file when you click <strong>Run check</strong>{" "}
                     below. Use <strong>Re-pull all photos</strong> to rescrape this
                     unit&apos;s own listing and refresh its full gallery. To swap in a
-                    different unit entirely, use <strong>Find / Replace a Unit</strong>.
+                    different unit entirely, use <strong>Replace with URL</strong> (paste a listing you chose) or <strong>Find / Replace a Unit</strong> (automatic search).
                   </p>
                 );
               }
@@ -1752,6 +1798,30 @@ export default function BuilderPreflight() {
                         {savedPhotoCount} on file
                       </Badge>
                     )}
+                    {!swapsCommitted && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          if (manualReplaceUnitId === unit.id) {
+                            setManualReplaceUnitId(null);
+                            setManualReplaceUrl("");
+                          } else {
+                            setManualReplaceUnitId(unit.id);
+                            setManualReplaceUrl(unitOverrides[unit.id]?.sourceUrl ?? "");
+                          }
+                        }}
+                        disabled={manualReplacingUnitId === unit.id}
+                        className="h-8 text-xs flex-shrink-0"
+                        data-testid={`button-manual-replace-${unit.id}`}
+                      >
+                        {manualReplacingUnitId === unit.id ? (
+                          <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Replacing…</>
+                        ) : (
+                          <><Link2 className="h-3 w-3 mr-1" /> Replace with URL</>
+                        )}
+                      </Button>
+                    )}
                     {/* Reveal the original scrape source URL on demand. */}
                     {folderHasPhotos && sourceRevealed && (
                       <div
@@ -1782,6 +1852,33 @@ export default function BuilderPreflight() {
                             No original source URL on file for this unit. A re-pull will record one if it discovers a listing.
                           </span>
                         )}
+                      </div>
+                    )}
+                    {manualReplaceUnitId === unit.id && !manualReplacingUnitId && (
+                      <div
+                        className="basis-full rounded-md border border-amber-200 bg-amber-50/70 dark:border-amber-800 dark:bg-amber-950/30 px-3 py-2 space-y-2"
+                        data-testid={`manual-replace-panel-${unit.id}`}
+                      >
+                        <p className="text-xs text-amber-900 dark:text-amber-200">
+                          Paste the Zillow, Redfin, or Realtor URL for the unit you want instead. We&apos;ll scrape its photos, replace this unit&apos;s gallery, and update the listing.
+                        </p>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <Input
+                            value={manualReplaceUrl}
+                            onChange={(e) => setManualReplaceUrl(e.target.value)}
+                            placeholder="https://www.zillow.com/homedetails/..."
+                            className="h-8 text-xs flex-1"
+                            data-testid={`input-manual-replace-url-${unit.id}`}
+                          />
+                          <Button
+                            size="sm"
+                            className="h-8 text-xs flex-shrink-0"
+                            onClick={() => void handleManualReplaceFromUrl(unit)}
+                            data-testid={`button-confirm-manual-replace-${unit.id}`}
+                          >
+                            Scrape &amp; replace unit
+                          </Button>
+                        </div>
                       </div>
                     )}
                     {skippedCount > 0 && !folderHasPhotos && (
