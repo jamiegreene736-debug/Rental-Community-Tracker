@@ -875,7 +875,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
   return { error: `Unknown tool: ${name}` };
 }
 
-const SYSTEM_PROMPT = `You are John Carpenter, a Reservationist at Magical Island Rentals, a premium vacation rental management company in Hawaii.
+const SYSTEM_PROMPT = `You are John Carpenter, a Reservationist at VacationRentalExpertz, a premium vacation rental management company in Hawaii.
 
 Your job: read a guest's incoming message and write a decisive, warm, concise reply in the voice of an expert host who knows this property inside and out and wants the guest to book with confidence.
 
@@ -981,16 +981,16 @@ FORMATTING
   - Do NOT end with "If you have any specific questions…", "Is there anything else…", "Feel free to reach out", "Don't hesitate to ask", "Looking forward to hosting you". Stop after the last answer.
 - No subject line, no email headers.
 - Sign off EXACTLY as three lines, on their own, after a blank line:
+  Mahalo,
   John Carpenter
-  Reservationist
-  Magical Island Rentals
+  VacationRentalExpertz
 - Never mention that units are "combined" or that this is a portfolio listing. Refer to the listing as a single property with multiple units.
 - Never share guest personal information or internal operational notes.
 
 When you have everything you need and the message is in scope, write ONLY the reply body (ending with the sign-off block above) as your final response — no preamble, no explanation. When in doubt, flag for human.`;
 
 // Canonical sign-off appended to every auto-reply.
-const SIGNOFF = "John Carpenter\nReservationist\nMagical Island Rentals";
+const SIGNOFF = "Mahalo,\nJohn Carpenter\nVacationRentalExpertz";
 
 /**
  * Guarantees every reply ends with the fixed sign-off. If the model already
@@ -1002,13 +1002,15 @@ function ensureSignoff(text: string): string {
 
   // Strip any generic sign-offs the model may have added by habit.
   const stripPatterns = [
-    /\n\s*(best|warm regards|regards|thanks|sincerely|cheers|aloha|mahalo)[,!.]?\s*\n?\s*(the\s+\w+\s+team|nex\s*stay[^\n]*|magical\s+island[^\n]*)?\s*$/i,
+    /\n\s*(best|warm regards|regards|thanks|sincerely|cheers|aloha|mahalo)[,!.]?\s*\n?\s*(the\s+\w+\s+team|nex\s*stay[^\n]*|magical\s+island[^\n]*|vacation\s*rental\s*expertz[^\n]*)?\s*$/i,
     /\n\s*the\s+\w+\s+team\s*$/i,
   ];
   for (const re of stripPatterns) body = body.replace(re, "").trim();
 
   // If the canonical sign-off is already present (case-insensitive, any whitespace), leave it.
-  const hasSignoff = /john\s+carpenter\s*[\r\n]+\s*reservationist\s*[\r\n]+\s*magical\s+island\s+rentals/i.test(body);
+  // Match name → brand directly so an optional "Mahalo," opener and the dropped
+  // "Reservationist" line don't cause a duplicate sign-off to be appended.
+  const hasSignoff = /john\s+carpenter\s*[\r\n]+\s*vacation\s*rental\s*expertz/i.test(body);
   if (hasSignoff) return body;
 
   return `${body}\n\n${SIGNOFF}`;
@@ -1162,7 +1164,7 @@ ${params.forceDraftForReview
     // help" warm-ups, "Is there anything specific before you book?"
     // closers, etc. — BEFORE attaching the sign-off so the signature
     // doesn't get touched. ensureSignoff then guarantees the fixed
-    // John Carpenter / Reservationist / Magical Island Rentals block.
+    // Mahalo / John Carpenter / VacationRentalExpertz block.
     const baseHumanized = humanizeReply(text);
     const trimmedHumanized = proximityOnlyRaised ? trimProximityOnlyReply(baseHumanized) : baseHumanized;
     const withPersonalTouch = addGuestPersonalTouch(trimmedHumanized, params.guestMessage);

@@ -3095,6 +3095,58 @@ export default function InboxPage() {
     }
   };
 
+  // Background OTA delivery confirmation. The Send route returns FAST (`pending`)
+  // instead of blocking ~30s for the channel to stamp module.externalId; this
+  // polls the read-only /delivery-status probe (NEVER re-sends) to upgrade the
+  // status to "delivered" once the channel confirms. Fully fail-soft — any error
+  // just stops the poll; the message is already on the thread either way.
+  const confirmDeliveryInBackground = async (params: {
+    conversationId: string;
+    body: string;
+    channel: string | null;
+    reservationId: string | null;
+    via: string;
+  }) => {
+    const { conversationId, body, channel, reservationId, via } = params;
+    const MAX_ATTEMPTS = 9;
+    const INTERVAL_MS = 4000;
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      await new Promise((resolve) => setTimeout(resolve, INTERVAL_MS));
+      try {
+        const r = await apiRequest(
+          "POST",
+          `/api/inbox/conversations/${conversationId}/delivery-status`,
+          { body, channel, reservationId },
+        );
+        const j = await r.json().catch(() => ({} as any));
+        if (r.ok && j?.verified === true) {
+          qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", conversationId, "posts"] });
+          qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+          toast({ title: "Delivery confirmed", description: `${via} confirmed your message reached the guest.` });
+          return;
+        }
+        // Explicit wrong-channel MISROUTE (verified:false AND pending:false) that
+        // only surfaced after the fast return — the message was filed on a non-OTA
+        // channel (e.g. email) and never reached the guest's booking channel. The
+        // inline send window is short now, so this is where a late-syncing misroute
+        // gets caught. Surface it loudly instead of leaving "confirming…" hanging.
+        if (r.ok && j?.ok === true && j?.verified !== true && j?.pending !== true) {
+          toast({
+            title: "Delivery NOT confirmed",
+            description: j?.deliveryReason
+              || `${via} did not confirm delivery — it may have been filed on email instead. Check the channel's extranet before resending.`,
+            variant: "destructive",
+          });
+          return;
+        }
+        // Still pending (or a transient miss) — keep polling.
+      } catch {
+        // Network hiccup / session expiry — stop quietly; the send already happened.
+        return;
+      }
+    }
+  };
+
   const sendMessage = useMutation({
     // Routed through the server's hardened, delivery-VERIFIED send path
     // (/api/inbox/conversations/:id/send) instead of a client-direct
@@ -3102,17 +3154,19 @@ export default function InboxPage() {
     // proven-delivering module from the reservation's integration.platform,
     // sends ONCE, and confirms via Guesty's module.externalId — so a Booking.com
     // reply that only ever reaches Guesty's `pending` state (never the guest's
-    // portal) is no longer reported as a clean success.
+    // portal) is no longer reported as a clean success. The route now returns as
+    // soon as the POST lands (short inline verify), so the button frees in a few
+    // seconds; OTA confirmation finishes in confirmDeliveryInBackground.
     mutationFn: async () => {
-      if (!selectedConv) throw new Error("No conversation selected");
+      if (!selectedConv || !selectedConvId) throw new Error("No conversation selected");
+      const conversationId = selectedConvId;
+      const sentBody = normalizeGuestyManualMessageBody(replyText);
+      const channel = selectedConv.module?.type ?? null;
+      const reservationId = selectedConv.reservationId ?? null;
       const r = await apiRequest(
         "POST",
-        `/api/inbox/conversations/${selectedConvId}/send`,
-        {
-          body: normalizeGuestyManualMessageBody(replyText),
-          reservationId: selectedConv.reservationId ?? null,
-          channel: selectedConv.module?.type ?? null,
-        },
+        `/api/inbox/conversations/${conversationId}/send`,
+        { body: sentBody, reservationId, channel },
       );
       const body = await r.json().catch(() => ({} as any));
       if (!r.ok || body?.ok !== true) {
@@ -3120,7 +3174,7 @@ export default function InboxPage() {
       }
       // A genuine MISROUTE (filed on a non-OTA channel, e.g. email →
       // verified:false AND pending:false) is a hard error — it did NOT reach the
-      // guest's booking channel. A true PENDING is surfaced as a warning, not
+      // guest's booking channel. A true PENDING is surfaced as a notice, not
       // thrown (resending would pile up duplicate guest messages).
       if (body.verified !== true && body.pending !== true) {
         throw new Error(
@@ -3128,22 +3182,30 @@ export default function InboxPage() {
             || "The message did not reach the guest's booking channel — it may have been saved on email instead. Verify on the channel's extranet.",
         );
       }
-      return body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string };
+      return { ...(body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string }), conversationId, sentBody, channel, reservationId };
     },
     onSuccess: (data) => {
-      markConversationReplied(selectedConvId);
+      markConversationReplied(data.conversationId);
       setReplyText("");
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", data.conversationId] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", data.conversationId, "posts"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
       const via = data?.deliveredVia?.trim() || "the booking channel";
       if (data?.verified === true) {
         toast({ title: "Message sent!", description: `Delivered through ${via} and confirmed on the guest thread.` });
       } else {
         toast({
-          title: `Queued through ${via} — confirming delivery`,
-          description: `Posted to ${via}, but it hasn't confirmed delivery yet (this can take up to ~30s). It'll appear in the thread — don't resend, that can duplicate the message.`,
-          variant: "destructive",
+          title: `Sent through ${via} — confirming delivery`,
+          description: `Your message is on the thread. ${via} usually confirms delivery within ~30s and I'll update once it does. Don't resend — that can duplicate the message.`,
+        });
+        // Fire-and-forget: upgrade to "Delivery confirmed" in the background so
+        // the operator isn't blocked waiting on the channel's async confirmation.
+        void confirmDeliveryInBackground({
+          conversationId: data.conversationId,
+          body: data.sentBody,
+          channel: data.channel,
+          reservationId: data.reservationId,
+          via,
         });
       }
     },
@@ -4599,15 +4661,16 @@ export default function InboxPage() {
                           onClick={() => sendMessage.mutate()}
                           disabled={!replyText.trim() || sendMessage.isPending || sendTextMessage.isPending}
                           data-testid="button-send-reply"
-                          // OTA sends now block until the channel confirms delivery
-                          // (~30s for Booking.com) instead of a false instant
-                          // "sent", so surface a clear in-progress state.
-                          title={sendMessage.isPending ? "Confirming the channel actually delivered it…" : undefined}
+                          // The send route returns as soon as the message is
+                          // posted (a short inline verify), so this clears in a
+                          // few seconds; OTA delivery confirmation then finishes
+                          // in the background and updates the status itself.
+                          title={sendMessage.isPending ? "Posting your message…" : undefined}
                         >
                           {sendMessage.isPending
                             ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
                             : <Send className="h-3.5 w-3.5 mr-1.5" />}
-                          {sendMessage.isPending ? "Confirming…" : "Send in Guesty"}
+                          {sendMessage.isPending ? "Sending…" : "Send in Guesty"}
                         </Button>
                       </div>
                     </div>
