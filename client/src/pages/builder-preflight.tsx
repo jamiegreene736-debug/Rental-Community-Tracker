@@ -45,6 +45,26 @@ type PreflightPhotoFetchJob = {
   error: string | null;
 };
 
+type CommunityRepullJob = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  phase: string;
+  message: string;
+  progress: number;
+  communityName: string;
+  communityFolder: string;
+  researchSummary: string | null;
+  candidatesFound: number | null;
+  savedCount: number | null;
+  removedCount: number | null;
+  verifiedCount: number | null;
+  verdict: string | null;
+  removed: Array<{ filename?: string; reason: string }>;
+  error: string | null;
+};
+
+const communityRepullJobStorageKey = (propertyId: number) => `preflight.communityRepullJob.v1:${propertyId}`;
+
 const photoFetchJobStorageKey = (propertyId: number) => `preflight.photoFetchJob.v1:${propertyId}`;
 const loadPhotoFetchJobIds = (propertyId: number): Record<string, string> => {
   try {
@@ -548,6 +568,89 @@ export default function BuilderPreflight() {
       setPhotoFetchTick(0);
     } catch (e: any) {
       toast({ title: "Scrape failed", description: e?.message || String(e), variant: "destructive" });
+    }
+  };
+
+  // ── Re-pull community photos ──────────────────────────────────────────────
+  // Researches the community via Claude, finds correct community photo URLs,
+  // scrapes them into the community folder, then verifies every photo with AI
+  // vision + Google Lens reverse image search (deleting any mismatches).
+  const [communityRepullJobId, setCommunityRepullJobId] = useState<string | null>(() => {
+    if (!Number.isFinite(id)) return null;
+    try {
+      return localStorage.getItem(communityRepullJobStorageKey(id));
+    } catch {
+      return null;
+    }
+  });
+  const [communityRepullJob, setCommunityRepullJob] = useState<CommunityRepullJob | null>(null);
+
+  const persistRepullJobId = (jobId: string | null) => {
+    try {
+      if (jobId) localStorage.setItem(communityRepullJobStorageKey(id), jobId);
+      else localStorage.removeItem(communityRepullJobStorageKey(id));
+    } catch { /* ignore */ }
+  };
+
+  const repullActive =
+    !!communityRepullJobId &&
+    (!communityRepullJob || communityRepullJob.status === "queued" || communityRepullJob.status === "running");
+
+  useEffect(() => {
+    if (!communityRepullJobId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const resp = await fetch(
+          `/api/preflight/community-photo-repull/${encodeURIComponent(communityRepullJobId)}`,
+          { credentials: "include" },
+        );
+        if (resp.status === 404) {
+          if (!cancelled) { setCommunityRepullJobId(null); persistRepullJobId(null); }
+          return;
+        }
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (cancelled || !data?.job) return;
+        const job = data.job as CommunityRepullJob;
+        setCommunityRepullJob(job);
+        const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+        if (terminal) {
+          setCommunityRepullJobId(null);
+          persistRepullJobId(null);
+          if (job.status === "completed") {
+            toast({ title: "Community photos refreshed", description: job.message });
+          } else if (job.error) {
+            toast({ title: "Re-pull failed", description: job.error, variant: "destructive" });
+          }
+        }
+      } catch { /* keep polling */ }
+    };
+    void poll();
+    const interval = window.setInterval(poll, 2_000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [communityRepullJobId]);
+
+  const handleRepullCommunityPhotos = async () => {
+    if (!property?.communityPhotoFolder) {
+      toast({ title: "No community folder", description: "This listing has no community photo folder to refresh.", variant: "destructive" });
+      return;
+    }
+    try {
+      const resp = await apiRequest("POST", "/api/preflight/community-photo-repull", {
+        communityName: property.complexName,
+        communityFolder: property.communityPhotoFolder,
+        city: parseCityFromMailingAddress(property.address) || undefined,
+      });
+      const data = await resp.json();
+      if (!data?.job?.id) throw new Error("Re-pull job did not start");
+      setCommunityRepullJob(data.job as CommunityRepullJob);
+      setCommunityRepullJobId(data.job.id as string);
+      persistRepullJobId(data.job.id as string);
+      toast({ title: "Re-pull started", description: "Researching the community and finding fresh photos — safe to leave this tab." });
+    } catch (e: any) {
+      toast({ title: "Could not start re-pull", description: e?.message || String(e), variant: "destructive" });
     }
   };
 
@@ -1120,6 +1223,89 @@ export default function BuilderPreflight() {
             {property.address}
           </p>
         </div>
+
+        {/* ── Community Photos re-pull ──
+            One button that researches the community via Claude, finds the
+            correct community photo URLs, scrapes them into the community
+            folder, then double-checks every photo with AI vision + Google Lens
+            reverse-image search and removes any that aren't this community. */}
+        {property.communityPhotoFolder && (
+          <Card className="p-6 mb-6">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+              <h2 className="text-base font-semibold">Community Photos</h2>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void handleRepullCommunityPhotos()}
+                disabled={repullActive}
+                className="h-8 text-xs"
+                data-testid="button-repull-community-photos"
+              >
+                {repullActive ? (
+                  <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Re-pulling…</>
+                ) : (
+                  <><RefreshCw className="h-3 w-3 mr-1" /> Re-pull community photos</>
+                )}
+              </Button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-3">
+              Refreshes the community amenity photos (pool, grounds, building exteriors)
+              for <strong>{property.complexName}</strong>. We research the community with
+              Claude, find the correct photo URLs, scrape them, then verify every photo
+              with AI vision and Google Lens reverse-image search — removing any that
+              aren&apos;t actually this community.
+            </p>
+
+            {repullActive && communityRepullJob && (
+              <div className="rounded-md border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
+                <div className="mb-1 flex items-center justify-between gap-3">
+                  <span className="font-medium">{communityRepullJob.message}</span>
+                  <span className="text-blue-700 dark:text-blue-300">
+                    {Math.round(communityRepullJob.progress)}% · safe to leave this tab
+                  </span>
+                </div>
+                <div
+                  className="h-2 overflow-hidden rounded-full bg-blue-100 dark:bg-blue-900"
+                  role="progressbar"
+                  aria-label="Re-pulling community photos"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(communityRepullJob.progress)}
+                >
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-600 transition-all duration-700"
+                    style={{ width: `${communityRepullJob.progress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {!repullActive && communityRepullJob?.status === "completed" && (
+              <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300">
+                <div className="flex items-center gap-1.5 font-medium">
+                  <CheckCircle2 className="h-3.5 w-3.5" /> {communityRepullJob.message}
+                </div>
+                {communityRepullJob.researchSummary && (
+                  <p className="mt-1 text-green-700 dark:text-green-400">{communityRepullJob.researchSummary}</p>
+                )}
+                {communityRepullJob.removed.length > 0 && (
+                  <ul className="mt-1.5 list-disc pl-4 text-green-700 dark:text-green-400">
+                    {communityRepullJob.removed.slice(0, 5).map((r, i) => (
+                      <li key={i}>Removed {r.filename ?? "a photo"} — {r.reason}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {!repullActive && communityRepullJob?.status === "failed" && (
+              <div className="rounded-md border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-900 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200">
+                <AlertTriangle className="inline h-3.5 w-3.5 mr-1" />
+                {communityRepullJob.error || communityRepullJob.message}
+              </div>
+            )}
+          </Card>
+        )}
 
         {/* ── Photo Sources (promoted drafts only) ──
             The reverse-image-search half of the Platform Check needs

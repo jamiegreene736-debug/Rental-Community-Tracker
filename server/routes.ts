@@ -62,6 +62,10 @@ import {
   startPreflightReplacementFindJob,
 } from "./preflight-background-jobs";
 import {
+  getCommunityPhotoRepullJob,
+  startCommunityPhotoRepullJob,
+} from "./community-photo-repull";
+import {
   registerOperationDiagnosticsRoutes,
   setOperationDiagnosticsQueueHooks,
 } from "./operation-diagnostics-api";
@@ -30632,6 +30636,46 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/preflight/photo-fetch-jobs/:jobId", (req, res) => {
     const job = getPreflightPhotoFetchJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Photo fetch job not found" });
+    res.json({ job });
+  });
+
+  // Re-pull community photos: research the community via Claude, find correct
+  // photo URLs, scrape them into the community folder, then verify every photo
+  // with AI vision + Google Lens reverse image search (deleting mismatches).
+  // Runs as a background job; the Pre-Flight page polls the GET below.
+  app.post("/api/preflight/community-photo-repull", async (req, res) => {
+    const body = (req.body ?? {}) as {
+      communityName?: string;
+      communityFolder?: string;
+      city?: string;
+    };
+    const communityName = typeof body.communityName === "string" ? body.communityName.trim() : "";
+    if (!communityName) return res.status(400).json({ error: "communityName required" });
+
+    // Resolve the target folder: prefer the explicit folder, else the canonical
+    // mapping for this community name. Both must be a safe community-* slug.
+    let communityFolder = typeof body.communityFolder === "string" ? body.communityFolder.trim() : "";
+    if (!communityFolder) {
+      communityFolder = resolveCanonicalCommunityPhotoFolder(communityName) ?? "";
+    }
+    if (!communityFolder) {
+      return res.status(400).json({ error: "Could not resolve a community photo folder for this community." });
+    }
+    if (!/^community-[\w-]+$/.test(communityFolder)) {
+      return res.status(400).json({ error: "Invalid community photo folder." });
+    }
+
+    const job = startCommunityPhotoRepullJob({
+      communityName,
+      communityFolder,
+      city: typeof body.city === "string" ? body.city.trim() : undefined,
+    });
+    res.status(202).json({ job });
+  });
+
+  app.get("/api/preflight/community-photo-repull/:jobId", (req, res) => {
+    const job = getCommunityPhotoRepullJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Community photo re-pull job not found" });
     res.json({ job });
   });
 
