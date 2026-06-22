@@ -30661,6 +30661,7 @@ Return ONLY compact JSON with this exact shape:
       skipUrls?: string[];
       replacingExistingPhotos?: boolean;
       skipFirst?: number;
+      rescrapeSourceUrl?: string;
     };
     const draftId = Number(body.draftId);
     const propertyId = Number(body.propertyId);
@@ -30686,6 +30687,9 @@ Return ONLY compact JSON with this exact shape:
       skipUrls: body.skipUrls,
       replacingExistingPhotos: body.replacingExistingPhotos === true,
       skipFirst: body.skipFirst,
+      rescrapeSourceUrl: typeof body.rescrapeSourceUrl === "string" && /^https?:\/\//i.test(body.rescrapeSourceUrl)
+        ? body.rescrapeSourceUrl.trim()
+        : undefined,
     });
     res.status(202).json({ job });
   });
