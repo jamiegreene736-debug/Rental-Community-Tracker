@@ -35,6 +35,10 @@ import {
 } from "./community-photo-verify";
 import { communityAddressRuleForName } from "../shared/community-addresses";
 import { resolveCuratedCommunityDescription } from "./community-descriptions";
+import {
+  confirmCommunityLocation,
+  type LocationConfirmation,
+} from "../shared/photo-location-confirmation";
 
 type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -60,6 +64,8 @@ export type CommunityPhotoRepullJob = {
   verdict: string | null;
   /** Photos that were deleted because they were a different community. */
   removed: Array<{ filename?: string; reason: string }>;
+  /** Confirms the community's state/city (and flags a Bay-Watch-style mis-location). */
+  locationConfirmation: LocationConfirmation | null;
   error: string | null;
 };
 
@@ -147,6 +153,10 @@ export type CommunityPhotoResearch = {
   description: string;
   imageQueries: string[];
   sourceUrls: string[];
+  /** US state where Claude is confident the community physically sits (full name), or "". */
+  confirmedState: string;
+  /** City where Claude is confident the community sits, or "". */
+  confirmedCity: string;
 };
 
 function defaultImageQueries(communityName: string): string[] {
@@ -175,6 +185,8 @@ export async function researchCommunityForPhotos(
     description: curated,
     imageQueries: defaultImageQueries(communityName),
     sourceUrls: [],
+    confirmedState: "",
+    confirmedCity: "",
   };
   if (!anthropicApiKey) return fallback;
 
@@ -184,9 +196,9 @@ export async function researchCommunityForPhotos(
     "We will use your answer to drive Google Images searches and to scrape official sites for COMMUNITY/AMENITY photos (pool, grounds, building exteriors, clubhouse, aerial) — NOT individual unit interiors.",
     "",
     "Return ONLY minified JSON with this exact shape:",
-    '{"description":"2-3 sentence visual fingerprint (architecture, setting, distinctive amenities) used to recognize this exact community","imageQueries":["up to 6 google-images queries, each quoting the resort name and targeting a specific amenity/area"],"sourceUrls":["up to 4 https URLs of the official resort site or property-management pages most likely to host real community photos"]}',
+    '{"description":"2-3 sentence visual fingerprint (architecture, setting, distinctive amenities) used to recognize this exact community","imageQueries":["up to 6 google-images queries, each quoting the resort name and targeting a specific amenity/area"],"sourceUrls":["up to 4 https URLs of the official resort site or property-management pages most likely to host real community photos"],"state":"the US STATE (full name) where this community is physically located, ONLY if you are confident; else empty string","city":"the city/town where it is located, ONLY if confident; else empty string"}',
     "",
-    "Rules: queries must be specific enough to avoid other resorts that share the same town. Only include sourceUrls you are confident are the correct resort. If unsure of a URL, omit it (do not guess).",
+    "Rules: queries must be specific enough to avoid other resorts that share the same town. Only include sourceUrls you are confident are the correct resort. If unsure of a URL, omit it (do not guess). For state/city: this confirms WHERE the community actually is so we can catch a resort filed under the wrong state — a famous name can exist in multiple states (e.g. a 'Bay Watch' resort is in Myrtle Beach, South Carolina, not Florida), so only return a state you are sure of and leave it empty when unsure.",
   ].join("\n");
 
   try {
@@ -221,6 +233,8 @@ export async function researchCommunityForPhotos(
       // Always keep the proven amenity queries as a backstop, Claude's first.
       imageQueries: Array.from(new Set([...imageQueries, ...defaultImageQueries(communityName)])),
       sourceUrls,
+      confirmedState: String((parsed as any).state ?? "").trim(),
+      confirmedCity: String((parsed as any).city ?? "").trim(),
     };
   } catch {
     return fallback;
@@ -387,6 +401,8 @@ export type StartCommunityPhotoRepullInput = {
   communityName: string;
   communityFolder: string;
   city?: string;
+  /** Expected US state (from the property/draft record) to confirm against. */
+  state?: string;
 };
 
 export function startCommunityPhotoRepullJob(input: StartCommunityPhotoRepullInput): CommunityPhotoRepullJob {
@@ -410,6 +426,7 @@ export function startCommunityPhotoRepullJob(input: StartCommunityPhotoRepullInp
     verifiedCount: null,
     verdict: null,
     removed: [],
+    locationConfirmation: null,
     error: null,
   };
   jobs.set(id, job);
@@ -428,6 +445,7 @@ async function runCommunityPhotoRepullJob(
   const searchApiKey = getSearchApiKey();
   const rule = communityAddressRuleForName(input.communityName);
   const city = input.city?.trim() || rule?.city || "";
+  const expectedState = input.state?.trim() || rule?.state || "";
 
   try {
     if (!searchApiKey) {
@@ -443,7 +461,20 @@ async function runCommunityPhotoRepullJob(
       startedAt: job.startedAt ?? Date.now(),
     });
     const research = await researchCommunityForPhotos(input.communityName, city, anthropicApiKey);
-    touch(job, { researchSummary: research.description || null });
+    // Confirm WHAT STATE the community is in: the curated location guard
+    // (Bay-Watch-style known mis-locations) layered with the state Claude just
+    // confirmed. Surfaced to the operator alongside the re-pulled photos.
+    const locationConfirmation = confirmCommunityLocation({
+      communityName: input.communityName,
+      expectedCity: city || null,
+      expectedState: expectedState || null,
+      observedState: research.confirmedState || null,
+      observedCity: research.confirmedCity || null,
+    });
+    touch(job, { researchSummary: research.description || null, locationConfirmation });
+    if (locationConfirmation.status === "mismatch") {
+      console.warn(`[community-photo-repull] location mismatch for "${input.communityName}": ${locationConfirmation.note}`);
+    }
 
     // 2. FINDING
     touch(job, {
@@ -523,7 +554,8 @@ async function runCommunityPhotoRepullJob(
       message:
         `Saved ${saved.length} photo${saved.length === 1 ? "" : "s"}` +
         (removed.length > 0 ? `, removed ${removed.length} that didn't match` : "") +
-        (verifiedCount > 0 ? ` · ${verifiedCount} confirmed for ${input.communityName}.` : "."),
+        (verifiedCount > 0 ? ` · ${verifiedCount} confirmed for ${input.communityName}.` : ".") +
+        (locationConfirmation.status === "mismatch" ? ` ⚠️ ${locationConfirmation.note}` : ""),
       error: null,
     });
   } catch (e: any) {
