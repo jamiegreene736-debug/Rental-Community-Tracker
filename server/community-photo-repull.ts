@@ -15,11 +15,19 @@
 //                   auto-labels).
 //   4. VERIFYING  — double-checks EVERY saved photo belongs to the community
 //                   with verifyCommunityPhotos (Google Lens reverse-image search
-//                   + Claude vision per photo) and DELETES any photo that comes
-//                   back a positive mismatch (different resort). Same-area
-//                   sibling cross-matches are deliberately NOT deleted — the Lens
-//                   logic already downgrades those to inconclusive (see
-//                   community-photo-lens-logic.ts / AGENTS.md #45).
+//                   + Claude vision per photo) AND classifies each photo as a
+//                   shared community AMENITY vs a private unit INTERIOR vs junk
+//                   (Claude vision; caption-keyword fallback). Same-area sibling
+//                   cross-matches are deliberately treated as inconclusive — the
+//                   Lens logic already downgrades those (community-photo-lens-
+//                   logic.ts / AGENTS.md #45).
+//   5. CURATING   — keeps only the strongest COMMUNITY-FEATURE photos and caps
+//                   the folder at MAX_COMMUNITY_PHOTOS (10): every kept photo is
+//                   a community amenity that isn't flagged as a different resort,
+//                   and unit interiors / junk / different-community / over-cap
+//                   photos are deleted from disk (and their stale labels removed).
+//                   This is what guarantees the operator's "≤10, all community
+//                   features" outcome.
 //
 // State lives in-process (mirrors preflight-background-jobs.ts): the client
 // starts a job, then polls. Photos are written to client/public/photos/<folder>
@@ -39,6 +47,15 @@ import {
   confirmCommunityLocation,
   type LocationConfirmation,
 } from "../shared/photo-location-confirmation";
+import {
+  selectCommunityPhotosToKeep,
+  DEFAULT_MAX_COMMUNITY_PHOTOS,
+  type CuratableCommunityPhoto,
+  type AmenityCategory,
+  type BelongsVerdict,
+  type CommunityVerdict,
+} from "../shared/community-photo-curation";
+import { storage } from "./storage";
 
 type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -70,12 +87,22 @@ export type CommunityPhotoRepullJob = {
 };
 
 const JOB_TTL_MS = 2 * 60 * 60 * 1000;
-const MAX_CANDIDATE_URLS = 40;
+// We download a modest candidate POOL, verify + classify it, then keep only the
+// strongest MAX_COMMUNITY_PHOTOS. The pool is intentionally larger than the final
+// cap so curation has good amenity photos to choose from after dropping interiors,
+// junk, and different-community hits — but small enough to bound Lens+vision cost.
+const MAX_CANDIDATE_URLS = 24;
+/** Final cap on photos kept in the community folder (operator requirement). */
+const MAX_COMMUNITY_PHOTOS = DEFAULT_MAX_COMMUNITY_PHOTOS; // 10
 const RESEARCH_MODEL = "claude-sonnet-4-6";
 const RESEARCH_TIMEOUT_MS = 45_000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 /** Cap on community photos sent through the Lens+vision verifier (cost guard). */
 const VERIFY_CAP = 30;
+// Amenity-vs-interior classification (Claude vision).
+const AMENITY_MODEL = "claude-sonnet-4-6";
+const AMENITY_BATCH_SIZE = 5;
+const AMENITY_TIMEOUT_MS = 90_000;
 
 const jobs = new Map<string, CommunityPhotoRepullJob>();
 const activeJobIds = new Set<string>();
@@ -370,6 +397,152 @@ async function saveToFolder(communityFolder: string, imageUrls: string[]): Promi
   return Array.isArray(data?.saved) ? (data.saved as string[]) : [];
 }
 
+// ── Amenity classification ──────────────────────────────────────────────────
+// Decides, per photo, whether it depicts a SHARED COMMUNITY FEATURE (pool,
+// grounds, clubhouse, exterior, aerial…) vs the inside of a PRIVATE UNIT vs junk
+// (map / floor plan / logo / screenshot / person). The verifier next door answers
+// "is this the right community"; this answers "is this a community FEATURE at
+// all" — the operator wants both to be true for every kept photo.
+
+export type AmenityClassification = {
+  category: AmenityCategory;
+  belongs: BelongsVerdict;
+  /** 0-100 confidence that this is a genuine, useful community-feature photo. */
+  confidence: number;
+  reason: string;
+};
+
+const VALID_CATEGORIES = new Set<AmenityCategory>(["amenity", "interior", "other"]);
+const VALID_BELONGS = new Set<BelongsVerdict>(["yes", "no", "unsure"]);
+
+/**
+ * Caption/filename keyword fallback used only when vision is unavailable. The
+ * re-pull filenames are all "NN-community.jpg", so this leans on the caption when
+ * one exists; with neither signal it defaults to "amenity"/"unsure" so the photo
+ * stays eligible (degrade to "cap to 10, drop different-community" rather than
+ * nuking the whole folder when there's no ANTHROPIC_API_KEY).
+ */
+function fallbackAmenityClassification(sample: CommunityPhotoSample): AmenityClassification {
+  const hay = `${sample.caption ?? ""} ${sample.filename}`.toLowerCase();
+  const interior = INTERIOR_KEYWORDS.some((kw) => hay.includes(kw));
+  return {
+    category: interior ? "interior" : "amenity",
+    belongs: "unsure",
+    confidence: 50,
+    reason: interior ? "Caption suggests a unit interior." : "Classified by caption (vision unavailable).",
+  };
+}
+
+async function classifyAmenityBatch(
+  apiKey: string,
+  communityName: string,
+  description: string,
+  batch: Array<{ id: string; buffer: Buffer; mime: string; caption?: string }>,
+): Promise<Array<{ id: string } & AmenityClassification>> {
+  if (!apiKey || batch.length === 0) return [];
+  const content: any[] = [
+    {
+      type: "text",
+      text: [
+        `You are auditing candidate photos for the vacation-rental resort/condo COMMUNITY: "${communityName}".`,
+        description ? `Known description: ${description}` : "",
+        "",
+        "We ONLY want photos of SHARED COMMUNITY FEATURES — the pool, hot tub, clubhouse, lobby, fitness center, BBQ/grill areas, tennis/pickleball/sport courts, golf, gardens/landscaping/grounds, walkways, building exteriors, entrance/signage, shared beach/ocean/outdoor space, and aerial/overview shots of the property.",
+        "We must EXCLUDE: photos taken INSIDE a private rental unit (a bedroom, living room, in-unit kitchen, in-unit bathroom, in-unit dining area, or one unit's private lanai/balcony), and non-photo or junk images (floor plans, site maps, logos, text graphics, screenshots, a person/portrait, a close-up of food or a single object).",
+        "",
+        "For EACH photo return:",
+        '- "category": "amenity" if it shows a shared community feature/exterior/grounds/aerial; "interior" if it is the inside of a private unit; "other" for maps/floor plans/logos/screenshots/people/objects/anything that is not a place.',
+        '- "belongs": "yes" if it clearly depicts THIS community (architecture, signage, landscaping, setting all fit); "no" if it clearly shows a DIFFERENT named resort; "unsure" otherwise.',
+        '- "confidence": 0-100 that this is a genuine, useful community-FEATURE photo of THIS community.',
+        '- "reason": a short phrase.',
+        "",
+        "Respond with ONLY minified JSON:",
+        '{"photos":[{"id":"C1","category":"amenity","belongs":"yes","confidence":88,"reason":"resort pool"}]}',
+      ].filter(Boolean).join("\n"),
+    },
+  ];
+  for (const row of batch) {
+    const cap = row.caption ? ` caption="${row.caption}"` : "";
+    content.push({ type: "text", text: `--- PHOTO ${row.id}${cap} ---` });
+    content.push({
+      type: "image",
+      source: { type: "base64", media_type: row.mime, data: row.buffer.toString("base64") },
+    });
+  }
+
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: AMENITY_MODEL,
+      max_tokens: 1024,
+      messages: [{ role: "user", content }],
+    }),
+    signal: AbortSignal.timeout(AMENITY_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`Amenity batch failed (${resp.status}): ${body.slice(0, 200)}`);
+  }
+  const data = (await resp.json()) as any;
+  const text: string = data?.content?.[0]?.text ?? "";
+  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (!match) return [];
+  const parsed = JSON.parse(match[0]) as { photos?: any[] };
+  if (!Array.isArray(parsed.photos)) return [];
+  return parsed.photos
+    .filter((p) => p?.id)
+    .map((p) => {
+      const category = VALID_CATEGORIES.has(p.category) ? (p.category as AmenityCategory) : "other";
+      const belongs = VALID_BELONGS.has(p.belongs) ? (p.belongs as BelongsVerdict) : "unsure";
+      return {
+        id: String(p.id),
+        category,
+        belongs,
+        confidence: Math.max(0, Math.min(100, Number(p.confidence) || 0)),
+        reason: String(p.reason ?? "").trim() || "Visual analysis",
+      };
+    });
+}
+
+/**
+ * Classify every sample as community-amenity / unit-interior / junk. Best-effort:
+ * a batch that throws leaves its photos unclassified, and the caller fills those
+ * with the caption fallback so curation can still proceed.
+ */
+export async function classifyCommunityAmenityPhotos(
+  samples: CommunityPhotoSample[],
+  communityName: string,
+  description: string,
+  apiKey: string,
+): Promise<Map<string, AmenityClassification>> {
+  const out = new Map<string, AmenityClassification>();
+  if (!apiKey) return out;
+  const withBuffers = samples.filter((s) => s.buffer && s.mime);
+  for (let i = 0; i < withBuffers.length; i += AMENITY_BATCH_SIZE) {
+    const batch = withBuffers.slice(i, i + AMENITY_BATCH_SIZE).map((s) => ({
+      id: s.id,
+      buffer: s.buffer!,
+      mime: s.mime!,
+      caption: s.caption,
+    }));
+    try {
+      const rows = await classifyAmenityBatch(apiKey, communityName, description, batch);
+      for (const r of rows) {
+        out.set(r.id, { category: r.category, belongs: r.belongs, confidence: r.confidence, reason: r.reason });
+      }
+    } catch {
+      // best-effort — unclassified ids fall back to caption heuristics
+    }
+  }
+  return out;
+}
+
 async function loadFolderSamples(folder: string, filenames: string[]): Promise<CommunityPhotoSample[]> {
   const out: CommunityPhotoSample[] = [];
   let n = 0;
@@ -503,18 +676,20 @@ async function runCommunityPhotoRepullJob(
       throw new Error("Found candidates but none could be downloaded. Try again.");
     }
 
-    // 4. VERIFYING — Google Lens + Claude vision on every saved photo.
+    // 4. VERIFYING — community match (Google Lens + vision) AND amenity-vs-interior
+    //    classification, on every saved photo (the pool is ≤ MAX_CANDIDATE_URLS ≤
+    //    VERIFY_CAP, so this covers them all).
     touch(job, {
       phase: "verifying",
-      message: `Double-checking ${Math.min(saved.length, VERIFY_CAP)} photo${saved.length === 1 ? "" : "s"} with AI vision + reverse image search…`,
-      progress: 70,
+      message: `Checking ${saved.length} photo${saved.length === 1 ? "" : "s"} and keeping only community features…`,
+      progress: 68,
     });
     const sampleFiles = saved.slice(0, VERIFY_CAP);
     const samples = await loadFolderSamples(input.communityFolder, sampleFiles);
-    let removed: Array<{ filename?: string; reason: string }> = [];
-    let verdict: string | null = null;
-    let verifiedCount = 0;
 
+    // 4a. Per-photo community verdict (different-community signal).
+    const communityVerdictByFile = new Map<string, CommunityVerdict>();
+    let verdict: string | null = null;
     if (samples.length > 0) {
       const audit = await verifyCommunityPhotos(
         samples,
@@ -526,39 +701,90 @@ async function runCommunityPhotoRepullJob(
       const community = audit.community;
       if (community) {
         verdict = community.overallStatus ?? null;
-        verifiedCount = community.photoVerdicts.filter((p) => p.match === "yes").length;
-        // Delete ONLY photos with a positive mismatch verdict (different
-        // community). Same-area sibling cross-matches are already downgraded to
-        // inconclusive by the Lens logic, so they stay. Uncertain stays too.
-        const mismatches = community.photoVerdicts.filter((p) => p.match === "no");
-        for (const m of mismatches) {
-          if (!m.filename) continue;
-          const abs = safePhotoFilePath(input.communityFolder, m.filename);
-          if (!abs) continue;
-          try {
-            await fs.promises.unlink(abs);
-            removed.push({ filename: path.basename(m.filename), reason: m.reason || "Identified as a different community." });
-          } catch {
-            // already gone / unreadable — ignore
-          }
+        for (const pv of community.photoVerdicts) {
+          if (pv.filename) communityVerdictByFile.set(pv.filename, pv.match);
         }
       }
     }
+
+    // 4b. Per-photo amenity classification (community feature vs unit interior vs junk).
+    touch(job, { progress: 82 });
+    const amenityById = await classifyCommunityAmenityPhotos(
+      samples,
+      input.communityName,
+      research.description,
+      anthropicApiKey,
+    );
+
+    // 5. CURATING — merge both signals, keep only the strongest community-FEATURE
+    //    photos, cap at MAX_COMMUNITY_PHOTOS, and delete everything else.
+    const curatable: CuratableCommunityPhoto[] = samples.map((s) => {
+      const amenity = amenityById.get(s.id) ?? fallbackAmenityClassification(s);
+      return {
+        id: s.id,
+        filename: s.filename,
+        category: amenity.category,
+        belongs: amenity.belongs,
+        communityVerdict: communityVerdictByFile.get(s.filename),
+        confidence: amenity.confidence,
+        reason: amenity.reason,
+      };
+    });
+    const selection = selectCommunityPhotosToKeep(curatable, { max: MAX_COMMUNITY_PHOTOS });
+    const keepSet = new Set(selection.keep);
+    const dropReasonByFile = new Map(selection.drop.map((d) => [d.filename, d.reason]));
+
+    // Delete every saved file NOT in the keep set — this also sweeps stragglers
+    // that were never classified (unreadable/oversized images skipped by
+    // loadFolderSamples), so the folder can never exceed the cap.
+    const removed: Array<{ filename?: string; reason: string }> = [];
+    for (const filename of saved) {
+      if (keepSet.has(filename)) continue;
+      const base = path.basename(filename);
+      const abs = safePhotoFilePath(input.communityFolder, filename);
+      if (!abs) continue;
+      try {
+        await fs.promises.unlink(abs);
+        await storage.deletePhotoLabel(input.communityFolder, base).catch(() => {});
+        removed.push({
+          filename: base,
+          reason: dropReasonByFile.get(filename) ?? "Removed to keep only confirmed community photos.",
+        });
+      } catch {
+        // already gone / unreadable — ignore
+      }
+    }
+
+    const keptCount = selection.keptCount;
+    // "verified" = kept photos the reverse-image+vision verifier positively
+    // confirmed as this community.
+    const verifiedCount = selection.keep.filter(
+      (f) => communityVerdictByFile.get(f) === "yes",
+    ).length;
+
+    const message =
+      keptCount === 0
+        ? `No confirmed community photos found for ${input.communityName} — none of the ${saved.length} candidate${saved.length === 1 ? "" : "s"} were a verified community feature. Try the Community Photo Finder to add a source URL.`
+        : `Kept ${keptCount} community photo${keptCount === 1 ? "" : "s"} for ${input.communityName}` +
+          // Per-item reasons in `removed` are precise; the headline stays accurate
+          // because drops can be interiors, junk, a different community, OR simply
+          // over the 10-photo cap (all legitimate amenities beyond the limit).
+          (removed.length > 0
+            ? `; removed ${removed.length} (unit interiors, junk, a different community, or over the ${MAX_COMMUNITY_PHOTOS}-photo cap)`
+            : "") +
+          (verifiedCount > 0 ? ` · ${verifiedCount} reverse-image confirmed.` : ".");
 
     touch(job, {
       status: "completed",
       phase: "completed",
       progress: 100,
       finishedAt: Date.now(),
+      savedCount: keptCount,
       removedCount: removed.length,
       verifiedCount,
       verdict,
       removed,
-      message:
-        `Saved ${saved.length} photo${saved.length === 1 ? "" : "s"}` +
-        (removed.length > 0 ? `, removed ${removed.length} that didn't match` : "") +
-        (verifiedCount > 0 ? ` · ${verifiedCount} confirmed for ${input.communityName}.` : ".") +
-        (locationConfirmation.status === "mismatch" ? ` ⚠️ ${locationConfirmation.note}` : ""),
+      message: message + (locationConfirmation.status === "mismatch" ? ` ⚠️ ${locationConfirmation.note}` : ""),
       error: null,
     });
   } catch (e: any) {

@@ -1803,6 +1803,16 @@ export class DatabaseStorage implements IStorage {
     return result.length;
   }
 
+  // Delete the label for a single file (used when a photo is curated away so the
+  // DB doesn't keep an orphan label pointing at a now-deleted image).
+  async deletePhotoLabel(folder: string, filename: string): Promise<number> {
+    const result = await db
+      .delete(photoLabels)
+      .where(and(eq(photoLabels.folder, folder), eq(photoLabels.filename, filename)))
+      .returning();
+    return result.length;
+  }
+
   // ── Scanner blocks ──
   async getActiveScannerBlocks(propertyId: number): Promise<ScannerBlock[]> {
     return db.select().from(scannerBlocks)
