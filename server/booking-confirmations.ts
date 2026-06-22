@@ -4,7 +4,7 @@
 // "thanks for booking" message into the matching conversation. The
 // message includes:
 //   - Hawaiian tone (Aloha greeting / Mahalo sign-off, John Carpenter
-//     / Magical Island Rentals signature) — every active property is
+//     / VacationRentalExpertz signature) — every active property is
 //     in HI today; if/when mainland properties are added we'd
 //     introduce a tone variant gated on the listing's address.
 //   - A reminder that the listing is two separate units within the
@@ -26,6 +26,7 @@
 // hear from us out of nowhere.
 
 import { guestyRequest } from "./guesty-sync";
+import { findGuestyConversationForReservation, sendGuestyConversationMessage, deliveryOutcome } from "./guesty-ota-messaging";
 import { storage } from "./storage";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 import { fallbackWalkForResort } from "@shared/walking-distance";
@@ -95,45 +96,8 @@ function buildConfirmationMessage(args: {
     "",
     "Mahalo,",
     "John Carpenter",
-    "Magical Island Rentals",
+    "VacationRentalExpertz",
   ].join("\n");
-}
-
-// Find the conversation associated with a reservation. Guesty exposes
-// this via `/communication/conversations?reservationId=...`. Falls
-// back to the conversation embedded on the reservation document if
-// the search endpoint returns nothing. Either way, returns null when
-// we can't post — log + skip.
-async function findConversationForReservation(reservationId: string): Promise<{ id: string; module: any } | null> {
-  try {
-    const data = await guestyRequest("GET", `/communication/conversations?reservationId=${encodeURIComponent(reservationId)}&limit=1`) as any;
-    const list = data?.data?.conversations ?? data?.conversations ?? data?.results ?? [];
-    if (Array.isArray(list) && list.length > 0) {
-      const c = list[0];
-      return { id: c._id, module: c.module ?? c.lastPost?.module ?? null };
-    }
-  } catch (e: any) {
-    console.warn(`[booking-confirmation] conversation lookup failed for reservation ${reservationId}: ${e.message}`);
-  }
-  return null;
-}
-
-async function sendMessage(conversationId: string, body: string, mod: any): Promise<void> {
-  // Whitelist module fields per the existing inbox send code (extra
-  // fields like templateValues / templateVariableNames cause Guesty's
-  // /send-message to reject the request). type defaults to "email"
-  // when we couldn't sniff the channel.
-  const cleanMod: Record<string, unknown> = {};
-  if (mod && typeof mod === "object") {
-    for (const k of ["type", "channelId", "platform", "integrationId"] as const) {
-      if (mod[k] !== undefined) cleanMod[k] = mod[k];
-    }
-  }
-  if (!cleanMod.type) cleanMod.type = "email";
-  await guestyRequest("POST", `/communication/conversations/${conversationId}/send-message`, {
-    body,
-    module: cleanMod,
-  });
 }
 
 export async function runBookingConfirmations(): Promise<NonNullable<typeof _lastRunResult>> {
@@ -199,19 +163,37 @@ export async function runBookingConfirmations(): Promise<NonNullable<typeof _las
           walkMinutes: walk.minutes,
         });
 
-        const conv = await findConversationForReservation(reservationId);
+        // Resolve the conversation + the proven-delivering OTA module via the
+        // hardened resolver (reservation integration.platform + conversation
+        // posts), the same one Message AD / the inbox compose box use.
+        const channelHint = r.integration?.platform ?? r.source ?? null;
+        const conv = await findGuestyConversationForReservation(reservationId, channelHint);
         if (!conv) {
           console.log(`[booking-confirmation] reservation ${reservationId}: no conversation found — skipping`);
           skipped++;
           continue;
         }
 
-        // Send first; insert dedup row only if the send actually
-        // went through. A failed send leaves no row and gets retried.
+        // Send ONCE through the delivery-verified path, then write the dedup row
+        // based on the verified outcome. A bare Guesty `pending` post is NOT
+        // proof the guest received it (see AGENTS.md #51 /
+        // guesty-bookingcom-delivery-externalid) — so we never record a
+        // confirmation as "sent" on a misroute. The dedup row's mere EXISTENCE
+        // stops the 5-minute scheduler from re-posting, so we still write a row
+        // on a posted-but-unconfirmed / misrouted send (just not as "sent") to
+        // avoid piling up duplicate copies on the thread.
         try {
-          await sendMessage(conv.id, body, conv.module);
-          const channel = conv.module?.type ?? r.integration?.platform ?? null;
-          const insert: InsertBookingConfirmation = {
+          const delivery = await sendGuestyConversationMessage({
+            conversationId: conv.id,
+            body,
+            module: conv.module,
+            reservation: conv.reservation ?? r,
+            channelHint,
+            logPrefix: "booking-confirmation",
+          });
+          const channel = delivery.deliveryModuleType ?? (conv.module?.type as string | undefined) ?? r.integration?.platform ?? null;
+          const outcome = deliveryOutcome(delivery);
+          const baseInsert: InsertBookingConfirmation = {
             reservationId,
             conversationId: conv.id,
             guestName: r.guest?.fullName ?? null,
@@ -219,13 +201,23 @@ export async function runBookingConfirmations(): Promise<NonNullable<typeof _las
             listingNickname: r.listing?.nickname ?? r.listing?.title ?? null,
             channel,
             messageBody: body,
-            status: "sent",
-            errorMessage: null,
+            status: outcome === "delivered" ? "sent" : outcome === "misroute" ? "misroute" : "pending",
+            errorMessage: outcome === "delivered" ? null : (delivery.reason ?? null),
           };
-          await storage.createBookingConfirmation(insert);
-          sent++;
-          console.log(`[booking-confirmation] sent to reservation ${reservationId} (${guestFirstName || "Guest"} @ ${property.propertyName})`);
+          await storage.createBookingConfirmation(baseInsert);
+          if (outcome === "misroute") {
+            errors++;
+            console.warn(`[booking-confirmation] MISROUTE for reservation ${reservationId} (${channel}): ${delivery.reason ?? ""} — recorded, not delivered to the guest channel`);
+          } else if (outcome === "unconfirmed") {
+            sent++;
+            console.warn(`[booking-confirmation] POSTED to reservation ${reservationId} but ${channel} delivery unconfirmed — not resending: ${delivery.reason ?? ""}`);
+          } else {
+            sent++;
+            console.log(`[booking-confirmation] sent to reservation ${reservationId} (${guestFirstName || "Guest"} @ ${property.propertyName}, via ${channel})`);
+          }
         } catch (e: any) {
+          // POST threw (Guesty rejected every module / network) — leave NO row so
+          // it retries next tick.
           errors++;
           console.error(`[booking-confirmation] send failed for reservation ${reservationId}: ${e.message}`);
         }

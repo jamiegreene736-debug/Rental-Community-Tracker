@@ -438,6 +438,15 @@ assert.match(
   /isolateRedfinSubjectGallery\(html, urls\)/,
   "Redfin gallery scrape must isolate the subject listing and drop the comparable-homes carousel",
 );
+// Host-agnostic guard: the generic gallery extractor (Homes.com + other portals,
+// not just Redfin) must prefer the subject unit's JSON-LD gallery so the greedy
+// page harvest can't bleed the "Nearby similar homes" carousel of OTHER units'
+// photos into one unit folder (the jumbled-photos contamination on re-pull).
+assert.match(
+  routesSource,
+  /subjectGalleryFromJsonLd\(html\)[\s\S]*MIN_JSONLD_SUBJECT_GALLERY/,
+  "generic gallery scrape must isolate the subject unit via its JSON-LD gallery for non-Redfin portals too",
+);
 assert.match(
   preflightSource,
   /\/api\/preflight\/photo-fetch-jobs/,
@@ -2242,6 +2251,43 @@ assert.match(
   /find-unit[\s\S]*scrapeListingPhotosDualSource\(clusterUrls/,
   "replacement find-unit must parallel-scrape all portal URLs per address cluster",
 );
+// The portal cluster must key on street root + UNIT NUMBER, not a bare street root —
+// otherwise a single-address condo building (every unit at one street) collapses all
+// units into one cluster and the dual-source scrape stamps one unit's bedroom count +
+// photos onto its neighbors (real 3BRs wrongly rejected as the cluster's 1BR).
+assert.ok(
+  routeSource.includes("const listingClusterKeyFor = (url: string, contextText = \"\"): string =>")
+    && /listingClusterKeyFor[\s\S]*?\$\{root\}#\$\{unit\}/.test(routeSource),
+  "replacement find-unit must cluster portals by unit identity (street root + unit number), not a bare street root",
+);
+assert.ok(
+  !/const clusterKey = streetRootFromListingAddress\(/.test(routeSource)
+    && routeSource.includes("const clusterKey = listingClusterKeyFor("),
+  "replacement find-unit cluster lookups must use the unit-aware listingClusterKeyFor helper",
+);
+// 2026-06-22 follow-up to #808 (Cocoa Beach Towers): /api/single-listing/find-clean-unit
+// had the SAME single-address collapse. Its photo cluster keyed on a bare street root
+// (streetRootFromAddress(addressGuess)), so every unit in a one-address condo building
+// (e.g. 220 Young Ave) merged into one cluster and the dual-source scrape stamped one
+// unit's bedroom count + photos onto its neighbors. (That build loop was also a dead
+// path — it referenced the addressFromSlug/streetRootFromAddress aliases before their
+// declaration, a TDZ that threw at runtime.) It must cluster by unit identity too.
+{
+  const fcuStart = routeSource.indexOf('app.post("/api/single-listing/find-clean-unit"');
+  const fcuEnd = routeSource.indexOf('app.post("/api/community/save"', fcuStart);
+  assert.ok(fcuStart >= 0 && fcuEnd > fcuStart, "find-clean-unit route must be locatable for source-lock");
+  const fcuSource = routeSource.slice(fcuStart, fcuEnd);
+  assert.ok(
+    fcuSource.includes("const listingClusterKeyFor = (url: string, contextText = \"\"): string =>")
+      && /listingClusterKeyFor[\s\S]*?\$\{root\}#\$\{unit\}/.test(fcuSource),
+    "find-clean-unit must cluster portals by unit identity (street root + unit token), not a bare street root",
+  );
+  assert.ok(
+    !/streetRootFromAddress\(addressGuess\)\s*\?\?\s*`__url:/.test(fcuSource)
+      && (fcuSource.match(/const clusterKey = listingClusterKeyFor\(/g) || []).length >= 2,
+    "find-clean-unit cluster build + lookup must both use the unit-aware listingClusterKeyFor helper",
+  );
+}
 assert.ok(
   routeSource.includes("const candidatePhaseStartedAt = Date.now()"),
   "replacement search must reserve a dedicated candidate-check budget after discovery",
@@ -2403,6 +2449,69 @@ assert.ok(
   routeSource.includes('found on ${cleanChannel ? "the enforced channel" : "Airbnb/VRBO/Booking.com"}'),
   "the load-bearing skipped-found diagnostic substring must remain intact (append-only diagnostic hint)",
 );
+
+// ── Find-a-New-Unit candidate-cap fix (Tiers 1-4): deeper scan + multi-building breadth + cost guardrail ──
+assert.ok(
+  routeSource.includes("const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 120 : 70;"),
+  "Tier 2: per-pass candidate cap raised (120/70) so a bigger discovery pool can be drained",
+);
+assert.match(
+  routeSource,
+  /DISCOVERY_CANDIDATE_TARGET[\s\S]*?\?\s*80[\s\S]*?\?\s*60[\s\S]*?\?\s*48[\s\S]*?:\s*40;/,
+  "Tier 2: discovery early-stop target raised (80/60/48/40) so hundreds-unit communities surface more than ~20",
+);
+assert.ok(
+  routeSource.includes("const capExceeded = totalCandidates > MAX_CANDIDATES_TO_CHECK;")
+    && routeSource.includes("const uncheckedCandidates = (budgetStopped || capExceeded)")
+    && routeSource.includes("? candidates.slice(attempts.length).map((c) => ({"),
+  "Tier 2: cap overflow is resumable — uncheckedCandidates sourced from the FULL sorted pool on budgetStopped OR capExceeded",
+);
+assert.ok(
+  routeSource.includes("capExceeded,") && routeSource.includes("searchApiCalls,"),
+  "Tier 2/4: the diagnostic must return capExceeded + searchApiCalls (continuation trigger + observability)",
+);
+assert.ok(
+  preflightJobsSource.includes("!diagnostic?.capExceeded")
+    && preflightJobsSource.includes("MAX_REPLACEMENT_FIND_CONTINUATIONS = 12"),
+  "Tier 2: the background job continues on capExceeded (not only budgetStopped) with more passes to drain a big pool",
+);
+{
+  const sharedOpDiagnosticsSource = readFileSync("shared/operation-diagnostics.ts", "utf8");
+  assert.ok(
+    sharedOpDiagnosticsSource.includes("(budgetStopped || capExceeded) && unchecked > 0"),
+    "Tier 2: the manual continue-search remediation also offers on capExceeded",
+  );
+}
+assert.ok(
+  routeSource.includes("SEARCHAPI_CALL_BUDGET")
+    && routeSource.includes("REPLACEMENT_SEARCHAPI_CALL_BUDGET")
+    && routeSource.includes("searchApiCalls += 1;"),
+  "Tier 4: a per-pass SearchAPI call budget guards the shared plan and is counted on every Google query",
+);
+{
+  const communityAddressesSource = readFileSync("shared/community-addresses.ts", "utf8");
+  assert.ok(
+    communityAddressesSource.includes("buildingStreetRoots?: string[]"),
+    "Tier 3: CommunityAddressRule exposes buildingStreetRoots for multi-building resorts",
+  );
+}
+assert.ok(
+  routeSource.includes("?.buildingStreetRoots ?? []"),
+  "Tier 3: communityKnownAddressRoots threads curated buildingStreetRoots into the resort-street gate",
+);
+assert.ok(
+  routeSource.includes("learnedBuildingRoots") && routeSource.includes("buildingAllowedRoots"),
+  "Tier 3: the Zillow /b/ harvest auto-learns sibling building roots (>=2x on the page) to admit other buildings",
+);
+assert.ok(
+  unitReplacementSource.includes('data-testid="button-include-ota-listed-retry"')
+    && unitReplacementSource.includes("search({ allowOtaListed: true"),
+  "Tier 1: the replacement flow offers a one-click 'Include OTA-listed & retry' when skipped-found dominates",
+);
+assert.ok(
+  routeSource.includes("Found ${totalCandidates} for-sale"),
+  "Tier 1: the failure diagnostic reframes the count as the discovered for-sale pool, not a scan limit",
+);
 assert.ok(
   unitReplacementSource.includes("allowOtaListed,")
     && unitReplacementSource.includes("setAllowOtaListed"),
@@ -2438,7 +2547,28 @@ assert.ok(
 );
 assert.ok(
   routeSource.includes("...SCRAPE_WITHOUT_SIDECAR"),
-  "fetch-unit-photos must not enqueue zillow_photo_scrape on the local sidecar",
+  "fetch-unit-photos discovery path must stay sidecar-free (only the opt-in direct rescrape may use the sidecar)",
+);
+// "Re-pull all photos" (preflight background job, Stage 1 — rescrape of the
+// unit's OWN saved listing) opts INTO the residential-IP sidecar so a
+// Redfin/Homes/Zillow listing that bot-walls to a single og:image on Railway's
+// datacenter IP is still fully recovered instead of re-pulling thin. Synchronous
+// wizard callers omit the flag and stay sidecar-free. See Load-Bearing #45.
+assert.ok(
+  routeSource.includes("const SCRAPE_WITH_SIDECAR: ScrapeOptions = { sidecarWalletMs: 90_000 }"),
+  "the background re-pull path must define a sidecar-enabled scrape option",
+);
+assert.ok(
+  routeSource.includes("const directScrapeOptions = useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR"),
+  "fetch-unit-photos direct rescrape must enable the sidecar ONLY when the caller opts in",
+);
+assert.ok(
+  routeSource.includes("scrapeListingPhotos(listingUrl, undefined, facts, directScrapeOptions)"),
+  "fetch-unit-photos direct rescrape must use the opt-in (sidecar-aware) scrape options",
+);
+assert.ok(
+  preflightJobsSource.includes("useSidecar: true"),
+  "Re-pull all photos (own-listing rescrape) must opt into the residential-IP sidecar",
 );
 assert.ok(
   routeSource.includes("scrapeListingPhotosDualSource(clusterUrls, candidateFacts, SCRAPE_WITHOUT_SIDECAR)"),
@@ -2465,8 +2595,10 @@ assert.ok(
   "replacement discovery should run SearchAPI queries in parallel batches",
 );
 assert.ok(
-  routeSource.includes("const filterRoots = suppliedStreetRoot"),
-  "replacement stacked Apify discovery must filter Zillow/Realtor through canonical resort street when known",
+  routeSource.includes("const filterRoots = allowedRoots.size > 0")
+    && routeSource.includes('for (const link of batch.realtor) addCandidateUrl(link, "realtor", "", "", filterRoots);')
+    && routeSource.includes('for (const link of batch.zillow) addCandidateUrl(link, "zillow", "", "", filterRoots);'),
+  "replacement stacked Apify discovery must filter Zillow/Realtor through the resort root SET (canonical + curated buildingStreetRoots + learned), not a single narrowed root",
 );
 assert.ok(
   routeSource.includes("(?:[-\\\\s]+\\\\d{1,4})?[-\\\\s]+"),

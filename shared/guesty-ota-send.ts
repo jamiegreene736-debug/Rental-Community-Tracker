@@ -144,20 +144,81 @@ export function isHostConversationPost(post: Record<string, unknown>): boolean {
     || post?.isIncoming === false;
 }
 
-export function bodiesLikelyMatch(sentBody: string, postBody: string): boolean {
-  const a = sentBody.trim().toLowerCase();
-  const b = postBody.trim().toLowerCase();
-  if (!a || !b) return false;
-  const head = a.slice(0, Math.min(80, a.length));
-  const tail = a.slice(Math.max(0, a.length - 80));
-  return b.includes(head.slice(0, 40)) || b.includes(tail) || a.includes(b.slice(0, 40));
+// STRICT, edit-SENSITIVE body equality — used to confirm that a delivered post
+// is THIS exact message, not a stale earlier copy. The arrival greeting +
+// signature are byte-identical across edits, so a lenient head/tail match would
+// treat a corrected resend (e.g. a fixed access code) as "already delivered"
+// against the OLD copy and show a false green confirm with the wrong details.
+// Collapse whitespace (tolerates the channel trimming blank lines — the live
+// synced copy was 1793 vs our 1801 chars) but stay sensitive to any real content
+// change.
+export function bodiesAreDuplicate(a: string, b: string): boolean {
+  const norm = (s: string) => String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  const na = norm(a);
+  const nb = norm(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na];
+  // Tolerate the channel dropping a trailing footer/signature only (>=95% prefix).
+  return long.startsWith(short) && short.length / long.length >= 0.95;
+}
+
+/**
+ * Real OTA delivery signal. Guesty's POST /send-message creates a LOCAL outbound
+ * post IMMEDIATELY with `status:"pending"` and no `module.externalId` — that is
+ * NOT proof the OTA (Booking.com/Airbnb/VRBO) accepted it. The message only
+ * reaches the guest's portal once Guesty stamps the channel's message id
+ * (`module.externalId`) and/or flips the post to a delivered status
+ * (`completed`/`sent`/`delivered`). A post that stays `pending` with no
+ * externalId is queued, never delivered. (Verified live 2026-06-20: 4 stuck
+ * `pending` Booking.com arrival messages with no externalId vs. older
+ * `completed`+externalId ones — see AGENTS.md.)
+ */
+export function postDeliveryState(post: Record<string, unknown>): "delivered" | "pending" | "failed" {
+  const mod = (post.module as Record<string, unknown> | undefined) ?? {};
+  const externalId = mod.externalId;
+  const status = String(post.status ?? post.deliveryStatus ?? "").toLowerCase();
+  if (status === "failed" || status === "error" || status === "rejected" || status === "bounced") return "failed";
+  if (externalId !== undefined && externalId !== null && externalId !== "") return "delivered";
+  if (["completed", "sent", "delivered", "success", "ok"].includes(status)) return "delivered";
+  return "pending";
+}
+
+/**
+ * Collapse a `sendGuestyConversationMessage` result into the single action a
+ * BACKGROUND sender (auto-reply auto-send, booking confirmations, guest
+ * receipts) should take:
+ *
+ *   - `delivered`   → the channel confirmed delivery (module.externalId /
+ *                     completed). Record it as sent.
+ *   - `misroute`    → a HARD non-delivery: Guesty filed our message off the
+ *                     guest's OTA channel (e.g. on email), so the guest never
+ *                     got it on the channel they booked with. Do NOT record it
+ *                     as sent. (`pending === false` is the explicit misroute
+ *                     signal from verifyOtaHostPostDelivered.)
+ *   - `unconfirmed` → posted to the OTA channel but not confirmed within the
+ *                     verify window. The message WAS posted exactly once, so the
+ *                     caller must record it terminally to avoid a duplicate
+ *                     re-send on the next tick — but never as a clean delivery.
+ *
+ * Note `pending` is only a misroute when EXPLICITLY false. A missing/undefined
+ * `pending` (verified false, pending not set) is treated as `unconfirmed`, never
+ * a hard misroute — we never suppress a record or flag a thread on an ambiguous
+ * verdict.
+ */
+export function deliveryOutcome(
+  result: { verified?: boolean; pending?: boolean } | null | undefined,
+): "delivered" | "unconfirmed" | "misroute" {
+  if (result?.verified) return "delivered";
+  if (result?.pending === false) return "misroute";
+  return "unconfirmed";
 }
 
 export function verifyOtaHostPostDelivered(
   posts: unknown[],
   sentBody: string,
   requireOtaModule: boolean,
-): { verified: boolean; deliveryModuleType?: string; reason?: string } {
+): { verified: boolean; deliveryModuleType?: string; reason?: string; pending?: boolean } {
   if (!Array.isArray(posts) || posts.length === 0) {
     return { verified: false, reason: "No conversation posts returned after send" };
   }
@@ -165,21 +226,56 @@ export function verifyOtaHostPostDelivered(
     .filter((p): p is Record<string, unknown> => !!p && typeof p === "object")
     .sort((a, b) => postTimestamp(b) - postTimestamp(a));
 
-  for (const post of sorted.slice(0, 8)) {
+  // Scan the newest matching host posts. Only a post that STRICTLY matches the
+  // body we just sent counts (bodiesAreDuplicate) — a delivered copy of an
+  // earlier/edited message must NOT verify this send. A delivered OTA copy wins
+  // outright; a wrong-channel (e.g. email) copy or a still-pending OTA copy are
+  // remembered and only reported if NO delivered copy is found — so we never call
+  // a stuck `pending` post "delivered".
+  let sawWrongChannel: string | null = null;
+  let sawPendingOta = false;
+  for (const post of sorted.slice(0, 20)) {
     if (!isHostConversationPost(post)) continue;
     const body = postBodyText(post as { body?: unknown; text?: unknown; message?: unknown });
-    if (!bodiesLikelyMatch(sentBody, body)) continue;
+    if (!bodiesAreDuplicate(sentBody, body)) continue;
 
     const modType = String((post.module as Record<string, unknown> | undefined)?.type ?? "").toLowerCase();
     if (requireOtaModule && !guestyModuleTypeLooksOta(modType)) {
-      return {
-        verified: false,
-        deliveryModuleType: modType || "unknown",
-        reason: `Guesty saved the message on ${modType || "unknown"} instead of the OTA guest channel`,
-      };
+      if (!sawWrongChannel) sawWrongChannel = modType || "unknown";
+      continue;
     }
-    return { verified: true, deliveryModuleType: modType || undefined };
+    const state = postDeliveryState(post);
+    if (state === "delivered") {
+      return { verified: true, deliveryModuleType: modType || undefined };
+    }
+    if (state === "pending") sawPendingOta = true;
+    // `failed` → keep scanning; a later retry copy may have delivered.
   }
 
-  return { verified: false, reason: "No matching host post found on the conversation after send" };
+  // A genuine in-flight OTA copy takes precedence over a wrong-channel copy: if
+  // an identical body is BOTH pending on the OTA channel AND present on email
+  // (e.g. a prior identical email send), our current OTA send is still in flight
+  // — keep waiting rather than falsely declaring a hard misroute.
+  if (sawPendingOta) {
+    return {
+      verified: false,
+      pending: true,
+      reason: "Message is queued on the OTA channel but the channel has not confirmed delivery yet",
+    };
+  }
+  if (sawWrongChannel) {
+    // Filed on the wrong (non-OTA) channel — a hard non-delivery, NOT "pending".
+    // pending:false is explicit so the caller's `pending === true` stays false.
+    return {
+      verified: false,
+      pending: false,
+      deliveryModuleType: sawWrongChannel,
+      reason: `Guesty saved the message on ${sawWrongChannel} instead of the OTA guest channel, so it was NOT delivered to the guest's booking channel`,
+    };
+  }
+  // The POST succeeded but no body-matching host post surfaced in the window —
+  // most likely sync lag, or the channel re-wrapped the body past the strict
+  // matcher. This is UNCONFIRMED, not a wrong-channel misroute: report `pending`
+  // (queued — don't resend) rather than a hard "saved on email" failure.
+  return { verified: false, pending: true, reason: "Message was posted but delivery is not confirmed yet" };
 }

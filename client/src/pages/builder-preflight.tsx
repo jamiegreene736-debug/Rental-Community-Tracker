@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Camera,
   Search,
+  MapPin,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "@/data/unit-builder-data";
 import { useAssistantContext } from "@/lib/assistant-context";
@@ -30,6 +31,7 @@ import {
   parseCityFromMailingAddress,
 } from "@shared/community-addresses";
 import { mergeUnitVerdict, DEEP_PHOTO_MIN } from "@shared/preflight-verdict";
+import { confirmCommunityLocation, type LocationConfirmation } from "@shared/photo-location-confirmation";
 
 type PreflightPhotoFetchJob = {
   id: string;
@@ -44,6 +46,103 @@ type PreflightPhotoFetchJob = {
   diagnostic?: Record<string, unknown> | null;
   error: string | null;
 };
+
+type CommunityRepullJob = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  phase: string;
+  message: string;
+  progress: number;
+  communityName: string;
+  communityFolder: string;
+  researchSummary: string | null;
+  candidatesFound: number | null;
+  savedCount: number | null;
+  removedCount: number | null;
+  verifiedCount: number | null;
+  verdict: string | null;
+  removed: Array<{ filename?: string; reason: string }>;
+  locationConfirmation: LocationConfirmation | null;
+  error: string | null;
+};
+
+// Renders the state/city confirmation for a community re-pull or a unit photo
+// fetch: red when the location contradicts the expected state (e.g. a "Bay
+// Watch" unit filed under Florida when Bay Watch is in South Carolina), green
+// when the state is positively confirmed, amber when it could not be confirmed.
+function LocationConfirmationNote({ confirmation }: { confirmation: LocationConfirmation | null }) {
+  if (!confirmation) return null;
+  const status = confirmation.status;
+  const cls =
+    status === "mismatch"
+      ? "border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-200"
+      : status === "match"
+        ? "border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300"
+        : "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300";
+  const Icon = status === "mismatch" ? AlertTriangle : status === "match" ? CheckCircle2 : MapPin;
+  // The overall verdict is state-driven, so a `mismatch` is always a wrong state.
+  const label = status === "match" ? "Location confirmed" : status === "mismatch" ? "Wrong state" : "Location";
+  return (
+    <div className={`mt-1.5 flex items-start gap-1.5 rounded-md border px-2 py-1.5 text-xs ${cls}`}>
+      <Icon className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+      <span><span className="font-medium">{label}:</span> {confirmation.note}</span>
+    </div>
+  );
+}
+
+// A sticky, dismissible "last processed" receipt for a long-running operation
+// (re-pulling a unit's photos, running the OTA unit audit). The operator asked
+// for a confirmation that STAYS on screen after the work finishes — telling
+// them when it last ran and whether it succeeded — until they click the × to
+// dismiss it. Green when the operation succeeded, red when it failed.
+type OperationReceipt = {
+  timestamp: number; // ms epoch
+  success: boolean;
+  title: string; // e.g. "Photos re-pulled" / "Full unit audit"
+  detail: string; // human summary or error message
+  jobId?: string; // de-dupes repeat records for the same finished job
+};
+
+function OperationReceiptNote({
+  receipt,
+  relative,
+  onDismiss,
+  testId,
+}: {
+  receipt: OperationReceipt;
+  relative: (ts: number) => string;
+  onDismiss: () => void;
+  testId?: string;
+}) {
+  const cls = receipt.success
+    ? "border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300"
+    : "border-red-200 bg-red-50 text-red-900 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200";
+  const Icon = receipt.success ? CheckCircle2 : AlertTriangle;
+  return (
+    <div
+      className={`basis-full flex items-start gap-2 rounded-md border px-2.5 py-1.5 text-[11px] ${cls}`}
+      data-testid={testId}
+    >
+      <Icon className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+      <div className="min-w-0">
+        <span className="font-medium">{receipt.title}</span>{" "}
+        <span className="opacity-90">· last run {relative(receipt.timestamp)}</span>
+        <p className="opacity-90">{receipt.detail}</p>
+      </div>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="ml-auto text-base leading-none px-1 opacity-70 hover:opacity-100"
+        aria-label="Dismiss confirmation"
+        title="Dismiss"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+const communityRepullJobStorageKey = (propertyId: number) => `preflight.communityRepullJob.v1:${propertyId}`;
 
 const photoFetchJobStorageKey = (propertyId: number) => `preflight.photoFetchJob.v1:${propertyId}`;
 const loadPhotoFetchJobIds = (propertyId: number): Record<string, string> => {
@@ -96,6 +195,31 @@ type UnitOverride = {
   photoFolder?: string;
   swapId?: number;
 };
+
+// Friendly name for the scrape source (Zillow / Redfin / VRBO …) from the
+// stored `_source.json` platform field, falling back to the URL hostname.
+function sourcePlatformLabel(source: { url: string; platform?: string } | null | undefined): string {
+  if (!source) return "source";
+  const p = (source.platform || "").toLowerCase();
+  if (p === "zillow") return "Zillow";
+  if (p === "redfin") return "Redfin";
+  if (p === "homes.com") return "Homes.com";
+  if (p === "realtor") return "Realtor.com";
+  if (p === "vrbo") return "VRBO";
+  if (p === "airbnb") return "Airbnb";
+  try {
+    const host = new URL(source.url).hostname.replace(/^www\./, "");
+    if (/zillow/i.test(host)) return "Zillow";
+    if (/redfin/i.test(host)) return "Redfin";
+    if (/realtor/i.test(host)) return "Realtor.com";
+    if (/homes\.com/i.test(host)) return "Homes.com";
+    if (/vrbo/i.test(host)) return "VRBO";
+    if (/airbnb/i.test(host)) return "Airbnb";
+    return host;
+  } catch {
+    return "source";
+  }
+}
 
 function formatUnitDisplayLabel(unitNumber: string): string {
   const raw = String(unitNumber || "").trim();
@@ -341,6 +465,52 @@ export default function BuilderPreflight() {
     return `${Math.floor(diff / 86_400_000)}d ago`;
   };
 
+  // ── Sticky "last processed" receipts ──────────────────────────────────────
+  // The operator asked that re-scraping a unit's photos and running the OTA
+  // unit audit each leave a confirmation that sticks (with an × to dismiss),
+  // showing when it last ran and whether it succeeded. Persisted to
+  // localStorage per property so it survives leaving and returning to the page.
+  // Photo-fetch receipts are keyed by unitId; the platform check has one.
+  const photoFetchReceiptsKey = (propertyId: number) => `preflight.photoFetchReceipts.v1:${propertyId}`;
+  const platformCheckReceiptKey = (propertyId: number) => `preflight.platformCheckReceipt.v1:${propertyId}`;
+  const [photoFetchReceipts, setPhotoFetchReceipts] = useState<Record<string, OperationReceipt>>(() => {
+    try {
+      const raw = localStorage.getItem(photoFetchReceiptsKey(id));
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
+  const recordPhotoFetchReceipt = (unitId: string, receipt: OperationReceipt) => {
+    setPhotoFetchReceipts((prev) => {
+      // Skip a repeat record for the SAME finished job (the poll loop can
+      // re-deliver a terminal job) so the timestamp doesn't churn on reload.
+      if (receipt.jobId && prev[unitId]?.jobId === receipt.jobId) return prev;
+      const next = { ...prev, [unitId]: receipt };
+      try { localStorage.setItem(photoFetchReceiptsKey(id), JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+  const dismissPhotoFetchReceipt = (unitId: string) => {
+    setPhotoFetchReceipts((prev) => {
+      const next = { ...prev };
+      delete next[unitId];
+      try { localStorage.setItem(photoFetchReceiptsKey(id), JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+  const [platformCheckReceipt, setPlatformCheckReceipt] = useState<OperationReceipt | null>(() => {
+    try {
+      const raw = localStorage.getItem(platformCheckReceiptKey(id));
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  });
+  const recordPlatformCheckReceipt = (receipt: OperationReceipt | null) => {
+    setPlatformCheckReceipt(receipt);
+    try {
+      if (receipt) localStorage.setItem(platformCheckReceiptKey(id), JSON.stringify(receipt));
+      else localStorage.removeItem(platformCheckReceiptKey(id));
+    } catch {}
+  };
+
   // ── Photo source scraper for promoted drafts ─────────────────────────────
   // Drafts whose Step 4 wizard scrape didn't find a matching Zillow listing
   // arrive at preflight with no photos persisted on the volume. Without
@@ -392,6 +562,28 @@ export default function BuilderPreflight() {
       savePhotoFetchJobIds(id, next);
       return next;
     });
+    // Leave a sticky "last processed" receipt the operator dismisses with ×.
+    if (job.status === "completed") {
+      let sourceNote = "";
+      if (job.sourceUrl) {
+        try { sourceNote = ` from ${new URL(job.sourceUrl).hostname}`; } catch { /* keep blank */ }
+      }
+      recordPhotoFetchReceipt(unitId, {
+        timestamp: Date.now(),
+        success: true,
+        title: "Photos re-pulled",
+        detail: `${job.savedCount ?? 0} photo${job.savedCount === 1 ? "" : "s"} saved${sourceNote}.`,
+        jobId: job.id,
+      });
+    } else if (job.status === "failed") {
+      recordPhotoFetchReceipt(unitId, {
+        timestamp: Date.now(),
+        success: false,
+        title: "Photo re-pull failed",
+        detail: job.error || job.message || "No photos were saved.",
+        jobId: job.id,
+      });
+    }
     if (job.status === "completed") {
       void loadDraftPropertyByNegativeId(id).then((updated) => {
         if (updated) setDraftProperty(updated);
@@ -476,6 +668,19 @@ export default function BuilderPreflight() {
     return { street, city, state };
   };
 
+  // Confirm the state/city the units sit in (all units share the property's
+  // community), so getting new unit photos surfaces — and flags — a unit whose
+  // community is filed under the wrong state (e.g. a Bay Watch unit under
+  // Florida; Bay Watch is a South Carolina resort). Recall-safe: only a KNOWN
+  // mis-location is flagged. See shared/community-location-guard.ts.
+  const unitLocationConfirmation: LocationConfirmation | null = property
+    ? confirmCommunityLocation({
+        communityName: property.complexName,
+        expectedCity: parsePropertyAddress(property.address).city || null,
+        expectedState: parsePropertyAddress(property.address).state || null,
+      })
+    : null;
+
   const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unit: { id: string; bedrooms: number; photos?: { url: string }[]; photoFolder?: string }) => {
     if (id >= 0 || !property) return; // promoted drafts only
     const draftId = -id;
@@ -547,7 +752,99 @@ export default function BuilderPreflight() {
       applyPhotoFetchJob(unit.id, data.job as PreflightPhotoFetchJob);
       setPhotoFetchTick(0);
     } catch (e: any) {
+      // The job-start API didn't respond (or errored) — leave a sticky red
+      // receipt, not just a transient toast, so the failure is visible after.
+      recordPhotoFetchReceipt(unit.id, {
+        timestamp: Date.now(),
+        success: false,
+        title: "Photo re-pull failed",
+        detail: `Couldn't start the photo re-pull — the service didn't respond (${e?.message || String(e)}). Try again.`,
+      });
       toast({ title: "Scrape failed", description: e?.message || String(e), variant: "destructive" });
+    }
+  };
+
+  // ── Re-pull community photos ──────────────────────────────────────────────
+  // Researches the community via Claude, finds correct community photo URLs,
+  // scrapes them into the community folder, then verifies every photo with AI
+  // vision + Google Lens reverse image search (deleting any mismatches).
+  const [communityRepullJobId, setCommunityRepullJobId] = useState<string | null>(() => {
+    if (!Number.isFinite(id)) return null;
+    try {
+      return localStorage.getItem(communityRepullJobStorageKey(id));
+    } catch {
+      return null;
+    }
+  });
+  const [communityRepullJob, setCommunityRepullJob] = useState<CommunityRepullJob | null>(null);
+
+  const persistRepullJobId = (jobId: string | null) => {
+    try {
+      if (jobId) localStorage.setItem(communityRepullJobStorageKey(id), jobId);
+      else localStorage.removeItem(communityRepullJobStorageKey(id));
+    } catch { /* ignore */ }
+  };
+
+  const repullActive =
+    !!communityRepullJobId &&
+    (!communityRepullJob || communityRepullJob.status === "queued" || communityRepullJob.status === "running");
+
+  useEffect(() => {
+    if (!communityRepullJobId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const resp = await fetch(
+          `/api/preflight/community-photo-repull/${encodeURIComponent(communityRepullJobId)}`,
+          { credentials: "include" },
+        );
+        if (resp.status === 404) {
+          if (!cancelled) { setCommunityRepullJobId(null); persistRepullJobId(null); }
+          return;
+        }
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (cancelled || !data?.job) return;
+        const job = data.job as CommunityRepullJob;
+        setCommunityRepullJob(job);
+        const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+        if (terminal) {
+          setCommunityRepullJobId(null);
+          persistRepullJobId(null);
+          if (job.status === "completed") {
+            toast({ title: "Community photos refreshed", description: job.message });
+          } else if (job.error) {
+            toast({ title: "Re-pull failed", description: job.error, variant: "destructive" });
+          }
+        }
+      } catch { /* keep polling */ }
+    };
+    void poll();
+    const interval = window.setInterval(poll, 2_000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [communityRepullJobId]);
+
+  const handleRepullCommunityPhotos = async () => {
+    if (!property?.communityPhotoFolder) {
+      toast({ title: "No community folder", description: "This listing has no community photo folder to refresh.", variant: "destructive" });
+      return;
+    }
+    try {
+      const resp = await apiRequest("POST", "/api/preflight/community-photo-repull", {
+        communityName: property.complexName,
+        communityFolder: property.communityPhotoFolder,
+        city: parseCityFromMailingAddress(property.address) || undefined,
+        state: parsePropertyAddress(property.address).state || undefined,
+      });
+      const data = await resp.json();
+      if (!data?.job?.id) throw new Error("Re-pull job did not start");
+      setCommunityRepullJob(data.job as CommunityRepullJob);
+      setCommunityRepullJobId(data.job.id as string);
+      persistRepullJobId(data.job.id as string);
+      toast({ title: "Re-pull started", description: "Researching the community and finding fresh photos — safe to leave this tab." });
+    } catch (e: any) {
+      toast({ title: "Could not start re-pull", description: e?.message || String(e), variant: "destructive" });
     }
   };
 
@@ -714,6 +1011,50 @@ export default function BuilderPreflight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [photoFolderKey]);
 
+  // Load the original scrape source (Zillow/Redfin/etc.) for each unit's folder
+  // from its _source.json, so the Photo Sources card can show a "View source"
+  // button next to Re-pull that reveals the listing URL the photos came from.
+  // Stays ABOVE the `if (!property)` early return (stable hook count) and reads
+  // property/unitOverrides directly. Re-runs after a re-pull (receipt timestamp
+  // changes) so the URL refreshes if discovery picked a new listing.
+  const [unitSourceByFolder, setUnitSourceByFolder] = useState<Record<string, { url: string; platform?: string } | null>>({});
+  const [revealedSourceUnitIds, setRevealedSourceUnitIds] = useState<Set<string>>(new Set());
+  const toggleRevealSource = (unitId: string) => {
+    setRevealedSourceUnitIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(unitId)) next.delete(unitId); else next.add(unitId);
+      return next;
+    });
+  };
+  const sourceRefreshKey = (property?.units ?? [])
+    .map((u) => photoFetchReceipts[u.id]?.timestamp ?? 0)
+    .join("|");
+  useEffect(() => {
+    const folders = Array.from(new Set(
+      (property?.units ?? [])
+        .map((u) => (unitOverrides[u.id]?.photoFolder ?? (u as any).photoFolder) as string | undefined)
+        .filter((f): f is string => !!f),
+    ));
+    if (folders.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const map: Record<string, { url: string; platform?: string } | null> = {};
+      await Promise.all(folders.map(async (folder) => {
+        try {
+          const r = await fetch(`/api/builder/photo-source/${encodeURIComponent(folder)}`, { credentials: "include" });
+          if (!r.ok) return;
+          const data = await r.json();
+          const sl = data?.source?.sourceListing;
+          const url = typeof sl?.url === "string" && /^https?:\/\//i.test(sl.url) ? sl.url : null;
+          map[folder] = url ? { url, platform: typeof sl?.platform === "string" ? sl.platform : undefined } : null;
+        } catch { /* leave folder absent → button shows "no source on file" */ }
+      }));
+      if (!cancelled) setUnitSourceByFolder((prev) => ({ ...prev, ...map }));
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photoFolderKey, sourceRefreshKey]);
+
   if (!property) {
     if (draftLoading) {
       return (
@@ -784,6 +1125,12 @@ export default function BuilderPreflight() {
     setProgressTick(0);
     const pendingIds = new Set(unitsToCheck.map(u => u.id));
     setCheckingUnitIds(new Set(pendingIds));
+    // Tally outcomes locally so we can stamp an accurate success/fail receipt —
+    // the `results` state isn't readable here (it's set async). We separate a
+    // dead/non-responding endpoint (`apiFailUnits`) from per-platform lookups
+    // that came back as "error" (an OTA API not responding) so the confirmation
+    // can explicitly call out an API issue instead of hiding it behind a ✓.
+    const outcome = { verified: 0, apiFailUnits: 0, platformErrors: 0, platformsChecked: 0 };
 
     const hasPhotos = unitsToCheck.some(u => !!(u as any).photoFolder);
     if (hasPhotos) setCheckPhase("text");
@@ -826,9 +1173,25 @@ export default function BuilderPreflight() {
             const data = await resp.json();
             const unitResult: UnitCheckResult | undefined = data?.units?.[0];
             if (unitResult) {
+              const statuses = PLATFORM_LIST.map(({ key }) => unitResult.platforms?.[key]?.status);
+              outcome.platformsChecked += statuses.length;
+              // "error" = the platform lookup couldn't be completed (e.g. the OTA
+              // API didn't respond). Counted so the receipt surfaces it as an error.
+              outcome.platformErrors += statuses.filter((s) => s === "error").length;
+              if (statuses.some((s) => s === "confirmed" || s === "photo-confirmed" || s === "not-listed")) {
+                outcome.verified += 1;
+              }
               setResults(prev => ({ ...prev, [unit.id]: unitResult }));
+            } else {
+              // 200 OK but no usable unit result — treat as the endpoint not responding properly.
+              outcome.apiFailUnits += 1;
+              outcome.platformsChecked += 3;
+              outcome.platformErrors += 3;
             }
           } else {
+            outcome.apiFailUnits += 1;
+            outcome.platformsChecked += 3;
+            outcome.platformErrors += 3;
             setResults(prev => ({
               ...prev,
               [unit.id]: {
@@ -844,6 +1207,10 @@ export default function BuilderPreflight() {
             }));
           }
         } catch {
+          // Timeout/abort or network failure — the listing-check endpoint didn't respond.
+          outcome.apiFailUnits += 1;
+          outcome.platformsChecked += 3;
+          outcome.platformErrors += 3;
           setResults(prev => ({
             ...prev,
             [unit.id]: {
@@ -874,6 +1241,46 @@ export default function BuilderPreflight() {
     setCheckStartedAt(null);
     setPlatformDone(true);
     setLastCheckWasFullAudit(fullPhotoAudit);
+
+    // Sticky "last processed" receipt for the OTA unit audit (× to dismiss).
+    // Any API that didn't respond — the listing-check endpoint itself, OR an
+    // Airbnb/VRBO/Booking lookup returning "error" — is shown as a RED error so
+    // a connection problem is never hidden behind a green check.
+    const total = unitsToCheck.length;
+    const unitWord = total === 1 ? "unit" : "units";
+    const base = fullPhotoAudit ? "Full unit audit" : "OTA platform check";
+    const allPlatformsErrored =
+      outcome.platformsChecked > 0 && outcome.platformErrors >= outcome.platformsChecked;
+    let receiptSuccess: boolean;
+    let receiptTitle: string;
+    let receiptDetail: string;
+    if (outcome.apiFailUnits > 0) {
+      receiptSuccess = false;
+      receiptTitle = `${base} — connection error`;
+      receiptDetail = `${outcome.apiFailUnits} of ${total} ${unitWord} couldn't be checked — the listing-check service didn't respond (timeout or API error). Results are incomplete; run it again.`;
+    } else if (allPlatformsErrored) {
+      receiptSuccess = false;
+      receiptTitle = `${base} — connection error`;
+      receiptDetail = `Couldn't verify any of ${total} ${unitWord} — Airbnb, VRBO & Booking.com didn't respond (API error). Try running it again.`;
+    } else if (outcome.platformErrors > 0) {
+      receiptSuccess = false;
+      receiptTitle = `${base} — some checks didn't respond`;
+      receiptDetail = `Checked ${total} ${unitWord}, but ${outcome.platformErrors} OTA lookup${outcome.platformErrors === 1 ? "" : "s"} didn't respond (API error) — results may be incomplete. Re-run to retry them.`;
+    } else if (outcome.verified === 0) {
+      receiptSuccess = false;
+      receiptTitle = base;
+      receiptDetail = `Couldn't verify any of ${total} ${unitWord} against Airbnb, VRBO & Booking.com. Try running it again.`;
+    } else {
+      receiptSuccess = true;
+      receiptTitle = base;
+      receiptDetail = `Checked all ${total} ${unitWord} against Airbnb, VRBO & Booking.com.`;
+    }
+    recordPlatformCheckReceipt({
+      timestamp: Date.now(),
+      success: receiptSuccess,
+      title: receiptTitle,
+      detail: receiptDetail,
+    });
   };
 
   const rerunChecks = () => {
@@ -1121,6 +1528,93 @@ export default function BuilderPreflight() {
           </p>
         </div>
 
+        {/* ── Community Photos re-pull ──
+            One button that researches the community via Claude, finds the
+            correct community photo URLs, scrapes them into the community
+            folder, then double-checks every photo with AI vision + Google Lens
+            reverse-image search and removes any that aren't this community. */}
+        {property.communityPhotoFolder && (
+          <Card className="p-6 mb-6">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+              <h2 className="text-base font-semibold">Community Photos</h2>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void handleRepullCommunityPhotos()}
+                disabled={repullActive}
+                className="h-8 text-xs"
+                data-testid="button-repull-community-photos"
+              >
+                {repullActive ? (
+                  <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Re-pulling…</>
+                ) : (
+                  <><RefreshCw className="h-3 w-3 mr-1" /> Re-pull community photos</>
+                )}
+              </Button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-3">
+              Refreshes the community amenity photos (pool, grounds, building exteriors)
+              for <strong>{property.complexName}</strong>. We research the community with
+              Claude, find the correct photo URLs, scrape them, then verify every photo
+              with AI vision and Google Lens reverse-image search — removing any that
+              aren&apos;t actually this community.
+            </p>
+
+            {repullActive && communityRepullJob && (
+              <div className="rounded-md border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
+                <div className="mb-1 flex items-center justify-between gap-3">
+                  <span className="font-medium">{communityRepullJob.message}</span>
+                  <span className="text-blue-700 dark:text-blue-300">
+                    {Math.round(communityRepullJob.progress)}% · safe to leave this tab
+                  </span>
+                </div>
+                <div
+                  className="h-2 overflow-hidden rounded-full bg-blue-100 dark:bg-blue-900"
+                  role="progressbar"
+                  aria-label="Re-pulling community photos"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(communityRepullJob.progress)}
+                >
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-600 transition-all duration-700"
+                    style={{ width: `${communityRepullJob.progress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {!repullActive && communityRepullJob?.status === "completed" && (
+              <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300">
+                <div className="flex items-center gap-1.5 font-medium">
+                  <CheckCircle2 className="h-3.5 w-3.5" /> {communityRepullJob.message}
+                </div>
+                {communityRepullJob.researchSummary && (
+                  <p className="mt-1 text-green-700 dark:text-green-400">{communityRepullJob.researchSummary}</p>
+                )}
+                {communityRepullJob.removed.length > 0 && (
+                  <ul className="mt-1.5 list-disc pl-4 text-green-700 dark:text-green-400">
+                    {communityRepullJob.removed.slice(0, 5).map((r, i) => (
+                      <li key={i}>Removed {r.filename ?? "a photo"} — {r.reason}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {!repullActive && communityRepullJob?.status === "failed" && (
+              <div className="rounded-md border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-900 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200">
+                <AlertTriangle className="inline h-3.5 w-3.5 mr-1" />
+                {communityRepullJob.error || communityRepullJob.message}
+              </div>
+            )}
+
+            {/* Confirms what state the community is actually in (catches a
+                community filed under the wrong state, e.g. Bay Watch = SC not FL). */}
+            <LocationConfirmationNote confirmation={communityRepullJob?.locationConfirmation ?? null} />
+          </Card>
+        )}
+
         {/* ── Photo Sources (promoted drafts only) ──
             The reverse-image-search half of the Platform Check needs
             photos to scan. When the wizard's Step 4 scrape didn't
@@ -1156,6 +1650,9 @@ export default function BuilderPreflight() {
                 </Button>
               )}
             </div>
+            {/* Confirms what state/city the units are in (catches a unit whose
+                community is filed under the wrong state, e.g. Bay Watch = SC not FL). */}
+            <LocationConfirmationNote confirmation={unitLocationConfirmation} />
             {(() => {
               const allUnitsHavePhotos = effectiveUnits.length > 0
                 && effectiveUnits.every((unit) => photoCountForUnit(unit.id, unit.photos?.length ?? 0) > 0);
@@ -1203,6 +1700,9 @@ export default function BuilderPreflight() {
                 const isScrapingThisUnit = isPhotoFetchActive(unit.id);
                 const unitProgress = photoFetchProgressValue(unit.id);
                 const isReplaced = !!unitOverrides[unit.id];
+                const unitFolder = (unit as any).photoFolder as string | undefined;
+                const unitSource = unitFolder ? unitSourceByFolder[unitFolder] : undefined;
+                const sourceRevealed = revealedSourceUnitIds.has(unit.id);
                 return (
                   <div key={unit.id} className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-medium w-20 flex-shrink-0">
@@ -1235,9 +1735,54 @@ export default function BuilderPreflight() {
                       )}
                     </Button>
                     {folderHasPhotos && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => toggleRevealSource(unit.id)}
+                        className="h-8 text-xs flex-shrink-0"
+                        data-testid={`button-view-source-${unit.id}`}
+                        title="Show the original listing (Zillow, Redfin, etc.) these photos were scraped from"
+                      >
+                        <ExternalLink className="h-3 w-3 mr-1" />
+                        {sourceRevealed ? "Hide source" : "View source"}
+                      </Button>
+                    )}
+                    {folderHasPhotos && (
                       <Badge variant="outline" className="text-[10px] flex-shrink-0">
                         {savedPhotoCount} on file
                       </Badge>
+                    )}
+                    {/* Reveal the original scrape source URL on demand. */}
+                    {folderHasPhotos && sourceRevealed && (
+                      <div
+                        className="basis-full rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs"
+                        data-testid={`source-panel-${unit.id}`}
+                      >
+                        {unitSource === undefined ? (
+                          <span className="inline-flex items-center gap-1 text-muted-foreground">
+                            <Loader2 className="h-3 w-3 animate-spin" /> Loading source…
+                          </span>
+                        ) : unitSource ? (
+                          <div className="flex items-start gap-1.5">
+                            <MapPin className="h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-muted-foreground" />
+                            <span className="min-w-0">
+                              <span className="font-medium">Scraped from {sourcePlatformLabel(unitSource)}:</span>{" "}
+                              <a
+                                href={unitSource.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary hover:underline break-all"
+                              >
+                                {unitSource.url}
+                              </a>
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">
+                            No original source URL on file for this unit. A re-pull will record one if it discovers a listing.
+                          </span>
+                        )}
+                      </div>
                     )}
                     {skippedCount > 0 && !folderHasPhotos && (
                       <span className="text-[10px] text-muted-foreground flex-shrink-0">
@@ -1289,6 +1834,16 @@ export default function BuilderPreflight() {
                           />
                         </div>
                       </div>
+                    )}
+                    {/* Sticky receipt: when this unit's photos were last
+                        re-pulled and whether it worked (× dismisses). */}
+                    {!isScrapingThisUnit && photoFetchReceipts[unit.id] && (
+                      <OperationReceiptNote
+                        receipt={photoFetchReceipts[unit.id]}
+                        relative={fmtRelative}
+                        onDismiss={() => dismissPhotoFetchReceipt(unit.id)}
+                        testId={`receipt-photo-fetch-${unit.id}`}
+                      />
                     )}
                   </div>
                 );
@@ -1363,6 +1918,18 @@ export default function BuilderPreflight() {
           {lastCheckWasFullAudit && hasAnyResults && (
             <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300">
               Full unit audit complete — each unit was checked by text search and by a reverse-image scan of <strong>every interior photo</strong> against Airbnb, VRBO, and Booking.com. Each platform shows a decisive verdict: <strong>Listed</strong> only when <strong>both</strong> text search and photo scan confirm the same unit, or <strong>Not Listed</strong> otherwise.
+            </div>
+          )}
+          {/* Sticky receipt: when the OTA unit audit last ran and whether it
+              succeeded — stays until the operator clicks × to dismiss. */}
+          {!isCheckRunning && platformCheckReceipt && (
+            <div className="mb-4">
+              <OperationReceiptNote
+                receipt={platformCheckReceipt}
+                relative={fmtRelative}
+                onDismiss={() => recordPlatformCheckReceipt(null)}
+                testId="receipt-platform-check"
+              />
             </div>
           )}
 

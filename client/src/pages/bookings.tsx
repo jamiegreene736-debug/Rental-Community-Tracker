@@ -44,6 +44,7 @@ import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log"
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
+import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
@@ -4840,16 +4841,26 @@ function ArrivalDetailsMessageDialog({
 
   const [message, setMessage] = useState("");
   const [sent, setSent] = useState(false);
+  // Posted to Guesty but the OTA channel has not confirmed delivery yet — shown
+  // as an amber "queued, don't resend" notice (resending piles up duplicates).
+  const [sendPending, setSendPending] = useState(false);
   const messageEditedRef = useRef(false);
 
   useEffect(() => {
     if (!data || messageEditedRef.current) return;
     const units = (data.units ?? []).map(arrivalUnitDetailForMessage);
+    // Aloha/Mahalo for Hawaii listings, Hi/Thanks for mainland (e.g. Florida).
+    // Region is resolved from the unit address(es), falling back to the property
+    // name, then to Hawaii (the current portfolio) when nothing resolves.
+    const regionSource = units.map((u) => u.unitAddress).filter(Boolean).join(" ") || propertyName || "";
+    const region = resolveIslandRegion(regionSource);
+    const isHawaii = region ? !/\bflorida\b/i.test(region) : true;
     setMessage(buildArrivalDetailsGuestMessage({
       guestFirstName: firstName,
       propertyName,
       checkInIso: checkInOf(reservation),
       units,
+      isHawaii,
     }));
   }, [data, firstName, propertyName, reservation]);
 
@@ -4862,7 +4873,9 @@ function ArrivalDetailsMessageDialog({
         conversationId?: string;
         deliveredVia?: string;
         verified?: boolean;
+        pending?: boolean;
         deliveryModuleType?: string | null;
+        deliveryReason?: string | null;
         message?: string;
         error?: string;
       }>(
@@ -4873,23 +4886,42 @@ function ArrivalDetailsMessageDialog({
           channel,
         },
       );
+      // A failed POST is a hard error. A genuine MISROUTE (Guesty filed it on a
+      // non-OTA channel, e.g. email → verified:false AND pending:false) is also a
+      // hard error — it did NOT reach the guest's booking channel. Only a true
+      // PENDING (posted to the OTA channel, not yet confirmed) is NOT thrown,
+      // because resending it just piles up duplicate guest messages.
       if (body?.ok !== true) {
         throw new Error(body?.message || body?.error || "Guesty did not confirm the send");
       }
-      if (body.verified === false) {
-        throw new Error("Guesty accepted the send but the message was not posted on the Booking.com guest channel");
+      if (body.verified !== true && body.pending !== true) {
+        throw new Error(
+          body.deliveryReason
+            || `${channelLabel} did not deliver the message to the guest — it may have been saved on email instead. Verify on the ${channelLabel} extranet.`,
+        );
       }
-      return body as { ok: true; conversationId: string; deliveredVia?: string; verified?: boolean };
+      return body;
     },
     onSuccess: (data) => {
       setSent(true);
-      const via = data?.deliveredVia?.trim();
-      toast({
-        title: "Arrival details sent",
-        description: via
-          ? `Delivered through ${via}${data?.verified === true ? " and verified on the guest thread" : ""}.`
-          : `Delivered through ${channelLabel}.`,
-      });
+      const via = data?.deliveredVia?.trim() || channelLabel;
+      if (data?.verified === true) {
+        setSendPending(false);
+        toast({
+          title: "Arrival details sent",
+          description: `Delivered through ${via} and confirmed on the guest thread.`,
+        });
+      } else {
+        // Posted to the OTA channel, but it hasn't confirmed delivery yet. Disable
+        // resend (sent=true) and tell the operator to verify on the channel's
+        // portal — resending now creates duplicate messages to the guest.
+        setSendPending(true);
+        toast({
+          title: "Queued — delivery not yet confirmed",
+          description: `Sent to ${via}, but ${via} hasn't confirmed it reached the guest yet. Check the ${via} inbox/extranet in a few minutes before resending — resending now can send duplicates.`,
+          variant: "destructive",
+        });
+      }
     },
     onError: (e: any) => toast({ title: "Message send failed", description: e?.message ?? String(e), variant: "destructive" }),
   });
@@ -4955,6 +4987,9 @@ function ArrivalDetailsMessageDialog({
                   value={message}
                   onChange={(e) => {
                     messageEditedRef.current = true;
+                    // Editing after a send re-enables Send (with fresh content the
+                    // server's duplicate guard won't block a legitimate resend).
+                    if (sent) { setSent(false); setSendPending(false); }
                     setMessage(e.target.value);
                   }}
                   className="text-sm font-mono"
@@ -4962,9 +4997,17 @@ function ArrivalDetailsMessageDialog({
                 />
               </div>
               {sent && (
-                <div className="rounded border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-xs text-emerald-950">
-                  Sent through {channelLabel}.
-                </div>
+                sendPending ? (
+                  <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                    Queued to {channelLabel}, but delivery is not confirmed yet. Check the {channelLabel} inbox/extranet
+                    in a few minutes — do not resend (resending can send the guest duplicate messages). Edit the message
+                    to re-enable Send.
+                  </div>
+                ) : (
+                  <div className="rounded border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-xs text-emerald-950">
+                    Sent through {channelLabel} and confirmed on the guest thread.
+                  </div>
+                )
               )}
             </>
           )}
@@ -4983,7 +5026,9 @@ function ArrivalDetailsMessageDialog({
             {sendMessage.isPending ? (
               <><Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> Sending…</>
             ) : sent ? (
-              <><CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Sent</>
+              sendPending
+                ? <><Loader2 className="mr-1 h-3.5 w-3.5" /> Queued</>
+                : <><CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Sent</>
             ) : (
               <><Send className="mr-1 h-3.5 w-3.5" /> Send through {channelLabel}</>
             )}
@@ -15713,10 +15758,28 @@ function VrboGuestPageDialog({
       if (!response.ok || body?.ok !== true) {
         throw new Error(body?.message || body?.error || `Guesty returned HTTP ${response.status}`);
       }
-      return body as { ok: true; conversationId: string };
+      // A genuine misroute (filed on a non-OTA channel, e.g. email) is a hard
+      // error — it did NOT reach the guest's booking channel. A true pending
+      // (queued, not yet confirmed) is surfaced as a warning, not thrown.
+      if (body.verified !== true && body.pending !== true) {
+        throw new Error(
+          body.deliveryReason
+            || "The message did not reach the guest's booking channel — it may have been saved on email instead. Verify on the channel's extranet.",
+        );
+      }
+      return body as { ok: true; conversationId: string; deliveredVia?: string; verified?: boolean; pending?: boolean };
     },
-    onSuccess: () => {
-      toast({ title: "Guest message sent", description: "Sent through the Guesty conversation." });
+    onSuccess: (data) => {
+      const via = data?.deliveredVia?.trim() || "the booking channel";
+      if (data?.verified === true) {
+        toast({ title: "Guest message sent", description: `Delivered through ${via} and confirmed.` });
+      } else {
+        toast({
+          title: `Queued through ${via} — not yet confirmed`,
+          description: `${via} hasn't confirmed delivery. Check the channel's inbox/extranet before resending — resending now can send duplicates.`,
+          variant: "destructive",
+        });
+      }
       onClose();
     },
     onError: (e: any) => toast({ title: "Message send failed", description: e?.message ?? String(e), variant: "destructive" }),
@@ -15880,6 +15943,9 @@ function RelocateGuestDialog({
   const [createdPage, setCreatedPage] = useState<{ url: string; token: string } | null>(null);
   const [message, setMessage] = useState("");
   const [sent, setSent] = useState(false);
+  // Posted to the booking channel but delivery not confirmed — shown as a
+  // "queued, don't resend" notice rather than a confident "Sent ✓".
+  const [sendPending, setSendPending] = useState(false);
   const startedRef = useRef(false);
 
   const createPage = useMutation({
@@ -15968,14 +16034,32 @@ function RelocateGuestDialog({
       if (!response.ok || body?.ok !== true) {
         throw new Error(body?.message || body?.error || `Guesty returned HTTP ${response.status}`);
       }
-      return body as { ok: true; conversationId: string };
+      // Genuine non-delivery (misrouted to a non-OTA channel) is a hard error;
+      // a true pending (queued, not yet confirmed) is surfaced as a warning, not
+      // thrown — resending would duplicate the guest message.
+      if (body.verified !== true && body.pending !== true) {
+        throw new Error(
+          body.deliveryReason
+            || `${channelLabel} did not deliver the message — it may have been saved on email instead. Verify on the ${channelLabel} extranet.`,
+        );
+      }
+      return body as { ok: true; conversationId: string; verified?: boolean; pending?: boolean };
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       setSent(true);
+      setSendPending(data?.verified !== true);
       // Refresh the bookings-row "Guest messaged ✓" badge immediately so the
       // operator sees the recorded confirmation without reopening anything.
       queryClient.invalidateQueries({ queryKey: ["/api/booking-alternatives/sent-status"] });
-      toast({ title: `Message sent through ${channelLabel}`, description: "Recorded — tracking whether the guest opens the link." });
+      if (data?.verified === true) {
+        toast({ title: `Message sent through ${channelLabel}`, description: "Delivered and confirmed — tracking whether the guest opens the link." });
+      } else {
+        toast({
+          title: `Queued through ${channelLabel} — not yet confirmed`,
+          description: `${channelLabel} hasn't confirmed delivery. Check the ${channelLabel} inbox/extranet before resending — resending now can send duplicates.`,
+          variant: "destructive",
+        });
+      }
     },
     onError: (e: any) => toast({ title: "Message send failed", description: e?.message ?? String(e), variant: "destructive" }),
   });
@@ -16047,9 +16131,15 @@ function RelocateGuestDialog({
                   data-testid="input-relocate-message"
                 />
               </div>
-              {sent && (
+              {sent && sendPending && (
+                <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Queued to {channelLabel}, but delivery is not confirmed yet. Check the {channelLabel} inbox/extranet
+                  before resending — resending can send the guest duplicate messages.
+                </div>
+              )}
+              {sent && !sendPending && (
                 <div className="rounded border border-sky-200 bg-sky-50/70 px-3 py-2 text-xs text-sky-950">
-                  <p className="font-medium">Sent through {channelLabel}.</p>
+                  <p className="font-medium">Sent through {channelLabel} and confirmed.</p>
                   <p className="mt-0.5">
                     {tracking.data?.opened
                       ? `Guest opened the link${tracking.data.openCount ? ` ${tracking.data.openCount} time${tracking.data.openCount === 1 ? "" : "s"}` : ""}${tracking.data.lastOpenedAt ? ` · last ${fmtDate(tracking.data.lastOpenedAt)}` : ""}. ✓`
@@ -16119,6 +16209,7 @@ function CancellationNoticeDialog({
     + "Thank you for your understanding.";
   const [message, setMessage] = useState(defaultMessage);
   const [sent, setSent] = useState(false);
+  const [sendPending, setSendPending] = useState(false);
 
   const sendNotice = useMutation({
     mutationFn: async () => {
@@ -16132,13 +16223,30 @@ function CancellationNoticeDialog({
       if (!response.ok || body?.ok !== true) {
         throw new Error(body?.message || body?.error || `Guesty returned HTTP ${response.status}`);
       }
-      return body as { ok: true; conversationId: string };
+      // Hard error on a genuine misroute (not delivered, not queued on the OTA
+      // channel); a true pending is surfaced as a warning, not thrown.
+      if (body.verified !== true && body.pending !== true) {
+        throw new Error(
+          body.deliveryReason
+            || `${channelLabel} did not deliver the notice — it may have been saved on email instead. Verify on the ${channelLabel} extranet.`,
+        );
+      }
+      return body as { ok: true; conversationId: string; verified?: boolean; pending?: boolean };
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       setSent(true);
+      setSendPending(data?.verified !== true);
       // Refresh the row's "Cancellation notice sent ✓" badge immediately.
       queryClient.invalidateQueries({ queryKey: ["/api/operations/cancellation-notice-status"] });
-      toast({ title: `Cancellation notice sent through ${channelLabel}`, description: "Recorded internally — the reservation was NOT cancelled in Guesty." });
+      if (data?.verified === true) {
+        toast({ title: `Cancellation notice sent through ${channelLabel}`, description: "Delivered and confirmed. Recorded internally — the reservation was NOT cancelled in Guesty." });
+      } else {
+        toast({
+          title: `Queued through ${channelLabel} — not yet confirmed`,
+          description: `${channelLabel} hasn't confirmed delivery. Check the ${channelLabel} inbox/extranet before resending. The reservation was NOT cancelled in Guesty.`,
+          variant: "destructive",
+        });
+      }
     },
     onError: (e: any) => toast({ title: "Cancellation notice failed", description: e?.message ?? String(e), variant: "destructive" }),
   });
@@ -16188,9 +16296,15 @@ function CancellationNoticeDialog({
             />
           </div>
 
-          {sent && (
+          {sent && sendPending && (
+            <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              <p className="font-medium">Queued to {channelLabel} — delivery not confirmed yet.</p>
+              <p className="mt-0.5">Check the {channelLabel} inbox/extranet before resending. The reservation is unchanged in Guesty.</p>
+            </div>
+          )}
+          {sent && !sendPending && (
             <div className="rounded border border-red-200 bg-red-50/70 px-3 py-2 text-xs text-red-950 dark:border-red-800 dark:bg-red-950/40 dark:text-red-100">
-              <p className="font-medium">Sent through {channelLabel}.</p>
+              <p className="font-medium">Sent through {channelLabel} and confirmed.</p>
               <p className="mt-0.5">Recorded as a cancellation notice for this booking. The reservation itself is unchanged in Guesty.</p>
             </div>
           )}

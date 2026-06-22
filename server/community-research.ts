@@ -3,6 +3,7 @@
 // (/api/community/scan-top-markets) can reuse the same Google + Claude pipeline.
 
 import { checkCommunityType } from "@shared/community-type";
+import { checkCommunityState, isCommunityInWrongState } from "@shared/community-location-guard";
 import {
   formatTypicalComboLabel,
   inferTypicalComboPair,
@@ -2616,7 +2617,7 @@ const KNOWN_COMBO_COMMUNITY_SEEDS: KnownComboCommunitySeed[] = [
   },
 ];
 
-function knownSingleListingSeedsForCity(city: string, state: string): ResearchedCommunity[] {
+export function knownSingleListingSeedsForCity(city: string, state: string): ResearchedCommunity[] {
   return KNOWN_SINGLE_LISTING_COMMUNITY_SEEDS
     .filter((seed) => seed.city.test(city.trim()) && seed.state.test(state.trim()))
     .map((seed) => ({
@@ -2709,7 +2710,26 @@ export function isTopScanComboCandidate(community: ComboCandidateFields): boolea
 export function filterTopScanComboCandidates<T extends ComboCandidateFields>(
   communities: T[],
 ): T[] {
-  return communities.filter(isTopScanComboCandidate);
+  return communities.filter((community) => {
+    if (!isTopScanComboCandidate(community)) return false;
+    // Drop communities attached to the wrong state — e.g. "Bay Watch", a North
+    // Myrtle Beach SOUTH CAROLINA resort, surfacing under a Florida market.
+    // This is the single chokepoint the sweep grid, the cache writer
+    // (upsertTopMarketScanCache) and the boot cache scrub
+    // (refreshTopMarketScanCacheComboFlags) all run through, so a mis-located
+    // community is hidden everywhere at once — even one already cached.
+    // See shared/community-location-guard.ts.
+    const name = (community as { name?: unknown }).name;
+    const state = (community as { state?: unknown }).state;
+    if (
+      typeof name === "string" &&
+      typeof state === "string" &&
+      isCommunityInWrongState(name, state)
+    ) {
+      return false;
+    }
+    return true;
+  });
 }
 
 function getComboBedroomCounts(
@@ -3399,12 +3419,14 @@ export async function researchCommunitiesForCity(
     // Combo prompt: unchanged — combinabilityScore-gated, max 3
     // world-knowledge entries, max 10 results.
     const prompt = mode === "single"
-      ? `You are sourcing standalone vacation-rental condo/townhouse resorts for Magical Island Rentals's "Add a Single Listing" tool, which onboards individually-owned condos and townhouses one unit at a time.
+      ? `You are sourcing standalone vacation-rental condo/townhouse resorts for VacationRentalExpertz's "Add a Single Listing" tool, which onboards individually-owned condos and townhouses one unit at a time.
 
 THE BUSINESS MODEL (single-listing mode):
   We onboard ONE unit at a time from a known condo or townhouse resort. The unit is rented as a standalone listing — NOT combined with another unit.
   So the VALUE of a community = whether it is a recognizable, individually-owned condo/townhouse resort with active vacation rental inventory.
   We do NOT care about "combinability" — single-unit standalones, large 4BR townhouses, small 1BR condos all qualify if the resort fits.
+
+LOCATION (MANDATORY): Every resort you return MUST physically sit in "${city}, ${state}". NEVER return a resort that is actually in a different state, even if its name is well known or sounds like it could be local. Example trap: "Bay Watch" is a North Myrtle Beach, SOUTH CAROLINA resort — it must NEVER be returned for a Florida market. If you are not confident a named resort is located in ${state}, omit it.
 
 QUALIFYING CRITERIA:
 1. PROPERTY TYPE: Condos in a multi-unit building OR townhouses with shared walls. NO villas, detached homes, or single-family residences.
@@ -3455,7 +3477,7 @@ Output JSON array. Each element:
 {"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"minimumStayNights":N|null,"minimumStayEvidence":"short source-backed note or empty","minimumStaySourceUrl":"source url or empty","unitTypes":"...","confidenceScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":true|false,"addressHint":"optional representative street like 9000 Treasure Trove Ln"}
 
 Include ONLY entries with confidenceScore >= 60. Max 20 results. Sort by confidenceScore descending. No markdown, no prose.`
-      : `You are sourcing condo/townhome resorts for Magical Island Rentals, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
+      : `You are sourcing condo/townhome resorts for VacationRentalExpertz, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
 
 THE BUSINESS MODEL:
   We rent unit A (e.g. 3BR) + unit B (e.g. 3BR) in the same building → list them together as one "6BR sleeps 14" villa-style product.
@@ -3470,6 +3492,8 @@ CONCRETE EXAMPLES of what we want:
   ❌ Fort Myers Beach "villa" resorts — standalone structures, disqualified.
   ❌ Marriott / Hilton / Westin timeshares — single-owner, disqualified.
   ❌ Hotel-run condo-hotels with front desk check-in — disqualified.
+
+LOCATION (MANDATORY): Every resort you return MUST physically sit in "${city}, ${state}". NEVER return a resort that is actually in another state, even if its name is well known. Example trap: "Bay Watch" is a North Myrtle Beach, SOUTH CAROLINA resort and must NEVER be returned for a Florida market. If you are not confident a resort is located in ${state}, omit it.
 
 STRICT QUALIFYING CRITERIA:
 1. PROPERTY TYPE: Condos in multi-unit building OR townhomes with shared walls. NO villas/detached/single-family.
@@ -3581,6 +3605,15 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
             const check = checkCommunityType(s.unitTypes, s.reason);
             if (!check.eligible) {
               console.log(`[research] dropped "${s.communityName}" (${city}, ${state}): ${check.reason}`);
+              continue;
+            }
+            // Location guard: never attach a community to a state it does not
+            // physically sit in (e.g. "Bay Watch", a South Carolina resort,
+            // surfacing under a Florida market). Curated, recall-safe — only
+            // KNOWN mis-locations are dropped. See shared/community-location-guard.ts.
+            const stateCheck = checkCommunityState(s.communityName, state);
+            if (stateCheck.wrong) {
+              console.log(`[research] dropped "${s.communityName}" (${city}, ${state}): belongs to ${stateCheck.homeState}, not ${state}`);
               continue;
             }
             const normalizedBedrooms = normalizeBedroomList(s.availableBedrooms);
@@ -3700,6 +3733,15 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
   const deduped: ResearchedCommunity[] = [];
   const seenCommunities = new Set<string>();
   for (const result of results) {
+    // Final location backstop: this is the single return chokepoint for every
+    // source — LLM suggestions, curated combo seeds, curated single-listing
+    // seeds, and the no-Claude fallback. The per-source drops above are belt;
+    // this is suspenders so researchCommunitiesForCity NEVER returns a community
+    // attached to the wrong state in EITHER mode. See shared/community-location-guard.ts.
+    if (isCommunityInWrongState(result.name, result.state)) {
+      console.log(`[research] dropped "${result.name}" (${result.city}, ${result.state}): wrong state at return`);
+      continue;
+    }
     const key = `${normalizeCommunityName(result.name)}|${result.city.toLowerCase()}|${result.state.toLowerCase()}`;
     if (seenCommunities.has(key)) continue;
     seenCommunities.add(key);

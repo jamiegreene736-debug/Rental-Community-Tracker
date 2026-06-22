@@ -290,6 +290,12 @@ const TRIGGER_OPTIONS = [
 ];
 
 const MERGE_TAGS = [
+  // {greeting}     → "Aloha [name]," for Hawaii stays, "Hi [name]," for mainland.
+  // {signoff}      → "Mahalo," / "Thanks," + the sender + brand block (full messages).
+  // {signoff_sms}  → "Mahalo, John" / "Thanks, John" (one line, for SMS).
+  // These carry the region-aware voice so a single template reads correctly for
+  // both a Hawaii and a Florida property.
+  "{greeting}", "{signoff}", "{signoff_sms}",
   "{guest_name}", "{property_name}", "{check_in_date}", "{check_out_date}",
   "{confirmation_code}", "{num_nights}",
 ];
@@ -331,6 +337,13 @@ function findRelevantThreadUrl(posts: GuestyPost[], kind: "prearrival" | "paymen
   return preferred?.url ?? urlRows[0]?.url ?? "";
 }
 
+// Static seed templates for the Auto-Messages tab. The {greeting} and {signoff}
+// merge tags carry the region-aware voice: {greeting} renders as "Aloha [name],"
+// for Hawaii stays and "Hi [name]," for mainland (e.g. Florida) stays, and
+// {signoff} renders the matching "Mahalo," / "Thanks," + sender + brand block.
+// SMS templates close with "{signoff_sms}" (one line, first name only). Keeping
+// the voice in merge tags means one template reads correctly for both islands
+// and the mainland — the same fill-at-send pattern as {guest_name}.
 const DEFAULT_TEMPLATES: Omit<MessageTemplate, "id" | "createdAt">[] = [
   {
     name: "Booking Confirmation / Next Steps",
@@ -338,19 +351,17 @@ const DEFAULT_TEMPLATES: Omit<MessageTemplate, "id" | "createdAt">[] = [
     trigger: "booking_confirmed",
     daysOffset: 0,
     isActive: true,
-    body: `Hi {guest_name},
+    body: `{greeting}
 
-This confirms your reservation at {property_name} for {check_in_date} through {check_out_date} ({num_nights} nights).
+Wonderful news — your reservation at {property_name} for {check_in_date} through {check_out_date} ({num_nights} nights) is confirmed, and we are so glad to have you with us.
 
 Confirmation code: {confirmation_code}
 
-This stay is set up as two units that are minutes from each other. We will send more details about the unit setup in a follow-up message.
+Your stay is set up as two units that are only minutes apart, and we will share a few more details about that setup in a follow-up note.
 
-We will send the detailed arrival/access information 14 days before check-in. If you have any questions before then, just reply here.
+We will send your detailed arrival and access information 14 days before check-in. If any questions come up before then, just reply here — we are happy to help.
 
-Thanks,
-John Carpenter
-VacationRentalExpertz`,
+{signoff}`,
   },
   {
     name: "Unit Setup Confirmation",
@@ -358,17 +369,15 @@ VacationRentalExpertz`,
     trigger: "days_after_booking",
     daysOffset: 1,
     isActive: true,
-    body: `Hi {guest_name},
+    body: `{greeting}
 
-Just a quick note about your upcoming stay at {property_name}.
+I wanted to share a quick note about your upcoming stay at {property_name} so everything feels clear before you arrive.
 
-This reservation is set up as two nearby units that are only minutes from each other. The listing photos are representative of the resort/community and unit style. Your assigned units will match the bedroom count and overall property standard, though exact interiors, furnishings, views, and layouts can vary slightly by unit.
+Your reservation is set up as two nearby units that are only minutes from each other. The listing photos are representative of the resort/community and unit style. Your assigned units will match the bedroom count and overall property standard, though exact interiors, furnishings, views, and layouts can vary slightly by unit.
 
-Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.
+Your arrival details will arrive about 14 days before check-in. Until then, please feel free to message me with any questions at all.
 
-Thanks,
-John Carpenter
-VacationRentalExpertz`,
+{signoff}`,
   },
   {
     name: "Internal Rental Agreement Request",
@@ -376,20 +385,18 @@ VacationRentalExpertz`,
     trigger: "days_after_booking",
     daysOffset: 0,
     isActive: false,
-    body: `Hi {guest_name},
+    body: `{greeting}
 
-Please have the primary guest review and sign our secure rental agreement for the stay at {property_name}.
+As we get your stay at {property_name} ready, please have the primary guest review and sign our secure rental agreement.
 
-Please complete it here:
+You can complete it here:
 [agreement link]
 
-This confirms the booking details, house rules, authorized guest, signed rental agreement, and two-separate-units acknowledgment before arrival. Please do not send credit card details in this message thread.
+This confirms the booking details, house rules, authorized guest, signed rental agreement, and two-separate-units acknowledgment before arrival. For your security, please do not send credit card details in this message thread.
 
-Once completed, you are all set. We will send final arrival/access details 14 days before check-in.
+Once that is done, you are all set, and we will send your final arrival/access details 14 days before check-in.
 
-Thanks,
-John Carpenter
-VacationRentalExpertz`,
+{signoff}`,
   },
   {
     name: "Guesty Invoice / Payment Method Request",
@@ -397,17 +404,15 @@ VacationRentalExpertz`,
     trigger: "days_after_booking",
     daysOffset: 0,
     isActive: true,
-    body: `Hi {guest_name},
+    body: `{greeting}
 
-Please use the secure Guesty invoice link below to add your payment method or complete any remaining balance for your stay at {property_name}.
+When you have a moment, please use the secure Guesty invoice link below to add your payment method or complete any remaining balance for your stay at {property_name}.
 
 {{guest_invoice}}
 
-For security, please do not send credit card details in this message thread.
+For your security, please do not send credit card details in this message thread.
 
-Thanks,
-John Carpenter
-VacationRentalExpertz`,
+{signoff}`,
   },
   {
     name: "SMS: Rental Agreement",
@@ -415,9 +420,9 @@ VacationRentalExpertz`,
     trigger: "days_after_booking",
     daysOffset: 0,
     isActive: false,
-    body: `Hi {guest_name}, please review and sign the secure rental agreement for {property_name}: [agreement link]
+    body: `{greeting} please review and sign the secure rental agreement for {property_name}: [agreement link]
 
-This covers the rental agreement, two-unit acknowledgment, and arrival requirements. Please do not text card details. Thanks, John`,
+This covers the rental agreement, two-unit acknowledgment, and arrival requirements. Please do not text card details. {signoff_sms}`,
   },
   {
     name: "SMS: Reminder to Sign Rental Agreement",
@@ -425,9 +430,9 @@ This covers the rental agreement, two-unit acknowledgment, and arrival requireme
     trigger: "days_after_booking",
     daysOffset: 1,
     isActive: false,
-    body: `Hi {guest_name}, quick reminder to sign the secure rental agreement for {property_name}: [agreement link]
+    body: `{greeting} just a friendly reminder to sign the secure rental agreement for {property_name}: [agreement link]
 
-Once that is complete, you are all set for the next step. Thanks, John`,
+Once that is complete, you are all set for the next step. {signoff_sms}`,
   },
   {
     name: "SMS: Secure Payment Link",
@@ -435,9 +440,9 @@ Once that is complete, you are all set for the next step. Thanks, John`,
     trigger: "days_after_booking",
     daysOffset: 0,
     isActive: false,
-    body: `Hi {guest_name}, I sent the secure Guesty payment request for {property_name} in the booking thread/email. Please use that secure link to add your payment method or complete any remaining balance.
+    body: `{greeting} I sent the secure Guesty payment request for {property_name} in the booking thread/email. Please use that secure link to add your payment method or complete any remaining balance.
 
-Please do not text card details. Thanks, John`,
+Please do not text card details. {signoff_sms}`,
   },
   {
     name: "14-Day Arrival Details",
@@ -445,7 +450,7 @@ Please do not text card details. Thanks, John`,
     trigger: "days_before_checkin",
     daysOffset: 14,
     isActive: true,
-    body: `Hi {guest_name},
+    body: `{greeting}
 
 Your stay at {property_name} is coming up, so I wanted to send your arrival details.
 
@@ -455,11 +460,9 @@ Confirmation code: {confirmation_code}
 Address / access code / parking / Wi-Fi:
 [INSERT UNIT DETAILS]
 
-Please reply here if anything looks unclear before arrival.
+Please reply here if anything looks unclear before arrival — we are glad to help.
 
-Thanks,
-John Carpenter
-VacationRentalExpertz`,
+{signoff}`,
   },
   {
     name: "Parking + Travel Reminder",
@@ -467,19 +470,17 @@ VacationRentalExpertz`,
     trigger: "days_before_checkin",
     daysOffset: 3,
     isActive: true,
-    body: `Hi {guest_name},
+    body: `{greeting}
 
-Your stay at {property_name} is just a few days away. A few quick reminders:
+Your stay at {property_name} is just a few days away — we cannot wait to host you. A few quick reminders before travel day:
 
-- Please review your arrival/access details before travel day.
+- Please review your arrival/access details before you leave.
 - Bring any parking or gate information with you.
-- For restaurants, beaches, groceries, and local activities, I recommend making reservations where possible during busy weeks.
+- For restaurants, beaches, groceries, and local activities, reservations can be helpful during busy weeks.
 
-If you want recommendations near the property, reply here and I am happy to help.
+If you would like recommendations near the property, just reply here — I am always happy to share favorites.
 
-Thanks,
-John Carpenter
-VacationRentalExpertz`,
+{signoff}`,
   },
   {
     name: "SMS: Arrival Details Reminder",
@@ -487,7 +488,7 @@ VacationRentalExpertz`,
     trigger: "days_before_checkin",
     daysOffset: 14,
     isActive: true,
-    body: `Hi {guest_name}, your arrival details for {property_name} have been sent in the booking thread/email. Please review them before travel day and reply here if anything looks unclear. Thanks, John`,
+    body: `{greeting} your arrival details for {property_name} have been sent in the booking thread/email. Please review them before travel day and reply here if anything looks unclear. {signoff_sms}`,
   },
   {
     name: "SMS: Day-Of Arrival Help",
@@ -495,7 +496,7 @@ VacationRentalExpertz`,
     trigger: "day_of_checkin",
     daysOffset: 0,
     isActive: true,
-    body: `Hi {guest_name}, hope your travel day is going smoothly. Your arrival details were sent in the booking thread/email. Reply here if you need help with access or parking. - John`,
+    body: `{greeting} I hope your travel day is going smoothly. Your arrival details were sent in the booking thread/email. Reply here if you need any help with access or parking. {signoff_sms}`,
   },
   {
     name: "Day-Before Final Check-In",
@@ -503,17 +504,15 @@ VacationRentalExpertz`,
     trigger: "days_before_checkin",
     daysOffset: 1,
     isActive: true,
-    body: `Hi {guest_name},
+    body: `{greeting}
 
-Your check-in for {property_name} is tomorrow. Please keep your arrival details handy, including the address, access code, parking information, and Wi-Fi details.
+Your check-in for {property_name} is tomorrow, and we are looking forward to welcoming you. Please keep your arrival details handy, including the address, access code, parking information, and Wi-Fi details.
 
 Confirmation code: {confirmation_code}
 
 Safe travels, and please reply here if anything comes up.
 
-Thanks,
-John Carpenter
-VacationRentalExpertz`,
+{signoff}`,
   },
   {
     name: "Post-Stay Thank You / Review Request",
@@ -521,17 +520,15 @@ VacationRentalExpertz`,
     trigger: "days_after_checkout",
     daysOffset: 2,
     isActive: true,
-    body: `Hi {guest_name},
+    body: `{greeting}
 
-Thank you again for staying at {property_name}. I hope you had a wonderful trip.
+Thank you so much for staying at {property_name}. It was a pleasure to host you, and I hope you had a wonderful trip.
 
-If you have a moment, I would really appreciate a review. It helps future guests feel confident booking and means a lot to us.
+If you have a moment, we would truly appreciate a review. It helps future guests feel confident booking and means the world to us.
 
-We would be happy to host you again anytime.
+We would love to welcome you back anytime.
 
-Thanks,
-John Carpenter
-VacationRentalExpertz`,
+{signoff}`,
   },
   {
     name: "SMS: Post-Stay Review Request",
@@ -539,7 +536,7 @@ VacationRentalExpertz`,
     trigger: "days_after_checkout",
     daysOffset: 2,
     isActive: true,
-    body: `Hi {guest_name}, thank you again for staying at {property_name}. If you have a moment, we would really appreciate a review. We would be happy to host you again anytime. - John`,
+    body: `{greeting} thank you so much for staying at {property_name}. If you have a moment, we would truly appreciate a review. We would love to host you again anytime. {signoff_sms}`,
   },
 ];
 
@@ -1072,6 +1069,32 @@ function buildReceiptBody(args: {
   return lines.join("\n");
 }
 
+// ─── Region-aware greeting + sign-off ───────────────────────────────────────────
+// Hawaii stays open with "Aloha [name]," and close with "Mahalo," — the warm
+// island voice the operator's booking-confirmation scheduler already uses
+// (server/booking-confirmations.ts) and that the AI drafter gates on the same
+// isHawaii flag. Mainland stays (e.g. the Florida markets in
+// resolveIslandRegion) use a normal "Hi [name]," / "Thanks," so the Hawaiian
+// flavor never bleeds onto a property where it would read as off. Region is the
+// isHawaii flag from buildPropertyContextForDraft, resolved deterministically
+// from the listing address. Centralized here so every template (full + SMS)
+// picks up the same voice.
+function guestGreeting(firstName: string, isHawaii: boolean): string {
+  const name = String(firstName ?? "").trim();
+  const opener = isHawaii ? "Aloha" : "Hi";
+  return name ? `${opener} ${name},` : `${opener} there,`;
+}
+
+// Multi-line sign-off for full (Guesty / OTA / email) messages.
+function guestSignoffLines(isHawaii: boolean): string[] {
+  return [isHawaii ? "Mahalo," : "Thanks,", OUTBOUND_SENDER_NAME, OUTBOUND_BRAND_NAME];
+}
+
+// One-line sign-off for SMS — first name only, no brand block.
+function guestSmsSignoff(isHawaii: boolean): string {
+  return `${isHawaii ? "Mahalo" : "Thanks"}, ${OUTBOUND_SENDER_NAME.split(" ")[0]}`;
+}
+
 function buildBookingConfirmationBody(args: {
   guestFirstName: string;
   propertyName: string;
@@ -1082,16 +1105,18 @@ function buildBookingConfirmationBody(args: {
   bookingTotal?: number;
   totalPaid?: number;
   channelRaw?: string;
+  isHawaii?: boolean;
 }): string {
   const total = args.bookingTotal ?? 0;
   const paid = args.totalPaid ?? 0;
   const balance = Math.max(0, total - paid);
   const balanceDueIso = addDaysToIsoYmd(args.checkInIso, -120);
   const shouldMentionBalanceDue = isVrboOrBookingChannel(args.channelRaw) && balance > 0 && !!balanceDueIso;
+  const isHawaii = args.isHawaii ?? true;
   const lines: string[] = [
-    `Hi ${args.guestFirstName || "there"},`,
+    guestGreeting(args.guestFirstName, isHawaii),
     ``,
-    `This confirms your reservation${args.propertyName ? ` at ${args.propertyName}` : ""}.`,
+    `Wonderful news — your reservation${args.propertyName ? ` at ${args.propertyName}` : ""} is confirmed, and we are so glad to have you with us.`,
   ];
   if (args.checkInIso || args.checkOutIso) {
     lines.push(``);
@@ -1111,11 +1136,9 @@ function buildBookingConfirmationBody(args: {
   lines.push(``);
   lines.push(representativeUnitSetupLine(args.propertyName));
   lines.push(``);
-  lines.push(`We will send the detailed arrival information 14 days prior to arrival, including addresses, access details, parking, Wi-Fi, and anything else needed for check-in.`);
+  lines.push(`We will send your detailed arrival information 14 days before check-in — addresses, access details, parking, Wi-Fi, and everything else you will need to settle right in. In the meantime, if any questions come up, just reply here and I am happy to help.`);
   lines.push(``);
-  lines.push(`Thanks,`);
-  lines.push(OUTBOUND_SENDER_NAME);
-  lines.push(OUTBOUND_BRAND_NAME);
+  lines.push(...guestSignoffLines(isHawaii));
   return lines.join("\n");
 }
 
@@ -1123,21 +1146,21 @@ function buildRepresentativeUnitsFollowUpBody(args: {
   guestFirstName: string;
   propertyName: string;
   checkInIso?: string;
+  isHawaii?: boolean;
 }): string {
+  const isHawaii = args.isHawaii ?? true;
   const lines: string[] = [
-    `Hi ${args.guestFirstName || "there"},`,
+    guestGreeting(args.guestFirstName, isHawaii),
     ``,
-    `Just a quick note about your upcoming stay${args.propertyName ? ` at ${args.propertyName}` : ""}.`,
+    `I wanted to share a quick note about your upcoming stay${args.propertyName ? ` at ${args.propertyName}` : ""} so everything feels clear before you arrive.`,
   ];
   if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
   lines.push(``);
-  lines.push(`This reservation is set up as two nearby units that are only minutes from each other. The listing photos are representative of the resort/community and unit style. Your assigned units will match the bedroom count and overall property standard, though exact interiors, furnishings, views, and layouts can vary slightly by unit.`);
+  lines.push(`Your reservation is set up as two nearby units that are only minutes apart. The listing photos are representative of the resort/community and unit style. Your assigned units will match the bedroom count and overall property standard, though exact interiors, furnishings, views, and layouts can vary slightly by unit.`);
   lines.push(``);
-  lines.push(`Arrival details are normally sent 14 days before check-in. In the meantime, feel free to message me with any questions.`);
+  lines.push(`Your arrival details will arrive about 14 days before check-in. Until then, please feel free to message me with any questions at all — I am glad to help.`);
   lines.push(``);
-  lines.push(`Thanks,`);
-  lines.push(OUTBOUND_SENDER_NAME);
-  lines.push(OUTBOUND_BRAND_NAME);
+  lines.push(...guestSignoffLines(isHawaii));
   return lines.join("\n");
 }
 
@@ -1147,25 +1170,25 @@ function buildAgreementRequestBody(args: {
   agreementUrl: string;
   checkInIso?: string;
   confirmationCode?: string;
+  isHawaii?: boolean;
 }): string {
+  const isHawaii = args.isHawaii ?? true;
   const lines: string[] = [
-    `Hi ${args.guestFirstName || "there"},`,
+    guestGreeting(args.guestFirstName, isHawaii),
     ``,
-    `Please have the primary guest review and sign our secure rental agreement${args.propertyName ? ` for the stay at ${args.propertyName}` : ""}.`,
+    `As we get your stay${args.propertyName ? ` at ${args.propertyName}` : ""} ready, please have the primary guest review and sign our secure rental agreement.`,
   ];
   if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
   if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
   lines.push(``);
-  lines.push(`Please complete it here:`);
+  lines.push(`You can complete it here:`);
   lines.push(args.agreementUrl);
   lines.push(``);
-  lines.push(`This confirms the booking details, house rules, authorized guest, signed rental agreement, and the two-separate-units acknowledgment before arrival. Please do not send credit card details in this message thread.`);
+  lines.push(`This confirms the booking details, house rules, authorized guest, signed rental agreement, and the two-separate-units acknowledgment before arrival. For your security, please do not send credit card details in this message thread.`);
   lines.push(``);
-  lines.push(`Once completed, you are all set. We will send final arrival/access details 14 days before check-in.`);
+  lines.push(`Once that is done, you are all set, and we will send your final arrival/access details 14 days before check-in.`);
   lines.push(``);
-  lines.push(`Thanks,`);
-  lines.push(OUTBOUND_SENDER_NAME);
-  lines.push(OUTBOUND_BRAND_NAME);
+  lines.push(...guestSignoffLines(isHawaii));
   return lines.join("\n");
 }
 
@@ -1175,15 +1198,17 @@ function buildAgreementRequestSmsBody(args: {
   checkInIso?: string;
   checkOutIso?: string;
   agreementUrl: string;
+  isHawaii?: boolean;
 }): string {
+  const isHawaii = args.isHawaii ?? true;
   const propertyLabel = smsAgreementPropertyLabel(args.propertyName);
   return [
-    `Hi ${args.guestFirstName || "there"}, please review and sign the secure rental agreement for: ${propertyLabel}`,
+    `${guestGreeting(args.guestFirstName, isHawaii)} please review and sign the secure rental agreement for: ${propertyLabel}`,
     args.checkInIso ? `Arriving: ${formatLongDate(args.checkInIso.slice(0, 10))}` : "",
     args.checkOutIso ? `Departing: ${formatLongDate(args.checkOutIso.slice(0, 10))}` : "",
     args.agreementUrl,
     ``,
-    `This confirms your reservation details, the two-unit acknowledgment, and arrival requirements. Thanks, ${OUTBOUND_SENDER_NAME}`,
+    `This confirms your reservation details, the two-unit acknowledgment, and arrival requirements. ${guestSmsSignoff(isHawaii)}`,
   ].filter(Boolean).join("\n");
 }
 
@@ -1203,22 +1228,22 @@ function buildGuestyInvoicePaymentBody(args: {
   propertyName: string;
   checkInIso?: string;
   confirmationCode?: string;
+  isHawaii?: boolean;
 }): string {
+  const isHawaii = args.isHawaii ?? true;
   const lines: string[] = [
-    `Hi ${args.guestFirstName || "there"},`,
+    guestGreeting(args.guestFirstName, isHawaii),
     ``,
-    `Please use the secure Guesty invoice link below to add your payment method or complete any remaining balance${args.propertyName ? ` for your stay at ${args.propertyName}` : ""}.`,
+    `When you have a moment, please use the secure Guesty invoice link below to add your payment method or complete any remaining balance${args.propertyName ? ` for your stay at ${args.propertyName}` : ""}.`,
   ];
   if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
   if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
   lines.push(``);
   lines.push(`{{guest_invoice}}`);
   lines.push(``);
-  lines.push(`For security, please do not send credit card details in this message thread.`);
+  lines.push(`For your security, please do not send credit card details in this message thread.`);
   lines.push(``);
-  lines.push(`Thanks,`);
-  lines.push(OUTBOUND_SENDER_NAME);
-  lines.push(OUTBOUND_BRAND_NAME);
+  lines.push(...guestSignoffLines(isHawaii));
   return lines.join("\n");
 }
 
@@ -1226,44 +1251,53 @@ function buildGuestyInvoicePaymentSmsBody(args: {
   guestFirstName: string;
   propertyName: string;
   paymentUrl?: string;
+  isHawaii?: boolean;
 }): string {
+  const isHawaii = args.isHawaii ?? true;
   const link = args.paymentUrl?.trim() || "[PASTE SECURE GUESTY PAYMENT LINK]";
   return [
-    `Hi ${args.guestFirstName || "there"}, please use this secure Guesty link to add your payment method or complete any remaining balance${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
+    `${guestGreeting(args.guestFirstName, isHawaii)} please use this secure Guesty link to add your payment method or complete any remaining balance${args.propertyName ? ` for ${args.propertyName}` : ""}:`,
     link,
     ``,
-    `Please do not text card details. Thanks, ${OUTBOUND_SENDER_NAME}`,
+    `Please do not text card details. ${guestSmsSignoff(isHawaii)}`,
   ].join("\n");
 }
 
 function buildArrivalDetailsSmsBody(args: {
   guestFirstName: string;
   propertyName: string;
+  isHawaii?: boolean;
 }): string {
-  return `Hi ${args.guestFirstName || "there"}, your arrival details${args.propertyName ? ` for ${args.propertyName}` : ""} have been sent in the booking thread/email. Please review them before travel day and reply here if anything looks unclear. Thanks, ${OUTBOUND_SENDER_NAME}`;
+  const isHawaii = args.isHawaii ?? true;
+  return `${guestGreeting(args.guestFirstName, isHawaii)} your arrival details${args.propertyName ? ` for ${args.propertyName}` : ""} have been sent in the booking thread/email. Please review them before travel day and reply here if anything looks unclear. ${guestSmsSignoff(isHawaii)}`;
 }
 
 function buildLocalTipsBody(args: {
   guestFirstName: string;
   propertyName: string;
   units: ArrivalUnitDetail[];
+  isHawaii?: boolean;
 }): string {
+  const isHawaii = args.isHawaii ?? true;
   const parking = args.units.map((u) => u.parkingInfo).filter(Boolean).join("\n");
+  // Hawaii guests get the island-flavored activity prompts (luaus, boat tours);
+  // mainland guests get a neutral version so the tips read right for the market.
+  const activityLine = isHawaii
+    ? `- For restaurants, activities, luaus, boat tours, and popular beach parking, reservations can be helpful during busy weeks.`
+    : `- For restaurants, activities, and popular attractions, reservations can be helpful during busy weeks.`;
   const lines: string[] = [
-    `Hi ${args.guestFirstName || "there"},`,
+    guestGreeting(args.guestFirstName, isHawaii),
     ``,
-    `Your stay${args.propertyName ? ` at ${args.propertyName}` : ""} is just a few days away. A few quick reminders before travel day:`,
+    `Your stay${args.propertyName ? ` at ${args.propertyName}` : ""} is just a few days away — we cannot wait to host you. A few quick reminders before travel day:`,
     ``,
     `- Please review your arrival/access details before you leave.`,
     `- If you are renting a car, keep the parking details handy.${parking ? `\n\nParking notes:\n${parking}` : ""}`,
-    `- For restaurants, activities, luaus, boat tours, and popular beach parking, reservations can be helpful during busy weeks.`,
+    activityLine,
     `- Grocery stops are usually easiest before heading fully into resort areas.`,
     ``,
-    `If you want specific restaurant or local area ideas near the property, reply here and I am happy to help.`,
+    `If you would like specific restaurant or local-area ideas near the property, just reply here — I am always happy to share favorites.`,
     ``,
-    `Thanks,`,
-    OUTBOUND_SENDER_NAME,
-    OUTBOUND_BRAND_NAME,
+    ...guestSignoffLines(isHawaii),
   ];
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -1271,8 +1305,10 @@ function buildLocalTipsBody(args: {
 function buildLocalTipsSmsBody(args: {
   guestFirstName: string;
   propertyName: string;
+  isHawaii?: boolean;
 }): string {
-  return `Hi ${args.guestFirstName || "there"}, quick travel reminder${args.propertyName ? ` for ${args.propertyName}` : ""}: please keep your arrival/access and parking details handy before you leave. Reply here if you need help. - ${OUTBOUND_SENDER_NAME}`;
+  const isHawaii = args.isHawaii ?? true;
+  return `${guestGreeting(args.guestFirstName, isHawaii)} quick travel reminder${args.propertyName ? ` for ${args.propertyName}` : ""}: please keep your arrival/access and parking details handy before you leave. Reply here if you need anything at all. ${guestSmsSignoff(isHawaii)}`;
 }
 
 function buildDayBeforeBody(args: {
@@ -1280,11 +1316,13 @@ function buildDayBeforeBody(args: {
   propertyName: string;
   checkInIso?: string;
   units: ArrivalUnitDetail[];
+  isHawaii?: boolean;
 }): string {
+  const isHawaii = args.isHawaii ?? true;
   const lines: string[] = [
-    `Hi ${args.guestFirstName || "there"},`,
+    guestGreeting(args.guestFirstName, isHawaii),
     ``,
-    `Your check-in${args.propertyName ? ` for ${args.propertyName}` : ""} is tomorrow. Please keep your arrival details handy, including the address, access code, parking information, and Wi-Fi details.`,
+    `Your check-in${args.propertyName ? ` for ${args.propertyName}` : ""} is tomorrow, and we are looking forward to welcoming you. Please keep your arrival details handy, including the address, access code, parking information, and Wi-Fi details.`,
   ];
   if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
   if (args.units.length > 0) {
@@ -1297,52 +1335,56 @@ function buildDayBeforeBody(args: {
       lines.push(``);
     });
   }
-  lines.push(`Safe travels, and please reply here if anything comes up.`);
+  lines.push(`Safe travels, and please reply here if anything comes up — we are here to help.`);
   lines.push(``);
-  lines.push(`Thanks,`);
-  lines.push(OUTBOUND_SENDER_NAME);
-  lines.push(OUTBOUND_BRAND_NAME);
+  lines.push(...guestSignoffLines(isHawaii));
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function buildDayBeforeSmsBody(args: {
   guestFirstName: string;
   propertyName: string;
+  isHawaii?: boolean;
 }): string {
-  return `Hi ${args.guestFirstName || "there"}, check-in${args.propertyName ? ` for ${args.propertyName}` : ""} is tomorrow. Please keep your arrival details handy. Reply here if anything comes up. Safe travels, ${OUTBOUND_SENDER_NAME}`;
+  const isHawaii = args.isHawaii ?? true;
+  return `${guestGreeting(args.guestFirstName, isHawaii)} check-in${args.propertyName ? ` for ${args.propertyName}` : ""} is tomorrow. Please keep your arrival details handy, and reply here if anything comes up. Safe travels! ${guestSmsSignoff(isHawaii)}`;
 }
 
 function buildPostStayBody(args: {
   guestFirstName: string;
   propertyName: string;
+  isHawaii?: boolean;
 }): string {
+  const isHawaii = args.isHawaii ?? true;
   return [
-    `Hi ${args.guestFirstName || "there"},`,
+    guestGreeting(args.guestFirstName, isHawaii),
     ``,
-    `Thank you again for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. I hope you had a wonderful trip.`,
+    `Thank you so much for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. It was a pleasure to host you, and I hope you had a wonderful trip.`,
     ``,
-    `If you have a moment, I would really appreciate a review. It helps future guests feel confident booking and means a lot to us.`,
+    `If you have a moment, we would truly appreciate a review. It helps future guests feel confident booking and means the world to us.`,
     ``,
-    `We would be happy to host you again anytime.`,
+    `We would love to welcome you back anytime.`,
     ``,
-    `Thanks,`,
-    OUTBOUND_SENDER_NAME,
-    OUTBOUND_BRAND_NAME,
+    ...guestSignoffLines(isHawaii),
   ].join("\n");
 }
 
 function buildPostStaySmsBody(args: {
   guestFirstName: string;
   propertyName: string;
+  isHawaii?: boolean;
 }): string {
-  return `Hi ${args.guestFirstName || "there"}, thank you again for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. If you have a moment, we would really appreciate a review. We would be happy to host you again anytime. - ${OUTBOUND_SENDER_NAME}`;
+  const isHawaii = args.isHawaii ?? true;
+  return `${guestGreeting(args.guestFirstName, isHawaii)} thank you so much for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. If you have a moment, we would truly appreciate a review. We would love to host you again anytime. ${guestSmsSignoff(isHawaii)}`;
 }
 
 function buildUnitSetupSmsBody(args: {
   guestFirstName: string;
   propertyName: string;
+  isHawaii?: boolean;
 }): string {
-  return `Hi ${args.guestFirstName || "there"}, quick note${args.propertyName ? ` for ${args.propertyName}` : ""}: this stay is set up as nearby units, and final arrival details will come before check-in. Reply here with any questions. - ${OUTBOUND_SENDER_NAME}`;
+  const isHawaii = args.isHawaii ?? true;
+  return `${guestGreeting(args.guestFirstName, isHawaii)} quick note${args.propertyName ? ` for ${args.propertyName}` : ""}: this stay is set up as nearby units, and your final arrival details will come before check-in. Reply here with any questions. ${guestSmsSignoff(isHawaii)}`;
 }
 
 // ─── Response-shape normalizer ─────────────────────────────────────────────────
@@ -2890,7 +2932,7 @@ export default function InboxPage() {
   });
   const buyInSearchRunning = startBuyInSearch.isPending || (!!buyInSearchStatus && !buyInSearchStatus.done);
 
-  const draftArrivalDetails = ({
+  const draftArrivalDetails = async ({
     title = "14-day arrival details",
     channel = "guesty",
     guestFirstName,
@@ -2903,13 +2945,20 @@ export default function InboxPage() {
     propertyName: string;
     checkInIso?: string;
   }) => {
+    // Aloha/Mahalo for Hawaii listings, Hi/Thanks for mainland — resolved from
+    // the conversation's mapped property (defaults to Hawaii when unmapped).
+    const regionCtx = selectedConv?.listingId
+      ? await buildPropertyContextForDraft(selectedConv.listingId)
+      : null;
+    const isHawaii = regionCtx?.isHawaii ?? true;
     const body = channel === "sms"
-      ? buildArrivalDetailsSmsBody({ guestFirstName, propertyName })
+      ? buildArrivalDetailsSmsBody({ guestFirstName, propertyName, isHawaii })
       : buildArrivalDetailsGuestMessage({
         guestFirstName,
         propertyName,
         checkInIso,
         units: arrivalDetails?.units ?? [],
+        isHawaii,
       });
     previewTemplateBody(title, body, channel);
   };
@@ -2990,6 +3039,16 @@ export default function InboxPage() {
   }) => {
     try {
       const units = arrivalDetails?.units ?? [];
+      // Region drives the greeting/sign-off voice — Aloha/Mahalo for Hawaii
+      // listings, Hi/Thanks for mainland (e.g. Florida) listings. Resolved from
+      // the conversation's mapped property address (same isHawaii signal the AI
+      // drafter uses). Defaults to Hawaii when the listing isn't mapped, since
+      // the current portfolio is Hawaii and the operator reviews every draft in
+      // the composer before sending.
+      const regionCtx = selectedConv?.listingId
+        ? await buildPropertyContextForDraft(selectedConv.listingId)
+        : null;
+      const isHawaii = regionCtx?.isHawaii ?? true;
       const agreementUrl = kind === "agreement-request"
         ? await ensureRentalAgreementLink({
           channelRaw: channelRaw ?? "",
@@ -3006,80 +3065,149 @@ export default function InboxPage() {
         })
         : "";
       const body = channel === "sms" && kind === "agreement-request"
-        ? buildAgreementRequestSmsBody({ guestFirstName, propertyName, checkInIso, checkOutIso, agreementUrl })
+        ? buildAgreementRequestSmsBody({ guestFirstName, propertyName, checkInIso, checkOutIso, agreementUrl, isHawaii })
         : channel === "sms" && kind === "guesty-invoice-payment"
-          ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName, paymentUrl: effectivePaymentUrl })
+          ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName, paymentUrl: effectivePaymentUrl, isHawaii })
         : channel === "sms" && kind === "representative-follow-up"
-          ? buildUnitSetupSmsBody({ guestFirstName, propertyName })
+          ? buildUnitSetupSmsBody({ guestFirstName, propertyName, isHawaii })
         : channel === "sms" && kind === "local-tips"
-          ? buildLocalTipsSmsBody({ guestFirstName, propertyName })
+          ? buildLocalTipsSmsBody({ guestFirstName, propertyName, isHawaii })
         : channel === "sms" && kind === "day-before"
-          ? buildDayBeforeSmsBody({ guestFirstName, propertyName })
+          ? buildDayBeforeSmsBody({ guestFirstName, propertyName, isHawaii })
         : channel === "sms" && kind === "post-stay"
-          ? buildPostStaySmsBody({ guestFirstName, propertyName })
+          ? buildPostStaySmsBody({ guestFirstName, propertyName, isHawaii })
         : kind === "booking"
-          ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid, channelRaw })
+          ? buildBookingConfirmationBody({ guestFirstName, propertyName, checkInIso, checkOutIso, confirmationCode, numNights, bookingTotal, totalPaid, channelRaw, isHawaii })
         : kind === "agreement-request"
-          ? buildAgreementRequestBody({ guestFirstName, propertyName, agreementUrl, checkInIso, confirmationCode })
+          ? buildAgreementRequestBody({ guestFirstName, propertyName, agreementUrl, checkInIso, confirmationCode, isHawaii })
         : kind === "guesty-invoice-payment"
-          ? buildGuestyInvoicePaymentBody({ guestFirstName, propertyName, checkInIso, confirmationCode })
+          ? buildGuestyInvoicePaymentBody({ guestFirstName, propertyName, checkInIso, confirmationCode, isHawaii })
         : kind === "representative-follow-up"
-          ? buildRepresentativeUnitsFollowUpBody({ guestFirstName, propertyName, checkInIso })
+          ? buildRepresentativeUnitsFollowUpBody({ guestFirstName, propertyName, checkInIso, isHawaii })
           : kind === "local-tips"
-            ? buildLocalTipsBody({ guestFirstName, propertyName, units })
+            ? buildLocalTipsBody({ guestFirstName, propertyName, units, isHawaii })
             : kind === "day-before"
-              ? buildDayBeforeBody({ guestFirstName, propertyName, checkInIso, units })
-              : buildPostStayBody({ guestFirstName, propertyName });
+              ? buildDayBeforeBody({ guestFirstName, propertyName, checkInIso, units, isHawaii })
+              : buildPostStayBody({ guestFirstName, propertyName, isHawaii });
       previewTemplateBody(title, body, channel);
     } catch (err: any) {
       toast({ title: "Could not create agreement", description: err?.message ?? "Please try again.", variant: "destructive" });
     }
   };
 
-  const sendMessage = useMutation({
-    // /posts adds a message to the thread but doesn't deliver it to the guest —
-    // /send-message does both. Guesty requires a `module` describing the channel.
-    mutationFn: async () => {
-      if (!selectedConv) throw new Error("No conversation selected");
-      const lastPostModule = [...(posts ?? [])].reverse().find(p => p.module)?.module;
-      const rawMod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
-
-      // Guesty's /send-message validator rejects extra keys on the
-      // `module` object with a 400 — specifically `templateValues`,
-      // `templateVariableNames`, and `externalId`, which show up on
-      // the module of any post that was itself sent via a Guesty
-      // template or external channel link. Reading `selectedConv.module`
-      // or `lastPostModule` carries those fields forward, and the
-      // send blows up with `"module.templateValues" is not allowed`.
-      //
-      // Whitelist only what /send-message accepts. Everything else is
-      // metadata from Guesty's read shape that the write shape doesn't
-      // tolerate.
-      const mod: GuestyModule = {};
-      const allowedKeys = ["type", "channelId", "platform", "integrationId"] as const;
-      for (const k of allowedKeys) {
-        if (rawMod[k] !== undefined) (mod as any)[k] = rawMod[k];
+  // Background OTA delivery confirmation. The Send route returns FAST (`pending`)
+  // instead of blocking ~30s for the channel to stamp module.externalId; this
+  // polls the read-only /delivery-status probe (NEVER re-sends) to upgrade the
+  // status to "delivered" once the channel confirms. Fully fail-soft — any error
+  // just stops the poll; the message is already on the thread either way.
+  const confirmDeliveryInBackground = async (params: {
+    conversationId: string;
+    body: string;
+    channel: string | null;
+    reservationId: string | null;
+    via: string;
+  }) => {
+    const { conversationId, body, channel, reservationId, via } = params;
+    const MAX_ATTEMPTS = 9;
+    const INTERVAL_MS = 4000;
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      await new Promise((resolve) => setTimeout(resolve, INTERVAL_MS));
+      try {
+        const r = await apiRequest(
+          "POST",
+          `/api/inbox/conversations/${conversationId}/delivery-status`,
+          { body, channel, reservationId },
+        );
+        const j = await r.json().catch(() => ({} as any));
+        if (r.ok && j?.verified === true) {
+          qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", conversationId, "posts"] });
+          qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
+          toast({ title: "Delivery confirmed", description: `${via} confirmed your message reached the guest.` });
+          return;
+        }
+        // Explicit wrong-channel MISROUTE (verified:false AND pending:false) that
+        // only surfaced after the fast return — the message was filed on a non-OTA
+        // channel (e.g. email) and never reached the guest's booking channel. The
+        // inline send window is short now, so this is where a late-syncing misroute
+        // gets caught. Surface it loudly instead of leaving "confirming…" hanging.
+        if (r.ok && j?.ok === true && j?.verified !== true && j?.pending !== true) {
+          toast({
+            title: "Delivery NOT confirmed",
+            description: j?.deliveryReason
+              || `${via} did not confirm delivery — it may have been filed on email instead. Check the channel's extranet before resending.`,
+            variant: "destructive",
+          });
+          return;
+        }
+        // Still pending (or a transient miss) — keep polling.
+      } catch {
+        // Network hiccup / session expiry — stop quietly; the send already happened.
+        return;
       }
-      if (!mod.type) mod.type = "email";
+    }
+  };
 
+  const sendMessage = useMutation({
+    // Routed through the server's hardened, delivery-VERIFIED send path
+    // (/api/inbox/conversations/:id/send) instead of a client-direct
+    // /send-message that trusts HTTP 200. The server resolves the
+    // proven-delivering module from the reservation's integration.platform,
+    // sends ONCE, and confirms via Guesty's module.externalId — so a Booking.com
+    // reply that only ever reaches Guesty's `pending` state (never the guest's
+    // portal) is no longer reported as a clean success. The route now returns as
+    // soon as the POST lands (short inline verify), so the button frees in a few
+    // seconds; OTA confirmation finishes in confirmDeliveryInBackground.
+    mutationFn: async () => {
+      if (!selectedConv || !selectedConvId) throw new Error("No conversation selected");
+      const conversationId = selectedConvId;
+      const sentBody = normalizeGuestyManualMessageBody(replyText);
+      const channel = selectedConv.module?.type ?? null;
+      const reservationId = selectedConv.reservationId ?? null;
       const r = await apiRequest(
         "POST",
-        `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
-        { body: normalizeGuestyManualMessageBody(replyText), module: mod },
+        `/api/inbox/conversations/${conversationId}/send`,
+        { body: sentBody, reservationId, channel },
       );
-      if (!r.ok) {
-        const errBody = await r.json().catch(() => ({}));
-        throw new Error(errBody.error ?? errBody.message ?? `Guesty returned HTTP ${r.status}`);
+      const body = await r.json().catch(() => ({} as any));
+      if (!r.ok || body?.ok !== true) {
+        throw new Error(body?.message || body?.error || `Guesty returned HTTP ${r.status}`);
       }
-      return r.json();
+      // A genuine MISROUTE (filed on a non-OTA channel, e.g. email →
+      // verified:false AND pending:false) is a hard error — it did NOT reach the
+      // guest's booking channel. A true PENDING is surfaced as a notice, not
+      // thrown (resending would pile up duplicate guest messages).
+      if (body.verified !== true && body.pending !== true) {
+        throw new Error(
+          body.deliveryReason
+            || "The message did not reach the guest's booking channel — it may have been saved on email instead. Verify on the channel's extranet.",
+        );
+      }
+      return { ...(body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string }), conversationId, sentBody, channel, reservationId };
     },
-    onSuccess: () => {
-      markConversationReplied(selectedConvId);
+    onSuccess: (data) => {
+      markConversationReplied(data.conversationId);
       setReplyText("");
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", data.conversationId] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", data.conversationId, "posts"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
-      toast({ title: "Message sent!" });
+      const via = data?.deliveredVia?.trim() || "the booking channel";
+      if (data?.verified === true) {
+        toast({ title: "Message sent!", description: `Delivered through ${via} and confirmed on the guest thread.` });
+      } else {
+        toast({
+          title: `Sent through ${via} — confirming delivery`,
+          description: `Your message is on the thread. ${via} usually confirms delivery within ~30s and I'll update once it does. Don't resend — that can duplicate the message.`,
+        });
+        // Fire-and-forget: upgrade to "Delivery confirmed" in the background so
+        // the operator isn't blocked waiting on the channel's async confirmation.
+        void confirmDeliveryInBackground({
+          conversationId: data.conversationId,
+          body: data.sentBody,
+          channel: data.channel,
+          reservationId: data.reservationId,
+          via,
+        });
+      }
     },
     onError: (e: any) => toast({ title: "Failed to send", description: e.message, variant: "destructive" }),
   });
@@ -3236,40 +3364,49 @@ export default function InboxPage() {
     setReceiptBodyTouched(false);
   };
 
-  // Send the receipt body through the same Guesty proxy + module
-  // whitelist `sendMessage` uses. Guesty's /send-message validator
-  // rejects extra module keys (`templateValues`, `externalId`, …) with
-  // a 400, so the same allow-list applies.
+  // Send the receipt body through the SAME hardened, delivery-verified server
+  // path as the main reply (/api/inbox/conversations/:id/send) — a receipt that
+  // only reaches Guesty's `pending` state isn't reported as delivered either.
   const sendReceipt = useMutation({
     mutationFn: async () => {
       if (!selectedConv) throw new Error("No conversation selected");
       if (!receiptBody.trim()) throw new Error("Receipt body is empty");
-      const lastPostModule = [...(posts ?? [])].reverse().find(p => p.module)?.module;
-      const rawMod: GuestyModule = selectedConv.module ?? lastPostModule ?? { type: "email" };
-      const mod: GuestyModule = {};
-      const allowedKeys = ["type", "channelId", "platform", "integrationId"] as const;
-      for (const k of allowedKeys) {
-        if (rawMod[k] !== undefined) (mod as any)[k] = rawMod[k];
-      }
-      if (!mod.type) mod.type = "email";
-
       const r = await apiRequest(
         "POST",
-        `/api/guesty-proxy/communication/conversations/${selectedConvId}/send-message`,
-        { body: receiptBody, module: mod },
+        `/api/inbox/conversations/${selectedConvId}/send`,
+        {
+          body: receiptBody,
+          reservationId: selectedConv.reservationId ?? null,
+          channel: selectedConv.module?.type ?? null,
+        },
       );
-      if (!r.ok) {
-        const errBody = await r.json().catch(() => ({}));
-        throw new Error(errBody.error ?? errBody.message ?? `Guesty returned HTTP ${r.status}`);
+      const body = await r.json().catch(() => ({} as any));
+      if (!r.ok || body?.ok !== true) {
+        throw new Error(body?.message || body?.error || `Guesty returned HTTP ${r.status}`);
       }
-      return r.json();
+      if (body.verified !== true && body.pending !== true) {
+        throw new Error(
+          body.deliveryReason
+            || "The receipt did not reach the guest's booking channel — verify on the channel's extranet.",
+        );
+      }
+      return body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string };
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       resetReceiptState();
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
-      toast({ title: "Receipt sent" });
+      const via = data?.deliveredVia?.trim() || "the booking channel";
+      if (data?.verified === true) {
+        toast({ title: "Receipt sent", description: `Delivered through ${via} and confirmed.` });
+      } else {
+        toast({
+          title: `Receipt queued through ${via} — confirming`,
+          description: `Posted to ${via}, not confirmed yet. It'll appear in the thread — don't resend.`,
+          variant: "destructive",
+        });
+      }
     },
     onError: (e: any) => toast({ title: "Failed to send receipt", description: e.message, variant: "destructive" }),
   });
@@ -4524,9 +4661,16 @@ export default function InboxPage() {
                           onClick={() => sendMessage.mutate()}
                           disabled={!replyText.trim() || sendMessage.isPending || sendTextMessage.isPending}
                           data-testid="button-send-reply"
+                          // The send route returns as soon as the message is
+                          // posted (a short inline verify), so this clears in a
+                          // few seconds; OTA delivery confirmation then finishes
+                          // in the background and updates the status itself.
+                          title={sendMessage.isPending ? "Posting your message…" : undefined}
                         >
-                          <Send className="h-3.5 w-3.5 mr-1.5" />
-                          Send in Guesty
+                          {sendMessage.isPending
+                            ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                            : <Send className="h-3.5 w-3.5 mr-1.5" />}
+                          {sendMessage.isPending ? "Sending…" : "Send in Guesty"}
                         </Button>
                       </div>
                     </div>
@@ -5581,7 +5725,7 @@ export default function InboxPage() {
               <div>
                 <h2 className="font-semibold">Automated Message Templates</h2>
                 <p className="text-sm text-muted-foreground mt-0.5">
-                  Templates are sent automatically based on reservation events. Use merge tags like <code className="text-xs bg-muted px-1 rounded">{"{guest_name}"}</code> for personalization.
+                  Templates are sent automatically based on reservation events. Use merge tags like <code className="text-xs bg-muted px-1 rounded">{"{guest_name}"}</code> for personalization. <code className="text-xs bg-muted px-1 rounded">{"{greeting}"}</code> and <code className="text-xs bg-muted px-1 rounded">{"{signoff}"}</code> adapt to the property: <em>Aloha…/Mahalo</em> for Hawaii stays and <em>Hi…/Thanks</em> for mainland (Florida) stays.
                 </p>
               </div>
               <div className="flex gap-2 shrink-0">

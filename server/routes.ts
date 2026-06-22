@@ -62,6 +62,10 @@ import {
   startPreflightReplacementFindJob,
 } from "./preflight-background-jobs";
 import {
+  getCommunityPhotoRepullJob,
+  startCommunityPhotoRepullJob,
+} from "./community-photo-repull";
+import {
   registerOperationDiagnosticsRoutes,
   setOperationDiagnosticsQueueHooks,
 } from "./operation-diagnostics-api";
@@ -87,7 +91,7 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
-import { findGuestyConversationForReservation, sendGuestyConversationMessage } from "./guesty-ota-messaging";
+import { findGuestyConversationById, findGuestyConversationForReservation, sendGuestyConversationMessage, checkOtaDeliveryStatus } from "./guesty-ota-messaging";
 import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress, lookupHawaiiStatewideTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
   acquireSidecarLane,
@@ -161,6 +165,9 @@ import {
 } from "@shared/folder-unit-map";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
+import { isSameHawaiiStreetFamily } from "@shared/hawaii-street-family";
+import { checkCommunityState, isCommunityInWrongState } from "@shared/community-location-guard";
+import { confirmCommunityLocation } from "@shared/photo-location-confirmation";
 import {
   communityAddressRuleForName,
   discoveryCityForPhotoSearch,
@@ -260,7 +267,12 @@ import {
   unitGalleryMaxKeep,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
-import { isolateRedfinSubjectGallery, redfinPhotoSetId } from "./redfin-gallery";
+import {
+  isolateRedfinSubjectGallery,
+  redfinPhotoSetId,
+  subjectGalleryFromJsonLd,
+  MIN_JSONLD_SUBJECT_GALLERY,
+} from "./redfin-gallery";
 import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-combo";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
@@ -4033,8 +4045,19 @@ type ScrapeOptions = {
 };
 
 // Preflight photo fetch, builder rescrape, and replacement find-unit run on
-// Railway — opening the operator's local Chrome is unexpected there.
+// Railway — opening the operator's local Chrome is unexpected there, and the
+// synchronous wizard callers (add-single-listing / add-community) must never
+// hang the UI on a 90s sidecar. They all run SCRAPE_WITHOUT_SIDECAR.
 const SCRAPE_WITHOUT_SIDECAR: ScrapeOptions = { sidecarWalletMs: 0 };
+// EXCEPTION (2026-06-20, claude/festive-kilby): the "Re-pull all photos"
+// background job (preflight photo-fetch-jobs, Stage 1 — rescrape of the unit's
+// OWN saved listing) opts INTO the residential-IP sidecar tier so a
+// Redfin/Homes/Zillow listing that bot-walls to a single og:image on Railway's
+// datacenter IP is still fully recovered (this was the documented gap that left
+// re-pulled galleries missing bedroom photos). Safe because it's a background
+// job (no UI latency budget) and the sidecar fires only when datacenter
+// scraping came up short, merging — never clobbering (Load-Bearing #5, #45).
+const SCRAPE_WITH_SIDECAR: ScrapeOptions = { sidecarWalletMs: 90_000 };
 
 function listingScrapePlatform(url: string): "realtor" | "zillow" | "redfin" | "homes" | "other" {
   if (/realtor\.com\/realestateandhomes-detail/i.test(url)) return "realtor";
@@ -4267,6 +4290,29 @@ function extractGenericRealEstateGalleryFromHtml(html: string): { urls: string[]
         `[redfin-gallery] subjectSetId=${redfinIsolated.subjectSetId ?? "none"} ` +
         `kept=${redfinIsolated.urls.length} droppedComps=${redfinIsolated.droppedComps}`,
       );
+    }
+
+    // Host-agnostic subject-gallery isolation. Redfin's photoSetId guard above
+    // only protects Redfin; Homes.com and every other portal also render a
+    // "Nearby similar homes" carousel whose thumbnails the greedy harvest above
+    // sweeps into the unit folder (the "jumbled photos from multiple units" the
+    // operator reported on re-pull). A listing page's JSON-LD `image` array is
+    // the SUBJECT unit's own authoritative gallery — the comp carousel lives in a
+    // separate ItemList node and is never part of it. When structured data gives
+    // us a substantial subject gallery, trust ONLY it and drop the page-wide
+    // harvest. Redfin JSON-LD is typically sparse (< the threshold), so Redfin
+    // keeps relying on the photoSetId isolation above — no behavior change there.
+    // See server/redfin-gallery.ts.
+    const jsonLdGallery = subjectGalleryFromJsonLd(html);
+    if (jsonLdGallery.length >= MIN_JSONLD_SUBJECT_GALLERY) {
+      // Belt-and-suspenders: re-run Redfin isolation on the structured-data set
+      // (no-op for non-Redfin and for an already-clean subject gallery).
+      const isolated = isolateRedfinSubjectGallery(html, jsonLdGallery);
+      console.log(
+        `[listing-gallery] using JSON-LD subject gallery: kept=${isolated.urls.length} ` +
+        `(page harvest had ${redfinIsolated.urls.length})`,
+      );
+      return { urls: isolated.urls, facts };
     }
 
     return { urls: redfinIsolated.urls, facts };
@@ -7784,7 +7830,10 @@ export async function registerRoutes(
       try {
         const receiptRows = await storage.getRecentGuestReceipts(300);
         for (const row of receiptRows) {
-          if (row.status !== "sent") continue;
+          // "unconfirmed" = posted to the guest's OTA channel exactly once
+          // (delivery just not confirmed within the verify window) — count it as
+          // sent. "misroute"/"error"/"pending" did NOT reach the guest channel.
+          if (row.status !== "sent" && row.status !== "unconfirmed") continue;
           const sentRaw = row.messageSentAt ?? row.createdAt;
           if (!sentRaw) continue;
           const sentDate = new Date(sentRaw as any);
@@ -8946,8 +8995,8 @@ Requirements:
       "If you do not want this alternative, I completely understand. I will issue a full refund today and send you the receipt.",
       "",
       "Mahalo,",
-      "John Carptenter",
-      "Magical Island Vacations",
+      "John Carpenter",
+      "VacationRentalExpertz",
     ].join("\n");
   };
 
@@ -10132,7 +10181,7 @@ Requirements:
         return res.status(400).json({ error: "message body required" });
       }
 
-      const { deliveredVia, verified, deliveryModuleType } = await sendGuestyConversationMessage({
+      const { deliveredVia, verified, pending, deliveryModuleType, reason } = await sendGuestyConversationMessage({
         conversationId: conversation.id,
         body,
         module: conversation.module,
@@ -10140,7 +10189,10 @@ Requirements:
         channelHint,
         logPrefix: "booking-alternatives",
       });
-      if (token) {
+      // Only record the durable "Guest messaged ✓" badge when the message
+      // actually reached the channel (delivered) or is queued on it (pending) —
+      // a misroute (filed on email) must NOT show as messaged.
+      if (token && (verified || pending)) {
         await storage.markBookingAlternativePageSent(token, channelHint).catch((e) =>
           console.error("[booking-alternatives] mark-sent failed:", e?.message ?? e));
       }
@@ -10152,7 +10204,12 @@ Requirements:
         conversationId: conversation.id,
         deliveredVia,
         verified,
+        // `pending` = Guesty accepted the post but the OTA channel
+        // (Booking.com/Airbnb/VRBO) has not confirmed delivery yet. The client
+        // shows a "queued — don't resend" notice rather than a false success.
+        pending: pending === true,
         deliveryModuleType: deliveryModuleType ?? null,
+        deliveryReason: reason ?? null,
       });
     } catch (err: any) {
       if (responded) return;
@@ -10250,7 +10307,7 @@ Requirements:
       const conversation = await findGuestyConversationForReservation(reservationId, channel);
       if (!conversation) return res.status(404).json({ error: "No Guesty conversation found for this reservation" });
 
-      await sendGuestyConversationMessage({
+      const { verified, pending, deliveredVia, reason } = await sendGuestyConversationMessage({
         conversationId: conversation.id,
         body,
         module: conversation.module,
@@ -10258,10 +10315,14 @@ Requirements:
         channelHint: channel,
         logPrefix: "cancellation-notice",
       });
-      // Internal flag ONLY — we intentionally do not change the reservation status.
-      await storage.recordCancellationNoticeSent(reservationId, channel, body).catch((e) =>
-        console.error("[cancellation-notice] mark-sent failed:", e?.message ?? e));
-      return res.json({ ok: true, conversationId: conversation.id });
+      // A genuine misroute (posted, but neither delivered nor queued on the OTA
+      // channel) is NOT a real notice — don't record the durable "sent ✓" badge
+      // for it. Internal flag ONLY — we never change the reservation status.
+      if (verified || pending) {
+        await storage.recordCancellationNoticeSent(reservationId, channel, body).catch((e) =>
+          console.error("[cancellation-notice] mark-sent failed:", e?.message ?? e));
+      }
+      return res.json({ ok: true, conversationId: conversation.id, verified, pending: pending === true, deliveredVia, deliveryReason: reason ?? null });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to send cancellation notice", message: err?.message ?? String(err) });
     }
@@ -10316,7 +10377,10 @@ Requirements:
         const rows: any[] = await storage.getGuestReceiptsByReservationIds(reservationIds).catch(() => []);
         const byReservation = new Map<string, any[]>();
         for (const r of rows) {
-          if (r.status !== "sent") continue;
+          // "unconfirmed" = posted to the guest channel once (delivery not yet
+          // confirmed) — show the "Receipt sent" badge so the operator doesn't
+          // re-send a duplicate. "misroute"/"error"/"pending" stay hidden.
+          if (r.status !== "sent" && r.status !== "unconfirmed") continue;
           const list = byReservation.get(r.reservationId) ?? [];
           list.push(r);
           byReservation.set(r.reservationId, list);
@@ -11989,6 +12053,124 @@ Requirements:
   // intentionally DISABLED (expectedRevenue=0, the documented inquiry degrade-safe
   // path) so the operator simply sees the cheapest options found, not a "would lose
   // money, left empty" verdict — an inquiry has no committed revenue to gate on.
+  // Guest-inbox "Send in Guesty" + "Send receipt" used to POST directly from the
+  // client to /api/guesty-proxy/.../send-message and treat HTTP 200 as success —
+  // but Guesty's /send-message only creates a `pending` post; the OTA channel
+  // (Booking.com/Airbnb/VRBO) confirms delivery asynchronously (~30s, stamping
+  // module.externalId / status=completed). So an inbox reply showed "Message
+  // sent!" while never reaching the guest on Booking.com (operator-reported twice).
+  // Route it through the SAME hardened, delivery-verified path as Message AD
+  // (server resolves the proven-delivering module from integration.platform,
+  // sends ONCE, verifies via externalId, and reports verified/pending/misroute).
+  app.post("/api/inbox/conversations/:conversationId/send", async (req: Request, res: Response) => {
+    // The operator is waiting on this request, so we do NOT block the full
+    // ~38s OTA delivery window here. We POST once, verify INLINE only briefly
+    // (fast channels confirm in this window), and otherwise return `pending`
+    // immediately — the message is already on the thread and the client polls
+    // /delivery-status in the background to flip the badge to confirmed. The POST
+    // happens exactly once regardless (send-once + dedup pre-check preserved).
+    const INBOX_FAST_VERIFY_MS = Math.max(0, Number(process.env.INBOX_SEND_FAST_VERIFY_MS ?? 4_000));
+    const INBOX_SEND_TIMEOUT_MS = 50_000;
+    let responded = false;
+    const timer = setTimeout(() => {
+      if (responded) return;
+      responded = true;
+      res.status(504).json({
+        error: "Send timed out",
+        message: "Guesty did not confirm delivery in time — check the thread before resending.",
+      });
+    }, INBOX_SEND_TIMEOUT_MS);
+    try {
+      const conversationId = String(req.params.conversationId ?? "").trim();
+      const reservationId = req.body?.reservationId ? String(req.body.reservationId).trim() : null;
+      const channelHint = req.body?.channel ? String(req.body.channel).trim() : null;
+      // Keep the body the operator typed; only cap length. Booking.com gets an
+      // ASCII-plain pass below (matches the relocation/receipt paths).
+      let body = String(req.body?.body ?? "").slice(0, 8_000).trim();
+      if (!conversationId) { responded = true; clearTimeout(timer); return res.status(400).json({ error: "conversationId required" }); }
+      if (!body) { responded = true; clearTimeout(timer); return res.status(400).json({ error: "message body required" }); }
+
+      const conversation = await findGuestyConversationById(conversationId, reservationId, channelHint);
+      if (!conversation) { responded = true; clearTimeout(timer); return res.status(404).json({ error: "No Guesty conversation found" }); }
+
+      const moduleType = String(conversation.module?.type ?? "");
+      if (isBookingChannel(channelHint) || moduleType.toLowerCase().includes("booking")) {
+        body = sanitizeForBookingChannel(body);
+      }
+
+      const { deliveredVia, verified, pending, deliveryModuleType, reason } = await sendGuestyConversationMessage({
+        conversationId: conversation.id,
+        body,
+        module: conversation.module,
+        reservation: conversation.reservation,
+        channelHint,
+        logPrefix: "inbox-send",
+        verifyDeadlineMs: INBOX_FAST_VERIFY_MS,
+      });
+      if (responded) return;
+      responded = true;
+      clearTimeout(timer);
+      return res.json({
+        ok: true,
+        conversationId: conversation.id,
+        deliveredVia,
+        verified,
+        // pending = posted to the OTA channel but not confirmed yet (client shows
+        // "queued — confirming, don't resend"); verified=false && pending=false is
+        // a misroute (e.g. filed on email) the client surfaces as a hard error.
+        pending: pending === true,
+        deliveryModuleType: deliveryModuleType ?? null,
+        deliveryReason: reason ?? null,
+      });
+    } catch (err: any) {
+      if (responded) return;
+      responded = true;
+      clearTimeout(timer);
+      return res.status(500).json({ error: "Failed to send message", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Read-only delivery confirmation for a message the inbox already sent. The
+  // Send route returns fast (`pending`) instead of blocking ~30s for the OTA
+  // channel to stamp module.externalId; the client polls THIS to upgrade the
+  // "confirming…" badge to delivered. NEVER sends — purely verifies, so polling
+  // can't duplicate the guest message.
+  app.post("/api/inbox/conversations/:conversationId/delivery-status", async (req: Request, res: Response) => {
+    try {
+      const conversationId = String(req.params.conversationId ?? "").trim();
+      const reservationId = req.body?.reservationId ? String(req.body.reservationId).trim() : null;
+      const channelHint = req.body?.channel ? String(req.body.channel).trim() : null;
+      let body = String(req.body?.body ?? "").slice(0, 8_000).trim();
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      if (!body) return res.status(400).json({ error: "message body required" });
+
+      const conversation = await findGuestyConversationById(conversationId, reservationId, channelHint);
+      if (!conversation) return res.status(404).json({ error: "No Guesty conversation found" });
+
+      // Match the exact body the send route posted so the verifier finds it.
+      const moduleType = String(conversation.module?.type ?? "");
+      if (isBookingChannel(channelHint) || moduleType.toLowerCase().includes("booking")) {
+        body = sanitizeForBookingChannel(body);
+      }
+
+      const { verified, pending, deliveryModuleType, reason } = await checkOtaDeliveryStatus({
+        conversationId: conversation.id,
+        body,
+        module: conversation.module,
+        channelHint,
+      });
+      return res.json({
+        ok: true,
+        verified: verified === true,
+        pending: pending === true,
+        deliveryModuleType: deliveryModuleType ?? null,
+        deliveryReason: reason ?? null,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to check delivery status", message: err?.message ?? String(err) });
+    }
+  });
+
   app.post("/api/inbox/buy-in-search", async (req: Request, res: Response) => {
     try {
       const listingId = String(req.body?.listingId ?? "").trim();
@@ -30514,6 +30696,48 @@ Return ONLY compact JSON with this exact shape:
     res.json({ job });
   });
 
+  // Re-pull community photos: research the community via Claude, find correct
+  // photo URLs, scrape them into the community folder, then verify every photo
+  // with AI vision + Google Lens reverse image search (deleting mismatches).
+  // Runs as a background job; the Pre-Flight page polls the GET below.
+  app.post("/api/preflight/community-photo-repull", async (req, res) => {
+    const body = (req.body ?? {}) as {
+      communityName?: string;
+      communityFolder?: string;
+      city?: string;
+      state?: string;
+    };
+    const communityName = typeof body.communityName === "string" ? body.communityName.trim() : "";
+    if (!communityName) return res.status(400).json({ error: "communityName required" });
+
+    // Resolve the target folder: prefer the explicit folder, else the canonical
+    // mapping for this community name. Both must be a safe community-* slug.
+    let communityFolder = typeof body.communityFolder === "string" ? body.communityFolder.trim() : "";
+    if (!communityFolder) {
+      communityFolder = resolveCanonicalCommunityPhotoFolder(communityName) ?? "";
+    }
+    if (!communityFolder) {
+      return res.status(400).json({ error: "Could not resolve a community photo folder for this community." });
+    }
+    if (!/^community-[\w-]+$/.test(communityFolder)) {
+      return res.status(400).json({ error: "Invalid community photo folder." });
+    }
+
+    const job = startCommunityPhotoRepullJob({
+      communityName,
+      communityFolder,
+      city: typeof body.city === "string" ? body.city.trim() : undefined,
+      state: typeof body.state === "string" ? body.state.trim() : undefined,
+    });
+    res.status(202).json({ job });
+  });
+
+  app.get("/api/preflight/community-photo-repull/:jobId", (req, res) => {
+    const job = getCommunityPhotoRepullJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Community photo re-pull job not found" });
+    res.json({ job });
+  });
+
   app.post("/api/preflight/replacement-find-jobs", async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     if (!body.communityFolder) return res.status(400).json({ error: "communityFolder required" });
@@ -31046,7 +31270,24 @@ Return ONLY compact JSON with this exact shape:
     const PLATFORM_CHECK_RESERVE_MS = 12_000;
     const PHOTO_REVERSE_SEARCH_TIMEOUT_MS = expandedSearch ? 14_000 : 20_000;
     const PHOTO_PIPELINE_RESERVE_MS = PHOTO_SCRAPE_TIMEOUT_MS + 25_000;
-    const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 80 : 45;
+    // Per-PASS candidate cap. Kept >= DISCOVERY_CANDIDATE_TARGET so one pass can
+    // in principle clear its whole discovery pool; overflow beyond this is no longer
+    // dropped — it's resumed across continuation passes via the capExceeded path
+    // (uncheckedCandidates now sourced from the FULL sorted pool). Raised with the
+    // target bump so a hundreds-unit community is actually scanned deep, while the
+    // route time budget + the SearchAPI call budget below remain the real stops.
+    const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 120 : 70;
+    // Tier 4 cost guardrail: a hard per-PASS ceiling on SearchAPI Google calls so a
+    // big-community scan (discovery queries + ~6 OTA queries/candidate + equivalent-
+    // source queries) can't exhaust the shared SEARCHAPI plan in a single run. When
+    // hit mid candidate-loop we set budgetStopped + break, which populates
+    // uncheckedCandidates and resumes on the next continuation pass (fresh ceiling) —
+    // so the operator still drains the community across passes, just bounded per pass.
+    // Env-tunable; 0/negative disables the ceiling.
+    const SEARCHAPI_CALL_BUDGET = Number.isFinite(Number(process.env.REPLACEMENT_SEARCHAPI_CALL_BUDGET))
+      ? Number(process.env.REPLACEMENT_SEARCHAPI_CALL_BUDGET)
+      : 220;
+    let searchApiCalls = 0;
     const discoveryElapsedMs = () => Date.now() - routeStartedAt;
     const hasDiscoveryBudget = () => discoveryElapsedMs() < DISCOVERY_BUDGET_MS;
     let hasRouteBudget = (reserveMs = 0) => Date.now() + reserveMs < routeStartedAt + ROUTE_BUDGET_MS;
@@ -31121,13 +31362,19 @@ Return ONLY compact JSON with this exact shape:
     const requiredBedroomCount = Number.isFinite(parsedRequiredBedrooms) && parsedRequiredBedrooms > 0
       ? Math.round(parsedRequiredBedrooms)
       : null;
+    // Discovery early-stop target. Raised (was 42/28/24/20) so a hundreds-unit
+    // community surfaces a far larger pool before discovery breaks — the old ~20
+    // ceiling is exactly what made "Find a New Unit" report it only tried ~20 of
+    // hundreds. Safe to raise because (a) discovery queries are cheap (~1 SearchAPI
+    // credit each, bounded by DISCOVERY_BUDGET_MS) and (b) the larger pool is now
+    // drained across continuation passes (capExceeded), not in one over-long route.
     const DISCOVERY_CANDIDATE_TARGET = (expandedSearch && requiredBedroomCount)
-      ? 42
+      ? 80
       : expandedSearch
-      ? 28
+      ? 60
       : requiredBedroomCount
-      ? 24
-      : 20;
+      ? 48
+      : 40;
     const hawaiiStreetSlugTokens = (() => {
       const merged = new Set<string>();
       for (const source of [communityAddress, normalizedStreetAddress, folderCommunityAddress]) {
@@ -31304,12 +31551,12 @@ Return ONLY compact JSON with this exact shape:
     const escapeRegExp = (value: string): string =>
       value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-    const isSameHawaiiStreetFamily = (candidateRoot: string, allowedRoot: string): boolean => {
-      const candidate = candidateRoot.match(/^(\d{1,2})\s+\d{3,5}\s+(.+)$/i);
-      const allowed = allowedRoot.match(/^(\d{1,2})\s+\d{3,5}\s+(.+)$/i);
-      if (!candidate || !allowed) return false;
-      return candidate[1] === allowed[1] && candidate[2] === allowed[2];
-    };
+    // isSameHawaiiStreetFamily lives in @shared/hawaii-street-family so it can
+    // be unit-tested. It matches same-district + same-street roots, but on
+    // streets where the lot number distinguishes SEPARATE resorts (e.g.
+    // Waikoloa Beach Dr: 69-180 Beach Villas vs 69-555 Colony Villas) it also
+    // requires the lot number to match, so a different resort on the same
+    // street is no longer accepted as a sibling building.
 
     const candidateRootMatches = (url: string, allowedRoots: Set<string>, _contextText = ""): boolean => {
       if (allowedRoots.size === 0) return false;
@@ -31356,6 +31603,14 @@ Return ONLY compact JSON with this exact shape:
       add(normalizedStreetAddress);
       add(addressStreet);
       add(communityAddress);
+
+      // Curated sibling building street roots for a multi-building resort (optional;
+      // dormant until a CommunityAddressRule sets `buildingStreetRoots`). A large
+      // resort spans many building addresses, but the resort-street gate only knew the
+      // ONE canonical street — so every unit on a sibling building was rejected before
+      // it could enter the pool. This admits those buildings. Recall-safe: absent for
+      // every rule today, so non-curated communities are byte-identical to before.
+      for (const extra of communityAddressRuleForName(communityName)?.buildingStreetRoots ?? []) add(extra);
 
       // Na Hale O Keauhou is on Alii Drive in Keauhou. A city-wide
       // Kailua-Kona search can surface nearby Alii Drive resorts such as
@@ -31675,6 +31930,7 @@ Return ONLY compact JSON with this exact shape:
 
     const runDiscoveryQuery = async (siteQuery: string) => {
       console.error(`[find-unit] Searching: ${siteQuery}`);
+      searchApiCalls += 1;
       const searchResp = await fetch(
         `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=${expandedSearch ? 20 : 10}&api_key=${searchApiKey}`,
         { signal: AbortSignal.timeout(DISCOVERY_SEARCH_TIMEOUT_MS) },
@@ -31795,11 +32051,14 @@ Return ONLY compact JSON with this exact shape:
       if (directRoot) allowedRoots.add(directRoot);
       for (const root of communityAddressRoots) allowedRoots.add(root);
       if (suppliedStreetRoot) allowedRoots.add(suppliedStreetRoot);
-      const filterRoots = suppliedStreetRoot
-        ? new Set([suppliedStreetRoot])
-        : allowedRoots.size > 0
-          ? allowedRoots
-          : directAllowedRoots;
+      // Use the FULL set of the resort's known/learned street roots (drops the old
+      // single-root narrowing): for a multi-building resort that single root rejected
+      // every sibling building. `allowedRoots` already = configured + curated
+      // (buildingStreetRoots) + repeated-on-this-run roots, so this stays pinned to the
+      // resort — it does NOT widen to arbitrary nearby inventory.
+      const filterRoots = allowedRoots.size > 0
+        ? allowedRoots
+        : directAllowedRoots;
       const beforeApify = candidates.length;
       for (const link of batch.realtor) addCandidateUrl(link, "realtor", "", "", filterRoots);
       for (const link of batch.zillow) addCandidateUrl(link, "zillow", "", "", filterRoots);
@@ -31819,11 +32078,14 @@ Return ONLY compact JSON with this exact shape:
       if (directRoot) allowedRoots.add(directRoot);
       for (const root of communityAddressRoots) allowedRoots.add(root);
       if (suppliedStreetRoot) allowedRoots.add(suppliedStreetRoot);
-      const filterRoots = suppliedStreetRoot
-        ? new Set([suppliedStreetRoot])
-        : allowedRoots.size > 0
-          ? allowedRoots
-          : directAllowedRoots;
+      // Use the FULL set of the resort's known/learned street roots (drops the old
+      // single-root narrowing): for a multi-building resort that single root rejected
+      // every sibling building. `allowedRoots` already = configured + curated
+      // (buildingStreetRoots) + repeated-on-this-run roots, so this stays pinned to the
+      // resort — it does NOT widen to arbitrary nearby inventory.
+      const filterRoots = allowedRoots.size > 0
+        ? allowedRoots
+        : directAllowedRoots;
       const realtyApiBudgetMs = Math.min(
         20_000,
         Math.max(6_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
@@ -31838,7 +32100,7 @@ Return ONLY compact JSON with this exact shape:
           profile: expandedSearch ? "standard" : "findUnit",
           minBedrooms: requiredBedroomCount,
           maxBedrooms: requiredBedroomCount,
-          allowedStreetRoots: suppliedStreetRoot ? new Set([suppliedStreetRoot]) : undefined,
+          allowedStreetRoots: suppliedStreetRoot ? filterRoots : undefined,
           strictCommunityAnchor: true,
           addRealtorUrl: (url, title) => addCandidateUrl(url, "realtor", title ?? "", "", filterRoots),
         }),
@@ -31944,9 +32206,19 @@ Return ONLY compact JSON with this exact shape:
       // Zillow building (/b/...) pages list many units in one condo resort.
       const addressRule = communityAddressRuleForName(communityName);
       let zillowBuildingUrl = addressRule?.zillowBuildingUrl ?? null;
+      // Only a CURATED/own building page is trusted enough to auto-learn sibling
+      // street roots from — it's guaranteed to be this resort's own /b/ page. A
+      // SERP-DISCOVERED /b/ page (discoverZillowBuildingPageUrl below) is a name-match
+      // guess that could resolve to a DIFFERENT building, so we still harvest its units
+      // (gated to the known resort street) but must NOT widen the resort-street gate
+      // from its dominant roots — that would risk wrong-resort photo contamination.
+      let zillowBuildingUrlTrusted = Boolean(zillowBuildingUrl);
       if (!zillowBuildingUrl) {
         const hardcoded = COMMUNITY_SOURCE_URLS[communityName]?.primary;
-        if (hardcoded && /zillow\.com\/b\//i.test(hardcoded)) zillowBuildingUrl = hardcoded;
+        if (hardcoded && /zillow\.com\/b\//i.test(hardcoded)) {
+          zillowBuildingUrl = hardcoded;
+          zillowBuildingUrlTrusted = true;
+        }
       }
       if (!zillowBuildingUrl && communityLocForQueries) {
         zillowBuildingUrl = await discoverZillowBuildingPageUrl(
@@ -31954,16 +32226,44 @@ Return ONLY compact JSON with this exact shape:
           communityLocForQueries.city,
           searchApiKey,
         );
+        // Discovered, not curated → leave zillowBuildingUrlTrusted false (no root-learning).
       }
       if (zillowBuildingUrl && hasDiscoveryBudget()) {
         const buildingUrls = await harvestZillowBuildingPageUrls(zillowBuildingUrl);
+        // A CURATED/own Zillow /b/ page may span several building street addresses
+        // (a multi-building resort). Auto-learn a sibling street root only when it
+        // recurs on THIS page (>=2 homedetails URLs) — mirroring repeatedCandidateRoots,
+        // so one stray nearby listing on the /b/ page can't widen the net — then admit
+        // those buildings. Gated to a TRUSTED page (curated rule / COMMUNITY_SOURCE_URLS);
+        // a SERP-discovered /b/ page is NOT trusted to widen the gate (wrong-resort risk).
+        const buildingRootCounts = new Map<string, number>();
+        for (const link of buildingUrls) {
+          const root = streetRootFromListingAddress(parseListingAddressFromUrl(link));
+          if (root) buildingRootCounts.set(root, (buildingRootCounts.get(root) ?? 0) + 1);
+        }
+        const learnedBuildingRoots = zillowBuildingUrlTrusted
+          ? Array.from(buildingRootCounts.entries())
+              .filter(([, count]) => count >= 2)
+              .map(([root]) => root)
+          : [];
+        let buildingAllowedRoots = directAllowedRoots;
+        if (learnedBuildingRoots.length > 0) {
+          if (directAllowedRoots && directAllowedRoots.size > 0) {
+            const merged = new Set<string>();
+            directAllowedRoots.forEach((r) => merged.add(r));
+            for (const r of learnedBuildingRoots) merged.add(r);
+            buildingAllowedRoots = merged;
+          } else {
+            buildingAllowedRoots = new Set<string>(learnedBuildingRoots);
+          }
+        }
         const beforeBuilding = candidates.length;
         for (const link of buildingUrls) {
-          addCandidateUrl(link, "zillow", `Zillow building page ${communityName}`, "", directAllowedRoots);
+          addCandidateUrl(link, "zillow", `Zillow building page ${communityName}`, "", buildingAllowedRoots);
         }
         console.error(
           `[find-unit] Zillow building page ${zillowBuildingUrl} → ${buildingUrls.length} homedetails URLs, ` +
-          `added=${candidates.length - beforeBuilding}`,
+          `learnedRoots=${learnedBuildingRoots.join(" | ") || "none"}, added=${candidates.length - beforeBuilding}`,
         );
       }
 
@@ -31979,15 +32279,35 @@ Return ONLY compact JSON with this exact shape:
       }
     }
 
+    // Cluster a unit's pages ACROSS PORTALS (the SAME unit on zillow/redfin/realtor) so
+    // the dual-source scrape can pick the richest gallery FOR THAT UNIT — without
+    // collapsing DISTINCT units that merely share a street address. A bare street root
+    // does the latter: in a single-address condo building (e.g. Cocoa Beach Towers,
+    // every unit at "220 Young Ave") it lumps all ~50 units into ONE cluster, and the
+    // scrape then stamps one unit's photos + bedroom count onto every neighbor — so real
+    // 3BRs get rejected as the cluster's 1BR (and inherit the wrong unit's photos).
+    // Appending the unit number keeps each unit's portals together while separating
+    // different units. When no unit token is parseable (a distinct-street-number resort
+    // unit, one address == one unit) it falls back to street-root-only, preserving prior
+    // behavior there. The same url always yields the same key, so build and lookup agree.
+    const listingClusterKeyFor = (url: string, contextText = ""): string => {
+      const root = streetRootFromListingAddress(
+        parseListingAddressFromUrl(url) ?? parseListingAddressFromText(contextText),
+      );
+      if (!root) return `__url:${url}`;
+      const rawUnit = extractUnitNumber(url, detectSource(url) ?? "zillow", contextText)
+        || extractUnitNumberFromText(contextText);
+      const unit = normalizeUnitClaim(String(rawUnit || "")).replace(/^0+(?=\d)/, "");
+      return unit ? `${root}#${unit}` : root;
+    };
+
     const listingUrlsByCluster = new Map<string, string[]>();
     for (const candidate of candidates) {
-      const root = streetRootFromListingAddress(
-        parseListingAddressFromUrl(candidate.sourceUrl) ?? parseListingAddressFromText(candidate.contextText),
-      ) ?? `__url:${candidate.sourceUrl}`;
-      const bucket = listingUrlsByCluster.get(root) ?? [];
+      const clusterKey = listingClusterKeyFor(candidate.sourceUrl, candidate.contextText);
+      const bucket = listingUrlsByCluster.get(clusterKey) ?? [];
       const key = unitSwapListingKey(candidate.sourceUrl);
       if (key && !bucket.some((u) => unitSwapListingKey(u) === key)) bucket.push(candidate.sourceUrl);
-      listingUrlsByCluster.set(root, bucket);
+      listingUrlsByCluster.set(clusterKey, bucket);
     }
 
     // PR #329 / #338: sort candidates by source priority before
@@ -32068,6 +32388,7 @@ Return ONLY compact JSON with this exact shape:
     const enforcedHosts = platformHosts.filter((p) => enforcedKeys.includes(p.key));
 
     async function runSearch(q: string): Promise<any[] | null> {
+      searchApiCalls += 1;
       try {
         const resp = await fetch(
           `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=3&api_key=${searchApiKey}`,
@@ -32243,9 +32564,7 @@ Return ONLY compact JSON with this exact shape:
             continue;
           }
           const facts: ListingFacts = {};
-          const clusterKey = streetRootFromListingAddress(
-            parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${hit?.title || ""} ${hit?.snippet || ""}`),
-          ) ?? `__url:${link}`;
+          const clusterKey = listingClusterKeyFor(link, `${hit?.title || ""} ${hit?.snippet || ""}`);
           const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [link];
           const dual = await withStepTimeout(
             scrapeListingPhotosDualSource(clusterUrls.length > 0 ? clusterUrls : [link], facts, SCRAPE_WITHOUT_SIDECAR),
@@ -32325,6 +32644,15 @@ Return ONLY compact JSON with this exact shape:
       if (!hasRouteBudget(PLATFORM_CHECK_RESERVE_MS)) {
         budgetStopped = true;
         console.warn(`[find-unit] route budget nearly exhausted after ${attempts.length}/${candidates.length} candidates`);
+        break;
+      }
+      // Tier 4 guardrail: stop spending SearchAPI before a single pass can drain the
+      // shared plan. Reserve ~12 calls (the worst-case per-candidate fan-out) so we
+      // stop cleanly rather than overshooting. Setting budgetStopped routes the
+      // remaining candidates into uncheckedCandidates → next continuation pass.
+      if (SEARCHAPI_CALL_BUDGET > 0 && searchApiCalls + 12 > SEARCHAPI_CALL_BUDGET) {
+        budgetStopped = true;
+        console.warn(`[find-unit] SearchAPI call budget (${SEARCHAPI_CALL_BUDGET}) reached after ${searchApiCalls} calls / ${attempts.length} candidates — pausing for continuation`);
         break;
       }
       try {
@@ -32432,9 +32760,7 @@ Return ONLY compact JSON with this exact shape:
           const MIN_PHOTOS = expandedSearch ? 3 : 5;
           let scrapedPhotoUrls: string[] = [];
           let candidateFacts: ListingFacts = {};
-          const clusterKey = streetRootFromListingAddress(
-            parseListingAddressFromUrl(sourceUrl) ?? parseListingAddressFromText(candidate.contextText),
-          ) ?? `__url:${sourceUrl}`;
+          const clusterKey = listingClusterKeyFor(sourceUrl, candidate.contextText);
           const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [sourceUrl];
           try {
             const dual = await withStepTimeout(
@@ -32680,7 +33006,11 @@ Return ONLY compact JSON with this exact shape:
       if (sourceBreakdown.redfin > 0) sourceParts.push(`${sourceBreakdown.redfin} Redfin`);
       if (sourceBreakdown.homes > 0) sourceParts.push(`${sourceBreakdown.homes} Homes.com`);
       if (sourceBreakdown.vrbo > 0) sourceParts.push(`${sourceBreakdown.vrbo} VRBO`);
-      diagnostic = `Checked ${totalCandidates} ${totalCandidates === 1 ? "candidate" : "candidates"} (${sourceParts.join(" + ")})${expandedSearch ? " in expanded mode" : ""} — ${parts.join(", ")}.`;
+      // Reframed (was "Checked N candidates") so the operator reads N as the
+      // discovered for-sale POOL, not a scan limit — the complaint was "it only
+      // tried ~20 of hundreds." The `parts` breakdown below explains the outcome
+      // (e.g. how many were already on an OTA).
+      diagnostic = `Found ${totalCandidates} for-sale ${totalCandidates === 1 ? "listing" : "listings"} in ${communityName} (${sourceParts.join(" + ")})${expandedSearch ? " in expanded mode" : ""} — ${parts.join(", ")}.`;
       // Saturated-community hint: when the ONLY thing standing between the operator
       // and a result is the OTA-presence gate, point them at the opt-in. Append-only
       // so the test-asserted "found on …Airbnb/VRBO/Booking.com" substring above is
@@ -32691,8 +33021,17 @@ Return ONLY compact JSON with this exact shape:
       }
     }
 
-    const uncheckedCandidates = budgetStopped
-      ? candidatesToCheck.slice(attempts.length).map((c) => ({
+    // Candidates can be left unchecked two ways: the route/SearchAPI budget tripped
+    // (budgetStopped), OR discovery surfaced more than one pass checks
+    // (capExceeded — totalCandidates > MAX_CANDIDATES_TO_CHECK). Feed BOTH to the
+    // continuation loop, sourced from the FULL sorted pool (not the per-pass slice),
+    // so a hundreds-unit community's overflow is resumed across passes instead of
+    // being silently dropped after the first MAX_CANDIDATES_TO_CHECK. `attempts.length`
+    // is how many of the sorted pool this pass consumed, so slicing from there yields
+    // exactly the not-yet-checked tail (budget remainder + cap overflow).
+    const capExceeded = totalCandidates > MAX_CANDIDATES_TO_CHECK;
+    const uncheckedCandidates = (budgetStopped || capExceeded)
+      ? candidates.slice(attempts.length).map((c) => ({
         sourceUrl: c.sourceUrl,
         source: c.source,
         address: c.address,
@@ -32723,6 +33062,8 @@ Return ONLY compact JSON with this exact shape:
         uncheckedCount: uncheckedCandidates.length,
         maxCandidatesChecked: MAX_CANDIDATES_TO_CHECK,
         budgetStopped,
+        capExceeded,
+        searchApiCalls,
       },
     });
   });
@@ -35774,7 +36115,7 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
@@ -35791,7 +36132,33 @@ Return ONLY compact JSON with this exact shape:
       // preflight "Find different photos" action can ask discovery to jump
       // past the top candidate once.
       skipFirst?: number;
+      // Opt INTO the residential-IP Chrome sidecar tier for the DIRECT
+      // (`url`) rescrape. Only the "Re-pull all photos" background job sets
+      // this — synchronous wizard callers omit it and stay sidecar-free so
+      // the UI never hangs on a 90s sidecar. See SCRAPE_WITH_SIDECAR / LB #45.
+      useSidecar?: boolean;
     };
+    // Direct-url rescrape scrape options: sidecar ON only when the background
+    // re-pull explicitly opts in, otherwise the long-standing no-sidecar path.
+    const directScrapeOptions = useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR;
+
+    // Confirm WHAT STATE/CITY this unit is in and surface it with the photos, so a
+    // unit whose community is actually in a different state (e.g. a "Bay Watch"
+    // unit filed under Florida — Bay Watch is a South Carolina resort) is caught
+    // while the operator looks at the gallery. The curated location guard
+    // (shared/community-location-guard.ts) is the authoritative cross-check.
+    // Injected into every object response below via a local res.json wrapper so
+    // the many existing return points stay untouched.
+    const unitLocationConfirmation = confirmCommunityLocation({
+      communityName: typeof communityName === "string" ? communityName : null,
+      expectedCity: typeof city === "string" ? city : null,
+      expectedState: typeof state === "string" ? state : null,
+    });
+    const baseJson = res.json.bind(res);
+    (res as any).json = (payload: any) =>
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? baseJson({ locationConfirmation: unitLocationConfirmation, ...payload })
+        : baseJson(payload);
 
     let listingUrl: string | undefined = url || undefined;
     let foundVia: "url" | "search" = "url";
@@ -36459,7 +36826,7 @@ Return ONLY compact JSON with this exact shape:
       // wizard ignores facts so this is additive (combo always returns
       // an empty facts object — no behavior change for combo).
       const facts: ListingFacts = {};
-      const photos = await scrapeListingPhotos(listingUrl, undefined, facts, SCRAPE_WITHOUT_SIDECAR);
+      const photos = await scrapeListingPhotos(listingUrl, undefined, facts, directScrapeOptions);
       const scrapedBR = facts.bedrooms ?? null;
       const bedroomMismatch = scrapedBR !== null && (
         requestedBedrooms ? scrapedBR !== requestedBedrooms : !!minimumBedrooms && scrapedBR < minimumBedrooms
@@ -36606,8 +36973,41 @@ Return ONLY compact JSON with this exact shape:
     return deletedIds;
   }
 
+  // Community drafts that must be removed from the system because they were
+  // saved under the wrong state. Property 900039 (draft id 39) is the "Bay
+  // Watch" unit the operator added as a Florida community even though Bay Watch
+  // is a North Myrtle Beach, SOUTH CAROLINA resort (2026-06-22 request). The
+  // location guard (shared/community-location-guard.ts) blocks NEW mis-located
+  // saves; this prune removes any that already exist — by explicit id and by
+  // the guard — and runs lazily whenever the dashboard lists drafts, so the
+  // cleanup happens on Railway without needing live DB credentials.
+  const MISLOCATED_REMOVED_DRAFT_IDS = new Set<number>([39]);
+  async function pruneMislocatedCommunityDrafts(reason: string): Promise<number[]> {
+    const drafts = await storage.getCommunityDrafts();
+    const deletedIds: number[] = [];
+    for (const draft of drafts as any[]) {
+      const draftId = Number(draft.id);
+      if (!Number.isFinite(draftId)) continue;
+      const explicitlyRemoved = MISLOCATED_REMOVED_DRAFT_IDS.has(draftId);
+      const wrongState =
+        isCommunityInWrongState(draft.name, draft.state) ||
+        isCommunityInWrongState(draft.listingTitle, draft.state) ||
+        isCommunityInWrongState(draft.bookingTitle, draft.state);
+      if (!explicitlyRemoved && !wrongState) continue;
+      const deleted = await storage.deleteCommunityDraft(draftId);
+      if (deleted) deletedIds.push(draftId);
+    }
+    if (deletedIds.length > 0) {
+      console.log(`[community-drafts] pruned mis-located community draft(s) during ${reason}: ${deletedIds.join(", ")}`);
+    }
+    return deletedIds;
+  }
+
   app.get("/api/community/drafts", async (_req, res) => {
-    const deletedIds = await pruneStaleSantaMariaPlaceholders("draft list");
+    const deletedIds = [
+      ...(await pruneStaleSantaMariaPlaceholders("draft list")),
+      ...(await pruneMislocatedCommunityDrafts("draft list")),
+    ];
     let drafts = await storage.getCommunityDrafts();
     const photoBackfills = [];
     for (const draft of drafts) {
@@ -37874,14 +38274,37 @@ Return ONLY compact JSON with this exact shape:
       rejectedBecause: string;
     };
     const attempts: Attempt[] = [];
+    // Cluster a unit's pages ACROSS PORTALS (the SAME unit on zillow/redfin/realtor) so
+    // the dual-source scrape can pick the richest gallery FOR THAT UNIT — without
+    // collapsing DISTINCT units that merely share a street address. A bare street root
+    // does the latter: in a single-address condo building (e.g. Cocoa Beach Towers, every
+    // unit at "220 Young Ave") it lumps all ~50 units into ONE cluster, and the scrape
+    // then stamps one unit's photos + bedroom count onto every neighbor — so real 3BRs
+    // get rejected as the cluster's 1BR (and inherit the wrong unit's photos). Appending
+    // the unit token keeps each unit's portals together while separating different units;
+    // when no unit token is parseable (a distinct-street-number resort unit, one address
+    // == one unit) it falls back to street-root-only, preserving prior behavior there.
+    // The same url + context always yields the same key, so the build pass below and the
+    // per-candidate lookup later agree. Mirrors the /api/replacement/find-unit fix (#808).
+    // NOTE (load-bearing): this references the MODULE-LEVEL address/unit helpers directly,
+    // NOT the local addressFromSlug/addressFromSearchText/streetRootFromAddress aliases
+    // (declared ~50 lines below) — those would put this in their temporal dead zone, the
+    // pre-existing bug (TS2448) that left this whole cluster build throwing at runtime.
+    const listingClusterKeyFor = (url: string, contextText = ""): string => {
+      const root = streetRootFromListingAddress(
+        parseListingAddressFromUrl(url) ?? parseListingAddressFromText(contextText),
+      );
+      if (!root) return `__url:${url}`;
+      let decodedUrl = url;
+      try { decodedUrl = decodeURIComponent(url); } catch { /* keep raw on malformed escapes */ }
+      const rawUnit = extractUnitTokenFromText(`${contextText} ${decodedUrl}`);
+      const unit = normalizeUnitClaim(String(rawUnit || "")).replace(/^0+(?=\d)/, "");
+      return unit ? `${root}#${unit}` : root;
+    };
     const listingUrlsByCluster = new Map<string, string[]>();
     for (const candidateUrl of candidateUrls) {
       const meta = candidateMeta.get(candidateUrl.toLowerCase());
-      const addressGuess = addressFromSlug(candidateUrl)
-        ?? addressFromSearchText(`${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
-      const clusterKey = addressGuess
-        ? (streetRootFromAddress(addressGuess) ?? `__url:${candidateUrl}`)
-        : `__url:${candidateUrl}`;
+      const clusterKey = listingClusterKeyFor(candidateUrl, `${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
       const bucket = listingUrlsByCluster.get(clusterKey) ?? [];
       if (!bucket.includes(candidateUrl)) bucket.push(candidateUrl);
       listingUrlsByCluster.set(clusterKey, bucket);
@@ -38162,9 +38585,9 @@ Return ONLY compact JSON with this exact shape:
       const facts: ListingFacts = {};
       let photos: ScrapedPhoto[] = [];
       let scrapeError: string | null = null;
-      const clusterKey = addressGuess
-        ? (streetRootFromAddress(addressGuess) ?? `__url:${url}`)
-        : `__url:${url}`;
+      // Must compute the SAME key the build pass above used for this url (street root +
+      // unit token), so a single-address building's units don't share one cluster.
+      const clusterKey = listingClusterKeyFor(url, `${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
       const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [url];
       try {
         const dual = await scrapeListingPhotosDualSource(clusterUrls, facts, { sidecarWalletMs: 25_000 });
@@ -38500,6 +38923,24 @@ Return ONLY compact JSON with this exact shape:
         error: "Community type not supported",
         reason: typeCheck.reason,
         matchedDisqualifier: typeCheck.matchedDisqualifier,
+      });
+    }
+    // Location guard: refuse to save a community under a state it does not
+    // physically sit in (e.g. "Bay Watch", a South Carolina resort, saved as a
+    // Florida community). Curated + recall-safe — only KNOWN mis-locations are
+    // rejected, so legitimate communities are unaffected. This makes the
+    // reported mistake impossible to re-enter. See shared/community-location-guard.ts.
+    const stateGuard = checkCommunityState(
+      [draftData.name, draftData.listingTitle, draftData.bookingTitle].find(
+        (candidate) => candidate && isCommunityInWrongState(candidate, draftData.state),
+      ) ?? draftData.name,
+      draftData.state,
+    );
+    if (stateGuard.wrong) {
+      return res.status(400).json({
+        error: "Community is in a different state",
+        reason: `"${draftData.name}" is located in ${stateGuard.homeState}, not ${draftData.state}. Re-add it under ${stateGuard.homeState} so pricing, addresses, and the Top Markets Sweep stay correct.`,
+        homeState: stateGuard.homeState,
       });
     }
     const canonicalRule =
@@ -45221,10 +45662,10 @@ CONSTRAINTS
     const SIGNATURE = isHawaii
       ? `Mahalo,
 John Carpenter
-Magical Island Rentals`
+VacationRentalExpertz`
       : `Thank You,
 John Carpenter
-Magical Island Rentals`;
+VacationRentalExpertz`;
 
     const PLAIN_TEXT_RULES = `FORMATTING RULES (strict — these replies go into email and OTA messaging channels that render plain text):
   - Plain text only. Do NOT use Markdown of any kind — no asterisks for bold or italics, no underscores, no backticks, no bullet markers like "*" or "-" at line starts, no headings.
@@ -45271,7 +45712,7 @@ Examples (same content — chatbot vs. expert):
   HUMAN:    "They won't be directly next door to each other, but the two units are about a 3-minute walk apart within Pili Mai, easy to move between. That sounds like a really sweet Christmas gift for your family."`;
 
     const tonePreamble = isHawaii
-      ? `You are writing as a host for Magical Island Rentals in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
+      ? `You are writing as a host for VacationRentalExpertz in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
   - Open with "Aloha [Name]," or a similar welcoming phrase
   - Use "'ohana" (family/group) only when it sounds natural. If the guest already said "family", usually keep saying "family" instead of swapping in Hawaiian vocabulary.
   - Use "makai" (toward the ocean) / "mauka" (toward the mountains) only if geographically relevant to the answer
@@ -45282,7 +45723,7 @@ Avoid over-using Hawaiian words — one or two per reply max. The goal is authen
 ${HUMAN_VOICE_RULES}
 
 ${PLAIN_TEXT_RULES}`
-      : `You are writing as a host for Magical Island Rentals. Tone is warm, personable, and professional.
+      : `You are writing as a host for VacationRentalExpertz. Tone is warm, personable, and professional.
 
 ${HUMAN_VOICE_RULES}
 
@@ -45447,7 +45888,7 @@ Structure:
 4. Explain that the units shown are example/representative units: the exact assigned units may vary, but they will be very similar quality and will always match the same bedroom counts.
 5. ${balanceDueSentence ? `Include this payment timing sentence exactly once: "${balanceDueSentence}"` : `Do NOT mention the 120-day remaining-balance rule or a balance due date. That sentence is only for VRBO/HomeAway/Booking.com reservations, and this channel is ${platformName}.`}
 6. Say that detailed arrival information will be sent 14 days prior to arrival, including access details and other check-in details.
-7. Sign off with the canonical signature block (Mahalo, / John Carpenter / Magical Island Rentals).
+7. Sign off with the canonical signature block (Mahalo, / John Carpenter / VacationRentalExpertz).
 
 Hard rules:
 - Do NOT say "Thanks for reaching out" or imply the guest asked a question. They did not.
@@ -45473,7 +45914,7 @@ Write a helpful, polite, BRIEF reply. Polite but to the point. NO conversational
 Structure:
 1. A one-line greeting ("Aloha [Name],"). Nothing more — do NOT add "Thanks for reaching out!", "We're excited to host you", "We're thrilled to have you", or any variation. Skip it.
 2. Lead straight into answering the guest's questions in the order they asked. One sentence per question when possible.
-3. Sign off with the canonical signature block (Mahalo, / John Carpenter / Magical Island Rentals).
+3. Sign off with the canonical signature block (Mahalo, / John Carpenter / VacationRentalExpertz).
 
 Hard rules — every one of these has been a real failure mode:
 - Do NOT restate the booking dates ("you've got two beautiful townhomes reserved from December 27th through January 1st"). The guest sent the inquiry; they know their dates.

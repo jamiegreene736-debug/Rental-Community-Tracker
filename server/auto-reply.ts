@@ -4,6 +4,7 @@
 // attempt is persisted to autoReplyLog.
 
 import { guestyRequest } from "./guesty-sync";
+import { findGuestyConversationById, sendGuestyConversationMessage, deliveryOutcome } from "./guesty-ota-messaging";
 import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { occupancyForBedrooms } from "../shared/occupancy";
@@ -704,6 +705,46 @@ async function sendReply(conversationId: string, body: string, moduleField: { ty
   });
 }
 
+// Delivery-verified send for the AUTO-SEND engine (runAutoSendQueue). Routes
+// through the same hardened path as Message AD / the inbox compose box: resolve
+// the proven-delivering OTA module from the reservation's integration.platform,
+// send ONCE, and confirm the channel actually accepted it via module.externalId.
+// A bare Guesty `pending` post is NOT proof the guest received it — see
+// AGENTS.md #51 and the guesty-bookingcom-delivery-externalid memory. Returns
+// the verdict so the caller never marks a thread "replied" on a hard misroute.
+// (The manual operator banner send uses sendReply above — it's interactive and
+// out of this scope.)
+async function deliverGuestyReply(args: {
+  conversationId: string;
+  body: string;
+  channel?: string | null;
+  reservationId?: string | null;
+}): Promise<{ verified: boolean; pending: boolean; deliveredVia: string; deliveryModuleType?: string; reason?: string }> {
+  const conversation = await findGuestyConversationById(
+    args.conversationId,
+    args.reservationId ?? null,
+    args.channel ?? null,
+  );
+  // If the conversation can't be resolved (Guesty hiccup), fall back to a bare
+  // channel module so a clean draft still attempts delivery.
+  const module = conversation?.module ?? { type: args.channel || "email" };
+  const result = await sendGuestyConversationMessage({
+    conversationId: conversation?.id ?? args.conversationId,
+    body: args.body,
+    module,
+    reservation: conversation?.reservation ?? null,
+    channelHint: args.channel ?? null,
+    logPrefix: "auto-reply-send",
+  });
+  return {
+    verified: result.verified,
+    pending: result.pending === true,
+    deliveredVia: result.deliveredVia,
+    deliveryModuleType: result.deliveryModuleType,
+    reason: result.reason,
+  };
+}
+
 // --- Context gathering (Claude tool-use) ---------------------------------
 
 const TOOLS = [
@@ -834,7 +875,7 @@ async function runTool(name: string, input: any): Promise<unknown> {
   return { error: `Unknown tool: ${name}` };
 }
 
-const SYSTEM_PROMPT = `You are John Carpenter, a Reservationist at Magical Island Rentals, a premium vacation rental management company in Hawaii.
+const SYSTEM_PROMPT = `You are John Carpenter, a Reservationist at VacationRentalExpertz, a premium vacation rental management company in Hawaii.
 
 Your job: read a guest's incoming message and write a decisive, warm, concise reply in the voice of an expert host who knows this property inside and out and wants the guest to book with confidence.
 
@@ -940,16 +981,16 @@ FORMATTING
   - Do NOT end with "If you have any specific questions…", "Is there anything else…", "Feel free to reach out", "Don't hesitate to ask", "Looking forward to hosting you". Stop after the last answer.
 - No subject line, no email headers.
 - Sign off EXACTLY as three lines, on their own, after a blank line:
+  Mahalo,
   John Carpenter
-  Reservationist
-  Magical Island Rentals
+  VacationRentalExpertz
 - Never mention that units are "combined" or that this is a portfolio listing. Refer to the listing as a single property with multiple units.
 - Never share guest personal information or internal operational notes.
 
 When you have everything you need and the message is in scope, write ONLY the reply body (ending with the sign-off block above) as your final response — no preamble, no explanation. When in doubt, flag for human.`;
 
 // Canonical sign-off appended to every auto-reply.
-const SIGNOFF = "John Carpenter\nReservationist\nMagical Island Rentals";
+const SIGNOFF = "Mahalo,\nJohn Carpenter\nVacationRentalExpertz";
 
 /**
  * Guarantees every reply ends with the fixed sign-off. If the model already
@@ -961,13 +1002,15 @@ function ensureSignoff(text: string): string {
 
   // Strip any generic sign-offs the model may have added by habit.
   const stripPatterns = [
-    /\n\s*(best|warm regards|regards|thanks|sincerely|cheers|aloha|mahalo)[,!.]?\s*\n?\s*(the\s+\w+\s+team|nex\s*stay[^\n]*|magical\s+island[^\n]*)?\s*$/i,
+    /\n\s*(best|warm regards|regards|thanks|sincerely|cheers|aloha|mahalo)[,!.]?\s*\n?\s*(the\s+\w+\s+team|nex\s*stay[^\n]*|magical\s+island[^\n]*|vacation\s*rental\s*expertz[^\n]*)?\s*$/i,
     /\n\s*the\s+\w+\s+team\s*$/i,
   ];
   for (const re of stripPatterns) body = body.replace(re, "").trim();
 
   // If the canonical sign-off is already present (case-insensitive, any whitespace), leave it.
-  const hasSignoff = /john\s+carpenter\s*[\r\n]+\s*reservationist\s*[\r\n]+\s*magical\s+island\s+rentals/i.test(body);
+  // Match name → brand directly so an optional "Mahalo," opener and the dropped
+  // "Reservationist" line don't cause a duplicate sign-off to be appended.
+  const hasSignoff = /john\s+carpenter\s*[\r\n]+\s*vacation\s*rental\s*expertz/i.test(body);
   if (hasSignoff) return body;
 
   return `${body}\n\n${SIGNOFF}`;
@@ -1121,7 +1164,7 @@ ${params.forceDraftForReview
     // help" warm-ups, "Is there anything specific before you book?"
     // closers, etc. — BEFORE attaching the sign-off so the signature
     // doesn't get touched. ensureSignoff then guarantees the fixed
-    // John Carpenter / Reservationist / Magical Island Rentals block.
+    // Mahalo / John Carpenter / VacationRentalExpertz block.
     const baseHumanized = humanizeReply(text);
     const trimmedHumanized = proximityOnlyRaised ? trimProximityOnlyReply(baseHumanized) : baseHumanized;
     const withPersonalTouch = addGuestPersonalTouch(trimmedHumanized, params.guestMessage);
@@ -1515,10 +1558,38 @@ export async function runAutoSendQueue(): Promise<{ due: number; sent: number; i
             intercepted++;
             continue;
           }
-          await sendReply(fresh.conversationId, draft, fresh.channel ? { type: fresh.channel } : undefined);
+          const delivery = await deliverGuestyReply({
+            conversationId: fresh.conversationId,
+            body: draft,
+            channel: fresh.channel,
+            reservationId: fresh.reservationId,
+          });
+          if (deliveryOutcome(delivery) === "misroute") {
+            // HARD MISROUTE: Guesty filed our reply off the guest's OTA channel
+            // (e.g. on email) so the guest never received it on the channel they
+            // booked with. Do NOT mark the thread replied — flag it for the
+            // operator instead of silently claiming a delivery.
+            await storage.updateAutoReplyLog(fresh.id, {
+              replyDraft: draft,
+              status: "flagged",
+              flagReason: `Auto-send not delivered: ${delivery.reason ?? `landed off the ${delivery.deliveredVia} guest channel`}`,
+              sendAfter: null,
+            });
+            intercepted++;
+            console.warn(`[auto-reply] auto-send MISROUTE for draft ${fresh.id} (conversation ${fresh.conversationId}): ${delivery.reason ?? ""}`);
+            continue;
+          }
+          // Delivered (externalId confirmed) OR posted-but-unconfirmed
+          // ("pending"): the message was posted EXACTLY ONCE, so mark it sent so
+          // the queue never re-posts a duplicate. `pending` is logged as
+          // unconfirmed rather than silently treated as a clean delivery.
           await storage.updateAutoReplyLog(fresh.id, { replyDraft: draft, replySent: true, status: "sent", autoSent: true, errorMessage: null, sendAfter: null });
           sent++;
-          console.log(`[auto-reply] AUTO-SENT draft ${fresh.id} (conversation ${fresh.conversationId})`);
+          if (delivery.verified) {
+            console.log(`[auto-reply] AUTO-SENT draft ${fresh.id} (conversation ${fresh.conversationId}, delivered via ${delivery.deliveredVia})`);
+          } else {
+            console.warn(`[auto-reply] AUTO-SENT draft ${fresh.id} POSTED but ${delivery.deliveredVia} delivery unconfirmed — not resending: ${delivery.reason ?? ""}`);
+          }
         } catch (err) {
           errors++;
           await storage.updateAutoReplyLog(queuedLog.id, { status: "flagged", flagReason: `Auto-send failed: ${(err as Error).message}`, sendAfter: null }).catch(() => {});

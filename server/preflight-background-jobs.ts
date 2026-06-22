@@ -49,7 +49,7 @@ const JOB_TTL_MS = 2 * 60 * 60 * 1000;
 // find-unit ROUTE_BUDGET_MS is up to 285s (expanded) and may still run one
 // PHOTO_SCRAPE_TIMEOUT_MS step that started just inside the budget guard.
 const REPLACEMENT_FIND_UNIT_LOOPBACK_TIMEOUT_MS = 350_000;
-const MAX_REPLACEMENT_FIND_CONTINUATIONS = 8;
+const MAX_REPLACEMENT_FIND_CONTINUATIONS = 12;
 const photoFetchJobs = new Map<string, PreflightPhotoFetchJob>();
 const replacementFindJobs = new Map<string, PreflightReplacementFindJob>();
 const activePhotoFetchJobIds = new Set<string>();
@@ -251,7 +251,17 @@ async function runPreflightPhotoFetchJob(
           // No bedroom gate: this IS the unit's own listing — never reject it on
           // a scraped-bedroom mismatch (resort condos often mis-parse).
           bedrooms: "any",
-        }, 120_000);
+          // Opt into the residential-IP sidecar: a Redfin/Homes/Zillow listing
+          // whose datacenter scrape returns 0 usable gallery photos (bot-wall /
+          // block page) is otherwise re-pulled thin (missing bedrooms). This is
+          // a background job, so the extra sidecar latency is invisible to the
+          // UI. The 300s timeout gives headroom for the worst realistic chain —
+          // Apify (180s ceiling) then a 90s sidecar wallet — so a genuinely slow
+          // re-pull isn't silently dropped into discovery; if it still overruns
+          // it fails soft to the discovery loop below (current behavior). The
+          // sidecar is inert/fast when the worker is offline. See LB #45.
+          useSidecar: true,
+        }, 300_000);
         lastNote = typeof fetchData?.note === "string" ? fetchData.note : lastNote;
         const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
         const nextSourceUrl: string | null = fetchData?.sourceUrl ?? rescrapeSourceUrl;
@@ -470,13 +480,18 @@ async function runPreflightReplacementFindJob(
       if (!data?.error) break;
       const diagnostic = data.diagnostic as {
         budgetStopped?: boolean;
+        capExceeded?: boolean;
         uncheckedCandidates?: Array<Record<string, unknown>>;
         attempts?: Array<{ sourceUrl?: string }>;
       } | null;
       const unchecked = Array.isArray(diagnostic?.uncheckedCandidates)
         ? diagnostic!.uncheckedCandidates!
         : [];
-      if (!diagnostic?.budgetStopped || unchecked.length === 0) break;
+      // Continue when the route left candidates unchecked — either the route/SearchAPI
+      // budget tripped (budgetStopped) OR discovery overflowed one pass (capExceeded,
+      // the hundreds-unit case). Each continuation re-checks the leftover pool with
+      // skipDiscovery, so it drains a big community across passes without re-discovering.
+      if ((!diagnostic?.budgetStopped && !diagnostic?.capExceeded) || unchecked.length === 0) break;
       const checkedUrls = (diagnostic.attempts ?? [])
         .map((row) => String(row?.sourceUrl ?? "").trim())
         .filter(Boolean);
