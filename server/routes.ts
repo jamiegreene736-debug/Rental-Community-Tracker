@@ -41261,6 +41261,20 @@ Return ONLY compact JSON with this exact shape:
         return null;
       }
     };
+    // Content fingerprints (sha256) of the photos CURRENTLY on disk for a folder,
+    // read from _source.json before we replace it. Used to report whether a
+    // re-pull actually changed the gallery (vs re-pulling the same listing →
+    // identical photos → "already current").
+    const readPersistedFingerprints = async (folder: string): Promise<Set<string>> => {
+      const proof = await readPersistedUnitProof(folder);
+      const fromSavedPhotos = Array.isArray((proof as any)?.savedPhotos)
+        ? (proof as any).savedPhotos.map((p: any) => String(p?.contentFingerprint ?? "")).filter(Boolean)
+        : [];
+      const fromArray = Array.isArray((proof as any)?.contentFingerprints)
+        ? (proof as any).contentFingerprints.map((f: any) => String(f ?? "")).filter(Boolean)
+        : [];
+      return new Set<string>(fromSavedPhotos.length ? fromSavedPhotos : fromArray);
+    };
     const duplicatePersistResponse = (
       unitLabel: "Unit A" | "Unit B",
       unitProof: UnitPhotoResolverProof,
@@ -41365,9 +41379,13 @@ Return ONLY compact JSON with this exact shape:
       proof: UnitPhotoResolverProof;
       stagingPath: string;
       finalPath: string;
+      delta: { total: number; added: number; removed: number; unchanged: number; hadPrevious: boolean; changed: boolean };
     } | null> => {
       if (urls.length === 0) return null;
       const folderPath = path.join(PHOTOS_BASE, folder);
+      // Snapshot the fingerprints already on disk BEFORE we stage/replace, so we
+      // can report whether this re-pull actually changed anything.
+      const previousFingerprints = await readPersistedFingerprints(folder);
       const stagingPath = path.join(
         PHOTOS_BASE,
         `.${folder}.staging-${Date.now()}-${randomBytes(4).toString("hex")}`,
@@ -41378,6 +41396,17 @@ Return ONLY compact JSON with this exact shape:
       const results = await Promise.all(capped.map((u, i) => downloadOne(u, stagingPath, i)));
       const savedRows = results.filter((row): row is { url: string; filename: string; contentFingerprint: string } => !!row);
       const saved = savedRows.length;
+      const newFingerprints = new Set(savedRows.map((row) => row.contentFingerprint));
+      const addedCount = Array.from(newFingerprints).filter((f) => !previousFingerprints.has(f)).length;
+      const removedCount = Array.from(previousFingerprints).filter((f) => !newFingerprints.has(f)).length;
+      const delta = {
+        total: saved,
+        added: addedCount,
+        removed: removedCount,
+        unchanged: saved - addedCount,
+        hadPrevious: previousFingerprints.size > 0,
+        changed: previousFingerprints.size === 0 ? true : addedCount > 0 || removedCount > 0,
+      };
       const persistedProof = buildUnitPhotoResolverProof({
         photos: savedRows.map((row) => ({ url: row.url })),
         sourceUrl,
@@ -41410,7 +41439,7 @@ Return ONLY compact JSON with this exact shape:
           },
         }, null, 2));
       }
-      return { folder, saved, proof: persistedProof, stagingPath, finalPath: folderPath };
+      return { folder, saved, proof: persistedProof, stagingPath, finalPath: folderPath, delta };
     };
 
     try {
