@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Camera,
   Search,
+  MapPin,
 } from "lucide-react";
 import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "@/data/unit-builder-data";
 import { useAssistantContext } from "@/lib/assistant-context";
@@ -30,6 +31,7 @@ import {
   parseCityFromMailingAddress,
 } from "@shared/community-addresses";
 import { mergeUnitVerdict, DEEP_PHOTO_MIN } from "@shared/preflight-verdict";
+import { confirmCommunityLocation, type LocationConfirmation } from "@shared/photo-location-confirmation";
 
 type PreflightPhotoFetchJob = {
   id: string;
@@ -60,8 +62,37 @@ type CommunityRepullJob = {
   verifiedCount: number | null;
   verdict: string | null;
   removed: Array<{ filename?: string; reason: string }>;
+  locationConfirmation: LocationConfirmation | null;
   error: string | null;
 };
+
+// Renders the state/city confirmation for a community re-pull or a unit photo
+// fetch: red when the location contradicts the expected state (e.g. a "Bay
+// Watch" unit filed under Florida when Bay Watch is in South Carolina), green
+// when the state is positively confirmed, amber when it could not be confirmed.
+function LocationConfirmationNote({ confirmation }: { confirmation: LocationConfirmation | null }) {
+  if (!confirmation) return null;
+  const status = confirmation.status;
+  const cls =
+    status === "mismatch"
+      ? "border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-200"
+      : status === "match"
+        ? "border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300"
+        : "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300";
+  const Icon = status === "mismatch" ? AlertTriangle : status === "match" ? CheckCircle2 : MapPin;
+  const label =
+    status === "match"
+      ? "Location confirmed"
+      : status === "mismatch"
+        ? (confirmation.stateStatus === "mismatch" ? "Wrong state" : "Wrong city")
+        : "Location";
+  return (
+    <div className={`mt-1.5 flex items-start gap-1.5 rounded-md border px-2 py-1.5 text-xs ${cls}`}>
+      <Icon className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+      <span><span className="font-medium">{label}:</span> {confirmation.note}</span>
+    </div>
+  );
+}
 
 const communityRepullJobStorageKey = (propertyId: number) => `preflight.communityRepullJob.v1:${propertyId}`;
 
@@ -496,6 +527,19 @@ export default function BuilderPreflight() {
     return { street, city, state };
   };
 
+  // Confirm the state/city the units sit in (all units share the property's
+  // community), so getting new unit photos surfaces — and flags — a unit whose
+  // community is filed under the wrong state (e.g. a Bay Watch unit under
+  // Florida; Bay Watch is a South Carolina resort). Recall-safe: only a KNOWN
+  // mis-location is flagged. See shared/community-location-guard.ts.
+  const unitLocationConfirmation: LocationConfirmation | null = property
+    ? confirmCommunityLocation({
+        communityName: property.complexName,
+        expectedCity: parsePropertyAddress(property.address).city || null,
+        expectedState: parsePropertyAddress(property.address).state || null,
+      })
+    : null;
+
   const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unit: { id: string; bedrooms: number; photos?: { url: string }[]; photoFolder?: string }) => {
     if (id >= 0 || !property) return; // promoted drafts only
     const draftId = -id;
@@ -642,6 +686,7 @@ export default function BuilderPreflight() {
         communityName: property.complexName,
         communityFolder: property.communityPhotoFolder,
         city: parseCityFromMailingAddress(property.address) || undefined,
+        state: parsePropertyAddress(property.address).state || undefined,
       });
       const data = await resp.json();
       if (!data?.job?.id) throw new Error("Re-pull job did not start");
@@ -1304,6 +1349,10 @@ export default function BuilderPreflight() {
                 {communityRepullJob.error || communityRepullJob.message}
               </div>
             )}
+
+            {/* Confirms what state the community is actually in (catches a
+                community filed under the wrong state, e.g. Bay Watch = SC not FL). */}
+            <LocationConfirmationNote confirmation={communityRepullJob?.locationConfirmation ?? null} />
           </Card>
         )}
 
@@ -1342,6 +1391,9 @@ export default function BuilderPreflight() {
                 </Button>
               )}
             </div>
+            {/* Confirms what state/city the units are in (catches a unit whose
+                community is filed under the wrong state, e.g. Bay Watch = SC not FL). */}
+            <LocationConfirmationNote confirmation={unitLocationConfirmation} />
             {(() => {
               const allUnitsHavePhotos = effectiveUnits.length > 0
                 && effectiveUnits.every((unit) => photoCountForUnit(unit.id, unit.photos?.length ?? 0) > 0);

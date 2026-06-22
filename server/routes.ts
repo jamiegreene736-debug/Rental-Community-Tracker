@@ -166,6 +166,7 @@ import {
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
 import { checkCommunityState, isCommunityInWrongState } from "@shared/community-location-guard";
+import { confirmCommunityLocation } from "@shared/photo-location-confirmation";
 import {
   communityAddressRuleForName,
   discoveryCityForPhotoSearch,
@@ -30649,6 +30650,7 @@ Return ONLY compact JSON with this exact shape:
       communityName?: string;
       communityFolder?: string;
       city?: string;
+      state?: string;
     };
     const communityName = typeof body.communityName === "string" ? body.communityName.trim() : "";
     if (!communityName) return res.status(400).json({ error: "communityName required" });
@@ -30670,6 +30672,7 @@ Return ONLY compact JSON with this exact shape:
       communityName,
       communityFolder,
       city: typeof body.city === "string" ? body.city.trim() : undefined,
+      state: typeof body.state === "string" ? body.state.trim() : undefined,
     });
     res.status(202).json({ job });
   });
@@ -35904,6 +35907,24 @@ Return ONLY compact JSON with this exact shape:
     // Direct-url rescrape scrape options: sidecar ON only when the background
     // re-pull explicitly opts in, otherwise the long-standing no-sidecar path.
     const directScrapeOptions = useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR;
+
+    // Confirm WHAT STATE/CITY this unit is in and surface it with the photos, so a
+    // unit whose community is actually in a different state (e.g. a "Bay Watch"
+    // unit filed under Florida — Bay Watch is a South Carolina resort) is caught
+    // while the operator looks at the gallery. The curated location guard
+    // (shared/community-location-guard.ts) is the authoritative cross-check.
+    // Injected into every object response below via a local res.json wrapper so
+    // the many existing return points stay untouched.
+    const unitLocationConfirmation = confirmCommunityLocation({
+      communityName: typeof communityName === "string" ? communityName : null,
+      expectedCity: typeof city === "string" ? city : null,
+      expectedState: typeof state === "string" ? state : null,
+    });
+    const baseJson = res.json.bind(res);
+    (res as any).json = (payload: any) =>
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? baseJson({ locationConfirmation: unitLocationConfirmation, ...payload })
+        : baseJson(payload);
 
     let listingUrl: string | undefined = url || undefined;
     let foundVia: "url" | "search" = "url";
