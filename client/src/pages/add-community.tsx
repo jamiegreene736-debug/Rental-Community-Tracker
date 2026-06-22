@@ -369,6 +369,19 @@ export default function AddCommunity() {
 
   const [step, setStep] = useState(1);
 
+  // Step 1 — manual "Add a community" mode. Instead of researching a city and
+  // picking a discovered community, the operator names the community + state and
+  // pastes the two concrete unit listing URLs; the server seeds a bulk combo
+  // listing job with those URLs and the existing job modal shows progress.
+  const [manualMode, setManualMode] = useState(false);
+  const [manualName, setManualName] = useState("");
+  const [manualState, setManualState] = useState("");
+  const [manualUnit1Url, setManualUnit1Url] = useState("");
+  const [manualUnit2Url, setManualUnit2Url] = useState("");
+  const [manualUnit1Beds, setManualUnit1Beds] = useState("");
+  const [manualUnit2Beds, setManualUnit2Beds] = useState("");
+  const [manualBuilding, setManualBuilding] = useState(false);
+
   // Step 1
   const [selectedState, setSelectedState] = useState("");
   const [cityInput, setCityInput] = useState("");
@@ -830,6 +843,15 @@ export default function AddCommunity() {
         setBulkComboJobId(draft.bulkComboJobId);
         setBulkComboOpen(true);
       }
+      // Manual "Add a community" mode + its form fields, so a reload mid-build
+      // returns to the manual tab (not the search tab) with the operator's inputs.
+      if (typeof draft.manualMode === "boolean") setManualMode(draft.manualMode);
+      if (typeof draft.manualName === "string") setManualName(draft.manualName);
+      if (typeof draft.manualState === "string") setManualState(draft.manualState);
+      if (typeof draft.manualUnit1Url === "string") setManualUnit1Url(draft.manualUnit1Url);
+      if (typeof draft.manualUnit2Url === "string") setManualUnit2Url(draft.manualUnit2Url);
+      if (typeof draft.manualUnit1Beds === "string") setManualUnit1Beds(draft.manualUnit1Beds);
+      if (typeof draft.manualUnit2Beds === "string") setManualUnit2Beds(draft.manualUnit2Beds);
       if (Array.isArray(draft.seedMarkets)) setSeedMarkets(draft.seedMarkets);
       if (Array.isArray(draft.selectedMarkets)) setSelectedMarkets(new Set(draft.selectedMarkets));
       if (draft.unitSearchResults) setUnitSearchResults(draft.unitSearchResults);
@@ -908,6 +930,13 @@ export default function AddCommunity() {
       strPermit,
       dbprLicense,
       touristTaxAccount,
+      manualMode,
+      manualName,
+      manualState,
+      manualUnit1Url,
+      manualUnit2Url,
+      manualUnit1Beds,
+      manualUnit2Beds,
       savedAt: new Date().toISOString(),
     };
     try {
@@ -924,6 +953,7 @@ export default function AddCommunity() {
     editedBookingTitle, editedPropertyType, editedPricingArea, editedStreetAddress,
     editedDescription, editedNeighborhood, editedTransit, editedUnitA, editedUnitB,
     strPermit, dbprLicense, touristTaxAccount,
+    manualMode, manualName, manualState, manualUnit1Url, manualUnit2Url, manualUnit1Beds, manualUnit2Beds,
   ]);
 
   useEffect(() => {
@@ -1543,6 +1573,70 @@ export default function AddCommunity() {
       toast({ title: "Quick queue failed", description: e?.message || "See console", variant: "destructive" });
     }
   }, [toast, buildBulkComboItemForCommunity]);
+
+  // Manual "Add a community": POST the operator-typed name/state + two unit URLs.
+  // The server seeds a single bulk combo-listing job (URL-scraped photos → Claude
+  // listing copy → community research/photo folder → dashboard draft → pricing),
+  // and we reuse the existing bulk combo job modal + poller to show progress.
+  const handleManualBuild = useCallback(async () => {
+    const name = manualName.trim();
+    const u1 = manualUnit1Url.trim();
+    const u2 = manualUnit2Url.trim();
+    if (!name) {
+      toast({ title: "Community name required", description: "Enter the name of the community you're adding.", variant: "destructive" });
+      return;
+    }
+    if (!manualState) {
+      toast({ title: "State required", description: "Pick the state the community is in.", variant: "destructive" });
+      return;
+    }
+    if (!u1 || !u2) {
+      toast({ title: "Two unit URLs required", description: "Paste a listing URL for each of the two units.", variant: "destructive" });
+      return;
+    }
+    setManualBuilding(true);
+    try {
+      const resp = await fetch("/api/community/manual-combo-listing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          communityName: name,
+          state: manualState,
+          unit1Url: u1,
+          unit2Url: u2,
+          unit1Bedrooms: manualUnit1Beds.trim() ? Number(manualUnit1Beds) : undefined,
+          unit2Bedrooms: manualUnit2Beds.trim() ? Number(manualUnit2Beds) : undefined,
+        }),
+      });
+      const data = await resp.json().catch(() => ({} as any));
+      if (!resp.ok) {
+        throw new Error(data?.reason || data?.error || `Request failed (${resp.status})`);
+      }
+      if (!data?.job) throw new Error("The server did not start a build job.");
+      setBulkComboJob(data.job);
+      setBulkComboJobId(data.job.id);
+      setBulkComboEvents([]);
+      setBulkComboOpen(true);
+      // Clear the form so an accidental second click (the POST returns instantly
+      // while the job runs for minutes) can't spawn a duplicate job — the manual
+      // path sets allowDuplicate:true server-side, so there's no dedup backstop.
+      // State is kept so the operator can add another community in the same state.
+      setManualName("");
+      setManualUnit1Url("");
+      setManualUnit2Url("");
+      setManualUnit1Beds("");
+      setManualUnit2Beds("");
+      toast({
+        title: "Building your listing",
+        description: `${name} — scraping unit photos, researching the community, and saving the dashboard draft. You can leave this page; it runs on the server.`,
+      });
+    } catch (e: any) {
+      toast({ title: "Could not start the build", description: e?.message || "See console", variant: "destructive" });
+    } finally {
+      setManualBuilding(false);
+    }
+  }, [manualName, manualState, manualUnit1Url, manualUnit2Url, manualUnit1Beds, manualUnit2Beds, toast]);
 
   const toggleBulkCommunity = useCallback((index: number) => {
     setBulkCommunityIndexes((prev) => {
@@ -2422,8 +2516,33 @@ export default function AddCommunity() {
           <Card className="p-6" id="step-1-content">
             <div className="flex items-center gap-2 mb-4">
               <MapPin className="h-5 w-5 text-primary" />
-              <h2 className="text-lg font-semibold" id="step-1-heading">Step 1: Select Location</h2>
+              <h2 className="text-lg font-semibold" id="step-1-heading">{manualMode ? "Add a community manually" : "Step 1: Select Location"}</h2>
             </div>
+            {/* Mode toggle — discover communities by city (default) vs. add one
+                manually from a name + two pasted unit URLs. */}
+            <div className="mb-5 inline-flex rounded-lg border bg-muted/40 p-1" role="tablist" aria-label="Add community mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!manualMode}
+                onClick={() => setManualMode(false)}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${!manualMode ? "bg-background shadow font-medium" : "text-muted-foreground hover:text-foreground"}`}
+                data-testid="mode-search"
+              >
+                Search &amp; discover
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={manualMode}
+                onClick={() => setManualMode(true)}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${manualMode ? "bg-background shadow font-medium" : "text-muted-foreground hover:text-foreground"}`}
+                data-testid="mode-manual"
+              >
+                Add manually
+              </button>
+            </div>
+            {!manualMode && (<>
             <p className="text-muted-foreground text-sm mb-6">
               Choose a US state and city to research vacation rental communities suitable for bundled multi-unit listings.
             </p>
@@ -2618,6 +2737,114 @@ export default function AddCommunity() {
                 </div>
               );
             })()}
+            </>)}
+            {manualMode && (
+              <div className="space-y-4" data-testid="manual-community-form">
+                <p className="text-muted-foreground text-sm">
+                  Already found the two units? Name the community, pick its state, and paste a
+                  listing URL for each unit. We'll scrape the photos, research the community and
+                  its amenity photos with AI, and build the combo listing on your dashboard — it
+                  runs on the server, so you can leave this page.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="sm:col-span-2">
+                    <label htmlFor="manual-name" className="text-sm font-medium mb-1.5 block">Community name</label>
+                    <Input
+                      id="manual-name"
+                      placeholder="e.g. Poipu Kai Resort"
+                      value={manualName}
+                      onChange={(e) => setManualName(e.target.value)}
+                      data-testid="manual-name"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label htmlFor="manual-state" className="text-sm font-medium mb-1.5 block">State</label>
+                    <Select value={manualState} onValueChange={setManualState}>
+                      <SelectTrigger data-testid="manual-state" id="manual-state" aria-label="Select the community's state">
+                        <SelectValue placeholder="Select a state…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {US_STATES.map((s) => (
+                          <SelectItem key={s} value={s} id={`manual-option-state-${s.replace(/\s/g, "-")}`}>{s}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[11px] text-muted-foreground mt-1">City and street address are detected automatically from the units + community name.</p>
+                  </div>
+                  <div>
+                    <label htmlFor="manual-unit1-url" className="text-sm font-medium mb-1.5 block">Unit A listing URL</label>
+                    <Input
+                      id="manual-unit1-url"
+                      placeholder="Zillow / Redfin / Realtor.com / Homes.com"
+                      value={manualUnit1Url}
+                      onChange={(e) => setManualUnit1Url(e.target.value)}
+                      data-testid="manual-unit1-url"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="manual-unit2-url" className="text-sm font-medium mb-1.5 block">Unit B listing URL</label>
+                    <Input
+                      id="manual-unit2-url"
+                      placeholder="Zillow / Redfin / Realtor.com / Homes.com"
+                      value={manualUnit2Url}
+                      onChange={(e) => setManualUnit2Url(e.target.value)}
+                      data-testid="manual-unit2-url"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="manual-unit1-beds" className="text-sm font-medium mb-1.5 block">Unit A bedrooms <span className="font-normal text-muted-foreground">(optional)</span></label>
+                    <Input
+                      id="manual-unit1-beds"
+                      type="number"
+                      min={1}
+                      max={8}
+                      placeholder="auto-detect"
+                      value={manualUnit1Beds}
+                      onChange={(e) => setManualUnit1Beds(e.target.value)}
+                      data-testid="manual-unit1-beds"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="manual-unit2-beds" className="text-sm font-medium mb-1.5 block">Unit B bedrooms <span className="font-normal text-muted-foreground">(optional)</span></label>
+                    <Input
+                      id="manual-unit2-beds"
+                      type="number"
+                      min={1}
+                      max={8}
+                      placeholder="auto-detect"
+                      value={manualUnit2Beds}
+                      onChange={(e) => setManualUnit2Beds(e.target.value)}
+                      data-testid="manual-unit2-beds"
+                    />
+                  </div>
+                </div>
+                <div className="rounded-md border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-900">
+                  Use a <strong>Zillow, Redfin, Realtor.com, or Homes.com</strong> listing for each unit —
+                  those expose full photo galleries. VRBO / Airbnb / Booking.com URLs can't be scraped
+                  (and a combo is built from clean, non-OTA units anyway).
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={handleManualBuild}
+                    disabled={manualBuilding || !manualName.trim() || !manualState || !manualUnit1Url.trim() || !manualUnit2Url.trim()}
+                    data-testid="manual-build"
+                    aria-label="Build the combo listing from the two unit URLs"
+                  >
+                    {manualBuilding ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
+                    {manualBuilding ? "Starting…" : "Build listing"}
+                  </Button>
+                  {bulkComboJob && (
+                    <Button
+                      variant="outline"
+                      onClick={() => setBulkComboOpen(true)}
+                      data-testid="manual-view-progress"
+                    >
+                      View build progress
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
           </Card>
         )}
 
