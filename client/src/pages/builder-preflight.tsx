@@ -80,12 +80,8 @@ function LocationConfirmationNote({ confirmation }: { confirmation: LocationConf
         ? "border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300"
         : "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300";
   const Icon = status === "mismatch" ? AlertTriangle : status === "match" ? CheckCircle2 : MapPin;
-  const label =
-    status === "match"
-      ? "Location confirmed"
-      : status === "mismatch"
-        ? (confirmation.stateStatus === "mismatch" ? "Wrong state" : "Wrong city")
-        : "Location";
+  // The overall verdict is state-driven, so a `mismatch` is always a wrong state.
+  const label = status === "match" ? "Location confirmed" : status === "mismatch" ? "Wrong state" : "Location";
   return (
     <div className={`mt-1.5 flex items-start gap-1.5 rounded-md border px-2 py-1.5 text-xs ${cls}`}>
       <Icon className="h-3.5 w-3.5 mt-0.5 shrink-0" />

@@ -65,11 +65,30 @@ const unconf = confirmCommunityLocation({ communityName: "Mystery Condos", expec
 check("unknown community → unconfirmed (no false mismatch)", unconf.stateStatus === "unconfirmed" && unconf.status === "unconfirmed", unconf);
 check("unconfirmed still reports the expected state", unconf.confirmedState === "Florida", unconf);
 
-// ── city mismatch only ──────────────────────────────────────────────────────
+// ── city divergence with a MATCHING state must NOT red-flag ─────────────────
+// (mailing-city vs marketed-town differences are pervasive — e.g. Poipu Kai's
+// mailing city is "Koloa" but it markets as "Poipu"). State is the verdict.
 const cityBad = confirmCommunityLocation({
   communityName: "Reunion Resort", expectedState: "Florida", observedState: "Florida", expectedCity: "Kissimmee", observedCity: "Orlando",
 });
-check("same state, different city → mismatch overall", cityBad.cityStatus === "mismatch" && cityBad.status === "mismatch", cityBad);
+check("same state, different city → NOT a mismatch (state drives verdict)", cityBad.status === "match", cityBad);
+check("city divergence still recorded as a signal", cityBad.cityStatus === "mismatch", cityBad);
+check("state-match note stays green + adds a soft city aside", /Confirmed in Florida\./.test(cityBad.note) && /usually the same resort area/.test(cityBad.note), cityBad.note);
+
+// ── curated cityAliases collapse mailing-city vs marketed-town ──────────────
+const poipu = confirmCommunityLocation({
+  communityName: "Poipu Kai", expectedState: "HI", expectedCity: "Koloa",
+  expectedCityAliases: ["Poipu", "Poipu Beach"],
+  observedState: "Hawaii", observedCity: "Poipu",
+});
+check("Koloa/Poipu alias → city MATCH, state match, overall match", poipu.stateStatus === "match" && poipu.cityStatus === "match" && poipu.status === "match", poipu);
+check("alias-matched note has no city-difference aside", !/differs from/.test(poipu.note), poipu.note);
+
+// A real WRONG STATE still reds even when a city happens to look fine.
+const wrongStateOnly = confirmCommunityLocation({
+  communityName: "Bay Watch", expectedState: "Florida", expectedCity: "Destin", observedCity: "Destin",
+});
+check("wrong state still mismatch regardless of city", wrongStateOnly.status === "mismatch", wrongStateOnly);
 
 // ── nothing to compare ──────────────────────────────────────────────────────
 const empty = confirmCommunityLocation({ communityName: "Whatever" });
