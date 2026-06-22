@@ -33107,7 +33107,8 @@ Return ONLY compact JSON with this exact shape:
       newBedrooms?: number | null;
       newSourceUrl: string;
     },
-  ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string }> => {
+    opts: { useSidecar?: boolean } = {},
+  ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string; bedrooms?: number | null; bathrooms?: number | null }> => {
     const url = swap.newSourceUrl;
     const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
     if (!/^https?:\/\//i.test(url)) return { ok: false, folder, savedCount: 0, error: "Replacement source URL is invalid" };
@@ -33124,7 +33125,8 @@ Return ONLY compact JSON with this exact shape:
     };
     try {
       const listingFacts: ListingFacts = {};
-      const scraped = await scrapeListingPhotos(url, undefined, listingFacts, SCRAPE_WITHOUT_SIDECAR);
+      const scrapeOpts = opts.useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR;
+      const scraped = await scrapeListingPhotos(url, undefined, listingFacts, scrapeOpts);
       if (!scraped.length) {
         console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
         return { ok: false, folder, savedCount: 0, error: "Replacement listing returned 0 photos" };
@@ -33211,13 +33213,128 @@ Return ONLY compact JSON with this exact shape:
         console.warn(`[unit-swap rescrape] ${folder}: label queue failed ${error?.message ?? error}`);
       });
 
-      return { ok: true, folder, savedCount: result.kept };
+      return {
+        ok: true,
+        folder,
+        savedCount: result.kept,
+        bedrooms: listingFacts.bedrooms ?? swap.newBedrooms ?? swap.oldBedrooms ?? null,
+        bathrooms: listingFacts.bathrooms ?? null,
+      };
     } catch (e: any) {
       await cleanupStaging();
       console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
       return { ok: false, folder, savedCount: 0, error: e?.message ?? "Replacement photo scrape failed" };
     }
   };
+
+  const manualReplacementFromUrl = (sourceUrl: string, fallbackUnitNumber: string) => {
+    const url = String(sourceUrl ?? "").trim();
+    const decodedUrl = decodeURIComponent(url);
+    const addressRaw = parseListingAddressFromUrl(url);
+    const unitToken =
+      extractUnitTokenFromText(decodedUrl)
+      ?? extractAddressUnitToken(addressRaw);
+    const newAddress = withUnitToken(addressRaw, unitToken) ?? addressRaw ?? "Manual replacement";
+    const newUnitLabel = unitToken
+      ? `Unit ${unitToken}`
+      : (fallbackUnitNumber ? `Unit ${fallbackUnitNumber}` : "Replacement unit");
+    return { url, newAddress, newUnitLabel, unitToken };
+  };
+
+  // Operator-picked listing URL: scrape photos + record a unit swap without running
+  // the automated find-unit search (used from Pre-Flight Photo Sources).
+  app.post("/api/preflight/manual-unit-replacement", async (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const propertyId = Number(body.propertyId);
+    const communityFolder = String(body.communityFolder ?? "").trim();
+    const oldUnitId = String(body.oldUnitId ?? "").trim();
+    const oldUnitNumber = String(body.oldUnitNumber ?? "").trim();
+    const oldBedrooms = Number(body.oldBedrooms);
+    const sourceUrl = String(body.sourceUrl ?? "").trim();
+    if (!Number.isFinite(propertyId) || !communityFolder || !oldUnitId || !oldUnitNumber || !sourceUrl) {
+      return res.status(400).json({ error: "propertyId, communityFolder, oldUnitId, oldUnitNumber, and sourceUrl are required" });
+    }
+    if (!/^https?:\/\//i.test(sourceUrl)) {
+      return res.status(400).json({ error: "Paste a full listing URL (Zillow, Redfin, Realtor, etc.)" });
+    }
+
+    const { url, newAddress, newUnitLabel } = manualReplacementFromUrl(sourceUrl, oldUnitNumber);
+    const swapInput = {
+      propertyId,
+      communityFolder,
+      oldUnitId,
+      oldUnitNumber,
+      oldBedrooms: Number.isFinite(oldBedrooms) ? oldBedrooms : null,
+      newAddress,
+      newUnitLabel,
+      newBedrooms: null as number | null,
+      newSourceUrl: url,
+      thumbnailUrl: null as string | null,
+    };
+
+    const activeSwaps = latestUnitSwaps(await storage.getUnitSwaps(propertyId));
+    const newSourceKey = unitSwapListingKey(swapInput.newSourceUrl);
+    const duplicateSource = activeSwaps.find((swap) =>
+      swap.oldUnitId !== swapInput.oldUnitId
+      && newSourceKey
+      && unitSwapListingKey(swap.newSourceUrl) === newSourceKey
+    );
+    if (duplicateSource) {
+      return res.status(409).json({
+        error: "This replacement listing is already assigned to another unit. Choose a different replacement so Unit A and Unit B keep separate photo sets.",
+        duplicateOldUnitId: duplicateSource.oldUnitId,
+      });
+    }
+    const communityName = PROPERTY_UNIT_CONFIGS[propertyId]?.community ?? COMMUNITY_FOLDER_TO_NAME[communityFolder] ?? "";
+    const sameCommunityExclusions = await loadSameCommunityReplacementExclusions({
+      communityFolder,
+      communityName,
+      propertyId,
+      targetUnitId: oldUnitId,
+    });
+    if (newSourceKey && sameCommunityExclusions.urlKeys.has(newSourceKey)) {
+      return res.status(409).json({
+        error: "This replacement listing is already used by another listing in the same community. Choose a different replacement so dashboard listings do not reuse the same unit/photos.",
+      });
+    }
+    const duplicateUnitClaim = findReplacementBlockedUnitClaim(newUnitLabel, newAddress, sameCommunityExclusions);
+    if (duplicateUnitClaim) {
+      return res.status(409).json({
+        error: `Unit ${duplicateUnitClaim} is already used by another listing in this community. Choose a different replacement so dashboard listings do not reuse the same unit/photos.`,
+        duplicateUnitClaim,
+      });
+    }
+
+    const hydrated = await hydrateUnitSwapPhotoFolder(swapInput, { useSidecar: true });
+    if (!hydrated.ok) {
+      return res.status(502).json({
+        error: hydrated.error ?? "Could not scrape photos from that listing URL.",
+        photoFolder: hydrated.folder,
+      });
+    }
+
+    const resolvedBedrooms = hydrated.bedrooms ?? swapInput.oldBedrooms ?? null;
+    const swap = await storage.createUnitSwap({
+      ...swapInput,
+      newBedrooms: resolvedBedrooms,
+    });
+
+    return res.json({
+      swap,
+      photoFolder: hydrated.folder,
+      savedPhotoCount: hydrated.savedCount,
+      unit: {
+        url,
+        address: newAddress,
+        unitLabel: newUnitLabel,
+        bedrooms: resolvedBedrooms,
+        source: "manual-url",
+        photoFolder: hydrated.folder,
+        photoCount: hydrated.savedCount,
+        photos: [],
+      },
+    });
+  });
 
   app.post("/api/unit-swaps", async (req, res) => {
     const { photoFolder: _legacyPhotoFolder, ...swapBody } = req.body as any;
