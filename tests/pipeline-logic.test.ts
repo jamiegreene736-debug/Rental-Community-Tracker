@@ -430,6 +430,11 @@ assert.match(
   /rescrapeSourceUrl[\s\S]*MIN_INDEPENDENT_UNIT_PHOTOS[\s\S]*photos = nextPhotos/,
   "preflight photo job must rescrape the saved source, then fall back to discovery when it yields fewer than MIN_INDEPENDENT_UNIT_PHOTOS",
 );
+assert.match(
+  routesSource,
+  /\/api\/preflight\/photo-fetch-jobs[\s\S]*rescrapeSourceUrl[\s\S]*startPreflightPhotoFetchJob/,
+  "preflight photo-fetch-jobs API must forward rescrapeSourceUrl into the background job (not drop it at the route boundary)",
+);
 // Root-cause guard: the Redfin gallery extractor must isolate the subject
 // listing's photo set so a unit folder never fills with the nearby/comparable
 // homes carousel (the mixed-photos / wrong-community contamination).
