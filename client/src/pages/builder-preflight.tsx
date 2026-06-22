@@ -727,6 +727,14 @@ export default function BuilderPreflight() {
       applyPhotoFetchJob(unit.id, data.job as PreflightPhotoFetchJob);
       setPhotoFetchTick(0);
     } catch (e: any) {
+      // The job-start API didn't respond (or errored) — leave a sticky red
+      // receipt, not just a transient toast, so the failure is visible after.
+      recordPhotoFetchReceipt(unit.id, {
+        timestamp: Date.now(),
+        success: false,
+        title: "Photo re-pull failed",
+        detail: `Couldn't start the photo re-pull — the service didn't respond (${e?.message || String(e)}). Try again.`,
+      });
       toast({ title: "Scrape failed", description: e?.message || String(e), variant: "destructive" });
     }
   };
@@ -1048,9 +1056,12 @@ export default function BuilderPreflight() {
     setProgressTick(0);
     const pendingIds = new Set(unitsToCheck.map(u => u.id));
     setCheckingUnitIds(new Set(pendingIds));
-    // Tally per-unit outcomes locally so we can stamp an accurate success/fail
-    // receipt — the `results` state isn't readable here (it's set async).
-    const outcome = { ok: 0, errored: 0 };
+    // Tally outcomes locally so we can stamp an accurate success/fail receipt —
+    // the `results` state isn't readable here (it's set async). We separate a
+    // dead/non-responding endpoint (`apiFailUnits`) from per-platform lookups
+    // that came back as "error" (an OTA API not responding) so the confirmation
+    // can explicitly call out an API issue instead of hiding it behind a ✓.
+    const outcome = { verified: 0, apiFailUnits: 0, platformErrors: 0, platformsChecked: 0 };
 
     const hasPhotos = unitsToCheck.some(u => !!(u as any).photoFolder);
     if (hasPhotos) setCheckPhase("text");
@@ -1093,13 +1104,25 @@ export default function BuilderPreflight() {
             const data = await resp.json();
             const unitResult: UnitCheckResult | undefined = data?.units?.[0];
             if (unitResult) {
-              outcome.ok += 1;
+              const statuses = PLATFORM_LIST.map(({ key }) => unitResult.platforms?.[key]?.status);
+              outcome.platformsChecked += statuses.length;
+              // "error" = the platform lookup couldn't be completed (e.g. the OTA
+              // API didn't respond). Counted so the receipt surfaces it as an error.
+              outcome.platformErrors += statuses.filter((s) => s === "error").length;
+              if (statuses.some((s) => s === "confirmed" || s === "photo-confirmed" || s === "not-listed")) {
+                outcome.verified += 1;
+              }
               setResults(prev => ({ ...prev, [unit.id]: unitResult }));
             } else {
-              outcome.errored += 1;
+              // 200 OK but no usable unit result — treat as the endpoint not responding properly.
+              outcome.apiFailUnits += 1;
+              outcome.platformsChecked += 3;
+              outcome.platformErrors += 3;
             }
           } else {
-            outcome.errored += 1;
+            outcome.apiFailUnits += 1;
+            outcome.platformsChecked += 3;
+            outcome.platformErrors += 3;
             setResults(prev => ({
               ...prev,
               [unit.id]: {
@@ -1115,7 +1138,10 @@ export default function BuilderPreflight() {
             }));
           }
         } catch {
-          outcome.errored += 1;
+          // Timeout/abort or network failure — the listing-check endpoint didn't respond.
+          outcome.apiFailUnits += 1;
+          outcome.platformsChecked += 3;
+          outcome.platformErrors += 3;
           setResults(prev => ({
             ...prev,
             [unit.id]: {
@@ -1148,18 +1174,43 @@ export default function BuilderPreflight() {
     setLastCheckWasFullAudit(fullPhotoAudit);
 
     // Sticky "last processed" receipt for the OTA unit audit (× to dismiss).
+    // Any API that didn't respond — the listing-check endpoint itself, OR an
+    // Airbnb/VRBO/Booking lookup returning "error" — is shown as a RED error so
+    // a connection problem is never hidden behind a green check.
     const total = unitsToCheck.length;
     const unitWord = total === 1 ? "unit" : "units";
+    const base = fullPhotoAudit ? "Full unit audit" : "OTA platform check";
+    const allPlatformsErrored =
+      outcome.platformsChecked > 0 && outcome.platformErrors >= outcome.platformsChecked;
+    let receiptSuccess: boolean;
+    let receiptTitle: string;
+    let receiptDetail: string;
+    if (outcome.apiFailUnits > 0) {
+      receiptSuccess = false;
+      receiptTitle = `${base} — connection error`;
+      receiptDetail = `${outcome.apiFailUnits} of ${total} ${unitWord} couldn't be checked — the listing-check service didn't respond (timeout or API error). Results are incomplete; run it again.`;
+    } else if (allPlatformsErrored) {
+      receiptSuccess = false;
+      receiptTitle = `${base} — connection error`;
+      receiptDetail = `Couldn't verify any of ${total} ${unitWord} — Airbnb, VRBO & Booking.com didn't respond (API error). Try running it again.`;
+    } else if (outcome.platformErrors > 0) {
+      receiptSuccess = false;
+      receiptTitle = `${base} — some checks didn't respond`;
+      receiptDetail = `Checked ${total} ${unitWord}, but ${outcome.platformErrors} OTA lookup${outcome.platformErrors === 1 ? "" : "s"} didn't respond (API error) — results may be incomplete. Re-run to retry them.`;
+    } else if (outcome.verified === 0) {
+      receiptSuccess = false;
+      receiptTitle = base;
+      receiptDetail = `Couldn't verify any of ${total} ${unitWord} against Airbnb, VRBO & Booking.com. Try running it again.`;
+    } else {
+      receiptSuccess = true;
+      receiptTitle = base;
+      receiptDetail = `Checked all ${total} ${unitWord} against Airbnb, VRBO & Booking.com.`;
+    }
     recordPlatformCheckReceipt({
       timestamp: Date.now(),
-      success: outcome.ok > 0,
-      title: fullPhotoAudit ? "Full unit audit" : "OTA platform check",
-      detail:
-        outcome.ok === 0
-          ? `Couldn't verify any of ${total} ${unitWord} — Airbnb/VRBO/Booking lookups errored. Try running it again.`
-          : outcome.errored > 0
-            ? `Checked ${total} ${unitWord} against Airbnb, VRBO & Booking.com — ${outcome.errored} couldn't be verified.`
-            : `Checked all ${total} ${unitWord} against Airbnb, VRBO & Booking.com.`,
+      success: receiptSuccess,
+      title: receiptTitle,
+      detail: receiptDetail,
     });
   };
 
