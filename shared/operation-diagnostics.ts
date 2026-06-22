@@ -135,6 +135,7 @@ export function suggestRemediations(args: {
   const out: OperationRemediation[] = [];
   const { jobType, failureClass, errorText, diagnostic, itemKey } = args;
   const budgetStopped = Boolean(diagnostic?.budgetStopped);
+  const capExceeded = Boolean(diagnostic?.capExceeded);
   const unchecked = Array.isArray(diagnostic?.uncheckedCandidates)
     ? diagnostic!.uncheckedCandidates!.length
     : 0;
@@ -181,7 +182,7 @@ export function suggestRemediations(args: {
   }
 
   if (jobType === "replacement-find") {
-    if (budgetStopped && unchecked > 0) {
+    if ((budgetStopped || capExceeded) && unchecked > 0) {
       out.push({
         playbook: "continue-search",
         label: "Continue search",

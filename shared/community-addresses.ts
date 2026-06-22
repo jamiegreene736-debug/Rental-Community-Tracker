@@ -8,6 +8,16 @@ export type CommunityAddressRule = {
   zillowBuildingUrl?: string;
   /** Alphanumeric condo unit labels for targeted Google discovery (e.g. C1, O1). */
   discoveryUnitLabels?: string[];
+  /**
+   * Optional sibling building street addresses for a MULTI-BUILDING resort (e.g.
+   * a 300-unit complex spanning several street numbers). The replacement
+   * "Find a New Unit" flow gates candidates to the resort's street root(s); with
+   * only the single canonical `street` it rejected every unit on a sibling
+   * building. List the other building addresses here to admit them. Each entry is
+   * a full street address (root is derived). Keep entries SPECIFIC to this resort —
+   * a wrong/loose root would let a different resort's units in (wrong-resort photos).
+   */
+  buildingStreetRoots?: string[];
 };
 
 export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [

@@ -31215,7 +31215,24 @@ Return ONLY compact JSON with this exact shape:
     const PLATFORM_CHECK_RESERVE_MS = 12_000;
     const PHOTO_REVERSE_SEARCH_TIMEOUT_MS = expandedSearch ? 14_000 : 20_000;
     const PHOTO_PIPELINE_RESERVE_MS = PHOTO_SCRAPE_TIMEOUT_MS + 25_000;
-    const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 80 : 45;
+    // Per-PASS candidate cap. Kept >= DISCOVERY_CANDIDATE_TARGET so one pass can
+    // in principle clear its whole discovery pool; overflow beyond this is no longer
+    // dropped — it's resumed across continuation passes via the capExceeded path
+    // (uncheckedCandidates now sourced from the FULL sorted pool). Raised with the
+    // target bump so a hundreds-unit community is actually scanned deep, while the
+    // route time budget + the SearchAPI call budget below remain the real stops.
+    const MAX_CANDIDATES_TO_CHECK = expandedSearch ? 120 : 70;
+    // Tier 4 cost guardrail: a hard per-PASS ceiling on SearchAPI Google calls so a
+    // big-community scan (discovery queries + ~6 OTA queries/candidate + equivalent-
+    // source queries) can't exhaust the shared SEARCHAPI plan in a single run. When
+    // hit mid candidate-loop we set budgetStopped + break, which populates
+    // uncheckedCandidates and resumes on the next continuation pass (fresh ceiling) —
+    // so the operator still drains the community across passes, just bounded per pass.
+    // Env-tunable; 0/negative disables the ceiling.
+    const SEARCHAPI_CALL_BUDGET = Number.isFinite(Number(process.env.REPLACEMENT_SEARCHAPI_CALL_BUDGET))
+      ? Number(process.env.REPLACEMENT_SEARCHAPI_CALL_BUDGET)
+      : 220;
+    let searchApiCalls = 0;
     const discoveryElapsedMs = () => Date.now() - routeStartedAt;
     const hasDiscoveryBudget = () => discoveryElapsedMs() < DISCOVERY_BUDGET_MS;
     let hasRouteBudget = (reserveMs = 0) => Date.now() + reserveMs < routeStartedAt + ROUTE_BUDGET_MS;
@@ -31290,13 +31307,19 @@ Return ONLY compact JSON with this exact shape:
     const requiredBedroomCount = Number.isFinite(parsedRequiredBedrooms) && parsedRequiredBedrooms > 0
       ? Math.round(parsedRequiredBedrooms)
       : null;
+    // Discovery early-stop target. Raised (was 42/28/24/20) so a hundreds-unit
+    // community surfaces a far larger pool before discovery breaks — the old ~20
+    // ceiling is exactly what made "Find a New Unit" report it only tried ~20 of
+    // hundreds. Safe to raise because (a) discovery queries are cheap (~1 SearchAPI
+    // credit each, bounded by DISCOVERY_BUDGET_MS) and (b) the larger pool is now
+    // drained across continuation passes (capExceeded), not in one over-long route.
     const DISCOVERY_CANDIDATE_TARGET = (expandedSearch && requiredBedroomCount)
-      ? 42
+      ? 80
       : expandedSearch
-      ? 28
+      ? 60
       : requiredBedroomCount
-      ? 24
-      : 20;
+      ? 48
+      : 40;
     const hawaiiStreetSlugTokens = (() => {
       const merged = new Set<string>();
       for (const source of [communityAddress, normalizedStreetAddress, folderCommunityAddress]) {
@@ -31525,6 +31548,14 @@ Return ONLY compact JSON with this exact shape:
       add(normalizedStreetAddress);
       add(addressStreet);
       add(communityAddress);
+
+      // Curated sibling building street roots for a multi-building resort (optional;
+      // dormant until a CommunityAddressRule sets `buildingStreetRoots`). A large
+      // resort spans many building addresses, but the resort-street gate only knew the
+      // ONE canonical street — so every unit on a sibling building was rejected before
+      // it could enter the pool. This admits those buildings. Recall-safe: absent for
+      // every rule today, so non-curated communities are byte-identical to before.
+      for (const extra of communityAddressRuleForName(communityName)?.buildingStreetRoots ?? []) add(extra);
 
       // Na Hale O Keauhou is on Alii Drive in Keauhou. A city-wide
       // Kailua-Kona search can surface nearby Alii Drive resorts such as
@@ -31844,6 +31875,7 @@ Return ONLY compact JSON with this exact shape:
 
     const runDiscoveryQuery = async (siteQuery: string) => {
       console.error(`[find-unit] Searching: ${siteQuery}`);
+      searchApiCalls += 1;
       const searchResp = await fetch(
         `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=${expandedSearch ? 20 : 10}&api_key=${searchApiKey}`,
         { signal: AbortSignal.timeout(DISCOVERY_SEARCH_TIMEOUT_MS) },
@@ -31903,11 +31935,14 @@ Return ONLY compact JSON with this exact shape:
       if (directRoot) allowedRoots.add(directRoot);
       for (const root of communityAddressRoots) allowedRoots.add(root);
       if (suppliedStreetRoot) allowedRoots.add(suppliedStreetRoot);
-      const filterRoots = suppliedStreetRoot
-        ? new Set([suppliedStreetRoot])
-        : allowedRoots.size > 0
-          ? allowedRoots
-          : directAllowedRoots;
+      // Use the FULL set of the resort's known/learned street roots (drops the old
+      // single-root narrowing): for a multi-building resort that single root rejected
+      // every sibling building. `allowedRoots` already = configured + curated
+      // (buildingStreetRoots) + repeated-on-this-run roots, so this stays pinned to the
+      // resort — it does NOT widen to arbitrary nearby inventory.
+      const filterRoots = allowedRoots.size > 0
+        ? allowedRoots
+        : directAllowedRoots;
       const beforeApify = candidates.length;
       for (const link of batch.realtor) addCandidateUrl(link, "realtor", "", "", filterRoots);
       for (const link of batch.zillow) addCandidateUrl(link, "zillow", "", "", filterRoots);
@@ -31927,11 +31962,14 @@ Return ONLY compact JSON with this exact shape:
       if (directRoot) allowedRoots.add(directRoot);
       for (const root of communityAddressRoots) allowedRoots.add(root);
       if (suppliedStreetRoot) allowedRoots.add(suppliedStreetRoot);
-      const filterRoots = suppliedStreetRoot
-        ? new Set([suppliedStreetRoot])
-        : allowedRoots.size > 0
-          ? allowedRoots
-          : directAllowedRoots;
+      // Use the FULL set of the resort's known/learned street roots (drops the old
+      // single-root narrowing): for a multi-building resort that single root rejected
+      // every sibling building. `allowedRoots` already = configured + curated
+      // (buildingStreetRoots) + repeated-on-this-run roots, so this stays pinned to the
+      // resort — it does NOT widen to arbitrary nearby inventory.
+      const filterRoots = allowedRoots.size > 0
+        ? allowedRoots
+        : directAllowedRoots;
       const realtyApiBudgetMs = Math.min(
         20_000,
         Math.max(6_000, DISCOVERY_BUDGET_MS - discoveryElapsedMs()),
@@ -31946,7 +31984,7 @@ Return ONLY compact JSON with this exact shape:
           profile: expandedSearch ? "standard" : "findUnit",
           minBedrooms: requiredBedroomCount,
           maxBedrooms: requiredBedroomCount,
-          allowedStreetRoots: suppliedStreetRoot ? new Set([suppliedStreetRoot]) : undefined,
+          allowedStreetRoots: suppliedStreetRoot ? filterRoots : undefined,
           strictCommunityAnchor: true,
           addRealtorUrl: (url, title) => addCandidateUrl(url, "realtor", title ?? "", "", filterRoots),
         }),
@@ -32051,9 +32089,19 @@ Return ONLY compact JSON with this exact shape:
       // Zillow building (/b/...) pages list many units in one condo resort.
       const addressRule = communityAddressRuleForName(communityName);
       let zillowBuildingUrl = addressRule?.zillowBuildingUrl ?? null;
+      // Only a CURATED/own building page is trusted enough to auto-learn sibling
+      // street roots from — it's guaranteed to be this resort's own /b/ page. A
+      // SERP-DISCOVERED /b/ page (discoverZillowBuildingPageUrl below) is a name-match
+      // guess that could resolve to a DIFFERENT building, so we still harvest its units
+      // (gated to the known resort street) but must NOT widen the resort-street gate
+      // from its dominant roots — that would risk wrong-resort photo contamination.
+      let zillowBuildingUrlTrusted = Boolean(zillowBuildingUrl);
       if (!zillowBuildingUrl) {
         const hardcoded = COMMUNITY_SOURCE_URLS[communityName]?.primary;
-        if (hardcoded && /zillow\.com\/b\//i.test(hardcoded)) zillowBuildingUrl = hardcoded;
+        if (hardcoded && /zillow\.com\/b\//i.test(hardcoded)) {
+          zillowBuildingUrl = hardcoded;
+          zillowBuildingUrlTrusted = true;
+        }
       }
       if (!zillowBuildingUrl && communityLocForQueries) {
         zillowBuildingUrl = await discoverZillowBuildingPageUrl(
@@ -32061,16 +32109,44 @@ Return ONLY compact JSON with this exact shape:
           communityLocForQueries.city,
           searchApiKey,
         );
+        // Discovered, not curated → leave zillowBuildingUrlTrusted false (no root-learning).
       }
       if (zillowBuildingUrl && hasDiscoveryBudget()) {
         const buildingUrls = await harvestZillowBuildingPageUrls(zillowBuildingUrl);
+        // A CURATED/own Zillow /b/ page may span several building street addresses
+        // (a multi-building resort). Auto-learn a sibling street root only when it
+        // recurs on THIS page (>=2 homedetails URLs) — mirroring repeatedCandidateRoots,
+        // so one stray nearby listing on the /b/ page can't widen the net — then admit
+        // those buildings. Gated to a TRUSTED page (curated rule / COMMUNITY_SOURCE_URLS);
+        // a SERP-discovered /b/ page is NOT trusted to widen the gate (wrong-resort risk).
+        const buildingRootCounts = new Map<string, number>();
+        for (const link of buildingUrls) {
+          const root = streetRootFromListingAddress(parseListingAddressFromUrl(link));
+          if (root) buildingRootCounts.set(root, (buildingRootCounts.get(root) ?? 0) + 1);
+        }
+        const learnedBuildingRoots = zillowBuildingUrlTrusted
+          ? Array.from(buildingRootCounts.entries())
+              .filter(([, count]) => count >= 2)
+              .map(([root]) => root)
+          : [];
+        let buildingAllowedRoots = directAllowedRoots;
+        if (learnedBuildingRoots.length > 0) {
+          if (directAllowedRoots && directAllowedRoots.size > 0) {
+            const merged = new Set<string>();
+            directAllowedRoots.forEach((r) => merged.add(r));
+            for (const r of learnedBuildingRoots) merged.add(r);
+            buildingAllowedRoots = merged;
+          } else {
+            buildingAllowedRoots = new Set<string>(learnedBuildingRoots);
+          }
+        }
         const beforeBuilding = candidates.length;
         for (const link of buildingUrls) {
-          addCandidateUrl(link, "zillow", `Zillow building page ${communityName}`, "", directAllowedRoots);
+          addCandidateUrl(link, "zillow", `Zillow building page ${communityName}`, "", buildingAllowedRoots);
         }
         console.error(
           `[find-unit] Zillow building page ${zillowBuildingUrl} → ${buildingUrls.length} homedetails URLs, ` +
-          `added=${candidates.length - beforeBuilding}`,
+          `learnedRoots=${learnedBuildingRoots.join(" | ") || "none"}, added=${candidates.length - beforeBuilding}`,
         );
       }
 
@@ -32175,6 +32251,7 @@ Return ONLY compact JSON with this exact shape:
     const enforcedHosts = platformHosts.filter((p) => enforcedKeys.includes(p.key));
 
     async function runSearch(q: string): Promise<any[] | null> {
+      searchApiCalls += 1;
       try {
         const resp = await fetch(
           `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=3&api_key=${searchApiKey}`,
@@ -32432,6 +32509,15 @@ Return ONLY compact JSON with this exact shape:
       if (!hasRouteBudget(PLATFORM_CHECK_RESERVE_MS)) {
         budgetStopped = true;
         console.warn(`[find-unit] route budget nearly exhausted after ${attempts.length}/${candidates.length} candidates`);
+        break;
+      }
+      // Tier 4 guardrail: stop spending SearchAPI before a single pass can drain the
+      // shared plan. Reserve ~12 calls (the worst-case per-candidate fan-out) so we
+      // stop cleanly rather than overshooting. Setting budgetStopped routes the
+      // remaining candidates into uncheckedCandidates → next continuation pass.
+      if (SEARCHAPI_CALL_BUDGET > 0 && searchApiCalls + 12 > SEARCHAPI_CALL_BUDGET) {
+        budgetStopped = true;
+        console.warn(`[find-unit] SearchAPI call budget (${SEARCHAPI_CALL_BUDGET}) reached after ${searchApiCalls} calls / ${attempts.length} candidates — pausing for continuation`);
         break;
       }
       try {
@@ -32787,7 +32873,11 @@ Return ONLY compact JSON with this exact shape:
       if (sourceBreakdown.redfin > 0) sourceParts.push(`${sourceBreakdown.redfin} Redfin`);
       if (sourceBreakdown.homes > 0) sourceParts.push(`${sourceBreakdown.homes} Homes.com`);
       if (sourceBreakdown.vrbo > 0) sourceParts.push(`${sourceBreakdown.vrbo} VRBO`);
-      diagnostic = `Checked ${totalCandidates} ${totalCandidates === 1 ? "candidate" : "candidates"} (${sourceParts.join(" + ")})${expandedSearch ? " in expanded mode" : ""} — ${parts.join(", ")}.`;
+      // Reframed (was "Checked N candidates") so the operator reads N as the
+      // discovered for-sale POOL, not a scan limit — the complaint was "it only
+      // tried ~20 of hundreds." The `parts` breakdown below explains the outcome
+      // (e.g. how many were already on an OTA).
+      diagnostic = `Found ${totalCandidates} for-sale ${totalCandidates === 1 ? "listing" : "listings"} in ${communityName} (${sourceParts.join(" + ")})${expandedSearch ? " in expanded mode" : ""} — ${parts.join(", ")}.`;
       // Saturated-community hint: when the ONLY thing standing between the operator
       // and a result is the OTA-presence gate, point them at the opt-in. Append-only
       // so the test-asserted "found on …Airbnb/VRBO/Booking.com" substring above is
@@ -32798,8 +32888,17 @@ Return ONLY compact JSON with this exact shape:
       }
     }
 
-    const uncheckedCandidates = budgetStopped
-      ? candidatesToCheck.slice(attempts.length).map((c) => ({
+    // Candidates can be left unchecked two ways: the route/SearchAPI budget tripped
+    // (budgetStopped), OR discovery surfaced more than one pass checks
+    // (capExceeded — totalCandidates > MAX_CANDIDATES_TO_CHECK). Feed BOTH to the
+    // continuation loop, sourced from the FULL sorted pool (not the per-pass slice),
+    // so a hundreds-unit community's overflow is resumed across passes instead of
+    // being silently dropped after the first MAX_CANDIDATES_TO_CHECK. `attempts.length`
+    // is how many of the sorted pool this pass consumed, so slicing from there yields
+    // exactly the not-yet-checked tail (budget remainder + cap overflow).
+    const capExceeded = totalCandidates > MAX_CANDIDATES_TO_CHECK;
+    const uncheckedCandidates = (budgetStopped || capExceeded)
+      ? candidates.slice(attempts.length).map((c) => ({
         sourceUrl: c.sourceUrl,
         source: c.source,
         address: c.address,
@@ -32830,6 +32929,8 @@ Return ONLY compact JSON with this exact shape:
         uncheckedCount: uncheckedCandidates.length,
         maxCandidatesChecked: MAX_CANDIDATES_TO_CHECK,
         budgetStopped,
+        capExceeded,
+        searchApiCalls,
       },
     });
   });

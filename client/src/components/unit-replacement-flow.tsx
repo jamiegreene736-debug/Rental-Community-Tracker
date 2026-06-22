@@ -239,6 +239,18 @@ export function UnitReplacementFlow({
   const selectedUnit = allUnits.find(u => u.id === selectedUnitId) || unit;
   const hasActiveReplacement = allUnits.some(u => Boolean(u.replacementSourceUrl));
 
+  // When the last failed search shows its candidates were overwhelmingly already
+  // listed on an OTA (skipped-found is the dominant verdict) and the operator hasn't
+  // opted into OTA-listed units yet, surface a one-click re-run that includes them —
+  // for a short-term-rental-saturated community that's the cheapest, most effective
+  // fix (scanning MORE units just finds more already-listed ones). The diagnostic
+  // breakdown rides along on the failed job (replacementJob.diagnostic.breakdown).
+  const failedBreakdown = (replacementJob?.diagnostic as { breakdown?: Record<string, number> } | null | undefined)?.breakdown ?? null;
+  const skippedFoundCount = failedBreakdown?.["skipped-found"] ?? 0;
+  const otaSaturatedFailure = !allowOtaListed
+    && skippedFoundCount > 0
+    && Object.entries(failedBreakdown ?? {}).every(([key, n]) => key === "skipped-found" || (n ?? 0) <= skippedFoundCount);
+
   const applyReplacementJob = (job: PreflightReplacementFindJob, restored = false) => {
     setReplacementJob(job);
     if (job.status === "queued" || job.status === "running") {
@@ -420,8 +432,13 @@ export function UnitReplacementFlow({
     return () => window.clearInterval(id);
   }, [isWorking]);
 
-  async function search(opts: { extraSkip?: string; expanded?: boolean } = {}) {
+  async function search(opts: { extraSkip?: string; expanded?: boolean; allowOtaListed?: boolean } = {}) {
     const expanded = opts.expanded === true;
+    // Allow a one-shot override (the "Include OTA-listed & retry" action) without
+    // waiting for the checkbox's setState to flush. Also reflect it in the checkbox
+    // so subsequent manual searches keep the operator's choice.
+    const useAllowOtaListed = opts.allowOtaListed ?? allowOtaListed;
+    if (opts.allowOtaListed === true && !allowOtaListed) setAllowOtaListed(true);
     // A fresh operator-initiated search resets the durable resume budget and the
     // per-mount eviction guard, so a new search gets its own restart allowance.
     autoResumedFromRef.current = new Set();
@@ -446,7 +463,7 @@ export function UnitReplacementFlow({
       requiredBedrooms: selectedUnit.bedrooms,
       skipUrls: [...skipUrls, ...nextExtra],
       expandedSearch: expanded,
-      allowOtaListed,
+      allowOtaListed: useAllowOtaListed,
     };
     lastSearchPayloadRef.current = startPayload;
     try {
@@ -688,7 +705,25 @@ export function UnitReplacementFlow({
             <XCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
             {swapError || "Search failed. Please try again."}
           </p>
+          {otaSaturatedFailure && (
+            <p className="text-[11px] text-amber-700 dark:text-amber-400 flex items-start gap-1.5" data-testid="replacement-ota-saturated-hint">
+              <ShieldAlert className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+              <span>
+                {skippedFoundCount} of the listings found are already on Airbnb/VRBO/Booking.com — this community is heavily rented, so few or no fully-clean units remain. Include OTA-listed units to use one (its real-estate photos are still checked, so duplicate photos are never reused).
+              </span>
+            </p>
+          )}
           <div className="flex flex-wrap gap-2 items-center">
+            {otaSaturatedFailure && (
+              <Button
+                size="sm"
+                onClick={() => search({ allowOtaListed: true, expanded: lastSearchExpanded })}
+                data-testid="button-include-ota-listed-retry"
+              >
+                <ShieldAlert className="h-3.5 w-3.5 mr-1.5" />
+                Include OTA-listed units &amp; retry
+              </Button>
+            )}
             <OperationFailureActions
               jobType="replacement-find"
               jobId={replacementJobId}
