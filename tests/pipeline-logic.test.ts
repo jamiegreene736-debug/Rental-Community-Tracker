@@ -2255,6 +2255,29 @@ assert.ok(
     && routeSource.includes("const clusterKey = listingClusterKeyFor("),
   "replacement find-unit cluster lookups must use the unit-aware listingClusterKeyFor helper",
 );
+// 2026-06-22 follow-up to #808 (Cocoa Beach Towers): /api/single-listing/find-clean-unit
+// had the SAME single-address collapse. Its photo cluster keyed on a bare street root
+// (streetRootFromAddress(addressGuess)), so every unit in a one-address condo building
+// (e.g. 220 Young Ave) merged into one cluster and the dual-source scrape stamped one
+// unit's bedroom count + photos onto its neighbors. (That build loop was also a dead
+// path — it referenced the addressFromSlug/streetRootFromAddress aliases before their
+// declaration, a TDZ that threw at runtime.) It must cluster by unit identity too.
+{
+  const fcuStart = routeSource.indexOf('app.post("/api/single-listing/find-clean-unit"');
+  const fcuEnd = routeSource.indexOf('app.post("/api/community/save"', fcuStart);
+  assert.ok(fcuStart >= 0 && fcuEnd > fcuStart, "find-clean-unit route must be locatable for source-lock");
+  const fcuSource = routeSource.slice(fcuStart, fcuEnd);
+  assert.ok(
+    fcuSource.includes("const listingClusterKeyFor = (url: string, contextText = \"\"): string =>")
+      && /listingClusterKeyFor[\s\S]*?\$\{root\}#\$\{unit\}/.test(fcuSource),
+    "find-clean-unit must cluster portals by unit identity (street root + unit token), not a bare street root",
+  );
+  assert.ok(
+    !/streetRootFromAddress\(addressGuess\)\s*\?\?\s*`__url:/.test(fcuSource)
+      && (fcuSource.match(/const clusterKey = listingClusterKeyFor\(/g) || []).length >= 2,
+    "find-clean-unit cluster build + lookup must both use the unit-aware listingClusterKeyFor helper",
+  );
+}
 assert.ok(
   routeSource.includes("const candidatePhaseStartedAt = Date.now()"),
   "replacement search must reserve a dedicated candidate-check budget after discovery",

@@ -38163,14 +38163,37 @@ Return ONLY compact JSON with this exact shape:
       rejectedBecause: string;
     };
     const attempts: Attempt[] = [];
+    // Cluster a unit's pages ACROSS PORTALS (the SAME unit on zillow/redfin/realtor) so
+    // the dual-source scrape can pick the richest gallery FOR THAT UNIT — without
+    // collapsing DISTINCT units that merely share a street address. A bare street root
+    // does the latter: in a single-address condo building (e.g. Cocoa Beach Towers, every
+    // unit at "220 Young Ave") it lumps all ~50 units into ONE cluster, and the scrape
+    // then stamps one unit's photos + bedroom count onto every neighbor — so real 3BRs
+    // get rejected as the cluster's 1BR (and inherit the wrong unit's photos). Appending
+    // the unit token keeps each unit's portals together while separating different units;
+    // when no unit token is parseable (a distinct-street-number resort unit, one address
+    // == one unit) it falls back to street-root-only, preserving prior behavior there.
+    // The same url + context always yields the same key, so the build pass below and the
+    // per-candidate lookup later agree. Mirrors the /api/replacement/find-unit fix (#808).
+    // NOTE (load-bearing): this references the MODULE-LEVEL address/unit helpers directly,
+    // NOT the local addressFromSlug/addressFromSearchText/streetRootFromAddress aliases
+    // (declared ~50 lines below) — those would put this in their temporal dead zone, the
+    // pre-existing bug (TS2448) that left this whole cluster build throwing at runtime.
+    const listingClusterKeyFor = (url: string, contextText = ""): string => {
+      const root = streetRootFromListingAddress(
+        parseListingAddressFromUrl(url) ?? parseListingAddressFromText(contextText),
+      );
+      if (!root) return `__url:${url}`;
+      let decodedUrl = url;
+      try { decodedUrl = decodeURIComponent(url); } catch { /* keep raw on malformed escapes */ }
+      const rawUnit = extractUnitTokenFromText(`${contextText} ${decodedUrl}`);
+      const unit = normalizeUnitClaim(String(rawUnit || "")).replace(/^0+(?=\d)/, "");
+      return unit ? `${root}#${unit}` : root;
+    };
     const listingUrlsByCluster = new Map<string, string[]>();
     for (const candidateUrl of candidateUrls) {
       const meta = candidateMeta.get(candidateUrl.toLowerCase());
-      const addressGuess = addressFromSlug(candidateUrl)
-        ?? addressFromSearchText(`${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
-      const clusterKey = addressGuess
-        ? (streetRootFromAddress(addressGuess) ?? `__url:${candidateUrl}`)
-        : `__url:${candidateUrl}`;
+      const clusterKey = listingClusterKeyFor(candidateUrl, `${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
       const bucket = listingUrlsByCluster.get(clusterKey) ?? [];
       if (!bucket.includes(candidateUrl)) bucket.push(candidateUrl);
       listingUrlsByCluster.set(clusterKey, bucket);
@@ -38451,9 +38474,9 @@ Return ONLY compact JSON with this exact shape:
       const facts: ListingFacts = {};
       let photos: ScrapedPhoto[] = [];
       let scrapeError: string | null = null;
-      const clusterKey = addressGuess
-        ? (streetRootFromAddress(addressGuess) ?? `__url:${url}`)
-        : `__url:${url}`;
+      // Must compute the SAME key the build pass above used for this url (street root +
+      // unit token), so a single-address building's units don't share one cluster.
+      const clusterKey = listingClusterKeyFor(url, `${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
       const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [url];
       try {
         const dual = await scrapeListingPhotosDualSource(clusterUrls, facts, { sidecarWalletMs: 25_000 });
