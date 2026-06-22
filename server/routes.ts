@@ -165,6 +165,7 @@ import {
 } from "@shared/folder-unit-map";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
+import { checkCommunityState, isCommunityInWrongState } from "@shared/community-location-guard";
 import {
   communityAddressRuleForName,
   discoveryCityForPhotoSearch,
@@ -36674,8 +36675,41 @@ Return ONLY compact JSON with this exact shape:
     return deletedIds;
   }
 
+  // Community drafts that must be removed from the system because they were
+  // saved under the wrong state. Property 900039 (draft id 39) is the "Bay
+  // Watch" unit the operator added as a Florida community even though Bay Watch
+  // is a North Myrtle Beach, SOUTH CAROLINA resort (2026-06-22 request). The
+  // location guard (shared/community-location-guard.ts) blocks NEW mis-located
+  // saves; this prune removes any that already exist — by explicit id and by
+  // the guard — and runs lazily whenever the dashboard lists drafts, so the
+  // cleanup happens on Railway without needing live DB credentials.
+  const MISLOCATED_REMOVED_DRAFT_IDS = new Set<number>([39]);
+  async function pruneMislocatedCommunityDrafts(reason: string): Promise<number[]> {
+    const drafts = await storage.getCommunityDrafts();
+    const deletedIds: number[] = [];
+    for (const draft of drafts as any[]) {
+      const draftId = Number(draft.id);
+      if (!Number.isFinite(draftId)) continue;
+      const explicitlyRemoved = MISLOCATED_REMOVED_DRAFT_IDS.has(draftId);
+      const wrongState =
+        isCommunityInWrongState(draft.name, draft.state) ||
+        isCommunityInWrongState(draft.listingTitle, draft.state) ||
+        isCommunityInWrongState(draft.bookingTitle, draft.state);
+      if (!explicitlyRemoved && !wrongState) continue;
+      const deleted = await storage.deleteCommunityDraft(draftId);
+      if (deleted) deletedIds.push(draftId);
+    }
+    if (deletedIds.length > 0) {
+      console.log(`[community-drafts] pruned mis-located community draft(s) during ${reason}: ${deletedIds.join(", ")}`);
+    }
+    return deletedIds;
+  }
+
   app.get("/api/community/drafts", async (_req, res) => {
-    const deletedIds = await pruneStaleSantaMariaPlaceholders("draft list");
+    const deletedIds = [
+      ...(await pruneStaleSantaMariaPlaceholders("draft list")),
+      ...(await pruneMislocatedCommunityDrafts("draft list")),
+    ];
     let drafts = await storage.getCommunityDrafts();
     const photoBackfills = [];
     for (const draft of drafts) {
@@ -38568,6 +38602,24 @@ Return ONLY compact JSON with this exact shape:
         error: "Community type not supported",
         reason: typeCheck.reason,
         matchedDisqualifier: typeCheck.matchedDisqualifier,
+      });
+    }
+    // Location guard: refuse to save a community under a state it does not
+    // physically sit in (e.g. "Bay Watch", a South Carolina resort, saved as a
+    // Florida community). Curated + recall-safe — only KNOWN mis-locations are
+    // rejected, so legitimate communities are unaffected. This makes the
+    // reported mistake impossible to re-enter. See shared/community-location-guard.ts.
+    const stateGuard = checkCommunityState(
+      [draftData.name, draftData.listingTitle, draftData.bookingTitle].find(
+        (candidate) => candidate && isCommunityInWrongState(candidate, draftData.state),
+      ) ?? draftData.name,
+      draftData.state,
+    );
+    if (stateGuard.wrong) {
+      return res.status(400).json({
+        error: "Community is in a different state",
+        reason: `"${draftData.name}" is located in ${stateGuard.homeState}, not ${draftData.state}. Re-add it under ${stateGuard.homeState} so pricing, addresses, and the Top Markets Sweep stay correct.`,
+        homeState: stateGuard.homeState,
       });
     }
     const canonicalRule =

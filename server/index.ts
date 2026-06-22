@@ -11,7 +11,7 @@ import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { startGuestReceiptScheduler } from "./guest-receipts";
 import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 import { ensureRuntimeSchema } from "./schema-maintenance";
-import { ensureTopMarketScanCacheLogicVersion } from "./top-market-scan-cache";
+import { ensureTopMarketScanCacheLogicVersion, refreshTopMarketScanCacheComboFlags } from "./top-market-scan-cache";
 import { requireAuth, loginPageHandler, loginPostHandler, logoutHandler } from "./auth";
 import { installSearchApiFetchFallback } from "./searchapi";
 
@@ -97,6 +97,13 @@ app.get("/api/auth/session", (_req, res) => {
 (async () => {
   await ensureRuntimeSchema();
   await ensureTopMarketScanCacheLogicVersion();
+  // Rewrite any cached market scans through filterTopScanComboCandidates so a
+  // community now disqualified by the location guard (e.g. "Bay Watch" cached
+  // under a Florida market) is physically removed from the stored JSON on
+  // deploy — not just hidden at serve time. Idempotent; only changed rows write.
+  await refreshTopMarketScanCacheComboFlags().catch((e: any) =>
+    console.warn(`[top-market-scan-cache] boot location/combo scrub failed: ${e?.message ?? e}`),
+  );
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
