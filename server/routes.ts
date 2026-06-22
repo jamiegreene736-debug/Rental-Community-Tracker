@@ -32211,15 +32211,35 @@ Return ONLY compact JSON with this exact shape:
       }
     }
 
+    // Cluster a unit's pages ACROSS PORTALS (the SAME unit on zillow/redfin/realtor) so
+    // the dual-source scrape can pick the richest gallery FOR THAT UNIT — without
+    // collapsing DISTINCT units that merely share a street address. A bare street root
+    // does the latter: in a single-address condo building (e.g. Cocoa Beach Towers,
+    // every unit at "220 Young Ave") it lumps all ~50 units into ONE cluster, and the
+    // scrape then stamps one unit's photos + bedroom count onto every neighbor — so real
+    // 3BRs get rejected as the cluster's 1BR (and inherit the wrong unit's photos).
+    // Appending the unit number keeps each unit's portals together while separating
+    // different units. When no unit token is parseable (a distinct-street-number resort
+    // unit, one address == one unit) it falls back to street-root-only, preserving prior
+    // behavior there. The same url always yields the same key, so build and lookup agree.
+    const listingClusterKeyFor = (url: string, contextText = ""): string => {
+      const root = streetRootFromListingAddress(
+        parseListingAddressFromUrl(url) ?? parseListingAddressFromText(contextText),
+      );
+      if (!root) return `__url:${url}`;
+      const rawUnit = extractUnitNumber(url, detectSource(url) ?? "zillow", contextText)
+        || extractUnitNumberFromText(contextText);
+      const unit = normalizeUnitClaim(String(rawUnit || "")).replace(/^0+(?=\d)/, "");
+      return unit ? `${root}#${unit}` : root;
+    };
+
     const listingUrlsByCluster = new Map<string, string[]>();
     for (const candidate of candidates) {
-      const root = streetRootFromListingAddress(
-        parseListingAddressFromUrl(candidate.sourceUrl) ?? parseListingAddressFromText(candidate.contextText),
-      ) ?? `__url:${candidate.sourceUrl}`;
-      const bucket = listingUrlsByCluster.get(root) ?? [];
+      const clusterKey = listingClusterKeyFor(candidate.sourceUrl, candidate.contextText);
+      const bucket = listingUrlsByCluster.get(clusterKey) ?? [];
       const key = unitSwapListingKey(candidate.sourceUrl);
       if (key && !bucket.some((u) => unitSwapListingKey(u) === key)) bucket.push(candidate.sourceUrl);
-      listingUrlsByCluster.set(root, bucket);
+      listingUrlsByCluster.set(clusterKey, bucket);
     }
 
     // PR #329 / #338: sort candidates by source priority before
@@ -32476,9 +32496,7 @@ Return ONLY compact JSON with this exact shape:
             continue;
           }
           const facts: ListingFacts = {};
-          const clusterKey = streetRootFromListingAddress(
-            parseListingAddressFromUrl(link) ?? parseListingAddressFromText(`${hit?.title || ""} ${hit?.snippet || ""}`),
-          ) ?? `__url:${link}`;
+          const clusterKey = listingClusterKeyFor(link, `${hit?.title || ""} ${hit?.snippet || ""}`);
           const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [link];
           const dual = await withStepTimeout(
             scrapeListingPhotosDualSource(clusterUrls.length > 0 ? clusterUrls : [link], facts, SCRAPE_WITHOUT_SIDECAR),
@@ -32674,9 +32692,7 @@ Return ONLY compact JSON with this exact shape:
           const MIN_PHOTOS = expandedSearch ? 3 : 5;
           let scrapedPhotoUrls: string[] = [];
           let candidateFacts: ListingFacts = {};
-          const clusterKey = streetRootFromListingAddress(
-            parseListingAddressFromUrl(sourceUrl) ?? parseListingAddressFromText(candidate.contextText),
-          ) ?? `__url:${sourceUrl}`;
+          const clusterKey = listingClusterKeyFor(sourceUrl, candidate.contextText);
           const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [sourceUrl];
           try {
             const dual = await withStepTimeout(

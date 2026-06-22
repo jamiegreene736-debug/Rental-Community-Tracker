@@ -2241,6 +2241,20 @@ assert.match(
   /find-unit[\s\S]*scrapeListingPhotosDualSource\(clusterUrls/,
   "replacement find-unit must parallel-scrape all portal URLs per address cluster",
 );
+// The portal cluster must key on street root + UNIT NUMBER, not a bare street root —
+// otherwise a single-address condo building (every unit at one street) collapses all
+// units into one cluster and the dual-source scrape stamps one unit's bedroom count +
+// photos onto its neighbors (real 3BRs wrongly rejected as the cluster's 1BR).
+assert.ok(
+  routeSource.includes("const listingClusterKeyFor = (url: string, contextText = \"\"): string =>")
+    && /listingClusterKeyFor[\s\S]*?\$\{root\}#\$\{unit\}/.test(routeSource),
+  "replacement find-unit must cluster portals by unit identity (street root + unit number), not a bare street root",
+);
+assert.ok(
+  !/const clusterKey = streetRootFromListingAddress\(/.test(routeSource)
+    && routeSource.includes("const clusterKey = listingClusterKeyFor("),
+  "replacement find-unit cluster lookups must use the unit-aware listingClusterKeyFor helper",
+);
 assert.ok(
   routeSource.includes("const candidatePhaseStartedAt = Date.now()"),
   "replacement search must reserve a dedicated candidate-check budget after discovery",
