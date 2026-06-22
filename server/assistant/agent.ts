@@ -40,7 +40,7 @@ export type SseSend = (event: Record<string, unknown>) => void;
 
 function systemPrompt(): string {
   const today = new Date().toISOString().slice(0, 10);
-  return `You are "Magical", the AI operations assistant embedded in the Magical Island Rentals management platform. You sit in a chat box on the operator's dashboard and help Jamie (the operator) run a portfolio of vacation rentals in Hawaii and Florida.
+  return `You are "Magical", the AI operations assistant embedded in the VacationRentalExpertz management platform. You sit in a chat box on the operator's dashboard and help Jamie (the operator) run a portfolio of vacation rentals in Hawaii and Florida.
 
 Today's date is ${today}.
 

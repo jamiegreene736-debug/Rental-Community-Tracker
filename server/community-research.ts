@@ -3419,7 +3419,7 @@ export async function researchCommunitiesForCity(
     // Combo prompt: unchanged — combinabilityScore-gated, max 3
     // world-knowledge entries, max 10 results.
     const prompt = mode === "single"
-      ? `You are sourcing standalone vacation-rental condo/townhouse resorts for Magical Island Rentals's "Add a Single Listing" tool, which onboards individually-owned condos and townhouses one unit at a time.
+      ? `You are sourcing standalone vacation-rental condo/townhouse resorts for VacationRentalExpertz's "Add a Single Listing" tool, which onboards individually-owned condos and townhouses one unit at a time.
 
 THE BUSINESS MODEL (single-listing mode):
   We onboard ONE unit at a time from a known condo or townhouse resort. The unit is rented as a standalone listing — NOT combined with another unit.
@@ -3477,7 +3477,7 @@ Output JSON array. Each element:
 {"communityName":"...","bedroomMix":"...","availableBedrooms":[N,N,...],"estimatedTotalUnits":N,"minimumStayNights":N|null,"minimumStayEvidence":"short source-backed note or empty","minimumStaySourceUrl":"source url or empty","unitTypes":"...","confidenceScore":0-100,"reason":"...","sourceUrl":"...","fromWorldKnowledge":true|false,"addressHint":"optional representative street like 9000 Treasure Trove Ln"}
 
 Include ONLY entries with confidenceScore >= 60. Max 20 results. Sort by confidenceScore descending. No markdown, no prose.`
-      : `You are sourcing condo/townhome resorts for Magical Island Rentals, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
+      : `You are sourcing condo/townhome resorts for VacationRentalExpertz, which bundles TWO individually-owned units in the SAME complex into one large-group vacation listing.
 
 THE BUSINESS MODEL:
   We rent unit A (e.g. 3BR) + unit B (e.g. 3BR) in the same building → list them together as one "6BR sleeps 14" villa-style product.

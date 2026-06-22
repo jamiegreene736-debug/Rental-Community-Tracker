@@ -221,6 +221,7 @@ async function waitForVerifiedHostPost(
   body: string,
   requireOtaModule: boolean,
   logPrefix: string,
+  deadlineMs: number = VERIFY_DEADLINE_MS,
 ): Promise<ReturnType<typeof verifyOtaHostPostDelivered>> {
   const start = Date.now();
   let last: ReturnType<typeof verifyOtaHostPostDelivered> = { verified: false, reason: "No matching host post found on the conversation after send" };
@@ -235,7 +236,7 @@ async function waitForVerifiedHostPost(
     // channel, e.g. email) is terminal — don't burn the full window waiting for
     // an OTA confirmation that will never come.
     if (last.pending === false) return last;
-    if (Date.now() - start >= VERIFY_DEADLINE_MS) break;
+    if (Date.now() - start >= deadlineMs) break;
   }
   console.warn(
     `[${logPrefix}] OTA delivery still unconfirmed after ${Math.round((Date.now() - start) / 1000)}s (pending=${last.pending === true}): ${last.reason ?? ""}`,
@@ -280,6 +281,14 @@ export async function sendGuestyConversationMessage(args: {
   reservation?: Record<string, unknown> | null;
   channelHint?: string | null;
   logPrefix?: string;
+  // How long to poll INLINE for OTA delivery confirmation before returning.
+  // Background senders (booking confirmations, receipts, relocation, arrival
+  // details) keep the full ~38s window. Interactive callers (the inbox Send
+  // button) pass a short window so the operator isn't blocked ~30s — the POST
+  // already happened (send-once is preserved), and an unconfirmed result comes
+  // back as `pending` for the client to confirm asynchronously via
+  // checkOtaDeliveryStatus. Defaults to VERIFY_DEADLINE_MS.
+  verifyDeadlineMs?: number;
 }): Promise<{ deliveredVia: string; deliveryModuleType?: string; verified: boolean; pending?: boolean; reason?: string }> {
   const {
     conversationId,
@@ -288,6 +297,7 @@ export async function sendGuestyConversationMessage(args: {
     reservation = null,
     channelHint,
     logPrefix = "guesty-ota-messaging",
+    verifyDeadlineMs,
   } = args;
 
   const requireOta = otaChannelRequested(module, channelHint);
@@ -352,7 +362,7 @@ export async function sendGuestyConversationMessage(args: {
     return { deliveredVia: guestyChannelLabel(postedModule), verified: true };
   }
 
-  const verification = await waitForVerifiedHostPost(conversationId, body, requireOta, logPrefix);
+  const verification = await waitForVerifiedHostPost(conversationId, body, requireOta, logPrefix, verifyDeadlineMs);
   if (verification.verified) {
     return { deliveredVia: guestyChannelLabel(postedModule), deliveryModuleType: verification.deliveryModuleType, verified: true };
   }
@@ -375,6 +385,26 @@ export async function sendGuestyConversationMessage(args: {
     reason: verification.reason
       ?? `${guestyChannelLabel(module)} has not confirmed delivery yet`,
   };
+}
+
+// Read-only delivery probe — NO send. Fetches the conversation's recent posts
+// once and runs the same delivery verifier sendGuestyConversationMessage uses.
+// Lets the interactive Send path return fast (`pending`) and have the client
+// confirm OTA delivery in the background without re-posting (the dedup pre-check
+// in sendGuestyConversationMessage is the only resend boundary; this never sends).
+export async function checkOtaDeliveryStatus(args: {
+  conversationId: string;
+  body: string;
+  module: Record<string, unknown>;
+  channelHint?: string | null;
+}): Promise<{ verified: boolean; pending?: boolean; deliveryModuleType?: string; reason?: string }> {
+  const { conversationId, body, module, channelHint } = args;
+  const requireOta = otaChannelRequested(module, channelHint);
+  // Non-OTA channels have no async portal to confirm — the accepted POST is the
+  // send, same as the send path. Report verified so the client stops polling.
+  if (!requireOta) return { verified: true };
+  const posts = await fetchRecentConversationPosts(conversationId);
+  return verifyOtaHostPostDelivered(posts, body, requireOta);
 }
 
 function guestySendMessageModuleSafe(module: Record<string, unknown>): Record<string, unknown> {

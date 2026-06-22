@@ -4,7 +4,7 @@
 // "thanks for booking" message into the matching conversation. The
 // message includes:
 //   - Hawaiian tone (Aloha greeting / Mahalo sign-off, John Carpenter
-//     / Magical Island Rentals signature) — every active property is
+//     / VacationRentalExpertz signature) — every active property is
 //     in HI today; if/when mainland properties are added we'd
 //     introduce a tone variant gated on the listing's address.
 //   - A reminder that the listing is two separate units within the
@@ -96,7 +96,7 @@ function buildConfirmationMessage(args: {
     "",
     "Mahalo,",
     "John Carpenter",
-    "Magical Island Rentals",
+    "VacationRentalExpertz",
   ].join("\n");
 }
 

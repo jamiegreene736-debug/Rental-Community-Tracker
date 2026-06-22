@@ -91,7 +91,7 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
-import { findGuestyConversationById, findGuestyConversationForReservation, sendGuestyConversationMessage } from "./guesty-ota-messaging";
+import { findGuestyConversationById, findGuestyConversationForReservation, sendGuestyConversationMessage, checkOtaDeliveryStatus } from "./guesty-ota-messaging";
 import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress, lookupHawaiiStatewideTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
   acquireSidecarLane,
@@ -8989,8 +8989,8 @@ Requirements:
       "If you do not want this alternative, I completely understand. I will issue a full refund today and send you the receipt.",
       "",
       "Mahalo,",
-      "John Carptenter",
-      "Magical Island Vacations",
+      "John Carpenter",
+      "VacationRentalExpertz",
     ].join("\n");
   };
 
@@ -12057,6 +12057,13 @@ Requirements:
   // (server resolves the proven-delivering module from integration.platform,
   // sends ONCE, verifies via externalId, and reports verified/pending/misroute).
   app.post("/api/inbox/conversations/:conversationId/send", async (req: Request, res: Response) => {
+    // The operator is waiting on this request, so we do NOT block the full
+    // ~38s OTA delivery window here. We POST once, verify INLINE only briefly
+    // (fast channels confirm in this window), and otherwise return `pending`
+    // immediately — the message is already on the thread and the client polls
+    // /delivery-status in the background to flip the badge to confirmed. The POST
+    // happens exactly once regardless (send-once + dedup pre-check preserved).
+    const INBOX_FAST_VERIFY_MS = Math.max(0, Number(process.env.INBOX_SEND_FAST_VERIFY_MS ?? 4_000));
     const INBOX_SEND_TIMEOUT_MS = 50_000;
     let responded = false;
     const timer = setTimeout(() => {
@@ -12092,6 +12099,7 @@ Requirements:
         reservation: conversation.reservation,
         channelHint,
         logPrefix: "inbox-send",
+        verifyDeadlineMs: INBOX_FAST_VERIFY_MS,
       });
       if (responded) return;
       responded = true;
@@ -12113,6 +12121,47 @@ Requirements:
       responded = true;
       clearTimeout(timer);
       return res.status(500).json({ error: "Failed to send message", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Read-only delivery confirmation for a message the inbox already sent. The
+  // Send route returns fast (`pending`) instead of blocking ~30s for the OTA
+  // channel to stamp module.externalId; the client polls THIS to upgrade the
+  // "confirming…" badge to delivered. NEVER sends — purely verifies, so polling
+  // can't duplicate the guest message.
+  app.post("/api/inbox/conversations/:conversationId/delivery-status", async (req: Request, res: Response) => {
+    try {
+      const conversationId = String(req.params.conversationId ?? "").trim();
+      const reservationId = req.body?.reservationId ? String(req.body.reservationId).trim() : null;
+      const channelHint = req.body?.channel ? String(req.body.channel).trim() : null;
+      let body = String(req.body?.body ?? "").slice(0, 8_000).trim();
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      if (!body) return res.status(400).json({ error: "message body required" });
+
+      const conversation = await findGuestyConversationById(conversationId, reservationId, channelHint);
+      if (!conversation) return res.status(404).json({ error: "No Guesty conversation found" });
+
+      // Match the exact body the send route posted so the verifier finds it.
+      const moduleType = String(conversation.module?.type ?? "");
+      if (isBookingChannel(channelHint) || moduleType.toLowerCase().includes("booking")) {
+        body = sanitizeForBookingChannel(body);
+      }
+
+      const { verified, pending, deliveryModuleType, reason } = await checkOtaDeliveryStatus({
+        conversationId: conversation.id,
+        body,
+        module: conversation.module,
+        channelHint,
+      });
+      return res.json({
+        ok: true,
+        verified: verified === true,
+        pending: pending === true,
+        deliveryModuleType: deliveryModuleType ?? null,
+        deliveryReason: reason ?? null,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to check delivery status", message: err?.message ?? String(err) });
     }
   });
 
@@ -45463,10 +45512,10 @@ CONSTRAINTS
     const SIGNATURE = isHawaii
       ? `Mahalo,
 John Carpenter
-Magical Island Rentals`
+VacationRentalExpertz`
       : `Thank You,
 John Carpenter
-Magical Island Rentals`;
+VacationRentalExpertz`;
 
     const PLAIN_TEXT_RULES = `FORMATTING RULES (strict — these replies go into email and OTA messaging channels that render plain text):
   - Plain text only. Do NOT use Markdown of any kind — no asterisks for bold or italics, no underscores, no backticks, no bullet markers like "*" or "-" at line starts, no headings.
@@ -45513,7 +45562,7 @@ Examples (same content — chatbot vs. expert):
   HUMAN:    "They won't be directly next door to each other, but the two units are about a 3-minute walk apart within Pili Mai, easy to move between. That sounds like a really sweet Christmas gift for your family."`;
 
     const tonePreamble = isHawaii
-      ? `You are writing as a host for Magical Island Rentals in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
+      ? `You are writing as a host for VacationRentalExpertz in Hawaii. Tone is warm, personable, and professional — the way a longtime local host greets guests. Sprinkle in authentic Hawaiian words naturally where they fit (do not force them into every sentence):
   - Open with "Aloha [Name]," or a similar welcoming phrase
   - Use "'ohana" (family/group) only when it sounds natural. If the guest already said "family", usually keep saying "family" instead of swapping in Hawaiian vocabulary.
   - Use "makai" (toward the ocean) / "mauka" (toward the mountains) only if geographically relevant to the answer
@@ -45524,7 +45573,7 @@ Avoid over-using Hawaiian words — one or two per reply max. The goal is authen
 ${HUMAN_VOICE_RULES}
 
 ${PLAIN_TEXT_RULES}`
-      : `You are writing as a host for Magical Island Rentals. Tone is warm, personable, and professional.
+      : `You are writing as a host for VacationRentalExpertz. Tone is warm, personable, and professional.
 
 ${HUMAN_VOICE_RULES}
 
@@ -45689,7 +45738,7 @@ Structure:
 4. Explain that the units shown are example/representative units: the exact assigned units may vary, but they will be very similar quality and will always match the same bedroom counts.
 5. ${balanceDueSentence ? `Include this payment timing sentence exactly once: "${balanceDueSentence}"` : `Do NOT mention the 120-day remaining-balance rule or a balance due date. That sentence is only for VRBO/HomeAway/Booking.com reservations, and this channel is ${platformName}.`}
 6. Say that detailed arrival information will be sent 14 days prior to arrival, including access details and other check-in details.
-7. Sign off with the canonical signature block (Mahalo, / John Carpenter / Magical Island Rentals).
+7. Sign off with the canonical signature block (Mahalo, / John Carpenter / VacationRentalExpertz).
 
 Hard rules:
 - Do NOT say "Thanks for reaching out" or imply the guest asked a question. They did not.
@@ -45715,7 +45764,7 @@ Write a helpful, polite, BRIEF reply. Polite but to the point. NO conversational
 Structure:
 1. A one-line greeting ("Aloha [Name],"). Nothing more — do NOT add "Thanks for reaching out!", "We're excited to host you", "We're thrilled to have you", or any variation. Skip it.
 2. Lead straight into answering the guest's questions in the order they asked. One sentence per question when possible.
-3. Sign off with the canonical signature block (Mahalo, / John Carpenter / Magical Island Rentals).
+3. Sign off with the canonical signature block (Mahalo, / John Carpenter / VacationRentalExpertz).
 
 Hard rules — every one of these has been a real failure mode:
 - Do NOT restate the booking dates ("you've got two beautiful townhomes reserved from December 27th through January 1st"). The guest sent the inquiry; they know their dates.
