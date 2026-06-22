@@ -274,6 +274,7 @@ import {
   MIN_JSONLD_SUBJECT_GALLERY,
 } from "./redfin-gallery";
 import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-combo";
+import { classifyManualComboUnitUrl } from "@shared/manual-combo-url";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
 import { geocode, walkBetween } from "./walking-distance";
@@ -33902,8 +33903,16 @@ Return ONLY compact JSON with this exact shape:
     abortKey?: string,
     signal?: AbortSignal,
     onOtaCheck?: (message: string) => void | Promise<void>,
-  ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean; proof: UnitPhotoResolverProof }> => {
+  ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean; proof: UnitPhotoResolverProof; bedrooms?: number | null }> => {
     const seenUrls = new Set(blockedUrls.filter(Boolean));
+    // Bedroom count scraped from the listing facts (Zillow/Realtor/Redfin/Homes
+    // expose `facts.bedrooms`). In manual mode the unit has a url but no requested
+    // bedroom count, so this is how the saved combo learns each unit's real size.
+    const parseScrapedBedrooms = (facts: any): number | null => {
+      const n = Number(facts?.bedrooms);
+      return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+    };
+    let scrapedBedroomsSeen: number | null = null;
     const attempts: Array<{ bedroomOverride?: number | "any"; relaxed: boolean }> = [
       { relaxed: false },
       { bedroomOverride: "any", relaxed: true },
@@ -33942,6 +33951,8 @@ Return ONLY compact JSON with this exact shape:
         const sourceUrl = typeof data?.sourceUrl === "string" ? data.sourceUrl : unit?.url || null;
         const rawPhotos = (data?.photos || []) as Array<{ url: string; label?: string }>;
         const photos = rawPhotos.slice(0, unitGalleryMaxKeep(rawPhotos.length));
+        const attemptBedrooms = parseScrapedBedrooms(data?.facts);
+        if (attemptBedrooms != null) scrapedBedroomsSeen = attemptBedrooms;
         const proof = normalizeUnitPhotoProofFromFetchResponse(data, photos, sourceUrl, body, attempt.relaxed);
         const duplicateSource = !!sourceUrl && Array.from(seenUrls).some((u) => canonicalListingKey(u) === canonicalListingKey(sourceUrl));
         const duplicatePhotos = avoidPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(avoidPhotos, photos);
@@ -33951,7 +33962,7 @@ Return ONLY compact JSON with this exact shape:
         if (sourceUrl) seenUrls.add(sourceUrl);
         if (proof.status === "rejected" || duplicateSource || duplicatePhotos) continue;
         if (!apiKey) {
-          return { photos, sourceUrl, relaxed: attempt.relaxed, proof };
+          return { photos, sourceUrl, relaxed: attempt.relaxed, proof, bedrooms: attemptBedrooms ?? scrapedBedroomsSeen };
         }
         const addressGuess =
           parseListingAddressFromUrl(sourceUrl || "") ||
@@ -33965,7 +33976,7 @@ Return ONLY compact JSON with this exact shape:
           item.state ?? "",
         );
         if (preflight.qualifies) {
-          return { photos, sourceUrl, relaxed: attempt.relaxed, proof };
+          return { photos, sourceUrl, relaxed: attempt.relaxed, proof, bedrooms: attemptBedrooms ?? scrapedBedroomsSeen };
         }
         const listed = preflight.listedOn.length > 0 ? preflight.listedOn.join(", ") : "OTA";
         console.warn(
@@ -33978,7 +33989,7 @@ Return ONLY compact JSON with this exact shape:
       }
       if (!otaRejectedThisRound) break;
     }
-    return best;
+    return { ...best, bedrooms: scrapedBedroomsSeen };
   };
   const runComboPhotoFetchItem = async (
     job: ComboPhotoFetchJob,
@@ -34041,6 +34052,12 @@ Return ONLY compact JSON with this exact shape:
       firstPhotos = first.photos;
       firstSourceUrl = first.sourceUrl;
       firstProof = first.proof;
+      // Manual mode: a URL-sourced unit carries no requested bedroom count, so
+      // adopt the count scraped from the listing facts. This flows into
+      // resolvedUnit1Bedrooms below → the saved combo's real Unit A size.
+      if (item.unit1?.url && item.unit1.bedrooms == null && first.bedrooms != null) {
+        item.unit1.bedrooms = first.bedrooms;
+      }
       item.unit1Photos = firstPhotos;
       item.unit1SourceUrl = firstSourceUrl;
       item.unit1Proof = firstProof;
@@ -34059,6 +34076,10 @@ Return ONLY compact JSON with this exact shape:
       let secondPhotos = second.photos;
       if (!item.unit2?.url && firstPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(firstPhotos, secondPhotos)) {
         secondPhotos = [];
+      }
+      // Manual mode: adopt the scraped Unit B bedroom count (see Unit A above).
+      if (item.unit2?.url && item.unit2.bedrooms == null && second.bedrooms != null) {
+        item.unit2.bedrooms = second.bedrooms;
       }
       item.unit2Photos = secondPhotos;
       item.unit2SourceUrl = second.sourceUrl;
@@ -34764,6 +34785,15 @@ Return ONLY compact JSON with this exact shape:
     strPermit?: string | null;
     dbprLicense?: string | null;
     touristTaxAccount?: string | null;
+    // Manual "Add a community" mode (Add Combo Listing wizard): the operator
+    // pastes the two concrete unit listing URLs instead of letting the queue
+    // DISCOVER units. When set, runBulkComboListingItem stamps them onto the
+    // ComboPhotoFetchUnit `url` field, which flips photo discovery to a direct
+    // scrape of that exact listing (and skips the bedroom re-mix ladder —
+    // `unitsAreSearchMode` is false). `manual` is purely diagnostic/labeling.
+    unit1Url?: string | null;
+    unit2Url?: string | null;
+    manual?: boolean;
   };
   type BulkComboListingItem = BulkComboListingInput & {
     id: string;
@@ -35317,14 +35347,25 @@ Return ONLY compact JSON with this exact shape:
     }
     const community = item.community || {};
     const pairing = item.pairing;
-    const unit1: ComboPhotoFetchUnit = {
-      title: `Unit A — ${pairing.unit1Beds}BR`,
-      bedrooms: pairing.unit1Beds,
-    };
-    const unit2: ComboPhotoFetchUnit = {
-      title: `Unit B — ${pairing.unit2Beds}BR`,
-      bedrooms: pairing.unit2Beds,
-    };
+    // Manual mode: the operator pasted the two unit URLs, so scrape those exact
+    // listings directly (url set → search mode off → re-mix ladder skipped). We
+    // deliberately leave `bedrooms` UNSET on a URL-sourced unit so the bedroom
+    // count comes from the scraped listing facts (captured in runComboPhotoFetchItem
+    // → resolvedUnit*Bedrooms → effUnit*Beds) rather than the pairing placeholder.
+    const manualUnit1Url = String(item.unit1Url ?? "").trim() || undefined;
+    const manualUnit2Url = String(item.unit2Url ?? "").trim() || undefined;
+    const unit1: ComboPhotoFetchUnit = manualUnit1Url
+      ? { title: "Unit A", url: manualUnit1Url }
+      : {
+          title: `Unit A — ${pairing.unit1Beds}BR`,
+          bedrooms: pairing.unit1Beds,
+        };
+    const unit2: ComboPhotoFetchUnit = manualUnit2Url
+      ? { title: "Unit B", url: manualUnit2Url }
+      : {
+          title: `Unit B — ${pairing.unit2Beds}BR`,
+          bedrooms: pairing.unit2Beds,
+        };
     const photoItem: ComboPhotoFetchItem = {
       id: item.id,
       label: item.label,
@@ -35413,10 +35454,14 @@ Return ONLY compact JSON with this exact shape:
     // collide with another combo already saved or queued for this community. The
     // enqueue occupied-key guard only ever saw the REQUESTED key, so re-check the
     // EFFECTIVE key now and skip-as-duplicate rather than mint a second listing
-    // for the same community+size.
+    // for the same community+size. SKIPPED when the operator explicitly opted into
+    // a duplicate (allowDuplicate) — e.g. manual "Add a community", where the
+    // pairing carries placeholder bedrooms and the scraped facts almost always
+    // shift the key, so this guard would otherwise silently drop the operator's
+    // deliberate add as a phantom "re-mix duplicate" (no re-mix happens in URL mode).
     const requestedComboKey = comboKeyForBeds(pairing.unit1Beds, pairing.unit2Beds);
     const effectiveComboKey = comboKeyForBeds(effUnit1Beds, effUnit2Beds);
-    if (effectiveComboKey && effectiveComboKey !== requestedComboKey) {
+    if (!item.allowDuplicate && effectiveComboKey && effectiveComboKey !== requestedComboKey) {
       const inventory = await getComboInventoryForCommunity({
         communityName: community.name,
         city: community.city,
@@ -35851,39 +35896,10 @@ Return ONLY compact JSON with this exact shape:
     });
   };
 
-  app.post("/api/community/bulk-combo-listing-jobs", async (req, res) => {
-    const inputs = Array.isArray(req.body?.items) ? req.body.items as BulkComboListingInput[] : [];
-    if (inputs.length === 0) return res.status(400).json({ error: "items required" });
-    const requestReservations = new Set<string>();
-    for (const input of inputs.slice(0, 12)) {
-      const communityName = String(input.community?.name || "").trim();
-      const city = String(input.community?.city || "").trim();
-      const state = String(input.community?.state || "").trim();
-      const key = comboKeyForBeds(input.pairing?.unit1Beds, input.pairing?.unit2Beds);
-      if (!communityName || !key) continue;
-      const reservationKey = `${normalizeQueueText(communityName)}|${normalizeQueueText(city)}|${normalizeQueueText(state)}|${key}`;
-      const inventory = await getComboInventoryForCommunity({ communityName, city, state });
-      const occupied = inventory.occupiedKeys.has(key) || requestReservations.has(reservationKey);
-      if (occupied && !input.allowDuplicate) {
-        const existing = inventory.items.find((item) => item.key === key);
-        return res.status(409).json({
-          error: "Combo already exists or is queued",
-          message: `${communityName} already has or is actively queueing ${comboLabelForKey(key)}. Choose the next unused combo or explicitly queue a duplicate.`,
-          duplicate: {
-            communityName,
-            city,
-            state,
-            key,
-            label: comboLabelForKey(key),
-            source: requestReservations.has(reservationKey) ? "current_request" : existing?.source ?? "existing",
-            draftId: existing?.draftId ?? null,
-            jobId: existing?.jobId ?? null,
-          },
-          comboInventory: inventory.items,
-        });
-      }
-      requestReservations.add(reservationKey);
-    }
+  // Build + persist + start a bulk combo-listing job from a list of inputs.
+  // Shared by the bulk queue endpoint (which dedup-checks first) and the manual
+  // "Add a community" endpoint (which supplies a single URL-seeded input).
+  const createBulkComboListingJob = async (inputs: BulkComboListingInput[]): Promise<BulkComboListingJob> => {
     const now = Date.now();
     const id = `bcj_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const items: BulkComboListingItem[] = inputs.slice(0, 12).map((input, index) => {
@@ -35968,6 +35984,12 @@ Return ONLY compact JSON with this exact shape:
         strPermit: item.strPermit,
         dbprLicense: item.dbprLicense,
         touristTaxAccount: item.touristTaxAccount,
+        // Manual mode: persist the operator-pasted unit URLs so a resumed/
+        // redeployed job still scrapes the same listings (the row→item rebuild
+        // spreads `...payload`, so reading them back is automatic).
+        unit1Url: item.unit1Url ?? null,
+        unit2Url: item.unit2Url ?? null,
+        manual: item.manual ?? false,
       },
       draftId: null,
       unit1Photos: [],
@@ -35984,6 +36006,155 @@ Return ONLY compact JSON with this exact shape:
       updatedAt: new Date(now),
     })));
     void runBulkComboListingJob(id);
+    return job;
+  };
+
+  app.post("/api/community/bulk-combo-listing-jobs", async (req, res) => {
+    const inputs = Array.isArray(req.body?.items) ? req.body.items as BulkComboListingInput[] : [];
+    if (inputs.length === 0) return res.status(400).json({ error: "items required" });
+    const requestReservations = new Set<string>();
+    for (const input of inputs.slice(0, 12)) {
+      const communityName = String(input.community?.name || "").trim();
+      const city = String(input.community?.city || "").trim();
+      const state = String(input.community?.state || "").trim();
+      const key = comboKeyForBeds(input.pairing?.unit1Beds, input.pairing?.unit2Beds);
+      if (!communityName || !key) continue;
+      const reservationKey = `${normalizeQueueText(communityName)}|${normalizeQueueText(city)}|${normalizeQueueText(state)}|${key}`;
+      const inventory = await getComboInventoryForCommunity({ communityName, city, state });
+      const occupied = inventory.occupiedKeys.has(key) || requestReservations.has(reservationKey);
+      if (occupied && !input.allowDuplicate) {
+        const existing = inventory.items.find((item) => item.key === key);
+        return res.status(409).json({
+          error: "Combo already exists or is queued",
+          message: `${communityName} already has or is actively queueing ${comboLabelForKey(key)}. Choose the next unused combo or explicitly queue a duplicate.`,
+          duplicate: {
+            communityName,
+            city,
+            state,
+            key,
+            label: comboLabelForKey(key),
+            source: requestReservations.has(reservationKey) ? "current_request" : existing?.source ?? "existing",
+            draftId: existing?.draftId ?? null,
+            jobId: existing?.jobId ?? null,
+          },
+          comboInventory: inventory.items,
+        });
+      }
+      requestReservations.add(reservationKey);
+    }
+    const job = await createBulkComboListingJob(inputs);
+    res.status(202).json({ job: serializeBulkComboListingJob(job) });
+  });
+
+  // ── Manual "Add a community" (Add Combo Listing wizard) ──────────────────────
+  // The operator types a community name + state and pastes the TWO concrete unit
+  // listing URLs; we seed a single bulk combo-listing job with those URLs. The
+  // hardened bulk runner then scrapes each pasted listing directly (Apify), lets
+  // Claude write the listing copy, researches + pulls the community photo folder
+  // (persist-community-photos), saves the dashboard draft, and refreshes pricing —
+  // exactly the automated combo path, just with operator-chosen units instead of
+  // discovered ones. See the manual-combo-listing-feature memory note.
+  app.post("/api/community/manual-combo-listing", async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, any>;
+    const communityName = String(body.communityName ?? body.name ?? "").trim();
+    const state = String(body.state ?? "").trim();
+    let city = String(body.city ?? "").trim();
+    const unit1Url = String(body.unit1Url ?? "").trim();
+    const unit2Url = String(body.unit2Url ?? "").trim();
+    const toBeds = (value: any): number | null => {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 1 && n <= 8 ? Math.round(n) : null;
+    };
+    const unit1BedroomsHint = toBeds(body.unit1Bedrooms);
+    const unit2BedroomsHint = toBeds(body.unit2Bedrooms);
+
+    if (!communityName) return res.status(400).json({ error: "Community name is required." });
+    if (!state) return res.status(400).json({ error: "State is required — pick the state the community is in." });
+    if (!unit1Url || !unit2Url) {
+      return res.status(400).json({ error: "Two unit listing URLs are required (one per unit of the combo)." });
+    }
+
+    // Validate each URL with a strict POSITIVE allowlist of the real-estate hosts
+    // we can scrape a full gallery from (Zillow/Realtor/Redfin/Homes). This is also
+    // the SSRF guard — the pasted URL is fetched + browser-navigated server-side,
+    // so an allowlist (not a denylist) is the only safe gate; it blocks
+    // http://localhost, RFC-1918, and cloud-metadata (169.254.169.254) targets.
+    // See shared/manual-combo-url.ts (locked by tests/manual-combo-url.test.ts).
+    const c1 = classifyManualComboUnitUrl(unit1Url);
+    if (!c1.ok) return res.status(400).json({ error: `Unit A URL ${c1.reason}` });
+    const c2 = classifyManualComboUnitUrl(unit2Url);
+    if (!c2.ok) return res.status(400).json({ error: `Unit B URL ${c2.reason}` });
+    if (canonicalListingKey(unit1Url) === canonicalListingKey(unit2Url)) {
+      return res.status(400).json({ error: "Both URLs point to the same listing — paste a different listing for each unit." });
+    }
+
+    // Location guard: refuse a community that is KNOWN to sit in a different state
+    // (e.g. "Bay Watch", a South Carolina resort, claimed under Florida). Curated +
+    // recall-safe — unknown communities are never flagged. The save step re-checks.
+    const stateGuard = checkCommunityState(communityName, state);
+    if (stateGuard.wrong) {
+      return res.status(400).json({
+        error: "Community is in a different state",
+        reason: `"${communityName}" is located in ${stateGuard.homeState}, not ${state}. Pick ${stateGuard.homeState} so pricing, addresses, and photos resolve correctly.`,
+        homeState: stateGuard.homeState,
+      });
+    }
+
+    // Seed the community street address from the pasted unit URLs — each
+    // Zillow/Redfin/Realtor/Homes listing slug encodes the unit's numbered street,
+    // which IS the community's street. Without this, a non-curated community (the
+    // exact case manual mode exists for) whose NAME doesn't resolve via the
+    // google_maps lookup would fail the job's name-based address precheck even
+    // though the operator pasted URLs that contain the address. Only seed when
+    // there is NO curated rule, so a curated canonical street always wins (the
+    // hydrate step PREFERS a provided likely street, which would otherwise trip
+    // the "should use X" guard for a curated community).
+    const curatedRule = communityAddressRuleForName(communityName);
+    const streetGuess = curatedRule
+      ? undefined
+      : (parseListingAddressFromUrl(unit1Url) || parseListingAddressFromUrl(unit2Url) || undefined);
+
+    // Best-effort city fill (sharpens pricing area + photo discovery). The unit
+    // URL slug yields only a street (no city), so derive the city from the
+    // google_maps full address. The job's own address precheck still resolves the
+    // street, so a missing city is non-fatal.
+    const cityFromAddress = (addr: string | null | undefined): string => {
+      const parts = String(addr ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+      return parts.length >= 2 ? parts[parts.length - 2].replace(/\s+\d{4,}.*$/, "").trim() : "";
+    };
+    if (!city) {
+      const discovered = await discoverCommunityStreetAddress({ communityName, city: "", state }).catch(() => null);
+      if (discovered?.fullAddress) city = cityFromAddress(discovered.fullAddress);
+    }
+
+    // Bedroom counts are resolved from the scraped listing facts during the job
+    // (fetchComboPhotosForUnit → resolvedUnit*Bedrooms); the pairing values are a
+    // fallback used only if a listing exposes no bedroom count. Rates are seeds —
+    // refresh-pricing writes the real per-BR medians after the draft saves.
+    const u1 = unit1BedroomsHint ?? 2;
+    const u2 = unit2BedroomsHint ?? 2;
+    const input: BulkComboListingInput = {
+      id: `manual_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+      community: { name: communityName, city: city || undefined, state, unitTypes: "condominium", addressHint: streetGuess },
+      streetAddress: streetGuess,
+      pairing: {
+        unit1Beds: u1,
+        unit2Beds: u2,
+        totalBeds: u1 + u2,
+        estimatedUnit1Rate: 0,
+        estimatedUnit2Rate: 0,
+        estimatedSellRate: 0,
+      },
+      unit1Url,
+      unit2Url,
+      manual: true,
+      // The operator deliberately chose these two specific units, so don't block
+      // on the combo-slot dedup guard (the placeholder bedroom counts make that
+      // key unreliable anyway). The persist gate still rejects two duplicate
+      // galleries, so a same-photo mistake can't slip through.
+      allowDuplicate: true,
+    };
+    const job = await createBulkComboListingJob([input]);
     res.status(202).json({ job: serializeBulkComboListingJob(job) });
   });
 
