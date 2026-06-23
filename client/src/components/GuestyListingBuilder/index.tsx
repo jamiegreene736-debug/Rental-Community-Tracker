@@ -23,6 +23,7 @@ import { sampleLicensesForLocation } from "@/data/adapt-draft";
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
+import { curatedResortSearchName, isCuratedBuyInMarket } from "@shared/buy-in-market";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -4242,6 +4243,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, marketRatesVersion]);
 
+  // Research confirmation (Pricing tab): which resort the market-rate comps are
+  // drawn from + how a combo listing's bedroom sizes are researched and summed.
+  // Display-only, derived client-side from the same curated market dict the
+  // server's curatedAirbnbSearchQueries uses (@shared/buy-in-market). Mirrors
+  // the bulk-pricing-log confirmation block on the dashboard. NOTE FOR CODEX:
+  // the resort label here does NOT reflect a server-side widened-fallback
+  // anchor (only fires when the resort box returns zero comps); that needs the
+  // persisted searchName (a later phase).
+  const researchProvenance = useMemo(() => {
+    if (!propertyId) return null;
+    const propPricing = getPropertyPricing(propertyId);
+    if (!propPricing || propPricing.units.length === 0) return null;
+    const community = propPricing.units[0]?.community ?? "";
+    const resort = curatedResortSearchName(community) || community;
+    const curated = isCuratedBuyInMarket(community);
+    const units = propPricing.units.map((u) => ({ label: u.unitLabel, bedrooms: u.bedrooms }));
+    const distinctBedrooms = Array.from(new Set(units.map((u) => u.bedrooms))).sort((a, b) => a - b);
+    const totalBedrooms = units.reduce((sum, u) => sum + u.bedrooms, 0);
+    const combo = units.length > 1;
+    const composition = combo
+      ? `${totalBedrooms}BR listing = ${units.map((u) => `${u.bedrooms}BR`).join(" + ")}`
+      : `${units[0]?.bedrooms ?? totalBedrooms}BR · single unit`;
+    const scalingNote = combo
+      ? `Priced from ${distinctBedrooms.map((br) => `${br}BR`).join(" + ")} comp${distinctBedrooms.length === 1 ? "" : "s"}, summed across ${units.length} units — not a single ${totalBedrooms}BR estimate.`
+      : `Priced directly from a ${units[0]?.bedrooms ?? totalBedrooms}BR comp.`;
+    return { community, resort, curated, units, distinctBedrooms, combo, composition, scalingNote };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId, marketRatesVersion]);
+
   const latestServerMarketRateNotice = useMemo<MarketRefreshNotice | null>(() => {
     if (!propertyId) return null;
     let latest = 0;
@@ -6158,6 +6188,34 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 })()}
                               </div>
                             </div>
+                            {/* Research confirmation — shows WHICH resort the
+                                market-rate comps come from and HOW a combo
+                                listing's bedroom sizes are researched + summed,
+                                so the operator can confirm at a glance that the
+                                right resort and bedroom sizes were used (mirror
+                                of the dashboard bulk-pricing-log block). */}
+                            {researchProvenance && (
+                              <div style={{ marginTop: 8, marginBottom: 4, padding: "8px 10px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, fontSize: 11, color: "#374151", display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                                <span style={{ fontWeight: 600, color: "#111827" }}>🔎 Research confirmation</span>
+                                <span
+                                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: researchProvenance.curated ? "#dbeafe" : "#fef3c7", color: researchProvenance.curated ? "#1e40af" : "#92400e", borderRadius: 4, fontWeight: 500 }}
+                                  title={researchProvenance.curated
+                                    ? `Airbnb comps are drawn from the curated "${researchProvenance.community}" market (resort + geo box).`
+                                    : `"${researchProvenance.community}" is not a curated market, so comps are searched on this name verbatim with no curated resort/geo box — double-check the resort is right.`}
+                                >
+                                  Resort:&nbsp;<span style={{ fontWeight: 600 }}>{researchProvenance.resort}</span>
+                                  {!researchProvenance.curated && <span style={{ marginLeft: 4 }}>⚠ not curated</span>}
+                                </span>
+                                <span
+                                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: "#f1f5f9", color: "#334155", borderRadius: 4, fontWeight: 500 }}
+                                  title={researchProvenance.scalingNote}
+                                >
+                                  🛏️ {researchProvenance.composition}
+                                </span>
+                                <span style={{ flexBasis: "100%", height: 0 }} />
+                                <span style={{ color: "#6b7280" }}>{researchProvenance.scalingNote}</span>
+                              </div>
+                            )}
                             {/* Live buy-in summary. One badge per bedroom-count
                                 showing the persisted Airbnb SearchAPI layered
                                 basis for the market-rate tool. */}

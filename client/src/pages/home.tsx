@@ -2286,6 +2286,30 @@ function AdminDashboard() {
     const nights = recipe.stayNights ? `${recipe.stayNights}-night` : "7-night";
     return `${recipe.community || recipe.searchName || "Market"} · ${unitCount} · searching ${searched} · ${nights} ${percentile}`;
   };
+  // Research confirmation — pull the resort actually searched and the
+  // bedroom-size / combo scaling out of pricingRecipe as DISCRETE glanceable
+  // facts (formatPricingRecipe above only collapses them into one truncated
+  // pill, kept here for the full tooltip). The Pricing tab renders a mirrored
+  // block from the same recipe. NOTE FOR CODEX: searchName is the resort the
+  // scan actually used; prefer it over the raw community key.
+  const pricingRecipeResort = (recipe?: NonNullable<BulkPricingJob["items"][number]["progress"]>["pricingRecipe"]) => {
+    if (!recipe) return null;
+    const resort = (recipe.searchName || recipe.community || "").trim();
+    return resort || null;
+  };
+  const pricingRecipeScaling = (
+    recipe?: NonNullable<BulkPricingJob["items"][number]["progress"]>["pricingRecipe"],
+  ): { label: string; combo: boolean } | null => {
+    if (!recipe) return null;
+    const sizes = Array.isArray(recipe.searchedBedrooms)
+      ? recipe.searchedBedrooms.filter((br) => Number.isFinite(br))
+      : [];
+    if (sizes.length === 0) return null;
+    const unitCount = Number(recipe.unitCount) > 0 ? Number(recipe.unitCount) : sizes.length;
+    if (unitCount <= 1) return { label: `${sizes[0]}BR · single unit`, combo: false };
+    if (sizes.length === 1) return { label: `${sizes[0]}BR ×${unitCount} · summed`, combo: true };
+    return { label: `${sizes.map((br) => `${br}BR`).join(" + ")} · summed across ${unitCount} units`, combo: true };
+  };
   const confidenceTone = (level?: string) => (
     level === "green" ? "border-emerald-200 bg-emerald-50 text-emerald-700"
     : level === "yellow" ? "border-amber-200 bg-amber-50 text-amber-700"
@@ -3754,8 +3778,11 @@ function AdminDashboard() {
                               : "bg-amber-50 text-amber-700 border-amber-200";
                             const percent = typeof item.progress?.percent === "number" ? Math.max(0, Math.min(100, item.progress.percent)) : 0;
                             const recipeLabel = formatPricingRecipe(item.progress?.pricingRecipe);
+                            const recipeResort = pricingRecipeResort(item.progress?.pricingRecipe);
+                            const recipeScaling = pricingRecipeScaling(item.progress?.pricingRecipe);
                             const confidence = item.progress?.confidence;
                             const confidenceScore = typeof confidence?.score === "number" ? Math.round(confidence.score) : null;
+                            const sampleCount = typeof confidence?.sampleCount === "number" ? confidence.sampleCount : null;
                             const blackoutCount = typeof item.progress?.blackoutCount === "number" ? item.progress.blackoutCount : 0;
                             const blackoutClosed = typeof item.progress?.blackoutClosed === "number" ? item.progress.blackoutClosed : 0;
                             const rateChanges = Array.isArray(item.progress?.rateChanges) ? item.progress.rateChanges : [];
@@ -3770,11 +3797,28 @@ function AdminDashboard() {
                                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                                       Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
                                     </p>
-                                    {(recipeLabel || confidenceScore != null || blackoutCount > 0) && (
+                                    {(recipeResort || recipeScaling || confidenceScore != null || blackoutCount > 0) && (
                                       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
-                                        {recipeLabel && (
-                                          <span className="max-w-full truncate rounded border bg-muted/40 px-2 py-0.5 text-muted-foreground" title={recipeLabel}>
-                                            {recipeLabel}
+                                        {recipeResort && (
+                                          <span
+                                            className="inline-flex max-w-full items-center gap-1 truncate rounded border bg-muted/40 px-2 py-0.5 text-muted-foreground"
+                                            title={recipeLabel ?? undefined}
+                                          >
+                                            <span aria-hidden>🔎</span>
+                                            <span className="truncate">
+                                              Researched <span className="font-medium text-foreground">{recipeResort}</span>
+                                            </span>
+                                          </span>
+                                        )}
+                                        {recipeScaling && (
+                                          <span
+                                            className="inline-flex items-center gap-1 rounded border bg-muted/40 px-2 py-0.5 text-muted-foreground"
+                                            title={recipeScaling.combo
+                                              ? "Combo listing: each unit is priced from a real Airbnb comp of its OWN bedroom size, then summed — never a single smaller comp scaled up to the larger size."
+                                              : "Single unit priced directly from an Airbnb comp of its own bedroom size."}
+                                          >
+                                            <span aria-hidden>🛏️</span>
+                                            {recipeScaling.label}
                                           </span>
                                         )}
                                         {blackoutCount > 0 && (
@@ -3795,6 +3839,14 @@ function AdminDashboard() {
                                         {typeof confidence?.rejectedCandidates === "number" && confidence.rejectedCandidates > 0 && (
                                           <span className="rounded border bg-background px-2 py-0.5 text-muted-foreground">
                                             {confidence.rejectedCandidates} rejected
+                                          </span>
+                                        )}
+                                        {sampleCount != null && (
+                                          <span
+                                            className="rounded border bg-background px-2 py-0.5 text-muted-foreground"
+                                            title="Total Airbnb comps that backed this property's basis across the scanned months. A very low count is the strongest tell that the resort query may be too thin or wrong."
+                                          >
+                                            {sampleCount} comp{sampleCount === 1 ? "" : "s"}
                                           </span>
                                         )}
                                       </div>

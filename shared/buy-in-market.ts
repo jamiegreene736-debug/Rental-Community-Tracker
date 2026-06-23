@@ -317,6 +317,43 @@ export function searchLocationForBuyInMarket(marketKey: string): string | null {
 }
 
 /**
+ * The resort/market label the market-rate scan actually searches Airbnb under,
+ * mirroring the server's `curatedAirbnbSearchQueries(community)[0]` priority:
+ * platform Airbnb term → searchLocation → curated location searchName → the raw
+ * community key. Used by the "research confirmation" UI (Pricing tab + bulk
+ * pricing log) so the operator can SEE which resort the comps were drawn from.
+ *
+ * NOTE FOR CODEX: this is a display-only mirror. It does NOT reflect a
+ * widened-fallback city anchor — that only fires server-side when the resort
+ * box returns zero comps and is not echoed here. The accurate, persisted
+ * searchName (incl. widened fallback) is a later phase; until then the bulk-log
+ * side should prefer `pricingRecipe.searchName` (the value the scan actually
+ * used) and only fall back to this helper when that is absent.
+ */
+export function curatedResortSearchName(community: string | null | undefined): string {
+  const key = String(community ?? "").trim();
+  if (!key) return "";
+  const market = BUY_IN_MARKETS[key];
+  return (
+    market?.platformSearch?.airbnb
+    || market?.searchLocation
+    || market?.location?.searchName
+    || key
+  );
+}
+
+/**
+ * True when the community key maps to a curated buy-in market. When false the
+ * market-rate scan searches the raw community string verbatim (no curated
+ * resort/geo box), which the confirmation UI should surface so a fallen-through
+ * default is not mistaken for a confirmed resort.
+ */
+export function isCuratedBuyInMarket(community: string | null | undefined): boolean {
+  const key = String(community ?? "").trim();
+  return key.length > 0 && !!BUY_IN_MARKETS[key];
+}
+
+/**
  * Town-level destination for the city-wide VRBO inventory export. Falls back to
  * the resort/landmark `searchLocation` when a market has no town override, so
  * markets whose `searchLocation` is already town-scoped (Princeville, Keauhou)
