@@ -908,9 +908,18 @@ export default function BuilderPreflight() {
         try {
           const r = await fetch(`/api/photos/community/${encodeURIComponent(folder)}`, { credentials: "include" });
           if (!r.ok) return;
-          const data = await r.json();
-          const files = Array.isArray(data?.files) ? data.files as string[] : [];
-          counts[unitId] = files.filter((f) => /\.(?:jpe?g|png|webp)$/i.test(f)).length;
+          // GET /api/photos/community/:folder returns a BARE ARRAY of
+          // { url, filename } (already image-only) — NOT a { files: [...] }
+          // object. Reading `data.files` always yielded 0, so a replacement
+          // unit (whose photos live in a `replacement-…` folder) counted 0
+          // photos and the "Re-pull all photos" button fell back to "Find
+          // Photos" — which then runs a discovery search and can substitute a
+          // different listing. Read the array, matching the other callers
+          // (adapt-draft.ts, builder.tsx).
+          const data = (await r.json()) as Array<{ filename?: string }> | null;
+          counts[unitId] = Array.isArray(data)
+            ? data.filter((f) => /\.(?:jpe?g|png|webp)$/i.test(f?.filename ?? "")).length
+            : 0;
         } catch { /* ignore */ }
       }));
       if (!cancelled) setOverridePhotoCounts(counts);
