@@ -362,19 +362,27 @@ export default function PhotoCurator({
     onResetSectionOrder?.(folder);
   };
 
-  const relabelSection = async (section: Section) => {
+  // ONE button: Claude vision re-captions every photo, then the gallery is
+  // reordered best-first (hero → bedrooms → bathrooms → …) using those fresh
+  // labels. Combines the old "Relabel all photos" + "Reset to best order"
+  // (operator asked for a single action). Replaces manual captions AND the
+  // current manual drag order in this gallery with the AI's.
+  const relabelAndReorderSection = async (section: Section) => {
     const folder = sectionFolder(section);
     if (!folder || relabelingFolder) return;
     const confirmed = window.confirm(
-      `Re-label all ${section.photos.length} photo(s) in this gallery?\n\n`
-      + "Claude vision will re-caption each photo and merge duplicate bedroom views "
-      + "(e.g. Bedroom 6 → Master Bedroom — Alt View). Manual caption edits in this gallery will be cleared.",
+      `Re-label and reorder all ${section.photos.length} photo(s) in this gallery with Claude vision?\n\n`
+      + "Claude looks at each photo, re-captions it (merging duplicate bedroom views, e.g. "
+      + "Bedroom 6 → Master Bedroom — Alt View), then puts the gallery in the best presentation "
+      + "order (hero shots first → bedrooms → bathrooms → …).\n\n"
+      + "Your manual caption edits and the current drag order in this gallery will be replaced.",
     );
     if (!confirmed) return;
 
     setRelabelingFolder(folder);
     setRelabelProgress({ done: 0, total: section.photos.length });
     try {
+      // 1. Claude vision re-labels every photo (streaming per-photo progress).
       const resp = await fetch(`/api/photo-labels/${encodeURIComponent(folder)}/relabel`, {
         method: "POST",
       });
@@ -402,10 +410,15 @@ export default function PhotoCurator({
         }
       }
       await loadFolderLabels(localFolders);
+      // 2. Reorder best-first on the FRESH labels. resetSectionOrder clears any
+      //    manual drag order (sort_order) so the builder re-sorts the gallery
+      //    hero-first by the new vision categories.
+      setRelabelProgress({ done: section.photos.length, total: section.photos.length });
+      resetSectionOrder(section);
       onOverridesChanged?.();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      alert(`Relabel failed: ${msg}`);
+      alert(`Re-label & reorder failed: ${msg}`);
     } finally {
       setRelabelingFolder(null);
       setRelabelProgress(null);
@@ -921,27 +934,15 @@ export default function PhotoCurator({
                   </span>
                   <button
                     type="button"
-                    onClick={() => resetSectionOrder(section)}
-                    title="Revert this gallery to the suggested best-first order"
-                    style={{
-                      fontSize: 11, color: "#6d28d9", textDecoration: "none",
-                      padding: "2px 8px", background: "#f5f3ff", border: "1px solid #ddd6fe",
-                      borderRadius: 3, cursor: "pointer", fontWeight: 600,
-                    }}
-                  >
-                    ↺ Reset to best order
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => relabelSection(section)}
+                    onClick={() => relabelAndReorderSection(section)}
                     disabled={!!relabelingFolder}
-                    title="Re-run Claude vision on every photo and merge duplicate bedroom views into Alt View labels"
+                    title="Claude vision looks at every photo, re-captions each one, then reorders the gallery best-first (hero shots → bedrooms → bathrooms → …)"
                     style={{
                       fontSize: 11,
-                      color: relabelingFolder === firstFolder ? "#0369a1" : "#0c4a6e",
+                      color: relabelingFolder === firstFolder ? "#5b21b6" : "#6d28d9",
                       padding: "2px 8px",
-                      background: relabelingFolder === firstFolder ? "#e0f2fe" : "#f0f9ff",
-                      border: "1px solid #bae6fd",
+                      background: relabelingFolder === firstFolder ? "#ede9fe" : "#f5f3ff",
+                      border: "1px solid #ddd6fe",
                       borderRadius: 3,
                       cursor: relabelingFolder ? "wait" : "pointer",
                       fontWeight: 600,
@@ -949,8 +950,8 @@ export default function PhotoCurator({
                     }}
                   >
                     {relabelingFolder === firstFolder && relabelProgress
-                      ? `🏷 Relabeling ${relabelProgress.done}/${relabelProgress.total}…`
-                      : "🏷 Relabel all photos"}
+                      ? `✨ Re-labeling ${relabelProgress.done}/${relabelProgress.total}…`
+                      : "✨ Re-label & best order (AI)"}
                   </button>
                 </>
               )}
