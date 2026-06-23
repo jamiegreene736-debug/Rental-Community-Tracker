@@ -10,6 +10,7 @@ import {
   categoryRank,
   scopeForSource,
   hasManualOrder,
+  isAltView,
   orderGallery,
   bestOrderIndices,
   OTHER_CATEGORY_RANK,
@@ -35,6 +36,62 @@ assert.ok(categoryRank("Guest Bathroom", "unit") > categoryRank("Bedroom — Que
 assert.equal(categoryRank("photo_07", "unit"), OTHER_CATEGORY_RANK);
 assert.equal(categoryRank("", "unit"), OTHER_CATEGORY_RANK);
 console.log("  ✓ unit category ranks: living/view < kitchen < bedroom < bath < other");
+
+// ── categoryRank: cluster-suffix + keyword-collision fixes ───────────────────
+// "Alt View" is the bedroom/bath CLUSTER suffix, not a scenic VIEW — an
+// alt-angle must rank with its ROOM so a room's photos stay clustered, instead
+// of being pulled to the front like a hero view shot.
+assert.equal(
+  categoryRank("Master Bedroom — Alt View", "unit"),
+  categoryRank("Master Bedroom — King", "unit"),
+  "a Master Bedroom alt-view ranks with the master bedroom, not as a scenic view",
+);
+assert.ok(
+  categoryRank("Master Bedroom — Alt View", "unit") > categoryRank("Ocean View Lanai", "unit"),
+  "a bedroom alt-view is not a hero scenic shot",
+);
+// "Primary Bathroom" is a BATH, not a bedroom — the word "primary" must not win.
+assert.ok(
+  categoryRank("Primary Bathroom — Alt View", "unit") > categoryRank("Master Bedroom — King", "unit"),
+  "Primary Bathroom ranks after the master bedroom (bath, not bedroom)",
+);
+assert.equal(
+  categoryRank("Primary Bathroom — Shower", "unit"),
+  categoryRank("Bathroom 2 — Double Vanity", "unit"),
+  "all bathrooms share the bath rank",
+);
+// A plain "… Bathroom" caption (no shower/vanity keyword) still ranks as a
+// bath, not OTHER — a bare /\bbath\b/ never matched the word "bathroom".
+assert.ok(
+  categoryRank("Bathroom 2 — Alt View", "unit") < OTHER_CATEGORY_RANK,
+  "a plain 'Bathroom' caption ranks as a bath, not OTHER",
+);
+assert.equal(categoryRank("Guest Bathroom", "unit"), categoryRank("Primary Bathroom — Shower", "unit"));
+// A scenic word inside a ROOM caption ranks by the room, not as a view.
+assert.ok(
+  categoryRank("Dining Room With Mountain View", "unit") > categoryRank("Kitchen", "unit"),
+  "Dining Room With Mountain View ranks as dining, not a view",
+);
+console.log("  ✓ cluster suffixes + bathroom/primary keyword collisions resolved");
+
+// ── isAltView + room-cluster grouping ────────────────────────────────────────
+assert.equal(isAltView("Master Bedroom — Alt View"), true);
+assert.equal(isAltView("Master Bedroom — King"), false);
+assert.equal(isAltView("Outdoor Lanai With Ocean View"), false, "'… View' alone is not an alt view");
+const mbr: OrderablePhoto[] & Array<{ id: string }> = [
+  { id: "alt1", text: "Master Bedroom — Alt View" },
+  { id: "king", text: "Master Bedroom — King" },
+  { id: "alt2", text: "Master Bedroom — Alt View" },
+  { id: "kitchen", text: "Kitchen With Island" },
+  { id: "bathAlt", text: "Primary Bathroom — Alt View" },
+  { id: "bath", text: "Primary Bathroom — Shower" },
+] as any;
+assert.deepEqual(
+  orderGallery(mbr, "unit").map((p: any) => p.id),
+  ["kitchen", "king", "alt1", "alt2", "bath", "bathAlt"],
+  "bedroom + bathroom clusters stay together (primary first), after the kitchen",
+);
+console.log("  ✓ room clusters group together with the primary shot leading");
 
 // ── categoryRank: community hero-first ───────────────────────────────────────
 assert.ok(categoryRank("Resort Pool", "community") < categoryRank("Sandy Beach", "community"));

@@ -34,14 +34,26 @@ export type OrderablePhoto = {
 // Lower rank = earlier in the gallery. The first regex that matches the
 // photo text wins, so the lists are ordered most-specific-first where it
 // matters (e.g. "primary/master" before the generic "bedroom").
+// Order matters: the FIRST regex that matches wins, so collisions are resolved
+// by listing the more-specific rule first even when its rank value is higher.
 const UNIT_CATEGORY_RANK: Array<[RegExp, number]> = [
+  // Bathroom is matched BEFORE the primary/master bedroom rule so a "Primary
+  // Bathroom" / "Master Bath" ranks as a bath (6), not a bedroom (4). NOTE the
+  // `(?:room|s|tub)?` — a bare `\bbath\b` does NOT match the word "bathroom"
+  // (no word boundary inside "bath·room"), which previously dropped every
+  // plain "… Bathroom" caption to OTHER.
+  [/\b(bath(?:room|rooms|s|tub)?|shower|ensuite|en-?suite|powder|toilet|vanity|tub)\b/, 6],
   [/\b(living|great ?room|family ?room|lounge|sitting|loft|den|main ?room)\b/, 0],
-  [/\b(view|ocean ?front|ocean ?view|sunset|lanai|balcon|patio|deck|terrace|veranda)\b/, 1],
   [/\b(kitchen|kitchenette)\b/, 2],
   [/\b(dining|breakfast|eat-?in)\b/, 3],
   [/\b(primary|master)\b/, 4],
   [/\b(bed ?room|\bbeds?\b|king|queen|twin|bunk|murphy|sleeper)\b/, 5],
-  [/\b(bath|shower|ensuite|en-?suite|powder|toilet|vanity|tub)\b/, 6],
+  // Scenic/outdoor is matched AFTER the room rules so a bedroom/bath "— Alt
+  // View" (or a "Dining Room With Mountain View") ranks by its ROOM — keeping a
+  // room's photos clustered together — instead of being pulled to the front as
+  // a scenic shot. Bare "view" is deliberately NOT a keyword: it matched the
+  // "— Alt View" cluster suffix and scattered every alt-angle photo.
+  [/\b(ocean ?front|ocean ?view|sea ?view|water ?view|sunset|lanai|balcon|patio|deck|terrace|veranda)\b/, 1],
   [/\b(laundry|washer|dryer|closet|garage|entry|hallway|foyer|office|desk|workspace|stair)\b/, 7],
 ];
 
@@ -63,6 +75,16 @@ export function categoryRank(text: string | null | undefined, scope: PhotoScope)
   const table = scope === "community" ? COMMUNITY_CATEGORY_RANK : UNIT_CATEGORY_RANK;
   for (const [re, rank] of table) if (re.test(t)) return rank;
   return OTHER_CATEGORY_RANK;
+}
+
+/**
+ * True when the photo is a clustered ALT-ANGLE shot (the bedroom/bathroom
+ * clustering appends "— Alt View"). Within a category these sort AFTER the
+ * primary shot so a room's cluster leads with its hero photo
+ * (e.g. "Master Bedroom — King" before "Master Bedroom — Alt View").
+ */
+export function isAltView(text: string | null | undefined): boolean {
+  return /\balt(?:ernate)?\.?\s*view\b/i.test(text ?? "");
 }
 
 /** "Community — Pili Mai" → community; anything else → unit. */
@@ -98,7 +120,12 @@ export function orderGallery<T extends OrderablePhoto>(photos: T[], scope: Photo
     indexed.sort((a, b) => {
       const ra = categoryRank(a.p.text, scope);
       const rb = categoryRank(b.p.text, scope);
-      return ra - rb || a.i - b.i;
+      if (ra !== rb) return ra - rb;
+      // Within a category, the primary shot leads and alt angles follow, then
+      // stable on the original index — keeps a room's cluster together.
+      const aa = isAltView(a.p.text) ? 1 : 0;
+      const ab = isAltView(b.p.text) ? 1 : 0;
+      return aa - ab || a.i - b.i;
     });
   }
   return indexed.map((x) => x.p);
@@ -114,7 +141,7 @@ export function bestOrderIndices(
   scope: PhotoScope,
 ): number[] {
   return texts
-    .map((text, i) => ({ i, rank: categoryRank(text, scope) }))
-    .sort((a, b) => a.rank - b.rank || a.i - b.i)
+    .map((text, i) => ({ i, rank: categoryRank(text, scope), alt: isAltView(text) ? 1 : 0 }))
+    .sort((a, b) => a.rank - b.rank || a.alt - b.alt || a.i - b.i)
     .map((x) => x.i);
 }
