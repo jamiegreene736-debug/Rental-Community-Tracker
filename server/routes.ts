@@ -28,6 +28,7 @@ import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-or
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { occupancyForBedrooms } from "@shared/occupancy";
 import {
+  comboBedroomSplitIsInferred,
   inferCombinedBedroomsFromDraft,
   positiveDraftInteger,
   resolveComboUnitBedrooms,
@@ -1069,6 +1070,9 @@ async function refreshHybridPricingForDraft(
   const draftId = Math.abs(propertyId);
   let draft = await storage.getCommunityDraft(draftId);
   if (!draft) throw new Error(`Draft ${draftId} was not found`);
+  // Capture whether the combo split was inferred BEFORE the repair persists it
+  // (once written back to unit1/2Bedrooms it reads as explicit).
+  const bedroomSplitInferred = comboBedroomSplitIsInferred(draft);
   draft = await persistInferredComboDraftBedrooms(draft) ?? draft;
 
   const unitSlots = unitSlotsForCommunityDraft(draft);
@@ -1079,13 +1083,15 @@ async function refreshHybridPricingForDraft(
     throw new Error("Enter the single-listing bedroom count or both combo unit bedroom counts, then retry the queue.");
   }
 
-  const community = communityKeyForDraft(draft);
+  const { community, confident: resortConfident } = communityResolutionForDraft(draft);
   return refreshHybridPricingForTarget({
     propertyId,
     propertyName: String(draft.name || draft.listingTitle || fallbackLabel || `Draft ${draftId}`),
     community,
     bedroomCounts,
     unitCount: unitSlots.length || 1,
+    resortConfident,
+    bedroomSplitInferred,
     triggerType: "Manual Update",
     notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
     onMonthScanned,
@@ -5257,7 +5263,12 @@ function virtualPropertyIdForGuestyListingId(listingId: string): number {
   return -(100000 + (hash % 900000));
 }
 
-function communityKeyForDraft(draft: any): string {
+// Resolves a draft's community key AND whether that resolution is CONFIDENT.
+// confident=true when resolveBuyInMarket matched a curated market (or its
+// inference/FL-generic). confident=false when it fell through to a raw
+// pricingArea passthrough or the hard-coded "Poipu Kai" default — the
+// research-confirmation UI badges those so the operator verifies the resort.
+function communityResolutionForDraft(draft: any): { community: string; confident: boolean } {
   const pricingArea = typeof draft?.pricingArea === "string" ? draft.pricingArea.trim() : "";
   const resolved = resolveBuyInMarket({
     marketKey: pricingArea,
@@ -5271,9 +5282,13 @@ function communityKeyForDraft(draft: any): string {
     state: draft?.state,
     sourceUrl: draft?.sourceUrl,
   });
-  if (resolved) return resolved;
-  if (pricingArea) return pricingArea;
-  return draft?.name ?? "Poipu Kai";
+  if (resolved) return { community: resolved, confident: true };
+  if (pricingArea) return { community: pricingArea, confident: false };
+  return { community: draft?.name ?? "Poipu Kai", confident: false };
+}
+
+function communityKeyForDraft(draft: any): string {
+  return communityResolutionForDraft(draft).community;
 }
 
 function unitLabelFromDraftAddress(address: unknown, fallback: string): string {
@@ -5330,6 +5345,12 @@ function unitSlotsForCommunityDraft(draft: any, sourceListingId?: string): Array
   ];
 }
 
+function levelFromScores(scores: number[]): "red" | "yellow" | "green" {
+  const avg = Math.round(scores.reduce((s, n) => s + n, 0) / scores.length);
+  const min = Math.min(...scores);
+  return min < 75 ? "red" : avg >= 90 ? "green" : "yellow";
+}
+
 function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unknown> | null {
   const confidences: Array<{
     score: number;
@@ -5342,9 +5363,27 @@ function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unkn
     communityMatchedCandidates?: number;
     geoVerifiedCandidates?: number;
   }> = [];
+  // Phase 2: per-bedroom-size roll-up so the confirmation UI can say which size
+  // was weak / drawn from a widened box, instead of one number averaged across
+  // every size.
+  const perBedroom: Array<{
+    bedrooms: number;
+    score: number;
+    level: "red" | "yellow" | "green";
+    sampleCount: number;
+    months: number;
+    geoKind: "curated-bounds" | "center-radius" | "none" | null;
+    geoRadiusMiles: number | null;
+    widened: boolean;
+  }> = [];
   for (const row of rows) {
     const monthlyRates = row?.monthlyRates;
     if (!monthlyRates || typeof monthlyRates !== "object" || Array.isArray(monthlyRates)) continue;
+    const rowScores: number[] = [];
+    let rowSamples = 0;
+    let rowWidened = false;
+    let rowRadius: number | null = null;
+    let rowGeoKind: "curated-bounds" | "center-radius" | "none" | null = null;
     for (const payload of Object.values(monthlyRates as Record<string, any>)) {
       const confidence = payload?.confidence;
       if (!confidence || typeof confidence !== "object") continue;
@@ -5361,12 +5400,35 @@ function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unkn
         communityMatchedCandidates: Number(confidence.communityMatchedCandidates) || 0,
         geoVerifiedCandidates: Number(confidence.geoVerifiedCandidates) || 0,
       });
+      rowScores.push(score);
+      rowSamples += Number(confidence.sampleCount) || 0;
+      const geo = payload?.evidence?.geoConstraint;
+      if (geo && typeof geo === "object") {
+        if (geo.widened === true) rowWidened = true;
+        const r = Number(geo.radiusMiles);
+        if (Number.isFinite(r)) rowRadius = rowRadius == null ? r : Math.max(rowRadius, r);
+        if (typeof geo.kind === "string") rowGeoKind = geo.kind;
+      }
+    }
+    const bedrooms = Number(row?.bedrooms);
+    if (rowScores.length > 0 && Number.isFinite(bedrooms)) {
+      perBedroom.push({
+        bedrooms,
+        score: Math.round(rowScores.reduce((s, n) => s + n, 0) / rowScores.length),
+        level: levelFromScores(rowScores),
+        sampleCount: rowSamples,
+        months: rowScores.length,
+        geoKind: rowGeoKind,
+        geoRadiusMiles: rowRadius,
+        widened: rowWidened,
+      });
     }
   }
   if (confidences.length === 0) return null;
   const score = Math.round(confidences.reduce((sum, confidence) => sum + confidence.score, 0) / confidences.length);
   const minScore = Math.min(...confidences.map((confidence) => confidence.score));
   const level = minScore < 75 ? "red" : score >= 90 ? "green" : "yellow";
+  perBedroom.sort((a, b) => a.bedrooms - b.bedrooms);
   return {
     score,
     level,
@@ -5378,6 +5440,8 @@ function summarizeMarketRateProgressConfidence(rows: any[]): Record<string, unkn
     unknownBedroomCandidates: confidences.reduce((sum, confidence) => sum + (confidence.unknownBedroomCandidates || 0), 0),
     communityMatchedCandidates: confidences.reduce((sum, confidence) => sum + (confidence.communityMatchedCandidates || 0), 0),
     geoVerifiedCandidates: confidences.reduce((sum, confidence) => sum + (confidence.geoVerifiedCandidates || 0), 0),
+    widened: perBedroom.some((b) => b.widened),
+    perBedroom,
   };
 }
 

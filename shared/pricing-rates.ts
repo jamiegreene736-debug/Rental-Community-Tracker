@@ -243,6 +243,23 @@ export type MonthlyMarketRate = {
     layers?: Array<Record<string, unknown>>;
     notes?: string[];
   };
+  // Per-month research confidence + evidence (subset). Surfaced by the Pricing
+  // tab "Research confirmation" block: the resort actually searched (query), the
+  // geo radius / widened flag, and per-bedroom sample/confidence.
+  confidence?: {
+    score?: number;
+    level?: "green" | "yellow" | "red";
+    sampleCount?: number;
+  };
+  evidence?: {
+    query?: string;
+    geoConstraint?: {
+      kind?: "curated-bounds" | "center-radius" | "none";
+      description?: string;
+      radiusMiles?: number | null;
+      widened?: boolean;
+    };
+  };
 };
 
 export type LivePropertyMarketRateInput = {
@@ -293,6 +310,22 @@ function parseMonthlyRates(input: unknown): Record<string, MonthlyMarketRate> {
         pm: parseNullableRate(raw.channels.pm),
       } : undefined,
       hybrid: raw.hybrid && typeof raw.hybrid === "object" ? raw.hybrid : undefined,
+      confidence: raw.confidence && typeof raw.confidence === "object" ? {
+        score: typeof raw.confidence.score === "number" ? raw.confidence.score : undefined,
+        level: raw.confidence.level === "green" || raw.confidence.level === "yellow" || raw.confidence.level === "red"
+          ? raw.confidence.level
+          : undefined,
+        sampleCount: typeof raw.confidence.sampleCount === "number" ? raw.confidence.sampleCount : undefined,
+      } : undefined,
+      evidence: raw.evidence && typeof raw.evidence === "object" ? {
+        query: typeof raw.evidence.query === "string" ? raw.evidence.query : undefined,
+        geoConstraint: raw.evidence.geoConstraint && typeof raw.evidence.geoConstraint === "object" ? {
+          kind: raw.evidence.geoConstraint.kind,
+          description: typeof raw.evidence.geoConstraint.description === "string" ? raw.evidence.geoConstraint.description : undefined,
+          radiusMiles: typeof raw.evidence.geoConstraint.radiusMiles === "number" ? raw.evidence.geoConstraint.radiusMiles : null,
+          widened: raw.evidence.geoConstraint.widened === true,
+        } : undefined,
+      } : undefined,
     };
   }
   return parsed;
