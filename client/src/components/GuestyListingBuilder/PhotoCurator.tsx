@@ -416,6 +416,9 @@ export default function PhotoCurator({
       setRelabelProgress({ done: section.photos.length, total: section.photos.length });
       resetSectionOrder(section);
       onOverridesChanged?.();
+      // Fresh bedroom/bathroom labels change the best-order heuristic — clear
+      // any manual drag so the gallery re-sorts into bedroom→ensuite suites.
+      resetSectionOrder(section);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       alert(`Re-label & reorder failed: ${msg}`);

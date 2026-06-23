@@ -13,6 +13,9 @@ import {
   isAltView,
   orderGallery,
   bestOrderIndices,
+  isOutdoorGrillText,
+  parseBedroomSuiteNumber,
+  parseBathroomSuiteNumber,
   OTHER_CATEGORY_RANK,
   type OrderablePhoto,
 } from "../shared/photo-order";
@@ -26,6 +29,23 @@ assert.equal(scopeForSource("Unit A (3BR)"), "unit");
 assert.equal(scopeForSource("Unit B (2BR)"), "unit");
 assert.equal(scopeForSource(undefined), "unit");
 console.log("  ✓ scopeForSource maps community vs unit");
+
+// ── suite parsers ────────────────────────────────────────────────────────────
+assert.equal(parseBedroomSuiteNumber("Master Bedroom — King"), 1);
+assert.equal(parseBedroomSuiteNumber("Bedroom 2 — Queen"), 2);
+assert.equal(parseBedroomSuiteNumber("Primary Bathroom"), null);
+assert.equal(parseBathroomSuiteNumber("Primary Bathroom"), 1);
+assert.equal(parseBathroomSuiteNumber("Bathroom 2 — Shower/Tub"), 2);
+assert.equal(parseBathroomSuiteNumber("Guest Bathroom"), null);
+assert.equal(parseBathroomSuiteNumber("Half Bath"), null);
+console.log("  ✓ bedroom/bathroom suite parsers");
+
+// ── outdoor grill detection ──────────────────────────────────────────────────
+assert.equal(isOutdoorGrillText("Gas Grill on Deck"), true);
+assert.equal(isOutdoorGrillText("Outdoor BBQ Area"), true);
+assert.equal(isOutdoorGrillText("Kitchen with gas grill"), false);
+assert.equal(isOutdoorGrillText("Updated Kitchen"), false);
+console.log("  ✓ outdoor grill detected separately from kitchen");
 
 // ── categoryRank: unit hero-first ────────────────────────────────────────────
 assert.ok(categoryRank("Living Room", "unit") < categoryRank("Primary Bedroom — King", "unit"));
@@ -123,6 +143,23 @@ assert.deepEqual(
 );
 console.log("  ✓ orderGallery default = hero-first within a unit");
 
+// Bedroom suites interleave ensuite baths (post-relabel captions).
+const suites: P[] = [
+  { id: "living", text: "Living Room" },
+  { id: "bath2", text: "Bathroom 2 — Shower/Tub" },
+  { id: "bed2", text: "Bedroom 2 — Queen" },
+  { id: "bath1", text: "Primary Bathroom" },
+  { id: "bed1", text: "Master Bedroom — King" },
+  { id: "kitchen", text: "Kitchen" },
+  { id: "grill", text: "Outdoor BBQ Grill on Deck" },
+];
+assert.deepEqual(
+  orderGallery(suites, "unit").map((p) => p.id),
+  ["living", "kitchen", "bed1", "bath1", "bed2", "bath2", "grill"],
+  "bedroom suites should pair with ensuite baths; outdoor grill last",
+);
+console.log("  ✓ orderGallery interleaves bedroom + ensuite bath suites");
+
 // Stability: equal-rank photos keep their input order.
 const tie: P[] = [
   { id: "a", text: "Bedroom — Queen" },
@@ -165,6 +202,14 @@ assert.deepEqual(
   bestOrderIndices(["Guest Bathroom", "Living Room", "Kitchen"], "unit"),
   [1, 2, 0],
   "bestOrderIndices returns a hero-first permutation",
+);
+assert.deepEqual(
+  bestOrderIndices(
+    ["Bathroom 2", "Master Bedroom — King", "Primary Bathroom", "Bedroom 2", "Outdoor BBQ"],
+    "unit",
+  ),
+  [1, 2, 3, 0, 4],
+  "bestOrderIndices interleaves suites and puts grill last",
 );
 console.log("  ✓ bestOrderIndices returns a hero-first permutation");
 

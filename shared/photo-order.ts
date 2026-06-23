@@ -5,7 +5,8 @@
 //     → Unit A → Unit B → … → Community
 //
 // and WITHIN each gallery a "best presentation" hero-first order
-// (living / view / kitchen → bedrooms → bathrooms → … for a unit; pool /
+// (living / view / kitchen → bedroom suites with ensuite baths interleaved →
+// guest baths → laundry / misc → outdoor grill last for a unit; pool /
 // beach / exterior → grounds → amenities → … for the community) UNLESS the
 // operator has manually dragged the photos. A manual drag persists an
 // explicit per-photo `sortOrder` on photo_labels.sort_order; when present it
@@ -69,6 +70,107 @@ const COMMUNITY_CATEGORY_RANK: Array<[RegExp, number]> = [
 // photo but keep their original relative order (stable).
 export const OTHER_CATEGORY_RANK = 8;
 
+// Unit-gallery sort tiers — bedroom suites sit in 20+N, outdoor grill is last.
+const SUITE_BASE_RANK = 20;
+const UNMATCHED_BATH_RANK = 60;
+const FALLBACK_BEDROOM_RANK = 55;
+const LAUNDRY_MISC_RANK = 70;
+const OUTDOOR_GRILL_RANK = 100;
+
+/** Outdoor BBQ / grill amenity — pushed to the very end of a unit gallery. */
+export function isOutdoorGrillText(text: string | null | undefined): boolean {
+  const t = (text ?? "").toLowerCase();
+  if (!/\b(bbq|barbecue|barbeque|grill)\b/.test(t)) return false;
+  // In-kitchen grill stays with the kitchen hero block.
+  if (/\b(kitchen|kitchenette|indoor)\b/.test(t) && !/\b(outdoor|outside|exterior)\b/.test(t)) {
+    return false;
+  }
+  if (/\b(outdoor|outside|exterior|deck|patio|lanai|balcon|terrace|veranda|yard)\b/.test(t)) {
+    return true;
+  }
+  // Standalone BBQ/grill label (no kitchen) — treat as outdoor amenity.
+  return !/\b(kitchen|kitchenette|dining|breakfast)\b/.test(t);
+}
+
+/**
+ * Bedroom suite number after relabel: Master/Primary → 1, "Bedroom N" → N.
+ * Returns null when the text is not a bedroom photo.
+ */
+export function parseBedroomSuiteNumber(text: string | null | undefined): number | null {
+  const t = (text ?? "").toLowerCase();
+  if (/\b(bath|shower|toilet|vanity|tub|powder)\b/.test(t) && !/\b(bed ?room)\b/.test(t)) {
+    return null;
+  }
+  if (/\b(master|primary)\b/.test(t) && /\b(bed ?room|beds?)\b/.test(t)) return 1;
+  const numbered = t.match(/\bbedroom\s+(\d+)\b/);
+  if (numbered) return Number(numbered[1]);
+  return null;
+}
+
+/**
+ * Ensuite bathroom suite number: Primary/Master → 1, "Bathroom N" → N.
+ * Guest / hall / half baths return null and sort after all suites.
+ */
+export function parseBathroomSuiteNumber(text: string | null | undefined): number | null {
+  const t = (text ?? "").toLowerCase();
+  if (!/\b(bath(?:room)?|shower|ensuite|en-?suite|toilet|vanity|tub)\b/.test(t)) return null;
+  if (/\bhalf\s+bath\b/.test(t)) return null;
+  if (/\b(guest|hall|powder)\b/.test(t) && !/\b(primary|master|bedroom\s+\d+|bathroom\s+\d+)\b/.test(t)) {
+    return null;
+  }
+  if (/\b(primary|master)\b/.test(t)) return 1;
+  const numbered = t.match(/\bbathroom\s+(\d+)\b/);
+  if (numbered) return Number(numbered[1]);
+  return null;
+}
+
+function isUnmatchedBathroomText(text: string | null | undefined): boolean {
+  const t = (text ?? "").toLowerCase();
+  return /\b(bath(?:room)?|shower|ensuite|en-?suite|powder|toilet|vanity|tub)\b/.test(t);
+}
+
+/**
+ * Sort key for unit galleries: [primary tier, sub-rank within tier, stable index].
+ * Bedroom N is immediately followed by its ensuite Bathroom N when labels match.
+ */
+export function unitSortKey(
+  text: string | null | undefined,
+  originalIndex: number,
+): [number, number, number] {
+  if (isOutdoorGrillText(text)) {
+    return [OUTDOOR_GRILL_RANK, 0, originalIndex];
+  }
+
+  const bedSuite = parseBedroomSuiteNumber(text);
+  if (bedSuite !== null) {
+    return [SUITE_BASE_RANK + bedSuite, 0, originalIndex];
+  }
+
+  const bathSuite = parseBathroomSuiteNumber(text);
+  if (bathSuite !== null) {
+    return [SUITE_BASE_RANK + bathSuite, 1, originalIndex];
+  }
+
+  if (isUnmatchedBathroomText(text)) {
+    return [UNMATCHED_BATH_RANK, 0, originalIndex];
+  }
+
+  const rank = categoryRank(text, "unit");
+  if (rank === 5) {
+    return [FALLBACK_BEDROOM_RANK, 0, originalIndex];
+  }
+  if (rank === 6) {
+    return [UNMATCHED_BATH_RANK, 0, originalIndex];
+  }
+  if (rank === 7) {
+    return [LAUNDRY_MISC_RANK, 0, originalIndex];
+  }
+  if (rank === OTHER_CATEGORY_RANK) {
+    return [LAUNDRY_MISC_RANK + 1, 0, originalIndex];
+  }
+  return [rank, 0, originalIndex];
+}
+
 export function categoryRank(text: string | null | undefined, scope: PhotoScope): number {
   const t = (text ?? "").toLowerCase();
   if (!t.trim()) return OTHER_CATEGORY_RANK;
@@ -97,6 +199,10 @@ export function hasManualOrder(photos: ReadonlyArray<OrderablePhoto>): boolean {
   return photos.some((p) => p.sortOrder != null);
 }
 
+function compareSortKeys(a: [number, number, number], b: [number, number, number]): number {
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+}
+
 /**
  * Order one gallery (a single unit folder, or the community folder).
  *
@@ -104,7 +210,8 @@ export function hasManualOrder(photos: ReadonlyArray<OrderablePhoto>): boolean {
  *   (operator drag wins; ties + un-ordered photos fall back to the original
  *   index so the result is fully deterministic).
  * - Otherwise the gallery is ordered hero-first by category, stable on the
- *   original index.
+ *   original index. Unit galleries interleave each bedroom with its ensuite
+ *   bath and push outdoor grill photos to the end.
  *
  * Returns a NEW array and never mutates the input.
  */
@@ -116,6 +223,10 @@ export function orderGallery<T extends OrderablePhoto>(photos: T[], scope: Photo
       const sb = b.p.sortOrder ?? Number.MAX_SAFE_INTEGER;
       return sa - sb || a.i - b.i;
     });
+  } else if (scope === "unit") {
+    indexed.sort((a, b) =>
+      compareSortKeys(unitSortKey(a.p.text, a.i), unitSortKey(b.p.text, b.i)),
+    );
   } else {
     indexed.sort((a, b) => {
       const ra = categoryRank(a.p.text, scope);
@@ -140,6 +251,12 @@ export function bestOrderIndices(
   texts: ReadonlyArray<string | null | undefined>,
   scope: PhotoScope,
 ): number[] {
+  if (scope === "unit") {
+    return texts
+      .map((text, i) => ({ i, key: unitSortKey(text, i) }))
+      .sort((a, b) => compareSortKeys(a.key, b.key))
+      .map((x) => x.i);
+  }
   return texts
     .map((text, i) => ({ i, rank: categoryRank(text, scope), alt: isAltView(text) ? 1 : 0 }))
     .sort((a, b) => a.rank - b.rank || a.alt - b.alt || a.i - b.i)
