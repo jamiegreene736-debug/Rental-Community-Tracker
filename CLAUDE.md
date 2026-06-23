@@ -43,6 +43,42 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-22 (market-rate "is it the right resort + bedroom?" confirmation UI, Phase 1):
+  Operator wanted glanceable proof that the bulk market-rate queue AND the Pricing-tab
+  "Update Market Rates" use the CORRECT resort/community and the CORRECT bedroom size
+  (his fear: looking up a 3BR for a 6BR listing and ×2-ing it). Investigated via a
+  6-agent map workflow. KEY FINDINGS (don't re-chase): (a) the persisting path
+  (`POST /api/property/:id/refresh-market-rates` → `refreshPricingTabMarketRates` →
+  `refreshHybridPricingForTarget`) does NOT scale — it scans ONE exact-BR Airbnb P40 comp
+  per DISTINCT bedroom size and stores one `property_market_rates` row per size; the combo
+  "×N" is a read-time SUM of per-unit bases in `buildBulkGuestySeasonalPlan`
+  (`routes.ts:888`), so a 6BR=3BR+3BR is two real 3BR comps summed, NOT a single comp
+  doubled. The only literal `×2`/`×unitCount` is `applyAirbnbBiasAndCombo`
+  (`shared/pricing-rates.ts:592`), reachable ONLY from the SECONDARY non-persisting path A
+  (`POST /api/builder/refresh-market-rates`, wired to the legacy `refreshMarketRates`, NOT
+  the visible button). (b) The provenance facts are ALREADY computed: resort `searchName`,
+  `searchedBedrooms`, `unitCount` live on `pricingRecipe`, and the bulk-log already plumbs
+  it to the client in `item.progress.pricingRecipe` + `confidence` (incl. `sampleCount`) —
+  it was just collapsed into one truncated grey pill via `formatPricingRecipe`. So Phase 1
+  is DISPLAY-ONLY, ~no server change. SHIPPED (branch `claude/elated-stonebraker-aee5cb`,
+  PR #TBD): (1) bulk log (`home.tsx`) — replaced the recipe pill with discrete
+  "🔎 Researched <resort>" + "🛏️ <NBR ×N · summed>" pills + a now-visible "<N> comps"
+  pill (sampleCount was typed but never rendered); combo tooltip spells out "real comp of
+  each unit's own size, summed — never a smaller comp scaled up". (2) Pricing tab
+  (`GuestyListingBuilder/index.tsx`) — new `researchProvenance` memo + a "Research
+  confirmation" block above the per-bedroom badges (resort, composition "6BR listing =
+  3BR + 3BR", scaling note, and an amber "⚠ not curated" chip when the community isn't a
+  curated `BUY_IN_MARKETS` key). (3) new shared `curatedResortSearchName` /
+  `isCuratedBuyInMarket` (`shared/buy-in-market.ts`) mirror the server's
+  `curatedAirbnbSearchQueries[0]` priority — MUST stay in sync if that priority changes
+  (NOTE FOR CODEX inline). Trust signal is BADGE-ONLY (never blocks a push) per operator.
+  Caveat: the Pricing-tab resort label is client-derived and does NOT reflect a server-side
+  widened-fallback city anchor (only fires when the resort box returns 0 comps) — that, plus
+  per-bedroom geo radius + a real default-resort-fallback / inferred-bedroom-split warning,
+  is Phase 2/3 (deferred). Verified: `tests/research-confirmation.test.ts` green, full
+  `npm test` green, build clean, `npm run check` 330 = baseline (0 new). Could NOT
+  live-smoke the rendered UI (no portal creds in session) — confirm on the live bundle.
+
 - 2026-06-19 (Check photo community, Poipu Kai 6BR: use the Google Lens AI Overview to
   confirm community photos): the tennis-court photo stayed "unconfirmed" even though a
   manual Google reverse-image AI Overview says "These are the tennis courts at the Poipu
