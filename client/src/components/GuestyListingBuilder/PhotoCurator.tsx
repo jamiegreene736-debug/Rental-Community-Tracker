@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { RotateCcw, RotateCw, ChevronLeft, ChevronRight, GripVertical } from "lucide-react";
+import { bestOrderIndices, scopeForSource } from "@shared/photo-order";
 import { normalizePhotoVerdictKey, photoVerdictKeyFromUrl } from "@shared/photo-verdict-keys";
 
 type PhotoIn = { url: string; caption?: string; source?: string };
@@ -148,11 +149,11 @@ export default function PhotoCurator({
     return Array.from(set);
   }, [photos]);
 
-  const loadFolderLabels = useCallback(async (folders: string[]) => {
+  const loadFolderLabels = useCallback(async (folders: string[]): Promise<Map<string, LabelMeta>> => {
     if (folders.length === 0) {
       setMeta(new Map());
       setLoading(false);
-      return;
+      return new Map();
     }
     setLoading(true);
     const results = await Promise.all(
@@ -171,6 +172,7 @@ export default function PhotoCurator({
     }
     setMeta(next);
     setLoading(false);
+    return next;
   }, []);
 
   useEffect(() => {
@@ -362,6 +364,25 @@ export default function PhotoCurator({
     onResetSectionOrder?.(folder);
   };
 
+  const tileSortText = (tile: Tile, labelMeta: Map<string, LabelMeta>): string => {
+    const key = tile.folder && tile.filename ? `${tile.folder}/${tile.filename}` : null;
+    const m = key ? labelMeta.get(key) ?? tile.meta : tile.meta;
+    const caption = m?.userLabel || tile.caption || m?.label || "";
+    const category = m?.category || "";
+    return [caption, category, tile.filename].filter(Boolean).join(" ");
+  };
+
+  // Persist the heuristic best order for one gallery using fresh label metadata.
+  const applyBestSectionOrder = (section: Section, labelMeta: Map<string, LabelMeta>) => {
+    const folder = sectionFolder(section);
+    if (!folder || !onReorderSection) return;
+    const texts = section.photos.map((tile) => tileSortText(tile, labelMeta));
+    const indices = bestOrderIndices(texts, scopeForSource(section.source));
+    const orderedKeys = indices.map((i) => section.photos[i]?.key).filter((k): k is string => !!k);
+    if (orderedKeys.length !== section.photos.length) return;
+    applySectionOrder(section, orderedKeys);
+  };
+
   // ONE button: Claude vision re-captions every photo, then the gallery is
   // reordered best-first (hero → bedrooms → bathrooms → …) using those fresh
   // labels. Combines the old "Relabel all photos" + "Reset to best order"
@@ -374,7 +395,7 @@ export default function PhotoCurator({
       `Re-label and reorder all ${section.photos.length} photo(s) in this gallery with Claude vision?\n\n`
       + "Claude looks at each photo, re-captions it (merging duplicate bedroom views, e.g. "
       + "Bedroom 6 → Master Bedroom — Alt View), then puts the gallery in the best presentation "
-      + "order (hero shots first → bedrooms → bathrooms → …).\n\n"
+      + "order (hero shots first, then each bedroom followed by its ensuite bathroom, outdoor grill last).\n\n"
       + "Your manual caption edits and the current drag order in this gallery will be replaced.",
     );
     if (!confirmed) return;
@@ -409,16 +430,12 @@ export default function PhotoCurator({
           }
         }
       }
-      await loadFolderLabels(localFolders);
-      // 2. Reorder best-first on the FRESH labels. resetSectionOrder clears any
-      //    manual drag order (sort_order) so the builder re-sorts the gallery
-      //    hero-first by the new vision categories.
+      const freshMeta = await loadFolderLabels(localFolders);
+      // 2. Persist the computed best order from the fresh vision labels so
+      //    ensuite baths stay with their bedroom instead of clustering together.
       setRelabelProgress({ done: section.photos.length, total: section.photos.length });
-      resetSectionOrder(section);
+      applyBestSectionOrder(section, freshMeta);
       onOverridesChanged?.();
-      // Fresh bedroom/bathroom labels change the best-order heuristic — clear
-      // any manual drag so the gallery re-sorts into bedroom→ensuite suites.
-      resetSectionOrder(section);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       alert(`Re-label & reorder failed: ${msg}`);
