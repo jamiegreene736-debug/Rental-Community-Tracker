@@ -33,6 +33,7 @@ console.log("  ✓ scopeForSource maps community vs unit");
 // ── suite parsers ────────────────────────────────────────────────────────────
 assert.equal(parseBedroomSuiteNumber("Master Bedroom — King"), 1);
 assert.equal(parseBedroomSuiteNumber("Bedroom 2 — Queen"), 2);
+assert.equal(parseBedroomSuiteNumber("Second Bedroom — Queen"), 2);
 assert.equal(parseBedroomSuiteNumber("Primary Bathroom"), null);
 assert.equal(parseBathroomSuiteNumber("Primary Bathroom"), 1);
 assert.equal(parseBathroomSuiteNumber("Bathroom 2 — Shower/Tub"), 2);
@@ -159,6 +160,28 @@ assert.deepEqual(
   "bedroom suites should pair with ensuite baths; outdoor grill last",
 );
 console.log("  ✓ orderGallery interleaves bedroom + ensuite bath suites");
+
+// 2BR unit: many master alt views, then primary bath, bedroom 2, bath 2 — not all baths clustered.
+const unitB2br: P[] = [
+  { id: "k1", text: "Kitchen With Island" },
+  { id: "mbr_king", text: "Master Bedroom — King" },
+  { id: "mbr_alt1", text: "Master Bedroom — Alt View" },
+  { id: "mbr_alt2", text: "Master Bedroom — Alt View" },
+  { id: "mbr_alt3", text: "Master Bedroom — Alt View" },
+  { id: "pbath1", text: "Primary Bathroom — Shower" },
+  { id: "pbath2", text: "Primary Bathroom — Alt View" },
+  { id: "bed2", text: "Bedroom 2 — Queen" },
+  { id: "bath2a", text: "Bathroom 2 — Double Vanity" },
+  { id: "bath2b", text: "Bathroom 2 — Alt View" },
+  { id: "laundry", text: "Laundry Room With Washer/Dryer" },
+  { id: "grill", text: "Outdoor Grill Station" },
+];
+assert.deepEqual(
+  orderGallery(unitB2br, "unit").map((p) => p.id),
+  ["k1", "mbr_king", "mbr_alt1", "mbr_alt2", "mbr_alt3", "pbath1", "pbath2", "bed2", "bath2a", "bath2b", "laundry", "grill"],
+  "2BR suites: master+primary bath, then bedroom 2+bath 2; grill last",
+);
+console.log("  ✓ orderGallery keeps ensuite baths with their bedroom (2BR scenario)");
 
 // Stability: equal-rank photos keep their input order.
 const tie: P[] = [

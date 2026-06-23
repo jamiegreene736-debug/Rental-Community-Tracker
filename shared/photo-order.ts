@@ -104,6 +104,11 @@ export function parseBedroomSuiteNumber(text: string | null | undefined): number
   if (/\b(master|primary)\b/.test(t) && /\b(bed ?room|beds?)\b/.test(t)) return 1;
   const numbered = t.match(/\bbedroom\s+(\d+)\b/);
   if (numbered) return Number(numbered[1]);
+  const ordinal = t.match(/\b(second|third|fourth|fifth|sixth)\s+bedroom\b/);
+  if (ordinal) {
+    const map: Record<string, number> = { second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6 };
+    return map[ordinal[1]] ?? null;
+  }
   return null;
 }
 
@@ -130,45 +135,47 @@ function isUnmatchedBathroomText(text: string | null | undefined): boolean {
 }
 
 /**
- * Sort key for unit galleries: [primary tier, sub-rank within tier, stable index].
- * Bedroom N is immediately followed by its ensuite Bathroom N when labels match.
+ * Sort key for unit galleries: [primary tier, bed/bath slot, alt-view flag, stable index].
+ * Bedroom N (primary shot, then alt views) is immediately followed by ensuite Bathroom N.
  */
 export function unitSortKey(
   text: string | null | undefined,
   originalIndex: number,
-): [number, number, number] {
+): [number, number, number, number] {
   if (isOutdoorGrillText(text)) {
-    return [OUTDOOR_GRILL_RANK, 0, originalIndex];
+    return [OUTDOOR_GRILL_RANK, 0, 0, originalIndex];
   }
+
+  const alt = isAltView(text) ? 1 : 0;
 
   const bedSuite = parseBedroomSuiteNumber(text);
   if (bedSuite !== null) {
-    return [SUITE_BASE_RANK + bedSuite, 0, originalIndex];
+    return [SUITE_BASE_RANK + bedSuite, 0, alt, originalIndex];
   }
 
   const bathSuite = parseBathroomSuiteNumber(text);
   if (bathSuite !== null) {
-    return [SUITE_BASE_RANK + bathSuite, 1, originalIndex];
+    return [SUITE_BASE_RANK + bathSuite, 1, alt, originalIndex];
   }
 
   if (isUnmatchedBathroomText(text)) {
-    return [UNMATCHED_BATH_RANK, 0, originalIndex];
+    return [UNMATCHED_BATH_RANK, 0, alt, originalIndex];
   }
 
   const rank = categoryRank(text, "unit");
   if (rank === 5) {
-    return [FALLBACK_BEDROOM_RANK, 0, originalIndex];
+    return [FALLBACK_BEDROOM_RANK, 0, alt, originalIndex];
   }
   if (rank === 6) {
-    return [UNMATCHED_BATH_RANK, 0, originalIndex];
+    return [UNMATCHED_BATH_RANK, 0, alt, originalIndex];
   }
   if (rank === 7) {
-    return [LAUNDRY_MISC_RANK, 0, originalIndex];
+    return [LAUNDRY_MISC_RANK, 0, alt, originalIndex];
   }
   if (rank === OTHER_CATEGORY_RANK) {
-    return [LAUNDRY_MISC_RANK + 1, 0, originalIndex];
+    return [LAUNDRY_MISC_RANK + 1, 0, alt, originalIndex];
   }
-  return [rank, 0, originalIndex];
+  return [rank, 0, alt, originalIndex];
 }
 
 export function categoryRank(text: string | null | undefined, scope: PhotoScope): number {
@@ -199,8 +206,8 @@ export function hasManualOrder(photos: ReadonlyArray<OrderablePhoto>): boolean {
   return photos.some((p) => p.sortOrder != null);
 }
 
-function compareSortKeys(a: [number, number, number], b: [number, number, number]): number {
-  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+function compareSortKeys(a: readonly number[], b: readonly number[]): number {
+  return (a[0] - b[0]) || (a[1] - b[1]) || (a[2] - b[2]) || ((a[3] ?? 0) - (b[3] ?? 0));
 }
 
 /**
