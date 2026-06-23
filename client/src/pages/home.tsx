@@ -199,6 +199,17 @@ type BulkPricingJob = {
         acceptedCandidates?: number;
         rejectedCandidates?: number;
         sampleCount?: number;
+        widened?: boolean;
+        perBedroom?: Array<{
+          bedrooms: number;
+          score: number;
+          level: "green" | "yellow" | "red";
+          sampleCount: number;
+          months?: number;
+          geoKind?: "curated-bounds" | "center-radius" | "none" | null;
+          geoRadiusMiles?: number | null;
+          widened?: boolean;
+        }>;
       } | null;
       pricingRecipe?: {
         community?: string;
@@ -208,6 +219,8 @@ type BulkPricingJob = {
         searchedBedrooms?: number[];
         stayNights?: number;
         source?: string;
+        resortConfident?: boolean;
+        bedroomSplitInferred?: boolean;
       } | null;
       acceptedCandidates?: number;
       rejectedCandidates?: number;
@@ -3783,6 +3796,10 @@ function AdminDashboard() {
                             const confidence = item.progress?.confidence;
                             const confidenceScore = typeof confidence?.score === "number" ? Math.round(confidence.score) : null;
                             const sampleCount = typeof confidence?.sampleCount === "number" ? confidence.sampleCount : null;
+                            const resortUnconfident = item.progress?.pricingRecipe?.resortConfident === false;
+                            const bedroomSplitInferred = item.progress?.pricingRecipe?.bedroomSplitInferred === true;
+                            const perBedroomConfidence = Array.isArray(confidence?.perBedroom) ? confidence.perBedroom : [];
+                            const anyWidened = confidence?.widened === true || perBedroomConfidence.some((b) => b.widened);
                             const blackoutCount = typeof item.progress?.blackoutCount === "number" ? item.progress.blackoutCount : 0;
                             const blackoutClosed = typeof item.progress?.blackoutClosed === "number" ? item.progress.blackoutClosed : 0;
                             const rateChanges = Array.isArray(item.progress?.rateChanges) ? item.progress.rateChanges : [];
@@ -3797,8 +3814,18 @@ function AdminDashboard() {
                                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                                       Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
                                     </p>
-                                    {(recipeResort || recipeScaling || confidenceScore != null || blackoutCount > 0) && (
+                                    {(recipeResort || recipeScaling || confidenceScore != null || blackoutCount > 0 || resortUnconfident || bedroomSplitInferred) && (
                                       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+                                        {resortUnconfident && (
+                                          <span className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 font-medium text-amber-800" title="This draft's community could not be matched to a curated market, so the resort searched is a best-guess fallback. Verify the resort before trusting these rates.">
+                                            ⚠ resort not confidently matched
+                                          </span>
+                                        )}
+                                        {bedroomSplitInferred && (
+                                          <span className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 font-medium text-amber-800" title="This combo's per-unit bedroom split was inferred from the combined total (no explicit per-unit data), so the sizes researched may be wrong — e.g. a real 4BR+2BR researched as 3BR+3BR. Verify the split.">
+                                            ⚠ bedroom split inferred
+                                          </span>
+                                        )}
                                         {recipeResort && (
                                           <span
                                             className="inline-flex max-w-full items-center gap-1 truncate rounded border bg-muted/40 px-2 py-0.5 text-muted-foreground"
@@ -3849,6 +3876,25 @@ function AdminDashboard() {
                                             {sampleCount} comp{sampleCount === 1 ? "" : "s"}
                                           </span>
                                         )}
+                                        {anyWidened && (
+                                          <span className="rounded border border-amber-200 bg-amber-50 px-2 py-0.5 font-medium text-amber-700" title="At least one month's basis came from a widened search box because the resort footprint had no priced comps — comps are nearby-area, not strictly the resort.">
+                                            ↔ widened search area
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
+                                    {perBedroomConfidence.length > 1 && (
+                                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+                                        <span className="text-muted-foreground">By size:</span>
+                                        {perBedroomConfidence.map((b) => (
+                                          <span
+                                            key={b.bedrooms}
+                                            className={cn("rounded border px-2 py-0.5 font-medium", confidenceTone(b.level))}
+                                            title={`${b.bedrooms}BR researched: ${Math.round(b.score)}% confidence, ${b.sampleCount} comp${b.sampleCount === 1 ? "" : "s"}${b.geoRadiusMiles != null ? ` within ~${b.geoRadiusMiles}mi` : ""}${b.widened ? " (widened search area)" : ""}.`}
+                                          >
+                                            {b.bedrooms}BR {Math.round(b.score)}% · {b.sampleCount} comp{b.sampleCount === 1 ? "" : "s"}{b.widened ? " · ↔" : ""}
+                                          </span>
+                                        ))}
                                       </div>
                                     )}
                                     {rateChanges.length > 0 && (

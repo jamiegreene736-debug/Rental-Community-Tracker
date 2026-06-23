@@ -4245,12 +4245,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
   // Research confirmation (Pricing tab): which resort the market-rate comps are
   // drawn from + how a combo listing's bedroom sizes are researched and summed.
-  // Display-only, derived client-side from the same curated market dict the
-  // server's curatedAirbnbSearchQueries uses (@shared/buy-in-market). Mirrors
-  // the bulk-pricing-log confirmation block on the dashboard. NOTE FOR CODEX:
-  // the resort label here does NOT reflect a server-side widened-fallback
-  // anchor (only fires when the resort box returns zero comps); that needs the
-  // persisted searchName (a later phase).
+  // The resort label + composition are derived client-side from the curated
+  // market dict (@shared/buy-in-market); the per-bedroom detail (real query,
+  // sample count, confidence, geo radius, widened flag) comes from the PERSISTED
+  // rows (getLiveBuyIn → monthlyRates evidence/confidence), so it reflects the
+  // actual search incl. a server-side widened-fallback anchor. Mirrors the
+  // bulk-pricing-log confirmation block on the dashboard.
   const researchProvenance = useMemo(() => {
     if (!propertyId) return null;
     const propPricing = getPropertyPricing(propertyId);
@@ -4268,7 +4268,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const scalingNote = combo
       ? `Priced from ${distinctBedrooms.map((br) => `${br}BR`).join(" + ")} comp${distinctBedrooms.length === 1 ? "" : "s"}, summed across ${units.length} units — not a single ${totalBedrooms}BR estimate.`
       : `Priced directly from a ${units[0]?.bedrooms ?? totalBedrooms}BR comp.`;
-    return { community, resort, curated, units, distinctBedrooms, combo, composition, scalingNote };
+    // Per-bedroom detail from the persisted rows (actual searched query, samples,
+    // confidence, geo radius, widened flag).
+    const perBedroom = distinctBedrooms.map((br) => {
+      const live = getLiveBuyIn(propertyId, br);
+      const months = live?.monthlyRates ? Object.values(live.monthlyRates) : [];
+      const scores: number[] = [];
+      let sampleCount = 0;
+      let radiusMiles: number | null = null;
+      let widened = false;
+      let query: string | null = null;
+      for (const m of months) {
+        const c = m?.confidence;
+        const e = m?.evidence;
+        if (c && typeof c.score === "number") scores.push(c.score);
+        if (c && typeof c.sampleCount === "number") sampleCount += c.sampleCount;
+        const r = e?.geoConstraint?.radiusMiles;
+        if (typeof r === "number") radiusMiles = radiusMiles == null ? r : Math.max(radiusMiles, r);
+        if (e?.geoConstraint?.widened) widened = true;
+        if (!query && e?.query) query = e.query;
+      }
+      const score = scores.length ? Math.round(scores.reduce((s, n) => s + n, 0) / scores.length) : null;
+      const level: "green" | "yellow" | "red" | null = scores.length
+        ? (Math.min(...scores) < 75 ? "red" : score! >= 90 ? "green" : "yellow")
+        : null;
+      return { bedrooms: br, hasLive: !!live, score, level, sampleCount, radiusMiles, widened, query };
+    });
+    const realResort = perBedroom.map((b) => b.query).find((q): q is string => !!q) ?? null;
+    const anyWidened = perBedroom.some((b) => b.widened);
+    return { community, resort, realResort, curated, units, distinctBedrooms, combo, composition, scalingNote, perBedroom, anyWidened };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, marketRatesVersion]);
 
@@ -6199,11 +6227,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <span style={{ fontWeight: 600, color: "#111827" }}>🔎 Research confirmation</span>
                                 <span
                                   style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: researchProvenance.curated ? "#dbeafe" : "#fef3c7", color: researchProvenance.curated ? "#1e40af" : "#92400e", borderRadius: 4, fontWeight: 500 }}
-                                  title={researchProvenance.curated
-                                    ? `Airbnb comps are drawn from the curated "${researchProvenance.community}" market (resort + geo box).`
-                                    : `"${researchProvenance.community}" is not a curated market, so comps are searched on this name verbatim with no curated resort/geo box — double-check the resort is right.`}
+                                  title={researchProvenance.realResort
+                                    ? `Airbnb comps were searched under "${researchProvenance.realResort}" (the actual query the last refresh used).`
+                                    : researchProvenance.curated
+                                      ? `Airbnb comps are drawn from the curated "${researchProvenance.community}" market (resort + geo box). Run a refresh to record the exact query used.`
+                                      : `"${researchProvenance.community}" is not a curated market, so comps are searched on this name verbatim with no curated resort/geo box — double-check the resort is right.`}
                                 >
-                                  Resort:&nbsp;<span style={{ fontWeight: 600 }}>{researchProvenance.resort}</span>
+                                  Resort:&nbsp;<span style={{ fontWeight: 600 }}>{researchProvenance.realResort || researchProvenance.resort}</span>
                                   {!researchProvenance.curated && <span style={{ marginLeft: 4 }}>⚠ not curated</span>}
                                 </span>
                                 <span
@@ -6212,8 +6242,36 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >
                                   🛏️ {researchProvenance.composition}
                                 </span>
+                                {researchProvenance.anyWidened && (
+                                  <span
+                                    style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: "#fef3c7", color: "#92400e", borderRadius: 4, fontWeight: 500 }}
+                                    title="At least one month's basis came from a widened search box because the resort footprint had no priced comps — comps are nearby-area, not strictly the resort."
+                                  >
+                                    ↔ widened search area
+                                  </span>
+                                )}
                                 <span style={{ flexBasis: "100%", height: 0 }} />
                                 <span style={{ color: "#6b7280" }}>{researchProvenance.scalingNote}</span>
+                                {researchProvenance.perBedroom.some((b) => b.score != null) && (
+                                  <>
+                                    <span style={{ flexBasis: "100%", height: 0 }} />
+                                    <span style={{ color: "#6b7280" }}>By size:</span>
+                                    {researchProvenance.perBedroom.filter((b) => b.score != null).map((b) => {
+                                      const tone = b.level === "green" ? { bg: "#dcfce7", fg: "#166534" }
+                                        : b.level === "red" ? { bg: "#fee2e2", fg: "#991b1b" }
+                                        : { bg: "#fef3c7", fg: "#92400e" };
+                                      return (
+                                        <span
+                                          key={b.bedrooms}
+                                          style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: tone.bg, color: tone.fg, borderRadius: 4, fontWeight: 500 }}
+                                          title={`${b.bedrooms}BR researched: ${b.score}% confidence, ${b.sampleCount} comp${b.sampleCount === 1 ? "" : "s"}${b.radiusMiles != null ? ` within ~${b.radiusMiles}mi` : ""}${b.widened ? " (widened search area)" : ""}.`}
+                                        >
+                                          {b.bedrooms}BR {b.score}% · {b.sampleCount} comp{b.sampleCount === 1 ? "" : "s"}{b.widened ? " · ↔" : ""}
+                                        </span>
+                                      );
+                                    })}
+                                  </>
+                                )}
                               </div>
                             )}
                             {/* Live buy-in summary. One badge per bedroom-count

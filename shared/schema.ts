@@ -800,6 +800,30 @@ export const propertyMarketRates = pgTable("property_market_rates", {
       layers?: Array<Record<string, unknown>>;
       notes?: string[];
     };
+    // Per-month research confidence + evidence written by the hybrid market-rate
+    // scan (server/hybrid-pricing.ts recordPricedMonth). Structural subset of
+    // MarketRateConfidence / MarketRateEvidence — the source-of-truth shapes live
+    // in hybrid-pricing.ts; shared/ cannot import server types. Surfaced by the
+    // research-confirmation UI (resort + geo radius + per-bedroom confidence).
+    confidence?: {
+      score?: number;
+      level?: "green" | "yellow" | "red";
+      sampleCount?: number;
+      acceptedCandidates?: number;
+      rejectedCandidates?: number;
+      exactBedroomCandidates?: number;
+      communityMatchedCandidates?: number;
+      geoVerifiedCandidates?: number;
+    };
+    evidence?: {
+      query?: string;
+      geoConstraint?: {
+        kind?: "curated-bounds" | "center-radius" | "none";
+        description?: string;
+        radiusMiles?: number | null;
+        widened?: boolean;
+      };
+    };
   }>>().default(sql`'{}'::jsonb`).notNull(),
   lowNightly: numeric("low_nightly", { precision: 10, scale: 2 }),
   highNightly: numeric("high_nightly", { precision: 10, scale: 2 }),

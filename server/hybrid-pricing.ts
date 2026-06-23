@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS } from "@shared/buy-in-market";
+import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS, haversineMiles } from "@shared/buy-in-market";
 import { getBuyInRate, getCommunityRegion, getSeasonForMonth } from "@shared/pricing-rates";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
 import { extractBedroomsFromListing } from "./community-research";
@@ -176,6 +176,13 @@ export type MarketRatePricingRecipe = {
   searchedBedrooms: number[];
   stayNights: number;
   querySet: string[];
+  // Phase-3 confirmation flags (drafts only; configured properties are always
+  // confident/explicit). resortConfident=false means the community could not be
+  // matched to a curated market and fell through to a default — verify the
+  // resort. bedroomSplitInferred=true means a combo's per-unit bedroom split was
+  // inferred from the combined total rather than explicit per-unit data.
+  resortConfident?: boolean;
+  bedroomSplitInferred?: boolean;
 };
 
 export type MarketRateCandidateEvidence = {
@@ -212,6 +219,15 @@ export type MarketRateEvidence = {
   geoConstraint: {
     kind: "curated-bounds" | "center-radius" | "none";
     description: string;
+    // Approximate radius (miles) of the search box — center to the NE corner of
+    // the bbox. Null when there is no geographic constraint. Surfaced in the
+    // research-confirmation UI ("comps within ~X mi").
+    radiusMiles: number | null;
+    // True when this basis came from a geo-WIDENING fallback pass (the curated
+    // resort footprint returned no priced comps, so comps were pulled from a
+    // larger nearby box). The confirmation UI flags widened months so the
+    // operator knows the basis is nearby-area, not strictly the resort.
+    widened: boolean;
   };
 };
 
@@ -498,6 +514,21 @@ function geoConstraintForMarket(community: string): {
   return { kind: "none", params: {}, description: "no configured geographic constraint" };
 }
 
+// Approximate search-box radius in miles (center → NE corner) from the bbox
+// params a geoConstraint carries. Null when the box is incomplete/absent. Used
+// only for the research-confirmation display ("comps within ~X mi").
+function geoConstraintRadiusMiles(params: Record<string, string>): number | null {
+  const swLat = numberFromCandidate(params.sw_lat);
+  const swLng = numberFromCandidate(params.sw_lng);
+  const neLat = numberFromCandidate(params.ne_lat);
+  const neLng = numberFromCandidate(params.ne_lng);
+  if (swLat == null || swLng == null || neLat == null || neLng == null) return null;
+  const centerLat = (swLat + neLat) / 2;
+  const centerLng = (swLng + neLng) / 2;
+  const miles = haversineMiles(centerLat, centerLng, neLat, neLng);
+  return Number.isFinite(miles) ? Math.round(miles * 10) / 10 : null;
+}
+
 function candidateGeoMatch(candidate: any, params: Record<string, string>): boolean | null {
   const coords = candidateCoordinates(candidate);
   if (!coords) return null;
@@ -685,6 +716,9 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
   // (which is locked by the curated-bounds tests). The override drives the SearchAPI
   // request params, the candidateGeoMatch post-filter, and the evidence kind alike.
   geoConstraintOverride?: ReturnType<typeof geoConstraintForMarket>;
+  // True when this query runs under a geo-widening fallback pass — recorded on
+  // the evidence so the confirmation UI can flag a widened (nearby-area) basis.
+  widened?: boolean;
 }): Promise<{ rates: number[]; evidence: MarketRateEvidence; confidence: MarketRateConfidence | null; noResultsError: string | null }> {
   const geoConstraint = args.geoConstraintOverride ?? geoConstraintForMarket(args.community);
   const params: Record<string, string> = {
@@ -727,6 +761,8 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
     geoConstraint: {
       kind: geoConstraint.kind,
       description: geoConstraint.description,
+      radiusMiles: geoConstraintRadiusMiles(geoConstraint.params),
+      widened: !!args.widened,
     },
   };
   if (data?.error) {
@@ -844,6 +880,7 @@ export async function fetchAirbnbMedianNightly(args: {
         apiKey,
         nights,
         geoConstraintOverride: pass.geoConstraintOverride,
+        widened: pass.widened,
       });
       if (noResultsError) {
         lastNoResults = noResultsError;
@@ -1040,6 +1077,8 @@ export async function refreshHybridPricingForTarget(args: {
   triggerType: HybridTriggerType;
   notes?: string;
   searchName?: string;
+  resortConfident?: boolean;
+  bedroomSplitInferred?: boolean;
   asOf?: Date;
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
   onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>;
@@ -1068,6 +1107,8 @@ export async function refreshHybridPricingForTarget(args: {
     searchedBedrooms: bedroomCounts,
     stayNights: HYBRID_PRICING_CONFIG.scanSettings.defaultStayNights,
     querySet: searchQueries,
+    resortConfident: args.resortConfident ?? true,
+    bedroomSplitInferred: args.bedroomSplitInferred ?? false,
   };
 
   for (const bedrooms of bedroomCounts) {

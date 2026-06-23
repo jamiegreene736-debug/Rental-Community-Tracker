@@ -132,3 +132,25 @@ export function resolveDraftUnitBedrooms(
   const resolved = resolveComboUnitBedrooms(draft);
   return unitKey === "unit1" ? resolved.unit1 : resolved.unit2;
 }
+
+/**
+ * True when a COMBO draft's per-unit bedroom split was INFERRED (from the
+ * combined total or a halving heuristic) rather than coming from explicit
+ * per-unit data on BOTH sides. The market-rate confirmation UI badges these so
+ * the operator can verify the split before the prices push — e.g. a real 4BR+2BR
+ * stored only as "combined 6BR" gets resolved to 3BR+3BR and would research the
+ * wrong unit sizes.
+ *
+ * IMPORTANT: call this on the ORIGINAL draft BEFORE persistInferredComboDraftBedrooms
+ * repairs it — once the inferred split is written back to unit1Bedrooms/unit2Bedrooms
+ * it reads as explicit and this returns false.
+ */
+export function comboBedroomSplitIsInferred(draft: DraftBedroomFields): boolean {
+  if (draft.singleListing === true) return false;
+  const u1 = inferStoredUnitBedrooms(draft, "unit1");
+  const u2 = inferStoredUnitBedrooms(draft, "unit2");
+  // Inferred unless BOTH unit sizes came from explicit/per-unit data (stored
+  // fields or unit-specific prose). Anything filled by splitting the combined
+  // total is treated as inferred.
+  return u1 == null || u2 == null;
+}
