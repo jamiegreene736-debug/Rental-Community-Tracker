@@ -108,7 +108,7 @@ import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { registerAssistantRoutes } from "./assistant/routes";
 import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar-automation";
 import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel } from "@shared/receipt-message";
-import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation } from "./guest-receipts";
+import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation, createReceiptPage } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { validateAndFixPhoto } from "./photo-validator";
@@ -45219,6 +45219,45 @@ CONSTRAINTS
       res.status(result.ok ? 200 : 422).json(result);
     } catch (err: any) {
       res.status(500).json({ error: "Manual receipt send failed", message: err.message });
+    }
+  });
+
+  // Generate a durable /receipt/:token PAYMENT-DETAILS PAGE on demand from the
+  // Guest Inbox ("Generate payment details page URL"). Mints the tokenized page
+  // ONLY — does not post a Guesty message — and returns the shareable URL plus a
+  // ready-to-send message body that already embeds the link. Operator-gated like
+  // the rest of /api/inbox/guest-receipts/* (not in the public path list).
+  app.post("/api/inbox/guest-receipts/generate-page", async (req, res) => {
+    try {
+      const b = (req.body ?? {}) as Record<string, any>;
+      const reservationId = String(b.reservationId ?? "").trim();
+      const amount = Number(b.amount);
+      if (!reservationId) return res.status(400).json({ ok: false, error: "reservationId is required" });
+      if (!(amount > 0)) return res.status(400).json({ ok: false, error: "A payment amount greater than 0 is required" });
+      const result = await createReceiptPage({
+        reservationId,
+        conversationId: b.conversationId ? String(b.conversationId) : null,
+        kind: b.kind === "refund" ? "refund" : "payment",
+        guestName: b.guestName ?? null,
+        guestFirstName: b.guestFirstName ?? null,
+        propertyName: b.propertyName ?? null,
+        listingId: b.listingId ?? null,
+        listingNickname: b.listingNickname ?? null,
+        checkIn: b.checkIn ?? null,
+        checkOut: b.checkOut ?? null,
+        confirmationCode: b.confirmationCode ?? null,
+        channel: b.channel ?? null,
+        amount,
+        currency: b.currency ?? "USD",
+        transactionDate: b.transactionDate ?? null,
+        bookingTotal: typeof b.bookingTotal === "number" ? b.bookingTotal : Number(b.bookingTotal) || 0,
+        paymentHistory: Array.isArray(b.paymentHistory) ? b.paymentHistory : [],
+        totalPaidToDate: typeof b.totalPaidToDate === "number" ? b.totalPaidToDate : undefined,
+      });
+      return res.status(result.ok ? 200 : 422).json(result);
+    } catch (err: any) {
+      console.error(`[guest-receipts/generate-page] ${err?.message ?? err}`);
+      return res.status(500).json({ ok: false, error: "Failed to generate receipt page", message: err?.message ?? String(err) });
     }
   });
 
