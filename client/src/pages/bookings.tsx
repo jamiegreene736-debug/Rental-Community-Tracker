@@ -4674,6 +4674,7 @@ type GuestInboxMessageClient = {
   toEmail: string;
   body: string;
   receivedAt: string;
+  direction?: "inbound" | "outbound" | string;
 };
 
 function guestNamePartsFromReservation(reservation: GuestyReservation): { firstName: string; lastName: string } {
@@ -5088,6 +5089,27 @@ function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservati
 
   const messages = data?.messages ?? [];
   const displayEmail = email ?? data?.aliasEmail;
+  // We can only reply once the host has messaged inbound (that gives us a reply
+  // address); the server derives the host from the most recent inbound message.
+  const hasInboundHost = messages.some(
+    (m) => (m.direction ?? "inbound") === "inbound" && !!m.fromEmail && m.fromEmail.includes("@") && m.fromEmail !== "unknown@unknown",
+  );
+
+  const [replyText, setReplyText] = useState("");
+  const replyMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/guest-inbox/send", { buyInId: buyIn.id, body: replyText.trim() });
+      const b = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(b?.message || b?.error || `HTTP ${res.status}`);
+      return b;
+    },
+    onSuccess: () => {
+      setReplyText("");
+      toast({ title: "Reply sent", description: "Your reply was sent to the host through the booking alias." });
+      void refetch();
+    },
+    onError: (e: any) => toast({ title: "Could not send reply", description: e?.message ?? String(e), variant: "destructive" }),
+  });
 
   return (
     <div className="border-t bg-sky-50/40 px-3 py-2.5 space-y-2 dark:bg-sky-950/20" data-testid={`guest-thread-${buyIn.id}`}>
@@ -5136,16 +5158,46 @@ function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservati
       )}
       {messages.length > 0 && (
         <div className="space-y-2 max-h-64 overflow-y-auto">
-          {messages.map((m) => (
-            <div key={m.id} className="rounded border bg-background p-2 text-xs">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium truncate">{m.subject}</span>
-                <span className="text-[10px] text-muted-foreground whitespace-nowrap">{fmtDate(m.receivedAt)}</span>
+          {messages.map((m) => {
+            const outbound = (m.direction ?? "inbound") === "outbound";
+            return (
+              <div
+                key={m.id}
+                className={`rounded border p-2 text-xs ${outbound ? "bg-sky-100 dark:bg-sky-900/40 ml-6" : "bg-background mr-6"}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium truncate">{outbound ? "You → host" : m.subject}</span>
+                  <span className="text-[10px] text-muted-foreground whitespace-nowrap">{fmtDate(m.receivedAt)}</span>
+                </div>
+                <div className="text-[10px] text-muted-foreground truncate">{outbound ? `To: ${m.toEmail}` : `From: ${m.fromEmail}`}</div>
+                <div className="mt-1 whitespace-pre-wrap break-words text-[11px] line-clamp-6">{String(m.body || "").slice(0, 4000)}</div>
               </div>
-              <div className="text-[10px] text-muted-foreground truncate">From: {m.fromEmail}</div>
-              <div className="mt-1 whitespace-pre-wrap break-words text-[11px] line-clamp-6">{String(m.body || "").slice(0, 4000)}</div>
-            </div>
-          ))}
+            );
+          })}
+        </div>
+      )}
+      {displayEmail && hasInboundHost && (
+        <div className="space-y-1.5 border-t pt-2">
+          <Textarea
+            value={replyText}
+            onChange={(e) => setReplyText(e.target.value)}
+            placeholder="Reply to the host…"
+            className="min-h-[60px] text-xs"
+            data-testid={`guest-thread-reply-${buyIn.id}`}
+          />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] text-muted-foreground">Sends from {displayEmail} via the booking alias</span>
+            <Button
+              size="sm"
+              className="h-7 text-[11px]"
+              disabled={replyMutation.isPending || !replyText.trim()}
+              onClick={() => replyMutation.mutate()}
+              data-testid={`button-guest-thread-send-${buyIn.id}`}
+            >
+              {replyMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Send className="h-3 w-3 mr-1" />}
+              Send reply
+            </Button>
+          </div>
         </div>
       )}
     </div>
@@ -6602,6 +6654,39 @@ function depositStatusOf(r: GuestyReservation): DepositStatus {
   if (totalPaid > 0) return "partial";
   if (balanceDue > 0) return "not_collected";
   return "unknown";
+}
+
+// "Paid to date" for the reservations table — how much the guest has paid so
+// far per Guesty. Guesty's money.totalPaid is authoritative; when it's missing
+// or zero but collected payment rows exist (a real Guesty shape — this is the
+// same defensive fallback the receipt path uses, PR #828), sum the collected
+// payment items so the column never under-reports a payment Guesty actually
+// recorded. Callers should treat Airbnb separately (Guesty doesn't hold the
+// guest's card for Airbnb, so the figure is "NA").
+function paidToDateOf(r: GuestyReservation): number {
+  const totalPaid = asMoneyNumber(r.money?.totalPaid);
+  if (totalPaid > 0) return totalPaid;
+  return reservationPaymentItems(r)
+    .filter(paymentLooksCollected)
+    .reduce((sum, p) => sum + Math.max(0, paymentAmountOf(p)), 0);
+}
+
+// "Payment next due" for the reservations table — the date Guesty will next
+// collect from the guest. We take the earliest scheduled (not-yet-collected)
+// installment from the same payment rows the Expected Deposits tab reads
+// (reservationPaymentItems → paymentLooksScheduled → scheduledDateOf). Prefer
+// the soonest still-upcoming due date; if every scheduled date is already past
+// (an overdue installment) fall back to the earliest outstanding one. Returns
+// null when Guesty exposes no payment schedule (e.g. paid in full, or Airbnb).
+function nextPaymentDueOf(r: GuestyReservation): Date | null {
+  const scheduledDates = reservationPaymentItems(r)
+    .filter(paymentLooksScheduled)
+    .map(scheduledDateOf)
+    .filter((d): d is Date => !!d)
+    .sort((a, b) => a.getTime() - b.getTime());
+  if (scheduledDates.length === 0) return null;
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000; // still show a due-today date
+  return scheduledDates.find((d) => d.getTime() >= cutoff) ?? scheduledDates[0];
 }
 
 function paymentSourceOf(r: GuestyReservation): { kind: PaymentSourceKind; label: string; detail: string } {
@@ -10317,10 +10402,12 @@ export default function Bookings() {
               {reservations.length > 0 && (
                 <div className="hidden px-4 py-2 border-b md:flex items-center gap-3">
                   <span className="w-4 h-4 shrink-0" /> {/* matches chevron icon in row */}
-                  <div className="grow min-w-0 grid grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] gap-3 items-center">
+                  <div className="grow min-w-0 grid grid-cols-[1.5fr_1.5fr_1fr_1.1fr_1.2fr_1fr_1fr_auto] gap-3 items-center">
                     <SortHeader label="Guest" active={sortBy === "guest"} dir={sortDir} onClick={() => toggleSort("guest")} />
                     <SortHeader label="Check-in" active={sortBy === "checkIn"} dir={sortDir} onClick={() => toggleSort("checkIn")} />
                     <SortHeader label="Payout" active={sortBy === "payout"} dir={sortDir} onClick={() => toggleSort("payout")} align="right" />
+                    <span className="text-[10px] uppercase tracking-wider text-right">Paid to date</span>
+                    <span className="text-[10px] uppercase tracking-wider text-right">Payment next due</span>
                     <SortHeader label="Buy-in" active={sortBy === "buyIn"} dir={sortDir} onClick={() => toggleSort("buyIn")} align="right" />
                     <SortHeader label="Profit" active={sortBy === "profit"} dir={sortDir} onClick={() => toggleSort("profit")} align="right" />
                     <SortHeader label="Fill" active={sortBy === "status"} dir={sortDir} onClick={() => toggleSort("status")} />
@@ -10388,7 +10475,7 @@ export default function Bookings() {
                       className="w-full text-left px-3 py-3 sm:px-4 flex items-start md:items-center gap-3 hover:bg-muted/40 transition-colors rounded-lg"
                     >
                       {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-                      <div className="grow min-w-0 grid grid-cols-2 gap-3 md:grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr_auto] md:items-center">
+                      <div className="grow min-w-0 grid grid-cols-2 gap-3 md:grid-cols-[1.5fr_1.5fr_1fr_1.1fr_1.2fr_1fr_1fr_auto] md:items-center">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <p className="font-medium text-sm truncate">{r.guest?.fullName ?? r.guest?.firstName ?? "Guest"}</p>
@@ -10471,6 +10558,58 @@ export default function Bookings() {
                               );
                             }
                             return <p className="text-[10px] text-muted-foreground">guest payout</p>;
+                          })()}
+                        </div>
+                        {/* Paid to date — how much the guest has paid so far per
+                            Guesty. Airbnb collects/pays out directly (Guesty
+                            doesn't hold the guest's card), so it's "NA". */}
+                        <div className="text-sm md:text-right">
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground md:hidden">Paid to date</p>
+                          {channelKindOf(r) === "airbnb" ? (
+                            <span
+                              className="text-sm text-muted-foreground"
+                              title="Airbnb collects from the guest and pays the host out directly — Guesty does not track the guest's paid amount for Airbnb."
+                            >
+                              NA
+                            </span>
+                          ) : (
+                            <>
+                              <p className="font-medium">{fmtMoney(paidToDateOf(r))}</p>
+                              <p className="text-[10px] text-muted-foreground">paid to date</p>
+                            </>
+                          )}
+                        </div>
+                        {/* Payment next due — the date Guesty will next collect
+                            from the guest (earliest scheduled installment). */}
+                        <div className="text-sm md:text-right">
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground md:hidden">Payment next due</p>
+                          {(() => {
+                            if (channelKindOf(r) === "airbnb") {
+                              return (
+                                <span
+                                  className="text-sm text-muted-foreground"
+                                  title="Airbnb collects from the guest directly — Guesty holds no payment schedule for Airbnb bookings."
+                                >
+                                  NA
+                                </span>
+                              );
+                            }
+                            const due = nextPaymentDueOf(r);
+                            if (due) {
+                              return (
+                                <>
+                                  <p className="font-medium">{fmtDate(due)}</p>
+                                  <p className="text-[10px] text-muted-foreground">next due</p>
+                                </>
+                              );
+                            }
+                            const balanceDue = asMoneyNumber(r.money?.balanceDue);
+                            const fullyPaid = r.money?.isFullyPaid === true || (balanceDue <= 0 && paidToDateOf(r) > 0);
+                            return (
+                              <span className="text-[10px] text-muted-foreground">
+                                {fullyPaid ? "Paid in full" : "—"}
+                              </span>
+                            );
                           })()}
                         </div>
                         <div className="text-sm md:text-right">

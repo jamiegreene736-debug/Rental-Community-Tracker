@@ -3,6 +3,7 @@
 // X-SimpleLogin-Envelope-To set to the guest alias; the inbound webhook path
 // only works when explicitly configured, so we poll IMAP on guest-inbox fetch.
 
+import { createHash } from "node:crypto";
 import { extractEmailAddress, SIMPLELOGIN_MAILBOX_EMAIL } from "./simplelogin";
 import type { InsertGuestInboxMessage } from "@shared/schema";
 
@@ -38,9 +39,33 @@ export function parseEmailHeaders(raw: string): Record<string, string> {
 }
 
 function decodeQuotedPrintable(input: string): string {
+  // Drop soft line breaks, then decode RUNS of =XX hex escapes as raw bytes and
+  // UTF-8-decode them together — so multi-byte sequences (=C3=A9 -> é) render
+  // correctly instead of as Latin-1 mojibake (CafÃ©).
   return input
     .replace(/=\r?\n/g, "")
-    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    .replace(/(?:=[0-9A-Fa-f]{2})+/g, (seq) => {
+      const bytes = seq.split("=").filter(Boolean).map((h) => parseInt(h, 16));
+      return Buffer.from(bytes).toString("utf8");
+    });
+}
+
+// Decode a MIME part body by its own Content-Transfer-Encoding. VRBO/forwarded
+// host emails are frequently base64-encoded; without this the body was stored as
+// raw base64 garbage ("SGVsbG8...") and arrival-detail extraction silently failed.
+function decodeByTransferEncoding(body: string, contentTransferEncoding?: string): string {
+  const enc = String(contentTransferEncoding ?? "").trim().toLowerCase();
+  if (enc === "base64") {
+    try {
+      return Buffer.from(body.replace(/\s+/g, ""), "base64").toString("utf8");
+    } catch {
+      return body;
+    }
+  }
+  if (enc === "quoted-printable") return decodeQuotedPrintable(body);
+  // 7bit / 8bit / binary / none — but quoted-printable markers can appear even
+  // without a declared CTE, so run the (idempotent on plain text) QP decoder.
+  return decodeQuotedPrintable(body);
 }
 
 function stripHtml(html: string): string {
@@ -67,26 +92,31 @@ export function extractBodyFromRawEmail(raw: string): string {
     if (boundaryMatch) {
       const boundary = boundaryMatch[1];
       const parts = body.split(`--${boundary}`);
+      // Decode each candidate part by ITS OWN Content-Transfer-Encoding (base64 /
+      // quoted-printable), not a single global pass — VRBO host parts are often
+      // base64 and were previously stored as garbage.
       for (const part of parts) {
         if (/content-type:\s*text\/plain/i.test(part)) {
+          const partHeaders = parseEmailHeaders(part);
           const partBody = part.split(/\r?\n\r?\n/).slice(1).join("\n\n");
-          const text = decodeQuotedPrintable(partBody.trim());
-          if (text) return text.slice(0, 500_000);
+          const text = decodeByTransferEncoding(partBody.trim(), partHeaders["content-transfer-encoding"]);
+          if (text.trim()) return text.slice(0, 500_000);
         }
       }
       for (const part of parts) {
         if (/content-type:\s*text\/html/i.test(part)) {
+          const partHeaders = parseEmailHeaders(part);
           const partBody = part.split(/\r?\n\r?\n/).slice(1).join("\n\n");
-          const text = stripHtml(decodeQuotedPrintable(partBody.trim()));
-          if (text) return text.slice(0, 500_000);
+          const text = stripHtml(decodeByTransferEncoding(partBody.trim(), partHeaders["content-transfer-encoding"]));
+          if (text.trim()) return text.slice(0, 500_000);
         }
       }
     }
   }
 
-  const decoded = /text\/html/i.test(contentType)
-    ? stripHtml(decodeQuotedPrintable(body.trim()))
-    : decodeQuotedPrintable(body.trim());
+  const cte = headers["content-transfer-encoding"];
+  const decodedRaw = decodeByTransferEncoding(body.trim(), cte);
+  const decoded = /text\/html/i.test(contentType) ? stripHtml(decodedRaw) : decodedRaw;
   return decoded.slice(0, 500_000);
 }
 
@@ -218,17 +248,33 @@ function guestInboxImapConfig(): {
   return { configured: !!(user && pass), host, port, user, pass };
 }
 
+// Deterministic dedup key for an email with no Message-ID. The basis fields
+// (alias + subject + the email's own Date + a body prefix) are stable across sync
+// ticks, so the same email re-scanned every tick (or by both the scheduler and an
+// on-open GET) won't insert a duplicate row.
+function surrogateMessageId(aliasEmail: string, parsed: ParsedRawEmail): string {
+  const basis = [
+    aliasEmail,
+    parsed.subject ?? "",
+    parsed.receivedAt ? parsed.receivedAt.toISOString() : "",
+    (parsed.body ?? "").slice(0, 200),
+  ].join("|");
+  return `synth:${createHash("sha1").update(basis).digest("hex")}`;
+}
+
 async function importParsedEmail(parsed: ParsedRawEmail, filterAlias?: string): Promise<boolean> {
   const { storage } = await import("./storage");
   const aliasEmail = parsed.aliasEmail!;
   if (filterAlias && aliasEmail !== filterAlias.toLowerCase()) return false;
   if (!parsed.body && !parsed.messageId) return false;
 
-  if (parsed.messageId) {
-    const recent = await storage.getGuestInboxMessages(aliasEmail, 100);
-    if (recent.some((m) => m.providerMessageId && m.providerMessageId === parsed.messageId)) {
-      return false;
-    }
+  // Dedup UNCONDITIONALLY — a real Message-ID when present, else a stable
+  // surrogate — so a body-bearing email that lacks a Message-ID isn't re-inserted
+  // on every sync tick.
+  const dedupKey = parsed.messageId ?? surrogateMessageId(aliasEmail, parsed);
+  const recent = await storage.getGuestInboxMessages(aliasEmail, 100);
+  if (recent.some((m) => m.providerMessageId && m.providerMessageId === dedupKey)) {
+    return false;
   }
 
   const buyIn = await storage.getBuyInByTravelerEmail(aliasEmail);
@@ -243,7 +289,7 @@ async function importParsedEmail(parsed: ParsedRawEmail, filterAlias?: string): 
     subject: parsed.subject,
     body: parsed.body || "(empty body)",
     attachmentsJson: null,
-    providerMessageId: parsed.messageId,
+    providerMessageId: dedupKey,
     rawPayload: null,
   };
   if (parsed.receivedAt) {
@@ -271,17 +317,24 @@ async function searchUidsForGuestAlias(
   since: Date,
 ): Promise<number[]> {
   const found = new Set<number>();
+  // imapflow expects `header` as an OBJECT { "Header-Name": "substring" }, NOT a
+  // two-element array — an array compiles to Object.keys(['a','b']) = ['0','1'] and
+  // emits `HEADER 0 ... / HEADER 1 ...` which matches nothing, so the per-alias
+  // search always returned empty and silently fell back to the 300-message full
+  // scan (PR #826's "scan only the relevant per-guest mail" optimization was dead
+  // on arrival). HEADER is an IMAP SUBSTRING match, so the bare alias matches both
+  // `<alias>` and `alias` — no separate angle-bracket query needed.
   const headerQueries: Array<Record<string, unknown>> = [
-    { header: ["X-SimpleLogin-Envelope-To", alias] },
-    { header: ["X-SimpleLogin-Envelope-To", `<${alias}>`] },
-    { header: ["To", alias] },
+    { header: { "X-SimpleLogin-Envelope-To": alias } },
+    { header: { "To": alias } },
   ];
   for (const criteria of headerQueries) {
     try {
       const uids = await client.search({ since, ...criteria });
-      if (uids?.length) uids.forEach((uid) => found.add(uid as number));
-    } catch {
-      // Some IMAP servers reject HEADER search — fall back below.
+      if (Array.isArray(uids) && uids.length) uids.forEach((uid) => found.add(uid as number));
+    } catch (err) {
+      // Some IMAP servers reject HEADER search — log and fall back to the scan below.
+      console.warn(`[guest-inbox] IMAP header search failed for ${alias}:`, (err as Error)?.message ?? err);
     }
   }
   if (found.size > 0) return [...found];

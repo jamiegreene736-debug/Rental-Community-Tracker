@@ -5,6 +5,8 @@
 
 import { guestyRequest } from "./guesty-sync";
 import { findGuestyConversationById, sendGuestyConversationMessage, deliveryOutcome } from "./guesty-ota-messaging";
+import { isBookingChannel, sanitizeForBookingChannel } from "@shared/receipt-message";
+import { isIncomingPost, isSystemPost, isHostPost, pickPostToReplyTo, postTimestampMs } from "@shared/guesty-post-classify";
 import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { occupancyForBedrooms } from "../shared/occupancy";
@@ -489,12 +491,39 @@ async function fetchOpenConversations(limit = 100): Promise<GuestyConversation[]
   // sort order for any downstream consumers.
   // NOTE FOR CODEX: Guesty's /conversations returns the full document only
   // when `fields=` is present. Don't strip it as a redundant query param.
-  const data = await guestyRequest(
-    "GET",
-    `/communication/conversations?limit=${limit}&sort=-lastMessageAt&fields=`
-  );
-  const results = unwrapConversations(data);
-  return results.filter((c) => {
+  //
+  // PAGINATION (load-bearing): `lastMessageAt` is null on the inbox-v2 list shape
+  // (real recency lives at state.lastMessage.date), so `sort=-lastMessageAt`
+  // silently falls back to CREATION-date order. A thread with FRESH guest activity
+  // but an old creation date can therefore sit past the first page and never get
+  // drafted — the exact "auto-reply silently skips a real guest message" failure
+  // class. We PAGE through the list (skip-based) up to a bounded total and apply
+  // the OPEN filter across the full accumulated set so no awaiting-reply thread is
+  // hidden by a single-page cap. The zero-new-items guard self-corrects if a
+  // Guesty shape ever ignores `skip` (returns the same page) — we stop instead of
+  // burning the full budget. Tunable via AUTO_REPLY_CONV_SCAN_MAX.
+  const PAGE = Math.max(1, Math.min(100, limit || 100));
+  const MAX_SCAN = Math.max(PAGE, Number(process.env.AUTO_REPLY_CONV_SCAN_MAX) || 500);
+  const all: GuestyConversation[] = [];
+  const seen = new Set<string>();
+  for (let skip = 0; skip < MAX_SCAN; skip += PAGE) {
+    const data = await guestyRequest(
+      "GET",
+      `/communication/conversations?limit=${PAGE}&skip=${skip}&sort=-lastMessageAt&fields=`
+    );
+    const page = unwrapConversations(data);
+    if (page.length === 0) break; // exhausted
+    const before = all.length;
+    for (const c of page) {
+      const id = String((c as any)?._id ?? (c as any)?.id ?? "");
+      if (id && seen.has(id)) continue;
+      if (id) seen.add(id);
+      all.push(c);
+    }
+    if (all.length === before) break; // no NEW conversations (skip unsupported or exhausted)
+    if (page.length < PAGE) break; // last page
+  }
+  return all.filter((c) => {
     const status =
       (typeof c.state === "object" && c.state?.status) ||
       (typeof c.state === "string" ? c.state : null);
@@ -526,95 +555,12 @@ async function fetchConversationPosts(id: string): Promise<GuestyPost[]> {
   }
 }
 
-// Identify which posts are FROM the guest vs FROM the host. Guesty
-// doesn't always populate every field — it's `isIncoming` on some
-// account shapes, `direction` on others, `authorType: "guest"` on
-// older inbox-v2 fixtures. The CURRENT inbox-v2 shape (verified on
-// real production conversations 2026-05-04) sets `sentBy: "guest" |
-// "host" | "log"` and leaves all the other fields null. Without the
-// `sentBy` check, `pickPostToReplyTo` returned null for every thread
-// because no post looked "incoming" — auto-reply silently skipped
-// real guest messages (e.g. Michelle's May-3 follow-up about a 5%
-// discount) for two weeks before the bug was noticed in the inbox UI.
-// NOTE FOR CODEX: keep the legacy field checks in place for old
-// fixtures and for any non-Guesty inbox source we might add later;
-// `sentBy` is just the most authoritative signal for current Guesty.
-function isIncomingPost(p: any): boolean {
-  if (p.sentBy === "guest") return true;
-  if (p.isIncoming === true) return true;
-  if (p.direction === "incoming" || p.direction === "in" || p.direction === "inbound") return true;
-  if (p.authorType && p.authorType.toLowerCase() === "guest") return true;
-  if (p.senderType && p.senderType.toLowerCase() === "guest") return true;
-  return false;
-}
-
-function isSystemPost(p: any): boolean {
-  // Inbox-v2 marks the auto-generated "New guest inquiry" log entry
-  // with `sentBy: "log"` (and also `module.type: "log"`). The body
-  // patterns below catch older fixtures and any future system post
-  // that doesn't carry the explicit log markers.
-  if (p.sentBy === "log") return true;
-  const moduleType = String(p.module?.type ?? p.type ?? "").toLowerCase();
-  if (moduleType === "log" || moduleType === "system" || moduleType === "internal" || moduleType === "note") return true;
-  const body = String(p.body ?? p.text ?? p.message ?? "").trim().toLowerCase();
-  return (
-    body === "new guest inquiry" ||
-    body === "new inquiry" ||
-    body === "new reservation request" ||
-    body.startsWith("new guest reservation")
-  );
-}
-
-function isHostPost(p: any): boolean {
-  if (p.sentBy === "host") return true;
-  if (p.isIncoming === false) return true;
-  if (p.direction === "outgoing" || p.direction === "out" || p.direction === "outbound") return true;
-  if (p.authorType && p.authorType.toLowerCase() === "host") return true;
-  if (p.authorRole && p.authorRole.toLowerCase() === "host") return true;
-  if (p.senderType && p.senderType.toLowerCase() === "host") return true;
-  return false;
-}
-
-// Decide whether this conversation has a guest message awaiting a
-// host response — and if so, which post is the trigger. Returns
-// null when:
-//   - there are no incoming posts (host-initiated thread)
-//   - the host has already replied AFTER the guest's latest message
-//     (manual reply via the inbox UI or Guesty itself)
-//
-// Without this check, a pure "is there an incoming post?" filter
-// would re-trigger after the host manually replies — the dedup
-// table catches re-sends only when the same post ID has been
-// processed before, so a fresh tick on a thread the host has
-// already handled would otherwise produce a duplicate auto-reply
-// on the very next guest message that arrives.
-function pickPostToReplyTo(posts: GuestyPost[] | undefined): GuestyPost | null {
-  if (!posts || posts.length === 0) return null;
-  const conversational = posts.filter((p) => !isSystemPost(p));
-
-  const incoming = conversational.filter(isIncomingPost);
-  if (incoming.length === 0) return null;
-  incoming.sort((a, b) => postTimestampMs(b) - postTimestampMs(a));
-  const latestIncoming = incoming[0];
-  if (!latestIncoming?._id) return null;
-
-  const host = conversational.filter(isHostPost);
-  if (host.length === 0) return latestIncoming;
-  host.sort((a, b) => postTimestampMs(b) - postTimestampMs(a));
-  const latestHost = host[0];
-
-  // Host's last message is more recent than the guest's last —
-  // they've already handled it. Skip.
-  if (postTimestampMs(latestHost) > postTimestampMs(latestIncoming)) return null;
-
-  return latestIncoming;
-}
-
-function postTimestampMs(p: any): number {
-  const v = p?.createdAt ?? p?.sentAt ?? p?.postedAt;
-  const t = v ? new Date(v).getTime() : NaN;
-  return Number.isFinite(t) ? t : 0;
-}
+// Host/guest/system post classification + reply-trigger selection (isIncomingPost,
+// isSystemPost, isHostPost, pickPostToReplyTo, postTimestampMs) now live in the
+// pure, unit-tested shared/guesty-post-classify module (imported above). It was
+// extracted verbatim so the 2026-05-04 inbox-v2 `sentBy` outage surface — where
+// these returned null for every thread and auto-reply silently skipped real guest
+// messages for ~2 weeks — is locked by tests/guesty-post-classify.test.ts.
 
 function logCreatedAtMs(log: Pick<AutoReplyLog, "createdAt">): number {
   const value = log.createdAt instanceof Date ? log.createdAt.getTime() : new Date(log.createdAt).getTime();
@@ -697,28 +643,24 @@ export async function dismissHandledAutoReplyDrafts(limit = 200): Promise<number
   return dismissed;
 }
 
-async function sendReply(conversationId: string, body: string, moduleField: { type?: string } | undefined) {
-  const mod = moduleField && moduleField.type ? moduleField : { type: "email" };
-  await guestyRequest("POST", `/communication/conversations/${conversationId}/send-message`, {
-    body,
-    module: mod,
-  });
-}
-
-// Delivery-verified send for the AUTO-SEND engine (runAutoSendQueue). Routes
-// through the same hardened path as Message AD / the inbox compose box: resolve
-// the proven-delivering OTA module from the reservation's integration.platform,
-// send ONCE, and confirm the channel actually accepted it via module.externalId.
-// A bare Guesty `pending` post is NOT proof the guest received it — see
-// AGENTS.md #51 and the guesty-bookingcom-delivery-externalid memory. Returns
-// the verdict so the caller never marks a thread "replied" on a hard misroute.
-// (The manual operator banner send uses sendReply above — it's interactive and
-// out of this scope.)
+// Delivery-verified send for the AUTO-SEND engine (runAutoSendQueue) AND the
+// manual attention-banner Send (sendDraftedReply). Routes through the same
+// hardened path as Message AD / the inbox compose box: resolve the
+// proven-delivering OTA module from the reservation's integration.platform,
+// ASCII-sanitize for Booking.com, send ONCE, and confirm the channel actually
+// accepted it via module.externalId. A bare Guesty `pending` post is NOT proof
+// the guest received it — see AGENTS.md #51 and the
+// guesty-bookingcom-delivery-externalid memory. Returns the verdict so the caller
+// never marks a thread "replied" on a hard misroute.
 async function deliverGuestyReply(args: {
   conversationId: string;
   body: string;
   channel?: string | null;
   reservationId?: string | null;
+  // Interactive callers (the banner Send) can pass a shorter window so the
+  // operator isn't blocked the full ~38s; background callers omit it and keep
+  // the full window. The POST still happens exactly once either way.
+  verifyDeadlineMs?: number;
 }): Promise<{ verified: boolean; pending: boolean; deliveredVia: string; deliveryModuleType?: string; reason?: string }> {
   const conversation = await findGuestyConversationById(
     args.conversationId,
@@ -728,13 +670,24 @@ async function deliverGuestyReply(args: {
   // If the conversation can't be resolved (Guesty hiccup), fall back to a bare
   // channel module so a clean draft still attempts delivery.
   const module = conversation?.module ?? { type: args.channel || "email" };
+  // Booking.com only delivers ASCII-plain text (straight quotes, hyphens, no
+  // smart punctuation / rich text) — mirror the inbox send + relocation/receipt
+  // paths so an auto-send / banner-send reply isn't mangled or dropped. Match by
+  // the channel hint OR the resolved module type so it fires even when the hint
+  // is absent.
+  let body = args.body;
+  const moduleType = String(module.type ?? "").toLowerCase();
+  if (isBookingChannel(args.channel) || moduleType.includes("booking")) {
+    body = sanitizeForBookingChannel(body);
+  }
   const result = await sendGuestyConversationMessage({
     conversationId: conversation?.id ?? args.conversationId,
-    body: args.body,
+    body,
     module,
     reservation: conversation?.reservation ?? null,
     channelHint: args.channel ?? null,
     logPrefix: "auto-reply-send",
+    verifyDeadlineMs: args.verifyDeadlineMs,
   });
   return {
     verified: result.verified,
@@ -1007,10 +960,14 @@ function ensureSignoff(text: string): string {
   ];
   for (const re of stripPatterns) body = body.replace(re, "").trim();
 
-  // If the canonical sign-off is already present (case-insensitive, any whitespace), leave it.
-  // Match name → brand directly so an optional "Mahalo," opener and the dropped
-  // "Reservationist" line don't cause a duplicate sign-off to be appended.
-  const hasSignoff = /john\s+carpenter\s*[\r\n]+\s*vacation\s*rental\s*expertz/i.test(body);
+  // If the canonical sign-off is already present (case-insensitive), leave it.
+  // Match name → brand SEPARATOR-TOLERANTLY: any run of up to ~60 chars between
+  // them so a one-line "John Carpenter, VacationRentalExpertz", a comma/extra
+  // whitespace, or an intervening "Reservationist" / old-brand line does NOT slip
+  // past and cause a SECOND sign-off block to be appended. Both the exact name and
+  // the exact brand within 60 chars of each other effectively only occur in a
+  // sign-off, so this won't false-match unrelated prose.
+  const hasSignoff = /john\s+carpenter\b[\s\S]{0,60}?vacation\s*rental\s*expertz/i.test(body);
   if (hasSignoff) return body;
 
   return `${body}\n\n${SIGNOFF}`;
@@ -1496,8 +1453,40 @@ export async function sendDraftedReply(logId: number, replyDraft?: string): Prom
   if (!draft) return { ok: false, error: "No draft to send" };
 
   try {
-    await sendReply(log.conversationId, draft, log.channel ? { type: log.channel } : undefined);
+    // Route the manual attention-banner Send through the SAME delivery-verified
+    // path the auto-send engine uses (deliverGuestyReply -> sendGuestyConversationMessage):
+    // resolve the proven OTA module, ASCII-sanitize Booking.com, send ONCE, and
+    // confirm the channel actually accepted it via module.externalId. The old bare
+    // sendReply() reported a false "sent" on a stuck-pending OTA post and skipped
+    // Booking.com sanitization (AGENTS.md #51 — the false-success class).
+    const delivery = await deliverGuestyReply({
+      conversationId: log.conversationId,
+      body: draft,
+      channel: log.channel,
+      reservationId: log.reservationId,
+    });
+    if (deliveryOutcome(delivery) === "misroute") {
+      // HARD MISROUTE: Guesty filed our reply off the guest's OTA channel (e.g. on
+      // email) so the guest never received it on the channel they booked with. Do
+      // NOT mark the thread replied — flag it for the operator and surface the
+      // error instead of a false "sent".
+      await storage.updateAutoReplyLog(logId, {
+        replyDraft: draft,
+        status: "flagged",
+        flagReason: `Reply not delivered: ${delivery.reason ?? `landed off the ${delivery.deliveredVia} guest channel`}`,
+      });
+      return {
+        ok: false,
+        error: `Not delivered on the guest's channel — ${delivery.reason ?? `filed off ${delivery.deliveredVia}`}. Verify on the channel before resending.`,
+      };
+    }
+    // Delivered (externalId confirmed) OR posted-but-unconfirmed ("pending"): the
+    // message was posted EXACTLY ONCE, so mark it sent so a re-click can't post a
+    // duplicate. `pending` is logged as unconfirmed rather than a clean delivery.
     await storage.updateAutoReplyLog(logId, { replyDraft: draft, replySent: true, status: "sent", errorMessage: null });
+    if (!delivery.verified) {
+      console.warn(`[auto-reply] banner-send POSTED draft ${logId} but ${delivery.deliveredVia} delivery unconfirmed — not resending: ${delivery.reason ?? ""}`);
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: (err as Error).message };

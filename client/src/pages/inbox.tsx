@@ -602,6 +602,12 @@ function channelBadge(raw: string) {
   if (src.includes("airbnb")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-[#FF5A5F] text-white">Airbnb</span>;
   if (src.includes("vrbo") || src.includes("homeaway")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-blue-600 text-white">VRBO</span>;
   if (src.includes("booking")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-blue-800 text-white">Booking</span>;
+  if (src.includes("expedia")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-yellow-500 text-black">Expedia</span>;
+  if (src.includes("google")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-sky-500 text-white">Google</span>;
+  if (src.includes("marriott") || src.includes("homesandvillas") || src.includes("hvmi")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-rose-900 text-white">Marriott</span>;
+  if (src.includes("hopper")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-purple-600 text-white">Hopper</span>;
+  if (src.includes("despegar")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-amber-600 text-white">Despegar</span>;
+  if (src.includes("agoda")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-red-700 text-white">Agoda</span>;
   if (src.includes("email")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-slate-600 text-white">Email</span>;
   if (src.includes("sms")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-emerald-600 text-white">SMS</span>;
   if (src.includes("whatsapp")) return <span className="inline-block px-1.5 py-[1px] rounded text-[9px] font-medium bg-green-600 text-white">WhatsApp</span>;
@@ -2454,11 +2460,22 @@ export default function InboxPage() {
       // in the first place — adding `fields=` is what actually makes the
       // unwrapping useful. Verified 2026-05-04 against production: omit
       // it and `state.lastMessage` is missing on every list row.
-      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=100&fields=");
+      // &sort=-lastMessageAt mirrors the server auto-reply scheduler so Guesty
+      // returns the freshest-by-activity conversations in the first page (the
+      // client still re-sorts by state.lastMessage.date below).
+      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=100&sort=-lastMessageAt&fields=");
       if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
       return r.json();
     },
     refetchInterval: 60_000,
+    // The global queryClient defaults are refetchOnWindowFocus:false +
+    // staleTime:Infinity and the poll PAUSES while the tab is hidden — so without
+    // these per-query overrides the inbox can look frozen for up to a full
+    // interval after the operator tabs back. Keep them ON for the inbox so a
+    // returning operator sees new guest messages immediately.
+    refetchOnWindowFocus: true,
+    refetchIntervalInBackground: true,
+    staleTime: 0,
   });
   // Guesty's Open API wraps list responses as:
   //   { status: 200, data: { count, countUnread, conversations: [...], cursor, ... } }
@@ -2667,6 +2684,11 @@ export default function InboxPage() {
       return r.json();
     },
     refetchInterval: 30_000,
+    // Keep the open thread fresh when the operator tabs away and back (see the
+    // conversation-list query note) so a new guest reply appears immediately.
+    refetchOnWindowFocus: true,
+    refetchIntervalInBackground: true,
+    staleTime: 0,
   });
 
   const { data: smsData, isLoading: smsLoading } = useQuery<any>({
@@ -3140,7 +3162,9 @@ export default function InboxPage() {
     via: string;
   }) => {
     const { conversationId, body, channel, reservationId, via } = params;
-    const MAX_ATTEMPTS = 9;
+    // ~60s — Booking.com confirms ~30s out (AGENTS.md #51), so the old ~36s window
+    // could exhaust before a legitimately-slow sync confirmed.
+    const MAX_ATTEMPTS = 15;
     const INTERVAL_MS = 4000;
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
       await new Promise((resolve) => setTimeout(resolve, INTERVAL_MS));
@@ -3177,6 +3201,14 @@ export default function InboxPage() {
         return;
       }
     }
+    // Loop exhausted with no verified/misroute verdict — the OTA channel is still
+    // confirming (or syncing slower than our window). The message was posted
+    // EXACTLY ONCE (send-once), so surface a terminal "don't resend" notice rather
+    // than letting the transient "confirming…" toast silently vanish.
+    toast({
+      title: `Still confirming on ${via}`,
+      description: `${via} hasn't confirmed delivery yet. Your message is on the thread — don't resend (that can duplicate it). If the guest doesn't reply, verify on the channel's extranet.`,
+    });
   };
 
   const sendMessage = useMutation({
@@ -5493,7 +5525,10 @@ export default function InboxPage() {
                                 propertyName,
                                 guestFirstName: firstName,
                                 guestFullName: fullName || undefined,
-                                checkInIso: res?.checkIn,
+                                // Localized calendar date (matches the panel),
+                                // NOT raw res.checkIn which slices a day off in
+                                // Hawaii/negative-offset timezones.
+                                checkInIso: checkInIso || undefined,
                                 checkOutIso: checkOutIso || undefined,
                                 confirmationCode: res?.confirmationCode || undefined,
                                 channel: (selectedConv as any)?.module?.type || channelRaw || undefined,
