@@ -1,8 +1,30 @@
 import { isBookingChannel } from "./receipt-message";
 
+// OTA channel module/integration types Guesty exposes that require async,
+// externalId-confirmed delivery — a bare Guesty POST 200 is NOT proof the guest
+// received it (AGENTS.md #51). The big three (Airbnb / VRBO-HomeAway /
+// Booking.com) are the operator's live channels; the rest are other OTAs Guesty
+// can relay onto the SAME conversation API. Any module type matching one of these
+// tokens is delivery-verified on outbound instead of silently trusting the bare
+// 200 (the false-green this list previously left open for EVERY non-big-3 OTA).
+// email / sms / whatsapp / manual / direct are deliberately ABSENT — they have no
+// async OTA portal to confirm against, so their accepted POST IS the delivery.
+const OTA_CHANNEL_TOKENS = [
+  "booking",          // bookingCom, bookingCom2
+  "airbnb",           // airbnb, airbnb2
+  "homeaway", "vrbo", // VRBO / HomeAway (homeaway, homeaway2)
+  "expedia",
+  "google",           // Google Vacation Rentals
+  "marriott", "homesandvillas", "homes_and_villas", "hvmi", // Marriott Homes & Villas
+  "hopper",
+  "despegar",
+  "tripadvisor", "holidu",
+  "agoda",
+];
+
 export function guestyModuleTypeLooksOta(type: string): boolean {
   const t = String(type ?? "").toLowerCase();
-  return t.includes("booking") || t.includes("airbnb") || t.includes("homeaway") || t.includes("vrbo");
+  return OTA_CHANNEL_TOKENS.some((token) => t.includes(token));
 }
 
 export function parseGuestyConversationModule(mod: unknown): Record<string, unknown> {
@@ -30,6 +52,12 @@ export function guestyChannelLabel(module: Record<string, unknown>): string {
   if (t.includes("booking")) return "Booking.com";
   if (t.includes("airbnb")) return "Airbnb";
   if (t.includes("homeaway") || t.includes("vrbo")) return "VRBO";
+  if (t.includes("expedia")) return "Expedia";
+  if (t.includes("google")) return "Google";
+  if (t.includes("marriott") || t.includes("homesandvillas") || t.includes("homes_and_villas") || t.includes("hvmi")) return "Marriott Homes & Villas";
+  if (t.includes("hopper")) return "Hopper";
+  if (t.includes("despegar")) return "Despegar";
+  if (t.includes("agoda")) return "Agoda";
   if (t === "email") return "email";
   return String(module.type ?? "unknown");
 }
@@ -51,7 +79,12 @@ export function otaModuleTypeFromReservation(
   const sourceText = String(reservation?.source ?? "").toLowerCase();
   if (/booking\.?com/.test(sourceText)) return "bookingCom";
   if (/airbnb/.test(sourceText)) return "airbnb2";
-  if (/vrbo|homeaway|expedia/.test(sourceText)) return "homeaway";
+  if (/vrbo|homeaway/.test(sourceText)) return "homeaway";
+  // Expedia is its OWN channel — do NOT fold it into homeaway (that misrouted an
+  // Expedia reply onto the VRBO module). Return its own platform; if Guesty
+  // rejects the send type, the attempt ladder falls back to the conversation-
+  // derived module (send-once advances only on a POST rejection).
+  if (/expedia/.test(sourceText)) return "expedia";
   return null;
 }
 

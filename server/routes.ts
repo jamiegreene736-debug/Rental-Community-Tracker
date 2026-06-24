@@ -11937,6 +11937,95 @@ Requirements:
     }
   });
 
+  // POST /api/guest-inbox/send  body: { buyInId | aliasEmail, body, subject?, toEmail? }
+  // Reply to a VRBO buy-in guest-thread message (operator -> the bought unit's
+  // host) THROUGH the SimpleLogin reverse-alias so the reply appears to come from
+  // the traveler alias and threads with the original VRBO conversation. Reuses the
+  // EXACT proven vendor-email mechanism (getOrCreateVendorContact -> a SimpleLogin
+  // reverse-alias for the host + sendBuyInEmail), then records an `outbound` row in
+  // guest_inbox_messages so the thread shows both sides. Operator-gated (not in the
+  // auth exclusions). NOTE: deliverability depends on the host's inbound address
+  // being a real reply target (some OTAs relay from a no-reply) — same constraint
+  // as the vendor-email path; confirm live before relying on it.
+  app.post("/api/guest-inbox/send", async (req, res) => {
+    try {
+      const rawBuyInId = Number(req.body?.buyInId);
+      let aliasEmail = String(req.body?.aliasEmail ?? "").trim().toLowerCase();
+      const subject = String(req.body?.subject ?? "").trim() || "Re: your booking";
+      const body = String(req.body?.body ?? "").trim();
+      if (!body) return res.status(400).json({ error: "Message body is required" });
+
+      let buyIn = Number.isFinite(rawBuyInId) && rawBuyInId > 0 ? await storage.getBuyIn(rawBuyInId) : null;
+      if (!buyIn && aliasEmail) buyIn = await storage.getBuyInByTravelerEmail(aliasEmail);
+      if (!buyIn) return res.status(404).json({ error: "Buy-in not found for this guest thread" });
+
+      aliasEmail = String(buyIn.travelerEmail ?? aliasEmail).trim().toLowerCase();
+      if (!aliasEmail) {
+        return res.status(400).json({ error: "This buy-in has no booking email yet — create one first" });
+      }
+      const reservationId = String(buyIn.guestyReservationId ?? "").trim();
+      if (!reservationId) {
+        return res.status(400).json({ error: "Buy-in is not attached to a reservation" });
+      }
+
+      // The host is whoever last messaged this alias inbound — reply to that
+      // address (operator can override with an explicit toEmail).
+      const recent = await storage.getGuestInboxMessages(aliasEmail, 50);
+      const lastInbound = recent.find(
+        (m) => m.direction === "inbound" && m.fromEmail && m.fromEmail.includes("@") && m.fromEmail !== "unknown@unknown",
+      );
+      const explicitTo = String(req.body?.toEmail ?? "").trim().toLowerCase();
+      const hostEmail = explicitTo || String(lastInbound?.fromEmail ?? "").trim().toLowerCase();
+      if (!hostEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(hostEmail)) {
+        return res.status(400).json({
+          error: "No host reply address found",
+          message: "There is no inbound host message to reply to yet — the host must message first so we have a reply address.",
+        });
+      }
+
+      const { alias, contact } = await getOrCreateVendorContact({
+        buyInId: buyIn.id,
+        reservationId,
+        guestName: lastInbound?.guestName ?? null,
+        vendorEmail: hostEmail,
+        vendorName: lastInbound?.guestName ?? null,
+      });
+      if (!contact.reverseAliasEmail) {
+        return res.status(500).json({ error: "Could not establish a reply path to the host" });
+      }
+      if (reservationAliasIsExpired(alias)) {
+        return res.status(400).json({
+          error: "Booking email alias has expired",
+          message: "Create a new communication path before replying. Saved messages remain in history.",
+        });
+      }
+
+      const from = process.env.SMTP_FROM || process.env.RESERVATIONS_EMAIL || SIMPLELOGIN_MAILBOX_EMAIL;
+      const sent = await sendBuyInEmail({ from, to: contact.reverseAliasEmail, subject, body, attachments: [] });
+
+      const stored = await storage.createGuestInboxMessage({
+        aliasEmail,
+        guestName: lastInbound?.guestName ?? null,
+        buyInId: buyIn.id,
+        reservationId,
+        direction: "outbound",
+        // The host sees the alias as the sender (SimpleLogin rewrites it); record
+        // the alias as `from` and the real host address as `to`.
+        fromEmail: aliasEmail,
+        toEmail: hostEmail,
+        subject,
+        body,
+        attachmentsJson: null,
+        providerMessageId: sent.messageId ?? null,
+        rawPayload: null,
+      });
+      res.json({ ok: true, message: stored });
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      res.status(500).json({ error: "Failed to send guest reply", message });
+    }
+  });
+
   // POST /api/buy-ins/:id/traveler-email
   // Mint (or reuse) the per-guest VRBO booking email without starting checkout.
   // Used when manually attaching VRBO buy-ins so arrival confirmations land in

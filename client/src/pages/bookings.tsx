@@ -4674,6 +4674,7 @@ type GuestInboxMessageClient = {
   toEmail: string;
   body: string;
   receivedAt: string;
+  direction?: "inbound" | "outbound" | string;
 };
 
 function guestNamePartsFromReservation(reservation: GuestyReservation): { firstName: string; lastName: string } {
@@ -5088,6 +5089,27 @@ function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservati
 
   const messages = data?.messages ?? [];
   const displayEmail = email ?? data?.aliasEmail;
+  // We can only reply once the host has messaged inbound (that gives us a reply
+  // address); the server derives the host from the most recent inbound message.
+  const hasInboundHost = messages.some(
+    (m) => (m.direction ?? "inbound") === "inbound" && !!m.fromEmail && m.fromEmail.includes("@") && m.fromEmail !== "unknown@unknown",
+  );
+
+  const [replyText, setReplyText] = useState("");
+  const replyMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/guest-inbox/send", { buyInId: buyIn.id, body: replyText.trim() });
+      const b = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(b?.message || b?.error || `HTTP ${res.status}`);
+      return b;
+    },
+    onSuccess: () => {
+      setReplyText("");
+      toast({ title: "Reply sent", description: "Your reply was sent to the host through the booking alias." });
+      void refetch();
+    },
+    onError: (e: any) => toast({ title: "Could not send reply", description: e?.message ?? String(e), variant: "destructive" }),
+  });
 
   return (
     <div className="border-t bg-sky-50/40 px-3 py-2.5 space-y-2 dark:bg-sky-950/20" data-testid={`guest-thread-${buyIn.id}`}>
@@ -5136,16 +5158,46 @@ function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservati
       )}
       {messages.length > 0 && (
         <div className="space-y-2 max-h-64 overflow-y-auto">
-          {messages.map((m) => (
-            <div key={m.id} className="rounded border bg-background p-2 text-xs">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium truncate">{m.subject}</span>
-                <span className="text-[10px] text-muted-foreground whitespace-nowrap">{fmtDate(m.receivedAt)}</span>
+          {messages.map((m) => {
+            const outbound = (m.direction ?? "inbound") === "outbound";
+            return (
+              <div
+                key={m.id}
+                className={`rounded border p-2 text-xs ${outbound ? "bg-sky-100 dark:bg-sky-900/40 ml-6" : "bg-background mr-6"}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium truncate">{outbound ? "You → host" : m.subject}</span>
+                  <span className="text-[10px] text-muted-foreground whitespace-nowrap">{fmtDate(m.receivedAt)}</span>
+                </div>
+                <div className="text-[10px] text-muted-foreground truncate">{outbound ? `To: ${m.toEmail}` : `From: ${m.fromEmail}`}</div>
+                <div className="mt-1 whitespace-pre-wrap break-words text-[11px] line-clamp-6">{String(m.body || "").slice(0, 4000)}</div>
               </div>
-              <div className="text-[10px] text-muted-foreground truncate">From: {m.fromEmail}</div>
-              <div className="mt-1 whitespace-pre-wrap break-words text-[11px] line-clamp-6">{String(m.body || "").slice(0, 4000)}</div>
-            </div>
-          ))}
+            );
+          })}
+        </div>
+      )}
+      {displayEmail && hasInboundHost && (
+        <div className="space-y-1.5 border-t pt-2">
+          <Textarea
+            value={replyText}
+            onChange={(e) => setReplyText(e.target.value)}
+            placeholder="Reply to the host…"
+            className="min-h-[60px] text-xs"
+            data-testid={`guest-thread-reply-${buyIn.id}`}
+          />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] text-muted-foreground">Sends from {displayEmail} via the booking alias</span>
+            <Button
+              size="sm"
+              className="h-7 text-[11px]"
+              disabled={replyMutation.isPending || !replyText.trim()}
+              onClick={() => replyMutation.mutate()}
+              data-testid={`button-guest-thread-send-${buyIn.id}`}
+            >
+              {replyMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Send className="h-3 w-3 mr-1" />}
+              Send reply
+            </Button>
+          </div>
         </div>
       )}
     </div>
