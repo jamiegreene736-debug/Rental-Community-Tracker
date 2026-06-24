@@ -42,6 +42,7 @@ import { PROPERTY_UNIT_CONFIGS, type UnitConfig } from "@shared/property-units";
 import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
+import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { resolveIslandRegion } from "@shared/area-identity";
@@ -215,7 +216,10 @@ interface GuestyPayment {
   dueAt?: string;
   dueDate?: string;
   scheduledAt?: string;
+  scheduledFor?: string;
   chargeDate?: string;
+  chargeAt?: string;
+  shouldBePaidAt?: string; // Guesty's scheduled/auto-payment charge date
   createdAt?: string;
   date?: string;
   status?: string;
@@ -6595,7 +6599,12 @@ function paymentDateOf(p: GuestyPayment): Date | null {
 }
 
 function scheduledDateOf(p: GuestyPayment): Date | null {
-  return parseDateCandidate(p.dueAt ?? p.dueDate ?? p.scheduledAt ?? p.chargeDate ?? p.paymentDate ?? p.date ?? p.createdAt);
+  // Guesty stamps a scheduled/auto-payment's charge date on `shouldBePaidAt`
+  // (the date its UI shows as "Next payment … on <date>"); `createdAt` is the
+  // schedule-row creation time, NOT a due date. The field priority — and the
+  // deliberate exclusion of `createdAt` — lives in @shared/guesty-payment-schedule
+  // so it's regression-tested. (Operator-caught on BC-9jpBrRM5Y.)
+  return parseDateCandidate(scheduledChargeDateIso(p as GuestyPaymentRow));
 }
 
 function paymentDescriptionOf(p: GuestyPayment): string {
@@ -6672,21 +6681,13 @@ function paidToDateOf(r: GuestyReservation): number {
 }
 
 // "Payment next due" for the reservations table — the date Guesty will next
-// collect from the guest. We take the earliest scheduled (not-yet-collected)
-// installment from the same payment rows the Expected Deposits tab reads
-// (reservationPaymentItems → paymentLooksScheduled → scheduledDateOf). Prefer
-// the soonest still-upcoming due date; if every scheduled date is already past
-// (an overdue installment) fall back to the earliest outstanding one. Returns
+// collect from the guest: the earliest scheduled (not-yet-collected) charge,
+// read from the same payment rows the Expected Deposits tab uses. The selection
+// (classify scheduled-vs-collected → earliest still-upcoming `shouldBePaidAt`)
+// lives in @shared/guesty-payment-schedule so it's regression-tested. Returns
 // null when Guesty exposes no payment schedule (e.g. paid in full, or Airbnb).
 function nextPaymentDueOf(r: GuestyReservation): Date | null {
-  const scheduledDates = reservationPaymentItems(r)
-    .filter(paymentLooksScheduled)
-    .map(scheduledDateOf)
-    .filter((d): d is Date => !!d)
-    .sort((a, b) => a.getTime() - b.getTime());
-  if (scheduledDates.length === 0) return null;
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000; // still show a due-today date
-  return scheduledDates.find((d) => d.getTime() >= cutoff) ?? scheduledDates[0];
+  return nextScheduledChargeDate(reservationPaymentItems(r) as GuestyPaymentRow[], Date.now());
 }
 
 function paymentSourceOf(r: GuestyReservation): { kind: PaymentSourceKind; label: string; detail: string } {
