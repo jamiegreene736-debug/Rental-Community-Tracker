@@ -510,6 +510,165 @@ export async function sendReceiptForReservation(opts: {
   };
 }
 
+// ── Manual on-demand receipt PAGE generation (no message send) ────────────
+// Mints a durable /receipt/:token payment-details page from operator-supplied
+// values WITHOUT posting any Guesty message. This backs the Guest Inbox
+// "Generate payment details page URL" action: the operator gets a shareable,
+// printable link they can copy, preview, or fold into the receipt message and
+// send themselves.
+//
+// LOAD-BEARING dedup namespace: the key is prefixed `manual-page|…` and suffixed
+// with the unique token so it can NEVER collide with the auto-scheduler's
+// canonical `reservationId|kind|day|amount` key (receiptDedupKey). The 5-minute
+// scheduler therefore keeps its own independent ledger row and still auto-sends
+// its receipt for the same payment if it detects one — the manual page is a
+// standalone artifact, not a substitute for the auto send. Status is "page" so
+// the row is excluded from every "Receipt sent" badge / sent-status / dashboard
+// count (all of which gate on status sent/unconfirmed) and from the GET
+// /receipt/:token render (which only checks token + expiry, not status).
+export async function createReceiptPage(opts: {
+  reservationId: string;
+  conversationId?: string | null;
+  kind?: ReceiptKind;
+  guestName?: string | null;
+  guestFirstName?: string | null;
+  propertyName?: string | null;
+  listingId?: string | null;
+  listingNickname?: string | null;
+  checkIn?: string | null;
+  checkOut?: string | null;
+  confirmationCode?: string | null;
+  channel?: string | null;
+  amount: number;
+  currency?: string | null;
+  transactionDate?: string | null;
+  bookingTotal?: number | null;
+  paymentHistory?: Array<{ date: string; amount: number }>;
+  totalPaidToDate?: number | null;
+}): Promise<{ ok: boolean; token: string; url: string; messageBody: string; message: string }> {
+  const reservationId = String(opts.reservationId ?? "").trim();
+  if (!reservationId) {
+    return { ok: false, token: "", url: "", messageBody: "", message: "reservationId is required" };
+  }
+  const amount = Number(opts.amount);
+  if (!(amount > 0)) {
+    return { ok: false, token: "", url: "", messageBody: "", message: "amount must be greater than 0" };
+  }
+
+  const kind: ReceiptKind = opts.kind === "refund" ? "refund" : "payment";
+  const now = Date.now();
+  const token = randomBytes(12).toString("hex");
+  const receiptUrl = `${baseUrl()}/receipt/${token}`;
+
+  const guestFirst = String(
+    opts.guestFirstName ?? (opts.guestName ? String(opts.guestName).trim().split(/\s+/)[0] : "") ?? "",
+  ).trim();
+  const propertyName = String(opts.propertyName ?? opts.listingNickname ?? "").trim();
+  const checkInIso = opts.checkIn ? String(opts.checkIn).slice(0, 10) : null;
+  const checkOutIso = opts.checkOut ? String(opts.checkOut).slice(0, 10) : null;
+  const transactionDate = opts.transactionDate ? String(opts.transactionDate) : new Date(now).toISOString();
+  const channel = String(opts.channel ?? "").trim() || null;
+  const currency = String(opts.currency ?? "USD").trim() || "USD";
+  const bookingTotal = Number(opts.bookingTotal) > 0 ? Number(opts.bookingTotal) : 0;
+  const history = Array.isArray(opts.paymentHistory)
+    ? opts.paymentHistory
+        .map((p) => ({ date: String(p?.date ?? "").slice(0, 10), amount: Number(p?.amount) || 0 }))
+        .filter((p) => p.amount > 0)
+    : [];
+  const totalPaidToDate =
+    kind === "payment"
+      ? typeof opts.totalPaidToDate === "number" && opts.totalPaidToDate >= 0
+        ? opts.totalPaidToDate
+        : history.reduce((s, p) => s + p.amount, 0)
+      : null;
+
+  // Build the receipt MESSAGE body via the SAME shared builders the
+  // auto-scheduler uses (so the page-link wording stays in lockstep). The body
+  // is returned so the inbox can fold the link into the message it sends.
+  let messageBody: string;
+  if (kind === "payment") {
+    // Remove this charge from the history before passing as "past" so the
+    // builder's total-paid math doesn't double-count it (it adds it back).
+    const day = transactionDate.slice(0, 10);
+    let removedThis = false;
+    const pastPayments = history.filter((p) => {
+      if (!removedThis && p.date === day && Math.abs(p.amount - amount) < 0.005) {
+        removedThis = true;
+        return false;
+      }
+      return true;
+    });
+    messageBody = buildPaymentReceiptBody({
+      guestFirstName: guestFirst,
+      propertyName,
+      checkInIso,
+      paymentAmount: amount,
+      paymentDateIso: transactionDate,
+      bookingTotal,
+      pastPayments,
+      receiptUrl,
+      channel,
+    });
+  } else {
+    messageBody = buildRefundReceiptBody({
+      guestFirstName: guestFirst,
+      propertyName,
+      checkInIso,
+      refundAmount: amount,
+      refundDateIso: transactionDate,
+      receiptUrl,
+      channel,
+    });
+  }
+
+  const payload = {
+    kind,
+    brandName: RECEIPT_BRAND_NAME,
+    senderName: RECEIPT_SENDER_NAME,
+    guestFirstName: guestFirst,
+    guestName: opts.guestName ?? null,
+    propertyName,
+    listingNickname: opts.listingNickname ?? propertyName ?? null,
+    checkIn: checkInIso,
+    checkOut: checkOutIso,
+    confirmationCode: opts.confirmationCode ?? null,
+    channel,
+    amount,
+    currency,
+    transactionDate,
+    bookingTotal,
+    paymentHistory: kind === "payment" ? history : [],
+    totalPaidToDate,
+    receiptUrl,
+    messageBody,
+    generatedAt: new Date(now).toISOString(),
+  };
+
+  const dedupKey = `manual-page|${reservationId}|${kind}|${transactionDate.slice(0, 10)}|${amount.toFixed(2)}|${token}`;
+  const insert: InsertGuestReceipt = {
+    token,
+    dedupKey,
+    reservationId,
+    conversationId: opts.conversationId ?? null,
+    kind,
+    amount: amount.toFixed(2),
+    currency,
+    transactionDate,
+    guestName: opts.guestName ?? null,
+    listingId: opts.listingId ?? null,
+    listingNickname: opts.listingNickname ?? propertyName ?? null,
+    channel,
+    messageBody,
+    payload,
+    status: "page",
+    errorMessage: null,
+    expiresAt: new Date(now + RECEIPT_PAGE_TTL_DAYS * 24 * 60 * 60 * 1000),
+  };
+  await storage.createGuestReceipt(insert);
+  console.log(`[guest-receipts] minted manual receipt page ${token} for reservation ${reservationId} ($${amount.toFixed(2)} ${kind})`);
+  return { ok: true, token, url: receiptUrl, messageBody, message: "Receipt page generated" };
+}
+
 export function startGuestReceiptScheduler() {
   // Stagger after the other schedulers finish booting.
   setTimeout(() => { runGuestReceipts().catch(() => {}); }, 60_000);

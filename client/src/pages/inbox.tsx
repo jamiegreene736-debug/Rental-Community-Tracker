@@ -29,7 +29,7 @@ import {
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
   FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
-  Search, Loader2, ExternalLink,
+  Search, Loader2, ExternalLink, Copy, Link2,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -1023,6 +1023,9 @@ function buildReceiptBody(args: {
   paymentDateIso: string;
   bookingTotal: number;
   pastPayments: Array<{ date: string; amount: number }>;
+  // When a durable /receipt/:token page has been generated, its URL is woven
+  // into the message (own line — load-bearing for Booking.com link delivery).
+  receiptUrl?: string;
 }): string {
   const past = args.pastPayments
     .filter((p) => p.amount > 0)
@@ -1060,6 +1063,11 @@ function buildReceiptBody(args: {
   lines.push(`Total paid to date: ${formatMoney(totalPaid)}`);
   lines.push(`Remaining balance:  ${formatMoney(balance)}`);
   lines.push(``);
+  if (args.receiptUrl && args.receiptUrl.trim()) {
+    lines.push(`You can view your full itemized receipt here:`);
+    lines.push(args.receiptUrl.trim());
+    lines.push(``);
+  }
   lines.push(`If you have any questions about this charge or your reservation, just reply to this message — happy to help.`);
   lines.push(``);
   lines.push(`Thanks,`);
@@ -1067,6 +1075,21 @@ function buildReceiptBody(args: {
   lines.push(OUTBOUND_BRAND_NAME);
 
   return lines.join("\n");
+}
+
+// Weave a generated receipt-page link into a message the operator has already
+// hand-edited (so we don't clobber their copy). No-op if the link is already
+// present. Inserts the link block just above the "Thanks," sign-off when found,
+// otherwise appends it.
+function withReceiptLink(body: string, url: string): string {
+  const link = String(url ?? "").trim();
+  if (!link || !body || body.includes(link)) return body;
+  const block = `You can view your full itemized receipt here:\n${link}`;
+  const idx = body.indexOf("\nThanks,");
+  const next = idx >= 0
+    ? `${body.slice(0, idx)}\n\n${block}\n${body.slice(idx)}`
+    : `${body}\n\n${block}`;
+  return next.replace(/\n{3,}/g, "\n\n");
 }
 
 // ─── Region-aware greeting + sign-off ───────────────────────────────────────────
@@ -2347,7 +2370,12 @@ export default function InboxPage() {
     reservationId: string | null;
     propertyName: string;
     guestFirstName: string;
+    guestFullName?: string;
     checkInIso?: string;
+    checkOutIso?: string;
+    confirmationCode?: string;
+    channel?: string;
+    conversationId?: string;
   }>({ open: false, reservationId: null, propertyName: "", guestFirstName: "" });
   const [receiptPaymentAmount, setReceiptPaymentAmount] = useState<string>("");
   const [receiptPaymentDate, setReceiptPaymentDate] = useState<string>("");
@@ -2362,6 +2390,10 @@ export default function InboxPage() {
   const [receiptPaymentsLoading, setReceiptPaymentsLoading] = useState<boolean>(false);
   const [receiptBody, setReceiptBody] = useState<string>("");
   const [receiptBodyTouched, setReceiptBodyTouched] = useState<boolean>(false);
+  // The durable /receipt/:token payment-details page URL once generated on the
+  // fly for this dialog (empty until the operator clicks "Generate page link").
+  const [receiptPageUrl, setReceiptPageUrl] = useState<string>("");
+  const [receiptPageError, setReceiptPageError] = useState<string>("");
   const threadRef = useRef<HTMLDivElement>(null);
   const deepLinkNoticeRef = useRef<string | null>(null);
 
@@ -3336,6 +3368,7 @@ export default function InboxPage() {
       paymentDateIso: receiptPaymentDate,
       bookingTotal: parseFloat(receiptTotalPrice) || 0,
       pastPayments,
+      receiptUrl: receiptPageUrl || undefined,
     });
     setReceiptBody(body);
   }, [
@@ -3347,6 +3380,7 @@ export default function InboxPage() {
     receiptPaymentDate,
     receiptTotalPrice,
     receiptPastPayments,
+    receiptPageUrl,
     receiptBodyTouched,
   ]);
 
@@ -3362,6 +3396,8 @@ export default function InboxPage() {
     setReceiptPaymentsLoading(false);
     setReceiptBody("");
     setReceiptBodyTouched(false);
+    setReceiptPageUrl("");
+    setReceiptPageError("");
   };
 
   // Send the receipt body through the SAME hardened, delivery-verified server
@@ -3369,15 +3405,20 @@ export default function InboxPage() {
   // only reaches Guesty's `pending` state isn't reported as delivered either.
   const sendReceipt = useMutation({
     mutationFn: async () => {
-      if (!selectedConv) throw new Error("No conversation selected");
+      // Use the conversation/reservation/channel CAPTURED when the dialog opened
+      // (not live selectedConv*) so a programmatic deep-link that switches the
+      // selected conversation mid-dialog can't deliver this receipt — and its
+      // page link — to the wrong guest. Mirrors generateReceiptPage.
+      const convId = receiptDialog.conversationId ?? selectedConvId;
+      if (!convId) throw new Error("No conversation selected");
       if (!receiptBody.trim()) throw new Error("Receipt body is empty");
       const r = await apiRequest(
         "POST",
-        `/api/inbox/conversations/${selectedConvId}/send`,
+        `/api/inbox/conversations/${convId}/send`,
         {
           body: receiptBody,
-          reservationId: selectedConv.reservationId ?? null,
-          channel: selectedConv.module?.type ?? null,
+          reservationId: receiptDialog.reservationId ?? selectedConv?.reservationId ?? null,
+          channel: receiptDialog.channel ?? (selectedConv as any)?.module?.type ?? null,
         },
       );
       const body = await r.json().catch(() => ({} as any));
@@ -3390,12 +3431,13 @@ export default function InboxPage() {
             || "The receipt did not reach the guest's booking channel — verify on the channel's extranet.",
         );
       }
-      return body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string };
+      return { ...(body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string }), convId };
     },
     onSuccess: (data) => {
+      const convId = data.convId;
       resetReceiptState();
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", convId] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", convId, "posts"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
       const via = data?.deliveredVia?.trim() || "the booking channel";
       if (data?.verified === true) {
@@ -3409,6 +3451,63 @@ export default function InboxPage() {
       }
     },
     onError: (e: any) => toast({ title: "Failed to send receipt", description: e.message, variant: "destructive" }),
+  });
+
+  // Mint a durable /receipt/:token PAYMENT-DETAILS PAGE on demand (the operator
+  // "Generate payment details page URL" action) without sending a message. The
+  // returned link is surfaced for copy/preview and folded into the receipt
+  // message so a subsequent "Send receipt" delivers the page link too.
+  const generateReceiptPage = useMutation({
+    mutationFn: async () => {
+      if (!receiptDialog.reservationId) throw new Error("No reservation selected");
+      const amt = parseFloat(receiptPaymentAmount);
+      if (!Number.isFinite(amt) || amt <= 0) throw new Error("Enter a payment amount greater than 0 first");
+      const pastPayments = receiptPastPayments
+        .map((p) => ({ date: p.date, amount: parseFloat(p.amount) || 0 }))
+        .filter((p) => p.amount > 0);
+      const fullHistory = [
+        ...pastPayments,
+        ...(amt > 0 ? [{ date: receiptPaymentDate, amount: amt }] : []),
+      ];
+      const r = await apiRequest("POST", "/api/inbox/guest-receipts/generate-page", {
+        reservationId: receiptDialog.reservationId,
+        conversationId: receiptDialog.conversationId ?? selectedConvId ?? null,
+        kind: "payment",
+        guestName: receiptDialog.guestFullName ?? receiptDialog.guestFirstName ?? null,
+        guestFirstName: receiptDialog.guestFirstName ?? null,
+        propertyName: receiptDialog.propertyName ?? null,
+        listingNickname: receiptDialog.propertyName ?? null,
+        checkIn: receiptDialog.checkInIso ?? null,
+        checkOut: receiptDialog.checkOutIso ?? null,
+        confirmationCode: receiptDialog.confirmationCode ?? null,
+        channel: receiptDialog.channel ?? (selectedConv as any)?.module?.type ?? null,
+        amount: amt,
+        transactionDate: receiptPaymentDate || null,
+        bookingTotal: parseFloat(receiptTotalPrice) || 0,
+        paymentHistory: fullHistory,
+        totalPaidToDate: fullHistory.reduce((s, p) => s + p.amount, 0),
+      });
+      const data = await r.json().catch(() => ({} as any));
+      if (!r.ok || data?.ok !== true || !data?.url) {
+        throw new Error(data?.message || data?.error || `Server returned HTTP ${r.status}`);
+      }
+      return data as { ok: true; token: string; url: string; messageBody: string };
+    },
+    onSuccess: (data) => {
+      setReceiptPageError("");
+      setReceiptPageUrl(data.url);
+      // If the operator has hand-edited the message, weave the link into their
+      // copy without clobbering it. Otherwise the regenerate effect (which now
+      // depends on receiptPageUrl) folds the link into the auto-built message.
+      if (receiptBodyTouched) {
+        setReceiptBody((prev) => withReceiptLink(prev, data.url));
+      }
+      toast({ title: "Payment details page ready", description: "Copy the link or send it to the guest." });
+    },
+    onError: (e: any) => {
+      setReceiptPageError(e?.message ?? "Could not generate the page");
+      toast({ title: "Couldn't generate page", description: e?.message, variant: "destructive" });
+    },
   });
 
   const generateDraft = async () => {
@@ -5358,7 +5457,12 @@ export default function InboxPage() {
                                 reservationId: res._id,
                                 propertyName,
                                 guestFirstName: firstName,
+                                guestFullName: fullName || undefined,
                                 checkInIso: res?.checkIn,
+                                checkOutIso: checkOutIso || undefined,
+                                confirmationCode: res?.confirmationCode || undefined,
+                                channel: (selectedConv as any)?.module?.type || channelRaw || undefined,
+                                conversationId: selectedConvId || undefined,
                               });
                               setReceiptTotalPrice(totalPriceFromMoney > 0 ? totalPriceFromMoney.toFixed(2) : "");
                               setReceiptPastPayments([]);
@@ -5367,6 +5471,8 @@ export default function InboxPage() {
                               setReceiptPaymentDate(todayIso);
                               setReceiptBody("");
                               setReceiptBodyTouched(false);
+                              setReceiptPageUrl("");
+                              setReceiptPageError("");
                               apiRequest("GET", `/api/inbox/reservations/${res._id}/payments`)
                                 .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
                                 .then((data: any) => {
@@ -5536,15 +5642,26 @@ export default function InboxPage() {
                                   </div>
                                 ))}
                                 {!isAgent && (
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-8 px-2.5 text-[11px] w-full justify-start"
-                                    onClick={openReceiptDialog}
-                                    data-testid="button-send-receipt"
-                                  >
-                                    <DollarSign className="h-3 w-3 mr-1.5" /> Open detailed payment receipt
-                                  </Button>
+                                  <>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-8 px-2.5 text-[11px] w-full justify-start"
+                                      onClick={openReceiptDialog}
+                                      data-testid="button-send-receipt"
+                                    >
+                                      <DollarSign className="h-3 w-3 mr-1.5" /> Open detailed payment receipt
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-8 px-2.5 text-[11px] w-full justify-start text-cyan-700 border-cyan-300 hover:bg-cyan-50 hover:text-cyan-800"
+                                      onClick={openReceiptDialog}
+                                      data-testid="button-generate-receipt-page"
+                                    >
+                                      <Link2 className="h-3 w-3 mr-1.5" /> Generate payment details page URL
+                                    </Button>
+                                  </>
                                 )}
                               </div>
                             );
@@ -5961,14 +6078,62 @@ export default function InboxPage() {
           if (!open) resetReceiptState();
         }}
       >
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-2xl max-h-[88vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              Send payment receipt
-              {receiptDialog.guestFirstName ? ` to ${receiptDialog.guestFirstName}` : ""}
+              Payment receipt &amp; details page
+              {receiptDialog.guestFirstName ? ` · ${receiptDialog.guestFirstName}` : ""}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-1">
+            {receiptPageUrl ? (
+              <div className="rounded-lg border border-cyan-300 bg-cyan-50 p-3" data-testid="receipt-page-ready">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-800">
+                  <CheckCircle className="h-3.5 w-3.5" /> Payment details page ready
+                </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <Input
+                    readOnly
+                    value={receiptPageUrl}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="h-8 font-mono text-[11px]"
+                    data-testid="input-receipt-page-url"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 shrink-0"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(receiptPageUrl)
+                        .then(() => toast({ title: "Link copied" }))
+                        .catch(() => toast({ title: "Couldn't copy — select the link manually", variant: "destructive" }));
+                    }}
+                    data-testid="button-copy-receipt-page"
+                  >
+                    <Copy className="h-3 w-3 mr-1" /> Copy
+                  </Button>
+                  <a
+                    href={`${receiptPageUrl}?preview=1`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="shrink-0 inline-flex items-center gap-1 text-[11px] text-cyan-700 hover:underline"
+                    data-testid="link-open-receipt-page"
+                  >
+                    Open <ExternalLink className="h-3 w-3" />
+                  </a>
+                </div>
+                <p className="mt-1.5 text-[10px] text-muted-foreground">
+                  The link is woven into the message below — “Send receipt” delivers it to the guest, or share the URL yourself. Opening it here (preview) is not counted as a guest view.
+                </p>
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">
+                Send the payment confirmation as a message, and/or generate a durable, printable payment-details page the guest can open. Fill in the charge below, then “Generate page link”.
+              </p>
+            )}
+            {receiptPageError ? (
+              <p className="text-[11px] text-red-600" data-testid="receipt-page-error">{receiptPageError}</p>
+            ) : null}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label htmlFor="receipt-payment-amount">Payment amount (USD)</Label>
@@ -6108,13 +6273,37 @@ export default function InboxPage() {
               </p>
             </div>
           </div>
-          <DialogFooter>
+          <DialogFooter className="gap-2">
             <Button
               variant="outline"
               onClick={resetReceiptState}
               data-testid="button-receipt-cancel"
             >
               Cancel
+            </Button>
+            <Button
+              variant="outline"
+              className="text-cyan-700 border-cyan-300 hover:bg-cyan-50 hover:text-cyan-800"
+              onClick={() => {
+                const amt = parseFloat(receiptPaymentAmount);
+                if (!Number.isFinite(amt) || amt <= 0) {
+                  toast({ title: "Enter a payment amount greater than 0", variant: "destructive" });
+                  return;
+                }
+                generateReceiptPage.mutate();
+              }}
+              disabled={generateReceiptPage.isPending || !receiptPaymentAmount}
+              data-testid="button-generate-receipt-page-link"
+            >
+              {generateReceiptPage.isPending ? (
+                <>
+                  <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> Generating…
+                </>
+              ) : (
+                <>
+                  <Link2 className="h-3 w-3 mr-1" /> {receiptPageUrl ? "Regenerate page link" : "Generate page link"}
+                </>
+              )}
             </Button>
             <Button
               onClick={() => {
