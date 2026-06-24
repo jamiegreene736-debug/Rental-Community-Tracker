@@ -71,9 +71,11 @@ import {
 } from "../server/unit-photo-resolver";
 import {
   extractBodyFromRawEmail,
+  headersFromInboundEmailPayload,
   isGuestBookingAliasEmail,
   parseEmailHeaders,
   parseGuestInboxEmailFromRaw,
+  resolveGuestAliasEmail,
 } from "../server/guest-inbox-sync";
 import { parseArrivalDetailsFromText, stripHtmlForEmailParse, isBlocklistedPropertyAddress, looksLikeHtmlGarbage, isPlausiblePropertyAddressForBuyIn, pickBestPropertyAddressFromText } from "../server/buy-in-email";
 import { mergeArrivalDetailsIntoBuyIn } from "../server/guest-inbox-arrival";
@@ -4056,6 +4058,20 @@ assert.equal(parsedGuest!.subject, "Your reservation is confirmed");
 assert.match(parsedGuest!.body, /reservation is confirmed/i);
 assert.equal(parseEmailHeaders(sampleGuestEmailRaw)["x-simplelogin-envelope-to"], "cecilio.marquez@emailprivacy.com");
 assert.match(extractBodyFromRawEmail(sampleGuestEmailRaw), /Townhome A/);
+const webhookHeaders = headersFromInboundEmailPayload({
+  to: "reservations@magicalislandvacations.com",
+  headers: { "X-SimpleLogin-Envelope-To": "cecilio.marquez@emailprivacy.com" },
+});
+assert.equal(resolveGuestAliasEmail(webhookHeaders, "reservations@magicalislandvacations.com"), "cecilio.marquez@emailprivacy.com");
+assert.ok(
+  routesSource.includes("headersFromInboundEmailPayload") &&
+    routesSource.includes("resolveGuestAliasEmail"),
+  "inbound email webhook should resolve guest alias from SimpleLogin envelope headers",
+);
+assert.ok(
+  readFileSync("server/index.ts", "utf8").includes("startGuestInboxSyncScheduler"),
+  "server boot should start background guest inbox mailbox sync",
+);
 console.log("  ✓ guest inbox mailbox sync (SimpleLogin envelope headers + IMAP pull on fetch)");
 
 // ── Guest inbox → buy-in arrival extraction ────────────────────────────────
