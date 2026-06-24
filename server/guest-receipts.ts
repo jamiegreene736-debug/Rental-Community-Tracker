@@ -591,8 +591,8 @@ export async function createReceiptPage(opts: {
   // Identity fields: operator-supplied first, reservation-derived as fallback.
   const guestFirst = String(
     opts.guestFirstName
-      ?? (opts.guestName ? String(opts.guestName).trim().split(/\s+/)[0] : "")
-      ?? (reservation ? guestFirstName(reservation) : "")
+      ?? (opts.guestName ? String(opts.guestName).trim().split(/\s+/)[0] : null)
+      ?? (reservation ? guestFirstName(reservation) : null)
       ?? "",
   ).trim();
   const guestFull = opts.guestName ?? (reservation ? guestFullName(reservation) : null);
