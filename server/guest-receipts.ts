@@ -545,59 +545,134 @@ export async function createReceiptPage(opts: {
   bookingTotal?: number | null;
   paymentHistory?: Array<{ date: string; amount: number }>;
   totalPaidToDate?: number | null;
-}): Promise<{ ok: boolean; token: string; url: string; messageBody: string; message: string }> {
+}): Promise<{
+  ok: boolean;
+  token: string;
+  url: string;
+  messageBody: string;
+  message: string;
+  amount?: number;
+  bookingTotal?: number;
+  paymentHistory?: Array<{ date: string; amount: number }>;
+  totalPaidToDate?: number;
+  transactionDate?: string;
+  kind?: ReceiptKind;
+}> {
   const reservationId = String(opts.reservationId ?? "").trim();
   if (!reservationId) {
     return { ok: false, token: "", url: "", messageBody: "", message: "reservationId is required" };
   }
-  const amount = Number(opts.amount);
-  if (!(amount > 0)) {
-    return { ok: false, token: "", url: "", messageBody: "", message: "amount must be greater than 0" };
-  }
 
   const kind: ReceiptKind = opts.kind === "refund" ? "refund" : "payment";
   const now = Date.now();
+
+  // AUTHORITATIVE money data. The bug this fixes: the inbox dialog passed a
+  // client-built payment history that could be empty or still loading from
+  // Guesty, so the minted page reported "$0 paid" for a guest who had actually
+  // paid (e.g. Gary Dawes — half paid, page showed nothing). Fetch the
+  // reservation and derive the REAL paid-to-date with the SAME detection the
+  // auto-scheduler uses (collectedPaymentsForReceipts / reservationRevenue), so
+  // the page can't contradict the auto-receipt. The fetch is best-effort: on
+  // failure we fall back to the operator-supplied values.
+  let reservation: any = null;
+  try {
+    const fields = encodeURIComponent(
+      "_id status checkIn checkOut listing listingId money payments refunds guest source integration confirmationCode conversationId createdAt updatedAt lastUpdatedAt",
+    );
+    const data = await guestyRequest("GET", `/reservations/${encodeURIComponent(reservationId)}?fields=${fields}`);
+    reservation = data?.result ?? data?.data ?? (data && (data as any)._id ? data : null) ?? null;
+  } catch (e: any) {
+    console.warn(`[guest-receipts] createReceiptPage: could not fetch reservation ${reservationId} (${e?.message ?? e}) — using operator-supplied values`);
+  }
+
   const token = randomBytes(12).toString("hex");
   const receiptUrl = `${baseUrl()}/receipt/${token}`;
 
+  // Identity fields: operator-supplied first, reservation-derived as fallback.
   const guestFirst = String(
-    opts.guestFirstName ?? (opts.guestName ? String(opts.guestName).trim().split(/\s+/)[0] : "") ?? "",
+    opts.guestFirstName
+      ?? (opts.guestName ? String(opts.guestName).trim().split(/\s+/)[0] : "")
+      ?? (reservation ? guestFirstName(reservation) : "")
+      ?? "",
   ).trim();
-  const propertyName = String(opts.propertyName ?? opts.listingNickname ?? "").trim();
-  const checkInIso = opts.checkIn ? String(opts.checkIn).slice(0, 10) : null;
-  const checkOutIso = opts.checkOut ? String(opts.checkOut).slice(0, 10) : null;
-  const transactionDate = opts.transactionDate ? String(opts.transactionDate) : new Date(now).toISOString();
-  const channel = String(opts.channel ?? "").trim() || null;
+  const guestFull = opts.guestName ?? (reservation ? guestFullName(reservation) : null);
+  const propertyName = String(
+    opts.propertyName ?? opts.listingNickname ?? (reservation ? propertyNameForReceipt(reservation) : "") ?? "",
+  ).trim();
+  const listingNick = opts.listingNickname ?? (reservation ? listingNickname(reservation) : null) ?? propertyName ?? null;
+  const checkInIso = (opts.checkIn ?? reservation?.checkIn) ? String(opts.checkIn ?? reservation?.checkIn).slice(0, 10) : null;
+  const checkOutIso = (opts.checkOut ?? reservation?.checkOut) ? String(opts.checkOut ?? reservation?.checkOut).slice(0, 10) : null;
+  const confirmationCode = opts.confirmationCode ?? reservation?.confirmationCode ?? null;
+  const channel = (String(opts.channel ?? "").trim() || (reservation ? channelForReservation(reservation) : "")) || null;
   const currency = String(opts.currency ?? "USD").trim() || "USD";
-  const bookingTotal = Number(opts.bookingTotal) > 0 ? Number(opts.bookingTotal) : 0;
-  const history = Array.isArray(opts.paymentHistory)
+
+  // AUTHORITATIVE payment history + booking total (payment receipts only).
+  const authHistory = reservation && kind === "payment" ? paymentHistoryForReceipts(reservation) : [];
+  const authBookingTotal = reservation && kind === "payment" ? reservationRevenue(reservation) : 0;
+
+  const clientHistory = Array.isArray(opts.paymentHistory)
     ? opts.paymentHistory
         .map((p) => ({ date: String(p?.date ?? "").slice(0, 10), amount: Number(p?.amount) || 0 }))
         .filter((p) => p.amount > 0)
     : [];
-  const totalPaidToDate =
+  // Trust Guesty's real history when we have it; fall back to whatever the
+  // operator typed only when the fetch failed / returned nothing.
+  const history = authHistory.length ? authHistory : clientHistory;
+  const bookingTotal =
+    authBookingTotal > 0 ? authBookingTotal : Number(opts.bookingTotal) > 0 ? Number(opts.bookingTotal) : 0;
+
+  // Headline "this payment". If the operator typed a NEW charge they just ran,
+  // use it. Otherwise (a plain payment-details statement, e.g. Gary) headline
+  // the guest's MOST RECENT real payment so the page never reads "$0 paid".
+  const clientAmount = Number(opts.amount) > 0 ? Number(opts.amount) : 0;
+  let amount = clientAmount;
+  let transactionDate = opts.transactionDate ? String(opts.transactionDate) : new Date(now).toISOString();
+  if (!(amount > 0)) {
+    const latest = [...history].sort((a, b) => String(a.date).localeCompare(String(b.date))).at(-1);
+    if (latest && latest.amount > 0) {
+      amount = latest.amount;
+      transactionDate = latest.date || transactionDate;
+    }
+  }
+  if (!(amount > 0)) {
+    return {
+      ok: false,
+      token: "",
+      url: "",
+      messageBody: "",
+      message:
+        kind === "refund"
+          ? "Enter a refund amount greater than 0."
+          : "No collected payments found for this reservation yet. Enter a payment amount to record a charge.",
+    };
+  }
+
+  // Split the full history into "past" + the headline payment so the builder's
+  // total-paid math counts the headline exactly once. If the headline isn't in
+  // the history (a brand-new charge not yet reflected in Guesty), it's added on
+  // top; otherwise the matching row is removed from "past".
+  const day = transactionDate.slice(0, 10);
+  let matchedHeadline = false;
+  const pastPayments = history.filter((p) => {
+    if (!matchedHeadline && p.date === day && Math.abs(p.amount - amount) < 0.005) {
+      matchedHeadline = true;
+      return false;
+    }
+    return true;
+  });
+  const fullHistory =
     kind === "payment"
-      ? typeof opts.totalPaidToDate === "number" && opts.totalPaidToDate >= 0
-        ? opts.totalPaidToDate
-        : history.reduce((s, p) => s + p.amount, 0)
-      : null;
+      ? (matchedHeadline ? history : [...history, { date: day, amount }])
+          .slice()
+          .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+      : [];
+  const totalPaidToDate = kind === "payment" ? pastPayments.reduce((s, p) => s + p.amount, 0) + amount : null;
 
   // Build the receipt MESSAGE body via the SAME shared builders the
   // auto-scheduler uses (so the page-link wording stays in lockstep). The body
   // is returned so the inbox can fold the link into the message it sends.
   let messageBody: string;
   if (kind === "payment") {
-    // Remove this charge from the history before passing as "past" so the
-    // builder's total-paid math doesn't double-count it (it adds it back).
-    const day = transactionDate.slice(0, 10);
-    let removedThis = false;
-    const pastPayments = history.filter((p) => {
-      if (!removedThis && p.date === day && Math.abs(p.amount - amount) < 0.005) {
-        removedThis = true;
-        return false;
-      }
-      return true;
-    });
     messageBody = buildPaymentReceiptBody({
       guestFirstName: guestFirst,
       propertyName,
@@ -626,18 +701,18 @@ export async function createReceiptPage(opts: {
     brandName: RECEIPT_BRAND_NAME,
     senderName: RECEIPT_SENDER_NAME,
     guestFirstName: guestFirst,
-    guestName: opts.guestName ?? null,
+    guestName: guestFull,
     propertyName,
-    listingNickname: opts.listingNickname ?? propertyName ?? null,
+    listingNickname: listingNick,
     checkIn: checkInIso,
     checkOut: checkOutIso,
-    confirmationCode: opts.confirmationCode ?? null,
+    confirmationCode,
     channel,
     amount,
     currency,
     transactionDate,
     bookingTotal,
-    paymentHistory: kind === "payment" ? history : [],
+    paymentHistory: fullHistory,
     totalPaidToDate,
     receiptUrl,
     messageBody,
@@ -654,9 +729,9 @@ export async function createReceiptPage(opts: {
     amount: amount.toFixed(2),
     currency,
     transactionDate,
-    guestName: opts.guestName ?? null,
-    listingId: opts.listingId ?? null,
-    listingNickname: opts.listingNickname ?? propertyName ?? null,
+    guestName: guestFull,
+    listingId: opts.listingId ?? reservation?.listingId ?? reservation?.listing?._id ?? null,
+    listingNickname: listingNick,
     channel,
     messageBody,
     payload,
@@ -665,8 +740,20 @@ export async function createReceiptPage(opts: {
     expiresAt: new Date(now + RECEIPT_PAGE_TTL_DAYS * 24 * 60 * 60 * 1000),
   };
   await storage.createGuestReceipt(insert);
-  console.log(`[guest-receipts] minted manual receipt page ${token} for reservation ${reservationId} ($${amount.toFixed(2)} ${kind})`);
-  return { ok: true, token, url: receiptUrl, messageBody, message: "Receipt page generated" };
+  console.log(`[guest-receipts] minted manual receipt page ${token} for reservation ${reservationId} ($${amount.toFixed(2)} ${kind}, paid-to-date $${Number(totalPaidToDate ?? amount).toFixed(2)}${authHistory.length ? " from Guesty" : " from operator input"})`);
+  return {
+    ok: true,
+    token,
+    url: receiptUrl,
+    messageBody,
+    message: "Receipt page generated",
+    amount,
+    bookingTotal,
+    paymentHistory: fullHistory,
+    totalPaidToDate: totalPaidToDate ?? undefined,
+    transactionDate,
+    kind,
+  };
 }
 
 export function startGuestReceiptScheduler() {

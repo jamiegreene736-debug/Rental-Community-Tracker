@@ -3460,14 +3460,18 @@ export default function InboxPage() {
   const generateReceiptPage = useMutation({
     mutationFn: async () => {
       if (!receiptDialog.reservationId) throw new Error("No reservation selected");
+      // The "new charge" amount is OPTIONAL — when the operator hasn't typed one
+      // the SERVER derives the headline + paid-to-date from Guesty so the page
+      // reflects what the guest has actually paid (not $0). Still send whatever
+      // the dialog loaded as a fallback for when the server can't reach Guesty.
       const amt = parseFloat(receiptPaymentAmount);
-      if (!Number.isFinite(amt) || amt <= 0) throw new Error("Enter a payment amount greater than 0 first");
+      const newCharge = Number.isFinite(amt) && amt > 0 ? amt : 0;
       const pastPayments = receiptPastPayments
         .map((p) => ({ date: p.date, amount: parseFloat(p.amount) || 0 }))
         .filter((p) => p.amount > 0);
       const fullHistory = [
         ...pastPayments,
-        ...(amt > 0 ? [{ date: receiptPaymentDate, amount: amt }] : []),
+        ...(newCharge > 0 ? [{ date: receiptPaymentDate, amount: newCharge }] : []),
       ];
       const r = await apiRequest("POST", "/api/inbox/guest-receipts/generate-page", {
         reservationId: receiptDialog.reservationId,
@@ -3481,8 +3485,8 @@ export default function InboxPage() {
         checkOut: receiptDialog.checkOutIso ?? null,
         confirmationCode: receiptDialog.confirmationCode ?? null,
         channel: receiptDialog.channel ?? (selectedConv as any)?.module?.type ?? null,
-        amount: amt,
-        transactionDate: receiptPaymentDate || null,
+        amount: newCharge,
+        transactionDate: newCharge > 0 ? (receiptPaymentDate || null) : null,
         bookingTotal: parseFloat(receiptTotalPrice) || 0,
         paymentHistory: fullHistory,
         totalPaidToDate: fullHistory.reduce((s, p) => s + p.amount, 0),
@@ -3491,16 +3495,47 @@ export default function InboxPage() {
       if (!r.ok || data?.ok !== true || !data?.url) {
         throw new Error(data?.message || data?.error || `Server returned HTTP ${r.status}`);
       }
-      return data as { ok: true; token: string; url: string; messageBody: string };
+      return data as {
+        ok: true; token: string; url: string; messageBody: string;
+        amount?: number; bookingTotal?: number; transactionDate?: string;
+        totalPaidToDate?: number; paymentHistory?: Array<{ date: string; amount: number }>;
+      };
     },
     onSuccess: (data) => {
       setReceiptPageError("");
       setReceiptPageUrl(data.url);
-      // If the operator has hand-edited the message, weave the link into their
-      // copy without clobbering it. Otherwise the regenerate effect (which now
-      // depends on receiptPageUrl) folds the link into the auto-built message.
+      // Sync the dialog to the server's AUTHORITATIVE figures (derived from
+      // Guesty) so the amount / booking total / previous-payments / message
+      // preview all reflect what the guest actually paid — fixing the "$0 paid"
+      // page when the client-side history hadn't loaded. The regenerate effect
+      // (which depends on these fields + receiptPageUrl) then rebuilds the body
+      // with the link folded in. If the operator already hand-edited the body,
+      // don't clobber it — just weave the link into their copy.
       if (receiptBodyTouched) {
         setReceiptBody((prev) => withReceiptLink(prev, data.url));
+      } else {
+        if (typeof data.amount === "number" && data.amount > 0) {
+          setReceiptPaymentAmount(data.amount.toFixed(2));
+        }
+        if (typeof data.bookingTotal === "number" && data.bookingTotal > 0) {
+          setReceiptTotalPrice(data.bookingTotal.toFixed(2));
+        }
+        const headlineDay = String(data.transactionDate ?? "").slice(0, 10);
+        if (headlineDay) setReceiptPaymentDate(headlineDay);
+        if (Array.isArray(data.paymentHistory)) {
+          // "Previous payments" = full history minus the headline payment.
+          let removed = false;
+          const past = data.paymentHistory
+            .filter((p) => {
+              if (!removed && String(p.date).slice(0, 10) === headlineDay && Math.abs(Number(p.amount) - Number(data.amount)) < 0.005) {
+                removed = true;
+                return false;
+              }
+              return true;
+            })
+            .map((p) => ({ id: newReceiptRowId(), date: String(p.date).slice(0, 10), amount: (Number(p.amount) || 0).toFixed(2) }));
+          setReceiptPastPayments(past);
+        }
       }
       toast({ title: "Payment details page ready", description: "Copy the link or send it to the guest." });
     },
@@ -6128,7 +6163,7 @@ export default function InboxPage() {
               </div>
             ) : (
               <p className="text-[11px] text-muted-foreground">
-                Send the payment confirmation as a message, and/or generate a durable, printable payment-details page the guest can open. Fill in the charge below, then “Generate page link”.
+                Generate a durable, printable payment-details page (and/or send it as a message). Leave the amount blank for a statement of what the guest has paid so far, or enter a new charge you just ran. The page pulls the real paid-to-date from Guesty.
               </p>
             )}
             {receiptPageError ? (
@@ -6148,7 +6183,7 @@ export default function InboxPage() {
                   data-testid="input-receipt-payment-amount"
                 />
                 <p className="text-[11px] text-muted-foreground mt-1">
-                  The charge you just ran on the guest's card.
+                  A new charge you just ran — or leave blank to use the latest payment on file.
                 </p>
               </div>
               <div>
@@ -6284,15 +6319,9 @@ export default function InboxPage() {
             <Button
               variant="outline"
               className="text-cyan-700 border-cyan-300 hover:bg-cyan-50 hover:text-cyan-800"
-              onClick={() => {
-                const amt = parseFloat(receiptPaymentAmount);
-                if (!Number.isFinite(amt) || amt <= 0) {
-                  toast({ title: "Enter a payment amount greater than 0", variant: "destructive" });
-                  return;
-                }
-                generateReceiptPage.mutate();
-              }}
-              disabled={generateReceiptPage.isPending || !receiptPaymentAmount}
+              onClick={() => generateReceiptPage.mutate()}
+              disabled={generateReceiptPage.isPending}
+              title="Generates a payment-details page showing the guest's real paid-to-date from Guesty. Enter an amount only to record a new charge."
               data-testid="button-generate-receipt-page-link"
             >
               {generateReceiptPage.isPending ? (
