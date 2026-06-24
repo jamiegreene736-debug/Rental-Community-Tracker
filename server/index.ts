@@ -10,6 +10,7 @@ import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { startGuestReceiptScheduler } from "./guest-receipts";
 import { startGuestInboxSyncScheduler } from "./guest-inbox-sync";
+import { warmGuestyListingsCache } from "./guesty-listings-cache";
 import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 import { ensureRuntimeSchema } from "./schema-maintenance";
 import { ensureTopMarketScanCacheLogicVersion, refreshTopMarketScanCacheComboFlags } from "./top-market-scan-cache";
@@ -162,6 +163,14 @@ app.get("/api/auth/session", (_req, res) => {
       startBookingConfirmationScheduler();
       startGuestReceiptScheduler();
       startGuestInboxSyncScheduler();
+      // Prime the Operations Property dropdown + global-summary listing set so
+      // the operator's first page load reads from memory instead of paying for
+      // two serialized Guesty paginations. Fire-and-forget; swallows its own
+      // errors so a Guesty outage at boot can't crash startup.
+      void warmGuestyListingsCache().catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err ?? "");
+        console.warn("[guesty-listings-cache] boot warm failed:", message);
+      });
       const startTopMarketCacheRefresh = app.get("startTopMarketCacheRefresh") as
         | (() => Promise<unknown>)
         | undefined;

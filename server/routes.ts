@@ -92,6 +92,10 @@ import {
 } from "./availability-scanner";
 import { addGuestPersonalTouch, addInitialContactCloser, humanizeReply, trimProximityOnlyReply } from "./humanize-reply";
 import { guestyRequest } from "./guesty-sync";
+import {
+  getCachedGuestyListings,
+  OPERATIONS_LISTING_FIELDS,
+} from "./guesty-listings-cache";
 import { findGuestyConversationById, findGuestyConversationForReservation, sendGuestyConversationMessage, checkOtaDeliveryStatus } from "./guesty-ota-messaging";
 import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress, lookupHawaiiStatewideTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
@@ -8039,45 +8043,22 @@ export async function registerRoutes(
       const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 100, 1), 100);
       const maxPagesRaw = parseInt((req.query.maxPages as string) ?? "50", 10);
       const maxPages = Math.min(Math.max(Number.isFinite(maxPagesRaw) ? maxPagesRaw : 50, 1), 100);
-      let skip = Math.max(parseInt((req.query.skip as string) ?? "0", 10) || 0, 0);
+      const startSkip = Math.max(parseInt((req.query.skip as string) ?? "0", 10) || 0, 0);
       const fields = typeof req.query.fields === "string" ? req.query.fields.trim() : "";
 
-      const results: any[] = [];
-      const seen = new Set<string>();
-      let fetchedPages = 0;
-      let reportedTotal: number | null = null;
-
-      for (let page = 0; page < maxPages; page++) {
-        const params = new URLSearchParams({
-          limit: String(limit),
-          skip: String(skip),
-        });
-        if (fields) params.set("fields", fields);
-
-        const data = await guestyRequest("GET", `/listings?${params.toString()}`) as any;
-        const rows = unwrapGuestyListResponse(data);
-        reportedTotal ??= guestyListTotal(data);
-        fetchedPages += 1;
-
-        for (const row of rows) {
-          const id = String(row?._id ?? row?.id ?? "").trim();
-          const key = id || JSON.stringify(row);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          results.push(row);
-        }
-
-        if (rows.length < limit) break;
-        if (reportedTotal && results.length >= reportedTotal) break;
-        skip += limit;
-      }
-
-      res.json({
-        results,
-        total: reportedTotal ?? results.length,
-        returned: results.length,
-        fetchedPages,
+      // SWR-cached behind server/guesty-listings-cache.ts. Keyed by
+      // fields+limit+maxPages so each client field set is its own entry; a
+      // startSkip>0 windowed read bypasses the cache. Cache-Control stays
+      // no-store — the cache is server memory, the client still gets fresh
+      // bytes (and the SPA 401-redirect auth layer dislikes HTTP caching).
+      const { results, total, returned, fetchedPages } = await getCachedGuestyListings({
+        fields,
+        limit,
+        maxPages,
+        startSkip,
       });
+
+      res.json({ results, total, returned, fetchedPages });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch Guesty listings", message: err.message });
     }
@@ -20205,29 +20186,18 @@ Requirements:
   };
 
   const fetchOperationsGuestyListings = async () => {
-    const fields = "title nickname name bedrooms bedroomsCount bedroomCount beds bathrooms accommodates personCapacity address.full address.city address.state address.street status active isActive terms cancellationPolicy cancellationPolicies";
-    const limit = 100;
-    const maxPages = 100;
-    const listings: any[] = [];
-    const seen = new Set<string>();
-    for (let page = 0; page < maxPages; page++) {
-      const params = new URLSearchParams({
-        limit: String(limit),
-        skip: String(page * limit),
-        fields,
-      });
-      const data = await guestyRequest("GET", `/listings?${params.toString()}`) as any;
-      const rows = unwrapGuestyListResponse(data);
-      for (const row of rows) {
-        const id = firstNonEmptyString(row?._id, row?.id);
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        listings.push(row);
-      }
-      const total = guestyListTotal(data);
-      if (rows.length < limit || (total && listings.length >= total)) break;
-    }
-    return listings;
+    // SWR-cached listing set (server/guesty-listings-cache.ts), its OWN key
+    // because OPERATIONS_LISTING_FIELDS is a superset of the dropdown's fields
+    // (name/bathrooms/terms/cancellationPolicy* feed cancellation-policy +
+    // listing-target derivation). Only the listing pagination is cached here —
+    // the reservation fetch, includeCanceled merge, and per-listing buy-in
+    // enrichment below remain live (load-bearing account-wide coverage).
+    const { results } = await getCachedGuestyListings({
+      fields: OPERATIONS_LISTING_FIELDS,
+      limit: 100,
+      maxPages: 100,
+    });
+    return results;
   };
 
   const enrichGuestyReservationForOperations = async (

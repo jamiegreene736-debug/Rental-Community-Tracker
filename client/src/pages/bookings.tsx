@@ -7139,6 +7139,12 @@ export default function Bookings() {
   const { data: guestyListings } = useQuery<any>({
     queryKey: ["/api/guesty-listings-all?limit=100&maxPages=50&fields=_id%20nickname%20title%20isListed%20active%20isActive%20status%20bedrooms%20bedroomsCount%20bedroomCount%20beds%20accommodates%20personCapacity%20address.full%20address.city%20address.state%20address.street"],
     staleTime: 5 * 60_000,
+    // Keep the listing set in the client cache across in-app navigation (Home
+    // <-> Operations) so the Property dropdown stays populated on remount and
+    // only background-refetches. Server response is now SWR-cached, so the
+    // refetch is fast. Default gcTime is 5min, which would drop the cache and
+    // force a cold fetch after a short detour.
+    gcTime: 30 * 60_000,
   });
   const guestyListingId = (listing: GuestyListingSummary | null | undefined) =>
     String(listing?._id ?? listing?.id ?? "").trim();
