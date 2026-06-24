@@ -45242,9 +45242,11 @@ CONSTRAINTS
     try {
       const b = (req.body ?? {}) as Record<string, any>;
       const reservationId = String(b.reservationId ?? "").trim();
-      const amount = Number(b.amount);
+      // amount is OPTIONAL: when the operator doesn't type a new charge, the
+      // server derives the headline + paid-to-date from Guesty (see
+      // createReceiptPage). Only reservationId is required up front.
+      const amount = Number(b.amount) > 0 ? Number(b.amount) : 0;
       if (!reservationId) return res.status(400).json({ ok: false, error: "reservationId is required" });
-      if (!(amount > 0)) return res.status(400).json({ ok: false, error: "A payment amount greater than 0 is required" });
       const result = await createReceiptPage({
         reservationId,
         conversationId: b.conversationId ? String(b.conversationId) : null,
