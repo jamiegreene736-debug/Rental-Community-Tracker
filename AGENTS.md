@@ -685,6 +685,54 @@ NOTE: `PreflightPhotoFetchJob` in the same file shares the in-memory pattern but
 is NOT auto-resumed here (its "Find Photos" UX dead-ends less painfully and a
 re-click is cheap) — a sibling candidate if the operator reports it.
 
+### Full unit audit + per-unit rescrape are SERVER-SIDE background jobs (Load-Bearing, 2026-06-24)
+
+Two more Pre-Flight operations that used to die on a tab close now run as
+server-side background jobs (same in-memory + 2h-TTL pattern as the photo-fetch /
+replacement-find jobs above), so the operator can fire them and leave the tab.
+Both live in `server/preflight-background-jobs.ts` and DRIVE the existing
+synchronous endpoints via in-process loopback (no logic re-implementation):
+
+1. **Full unit audit / "Run check" → `PreflightAuditJob`.** `runPlatformCheck`
+   in `client/src/pages/builder-preflight.tsx` (name kept; every call site —
+   `rerunChecks`, the on-mount auto-run effect — is unchanged) now POSTs
+   `/api/preflight/audit-jobs` and the client polls `GET .../audit-jobs/:jobId`,
+   re-attaching via `localStorage` (`preflight.auditJob.v1:<propertyId>`, one
+   in-flight job per property). The job loops the units (same parallelism the old
+   client `Promise.all` used), calls `GET /api/preflight/platform-check` per unit
+   via loopback, accumulates per-unit `results` + the receipt onto the job, and —
+   for a full audit — ALSO drives the deep reverse-image scan server-side
+   (`runAuditDeepPhotoCheck`: a port of the old client poll — read `before`
+   timestamps, POST `/api/preflight/photo-check {run:true}`, poll `{run:false}`
+   until every folder's `checkedAt` advances) into `job.photoChecks`. The
+   receipt is computed SERVER-SIDE (`buildAuditReceipt`, a verbatim port of the
+   client tally) so it's accurate even when the operator left. Load-bearing
+   client choices: the old `checkingUnitIds` STATE is gone — it's now DERIVED
+   (`isCheckRunning ? effectiveUnits without a result : []`) so it can't drift
+   from the server job; `isCheckRunning` is just `platformChecking` (the job
+   drives it for the whole run); the on-mount auto-run is guarded with
+   `&& !auditJobId` so a re-attached in-flight job is never double-started.
+   `runDeepPhotoCheck`/`loadPhotoChecks` in the client are now DEAD (the server
+   owns the deep scan) but left in place — don't wire them back to a button.
+2. **Per-unit "Rescrape photos" → `PreflightRescrapeJob`.** The per-row handler
+   POSTs `/api/preflight/rescrape-jobs` (drives `POST /api/builder/rescrape-unit-photos`
+   via loopback) and polls `GET .../rescrape-jobs/:jobId`; jobs persist per folder
+   in `localStorage` (`preflight.rescrapeJobs.v1:<propertyId>`, a `folder→jobId`
+   map), spinner keyed off `rescrapeJobIdsByFolder[folder]`. The ONE interactive
+   case — no source URL on file (the endpoint's 409 `needsUrl`) — surfaces as a
+   terminal `needsUrl` job; the client prompts and starts a FRESH job with the
+   pasted URL (the only step that still needs the operator present). The
+   toast/needs-URL prompt fire only for jobs STARTED this session
+   (`sessionRescrapeFoldersRef`); a job merely re-attached on mount updates the
+   sticky `rescrapeReceipts` receipt silently.
+
+Like the sibling jobs these are in-memory: a redeploy mid-run evicts them and the
+poll 404s → the client clears the "checking" UI and the operator re-clicks (the
+deep photo scan a full audit kicked off persists via its own 24h cache, so those
+results still land on return). Endpoints are loopback-reachable
+(`loopbackRequestHeaders()` carries `X-Admin-Secret`). The platform-check /
+rescrape ENDPOINTS are byte-unchanged — only the orchestration moved.
+
 ### `allowOtaListed` opt-in for STVR-saturated replacement search (Load-Bearing, 2026-06-17)
 
 The builder "Find a New Unit" flow (`POST /api/replacement/find-unit`) requires a

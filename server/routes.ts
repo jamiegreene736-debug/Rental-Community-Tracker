@@ -61,6 +61,11 @@ import {
   getPreflightReplacementFindJob,
   startPreflightPhotoFetchJob,
   startPreflightReplacementFindJob,
+  getPreflightAuditJob,
+  startPreflightAuditJob,
+  getPreflightRescrapeJob,
+  startPreflightRescrapeJob,
+  type PreflightAuditUnitInput,
 } from "./preflight-background-jobs";
 import {
   getCommunityPhotoRepullJob,
@@ -30887,6 +30892,72 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/preflight/replacement-find-jobs/:jobId", (req, res) => {
     const job = getPreflightReplacementFindJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Replacement find job not found" });
+    res.json({ job });
+  });
+
+  // Full unit audit / "Run check" — server-side background job so the operator
+  // can fire it and leave the tab (the old client looped over units with
+  // parallel fetches and held results in React state, which a tab close aborted).
+  app.post("/api/preflight/audit-jobs", async (req, res) => {
+    const body = (req.body ?? {}) as {
+      name?: string;
+      city?: string;
+      singleListing?: boolean;
+      fullPhotoAudit?: boolean;
+      units?: Array<{ unitId?: string; unitNumber?: string; address?: string; bedrooms?: number; photoFolder?: string }>;
+      deepPhotoFolders?: string[];
+    };
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name) return res.status(400).json({ error: "name required" });
+    const rawUnits = Array.isArray(body.units) ? body.units : [];
+    const units: PreflightAuditUnitInput[] = rawUnits
+      .filter((u) => u && typeof u.unitId === "string" && u.unitId.trim())
+      .map((u) => ({
+        unitId: String(u.unitId).trim(),
+        unitNumber: typeof u.unitNumber === "string" ? u.unitNumber : String(u.unitNumber ?? ""),
+        address: typeof u.address === "string" ? u.address : "",
+        bedrooms: typeof u.bedrooms === "number" ? u.bedrooms : undefined,
+        photoFolder: typeof u.photoFolder === "string" && u.photoFolder.trim() ? u.photoFolder.trim() : undefined,
+      }));
+    if (units.length === 0) return res.status(400).json({ error: "units array required" });
+    const deepPhotoFolders = Array.isArray(body.deepPhotoFolders)
+      ? body.deepPhotoFolders.filter((f): f is string => typeof f === "string" && !!f.trim()).map((f) => f.trim())
+      : [];
+    const job = startPreflightAuditJob({
+      name,
+      city: typeof body.city === "string" ? body.city.trim() : "",
+      singleListing: body.singleListing === true,
+      fullPhotoAudit: body.fullPhotoAudit === true,
+      units,
+      deepPhotoFolders,
+    });
+    res.status(202).json({ job });
+  });
+
+  app.get("/api/preflight/audit-jobs/:jobId", (req, res) => {
+    const job = getPreflightAuditJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Audit job not found" });
+    res.json({ job });
+  });
+
+  // Per-unit "Rescrape photos" — server-side background job so it survives a
+  // tab close. Drives POST /api/builder/rescrape-unit-photos via loopback.
+  app.post("/api/preflight/rescrape-jobs", async (req, res) => {
+    const body = (req.body ?? {}) as { folder?: string; sourceUrl?: string };
+    const folder = typeof body.folder === "string" ? body.folder.trim() : "";
+    if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "Invalid folder" });
+    const job = startPreflightRescrapeJob({
+      folder,
+      sourceUrl: typeof body.sourceUrl === "string" && /^https?:\/\//i.test(body.sourceUrl)
+        ? body.sourceUrl.trim()
+        : undefined,
+    });
+    res.status(202).json({ job });
+  });
+
+  app.get("/api/preflight/rescrape-jobs/:jobId", (req, res) => {
+    const job = getPreflightRescrapeJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Rescrape job not found" });
     res.json({ job });
   });
 

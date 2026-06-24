@@ -212,10 +212,15 @@ assert.deepEqual(
 const preflightSource = readFileSync("client/src/pages/builder-preflight.tsx", "utf8");
 const preflightPhotoDiscoverySource = readFileSync("shared/preflight-photo-discovery.ts", "utf8");
 const preflightJobsSource = readFileSync("server/preflight-background-jobs.ts", "utf8");
+// The audit now runs as a server-side background job; its per-unit payload is
+// built from effectiveUnits (which carry unit overrides), and each unit passes
+// its photoFolder — so a re-check scans a swapped unit's replacement photo
+// folder instead of skipping _isReplaced units. (Was: a `hasUnitPhoto` local in
+// the old client-side per-unit loop; relocated, intent preserved.)
 assert.match(
   preflightSource,
-  /const hasUnitPhoto = !!\(unit as any\)\.photoFolder;/,
-  "preflight recheck must scan replacement photo folders instead of skipping _isReplaced units",
+  /photoFolder: \(unit as any\)\.photoFolder \|\| ""/,
+  "preflight audit must include each unit's (replacement) photo folder so re-checks scan swapped units, not skip them",
 );
 const routesSource = readFileSync("server/routes.ts", "utf8");
 assert.match(

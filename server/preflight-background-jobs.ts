@@ -51,6 +51,79 @@ export type PreflightReplacementFindJob = {
   diagnostic: Record<string, unknown> | null;
 };
 
+/**
+ * "Full unit audit" / "Run check" — the OTA platform check (text search +
+ * reverse-image photo scan) run SERVER-SIDE so the operator can fire it and
+ * leave the tab. Previously the client looped over units with parallel fetches
+ * to `/api/preflight/platform-check` and held the results in React state, so a
+ * tab close mid-audit aborted the fetches and discarded everything. The job now
+ * drives the SAME endpoint via loopback (no re-implementation of the ~800-line
+ * handler) and accumulates per-unit results + the receipt + (for a full audit)
+ * the deep reverse-image photo results onto the job. The client polls and
+ * rehydrates its UI from the job; localStorage re-attaches on return. In-memory
+ * + 2h TTL like the sibling jobs — a redeploy mid-audit just means a re-click
+ * (the deep photo scan it kicks off persists independently via its 24h cache).
+ */
+export type PreflightAuditReceipt = {
+  timestamp: number;
+  success: boolean;
+  title: string;
+  detail: string;
+};
+
+export type PreflightAuditJob = {
+  id: string;
+  status: JobStatus;
+  phase: "queued" | "text" | "photo" | "completed" | "failed";
+  message: string;
+  progress: number;
+  createdAt: number;
+  updatedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  fullPhotoAudit: boolean;
+  totalUnits: number;
+  completedCount: number;
+  /** unitId → the platform-check endpoint's per-unit result (rendered as-is). */
+  results: Record<string, unknown>;
+  receipt: PreflightAuditReceipt | null;
+  /** folder → deep reverse-image PhotoCheckRow (full audit only). */
+  photoChecks: Record<string, unknown> | null;
+  photoBudget: Record<string, unknown> | null;
+  deepPhotoStarted: boolean;
+  error: string | null;
+};
+
+/**
+ * "Rescrape photos" — re-pull a single unit's OWN saved listing gallery, run
+ * SERVER-SIDE so it survives a tab close. Drives the existing
+ * `POST /api/builder/rescrape-unit-photos` via loopback. The one interactive
+ * case (no source URL on file → HTTP 409 `needsUrl`) is surfaced as a terminal
+ * `needsUrl` job so the client can prompt for a URL and start a fresh job — the
+ * only step that still needs the operator present.
+ */
+export type PreflightRescrapeJob = {
+  id: string;
+  status: JobStatus;
+  phase: "queued" | "scraping" | "completed" | "failed";
+  message: string;
+  progress: number;
+  createdAt: number;
+  updatedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  folder: string;
+  /** True when the rescrape needs a source URL the operator must paste. */
+  needsUrl: boolean;
+  savedCount: number | null;
+  bedroomCount: number | null;
+  bathroomCount: number | null;
+  sourceUrl: string | null;
+  urlSource: string | null;
+  coverage: Record<string, unknown> | null;
+  error: string | null;
+};
+
 const JOB_TTL_MS = 2 * 60 * 60 * 1000;
 // find-unit ROUTE_BUDGET_MS is up to 285s (expanded) and may still run one
 // PHOTO_SCRAPE_TIMEOUT_MS step that started just inside the budget guard.
@@ -58,8 +131,12 @@ const REPLACEMENT_FIND_UNIT_LOOPBACK_TIMEOUT_MS = 350_000;
 const MAX_REPLACEMENT_FIND_CONTINUATIONS = 12;
 const photoFetchJobs = new Map<string, PreflightPhotoFetchJob>();
 const replacementFindJobs = new Map<string, PreflightReplacementFindJob>();
+const auditJobs = new Map<string, PreflightAuditJob>();
+const rescrapeJobs = new Map<string, PreflightRescrapeJob>();
 const activePhotoFetchJobIds = new Set<string>();
 const activeReplacementFindJobIds = new Set<string>();
+const activeAuditJobIds = new Set<string>();
+const activeRescrapeJobIds = new Set<string>();
 const draftPhotoFetchProofs = new Map<number, Partial<Record<0 | 1, UnitPhotoResolverProof>>>();
 const draftPhotoProofLockTails = new Map<number, Promise<void>>();
 
@@ -80,6 +157,18 @@ function touchReplacementJob(job: PreflightReplacementFindJob, patch: Partial<Pr
   Object.assign(job, patch, { updatedAt: Date.now() });
   replacementFindJobs.set(job.id, job);
 }
+
+function touchAuditJob(job: PreflightAuditJob, patch: Partial<PreflightAuditJob> = {}) {
+  Object.assign(job, patch, { updatedAt: Date.now() });
+  auditJobs.set(job.id, job);
+}
+
+function touchRescrapeJob(job: PreflightRescrapeJob, patch: Partial<PreflightRescrapeJob> = {}) {
+  Object.assign(job, patch, { updatedAt: Date.now() });
+  rescrapeJobs.set(job.id, job);
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 function reserveDraftPhotoProof(
   draftId: number,
@@ -147,6 +236,14 @@ function cleanupStaleJobs(): void {
   for (const [id, job] of replacementFindJobs) {
     if ((job.finishedAt ?? job.createdAt) < cutoff) replacementFindJobs.delete(id);
   }
+  // .forEach (not for-of) to avoid the repo's ES5 downlevelIteration tsc error;
+  // deleting during Map.forEach is safe.
+  auditJobs.forEach((job, id) => {
+    if ((job.finishedAt ?? job.createdAt) < cutoff) auditJobs.delete(id);
+  });
+  rescrapeJobs.forEach((job, id) => {
+    if ((job.finishedAt ?? job.createdAt) < cutoff) rescrapeJobs.delete(id);
+  });
 }
 
 setInterval(cleanupStaleJobs, 30 * 60 * 1000).unref?.();
@@ -157,6 +254,14 @@ export function getPreflightPhotoFetchJob(jobId: string): PreflightPhotoFetchJob
 
 export function getPreflightReplacementFindJob(jobId: string): PreflightReplacementFindJob | null {
   return replacementFindJobs.get(jobId) ?? null;
+}
+
+export function getPreflightAuditJob(jobId: string): PreflightAuditJob | null {
+  return auditJobs.get(jobId) ?? null;
+}
+
+export function getPreflightRescrapeJob(jobId: string): PreflightRescrapeJob | null {
+  return rescrapeJobs.get(jobId) ?? null;
 }
 
 export type StartPreflightPhotoFetchInput = {
@@ -577,5 +682,391 @@ async function runPreflightReplacementFindJob(
   } finally {
     clearInterval(heartbeat);
     activeReplacementFindJobIds.delete(job.id);
+  }
+}
+
+// ── Full unit audit / platform check (server-side background job) ──────────────
+
+const AUDIT_PLATFORM_KEYS = ["airbnb", "vrbo", "booking"] as const;
+const AUDIT_PLATFORM_CHECK_TIMEOUT_MS = 120_000;
+const AUDIT_DEEP_PHOTO_TIMEOUT_MS = 60_000;
+// Mirrors the client's old 90×6s (~9 min) deep-photo poll ceiling.
+const AUDIT_DEEP_PHOTO_POLL_TRIES = 90;
+const AUDIT_DEEP_PHOTO_POLL_INTERVAL_MS = 6_000;
+
+export type PreflightAuditUnitInput = {
+  unitId: string;
+  unitNumber: string;
+  address: string;
+  bedrooms?: number;
+  photoFolder?: string;
+};
+
+export type StartPreflightAuditInput = {
+  name: string;
+  city: string;
+  singleListing: boolean;
+  fullPhotoAudit: boolean;
+  units: PreflightAuditUnitInput[];
+  deepPhotoFolders: string[];
+};
+
+function auditErrorUnitResult(unit: PreflightAuditUnitInput): Record<string, unknown> {
+  const platform = { status: "error", url: null, detection: "Could not verify" };
+  return {
+    unitId: unit.unitId,
+    unitNumber: unit.unitNumber,
+    address: unit.address,
+    platforms: { airbnb: { ...platform }, vrbo: { ...platform }, booking: { ...platform } },
+  };
+}
+
+// Port of the client's receipt logic (builder-preflight.tsx) so the sticky
+// confirmation is computed server-side and is accurate even when the operator
+// left the tab. `outcome` is tallied across every unit's platform statuses.
+function buildAuditReceipt(
+  input: StartPreflightAuditInput,
+  outcome: { verified: number; apiFailUnits: number; platformErrors: number; platformsChecked: number },
+): PreflightAuditReceipt {
+  const total = input.units.length;
+  const unitWord = total === 1 ? "unit" : "units";
+  const base = input.fullPhotoAudit ? "Full unit audit" : "OTA platform check";
+  const allPlatformsErrored =
+    outcome.platformsChecked > 0 && outcome.platformErrors >= outcome.platformsChecked;
+  let success: boolean;
+  let title: string;
+  let detail: string;
+  if (outcome.apiFailUnits > 0) {
+    success = false;
+    title = `${base} — connection error`;
+    detail = `${outcome.apiFailUnits} of ${total} ${unitWord} couldn't be checked — the listing-check service didn't respond (timeout or API error). Results are incomplete; run it again.`;
+  } else if (allPlatformsErrored) {
+    success = false;
+    title = `${base} — connection error`;
+    detail = `Couldn't verify any of ${total} ${unitWord} — Airbnb, VRBO & Booking.com didn't respond (API error). Try running it again.`;
+  } else if (outcome.platformErrors > 0) {
+    success = false;
+    title = `${base} — some checks didn't respond`;
+    detail = `Checked ${total} ${unitWord}, but ${outcome.platformErrors} OTA lookup${outcome.platformErrors === 1 ? "" : "s"} didn't respond (API error) — results may be incomplete. Re-run to retry them.`;
+  } else if (outcome.verified === 0) {
+    success = false;
+    title = base;
+    detail = `Couldn't verify any of ${total} ${unitWord} against Airbnb, VRBO & Booking.com. Try running it again.`;
+  } else {
+    success = true;
+    title = base;
+    detail = `Checked all ${total} ${unitWord} against Airbnb, VRBO & Booking.com.`;
+  }
+  return { timestamp: Date.now(), success, title, detail };
+}
+
+export function startPreflightAuditJob(input: StartPreflightAuditInput): PreflightAuditJob {
+  const id = newJobId("paj");
+  const job: PreflightAuditJob = {
+    id,
+    status: "queued",
+    phase: "queued",
+    message: "Queued",
+    progress: 4,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    startedAt: null,
+    finishedAt: null,
+    fullPhotoAudit: input.fullPhotoAudit,
+    totalUnits: input.units.length,
+    completedCount: 0,
+    results: {},
+    receipt: null,
+    photoChecks: null,
+    photoBudget: null,
+    deepPhotoStarted: false,
+    error: null,
+  };
+  auditJobs.set(id, job);
+  void runPreflightAuditJob(job, input);
+  return job;
+}
+
+async function runPreflightAuditJob(job: PreflightAuditJob, input: StartPreflightAuditInput): Promise<void> {
+  if (activeAuditJobIds.has(job.id)) return;
+  activeAuditJobIds.add(job.id);
+  const base = loopbackBaseUrl();
+  const total = input.units.length;
+  try {
+    touchAuditJob(job, {
+      status: "running",
+      phase: "text",
+      message: "Searching Airbnb, VRBO & Booking.com…",
+      progress: 8,
+      startedAt: job.startedAt ?? Date.now(),
+    });
+
+    const outcome = { verified: 0, apiFailUnits: 0, platformErrors: 0, platformsChecked: 0 };
+    const recordResult = (unitId: string, result: Record<string, unknown>) => {
+      job.results = { ...job.results, [unitId]: result };
+      job.completedCount = Math.min(total, job.completedCount + 1);
+      // Text phase climbs to ~78%; the deep photo phase (if any) owns 78→98.
+      const progress = total > 0 ? 8 + Math.round((job.completedCount / total) * 70) : 78;
+      touchAuditJob(job, { progress });
+    };
+
+    // Same parallelism as the old client Promise.all over units — the heavy
+    // work already lives in the platform-check handler; we just drive it.
+    await Promise.all(
+      input.units.map(async (unit) => {
+        const params = new URLSearchParams({
+          name: input.name,
+          city: input.city,
+          units: JSON.stringify([
+            {
+              unitId: unit.unitId,
+              unitNumber: unit.unitNumber,
+              address: unit.address,
+              photoFolder: unit.photoFolder ?? "",
+              bedrooms: unit.bedrooms,
+            },
+          ]),
+          photoMode: input.fullPhotoAudit ? "full" : "sample",
+          singleListing: input.singleListing ? "1" : "0",
+        });
+        try {
+          const resp = await fetch(`${base}/api/preflight/platform-check?${params.toString()}`, {
+            headers: loopbackRequestHeaders(),
+            signal: AbortSignal.timeout(AUDIT_PLATFORM_CHECK_TIMEOUT_MS),
+          });
+          if (resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            const unitResult = Array.isArray(data?.units) ? data.units[0] : undefined;
+            if (unitResult) {
+              const statuses = AUDIT_PLATFORM_KEYS.map((k) => unitResult.platforms?.[k]?.status);
+              outcome.platformsChecked += statuses.length;
+              outcome.platformErrors += statuses.filter((s: unknown) => s === "error").length;
+              if (statuses.some((s: unknown) => s === "confirmed" || s === "photo-confirmed" || s === "not-listed")) {
+                outcome.verified += 1;
+              }
+              recordResult(unit.unitId, unitResult);
+            } else {
+              outcome.apiFailUnits += 1;
+              outcome.platformsChecked += 3;
+              outcome.platformErrors += 3;
+              recordResult(unit.unitId, auditErrorUnitResult(unit));
+            }
+          } else {
+            outcome.apiFailUnits += 1;
+            outcome.platformsChecked += 3;
+            outcome.platformErrors += 3;
+            recordResult(unit.unitId, auditErrorUnitResult(unit));
+          }
+        } catch {
+          outcome.apiFailUnits += 1;
+          outcome.platformsChecked += 3;
+          outcome.platformErrors += 3;
+          recordResult(unit.unitId, auditErrorUnitResult(unit));
+        }
+      }),
+    );
+
+    const receipt = buildAuditReceipt(input, outcome);
+    touchAuditJob(job, { receipt, progress: total > 0 ? 78 : 90 });
+
+    // Full audit: also drive the deep reverse-image photo scan server-side. It
+    // is itself a persistent job (its 24h photo-check cache survives a redeploy),
+    // so even if this audit job is evicted the operator still gets the photo
+    // results via the page-load read-path on return.
+    if (input.fullPhotoAudit && input.deepPhotoFolders.length > 0) {
+      touchAuditJob(job, {
+        phase: "photo",
+        message: "Reverse-image-scanning every interior photo…",
+        deepPhotoStarted: true,
+      });
+      await runAuditDeepPhotoCheck(job, base, input.deepPhotoFolders);
+    }
+
+    touchAuditJob(job, {
+      status: "completed",
+      phase: "completed",
+      message: receipt.detail,
+      progress: 100,
+      finishedAt: Date.now(),
+    });
+  } catch (e: any) {
+    touchAuditJob(job, {
+      status: "failed",
+      phase: "failed",
+      message: e?.message || "Unit audit failed",
+      progress: 100,
+      finishedAt: Date.now(),
+      error: e?.message || "Unit audit failed",
+    });
+  } finally {
+    activeAuditJobIds.delete(job.id);
+  }
+}
+
+// Server-side port of the client's deep-photo poll: read once for "before"
+// timestamps, kick off the run, then poll the read-path until every scanned
+// folder's checkedAt advances (or the ~9-min ceiling). Results are stored on the
+// job as they arrive so a watching operator sees them live.
+async function runAuditDeepPhotoCheck(job: PreflightAuditJob, base: string, folders: string[]): Promise<void> {
+  const setPhotoChecks = (checks: unknown, budget: unknown) => {
+    if (Array.isArray(checks)) {
+      const map: Record<string, unknown> = {};
+      for (const c of checks) {
+        if (c && typeof c === "object" && typeof (c as any).folder === "string") {
+          map[(c as any).folder] = c;
+        }
+      }
+      job.photoChecks = map;
+    }
+    if (budget && typeof budget === "object") job.photoBudget = budget as Record<string, unknown>;
+    touchAuditJob(job);
+  };
+
+  const before: Record<string, string | undefined> = {};
+  try {
+    const r0 = await postJson(`${base}/api/preflight/photo-check`, { folders, run: false }, AUDIT_DEEP_PHOTO_TIMEOUT_MS);
+    for (const c of (r0?.checks ?? [])) before[c.folder] = c.checkedAt;
+    setPhotoChecks(r0?.checks, r0?.budget);
+  } catch { /* non-fatal — start the run anyway */ }
+
+  let started = false;
+  let scanning: string[] = folders;
+  try {
+    const startData = await postJson(
+      `${base}/api/preflight/photo-check`,
+      { folders, run: true, force: true },
+      AUDIT_DEEP_PHOTO_TIMEOUT_MS,
+    );
+    if (startData?.budget) job.photoBudget = startData.budget;
+    started = startData?.started === true;
+    if (Array.isArray(startData?.scanning)) scanning = startData.scanning;
+    if (startData?.budgetReached) {
+      touchAuditJob(job, { message: "Daily photo-check budget reached — re-run tomorrow." });
+    }
+  } catch { /* the read-path/page-load effect picks up cached results on return */ }
+
+  // Nothing fresh was kicked off (cached within 24h) — the initial read already
+  // stored the current results, so there's nothing to poll for.
+  if (!started) return;
+
+  for (let i = 0; i < AUDIT_DEEP_PHOTO_POLL_TRIES; i += 1) {
+    await sleep(AUDIT_DEEP_PHOTO_POLL_INTERVAL_MS);
+    try {
+      const d2 = await postJson(`${base}/api/preflight/photo-check`, { folders, run: false }, AUDIT_DEEP_PHOTO_TIMEOUT_MS);
+      setPhotoChecks(d2?.checks, d2?.budget);
+      const checks: any[] = Array.isArray(d2?.checks) ? d2.checks : [];
+      const allAdvanced = scanning.every((f) => {
+        const row = checks.find((c) => c?.folder === f);
+        return row?.checkedAt && row.checkedAt !== before[f];
+      });
+      if (allAdvanced) break;
+    } catch { /* keep polling */ }
+  }
+}
+
+// ── Per-unit rescrape (server-side background job) ────────────────────────────
+
+const RESCRAPE_LOOPBACK_TIMEOUT_MS = 300_000;
+
+export type StartPreflightRescrapeInput = {
+  folder: string;
+  sourceUrl?: string;
+};
+
+export function startPreflightRescrapeJob(input: StartPreflightRescrapeInput): PreflightRescrapeJob {
+  const id = newJobId("prsj");
+  const job: PreflightRescrapeJob = {
+    id,
+    status: "queued",
+    phase: "queued",
+    message: "Queued",
+    progress: 6,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    startedAt: null,
+    finishedAt: null,
+    folder: input.folder,
+    needsUrl: false,
+    savedCount: null,
+    bedroomCount: null,
+    bathroomCount: null,
+    sourceUrl: null,
+    urlSource: null,
+    coverage: null,
+    error: null,
+  };
+  rescrapeJobs.set(id, job);
+  void runPreflightRescrapeJob(job, input);
+  return job;
+}
+
+async function runPreflightRescrapeJob(job: PreflightRescrapeJob, input: StartPreflightRescrapeInput): Promise<void> {
+  if (activeRescrapeJobIds.has(job.id)) return;
+  activeRescrapeJobIds.add(job.id);
+  const base = loopbackBaseUrl();
+  try {
+    touchRescrapeJob(job, {
+      status: "running",
+      phase: "scraping",
+      message: "Re-pulling this unit's saved listing…",
+      progress: 25,
+      startedAt: Date.now(),
+    });
+
+    const body: Record<string, unknown> = { folder: input.folder };
+    if (typeof input.sourceUrl === "string" && /^https?:\/\//i.test(input.sourceUrl)) {
+      body.sourceUrl = input.sourceUrl.trim();
+    }
+    // Manual fetch (not postJson) so we can inspect the 409 `needsUrl` case
+    // instead of collapsing it into a generic throw.
+    const resp = await fetch(`${base}/api/builder/rescrape-unit-photos`, {
+      method: "POST",
+      headers: loopbackRequestHeaders(),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(RESCRAPE_LOOPBACK_TIMEOUT_MS),
+    });
+    const data = await resp.json().catch(() => ({} as any));
+
+    if (resp.status === 409 && data?.needsUrl) {
+      touchRescrapeJob(job, {
+        status: "failed",
+        phase: "failed",
+        message: data?.error || "No source URL on file — paste the listing URL to re-pull.",
+        progress: 100,
+        finishedAt: Date.now(),
+        needsUrl: true,
+        error: data?.error || "No source URL on file for this folder.",
+      });
+      return;
+    }
+    if (!resp.ok) {
+      throw new Error(data?.error || `HTTP ${resp.status}`);
+    }
+
+    touchRescrapeJob(job, {
+      status: "completed",
+      phase: "completed",
+      message: `Re-pulled ${Number(data?.savedCount ?? 0)} photo${Number(data?.savedCount ?? 0) === 1 ? "" : "s"}`,
+      progress: 100,
+      finishedAt: Date.now(),
+      savedCount: Number(data?.savedCount ?? 0),
+      bedroomCount: Number(data?.bedroomCount ?? 0),
+      bathroomCount: Number(data?.bathroomCount ?? 0),
+      sourceUrl: typeof data?.sourceUrl === "string" ? data.sourceUrl : null,
+      urlSource: typeof data?.urlSource === "string" ? data.urlSource : null,
+      coverage: data?.coverage && typeof data.coverage === "object" ? data.coverage : null,
+      error: null,
+    });
+  } catch (e: any) {
+    touchRescrapeJob(job, {
+      status: "failed",
+      phase: "failed",
+      message: e?.message || "Rescrape failed",
+      progress: 100,
+      finishedAt: Date.now(),
+      error: e?.message || "Rescrape failed",
+    });
+  } finally {
+    activeRescrapeJobIds.delete(job.id);
   }
 }
