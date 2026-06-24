@@ -5525,7 +5525,10 @@ export default function InboxPage() {
                                 propertyName,
                                 guestFirstName: firstName,
                                 guestFullName: fullName || undefined,
-                                checkInIso: res?.checkIn,
+                                // Localized calendar date (matches the panel),
+                                // NOT raw res.checkIn which slices a day off in
+                                // Hawaii/negative-offset timezones.
+                                checkInIso: checkInIso || undefined,
                                 checkOutIso: checkOutIso || undefined,
                                 confirmationCode: res?.confirmationCode || undefined,
                                 channel: (selectedConv as any)?.module?.type || channelRaw || undefined,
