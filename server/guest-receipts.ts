@@ -39,6 +39,7 @@ import {
   realRefundsForReceipts,
   reservationRevenue,
   paymentHistoryForReceipts,
+  localizedStayDate,
   type ReceiptTransaction,
 } from "./guesty-money";
 import type { InsertGuestReceipt } from "@shared/schema";
@@ -143,7 +144,7 @@ export async function runGuestReceipts(): Promise<NonNullable<typeof _lastRunRes
 
   try {
     const fields = encodeURIComponent(
-      "_id status checkIn checkOut listing listingId money payments refunds guest source integration confirmationCode conversationId createdAt updatedAt lastUpdatedAt",
+      "_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized listing listingId money payments refunds guest source integration confirmationCode conversationId createdAt updatedAt lastUpdatedAt",
     );
     const updatedAtOf = (r: any): number => {
       const raw = r?.lastUpdatedAt ?? r?.updatedAt ?? r?.createdAt;
@@ -268,7 +269,9 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
 
   const propertyName = propertyNameForReceipt(reservation);
   const guestFirst = guestFirstName(reservation);
-  const checkInIso = reservation?.checkIn ? String(reservation.checkIn).slice(0, 10) : null;
+  // Localized calendar date — NOT the raw UTC checkIn (which slices to the wrong
+  // day for negative-offset timezones like Hawaii). See localizedStayDate.
+  const checkInIso = localizedStayDate(reservation, "in");
   const bookingTotal = reservationRevenue(reservation);
   const history = paymentHistoryForReceipts(reservation);
 
@@ -320,7 +323,7 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
     propertyName,
     listingNickname: listingNickname(reservation),
     checkIn: checkInIso,
-    checkOut: reservation?.checkOut ? String(reservation.checkOut).slice(0, 10) : null,
+    checkOut: localizedStayDate(reservation, "out"),
     confirmationCode: reservation?.confirmationCode ?? null,
     channel,
     amount: txn.amount,
@@ -444,7 +447,7 @@ export async function sendReceiptForReservation(opts: {
   message: string;
 }> {
   const fields = encodeURIComponent(
-    "_id status checkIn checkOut listing listingId money payments refunds guest source integration confirmationCode conversationId createdAt updatedAt lastUpdatedAt",
+    "_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized listing listingId money payments refunds guest source integration confirmationCode conversationId createdAt updatedAt lastUpdatedAt",
   );
 
   let reservation: any = null;
@@ -577,7 +580,7 @@ export async function createReceiptPage(opts: {
   let reservation: any = null;
   try {
     const fields = encodeURIComponent(
-      "_id status checkIn checkOut listing listingId money payments refunds guest source integration confirmationCode conversationId createdAt updatedAt lastUpdatedAt",
+      "_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized listing listingId money payments refunds guest source integration confirmationCode conversationId createdAt updatedAt lastUpdatedAt",
     );
     const data = await guestyRequest("GET", `/reservations/${encodeURIComponent(reservationId)}?fields=${fields}`);
     reservation = data?.result ?? data?.data ?? (data && (data as any)._id ? data : null) ?? null;
@@ -600,8 +603,13 @@ export async function createReceiptPage(opts: {
     opts.propertyName ?? opts.listingNickname ?? (reservation ? propertyNameForReceipt(reservation) : "") ?? "",
   ).trim();
   const listingNick = opts.listingNickname ?? (reservation ? listingNickname(reservation) : null) ?? propertyName ?? null;
-  const checkInIso = (opts.checkIn ?? reservation?.checkIn) ? String(opts.checkIn ?? reservation?.checkIn).slice(0, 10) : null;
-  const checkOutIso = (opts.checkOut ?? reservation?.checkOut) ? String(opts.checkOut ?? reservation?.checkOut).slice(0, 10) : null;
+  // Stay dates: prefer the reservation's LOCALIZED calendar date (authoritative,
+  // correct for Hawaii/negative-offset timezones); fall back to the operator-
+  // supplied value only when the Guesty fetch failed. The raw checkIn/checkOut
+  // UTC timestamp must NOT be sliced directly — it drifts a day. See
+  // localizedStayDate.
+  const checkInIso = localizedStayDate(reservation, "in") ?? (opts.checkIn ? String(opts.checkIn).slice(0, 10) : null);
+  const checkOutIso = localizedStayDate(reservation, "out") ?? (opts.checkOut ? String(opts.checkOut).slice(0, 10) : null);
   const confirmationCode = opts.confirmationCode ?? reservation?.confirmationCode ?? null;
   const channel = (String(opts.channel ?? "").trim() || (reservation ? channelForReservation(reservation) : "")) || null;
   const currency = String(opts.currency ?? "USD").trim() || "USD";

@@ -53,6 +53,23 @@ export function paymentAmount(payment: any): number {
   return asNum(payment?.amount ?? payment?.paidAmount ?? payment?.collectedAmount ?? payment?.total ?? payment?.value);
 }
 
+// Resolve a reservation's check-in / check-out CALENDAR date (YYYY-MM-DD) the way
+// the guest experiences it. LOAD-BEARING: Guesty's raw `checkIn`/`checkOut` are
+// UTC timestamps of the local check-in/out MOMENT — e.g. a Hawaii (UTC-10) stay
+// starting May 23 3pm is stored as `2027-05-24T01:00:00.000Z`, so slicing the
+// raw field to a date yields the WRONG day (May 24). Guesty's
+// `checkInDateLocalized`/`checkOutDateLocalized` carry the correct local calendar
+// date ("2027-05-23"). Prefer those; fall back to the raw field only when the
+// localized one is absent (older records). Use this everywhere a guest-facing
+// date is shown (receipts, confirmations) so the date never drifts a day.
+export function localizedStayDate(reservation: any, which: "in" | "out"): string | null {
+  if (!reservation || typeof reservation !== "object") return null;
+  const localized = which === "in" ? reservation.checkInDateLocalized : reservation.checkOutDateLocalized;
+  const raw = which === "in" ? reservation.checkIn : reservation.checkOut;
+  const pick = localized ?? raw;
+  return pick ? String(pick).slice(0, 10) : null;
+}
+
 export function paymentDate(payment: any): Date | null {
   const raw =
     payment?.paidAt ??
