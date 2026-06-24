@@ -4705,6 +4705,7 @@ type GuestInboxResponse = {
   arrivalDetails?: GuestInboxArrivalDetails | null;
   arrivalExtracted?: boolean;
   arrivalFieldsUpdated?: string[];
+  syncResult?: { imported: number; skipped?: string };
 };
 
 function sanitizeArrivalDisplayValue(value: string | null | undefined): string {
@@ -5126,6 +5127,11 @@ function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservati
       {displayEmail && !isLoading && messages.length === 0 && (
         <p className="text-[11px] text-muted-foreground">
           No messages yet — VRBO confirmations and arrival details sent to {displayEmail} will appear here.
+          {data?.syncResult?.skipped === "IMAP not configured" && (
+            <span className="block mt-1 text-amber-700 dark:text-amber-300">
+              Mailbox sync is not configured on the server — ask ops to set GUEST_INBOX_IMAP_* credentials.
+            </span>
+          )}
         </p>
       )}
       {messages.length > 0 && (

@@ -103,6 +103,50 @@ function guestAliasFromHeaders(headers: Record<string, string>): string | null {
   return null;
 }
 
+/** Resolve the guest booking alias from email headers (IMAP raw mail or webhook payload). */
+export function resolveGuestAliasEmail(
+  headers: Record<string, string>,
+  fallbackTo?: string,
+): string | null {
+  const fromHeaders = guestAliasFromHeaders(headers);
+  if (fromHeaders) return fromHeaders;
+  const fb = extractEmailAddress(String(fallbackTo ?? "")).trim().toLowerCase();
+  if (fb && isGuestBookingAliasEmail(fb)) return fb;
+  return null;
+}
+
+/** Build a normalized header map from an inbound email webhook body + request headers. */
+export function headersFromInboundEmailPayload(
+  body: Record<string, unknown> | null | undefined,
+  reqHeaders?: Record<string, string | string[] | undefined>,
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (reqHeaders) {
+    for (const [k, v] of Object.entries(reqHeaders)) {
+      if (typeof v === "string") headers[k.toLowerCase()] = v;
+      else if (Array.isArray(v)) headers[k.toLowerCase()] = v.join(", ");
+    }
+  }
+  const bh = body?.headers;
+  if (bh && typeof bh === "object" && !Array.isArray(bh)) {
+    for (const [k, v] of Object.entries(bh as Record<string, unknown>)) {
+      headers[String(k).trim().toLowerCase()] = String(v ?? "").trim();
+    }
+  }
+  for (const key of [
+    "x-simplelogin-envelope-to",
+    "x-simplelogin-envelope-from",
+    "x-simplelogin-original-from",
+    "to",
+    "from",
+  ]) {
+    const underscored = key.replace(/-/g, "_");
+    const flat = body?.[key] ?? body?.[underscored];
+    if (flat != null && String(flat).trim()) headers[key] = String(flat).trim();
+  }
+  return headers;
+}
+
 export function isGuestBookingAliasEmail(email: string): boolean {
   const e = String(email ?? "").trim().toLowerCase();
   if (!e.includes("@")) return false;
@@ -219,6 +263,41 @@ async function importParsedEmail(parsed: ParsedRawEmail, filterAlias?: string): 
   return true;
 }
 
+const IMAP_FALLBACK_SCAN_CAP = 300;
+
+async function searchUidsForGuestAlias(
+  client: import("imapflow").ImapFlow,
+  alias: string,
+  since: Date,
+): Promise<number[]> {
+  const found = new Set<number>();
+  const headerQueries: Array<Record<string, unknown>> = [
+    { header: ["X-SimpleLogin-Envelope-To", alias] },
+    { header: ["X-SimpleLogin-Envelope-To", `<${alias}>`] },
+    { header: ["To", alias] },
+  ];
+  for (const criteria of headerQueries) {
+    try {
+      const uids = await client.search({ since, ...criteria });
+      if (uids?.length) uids.forEach((uid) => found.add(uid as number));
+    } catch {
+      // Some IMAP servers reject HEADER search — fall back below.
+    }
+  }
+  if (found.size > 0) return [...found];
+
+  const uids = await client.search({ since });
+  if (!uids?.length) return [];
+  for (const uid of uids.slice().reverse().slice(0, IMAP_FALLBACK_SCAN_CAP)) {
+    const msg = await client.fetchOne(uid as number, { source: true });
+    const raw = msg.source?.toString("utf8") ?? "";
+    if (!raw) continue;
+    const parsed = parseGuestInboxEmailFromRaw(raw);
+    if (parsed?.aliasEmail === alias) found.add(uid as number);
+  }
+  return [...found];
+}
+
 export async function syncGuestInboxForAlias(aliasEmail: string): Promise<{ imported: number; skipped?: string }> {
   const alias = String(aliasEmail ?? "").trim().toLowerCase();
   if (!alias) return { imported: 0, skipped: "empty alias" };
@@ -256,10 +335,10 @@ export async function syncGuestInboxForAlias(aliasEmail: string): Promise<{ impo
         continue;
       }
       try {
-        const uids = await client.search({ since });
-        if (!uids || uids.length === 0) continue;
-        for (const uid of uids.slice().reverse().slice(0, 80)) {
-          const msg = await client.fetchOne(uid as number, { source: true });
+        const uids = await searchUidsForGuestAlias(client, alias, since);
+        if (uids.length === 0) continue;
+        for (const uid of uids.sort((a, b) => b - a)) {
+          const msg = await client.fetchOne(uid, { source: true });
           const raw = msg.source?.toString("utf8") ?? "";
           if (!raw) continue;
           const parsed = parseGuestInboxEmailFromRaw(raw);
@@ -275,4 +354,50 @@ export async function syncGuestInboxForAlias(aliasEmail: string): Promise<{ impo
   }
 
   return { imported };
+}
+
+let _schedulerStarted = false;
+
+export async function syncAllGuestInboxAliases(): Promise<{ aliases: number; imported: number; skipped?: string }> {
+  const imap = guestInboxImapConfig();
+  if (!imap.configured) return { aliases: 0, imported: 0, skipped: "IMAP not configured" };
+
+  const { db } = await import("./db");
+  const { buyIns } = await import("@shared/schema");
+  const { isNotNull } = await import("drizzle-orm");
+  const rows = await db
+    .select({ email: buyIns.travelerEmail })
+    .from(buyIns)
+    .where(isNotNull(buyIns.travelerEmail));
+  const aliases = [...new Set(
+    rows
+      .map((r) => String(r.email ?? "").trim().toLowerCase())
+      .filter((e) => e && isGuestBookingAliasEmail(e)),
+  )];
+  let imported = 0;
+  for (const alias of aliases) {
+    const result = await syncGuestInboxForAlias(alias);
+    imported += result.imported;
+  }
+  return { aliases: aliases.length, imported };
+}
+
+export function startGuestInboxSyncScheduler(): void {
+  if (_schedulerStarted || process.env.GUEST_INBOX_SYNC_DISABLED === "true") return;
+  _schedulerStarted = true;
+  const intervalMs = Number(process.env.GUEST_INBOX_SYNC_INTERVAL_MS) > 0
+    ? Number(process.env.GUEST_INBOX_SYNC_INTERVAL_MS)
+    : 5 * 60_000;
+  const tick = () => {
+    void syncAllGuestInboxAliases()
+      .then((r) => {
+        if (r.imported > 0) {
+          console.log(`[guest-inbox] background sync imported ${r.imported} message(s) across ${r.aliases} alias(es)`);
+        }
+      })
+      .catch((err) => console.warn("[guest-inbox] background sync failed:", err?.message ?? err));
+  };
+  setTimeout(tick, 30_000);
+  setInterval(tick, intervalMs);
+  console.log(`[guest-inbox] background sync scheduler started (every ${Math.round(intervalMs / 1000)}s)`);
 }

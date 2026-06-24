@@ -11749,11 +11749,18 @@ Requirements:
         if (provided !== webhookSecret) return res.status(401).json({ error: "Unauthorized" });
       }
       const fromEmail = extractEmailAddress(String(req.body?.from ?? req.body?.fromEmail ?? "")).toLowerCase();
-      const toEmail = extractEmailAddress(String(req.body?.to ?? req.body?.toEmail ?? "")).toLowerCase();
+      const toEmailRaw = extractEmailAddress(String(req.body?.to ?? req.body?.toEmail ?? "")).toLowerCase();
+      const {
+        resolveGuestAliasEmail,
+        headersFromInboundEmailPayload,
+        isGuestBookingAliasEmail,
+      } = await import("./guest-inbox-sync");
+      const inboundHeaders = headersFromInboundEmailPayload(req.body, req.headers);
+      const aliasEmail = resolveGuestAliasEmail(inboundHeaders, toEmailRaw) ?? toEmailRaw;
       const subject = String(req.body?.subject ?? "").trim() || "(no subject)";
       const body = String(req.body?.text ?? req.body?.body ?? req.body?.html ?? "").trim();
       const attachments = normalizeBuyInEmailAttachments(req.body?.attachments ?? req.body?.files ?? req.body?.attachment);
-      if (!fromEmail || !toEmail || (!body && attachments.length === 0)) {
+      if (!fromEmail || !aliasEmail || (!body && attachments.length === 0)) {
         return res.status(400).json({ error: "from, to, and body or attachments are required" });
       }
 
@@ -11762,30 +11769,29 @@ Requirements:
       // confirmation) is stored in that guest's portal inbox, keyed by the alias
       // address and kept forever. This runs BEFORE vendor matching so guest mail
       // is never 404'd as "no matching vendor contact".
-      const guestEmailDomain = (process.env.BUYIN_TRAVELER_EMAIL_DOMAIN || "emailprivaccy.com").trim().toLowerCase();
-      const guestBuyIn = await storage.getBuyInByTravelerEmail(toEmail);
-      const isGuestAlias = !!guestBuyIn || (!!guestEmailDomain && toEmail.endsWith(`@${guestEmailDomain}`));
+      const guestBuyIn = await storage.getBuyInByTravelerEmail(aliasEmail);
+      const isGuestAlias = !!guestBuyIn || isGuestBookingAliasEmail(aliasEmail);
       if (isGuestAlias) {
         const providerMessageId = String(req.body?.messageId ?? req.body?.message_id ?? "") || null;
         // Idempotent on relay retries.
         if (providerMessageId) {
-          const recent = await storage.getGuestInboxMessages(toEmail, 100);
+          const recent = await storage.getGuestInboxMessages(aliasEmail, 100);
           if (recent.some((m) => m.providerMessageId && m.providerMessageId === providerMessageId)) {
             return res.json({ deduped: true });
           }
         }
-        const localPart = toEmail.split("@")[0] || "";
+        const localPart = aliasEmail.split("@")[0] || "";
         const guestName = localPart
           .split(/[._]+/).filter(Boolean)
           .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || null;
         const stored = await storage.createGuestInboxMessage({
-          aliasEmail: toEmail,
+          aliasEmail,
           guestName,
           buyInId: guestBuyIn?.id ?? null,
           reservationId: guestBuyIn?.guestyReservationId ?? null,
           direction: "inbound",
           fromEmail,
-          toEmail,
+          toEmail: aliasEmail,
           subject,
           body,
           attachmentsJson: attachments.length ? JSON.stringify(attachments) : null,
@@ -11794,12 +11800,14 @@ Requirements:
         });
         try {
           const { applyArrivalDetailsFromGuestMessage } = await import("./guest-inbox-arrival");
-          await applyArrivalDetailsFromGuestMessage({ aliasEmail: toEmail, subject, body });
+          await applyArrivalDetailsFromGuestMessage({ aliasEmail, subject, body });
         } catch (extractErr: any) {
           console.warn("[guest-inbox] arrival extract failed:", extractErr?.message ?? extractErr);
         }
         return res.json({ guestInboxMessage: stored });
       }
+
+      const toEmail = toEmailRaw;
 
       let [contact] = await db
         .select()
@@ -11880,11 +11888,13 @@ Requirements:
       }
       // Pull VRBO confirmations from the SimpleLogin forwarding mailbox when the
       // inbound webhook hasn't recorded them yet (common after manual buy-in).
+      let syncResult: { imported: number; skipped?: string } = { imported: 0 };
       try {
         const { syncGuestInboxForAlias } = await import("./guest-inbox-sync");
-        await syncGuestInboxForAlias(aliasEmail);
+        syncResult = await syncGuestInboxForAlias(aliasEmail);
       } catch (syncErr: any) {
         console.warn("[guest-inbox] mailbox sync failed:", syncErr?.message ?? syncErr);
+        syncResult = { imported: 0, skipped: syncErr?.message ?? "sync failed" };
       }
       let arrivalExtract: { updated: boolean; buyInId: number | null; fields: string[] } = {
         updated: false,
@@ -11920,6 +11930,7 @@ Requirements:
         } : null,
         arrivalExtracted: arrivalExtract.updated,
         arrivalFieldsUpdated: arrivalExtract.fields,
+        syncResult,
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch guest inbox", message: err?.message ?? String(err) });
