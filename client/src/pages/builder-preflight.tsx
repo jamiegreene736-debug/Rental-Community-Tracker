@@ -167,6 +167,34 @@ const savePhotoFetchJobIds = (propertyId: number, next: Record<string, string>) 
   } catch { /* ignore */ }
 };
 
+// Full unit audit / platform check — one in-flight job per property, persisted so
+// the operator can leave the tab and re-attach on return.
+const auditJobStorageKey = (propertyId: number) => `preflight.auditJob.v1:${propertyId}`;
+const loadAuditJobId = (propertyId: number): string | null => {
+  try { return localStorage.getItem(auditJobStorageKey(propertyId)); } catch { return null; }
+};
+const saveAuditJobId = (propertyId: number, jobId: string | null) => {
+  try {
+    if (jobId) localStorage.setItem(auditJobStorageKey(propertyId), jobId);
+    else localStorage.removeItem(auditJobStorageKey(propertyId));
+  } catch { /* ignore */ }
+};
+
+// Per-unit rescrape — a map of photoFolder → in-flight jobId, persisted per property.
+const rescrapeJobStorageKey = (propertyId: number) => `preflight.rescrapeJobs.v1:${propertyId}`;
+const loadRescrapeJobIds = (propertyId: number): Record<string, string> => {
+  try {
+    const raw = localStorage.getItem(rescrapeJobStorageKey(propertyId));
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+};
+const saveRescrapeJobIds = (propertyId: number, next: Record<string, string>) => {
+  try {
+    if (Object.keys(next).length === 0) localStorage.removeItem(rescrapeJobStorageKey(propertyId));
+    else localStorage.setItem(rescrapeJobStorageKey(propertyId), JSON.stringify(next));
+  } catch { /* ignore */ }
+};
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type UnitPlatformResult = {
@@ -362,6 +390,45 @@ type PhotoCheckRow = {
   error?: string | null;
 };
 
+// Server-side "Full unit audit" / "Run check" job (server/preflight-background-jobs.ts).
+// The check now runs server-side so the operator can fire it and leave the tab;
+// the client polls this and rehydrates the platform-check UI from it.
+type PreflightAuditJob = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  phase: "queued" | "text" | "photo" | "completed" | "failed";
+  message: string;
+  progress: number;
+  fullPhotoAudit: boolean;
+  totalUnits: number;
+  completedCount: number;
+  results: Record<string, UnitCheckResult>;
+  receipt: { timestamp: number; success: boolean; title: string; detail: string } | null;
+  photoChecks: Record<string, PhotoCheckRow> | null;
+  photoBudget: { used: number; cap: number | null; remaining: number | null } | null;
+  deepPhotoStarted: boolean;
+  startedAt: number | null;
+  error: string | null;
+};
+
+// Server-side per-unit "Rescrape photos" job.
+type PreflightRescrapeJob = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  phase: "queued" | "scraping" | "completed" | "failed";
+  message: string;
+  progress: number;
+  folder: string;
+  needsUrl: boolean;
+  savedCount: number | null;
+  bedroomCount: number | null;
+  bathroomCount: number | null;
+  sourceUrl: string | null;
+  urlSource: string | null;
+  coverage: { bedroomsShortfall?: number; bathroomsShortfall?: number; bedroomsExpected?: number } | null;
+  error: string | null;
+};
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function BuilderPreflight() {
@@ -413,8 +480,6 @@ export default function BuilderPreflight() {
 
   const { toast } = useToast();
 
-  // Per-row rescrape state so each row can show its own spinner/result.
-  const [rescrapingUnitId, setRescrapingUnitId] = useState<string | null>(null);
 
   // Sticky rescrape results — persisted to localStorage so the user can
   // navigate away and come back and still see when they last rescraped a
@@ -532,6 +597,15 @@ export default function BuilderPreflight() {
   );
   const [photoFetchJobsByUnit, setPhotoFetchJobsByUnit] = useState<Record<string, PreflightPhotoFetchJob>>({});
   const [photoFetchTick, setPhotoFetchTick] = useState(0);
+  // The audit (platform check / full unit audit) now runs as a server-side
+  // background job — the client just starts it, persists the id, and polls. This
+  // is what lets the operator fire it and leave the tab. Declared here (before
+  // the apply/poll effects below) so it's in scope for them.
+  const [auditJobId, setAuditJobId] = useState<string | null>(() => loadAuditJobId(id));
+  // Per-folder rescrape jobs (server-side background). Map of folder → jobId for
+  // polling/persistence; the latest job object per folder for the spinner/receipt.
+  const [rescrapeJobIdsByFolder, setRescrapeJobIdsByFolder] = useState<Record<string, string>>(() => loadRescrapeJobIds(id));
+  const [rescrapeJobsByFolder, setRescrapeJobsByFolder] = useState<Record<string, PreflightRescrapeJob>>({});
   // Track URLs the operator has already accepted/rejected so the
   // "Try another" path skips them. Reset when the property changes.
   const [skippedUrlsByUnit, setSkippedUrlsByUnit] = useState<Record<string, string[]>>({});
@@ -655,6 +729,207 @@ export default function BuilderPreflight() {
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, photoFetchJobIdsByUnit]);
+
+  // ── Audit job (platform check / full unit audit) — re-attach + poll ─────────
+  // The audit runs server-side; the client mirrors the job into the existing
+  // platform-check UI state. Declared above the early `if (!property)` return so
+  // the hook count stays stable, and it reads ONLY job + setters (never
+  // `property`/`effectiveUnits`) so it's safe to run before the property loads.
+  const applyAuditJob = (job: PreflightAuditJob) => {
+    const running = job.status === "queued" || job.status === "running";
+    setTotalUnits(job.totalUnits);
+    setCompletedCount(job.completedCount);
+    setResults(job.results || {});
+    if (job.photoChecks) setPhotoChecks(job.photoChecks);
+    if (job.photoBudget) setPhotoBudget(job.photoBudget);
+    if (job.startedAt) setCheckStartedAt(job.startedAt);
+    setPlatformChecking(running);
+    setFullAuditRunning(job.fullPhotoAudit && running);
+    setPhotoScanning(job.phase === "photo" && running);
+    setCheckPhase(job.phase === "photo" ? "photo" : running ? "text" : "done");
+
+    const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+    if (!terminal) return;
+
+    // Terminal: stop polling, mark done, stamp the receipt the server computed.
+    setPlatformChecking(false);
+    setFullAuditRunning(false);
+    setPhotoScanning(false);
+    setCheckStartedAt(null);
+    setCheckPhase("done");
+    setPlatformDone(true);
+    setLastCheckWasFullAudit(job.fullPhotoAudit);
+    if (job.receipt) {
+      recordPlatformCheckReceipt(job.receipt);
+    } else if (job.error) {
+      recordPlatformCheckReceipt({ timestamp: Date.now(), success: false, title: "Unit audit", detail: job.error });
+    }
+    setAuditJobId(null);
+    saveAuditJobId(id, null);
+  };
+
+  useEffect(() => {
+    if (!auditJobId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const resp = await fetch(`/api/preflight/audit-jobs/${encodeURIComponent(auditJobId)}`, { credentials: "include" });
+        if (!resp.ok) {
+          // 404 = the job was evicted (redeploy / 2h TTL). Drop it and clear the
+          // "checking" UI so the operator just re-runs — picks already rendered
+          // stay; the deep photo scan it kicked off persists via its 24h cache.
+          if (resp.status === 404 && !cancelled) {
+            setAuditJobId(null);
+            saveAuditJobId(id, null);
+            setPlatformChecking(false);
+            setFullAuditRunning(false);
+            setPhotoScanning(false);
+            setCheckStartedAt(null);
+            setCheckPhase("done");
+          }
+          return;
+        }
+        const data = await resp.json();
+        if (!cancelled && data.job) applyAuditJob(data.job as PreflightAuditJob);
+      } catch {
+        // keep polling
+      }
+    };
+    poll();
+    const interval = window.setInterval(poll, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, auditJobId]);
+
+  // ── Per-unit rescrape job — start / re-attach + poll ───────────────────────
+  const handledRescrapeJobsRef = useRef<Set<string>>(new Set());
+  // Folders whose rescrape the operator started THIS session — they get the
+  // toast / needs-URL prompt on completion. Jobs only re-attached on mount
+  // (restored) update the sticky receipt silently.
+  const sessionRescrapeFoldersRef = useRef<Set<string>>(new Set());
+
+  const startRescrapeJob = async (folder: string, sourceUrl?: string) => {
+    sessionRescrapeFoldersRef.current.add(folder);
+    try {
+      const resp = await apiRequest("POST", "/api/preflight/rescrape-jobs", { folder, ...(sourceUrl ? { sourceUrl } : {}) });
+      const data = await resp.json();
+      if (!data?.job?.id) throw new Error(data?.error || "Rescrape job did not start");
+      setRescrapeJobIdsByFolder((prev) => {
+        const next = { ...prev, [folder]: data.job.id as string };
+        saveRescrapeJobIds(id, next);
+        return next;
+      });
+      setRescrapeJobsByFolder((prev) => ({ ...prev, [folder]: data.job as PreflightRescrapeJob }));
+    } catch (e: any) {
+      toast({ title: "Rescrape failed to start", description: e?.message || String(e), variant: "destructive" });
+    }
+  };
+
+  const applyRescrapeJob = (folder: string, job: PreflightRescrapeJob) => {
+    const restored = !sessionRescrapeFoldersRef.current.has(folder);
+    setRescrapeJobsByFolder((prev) => ({ ...prev, [folder]: job }));
+    const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+    if (!terminal) return;
+    setRescrapeJobIdsByFolder((prev) => {
+      const next = { ...prev };
+      delete next[folder];
+      saveRescrapeJobIds(id, next);
+      return next;
+    });
+    if (handledRescrapeJobsRef.current.has(job.id)) return;
+    handledRescrapeJobsRef.current.add(job.id);
+
+    if (job.status === "completed") {
+      const saved = Number(job.savedCount ?? 0);
+      const beds = Number(job.bedroomCount ?? 0);
+      const baths = Number(job.bathroomCount ?? 0);
+      recordRescrape(folder, {
+        folder,
+        timestamp: Date.now(),
+        savedCount: saved,
+        bedroomCount: beds,
+        bathroomCount: baths,
+        sourceUrl: job.sourceUrl ?? undefined,
+        urlSource: job.urlSource ?? undefined,
+      });
+      if (!restored) {
+        const noInteriors = beds === 0 && baths === 0;
+        const bedShortfall = Number(job.coverage?.bedroomsShortfall ?? 0);
+        const expectedBeds = job.coverage?.bedroomsExpected;
+        const shortfallNote = bedShortfall > 0
+          ? ` ⚠ Only ${beds} unique bedrooms found — listing claims ${expectedBeds}. Click "Change" if you need a richer source.`
+          : "";
+        toast({
+          title: noInteriors
+            ? `Rescraped ${saved} photos — no bedrooms found`
+            : `Photos rescraped — ${beds} bedroom${beds !== 1 ? "s" : ""}, ${baths} bathroom${baths !== 1 ? "s" : ""}`,
+          description: noInteriors
+            ? `That listing's photos are all kitchen/exterior/views — no bedrooms detected. Click "Change" to search for a different replacement with actual interior shots.`
+            : `${saved} saved (source: ${job.urlSource ?? "manual"}). Hard-refresh the builder page to see them.${shortfallNote}`,
+          duration: 10000,
+        });
+      }
+    } else if (job.needsUrl && !restored) {
+      // The one interactive case: no source URL on file. Prompt and start a
+      // fresh background job with the pasted URL.
+      const url = window.prompt(
+        "No source URL on file for this unit. Paste the Zillow/Redfin listing URL — I'll save it for next time.",
+        "",
+      );
+      if (url && /^https?:\/\//i.test(url)) {
+        void startRescrapeJob(folder, url.trim());
+      } else if (url) {
+        toast({ title: "That doesn't look like a URL", description: "Paste a full https:// listing URL and try again.", variant: "destructive" });
+      }
+    } else if (!restored) {
+      toast({ title: "Rescrape failed", description: job.error || job.message || "No photos were saved.", variant: "destructive" });
+    }
+  };
+
+  useEffect(() => {
+    const jobIds = Object.entries(rescrapeJobIdsByFolder).filter(([, jobId]) => !!jobId);
+    if (jobIds.length === 0) return;
+    let cancelled = false;
+    const poll = async () => {
+      for (const [folder, jobId] of jobIds) {
+        try {
+          const resp = await fetch(`/api/preflight/rescrape-jobs/${encodeURIComponent(jobId)}`, { credentials: "include" });
+          if (!resp.ok) {
+            if (resp.status === 404 && !cancelled) {
+              setRescrapeJobIdsByFolder((prev) => {
+                const next = { ...prev };
+                delete next[folder];
+                saveRescrapeJobIds(id, next);
+                return next;
+              });
+            }
+            continue;
+          }
+          const data = await resp.json();
+          if (!cancelled && data.job) applyRescrapeJob(folder, data.job as PreflightRescrapeJob);
+        } catch {
+          // keep polling
+        }
+      }
+    };
+    poll();
+    const interval = window.setInterval(poll, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, rescrapeJobIdsByFolder]);
+
+  // Re-load persisted in-flight job ids when the property changes (mirrors the
+  // photo-fetch restore; covers a route change without a full remount).
+  useEffect(() => {
+    setAuditJobId(loadAuditJobId(id));
+    setRescrapeJobIdsByFolder(loadRescrapeJobIds(id));
+  }, [id]);
 
   // Parse street / city / state out of the property's display address
   // ("9000 Treasure Trove Lane, Kissimmee, Florida"). For HI properties
@@ -857,8 +1132,8 @@ export default function BuilderPreflight() {
   };
 
   const [platformChecking, setPlatformChecking] = useState(false);
-  // Track which unit IDs are still being checked (for per-row spinner)
-  const [checkingUnitIds, setCheckingUnitIds] = useState<Set<string>>(new Set());
+  // Units still being checked are derived from the audit job (results vs total)
+  // below — see `checkingUnitIds` after effectiveUnits.
   const [completedCount, setCompletedCount] = useState(0);
   const [totalUnits, setTotalUnits] = useState(0);
   const [checkPhase, setCheckPhase] = useState<"text" | "photo" | "done" | null>(null);
@@ -927,7 +1202,7 @@ export default function BuilderPreflight() {
     return () => { cancelled = true; };
   }, [unitOverrides]);
 
-  const isCheckRunning = platformChecking || checkingUnitIds.size > 0;
+  const isCheckRunning = platformChecking;
   useEffect(() => {
     if (!isCheckRunning) return;
     const id = setInterval(() => setProgressTick(t => t + 1), 1_000);
@@ -944,7 +1219,7 @@ export default function BuilderPreflight() {
       .then(r => r.ok ? r.json() : null)
       .then((data: { swaps: any[] } | null) => {
         if (!data?.swaps?.length) {
-          if (!isPromotedDraft && !autoRunFired.current) {
+          if (!isPromotedDraft && !autoRunFired.current && !auditJobId) {
             autoRunFired.current = true;
             runPlatformCheck();
           }
@@ -1115,6 +1390,12 @@ export default function BuilderPreflight() {
     return { ...u, _overrideAddress: undefined, _isReplaced: false, _replacedLabel: undefined, _replacedSourceUrl: undefined, _originalUnitNumber: u.unitNumber };
   });
 
+  // Units still "checking" while the audit job runs = those without a result yet.
+  // Derived (not state) so it can't drift from the server-driven job.
+  const checkingUnitIds = new Set<string>(
+    isCheckRunning ? effectiveUnits.filter((u) => !results[u.id]).map((u) => u.id) : [],
+  );
+
   const photoCountForUnit = (unitId: string, fallback: number) =>
     unitOverrides[unitId]?.photoFolder
       ? (overridePhotoCounts[unitId] ?? fallback)
@@ -1127,180 +1408,82 @@ export default function BuilderPreflight() {
     || property.complexName;
   const searchCommunityName = property.complexName?.trim() || property.propertyName;
 
-  // ── Check one unit at a time, updating results as each completes ──────────
+  // ── Start the server-side audit job (platform check / full unit audit) ──────
+  // The check now runs ENTIRELY server-side (server/preflight-background-jobs.ts)
+  // so the operator can fire it and leave the tab — the old version looped over
+  // units with parallel fetches and held results in React state, so a tab close
+  // aborted the fetches and discarded everything. We POST the job, persist its
+  // id, and the audit poll effect (above) rehydrates results / receipt / deep
+  // photo results from the job. Name kept as runPlatformCheck so every existing
+  // call site (rerunChecks, the auto-run effect) is unchanged.
   const runPlatformCheck = async (
     unitsToCheck = effectiveUnits,
     opts: { fullPhotoAudit?: boolean } = {},
   ) => {
     const fullPhotoAudit = opts.fullPhotoAudit === true;
+    const singleUnitListing = property.units.length === 1;
+    const unitPayload = unitsToCheck.map((unit) => {
+      const address = (unit as any)._overrideAddress
+        || (singleUnitListing ? property.address : `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`);
+      return {
+        unitId: unit.id,
+        unitNumber: unit.unitNumber,
+        address,
+        bedrooms: (unit as any).bedrooms,
+        photoFolder: (unit as any).photoFolder || "",
+      };
+    });
+    // For a full audit, the server also drives the deep reverse-image scan over
+    // these folders (it kicks off the persistent /photo-check job server-side).
+    const deepPhotoFolders = fullPhotoAudit
+      ? Array.from(new Set(
+          unitsToCheck
+            .map((u) => (u as any).photoFolder as string | undefined)
+            .filter((f): f is string => !!f),
+        ))
+      : [];
+
+    // Optimistic reset so the UI flips to "checking" instantly; the poll then
+    // drives every field from the job (results, progress, receipt, photo scan).
     setPlatformChecking(true);
     setFullAuditRunning(fullPhotoAudit);
     setLastCheckWasFullAudit(false);
     setPlatformDone(false);
     setResults({});
+    if (fullPhotoAudit) setPhotoChecks({});
     setCompletedCount(0);
     setTotalUnits(unitsToCheck.length);
     setCheckPhase("text");
     setCheckStartedAt(Date.now());
     setProgressTick(0);
-    const pendingIds = new Set(unitsToCheck.map(u => u.id));
-    setCheckingUnitIds(new Set(pendingIds));
-    // Tally outcomes locally so we can stamp an accurate success/fail receipt —
-    // the `results` state isn't readable here (it's set async). We separate a
-    // dead/non-responding endpoint (`apiFailUnits`) from per-platform lookups
-    // that came back as "error" (an OTA API not responding) so the confirmation
-    // can explicitly call out an API issue instead of hiding it behind a ✓.
-    const outcome = { verified: 0, apiFailUnits: 0, platformErrors: 0, platformsChecked: 0 };
 
-    const hasPhotos = unitsToCheck.some(u => !!(u as any).photoFolder);
-    if (hasPhotos) setCheckPhase("text");
-
-    await Promise.all(
-      unitsToCheck.map(async (unit) => {
-        const singleUnitListing = property.units.length === 1;
-        const address = (unit as any)._overrideAddress || (singleUnitListing ? property.address : `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`);
-        const hasUnitPhoto = !!(unit as any).photoFolder;
-        const unitPayload = [{
-          unitId: unit.id,
-          unitNumber: unit.unitNumber,
-          address,
-          bedrooms: unit.bedrooms,
-          photoFolder: hasUnitPhoto ? unit.photoFolder : "",
-          // Pass bedroom count so the server can reject a listing whose snippet states a
-          // DIFFERENT bedroom count (e.g. a 2BR "Oceanview End Unit" matched to a 3BR unit).
-          bedrooms: (unit as any).bedrooms,
-        }];
-        const params = new URLSearchParams({
-          name: searchCommunityName,
-          city,
-          units: JSON.stringify(unitPayload),
-          photoMode: fullPhotoAudit ? "full" : "sample",
-          singleListing: singleUnitListing ? "1" : "0",
-        });
-        if (hasUnitPhoto) setCheckPhase("photo");
-        try {
-          // Hard timeout so a hung/slow server can never leave a unit "Checking"
-          // forever — on abort the catch below records an error result and the
-          // finally clears it from checkingUnitIds.
-          const ctrl = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), 45_000);
-          const resp = await fetch(`/api/preflight/platform-check?${params.toString()}`, {
-            signal: ctrl.signal,
-            ...(fullPhotoAudit ? { cache: "no-store" as const } : {}),
-          })
-            .finally(() => clearTimeout(timer));
-          if (resp.ok) {
-            const data = await resp.json();
-            const unitResult: UnitCheckResult | undefined = data?.units?.[0];
-            if (unitResult) {
-              const statuses = PLATFORM_LIST.map(({ key }) => unitResult.platforms?.[key]?.status);
-              outcome.platformsChecked += statuses.length;
-              // "error" = the platform lookup couldn't be completed (e.g. the OTA
-              // API didn't respond). Counted so the receipt surfaces it as an error.
-              outcome.platformErrors += statuses.filter((s) => s === "error").length;
-              if (statuses.some((s) => s === "confirmed" || s === "photo-confirmed" || s === "not-listed")) {
-                outcome.verified += 1;
-              }
-              setResults(prev => ({ ...prev, [unit.id]: unitResult }));
-            } else {
-              // 200 OK but no usable unit result — treat as the endpoint not responding properly.
-              outcome.apiFailUnits += 1;
-              outcome.platformsChecked += 3;
-              outcome.platformErrors += 3;
-            }
-          } else {
-            outcome.apiFailUnits += 1;
-            outcome.platformsChecked += 3;
-            outcome.platformErrors += 3;
-            setResults(prev => ({
-              ...prev,
-              [unit.id]: {
-                unitId: unit.id,
-                unitNumber: unit.unitNumber,
-                address,
-                platforms: {
-                  airbnb:  { status: "error", url: null, detection: "Could not verify" },
-                  vrbo:    { status: "error", url: null, detection: "Could not verify" },
-                  booking: { status: "error", url: null, detection: "Could not verify" },
-                },
-              },
-            }));
-          }
-        } catch {
-          // Timeout/abort or network failure — the listing-check endpoint didn't respond.
-          outcome.apiFailUnits += 1;
-          outcome.platformsChecked += 3;
-          outcome.platformErrors += 3;
-          setResults(prev => ({
-            ...prev,
-            [unit.id]: {
-              unitId: unit.id,
-              unitNumber: unit.unitNumber,
-              address,
-              platforms: {
-                airbnb:  { status: "error", url: null, detection: "Could not verify" },
-                vrbo:    { status: "error", url: null, detection: "Could not verify" },
-                booking: { status: "error", url: null, detection: "Could not verify" },
-              },
-            },
-          }));
-        } finally {
-          setCheckingUnitIds(prev => {
-            const next = new Set(prev);
-            next.delete(unit.id);
-            return next;
-          });
-          setCompletedCount(prev => prev + 1);
-        }
-      })
-    );
-
-    setCheckPhase("done");
-    setPlatformChecking(false);
-    setFullAuditRunning(false);
-    setCheckStartedAt(null);
-    setPlatformDone(true);
-    setLastCheckWasFullAudit(fullPhotoAudit);
-
-    // Sticky "last processed" receipt for the OTA unit audit (× to dismiss).
-    // Any API that didn't respond — the listing-check endpoint itself, OR an
-    // Airbnb/VRBO/Booking lookup returning "error" — is shown as a RED error so
-    // a connection problem is never hidden behind a green check.
-    const total = unitsToCheck.length;
-    const unitWord = total === 1 ? "unit" : "units";
-    const base = fullPhotoAudit ? "Full unit audit" : "OTA platform check";
-    const allPlatformsErrored =
-      outcome.platformsChecked > 0 && outcome.platformErrors >= outcome.platformsChecked;
-    let receiptSuccess: boolean;
-    let receiptTitle: string;
-    let receiptDetail: string;
-    if (outcome.apiFailUnits > 0) {
-      receiptSuccess = false;
-      receiptTitle = `${base} — connection error`;
-      receiptDetail = `${outcome.apiFailUnits} of ${total} ${unitWord} couldn't be checked — the listing-check service didn't respond (timeout or API error). Results are incomplete; run it again.`;
-    } else if (allPlatformsErrored) {
-      receiptSuccess = false;
-      receiptTitle = `${base} — connection error`;
-      receiptDetail = `Couldn't verify any of ${total} ${unitWord} — Airbnb, VRBO & Booking.com didn't respond (API error). Try running it again.`;
-    } else if (outcome.platformErrors > 0) {
-      receiptSuccess = false;
-      receiptTitle = `${base} — some checks didn't respond`;
-      receiptDetail = `Checked ${total} ${unitWord}, but ${outcome.platformErrors} OTA lookup${outcome.platformErrors === 1 ? "" : "s"} didn't respond (API error) — results may be incomplete. Re-run to retry them.`;
-    } else if (outcome.verified === 0) {
-      receiptSuccess = false;
-      receiptTitle = base;
-      receiptDetail = `Couldn't verify any of ${total} ${unitWord} against Airbnb, VRBO & Booking.com. Try running it again.`;
-    } else {
-      receiptSuccess = true;
-      receiptTitle = base;
-      receiptDetail = `Checked all ${total} ${unitWord} against Airbnb, VRBO & Booking.com.`;
+    try {
+      const resp = await apiRequest("POST", "/api/preflight/audit-jobs", {
+        name: searchCommunityName,
+        city,
+        singleListing: singleUnitListing,
+        fullPhotoAudit,
+        units: unitPayload,
+        deepPhotoFolders,
+      });
+      const data = await resp.json();
+      if (!data?.job?.id) throw new Error(data?.error || "Audit job did not start");
+      setAuditJobId(data.job.id as string);
+      saveAuditJobId(id, data.job.id as string);
+      applyAuditJob(data.job as PreflightAuditJob);
+    } catch (e: any) {
+      // The job-start API didn't respond — leave a sticky red receipt (not just
+      // a transient toast) so the failure is visible after the operator returns.
+      setPlatformChecking(false);
+      setCheckStartedAt(null);
+      recordPlatformCheckReceipt({
+        timestamp: Date.now(),
+        success: false,
+        title: "Unit audit",
+        detail: `Couldn't start the check — the service didn't respond (${e?.message || String(e)}). Try again.`,
+      });
+      toast({ title: "Couldn't start the check", description: e?.message || String(e), variant: "destructive" });
     }
-    recordPlatformCheckReceipt({
-      timestamp: Date.now(),
-      success: receiptSuccess,
-      title: receiptTitle,
-      detail: receiptDetail,
-    });
   };
 
   const rerunChecks = () => {
@@ -1309,17 +1492,14 @@ export default function BuilderPreflight() {
     runPlatformCheck();
   };
 
-  // The full unit audit is the ONE comprehensive button: it runs the text platform check AND
-  // the real reverse-image photo scan (the only reliable signal for units whose number can't be
-  // confirmed by text). It subsumes the old standalone "Deep photo check" button.
+  // The full unit audit is the ONE comprehensive button. The server-side audit
+  // job runs the text platform check AND the reverse-image photo scan of every
+  // interior photo — it drives the persistent /api/preflight/photo-check job
+  // internally (via loopback) — so the whole audit survives a tab close. The
+  // client `runDeepPhotoCheck` below is now dead (the server owns the deep scan)
+  // but kept in place; don't wire it back to a button.
   const runFullUnitAudit = async () => {
-    setPlatformDone(false);
-    setResults({});
-    setPhotoChecks({});
     await runPlatformCheck(effectiveUnits, { fullPhotoAudit: true });
-    if (photoFoldersForUnits().length > 0) {
-      await runDeepPhotoCheck({ force: true });
-    }
   };
 
   // ── Photo cross-check ───────────────────────────────────────────────────────
@@ -2078,81 +2258,19 @@ export default function BuilderPreflight() {
                   const override = unitOverrides[origUnit.id];
                   const unitPhotoFolder = override?.photoFolder ?? origUnit.photoFolder;
                   const positionLabel = `Unit ${String.fromCharCode(65 + idx)}`;
-                  const rescrapeHandler = async () => {
+                  // Rescrape now runs as a server-side background job, so the
+                  // operator can fire it and leave the tab. The completion toast /
+                  // needs-URL prompt / sticky receipt are handled by the rescrape
+                  // poll effect (applyRescrapeJob).
+                  const rescrapeHandler = () => {
                     if (!unitPhotoFolder) {
                       toast({ title: "Can't rescrape", description: "No photoFolder on this unit.", variant: "destructive" });
                       return;
                     }
-                    setRescrapingUnitId(origUnit.id);
-                    const folder = unitPhotoFolder;
-                    try {
-                      const r = await fetch("/api/builder/rescrape-unit-photos", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ folder }),
-                      });
-                      const data = await r.json();
-                      if (r.status === 409 && data?.needsUrl) {
-                        const url = window.prompt(
-                          `No source URL on file for ${positionLabel}. Paste the Zillow listing URL — I'll save it for next time.`,
-                          "",
-                        );
-                        if (!url) return;
-                        const r2 = await fetch("/api/builder/rescrape-unit-photos", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ folder, sourceUrl: url }),
-                        });
-                        const d2 = await r2.json();
-                        if (!r2.ok) throw new Error(d2?.error ?? `HTTP ${r2.status}`);
-                        recordRescrape(folder, {
-                          folder,
-                          timestamp: Date.now(),
-                          savedCount: Number(d2.savedCount ?? 0),
-                          bedroomCount: Number(d2.bedroomCount ?? 0),
-                          bathroomCount: Number(d2.bathroomCount ?? 0),
-                          sourceUrl: d2.sourceUrl,
-                          urlSource: d2.urlSource,
-                        });
-                        toast({ title: "Photos rescraped", description: `${d2.savedCount} saved. Hard-refresh the builder page.`, duration: 8000 });
-                        return;
-                      }
-                      if (!r.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
-                      const saved = Number(data.savedCount ?? 0);
-                      const beds = Number(data.bedroomCount ?? 0);
-                      const baths = Number(data.bathroomCount ?? 0);
-                      const noInteriors = beds === 0 && baths === 0;
-                      const cov = data.coverage ?? null;
-                      const bedShortfall = Number(cov?.bedroomsShortfall ?? 0);
-                      const bathShortfall = Number(cov?.bathroomsShortfall ?? 0);
-                      const expectedBeds = cov?.bedroomsExpected;
-                      recordRescrape(folder, {
-                        folder,
-                        timestamp: Date.now(),
-                        savedCount: saved,
-                        bedroomCount: beds,
-                        bathroomCount: baths,
-                        sourceUrl: data.sourceUrl,
-                        urlSource: data.urlSource,
-                      });
-                      const shortfallNote = bedShortfall > 0
-                        ? ` ⚠ Only ${beds} unique bedrooms found — listing claims ${expectedBeds}. Click "Change" if you need a richer source.`
-                        : "";
-                      toast({
-                        title: noInteriors
-                          ? `Rescraped ${saved} photos — no bedrooms found`
-                          : `Photos rescraped — ${beds} bedroom${beds !== 1 ? "s" : ""}, ${baths} bathroom${baths !== 1 ? "s" : ""}`,
-                        description: noInteriors
-                          ? `That Zillow listing's photos are all kitchen/exterior/views — no bedrooms detected by Claude Vision. Click "Change" to search for a different replacement with actual interior shots.`
-                          : `${saved} saved (source: ${data.urlSource ?? "manual"}). Bedrooms are renamed Master / Bedroom 2 / Bedroom 3 by bed type. Hard-refresh the builder page to see them.${shortfallNote}`,
-                        duration: 10000,
-                      });
-                    } catch (e: any) {
-                      toast({ title: "Rescrape failed", description: e.message, variant: "destructive" });
-                    } finally {
-                      setRescrapingUnitId(null);
-                    }
+                    void startRescrapeJob(unitPhotoFolder);
+                    toast({ title: "Rescrape started", description: "Re-pulling this unit's photos — safe to leave this tab." });
                   };
+                  const rescrapeActive = !!(unitPhotoFolder && rescrapeJobIdsByFolder[unitPhotoFolder]);
                   const receipt = unitPhotoFolder ? rescrapeReceipts[unitPhotoFolder] : undefined;
                   return (
                     <div key={origUnit.id} className="rounded border border-green-200 dark:border-green-700 bg-white/60 dark:bg-background/40 px-3 py-2 space-y-1.5">
@@ -2178,11 +2296,11 @@ export default function BuilderPreflight() {
                           size="sm"
                           variant="outline"
                           className="h-7 px-2 text-xs border-blue-400 dark:border-blue-600 text-blue-800 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/40"
-                          disabled={rescrapingUnitId === origUnit.id}
+                          disabled={rescrapeActive}
                           onClick={rescrapeHandler}
                           data-testid={`button-rescrape-unit-${origUnit.id}`}
                         >
-                          {rescrapingUnitId === origUnit.id ? (
+                          {rescrapeActive ? (
                             <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Rescraping…</>
                           ) : (
                             <><RefreshCw className="h-3 w-3 mr-1" /> Rescrape photos</>
