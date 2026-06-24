@@ -3405,15 +3405,20 @@ export default function InboxPage() {
   // only reaches Guesty's `pending` state isn't reported as delivered either.
   const sendReceipt = useMutation({
     mutationFn: async () => {
-      if (!selectedConv) throw new Error("No conversation selected");
+      // Use the conversation/reservation/channel CAPTURED when the dialog opened
+      // (not live selectedConv*) so a programmatic deep-link that switches the
+      // selected conversation mid-dialog can't deliver this receipt — and its
+      // page link — to the wrong guest. Mirrors generateReceiptPage.
+      const convId = receiptDialog.conversationId ?? selectedConvId;
+      if (!convId) throw new Error("No conversation selected");
       if (!receiptBody.trim()) throw new Error("Receipt body is empty");
       const r = await apiRequest(
         "POST",
-        `/api/inbox/conversations/${selectedConvId}/send`,
+        `/api/inbox/conversations/${convId}/send`,
         {
           body: receiptBody,
-          reservationId: selectedConv.reservationId ?? null,
-          channel: selectedConv.module?.type ?? null,
+          reservationId: receiptDialog.reservationId ?? selectedConv?.reservationId ?? null,
+          channel: receiptDialog.channel ?? (selectedConv as any)?.module?.type ?? null,
         },
       );
       const body = await r.json().catch(() => ({} as any));
@@ -3426,12 +3431,13 @@ export default function InboxPage() {
             || "The receipt did not reach the guest's booking channel — verify on the channel's extranet.",
         );
       }
-      return body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string };
+      return { ...(body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string }), convId };
     },
     onSuccess: (data) => {
+      const convId = data.convId;
       resetReceiptState();
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId] });
-      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", convId] });
+      qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", convId, "posts"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
       const via = data?.deliveredVia?.trim() || "the booking channel";
       if (data?.verified === true) {
