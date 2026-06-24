@@ -9655,8 +9655,8 @@ export default function Bookings() {
             <CardContent>
               <div className="overflow-hidden rounded border">
                 <div className="max-h-[560px] overflow-auto">
-                  <div className="min-w-[1600px]">
-                    <div className="sticky top-0 z-10 grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
+                  <div className="min-w-[1850px]">
+                    <div className="sticky top-0 z-10 grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.95fr_1.05fr_.75fr_72px] gap-3 border-b bg-muted/95 px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground backdrop-blur">
                       <div>Last scan</div>
                       <div>
                         <input
@@ -9682,13 +9682,15 @@ export default function Bookings() {
                       <SortHeader label="Revenue" active={sortBy === "payout"} dir={sortDir} onClick={() => toggleSort("payout")} align="right" />
                       <SortHeader label="Buy-in" active={sortBy === "buyIn"} dir={sortDir} onClick={() => toggleSort("buyIn")} align="right" />
                       <SortHeader label="Net profit" active={sortBy === "profit"} dir={sortDir} onClick={() => toggleSort("profit")} align="right" />
+                      <div className="text-right">Paid to date</div>
+                      <div className="text-right">Payment next due</div>
                       <SortHeader label="Fill" active={sortBy === "status"} dir={sortDir} onClick={() => toggleSort("status")} />
                       <div className="text-right">Open</div>
                     </div>
                     <div className="divide-y">
                       {globalBookingMonthSections.map((section) => (
                         <div key={`global-booking-month-${section.key}`} className="divide-y">
-                          <div className="grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800">
+                          <div className="grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.95fr_1.05fr_.75fr_72px] gap-3 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800">
                             <div style={{ gridColumn: "1 / span 10" }}>
                               {section.label}
                               <span className="ml-2 font-normal text-muted-foreground">
@@ -9700,7 +9702,7 @@ export default function Bookings() {
                             <div className={`text-right ${section.totals.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
                               {fmtMoney(section.totals.profit)}
                             </div>
-                            <div className="text-[10px] font-normal text-muted-foreground" style={{ gridColumn: "14 / -1" }}>
+                            <div className="text-[10px] font-normal text-muted-foreground" style={{ gridColumn: "16 / -1" }}>
                               {section.totals.openSlots} open slot{section.totals.openSlots === 1 ? "" : "s"}
                             </div>
                           </div>
@@ -9732,7 +9734,7 @@ export default function Bookings() {
                                 key={`global-booking-${reservation._id}`}
                                 role="button"
                                 tabIndex={0}
-                                className="grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                                className="grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.95fr_1.05fr_.75fr_72px] gap-3 px-3 py-2.5 text-sm items-center transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
                                 onClick={() => openReservationDetail(reservation._id)}
                                 onKeyDown={(event) => {
                                   if (event.key === "Enter" || event.key === " ") {
@@ -9864,6 +9866,45 @@ export default function Bookings() {
                                     <p className="text-[10px] text-muted-foreground">after buy-ins</p>
                                   )}
                                 </div>
+                                {/* Paid to date — guest's paid amount per Guesty;
+                                    Airbnb is "NA" (Guesty doesn't hold the card). */}
+                                <div className="text-right">
+                                  {channelKindOf(reservation) === "airbnb" ? (
+                                    <span
+                                      className="text-muted-foreground"
+                                      title="Airbnb collects from the guest and pays the host out directly — Guesty does not track the guest's paid amount for Airbnb."
+                                    >
+                                      NA
+                                    </span>
+                                  ) : (
+                                    <p className="font-medium">{fmtMoney(paidToDateOf(reservation))}</p>
+                                  )}
+                                </div>
+                                {/* Payment next due — date Guesty next collects
+                                    from the guest (earliest scheduled installment). */}
+                                <div className="text-right">
+                                  {(() => {
+                                    if (channelKindOf(reservation) === "airbnb") {
+                                      return (
+                                        <span
+                                          className="text-muted-foreground"
+                                          title="Airbnb collects from the guest directly — Guesty holds no payment schedule for Airbnb bookings."
+                                        >
+                                          NA
+                                        </span>
+                                      );
+                                    }
+                                    const due = nextPaymentDueOf(reservation);
+                                    if (due) return <p className="font-medium">{fmtDate(due)}</p>;
+                                    const balanceDue = asMoneyNumber(reservation.money?.balanceDue);
+                                    const fullyPaid = reservation.money?.isFullyPaid === true || (balanceDue <= 0 && paidToDateOf(reservation) > 0);
+                                    return (
+                                      <span className="text-[10px] text-muted-foreground">
+                                        {fullyPaid ? "Paid in full" : "—"}
+                                      </span>
+                                    );
+                                  })()}
+                                </div>
                                 <div>
                                   <Badge
                                     variant={reservation.fullyLinked ? "default" : "outline"}
@@ -9896,7 +9937,7 @@ export default function Bookings() {
                               </div>
                             );
                           })}
-                          <div className="grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-950">
+                          <div className="grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.95fr_1.05fr_.75fr_72px] gap-3 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-950">
                             <div style={{ gridColumn: "1 / span 10" }}>
                               Subtotal for {section.label}
                             </div>
@@ -9905,14 +9946,14 @@ export default function Bookings() {
                             <div className={`text-right ${section.totals.profit >= 0 ? "text-green-700" : "text-red-700"}`}>
                               {fmtMoney(section.totals.profit)}
                             </div>
-                            <div className="text-[10px] font-normal text-blue-900/80" style={{ gridColumn: "14 / -1" }}>
+                            <div className="text-[10px] font-normal text-blue-900/80" style={{ gridColumn: "16 / -1" }}>
                               {section.totals.bookingCount} booking{section.totals.bookingCount === 1 ? "" : "s"}
                             </div>
                           </div>
                         </div>
                       ))}
                       {globalBookingGrandTotals && (
-                        <div className="grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.75fr_72px] gap-3 border-t-2 border-slate-300 bg-slate-900 px-3 py-3 text-sm font-semibold text-white">
+                        <div className="grid grid-cols-[1.4fr_42px_110px_130px_100px_1.1fr_1.45fr_1.2fr_1.8fr_.75fr_.85fr_.85fr_.85fr_.95fr_1.05fr_.75fr_72px] gap-3 border-t-2 border-slate-300 bg-slate-900 px-3 py-3 text-sm font-semibold text-white">
                           <div style={{ gridColumn: "1 / span 10" }}>
                             Total for all visible months
                             <span className="ml-2 font-normal text-slate-300">
@@ -9924,7 +9965,7 @@ export default function Bookings() {
                           <div className={`text-right ${globalBookingGrandTotals.profit >= 0 ? "text-green-300" : "text-red-300"}`}>
                             {fmtMoney(globalBookingGrandTotals.profit)}
                           </div>
-                          <div className="text-[10px] font-normal text-slate-300" style={{ gridColumn: "14 / -1" }}>
+                          <div className="text-[10px] font-normal text-slate-300" style={{ gridColumn: "16 / -1" }}>
                             {globalBookingGrandTotals.openSlots} open slot{globalBookingGrandTotals.openSlots === 1 ? "" : "s"}
                           </div>
                         </div>
