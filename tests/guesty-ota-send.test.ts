@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import {
   buildOtaSendModuleAttempts,
   deliveryOutcome,
+  guestyChannelLabel,
+  guestyModuleTypeLooksOta,
   mergeOtaModuleFromReservation,
+  otaChannelRequested,
   otaModuleTypeFromReservation,
   postDeliveryState,
   verifyOtaHostPostDelivered,
@@ -192,5 +195,53 @@ assert.equal(deliveryOutcome({ verified: false, pending: false }), "misroute", "
 assert.equal(deliveryOutcome({ verified: false }), "unconfirmed", "missing pending must not be treated as a misroute");
 assert.equal(deliveryOutcome({}), "unconfirmed");
 assert.equal(deliveryOutcome(null), "unconfirmed", "null result is conservatively unconfirmed, never a misroute");
+
+// ── Channel coverage: every OTA channel a guest can book on must be recognized
+// as OTA so its outbound reply is delivery-VERIFIED (externalId), not falsely
+// reported "sent" on a bare POST 200. The big three plus the additional OTAs
+// Guesty can relay; direct channels stay non-OTA (their accepted POST IS the send).
+for (const t of [
+  "airbnb", "airbnb2",
+  "homeaway", "homeaway2", "vrbo",
+  "bookingCom", "bookingCom2",
+  "expedia", "googleVacationRentals", "google",
+  "marriott", "homesAndVillas", "hvmi",
+  "hopper", "despegar", "tripadvisor", "holidu", "agoda",
+]) {
+  assert.equal(guestyModuleTypeLooksOta(t), true, `${t} must be treated as an OTA (delivery-verified)`);
+  assert.equal(otaChannelRequested({ type: t }), true, `${t} must require OTA delivery confirmation`);
+}
+for (const t of ["email", "sms", "whatsapp", "manual", "direct", "log", "note", "", "system"]) {
+  assert.equal(guestyModuleTypeLooksOta(t), false, `${t} must NOT be treated as an OTA`);
+}
+
+// ── Expedia must resolve to its OWN channel, never be folded into homeaway/VRBO
+// (the old source-text fallback misrouted an Expedia reply onto the VRBO module).
+assert.equal(
+  otaModuleTypeFromReservation({ integration: { platform: "expedia" }, source: "Expedia" }, null),
+  "expedia",
+  "Expedia integration.platform must win as its own channel",
+);
+assert.equal(
+  otaModuleTypeFromReservation({ integration: null, source: "Expedia" }, null),
+  "expedia",
+  "Expedia source must resolve to expedia, NOT homeaway",
+);
+assert.notEqual(
+  otaModuleTypeFromReservation({ integration: null, source: "Expedia" }, null),
+  "homeaway",
+  "Expedia must never misroute to the VRBO/homeaway module",
+);
+
+// ── Airbnb / VRBO outbound resolution + labels (previously untested live channels)
+assert.equal(otaModuleTypeFromReservation({ integration: { platform: "airbnb2" } }, "airbnb"), "airbnb2");
+assert.equal(otaModuleTypeFromReservation({ integration: null, source: "Airbnb" }, null), "airbnb2");
+assert.equal(otaModuleTypeFromReservation({ integration: { platform: "homeaway2" } }, "vrbo"), "homeaway2");
+assert.equal(otaModuleTypeFromReservation({ integration: null, source: "Vrbo" }, null), "homeaway");
+assert.equal(guestyChannelLabel({ type: "airbnb2" }), "Airbnb");
+assert.equal(guestyChannelLabel({ type: "homeaway2" }), "VRBO");
+assert.equal(guestyChannelLabel({ type: "bookingCom2" }), "Booking.com");
+assert.equal(guestyChannelLabel({ type: "expedia" }), "Expedia");
+assert.equal(guestyChannelLabel({ type: "email" }), "email");
 
 console.log("  ✓ guesty OTA send module resolution + delivery-confirmed verification");
