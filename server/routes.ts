@@ -27838,19 +27838,33 @@ Return ONLY compact JSON with this exact shape:
           ? body.propertyId
           : null;
 
+      // LOAD-BEARING (combo Unit-B badge fix, 2026-06-24): when the client sent
+      // its own groups, compute verdicts from THOSE — they are built from the
+      // exact `/photos/<folder>/<file>` tiles the gallery rendered, so every
+      // per-photo verdict's folder+filename lines up with a tile. The previous
+      // behavior rebuilt the groups server-side from `propertyId`
+      // (buildPhotoCommunityCheckRequestForProperty), which reads a DIFFERENT
+      // filename pipeline (listPublishedFilenames / unitN photo folders). For a
+      // combo draft that diverges on the SECOND unit, so Unit B's verdict
+      // filenames didn't match its tiles and those tiles got no badge (while
+      // bedroom coverage still showed Unit B, since it follows the server set).
+      // propertyId is kept ONLY to persist the result below. The server rebuild
+      // is still used when the caller didn't send groups (e.g. an internal/bulk
+      // caller that only has a propertyId).
+      const hasClientGroups = Array.isArray(body.groups) && body.groups.length > 0;
       let request: PhotoCommunityCheckRequest;
-      const built = propertyId != null ? await buildPhotoCommunityCheckRequestForProperty(propertyId) : null;
-      if (built) {
-        request = built.request;
-      } else {
-        if (!Array.isArray(body.groups) || body.groups.length === 0) {
-          return res.status(400).json({ ok: false, error: "groups[] required" });
-        }
+      if (hasClientGroups) {
         request = {
           expectedCommunity: body.expectedCommunity,
           expectedListingBedrooms: body.expectedListingBedrooms,
           groups: body.groups,
         };
+      } else {
+        const built = propertyId != null ? await buildPhotoCommunityCheckRequestForProperty(propertyId) : null;
+        if (!built) {
+          return res.status(400).json({ ok: false, error: "groups[] required" });
+        }
+        request = built.request;
       }
 
       const result = await runPhotoCommunityCheck(

@@ -113,6 +113,21 @@ check("clean trim with matching inventory → pass (no warn)",
 check("clean trim does not raise a listing warn",
   deriveBedroomListingTier(cleanTrim.matchesListing, [cleanTrim]) === "pass");
 
+// Bed-TYPE inventory mismatch is NO LONGER surfaced — the photos are
+// authoritative for bedding, so a "missing Queen Bed" (description says Queen,
+// photos show two Kings) must NOT warn and must NOT add a mismatch reason.
+const bedTypeMismatch = computeUnitBedroomCoverage("Unit A (2BR)", "a", [
+  { name: "Bedroom 1", description: "King Bed", bedType: "King Bed", photoCount: 1, photoIds: ["1"], altViewCount: 0 },
+  { name: "Bedroom 2", description: "King Bed", bedType: "King Bed", photoCount: 1, photoIds: ["2"], altViewCount: 0 },
+], 2, { bedInventoryMatch: "no", bedInventoryReason: "missing Queen Bed" });
+check("bed-type inventory mismatch no longer warns (photos are authoritative)",
+  bedTypeMismatch.tier === "pass"
+  && bedTypeMismatch.matchesListing === "yes"
+  && !/inventory mismatch/i.test(bedTypeMismatch.reason)
+  && /2\/2 bedrooms photographed/.test(bedTypeMismatch.reason));
+check("bed-type inventory mismatch does not raise a listing warn",
+  deriveBedroomListingTier(bedTypeMismatch.matchesListing, [bedTypeMismatch]) === "pass");
+
 const dedupe = dedupeCrossUnitBedroomClusters([
   {
     label: "Unit A",

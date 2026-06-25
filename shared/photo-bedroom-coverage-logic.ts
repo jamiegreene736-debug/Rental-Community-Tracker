@@ -603,9 +603,8 @@ export function deriveBedroomListingTier(
   const anyUnitFail = units.some((u) => u.matchesListing === "no");
   // Drive warns off each unit's own tier — a trim that still matched the bed
   // inventory leaves the unit at "pass" and must not re-raise a listing warn.
-  const anyWarn =
-    units.some((u) => u.tier === "warn")
-    || (bedInventoryMatch === "no");
+  // (Bed-TYPE inventory mismatch no longer warns — photos are authoritative.)
+  const anyWarn = units.some((u) => u.tier === "warn");
   if (listingMatches === "yes" && (anyUnitFail || anyWarn)) return "warn";
   if (listingMatches === "yes") return "pass";
   return "fail";
@@ -680,10 +679,12 @@ export function computeUnitBedroomCoverage(
         bedroomsFound === expectedBedrooms
           ? `${bedroomsFound}/${expectedBedrooms} bedrooms photographed.${trimNote}`
           : `${bedroomsFound}/${expectedBedrooms} bedrooms detected.${trimNote}`;
-      if (opts?.bedInventoryMatch === "no") {
-        tier = "warn";
-        reason += ` Bed inventory mismatch: ${opts.bedInventoryReason ?? "review bed types"}.`;
-      } else if (opts?.trimmedClusterCount && !cleanTrim) {
+      // Bed-TYPE inventory is intentionally NOT compared against the listing
+      // description — the photos are authoritative for the bedding, so a
+      // "missing Queen Bed"-style mismatch is never surfaced as a warning. Only
+      // an unclean over-count trim (more distinct bedroom clusters than the
+      // listing's bedroom count) still warrants a look.
+      if (opts?.trimmedClusterCount && !cleanTrim) {
         tier = "warn";
       }
     } else {
