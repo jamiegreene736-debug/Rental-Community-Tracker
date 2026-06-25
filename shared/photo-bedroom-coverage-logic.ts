@@ -151,14 +151,34 @@ export function normalizeBedType(label: string): string {
   return bt ?? label.trim();
 }
 
+/**
+ * A sleeper sofa / sofa bed lives in the LIVING ROOM, not a bedroom, so it never
+ * appears as a bedroom photo cluster. We ASSUME every condo has one, so a sleeper
+ * sofa in the expected inventory is treated as always-present and is excluded
+ * from the bedroom bed-inventory comparison — it can never be "missing" and can
+ * never turn a unit's bedroom photos amber.
+ *
+ * Tested on the RAW label, BEFORE normalizeBedType, which would otherwise collapse
+ * "Queen Sleeper Sofa" -> "Queen Bed" (line below in detectBedTypeFromCaption the
+ * `\bqueen\b` branch wins) and silently demand a phantom SECOND queen bedroom.
+ */
+export function isSofaBedType(label: string): boolean {
+  return /\b(?:sleeper\s+sofa|sofa\s+sleeper|sofa\s*beds?)\b/i.test(String(label ?? ""));
+}
+
 /** Compare detected bed types to parsed listing inventory (order-insensitive). */
 export function compareBedInventory(
   expected: string[],
   detected: string[],
 ): { matches: "yes" | "no" | "n/a"; missing: string[]; extra: string[] } {
-  if (expected.length === 0) return { matches: "n/a", missing: [], extra: [] };
-  const exp = expected.map(normalizeBedType).sort();
-  const det = detected.map(normalizeBedType).sort();
+  // Assume every condo has a sleeper sofa: drop sofa-bed entries from BOTH sides
+  // (on the raw label, before normalize) so a never-photographed living-room
+  // sleeper sofa can't read as "missing" and flip the unit to amber.
+  const expectedReal = expected.filter((e) => !isSofaBedType(e));
+  const detectedReal = detected.filter((d) => !isSofaBedType(d));
+  if (expectedReal.length === 0) return { matches: "n/a", missing: [], extra: [] };
+  const exp = expectedReal.map(normalizeBedType).sort();
+  const det = detectedReal.map(normalizeBedType).sort();
   const missing: string[] = [];
   const extra: string[] = [];
   const detCopy = [...det];
@@ -408,6 +428,9 @@ export function capBedroomClustersToExpected<T extends BedroomClusterInput>(
 
   const expectedRemaining = new Map<string, number>();
   for (const t of opts?.expectedBedInventory ?? []) {
+    // A sleeper sofa isn't a bedroom — don't let it steer which bedroom clusters
+    // we keep (and don't let "Queen Sleeper Sofa" masquerade as a Queen Bed).
+    if (isSofaBedType(t)) continue;
     const k = normalizeBedType(t).toLowerCase();
     expectedRemaining.set(k, (expectedRemaining.get(k) ?? 0) + 1);
   }

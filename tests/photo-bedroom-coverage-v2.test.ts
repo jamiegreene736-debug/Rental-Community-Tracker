@@ -11,6 +11,7 @@ import {
   mergeBedroomClustersByCaption,
   mergeBedroomClustersSameRoom,
   isBedroomCategory,
+  isSofaBedType,
   parseExpectedBedInventory,
   batchBedroomVisionRepresentatives,
 } from "../shared/photo-bedroom-coverage-logic";
@@ -41,6 +42,36 @@ check("bed inventory exact match", inv.matches === "yes");
 
 const invMiss = compareBedInventory(["King Bed", "Queen Bed"], ["King Bed"]);
 check("bed inventory missing queen", invMiss.matches === "no" && invMiss.missing.includes("Queen Bed"));
+
+// ── Sleeper sofa is assumed present (living-room item, never a bedroom photo) ──
+check("isSofaBedType matches sleeper sofa variants",
+  isSofaBedType("Sleeper Sofa") && isSofaBedType("Queen Sleeper Sofa") && isSofaBedType("Sofa Bed"));
+check("isSofaBedType does not match real bedroom beds",
+  !isSofaBedType("Queen Bed") && !isSofaBedType("King Bed") && !isSofaBedType("Two Twin Beds"));
+
+// A missing sleeper sofa must NOT flag the unit (assume every condo has one).
+const invSofaMissing = compareBedInventory(["King Bed", "Queen Bed", "Sleeper Sofa"], ["King Bed", "Queen Bed"]);
+check("missing sleeper sofa is assumed present → match (not 'no')",
+  invSofaMissing.matches === "yes" && invSofaMissing.missing.length === 0);
+
+// "Queen Sleeper Sofa" must NOT normalize into a phantom second Queen Bed requirement.
+const invQueenSofa = compareBedInventory(["King Bed", "Queen Sleeper Sofa"], ["King Bed"]);
+check("queen sleeper sofa is not a phantom Queen Bed requirement",
+  invQueenSofa.matches === "yes" && invQueenSofa.missing.length === 0);
+
+// A unit whose only parsed inventory is a sleeper sofa → nothing to verify (n/a).
+const invSofaOnly = compareBedInventory(["Sleeper Sofa"], []);
+check("sleeper-sofa-only inventory → n/a (nothing to verify)", invSofaOnly.matches === "n/a");
+
+// The cap must not be steered by a Queen Sleeper Sofa (no phantom Queen): a
+// King+King+Queen 2BR with only a King in the description + a Queen sleeper sofa
+// should still keep distinct types via diversity, not chase a phantom Queen.
+const invSofaParsed = compareBedInventory(
+  parseExpectedBedInventory("King bed and a queen sleeper sofa in the living area"),
+  ["King Bed"],
+);
+check("parsed 'King bed + queen sleeper sofa' vs detected King → match",
+  invSofaParsed.matches === "yes" && invSofaParsed.missing.length === 0);
 
 const clusters = [
   [{ id: "1", caption: "Master Bedroom — King", hash: "a".repeat(16) }],
