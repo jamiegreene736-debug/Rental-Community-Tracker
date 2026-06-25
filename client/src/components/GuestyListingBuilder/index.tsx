@@ -3389,27 +3389,71 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }
     }
 
-    // Bedroom inventory concerns → amber "review" badge on that unit's bedroom
-    // photos, so a flagged bed (e.g. "missing Two Twin Beds") points at a tile
-    // instead of living only in the summary text. Never overrides a community
-    // "no" (a wrong-community mismatch is the more important signal).
-    for (const u of communityCheckResult?.bedroomCoverage?.units ?? []) {
-      if (u.bedInventoryMatch !== "no") continue;
-      const reason = u.bedInventoryReason
-        ? `Bedroom inventory mismatch: ${u.bedInventoryReason} — review this unit's bedrooms.`
-        : `Bedroom inventory needs review (${u.reason}).`;
-      for (const room of u.rooms ?? []) {
-        for (const filename of room.filenames ?? []) {
-          if (!u.folder || !filename) continue;
-          const key = normalizePhotoVerdictKey(u.folder, filename);
-          if (map[key]?.match === "no") continue;
-          map[key] = { match: "uncertain", reason, status: map[key]?.status };
-        }
+    // Fallback: every photo in a CHECKED unit folder gets that unit's overall
+    // verdict if it didn't get its own per-photo vote. This guarantees a badge
+    // on EVERY photo of a checked unit — e.g. the SECOND unit of a combo, or
+    // photos past the vision sample cap — instead of leaving some tiles blank.
+    // Keyed off the SAME `/photos/<folder>/<file>` parse the tiles use, and it
+    // never overrides a specific per-photo verdict (only fills gaps).
+    const parseLocalPhoto = (url: string): { folder: string; filename: string } | null => {
+      try {
+        const p = url.startsWith("/") ? url : new URL(url, window.location.origin).pathname;
+        const m = p.match(/^\/photos\/([^/?#]+)\/([^/?#]+)$/);
+        return m ? { folder: m[1], filename: m[2] } : null;
+      } catch { return null; }
+    };
+    const unitFolderVerdict = new Map<string, { match: "yes" | "no" | "uncertain"; reason?: string }>();
+    for (const u of communityCheckResult?.units ?? []) {
+      if (!u.folder) continue;
+      const match: "yes" | "no" | "uncertain" =
+        u.sameAsCommunity === "yes" ? "yes" : u.sameAsCommunity === "no" ? "no" : "uncertain";
+      unitFolderVerdict.set(u.folder, {
+        match,
+        reason: match === "yes"
+          ? `${u.label}: matches the community profile.`
+          : (u.reason || `${u.label}: review against the community.`),
+      });
+    }
+    if (unitFolderVerdict.size > 0) {
+      for (const p of photos) {
+        const parsed = parseLocalPhoto(p.url);
+        if (!parsed) continue;
+        const uv = unitFolderVerdict.get(parsed.folder);
+        if (!uv) continue;
+        const key = normalizePhotoVerdictKey(parsed.folder, parsed.filename);
+        if (map[key]) continue; // keep the specific per-photo verdict
+        map[key] = { match: uv.match, reason: uv.reason };
+      }
+    }
+
+    // Duplicate photos → red ✕ on BOTH copies, so the operator can see exactly
+    // which photo is duplicated (and remove one). A real duplicate is a hard
+    // problem — the same image filed twice — so it takes precedence over a green
+    // "verified" verdict AND over the unit-folder fallback above (it runs last
+    // and overwrites unconditionally). Cross-folder (same photo under two
+    // units/community) and within-folder (the same photo twice in one gallery)
+    // are both flagged — the fallback would otherwise silently green a
+    // within-folder dup.
+    for (const d of communityCheckResult?.duplicates ?? []) {
+      const sides: Array<[{ folder: string; filename: string }, { folder: string; filename: string }]> = [
+        [d.a, d.b],
+        [d.b, d.a],
+      ];
+      for (const [self, other] of sides) {
+        if (!self.folder || !self.filename) continue;
+        const key = normalizePhotoVerdictKey(self.folder, self.filename);
+        map[key] = {
+          match: "no",
+          reason: d.scope === "cross-folder"
+            ? `Duplicate photo — the same image is also filed in ${other.folder}/${other.filename}. Remove one copy.`
+            : `Duplicate photo — the same image appears twice in this folder (also ${other.filename}). Remove one copy.`,
+          status: map[key]?.status,
+        };
       }
     }
 
     return Object.keys(map).length > 0 ? map : undefined;
-  }, [communityCheckResult]);
+  }, [communityCheckResult, photos]);
 
   const amenities = propertyData?.amenities || [];
   const descriptions = effectivePropertyData?.descriptions;
