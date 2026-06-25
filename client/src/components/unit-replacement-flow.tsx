@@ -7,6 +7,7 @@ import {
   ShieldCheck,
   ShieldAlert,
   Home,
+  BedDouble,
   ExternalLink,
   Search as SearchIcon,
   Repeat2,
@@ -786,6 +787,15 @@ export function UnitReplacementFlow({
             : anyUnknown
               ? "amber"
               : "green"; // no platformCheck field at all → treat as old-behavior green
+        // Bedroom confirmation: the search is constrained to the replaced unit's
+        // bedroom count (requiredBedrooms), but the operator asked to SEE the
+        // found unit's bedroom count confirmed every time it surfaces a
+        // replacement — including when the scraper couldn't detect it
+        // (foundBedrooms null) or when it doesn't match what we searched for.
+        const requiredBedrooms = selectedUnit.bedrooms;
+        const foundBedrooms = result.bedrooms;
+        const bedroomsKnown = typeof foundBedrooms === "number" && foundBedrooms > 0;
+        const bedroomsMatch = bedroomsKnown && foundBedrooms === requiredBedrooms;
         return (
         <div className="space-y-2.5">
           <div className="space-y-1.5">
@@ -844,6 +854,45 @@ export function UnitReplacementFlow({
                 })}
               </div>
             )}
+          </div>
+          {/* Bedroom confirmation — the operator explicitly wants to see how many
+              bedrooms the found replacement has, every time. Always shown: green
+              when it matches the unit being replaced, amber when it differs or
+              couldn't be auto-detected (so the count is never silently assumed). */}
+          <div
+            className={`rounded-md border px-3 py-2 flex items-start gap-2 ${
+              bedroomsMatch
+                ? "border-green-300 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300"
+                : "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300"
+            }`}
+            data-testid="replacement-bedroom-confirm"
+          >
+            <BedDouble className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div className="text-xs leading-snug">
+              {bedroomsKnown ? (
+                bedroomsMatch ? (
+                  <p className="font-semibold">
+                    Confirmed: this replacement has {foundBedrooms} bedroom{foundBedrooms === 1 ? "" : "s"} — matches the {requiredBedrooms}-bedroom unit you're replacing.
+                  </p>
+                ) : (
+                  <>
+                    <p className="font-semibold">
+                      This replacement has {foundBedrooms} bedroom{foundBedrooms === 1 ? "" : "s"}, but the unit you're replacing has {requiredBedrooms}.
+                    </p>
+                    <p className="text-[11px] mt-0.5">Open the listing and verify the bedroom count before confirming the swap.</p>
+                  </>
+                )
+              ) : (
+                <>
+                  <p className="font-semibold">
+                    Bedroom count couldn't be auto-detected for this replacement.
+                  </p>
+                  <p className="text-[11px] mt-0.5">
+                    The search targeted {requiredBedrooms} bedroom{requiredBedrooms === 1 ? "" : "s"} — open the listing below to confirm it has {requiredBedrooms} before replacing.
+                  </p>
+                </>
+              )}
+            </div>
           </div>
           <div className="rounded border border-border bg-background px-3 py-2.5 space-y-2">
             <div className="flex items-start justify-between gap-2">
@@ -940,7 +989,7 @@ export function UnitReplacementFlow({
           {/* What will change */}
           <div className="rounded bg-muted/50 border border-border px-2.5 py-2 text-[11px] text-muted-foreground space-y-0.5">
             <p className="font-medium text-foreground text-xs mb-1">What this replaces:</p>
-            <p><span className="line-through text-muted-foreground">Unit #{selectedUnit.unitNumber} ({selectedUnit.bedrooms} BR)</span> → <span className="font-medium text-foreground">{result.unitLabel} ({result.bedrooms ?? selectedUnit.bedrooms} BR)</span></p>
+            <p><span className="line-through text-muted-foreground">Unit #{selectedUnit.unitNumber} ({selectedUnit.bedrooms} BR)</span> → <span className="font-medium text-foreground">{result.unitLabel} ({bedroomsKnown ? `${foundBedrooms} BR` : "bedrooms unconfirmed"})</span></p>
             <p className="text-[10px]">Address, unit number, bedroom count, and photo source will all update. Platform check will re-run automatically.</p>
           </div>
 
