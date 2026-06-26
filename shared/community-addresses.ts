@@ -60,6 +60,21 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Grand Champions Villas", "Wailea Grand Champions"], street: "155 Wailea Ike Pl", city: "Kihei", cityAliases: ["Wailea"], state: "HI" },
   { names: ["Ko Olina Beach Villas", "Beach Villas at Ko Olina", "Beach Villas Ko Olina"], street: "92-102 Waialii Pl", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
   { names: ["Coconut Plantation at Ko Olina", "Coconut Plantation", "Coconut Plantation Ko Olina"], street: "92-1070 Olani St", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
+  // Oahu North Shore — Turtle Bay / Kuilima resort zone. LOAD-BEARING city alias:
+  // Zillow/Realtor/Redfin/Homes index these condos under KAHUKU, HI 96731 — "Turtle
+  // Bay" is the resort name, NOT a USPS city. The bulk-combo sweep market is literally
+  // "Turtle Bay" (community-research.ts OAHU_NORTH_CITY_PATTERN), and these resorts had
+  // NO curated rule, so hydrate never corrected the city and photo discovery searched
+  // "Turtle Bay" — a city Zillow returns nothing for — and skipped the resort as
+  // "no photos". rule.city=Kahuku makes discoverySearchCitiesForPhotoSearch put Kahuku
+  // first (the indexed city); the "Turtle Bay" alias keeps the sweep's city + the
+  // guest-facing listing label valid (mirrors the Ko Olina/Kapolei pattern above).
+  { names: ["Ocean Villas at Turtle Bay", "Ocean Villas Turtle Bay"], street: "57-020 Kuilima Dr", city: "Kahuku", cityAliases: ["Turtle Bay"], state: "HI" },
+  // One rule for the whole Kuilima Estates gated complex (generic + East + West are a
+  // single contiguous resort). East buildings sit on Eleku Kuilima Pl; West + the
+  // generic seed on 57-101 Kuilima Dr. Street precision only scores candidates here —
+  // discovery is name+city driven — so the shared canonical street is intentional.
+  { names: ["Kuilima Estates", "Kuilima Estates East", "Kuilima Estates West", "Kuilima Ests East", "Kuilima Ests West"], street: "57-101 Kuilima Dr", city: "Kahuku", cityAliases: ["Turtle Bay"], state: "HI", buildingStreetRoots: ["57-101 Kuilima Dr", "57-068 Eleku Kuilima Pl"] },
 ];
 
 /** Tokens from a Hawaii hyphenated street number (e.g. 92-102) that must not be treated as condo unit IDs in listing URL slugs. */

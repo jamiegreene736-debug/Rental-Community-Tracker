@@ -7,6 +7,7 @@ import {
   inferCommunityStreetAddress,
   resolveBulkComboListingStreet,
   communityAddressRuleForName,
+  discoverySearchCitiesForPhotoSearch,
 } from "../shared/community-addresses";
 
 let pass = 0;
@@ -89,6 +90,41 @@ for (const p of partials) {
     communityAddressRuleForName(p.name)?.street === p.street,
     communityAddressRuleForName(p.name)?.street);
 }
+
+// ── Oahu North Shore: Turtle Bay / Kuilima resort zone ────────────────────────
+// The bulk-combo sweep market is "Turtle Bay" (a resort name, not a USPS city).
+// Zillow/Realtor/Redfin/Homes index these condos under KAHUKU, HI 96731, so photo
+// discovery must search Kahuku, not "Turtle Bay" (the live failure: every query
+// returned no listings → "missing-source-url, no-photos" → resort skipped).
+const turtleBayResorts: Array<{ name: string; street: string }> = [
+  { name: "Ocean Villas at Turtle Bay", street: "57-020 Kuilima Dr" },
+  { name: "Kuilima Estates", street: "57-101 Kuilima Dr" },
+  { name: "Kuilima Estates East", street: "57-101 Kuilima Dr" },
+  { name: "Kuilima Estates West", street: "57-101 Kuilima Dr" },
+];
+for (const r of turtleBayResorts) {
+  // The sweep hands the queue city="Turtle Bay"; resolution must still land the street.
+  const resolved = resolveBulkComboListingStreet({ communityName: r.name, city: "Turtle Bay", state: "HI", streetAddress: "" });
+  check(`"${r.name}" resolves to a curated Kahuku street (queue path)`, resolved === r.street, resolved);
+
+  // Discovery must search KAHUKU first (the Zillow/Realtor index city), not "Turtle Bay".
+  const cities = discoverySearchCitiesForPhotoSearch({ communityName: r.name, city: "Turtle Bay", streetAddress: resolved });
+  check(`"${r.name}" photo discovery searches Kahuku first`, cities[0] === "Kahuku", cities);
+
+  // Both the resort's mailing city (Kahuku) and the sweep's "Turtle Bay" alias validate.
+  for (const city of ["Kahuku", "Turtle Bay"]) {
+    const verdict = validateCommunityStreetAddress({ communityName: r.name, city, state: "HI", streetAddress: resolved });
+    check(`"${r.name}" passes save-step validation with city "${city}"`, verdict.ok === true, verdict);
+  }
+}
+// East and West are one gated complex, but each must still resolve a rule (not null).
+for (const name of ["Kuilima Estates East", "Kuilima Estates West"]) {
+  check(`"${name}" matches a curated rule`, communityAddressRuleForName(name) !== null, communityAddressRuleForName(name)?.street);
+}
+// A look-alike that is NOT a Kuilima/Turtle Bay resort must not inherit the rule.
+check('"Turtle Bay Resort" hotel name does not falsely match Ocean Villas',
+  communityAddressRuleForName("Turtle Bay Resort")?.street !== "57-020 Kuilima Dr",
+  communityAddressRuleForName("Turtle Bay Resort")?.street);
 
 // The 4 Kauai resorts that failed the live sweep have NO curated rule — confirming
 // they correctly depend on the live discovery fallback, not a silent mismatch.
