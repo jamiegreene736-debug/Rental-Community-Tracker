@@ -147,3 +147,35 @@ export function fallbackWalkForResort(resortName?: string | null): WalkResult {
     source: "fallback",
   };
 }
+
+// Attach-time proximity gate decision: should a NON-trustworthy geocoded walk
+// between two units be IGNORED for rejection (collapsed to the resort-footprint
+// fallback) instead of being trusted to block the attach?
+//
+// The cross-resort gate already distrusts title-guess geocodes for CITY-WIDE
+// pairs — geocoding "title-soup, Town, HI" drops a fuzzy pin (the 2026-06-10
+// Puamana + Wyndham Ka Eo Kai mispair). The SAME distrust applies to a
+// NON-city-wide configured combo: when neither unit has a real (saved/scraped)
+// address, the unit's address is fabricated from the CONFIGURED resort (e.g. a
+// manual VRBO buy-in — VRBO exposes no scrapable per-listing address), so a
+// WITHIN-TOWN fuzzy distance is not reliable enough to hard-reject an attach the
+// operator explicitly made. Such pairs defer to the resort footprint default.
+//
+// A GROSS contradiction (> COORD_CONTRADICTION_WALK_MINUTES, ≈ a different
+// town/island) is NOT geocoding slop, so it is kept and still rejects. City-wide
+// pairs (handled by the unverified-cross-resort evidence rule) and trustworthy
+// geo (exact source coords, or two REAL addresses) are unaffected — they keep
+// their computed walk and reject when genuinely far.
+export function fuzzyGeocodeShouldDeferToResort(opts: {
+  pairCityWide: boolean;
+  geoTrustworthy: boolean;
+  walkSource: WalkResult["source"];
+  walkMinutes: number;
+}): boolean {
+  if (opts.pairCityWide || opts.geoTrustworthy) return false;
+  if (opts.walkSource !== "geocoded") return false;
+  return (
+    opts.walkMinutes > MAX_BUY_IN_WALK_MINUTES &&
+    opts.walkMinutes <= COORD_CONTRADICTION_WALK_MINUTES
+  );
+}

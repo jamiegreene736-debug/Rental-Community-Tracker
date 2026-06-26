@@ -4414,6 +4414,9 @@ function AdminDashboard() {
                     </Button>
                   </div>
                 </TableHead>
+                <TableHead className="w-[84px] text-center px-1" title="Date & time the units' photos (Unit A/B) were last scanned against Airbnb / VRBO / Booking.com to confirm the units aren't listed there — runs automatically once a week. '—' = no scannable unit folders, 'Never' = not scanned yet, amber = older than the weekly cadence.">
+                  Scanned
+                </TableHead>
                 <TableHead className="w-[104px] text-center px-1" title="Photo community QA: B = bedroom photo coverage, C = community folder matches resort, M = all folders same community">
                   Comm QA
                 </TableHead>
@@ -4837,6 +4840,59 @@ function AdminDashboard() {
                       );
                     })()}
                   </TableCell>
+                  <TableCell className="px-1 py-2 text-center whitespace-nowrap" data-testid={`cell-photo-scan-${property.id}`}>
+                    {(() => {
+                      // "Scanned" — when this listing's unit photos (Unit A/B)
+                      // were last reverse-image-searched against Airbnb / VRBO /
+                      // Booking.com to confirm the units aren't listed elsewhere.
+                      // Reuses the SAME per-property aggregation as the Photos
+                      // column (photoByProperty[id].lastCheckedAt = the most
+                      // recent checkedAt across the property's scannable unit
+                      // folders), so the date here always matches the badge it
+                      // annotates. Retroactive by construction: it reads the real
+                      // persisted photo_listing_checks rows the weekly scheduler
+                      // writes, so existing scans from the past week show up
+                      // immediately. Display-only (like the neighbouring Photos
+                      // and Comm QA status columns).
+                      const agg = photoByProperty.get(property.id);
+                      if (!agg || !agg.hasScannableFolders) {
+                        return (
+                          <span
+                            className="text-xs text-muted-foreground"
+                            title="No scannable unit folders — add real unit numbers in unit-builder-data to enable the listing scan"
+                          >
+                            —
+                          </span>
+                        );
+                      }
+                      if (!agg.lastCheckedAt) {
+                        return (
+                          <span
+                            className="text-[11px] leading-tight text-muted-foreground"
+                            title="Units not yet scanned against Airbnb / VRBO / Booking.com — the weekly scan will populate this"
+                          >
+                            Never
+                          </span>
+                        );
+                      }
+                      const when = new Date(agg.lastCheckedAt);
+                      // Flag a property whose last scan is older than the weekly
+                      // cadence (7d + 1d grace) so a missed cron run is visible.
+                      const stale = Date.now() - when.getTime() > 8 * 24 * 60 * 60 * 1000;
+                      const datePart = when.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                      const timePart = when.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+                      return (
+                        <span
+                          className={`inline-flex flex-col items-center leading-tight ${stale ? "text-amber-600" : "text-muted-foreground"}`}
+                          title={`Units last scanned against Airbnb / VRBO / Booking.com on ${formatShortDateTime(agg.lastCheckedAt)}${stale ? " — older than the weekly cadence" : ""}`}
+                          data-testid={`photo-scan-stamp-${property.id}`}
+                        >
+                          <span className="text-[11px] font-medium">{datePart}</span>
+                          <span className="text-[9px]">{timePart}</span>
+                        </span>
+                      );
+                    })()}
+                  </TableCell>
                   <TableCell className="px-0.5 py-2 text-center">
                     {(() => {
                       const row = photoCommunityByProperty.get(property.id);
@@ -5078,7 +5134,8 @@ function AdminDashboard() {
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={17} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={19} className="text-center py-8 text-muted-foreground">
+
                     No properties match your filters
                   </TableCell>
                 </TableRow>
