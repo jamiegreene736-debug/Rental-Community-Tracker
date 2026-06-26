@@ -16560,6 +16560,11 @@ function ManualBuyInDialog({
   const [managementCompany, setManagementCompany] = useState("");
   const [managementContact, setManagementContact] = useState("");
   const [notes, setNotes] = useState("");
+  // Proximity gate: when the attach is rejected as "units too far apart" but the
+  // server says an audited override is available (canForce), capture the created
+  // buy-in so the operator can attach anyway WITHOUT re-creating a duplicate row.
+  const [proximityOverride, setProximityOverride] = useState<{ buyInId: number; message: string; vrboUrl: boolean } | null>(null);
+  const [overrideNote, setOverrideNote] = useState("");
   const checkIn = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
   const checkOut = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
   const photoUrls = useMemo(() => parseUrlList(photoUrlText).slice(0, 12), [photoUrlText]);
@@ -16682,6 +16687,45 @@ function ManualBuyInDialog({
   const hasManualCost = Number.isFinite(parsedCost) && parsedCost > 0;
   const canSave = !!listingUrl.trim() && !duplicateSlot;
 
+  // Best-effort: VRBO buy-ins mint a traveler booking email so the operator can
+  // use it at checkout. Shared by the normal attach and the force-override retry.
+  const sendTravelerEmailIfVrbo = async (createdId: number, vrboUrl: boolean) => {
+    if (!vrboUrl) return;
+    const { firstName, lastName } = guestNamePartsFromReservation(reservation);
+    if (!firstName || !lastName) return;
+    try {
+      const emailRes = await apiRequest("POST", `/api/buy-ins/${createdId}/traveler-email`, {
+        reservationId: reservation._id,
+        guestFirstName: firstName,
+        guestLastName: lastName,
+      });
+      if (!emailRes.ok) {
+        const err = await emailRes.json().catch(() => ({}));
+        console.warn("[manual-buy-in] traveler email:", err?.error || err?.message);
+      }
+    } catch (e) {
+      console.warn("[manual-buy-in] traveler email failed:", e);
+    }
+  };
+
+  // Post-attach success side effects (shared by the normal attach + override retry).
+  const finalizeAttached = (vrboUrl: boolean) => {
+    const total = reservation.slotsTotal ?? reservation.slots.length;
+    const filledBefore = reservation.slots.filter((s) => s.buyIn).length;
+    const allFilled = filledBefore + 1 >= total;
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+    toast({
+      title: "Manual buy-in recorded and attached",
+      description: vrboUrl
+        ? "VRBO unit attached — booking email created when possible. Use it on VRBO checkout."
+        : undefined,
+    });
+    onClose();
+    if (allFilled) onAllUnitsAttached?.(reservation);
+  };
+
   const createAndAttach = useMutation({
     mutationFn: async () => {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
@@ -16760,49 +16804,63 @@ function ManualBuyInDialog({
         status: "active",
       }).then((r) => r.json());
       if (!created?.id) throw new Error(created?.error || "Buy-in create failed");
-      const attach = await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
-        buyInId: created.id,
-      }).then((r) => r.json());
-      if (!attach?.id) throw new Error(attach?.error || "Attach failed");
-
-      if (isVrboListingUrl(listingUrl)) {
-        const { firstName, lastName } = guestNamePartsFromReservation(reservation);
-        if (firstName && lastName) {
-          try {
-            const emailRes = await apiRequest("POST", `/api/buy-ins/${created.id}/traveler-email`, {
-              reservationId: reservation._id,
-              guestFirstName: firstName,
-              guestLastName: lastName,
-            });
-            if (!emailRes.ok) {
-              const err = await emailRes.json().catch(() => ({}));
-              console.warn("[manual-buy-in] traveler email:", err?.error || err?.message);
-            }
-          } catch (e) {
-            console.warn("[manual-buy-in] traveler email failed:", e);
-          }
+      // Raw fetch (not apiRequest) so we can read the structured 409 body: the
+      // proximity gate returns { canForce: true, message } when an audited
+      // operator override is available. apiRequest would collapse that to a bare
+      // thrown error and we'd lose the canForce signal + the human reason.
+      const attachResp = await fetch(`/api/bookings/${reservation._id}/attach-buy-in`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ buyInId: created.id }),
+      });
+      const attachData = await attachResp.json().catch(() => ({} as any));
+      if (!attachResp.ok) {
+        if (attachResp.status === 409 && attachData?.canForce) {
+          // Don't throw — surface the override panel. The buy-in row already
+          // exists; the retry re-attaches THIS id with force (no duplicate).
+          return {
+            status: "needs-override" as const,
+            buyInId: created.id as number,
+            vrboUrl,
+            message: String(attachData?.message || attachData?.error || "These units may be too far apart to be walkable."),
+          };
         }
+        throw new Error(attachData?.error || attachData?.message || `Attach failed (${attachResp.status})`);
       }
+      if (!attachData?.id) throw new Error(attachData?.error || "Attach failed");
 
-      return { created, attach, vrboUrl: isVrboListingUrl(listingUrl) };
+      await sendTravelerEmailIfVrbo(created.id, vrboUrl);
+      return { status: "attached" as const, vrboUrl };
     },
     onSuccess: (result) => {
-      const total = reservation.slotsTotal ?? reservation.slots.length;
-      const filledBefore = reservation.slots.filter((s) => s.buyIn).length;
-      const allFilled = filledBefore + 1 >= total;
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-      toast({
-        title: "Manual buy-in recorded and attached",
-        description: result.vrboUrl
-          ? "VRBO unit attached — booking email created when possible. Use it on VRBO checkout."
-          : undefined,
-      });
-      onClose();
-      if (allFilled) onAllUnitsAttached?.(reservation);
+      if (result.status === "needs-override") {
+        setProximityOverride({ buyInId: result.buyInId, message: result.message, vrboUrl: result.vrboUrl });
+        return;
+      }
+      finalizeAttached(result.vrboUrl);
     },
     onError: (e: any) => toast({ title: "Save failed", description: e.message, variant: "destructive" }),
+  });
+
+  // Audited operator override of the proximity gate — re-attaches the buy-in the
+  // initial save already created, this time with force + the reason note.
+  const forceAttach = useMutation({
+    mutationFn: async ({ buyInId, note, vrboUrl }: { buyInId: number; note: string; vrboUrl: boolean }) => {
+      const attach = await apiRequest("POST", `/api/bookings/${reservation._id}/attach-buy-in`, {
+        buyInId,
+        force: true,
+        overrideNote: note,
+      }).then((r) => r.json());
+      if (!attach?.id) throw new Error(attach?.error || "Attach failed");
+      await sendTravelerEmailIfVrbo(buyInId, vrboUrl);
+      return { vrboUrl };
+    },
+    onSuccess: (result) => {
+      setProximityOverride(null);
+      finalizeAttached(result.vrboUrl);
+    },
+    onError: (e: any) => toast({ title: "Attach failed", description: e.message, variant: "destructive" }),
   });
 
   return (
@@ -17028,21 +17086,54 @@ function ManualBuyInDialog({
             </div>
           </div>
         </div>
+        {proximityOverride && (
+          <div className="rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" data-testid="manual-buyin-proximity-override">
+            <p className="font-medium">Couldn’t confirm these units are walkable to each other</p>
+            <p className="mt-1">{proximityOverride.message}</p>
+            <p className="mt-1 text-amber-800 dark:text-amber-300">
+              VRBO doesn’t publish a unit address, so this is often a fuzzy location estimate rather than a real distance. If you know these units are close enough for one guest group, you can attach anyway — the override is recorded on the buy-in.
+            </p>
+            <Label htmlFor="manualProximityNote" className="mt-2 block text-[11px]">Override reason (optional, saved for audit)</Label>
+            <Input
+              id="manualProximityNote"
+              value={overrideNote}
+              onChange={(e) => setOverrideNote(e.target.value)}
+              placeholder="e.g. both units are in the same Princeville cluster"
+              className="mt-1 h-8 text-xs"
+              data-testid="input-manual-buyin-proximity-note"
+            />
+          </div>
+        )}
         <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button
-            onClick={() => createAndAttach.mutate()}
-            disabled={!canSave || createAndAttach.isPending}
-            data-testid="button-save-manual-buy-in"
-          >
-            {createAndAttach.isPending
-              ? (!hasManualCost && isVrboListingUrl(listingUrl)
-                  ? "Reading VRBO checkout…"
-                  : !hasManualCost && urlKind === "direct"
-                    ? "Reading listing rate…"
-                    : "Saving…")
-              : "Attach buy-in"}
-          </Button>
+          {proximityOverride ? (
+            <>
+              <Button variant="ghost" onClick={() => setProximityOverride(null)} disabled={forceAttach.isPending}>Back</Button>
+              <Button
+                onClick={() => forceAttach.mutate({ buyInId: proximityOverride.buyInId, note: overrideNote.trim(), vrboUrl: proximityOverride.vrboUrl })}
+                disabled={forceAttach.isPending}
+                data-testid="button-force-attach-manual-buy-in"
+              >
+                {forceAttach.isPending ? "Attaching…" : "Attach anyway"}
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={onClose}>Cancel</Button>
+              <Button
+                onClick={() => createAndAttach.mutate()}
+                disabled={!canSave || createAndAttach.isPending}
+                data-testid="button-save-manual-buy-in"
+              >
+                {createAndAttach.isPending
+                  ? (!hasManualCost && isVrboListingUrl(listingUrl)
+                      ? "Reading VRBO checkout…"
+                      : !hasManualCost && urlKind === "direct"
+                        ? "Reading listing rate…"
+                        : "Saving…")
+                  : "Attach buy-in"}
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
