@@ -43,6 +43,29 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-26 (dashboard "Total Revenue" column + daily revenue cron): Operator asked for a
+  per-property TOTAL REVENUE over the trailing 365 days on the dashboard table, auto-updated
+  daily. SHIPPED (`claude/dashboard-total-revenue`, PR #TBD). Pieces: (1) new `property_trailing_revenue`
+  cache table (`shared/schema.ts` + `server/schema-maintenance.ts` CREATE TABLE IF NOT EXISTS +
+  `storage.getPropertyTrailingRevenue`/`replacePropertyTrailingRevenue` — atomic wholesale replace
+  so aged-out properties drop rather than show stale). (2) `server/property-revenue-scheduler.ts`
+  (clone of `booking-confirmations.ts`): boot run + `setInterval` 24h = the "cron", single-flight,
+  fail-soft, `PROPERTY_REVENUE_DISABLED=1` to disable. It LOOPBACK self-calls the existing
+  `GET /api/bookings/guesty-all` (account-wide, committed-only, manual rows merged) with a NEW
+  additive `checkInFrom`/`checkInTo` filter (so the recent year isn't truncated at `maxRows`), then
+  sums the canonical `reservationRevenue()` per `operationsPropertyId`. Pure aggregator split into
+  `server/property-revenue-aggregate.ts` (no DB import → unit-testable; re-filters merged manual rows
+  by check-in). (3) endpoints `GET /api/dashboard/property-revenue` (fail-soft empty until table/first
+  run) + `POST /api/admin/refresh-property-revenue` (manual/smoke) + `GET /api/admin/property-revenue-status`.
+  (4) dashboard column (`client/src/pages/home.tsx`): sortable "Total Revenue", keyed by `property.id`,
+  `formatCurrency`, "—" when no connected listing / no in-window stays (absence ≠ $0), tooltip shows
+  stay count + last-updated. LOAD-BEARING: keying = `operationsPropertyId` matches `property.id` only
+  for `guesty_property_map`-mapped listings (positive core ids + negative `-draftId`); attribution is by
+  stay CHECK-IN date in the trailing 365 days. Verified: `tests/property-revenue-aggregate.test.ts` 12/0,
+  full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT
+  live-smoke the Guesty leg in-session (needs the running server + token) — confirm post-deploy via the
+  admin refresh endpoint, then the column populates (scheduler also auto-runs ~90s after boot).
+
 - 2026-06-22 (market-rate "is it the right resort + bedroom?" confirmation UI, Phase 1):
   Operator wanted glanceable proof that the bulk market-rate queue AND the Pricing-tab
   "Update Market Rates" use the CORRECT resort/community and the CORRECT bedroom size

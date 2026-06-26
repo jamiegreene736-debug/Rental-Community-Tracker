@@ -18,6 +18,7 @@ import {
   type BookingConfirmation, type InsertBookingConfirmation,
   type BookingAlternativePage, bookingAlternativePages,
   type GuestReceipt, type InsertGuestReceipt, guestReceipts,
+  type PropertyTrailingRevenue, type InsertPropertyTrailingRevenue, propertyTrailingRevenue,
   type AutoFillLossOptions, autoFillLossOptions,
   type BulkAutoFillState, bulkAutoFillState,
   type CancellationNotice, cancellationNotices,
@@ -313,6 +314,12 @@ export interface IStorage {
   recordGuestReceiptOpen(token: string): Promise<void>;
   getRecentGuestReceipts(limit?: number): Promise<GuestReceipt[]>;
   getGuestReceiptsByReservationIds(reservationIds: string[]): Promise<GuestReceipt[]>;
+
+  // Per-property trailing-365-day revenue cache (dashboard "Total Revenue").
+  // The scheduler wholesale-replaces the table each run; the dashboard reads
+  // all rows keyed by propertyId (= operationsPropertyId).
+  getPropertyTrailingRevenue(): Promise<PropertyTrailingRevenue[]>;
+  replacePropertyTrailingRevenue(rows: InsertPropertyTrailingRevenue[]): Promise<void>;
 
   createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
   getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
@@ -1420,6 +1427,20 @@ export class DatabaseStorage implements IStorage {
   }
 
   // ── Guest payment/refund receipts (auto-sent) ──
+  async getPropertyTrailingRevenue(): Promise<PropertyTrailingRevenue[]> {
+    return db.select().from(propertyTrailingRevenue);
+  }
+
+  // Atomic wholesale replace: readers see the old rows until COMMIT, then the
+  // fresh set — never an empty table mid-refresh. Properties absent from `rows`
+  // (no stays in the window) are dropped, so a stale figure can't linger.
+  async replacePropertyTrailingRevenue(rows: InsertPropertyTrailingRevenue[]): Promise<void> {
+    await db.transaction(async (tx) => {
+      await tx.delete(propertyTrailingRevenue);
+      if (rows.length > 0) await tx.insert(propertyTrailingRevenue).values(rows);
+    });
+  }
+
   async createGuestReceipt(r: InsertGuestReceipt): Promise<GuestReceipt> {
     const [row] = await db.insert(guestReceipts).values(r).returning();
     return row;
