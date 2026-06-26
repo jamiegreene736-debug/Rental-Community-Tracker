@@ -773,6 +773,42 @@ assert.match(
 );
 console.log("  ✓ combo photo and city research state stay observable");
 
+// ── Bulk "Select all" multi-city sweep: cross-city dedup + already-in-system skip ──
+// The operator runs many cities at once and clicks Select all; the SAME resort can
+// surface under two adjacent towns. The bulk enqueue must (1) collapse duplicate
+// resorts across cities (process each once) and (2) never re-add a community already
+// in the system. Both are enforced server-side as the 100%-sure backstop.
+assert.ok(
+  /dedupSeen|Cross-resort dedup/.test(routesSource)
+    && /\$\{nameKey\}\|\$\{stateKey\}/.test(routesSource),
+  "bulk-combo enqueue must dedup incoming items by normalized name|state (collapse the same resort across cities)",
+);
+assert.ok(
+  routesSource.includes("isCommunityAlreadyInSystem")
+    && /skipIfCommunityInSystem && !input\.allowDuplicate/.test(routesSource),
+  "bulk-combo enqueue must drop sweep items whose community is already in the system (skipIfCommunityInSystem)",
+);
+assert.ok(
+  /getComboInventoryForCommunity\(\{ communityName: name, state: target\.state \}\)/.test(routesSource),
+  "isCommunityAlreadyInSystem must check inventory CITY-AGNOSTICALLY so a resort saved under another town still counts",
+);
+assert.ok(
+  routesSource.includes("res.status(200).json({ job: null, skipped, deduped })"),
+  "bulk-combo enqueue must report (not error) when every item was a duplicate or already in the system",
+);
+// Client: Select all must not tick resorts already in the system, and the queue path
+// must stamp skipIfCommunityInSystem + drop in-system resorts as a backstop.
+assert.ok(
+  addCommunitySource.includes("const resortAlreadyInSystem = ")
+    && /if \(resortAlreadyInSystem\(c\)\) return;/.test(addCommunitySource),
+  "Select-all-eligible sweep must skip resorts already in the system",
+);
+assert.ok(
+  /buildBulkComboItemForCommunity\([^)]*\{ skipIfCommunityInSystem: true \}\)/.test(addCommunitySource),
+  "bulk sweep/community queue must stamp skipIfCommunityInSystem on every item it builds",
+);
+console.log("  ✓ bulk sweep dedups resorts across cities and skips already-in-system communities");
+
 // Case 7: Primary Bathroom — valid (has \"Primary\" + \"Bathroom\").
 assert.equal(
   sanity({ label: "Primary Bathroom With Shower", category: "Bathrooms", confidence: 0.9 }).category,
