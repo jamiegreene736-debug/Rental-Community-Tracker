@@ -297,7 +297,7 @@ import {
   looksLikeIndividualListingTitle,
   mergeDiscoveredScoutRowsByResort,
 } from "@shared/alternative-scout-resort";
-import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, walkBetweenCoords, parseGeoNote, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
+import { fallbackWalkForResort, describeWalk, describeWalkFromMinutes, walkBetweenCoords, parseGeoNote, fuzzyGeocodeShouldDeferToResort, MAX_BUY_IN_WALK_MINUTES, type WalkResult } from "@shared/walking-distance";
 import { titlesShareWalkableCommunity, parseVerifiedCommunityKeysFromNotes, verifiedKeysShareCommunity } from "@shared/city-vrbo-combo";
 import { analyzeGroundFloorRequirement, inferGroundFloorFromText } from "@shared/ground-floor";
 import {
@@ -10950,6 +10950,22 @@ Requirements:
           geoTrustworthy =
             walk.source === "geocoded" && hasRealAddress(units[i]) && hasRealAddress(units[j]);
         }
+        // A NON-city-wide configured combo (e.g. a manual VRBO buy-in whose
+        // address is fabricated from the configured resort because VRBO exposes
+        // no scrapable per-listing address) with only a fuzzy title-guess
+        // geocode is NOT reliable enough to reject on a WITHIN-TOWN distance —
+        // the same "title-soup geocode drops a fuzzy pin" distrust the city-wide
+        // gate already applies. Defer such pairs to the resort footprint default
+        // so a deliberate operator attach isn't blocked by geocoding slop; a
+        // GROSS contradiction (different town/island) is kept and still rejects.
+        if (fuzzyGeocodeShouldDeferToResort({
+          pairCityWide: units[i].cityWide || units[j].cityWide,
+          geoTrustworthy,
+          walkSource: walk.source,
+          walkMinutes: walk.minutes,
+        })) {
+          walk = fallbackWalkForResort(resortName);
+        }
         if (
           (units[i].cityWide || units[j].cityWide) &&
           !geoTrustworthy &&
@@ -20839,6 +20855,7 @@ Requirements:
     try {
       const reservationId = req.params.reservationId;
       const { buyInId, targetUnitId, force } = req.body as { buyInId: number; targetUnitId?: string; force?: boolean };
+      const overrideNoteText = String((req.body as any)?.overrideNote ?? "").trim();
       if (!buyInId) return res.status(400).json({ error: "buyInId required" });
 
       const candidate = await storage.getBuyIn(buyInId);
@@ -20847,15 +20864,32 @@ Requirements:
         .filter((b) => b.id !== buyInId && b.status !== "cancelled");
       const proximity = await estimateAttachedBuyInProximity([...currentAttachments, candidate]);
       if (proximity && !proximity.withinLimit) {
-        return res.status(409).json({
-          error: "Buy-in units too far apart",
-          message: proximity.confidence === "unverified-cross-resort"
-            ? `Cannot verify ${proximity.worstPair.unitLabels.join(" and ")} are walkable: ${proximity.walk.description}`
-            : `Buy-in units must be within ${MAX_BUY_IN_WALK_MINUTES} minutes walking distance. Estimated ${proximity.walk.minutes} minutes between ${proximity.worstPair.unitLabels.join(" and ")}.`,
-          walk: proximity.walk,
-          maxMinutes: MAX_BUY_IN_WALK_MINUTES,
-          confidence: proximity.confidence,
-        });
+        const proximityMessage = proximity.confidence === "unverified-cross-resort"
+          ? `Cannot verify ${proximity.worstPair.unitLabels.join(" and ")} are walkable: ${proximity.walk.description}`
+          : `Buy-in units must be within ${MAX_BUY_IN_WALK_MINUTES} minutes walking distance. Estimated ${proximity.walk.minutes} minutes between ${proximity.worstPair.unitLabels.join(" and ")}.`;
+        if (!force) {
+          // `canForce` tells the client an audited operator override is available
+          // (the manual buy-in dialog surfaces an "attach anyway" confirmation).
+          return res.status(409).json({
+            error: "Buy-in units too far apart",
+            message: proximityMessage,
+            walk: proximity.walk,
+            maxMinutes: MAX_BUY_IN_WALK_MINUTES,
+            confidence: proximity.confidence,
+            canForce: true,
+          });
+        }
+        // Operator force-override (audited) — same pattern as the unit-type
+        // confidence gate below. The proximity signal is frequently a fuzzy
+        // title-guess geocode for VRBO/manual units (no real address), so a
+        // deliberate manual attach can legitimately need this; record why on the
+        // buy-in so the override is never silent.
+        const auditLine = `[${new Date().toISOString()}] FORCE-OVERRIDE (proximity ${proximity.confidence}, ~${proximity.walk?.minutes ?? "?"} min) — ${overrideNoteText || "no note provided"}`;
+        try {
+          const existingNotes = candidate.notes || "";
+          await storage.updateBuyIn(buyInId, { notes: existingNotes ? `${existingNotes}\n${auditLine}` : auditLine }).catch(() => {});
+        } catch {}
+        console.warn(`[attach-buy-in] Operator force-attach over proximity gate: buyIn=${buyInId} reservation=${reservationId} confidence=${proximity.confidence} minutes=${proximity.walk?.minutes} note=${overrideNoteText ? "yes" : "no"}`);
       }
 
       // Per-slot combo awareness and stricter enforcement (surgical addition for this PR)
@@ -20896,14 +20930,13 @@ Requirements:
               });
             }
             // Operator override allowed — persist audit note to the buy-in record (append, no new tables)
-            const overrideNote = (req.body as any)?.overrideNote ? String((req.body as any).overrideNote).trim() : "";
-            const auditLine = `[${new Date().toISOString()}] FORCE-OVERRIDE (conf ${candidate.unitTypeConfidence}% < ${attachThreshold}%) — ${overrideNote || "no note provided"}`;
+            const auditLine = `[${new Date().toISOString()}] FORCE-OVERRIDE (conf ${candidate.unitTypeConfidence}% < ${attachThreshold}%) — ${overrideNoteText || "no note provided"}`;
             try {
               const existingNotes = candidate.notes || "";
               const updatedNotes = existingNotes ? `${existingNotes}\n${auditLine}` : auditLine;
               await storage.updateBuyIn(buyInId, { notes: updatedNotes }).catch(() => {});
             } catch {}
-            console.warn(`[attach-buy-in] Operator force-attach below threshold: buyIn=${buyInId} confidence=${candidate.unitTypeConfidence} threshold=${attachThreshold} reservation=${reservationId} note=${overrideNote ? "yes" : "no"}`);
+            console.warn(`[attach-buy-in] Operator force-attach below threshold: buyIn=${buyInId} confidence=${candidate.unitTypeConfidence} threshold=${attachThreshold} reservation=${reservationId} note=${overrideNoteText ? "yes" : "no"}`);
           }
         }
       }
