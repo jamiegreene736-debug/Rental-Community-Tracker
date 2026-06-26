@@ -139,6 +139,15 @@ const comboKeyForPairing = (pairing: Pick<SuggestedPairing, "unit1Beds" | "unit2
 
 const isPairingAvailable = (pairing: SuggestedPairing): boolean => isComboPairingAvailable(pairing);
 
+// True when the operator already has this resort in the system (a saved/queued
+// listing or any built/queued combo). The bulk "Select all" sweep must NEVER
+// re-add a resort that's already covered — see queueSelectedSweepResorts. The
+// server enforces the same thing city-agnostically as the 100%-sure backstop.
+const resortAlreadyInSystem = (c: CommunityResult): boolean =>
+  c.hasExistingListing === true
+  || (c.existingComboLabels?.length ?? 0) > 0
+  || (c.reservedComboLabels?.length ?? 0) > 0;
+
 type SuggestedPairing = {
   unit1Beds: number;
   unit2Beds: number;
@@ -1521,6 +1530,7 @@ export default function AddCommunity() {
   const buildBulkComboItemForCommunity = useCallback(async (
     community: CommunityResult,
     idSeed: string,
+    opts?: { skipIfCommunityInSystem?: boolean },
   ): Promise<Record<string, any> | null> => {
     const street = inferCommunityStreetAddress({
       communityName: community.name,
@@ -1551,6 +1561,9 @@ export default function AddCommunity() {
       strPermit: null,
       dbprLicense: null,
       touristTaxAccount: null,
+      // Bulk select-all paths set this so the server drops the item if the
+      // community is already in the system (city-agnostic backstop).
+      ...(opts?.skipIfCommunityInSystem ? { skipIfCommunityInSystem: true } : {}),
     };
   }, []);
 
@@ -1649,15 +1662,27 @@ export default function AddCommunity() {
 
   const queueBestCombosForCommunities = useCallback(async (indexes: number[]) => {
     if (indexes.length === 0) return;
-    const selected = [...indexes].sort((a, b) => a - b).map((i) => communities[i]).filter(Boolean);
-    if (selected.length === 0) return;
+    const picked = [...indexes].sort((a, b) => a - b).map((i) => communities[i]).filter(Boolean);
+    if (picked.length === 0) return;
+    // Skip resorts already in the system — the operator wants bulk-add to ignore
+    // anything already covered (the server enforces the same as the backstop).
+    const inSystemCount = picked.filter(resortAlreadyInSystem).length;
+    const selected = picked.filter((c) => !resortAlreadyInSystem(c));
+    if (selected.length === 0) {
+      toast({
+        title: "Nothing to queue",
+        description: `All ${inSystemCount} selected resort${inSystemCount === 1 ? " is" : "s are"} already in the system.`,
+        variant: "destructive",
+      });
+      return;
+    }
     setBulkComboStarting(true);
     setBulkComboOpen(true);
     try {
       const items: any[] = [];
       for (const community of selected) {
         try {
-          const item = await buildBulkComboItemForCommunity(community, `bcomm_${items.length}`);
+          const item = await buildBulkComboItemForCommunity(community, `bcomm_${items.length}`, { skipIfCommunityInSystem: true });
           if (item) items.push(item);
         } catch {
           // skip one on error; continue others
@@ -1669,11 +1694,25 @@ export default function AddCommunity() {
       }
       const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", { items });
       const jobData = await resp.json();
+      const serverSkipped = Array.isArray(jobData.skipped) ? jobData.skipped.length : 0;
+      const serverDeduped = Array.isArray(jobData.deduped) ? jobData.deduped.length : 0;
+      const inSystemTotal = inSystemCount + serverSkipped;
       if (jobData.job) {
         setBulkComboJob(jobData.job);
         setBulkComboJobId(jobData.job.id);
         setBulkComboEvents([]);
-        toast({ title: "Bulk queued", description: `${items.length} community best-combo draft${items.length === 1 ? "" : "s"}` });
+        const queuedCount = Array.isArray(jobData.job.items) ? jobData.job.items.length : items.length;
+        const extras: string[] = [];
+        if (inSystemTotal > 0) extras.push(`${inSystemTotal} already in the system`);
+        if (serverDeduped > 0) extras.push(`${serverDeduped} duplicate${serverDeduped === 1 ? "" : "s"}`);
+        toast({ title: "Bulk queued", description: [`${queuedCount} community best-combo draft${queuedCount === 1 ? "" : "s"}`, ...extras].join(" · ") });
+      } else {
+        toast({
+          title: "Nothing new to queue",
+          description: inSystemTotal > 0
+            ? `${inSystemTotal} selected resort${inSystemTotal === 1 ? " is" : "s are"} already in the system.`
+            : "All selected resorts were duplicates or already covered.",
+        });
       }
       setBulkCommunityIndexes(new Set());
     } catch (e: any) {
@@ -1723,7 +1762,11 @@ export default function AddCommunity() {
     const next = new Set<string>();
     sweepMarkets.forEach((m, mi) => {
       (m.communities ?? []).forEach((c, ci) => {
-        if (checkCommunityType(c.unitTypes, c.researchSummary).eligible) next.add(`${mi}:${ci}`);
+        if (!checkCommunityType(c.unitTypes, c.researchSummary).eligible) return;
+        // Never auto-select a resort already in the system — the operator wants the
+        // sweep to skip anything already covered (backstopped at queue + on the server).
+        if (resortAlreadyInSystem(c)) return;
+        next.add(`${mi}:${ci}`);
       });
     });
     setSweepResortSelection(next);
@@ -1736,8 +1779,21 @@ export default function AddCommunity() {
   // whose combos are all already built/queued.
   const BULK_COMBO_BATCH_MAX = 12;
   const queueSelectedSweepResorts = useCallback(async () => {
-    const selected = sweepSelectedCommunities;
-    if (selected.length === 0) return;
+    // sweepSelectedCommunities is already deduped across cities (same resort in two
+    // towns → one entry). 100%-sure backstop: also drop anything already in the
+    // system here, so a manually-ticked "Existing" resort is never re-added.
+    const alreadyInSystem = sweepSelectedCommunities.filter(resortAlreadyInSystem);
+    const selected = sweepSelectedCommunities.filter((c) => !resortAlreadyInSystem(c));
+    if (selected.length === 0) {
+      toast({
+        title: "Nothing to queue",
+        description: alreadyInSystem.length > 0
+          ? `${alreadyInSystem.length} selected resort${alreadyInSystem.length === 1 ? " is" : "s are"} already in the system — nothing new to add.`
+          : "No resorts selected.",
+        variant: "destructive",
+      });
+      return;
+    }
     const capped = selected.slice(0, BULK_COMBO_BATCH_MAX);
     const overflow = selected.length - capped.length;
     setSweepQueueStarting(true);
@@ -1747,7 +1803,7 @@ export default function AddCommunity() {
       let skipped = 0;
       for (const community of capped) {
         try {
-          const item = await buildBulkComboItemForCommunity(community, `sweep_${items.length}`);
+          const item = await buildBulkComboItemForCommunity(community, `sweep_${items.length}`, { skipIfCommunityInSystem: true });
           if (item) items.push(item);
           else skipped += 1;
         } catch {
@@ -1765,38 +1821,58 @@ export default function AddCommunity() {
       }
       const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", { items });
       const jobData = await resp.json();
+      // Server may DROP items it caught as duplicates of each other (cross-city) or
+      // already-in-system; surface those counts alongside the client-side skips.
+      const serverSkippedNames: string[] = Array.isArray(jobData.skipped) ? jobData.skipped.map((s: any) => String(s?.communityName || "")).filter(Boolean) : [];
+      const serverDeduped = Array.isArray(jobData.deduped) ? jobData.deduped.length : 0;
+      // Name the already-in-system resorts (client flag + server backstop) so a rare
+      // fuzzy over-skip is VISIBLE and the operator can re-add it via the wizard.
+      const inSystemNames = Array.from(new Set([...alreadyInSystem.map((c) => c.name), ...serverSkippedNames])).filter(Boolean);
+      const inSystemTotal = inSystemNames.length;
+      const namedList = (names: string[]) => names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3} more` : "");
+      // De-select every resort this run accounted for (queued + all-combos-used +
+      // already-in-system) so >12 overflow stays ticked for a one-click "run again".
+      const consumed = new Set([...capped, ...alreadyInSystem].map(resortDedupKey));
+      const deselectConsumed = () => setSweepResortSelection((prev) => {
+        const next = new Set<string>();
+        sweepMarkets.forEach((m, mi) => {
+          (m.communities ?? []).forEach((c, ci) => {
+            const k = `${mi}:${ci}`;
+            if (prev.has(k) && !consumed.has(resortDedupKey(c))) next.add(k);
+          });
+        });
+        return next;
+      });
       if (jobData.job) {
         setBulkComboJob(jobData.job);
         setBulkComboJobId(jobData.job.id);
         setBulkComboEvents([]);
-        // Drop ONLY the resorts this batch consumed (queued + all-combos-used
-        // skips) so any >12 overflow stays ticked and "run again for the rest"
-        // is a single click — never a re-tick.
-        const consumed = new Set(capped.map(resortDedupKey));
-        setSweepResortSelection((prev) => {
-          const next = new Set<string>();
-          sweepMarkets.forEach((m, mi) => {
-            (m.communities ?? []).forEach((c, ci) => {
-              const k = `${mi}:${ci}`;
-              if (prev.has(k) && !consumed.has(resortDedupKey(c))) next.add(k);
-            });
-          });
-          return next;
-        });
+        deselectConsumed();
         setBulkComboOpen(true);
+        const queuedCount = Array.isArray(jobData.job.items) ? jobData.job.items.length : items.length;
+        const extras: string[] = [];
+        if (skipped > 0) extras.push(`${skipped} skipped (all combos used)`);
+        if (inSystemTotal > 0) extras.push(`${inSystemTotal} already in the system (${namedList(inSystemNames)})`);
+        if (serverDeduped > 0) extras.push(`${serverDeduped} duplicate${serverDeduped === 1 ? "" : "s"} across cities`);
         if (overflow > 0) {
-          // Keep the sweep panel open behind the live queue so the operator can
-          // close it and queue the remaining resorts.
           toast({
             title: "Bulk queued from sweep",
-            description: `${items.length} queued${skipped > 0 ? ` · ${skipped} skipped (all combos used)` : ""} · ${overflow} still selected — close the queue and click Queue again for the rest`,
+            description: `${queuedCount} queued${extras.length ? ` · ${extras.join(" · ")}` : ""} · ${overflow} still selected — close the queue and click Queue again for the rest`,
           });
         } else {
           setSweepOpen(false);
-          const parts = [`${items.length} resort${items.length === 1 ? "" : "s"} queued`];
-          if (skipped > 0) parts.push(`${skipped} skipped (all combos used)`);
-          toast({ title: "Bulk queued from sweep", description: parts.join(" · ") });
+          toast({ title: "Bulk queued from sweep", description: [`${queuedCount} resort${queuedCount === 1 ? "" : "s"} queued`, ...extras].join(" · ") });
         }
+      } else {
+        // Nothing queued — the server dropped everything (all already in system or
+        // collapsed as cross-city duplicates). De-select them so they don't re-run.
+        deselectConsumed();
+        toast({
+          title: "Nothing new to queue",
+          description: inSystemTotal > 0
+            ? `${inSystemTotal} selected resort${inSystemTotal === 1 ? " is" : "s are"} already in the system (${namedList(inSystemNames)})${serverDeduped > 0 ? ` · ${serverDeduped} duplicate${serverDeduped === 1 ? "" : "s"} across cities` : ""}.`
+            : "All selected resorts were duplicates or already covered.",
+        });
       }
     } catch (e: any) {
       const msg = String(e?.message || "");
@@ -3593,7 +3669,10 @@ export default function AddCommunity() {
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => setBulkCommunityIndexes(new Set(communities.map((_, i) => i)))}
+                  onClick={() => setBulkCommunityIndexes(new Set(
+                    // Don't tick resorts already in the system — bulk-add skips them.
+                    communities.map((c, i) => (resortAlreadyInSystem(c) ? -1 : i)).filter((i) => i >= 0),
+                  ))}
                   data-testid="button-select-all-communities-bulk"
                 >
                   Select all for bulk queue

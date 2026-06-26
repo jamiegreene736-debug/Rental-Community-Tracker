@@ -35018,6 +35018,12 @@ Return ONLY compact JSON with this exact shape:
     unit1Url?: string | null;
     unit2Url?: string | null;
     manual?: boolean;
+    // Bulk "Select all" sweep flag: when set, the enqueue endpoint DROPS this item
+    // (never 409s) if the community is already in the system (any existing/queued
+    // listing, city-agnostic). The single-community wizard does NOT set it, so its
+    // deliberate "add another combo to a community I already have" path is unaffected.
+    // Enqueue-time only — not persisted onto the job item.
+    skipIfCommunityInSystem?: boolean;
   };
   type BulkComboListingItem = BulkComboListingInput & {
     id: string;
@@ -36338,19 +36344,82 @@ Return ONLY compact JSON with this exact shape:
   };
 
   app.post("/api/community/bulk-combo-listing-jobs", async (req, res) => {
-    const inputs = Array.isArray(req.body?.items) ? req.body.items as BulkComboListingInput[] : [];
-    if (inputs.length === 0) return res.status(400).json({ error: "items required" });
+    const rawInputs = Array.isArray(req.body?.items) ? req.body.items as BulkComboListingInput[] : [];
+    if (rawInputs.length === 0) return res.status(400).json({ error: "items required" });
+
+    // ── Cross-resort dedup (LOAD-BEARING for the multi-city "Select all" sweep) ──
+    // The same resort can surface under two adjacent towns (Koloa + Poipu both
+    // return Pili Mai), and "Select all" spans every scanned city. The per-combo
+    // dup guard below keys by name|CITY|state, so two DIFFERENT cities would NOT
+    // collapse and we'd discover + photograph + bill SearchAPI for the SAME resort
+    // twice. Collapse incoming items by normalized name|state first (keep the
+    // first). The client already dedupes; this is the server-side guarantee.
+    const dedupSeen = new Set<string>();
+    const deduped: Array<{ communityName: string; city: string }> = [];
+    const dedupedInputs: BulkComboListingInput[] = [];
+    for (const input of rawInputs) {
+      const nameKey = normalizeQueueText(input.community?.name);
+      const stateKey = normalizeQueueText(input.community?.state);
+      const dk = `${nameKey}|${stateKey}`;
+      if (nameKey && dedupSeen.has(dk)) {
+        deduped.push({ communityName: String(input.community?.name || ""), city: String(input.community?.city || "") });
+        continue;
+      }
+      if (nameKey) dedupSeen.add(dk);
+      dedupedInputs.push(input);
+    }
+
+    // ── "Already in the system" skip (sweep/bulk-select only) ───────────────────
+    // Items the bulk select-all path stamps with skipIfCommunityInSystem are DROPPED
+    // (not 409'd) when the community already has any listing/draft/queued combo —
+    // the operator asked the sweep to never re-add a resort already covered. The
+    // single-community wizard never sets the flag, so its deliberate "add another
+    // combo to an existing community" path is unchanged. allowDuplicate also opts out.
+    const skipped: Array<{ communityName: string }> = [];
+    const inputs: BulkComboListingInput[] = [];
+    for (const input of dedupedInputs) {
+      if (input.skipIfCommunityInSystem && !input.allowDuplicate) {
+        const already = await isCommunityAlreadyInSystem({
+          communityName: String(input.community?.name || ""),
+          state: String(input.community?.state || ""),
+        });
+        if (already) {
+          skipped.push({ communityName: String(input.community?.name || "") });
+          continue;
+        }
+      }
+      inputs.push(input);
+    }
+
+    if (inputs.length === 0) {
+      // Nothing left to queue (all duplicates of each other and/or already in the
+      // system). Not an error — report what was dropped so the client can toast it.
+      return res.status(200).json({ job: null, skipped, deduped });
+    }
+
+    // Per-combo duplicate guard. The bulk "Select all" sweep (skipIfCommunityInSystem)
+    // must be RESILIENT — one combo collision must never abort the whole batch and
+    // lose every other valid resort — so a sweep item that collides is SKIPPED
+    // per-item (added to `skipped`, dropped from the queue). The single-community
+    // wizard (no flag) keeps the hard 409 + override UX it depends on. We build a
+    // filtered `queueable` list rather than enqueueing every input.
     const requestReservations = new Set<string>();
+    const queueable: BulkComboListingInput[] = [];
     for (const input of inputs.slice(0, 12)) {
       const communityName = String(input.community?.name || "").trim();
       const city = String(input.community?.city || "").trim();
       const state = String(input.community?.state || "").trim();
       const key = comboKeyForBeds(input.pairing?.unit1Beds, input.pairing?.unit2Beds);
-      if (!communityName || !key) continue;
+      if (!communityName || !key) { queueable.push(input); continue; }
       const reservationKey = `${normalizeQueueText(communityName)}|${normalizeQueueText(city)}|${normalizeQueueText(state)}|${key}`;
       const inventory = await getComboInventoryForCommunity({ communityName, city, state });
       const occupied = inventory.occupiedKeys.has(key) || requestReservations.has(reservationKey);
       if (occupied && !input.allowDuplicate) {
+        if (input.skipIfCommunityInSystem) {
+          // Sweep/bulk-select: drop just this resort, keep queueing the rest.
+          skipped.push({ communityName });
+          continue;
+        }
         const existing = inventory.items.find((item) => item.key === key);
         return res.status(409).json({
           error: "Combo already exists or is queued",
@@ -36369,9 +36438,13 @@ Return ONLY compact JSON with this exact shape:
         });
       }
       requestReservations.add(reservationKey);
+      queueable.push(input);
     }
-    const job = await createBulkComboListingJob(inputs);
-    res.status(202).json({ job: serializeBulkComboListingJob(job) });
+    if (queueable.length === 0) {
+      return res.status(200).json({ job: null, skipped, deduped });
+    }
+    const job = await createBulkComboListingJob(queueable);
+    res.status(202).json({ job: serializeBulkComboListingJob(job), skipped, deduped });
   });
 
   // ── Manual "Add a community" (Add Combo Listing wizard) ──────────────────────
@@ -42194,6 +42267,49 @@ Return ONLY compact JSON with this exact shape:
       community.reservedComboLabels = Array.from(inventory.reservedKeys).sort().map(comboLabelForKey);
     }
     return communities;
+  };
+
+  // "Is this community already in the system?" — the server-side, city-AGNOSTIC
+  // backstop for the bulk "Select all" sweep guarantee (the operator wants a resort
+  // that's already covered to NEVER be re-added, even if it surfaces under a
+  // different town than the one it was saved under). Mirrors the client's
+  // hasExistingListing badge logic (annotateCommunitiesWithComboInventory) but
+  // drops the city match: ANY non-archived combo draft, queued/running combo, core
+  // tracked property, or saved draft for this name+state counts as in-system.
+  const trackedCoreComboCommunities = (): string[] => {
+    const out: string[] = [];
+    for (const pidStr of Object.keys(PROPERTY_UNIT_CONFIGS)) {
+      const cfg = PROPERTY_UNIT_CONFIGS[Number(pidStr)];
+      if (cfg?.community) out.push(String(cfg.community));
+    }
+    return out;
+  };
+  const isCommunityAlreadyInSystem = async (target: { communityName: string; state?: string }): Promise<boolean> => {
+    const name = String(target.communityName || "").trim();
+    if (!name) return false;
+    // City-agnostic combo + reserved inventory (no `city` → comboCommunityMatches
+    // skips the city gate, so the same resort under any town still matches).
+    try {
+      const inventory = await getComboInventoryForCommunity({ communityName: name, state: target.state });
+      if (inventory.items.length > 0) return true;
+    } catch (e: any) {
+      console.warn(`[bulk-combo-listings] in-system inventory check failed for "${name}": ${e?.message ?? e}`);
+    }
+    if (trackedCoreComboCommunities().some((existing) => nameLooksSameCommunity(existing, name))) return true;
+    // Any other saved draft (incl. single listings) for this community name+state.
+    try {
+      const stateKey = String(target.state || "").trim().toLowerCase();
+      const drafts = await storage.getCommunityDrafts();
+      return (drafts as any[]).some((draft) => {
+        const status = String(draft.status || "");
+        if (/archiv|delete|cancel/i.test(status)) return false;
+        if (!nameLooksSameCommunity(String(draft.name || ""), name)) return false;
+        return !stateKey || String(draft.state || "").trim().toLowerCase() === stateKey;
+      });
+    } catch (e: any) {
+      console.warn(`[bulk-combo-listings] in-system draft check failed for "${name}": ${e?.message ?? e}`);
+      return false;
+    }
   };
 
   const communityResearchMode = (mode?: string): "combo" | "single" => mode === "single" ? "single" : "combo";
