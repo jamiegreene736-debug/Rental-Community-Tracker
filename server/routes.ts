@@ -248,7 +248,8 @@ import {
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
 import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
-import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest } from "./photo-community-check";
+import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
+import { evaluateComboPhotoCommunityGate, type ComboPhotoGateDecision } from "@shared/combo-photo-community-gate";
 import {
   buildPhotoCommunityCheckRequestForProperty,
   cancelBulkPhotoCommunityJob,
@@ -35075,6 +35076,10 @@ Return ONLY compact JSON with this exact shape:
     copy: 120_000,
     save: 120_000,
     persist: 120_000,
+    // Lens on <=50 community photos + Claude vision on <=60 photos/unit (batched).
+    // Generous headroom; a real timeout here is treated as INFRA (publish), never
+    // a resort skip (see the gate block in runBulkComboListingItem).
+    "photo-community": 6 * 60 * 1000,
   };
   const hydrateBulkComboListingItem = (item: BulkComboListingItem) => {
     const community = item.community || {};
@@ -35846,7 +35851,107 @@ Return ONLY compact JSON with this exact shape:
       }
       throw e;
     }
-    fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
+    // ── Photo-community GATE (fresh drafts only) ─────────────────────────────
+    // Run the SAME "Check photo community" verification the operator runs by hand
+    // on the pricing tab — now server-side — and SKIP the resort when it
+    // POSITIVELY identifies a wrong community photo folder, a unit that isn't from
+    // that community, or a unit whose photos don't cover its bedroom count (e.g. a
+    // 1BR sourced for a 3BR slot). Mislabeled-queen / missing-sleeper-sofa nitpicks
+    // are stripped by the engine and never skip. An infra failure (no Lens/vision
+    // key, empty community folder, the check throwing or timing out) NEVER skips —
+    // it falls through and publishes, so a key outage can't silently drop every
+    // resort. Reused, already-photographed drafts are exempt (we don't own their
+    // photos and must never roll one back). Disable with COMBO_PHOTO_COMMUNITY_GATE=0.
+    // NOTE FOR CODEX: the skip predicate lives in shared/combo-photo-community-gate.ts
+    // (unit-tested). Keep the "skip only on a positive finding, publish on infra"
+    // posture — it is an explicit operator decision (2026-06-26), not an oversight.
+    if (!reusedExistingDraft && process.env.COMBO_PHOTO_COMMUNITY_GATE !== "0") {
+      let gate: ComboPhotoGateDecision | null = null;
+      try {
+        gate = await runBulkComboListingStep(job, item, "photo-community", "Verifying photo community", async (): Promise<ComboPhotoGateDecision> => {
+          // 1) Persist community photos SYNCHRONOUSLY (normally fire-and-forget) so
+          //    the check can read them, and capture the folder it wrote to. For a
+          //    known resort this is the shared canonical `community-<slug>` folder.
+          let communityFolder: string | null = null;
+          try {
+            const persistResp = await fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" });
+            const persistJson: any = await persistResp.json().catch(() => null);
+            if (persistJson && typeof persistJson.folder === "string" && persistJson.folder) {
+              communityFolder = persistJson.folder;
+            }
+          } catch { /* best-effort — derive the canonical folder below */ }
+          if (!communityFolder) {
+            communityFolder = resolveCanonicalCommunityPhotoFolder(community.name) || `community-draft-${draftId}`;
+          }
+          // 2) Run the SAME engine the pricing-tab button uses, in-process. Pass
+          //    FOLDER-ONLY groups (no captions / expectedBedInventory) so no
+          //    bed-label nitpick can leak into the verdict.
+          let check: PhotoCommunityCheckResult;
+          try {
+            check = await runPhotoCommunityCheck(
+              {
+                expectedCommunity: community.name,
+                expectedListingBedrooms: effTotalBeds,
+                groups: [
+                  { role: "community", label: community.name || "Community", folder: communityFolder },
+                  { role: "unit", label: "Unit A", folder: `draft-${draftId}-unit-a`, expectedBedrooms: effUnit1Beds },
+                  { role: "unit", label: "Unit B", folder: `draft-${draftId}-unit-b`, expectedBedrooms: effUnit2Beds },
+                ],
+              },
+              process.env.ANTHROPIC_API_KEY ?? "",
+              Date.now(),
+            );
+          } catch (e: any) {
+            // The check itself failed to run → infra, publish (fail-open).
+            return { decision: "publish", infra: true, reasons: [String(e?.message ?? e)] };
+          }
+          return evaluateComboPhotoCommunityGate({
+            expectedCommunity: community.name,
+            warning: check.warning,
+            community: check.community,
+            units: check.units,
+            bedroomCoverage: check.bedroomCoverage,
+          });
+        });
+      } catch (e: any) {
+        // Step timed out / threw → infra, publish (fail-open). Never fail a resort
+        // because the gate could not complete.
+        await queueEvent("bulk-combo-listing", job.id, "photo-community-error",
+          `Photo-community check could not complete (${queueErrorLabel(e, "error")}); publishing without the gate`,
+          { itemKey: item.id, level: "warn" });
+        gate = null;
+      }
+      if (gate?.decision === "skip") {
+        // Roll the freshly-saved draft back so the resort is simply skipped (no
+        // listing) instead of published with the wrong photos — mirrors the
+        // persist-failure rollback above and the duplicate-skip completion idiom.
+        await storage.deleteCommunityDraft(draftId).catch((delErr: any) =>
+          console.warn(`[bulk-combo-listings] could not roll back gated draft ${draftId}: ${delErr?.message ?? delErr}`));
+        item.draftId = null;
+        item.phase = "done";
+        item.status = "completed";
+        item.error = null;
+        item.message = `Skipped — photo check: ${gate.reasons.join("; ")}`;
+        item.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+        await queueEvent("bulk-combo-listing", job.id, "photo-community-skip", item.message, {
+          itemKey: item.id, level: "warn", meta: { reasons: gate.reasons },
+        });
+        await persistBulkComboListingSnapshot(job);
+        return;
+      }
+      if (gate?.infra) {
+        await queueEvent("bulk-combo-listing", job.id, "photo-community-infra",
+          `Photo-community check could not verify${gate.reasons[0] ? ` (${gate.reasons[0]})` : ""}; publishing without the gate`,
+          { itemKey: item.id, level: "warn" });
+      } else if (gate) {
+        await queueEvent("bulk-combo-listing", job.id, "photo-community-pass",
+          `Photo-community check passed — ${community.name || "community"} confirmed for both units`,
+          { itemKey: item.id, level: "info" });
+      }
+    } else {
+      fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
+    }
     void runPhotoListingCheckForFolders([
       `draft-${draftId}-unit-a`,
       `draft-${draftId}-unit-b`,
