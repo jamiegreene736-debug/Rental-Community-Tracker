@@ -20303,6 +20303,20 @@ Requirements:
       if (/^\d{4}-\d{2}-\d{2}$/.test(checkInTo)) {
         filterArr.push({ field: "checkIn", operator: "$lte", value: checkInTo });
       }
+      // Optional explicit BOOKING-DATE window (YYYY-MM-DD), filtered on Guesty's
+      // `createdAt` — the same field the 30-day revenue handler uses. The
+      // property-revenue scheduler passes these (with includePast=true) to pull
+      // every booking MADE in the trailing 365 days regardless of stay timing.
+      // Additive: absent params leave the existing behavior byte-identical.
+      const createdFrom = String(req.query.createdFrom ?? "").trim();
+      const createdTo = String(req.query.createdTo ?? "").trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(createdFrom)) {
+        filterArr.push({ field: "createdAt", operator: "$gte", value: createdFrom });
+      }
+      if (/^\d{4}-\d{2}-\d{2}$/.test(createdTo)) {
+        // Inclusive upper bound: createdAt is a timestamp, so bound at end-of-day.
+        filterArr.push({ field: "createdAt", operator: "$lte", value: `${createdTo}T23:59:59.999Z` });
+      }
       const filterQuery = filterArr.length > 0
         ? `filters=${encodeURIComponent(JSON.stringify(filterArr))}&`
         : "";

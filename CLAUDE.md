@@ -43,6 +43,17 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-26 (Total Revenue column FOLLOW-UP: attribution → BOOKING DATE): Post-deploy smoke
+  of PR #847 showed the portfolio is heavily forward-booked (prod: 34/35 committed reservations
+  have FUTURE check-ins), so the original CHECK-IN-date window populated only 2 properties and
+  left the rest "—". Operator chose "count every booking MADE in the last 365 days, regardless
+  of stay date." Shipped `claude/revenue-by-booking-date` (PR #TBD): aggregate by `createdAt`
+  (`bookingDayOf` in `server/property-revenue-aggregate.ts`); scheduler pulls via new additive
+  `createdFrom`/`createdTo` filter on `guesty-all` (mirrors the 30-day handler's createdAt
+  filter). `checkInFrom`/`checkInTo` stay on guesty-all (unused now, harmless). Column copy →
+  "bookings made in the last 365 days · by booking date, incl. upcoming stays". Verified:
+  aggregate test 16/0, full `npm test` exit 0, build clean, check 335 = baseline.
+
 - 2026-06-26 (dashboard "Total Revenue" column + daily revenue cron): Operator asked for a
   per-property TOTAL REVENUE over the trailing 365 days on the dashboard table, auto-updated
   daily. SHIPPED (`claude/dashboard-total-revenue`, PR #TBD). Pieces: (1) new `property_trailing_revenue`

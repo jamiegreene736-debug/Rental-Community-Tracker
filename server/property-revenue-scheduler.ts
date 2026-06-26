@@ -7,14 +7,17 @@
 // It does NOT re-implement the account-wide Guesty pull or the listing→property
 // mapping. It loopback self-calls the existing, load-bearing
 // GET /api/bookings/guesty-all (committed-only, manual reservations merged, each
-// row carrying operationsPropertyId + checkIn + money) with the new
-// checkInFrom/checkInTo filter so only the trailing-365-day window comes back —
-// then sums reservationRevenue() per property and wholesale-replaces the
+// row carrying operationsPropertyId + createdAt + money) with the createdFrom/
+// createdTo filter so only bookings MADE in the trailing-365-day window come
+// back — then sums reservationRevenue() per property and wholesale-replaces the
 // property_trailing_revenue cache the dashboard reads.
 //
-// Attribution convention: a reservation counts toward a property's window if its
-// CHECK-IN date falls in [windowStart, windowEnd] (i.e. revenue from stays that
-// began in the past year). Documented in the column tooltip + AGENTS.md.
+// Attribution convention (operator decision, 2026-06-26): a reservation counts
+// toward a property's window by its BOOKING DATE (`createdAt`) — every booking
+// MADE in the past 365 days regardless of when the stay is. The portfolio is
+// heavily forward-booked, so a stay/check-in window left almost every property
+// blank; booking-date captures the upcoming stays too. Documented in the column
+// tooltip + AGENTS.md.
 
 import { storage } from "./storage";
 import { loopbackRequestHeaders } from "./auth";
@@ -56,7 +59,7 @@ export async function runPropertyRevenueRefresh(): Promise<PropertyRevenueRunRes
   const port = process.env.PORT || "5000";
   const url =
     `http://127.0.0.1:${port}/api/bookings/guesty-all` +
-    `?includePast=true&checkInFrom=${windowStart}&checkInTo=${windowEnd}&maxRows=${MAX_ROWS}`;
+    `?includePast=true&createdFrom=${windowStart}&createdTo=${windowEnd}&maxRows=${MAX_ROWS}`;
 
   const resp = await fetch(url, { headers: loopbackRequestHeaders() });
   if (!resp.ok) {
