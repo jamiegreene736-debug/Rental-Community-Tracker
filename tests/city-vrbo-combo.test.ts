@@ -548,5 +548,62 @@ check("share: both empty → false", !verifiedKeysShareCommunity([], []));
     verifiedKeysShareCommunity(dictOnly(a.keys), dictOnly(b.keys)), { a: dictOnly(a.keys), b: dictOnly(b.keys) });
 }
 
+// ── 5) COORDINATE-CONFIRMED WALKABILITY ──────────────────────────────────────
+// Coordinates, when present, must VETO a same-name/photo coincidence across
+// distant towns — but only on a GROSS gap (> COORD_CONTRADICTION_WALK_MINUTES ~25),
+// so a slightly-off detail-page coordinate never rejects a real same-complex pair
+// (the Phase-4 "Point at Poipu 721 + 812" regression). Base point is Poipu, ~21.88N.
+const LCoord = (
+  url: string,
+  title: string,
+  bedrooms: number,
+  totalPrice: number,
+  lat: number,
+  lng: number,
+): CityVrboListing => ({ url, title, bedrooms, totalPrice, lat, lng });
+
+// 5a) GROSS contradiction: two real "Poipu Kai" units whose coords sit ~48 min
+// apart (delta lat 0.03 ≈ 2 mi). The dictionary match is a coincidence across that
+// gap → NO confirmed pair.
+const vetoPool = [
+  LCoord("https://vrbo.com/v1", "Poipu Kai Resort 3BR Oceanfront", 3, 3000, 21.8800, -159.4700),
+  LCoord("https://vrbo.com/v2", "Poipu Kai Resort 2BR Garden", 2, 2000, 21.9100, -159.4700),
+];
+const vetoPair = suggestCityVrboComboPair(vetoPool, [3, 2], 7);
+check("coords: gross-far (~48min) coords VETO a same-name pair → null", vetoPair === null, vetoPair);
+
+// 5b) SLIGHTLY-OFF coords (delta lat 0.0095 ≈ 16-min walk, between MAX 10 and veto
+// 25): the text match is TRUSTED (coords too ambiguous to reject) — preserves the
+// regression fix. Pair survives; walkSource stays the text fallback, not "coords".
+const slopPool = [
+  LCoord("https://vrbo.com/s1", "Poipu Kai Resort 3BR Oceanfront", 3, 3000, 21.8800, -159.4700),
+  LCoord("https://vrbo.com/s2", "Poipu Kai Resort 2BR Garden", 2, 2000, 21.8895, -159.4700),
+];
+const slopPair = suggestCityVrboComboPair(slopPool, [3, 2], 7);
+check("coords: slightly-off (~16min) coords do NOT reject a real same-complex pair",
+  !!slopPair && slopPair.picks.length === 2, slopPair);
+check("coords: slightly-off pair stays text-assumed (walkSource !== coords)",
+  !!slopPair && slopPair.walkSource !== "coords", slopPair?.walkSource);
+
+// 5c) NEAR coords (delta lat 0.001 ≈ 2-min walk): pair survives and is UPGRADED to
+// coordinate-confirmed (walkSource "coords", walkMinutes <= MAX).
+const nearPool = [
+  LCoord("https://vrbo.com/n1", "Poipu Kai Resort 3BR Oceanfront", 3, 3000, 21.8800, -159.4700),
+  LCoord("https://vrbo.com/n2", "Poipu Kai Resort 2BR Garden", 2, 2000, 21.8810, -159.4700),
+];
+const nearPair = suggestCityVrboComboPair(nearPool, [3, 2], 7);
+check("coords: near (~2min) coords confirm the pair (walkSource coords, <=10 min)",
+  !!nearPair && nearPair.walkSource === "coords" && (nearPair.walkMinutes ?? 99) <= 10, nearPair);
+
+// 5d) NO-coords regression guard: a coordless same-name pair still pairs (the veto
+// only fires when coords are present), walkSource "shared-phrase".
+const noCoordPool = [
+  L("https://vrbo.com/c1", "Poipu Kai Resort 3BR Oceanfront", 3, 3000),
+  L("https://vrbo.com/c2", "Poipu Kai Resort 2BR Garden", 2, 2000),
+];
+const noCoordPair = suggestCityVrboComboPair(noCoordPool, [3, 2], 7);
+check("coords: coordless same-name pair still pairs (veto needs coords present)",
+  !!noCoordPair && noCoordPair.walkSource === "shared-phrase", noCoordPair);
+
 console.log(`\ncity-vrbo-combo: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

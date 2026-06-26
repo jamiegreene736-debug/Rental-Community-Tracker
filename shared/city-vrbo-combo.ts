@@ -1,5 +1,10 @@
 import { textMatchesResortPhrase } from "./buy-in-market";
-import { haversineFeet, MAX_BUY_IN_WALK_MINUTES, walkMinutesFromFeet } from "./walking-distance";
+import {
+  haversineFeet,
+  MAX_BUY_IN_WALK_MINUTES,
+  COORD_CONTRADICTION_WALK_MINUTES,
+  walkMinutesFromFeet,
+} from "./walking-distance";
 import { comboSplitsForPlan } from "./combo-splits";
 
 export type CityVrboListing = {
@@ -518,6 +523,29 @@ function walkMinutesBetween(a: CityVrboListing, b: CityVrboListing): number | nu
   return walkMinutesFromFeet(feet);
 }
 
+/**
+ * True when two listings BOTH carry coordinates that place them grossly farther
+ * apart than any geocoding slop (> COORD_CONTRADICTION_WALK_MINUTES). A same-name /
+ * shared-photo / curated-adjacency match across that gap is a coincidence, not one
+ * community — so EVERY confirmed match path vetoes it. Returns false when either
+ * side lacks coordinates (absence is not contradiction: text/photo stays
+ * authoritative, per the Phase-4 slightly-off-coords tolerance).
+ */
+function coordsGrosslyContradict(a: CityVrboListing, b: CityVrboListing): boolean {
+  const minutes = walkMinutesBetween(a, b);
+  return minutes !== null && minutes > COORD_CONTRADICTION_WALK_MINUTES;
+}
+
+/** True when ANY two of the picks have coordinates grossly contradicting walkability. */
+function anyPickPairGrosslyContradicts(picks: CityVrboListing[]): boolean {
+  for (let i = 0; i < picks.length; i += 1) {
+    for (let j = i + 1; j < picks.length; j += 1) {
+      if (coordsGrosslyContradict(picks[i], picks[j])) return true;
+    }
+  }
+  return false;
+}
+
 /** True when two listings share at least one near-duplicate amenity photo hash. */
 function sharedPhotoHash(a: CityVrboListing, b: CityVrboListing): boolean {
   const aHashes = a.photoHashes;
@@ -639,8 +667,12 @@ function pickCheapestPlan(bucket: ScoredRow[], plan: number[]): CityVrboListing[
  *  - dictionary / complex / phrase / photo clusters are authoritative on their
  *    own — coordinates only ANNOTATE (near → upgrade the label). Enrichment
  *    coords can be stale/shared/parse-errored, so they must NOT *reject* a real
- *    text/photo pair (that was a Phase-4 regression: a good "Point at Poipu 721"
- *    + "Point at Poipu 812" pair getting dropped on slightly-off coords).
+ *    text/photo pair on a SMALL discrepancy (that was a Phase-4 regression: a good
+ *    "Point at Poipu 721" + "Point at Poipu 812" pair getting dropped on
+ *    slightly-off coords). They DO veto a text/photo pair when the units sit
+ *    GROSSLY far apart (> COORD_CONTRADICTION_WALK_MINUTES): that gap is a
+ *    different area entirely, not geocoding slop, so the same-name match is a
+ *    coincidence across distant towns, not one community.
  */
 function pairWalkability(
   picks: CityVrboListing[],
@@ -651,6 +683,12 @@ function pairWalkability(
   const coordsNear = minutes !== null && minutes <= MAX_BUY_IN_WALK_MINUTES;
   if (source === "coords" || source === "property-manager") {
     return { ok: coordsNear, walkMinutes: minutes, walkSource: "coords" };
+  }
+  // Gross-contradiction veto: a same-name/photo coincidence across a clearly-distant
+  // gap is not one community. Tolerant enough that near-miss enrichment coords never
+  // reject a real same-complex pair (see COORD_CONTRADICTION_WALK_MINUTES rationale).
+  if (minutes !== null && minutes > COORD_CONTRADICTION_WALK_MINUTES) {
+    return { ok: false, walkMinutes: minutes, walkSource: "coords" };
   }
   const fallback: CityVrboComboPair["walkSource"] = source === "photo" ? "photo" : "shared-phrase";
   return { ok: true, walkMinutes: minutes, walkSource: coordsNear ? "coords" : fallback };
@@ -921,6 +959,10 @@ function evaluateAdjacencyClusters(priced: ScoredRow[], plan: number[], nights: 
     const picks = pickCheapestPlan(rows, plan);
     if (!picks) continue;
     if (picks.some((p, i) => picks.some((q, j) => j > i && looksLikeSameUnit(p, q)))) continue;
+    // Curated adjacency assumes walkability, but real coordinates that put the picks
+    // grossly far apart override the curated assumption (e.g. two same-canonical units
+    // that are actually in different towns).
+    if (anyPickPairGrosslyContradicts(picks)) continue;
     const totalCost = picks.reduce((sum, p) => sum + listingTotalPrice(p, nights), 0);
     if (!best || totalCost < best.totalCost) {
       const usedCanon = Array.from(new Set(picks.flatMap((p) => dictCanonicalsOf(p)).filter((c) => clusterSet.has(c))));
