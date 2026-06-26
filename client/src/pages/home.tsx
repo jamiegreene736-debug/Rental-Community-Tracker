@@ -135,6 +135,12 @@ type Property = {
   communityUnitCountRangeHigh?: number | null;
   unitDetails: string;
   url: string;
+  // When this listing was added into the system. Sourced from the
+  // community_drafts row's `createdAt` for imported/draft rows (every
+  // listing added via the wizard / bulk-combo queue / single-listing
+  // flow). The 11 hard-coded core properties predate per-row tracking,
+  // so they leave this undefined and render a "—" in the Added column.
+  createdAt?: string | Date | null;
 };
 
 type BulkPhotoCommunityItemStatus = "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled";
@@ -638,7 +644,7 @@ const properties: Property[] = [
   },
 ];
 
-type SortField = "propertyId" | "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay";
+type SortField = "propertyId" | "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay" | "dateAdded";
 
 function displayPropertyId(property: Pick<Property, "id" | "draftId">): string {
   const numericId = property.draftId ? 900000 + property.draftId : 100000 + property.id;
@@ -1502,6 +1508,10 @@ function AdminDashboard() {
         ...communityUnitCount,
         unitDetails,
         url: d.sourceUrl ?? "",
+        // Real "date added into the system" for every imported/draft listing —
+        // the community_drafts row stamps createdAt at insert (defaultNow,
+        // notNull), so this is populated retroactively for all existing drafts.
+        createdAt: d.createdAt,
       };
     });
   }, [communityDraftsDataForRows, communityMinimumStayData, minimumStayData]);
@@ -1595,6 +1605,17 @@ function AdminDashboard() {
         const bStay = typeof b.minimumStayNights === "number" ? b.minimumStayNights : b.minimumStayRangeLow ?? Infinity;
         return sortDir === "asc" ? aStay - bStay : bStay - aStay;
       }
+      if (sortField === "dateAdded") {
+        // Rows with no recorded add-date (the core 11 hard-coded properties)
+        // always sort to the BOTTOM regardless of direction — they have no
+        // value to compare, not an "earliest" one.
+        const aT = a.createdAt ? new Date(a.createdAt).getTime() : null;
+        const bT = b.createdAt ? new Date(b.createdAt).getTime() : null;
+        if (aT === null && bT === null) return 0;
+        if (aT === null) return 1;
+        if (bT === null) return -1;
+        return sortDir === "asc" ? aT - bT : bT - aT;
+      }
       let aVal: string | number | null = a[sortField as keyof typeof a] as string | number | null;
       let bVal: string | number | null = b[sortField as keyof typeof b] as string | number | null;
       if (aVal === null) aVal = sortDir === "asc" ? Infinity : -Infinity;
@@ -1658,6 +1679,15 @@ function AdminDashboard() {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "N/A";
     return date.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+  // "Date added" column — month/day/YEAR (the year matters: listings
+  // accrue across seasons). Missing/invalid → "—" (the core 11 properties
+  // predate per-row tracking).
+  const formatDateAdded = (value: string | Date | null | undefined) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   };
 
   const unitBuilderIds = useMemo(() => new Set(getMultiUnitPropertyIds()), []);
@@ -4464,6 +4494,19 @@ function AdminDashboard() {
                     <SortIcon field="unitCount" />
                   </Button>
                 </TableHead>
+                <TableHead className="w-[88px] px-0.5" title="Date this listing was added into the system (from the community draft's created date). The 11 original core properties predate per-row tracking and show —.">
+                  <Button
+                    variant="ghost"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    onClick={() => handleSort("dateAdded")}
+                    data-testid="button-sort-date-added"
+                    id="button-sort-date-added"
+                    aria-label="Sort by date added"
+                  >
+                    Added
+                    <SortIcon field="dateAdded" />
+                  </Button>
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -4957,12 +5000,20 @@ function AdminDashboard() {
                       {unitCountDisplay.label}
                     </Badge>
                   </TableCell>
+                  <TableCell className="px-1 py-2 text-center whitespace-nowrap" data-testid={`cell-date-added-${property.id}`}>
+                    <span
+                      className="text-xs text-muted-foreground"
+                      title={property.createdAt ? `Added ${formatShortDateTime(property.createdAt)}` : "No recorded add-date (predates per-row tracking)"}
+                    >
+                      {formatDateAdded(property.createdAt)}
+                    </span>
+                  </TableCell>
                 </TableRow>
                 );
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={15} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={16} className="text-center py-8 text-muted-foreground">
                     No properties match your filters
                   </TableCell>
                 </TableRow>
