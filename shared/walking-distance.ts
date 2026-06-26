@@ -19,6 +19,16 @@ export const WALKING_SPEED_MPH = 3;
 export const PATH_BEND_FACTOR = 1.15; // paths inside resorts bend ~15% longer than straight-line
 export const MAX_BUY_IN_WALK_MINUTES = 10;
 
+// A text/photo same-community match (two listings sharing a resort name or amenity
+// photo) is normally trusted on its own — detail-page coordinates can be slightly
+// off (geocoded to a building centroid, a shared region pin, etc.), so coords must
+// NOT *reject* a real same-complex pair on a small discrepancy (the Phase-4 "Point
+// at Poipu 721 + 812" regression). But coordinates that place the two units THIS
+// far apart are not geocoding slop — they are a different area entirely, so a
+// same-name coincidence across that gap is vetoed. Deliberately generous (~2.5x
+// MAX_BUY_IN_WALK_MINUTES) so only gross contradictions reject, never near-misses.
+export const COORD_CONTRADICTION_WALK_MINUTES = 25;
+
 // For true multi-unit combo buy-ins (e.g. two 3BRs replacing a 6BR booking),
 // we intend to enforce this strictly at attach time. Sub-community correctness
 // (via unitTypeConfidence) is now an additional strong gate alongside distance.
