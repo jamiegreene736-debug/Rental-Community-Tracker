@@ -119,6 +119,22 @@ export const PHOTO_AUDIT_MAX_PHOTOS = (() => {
   // bounding the worst-case Lens spend on a pathologically large folder.
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 30;
 })();
+// Background re-scan cadence for the dashboard listing scan (the per-folder reverse-image check of
+// each unit's photos against Airbnb/VRBO/Booking). 2026-06-26 (operator ask — "ensure that this is
+// cron job once a week"): each scannable folder is re-scanned when its last check is older than this
+// many days. Default 7 → a WEEKLY cron, surfaced in the dashboard "Scanned" column. Override with
+// PHOTO_LISTING_SCAN_INTERVAL_DAYS without a code change (e.g. set to 1 to restore the prior daily
+// cadence). Supersedes the earlier 24h default (which had itself superseded an even-earlier weekly one).
+const PHOTO_LISTING_SCAN_INTERVAL_DAYS = (() => {
+  const n = Number(process.env.PHOTO_LISTING_SCAN_INTERVAL_DAYS);
+  if (!Number.isFinite(n) || n < 1) return 7;
+  // Clamp the upper bound so a fat-fingered override (e.g. 1000000) can't
+  // silently disable re-scanning entirely — a huge value would push the
+  // staleness cutoff past every folder's checkedAt so nothing ever re-scans.
+  // 366d ≈ "at most once a year" is the loosest sane cadence.
+  return Math.min(366, Math.floor(n));
+})();
+export const PHOTO_LISTING_SCAN_MAX_AGE_MS = PHOTO_LISTING_SCAN_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
 const LENS_TIMEOUT_MS = 45_000;
 const VERIFY_TIMEOUT_MS = 20_000;
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
@@ -855,15 +871,18 @@ export async function runPhotoListingCheckForFolders(
   return results;
 }
 
-// Background tick. Runs at boot and then every hour. For each
-// scanable folder whose last check is older than `maxAgeMs` (default:
-// 24 hours → daily cadence), runs a fresh check. Budgeted at
-// PHOTOS_PER_FOLDER (3) Lens calls + up to ~3 verification SERP calls
-// per folder, so one tick's worst-case cost is (folder_count × ~6) ×
-// the per-call rate — ~90 calls/day for the current ~15 folders.
-// Raised from 7-day cadence in response to "detection should be faster
-// than weekly" feedback.
-export function startPhotoListingScheduler(maxAgeMs = 24 * 60 * 60 * 1000, tickMs = 60 * 60 * 1000): void {
+// Background tick. Runs at boot and then every hour (the hourly tick is a
+// cheap staleness check against the DB — only folders past the cadence
+// window actually spend Lens calls). For each scanable folder whose last
+// check is older than `maxAgeMs` (default: 7 days → WEEKLY cadence, per
+// the operator's 2026-06-26 "ensure that this is cron job once a week"
+// request; override with PHOTO_LISTING_SCAN_INTERVAL_DAYS), runs a fresh
+// check. Budgeted at PHOTOS_PER_FOLDER (3) Lens calls + up to ~3
+// verification SERP calls per folder. The 7-day default supersedes the
+// prior 24h daily cadence; the dashboard "Scanned" column shows each
+// property's most-recent folder checkedAt so a missed weekly run is
+// visible (it renders amber once older than the cadence).
+export function startPhotoListingScheduler(maxAgeMs = PHOTO_LISTING_SCAN_MAX_AGE_MS, tickMs = 60 * 60 * 1000): void {
   const tick = async () => {
     try {
       const known = await listScanableFolders();
