@@ -3098,6 +3098,56 @@ contract — a known mis-location is flagged red, an unknown one stays a
 neutral "unconfirmed", never a false mismatch. See memory
 `preflight-photo-location-confirmation`.
 
+### Bulk combo-listing photo-community gate (Load-Bearing, 2026-06-26)
+
+The bulk "add a new combo listing" queue (`runBulkComboListingItem` in
+`server/routes.ts`) runs the SAME "Check photo community" engine the
+operator runs by hand on the pricing tab (`runPhotoCommunityCheck`) as a
+PRE-PUBLISH GATE, and SKIPS a resort that can't pass — so a combo never
+goes live with the wrong community-folder photos, a unit from a different
+community, or a unit short on bedrooms (a 1BR sourced for a 3BR slot).
+
+Load-bearing constraints — don't "simplify" any of these away:
+
+1. **Placement = inside the persist phase, after both unit folders are on
+   disk, before the listing is finalized** (the gate block at the old
+   fire-and-forget `persist-community-photos` call site). The check reads
+   photos from disk only, and the community folder doesn't exist until
+   `persist-community-photos` runs — so the gate AWAITS that call (it was
+   fire-and-forget) and runs the check over the persisted folders. There
+   is no earlier hook; the in-memory `item.unit*Photos` URLs aren't on
+   disk and there's no community folder yet.
+2. **Skip only on a POSITIVE finding; publish on infra (fail-open).** The
+   decision is computed by `evaluateComboPhotoCommunityGate`
+   (`shared/combo-photo-community-gate.ts`, unit-tested) from the check's
+   granular sub-fields, NOT the rolled-up `verdict` (which mixes in soft
+   `warn`s). Skip iff: a REAL community `mismatch` (NOT `unconfirmed` /
+   `likely` — Lens is often inconclusive for legit unindexed resorts); a
+   unit `sameAsCommunity:"no"` whose reason is a STRONG contradiction
+   (`isStrongContradiction`, NOT a "too few interior photos" no); or a
+   bedroom `matchesListing:"no"` (count short). A missing API key
+   (`SEARCHAPI_API_KEY` / `ANTHROPIC_API_KEY`), `no-photos`, an empty
+   community folder, or the check throwing/timing out NEVER skips — it
+   publishes. This is an explicit operator decision (2026-06-26): a key
+   outage must not silently skip an entire batch.
+3. **Bed-TYPE inventory is intentionally ignored.** Folder-only `groups`
+   are passed (no `captions` / `expectedBedInventory`), and the predicate
+   has no bed-type lever, so a mislabeled queen or a missing sleeper sofa
+   can never cause a skip (consistent with PR #836/#838). Only the bedroom
+   COUNT is enforced.
+4. **Reused, already-photographed drafts are EXEMPT** (`reusedExistingDraft`)
+   — we don't own their photos and must never roll one back; they keep the
+   prior best-effort fire-and-forget community persist.
+5. **Skip rollback mirrors the existing persist-failure path** —
+   `storage.deleteCommunityDraft(draftId)` + `item.draftId = null`, then
+   the item completes as `Skipped — photo check: …` (the duplicate-skip
+   idiom), NOT a thrown error, so no orphan draft and no wasted retries.
+6. **Wrapped in `runBulkComboListingStep("photo-community", …)`** for the
+   heartbeat + a 6-min timeout; the step's own throw/timeout is caught at
+   the call site and treated as publish (fail-open per #2). Disable the
+   whole gate with `COMBO_PHOTO_COMMUNITY_GATE=0`. See memory
+   `bulk-combo-photo-community-gate`.
+
 ## Conventions
 
 ### Branches
@@ -3285,3 +3335,5 @@ Welcome. When in doubt, ask the human.
 2026-06-24 · Jamie (Pre-Flight, replace a unit): "When it finds a replacement unit I need the UI to confirm how many bedrooms it has." ACCEPTED + shipped (`claude/replacement-bedroom-confirm`, PR #837) · UI-only change in `client/src/components/unit-replacement-flow.tsx`. The found replacement already carried `result.bedrooms` (server `/api/replacement/find-unit` returns `actualBedrooms ?? requiredBedroomCount ?? null`), but it only rendered as a small muted line that DISAPPEARED when `result.bedrooms` was null, and the "What this replaces" line silently substituted the OLD unit's count (`result.bedrooms ?? selectedUnit.bedrooms`) — so the operator got no real bedroom confirmation. FIX: a prominent, ALWAYS-shown bedroom-confirmation callout (`data-testid="replacement-bedroom-confirm"`, BedDouble icon) at the top of the result, computed from `requiredBedrooms = selectedUnit.bedrooms` (the unit being replaced / the search's `requiredBedrooms`) vs `foundBedrooms = result.bedrooms`: green "Confirmed: N bedrooms — matches the M-bedroom unit you're replacing" when equal; amber "has N… but you're replacing M — verify" when known-but-different (legitimately reachable: the server accepts `actualBedrooms >= requiredBedroomCount`, so a 3BR can be returned for a 2BR search); amber "Bedroom count couldn't be auto-detected — search targeted M, open the listing to confirm" when null/0. The "What this replaces" line is now honest (`bedroomsKnown ? `${foundBedrooms} BR` : "bedrooms unconfirmed"`) instead of showing the old count as the new. Verified via an adversarial data-flow review (result.bedrooms = found unit's count; selectedUnit = replaced unit; no stale-selection risk — changing the dropdown clears `result`); `npm run check` 0 new errors in the file, full `npm test` green, `npm run build` clean. UI-only — confirm visually by running a replacement in Pre-Flight.
 
 2026-06-24 · Jamie (builder Photos tab, "Check photo community" on a 4BR combo "Royal Kahana", two 2BR units): THREE asks · ACCEPTED + shipped (`claude/photo-check-inventory-dupe-badges`, PR #838). (1) "Bed inventory mismatch: missing Queen Bed" is WRONG — there is no authoritative bedding inventory, the PHOTOS dictate the bedding — remove it (keep "N/N bedrooms photographed"). FIX (`shared/photo-bedroom-coverage-logic.ts`): deleted the `if (opts?.bedInventoryMatch === "no") { tier="warn"; reason += " Bed inventory mismatch: …" }` block in `computeUnitBedroomCoverage` and the dead `|| bedInventoryMatch === "no"` in `deriveBedroomListingTier`; the bedroom-COUNT coverage + the over-count trim warn + `cleanTrim` (still reads bedInventoryMatch) are unchanged, and the client memo's per-photo amber fold for it was removed. `compareBedInventory`/`bedInventoryMatch` still compute (cleanTrim only); `bedInventoryReason` is now write-only (harmless). (2) The cross-folder duplicate must put a red ✕ on the duplicate TILE (was summary-text only). FIX (client `communityPhotoVerdicts` memo, `GuestyListingBuilder/index.tsx`): fold `result.duplicates` (server already returns both `a`/`b` {folder,filename}) into the verdict map as `match:"no"` on BOTH copies — BOTH scopes (cross-folder AND within-folder), run LAST so a dup overrides any green/fallback; PhotoCurator renders match:"no" as red ✕. (3) Unit B's gallery photos got NO badge (Unit A's were green). ROOT CAUSE (found via a background investigation agent, NOT a guess): the route **discarded the client's `groups` and rebuilt them from `propertyId`** via `buildPhotoCommunityCheckRequestForProperty` (PR #764 fork) — a DIFFERENT filename pipeline (`listPublishedFilenames`/`unitN` folders) than the gallery tiles (adapt-draft `/api/photos/community/<folder>`), so a combo draft's SECOND unit's verdict filenames diverged from its tiles → those tiles unbadged, while bedroom coverage still showed Unit B (it follows the server-rebuilt `unitInputs`). LOAD-BEARING FIX (`server/routes.ts` ~27841): when the client sent non-empty `groups`, compute verdicts from THOSE (they ARE the rendered tiles); `propertyId` is kept only to persist the result; the server rebuild is used ONLY when no groups were sent (internal/bulk callers). This restores the feature's documented "reads only from the rendered photo list" contract. PLUS a client defense-in-depth FALLBACK: every gallery photo in a CHECKED unit folder with no per-photo verdict gets that unit's overall `sameAsCommunity` verdict (covers photos past the vision sample cap; never overrides a specific verdict, never touches community/external URLs). Reviewed via TWO multi-agent workflows (a root-cause investigation + a 3-lens adversarial review) → all SHIP, 0 blockers; the two analyses converged (units[] reliably contains Unit B's folder, so the folder-keyed fallback works, AND using client groups makes the per-photo filenames match exactly). Verified: `tests/photo-bedroom-coverage-v2.test.ts` 35/0 (+2 bed-type-mismatch-no-longer-warns), full `npm test` green, `npm run build` clean, `npm run check` 0 new TS errors (stash-diffed across all touched files). Couldn't live-smoke the Lens/vision legs (no SEARCHAPI/ANTHROPIC keys) — confirm by re-clicking "Check photo community" on the Royal Kahana combo: no bed-inventory warning, a red ✕ on the duplicate tile, and a badge on every Unit B photo. Known follow-ups (non-blocking): `bedInventoryReason` is now dead (optional cleanup); the cross-folder-dup summary list is still cross-folder-only (tile badges cover both).
+
+2026-06-26 · Jamie (bulk "add a new combo listing" queue): "Before it adds the combo listing, run the Check-photo-community check — confirm the community folder is correct AND that Unit A and Unit B are of that community AND that each unit has the right number of bedrooms with bedroom photos (a 3BR combo needs two real 3BR units, not a 1BR). Ignore a mislabeled queen / missing sleeper sofa. If it can't be perfect, skip that resort." ACCEPTED + shipped (`claude/<this branch>`, PR #TBD) · Added a server-side PRE-PUBLISH GATE inside `runBulkComboListingItem` (`server/routes.ts`) that runs the SAME `runPhotoCommunityCheck` engine the pricing-tab button uses (in-process, folder-only `groups`) over the just-persisted `draft-<id>-unit-a/-unit-b` + canonical community folder, then SKIPS the resort (rollback + `Skipped — photo check: …`) on a positive finding. TWO operator-chosen knobs: (a) community strictness — skip ONLY on a real `mismatch`, treat `unconfirmed`/`likely` as pass (Lens is often inconclusive for legit unindexed resorts); (b) when the check can't run (missing `SEARCHAPI_API_KEY`/`ANTHROPIC_API_KEY`, empty community folder, throw/timeout) → PUBLISH (fail-open), so a key outage can't silently skip the whole batch. The skip predicate is the pure, unit-tested `evaluateComboPhotoCommunityGate` (`shared/combo-photo-community-gate.ts`): real community mismatch OR a STRONG-contradiction unit `no` (NOT an insufficient-photos `no`) OR a bedroom-count-short unit. Bed-TYPE inventory (queen mislabel / missing sleeper sofa) is structurally un-skippable — folder-only groups + no bed-type lever (consistent with PR #836/#838). Reused, already-photographed drafts are EXEMPT (never rolled back). Behind `COMBO_PHOTO_COMMUNITY_GATE` (default on). See Load-Bearing "Bulk combo-listing photo-community gate (2026-06-26)". Verified: `tests/combo-photo-community-gate.test.ts` (new) green, full `npm test` exit 0, `npm run build` clean, `npm run check` 0 new TS errors (stash-diffed baseline 335 = with changes). Could NOT live-smoke the Lens/vision legs (no SEARCHAPI/ANTHROPIC keys in session) — confirm on the next bulk combo run that a wrong-community or short-bedroom resort is skipped while a clean one publishes.
