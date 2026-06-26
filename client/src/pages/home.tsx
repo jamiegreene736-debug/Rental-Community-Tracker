@@ -1546,7 +1546,7 @@ function AdminDashboard() {
   const { data: marketRatesData } = useQuery<unknown[]>({
     queryKey: ["/api/property/market-rates"],
   });
-  // Trailing-365-day revenue per property (by stay check-in date), refreshed
+  // Trailing-365-day revenue per property (by booking date), refreshed
   // daily by the server property-revenue scheduler. Keyed by the dashboard
   // property id (= operationsPropertyId: positive core ids, negative -draftId
   // for mapped published drafts). Declared HERE — before the `filtered` useMemo
@@ -4537,14 +4537,14 @@ function AdminDashboard() {
                     <SortIcon field="dateAdded" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[104px] px-0.5 text-right" title="Total revenue over the trailing 365 days, attributed by stay check-in date and summed from connected Guesty listings (plus manual bookings). Refreshed automatically once a day. Properties with no connected listing or no stays in the window show —.">
+                <TableHead className="w-[104px] px-0.5 text-right" title="Total revenue from bookings MADE in the last 365 days (by booking date, including upcoming stays), summed from connected Guesty listings plus manual bookings. Refreshed automatically once a day. Properties with no connected listing or no bookings in the window show —.">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
                     onClick={() => handleSort("totalRevenue")}
                     data-testid="button-sort-total-revenue"
                     id="button-sort-total-revenue"
-                    aria-label="Sort by total revenue (trailing 365 days)"
+                    aria-label="Sort by total revenue (last 365 days, by booking date)"
                   >
                     Total Revenue
                     <SortIcon field="totalRevenue" />
@@ -5111,13 +5111,13 @@ function AdminDashboard() {
                         return (
                           <span
                             className="text-xs text-muted-foreground"
-                            title="No revenue attributed in the trailing 365 days (no connected Guesty listing, or no stays with a check-in in the window)."
+                            title="No revenue attributed in the last 365 days (no connected Guesty listing, or no bookings made in the window)."
                           >
                             —
                           </span>
                         );
                       }
-                      const stays = `${rev.bookings} stay${rev.bookings === 1 ? "" : "s"} (check-in in the last 365 days)`;
+                      const stays = `${rev.bookings} booking${rev.bookings === 1 ? "" : "s"} made in the last 365 days`;
                       const updated = rev.computedAt ? ` · updated ${formatShortDate(rev.computedAt)}` : "";
                       return (
                         <span
