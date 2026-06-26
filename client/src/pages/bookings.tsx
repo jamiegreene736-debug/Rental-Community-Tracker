@@ -47,6 +47,7 @@ import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@sh
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
+import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
@@ -16562,6 +16563,104 @@ function ManualBuyInDialog({
   const checkIn = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
   const checkOut = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
   const photoUrls = useMemo(() => parseUrlList(photoUrlText).slice(0, 12), [photoUrlText]);
+
+  // Direct-booking / property-manager URL auto-read. VRBO has its own
+  // checkout reader (vrbo-payment-schedule); every other bookable
+  // listing (waikikibeachrentals.com and the like) goes through the
+  // generic PM rate extractor so a direct link behaves "just like a
+  // VRBO URL" — paste it and the cost/title are read off the page.
+  type DirectExtract = {
+    status: "idle" | "loading" | "done" | "error";
+    cost: number | null;
+    title: string | null;
+    nightlyPrice: number | null;
+    available: boolean | null;
+    screenshot: string | null;
+    reason: string | null;
+  };
+  const DIRECT_EXTRACT_IDLE: DirectExtract = {
+    status: "idle", cost: null, title: null, nightlyPrice: null,
+    available: null, screenshot: null, reason: null,
+  };
+  const [directExtract, setDirectExtract] = useState<DirectExtract>(DIRECT_EXTRACT_IDLE);
+  const lastExtractedUrlRef = useRef<string>("");
+  const urlKind = classifyBuyInListingUrl(listingUrl);
+
+  // Read the rate (and title/availability/screenshot) off a direct
+  // listing for the reservation's dates. Returns the result so callers
+  // (auto-read button, on-blur, and the save fallback) can use it
+  // synchronously. Bounded by a generous client abort — the server's
+  // verifyPmRate has a 180s wall budget on hard PM date pickers.
+  const runDirectExtract = async (): Promise<DirectExtract> => {
+    const url = listingUrl.trim();
+    if (classifyBuyInListingUrl(url) !== "direct") return DIRECT_EXTRACT_IDLE;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+      const next: DirectExtract = { ...DIRECT_EXTRACT_IDLE, status: "error", reason: "This reservation is missing valid check-in/check-out dates." };
+      setDirectExtract(next);
+      return next;
+    }
+    setDirectExtract((s) => ({ ...s, status: "loading", reason: null }));
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 170000);
+    try {
+      const resp = await fetch("/api/operations/verify-pm-listing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ url, checkIn, checkOut }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (!resp.ok) {
+        const next: DirectExtract = { ...DIRECT_EXTRACT_IDLE, status: "error", reason: `Auto-read failed (server returned ${resp.status}). Open the link and type the cost.` };
+        setDirectExtract(next);
+        // Stamp so on-blur won't auto-retry; the button still can.
+        lastExtractedUrlRef.current = url;
+        return next;
+      }
+      const data = await resp.json().catch(() => ({} as any));
+      const extracted = (data?.extracted ?? null) as
+        | { totalPrice?: number | null; nightlyPrice?: number | null; available?: boolean | null; dateMatch?: boolean | null; reason?: string }
+        | null;
+      const resolved = resolvePmExtractedCost(extracted, nightsBetween(checkIn, checkOut));
+      // Strip "·" — it's the note-clause separator, so a title that
+      // contained one would truncate when re-read by titleFromBuyInNotes.
+      const titleRaw = typeof data?.title === "string" ? data.title.replace(/·/g, " ").replace(/\s+/g, " ").trim() : "";
+      const title = titleRaw ? titleRaw.slice(0, 160) : null;
+      const next: DirectExtract = {
+        status: "done",
+        cost: resolved.ok ? resolved.cost : null,
+        title,
+        nightlyPrice: typeof extracted?.nightlyPrice === "number" ? extracted.nightlyPrice : null,
+        available: typeof extracted?.available === "boolean" ? extracted.available : null,
+        screenshot: typeof data?.screenshotBase64 === "string" ? data.screenshotBase64 : null,
+        reason: resolved.ok
+          ? (extracted?.reason ?? null)
+          : resolved.reason === "unavailable"
+            ? "The page shows these dates as unavailable for this listing."
+            : (extracted?.reason ?? "No date-specific rate was visible on the page. Open the link and type the cost."),
+      };
+      setDirectExtract(next);
+      lastExtractedUrlRef.current = url;
+      // Prefill the cost only when the operator hasn't typed one, so a
+      // manual override is never clobbered by the auto-read.
+      if (resolved.ok && !costPaid.trim()) setCostPaid(String(resolved.cost));
+      return next;
+    } catch (e: any) {
+      clearTimeout(timeoutId);
+      const next: DirectExtract = {
+        ...DIRECT_EXTRACT_IDLE,
+        status: "error",
+        reason: e?.name === "AbortError"
+          ? "Auto-read timed out (~3 min). Open the link, then type the cost."
+          : (e?.message ?? "Network error during auto-read."),
+      };
+      setDirectExtract(next);
+      // Stamp so on-blur won't auto-retry; the button still can.
+      lastExtractedUrlRef.current = url;
+      return next;
+    }
+  };
   const duplicateSlot = useMemo(() => {
     const candidateKeys = new Set(listingIdentityKeys({
       url: listingUrl,
@@ -16593,6 +16692,8 @@ function ManualBuyInDialog({
       }
       let resolvedCost = hasManualCost ? parsedCost : 0;
       const vrboUrl = isVrboListingUrl(listingUrl);
+      const directUrl = !vrboUrl && classifyBuyInListingUrl(listingUrl) === "direct";
+      let extractedTitle: string | null = directUrl ? directExtract.title : null;
       if (vrboUrl && !hasManualCost) {
         try {
           const psRes = await apiRequest("POST", "/api/operations/vrbo-payment-schedule", {
@@ -16608,16 +16709,35 @@ function ManualBuyInDialog({
         } catch (e) {
           console.warn("[manual-buy-in] VRBO payment schedule:", e);
         }
+      } else if (directUrl && !hasManualCost) {
+        // Direct-booking / PM URL: read the stay cost off the page the
+        // same way a VRBO URL auto-reads its checkout total. Reuse a
+        // fresh successful auto-read for THIS url; otherwise read now.
+        const url = listingUrl.trim();
+        const haveFresh =
+          directExtract.status === "done" &&
+          lastExtractedUrlRef.current === url &&
+          directExtract.cost != null;
+        const result = haveFresh ? directExtract : await runDirectExtract();
+        if (result.cost != null && result.cost > 0) resolvedCost = result.cost;
+        if (result.title) extractedTitle = result.title;
       }
       if (!Number.isFinite(resolvedCost) || resolvedCost <= 0) {
         throw new Error(
           vrboUrl
             ? "Could not read the VRBO checkout total for these dates. Enter the total cost paid, or try again in a minute."
-            : "Enter the total cost paid before saving.",
+            : directUrl
+              ? "Could not read a rate from this listing for these dates. Enter the total cost paid, or click “Auto-read rate” and try again."
+              : "Enter the total cost paid before saving.",
         );
       }
-      const noteParts = [
+      // Clauses joined with " · " so titleFromBuyInNotes()'s `[^·]+`
+      // capture stays bounded to just the listing title. The photo
+      // marker MUST remain the LAST clause — manualBuyInPhotoUrlsFromNotes
+      // parses every URL after it.
+      const noteClauses = [
         `Manually recorded buy-in for ${slot.unitLabel}.`,
+        extractedTitle ? `Auto-filled from direct listing — ${extractedTitle}` : "",
         notes.trim(),
         photoUrls.length > 0 ? `${MANUAL_BUY_IN_PHOTO_MARKER} ${photoUrls.join(" ")}` : "",
       ].filter(Boolean);
@@ -16636,7 +16756,7 @@ function ManualBuyInDialog({
         managementContact: managementContact.trim() || null,
         groundFloorStatus: "unknown",
         groundFloorEvidence: null,
-        notes: noteParts.join(" "),
+        notes: noteClauses.join(" · "),
         status: "active",
       }).then((r) => r.json());
       if (!created?.id) throw new Error(created?.error || "Buy-in create failed");
@@ -16691,14 +16811,14 @@ function ManualBuyInDialog({
         <DialogHeader>
           <DialogTitle>Manually add buy-in for {slot.unitLabel}</DialogTitle>
           <DialogDescription>
-            Paste the VRBO listing URL to attach this unit. When every unit slot is filled, the guest page and message draft open automatically so you can send the options to the guest.
+            Paste a VRBO or direct-booking listing URL to attach this unit — the stay cost is read off the page automatically. When every unit slot is filled, the guest page and message draft open automatically so you can send the options to the guest.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
           <div className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <Label htmlFor="manualCostPaid" className="text-xs">Total cost paid (USD, optional — auto-read from VRBO when blank)</Label>
+                <Label htmlFor="manualCostPaid" className="text-xs">Total cost paid (USD, optional — auto-read from the listing when blank)</Label>
                 <Input
                   id="manualCostPaid"
                   type="number"
@@ -16725,14 +16845,103 @@ function ManualBuyInDialog({
               <Input
                 id="manualListingUrl"
                 value={listingUrl}
-                onChange={(e) => setListingUrl(e.target.value)}
-                placeholder="https://www.vrbo.com/..."
+                onChange={(e) => {
+                  setListingUrl(e.target.value);
+                  // A new URL invalidates any prior auto-read.
+                  if (e.target.value.trim() !== lastExtractedUrlRef.current) {
+                    setDirectExtract(DIRECT_EXTRACT_IDLE);
+                  }
+                }}
+                onBlur={() => {
+                  // Paste-and-go: auto-read a direct-booking / PM link
+                  // once it's entered, the same way a VRBO URL fills its
+                  // cost. Guarded so we never re-read the same URL or
+                  // fire while a read is in flight.
+                  const url = listingUrl.trim();
+                  if (
+                    classifyBuyInListingUrl(url) === "direct" &&
+                    url !== lastExtractedUrlRef.current &&
+                    directExtract.status !== "loading"
+                  ) {
+                    void runDirectExtract();
+                  }
+                }}
+                placeholder="https://www.vrbo.com/... or a direct-booking link"
                 data-testid="input-manual-buyin-listing-url"
               />
               {duplicateSlot && (
                 <p className="mt-1 text-[11px] text-destructive">
                   This listing or photo evidence already matches {duplicateSlot.unitLabel}. Use a different physical unit for {slot.unitLabel}.
                 </p>
+              )}
+              {urlKind === "direct" && (
+                <div className="mt-2 rounded-md border bg-muted/30 p-2.5 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-medium">
+                      Direct-booking link — read the rate for {fmtDate(checkIn)} → {fmtDate(checkOut)}
+                    </p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-[10px] shrink-0"
+                      disabled={directExtract.status === "loading"}
+                      onClick={() => void runDirectExtract()}
+                    >
+                      {directExtract.status === "loading" ? (
+                        <><RefreshCw className="h-3 w-3 mr-1 animate-spin" /> Reading…</>
+                      ) : (
+                        <><RefreshCw className="h-3 w-3 mr-1" /> {directExtract.status === "done" || directExtract.status === "error" ? "Re-read rate" : "Auto-read rate"}</>
+                      )}
+                    </Button>
+                  </div>
+                  {directExtract.status === "loading" && (
+                    <p className="text-[11px] text-muted-foreground">
+                      Loading the page and reading the price — PM sites with date pickers can take up to ~3 min.
+                    </p>
+                  )}
+                  {directExtract.status === "done" && (
+                    <div className="space-y-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                        {directExtract.cost != null && directExtract.cost > 0 ? (
+                          <Badge className="bg-blue-100 text-blue-800">
+                            ${directExtract.cost.toLocaleString()} total
+                            {directExtract.nightlyPrice ? ` · $${directExtract.nightlyPrice.toLocaleString()}/nt` : ""}
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-amber-700 border-amber-300">No rate read</Badge>
+                        )}
+                        {directExtract.available === true && (
+                          <Badge className="bg-emerald-100 text-emerald-800">Available</Badge>
+                        )}
+                        {directExtract.available === false && (
+                          <Badge variant="destructive">Unavailable</Badge>
+                        )}
+                      </div>
+                      {directExtract.title && (
+                        <p className="text-[11px] text-muted-foreground truncate" title={directExtract.title}>
+                          {directExtract.title}
+                        </p>
+                      )}
+                      {directExtract.reason && (
+                        <p className="text-[10px] text-muted-foreground italic">{directExtract.reason}</p>
+                      )}
+                      {directExtract.cost != null && directExtract.cost > 0 && (
+                        <p className="text-[10px] text-muted-foreground">
+                          Pre-filled into the cost field — override it above if the page showed a different total.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {directExtract.status === "error" && (
+                    <p className="text-[11px] text-destructive">{directExtract.reason}</p>
+                  )}
+                  {directExtract.status === "idle" && (
+                    <p className="text-[11px] text-muted-foreground">
+                      Reads the total off the page for these dates — or leave it and type the cost manually below.
+                    </p>
+                  )}
+                </div>
               )}
             </div>
             <div>
@@ -16827,7 +17036,11 @@ function ManualBuyInDialog({
             data-testid="button-save-manual-buy-in"
           >
             {createAndAttach.isPending
-              ? (isVrboListingUrl(listingUrl) && !hasManualCost ? "Reading VRBO checkout…" : "Saving…")
+              ? (!hasManualCost && isVrboListingUrl(listingUrl)
+                  ? "Reading VRBO checkout…"
+                  : !hasManualCost && urlKind === "direct"
+                    ? "Reading listing rate…"
+                    : "Saving…")
               : "Attach buy-in"}
           </Button>
         </DialogFooter>
