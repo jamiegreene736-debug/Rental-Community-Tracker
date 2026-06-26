@@ -512,4 +512,20 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS sort_order integer
   `);
   console.log("[schema] ensured photo_labels sort_order column");
+
+  // Per-property trailing-365-day revenue cache for the dashboard "Total
+  // Revenue" column, refreshed daily by the property-revenue scheduler.
+  // Created here so a fresh Railway deploy works before `npm run db:push`
+  // runs; GET /api/dashboard/property-revenue fails-soft (empty) until then.
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS property_trailing_revenue (
+      property_id integer PRIMARY KEY,
+      revenue numeric(12,2) NOT NULL DEFAULT 0,
+      currency text NOT NULL DEFAULT 'USD',
+      bookings integer NOT NULL DEFAULT 0,
+      window_days integer NOT NULL DEFAULT 365,
+      computed_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured property_trailing_revenue table");
 }

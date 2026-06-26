@@ -1141,6 +1141,28 @@ export const insertGuestReceiptSchema = createInsertSchema(guestReceipts).omit({
 export type InsertGuestReceipt = z.infer<typeof insertGuestReceiptSchema>;
 export type GuestReceipt = typeof guestReceipts.$inferSelect;
 
+// Per-property TRAILING-365-DAY revenue, refreshed once daily by the
+// property-revenue scheduler (server/property-revenue-scheduler.ts) and read by
+// the dashboard "Total Revenue" column (GET /api/dashboard/property-revenue).
+// Keyed by the dashboard property id — i.e. the enriched reservation's
+// `operationsPropertyId`: a POSITIVE core property id (PROPERTY_UNIT_CONFIGS),
+// or a NEGATIVE -draftId for a published community draft mapped to a Guesty
+// listing in guesty_property_map. Properties with no connected listing (or no
+// stays whose check-in falls in the window) simply have NO row → the column
+// renders "—". The scheduler WHOLESALE-REPLACES this table each run (delete-all
+// + insert in one txn) so a property whose bookings have aged out drops to
+// absent rather than keeping a stale figure.
+export const propertyTrailingRevenue = pgTable("property_trailing_revenue", {
+  propertyId: integer("property_id").primaryKey(),
+  revenue: numeric("revenue", { precision: 12, scale: 2 }).notNull().default("0"),
+  currency: text("currency").notNull().default("USD"),
+  bookings: integer("bookings").notNull().default(0),
+  windowDays: integer("window_days").notNull().default(365),
+  computedAt: timestamp("computed_at").defaultNow().notNull(),
+});
+export type PropertyTrailingRevenue = typeof propertyTrailingRevenue.$inferSelect;
+export type InsertPropertyTrailingRevenue = typeof propertyTrailingRevenue.$inferInsert;
+
 // Durable per-reservation "over-budget combos" the auto-fill search found but did
 // not attach (would have lost money). Persisted so the operator can review the
 // options + one-click attach a loss combo even after the in-memory job expires

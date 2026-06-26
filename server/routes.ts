@@ -120,6 +120,7 @@ import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeFo
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation, createReceiptPage } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
+import { runPropertyRevenueRefresh, getPropertyRevenueStatus } from "./property-revenue-scheduler";
 import { validateAndFixPhoto } from "./photo-validator";
 import { resolveCuratedCommunityDescription } from "./community-descriptions";
 import { filterNonRentalUnitPhotos, UNIT_PHOTO_VISION_VERSION } from "./unit-photo-vision";
@@ -20288,6 +20289,20 @@ Requirements:
       if (!includePast) {
         filterArr.push({ field: "checkOut", operator: "$gte", value: today });
       }
+      // Optional explicit check-in window (YYYY-MM-DD). The property-revenue
+      // scheduler passes these (with includePast=true) to pull EXACTLY the
+      // trailing-365-day window server-side — so the most-recent year is never
+      // truncated by maxRows (the default sort is checkIn ASC from skip 0, which
+      // would otherwise return the OLDEST rows first on a large account).
+      // Additive: absent params leave the existing behavior byte-identical.
+      const checkInFrom = String(req.query.checkInFrom ?? "").trim();
+      const checkInTo = String(req.query.checkInTo ?? "").trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(checkInFrom)) {
+        filterArr.push({ field: "checkIn", operator: "$gte", value: checkInFrom });
+      }
+      if (/^\d{4}-\d{2}-\d{2}$/.test(checkInTo)) {
+        filterArr.push({ field: "checkIn", operator: "$lte", value: checkInTo });
+      }
       const filterQuery = filterArr.length > 0
         ? `filters=${encodeURIComponent(JSON.stringify(filterArr))}&`
         : "";
@@ -20455,6 +20470,49 @@ Requirements:
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch account-wide Guesty bookings", message: err.message });
     }
+  });
+
+  // Per-property TRAILING-365-DAY revenue for the dashboard "Total Revenue"
+  // column. Reads the daily-refreshed property_trailing_revenue cache (the
+  // property-revenue scheduler); keyed by dashboard property id (=
+  // operationsPropertyId). Fails SOFT (empty map) until the table exists / the
+  // first refresh lands, so a fresh deploy never 500s this column.
+  app.get("/api/dashboard/property-revenue", async (_req, res) => {
+    try {
+      const rows = await storage.getPropertyTrailingRevenue();
+      const map: Record<number, {
+        revenue: number; bookings: number; currency: string; windowDays: number; computedAt: string | null;
+      }> = {};
+      for (const row of rows) {
+        map[row.propertyId] = {
+          revenue: Number(row.revenue) || 0,
+          bookings: row.bookings ?? 0,
+          currency: row.currency ?? "USD",
+          windowDays: row.windowDays ?? 365,
+          computedAt: row.computedAt ? new Date(row.computedAt).toISOString() : null,
+        };
+      }
+      res.json(map);
+    } catch (e: any) {
+      console.warn("[property-revenue] serve failed (table may not exist yet):", e?.message ?? e);
+      res.json({});
+    }
+  });
+
+  // Manual trigger for the daily trailing-365d revenue refresh (deploy smoke +
+  // on-demand recompute). Admin-gated like other /api/admin/* routes; loopback
+  // bypasses auth. Returns the run summary.
+  app.post("/api/admin/refresh-property-revenue", async (_req, res) => {
+    try {
+      const result = await runPropertyRevenueRefresh();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
+  app.get("/api/admin/property-revenue-status", async (_req, res) => {
+    res.json(getPropertyRevenueStatus());
   });
 
   // List reservations for a Guesty listing, annotated with per-unit-slot fill status.

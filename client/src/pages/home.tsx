@@ -644,7 +644,11 @@ const properties: Property[] = [
   },
 ];
 
-type SortField = "propertyId" | "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay" | "dateAdded";
+type SortField = "propertyId" | "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay" | "dateAdded" | "totalRevenue";
+
+// Per-property trailing-365-day revenue for the "Total Revenue" column.
+type PropertyRevenueEntry = { revenue: number; bookings: number; currency: string; windowDays: number; computedAt: string | null };
+type PropertyRevenueMap = Record<number, PropertyRevenueEntry>;
 
 function displayPropertyId(property: Pick<Property, "id" | "draftId">): string {
   const numericId = property.draftId ? 900000 + property.draftId : 100000 + property.id;
@@ -1542,6 +1546,18 @@ function AdminDashboard() {
   const { data: marketRatesData } = useQuery<unknown[]>({
     queryKey: ["/api/property/market-rates"],
   });
+  // Trailing-365-day revenue per property (by stay check-in date), refreshed
+  // daily by the server property-revenue scheduler. Keyed by the dashboard
+  // property id (= operationsPropertyId: positive core ids, negative -draftId
+  // for mapped published drafts). Declared HERE — before the `filtered` useMemo
+  // — so the sort comparator can close over it without a TDZ error. Only
+  // Guesty-connected listings with in-window stays have an entry; everything
+  // else is absent → the column renders "—".
+  const { data: propertyRevenueData } = useQuery<PropertyRevenueMap>({
+    queryKey: ["/api/dashboard/property-revenue"],
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
   const baseRates = useMemo(() => {
     const map = new Map<number, number>();
     for (const p of allProperties) {
@@ -1616,6 +1632,17 @@ function AdminDashboard() {
         if (bT === null) return -1;
         return sortDir === "asc" ? aT - bT : bT - aT;
       }
+      if (sortField === "totalRevenue") {
+        // Properties with no Guesty-attributed revenue (unmapped listing, or no
+        // in-window stays) always sort to the BOTTOM in both directions —
+        // absence isn't $0.
+        const aR = propertyRevenueData?.[a.id]?.revenue ?? null;
+        const bR = propertyRevenueData?.[b.id]?.revenue ?? null;
+        if (aR === null && bR === null) return 0;
+        if (aR === null) return 1;
+        if (bR === null) return -1;
+        return sortDir === "asc" ? aR - bR : bR - aR;
+      }
       let aVal: string | number | null = a[sortField as keyof typeof a] as string | number | null;
       let bVal: string | number | null = b[sortField as keyof typeof b] as string | number | null;
       if (aVal === null) aVal = sortDir === "asc" ? Infinity : -Infinity;
@@ -1628,7 +1655,7 @@ function AdminDashboard() {
       return sortDir === "asc" ? numA - numB : numB - numA;
     });
     return result;
-  }, [allProperties, searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, baseRates]);
+  }, [allProperties, searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, baseRates, propertyRevenueData]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -4510,6 +4537,19 @@ function AdminDashboard() {
                     <SortIcon field="dateAdded" />
                   </Button>
                 </TableHead>
+                <TableHead className="w-[104px] px-0.5 text-right" title="Total revenue over the trailing 365 days, attributed by stay check-in date and summed from connected Guesty listings (plus manual bookings). Refreshed automatically once a day. Properties with no connected listing or no stays in the window show —.">
+                  <Button
+                    variant="ghost"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    onClick={() => handleSort("totalRevenue")}
+                    data-testid="button-sort-total-revenue"
+                    id="button-sort-total-revenue"
+                    aria-label="Sort by total revenue (trailing 365 days)"
+                  >
+                    Total Revenue
+                    <SortIcon field="totalRevenue" />
+                  </Button>
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -5064,12 +5104,38 @@ function AdminDashboard() {
                       {formatDateAdded(property.createdAt)}
                     </span>
                   </TableCell>
+                  <TableCell className="px-1 py-2 text-right whitespace-nowrap" data-testid={`cell-total-revenue-${property.id}`}>
+                    {(() => {
+                      const rev = propertyRevenueData?.[property.id];
+                      if (!rev || !(rev.revenue > 0)) {
+                        return (
+                          <span
+                            className="text-xs text-muted-foreground"
+                            title="No revenue attributed in the trailing 365 days (no connected Guesty listing, or no stays with a check-in in the window)."
+                          >
+                            —
+                          </span>
+                        );
+                      }
+                      const stays = `${rev.bookings} stay${rev.bookings === 1 ? "" : "s"} (check-in in the last 365 days)`;
+                      const updated = rev.computedAt ? ` · updated ${formatShortDate(rev.computedAt)}` : "";
+                      return (
+                        <span
+                          className="text-xs font-semibold tabular-nums"
+                          title={`${formatCurrency(rev.revenue)} from ${stays}${updated}`}
+                        >
+                          {formatCurrency(rev.revenue)}
+                        </span>
+                      );
+                    })()}
+                  </TableCell>
                 </TableRow>
                 );
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={18} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={19} className="text-center py-8 text-muted-foreground">
+
                     No properties match your filters
                   </TableCell>
                 </TableRow>
