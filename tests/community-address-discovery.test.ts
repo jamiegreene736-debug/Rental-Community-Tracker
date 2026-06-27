@@ -125,5 +125,22 @@ check("streetless place without coordinates yields null",
     "Some Resort",
   ) === null);
 
+// ── Hawaiian diacritics (okina / macron) in map titles + addresses ────────────
+// google_maps returns okina spellings ("Kona Aliʻi", "Casa-De-Emdeko" on
+// "75-6082 Aliʻi Dr", "Hōlualoa Bay Villas"); the title gate + street selection
+// must fold them so real Kona resorts resolve (live 2026-06-26 — 6 of them failed).
+check("title gate matches across okina (Kona Aliʻi ↔ Kona Alii)",
+  titleMatchesResort("Kona Aliʻi", "Kona Alii") === true);
+check("title gate matches across macron (Hōlualoa Bay Villas)",
+  titleMatchesResort("Hōlualoa Bay Villas", "Holualoa Bay Villas") === true);
+check("okina street candidate is now selected (was rejected by the char class)",
+  selectDiscoveredStreet(
+    [{ title: "Casa-De-Emdeko", address: "75-6082 Ali‘i Dr, Kailua-Kona, HI 96740" }],
+    "Casa De Emdeko", "q",
+  )?.street === "75-6082 Alii Dr");
+// Precision preserved: folding does not let a DIFFERENT resort through the gate.
+check("okina fold does not match a different resort",
+  titleMatchesResort("Kona Aliʻi", "Kona Makai") === false);
+
 console.log(`\ncommunity-address-discovery: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

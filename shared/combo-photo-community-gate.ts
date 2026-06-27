@@ -98,6 +98,19 @@ export function communityIsRealMismatch(community: ComboPhotoGateCommunity): boo
   );
 }
 
+/**
+ * Loose "is the identified community the one we expected?" — tolerant of casing,
+ * punctuation, and one name being a phrase-subset of the other ("Kanaloa at Kona"
+ * vs "Kanaloa"). Used only to suppress a self-contradicting "looks like X, not X".
+ */
+function sameCommunityName(a: string, b: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const na = norm(a);
+  const nb = norm(b);
+  if (!na || !nb) return false;
+  return na === nb || ` ${na} `.includes(` ${nb} `) || ` ${nb} `.includes(` ${na} `);
+}
+
 export function evaluateComboPhotoCommunityGate(input: ComboPhotoGateInput): ComboPhotoGateDecision {
   // Fail-open: the check could not run → publish (never skip a whole batch on an
   // ops problem like a missing API key or an empty community folder).
@@ -111,11 +124,19 @@ export function evaluateComboPhotoCommunityGate(input: ComboPhotoGateInput): Com
   // (a) The community photo folder is the correct community.
   if (communityIsRealMismatch(input.community)) {
     const idd = input.community?.identifiedCommunity?.trim();
-    reasons.push(
-      idd
-        ? `community photos look like ${idd}, not ${expected}`
-        : `community photos do not match ${expected}`,
-    );
+    // Belt-and-suspenders: never emit a self-contradicting "looks like X, not X". If
+    // the engine flagged a mismatch but the identified community IS the expected one
+    // (e.g. a dHash pre-screen false-positive on diverse amenity photos that slips
+    // through), publish rather than skip. The primary fix is engine-side
+    // (server/photo-community-check.ts must not invert a positive vision ID); this is
+    // the second layer so the gate can never contradict itself.
+    if (!idd || !sameCommunityName(idd, expected)) {
+      reasons.push(
+        idd
+          ? `community photos look like ${idd}, not ${expected}`
+          : `community photos do not match ${expected}`,
+      );
+    }
   }
 
   // (b)/(c) Each unit is in that community — only a STRONG contradiction skips.

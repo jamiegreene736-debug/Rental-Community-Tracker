@@ -201,4 +201,43 @@ assert.equal(isComboPhotoGateInfraWarning("SEARCHAPI_API_KEY not configured"), t
 // via its null/contradiction checks, not by failing open.
 assert.equal(isComboPhotoGateInfraWarning("Unit B verification failed: vision timed out"), false);
 
+// 12. Defensive guard: a "mismatch" verdict whose identifiedCommunity IS the
+// expected community must NOT self-contradict ("looks like X, not X") — publish.
+// (Kanaloa at Kona, 2026-06-26: the dHash pre-screen flipped a positive vision ID
+// to "mismatch"; the engine fix stops the flip, this gate guard is the backstop.)
+{
+  const d = evaluateComboPhotoCommunityGate({
+    expectedCommunity: "Kanaloa at Kona",
+    warning: null,
+    community: { matchesExpected: "no", overallStatus: "mismatch", identifiedCommunity: "Kanaloa at Kona" },
+    units: [],
+    bedroomCoverage: null,
+  });
+  assert.equal(d.decision, "publish");
+  assert.equal(d.reasons.length, 0);
+}
+// Subset match also counts as "same" (identified "Kanaloa" ⊂ expected "Kanaloa at Kona").
+{
+  const d = evaluateComboPhotoCommunityGate({
+    expectedCommunity: "Kanaloa at Kona",
+    warning: null,
+    community: { matchesExpected: "no", overallStatus: "mismatch", identifiedCommunity: "Kanaloa" },
+    units: [],
+    bedroomCoverage: null,
+  });
+  assert.equal(d.decision, "publish");
+}
+// A genuinely DIFFERENT identified community still skips (real mismatch preserved).
+{
+  const d = evaluateComboPhotoCommunityGate({
+    expectedCommunity: "Kanaloa at Kona",
+    warning: null,
+    community: { matchesExpected: "no", overallStatus: "mismatch", identifiedCommunity: "Poipu Sands" },
+    units: [],
+    bedroomCoverage: null,
+  });
+  assert.equal(d.decision, "skip");
+  assert.equal(d.reasons.length, 1);
+}
+
 console.log("combo-photo-community-gate suite passed");

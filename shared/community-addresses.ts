@@ -87,8 +87,29 @@ export function hawaiiHyphenStreetSlugTokens(address: string | null | undefined)
   return tokens;
 }
 
+/**
+ * Fold Hawaiian diacritics to their ASCII base so SearchAPI/listing data matches
+ * the operator's plain-text resort names and so okina-bearing streets validate.
+ * google_maps returns the real spellings — "Kona Aliʻi", "75-6082 Aliʻi Dr",
+ * "Hōlualoa Bay Villas", "Molokaʻi Shores" — but the okina (ʻ U+02BB / ‘ U+2018)
+ * and macrons (ō, ā, …) previously (a) failed isLikelyStreetAddress's char class
+ * and (b) were turned into word-SPLITTING spaces by normalizeCommunityAddressToken
+ * ("Aliʻi" → "ali i"), so every Aliʻi-Drive Kona resort failed address discovery
+ * (observed live 2026-06-26: Casa De Emdeko, Sea Village, Kona Makai, Alii Villas,
+ * Kona Alii, Holualoa Bay Villas). NFD-decompose to drop macrons, then remove the
+ * okina + apostrophes so the glottal stop JOINS the word ("Aliʻi" → "alii"). It is
+ * a no-op on plain ASCII and never crosses a space, so the load-bearing
+ * "Alii Kai" ≠ "Halii Kai" word-boundary distinction is preserved.
+ */
+export function foldHawaiianDiacritics(value: string | null | undefined): string {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")            // strip combining marks (macrons: ō → o)
+    .replace(/[ʻʼ‘’']/g, ""); // drop okina + curly/straight apostrophes (join the word)
+}
+
 export function normalizeCommunityAddressToken(value: string): string {
-  return value
+  return foldHawaiianDiacritics(value)
     .toLowerCase()
     .replace(/\b(hawaii|hi|florida|fl|united states|usa|us)\b/g, " ")
     .replace(/\b(road)\b/g, "rd")
@@ -157,10 +178,23 @@ export function normalizePlatformCheckCity(city: string, mailingAddress?: string
   return raw;
 }
 
+// One numbered-street test, shared by isLikelyStreetAddress and the comma-segment
+// scan in streetRootFromAddress. The optional `-\d{1,6}` allows the Hawaii
+// hyphenated house number (e.g. 75-6082 Alii Dr). Inputs are diacritic-folded
+// upstream, so the okina never reaches this char class.
+const NUMBERED_STREET_PATTERN = /\b\d{1,6}(?:-\d{1,6})?\s+[A-Za-z0-9' .-]+(?:Rd|Road|Dr|Drive|St|Street|Ave|Avenue|Ln|Lane|Hwy|Highway|Blvd|Boulevard|Way|Cir|Circle|Ct|Court|Pl|Place|Trl|Trail|Pkwy|Parkway)\b/i;
+
 export function streetRootFromAddress(value: string | null | undefined): string {
-  const raw = String(value ?? "").trim();
+  const raw = foldHawaiianDiacritics(value).trim();
   if (!raw) return "";
-  return raw.split(",")[0]
+  // Pick the comma-segment that actually carries the numbered street. Most addresses
+  // lead with it, but rural Hawaii ones lead with a postal route — e.g.
+  // "Star Route, 1000 Kamehameha V Hwy, Kaunakakai, HI" (Molokai Shores) — where the
+  // real street is the SECOND segment. Fall back to the first segment so addresses
+  // with no numbered street ("Princeville, HI 96722") behave exactly as before.
+  const segments = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  const streetSeg = segments.find((s) => NUMBERED_STREET_PATTERN.test(s)) ?? segments[0] ?? "";
+  return streetSeg
     .replace(/\b(?:apartment|apt|unit|suite|ste|building|bldg|#)\s*[a-z0-9-]+\b/gi, "")
     .replace(/\b(Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Hwy|Highway|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Trl|Trail)\s+[A-Za-z]?\d{1,5}[A-Za-z]?\b$/i, "$1")
     .replace(/\s+/g, " ")
@@ -168,8 +202,7 @@ export function streetRootFromAddress(value: string | null | undefined): string 
 }
 
 export function isLikelyStreetAddress(value: string | null | undefined): boolean {
-  const street = streetRootFromAddress(value);
-  return /\b\d{1,6}(?:-\d{1,6})?\s+[A-Za-z0-9' .-]+(?:Rd|Road|Dr|Drive|St|Street|Ave|Avenue|Ln|Lane|Hwy|Highway|Blvd|Boulevard|Way|Cir|Circle|Ct|Court|Pl|Place|Trl|Trail|Pkwy|Parkway)\b/i.test(street);
+  return NUMBERED_STREET_PATTERN.test(streetRootFromAddress(value));
 }
 
 export function inferCommunityStreetAddress(input: {
