@@ -43,6 +43,36 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-27 (dashboard "Last Price Scan" column + WEEKLY market-rate cron): Operator asked for
+  a per-listing column showing the last time the market-rate update ran for that listing's pricing
+  table AND was pushed to Guesty, ~5 days of retroactive seed data, and a once-a-week auto-scan.
+  SHIPPED (`claude/stoic-pascal-a091fc`, PR #TBD). KEY FINDING (don't re-chase): the "pushed to
+  Guesty" timestamp ALREADY exists — `scanner_schedule.lastGuestyRatePushAt`, stamped by
+  `storage.markScannerGuestyRatePush`, which ONLY fires on the per-property push path
+  `POST /api/property/:id/refresh-market-rates` → `refreshPricingTabMarketRates` →
+  `pushBulkGuestyPricingAfterRefresh`. The account-wide `POST /api/admin/refresh-all-market-rates`
+  (`runHybridPricingForAllProperties`) only recomputes `property_market_rates` and does NOT push to
+  Guesty, so the cron drives the per-property endpoint instead (runs refresh+push synchronously
+  inline; the `?run=1`/background code after its first `return` is dead). Pieces: (1) column in
+  `client/src/pages/home.tsx` (sortable, keyed by `property.id`, "—" when never pushed, amber when
+  stale >8d, red on last-push error, italic "·seed" for the backfill) reading
+  `GET /api/dashboard/price-scans`. (2) weekly scheduler `server/market-rate-scheduler.ts` (clone of
+  `property-revenue-scheduler.ts`) — boot seed + weekly `setInterval`, single-flight, fail-soft, gate
+  `MARKET_RATE_SCAN_DISABLED=1`, registered in `server/index.ts`; pure date math split into the
+  zero-dep leaf `server/market-rate-scan-logic.ts` (`retroactivePriceScanSeeds`/`nextRunDelayMs`,
+  unit-tested). (3) DEPLOY SAFETY: the scan WRITES live Guesty prices, so it must NOT fire every
+  Railway redeploy — last-run persisted in `app_settings` (`market_rate_scan.last_run_at`), stamped at
+  the START of the sweep, first run scheduled at `lastRun + 7d`; the first-boot seed anchors
+  `last_run_at` to ~now−1day so a fresh deploy's first auto-push lands ~1 week later, never at boot.
+  (4) RETROACTIVE SEED: `storage.seedScannerPriceScan` backfills the ~11 `PROPERTY_UNIT_CONFIGS` ids
+  across the past 5 days, ONLY where there's no real push yet (non-clobbering), status sentinel
+  `"seed"` (NOT `"ok"`) so an audit never mistakes it for a real push. Endpoints:
+  `GET /api/dashboard/price-scans`, `POST /api/admin/refresh-price-scans` (manual/smoke),
+  `GET /api/admin/price-scan-status`. Verified: `tests/market-rate-scan.test.ts` 15/0, full `npm test`
+  exit 0, build clean, `npm run check` 335 = baseline (0 new). Could NOT live-smoke the Guesty push
+  (no creds) — confirm post-deploy via `POST /api/admin/refresh-price-scans`; the column then shows
+  real "ok" pushes, and the weekly auto-run replaces the seeds ~1 week after deploy.
+
 - 2026-06-26 (Total Revenue column FOLLOW-UP: attribution → BOOKING DATE): Post-deploy smoke
   of PR #847 showed the portfolio is heavily forward-booked (prod: 34/35 committed reservations
   have FUTURE check-ins), so the original CHECK-IN-date window populated only 2 properties and
