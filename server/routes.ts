@@ -36243,8 +36243,19 @@ Return ONLY compact JSON with this exact shape:
                 if (!canRetry) {
                   item.status = "failed";
                   item.phase = "failed";
+                  // A "no source URL / no photos" exhaustion means the resort has no
+                  // for-sale or recently-sold listings on the national portals to
+                  // source unit photos from (verified live 2026-06-26: leasehold
+                  // condotels like Country Club Villas / Kona Pacific / Casa De Emdeko
+                  // return 0 Zillow/Realtor/Redfin/Homes hits under any city term).
+                  // Surface the ACTIONABLE reason — the operator can still list it via
+                  // "Add a manual community" by pasting the two unit URLs — instead of
+                  // the generic "could not create a fully-photographed listing".
+                  const noSourceInventory = /missing-source-url|no-photos|too-few-distinct-photos:0/i.test(item.error || "");
                   item.message = e?.bulkComboNoRetry
-                    ? `Skipped — could not create a fully-photographed listing for this resort. ${item.error || ""}`.trim()
+                    ? (noSourceInventory
+                        ? `Skipped — no for-sale or recently-sold listings were found for "${item.community?.name ?? "this resort"}" on Zillow/Realtor/Redfin/Homes, so there are no unit photos to source automatically. Add it via "Add a manual community" (paste the two unit listing URLs) to list it. ${item.error || ""}`.trim()
+                        : `Skipped — could not create a fully-photographed listing for this resort. ${item.error || ""}`.trim())
                     : (item.error || "Bulk combo listing failed");
                   break;
                 }

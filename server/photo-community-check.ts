@@ -333,10 +333,19 @@ async function auditCommunityFolderFull(
 
   if (preScreen.mixed && preScreen.reason) {
     audit.community.outliers.push({ id: "pre-screen", reason: preScreen.reason });
-    audit.community.allSameCommunity = false;
-    audit.community.overallStatus = "mismatch";
-    if (audit.community.matchesExpected === "yes") {
-      audit.community.matchesExpected = "no";
+    // The dHash pre-screen flags a folder whose photos are visually DIVERSE. For a
+    // real resort that is EXPECTED (pool + beach + grounds + lobby look nothing
+    // alike), so it must NOT override a POSITIVE vision identification of the
+    // expected community — doing so forced a self-contradicting "looks like X, not X"
+    // skip (Kanaloa at Kona, bulk combo queue, 2026-06-26: vision said the folder IS
+    // Kanaloa at Kona, the pre-screen flipped it to "mismatch", and the gate emitted
+    // "looks like Kanaloa at Kona, not Kanaloa at Kona"). Only escalate the mix to a
+    // hard mismatch when vision did NOT already confirm the expected community; when
+    // it did, keep the positive verdict and leave the mix as an informational
+    // outlier note.
+    if (audit.community.matchesExpected !== "yes") {
+      audit.community.allSameCommunity = false;
+      audit.community.overallStatus = "mismatch";
     }
   }
 

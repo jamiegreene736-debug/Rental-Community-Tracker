@@ -8,6 +8,9 @@ import {
   resolveBulkComboListingStreet,
   communityAddressRuleForName,
   discoverySearchCitiesForPhotoSearch,
+  streetRootFromAddress,
+  isLikelyStreetAddress,
+  normalizeCommunityAddressToken,
 } from "../shared/community-addresses";
 
 let pass = 0;
@@ -133,6 +136,37 @@ for (const unknown of ["Lae Nani", "Puu Poa", "Hanalei Bay Resort", "Waipouli Be
     communityAddressRuleForName(unknown) === null,
     communityAddressRuleForName(unknown)?.street);
 }
+
+// ── Hawaiian diacritics (okina ʻ / ‘, macrons) ───────────────────────────────
+// google_maps returns the real spellings ("Kona Aliʻi", "75-6082 Aliʻi Dr",
+// "Hōlualoa Bay Villas"); these previously failed the address gate (okina outside
+// the street char class) and the discovery title match (okina split the word into
+// "ali i"). The fold collapses them to ASCII without crossing word boundaries.
+// Live 2026-06-26: 6 Kona resorts dropped at the address pre-check this way.
+check("okina street validates",
+  isLikelyStreetAddress("75-6082 Ali‘i Dr") === true);
+check("okina street root is clean ASCII",
+  streetRootFromAddress("75-6082 Ali‘i Dr, Kailua-Kona, HI 96740") === "75-6082 Alii Dr");
+check("macron resort name normalizes to ASCII",
+  normalizeCommunityAddressToken("Hōlualoa Bay Villas") === "holualoa bay villas");
+check("okina name joins, not splits (Kona Aliʻi)",
+  normalizeCommunityAddressToken("Kona Aliʻi") === "kona alii");
+check("straight apostrophe also joins",
+  normalizeCommunityAddressToken("Ali'i Villas") === "alii villas");
+// LOAD-BEARING: folding must NOT merge distinct resorts across a word boundary.
+check("Alii Kai stays distinct from Halii Kai after folding",
+  normalizeCommunityAddressToken("Alii Kai") !== normalizeCommunityAddressToken("Halii Kai"));
+// Rural Hawaii: the numbered street is the SECOND comma-segment (Molokai Shores'
+// "Star Route, 1000 Kamehameha V Hwy, …"); the scan must pick it, not "Star Route".
+check("rural Star Route picks the numbered second segment",
+  streetRootFromAddress("Star Route, 1000 Kamehameha V Hwy, Kaunakakai, HI 96748") === "1000 Kamehameha V Hwy");
+// No regression on plain ASCII / numberless addresses.
+check("plain street unchanged",
+  streetRootFromAddress("130 Kai Malina Pkwy, Lahaina, HI") === "130 Kai Malina Pkwy");
+check("numberless address falls back to the first segment",
+  streetRootFromAddress("Princeville, HI 96722") === "Princeville");
+check("plain Hawaii hyphen house number still validates",
+  isLikelyStreetAddress("78-261 Manukai St") === true);
 
 console.log(`\ncommunity-addresses: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
