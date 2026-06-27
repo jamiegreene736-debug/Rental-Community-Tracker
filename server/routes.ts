@@ -14629,6 +14629,13 @@ Requirements:
         // Bulk fresh re-run: supersede any in-flight job for this reservation
         // (the client detached its units, so a reused job would be stale).
         forceRestart: req.body?.forceRestart === true,
+        // Eval harness (plan §5): read-only dry-run + per-run engine override so the
+        // golden harness can compare legacy vs cowork on one server. engineOverride is
+        // honored ONLY when dryRun is true (enforced in startAutoFillJob).
+        dryRun: req.body?.dryRun === true,
+        engineOverride: req.body?.engineOverride === "legacy" || req.body?.engineOverride === "cowork"
+          ? req.body.engineOverride
+          : undefined,
       });
       return res.status(202).json(started);
     } catch (e: any) {
@@ -25817,6 +25824,163 @@ Return ONLY compact JSON with this exact shape:
     const { getLatestBulkAutoFillJob } = await import("./bulk-auto-fill-job");
     const bulkAutoFillActive = getLatestBulkAutoFillJob()?.status === "running";
     return res.json({ ...getStatus(), sidecarLane: getSidecarLaneStatus(), bulkAutoFillActive });
+  });
+
+  // ── Buy-in AGENT runner endpoints (cowork buy-in engine) ─────────────────────
+  // Worker transport for the LOCAL Mac "buy-in agent" runner
+  // (daemon/buyin-agent/runner.mjs). Same trust model as /api/admin/vrbo-sidecar/*:
+  // allowlisted in server/auth.ts, runner sends X-Admin-Secret. See cowork plan §2.
+  // GET /api/admin/buyin-agent/next — runner claims the oldest pending agent run.
+  app.get("/api/admin/buyin-agent/next", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const { nextAgentRun, getAgentHeartbeat } = await import("./buyin-agent-queue");
+    const run = nextAgentRun();
+    return res.json({ run: run ?? null, heartbeat: getAgentHeartbeat() });
+  });
+
+  // POST /api/admin/buyin-agent/heartbeat — runner liveness tick while it holds a
+  // long-running claim. Body: { id?, stage? }. `alive:false` means the server has
+  // already reclaimed/canceled the run, so the runner should abandon it.
+  app.post("/api/admin/buyin-agent/heartbeat", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as { id?: unknown; stage?: unknown };
+    const { stampAgentHeartbeat } = await import("./buyin-agent-queue");
+    const r = stampAgentHeartbeat(
+      typeof body.id === "string" ? body.id : undefined,
+      typeof body.stage === "string" ? body.stage : undefined,
+    );
+    return res.json({ ok: true, alive: r.alive });
+  });
+
+  // POST /api/admin/buyin-agent/result — runner reports a terminal outcome.
+  // Body: { id, result?: BuyinAgentRunResult, error?: string }
+  app.post("/api/admin/buyin-agent/result", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as { id?: string; result?: unknown; error?: string };
+    if (!body.id || typeof body.id !== "string") {
+      return res.status(400).json({ error: "id (string) required" });
+    }
+    const { completeAgentRun } = await import("./buyin-agent-queue");
+    const r = completeAgentRun({
+      id: body.id,
+      result: body.result === undefined ? undefined : (body.result as any),
+      error: typeof body.error === "string" ? body.error : undefined,
+    });
+    return res.json(r);
+  });
+
+  // GET /api/admin/buyin-agent/status — diagnostic snapshot of the agent queue.
+  app.get("/api/admin/buyin-agent/status", async (_req, res) => {
+    const { getAgentQueueStatus } = await import("./buyin-agent-queue");
+    return res.json(getAgentQueueStatus());
+  });
+
+  // ── Buy-in agent READ tools (cowork engine, plan §3) ─────────────────────────
+  // Thin wrappers over the deterministic logic so the agent reasons with the same
+  // numbers the legacy ladder uses. Logic lives in server/buyin-agent-tools.ts so
+  // the endpoints and the unit tests share one implementation.
+
+  // GET /api/admin/buyin-agent/tools/property-unit-config?propertyId=N
+  app.get("/api/admin/buyin-agent/tools/property-unit-config", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const propertyId = Number(req.query.propertyId);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "propertyId (number) required" });
+    const { toolPropertyUnitConfig } = await import("./buyin-agent-tools");
+    const config = toolPropertyUnitConfig(propertyId);
+    if (!config) return res.status(404).json({ error: `no PROPERTY_UNIT_CONFIGS entry for property ${propertyId}` });
+    return res.json({ propertyId, config });
+  });
+
+  // GET /api/admin/buyin-agent/tools/nearby-towns?community=X&maxDriveMinutes=&limit=
+  app.get("/api/admin/buyin-agent/tools/nearby-towns", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const community = typeof req.query.community === "string" ? req.query.community.trim() : "";
+    if (!community) return res.status(400).json({ error: "community query param required" });
+    const maxDriveMinutes = req.query.maxDriveMinutes !== undefined ? Number(req.query.maxDriveMinutes) : undefined;
+    const limit = req.query.limit !== undefined ? Number(req.query.limit) : undefined;
+    const { toolNearbyTowns } = await import("./buyin-agent-tools");
+    const towns = await toolNearbyTowns(community, maxDriveMinutes, limit);
+    return res.json({ community, towns });
+  });
+
+  // POST /api/admin/buyin-agent/tools/check-walkability  body: { picks: [...] }
+  // PRE-FILTER only — runs on AGENT-SUPPLIED coords. The authoritative proximity
+  // gate (server-re-derived coords) is at attach time (propose_attach, Phase 2).
+  app.post("/api/admin/buyin-agent/tools/check-walkability", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const picks = Array.isArray((req.body ?? {}).picks) ? (req.body as any).picks : null;
+    if (!picks) return res.status(400).json({ error: "picks (array) required" });
+    const { toolCheckWalkability } = await import("./buyin-agent-tools");
+    return res.json(toolCheckWalkability(picks));
+  });
+
+  // POST /api/admin/buyin-agent/tools/evaluate-profit
+  //   body: { expectedRevenue, existingCost, comboCost }
+  app.post("/api/admin/buyin-agent/tools/evaluate-profit", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const b = (req.body ?? {}) as { expectedRevenue?: unknown; existingCost?: unknown; comboCost?: unknown };
+    const { toolEvaluateProfit } = await import("./buyin-agent-tools");
+    return res.json(toolEvaluateProfit({
+      expectedRevenue: Number(b.expectedRevenue) || 0,
+      existingCost: Number(b.existingCost) || 0,
+      comboCost: Number(b.comboCost) || 0,
+    }));
+  });
+
+  // GET /api/admin/buyin-agent/tools/job-context?jobId=X — live context for the
+  // agent to re-read mid-run (remaining slots, running committed cost, revenue left).
+  app.get("/api/admin/buyin-agent/tools/job-context", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const jobId = String(req.query.jobId ?? "");
+    if (!jobId) return res.status(400).json({ error: "jobId required" });
+    const { getAutoFillJob } = await import("./auto-fill-job");
+    const job = getAutoFillJob(jobId);
+    if (!job) return res.status(404).json({ error: "no live job for this id" });
+    const filledIds = new Set(job.attached.map((a) => a.unitId));
+    const committedCost = job.existingAttachedCost + job.attached.reduce((s, a) => s + (Number(a.totalPrice) || 0), 0);
+    return res.json({
+      jobId: job.id,
+      reservationId: job.reservationId,
+      propertyId: job.propertyId,
+      propertyName: job.propertyName,
+      community: job.community,
+      checkIn: job.checkIn,
+      checkOut: job.checkOut,
+      nights: job.nights,
+      expectedRevenue: job.expectedRevenue,
+      gateEnabled: job.gateEnabled,
+      committedCost,
+      revenueAvailable: job.expectedRevenue - committedCost,
+      groundFloorBedrooms: Array.from(job.groundFloorBedrooms),
+      slots: job.slots.map((s) => ({ unitId: s.unitId, unitLabel: s.unitLabel, bedrooms: s.bedrooms, filled: filledIds.has(s.unitId) })),
+      attached: job.attached.map((a) => ({ unitId: a.unitId, url: a.url, title: a.title, totalPrice: a.totalPrice, bedrooms: a.bedrooms })),
+      canceled: job.canceled,
+      dryRun: job.dryRun,
+    });
+  });
+
+  // POST /api/admin/buyin-agent/propose-attach — the COMMIT chokepoint the agent
+  // calls to attach a proposed pick/combo (plan §3/§4). All guards (profit gate,
+  // ground-floor snippet, server-derived coords, photo validation, dedup, proximity)
+  // are server-enforced inside proposeAttach + attachPick. Body: { jobId, picks: [...] }.
+  app.post("/api/admin/buyin-agent/propose-attach", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as { jobId?: unknown; picks?: unknown };
+    if (!body.jobId || typeof body.jobId !== "string") return res.status(400).json({ error: "jobId (string) required" });
+    if (!Array.isArray(body.picks)) return res.status(400).json({ error: "picks (array) required" });
+    const { proposeAttach } = await import("./buyin-agent-commit");
+    const result = await proposeAttach({ jobId: body.jobId, picks: body.picks as any[] });
+    return res.json(result);
+  });
+
+  // GET /api/buyin-agent/result/:id — server-side poll target for the cowork engine
+  // (runCoworkAutoFillJob). No admin gate (same-instance server caller over loopback,
+  // mirrors /api/vrbo-sidecar/result/:id).
+  app.get("/api/buyin-agent/result/:id", async (req, res) => {
+    const { getAgentRunResult } = await import("./buyin-agent-queue");
+    const r = getAgentRunResult(String(req.params.id));
+    if (!r) return res.status(404).json({ error: "not found (expired?)" });
+    return res.json(r);
   });
 
   // GET /api/vrbo-sidecar/status — public queue counters for the

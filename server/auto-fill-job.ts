@@ -49,6 +49,10 @@ import {
   runCityVrboInventoryScanForCity,
   type CityVrboScanResult,
 } from "./city-vrbo-inventory";
+// Cowork (agent-driven) buy-in engine. The runtime dependency is one-directional
+// (this module → auto-fill-cowork); auto-fill-cowork imports only TYPES back, so
+// there is no circular require. See the fork in runAutoFillJob.
+import { resolveBuyInEngine, runCoworkAutoFillJob, type BuyInEngine } from "./auto-fill-cowork";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 
@@ -173,6 +177,11 @@ export type StartAutoFillInput = {
   // real reservation's row / enroll the search in boot-resume). See AGENTS.md
   // "Read-only inbox buy-in search (dry-run auto-fill)".
   dryRun?: boolean;
+  // EVAL HARNESS ONLY (plan §5): force the buy-in engine for THIS run regardless of
+  // the BUYIN_ENGINE / BUYIN_ENGINE_BULK env. Honored ONLY for dryRun jobs so the
+  // golden harness can compare legacy vs cowork on one server without flipping env
+  // and restarting; a real (committing) run always uses the env-resolved engine.
+  engineOverride?: "legacy" | "cowork";
   // BOOT-RESUME ONLY (server/auto-fill-resume.ts): re-register the job under
   // the SAME id the dead process used, so an operator's still-open poller
   // (polling /api/operations/auto-fill/:jobId) survives the redeploy without a
@@ -210,7 +219,7 @@ export type CityEconomics = {
   driveMinutesCeiling?: number; // env-accurate tier ceiling (tierCeilingMinutes) — no client 20/45 literal
 };
 
-type AttachStage = "resort" | "home-city" | "nearby" | "single-unit-city";
+export type AttachStage = "resort" | "home-city" | "nearby" | "single-unit-city";
 
 export type AutoFillAttached = {
   unitId: string;
@@ -268,7 +277,7 @@ export type AutoFillExpansionProgress = {
   currentCity: string | null;
 };
 
-type AutoFillJob = {
+export type AutoFillJob = {
   id: string;
   status: JobStatus;
   phase: string;
@@ -310,6 +319,8 @@ type AutoFillJob = {
   owner: "row" | "bulk";
   // Read-only inbox search: skip every persist + attach (see StartAutoFillInput.dryRun).
   dryRun: boolean;
+  // Eval-harness engine override (dry-run only); null = use the env-resolved engine.
+  engineOverride: BuyInEngine | null;
 };
 
 export type AutoFillJobStatus = {
@@ -589,7 +600,7 @@ async function postJson(url: string, body: unknown, timeoutMs: number): Promise<
   return { ok: resp.ok, status: resp.status, data };
 }
 
-type LiveCandidate = {
+export type LiveCandidate = {
   source: string;
   sourceLabel: string;
   title: string;
@@ -871,7 +882,10 @@ async function reconcileComboAllOrNothing(job: AutoFillJob): Promise<void> {
 }
 
 // ── attach (server analog of the client createAndAttachPick) ─────────────────
-async function attachPick(args: {
+// Exported so the cowork engine's propose_attach path (Phase 2) routes every
+// commit through the SAME chokepoint — keeping the notes-marker ordering, dedup,
+// proximity gate, and ground-floor check server-enforced (plan §4).
+export type AttachPickArgs = {
   job: AutoFillJob;
   base: string;
   slot: AutoFillSlotInput;
@@ -884,7 +898,8 @@ async function attachPick(args: {
   // operations "Last scan" column can show whether a booking was filled from the
   // original community (resort), the original city, or a nearby city. Optional.
   sourceCity?: string;
-}): Promise<boolean> {
+};
+async function attachPick(args: AttachPickArgs): Promise<boolean> {
   const { job, base, slot, pick, searchedBedrooms, used, stage, comboLabel, sourceCity } = args;
   const skip = (reason: string) => {
     job.skipped.push({ unitId: slot.unitId, unitLabel: slot.unitLabel, reason: `${slot.unitLabel}: ${reason}` });
@@ -1098,6 +1113,36 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
     };
     const recordLossComboOption = (label: string, pair: any, comboCost: number, profit: number, scope: LossComboScope) =>
       pushLossComboOption(job, label, pair, comboCost, profit, scope);
+
+    // ── ENGINE FORK (plan §1) ───────────────────────────────────────────────
+    // Resolve the buy-in engine for THIS job: BUYIN_ENGINE for a row "Auto-fill
+    // cheapest" click, the separate BUYIN_ENGINE_BULK for a bulk-queue run (so a
+    // single-reservation cutover never drags the whole bulk fleet onto the agent).
+    // When "cowork", hand off to the agent-driven engine; it mutates THIS job and
+    // reuses the helpers below via `deps`, so serializeAutoFillJob + the client
+    // poller + the bulk poller are all unchanged. If it returns true the agent
+    // owned the run (already finalized) — do NOT continue to the legacy ladder.
+    // Returns false to fall through to legacy (Phase-0 scaffold today, and the
+    // instant `legacy` rollback lever during build-out). The finally at the end of
+    // this function still cleans up activeJobIds on the early return.
+    const engine = job.engineOverride ?? resolveBuyInEngine(job.owner);
+    if (engine === "cowork") {
+      const handled = await runCoworkAutoFillJob(job, {
+        base,
+        gate,
+        committedCost,
+        remainingSlots,
+        used,
+        recordEconomics,
+        recordLossComboOption,
+        attachPick,
+        reconcile: reconcileComboAllOrNothing,
+        finalize,
+        touch,
+        setEscalation,
+      });
+      if (handled) return;
+    }
 
     const unitConfig = PROPERTY_UNIT_CONFIGS[job.propertyId];
     const isComboProperty = !!unitConfig && unitConfig.units.length >= 2;
@@ -1818,7 +1863,7 @@ function comboUnitsFromPicks(
 // whether it came from the same city (city-wide scan) or a drive-time ring. The
 // `scopeCategory` is REQUIRED so every call site must declare it — a forgotten
 // home-city chip becomes a compile error, not a silently missing badge.
-type LossComboScope = {
+export type LossComboScope = {
   scopeCategory: "home" | "tier1" | "tier2"; // home = resort/home-city/single-unit; tier1/2 = nearby
   driveMinutes?: number; // nearby only — actual drive time to the town
   driveMinutesCeiling?: number; // nearby only — env-accurate tier ceiling (tierCeilingMinutes)
@@ -2321,6 +2366,10 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
     canceled: false,
     owner: input.owner === "bulk" ? "bulk" : "row",
     dryRun: input.dryRun === true,
+    // Engine override is honored ONLY for dry-run eval runs (see StartAutoFillInput).
+    engineOverride: input.dryRun === true && (input.engineOverride === "legacy" || input.engineOverride === "cowork")
+      ? input.engineOverride
+      : null,
   };
   autoFillJobs.set(id, job);
   activeJobByReservation.set(reservationId, id);
