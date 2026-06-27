@@ -413,6 +413,41 @@ export function autoCuratedAirbnbSearchName(input: {
   return [name, city, st].filter(Boolean).join(", ");
 }
 
+// Coarse, generously-padded state bounding boxes used ONLY to reject a grossly
+// wrong-STATE geocode before it anchors an auto-curation comp box. The boxes are
+// intentionally loose — the goal is to catch "a Hawaii listing geocoded to
+// Florida", never to pin a precise border. States not listed fail OPEN
+// (validation skipped) so this can never block a legitimate in-state coordinate;
+// add states here as the portfolio expands. [sw_lat, sw_lng, ne_lat, ne_lng].
+const US_STATE_BOUNDS: Record<string, [number, number, number, number]> = {
+  hawaii: [18.5, -160.5, 22.5, -154.5],
+  florida: [24.3, -87.8, 31.2, -79.8],
+  california: [32.3, -124.6, 42.2, -113.9],
+  texas: [25.5, -106.9, 36.7, -93.3],
+  arizona: [31.2, -114.9, 37.1, -108.9],
+  nevada: [34.9, -120.1, 42.1, -113.9],
+  colorado: [36.9, -109.2, 41.1, -101.9],
+  tennessee: [34.9, -90.4, 36.8, -81.5],
+  "south carolina": [31.9, -83.4, 35.3, -78.4],
+  "north carolina": [33.7, -84.4, 36.7, -75.4],
+  georgia: [30.3, -85.7, 35.1, -80.8],
+};
+
+// True when (lat,lng) plausibly falls inside the claimed US state (or the state
+// is unlisted → fail open). Accepts a full name or a 2-letter code.
+export function coordinateMatchesState(lat: number, lng: number, state: string | null | undefined): boolean {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  const raw = String(state ?? "").trim().toLowerCase();
+  if (!raw) return true; // no claimed state → nothing to check against
+  const fullName = raw.length === 2
+    ? Object.entries(US_STATE_ABBREVIATIONS).find(([, abbr]) => abbr.toLowerCase() === raw)?.[0]
+    : raw;
+  const box = fullName ? US_STATE_BOUNDS[fullName] : undefined;
+  if (!box) return true; // unlisted state → fail open (never reject a real coord)
+  const [swLat, swLng, neLat, neLng] = box;
+  return lat >= swLat && lat <= neLat && lng >= swLng && lng <= neLng;
+}
+
 /**
  * Town-level destination for the city-wide VRBO inventory export. Falls back to
  * the resort/landmark `searchLocation` when a market has no town override, so

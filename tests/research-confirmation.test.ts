@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   abbreviateUsState,
   autoCuratedAirbnbSearchName,
+  coordinateMatchesState,
   curatedResortSearchName,
   isCuratedBuyInMarket,
 } from "../shared/buy-in-market";
@@ -45,6 +46,19 @@ assert.equal(abbreviateUsState("florida"), "FL");
 assert.equal(abbreviateUsState("HI"), "HI");
 assert.equal(abbreviateUsState(""), "");
 assert.equal(abbreviateUsState(null), "");
+
+// coordinateMatchesState — the auto-curation wrong-STATE guard. A Royal Kahana
+// (Maui, HI) coordinate is in-state; the same point fails a Florida claim. Accepts
+// both full names and 2-letter codes; unlisted states + empty state fail OPEN.
+assert.equal(coordinateMatchesState(20.972, -156.6793, "Hawaii"), true);
+assert.equal(coordinateMatchesState(20.972, -156.6793, "HI"), true);
+assert.equal(coordinateMatchesState(20.972, -156.6793, "Florida"), false); // Maui point, FL claim → rejected
+assert.equal(coordinateMatchesState(26.3254, -81.6713, "FL"), true); // Bonita Springs, FL
+assert.equal(coordinateMatchesState(26.3254, -81.6713, "Hawaii"), false);
+assert.equal(coordinateMatchesState(20.972, -156.6793, "Tennessee"), false); // far out of TN box
+assert.equal(coordinateMatchesState(20.972, -156.6793, "Vermont"), true); // VT unlisted → fail open
+assert.equal(coordinateMatchesState(20.972, -156.6793, ""), true); // no claim → fail open
+assert.equal(coordinateMatchesState(Number.NaN, -156.6793, "Hawaii"), false);
 
 // Empty / nullish input is safe.
 assert.equal(curatedResortSearchName(""), "");

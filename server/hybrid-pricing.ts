@@ -905,6 +905,11 @@ export async function fetchAirbnbMedianNightly(args: {
   const primaryGeoOverride = derived
     ? centerRadiusConstraintFromCoords(derived.lat, derived.lng, 0.02, "auto-curated center-radius box (derived from the listing's own address)")
     : undefined;
+  // The listing's own "City, State" anchor — used at the widened tiers AND as the
+  // broad fallback query set below, independent of the geo-widening kill switch.
+  const derivedCityAnchor = derived?.city
+    ? [derived.state ? `${derived.city}, ${derived.state}` : derived.city]
+    : [];
   const passes: SearchPass[] = [{ widened: false, queries: primaryQueries, geoConstraintOverride: primaryGeoOverride }];
   if (marketRateGeoWideningEnabled()) {
     // City anchors FIRST at the widened tiers: a city-level query ("Bonita Springs,
@@ -917,10 +922,7 @@ export async function fetchAirbnbMedianNightly(args: {
     // that and uses fewer requests. For a derived market the anchor is the listing's
     // own "City, State" and the wider boxes are centered on its coordinates.
     const widenedQueries = derived
-      ? Array.from(new Set([
-          ...(derived.city ? [derived.state ? `${derived.city}, ${derived.state}` : derived.city] : []),
-          ...primaryQueries,
-        ]))
+      ? Array.from(new Set([...derivedCityAnchor, ...primaryQueries]))
       : Array.from(new Set([...cityAnchorQueriesForMarket(args.community), ...primaryQueries]));
     for (const halfDeg of MARKET_RATE_WIDENING_HALF_DEGREES) {
       const override = derived
@@ -928,6 +930,20 @@ export async function fetchAirbnbMedianNightly(args: {
         : centerRadiusGeoConstraint(args.community, halfDeg);
       if (override) passes.push({ widened: true, queries: widenedQueries, geoConstraintOverride: override });
     }
+  }
+  // AUTO-CURATION safety net: a derived market ALWAYS keeps a broad escape hatch.
+  // If the tight + widened boxes all returned zero comps (a genuinely thin area,
+  // OR the MARKET_RATE_GEO_WIDENING kill switch is off so no widened tiers ran),
+  // fall back to the un-boxed state-wide search the listing had BEFORE auto-
+  // curation instead of hard-failing to the static table / throwing. Runs only
+  // after every geo-boxed pass came back empty (same rates.length===0 escalation),
+  // so a healthy derived market still makes a single request and is unaffected.
+  if (derived) {
+    passes.push({
+      widened: false,
+      queries: Array.from(new Set([...derivedCityAnchor, ...primaryQueries])),
+      geoConstraintOverride: { kind: "none", params: {}, description: "broad state-wide fallback (auto-curated geo boxes found no comps)" },
+    });
   }
 
   for (const pass of passes) {

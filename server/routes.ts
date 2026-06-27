@@ -160,6 +160,7 @@ import {
   BUY_IN_MARKET_SEARCH_LOCATIONS,
   SIMILAR_BUY_IN_MARKETS,
   autoCuratedAirbnbSearchName,
+  coordinateMatchesState,
   driveMinutesBetweenBuyInMarkets,
   driveMinutesBetweenCoords,
   isCuratedBuyInMarket,
@@ -1135,21 +1136,30 @@ function parseStoredCoord(value: unknown): number | null {
 
 // Geocode a draft's location, trying the most specific address first. Uses the
 // shared geocoder (Nominatim → SearchAPI google_maps), which already throttles
-// and caches. Returns null when nothing resolves.
-async function geocodeDraftLocation(draft: any): Promise<{ lat: number; lng: number } | null> {
+// and caches. Each candidate is REJECTED if it lands outside the draft's claimed
+// state (coordinateMatchesState) so a fuzzy resort-name geocode can't anchor the
+// comp box in the wrong state. The bare-street (no city/state) candidate is
+// intentionally NOT tried — it's the most cross-state-prone (a same-named street
+// in another state). `fromStreet` marks a precise numbered-street hit; only those
+// are cached on the draft (a name-only/city-centroid hit is used for the current
+// scan but never persisted, so it can't become a sticky wrong center). Returns
+// null when nothing resolves in-state.
+async function geocodeDraftLocation(
+  draft: any,
+): Promise<{ lat: number; lng: number; fromStreet: boolean } | null> {
   const city = String(draft?.city ?? "").trim();
   const state = String(draft?.state ?? "").trim();
   const street = String(draft?.streetAddress ?? "").trim();
   const name = String(draft?.name ?? "").trim();
   const tail = [city, state].filter(Boolean).join(", ");
-  const candidates = [
-    street && tail ? `${street}, ${tail}` : null,
-    name && tail ? `${name}, ${tail}` : null,
-    street || null,
-  ].filter((a): a is string => !!a && a.trim().length > 0);
-  for (const addr of candidates) {
-    const coord = await geocode(addr).catch(() => null);
-    if (coord) return coord;
+  const candidates: Array<{ q: string; fromStreet: boolean }> = [];
+  if (street && tail) candidates.push({ q: `${street}, ${tail}`, fromStreet: true });
+  if (name && tail) candidates.push({ q: `${name}, ${tail}`, fromStreet: false });
+  for (const candidate of candidates) {
+    const coord = await geocode(candidate.q).catch(() => null);
+    if (coord && coordinateMatchesState(coord.lat, coord.lng, state)) {
+      return { lat: coord.lat, lng: coord.lng, fromStreet: candidate.fromStreet };
+    }
   }
   return null;
 }
@@ -1173,11 +1183,17 @@ async function resolveDraftDerivedGeo(draft: any, community: string): Promise<De
     if (coords) {
       lat = coords.lat;
       lng = coords.lng;
-      // Persist so future refreshes (daily cron / manual) don't re-geocode.
-      await storage.updateCommunityDraft(Number(draft.id), {
-        latitude: String(coords.lat),
-        longitude: String(coords.lng),
-      }).catch(() => undefined);
+      // Persist ONLY a precise (street-address-derived) center so future refreshes
+      // (daily cron / manual) don't re-geocode. A name-only / city-centroid hit is
+      // left ephemeral: it prices this scan but is re-resolved next time, so a
+      // fuzzy center never becomes a sticky permanent cache and a later refresh
+      // with a real street address can supersede it.
+      if (coords.fromStreet) {
+        await storage.updateCommunityDraft(Number(draft.id), {
+          latitude: String(coords.lat),
+          longitude: String(coords.lng),
+        }).catch(() => undefined);
+      }
     }
   }
   if (lat == null || lng == null) return null;

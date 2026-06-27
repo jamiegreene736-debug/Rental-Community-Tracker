@@ -23,7 +23,7 @@ import { sampleLicensesForLocation } from "@/data/adapt-draft";
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
-import { curatedResortSearchName, isCuratedBuyInMarket } from "@shared/buy-in-market";
+import { curatedResortSearchName, isCuratedBuyInMarket, resolveBuyInMarketFromText } from "@shared/buy-in-market";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -4300,8 +4300,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const propPricing = getPropertyPricing(propertyId);
     if (!propPricing || propPricing.units.length === 0) return null;
     const community = propPricing.units[0]?.community ?? "";
-    const resort = curatedResortSearchName(community) || community;
-    const curatedByRegistry = isCuratedBuyInMarket(community);
+    // Resolve the same way the SERVER does (communityResolutionForDraft →
+    // resolveBuyInMarket): a draft NAME that matches a registry ALIAS but isn't the
+    // exact key (e.g. "Royal Kahana Resort" → "Royal Kahana") is priced with curated
+    // bounds server-side, so the badge must treat it as registry-curated — not
+    // mislabel it "auto-curated from the address". resolveBuyInMarketFromText is the
+    // pure, client-safe alias matcher shared with the server.
+    const resolvedCommunity = resolveBuyInMarketFromText(community) ?? community;
+    const resort = curatedResortSearchName(resolvedCommunity) || community;
+    const curatedByRegistry = isCuratedBuyInMarket(resolvedCommunity);
     const units = propPricing.units.map((u) => ({ label: u.unitLabel, bedrooms: u.bedrooms }));
     const distinctBedrooms = Array.from(new Set(units.map((u) => u.bedrooms))).sort((a, b) => a - b);
     const totalBedrooms = units.reduce((sum, u) => sum + u.bedrooms, 0);
