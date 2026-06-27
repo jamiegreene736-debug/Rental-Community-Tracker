@@ -149,6 +149,7 @@ import {
   getBuyInRate,
   getSeasonForMonth,
   MARKET_RATE_TARGET_MARGIN,
+  targetMarginForProperty,
   suggestPricingArea,
   type SeasonType,
 } from "@shared/pricing-rates";
@@ -963,10 +964,12 @@ async function pushBulkGuestyPricingAfterRefresh(
 }> {
   // Operator directive 2026-06-18: the market-rate update queue applies a FLAT
   // 15% markup to every property (MARKET_RATE_TARGET_MARGIN). We intentionally
-  // do NOT read the per-property scanner_schedules.target_margin here — legacy
-  // rows carry the old 0.2000 default, and the operator wants every queue update
-  // to push at 15% uniformly. Retune via the single shared constant.
-  const targetMargin = MARKET_RATE_TARGET_MARGIN;
+  // do NOT read the polluted per-property scanner_schedules.target_margin column
+  // (legacy rows carry the old 0.2000 default). Operator 2026-06-27: a small
+  // explicit allow-list (PROPERTY_TARGET_MARGIN_OVERRIDES) may raise the margin
+  // for specific outlier listings (e.g. the Menehune Shores -3 Maui combo at
+  // 20%); every property NOT in that list still pushes at the flat 15%.
+  const targetMargin = targetMarginForProperty(propertyId);
   const plan = await buildBulkGuestySeasonalPlan(propertyId, targetMargin);
   if (!plan) {
     return { skipped: true, reason: "No mapped Guesty listing or pricing configuration found for this property." };

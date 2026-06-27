@@ -13,7 +13,7 @@ import { guestyRequest } from "./guesty-sync";
 import { PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import {
   getCommunityRegion,
-  MARKET_RATE_TARGET_MARGIN,
+  targetMarginForProperty,
   totalNightlyBuyInForMonth,
 } from "@shared/pricing-rates";
 import {
@@ -412,10 +412,11 @@ async function tick() {
       try {
         const summary = await runFullScanForProperty(row.propertyId, {
           minSets: row.minSets,
-          // Flat 15% market markup (see MARKET_RATE_TARGET_MARGIN). The weekly
-          // pass must match the dashboard bulk queue, else it would re-push the
-          // legacy per-property 20% and undo a 15% queue update.
-          targetMargin: MARKET_RATE_TARGET_MARGIN,
+          // Flat 15% market markup by default (see MARKET_RATE_TARGET_MARGIN);
+          // targetMarginForProperty raises it only for allow-listed outliers
+          // (e.g. the Menehune Shores -3 Maui combo at 20%). The weekly pass and
+          // the dashboard bulk queue read the same chokepoint, so they agree.
+          targetMargin: targetMarginForProperty(row.propertyId),
           runInventory: row.runInventory,
           runPricing: row.runPricing,
           runSyncBlocks: row.runSyncBlocks,
@@ -476,9 +477,10 @@ export async function runFullScanNow(propertyId: number): Promise<{ summary: str
     const sched = await storage.getScannerSchedule(propertyId);
     const summary = await runFullScanForProperty(propertyId, {
       minSets: sched?.minSets ?? 3,
-      // Flat 15% market markup (see MARKET_RATE_TARGET_MARGIN), matching the
-      // dashboard bulk queue regardless of any legacy per-property margin.
-      targetMargin: MARKET_RATE_TARGET_MARGIN,
+      // Flat 15% market markup by default (see MARKET_RATE_TARGET_MARGIN),
+      // matching the dashboard bulk queue; targetMarginForProperty raises it
+      // only for allow-listed outliers (e.g. Menehune Shores -3 at 20%).
+      targetMargin: targetMarginForProperty(propertyId),
       runInventory: sched?.runInventory ?? true,
       runPricing: sched?.runPricing ?? true,
       runSyncBlocks: sched?.runSyncBlocks ?? false,

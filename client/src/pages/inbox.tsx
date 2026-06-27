@@ -1517,6 +1517,8 @@ function normalizeConversation(c: any): GuestyConversation & {
   displayPreview: string;
   displayTimestamp: string | undefined;
   displayGuestPhone: string;
+  displayGuestEmail: string;
+  displayConfirmationCode: string;
   isUnread: boolean;
   reservationId?: string;
   // Indicators surfaced on the list row beside the guest name. Each
@@ -1573,6 +1575,25 @@ function normalizeConversation(c: any): GuestyConversation & {
     firstReservation?.guest?.phoneNumber ??
     findPhoneInObject({ guest, firstReservation }),
   );
+
+  // Searchable guest email + reservation confirmation code. These power
+  // the conversation-list search box (search by name / email / phone /
+  // confirmation). Pulled from the same nested shapes Guesty returns on
+  // the list endpoint stub — empty string when absent so the search
+  // haystack join stays clean.
+  const guestEmail = String(
+    c?.guestEmail ??
+    guest.email ??
+    guest.emailAddress ??
+    firstReservation?.guest?.email ??
+    "",
+  ).trim();
+  const confirmationCode = String(
+    c?.confirmationCode ??
+    firstReservation?.confirmationCode ??
+    firstReservation?.confirmation?.code ??
+    "",
+  ).trim();
 
   const listingName =
     c?.listingNickname ??
@@ -1719,6 +1740,8 @@ function normalizeConversation(c: any): GuestyConversation & {
     displayPreview: typeof preview === "string" ? preview : "",
     displayTimestamp: timestamp,
     displayGuestPhone: guestPhone,
+    displayGuestEmail: guestEmail,
+    displayConfirmationCode: confirmationCode,
     isUnread: !!unread,
     needsReply: !!lastMessageFromGuest,
     lastMessageFromGuest: !!lastMessageFromGuest,
@@ -2361,6 +2384,11 @@ export default function InboxPage() {
   // "guest is waiting on us" rather than merely "thread was opened" —
   // see normalizeConversation.needsReply.
   const [replyStatusFilter, setReplyStatusFilter] = useState<"all" | "unread" | "read">("all");
+  // Free-text search across the whole conversation list — guest name,
+  // email, phone (digits-insensitive), listing, last-message preview, and
+  // reservation confirmation code. Lets the operator jump straight to a
+  // guest's thread without scrolling. Applied in `filteredConversations`.
+  const [searchQuery, setSearchQuery] = useState("");
   // Guesty's conversation list can lag for a short period after
   // /send-message succeeds. Hide the reply-needed marker locally as
   // soon as our send completes; if the guest replies again with a newer
@@ -2561,13 +2589,35 @@ export default function InboxPage() {
   // because that helper isn't memoized — re-walking 30 conversations
   // per render is cheap (sub-ms) and avoids a stale-memo trap.
   const filteredConversations = useMemo(() => {
+    // Free-text query, lower-cased once. The digits-only form lets a
+    // phone search ("808555..." or "5551234") match the formatted/E.164
+    // phone regardless of punctuation. A query of <3 digits is treated as
+    // text-only so typing a name like "Bo" doesn't spuriously phone-match.
+    const q = searchQuery.trim().toLowerCase();
+    const qDigits = q.replace(/\D/g, "");
     const propertyMatched = propertyFilter === "all"
       ? conversations
       : conversations.filter((c) => applyLocalReplyOverride(c).displayListingName === propertyFilter);
     const matched = propertyMatched.filter((c) => {
-      if (replyStatusFilter === "all") return true;
-      const needsReply = applyLocalReplyOverride(c).needsReply;
-      return replyStatusFilter === "unread" ? needsReply : !needsReply;
+      const n = applyLocalReplyOverride(c);
+      if (replyStatusFilter !== "all") {
+        const needsReply = n.needsReply;
+        if (replyStatusFilter === "unread" ? !needsReply : needsReply) return false;
+      }
+      if (q) {
+        const haystack = [
+          n.displayGuestName,
+          n.displayGuestEmail,
+          n.displayListingName,
+          n.displayPreview,
+          n.displayConfirmationCode,
+        ].filter(Boolean).join("  ").toLowerCase();
+        const phoneDigits = (n.displayGuestPhone || "").replace(/\D/g, "");
+        const textMatch = haystack.includes(q);
+        const phoneMatch = qDigits.length >= 3 && phoneDigits.length > 0 && phoneDigits.includes(qDigits);
+        if (!textMatch && !phoneMatch) return false;
+      }
+      return true;
     });
     const ts = (c: any): number => {
       const v = applyLocalReplyOverride(c).displayTimestamp;
@@ -2575,7 +2625,7 @@ export default function InboxPage() {
       return Number.isFinite(t) ? t : 0;
     };
     return [...matched].sort((a, b) => ts(b) - ts(a));
-  }, [conversations, propertyFilter, replyStatusFilter, locallyRepliedAtByConversation]);
+  }, [conversations, propertyFilter, replyStatusFilter, searchQuery, locallyRepliedAtByConversation]);
 
   useEffect(() => {
     const deepLinkKey = [
@@ -3380,6 +3430,29 @@ export default function InboxPage() {
       toast({ title: "Missed calls cleared", description: `${data?.cleared ?? 0} notification${data?.cleared === 1 ? "" : "s"} cleared` });
     },
     onError: (e: any) => toast({ title: "Could not clear missed calls", description: e.message, variant: "destructive" }),
+  });
+
+  // Dismiss a SINGLE missed-call notification with the small "×". Quietly
+  // acknowledges the one call (no callback note required) and refreshes the
+  // unacknowledged list — when the last one clears, the header badge and the
+  // whole "Missed calls need review" panel disappear because both are gated
+  // on the count being > 0.
+  const dismissMissedCall = useMutation({
+    mutationFn: async (callId: number) => {
+      const r = await apiRequest("POST", `/api/inbox/calls/${callId}/acknowledge`, {});
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/unacknowledged"] });
+      // Refresh any per-conversation call lists currently shown (prefix
+      // match covers ["/api/inbox/calls/conversations", <id>]).
+      qc.invalidateQueries({ queryKey: ["/api/inbox/calls/conversations"] });
+    },
+    onError: (e: any) => toast({ title: "Could not dismiss notification", description: e.message, variant: "destructive" }),
   });
 
   // Regenerate the receipt body whenever any input changes — but only
@@ -4390,6 +4463,18 @@ export default function InboxPage() {
                             >
                               Called back
                             </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 w-7 p-0 text-red-700 hover:bg-red-100 hover:text-red-900"
+                              onClick={() => dismissMissedCall.mutate(call.id)}
+                              disabled={dismissMissedCall.isPending}
+                              data-testid={`button-dismiss-missed-call-${call.id}`}
+                              aria-label="Dismiss missed call notification"
+                              title="Dismiss notification"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
                           </div>
                         </div>
                       </div>
@@ -4406,6 +4491,30 @@ export default function InboxPage() {
                   {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />}
                 </div>
                 <div className="px-3 py-2 border-b space-y-2">
+                  {/* Free-text search — name / email / phone / listing /
+                      confirmation. Filters the whole conversation list so the
+                      operator can jump straight to a guest. */}
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search name, email, phone…"
+                      className="h-8 pl-7 pr-7 text-xs"
+                      data-testid="input-conversation-search"
+                    />
+                    {searchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery("")}
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+                        aria-label="Clear search"
+                        data-testid="button-clear-conversation-search"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                   {/* Property filter — only visible when there's something to
                       filter (>1 distinct listing). Hidden when there's a single
                       property in the inbox so the dropdown isn't dead UI. */}
@@ -4460,6 +4569,7 @@ export default function InboxPage() {
                       onClick={() => {
                         setPropertyFilter("all");
                         setReplyStatusFilter("all");
+                        setSearchQuery("");
                       }}
                       data-testid="button-clear-conversation-filter"
                     >
