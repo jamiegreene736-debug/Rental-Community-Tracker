@@ -38,7 +38,29 @@ import {
   type BuyinAgentOutcome,
   type BuyinAgentRunResult,
 } from "./buyin-agent-queue";
-import { registerCommitContext, unregisterCommitContext } from "./buyin-agent-commit";
+import { registerCommitContext, unregisterCommitContext, setCoordResolver } from "./buyin-agent-commit";
+
+// Wire the SERVER-side coord re-derivation once (plan §4): for a combo commit, re-derive
+// each VRBO pick's coords via the sidecar (the same scrape Phase-4 enrichment uses) so
+// walkability is computed from server-known coords, never the agent's. Lazy-imported so
+// the heavy sidecar module isn't pulled into unit tests; best-effort (null on miss).
+let coordResolverWired = false;
+function ensureCoordResolverWired(): void {
+  if (coordResolverWired) return;
+  coordResolverWired = true;
+  setCoordResolver(async (url: string) => {
+    if (!/^https?:\/\//i.test(url) || !/vrbo\.com|homeaway/i.test(url)) return null;
+    try {
+      const { scrapeVrboPhotosViaSidecar } = await import("./vrbo-sidecar-queue");
+      const res = await scrapeVrboPhotosViaSidecar({ url, maxPhotos: 1, walletBudgetMs: 25_000 });
+      return typeof res?.lat === "number" && typeof res?.lng === "number" && Number.isFinite(res.lat) && Number.isFinite(res.lng)
+        ? { lat: res.lat, lng: res.lng }
+        : null;
+    } catch {
+      return null;
+    }
+  });
+}
 
 // Server-side poll ceiling: slightly longer than the runner's own wall-clock budget
 // (BUYIN_AGENT_RUN_BUDGET_MS, default 25 min) so the runner reports a terminal
@@ -155,6 +177,7 @@ export async function runCoworkAutoFillJob(job: AutoFillJob, deps: CoworkDeps): 
     return true;
   }
 
+  ensureCoordResolverWired();
   registerCommitContext(job.id, { job, deps });
   let runId: string | null = null;
   try {

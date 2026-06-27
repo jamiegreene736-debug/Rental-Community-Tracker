@@ -169,6 +169,11 @@ export async function proposeAttach(input: ProposeAttachInput): Promise<ProposeA
     return { ok: true, acceptable: false, profit: verdict.profit, reason: "profit gate: over the $100 max-loss cap", attached: [] };
   }
 
+  // Coords only matter for a multi-unit combo (walkability between picks). A
+  // single-unit attach never gates on walkability, so skip the (expensive) server
+  // coord re-derivation there.
+  const resolveCoords = resolved.length >= 2;
+
   // Build + attach each pick through the chokepoint.
   const attached: ProposeAttachResult["attached"] = [];
   for (const { pick, slot } of resolved) {
@@ -187,7 +192,7 @@ export async function proposeAttach(input: ProposeAttachInput): Promise<ProposeA
     }
 
     // 3. COORDS — server-derived only (agent coords ignored for the trusted marker).
-    const serverCoords = await coordResolver(pick.url).catch(() => null);
+    const serverCoords = resolveCoords ? await coordResolver(pick.url).catch(() => null) : null;
 
     // 4. PHOTOS — format-validate, then best-effort reachability.
     const photos = await filterReachablePhotoUrls(sanitizePhotoUrls(pick.photos ?? []));

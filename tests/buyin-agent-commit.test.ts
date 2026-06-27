@@ -130,16 +130,35 @@ function makeCtx(over: { expectedRevenue?: number; groundFloor?: number[] } = {}
   console.log("  ✓ ground-floor slot needs a server-verifiable snippet");
 }
 
-// coords: server-derived only — the agent's coords are ignored for the Geo marker
+// coords (combo): server-derived only — the agent's coords are ignored for the Geo
+// marker. Coords are resolved ONLY for a multi-unit combo (walkability), not for a
+// single-unit attach.
 {
   setCoordResolver(async () => ({ lat: 21.8800, lng: -159.4500 }));
   const { captured } = makeCtx();
-  await proposeAttach({ jobId: "afj_test", picks: [{ unitId: "A", url: "https://vrbo.com/a", title: "3BR", totalPrice: 3000, bedrooms: 3, /* agent-supplied bogus coords below */ ...( { lat: 99, lng: 99 } as any) }] });
+  await proposeAttach({ jobId: "afj_test", picks: [
+    { unitId: "A", url: "https://vrbo.com/a", title: "3BR", totalPrice: 3000, bedrooms: 3, ...({ lat: 99, lng: 99 } as any) },
+    { unitId: "B", url: "https://vrbo.com/b", title: "3BR", totalPrice: 3000, bedrooms: 3, ...({ lat: 88, lng: 88 } as any) },
+  ] });
   assert.equal(captured.picks[0].lat, 21.88, "uses server-derived lat, not the agent's");
   assert.equal(captured.picks[0].lng, -159.45);
+  assert.equal(captured.picks[1].lat, 21.88, "both combo picks use server-derived coords");
   unregisterCommitContext("afj_test");
   __resetCoordResolverForTests();
-  console.log("  ✓ coords are server-derived; agent coords ignored");
+  console.log("  ✓ combo coords are server-derived; agent coords ignored");
+}
+
+// coords (single unit): NOT resolved — a single attach never gates on walkability
+{
+  let resolverCalls = 0;
+  setCoordResolver(async () => { resolverCalls++; return { lat: 21.88, lng: -159.45 }; });
+  const { captured } = makeCtx();
+  await proposeAttach({ jobId: "afj_test", picks: [{ unitId: "A", url: "https://vrbo.com/a", title: "3BR", totalPrice: 3000, bedrooms: 3 }] });
+  assert.equal(resolverCalls, 0, "single-unit attach skips the coord resolver");
+  assert.equal(captured.picks[0].lat, null);
+  unregisterCommitContext("afj_test");
+  __resetCoordResolverForTests();
+  console.log("  ✓ single-unit attach skips coord resolution");
 }
 
 // unknown slot, already-filled slot, and no-context guards
