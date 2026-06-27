@@ -91,7 +91,14 @@ const JOB_TTL_MS = 2 * 60 * 60 * 1000;
 // strongest MAX_COMMUNITY_PHOTOS. The pool is intentionally larger than the final
 // cap so curation has good amenity photos to choose from after dropping interiors,
 // junk, and different-community hits — but small enough to bound Lens+vision cost.
-const MAX_CANDIDATE_URLS = 24;
+// Sized to VERIFY_CAP (30) so the whole pool fits in ONE Lens+vision verify pass.
+// On thinly-indexed resorts a 24-url pool often left < MAX_COMMUNITY_PHOTOS kept
+// after curation drops interiors/junk/different-community; widening the pool (and
+// the source/query slices below) gives curation more genuine amenity photos to
+// fill the 10 slots. Does NOT change the 10-photo cap or the eligibility rules —
+// only the input set those rules pick from. Keep <= VERIFY_CAP (going past 30
+// needs a matching VERIFY_CAP bump, which costs an extra verify batch).
+const MAX_CANDIDATE_URLS = 30;
 /** Final cap on photos kept in the community folder (operator requirement). */
 const MAX_COMMUNITY_PHOTOS = DEFAULT_MAX_COMMUNITY_PHOTOS; // 10
 const RESEARCH_MODEL = "claude-sonnet-4-6";
@@ -367,15 +374,15 @@ async function discoverCandidateUrls(
   // 1. Authoritative scrape + default amenity queries (existing, well-scored).
   add(await loopbackSearchUrls(communityName));
 
-  // 2. Claude source-URL scrapes (limit a couple to keep latency bounded).
-  for (const src of research.sourceUrls.slice(0, 2)) {
+  // 2. Claude source-URL scrapes (limit a few to keep latency bounded).
+  for (const src of research.sourceUrls.slice(0, 3)) {
     add(await loopbackSearchUrls(communityName, src));
   }
 
   // 3. Claude-derived image queries.
   if (getSearchApiKey()) {
     const results = await Promise.all(
-      research.imageQueries.slice(0, 6).map((q) => googleImagesUrls(q, requiredWords)),
+      research.imageQueries.slice(0, 8).map((q) => googleImagesUrls(q, requiredWords)),
     );
     for (const r of results) add(r);
   }
