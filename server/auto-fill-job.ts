@@ -52,7 +52,7 @@ import {
 // Cowork (agent-driven) buy-in engine. The runtime dependency is one-directional
 // (this module → auto-fill-cowork); auto-fill-cowork imports only TYPES back, so
 // there is no circular require. See the fork in runAutoFillJob.
-import { resolveBuyInEngine, runCoworkAutoFillJob } from "./auto-fill-cowork";
+import { resolveBuyInEngine, runCoworkAutoFillJob, type BuyInEngine } from "./auto-fill-cowork";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 
@@ -177,6 +177,11 @@ export type StartAutoFillInput = {
   // real reservation's row / enroll the search in boot-resume). See AGENTS.md
   // "Read-only inbox buy-in search (dry-run auto-fill)".
   dryRun?: boolean;
+  // EVAL HARNESS ONLY (plan §5): force the buy-in engine for THIS run regardless of
+  // the BUYIN_ENGINE / BUYIN_ENGINE_BULK env. Honored ONLY for dryRun jobs so the
+  // golden harness can compare legacy vs cowork on one server without flipping env
+  // and restarting; a real (committing) run always uses the env-resolved engine.
+  engineOverride?: "legacy" | "cowork";
   // BOOT-RESUME ONLY (server/auto-fill-resume.ts): re-register the job under
   // the SAME id the dead process used, so an operator's still-open poller
   // (polling /api/operations/auto-fill/:jobId) survives the redeploy without a
@@ -314,6 +319,8 @@ export type AutoFillJob = {
   owner: "row" | "bulk";
   // Read-only inbox search: skip every persist + attach (see StartAutoFillInput.dryRun).
   dryRun: boolean;
+  // Eval-harness engine override (dry-run only); null = use the env-resolved engine.
+  engineOverride: BuyInEngine | null;
 };
 
 export type AutoFillJobStatus = {
@@ -1118,7 +1125,8 @@ async function runAutoFillJob(job: AutoFillJob): Promise<void> {
     // Returns false to fall through to legacy (Phase-0 scaffold today, and the
     // instant `legacy` rollback lever during build-out). The finally at the end of
     // this function still cleans up activeJobIds on the early return.
-    if (resolveBuyInEngine(job.owner) === "cowork") {
+    const engine = job.engineOverride ?? resolveBuyInEngine(job.owner);
+    if (engine === "cowork") {
       const handled = await runCoworkAutoFillJob(job, {
         base,
         gate,
@@ -2358,6 +2366,10 @@ export function startAutoFillJob(input: StartAutoFillInput): { jobId: string; st
     canceled: false,
     owner: input.owner === "bulk" ? "bulk" : "row",
     dryRun: input.dryRun === true,
+    // Engine override is honored ONLY for dry-run eval runs (see StartAutoFillInput).
+    engineOverride: input.dryRun === true && (input.engineOverride === "legacy" || input.engineOverride === "cowork")
+      ? input.engineOverride
+      : null,
   };
   autoFillJobs.set(id, job);
   activeJobByReservation.set(reservationId, id);

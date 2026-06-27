@@ -14541,6 +14541,13 @@ Requirements:
         // Bulk fresh re-run: supersede any in-flight job for this reservation
         // (the client detached its units, so a reused job would be stale).
         forceRestart: req.body?.forceRestart === true,
+        // Eval harness (plan §5): read-only dry-run + per-run engine override so the
+        // golden harness can compare legacy vs cowork on one server. engineOverride is
+        // honored ONLY when dryRun is true (enforced in startAutoFillJob).
+        dryRun: req.body?.dryRun === true,
+        engineOverride: req.body?.engineOverride === "legacy" || req.body?.engineOverride === "cowork"
+          ? req.body.engineOverride
+          : undefined,
       });
       return res.status(202).json(started);
     } catch (e: any) {
@@ -25778,6 +25785,58 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/admin/buyin-agent/status", async (_req, res) => {
     const { getAgentQueueStatus } = await import("./buyin-agent-queue");
     return res.json(getAgentQueueStatus());
+  });
+
+  // ── Buy-in agent READ tools (cowork engine, plan §3) ─────────────────────────
+  // Thin wrappers over the deterministic logic so the agent reasons with the same
+  // numbers the legacy ladder uses. Logic lives in server/buyin-agent-tools.ts so
+  // the endpoints and the unit tests share one implementation.
+
+  // GET /api/admin/buyin-agent/tools/property-unit-config?propertyId=N
+  app.get("/api/admin/buyin-agent/tools/property-unit-config", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const propertyId = Number(req.query.propertyId);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "propertyId (number) required" });
+    const { toolPropertyUnitConfig } = await import("./buyin-agent-tools");
+    const config = toolPropertyUnitConfig(propertyId);
+    if (!config) return res.status(404).json({ error: `no PROPERTY_UNIT_CONFIGS entry for property ${propertyId}` });
+    return res.json({ propertyId, config });
+  });
+
+  // GET /api/admin/buyin-agent/tools/nearby-towns?community=X&maxDriveMinutes=&limit=
+  app.get("/api/admin/buyin-agent/tools/nearby-towns", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const community = typeof req.query.community === "string" ? req.query.community.trim() : "";
+    if (!community) return res.status(400).json({ error: "community query param required" });
+    const maxDriveMinutes = req.query.maxDriveMinutes !== undefined ? Number(req.query.maxDriveMinutes) : undefined;
+    const limit = req.query.limit !== undefined ? Number(req.query.limit) : undefined;
+    const { toolNearbyTowns } = await import("./buyin-agent-tools");
+    const towns = await toolNearbyTowns(community, maxDriveMinutes, limit);
+    return res.json({ community, towns });
+  });
+
+  // POST /api/admin/buyin-agent/tools/check-walkability  body: { picks: [...] }
+  // PRE-FILTER only — runs on AGENT-SUPPLIED coords. The authoritative proximity
+  // gate (server-re-derived coords) is at attach time (propose_attach, Phase 2).
+  app.post("/api/admin/buyin-agent/tools/check-walkability", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const picks = Array.isArray((req.body ?? {}).picks) ? (req.body as any).picks : null;
+    if (!picks) return res.status(400).json({ error: "picks (array) required" });
+    const { toolCheckWalkability } = await import("./buyin-agent-tools");
+    return res.json(toolCheckWalkability(picks));
+  });
+
+  // POST /api/admin/buyin-agent/tools/evaluate-profit
+  //   body: { expectedRevenue, existingCost, comboCost }
+  app.post("/api/admin/buyin-agent/tools/evaluate-profit", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const b = (req.body ?? {}) as { expectedRevenue?: unknown; existingCost?: unknown; comboCost?: unknown };
+    const { toolEvaluateProfit } = await import("./buyin-agent-tools");
+    return res.json(toolEvaluateProfit({
+      expectedRevenue: Number(b.expectedRevenue) || 0,
+      existingCost: Number(b.existingCost) || 0,
+      comboCost: Number(b.comboCost) || 0,
+    }));
   });
 
   // GET /api/buyin-agent/result/:id — server-side poll target for the cowork engine
