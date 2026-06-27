@@ -48,6 +48,9 @@ export type PreflightReplacementFindJob = {
   finishedAt: number | null;
   error: string | null;
   unit: Record<string, unknown> | null;
+  // A0: the full list of clean units this search surfaced (element 0 === `unit`),
+  // so the operator can pick from several options. Null/absent on older jobs.
+  units?: Array<Record<string, unknown>> | null;
   diagnostic: Record<string, unknown> | null;
 };
 
@@ -660,13 +663,21 @@ async function runPreflightReplacementFindJob(
       });
       return;
     }
+    const foundUnitList = Array.isArray(data.units) && data.units.length > 0
+      ? data.units as Array<Record<string, unknown>>
+      : data.unit
+        ? [data.unit as Record<string, unknown>]
+        : null;
     touchReplacementJob(job, {
       status: "completed",
       phase: "completed",
-      message: "Replacement unit found",
+      message: foundUnitList && foundUnitList.length > 1
+        ? `${foundUnitList.length} replacement options found`
+        : "Replacement unit found",
       progress: 100,
       finishedAt: Date.now(),
       unit: data.unit ?? null,
+      units: foundUnitList,
       diagnostic: data.diagnostic ?? null,
       error: null,
     });

@@ -316,12 +316,12 @@ assert.match(
 );
 assert.match(
   preflightPhotoDiscoverySource,
-  /replacingExistingPhotos \? 10 : 6/,
+  /replacingExistingPhotos \? 10 : 12/,
   "preflight Find Photos must bound candidate scans so a no-match does not run for several minutes",
 );
 assert.match(
   preflightPhotoDiscoverySource,
-  /bedrooms: "any", maxCandidates: replacingExistingPhotos \? 14 : 10/,
+  /bedrooms: "any", maxCandidates: replacingExistingPhotos \? 14 : 16/,
   "preflight Find Photos must fall back to any bedroom count for representative resort photos",
 );
 assert.doesNotMatch(
@@ -2603,8 +2603,8 @@ assert.ok(
   "preflight photo paths must define a no-sidecar scrape option",
 );
 assert.ok(
-  routeSource.includes("scrapeListingPhotos(sourceUrl, undefined, listingFacts, SCRAPE_WITHOUT_SIDECAR)"),
-  "builder rescrape must not open local Chrome when Apify omits bedroom facts",
+  routeSource.includes("scrapeListingPhotos(sourceUrl, undefined, listingFacts, SCRAPE_WITH_SIDECAR)"),
+  "builder rescrape (a fire-and-walk-away background job) must opt INTO the residential-IP sidecar to rescue a bot-walled own-listing scrape that returns zero photos on Railway's datacenter IP",
 );
 assert.ok(
   routeSource.includes("...SCRAPE_WITHOUT_SIDECAR"),

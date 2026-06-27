@@ -4066,19 +4066,22 @@ type ScrapeOptions = {
   scrapingBeeTimeoutMs?: number;
 };
 
-// Preflight photo fetch, builder rescrape, and replacement find-unit run on
-// Railway — opening the operator's local Chrome is unexpected there, and the
-// synchronous wizard callers (add-single-listing / add-community) must never
-// hang the UI on a 90s sidecar. They all run SCRAPE_WITHOUT_SIDECAR.
+// Synchronous wizard callers (add-single-listing / add-community) and the
+// bounded replacement find-unit discovery loops run on Railway — opening the
+// operator's local Chrome is unexpected there, and the synchronous callers must
+// never hang the UI on a 90s sidecar. They all run SCRAPE_WITHOUT_SIDECAR.
 const SCRAPE_WITHOUT_SIDECAR: ScrapeOptions = { sidecarWalletMs: 0 };
 // EXCEPTION (2026-06-20, claude/festive-kilby): the "Re-pull all photos"
 // background job (preflight photo-fetch-jobs, Stage 1 — rescrape of the unit's
 // OWN saved listing) opts INTO the residential-IP sidecar tier so a
 // Redfin/Homes/Zillow listing that bot-walls to a single og:image on Railway's
 // datacenter IP is still fully recovered (this was the documented gap that left
-// re-pulled galleries missing bedroom photos). Safe because it's a background
-// job (no UI latency budget) and the sidecar fires only when datacenter
-// scraping came up short, merging — never clobbering (Load-Bearing #5, #45).
+// re-pulled galleries missing bedroom photos). The per-unit "Rescrape photos"
+// background job (POST /api/builder/rescrape-unit-photos, driven only by the
+// fire-and-walk-away preflight rescrape job) opts in the same way for the same
+// reason. Safe because both are background jobs (no UI latency budget) and the
+// sidecar fires only when datacenter scraping came up short, merging — never
+// clobbering (Load-Bearing #5, #45).
 const SCRAPE_WITH_SIDECAR: ScrapeOptions = { sidecarWalletMs: 90_000 };
 
 function listingScrapePlatform(url: string): "realtor" | "zillow" | "redfin" | "homes" | "other" {
@@ -29221,7 +29224,16 @@ Return ONLY compact JSON with this exact shape:
       }
 
       const listingFacts: ListingFacts = {};
-      const scraped = await scrapeListingPhotos(sourceUrl, undefined, listingFacts, SCRAPE_WITHOUT_SIDECAR);
+      // Opt INTO the residential-IP sidecar (Load-Bearing #45): this endpoint is
+      // driven ONLY by the fire-and-walk-away preflight rescrape background job
+      // (RESCRAPE_LOOPBACK_TIMEOUT_MS = 300s, no UI latency budget), and a
+      // Redfin/Homes/Zillow listing that bot-walls to zero gallery photos on
+      // Railway's datacenter IP would otherwise 502 here and leave the gallery
+      // un-refreshed. The sidecar fires only when datacenter scraping comes up
+      // short and is inert/fast when the worker is offline. STRICTLY own-listing:
+      // this scrapes the single resolved sourceUrl and never substitutes another
+      // listing (the "Re-pull all photos" path already opts in the same way).
+      const scraped = await scrapeListingPhotos(sourceUrl, undefined, listingFacts, SCRAPE_WITH_SIDECAR);
       if (!scraped.length) {
         return res.status(502).json({ error: "Scraper returned zero photos. The page may have bot-detection or changed layout." });
       }
@@ -32015,6 +32027,29 @@ Return ONLY compact JSON with this exact shape:
       return countQualifyingDiscoveryCandidates() >= DISCOVERY_CANDIDATE_TARGET;
     };
 
+    // A bare `discoveryTargetMet()` early-stop truncates the entire cheap
+    // base/alias/recon query set the instant DISCOVERY_CANDIDATE_TARGET is hit —
+    // a hundreds-unit resort that saturates the target in the first batch leaves
+    // most of its queries (and therefore most of its distinct units) undiscovered,
+    // and the leftover pool is what feeds the continuation passes. So gate the
+    // early-stop on TIME: once the target is met, keep mining the remaining cheap
+    // queries while ample discovery budget remains, and only stop early once most
+    // of DISCOVERY_BUDGET_MS is spent (or an absolute ceiling is reached — a
+    // backstop so a tiny fast-saturating community can't burn the whole budget for
+    // near-zero new candidates). hasDiscoveryBudget() remains the hard stop, so
+    // discovery still can't exceed DISCOVERY_BUDGET_MS and the per-candidate phase
+    // keeps its time. Every newly-surfaced URL still passes the unchanged
+    // wrong-resort gate (candidateRootMatches), so this only widens the pool.
+    const DISCOVERY_EARLY_STOP_BUDGET_FRACTION = 0.6;
+    const DISCOVERY_HARD_CEILING = DISCOVERY_CANDIDATE_TARGET * 3;
+    const discoveryBudgetMostlySpent = (): boolean =>
+      discoveryElapsedMs() >= DISCOVERY_BUDGET_MS * DISCOVERY_EARLY_STOP_BUDGET_FRACTION;
+    const discoveryShouldStopEarly = (): boolean => {
+      if (!discoveryTargetMet()) return false;
+      if (candidates.length >= DISCOVERY_HARD_CEILING) return true;
+      return discoveryBudgetMostlySpent();
+    };
+
     const addCandidateUrl = (link: string, source: CandidateSource, contextText = "", thumbnail = "", allowedRoots?: Set<string>) => {
       if (!link) return;
       const lower = unitSwapListingKey(link);
@@ -32161,6 +32196,16 @@ Return ONLY compact JSON with this exact shape:
       // Redfin — for-sale, structured JSON-LD
       `site:redfin.com "${communityName}" "for sale"`,
       `site:redfin.com "${communityName}" condo`,
+      // Homes.com — 4th for-sale portal. It indexes resort condo inventory the
+      // other three miss, but was previously only queried in the bedroom-specific
+      // and expandedSearch blocks — so a DEFAULT (non-expanded, no-bedroom) search
+      // never hit it at all, leaving a whole portal of distinct candidates dark.
+      // Placed AFTER the cheaper Zillow/Realtor/Redfin probes so it doesn't consume
+      // the discovery-time budget ahead of the higher-yield portals. Each hit still
+      // passes the unchanged resort-street gate (addCandidateUrl → candidateRootMatches).
+      `site:homes.com "${communityName}" "for sale"`,
+      `site:homes.com "${communityName}" condo`,
+      `site:homes.com "${communityAddress}"`,
     ];
     for (const alias of searchCommunityAliases) {
       searchQueries.push(
@@ -32348,7 +32393,7 @@ Return ONLY compact JSON with this exact shape:
       const before = candidates.length;
       console.error(`[find-unit] market-recon sweep: ${queries.length} aggregator queries`);
       for (let i = 0; i < queries.length; i += DISCOVERY_QUERY_CONCURRENCY) {
-        if (discoveryTargetMet() || !hasDiscoveryBudget()) break;
+        if (discoveryShouldStopEarly() || !hasDiscoveryBudget()) break;
         const batch = queries.slice(i, i + DISCOVERY_QUERY_CONCURRENCY);
         await Promise.all(batch.map(async (siteQuery) => {
           try {
@@ -32511,7 +32556,7 @@ Return ONLY compact JSON with this exact shape:
     if (!skipDiscovery) {
       await runMarketReconDiscovery();
       for (let i = 0; i < searchQueries.length; i += DISCOVERY_QUERY_CONCURRENCY) {
-        if (discoveryTargetMet()) {
+        if (discoveryShouldStopEarly()) {
           console.warn(
             requiredBedroomCount
               ? `[find-unit] stopping discovery early — ${countQualifyingDiscoveryCandidates()} qualifying candidates ` +
@@ -33014,6 +33059,23 @@ Return ONLY compact JSON with this exact shape:
       return true;
     };
 
+    // A0: collect up to MAX_VIABLE_UNITS clean units in ONE pass instead of
+    // returning the first. The expensive discovery sweep is already paid for, so
+    // each additional viable unit only costs its own scrape+vision+reverse checks
+    // — far cheaper than a fresh "Try another" that re-discovers — and the
+    // operator gets a LIST to choose from. The existing per-candidate route-budget
+    // guards (hasRouteBudget) already break the loop and return whatever we have
+    // before this can overrun the route, so a slow community still returns
+    // promptly with however many it found. `unit` stays element 0 for any caller
+    // that ignores `units`. Env-tunable; minimum 1 = original single-result behavior.
+    const MAX_VIABLE_UNITS = Math.max(
+      1,
+      Number.isFinite(Number(process.env.REPLACEMENT_MAX_VIABLE_UNITS))
+        ? Number(process.env.REPLACEMENT_MAX_VIABLE_UNITS)
+        : (expandedSearch ? 5 : 4),
+    );
+    const foundUnits: Array<Record<string, unknown>> = [];
+
     let budgetStopped = false;
     const candidatesToCheck = candidates.slice(0, MAX_CANDIDATES_TO_CHECK);
     for (const candidate of candidatesToCheck) {
@@ -33294,25 +33356,31 @@ Return ONLY compact JSON with this exact shape:
           const photos = thumbnail
             ? [{ url: thumbnail, label: `Unit ${unitNumber || "—"} on ${sourceLabel(source)}` }]
             : [];
-          return res.json({
-            unit: {
-              url: sourceUrl,
-              address,
-              unitLabel: unitNumber ? `Unit #${unitNumber}` : "New unit",
-              bedrooms: actualBedrooms ?? requiredBedroomCount ?? null,
-              source: sourceLabel(source),
-              photos,
-              photoCount,
-              sampledCategories,
-              platformCheck,
-              expandedSearch,
-              relaxedPhotoFloor: expandedSearch && photoCount < 5,
-              // Set only when allowOtaListed kept an OTA-listed unit; the UI flags
-              // it so the operator knows the unit is already on this channel
-              // (its real-estate photos were still verified as not reused there).
-              otaListedOn: otaListedHost,
-            },
+          foundUnits.push({
+            url: sourceUrl,
+            address,
+            unitLabel: unitNumber ? `Unit #${unitNumber}` : "New unit",
+            bedrooms: actualBedrooms ?? requiredBedroomCount ?? null,
+            source: sourceLabel(source),
+            photos,
+            photoCount,
+            sampledCategories,
+            platformCheck,
+            expandedSearch,
+            relaxedPhotoFloor: expandedSearch && photoCount < 5,
+            // Set only when allowOtaListed kept an OTA-listed unit; the UI flags
+            // it so the operator knows the unit is already on this channel
+            // (its real-estate photos were still verified as not reused there).
+            otaListedOn: otaListedHost,
           });
+          console.error(`[find-unit] [${source}] viable unit ${foundUnits.length}/${MAX_VIABLE_UNITS}: ${sourceUrl}`);
+          // Keep scanning for more options unless we've hit the cap. NOT pushed to
+          // `attempts` (which feeds the no-result diagnostic + uncheckedCandidates
+          // continuation math) — when foundUnits>0 we return success below and
+          // never reach that block, so leaving accepted units out keeps that math
+          // unchanged from the original first-match behavior.
+          if (foundUnits.length >= MAX_VIABLE_UNITS) break;
+          continue;
         }
       } catch (err: any) {
         console.error(`[find-unit] [${candidate.source}] Candidate error: ${err?.message}`);
@@ -33325,6 +33393,24 @@ Return ONLY compact JSON with this exact shape:
           reason: err?.message ?? "Unknown error",
         });
       }
+    }
+
+    // A0: if this pass found at least one clean unit, return the LIST. `unit`
+    // stays element 0 (cheapest/first viable) so every existing caller — the
+    // background job's `data?.unit` break and the client's `job.unit` — is
+    // byte-compatible; the new `units` array carries the extra options. Dedupe by
+    // final url because the dual-source scrape can rewrite two distinct candidates
+    // to the same listing.
+    if (foundUnits.length > 0) {
+      const seenUrls = new Set<string>();
+      const units = foundUnits.filter((u) => {
+        const key = String((u as { url?: unknown }).url ?? "");
+        if (!key || seenUrls.has(key)) return false;
+        seenUrls.add(key);
+        return true;
+      });
+      console.error(`[find-unit] returning ${units.length} viable unit(s)`);
+      return res.json({ unit: units[0], units });
     }
 
     // PR #322: build a diagnostic-rich failure message that tells
