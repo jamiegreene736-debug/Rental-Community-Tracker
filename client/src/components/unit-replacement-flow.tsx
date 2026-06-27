@@ -31,6 +31,9 @@ type PreflightReplacementFindJob = {
   progress: number;
   error: string | null;
   unit: ReplacementUnitData | null;
+  // A0: every clean unit the search surfaced (element 0 === `unit`), so the
+  // operator can pick from several options instead of one. Absent on older jobs.
+  units?: ReplacementUnitData[] | null;
   diagnostic?: Record<string, unknown> | null;
 };
 
@@ -211,6 +214,9 @@ export function UnitReplacementFlow({
   const [selectedUnitId, setSelectedUnitId] = useState(unit.id);
   const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "replacing" | "error">("idle");
   const [result, setResult] = useState<ReplacementUnitData | null>(null);
+  // A0: all clean units the search surfaced. `result` is the currently-selected
+  // one (defaults to options[0]); the operator can pick a different option.
+  const [resultOptions, setResultOptions] = useState<ReplacementUnitData[]>([]);
   const [swapError, setSwapError] = useState<string | null>(null);
   // Operator opt-in for STVR-saturated communities (e.g. Waikoloa Beach Villas):
   // include units that are already listed on Airbnb/VRBO/Booking.com instead of
@@ -264,7 +270,11 @@ export function UnitReplacementFlow({
     setReplacementJobId(null);
     if (job.status === "completed" && job.unit) {
       setStage("found");
-      setResult(job.unit);
+      const options = Array.isArray(job.units) && job.units.length > 0
+        ? job.units
+        : [job.unit];
+      setResultOptions(options);
+      setResult(options[0]);
       setSwapError(null);
       return;
     }
@@ -433,7 +443,7 @@ export function UnitReplacementFlow({
     return () => window.clearInterval(id);
   }, [isWorking]);
 
-  async function search(opts: { extraSkip?: string; expanded?: boolean; allowOtaListed?: boolean } = {}) {
+  async function search(opts: { extraSkip?: string | string[]; expanded?: boolean; allowOtaListed?: boolean } = {}) {
     const expanded = opts.expanded === true;
     // Allow a one-shot override (the "Include OTA-listed & retry" action) without
     // waiting for the checkbox's setState to flush. Also reflect it in the checkbox
@@ -444,14 +454,18 @@ export function UnitReplacementFlow({
     // per-mount eviction guard, so a new search gets its own restart allowance.
     autoResumedFromRef.current = new Set();
     setResult(null);
+    setResultOptions([]);
     setSwapError(null);
     setResumedAfterRestart(false);
     setLastSearchExpanded(expanded);
     setSearchStartedAt(Date.now());
     setProgressTick(0);
     setStage("searching");
-    const nextExtra = opts.extraSkip ? [...extraSkipUrls, opts.extraSkip] : extraSkipUrls;
-    if (opts.extraSkip) setExtraSkipUrls(nextExtra);
+    const extraSkipList = Array.isArray(opts.extraSkip)
+      ? opts.extraSkip.filter(Boolean)
+      : opts.extraSkip ? [opts.extraSkip] : [];
+    const nextExtra = extraSkipList.length ? Array.from(new Set([...extraSkipUrls, ...extraSkipList])) : extraSkipUrls;
+    if (extraSkipList.length) setExtraSkipUrls(nextExtra);
     const startPayload = {
       communityFolder,
       communityName,
@@ -798,6 +812,50 @@ export function UnitReplacementFlow({
         const bedroomsMatch = bedroomsKnown && foundBedrooms === requiredBedrooms;
         return (
         <div className="space-y-2.5">
+          {/* A0: when the search surfaced several clean units, let the operator
+              pick which one to replace with. Selecting an option swaps `result`,
+              so the verdict header, bedroom confirmation, photos, and the
+              "Replace" action below all reflect the chosen unit. */}
+          {resultOptions.length > 1 && (
+            <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2 space-y-1.5" data-testid="replacement-options">
+              <p className="text-[11px] font-semibold text-foreground">
+                {resultOptions.length} clean options found — pick one to replace with:
+              </p>
+              <div className="space-y-1">
+                {resultOptions.map((opt, i) => {
+                  const selected = opt.url === result.url;
+                  return (
+                    <button
+                      key={opt.url || i}
+                      type="button"
+                      onClick={() => { setResult(opt); setSwapError(null); }}
+                      className={`w-full text-left rounded border px-2 py-1.5 flex items-center justify-between gap-2 transition ${
+                        selected
+                          ? "border-primary bg-primary/10"
+                          : "border-border bg-background hover:bg-muted"
+                      }`}
+                      data-testid={`replacement-option-${i}`}
+                    >
+                      <span className="min-w-0">
+                        <span className="text-[11px] font-medium text-foreground block truncate">{opt.unitLabel}</span>
+                        <span className="text-[10px] text-muted-foreground block truncate">
+                          {opt.source}
+                          {typeof opt.bedrooms === "number" && opt.bedrooms > 0 ? ` · ${opt.bedrooms} BR` : ""}
+                          {opt.otaListedOn ? ` · on ${opt.otaListedOn}` : ""}
+                        </span>
+                      </span>
+                      <span className="flex items-center gap-1.5 flex-shrink-0">
+                        {typeof opt.photoCount === "number" && (
+                          <span className="text-[10px] text-muted-foreground">📷 {opt.photoCount}</span>
+                        )}
+                        {selected && <span className="text-primary text-xs font-bold">✓</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <div className="space-y-1.5">
             <p
               className={`text-xs font-medium flex items-center gap-1.5 ${
@@ -1016,17 +1074,21 @@ export function UnitReplacementFlow({
               variant="outline"
               disabled={stage === "replacing"}
               onClick={() => {
-                // Skip this URL and immediately re-search so the user
-                // doesn't have to click Find again.
-                const skipThis = result.url;
+                // Skip every option currently shown (not just the selected one)
+                // and immediately re-search, so "Try Another" surfaces units the
+                // operator hasn't seen yet rather than re-offering this batch.
+                const skipAll = (resultOptions.length > 0 ? resultOptions : [result])
+                  .map((u) => u.url)
+                  .filter(Boolean);
                 const expanded = result.expandedSearch === true;
                 setResult(null);
+                setResultOptions([]);
                 setSwapError(null);
-                search({ extraSkip: skipThis, expanded });
+                search({ extraSkip: skipAll, expanded });
               }}
               data-testid="button-try-another-unit"
             >
-              Try Another
+              {resultOptions.length > 1 ? "Find Different Units" : "Try Another"}
             </Button>
           </div>
         </div>
