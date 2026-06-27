@@ -25731,6 +25731,65 @@ Return ONLY compact JSON with this exact shape:
     return res.json({ ...getStatus(), sidecarLane: getSidecarLaneStatus(), bulkAutoFillActive });
   });
 
+  // ── Buy-in AGENT runner endpoints (cowork buy-in engine) ─────────────────────
+  // Worker transport for the LOCAL Mac "buy-in agent" runner
+  // (daemon/buyin-agent/runner.mjs). Same trust model as /api/admin/vrbo-sidecar/*:
+  // allowlisted in server/auth.ts, runner sends X-Admin-Secret. See cowork plan §2.
+  // GET /api/admin/buyin-agent/next — runner claims the oldest pending agent run.
+  app.get("/api/admin/buyin-agent/next", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const { nextAgentRun, getAgentHeartbeat } = await import("./buyin-agent-queue");
+    const run = nextAgentRun();
+    return res.json({ run: run ?? null, heartbeat: getAgentHeartbeat() });
+  });
+
+  // POST /api/admin/buyin-agent/heartbeat — runner liveness tick while it holds a
+  // long-running claim. Body: { id?, stage? }. `alive:false` means the server has
+  // already reclaimed/canceled the run, so the runner should abandon it.
+  app.post("/api/admin/buyin-agent/heartbeat", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as { id?: unknown; stage?: unknown };
+    const { stampAgentHeartbeat } = await import("./buyin-agent-queue");
+    const r = stampAgentHeartbeat(
+      typeof body.id === "string" ? body.id : undefined,
+      typeof body.stage === "string" ? body.stage : undefined,
+    );
+    return res.json({ ok: true, alive: r.alive });
+  });
+
+  // POST /api/admin/buyin-agent/result — runner reports a terminal outcome.
+  // Body: { id, result?: BuyinAgentRunResult, error?: string }
+  app.post("/api/admin/buyin-agent/result", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as { id?: string; result?: unknown; error?: string };
+    if (!body.id || typeof body.id !== "string") {
+      return res.status(400).json({ error: "id (string) required" });
+    }
+    const { completeAgentRun } = await import("./buyin-agent-queue");
+    const r = completeAgentRun({
+      id: body.id,
+      result: body.result === undefined ? undefined : (body.result as any),
+      error: typeof body.error === "string" ? body.error : undefined,
+    });
+    return res.json(r);
+  });
+
+  // GET /api/admin/buyin-agent/status — diagnostic snapshot of the agent queue.
+  app.get("/api/admin/buyin-agent/status", async (_req, res) => {
+    const { getAgentQueueStatus } = await import("./buyin-agent-queue");
+    return res.json(getAgentQueueStatus());
+  });
+
+  // GET /api/buyin-agent/result/:id — server-side poll target for the cowork engine
+  // (runCoworkAutoFillJob). No admin gate (same-instance server caller over loopback,
+  // mirrors /api/vrbo-sidecar/result/:id).
+  app.get("/api/buyin-agent/result/:id", async (req, res) => {
+    const { getAgentRunResult } = await import("./buyin-agent-queue");
+    const r = getAgentRunResult(String(req.params.id));
+    if (!r) return res.status(404).json({ error: "not found (expired?)" });
+    return res.json(r);
+  });
+
   // GET /api/vrbo-sidecar/status — public queue counters for the
   // Operations UI. No URLs, cookies, params, or secrets are exposed;
   // this only lets the dashboard keep showing progress while the local

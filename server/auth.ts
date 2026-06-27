@@ -27,6 +27,11 @@
 //     operator's Mac. Gating would break the find-buy-in flow's
 //     most-reliable Vrbo path. The sidecar already runs on the
 //     operator's own machine and the channel is implicitly trusted.
+//   - /api/admin/buyin-agent/* — the local "buy-in agent" runner
+//     (daemon/buyin-agent/runner.mjs, the cowork buy-in engine) polls
+//     these from the operator's Mac, exactly like the sidecar above and
+//     for the same reason. Same trust model: local machine, X-Admin-Secret
+//     on every request. See the cowork engine plan §2.
 //   - /assets/* + /photos/* + /brand/* + favicon/touch icons +
 //     /manifest.json + /robots.txt — the page can't render the
 //     login form without its own JS/CSS/brand assets, and browsers
@@ -80,6 +85,7 @@ const PUBLIC_PATH_PREFIXES = [
   "/photos/",
   "/brand/",
   "/api/admin/vrbo-sidecar/",
+  "/api/admin/buyin-agent/",
   "/api/quo/webhooks/",
   "/agreement/",
   "/alternatives/",

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd LaunchAgent for the buy-in agent runner (cowork buy-in engine).
+
+  Mirrors the VRBO sidecar's launchd model. Install per-user (NOT a system daemon)
+  so the agent runs in the operator's GUI session and can reuse their logged-in
+  Chrome sessions / home IP (see cowork plan §2/§7):
+
+    1. Copy this file to ~/Library/LaunchAgents/com.buyinagent.runner.plist
+    2. Fill the placeholders below: NODE_BIN, RUNNER_PATH, BUYIN_AGENT_SERVER,
+       ADMIN_SECRET, ANTHROPIC_API_KEY.
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.buyinagent.runner.plist
+    4. launchctl kickstart -k gui/$(id -u)/com.buyinagent.runner
+
+  Restart after edits:  launchctl kickstart -k gui/$(id -u)/com.buyinagent.runner
+  Tail logs:            tail -f ~/.buyin-agent-daemon/runner.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.buyinagent.runner</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__RUNNER_PATH__</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- The deployed app base URL the runner polls (e.g. https://your-app.up.railway.app). -->
+    <key>BUYIN_AGENT_SERVER</key>
+    <string>__BUYIN_AGENT_SERVER__</string>
+    <!-- Same ADMIN_SECRET as the server, sent as X-Admin-Secret on every request. -->
+    <key>ADMIN_SECRET</key>
+    <string>__ADMIN_SECRET__</string>
+    <!-- Needed by the Claude Agent SDK loop (Phase 2). -->
+    <key>ANTHROPIC_API_KEY</key>
+    <string>__ANTHROPIC_API_KEY__</string>
+    <key>BUYIN_AGENT_MODEL</key>
+    <string>claude-opus-4-8</string>
+    <key>BUYIN_AGENT_KEEP_MAC_AWAKE</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.buyin-agent-daemon/runner.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.buyin-agent-daemon/runner.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
