@@ -545,6 +545,105 @@ process.env.SEARCHAPI_API_KEY = "test-key";
   }
 }
 
+// (F) AUTO-CURATION: a NON-registry community with a derived geo boxes the scan
+// around the listing's OWN coordinates (center-radius), leads the query set with
+// the clean derived searchName, and prices from the geo-scoped comps — instead of
+// the bounds-less "none" raw-string search an unmapped market would otherwise get.
+process.env.SEARCHAPI_API_KEY = "test-key";
+{
+  const seen: { q: string | null; swLat: string | null }[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const u = new URL(String(input));
+    seen.push({ q: u.searchParams.get("q"), swLat: u.searchParams.get("sw_lat") });
+    const properties = Array.from({ length: 6 }, (_, index) => ({
+      name: `2 Bedroom Kahana condo #${index + 1}`,
+      bedrooms: 2,
+      gps_coordinates: { latitude: 20.972, longitude: -156.6793 },
+      price: { extracted_total_price: 2100 + index * 90 },
+    }));
+    return new Response(JSON.stringify({ properties }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const derivedScan = await fetchAirbnbMedianNightly({
+      community: "Some Brand New Resort",
+      bedrooms: 2,
+      checkIn: "2026-06-08",
+      checkOut: "2026-06-15",
+      derived: { searchName: "Some Brand New Resort, Lahaina, HI", lat: 20.972, lng: -156.6793, city: "Lahaina", state: "Hawaii" },
+    });
+    assert.ok((derivedScan.medianNightly ?? 0) > 0, "an auto-curated derived scan should price from the geo-boxed comps");
+    assert.equal(derivedScan.evidence?.geoConstraint.kind, "center-radius", "a derived non-registry scan must issue a center-radius box, not 'none'");
+    assert.equal(seen[0]?.q, "Some Brand New Resort, Lahaina, HI", "the clean derived searchName must lead the query set");
+    assert.ok(seen[0]?.swLat != null, "the primary derived pass must be geo-boxed (sw_lat present)");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+    else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+  }
+}
+
+// (G) A derived geo NEVER overrides a curated registry market: Poipu Kai keeps its
+// hand-tuned curated bounds even when a (bogus, far-away) derived geo is supplied.
+process.env.SEARCHAPI_API_KEY = "test-key";
+{
+  const firstSwLat: (string | null)[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    firstSwLat.push(new URL(String(input)).searchParams.get("sw_lat"));
+    return new Response(JSON.stringify({ properties: [] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    await fetchAirbnbMedianNightly({
+      community: "Poipu Kai",
+      bedrooms: 3,
+      checkIn: "2026-06-08",
+      checkOut: "2026-06-15",
+      derived: { searchName: "Bogus, Nowhere, HI", lat: 0, lng: 0, city: "Nowhere", state: "Hawaii" },
+    });
+    assert.equal(firstSwLat[0], "21.875", "a registry market must keep its curated bounds and ignore any derived geo override");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+    else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+  }
+}
+
+// (H) AUTO-CURATION safety net: when a derived market's geo-boxed passes all
+// return zero comps, the scan falls back to a BROAD (un-boxed, kind "none")
+// state-wide search instead of hard-failing — preserving the pre-auto-curation
+// escape hatch for genuinely thin areas (and when geo-widening is disabled).
+process.env.SEARCHAPI_API_KEY = "test-key";
+{
+  const sawGeoBox: boolean[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const boxed = new URL(String(input)).searchParams.get("sw_lat") != null;
+    sawGeoBox.push(boxed);
+    // Every geo-boxed pass is empty; only the un-boxed broad fallback returns comps.
+    const properties = boxed ? [] : Array.from({ length: 5 }, (_, index) => ({
+      name: `2 Bedroom condo #${index + 1}`,
+      bedrooms: 2,
+      price: { extracted_total_price: 1900 + index * 80 },
+    }));
+    return new Response(JSON.stringify({ properties }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const fallbackScan = await fetchAirbnbMedianNightly({
+      community: "Thin Derived Resort",
+      bedrooms: 2,
+      checkIn: "2026-06-08",
+      checkOut: "2026-06-15",
+      derived: { searchName: "Thin Derived Resort, Lahaina, HI", lat: 20.972, lng: -156.6793, city: "Lahaina", state: "Hawaii" },
+    });
+    assert.ok((fallbackScan.medianNightly ?? 0) > 0, "a derived market must fall back to a broad search when its geo boxes find no comps");
+    assert.equal(fallbackScan.evidence?.geoConstraint.kind, "none", "the broad fallback pass must report kind 'none' (no geo box)");
+    assert.ok(sawGeoBox.some(Boolean), "the geo-boxed passes must be tried first");
+    assert.ok(sawGeoBox.some((boxed) => !boxed), "a broad un-boxed pass must run after the geo boxes came back empty");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchApiKey == null) delete process.env.SEARCHAPI_API_KEY;
+    else process.env.SEARCHAPI_API_KEY = originalSearchApiKey;
+  }
+}
+
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
   hybridPricingSource.includes('source: "airbnb"'),

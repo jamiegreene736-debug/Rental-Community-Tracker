@@ -23,7 +23,7 @@ import { sampleLicensesForLocation } from "@/data/adapt-draft";
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
-import { curatedResortSearchName, isCuratedBuyInMarket } from "@shared/buy-in-market";
+import { curatedResortSearchName, isCuratedBuyInMarket, resolveBuyInMarketFromText } from "@shared/buy-in-market";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -4300,8 +4300,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const propPricing = getPropertyPricing(propertyId);
     if (!propPricing || propPricing.units.length === 0) return null;
     const community = propPricing.units[0]?.community ?? "";
-    const resort = curatedResortSearchName(community) || community;
-    const curated = isCuratedBuyInMarket(community);
+    // Resolve the same way the SERVER does (communityResolutionForDraft →
+    // resolveBuyInMarket): a draft NAME that matches a registry ALIAS but isn't the
+    // exact key (e.g. "Royal Kahana Resort" → "Royal Kahana") is priced with curated
+    // bounds server-side, so the badge must treat it as registry-curated — not
+    // mislabel it "auto-curated from the address". resolveBuyInMarketFromText is the
+    // pure, client-safe alias matcher shared with the server.
+    const resolvedCommunity = resolveBuyInMarketFromText(community) ?? community;
+    const resort = curatedResortSearchName(resolvedCommunity) || community;
+    const curatedByRegistry = isCuratedBuyInMarket(resolvedCommunity);
     const units = propPricing.units.map((u) => ({ label: u.unitLabel, bedrooms: u.bedrooms }));
     const distinctBedrooms = Array.from(new Set(units.map((u) => u.bedrooms))).sort((a, b) => a - b);
     const totalBedrooms = units.reduce((sum, u) => sum + u.bedrooms, 0);
@@ -4340,7 +4347,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     });
     const realResort = perBedroom.map((b) => b.query).find((q): q is string => !!q) ?? null;
     const anyWidened = perBedroom.some((b) => b.widened);
-    return { community, resort, realResort, curated, units, distinctBedrooms, combo, composition, scalingNote, perBedroom, anyWidened };
+    // A non-registry community counts as curated once a market-rate refresh has
+    // run with AUTO-CURATION — i.e. the persisted scan used a real resort query +
+    // a geo box (radiusMiles set), not a state-wide raw-string search. This keeps
+    // the badge honest: it goes green only when the comps were actually
+    // geo-scoped, never just because a name was typed.
+    const curatedByEvidence = perBedroom.some((b) => b.hasLive && b.radiusMiles != null);
+    const curated = curatedByRegistry || curatedByEvidence;
+    const curatedDerived = !curatedByRegistry && curatedByEvidence;
+    return { community, resort, realResort, curated, curatedDerived, units, distinctBedrooms, combo, composition, scalingNote, perBedroom, anyWidened };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, marketRatesVersion]);
 
@@ -6271,13 +6286,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <span style={{ fontWeight: 600, color: "#111827" }}>🔎 Research confirmation</span>
                                 <span
                                   style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: researchProvenance.curated ? "#dbeafe" : "#fef3c7", color: researchProvenance.curated ? "#1e40af" : "#92400e", borderRadius: 4, fontWeight: 500 }}
-                                  title={researchProvenance.realResort
-                                    ? `Airbnb comps were searched under "${researchProvenance.realResort}" (the actual query the last refresh used).`
-                                    : researchProvenance.curated
-                                      ? `Airbnb comps are drawn from the curated "${researchProvenance.community}" market (resort + geo box). Run a refresh to record the exact query used.`
-                                      : `"${researchProvenance.community}" is not a curated market, so comps are searched on this name verbatim with no curated resort/geo box — double-check the resort is right.`}
+                                  title={researchProvenance.curatedDerived
+                                    ? `"${researchProvenance.community}" isn't a hand-tuned market, so it was AUTO-CURATED from the listing's own address: comps were searched under "${researchProvenance.realResort || researchProvenance.resort}" inside a geo box around the listing's coordinates (not a state-wide name search).`
+                                    : researchProvenance.realResort
+                                      ? `Airbnb comps were searched under "${researchProvenance.realResort}" (the actual query the last refresh used).`
+                                      : researchProvenance.curated
+                                        ? `Airbnb comps are drawn from the curated "${researchProvenance.community}" market (resort + geo box). Run a refresh to record the exact query used.`
+                                        : `"${researchProvenance.community}" is not a curated market yet — run "Update Market Rates Now" to auto-curate it from the listing's address (clean resort query + geo box).`}
                                 >
                                   Resort:&nbsp;<span style={{ fontWeight: 600 }}>{researchProvenance.realResort || researchProvenance.resort}</span>
+                                  {researchProvenance.curatedDerived && <span style={{ marginLeft: 4, opacity: 0.85 }}>· auto-curated</span>}
                                   {!researchProvenance.curated && <span style={{ marginLeft: 4 }}>⚠ not curated</span>}
                                 </span>
                                 <span

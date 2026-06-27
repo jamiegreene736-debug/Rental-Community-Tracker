@@ -203,7 +203,9 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS property_type text,
       ADD COLUMN IF NOT EXISTS neighborhood text,
       ADD COLUMN IF NOT EXISTS transit text,
-      ADD COLUMN IF NOT EXISTS str_permit text
+      ADD COLUMN IF NOT EXISTS str_permit text,
+      ADD COLUMN IF NOT EXISTS latitude text,
+      ADD COLUMN IF NOT EXISTS longitude text
   `);
   console.log("[schema] ensured community_drafts listing draft columns");
 

@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { curatedResortSearchName, isCuratedBuyInMarket } from "../shared/buy-in-market";
+import {
+  abbreviateUsState,
+  autoCuratedAirbnbSearchName,
+  coordinateMatchesState,
+  curatedResortSearchName,
+  isCuratedBuyInMarket,
+} from "../shared/buy-in-market";
 import { comboBedroomSplitIsInferred } from "../shared/draft-unit-bedrooms";
 
 // curatedResortSearchName mirrors the server's curatedAirbnbSearchQueries[0]
@@ -16,6 +22,43 @@ assert.equal(curatedResortSearchName("Princeville"), "Princeville, Kauai, HI");
 assert.equal(curatedResortSearchName("Totally Made Up Resort"), "Totally Made Up Resort");
 assert.equal(isCuratedBuyInMarket("Totally Made Up Resort"), false);
 assert.equal(isCuratedBuyInMarket("Poipu Kai"), true);
+
+// Royal Kahana (Maui) is now a curated market — its draft.name matches the new
+// BUY_IN_MARKETS key exactly, so the pricing tab badge goes green and the scan
+// uses the clean Airbnb resort query + the curated geo box.
+assert.equal(isCuratedBuyInMarket("Royal Kahana"), true);
+assert.equal(curatedResortSearchName("Royal Kahana"), "Royal Kahana, Lahaina, HI");
+
+// AUTO-CURATION query half: a non-registry resort gets a clean "Resort, City, ST"
+// Airbnb query built from its own identity (the geo box is added server-side from
+// geocoded coordinates), never the raw free-text name.
+assert.equal(
+  autoCuratedAirbnbSearchName({ name: "Sunset Cove", city: "Lahaina", state: "Hawaii" }),
+  "Sunset Cove, Lahaina, HI",
+);
+// Already-abbreviated state passes through (upper-cased); missing pieces are dropped.
+assert.equal(autoCuratedAirbnbSearchName({ name: "Beach Villas", city: "Kihei", state: "hi" }), "Beach Villas, Kihei, HI");
+assert.equal(autoCuratedAirbnbSearchName({ name: "Lone Tower" }), "Lone Tower");
+assert.equal(autoCuratedAirbnbSearchName({ name: "", city: "Kihei", state: "HI" }), "");
+// State abbreviation helper.
+assert.equal(abbreviateUsState("Hawaii"), "HI");
+assert.equal(abbreviateUsState("florida"), "FL");
+assert.equal(abbreviateUsState("HI"), "HI");
+assert.equal(abbreviateUsState(""), "");
+assert.equal(abbreviateUsState(null), "");
+
+// coordinateMatchesState — the auto-curation wrong-STATE guard. A Royal Kahana
+// (Maui, HI) coordinate is in-state; the same point fails a Florida claim. Accepts
+// both full names and 2-letter codes; unlisted states + empty state fail OPEN.
+assert.equal(coordinateMatchesState(20.972, -156.6793, "Hawaii"), true);
+assert.equal(coordinateMatchesState(20.972, -156.6793, "HI"), true);
+assert.equal(coordinateMatchesState(20.972, -156.6793, "Florida"), false); // Maui point, FL claim → rejected
+assert.equal(coordinateMatchesState(26.3254, -81.6713, "FL"), true); // Bonita Springs, FL
+assert.equal(coordinateMatchesState(26.3254, -81.6713, "Hawaii"), false);
+assert.equal(coordinateMatchesState(20.972, -156.6793, "Tennessee"), false); // far out of TN box
+assert.equal(coordinateMatchesState(20.972, -156.6793, "Vermont"), true); // VT unlisted → fail open
+assert.equal(coordinateMatchesState(20.972, -156.6793, ""), true); // no claim → fail open
+assert.equal(coordinateMatchesState(Number.NaN, -156.6793, "Hawaii"), false);
 
 // Empty / nullish input is safe.
 assert.equal(curatedResortSearchName(""), "");

@@ -479,6 +479,19 @@ function candidateCoordinates(candidate: any): { lat: number; lng: number } | nu
   return null;
 }
 
+// AUTO-CURATION geo: a non-registry listing's OWN clean Airbnb query + geocoded
+// center. Threaded into the market-rate scan it produces a center-radius comp box
+// (plus city-level widening anchors) for a resort that has no hand-tuned
+// BUY_IN_MARKETS entry — so every listing gets a curated-quality, geo-scoped scan
+// instead of a state-wide raw-string search. Ignored for registry markets.
+export type DerivedMarketGeo = {
+  searchName: string;
+  lat: number;
+  lng: number;
+  city?: string;
+  state?: string;
+};
+
 function geoConstraintForMarket(community: string): {
   kind: "curated-bounds" | "center-radius" | "none";
   params: Record<string, string>;
@@ -690,6 +703,30 @@ function centerRadiusGeoConstraint(community: string, halfDeg: number): ReturnTy
   };
 }
 
+// AUTO-CURATION: a center-radius box from arbitrary geocoded coordinates.
+// Mirrors centerRadiusGeoConstraint but keyed off a listing's OWN lat/lng rather
+// than a curated BUY_IN_MARKET_LOCATIONS center, so a non-registry resort still
+// gets a real comp box (primary and widened tiers alike). Returns undefined for
+// non-finite coordinates so the caller falls back to the raw-string "none" scan.
+function centerRadiusConstraintFromCoords(
+  lat: number,
+  lng: number,
+  halfDeg: number,
+  description: string,
+): ReturnType<typeof geoConstraintForMarket> | undefined {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+  return {
+    kind: "center-radius",
+    params: {
+      sw_lat: String(lat - halfDeg),
+      sw_lng: String(lng - halfDeg),
+      ne_lat: String(lat + halfDeg),
+      ne_lng: String(lng + halfDeg),
+    },
+    description,
+  };
+}
+
 // City-level query anchors used only at the widened tiers. A tight resort q can
 // itself starve Airbnb's result set, so broadening the box AND the query (e.g.
 // "Bonita Springs, FL") is what actually surfaces nearby same-area comps.
@@ -835,11 +872,21 @@ export async function fetchAirbnbMedianNightly(args: {
   checkOut: string;
   searchName?: string;
   avoidNightlyBasis?: number | null;
+  // AUTO-CURATION: the listing's own clean query + geocoded center, supplied when
+  // the community is NOT a hand-tuned BUY_IN_MARKETS key. When present it scopes
+  // the scan to a center-radius box around the listing (primary + widened tiers)
+  // and leads the query set with the clean searchName. Ignored for registry
+  // markets — those keep their curated bounds verbatim.
+  derived?: DerivedMarketGeo;
 }): Promise<{ medianNightly: number | null; sampleCount: number; notes: string[]; evidence?: MarketRateEvidence; confidence?: MarketRateConfidence }> {
   const apiKey = process.env.SEARCHAPI_API_KEY;
   if (!apiKey) throw new Error("SEARCHAPI_API_KEY not configured");
   const nights = nightsBetween(args.checkIn, args.checkOut);
-  const primaryQueries = curatedAirbnbSearchQueries(args.community, args.searchName);
+  // Never let a derived override displace a curated registry market.
+  const derived = args.derived && !BUY_IN_MARKETS[args.community] ? args.derived : undefined;
+  const primaryQueries = derived
+    ? Array.from(new Set([derived.searchName, ...curatedAirbnbSearchQueries(args.community, args.searchName)]))
+    : curatedAirbnbSearchQueries(args.community, args.searchName);
   const notes: string[] = [];
   let lastNoResults: string | null = null;
 
@@ -852,7 +899,18 @@ export async function fetchAirbnbMedianNightly(args: {
   // in-footprint markets. Each widened pass keeps a center-radius box and adds
   // city-level query anchors. Live SearchAPI scans throughout; no static fallback.
   type SearchPass = { widened: boolean; queries: string[]; geoConstraintOverride?: ReturnType<typeof geoConstraintForMarket> };
-  const passes: SearchPass[] = [{ widened: false, queries: primaryQueries }];
+  // AUTO-CURATION: a non-registry derived market boxes pass 0 around the listing's
+  // own coordinates (registry markets keep their primary curated bounds → the
+  // override stays undefined and behavior is byte-identical to before).
+  const primaryGeoOverride = derived
+    ? centerRadiusConstraintFromCoords(derived.lat, derived.lng, 0.02, "auto-curated center-radius box (derived from the listing's own address)")
+    : undefined;
+  // The listing's own "City, State" anchor — used at the widened tiers AND as the
+  // broad fallback query set below, independent of the geo-widening kill switch.
+  const derivedCityAnchor = derived?.city
+    ? [derived.state ? `${derived.city}, ${derived.state}` : derived.city]
+    : [];
+  const passes: SearchPass[] = [{ widened: false, queries: primaryQueries, geoConstraintOverride: primaryGeoOverride }];
   if (marketRateGeoWideningEnabled()) {
     // City anchors FIRST at the widened tiers: a city-level query ("Bonita Springs,
     // FL") is what actually surfaces a healthy nearby-comp set, whereas the tight
@@ -861,12 +919,31 @@ export async function fetchAirbnbMedianNightly(args: {
     // single-request guarantee for legitimately-thin markets like the Poipu test),
     // a thin 1–2 sample resort-name hit would short-circuit at red and abort before
     // the city anchor's yellow-clearing sample. Trying the city anchor first avoids
-    // that and uses fewer requests.
-    const widenedQueries = Array.from(new Set([...cityAnchorQueriesForMarket(args.community), ...primaryQueries]));
+    // that and uses fewer requests. For a derived market the anchor is the listing's
+    // own "City, State" and the wider boxes are centered on its coordinates.
+    const widenedQueries = derived
+      ? Array.from(new Set([...derivedCityAnchor, ...primaryQueries]))
+      : Array.from(new Set([...cityAnchorQueriesForMarket(args.community), ...primaryQueries]));
     for (const halfDeg of MARKET_RATE_WIDENING_HALF_DEGREES) {
-      const override = centerRadiusGeoConstraint(args.community, halfDeg);
+      const override = derived
+        ? centerRadiusConstraintFromCoords(derived.lat, derived.lng, halfDeg, `widened ~${Math.round(halfDeg * 111)}km center-radius box (auto-curated, derived from the listing's own address)`)
+        : centerRadiusGeoConstraint(args.community, halfDeg);
       if (override) passes.push({ widened: true, queries: widenedQueries, geoConstraintOverride: override });
     }
+  }
+  // AUTO-CURATION safety net: a derived market ALWAYS keeps a broad escape hatch.
+  // If the tight + widened boxes all returned zero comps (a genuinely thin area,
+  // OR the MARKET_RATE_GEO_WIDENING kill switch is off so no widened tiers ran),
+  // fall back to the un-boxed state-wide search the listing had BEFORE auto-
+  // curation instead of hard-failing to the static table / throwing. Runs only
+  // after every geo-boxed pass came back empty (same rates.length===0 escalation),
+  // so a healthy derived market still makes a single request and is unaffected.
+  if (derived) {
+    passes.push({
+      widened: false,
+      queries: Array.from(new Set([...derivedCityAnchor, ...primaryQueries])),
+      geoConstraintOverride: { kind: "none", params: {}, description: "broad state-wide fallback (auto-curated geo boxes found no comps)" },
+    });
   }
 
   for (const pass of passes) {
@@ -1077,6 +1154,10 @@ export async function refreshHybridPricingForTarget(args: {
   triggerType: HybridTriggerType;
   notes?: string;
   searchName?: string;
+  // AUTO-CURATION: the listing's own clean query + geocoded center, used when
+  // the community is NOT a curated BUY_IN_MARKETS key so the scan is geo-scoped
+  // rather than a state-wide raw-string search. Ignored for registry markets.
+  derivedGeo?: DerivedMarketGeo;
   resortConfident?: boolean;
   bedroomSplitInferred?: boolean;
   asOf?: Date;
@@ -1086,8 +1167,13 @@ export async function refreshHybridPricingForTarget(args: {
 }): Promise<{ propertyId: number; rows: any[]; logs: any[]; blackouts: HybridBlackoutWindow[] }> {
   const { storage } = await import("./storage");
   const asOf = args.asOf ?? new Date();
-  const searchQueries = curatedAirbnbSearchQueries(args.community, args.searchName);
-  const searchName = searchQueries[0] || args.community;
+  // A derived geo only applies to non-registry communities (registry markets are
+  // already curated and must keep their hand-tuned bounds/queries verbatim).
+  const derivedGeo = args.derivedGeo && !BUY_IN_MARKETS[args.community] ? args.derivedGeo : undefined;
+  const searchQueries = derivedGeo
+    ? Array.from(new Set([derivedGeo.searchName, ...curatedAirbnbSearchQueries(args.community, args.searchName)]))
+    : curatedAirbnbSearchQueries(args.community, args.searchName);
+  const searchName = derivedGeo ? derivedGeo.searchName : (searchQueries[0] || args.community);
   const pricingRegion = getCommunityRegion(args.community);
   const rows: any[] = [];
   const logs: any[] = [];
@@ -1253,6 +1339,7 @@ export async function refreshHybridPricingForTarget(args: {
         checkIn: window.checkIn,
         checkOut: window.checkOut,
         searchName,
+        derived: derivedGeo,
       });
       if (await args.shouldCancel?.()) throw hybridPricingCancelledError();
       if (!window.checkIn) {
