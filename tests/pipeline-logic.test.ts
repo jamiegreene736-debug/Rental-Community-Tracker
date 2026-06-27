@@ -1160,8 +1160,21 @@ console.log("  ✓ correct 3+3 unchanged");
 // ---------- Pricing tables (shared/pricing-rates) ----------
 console.log("\npricing tables suite");
 
-import { getBuyInRate, suggestPricingArea, BUY_IN_RATES, setLivePropertyMarketRates } from "../shared/pricing-rates";
+import { getBuyInRate, suggestPricingArea, BUY_IN_RATES, setLivePropertyMarketRates, targetMarginForProperty, MARKET_RATE_TARGET_MARGIN, PROPERTY_TARGET_MARGIN_OVERRIDES } from "../shared/pricing-rates";
 import { buyInMarketKeyForScoutCommunity, resolveBuyInMarket, searchLocationForBuyInMarket, textMatchesResortPhrase } from "../shared/buy-in-market";
+
+// Per-property margin override chokepoint: every property NOT in the explicit
+// allow-list keeps the global flat 15%; only listed outliers are raised. This
+// is the additive re-introduction of a per-property margin (operator 2026-06-27)
+// — it must NOT change the default for anyone else.
+assert.equal(MARKET_RATE_TARGET_MARGIN, 0.15, "global default margin stays 15%");
+assert.equal(targetMarginForProperty(-3), 0.20, "Menehune Shores -3 combo overridden to 20%");
+assert.equal(targetMarginForProperty(4), MARKET_RATE_TARGET_MARGIN, "an unlisted property keeps the flat 15%");
+assert.equal(targetMarginForProperty(undefined), MARKET_RATE_TARGET_MARGIN, "missing propertyId falls back to the flat 15%");
+assert.equal(targetMarginForProperty(null), MARKET_RATE_TARGET_MARGIN, "null propertyId falls back to the flat 15%");
+assert.equal(PROPERTY_TARGET_MARGIN_OVERRIDES[-3], 0.20, "override map records the -3 entry");
+assert.ok(!(0 in PROPERTY_TARGET_MARGIN_OVERRIDES), "no accidental propertyId 0 override");
+console.log("  ✓ targetMarginForProperty overrides only allow-listed properties");
 
 // Pili Mai 5BR is priced as its actual 3BR + 2BR component buy-ins, not
 // as a single 5BR villa comp. The operator-verified September 8-15, 2026
