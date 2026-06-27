@@ -24,6 +24,40 @@ import { resolveBuyInMarket } from "./buy-in-market";
 // default). Change this one constant to retune the global markup.
 export const MARKET_RATE_TARGET_MARGIN = 0.15;
 
+// Per-property margin OVERRIDES. Default (no entry) = MARKET_RATE_TARGET_MARGIN.
+// Keyed by dashboard propertyId — negative ids are community drafts (the
+// `-draftId` convention used across the dashboard); positive ids are static
+// properties from unit-builder-data.ts.
+//
+// NOTE FOR CODEX: this is the *additive* re-introduction of a per-property
+// margin. The 2026-06-18 directive disabled reading the polluted
+// `scanner_schedules.target_margin` column (legacy rows carry a stale 0.2000
+// default) and pushed a flat 15% to everyone. This map does NOT touch that
+// column — it is an explicit allow-list so the global flat 15% still applies to
+// every property NOT listed here. Operator 2026-06-27: the Menehune Shores
+// "4BR" listing (propertyId -3) is a 2-unit MAUI combo bought retail in peak
+// season — at the flat 15% over the Airbnb p40 rent median it books at or below
+// the doubled buy-in cost. Set to 20% (the operator's target net margin) so the
+// per-unit sell clears realized cost even when the cheap units are gone. Keep
+// this list short; if it grows, back it with an explicit DB column (NOT the
+// legacy target_margin) and read it through targetMarginForProperty.
+export const PROPERTY_TARGET_MARGIN_OVERRIDES: Record<number, number> = {
+  [-3]: 0.20, // Menehune Shores, Kihei (Maui) — 2BR+2BR combo "Sunny 4BR for 8"
+};
+
+// Single chokepoint for the margin applied when pushing market rates to Guesty.
+// Every price-push path (bulk queue, weekly cron, manual "Run now") must read
+// the margin through this helper so the override stays consistent.
+export function targetMarginForProperty(propertyId?: number | null): number {
+  if (propertyId != null) {
+    const override = PROPERTY_TARGET_MARGIN_OVERRIDES[propertyId];
+    if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+      return override;
+    }
+  }
+  return MARKET_RATE_TARGET_MARGIN;
+}
+
 export type SeasonType = "HIGH" | "LOW" | "HOLIDAY";
 export type RegionType = "hawaii" | "florida";
 
