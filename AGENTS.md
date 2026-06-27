@@ -1539,6 +1539,77 @@ established it so you can read the rationale in the commit message.
     only costs one SearchAPI call + one Nominatim call (or zero, on a
     cache hit).
 
+### Market-rate AUTO-CURATION: every listing gets a geo-scoped scan (Load-Bearing, 2026-06-27)
+
+A "curated" market = a key in `BUY_IN_MARKETS` (`shared/buy-in-market.ts`),
+which drives the market-rate scan's two real inputs: the Airbnb SearchAPI
+**query** (`curatedAirbnbSearchQueries`) and the **geo box** that scopes comps
+to the resort (`geoConstraintForMarket`: curated-bounds → center-radius →
+`none`). A listing whose community isn't a registry key used to search its raw
+free-text name with NO geo box (state-wide, red-capped confidence) — the source
+of the pricing-tab "⚠ not curated" badge. PR #TBD makes EVERY listing
+curated-quality and guarantees bulk-queue adds are too. Don't "fix" any of this
+cold:
+
+1. **Royal Kahana (Maui) is now a registry market.** Hand-tuned entry with
+   Nominatim-verified coords (OSM node 7228340763) + a resort bounds box.
+   Maui/Oahu resorts otherwise aren't in `BUY_IN_RATES`, so their STATIC
+   buy-in fallback basis is still the Kauai `$270/BR` default — adding the
+   `BUY_IN_MARKETS` entry fixes the live Airbnb scan (real Maui comps), not
+   that static fallback. (See memory `menehune-shores-combo-pricing-outlier`
+   for the separate Maui `BUY_IN_RATES`/`suggestPricingArea` gap.)
+
+2. **Auto-curation is RUNTIME, derived from the listing's OWN address.**
+   `resolveDraftDerivedGeo` (`server/routes.ts`) runs in
+   `refreshHybridPricingForDraft` for any promoted draft whose resolved
+   community is NOT a registry key. It builds a `DerivedMarketGeo`
+   (`{searchName, lat, lng, city, state}`): a clean `"Resort, City, ST"`
+   Airbnb query (`autoCuratedAirbnbSearchName`) + the draft's geocoded
+   coordinates. That threads through `refreshHybridPricingForTarget` →
+   `fetchAirbnbMedianNightly`, which scopes the primary pass AND the
+   geo-widening tiers to a center-radius box around those coords and leads the
+   query set with the clean searchName. **Double-guarded** by
+   `!BUY_IN_MARKETS[community]` in BOTH `fetchAirbnbMedianNightly` and
+   `refreshHybridPricingForTarget` — registry markets stay byte-identical.
+
+3. **The bulk queue inherits it for free.** Bulk add-combo/single-listing
+   loopback-refreshes through `refreshHybridPricingForDraft`, so a new unit is
+   auto-curated on its first pricing run. No separate wiring — don't add any.
+
+4. **Coordinates are cached, but only PRECISE ones.** New
+   `community_drafts.latitude/longitude` columns (`shared/schema.ts` +
+   `schema-maintenance.ts` ALTER) cache the geocode so refreshes don't
+   re-geocode. Only a STREET-address-derived (`fromStreet`) center is
+   persisted; a name-only/city-centroid hit prices the current scan but is
+   left ephemeral so a fuzzy center never becomes a sticky wrong cache and a
+   later street-address refresh supersedes it.
+
+5. **Wrong-STATE geocodes are rejected.** `geocodeDraftLocation` drops the
+   cross-state-prone bare-street candidate and validates every hit with
+   `coordinateMatchesState` (padded state boxes, fail-OPEN for unlisted states
+   so a legit coord is never blocked). A geocode outside the claimed state →
+   no derived box → the listing stays on the broad search (today's behavior),
+   never mis-centered.
+
+6. **A derived market ALWAYS keeps a broad escape hatch.** `fetchAirbnbMedian-
+   Nightly` appends a final un-boxed (`kind "none"`) state-wide pass for derived
+   markets, so if the tight + widened boxes all return zero comps (a thin area,
+   or `MARKET_RATE_GEO_WIDENING` is off) it falls back to the broad search the
+   listing had before — never a hard-fail to the static table. Runs only after
+   every geo-boxed pass is empty, so healthy markets make one request.
+
+7. **The badge is EVIDENCE-driven (no false green).** The pricing-tab
+   "Research confirmation" chip reads curated when the community is a registry
+   key (resolved via `resolveBuyInMarketFromText`, matching the server's alias
+   resolution so an alias-but-not-exact-key name like "Royal Kahana Resort"
+   isn't mislabeled) OR the persisted scan actually used a geo box
+   (`radiusMiles != null`). Auto-curated drafts read "· auto-curated"; "⚠ not
+   curated" shows only when there is genuinely no geo box. An existing
+   non-registry listing greens on its NEXT pricing refresh (daily cron / manual
+   "Update Market Rates Now").
+
+See the 2026-06-27 Decision Log line.
+
 ### Sourceability gate + last-minute pricing (Load-Bearing, 2026-06-15)
 
 The buy-in model sells inventory we don't own yet. These two mechanisms protect
@@ -3405,3 +3476,4 @@ Welcome. When in doubt, ask the human.
 2026-06-26 · Jamie: "the most recent bulk combo listing queue — so many are failing for different reasons. Investigate and fix." · ACCEPTED + shipped (`claude/happy-bassi-482b4c`, PR #TBD) · Pulled the two most recent jobs from prod (Railway Postgres `bulk_combo_listing_job_items`): 8 "No usable street address", 11 "photo-discovery-failed", 1 self-contradicting photo-community skip. THREE root causes, all reproduced live against the prod SearchAPI before touching code. (1) **Hawaiian diacritics broke address discovery** (the dominant bug). google_maps returns the real spellings — "Kona Aliʻi", "75-6082 Aliʻi Dr", "Hōlualoa Bay Villas" — but `isLikelyStreetAddress`'s char class `[A-Za-z0-9' .-]` excluded the okina (ʻ U+02BB / ‘ U+2018) so every Aliʻi-Drive Kona resort's street was rejected, and `normalizeCommunityAddressToken` turned the okina/macron into a word-SPLITTING space ("Aliʻi"→"ali i") so `titleMatchesResort` failed even when the street was clean (Kona Aliʻi's "Kuakini Hwy"). FIX: new `foldHawaiianDiacritics` (`shared/community-addresses.ts`, exported, NFD-decompose to drop macrons + remove okina/apostrophes so the glottal stop JOINS the word) applied in `normalizeCommunityAddressToken` + `streetRootFromAddress`. **LOAD-BEARING invariant: folding must never cross a space — "Alii Kai" (Kauai) must stay ≠ "Halii Kai" (Big Island); locked by tests.** Also made `streetRootFromAddress` scan comma-segments for the numbered street (rural HI "Star Route, 1000 Kamehameha V Hwy, …" = Molokai Shores, where the street is segment[1]), falling back to segment[0] so numberless addresses are unchanged. Resolves 7 of 8 address fails live (Kahaluu Reef remains a genuine name-indexing gap — google_maps only knows it as "Kahaluu Beach Villas"; precision gate correctly declines). (2) **photo-community gate self-contradiction**: `auditCommunityFolderFull` (`server/photo-community-check.ts`) let the dHash mixed-folder pre-screen FLIP a positive vision ID ("Kanaloa at Kona" matches) to "mismatch", so the gate emitted "looks like Kanaloa at Kona, not Kanaloa at Kona". FIX: the pre-screen no longer escalates to a hard mismatch when vision already confirmed the expected community (only an informational outlier); plus a belt-and-suspenders `sameCommunityName` guard in `evaluateComboPhotoCommunityGate` so the gate can never say "looks like X, not X". (3) **photo-discovery fails are GENUINE inventory scarcity** (verified live: Country Club Villas / Kona Pacific / Casa De Emdeko / Kona Makai return 0 Zillow/Realtor/Redfin/Homes hits under any city term, while Waikoloa Colony Villas / Poipu Kai / Kanaloa at Kona return 10) — these leasehold condotels don't trade on national portals, so the gate correctly declines a photoless listing. NOT a code bug; the only change is a clearer skip MESSAGE pointing the operator to "Add a manual community" (paste the two unit URLs). Deliberately did NOT add speculative city aliases (proven 0-hit no-ops). Verified: 3 affected suites + full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT live-smoke the running queue (no Guesty/sidecar creds) — confirm by re-running the Kona/Molokai sweep; the Aliʻi-Drive resorts should now pass the address gate.
 
 2026-06-27 · Jamie: "the 4-bedroom condo in Menehune Shores books at a loss — guest paid ~$3,700 but the buy-in is more; I should be making 20%. Fix the pricing for this ONE outlier without marking up across the board." · ACCEPTED + shipped (`claude/cool-feynman-a11af1`, PR #TBD) · **Live-verified diagnosis (prod DB via Postgres `DATABASE_PUBLIC_URL`):** Menehune Shores is community draft `id=3` → dashboard propertyId **-3**, a 2-unit COMBO (Zillow APT 202 2BR + APT 422 2BR = "Sunny 4BR for 8"), `pricing_area` BLANK, `minimum_stay_nights` BLANK. The pushed sell = `Σ ceil((1+margin) × monthly Airbnb p40 median)` per unit (`buildBulkGuestySeasonalPlan`/`cleanBaseRateFromBuyInServer`). Stored July 2BR basis = **$302** (n=18, source airbnb) → per-unit sell `ceil(1.15×302)`=$348 → combo $696/n → ~$3,480/5n + cleaning ≈ the $3,700 paid. ROOT CAUSE: the 15% markup basis is nightly RENT only — it excludes the per-unit FLAT fees (~$420 service + cleaning, paid TWICE for a 2-unit combo) and the realized retail premium when peak-summer cheap units sell out; the per-night markup (~$47/unit) is smaller than the amortized flat-fee drag (~$84/unit on a 5-night stay), so each unit loses before rent, ×2. (Also found: this listing's stored `median_nightly_high` $323 < base $368 — the seasonal scan came back INVERTED, under-pricing its own peak month; left for a separate data fix.) **SCOPE the operator chose (after I showed min-stay alone is insufficient): the two Guesty settings + a per-property 20% margin — NOT the portfolio-wide structural fix.** Manual Guesty (operator does these): listing -3 → 7-night minimum + cleaning fee raised to cover BOTH units (~$300). CODE shipped here: re-introduced a per-property margin as an ADDITIVE allow-list `PROPERTY_TARGET_MARGIN_OVERRIDES` + chokepoint `targetMarginForProperty(propertyId)` in `shared/pricing-rates.ts` (`{-3: 0.20}`; everyone else still returns the flat `MARKET_RATE_TARGET_MARGIN` 0.15). Wired through all three push paths — bulk queue (`pushBulkGuestyPricingAfterRefresh`, routes.ts) + weekly cron + manual "Run now" (`availability-scheduler.ts`). **LOAD-BEARING — intentional, documented reversal of the 2026-06-18 "push 15% uniformly" directive (see that Decision Log line + its annotation):** the override does NOT read the polluted legacy `scanner_schedules.target_margin` column; it's a hard-coded allow-list so the global default is unchanged for every property not listed. The next market-rate push for -3 raises its guest-facing prices ~5% (15%→20%); no other listing moves. Deliberately did NOT ship the Maui `BUY_IN_RATES` floor or the all-combos cost-aware basis (operator deferred). Verified: new `targetMarginForProperty` assertions in `tests/pipeline-logic.test.ts`, full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Live pricing change takes effect only when a push runs for -3 (operator-triggered bulk "Update market pricing" or the weekly cron).
+2026-06-27 · Jamie (from the pricing tab "⚠ not curated" badge on Royal Kahana): "add Royal Kahana as curated, then go through every listing and make sure they are curated too — if not, fix it — and when a new unit is added via the bulk queue make sure the pricing is always curated too." · ACCEPTED, full auto-curation · Added Royal Kahana (Maui) to BUY_IN_MARKETS, AND built runtime AUTO-CURATION: any promoted draft whose community isn't a registry key now derives a clean "Resort, City, ST" Airbnb query + a geo box from its OWN geocoded street address (server/routes.ts resolveDraftDerivedGeo → DerivedMarketGeo threaded through refreshHybridPricingForTarget/fetchAirbnbMedianNightly), so every listing — and every bulk-queue add, which loopback-refreshes through the same path — gets a curated-quality, geo-scoped scan instead of a state-wide raw-string search. Double-guarded by !BUY_IN_MARKETS[community] so registry markets stay byte-identical. Coords cached on community_drafts.latitude/longitude (precise/street-derived only). Hardened via a 3-dimension adversarial review (4 findings fixed): wrong-STATE geocode guard (coordinateMatchesState, drop bare-street candidate, persist precise-only), an always-on broad fallback pass so a derived market can't hard-fail where the old broad search found comps, and an evidence-driven badge that resolves aliases (resolveBuyInMarketFromText) so it never shows a false "auto-curated" on a hand-tuned market. See the "Market-rate AUTO-CURATION" Load-Bearing subsection. Verified: full npm test green (+ derived-geo + state-guard tests), build clean, npm run check 335 = baseline (0 new). Couldn't live-smoke the SearchAPI/geocode legs in-session — existing non-registry listings green on their next pricing refresh.
