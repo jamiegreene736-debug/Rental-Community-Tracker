@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { curatedResortSearchName, isCuratedBuyInMarket } from "../shared/buy-in-market";
+import {
+  abbreviateUsState,
+  autoCuratedAirbnbSearchName,
+  curatedResortSearchName,
+  isCuratedBuyInMarket,
+} from "../shared/buy-in-market";
 import { comboBedroomSplitIsInferred } from "../shared/draft-unit-bedrooms";
 
 // curatedResortSearchName mirrors the server's curatedAirbnbSearchQueries[0]
@@ -16,6 +21,30 @@ assert.equal(curatedResortSearchName("Princeville"), "Princeville, Kauai, HI");
 assert.equal(curatedResortSearchName("Totally Made Up Resort"), "Totally Made Up Resort");
 assert.equal(isCuratedBuyInMarket("Totally Made Up Resort"), false);
 assert.equal(isCuratedBuyInMarket("Poipu Kai"), true);
+
+// Royal Kahana (Maui) is now a curated market — its draft.name matches the new
+// BUY_IN_MARKETS key exactly, so the pricing tab badge goes green and the scan
+// uses the clean Airbnb resort query + the curated geo box.
+assert.equal(isCuratedBuyInMarket("Royal Kahana"), true);
+assert.equal(curatedResortSearchName("Royal Kahana"), "Royal Kahana, Lahaina, HI");
+
+// AUTO-CURATION query half: a non-registry resort gets a clean "Resort, City, ST"
+// Airbnb query built from its own identity (the geo box is added server-side from
+// geocoded coordinates), never the raw free-text name.
+assert.equal(
+  autoCuratedAirbnbSearchName({ name: "Sunset Cove", city: "Lahaina", state: "Hawaii" }),
+  "Sunset Cove, Lahaina, HI",
+);
+// Already-abbreviated state passes through (upper-cased); missing pieces are dropped.
+assert.equal(autoCuratedAirbnbSearchName({ name: "Beach Villas", city: "Kihei", state: "hi" }), "Beach Villas, Kihei, HI");
+assert.equal(autoCuratedAirbnbSearchName({ name: "Lone Tower" }), "Lone Tower");
+assert.equal(autoCuratedAirbnbSearchName({ name: "", city: "Kihei", state: "HI" }), "");
+// State abbreviation helper.
+assert.equal(abbreviateUsState("Hawaii"), "HI");
+assert.equal(abbreviateUsState("florida"), "FL");
+assert.equal(abbreviateUsState("HI"), "HI");
+assert.equal(abbreviateUsState(""), "");
+assert.equal(abbreviateUsState(null), "");
 
 // Empty / nullish input is safe.
 assert.equal(curatedResortSearchName(""), "");

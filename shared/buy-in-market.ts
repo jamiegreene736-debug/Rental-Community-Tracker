@@ -160,6 +160,19 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
     location: { searchName: "Menehune Shores", city: "Kihei", state: "Hawaii", streetAddress: "760 S Kihei Rd", lat: 20.7638, lng: -156.4594 },
     bounds: { sw_lat: 20.7615, sw_lng: -156.4615, ne_lat: 20.7655, ne_lng: -156.4570 },
   },
+  "Royal Kahana": {
+    key: "Royal Kahana",
+    aliases: [/\broyal\s+kahana\b/i],
+    searchLocation: "Royal Kahana Resort, Kahana, Lahaina, Maui, Hawaii",
+    // Curated Airbnb market-rate query — the resort name in clean form.
+    platformSearch: {
+      airbnb: "Royal Kahana, Lahaina, HI",
+    },
+    // Coordinates verified via Nominatim (OSM node 7228340763): the beachfront
+    // tower at 4365 Lower Honoapiilani Rd in Kahana, West Maui.
+    location: { searchName: "Royal Kahana", city: "Lahaina", state: "Hawaii", streetAddress: "4365 Lower Honoapiilani Rd", lat: 20.9720, lng: -156.6793 },
+    bounds: { sw_lat: 20.9640, sw_lng: -156.6873, ne_lat: 20.9800, ne_lng: -156.6713 },
+  },
   "Ilikai": {
     key: "Ilikai",
     aliases: [/\bilikai\b/i],
@@ -351,6 +364,53 @@ export function curatedResortSearchName(community: string | null | undefined): s
 export function isCuratedBuyInMarket(community: string | null | undefined): boolean {
   const key = String(community ?? "").trim();
   return key.length > 0 && !!BUY_IN_MARKETS[key];
+}
+
+// US state name → 2-letter abbreviation. Used to build a clean "Resort, City, ST"
+// Airbnb query from a listing's OWN city/state when it isn't a curated market
+// (auto-curation). A value that's already a 2-letter code is returned upper-cased;
+// an unrecognized value passes through unchanged.
+const US_STATE_ABBREVIATIONS: Record<string, string> = {
+  alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA",
+  colorado: "CO", connecticut: "CT", delaware: "DE", "district of columbia": "DC",
+  florida: "FL", georgia: "GA", hawaii: "HI", idaho: "ID", illinois: "IL",
+  indiana: "IN", iowa: "IA", kansas: "KS", kentucky: "KY", louisiana: "LA",
+  maine: "ME", maryland: "MD", massachusetts: "MA", michigan: "MI",
+  minnesota: "MN", mississippi: "MS", missouri: "MO", montana: "MT",
+  nebraska: "NE", nevada: "NV", "new hampshire": "NH", "new jersey": "NJ",
+  "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+  "north dakota": "ND", ohio: "OH", oklahoma: "OK", oregon: "OR",
+  pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC",
+  "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT",
+  vermont: "VT", virginia: "VA", washington: "WA", "west virginia": "WV",
+  wisconsin: "WI", wyoming: "WY",
+};
+
+export function abbreviateUsState(state: string | null | undefined): string {
+  const s = String(state ?? "").trim();
+  if (!s) return "";
+  if (/^[A-Za-z]{2}$/.test(s)) return s.toUpperCase();
+  return US_STATE_ABBREVIATIONS[s.toLowerCase()] ?? s;
+}
+
+/**
+ * AUTO-CURATION (query half): build a clean "Resort, City, ST" Airbnb search
+ * query from a listing's own identity when its community is NOT a curated
+ * BUY_IN_MARKETS key. Paired server-side with a geo box derived from the
+ * listing's geocoded coordinates so a non-registry resort still gets a
+ * curated-quality, geo-scoped Airbnb scan instead of a state-wide raw-string
+ * search on its free-text draft name. Returns "" when there is no usable name.
+ */
+export function autoCuratedAirbnbSearchName(input: {
+  name?: string | null;
+  city?: string | null;
+  state?: string | null;
+}): string {
+  const name = String(input.name ?? "").trim();
+  if (!name) return "";
+  const city = String(input.city ?? "").trim();
+  const st = abbreviateUsState(input.state);
+  return [name, city, st].filter(Boolean).join(", ");
 }
 
 /**

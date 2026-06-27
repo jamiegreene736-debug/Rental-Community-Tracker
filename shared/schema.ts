@@ -457,6 +457,15 @@ export const communityDrafts = pgTable("community_drafts", {
   // matching. Nullable so existing drafts saved before this column
   // existed keep working — the adapter falls back to "city, state".
   streetAddress: text("street_address"),
+  // Geocoded coordinates for the complex/listing, populated lazily the first time
+  // market-rate pricing runs for a NON-curated resort (AUTO-CURATION). Used to
+  // build a center-radius Airbnb comp box so a resort with no hand-tuned
+  // BUY_IN_MARKETS entry still gets a geo-scoped scan instead of a state-wide
+  // raw-string search. Nullable — drafts saved before this column (or that fail
+  // geocoding) keep working and fall back to the broad search. Stored as text to
+  // match the numeric-as-text convention used elsewhere in this schema.
+  latitude: text("latitude"),
+  longitude: text("longitude"),
   estimatedLowRate: integer("estimated_low_rate"),
   estimatedHighRate: integer("estimated_high_rate"),
   estimatedTotalUnits: integer("estimated_total_units"),

@@ -159,8 +159,10 @@ import {
   BUY_IN_MARKET_PLATFORM_SEARCH_TERMS,
   BUY_IN_MARKET_SEARCH_LOCATIONS,
   SIMILAR_BUY_IN_MARKETS,
+  autoCuratedAirbnbSearchName,
   driveMinutesBetweenBuyInMarkets,
   driveMinutesBetweenCoords,
+  isCuratedBuyInMarket,
   nearbyBuyInMarketsForScout,
   nearbyBuyInMarketsForScoutDetailed,
   oceanfrontComparableBuyInMarket,
@@ -221,7 +223,7 @@ import {
   runRealtyApiPhotoDiscoveryLeg,
 } from "./realtyapi-discovery";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
-import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type HybridBlackoutWindow, type HybridMonthBlackoutEvent, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
+import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type DerivedMarketGeo, type HybridBlackoutWindow, type HybridMonthBlackoutEvent, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
 import {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
   DEFAULT_TIGHT_SCARCITY_MARKUP,
@@ -1098,13 +1100,23 @@ async function refreshHybridPricingForDraft(
   }
 
   const { community, confident: resortConfident } = communityResolutionForDraft(draft);
+  // AUTO-CURATION: a promoted draft whose community is NOT a hand-tuned
+  // BUY_IN_MARKETS key (e.g. a freshly-swept resort, or a Maui/Oahu listing) gets
+  // a curated-quality scan derived from its OWN identity — a clean resort query +
+  // a geo box around its geocoded coordinates — instead of a state-wide raw-string
+  // search on its free-text name. This is what guarantees every listing (and every
+  // future bulk-queue add, which loopback-refreshes through here) is curated.
+  const derivedGeo = await resolveDraftDerivedGeo(draft, community);
   return refreshHybridPricingForTarget({
     propertyId,
     propertyName: String(draft.name || draft.listingTitle || fallbackLabel || `Draft ${draftId}`),
     community,
     bedroomCounts,
     unitCount: unitSlots.length || 1,
-    resortConfident,
+    // A derived geo box means we DID scope the scan to the right resort/area, so
+    // the research-confirmation provenance is confident (no "verify resort" flag).
+    resortConfident: derivedGeo ? true : resortConfident,
+    derivedGeo: derivedGeo ?? undefined,
     bedroomSplitInferred,
     triggerType: "Manual Update",
     notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
@@ -1112,6 +1124,66 @@ async function refreshHybridPricingForDraft(
     onMonthBlackout,
     shouldCancel,
   });
+}
+
+// Parse a stored coordinate (text column) back to a finite number, or null.
+function parseStoredCoord(value: unknown): number | null {
+  if (value == null) return null;
+  const n = typeof value === "number" ? value : Number(String(value).trim());
+  return Number.isFinite(n) && Math.abs(n) <= 180 ? n : null;
+}
+
+// Geocode a draft's location, trying the most specific address first. Uses the
+// shared geocoder (Nominatim → SearchAPI google_maps), which already throttles
+// and caches. Returns null when nothing resolves.
+async function geocodeDraftLocation(draft: any): Promise<{ lat: number; lng: number } | null> {
+  const city = String(draft?.city ?? "").trim();
+  const state = String(draft?.state ?? "").trim();
+  const street = String(draft?.streetAddress ?? "").trim();
+  const name = String(draft?.name ?? "").trim();
+  const tail = [city, state].filter(Boolean).join(", ");
+  const candidates = [
+    street && tail ? `${street}, ${tail}` : null,
+    name && tail ? `${name}, ${tail}` : null,
+    street || null,
+  ].filter((a): a is string => !!a && a.trim().length > 0);
+  for (const addr of candidates) {
+    const coord = await geocode(addr).catch(() => null);
+    if (coord) return coord;
+  }
+  return null;
+}
+
+// AUTO-CURATION: when a promoted draft's community is NOT a curated
+// BUY_IN_MARKETS key, derive a curated-quality market on the fly from the
+// listing's OWN identity — a clean "Resort, City, ST" Airbnb query plus a geo box
+// around the listing's geocoded coordinates. Coordinates are cached on the draft
+// row (latitude/longitude) so we geocode at most once per draft. Returns null for
+// registry markets (already curated) or when no coordinates can be resolved (the
+// scan then stays a raw-string search and the UI shows "not curated").
+async function resolveDraftDerivedGeo(draft: any, community: string): Promise<DerivedMarketGeo | null> {
+  if (!draft || isCuratedBuyInMarket(community)) return null;
+  const name = String(draft?.name ?? "").trim();
+  if (!name) return null;
+  const searchName = autoCuratedAirbnbSearchName({ name, city: draft?.city, state: draft?.state }) || name;
+  let lat = parseStoredCoord(draft?.latitude);
+  let lng = parseStoredCoord(draft?.longitude);
+  if (lat == null || lng == null) {
+    const coords = await geocodeDraftLocation(draft);
+    if (coords) {
+      lat = coords.lat;
+      lng = coords.lng;
+      // Persist so future refreshes (daily cron / manual) don't re-geocode.
+      await storage.updateCommunityDraft(Number(draft.id), {
+        latitude: String(coords.lat),
+        longitude: String(coords.lng),
+      }).catch(() => undefined);
+    }
+  }
+  if (lat == null || lng == null) return null;
+  const city = String(draft?.city ?? "").trim() || undefined;
+  const state = String(draft?.state ?? "").trim() || undefined;
+  return { searchName, lat, lng, city, state };
 }
 
 function pricingRowsForClient(rows: any[]): Array<{
