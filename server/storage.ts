@@ -2030,6 +2030,39 @@ export class DatabaseStorage implements IStorage {
       .returning();
   }
 
+  // One-time RETROACTIVE seed of the dashboard "Last Price Scan" column
+  // (scanner_schedule.lastGuestyRatePushAt). Writes a backfilled timestamp
+  // ONLY when the property has never had a real Guesty rate push — it never
+  // clobbers a genuine `markScannerGuestyRatePush` result. Status is the
+  // sentinel "seed" (NOT "ok") so the column can render it distinctly and an
+  // audit can never mistake the backfill for a real push. Idempotent: once a
+  // real push lands (or a prior seed exists) it returns false and changes
+  // nothing. Returns true iff it wrote a seed row.
+  async seedScannerPriceScan(propertyId: number, at: Date, summary: string): Promise<boolean> {
+    const existing = await this.getScannerSchedule(propertyId);
+    if (existing?.lastGuestyRatePushAt) return false; // never overwrite a real push
+    if (existing) {
+      await db.update(scannerSchedule)
+        .set({
+          lastGuestyRatePushAt: at,
+          lastGuestyRatePushStatus: "seed",
+          lastGuestyRatePushSummary: summary,
+          updatedAt: new Date(),
+        })
+        .where(eq(scannerSchedule.id, existing.id));
+      return true;
+    }
+    await db.insert(scannerSchedule)
+      .values({
+        propertyId,
+        enabled: false,
+        lastGuestyRatePushAt: at,
+        lastGuestyRatePushStatus: "seed",
+        lastGuestyRatePushSummary: summary,
+      });
+    return true;
+  }
+
   // Append one row per scanner run (scheduled tick or manual "Run now").
   // `scannerSchedule.lastRunSummary` holds only the latest; this table
   // keeps the trail the UI renders as "Last N runs".

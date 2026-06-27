@@ -10,6 +10,7 @@ import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { startGuestReceiptScheduler } from "./guest-receipts";
 import { startPropertyRevenueScheduler } from "./property-revenue-scheduler";
+import { startMarketRateScheduler } from "./market-rate-scheduler";
 import { startGuestInboxSyncScheduler } from "./guest-inbox-sync";
 import { warmGuestyListingsCache } from "./guesty-listings-cache";
 import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
@@ -165,6 +166,7 @@ app.get("/api/auth/session", (_req, res) => {
       startGuestReceiptScheduler();
       startGuestInboxSyncScheduler();
       startPropertyRevenueScheduler();
+      startMarketRateScheduler();
       // Prime the Operations Property dropdown + global-summary listing set so
       // the operator's first page load reads from memory instead of paying for
       // two serialized Guesty paginations. Fire-and-forget; swallows its own

@@ -644,11 +644,18 @@ const properties: Property[] = [
   },
 ];
 
-type SortField = "propertyId" | "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay" | "dateAdded" | "totalRevenue";
+type SortField = "propertyId" | "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay" | "dateAdded" | "totalRevenue" | "lastPriceScan";
 
 // Per-property trailing-365-day revenue for the "Total Revenue" column.
 type PropertyRevenueEntry = { revenue: number; bookings: number; currency: string; windowDays: number; computedAt: string | null };
 type PropertyRevenueMap = Record<number, PropertyRevenueEntry>;
+
+// Per-property "Last Price Scan" — the timestamp the market-rate pricing table
+// was last refreshed AND pushed to Guesty (scanner_schedule.lastGuestyRatePushAt).
+// status "seed" = one-time retroactive backfill (not a real push), "ok"/"error" =
+// real weekly/manual Guesty push outcome.
+type LastPriceScanEntry = { pushedAt: string | null; status: string | null; summary: string | null };
+type LastPriceScanMap = Record<number, LastPriceScanEntry>;
 
 function displayPropertyId(property: Pick<Property, "id" | "draftId">): string {
   const numericId = property.draftId ? 900000 + property.draftId : 100000 + property.id;
@@ -1558,6 +1565,17 @@ function AdminDashboard() {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
+  // Per-property "Last Price Scan" — when this listing's market-rate pricing
+  // table was last refreshed and pushed to Guesty (the weekly market-rate cron,
+  // or a manual "Update Market Rates"). Keyed by the dashboard property id
+  // (= scanner_schedule.propertyId, the positive core id). Declared HERE — before
+  // the `filtered` useMemo — so the sort comparator can close over it. Absent →
+  // the column renders "—".
+  const { data: priceScanData } = useQuery<LastPriceScanMap>({
+    queryKey: ["/api/dashboard/price-scans"],
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
   const baseRates = useMemo(() => {
     const map = new Map<number, number>();
     for (const p of allProperties) {
@@ -1643,6 +1661,18 @@ function AdminDashboard() {
         if (bR === null) return -1;
         return sortDir === "asc" ? aR - bR : bR - aR;
       }
+      if (sortField === "lastPriceScan") {
+        // Never-pushed properties (no scanner_schedule push timestamp) always
+        // sort to the BOTTOM in both directions — absence isn't "oldest".
+        const at = priceScanData?.[a.id]?.pushedAt;
+        const bt = priceScanData?.[b.id]?.pushedAt;
+        const aT = at ? new Date(at).getTime() : null;
+        const bT = bt ? new Date(bt).getTime() : null;
+        if (aT === null && bT === null) return 0;
+        if (aT === null) return 1;
+        if (bT === null) return -1;
+        return sortDir === "asc" ? aT - bT : bT - aT;
+      }
       let aVal: string | number | null = a[sortField as keyof typeof a] as string | number | null;
       let bVal: string | number | null = b[sortField as keyof typeof b] as string | number | null;
       if (aVal === null) aVal = sortDir === "asc" ? Infinity : -Infinity;
@@ -1655,7 +1685,7 @@ function AdminDashboard() {
       return sortDir === "asc" ? numA - numB : numB - numA;
     });
     return result;
-  }, [allProperties, searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, baseRates, propertyRevenueData]);
+  }, [allProperties, searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, baseRates, propertyRevenueData, priceScanData]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -4550,6 +4580,19 @@ function AdminDashboard() {
                     <SortIcon field="totalRevenue" />
                   </Button>
                 </TableHead>
+                <TableHead className="w-[96px] px-0.5 text-center" title="Date & time this listing's market-rate pricing table was last refreshed (SearchAPI Airbnb seasonal bases) AND pushed to Guesty — runs automatically once a week, or whenever you click 'Update Market Rates'. 'Seeded' = initial backfill (no live push yet), amber = older than the weekly cadence, red = the last push errored, '—' = never pushed.">
+                  <Button
+                    variant="ghost"
+                    className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
+                    onClick={() => handleSort("lastPriceScan")}
+                    data-testid="button-sort-last-price-scan"
+                    id="button-sort-last-price-scan"
+                    aria-label="Sort by last price scan (market-rate Guesty push)"
+                  >
+                    Last Price Scan
+                    <SortIcon field="lastPriceScan" />
+                  </Button>
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -5129,12 +5172,65 @@ function AdminDashboard() {
                       );
                     })()}
                   </TableCell>
+                  <TableCell className="px-1 py-2 text-center whitespace-nowrap" data-testid={`cell-last-price-scan-${property.id}`}>
+                    {(() => {
+                      // "Last Price Scan" — when this listing's market-rate
+                      // pricing table was last refreshed AND pushed to Guesty
+                      // (scanner_schedule.lastGuestyRatePushAt). Populated by the
+                      // weekly market-rate cron and by any manual "Update Market
+                      // Rates" push. status "seed" = the one-time retroactive
+                      // backfill (rendered distinctly so it's never mistaken for a
+                      // real push); "error" = the last push failed. Keyed by
+                      // property.id (= the positive core property id the scanner
+                      // schedule tracks), so drafts/unmapped listings show "—".
+                      const scan = priceScanData?.[property.id];
+                      if (!scan || !scan.pushedAt) {
+                        return (
+                          <span
+                            className="text-xs text-muted-foreground"
+                            title="Market-rate pricing has not been pushed to Guesty for this listing yet — the weekly scan (or 'Update Market Rates') will populate this."
+                          >
+                            —
+                          </span>
+                        );
+                      }
+                      const when = new Date(scan.pushedAt);
+                      const isSeed = scan.status === "seed";
+                      const isError = scan.status === "error";
+                      // Flag a real push older than the weekly cadence (7d + 1d
+                      // grace) so a missed cron run is visible. Seeds aren't real
+                      // pushes, so don't staleness-flag them.
+                      const stale = !isSeed && Date.now() - when.getTime() > 8 * 24 * 60 * 60 * 1000;
+                      const datePart = when.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                      const timePart = when.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+                      const tone = isError
+                        ? "text-red-600"
+                        : isSeed
+                          ? "text-muted-foreground italic"
+                          : stale
+                            ? "text-amber-600"
+                            : "text-muted-foreground";
+                      const title = isSeed
+                        ? `Seeded placeholder (no live Guesty push yet) dated ${formatShortDateTime(scan.pushedAt)} — the weekly scan will replace this with a real push`
+                        : `Market-rate pricing ${isError ? "push FAILED" : "pushed to Guesty"} on ${formatShortDateTime(scan.pushedAt)}${stale ? " — older than the weekly cadence" : ""}${scan.summary ? ` · ${scan.summary}` : ""}`;
+                      return (
+                        <span
+                          className={`inline-flex flex-col items-center leading-tight ${tone}`}
+                          title={title}
+                          data-testid={`last-price-scan-stamp-${property.id}`}
+                        >
+                          <span className="text-[11px] font-medium">{isSeed ? `${datePart} ·seed` : datePart}</span>
+                          <span className="text-[9px]">{isError ? "push failed" : timePart}</span>
+                        </span>
+                      );
+                    })()}
+                  </TableCell>
                 </TableRow>
                 );
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={19} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={20} className="text-center py-8 text-muted-foreground">
 
                     No properties match your filters
                   </TableCell>
