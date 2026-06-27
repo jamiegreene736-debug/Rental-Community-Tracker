@@ -25839,6 +25839,52 @@ Return ONLY compact JSON with this exact shape:
     }));
   });
 
+  // GET /api/admin/buyin-agent/tools/job-context?jobId=X — live context for the
+  // agent to re-read mid-run (remaining slots, running committed cost, revenue left).
+  app.get("/api/admin/buyin-agent/tools/job-context", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const jobId = String(req.query.jobId ?? "");
+    if (!jobId) return res.status(400).json({ error: "jobId required" });
+    const { getAutoFillJob } = await import("./auto-fill-job");
+    const job = getAutoFillJob(jobId);
+    if (!job) return res.status(404).json({ error: "no live job for this id" });
+    const filledIds = new Set(job.attached.map((a) => a.unitId));
+    const committedCost = job.existingAttachedCost + job.attached.reduce((s, a) => s + (Number(a.totalPrice) || 0), 0);
+    return res.json({
+      jobId: job.id,
+      reservationId: job.reservationId,
+      propertyId: job.propertyId,
+      propertyName: job.propertyName,
+      community: job.community,
+      checkIn: job.checkIn,
+      checkOut: job.checkOut,
+      nights: job.nights,
+      expectedRevenue: job.expectedRevenue,
+      gateEnabled: job.gateEnabled,
+      committedCost,
+      revenueAvailable: job.expectedRevenue - committedCost,
+      groundFloorBedrooms: Array.from(job.groundFloorBedrooms),
+      slots: job.slots.map((s) => ({ unitId: s.unitId, unitLabel: s.unitLabel, bedrooms: s.bedrooms, filled: filledIds.has(s.unitId) })),
+      attached: job.attached.map((a) => ({ unitId: a.unitId, url: a.url, title: a.title, totalPrice: a.totalPrice, bedrooms: a.bedrooms })),
+      canceled: job.canceled,
+      dryRun: job.dryRun,
+    });
+  });
+
+  // POST /api/admin/buyin-agent/propose-attach — the COMMIT chokepoint the agent
+  // calls to attach a proposed pick/combo (plan §3/§4). All guards (profit gate,
+  // ground-floor snippet, server-derived coords, photo validation, dedup, proximity)
+  // are server-enforced inside proposeAttach + attachPick. Body: { jobId, picks: [...] }.
+  app.post("/api/admin/buyin-agent/propose-attach", async (req, res) => {
+    if (!checkAdminSecret(req, res)) return;
+    const body = (req.body ?? {}) as { jobId?: unknown; picks?: unknown };
+    if (!body.jobId || typeof body.jobId !== "string") return res.status(400).json({ error: "jobId (string) required" });
+    if (!Array.isArray(body.picks)) return res.status(400).json({ error: "picks (array) required" });
+    const { proposeAttach } = await import("./buyin-agent-commit");
+    const result = await proposeAttach({ jobId: body.jobId, picks: body.picks as any[] });
+    return res.json(result);
+  });
+
   // GET /api/buyin-agent/result/:id — server-side poll target for the cowork engine
   // (runCoworkAutoFillJob). No admin gate (same-instance server caller over loopback,
   // mirrors /api/vrbo-sidecar/result/:id).
