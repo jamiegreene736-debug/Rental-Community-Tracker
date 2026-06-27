@@ -121,6 +121,7 @@ import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendR
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { runPropertyRevenueRefresh, getPropertyRevenueStatus } from "./property-revenue-scheduler";
+import { runMarketRateScan, getMarketRateScanStatus } from "./market-rate-scheduler";
 import { validateAndFixPhoto } from "./photo-validator";
 import { resolveCuratedCommunityDescription } from "./community-descriptions";
 import { filterNonRentalUnitPhotos, UNIT_PHOTO_VISION_VERSION } from "./unit-photo-vision";
@@ -20533,6 +20534,48 @@ Requirements:
 
   app.get("/api/admin/property-revenue-status", async (_req, res) => {
     res.json(getPropertyRevenueStatus());
+  });
+
+  // Per-property "Last Price Scan" for the dashboard column: the timestamp the
+  // market-rate pricing table was last refreshed AND pushed to Guesty
+  // (scanner_schedule.lastGuestyRatePushAt, stamped by markScannerGuestyRatePush).
+  // Keyed by the dashboard property id (= scanner_schedule.propertyId = the
+  // positive core property id). status "seed" marks the one-time retroactive
+  // backfill (not a real push). Fail-soft empty until the table/first run exists.
+  app.get("/api/dashboard/price-scans", async (_req, res) => {
+    try {
+      const rows = await storage.getScannerSchedules();
+      const map: Record<number, { pushedAt: string | null; status: string | null; summary: string | null }> = {};
+      for (const row of rows) {
+        if (!row.lastGuestyRatePushAt) continue;
+        map[row.propertyId] = {
+          pushedAt: new Date(row.lastGuestyRatePushAt).toISOString(),
+          status: row.lastGuestyRatePushStatus ?? null,
+          summary: row.lastGuestyRatePushSummary ?? null,
+        };
+      }
+      res.json(map);
+    } catch (e: any) {
+      console.warn("[market-rate-scan] price-scans serve failed (table may not exist yet):", e?.message ?? e);
+      res.json({});
+    }
+  });
+
+  // Manual trigger for the weekly market-rate scan (refresh every configured
+  // property's pricing table + push to Guesty). Admin-gated like other /api/admin/*
+  // routes; loopback bypasses auth. Heavy + synchronous — returns the run summary
+  // once the whole portfolio sweep finishes.
+  app.post("/api/admin/refresh-price-scans", async (_req, res) => {
+    try {
+      const result = await runMarketRateScan("manual");
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
+  app.get("/api/admin/price-scan-status", async (_req, res) => {
+    res.json(getMarketRateScanStatus());
   });
 
   // List reservations for a Guesty listing, annotated with per-unit-slot fill status.
