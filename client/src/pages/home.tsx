@@ -1879,9 +1879,16 @@ function AdminDashboard() {
   // Card payments captured through Guesty settle into the bank ~5 business days
   // after capture, so each collected payment is projected forward to its
   // expected deposit date. This surfaces the next bank deposit (amount + date)
-  // plus a per-day schedule for the next 5 calendar days, computed client-side
-  // from the same `payments` list the funds-collected tile already loads.
+  // plus a per-day schedule, computed client-side from the same `payments` list
+  // the funds-collected tile already loads.
+  //
+  // The schedule window spans 12 calendar days (today + the next ~2 weeks). A
+  // 5-business-day settlement is ~7 calendar days out, so the freshest captures
+  // (e.g. the "in last 48h" payments) deposit BEYOND a 5-day window — the
+  // 12-day window guarantees every still-pending deposit from a recent payment
+  // is shown, not just the ones landing in the next few days.
   const DEPOSIT_SETTLEMENT_BUSINESS_DAYS = 5;
+  const DEPOSIT_SCHEDULE_WINDOW_DAYS = 12;
   const addBusinessDays = (start: Date, businessDays: number) => {
     const result = new Date(start);
     let added = 0;
@@ -1914,14 +1921,14 @@ function AdminDashboard() {
     }
     const nextDeposit =
       Array.from(byDay.values()).sort((a, b) => a.date.getTime() - b.date.getTime())[0] ?? null;
-    const next5Days = Array.from({ length: 5 }, (_, i) => {
+    const scheduleDays = Array.from({ length: DEPOSIT_SCHEDULE_WINDOW_DAYS }, (_, i) => {
       const date = new Date(todayStart);
       date.setDate(date.getDate() + i);
       const entry = byDay.get(dayKey(date));
       return { date, amount: entry?.amount ?? 0, count: entry?.count ?? 0 };
     });
-    const next5DaysTotal = next5Days.reduce((sum, d) => sum + d.amount, 0);
-    return { nextDeposit, next5Days, next5DaysTotal };
+    const scheduleTotal = scheduleDays.reduce((sum, d) => sum + d.amount, 0);
+    return { nextDeposit, scheduleDays, scheduleTotal };
   }, [revenueSummary?.payments]);
   const propertyNameById = useMemo(() => {
     const map = new Map<number, string>();
@@ -2935,8 +2942,8 @@ function AdminDashboard() {
                     <span className="font-normal text-muted-foreground"> · {depositProjection.nextDeposit.count} payment{depositProjection.nextDeposit.count === 1 ? "" : "s"}</span>
                   ) : null}
                 </p>
-                <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-next-deposits-5-days">
-                  Next 5 days: {revenueSummaryLoading ? "..." : formatCurrency(depositProjection.next5DaysTotal)} expected
+                <p className="mt-0.5 text-xs leading-snug text-muted-foreground" data-testid="text-next-deposits-12-days">
+                  Next 12 days: {revenueSummaryLoading ? "..." : formatCurrency(depositProjection.scheduleTotal)} expected
                   <span className="font-normal"> · 5 business days after card payment</span>
                 </p>
                 {revenueSummary && (revenueSummary.refunds30Days ?? 0) > 0 && (
@@ -3010,8 +3017,8 @@ function AdminDashboard() {
                       ? `Next deposit: ${formatCurrency(depositProjection.nextDeposit.amount)} on ${formatShortDate(depositProjection.nextDeposit.date)} · ${depositProjection.nextDeposit.count} payment${depositProjection.nextDeposit.count === 1 ? "" : "s"}`
                       : "No deposits expected from recent payments"}
                   </p>
-                  <div className="mt-2 grid gap-2 sm:grid-cols-5">
-                    {depositProjection.next5Days.map((day) => (
+                  <div className="mt-2 grid gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                    {depositProjection.scheduleDays.map((day) => (
                       <div key={day.date.toISOString()} className="rounded-md border bg-background p-2">
                         <p className="text-xs text-muted-foreground">
                           {day.date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
