@@ -186,6 +186,11 @@ export interface IStorage {
   deletePropertyMarketRate(propertyId: number, bedrooms: number): Promise<void>;
   getPropertyMarketRates(propertyId: number): Promise<PropertyMarketRate[]>;
   getAllPropertyMarketRates(): Promise<PropertyMarketRate[]>;
+  updatePropertyMarketRateStatic(
+    propertyId: number,
+    bedrooms: number,
+    fields: Partial<Pick<typeof propertyMarketRates.$inferInsert, "medianNightly" | "medianNightlyHigh" | "medianNightlyHoliday" | "monthlyRates" | "staticPlan" | "source">>,
+  ): Promise<PropertyMarketRate | undefined>;
   createPricingUpdateLog(input: InsertPricingUpdateLog): Promise<PricingUpdateLog>;
   getPricingUpdateLogs(filters?: { propertyId?: number; limit?: number }): Promise<PricingUpdateLog[]>;
   getPropertyBuyInMarkets(propertyId: number): Promise<PropertyBuyInMarkets | undefined>;
@@ -811,6 +816,27 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(propertyMarketRates)
       .orderBy(propertyMarketRates.propertyId, propertyMarketRates.bedrooms);
+  }
+
+  // Partial in-place update for the Claude static-rate engine's
+  // edit/lock-then-re-expand path (server/static-rate-engine.ts
+  // applyStaticRateOverride). Touches only the seasonal-basis columns, the
+  // re-expanded monthlyRates calendar, and the staticPlan blob — never the
+  // (propertyId, bedrooms) identity. No-op if the row doesn't exist.
+  async updatePropertyMarketRateStatic(
+    propertyId: number,
+    bedrooms: number,
+    fields: Partial<Pick<typeof propertyMarketRates.$inferInsert, "medianNightly" | "medianNightlyHigh" | "medianNightlyHoliday" | "monthlyRates" | "staticPlan" | "source">>,
+  ): Promise<PropertyMarketRate | undefined> {
+    const [row] = await db
+      .update(propertyMarketRates)
+      .set({ ...fields, refreshedAt: new Date() })
+      .where(and(
+        eq(propertyMarketRates.propertyId, propertyId),
+        eq(propertyMarketRates.bedrooms, bedrooms),
+      ))
+      .returning();
+    return row;
   }
 
   async createPricingUpdateLog(input: InsertPricingUpdateLog): Promise<PricingUpdateLog> {

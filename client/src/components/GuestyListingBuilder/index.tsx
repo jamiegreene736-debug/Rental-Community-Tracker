@@ -16,6 +16,7 @@ import {
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
 import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
+import StaticRatePlanPanel from "./StaticRatePlanPanel";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
@@ -6336,6 +6337,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 )}
                               </div>
                             )}
+                            {/* Claude static-rate plan: editable/lockable seasonal
+                                anchors researched via web search (replaces the live
+                                SearchAPI P40 provenance as the rate source). */}
+                            <StaticRatePlanPanel propertyId={propertyId} version={marketRatesVersion} />
                             {/* Live buy-in summary. One badge per bedroom-count
                                 showing the persisted Airbnb SearchAPI layered
                                 basis for the market-rate tool. */}
@@ -6399,7 +6404,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     color: marketRatesRefreshing ? "#9ca3af" : "#1f2937",
                                     cursor: marketRatesRefreshing ? "wait" : "pointer",
                                   }}
-                                      title="Refreshes Airbnb SearchAPI seasonal pricing and pushes marked-up base rates to Guesty."
+                                      title="Has Claude web-research this resort's market rates, regenerates the static seasonal plan (keeping locked anchors), and pushes marked-up base rates to Guesty."
                                 >
                                   {marketRatesRefreshing ? "Refreshing…" : "↻ Update Market Rates Now"}
                                 </button>

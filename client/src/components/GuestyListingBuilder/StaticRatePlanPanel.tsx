@@ -1,0 +1,231 @@
+import { useCallback, useEffect, useState } from "react";
+
+// Pricing-tab panel for the Claude-generated STATIC seasonal rate plan
+// (server/static-rate-engine.ts). Replaces the live-SearchAPI "research
+// confirmation" provenance with the actual researched anchors: one rate per
+// LOW/HIGH/HOLIDAY per year, for the rolling 24-month calendar. Each anchor is
+// editable and lockable — locked anchors survive regeneration, and every anchor
+// still flows through the 20% markup + Guesty push unchanged.
+
+type Season = "LOW" | "HIGH" | "HOLIDAY";
+type YearKey = "year1" | "year2";
+
+type SeasonAnchors = { LOW: number; HIGH: number; HOLIDAY: number };
+type BedroomPlan = {
+  bedrooms: number;
+  anchors: { year1: SeasonAnchors; year2: SeasonAnchors };
+  locks: { year1?: Partial<Record<Season, boolean>>; year2?: Partial<Record<Season, boolean>> };
+  staticBasis: SeasonAnchors;
+  confidence: number;
+  reasoning: string;
+  metricsUsed: string[];
+  source?: string;
+  generatedAt?: string;
+  model?: string;
+  summary?: string;
+};
+
+const SEASONS: Season[] = ["LOW", "HIGH", "HOLIDAY"];
+const YEARS: YearKey[] = ["year1", "year2"];
+const SEASON_LABEL: Record<Season, string> = { LOW: "Low", HIGH: "High", HOLIDAY: "Holiday" };
+
+function confidenceTone(score: number): { bg: string; fg: string } {
+  if (score >= 80) return { bg: "#dcfce7", fg: "#166534" };
+  if (score >= 55) return { bg: "#fef3c7", fg: "#92400e" };
+  return { bg: "#fee2e2", fg: "#991b1b" };
+}
+
+export default function StaticRatePlanPanel({ propertyId, version }: { propertyId?: number; version?: number }) {
+  const [plans, setPlans] = useState<BedroomPlan[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Local edit buffer: `${bedrooms}:${year}:${season}` -> string value.
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  const [savingFor, setSavingFor] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    if (typeof propertyId !== "number" || propertyId === 0) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await fetch(`/api/property/${propertyId}/static-rate`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setPlans(Array.isArray(data?.bedrooms) ? data.bedrooms : []);
+      setEdits({});
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+      setPlans(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [propertyId]);
+
+  useEffect(() => {
+    load();
+  }, [load, version]);
+
+  const cellKey = (b: number, y: YearKey, s: Season) => `${b}:${y}:${s}`;
+
+  const saveBedroom = useCallback(async (plan: BedroomPlan) => {
+    if (typeof propertyId !== "number") return;
+    setSavingFor(plan.bedrooms);
+    try {
+      for (const y of YEARS) {
+        for (const s of SEASONS) {
+          const key = cellKey(plan.bedrooms, y, s);
+          const editVal = edits[key];
+          const locked = !!plan.locks?.[y]?.[s];
+          const current = plan.anchors[y][s];
+          const next = editVal != null && editVal !== "" ? Math.round(Number(editVal)) : current;
+          // Only POST when the value actually changed (lock toggles POST inline).
+          if (editVal != null && Number.isFinite(next) && next > 0 && next !== current) {
+            await fetch(`/api/property/${propertyId}/static-rate/override`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ bedrooms: plan.bedrooms, year: y, season: s, value: next, locked }),
+            });
+          }
+        }
+      }
+      await load();
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setSavingFor(null);
+    }
+  }, [edits, load, propertyId]);
+
+  const toggleLock = useCallback(async (plan: BedroomPlan, y: YearKey, s: Season) => {
+    if (typeof propertyId !== "number") return;
+    const nextLocked = !plan.locks?.[y]?.[s];
+    try {
+      await fetch(`/api/property/${propertyId}/static-rate/override`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bedrooms: plan.bedrooms, year: y, season: s, locked: nextLocked }),
+      });
+      await load();
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    }
+  }, [load, propertyId]);
+
+  if (typeof propertyId !== "number" || propertyId === 0) return null;
+
+  return (
+    <div style={{ marginTop: 8, marginBottom: 4, padding: "10px 12px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, fontSize: 11, color: "#374151" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 700, color: "#111827", fontSize: 12 }}>📊 Static rate plan</span>
+        <span style={{ color: "#6b7280" }}>Claude-researched buy-in cost basis · one rate per Low/High/Holiday per year · rolling 24 months · 20% markup on push</span>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          style={{ marginLeft: "auto", fontSize: 11, padding: "2px 8px", borderRadius: 4, border: "1px solid #d1d5db", background: loading ? "#f3f4f6" : "#fff", cursor: loading ? "wait" : "pointer" }}
+        >
+          {loading ? "Loading…" : "↻ Reload"}
+        </button>
+      </div>
+
+      {error && <div style={{ color: "#991b1b", marginBottom: 6 }}>Couldn’t load static rates: {error}</div>}
+      {!error && plans && plans.length === 0 && (
+        <div style={{ color: "#6b7280" }}>No static rate plan yet. Click “Update Market Rates Now” to have Claude research this resort and generate one.</div>
+      )}
+
+      {plans && plans.map((plan) => {
+        const tone = confidenceTone(plan.confidence ?? 0);
+        const isFallback = plan.source === "static-fallback";
+        return (
+          <div key={plan.bedrooms} style={{ marginBottom: 10, paddingBottom: 8, borderBottom: "1px dashed #e5e7eb" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
+              <span style={{ fontWeight: 700, color: "#111827" }}>{plan.bedrooms}BR</span>
+              <span style={{ padding: "1px 7px", borderRadius: 4, background: tone.bg, color: tone.fg, fontWeight: 600 }}>
+                {plan.confidence ?? 0}% confidence
+              </span>
+              {isFallback ? (
+                <span title="Web research was unavailable; rates fell back to the operator buy-in table × season multipliers." style={{ padding: "1px 7px", borderRadius: 4, background: "#fef3c7", color: "#92400e", fontWeight: 500 }}>
+                  ⚠ table fallback (no web research)
+                </span>
+              ) : (
+                <span title={`Researched with ${plan.model ?? "Claude"} via web search.`} style={{ padding: "1px 7px", borderRadius: 4, background: "#ede9fe", color: "#5b21b6", fontWeight: 500 }}>
+                  🔎 web-researched{plan.model ? ` · ${plan.model}` : ""}
+                </span>
+              )}
+              {plan.generatedAt && (
+                <span style={{ color: "#9ca3af" }}>· {new Date(plan.generatedAt).toLocaleDateString()}</span>
+              )}
+            </div>
+
+            <table style={{ borderCollapse: "collapse", fontSize: 11, marginBottom: 4 }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left", padding: "2px 8px 2px 0", color: "#6b7280", fontWeight: 600 }}>Season</th>
+                  {YEARS.map((y) => (
+                    <th key={y} style={{ textAlign: "left", padding: "2px 8px", color: "#6b7280", fontWeight: 600 }}>{y === "year1" ? "Year 1" : "Year 2"}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {SEASONS.map((s) => (
+                  <tr key={s}>
+                    <td style={{ padding: "2px 8px 2px 0", color: "#374151", fontWeight: 500 }}>
+                      {SEASON_LABEL[s]}
+                      <span style={{ color: "#9ca3af", marginLeft: 4 }} title="Operator table estimate (prior)">~${plan.staticBasis?.[s]}</span>
+                    </td>
+                    {YEARS.map((y) => {
+                      const key = cellKey(plan.bedrooms, y, s);
+                      const locked = !!plan.locks?.[y]?.[s];
+                      const val = edits[key] != null ? edits[key] : String(plan.anchors[y][s]);
+                      return (
+                        <td key={y} style={{ padding: "2px 8px", whiteSpace: "nowrap" }}>
+                          <span style={{ color: "#374151" }}>$</span>
+                          <input
+                            type="number"
+                            value={val}
+                            min={0}
+                            onChange={(e) => setEdits((prev) => ({ ...prev, [key]: e.target.value }))}
+                            style={{ width: 64, padding: "1px 4px", border: "1px solid #d1d5db", borderRadius: 4, fontSize: 11, background: locked ? "#f3f4f6" : "#fff" }}
+                            title={locked ? "Locked — regeneration won’t overwrite this value." : "Editable. Locked anchors survive regeneration."}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => toggleLock(plan, y, s)}
+                            title={locked ? "Locked (click to unlock)" : "Unlocked (click to lock)"}
+                            style={{ marginLeft: 4, border: "none", background: "transparent", cursor: "pointer", fontSize: 12, padding: 0 }}
+                          >
+                            {locked ? "🔒" : "🔓"}
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {plan.reasoning && (
+              <div style={{ color: "#6b7280", marginBottom: 4, maxWidth: 720 }}>
+                <span style={{ fontWeight: 600, color: "#4b5563" }}>Why: </span>{plan.reasoning}
+              </div>
+            )}
+            {plan.metricsUsed && plan.metricsUsed.length > 0 && (
+              <div style={{ color: "#9ca3af", marginBottom: 4 }}>
+                Sources: {plan.metricsUsed.join(", ")}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => saveBedroom(plan)}
+              disabled={savingFor === plan.bedrooms}
+              style={{ fontSize: 11, padding: "3px 10px", borderRadius: 4, border: "1px solid #2563eb", background: savingFor === plan.bedrooms ? "#bfdbfe" : "#2563eb", color: "#fff", cursor: savingFor === plan.bedrooms ? "wait" : "pointer", fontWeight: 600 }}
+            >
+              {savingFor === plan.bedrooms ? "Saving…" : "Save edits"}
+            </button>
+            <span style={{ color: "#9ca3af", marginLeft: 8 }}>Edits re-expand the 24-month calendar. Push to Guesty with “Update Market Rates Now”.</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}

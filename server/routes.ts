@@ -226,6 +226,7 @@ import {
 } from "./realtyapi-discovery";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
 import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type DerivedMarketGeo, type HybridBlackoutWindow, type HybridMonthBlackoutEvent, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
+import { generateStaticRatesForTarget, applyStaticRateOverride, type StaticProgressEvent } from "./static-rate-engine";
 import {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
   DEFAULT_TIGHT_SCARCITY_MARKUP,
@@ -1128,6 +1129,125 @@ async function refreshHybridPricingForDraft(
   });
 }
 
+// ── Claude static-rate engine dispatch ──────────────────────────────────────
+// The market-rate refresh source is the Claude static-rate engine by default
+// (server/static-rate-engine.ts). Set STATIC_RATE_ENGINE_DISABLED=1 to revert to
+// the legacy live Airbnb SearchAPI P40 random-window scan (hybrid-pricing.ts),
+// which is kept dormant but intact for fallback. The Guesty push, markup,
+// scheduler, and bulk queue are all source-agnostic — they read the same
+// property_market_rates.monthlyRates shape either engine writes.
+function staticRateEngineEnabled(): boolean {
+  return process.env.STATIC_RATE_ENGINE_DISABLED !== "1";
+}
+
+// Resolve a static-rate generation target (community + bedroom slots) for both
+// configured properties (positive id → PROPERTY_UNIT_CONFIGS) and community
+// drafts (negative id → community_drafts), reusing the same resolution the
+// legacy hybrid draft path uses so provenance flags stay consistent.
+async function resolveStaticPricingTarget(propertyId: number, fallbackLabel: string): Promise<{
+  propertyId: number;
+  propertyName: string;
+  community: string;
+  bedroomCounts: number[];
+  unitCount: number;
+  resortConfident: boolean;
+  bedroomSplitInferred: boolean;
+  searchLabel: string;
+}> {
+  if (propertyId > 0) {
+    const config = PROPERTY_UNIT_CONFIGS[propertyId];
+    if (!config) throw new Error(`Property ${propertyId} is not configured for pricing`);
+    const bedroomCounts = Array.from(new Set(config.units.map((u) => u.bedrooms)))
+      .filter((b) => Number.isFinite(b) && b > 0)
+      .sort((a, b) => a - b);
+    // A real, searchable resort label for the web research — the curated market's
+    // "Resort, Town, Island, State" string when available, else the community key.
+    const searchLabel = BUY_IN_MARKETS[config.community]?.searchLocation || config.community;
+    return {
+      propertyId,
+      propertyName: `${config.community} property ${propertyId}`,
+      community: config.community,
+      bedroomCounts,
+      unitCount: config.units.length,
+      resortConfident: true,
+      bedroomSplitInferred: false,
+      searchLabel,
+    };
+  }
+  const draftId = Math.abs(propertyId);
+  let draft = await storage.getCommunityDraft(draftId);
+  if (!draft) throw new Error(`Draft ${draftId} was not found`);
+  const bedroomSplitInferred = comboBedroomSplitIsInferred(draft);
+  draft = await persistInferredComboDraftBedrooms(draft) ?? draft;
+  const safeDraft = draft!; // always defined here (threw above; reassignment keeps it set)
+  const unitSlots = unitSlotsForCommunityDraft(safeDraft);
+  const bedroomCounts = Array.from(new Set(unitSlots.map((u) => u.bedrooms)))
+    .filter((b) => Number.isFinite(b) && b > 0)
+    .sort((a, b) => a - b);
+  if (bedroomCounts.length === 0) {
+    throw new Error("Enter the single-listing bedroom count or both combo unit bedroom counts, then retry.");
+  }
+  const { community, confident: resortConfident } = communityResolutionForDraft(safeDraft);
+  // For a draft, build the searchable label from its own identity (name + city/
+  // state), falling back to any curated market match, then the community key.
+  const draftName = String(safeDraft.name || safeDraft.listingTitle || "").trim();
+  const draftCity = String(safeDraft.city || "").trim();
+  const draftState = String(safeDraft.state || "").trim();
+  const draftLocLabel = [draftName, draftCity, draftState].filter(Boolean).join(", ");
+  const searchLabel = draftLocLabel || BUY_IN_MARKETS[community]?.searchLocation || community;
+  return {
+    propertyId,
+    propertyName: String(safeDraft.name || safeDraft.listingTitle || fallbackLabel || `Draft ${draftId}`),
+    community,
+    bedroomCounts,
+    unitCount: unitSlots.length || 1,
+    resortConfident,
+    bedroomSplitInferred,
+    searchLabel,
+  };
+}
+
+// Single dispatch point used by the Pricing-tab refresh, the bulk queue, and the
+// all-properties runner. Routes to the static engine (default) or the legacy
+// hybrid scan. The `onMonthScanned` callback is shared — StaticProgressEvent is a
+// structural subset of HybridMonthScannedEvent's consumers, so we cast at the
+// boundary rather than fork the queue's progress handler.
+async function refreshMarketRatesForProperty(
+  propertyId: number,
+  label: string,
+  hooks?: {
+    onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
+    onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>;
+    shouldCancel?: () => boolean | Promise<boolean>;
+    triggerType?: HybridTriggerType;
+  },
+): Promise<{ propertyId: number; rows: any[]; logs: any[]; blackouts: HybridBlackoutWindow[] }> {
+  if (staticRateEngineEnabled()) {
+    const target = await resolveStaticPricingTarget(propertyId, label);
+    const onMonthScanned = hooks?.onMonthScanned
+      ? (e: StaticProgressEvent) => hooks.onMonthScanned!(e as unknown as HybridMonthScannedEvent)
+      : undefined;
+    const result = await generateStaticRatesForTarget({
+      ...target,
+      triggerType: hooks?.triggerType ?? "Manual Update",
+      notes: "Claude static seasonal rates (one rate per LOW/HIGH/HOLIDAY per year, rolling 24 months).",
+      onMonthScanned,
+      shouldCancel: hooks?.shouldCancel,
+    });
+    return { ...result, blackouts: [] as HybridBlackoutWindow[] };
+  }
+  return propertyId < 0
+    ? refreshHybridPricingForDraft(propertyId, label, hooks?.onMonthScanned, hooks?.shouldCancel, hooks?.onMonthBlackout)
+    : refreshHybridPricingForProperty({
+      propertyId,
+      triggerType: hooks?.triggerType ?? "Manual Update",
+      notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
+      onMonthScanned: hooks?.onMonthScanned,
+      onMonthBlackout: hooks?.onMonthBlackout,
+      shouldCancel: hooks?.shouldCancel,
+    });
+}
+
 // Parse a stored coordinate (text column) back to a finite number, or null.
 function parseStoredCoord(value: unknown): number | null {
   if (value == null) return null;
@@ -1230,13 +1350,9 @@ async function refreshPricingTabMarketRates(propertyId: number, label: string, c
   pricingResult: { propertyId: number; rows: any[]; logs: any[] };
   guestyPush: Awaited<ReturnType<typeof pushBulkGuestyPricingAfterRefresh>>;
 }> {
-  const pricingResult = propertyId < 0
-    ? await refreshHybridPricingForDraft(propertyId, label)
-    : await refreshHybridPricingForProperty({
-      propertyId,
-      triggerType: "Manual Update",
-      notes: "Pricing tab manual refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
-    });
+  const pricingResult = await refreshMarketRatesForProperty(propertyId, label, {
+    triggerType: "Manual Update",
+  });
 
   assertPricingRefreshNotCancelled(propertyId, cancelGeneration);
 
@@ -1287,7 +1403,14 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     return;
   }
 
-  item.progress = { phase: "searchapi-airbnb", percent: 10, label: "Running SearchAPI Airbnb monthly pricing (starting month 1)" };
+  const usingStaticEngine = staticRateEngineEnabled();
+  item.progress = {
+    phase: usingStaticEngine ? "claude-static" : "searchapi-airbnb",
+    percent: 10,
+    label: usingStaticEngine
+      ? "Researching market rates with Claude (web search) and building static seasonal plan"
+      : "Running SearchAPI Airbnb monthly pricing (starting month 1)",
+  };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
 
@@ -1315,10 +1438,13 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   const onMonthScanned = async (event: HybridMonthScannedEvent) => {
     if (await shouldCancel()) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
     const confidenceLabel = event.confidence ? `; confidence ${event.confidence.score}% ${event.confidence.level}` : "";
+    const isStatic = (event.pricingRecipe as any)?.source === "claude-static";
     item.progress = {
-      phase: "searchapi-airbnb",
+      phase: isStatic ? "claude-static" : "searchapi-airbnb",
       percent: Math.min(79, Math.round(10 + (70 * (event.monthOffset + 1)) / event.horizonMonths)),
-      label: `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) -> P40 $${event.medianNightly}/night${confidenceLabel}`,
+      label: isStatic
+        ? `Claude static rates ${event.bedrooms}BR (${event.monthOffset + 1}/${event.horizonMonths}) -> LOW $${event.medianNightly}/night${confidenceLabel}`
+        : `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) -> P40 $${event.medianNightly}/night${confidenceLabel}`,
       currentMonth: event.yearMonth,
       monthsScanned: event.monthOffset + 1,
       horizonMonths: event.horizonMonths,
@@ -1360,16 +1486,12 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     });
   };
 
-  const pricingResult = item.propertyId < 0
-    ? await refreshHybridPricingForDraft(item.propertyId, item.label, onMonthScanned, shouldCancel, onMonthBlackout)
-    : await refreshHybridPricingForProperty({
-      propertyId: item.propertyId,
-      triggerType: "Manual Update",
-      notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
-      onMonthScanned,
-      onMonthBlackout,
-      shouldCancel,
-    });
+  const pricingResult = await refreshMarketRatesForProperty(item.propertyId, item.label, {
+    onMonthScanned,
+    onMonthBlackout,
+    shouldCancel,
+    triggerType: "Manual Update",
+  });
   const blackoutWindows: HybridBlackoutWindow[] = Array.isArray(pricingResult.blackouts) ? pricingResult.blackouts : [];
   const rateChanges = summarizePricingRateChanges(pricingResult.logs);
   const confidenceSummary = summarizeMarketRateProgressConfidence(pricingResult.rows);
@@ -40265,7 +40387,7 @@ Return ONLY compact JSON with this exact shape:
     const results: Array<{ id: number; ok: boolean; rows?: number; error?: string }> = [];
     for (const id of Array.from(new Set<number>(propertyIds))) {
       try {
-        const result = await refreshHybridPricingForProperty({ propertyId: id, triggerType: "Manual Update" });
+        const result = await refreshMarketRatesForProperty(id, `property ${id}`, { triggerType: "Manual Update" });
         results.push({ id, ok: true, rows: result.rows.length });
       } catch (e: any) {
         results.push({ id, ok: false, error: e?.message ?? String(e) });
@@ -40285,11 +40407,90 @@ Return ONLY compact JSON with this exact shape:
     res.json({ ok: true, logs });
   });
 
+  // Claude static-rate plan for a property: the persisted per-bedroom seasonal
+  // anchors (LOW/HIGH/HOLIDAY × year1/year2), operator lock flags, the static
+  // prior, and Claude's reasoning/confidence. Drives the Pricing-tab editor.
+  app.get("/api/property/:id/static-rate", async (req, res) => {
+    const propertyId = Number(req.params.id);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid property id" });
+    try {
+      const rows = await storage.getPropertyMarketRates(propertyId);
+      const bedrooms = rows
+        .filter((r) => r.staticPlan && Array.isArray((r.staticPlan as any).bedrooms))
+        .flatMap((r) => {
+          const plan = r.staticPlan as any;
+          return (plan.bedrooms as any[]).map((b) => ({
+            ...b,
+            source: r.source,
+            generatedAt: plan.generatedAt,
+            model: plan.model,
+            summary: plan.summary,
+            refreshedAt: r.refreshedAt,
+          }));
+        })
+        .sort((a, b) => a.bedrooms - b.bedrooms);
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ ok: true, propertyId, bedrooms });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // Edit/lock a single seasonal anchor, re-expand the 24-month calendar, and
+  // persist in place. Does NOT push to Guesty — the operator pushes via the
+  // existing "Update Market Rates" button / bulk queue once edits are settled.
+  app.post("/api/property/:id/static-rate/override", async (req, res) => {
+    const propertyId = Number(req.params.id);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "Invalid property id" });
+    const bedrooms = Number(req.body?.bedrooms);
+    const year = req.body?.year === "year2" ? "year2" : "year1";
+    const season = ["LOW", "HIGH", "HOLIDAY"].includes(req.body?.season) ? req.body.season : null;
+    if (!Number.isFinite(bedrooms) || bedrooms <= 0) return res.status(400).json({ error: "Invalid bedrooms" });
+    if (!season) return res.status(400).json({ error: "season must be LOW, HIGH, or HOLIDAY" });
+    const value = req.body?.value != null ? Number(req.body.value) : undefined;
+    const locked = typeof req.body?.locked === "boolean" ? req.body.locked : undefined;
+    try {
+      const target = await resolveStaticPricingTarget(propertyId, `property ${propertyId}`);
+      const result = await applyStaticRateOverride({
+        propertyId,
+        bedrooms,
+        community: target.community,
+        year,
+        season,
+        value,
+        locked,
+      });
+      if (!result) return res.status(404).json({ error: `No static-rate row for property ${propertyId} ${bedrooms}BR. Generate rates first.` });
+      res.json({ ok: true, propertyId, bedrooms: result.bedroomPlan });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
   app.post("/api/admin/refresh-all-market-rates", async (req, res) => {
     const trigger = String(req.query.trigger ?? "") === "scheduled"
       ? "Weekly Automated Scan"
       : "Admin Backfill";
     try {
+      if (staticRateEngineEnabled()) {
+        // Claude static-rate engine: loop the configured properties through the
+        // same dispatcher the per-property endpoint uses (web research → static
+        // anchors → persisted monthly rates). Does NOT push to Guesty (parity
+        // with the legacy runHybridPricingForAllProperties, which only recomputes).
+        const ids = Object.keys(PROPERTY_UNIT_CONFIGS).map(Number).sort((a, b) => a - b);
+        const results: Array<{ id: number; ok: boolean; rows?: number; error?: string }> = [];
+        for (const id of ids) {
+          try {
+            const result = await refreshMarketRatesForProperty(id, `property ${id}`, { triggerType: trigger as HybridTriggerType });
+            results.push({ id, ok: true, rows: result.rows.length });
+          } catch (e: any) {
+            results.push({ id, ok: false, error: e?.message ?? String(e) });
+          }
+        }
+        console.log(`[static-rate] refresh-all ${results.filter((r) => r.ok).length}/${results.length} succeeded`);
+        res.json({ ok: true, mode: "claude-static", total: results.length, succeeded: results.filter((r) => r.ok).length, results });
+        return;
+      }
       const result = await runHybridPricingForAllProperties(trigger as HybridTriggerType);
       console.log(`[hybrid-pricing] refresh-all ${result.succeeded}/${result.total} succeeded`);
       res.json({ ok: true, mode: "hybrid-airbnb-layered", ...result });
