@@ -44363,8 +44363,18 @@ Return ONLY compact JSON with this exact shape:
         return res.status(400).json({ error: "No scanable folders found (no photo labels in DB)" });
       }
       // Fire-and-forget. Completes in the background; status polled via GET.
-      void runPhotoListingCheckForFolders(folders);
-      res.json({ started: true, folders });
+      // DEEP scan: the dashboard refresh button reverse-image-searches the WHOLE
+      // deduped interior gallery per folder (clamped to PHOTO_AUDIT_MAX_PHOTOS) +
+      // the address-on-OTA leg — the same thoroughness as the weekly cron, so a
+      // manual "Run photo match scan" produces a confident verdict, not the old
+      // cheap 3-photo screen. budgetCap is passed only when a finite cap is set
+      // (cap === null → unlimited, the default).
+      const budget = await getPhotoCheckBudget();
+      void runPhotoListingCheckForFolders(folders, {
+        maxPhotos: PHOTO_AUDIT_MAX_PHOTOS,
+        ...(budget.cap != null ? { budgetCap: budget.cap } : {}),
+      });
+      res.json({ started: true, folders, deep: true });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? "Failed to start photo-listing scan" });
     }

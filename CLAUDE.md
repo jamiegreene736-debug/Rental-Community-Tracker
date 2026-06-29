@@ -43,6 +43,17 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-29 (FOLLOW-UP: dashboard "Run photo match scan" button → DEEP + progress modal): Operator
+  asked whether the dashboard refresh button (next to the Photos column) does a deep scan, and to add a
+  search bar / progress modal. It did NOT — `POST /api/photo-listing-check/run` ran the cheap 3-photo
+  screen (no `maxPhotos`). Made it DEEP (`maxPhotos: PHOTO_AUDIT_MAX_PHOTOS` + `budgetCap` when finite),
+  so a manual scan matches the weekly cron's thoroughness + runs the address leg. Added a progress modal
+  in `client/src/pages/home.tsx` (`photoScanModalOpen`): opens on click, polls `GET /api/photo-listing-check`
+  every 4s, marks each folder done when its `checkedAt` passes the scan start, folder search box, per-folder
+  photo + 📍address status dots, % bar. Progress is derived client-side (no server job state) — reliable
+  because scans run sequentially and upsert `checkedAt` per folder. Same PR/branch. Verified: full
+  `npm test` exit 0, build clean, `npm run check` 335 = baseline (0 new).
+
 - 2026-06-29 (photo/unit audit → 95-100% OTA detection + address leg): Operator wanted the recurring
   photo scan/unit audit to be 95-100% sure whether unit A/B's photos (besides community) are listed on
   Airbnb/Booking/VRBO, AND to detect the address being listed; noted there's already a dashboard cron.
