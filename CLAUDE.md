@@ -77,6 +77,48 @@ Before making any changes:
   `POST /api/admin/refresh-all-market-rates`, then the Pricing tab shows researched anchors and the
   queue shows "Claude web research".
 
+- 2026-06-29 (FOLLOW-UP: dashboard "Run photo match scan" button → DEEP + progress modal): Operator
+  asked whether the dashboard refresh button (next to the Photos column) does a deep scan, and to add a
+  search bar / progress modal. It did NOT — `POST /api/photo-listing-check/run` ran the cheap 3-photo
+  screen (no `maxPhotos`). Made it DEEP (`maxPhotos: PHOTO_AUDIT_MAX_PHOTOS` + `budgetCap` when finite),
+  so a manual scan matches the weekly cron's thoroughness + runs the address leg. Added a progress modal
+  in `client/src/pages/home.tsx` (`photoScanModalOpen`): opens on click, polls `GET /api/photo-listing-check`
+  every 4s, marks each folder done when its `checkedAt` passes the scan start, folder search box, per-folder
+  photo + 📍address status dots, % bar. Progress is derived client-side (no server job state) — reliable
+  because scans run sequentially and upsert `checkedAt` per folder. Same PR/branch. Verified: full
+  `npm test` exit 0, build clean, `npm run check` 335 = baseline (0 new).
+
+- 2026-06-29 (photo/unit audit → 95-100% OTA detection + address leg): Operator wanted the recurring
+  photo scan/unit audit to be 95-100% sure whether unit A/B's photos (besides community) are listed on
+  Airbnb/Booking/VRBO, AND to detect the address being listed; noted there's already a dashboard cron.
+  SHIPPED (`claude/photo-scan-ota-detection-gs6o30`, PR #TBD). KEY FINDING (don't re-chase): the cron
+  ALREADY exists and is solid — `server/photo-listing-scanner.ts` `startPhotoListingScheduler` (hourly
+  tick, re-scans folders stale >`PHOTO_LISTING_SCAN_INTERVAL_DAYS`=7 → WEEKLY) → Google-Lens
+  reverse-image over Airbnb/VRBO/Booking with strong-match ≥0.8, ≥2-distinct-photo `MIN_MATCHES`,
+  unit-number URL cross-validation (`verifyUrlMentionsUnit`), authorized-URL suppression, and
+  all-Lens-fail→`unknown` (never silently clean). TWO gaps fixed: (1) the BACKGROUND cron only scanned
+  `PHOTOS_PER_FOLDER`=3 hero shots (only the on-demand deep button scanned the whole gallery) → a repost
+  copying the 4th+ photo could slip the weekly scan. Now the cron passes the new
+  `PHOTO_LISTING_SCAN_MAX_PHOTOS` (default = `PHOTO_AUDIT_MAX_PHOTOS`=30 → full deduped interior gallery;
+  set to 3 to restore the cheap screen). Daily Lens cap is already unlimited (2026-06-17), so credits are
+  the only cost — operator chose certainty over cost. (2) NO address-on-OTA detection in the cron. Added
+  a per-unit `site:host "street" "city"` leg: pure `shared/address-listing-logic.ts`
+  (`ADDRESS_PLATFORMS`/`streetPortionOf`/`buildAddressQuery`/`filterAddressSerpRows`, 12 unit tests) +
+  `checkAddressOnOtas`/`folderAddressContext`/`callGoogleTextSearch` in the scanner. Keeps only real
+  listing-page URLs that surface the street, suppresses our own authorized URLs, and (unless standalone
+  unique-address) requires the page to ALSO mention the unit number so a shared-resort street can't flag
+  every owner. SEPARATE from the photo verdict (photos stay the precise 95-100% signal). Persisted in 4
+  additive `photo_listing_checks` columns (`airbnb/vrbo/booking_address_status` + `address_matches`,
+  ALTER-on-boot in `server/schema-maintenance.ts`), returned by `GET /api/photo-listing-check`, surfaced
+  on the dashboard Photos column as a 📍 A/V/B mini-row + "Addr on …" line (`client/src/pages/home.tsx`),
+  outage-preserved like the photo statuses. Toggle `PHOTO_LISTING_ADDRESS_SCAN_DISABLED=1`. No address
+  alert rows (the alert enrichment maps platform→photo-sync remediation; address is column-only). Full
+  rationale in AGENTS.md "Photo/address OTA detection audit" Load-Bearing subsection + the 2026-06-29
+  Decision Log line. Verified: `tests/address-listing-logic.test.ts` 12/0, full `npm test` exit 0,
+  `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT live-smoke the SearchAPI legs
+  (no key in session) — confirm post-deploy via the dashboard "Run photo match scan" button + the weekly
+  auto-run.
+
 - 2026-06-27 (dashboard "Last Price Scan" column + WEEKLY market-rate cron): Operator asked for
   a per-listing column showing the last time the market-rate update ran for that listing's pricing
   table AND was pushed to Guesty, ~5 days of retroactive seed data, and a once-a-week auto-scan.

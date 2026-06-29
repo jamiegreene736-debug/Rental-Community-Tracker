@@ -34,7 +34,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick, Download,
-  ShieldCheck, Paperclip, X, Minimize2, Plus, Send, Ban,
+  ShieldCheck, Paperclip, X, Minimize2, Plus, Send, Ban, Sparkles,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -47,6 +47,7 @@ import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@sh
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
+import { buildCoworkBuyInPrompt } from "@shared/cowork-buyin-prompt";
 import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
@@ -2198,6 +2199,99 @@ function BuyInEscalationStages({
         </div>
       ) : null}
     </div>
+  );
+}
+
+// "Create prompt for Cowork" — generates a copy-to-clipboard prompt for an agent
+// (Cowork) to search the open web (Google, PM sites, Airbnb/VRBO/Booking) for the
+// two cheapest buy-in units for this reservation and attach them via the manual-
+// attach API. Same-community first, then a city-wide fallback, and NEVER beyond
+// city-wide (operator's spec). The prompt itself is built by the shared, tested
+// buildCoworkBuyInPrompt() so the search/attach contract stays in one place.
+function CoworkBuyInPromptButton({
+  reservation,
+  propertyId,
+  propertyName,
+  community,
+  units,
+}: {
+  reservation: GuestyReservation;
+  propertyId: number;
+  propertyName: string;
+  community: string;
+  units: { unitId: string; unitLabel: string; bedrooms: number }[];
+}) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const toDateOnly = (s: string | undefined): string =>
+    !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
+  const prompt = useMemo(
+    () =>
+      buildCoworkBuyInPrompt({
+        reservationId: reservation._id,
+        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? null,
+        propertyId,
+        propertyName,
+        community,
+        checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
+        checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
+        units,
+        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
+      }),
+    [reservation, propertyId, propertyName, community, units],
+  );
+  const copy = async () => {
+    try {
+      await navigator.clipboard?.writeText(prompt);
+      toast({ title: "Cowork prompt copied", description: "Paste it into Cowork to run the search + attach." });
+    } catch {
+      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
+    }
+  };
+  return (
+    <>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 px-2 text-xs"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+          void copy();
+        }}
+        data-testid={`button-cowork-prompt-${reservation._id}`}
+        title="Generate a prompt for Cowork to web-search + manually attach the two cheapest buy-in units"
+      >
+        <Sparkles className="mr-1 h-3.5 w-3.5" />
+        Create prompt for Cowork
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Cowork buy-in prompt</DialogTitle>
+            <DialogDescription>
+              Copied to your clipboard. Paste this into Cowork — it searches Google, PM company sites,
+              Airbnb, VRBO and Booking.com for the two cheapest units (same community first, then a
+              city-wide fallback, never beyond the city) and attaches them with the manual-attach method.
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            readOnly
+            value={prompt}
+            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
+            data-testid={`textarea-cowork-prompt-${reservation._id}`}
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <DialogFooter>
+            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-prompt-copy-${reservation._id}`}>
+              <Copy className="mr-1 h-3.5 w-3.5" />
+              Copy again
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -10739,31 +10833,46 @@ export default function Bookings() {
                               <div className="text-xs text-muted-foreground">
                                 {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · auto-pick the cheapest live listing for each
                               </div>
-                              <Button
-                                size="sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (autoFillRunRef.current.has(r._id)) return;
-                                  autoFillRunRef.current.add(r._id);
-                                  clearAutoFillDiagnostics(r._id);
-                                  closeSlotSearchesForReservation(r);
-                                  setAutoFillStartedByReservation((prev) => ({
-                                    ...prev,
-                                    [r._id]: Date.now(),
-                                  }));
-                                  autoFillMutation.mutate({ reservation: r });
-                                }}
-                                disabled={rowAutoFillRunning}
-                                data-testid={`button-auto-fill-${r._id}`}
-                              >
-                                {rowAutoFillRunning && !rowSidecarOnly ? (
-                                  <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Searching…</>
-                                ) : rowSidecarOnly ? (
-                                  <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Sidecar verifying…</>
-                                ) : (
-                                  <><Zap className="h-3.5 w-3.5 mr-1" /> Auto-fill cheapest</>
+                              <div className="flex flex-wrap items-center gap-2">
+                                {selectedPropertyId && PROPERTY_UNIT_CONFIGS[selectedPropertyId] && (
+                                  <CoworkBuyInPromptButton
+                                    reservation={r}
+                                    propertyId={selectedPropertyId}
+                                    propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? PROPERTY_UNIT_CONFIGS[selectedPropertyId]!.community}
+                                    community={PROPERTY_UNIT_CONFIGS[selectedPropertyId]!.community}
+                                    units={PROPERTY_UNIT_CONFIGS[selectedPropertyId]!.units.map((u) => ({
+                                      unitId: u.unitId,
+                                      unitLabel: u.unitLabel,
+                                      bedrooms: u.bedrooms,
+                                    }))}
+                                  />
                                 )}
-                              </Button>
+                                <Button
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (autoFillRunRef.current.has(r._id)) return;
+                                    autoFillRunRef.current.add(r._id);
+                                    clearAutoFillDiagnostics(r._id);
+                                    closeSlotSearchesForReservation(r);
+                                    setAutoFillStartedByReservation((prev) => ({
+                                      ...prev,
+                                      [r._id]: Date.now(),
+                                    }));
+                                    autoFillMutation.mutate({ reservation: r });
+                                  }}
+                                  disabled={rowAutoFillRunning}
+                                  data-testid={`button-auto-fill-${r._id}`}
+                                >
+                                  {rowAutoFillRunning && !rowSidecarOnly ? (
+                                    <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Searching…</>
+                                  ) : rowSidecarOnly ? (
+                                    <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Sidecar verifying…</>
+                                  ) : (
+                                    <><Zap className="h-3.5 w-3.5 mr-1" /> Auto-fill cheapest</>
+                                  )}
+                                </Button>
+                              </div>
                             </div>
                             {rowAutoFillRunning && (
                               <AutoFillProgress

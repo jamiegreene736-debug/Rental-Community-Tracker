@@ -1579,6 +1579,15 @@ export const photoListingChecks = pgTable("photo_listing_checks", {
   airbnbMatches: text("airbnb_matches"),   // JSON-encoded array
   vrboMatches: text("vrbo_matches"),       // JSON-encoded array
   bookingMatches: text("booking_matches"), // JSON-encoded array
+  // Address-on-OTA leg (complements the photo reverse-image leg above).
+  // "clean" | "found" | "unknown" per platform — found means the unit's
+  // street address surfaced on a real Airbnb/VRBO/Booking listing page
+  // (unit-number gated, our own authorized URLs suppressed). addressMatches
+  // is a JSON array of { platform, url, title, snippet }.
+  airbnbAddressStatus: text("airbnb_address_status").notNull().default("unknown"),
+  vrboAddressStatus: text("vrbo_address_status").notNull().default("unknown"),
+  bookingAddressStatus: text("booking_address_status").notNull().default("unknown"),
+  addressMatches: text("address_matches"), // JSON-encoded array
   photosChecked: integer("photos_checked").default(0).notNull(),
   lensCalls: integer("lens_calls").default(0).notNull(),
   errorMessage: text("error_message"),

@@ -1282,6 +1282,12 @@ function AdminDashboard() {
   const [bulkAvailabilityAction, setBulkAvailabilityAction] = useState<"clear" | "pause" | "resume" | "cancel" | null>(null);
   const [bulkAvailabilityQueue, setBulkAvailabilityQueue] = useState<BulkAvailabilityQueue | null>(null);
   const [photoScanPollUntil, setPhotoScanPollUntil] = useState(0);
+  // Progress modal for the dashboard "Run photo match scan" (deep) button.
+  const [photoScanModalOpen, setPhotoScanModalOpen] = useState(false);
+  const [photoScanFolders, setPhotoScanFolders] = useState<string[]>([]);
+  const [photoScanStartedAt, setPhotoScanStartedAt] = useState(0);
+  const [photoScanLabel, setPhotoScanLabel] = useState("");
+  const [photoScanSearch, setPhotoScanSearch] = useState("");
   const [bulkPhotoCommunityJob, setBulkPhotoCommunityJob] = useState<BulkPhotoCommunityJob | null>(null);
   const [bulkPhotoCommunityStarting, setBulkPhotoCommunityStarting] = useState(false);
   const [bulkPhotoCommunityCancelling, setBulkPhotoCommunityCancelling] = useState(false);
@@ -2090,6 +2096,10 @@ function AdminDashboard() {
     airbnbMatches: Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
     vrboMatches:   Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
     bookingMatches:Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
+    airbnbAddressStatus?: PhotoStatus;
+    vrboAddressStatus?: PhotoStatus;
+    bookingAddressStatus?: PhotoStatus;
+    addressMatches?: Array<{ platform: string; url: string; title: string; snippet: string }>;
     photosChecked: number;
     checkedAt: string | null;
     errorMessage: string | null;
@@ -2129,7 +2139,7 @@ function AdminDashboard() {
     queryKey: ["/api/photo-listing-check"],
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
-    refetchInterval: () => Date.now() < photoScanPollUntil ? 10_000 : false,
+    refetchInterval: () => Date.now() < photoScanPollUntil ? (photoScanModalOpen ? 4_000 : 10_000) : false,
   });
 
   type PhotoCommunityStatusResponse = {
@@ -2228,6 +2238,9 @@ function AdminDashboard() {
       vrbo: PhotoMatchedUnit[];
       booking: PhotoMatchedUnit[];
     };
+    // Address-on-OTA leg: worst per-platform status + total address matches.
+    addr: { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus };
+    addressMatchCount: number;
     hasScannableFolders: boolean;
     folders: string[];
     checkedRows: number;
@@ -2295,6 +2308,8 @@ function AdminDashboard() {
         lastCheckedAt: null,
         matchCounts: { airbnb: 0, vrbo: 0, booking: 0 },
         matchedUnits: { airbnb: [], vrbo: [], booking: [] },
+        addr: { airbnb: null, vrbo: null, booking: null },
+        addressMatchCount: 0,
         hasScannableFolders: folders.length > 0,
         folders,
         checkedRows: 0,
@@ -2323,6 +2338,10 @@ function AdminDashboard() {
         agg.airbnb  = worst(agg.airbnb,  row.airbnbStatus);
         agg.vrbo    = worst(agg.vrbo,    row.vrboStatus);
         agg.booking = worst(agg.booking, row.bookingStatus);
+        agg.addr.airbnb  = worst(agg.addr.airbnb,  row.airbnbAddressStatus  ?? "unknown");
+        agg.addr.vrbo    = worst(agg.addr.vrbo,    row.vrboAddressStatus    ?? "unknown");
+        agg.addr.booking = worst(agg.addr.booking, row.bookingAddressStatus ?? "unknown");
+        agg.addressMatchCount += row.addressMatches?.length ?? 0;
         agg.matchCounts.airbnb  += row.airbnbMatches?.length  ?? 0;
         agg.matchCounts.vrbo    += row.vrboMatches?.length    ?? 0;
         agg.matchCounts.booking += row.bookingMatches?.length ?? 0;
@@ -2664,24 +2683,39 @@ function AdminDashboard() {
   });
 
   const photoScanMutation = useMutation({
-    mutationFn: async (folders?: string[]) => {
+    mutationFn: async (vars?: { folders?: string[]; label?: string }) => {
+      const folders = vars?.folders;
       const body = folders && folders.length > 0 ? { folders } : {};
       const r = await apiRequest("POST", "/api/photo-listing-check/run", body);
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         throw new Error(err.error ?? `HTTP ${r.status}`);
       }
-      return r.json() as Promise<{ started: boolean; folders: string[] }>;
+      return r.json() as Promise<{ started: boolean; folders: string[]; deep?: boolean }>;
+    },
+    onMutate: (vars) => {
+      // Open the progress modal immediately (before the round-trip) so the
+      // operator sees the deep scan is starting.
+      setPhotoScanLabel(vars?.label ?? "All scannable listings");
+      setPhotoScanSearch("");
+      setPhotoScanStartedAt(Date.now());
+      setPhotoScanModalOpen(true);
     },
     onSuccess: (data) => {
-      setPhotoScanPollUntil(Date.now() + Math.max(3 * 60_000, data.folders.length * 45_000));
+      setPhotoScanFolders(data.folders);
+      // Deep scan touches many photos per folder, so it's slower than the old
+      // 3-photo screen — budget ~60s/folder for the poll window.
+      setPhotoScanPollUntil(Date.now() + Math.max(3 * 60_000, data.folders.length * 60_000));
       queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
       toast({
-        title: "Photo scan started",
-        description: `${data.folders.length} folder${data.folders.length === 1 ? "" : "s"} queued. The badges will refresh as Lens finishes.`,
+        title: "Deep photo scan started",
+        description: `${data.folders.length} folder${data.folders.length === 1 ? "" : "s"} queued (full gallery + address). Progress is shown in the dialog.`,
       });
     },
-    onError: (e: any) => toast({ title: "Photo scan failed", description: e.message, variant: "destructive" }),
+    onError: (e: any) => {
+      setPhotoScanModalOpen(false);
+      toast({ title: "Photo scan failed", description: e.message, variant: "destructive" });
+    },
   });
 
   const startBulkPhotoCommunityCheck = async (propertyIds: number[]) => {
@@ -4438,7 +4472,7 @@ function AdminDashboard() {
                   </Button>
                 </TableHead>
                 <TableHead className="w-[86px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[112px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
+                <TableHead className="w-[112px] text-center px-1" title="Reverse-image search (top row A/V/B) — green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive. 📍 row = address-on-OTA check: does this unit's street address appear on an Airbnb/VRBO/Booking listing (unit-number gated, our own listings excluded).">
                   <div className="flex items-center justify-center gap-1">
                     <span>Photos</span>
                     <Button
@@ -4446,10 +4480,10 @@ function AdminDashboard() {
                       variant="ghost"
                       size="icon"
                       className="h-6 w-6"
-                      title="Run photo match scan for all scannable listings"
+                      title="Run a DEEP photo match scan (full gallery + address) for all scannable listings"
                       aria-label="Run photo match scan"
                       disabled={photoScanMutation.isPending}
-                      onClick={() => photoScanMutation.mutate(undefined)}
+                      onClick={() => photoScanMutation.mutate({ label: "All scannable listings" })}
                       data-testid="button-run-photo-match-scan"
                     >
                       <RefreshCw className={`h-3.5 w-3.5 ${photoScanMutation.isPending ? "animate-spin" : ""}`} />
@@ -4844,6 +4878,15 @@ function AdminDashboard() {
                       const matchedSummary = items
                         .filter((it) => it.status === "found")
                         .map((it) => `${it.name}: ${unitList(it.units)}`);
+                      // Address-on-OTA leg (complements the photo leg): did the
+                      // unit's street address surface on a real listing page?
+                      const addrItems: Array<{ letter: string; name: string; status: PhotoAggStatus }> = [
+                        { letter: "A", name: "Airbnb",      status: agg?.addr.airbnb  ?? null },
+                        { letter: "V", name: "VRBO",        status: agg?.addr.vrbo    ?? null },
+                        { letter: "B", name: "Booking.com", status: agg?.addr.booking ?? null },
+                      ];
+                      const hasAddrData = addrItems.some((it) => it.status != null);
+                      const addrFound = addrItems.filter((it) => it.status === "found").map((it) => it.name);
                       const folders = agg?.folders ?? [];
                       const stamp = agg?.lastCheckedAt ? new Date(agg.lastCheckedAt).toLocaleDateString() : "never";
                       const errorPreview = photoCheckErrorPreview(agg?.errorMessages?.[0]);
@@ -4877,10 +4920,10 @@ function AdminDashboard() {
                               variant="ghost"
                               size="icon"
                               className="ml-0.5 h-[18px] w-[18px] rounded"
-                              title={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans; no folders resolved for ${property.name}`}
+                              title={folders.length > 0 ? `Run a DEEP photo match scan (full gallery + address) for ${property.name}` : `Run all photo match scans; no folders resolved for ${property.name}`}
                               aria-label={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans`}
                               disabled={photoScanMutation.isPending}
-                              onClick={() => photoScanMutation.mutate(folders.length > 0 ? folders : undefined)}
+                              onClick={() => photoScanMutation.mutate(folders.length > 0 ? { folders, label: property.name } : { label: "All scannable listings" })}
                               data-testid={`button-run-photo-match-scan-${property.id}`}
                             >
                               <RefreshCw className={`h-3 w-3 ${photoScanMutation.isPending ? "animate-spin" : ""}`} />
@@ -4889,6 +4932,36 @@ function AdminDashboard() {
                           {matchedSummary.length > 0 ? (
                             <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-match-units-${property.id}`}>
                               {matchedSummary.join(" · ")}
+                            </div>
+                          ) : null}
+                          {hasAddrData ? (
+                            <div className="flex gap-[1px] justify-center items-center" data-testid={`photo-addr-${property.id}`}>
+                              <span className="text-[8px] leading-none mr-[1px]" title="Address-on-OTA check: does this unit's street address appear on a real Airbnb / VRBO / Booking listing page? (unit-number gated; our own listings excluded)">📍</span>
+                              {addrItems.map((it) => {
+                                const tone = toneOf(it.status);
+                                const p = PAL[tone];
+                                const tip =
+                                  it.status === "found" ? `${it.name}: this unit's address is listed there (last checked ${stamp})` :
+                                  it.status === "clean" ? `${it.name}: address not listed (last checked ${stamp})` :
+                                  it.status === "unknown" ? `${it.name}: address check inconclusive (${stamp})` :
+                                  `${it.name}: address not checked yet`;
+                                return (
+                                  <span
+                                    key={it.letter}
+                                    title={tip}
+                                    className="inline-flex items-center justify-center h-[15px] px-0.5 rounded text-[7px] font-bold leading-none"
+                                    style={{ background: p.bg, color: "white", minWidth: 16 }}
+                                    data-testid={`photo-addr-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
+                                  >
+                                    {it.letter}{p.glyph}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+                          {addrFound.length > 0 ? (
+                            <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-addr-found-${property.id}`}>
+                              Addr on {addrFound.join(" · ")}
                             </div>
                           ) : null}
                         </div>
@@ -5270,6 +5343,100 @@ function AdminDashboard() {
         open={connectTarget !== null}
         onOpenChange={(open) => { if (!open) setConnectTarget(null); }}
       />
+
+      <Dialog open={photoScanModalOpen} onOpenChange={setPhotoScanModalOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Search className="h-4 w-4" /> Deep photo scan
+            </DialogTitle>
+            <DialogDescription>
+              Reverse-image-searching the full photo gallery + the street address of{" "}
+              <span className="font-medium">{photoScanLabel || "the selected listings"}</span>{" "}
+              against Airbnb / VRBO / Booking.com. This runs in the background — you can close this and the badges keep updating.
+            </DialogDescription>
+          </DialogHeader>
+          {(() => {
+            const rows = photoScanFolders.map((folder) => {
+              const row = photoCheckByFolder.get(folder);
+              const done = !!(row?.checkedAt && new Date(row.checkedAt).getTime() >= photoScanStartedAt - 1000);
+              return { folder, row, done };
+            });
+            const total = rows.length;
+            const doneCount = rows.filter((r) => r.done).length;
+            const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0;
+            const q = photoScanSearch.trim().toLowerCase();
+            const visible = q ? rows.filter((r) => r.folder.toLowerCase().includes(q)) : rows;
+            const statusDot = (s?: string) =>
+              s === "found" ? "bg-red-500" : s === "clean" ? "bg-emerald-500" : "bg-gray-300";
+            return (
+              <div className="space-y-3">
+                <div>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+                    <span>{doneCount} of {total} folder{total === 1 ? "" : "s"} scanned</span>
+                    <span>{pct}%</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded bg-muted">
+                    <div className="h-full rounded bg-primary transition-all" style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+                <div className="relative">
+                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                  <Input
+                    value={photoScanSearch}
+                    onChange={(e) => setPhotoScanSearch(e.target.value)}
+                    placeholder="Search folders…"
+                    className="h-8 pl-7 text-sm"
+                    data-testid="input-photo-scan-search"
+                  />
+                </div>
+                <div className="max-h-72 overflow-y-auto rounded border divide-y">
+                  {visible.length === 0 ? (
+                    <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                      {total === 0 ? "Queuing…" : "No folders match your search."}
+                    </div>
+                  ) : visible.map(({ folder, row, done }) => (
+                    <div key={folder} className="flex items-center justify-between gap-2 px-3 py-1.5 text-xs" data-testid={`photo-scan-row-${folder}`}>
+                      <span className="truncate font-mono" title={folder}>{folder}</span>
+                      {done ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="flex items-center gap-0.5" title="Photos — Airbnb / VRBO / Booking">
+                            <span className={`h-2 w-2 rounded-full ${statusDot(row?.airbnbStatus)}`} />
+                            <span className={`h-2 w-2 rounded-full ${statusDot(row?.vrboStatus)}`} />
+                            <span className={`h-2 w-2 rounded-full ${statusDot(row?.bookingStatus)}`} />
+                          </span>
+                          <span className="flex items-center gap-0.5" title="Address — Airbnb / VRBO / Booking">
+                            <MapPin className="h-3 w-3 text-muted-foreground" />
+                            <span className={`h-2 w-2 rounded-full ${statusDot(row?.airbnbAddressStatus)}`} />
+                            <span className={`h-2 w-2 rounded-full ${statusDot(row?.vrboAddressStatus)}`} />
+                            <span className={`h-2 w-2 rounded-full ${statusDot(row?.bookingAddressStatus)}`} />
+                          </span>
+                          {(row?.airbnbStatus === "found" || row?.vrboStatus === "found" || row?.bookingStatus === "found" ||
+                            row?.airbnbAddressStatus === "found" || row?.vrboAddressStatus === "found" || row?.bookingAddressStatus === "found") ? (
+                            <AlertTriangle className="h-3.5 w-3.5 text-red-600" />
+                          ) : (
+                            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                          )}
+                        </div>
+                      ) : (
+                        <span className="flex items-center gap-1 shrink-0 text-muted-foreground">
+                          <Loader2 className="h-3 w-3 animate-spin" /> scanning…
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+                  <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-500" /> not found</span>
+                  <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-red-500" /> found</span>
+                  <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-gray-300" /> inconclusive</span>
+                  <span className="flex items-center gap-1"><MapPin className="h-3 w-3" /> address</span>
+                </div>
+              </div>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

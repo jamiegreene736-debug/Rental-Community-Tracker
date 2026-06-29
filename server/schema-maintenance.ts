@@ -187,6 +187,15 @@ export async function ensureRuntimeSchema(): Promise<void> {
   console.log("[schema] ensured property_market_rates monthly_rates column");
 
   await db.execute(sql`
+    ALTER TABLE photo_listing_checks
+      ADD COLUMN IF NOT EXISTS airbnb_address_status text NOT NULL DEFAULT 'unknown',
+      ADD COLUMN IF NOT EXISTS vrbo_address_status text NOT NULL DEFAULT 'unknown',
+      ADD COLUMN IF NOT EXISTS booking_address_status text NOT NULL DEFAULT 'unknown',
+      ADD COLUMN IF NOT EXISTS address_matches text
+  `);
+  console.log("[schema] ensured photo_listing_checks address-on-OTA columns");
+
+  await db.execute(sql`
     ALTER TABLE community_drafts
       ADD COLUMN IF NOT EXISTS street_address text,
       ADD COLUMN IF NOT EXISTS minimum_stay_nights integer,
