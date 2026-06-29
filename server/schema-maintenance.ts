@@ -19,6 +19,15 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured buy_ins arrival detail + ground-floor columns");
 
+  // Claude static-rate engine: additive nullable JSONB for the persisted
+  // seasonal anchor plan. The table itself is created by db:push; this keeps a
+  // Railway deploy usable before db:push runs.
+  await db.execute(sql`
+    ALTER TABLE property_market_rates
+      ADD COLUMN IF NOT EXISTS static_plan jsonb
+  `);
+  console.log("[schema] ensured property_market_rates.static_plan column");
+
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS reservation_aliases (
       id serial PRIMARY KEY,

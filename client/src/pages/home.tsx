@@ -2389,6 +2389,11 @@ function AdminDashboard() {
       ? recipe.searchedBedrooms.map((br) => `${br}BR`).join(", ")
       : "unknown BR";
     const unitCount = Number(recipe.unitCount) > 1 ? `${recipe.unitCount} units` : "single unit";
+    // Claude static-rate engine: web-researched seasonal anchors (no P40 window).
+    if ((recipe as any).source === "claude-static") {
+      const model = (recipe as any).model ? ` · ${(recipe as any).model}` : "";
+      return `${recipe.searchName || recipe.community || "Market"} · ${unitCount} · ${searched} · Claude web research${model}`;
+    }
     const percentile = recipe.percentileBasis ? `p${recipe.percentileBasis}` : "p40";
     const nights = recipe.stayNights ? `${recipe.stayNights}-night` : "7-night";
     return `${recipe.community || recipe.searchName || "Market"} · ${unitCount} · searching ${searched} · ${nights} ${percentile}`;
@@ -3792,7 +3797,7 @@ function AdminDashboard() {
                     <div className="rounded-md border bg-muted/20 p-3 text-sm">
                       <p className="font-medium">Runs one selected property at a time.</p>
                       <p className="mt-1 text-muted-foreground">
-                        This runs one SearchAPI Airbnb 7-night scan per calendar month (24 months ahead), stores the 40th percentile basis for each month, then pushes marked-up Guesty base rates. VRBO, Booking.com, direct booking, and PM websites are not priced. The queue is saved on the server, so closing this tab will not stop it.
+                        For each property, Claude web-researches the resort's real market rates and generates one buy-in rate per season (Low / High / Holiday) per year, expanded across the rolling next 24 months. Operator-locked anchors are preserved. It then pushes the marked-up base rates to Guesty. The queue is saved on the server, so closing this tab will not stop it.
                       </p>
                     </div>
                     {!bulkPricingJob ? (

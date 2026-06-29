@@ -838,6 +838,27 @@ export const propertyMarketRates = pgTable("property_market_rates", {
   highNightly: numeric("high_nightly", { precision: 10, scale: 2 }),
   sampleCount: integer("sample_count").notNull().default(0),
   source: text("source").notNull().default("airbnb"),
+  // Claude-generated STATIC seasonal rate plan (server/static-rate-engine.ts).
+  // Present when `source = "claude-static"`: the 6 seasonal anchors per bedroom
+  // (LOW/HIGH/HOLIDAY × year1/year2), operator lock flags, the static prior, and
+  // Claude's reasoning/confidence/metrics. Nullable so legacy airbnb-scan rows
+  // keep working. Structural mirror of StaticRatePlan in shared/static-rate-logic.ts
+  // (shared/ can't import server types).
+  staticPlan: jsonb("static_plan").$type<{
+    generatedAt: string;
+    model: string;
+    source: "claude-static" | "static-fallback";
+    summary: string;
+    bedrooms: Array<{
+      bedrooms: number;
+      anchors: { year1: { LOW: number; HIGH: number; HOLIDAY: number }; year2: { LOW: number; HIGH: number; HOLIDAY: number } };
+      locks: { year1?: { LOW?: boolean; HIGH?: boolean; HOLIDAY?: boolean }; year2?: { LOW?: boolean; HIGH?: boolean; HOLIDAY?: boolean } };
+      staticBasis: { LOW: number; HIGH: number; HOLIDAY: number };
+      confidence: number;
+      reasoning: string;
+      metricsUsed: string[];
+    }>;
+  }>(),
   refreshedAt: timestamp("refreshed_at").defaultNow().notNull(),
 });
 

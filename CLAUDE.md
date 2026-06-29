@@ -43,6 +43,40 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-29 (REPLACED live Airbnb P40 sampler with Claude WEB-RESEARCHED static seasonal rates):
+  Operator directive — stop the random-7-night SearchAPI Airbnb P40 sampler; instead have Claude
+  ACTUALLY WEB-SEARCH (Google/OTAs) each resort's real nightly rates and produce ONE static buy-in
+  rate per LOW/HIGH/HOLIDAY per YEAR for the rolling next 24 months, still markup + push to Guesty.
+  SHIPPED (`claude/static-pricing-rates-ckgp32`, PR #TBD). KEY SEAM (don't re-chase): the new engine
+  writes into the SAME `property_market_rates.monthlyRates` JSONB shape the Guesty push already reads
+  (`buildBulkGuestySeasonalPlan` → `pushBulkGuestyPricingAfterRefresh`), so markup
+  (`targetMarginForProperty`), the bulk queue, the weekly `market-rate-scheduler`, and the push are
+  ALL unchanged — only the rate SOURCE changed. Pieces: (1) `shared/static-rate-logic.ts` (pure,
+  unit-tested 34/0): 6 anchors per bedroom (LOW/HIGH/HOLIDAY × year1/year2), sanity clamps vs the
+  operator BUY_IN_RATES basis, lock-merge, and `expandAnchorsToMonthlyRates` (months 0-11=year1,
+  12-23=year2; **December is priced from the HOLIDAY anchor** — INTENTIONAL behavioral change, the
+  only whole-month HOLIDAY mapping since getSeasonForMonth never returns HOLIDAY). (2)
+  `server/claude-json.ts` centralized Anthropic helper incl. `callClaudeWebSearchJson` (server-side
+  `web_search_20250305` tool, handles `pause_turn`). (3) `server/static-rate-engine.ts`
+  `generateStaticRatesForTarget` — gathers metrics (operator table + last live medians snapshot +
+  trailing revenue as PRIORS only), then Claude **web-researches** the resort and returns anchors;
+  fail-soft to the static basis with NO key/error. `applyStaticRateOverride` = edit/lock then
+  re-expand. Persists `source:"claude-static"` + new nullable `static_plan` JSONB column
+  (schema.ts + schema-maintenance ALTER). (4) Dispatch behind flag `STATIC_RATE_ENGINE_DISABLED=1`
+  (default ON; legacy hybrid-pricing.ts kept dormant/intact for fallback): `refreshMarketRatesForProperty`
+  in routes.ts routes the Pricing-tab refresh, bulk queue (`runBulkPricingItem`), and
+  `/api/admin/refresh-all-market-rates`; the weekly scheduler inherits it via the loopback. New endpoints
+  `GET /api/property/:id/static-rate` + `POST /api/property/:id/static-rate/override` (edit/lock, no
+  auto-push). Search label = curated `BUY_IN_MARKETS[community].searchLocation` (or draft name+city+state).
+  (5) UI: new `StaticRatePlanPanel` on the Pricing tab (editable/lockable anchor grid + Claude
+  reasoning/confidence/model/sources) replacing the SearchAPI "research confirmation" as the rate
+  display; dashboard bulk-queue copy + `formatPricingRecipe` relabeled to "Claude web research". Verified:
+  `tests/static-rate-logic.test.ts` 34/0, full `npm test` exit 0, `npm run build` clean, `npm run check`
+  335 = baseline (0 new). Could NOT live-smoke the Claude web-search leg in-session (no ANTHROPIC_API_KEY) —
+  confirm post-deploy via the per-property "Update Market Rates Now" button or
+  `POST /api/admin/refresh-all-market-rates`, then the Pricing tab shows researched anchors and the
+  queue shows "Claude web research".
+
 - 2026-06-27 (dashboard "Last Price Scan" column + WEEKLY market-rate cron): Operator asked for
   a per-listing column showing the last time the market-rate update ran for that listing's pricing
   table AND was pushed to Guesty, ~5 days of retroactive seed data, and a once-a-week auto-scan.
