@@ -2090,6 +2090,10 @@ function AdminDashboard() {
     airbnbMatches: Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
     vrboMatches:   Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
     bookingMatches:Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
+    airbnbAddressStatus?: PhotoStatus;
+    vrboAddressStatus?: PhotoStatus;
+    bookingAddressStatus?: PhotoStatus;
+    addressMatches?: Array<{ platform: string; url: string; title: string; snippet: string }>;
     photosChecked: number;
     checkedAt: string | null;
     errorMessage: string | null;
@@ -2228,6 +2232,9 @@ function AdminDashboard() {
       vrbo: PhotoMatchedUnit[];
       booking: PhotoMatchedUnit[];
     };
+    // Address-on-OTA leg: worst per-platform status + total address matches.
+    addr: { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus };
+    addressMatchCount: number;
     hasScannableFolders: boolean;
     folders: string[];
     checkedRows: number;
@@ -2295,6 +2302,8 @@ function AdminDashboard() {
         lastCheckedAt: null,
         matchCounts: { airbnb: 0, vrbo: 0, booking: 0 },
         matchedUnits: { airbnb: [], vrbo: [], booking: [] },
+        addr: { airbnb: null, vrbo: null, booking: null },
+        addressMatchCount: 0,
         hasScannableFolders: folders.length > 0,
         folders,
         checkedRows: 0,
@@ -2323,6 +2332,10 @@ function AdminDashboard() {
         agg.airbnb  = worst(agg.airbnb,  row.airbnbStatus);
         agg.vrbo    = worst(agg.vrbo,    row.vrboStatus);
         agg.booking = worst(agg.booking, row.bookingStatus);
+        agg.addr.airbnb  = worst(agg.addr.airbnb,  row.airbnbAddressStatus  ?? "unknown");
+        agg.addr.vrbo    = worst(agg.addr.vrbo,    row.vrboAddressStatus    ?? "unknown");
+        agg.addr.booking = worst(agg.addr.booking, row.bookingAddressStatus ?? "unknown");
+        agg.addressMatchCount += row.addressMatches?.length ?? 0;
         agg.matchCounts.airbnb  += row.airbnbMatches?.length  ?? 0;
         agg.matchCounts.vrbo    += row.vrboMatches?.length    ?? 0;
         agg.matchCounts.booking += row.bookingMatches?.length ?? 0;
@@ -4433,7 +4446,7 @@ function AdminDashboard() {
                   </Button>
                 </TableHead>
                 <TableHead className="w-[86px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[112px] text-center px-1" title="Reverse-image search: green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive">
+                <TableHead className="w-[112px] text-center px-1" title="Reverse-image search (top row A/V/B) — green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive. 📍 row = address-on-OTA check: does this unit's street address appear on an Airbnb/VRBO/Booking listing (unit-number gated, our own listings excluded).">
                   <div className="flex items-center justify-center gap-1">
                     <span>Photos</span>
                     <Button
@@ -4839,6 +4852,15 @@ function AdminDashboard() {
                       const matchedSummary = items
                         .filter((it) => it.status === "found")
                         .map((it) => `${it.name}: ${unitList(it.units)}`);
+                      // Address-on-OTA leg (complements the photo leg): did the
+                      // unit's street address surface on a real listing page?
+                      const addrItems: Array<{ letter: string; name: string; status: PhotoAggStatus }> = [
+                        { letter: "A", name: "Airbnb",      status: agg?.addr.airbnb  ?? null },
+                        { letter: "V", name: "VRBO",        status: agg?.addr.vrbo    ?? null },
+                        { letter: "B", name: "Booking.com", status: agg?.addr.booking ?? null },
+                      ];
+                      const hasAddrData = addrItems.some((it) => it.status != null);
+                      const addrFound = addrItems.filter((it) => it.status === "found").map((it) => it.name);
                       const folders = agg?.folders ?? [];
                       const stamp = agg?.lastCheckedAt ? new Date(agg.lastCheckedAt).toLocaleDateString() : "never";
                       const errorPreview = photoCheckErrorPreview(agg?.errorMessages?.[0]);
@@ -4884,6 +4906,36 @@ function AdminDashboard() {
                           {matchedSummary.length > 0 ? (
                             <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-match-units-${property.id}`}>
                               {matchedSummary.join(" · ")}
+                            </div>
+                          ) : null}
+                          {hasAddrData ? (
+                            <div className="flex gap-[1px] justify-center items-center" data-testid={`photo-addr-${property.id}`}>
+                              <span className="text-[8px] leading-none mr-[1px]" title="Address-on-OTA check: does this unit's street address appear on a real Airbnb / VRBO / Booking listing page? (unit-number gated; our own listings excluded)">📍</span>
+                              {addrItems.map((it) => {
+                                const tone = toneOf(it.status);
+                                const p = PAL[tone];
+                                const tip =
+                                  it.status === "found" ? `${it.name}: this unit's address is listed there (last checked ${stamp})` :
+                                  it.status === "clean" ? `${it.name}: address not listed (last checked ${stamp})` :
+                                  it.status === "unknown" ? `${it.name}: address check inconclusive (${stamp})` :
+                                  `${it.name}: address not checked yet`;
+                                return (
+                                  <span
+                                    key={it.letter}
+                                    title={tip}
+                                    className="inline-flex items-center justify-center h-[15px] px-0.5 rounded text-[7px] font-bold leading-none"
+                                    style={{ background: p.bg, color: "white", minWidth: 16 }}
+                                    data-testid={`photo-addr-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
+                                  >
+                                    {it.letter}{p.glyph}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+                          {addrFound.length > 0 ? (
+                            <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-addr-found-${property.id}`}>
+                              Addr on {addrFound.join(" · ")}
                             </div>
                           ) : null}
                         </div>

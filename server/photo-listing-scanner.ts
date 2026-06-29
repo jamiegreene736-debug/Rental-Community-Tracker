@@ -60,6 +60,13 @@ import {
   listingHaystackIncompatibleWithCommunity,
 } from "@shared/preflight-platform-match";
 import { communityAddressRuleForName } from "@shared/community-addresses";
+import {
+  ADDRESS_PLATFORMS,
+  buildAddressQuery,
+  filterAddressSerpRows,
+  streetPortionOf,
+  type AddressPlatformKey,
+} from "@shared/address-listing-logic";
 import { isDuplicateHash } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
@@ -119,6 +126,28 @@ export const PHOTO_AUDIT_MAX_PHOTOS = (() => {
   // bounding the worst-case Lens spend on a pathologically large folder.
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 30;
 })();
+// How many DISTINCT interior photos the BACKGROUND weekly cron reverse-image-searches per folder.
+// 2026-06-29 (operator ask — "be 95-100% sure the unit's photos aren't listed on Airbnb/VRBO/Booking"):
+// the cron used to scan only PHOTOS_PER_FOLDER (3) hero shots, so a repost that copied the 4th+ photo
+// could slip past the AUTOMATIC weekly audit (only the on-demand deep button scanned the whole gallery).
+// The weekly cron now defaults to the SAME full deduped gallery depth as the deep audit, so the
+// unattended audit has the deep audit's recall. Set PHOTO_LISTING_SCAN_MAX_PHOTOS to a small number
+// (e.g. 3) to restore the cheap weekly screen if SearchAPI credits ever become a concern; the on-demand
+// deep audit is unaffected (it always passes PHOTO_AUDIT_MAX_PHOTOS).
+const PHOTO_LISTING_SCAN_MAX_PHOTOS = (() => {
+  const raw = String(process.env.PHOTO_LISTING_SCAN_MAX_PHOTOS ?? "").trim();
+  if (!raw) return PHOTO_AUDIT_MAX_PHOTOS; // deep by default
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1 ? Math.min(PHOTO_AUDIT_MAX_PHOTOS, Math.floor(n)) : PHOTO_AUDIT_MAX_PHOTOS;
+})();
+// Address-on-OTA detection leg (the complement to the photo reverse-image leg). For each scanned unit
+// folder we also run one Google `site:` text search per platform for the unit's street + city and check
+// whether the unit's address surfaces on a real Airbnb/VRBO/Booking listing page. A thief can swap the
+// photos but not the physical address, so this catches a relist the photo scan alone would miss. Set
+// PHOTO_LISTING_ADDRESS_SCAN_DISABLED=1 to turn it off (e.g. to preserve SearchAPI quota).
+const PHOTO_LISTING_ADDRESS_SCAN_DISABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.PHOTO_LISTING_ADDRESS_SCAN_DISABLED ?? "").trim(),
+);
 // Background re-scan cadence for the dashboard listing scan (the per-folder reverse-image check of
 // each unit's photos against Airbnb/VRBO/Booking). 2026-06-26 (operator ask — "ensure that this is
 // cron job once a week"): each scannable folder is re-scanned when its last check is older than this
@@ -142,6 +171,7 @@ const STANDALONE_DRAFT_NO_UNIT_TOKEN = "__standalone_draft_no_unit_token__";
 
 export type PlatformStatus = "clean" | "found" | "unknown";
 export type Match = { photoUrl: string; listingUrl: string; title: string; source: string };
+export type AddressMatch = { platform: AddressPlatformKey; url: string; title: string; snippet: string };
 type LensCallResult = { ok: true; rows: any[] } | { ok: false; error: string };
 type PhotoCandidate = {
   filename: string;
@@ -161,6 +191,10 @@ export type ScanResult = {
   airbnbMatches: Match[];
   vrboMatches: Match[];
   bookingMatches: Match[];
+  airbnbAddressStatus: PlatformStatus;
+  vrboAddressStatus: PlatformStatus;
+  bookingAddressStatus: PlatformStatus;
+  addressMatches: AddressMatch[];
   photosChecked: number;
   lensCalls: number;
   errorMessage?: string;
@@ -270,6 +304,118 @@ function listingMatchesFolderCommunity(
   const haystack = `${title} ${source} ${link}`;
   if (listingHaystackIncompatibleWithCommunity(haystack, ctx.complexName, ctx.city)) return false;
   return communityEvidenceInResult({ title, snippet: source, link }, ctx.complexName);
+}
+
+type FolderAddressContext = { street: string; city: string; state: string };
+
+// Resolve the street + city to text-search for this folder. Prefers the
+// resort's canonical street from community-addresses (shared across units;
+// the unit-number gate disambiguates), falling back to the unit-builder /
+// draft address string. Returns null when no usable street is known — the
+// address leg is then skipped (the photo leg still runs).
+async function folderAddressContext(folder: string): Promise<FolderAddressContext | null> {
+  const builder = unitBuilderData.find((b) =>
+    b.communityPhotoFolder === folder || b.units.some((u) => u.photoFolder === folder),
+  );
+  if (builder) {
+    const rule = communityAddressRuleForName(builder.complexName);
+    const parts = (builder.address ?? "").split(",").map((s) => s.trim());
+    const street = (rule?.street || streetPortionOf(builder.address ?? "")).trim();
+    const city = (rule?.city || parts[1] || "").trim();
+    const state = (rule?.state || parts[2] || "").trim();
+    if (street && city) return { street, city, state };
+    return null;
+  }
+  const ref = draftPhotoFolderRef(folder) ?? replacementPhotoFolderRef(folder);
+  if (ref?.propertyId && ref.propertyId < 0) {
+    const draft = await storage.getCommunityDraft(Math.abs(ref.propertyId));
+    if (draft) {
+      const rule = communityAddressRuleForName(String(draft.name ?? ""));
+      const street = (rule?.street || streetPortionOf(String((draft as any).streetAddress ?? ""))).trim();
+      const city = (rule?.city || String(draft.city ?? "")).trim();
+      const state = (rule?.state || String((draft as any).state ?? "")).trim();
+      if (street && city) return { street, city, state };
+    }
+  }
+  return null;
+}
+
+async function callGoogleTextSearch(query: string): Promise<LensCallResult> {
+  if (!SEARCHAPI_KEY) return { ok: false, error: "SEARCHAPI_API_KEY not configured" };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
+  try {
+    const params = new URLSearchParams({ engine: "google", q: query, api_key: SEARCHAPI_KEY, num: "10" });
+    const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, { signal: controller.signal });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      const msg = describeSearchApiHttpError(resp.status, body);
+      console.error(`[photo-listing-scanner] address ${msg} for "${query}"`);
+      return { ok: false, error: msg };
+    }
+    const data = await resp.json() as any;
+    return { ok: true, rows: Array.isArray(data.organic_results) ? data.organic_results : [] };
+  } catch (e: any) {
+    const msg = e?.name === "AbortError"
+      ? `Google/SearchAPI timed out after ${Math.round(VERIFY_TIMEOUT_MS / 1000)}s`
+      : `Google/SearchAPI request failed: ${e?.message ?? String(e)}`;
+    console.error(`[photo-listing-scanner] address ${msg} for "${query}"`);
+    return { ok: false, error: msg };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Address-on-OTA leg. For each platform, one `site:host "street" "city"`
+// query, then keep only real listing-page URLs that surface the street.
+// Our own authorized listings are suppressed, and (unless this is a
+// standalone unique-address listing) each hit must also pass the unit-
+// number gate so a shared-resort address can't paint every owner's
+// listing red. Returns per-platform status + the matches for the UI.
+async function checkAddressOnOtas(
+  ctx: FolderAddressContext,
+  deps: {
+    authorizedUrls: Awaited<ReturnType<typeof getAuthorizedChannelUrls>>;
+    allowUnverifiedStandalone: boolean;
+    verifyUnit: (url: string) => Promise<boolean>;
+  },
+): Promise<{
+  statuses: Record<AddressPlatformKey, PlatformStatus>;
+  matches: AddressMatch[];
+  anySucceeded: boolean;
+  errors: string[];
+}> {
+  const statuses: Record<AddressPlatformKey, PlatformStatus> = { airbnb: "unknown", vrbo: "unknown", booking: "unknown" };
+  const matches: AddressMatch[] = [];
+  const errors: string[] = [];
+  let anySucceeded = false;
+
+  for (const platform of ADDRESS_PLATFORMS) {
+    const query = buildAddressQuery(platform.site, ctx.street, ctx.city);
+    const serp = await callGoogleTextSearch(query);
+    if (!serp.ok) {
+      errors.push(serp.error);
+      continue; // leave this platform "unknown"
+    }
+    anySucceeded = true;
+    const candidates = filterAddressSerpRows(serp.rows as any[], platform, ctx.street);
+    const kept: AddressMatch[] = [];
+    for (const c of candidates) {
+      if (isAuthorizedUrl(c.url.toLowerCase(), deps.authorizedUrls)) continue; // our own listing — expected, not theft
+      // Unit-number gate (skipped for standalone unique-address listings):
+      // require the listing page to also surface our unit number so a
+      // sibling owner at the same resort street doesn't trip the flag.
+      if (!deps.allowUnverifiedStandalone) {
+        const ok = await deps.verifyUnit(c.url);
+        if (!ok) continue;
+      }
+      kept.push({ platform: platform.key, url: c.url, title: c.title, snippet: c.snippet });
+    }
+    statuses[platform.key] = kept.length > 0 ? "found" : "clean";
+    matches.push(...kept.slice(0, 5));
+  }
+
+  return { statuses, matches, anySucceeded, errors };
 }
 
 function compactErrorDetail(text: string): string {
@@ -481,6 +627,10 @@ export async function runPhotoListingCheckForFolder(
     airbnbMatches: [],
     vrboMatches: [],
     bookingMatches: [],
+    airbnbAddressStatus: "unknown",
+    vrboAddressStatus: "unknown",
+    bookingAddressStatus: "unknown",
+    addressMatches: [],
     photosChecked: 0,
     lensCalls: 0,
   };
@@ -693,6 +843,50 @@ export async function runPhotoListingCheckForFolder(
   result.vrboMatches    = tally.vrbo.matches.slice(0, 20);
   result.bookingMatches = tally.booking.matches.slice(0, 20);
 
+  // Address-on-OTA leg: does this unit's street address surface on a real
+  // OTA listing page? (A relist can swap photos but not the address.) One
+  // SERP per platform; unit-number gated unless this is a standalone
+  // unique-address listing. Runs alongside the photo leg; leaving statuses
+  // "unknown" when disabled or no street is known is correct (not "clean").
+  if (!PHOTO_LISTING_ADDRESS_SCAN_DISABLED) {
+    try {
+      const addrCtx = await folderAddressContext(folder);
+      if (addrCtx) {
+        // Unit-number gate for the address leg, separate cache from the
+        // photo leg's community-aware verify (street+city already proves
+        // the resort, so we only need the unit-number confirmation here).
+        const addressVerifyCache = new Map<string, boolean>();
+        const verifyUnitForAddress = async (url: string): Promise<boolean> => {
+          const cached = addressVerifyCache.get(url);
+          if (cached !== undefined) return cached;
+          for (const token of verifyTokens) {
+            if (await verifyUrlMentionsUnit(url, token)) {
+              addressVerifyCache.set(url, true);
+              return true;
+            }
+          }
+          addressVerifyCache.set(url, false);
+          return false;
+        };
+        const addr = await checkAddressOnOtas(addrCtx, {
+          authorizedUrls,
+          allowUnverifiedStandalone,
+          verifyUnit: verifyUnitForAddress,
+        });
+        result.airbnbAddressStatus  = addr.statuses.airbnb;
+        result.vrboAddressStatus    = addr.statuses.vrbo;
+        result.bookingAddressStatus = addr.statuses.booking;
+        result.addressMatches = addr.matches.slice(0, 15);
+        if (!addr.anySucceeded && addr.errors.length > 0 && !result.errorMessage) {
+          const distinct = Array.from(new Set(addr.errors)).slice(0, 2);
+          result.errorMessage = `Address search unavailable: ${distinct.join("; ")}`;
+        }
+      }
+    } catch (e: any) {
+      console.error(`[photo-listing-scanner] address leg failed for ${folder}: ${e?.message ?? e}`);
+    }
+  }
+
   await persist(result, priorRow);
   await alertOnStateWorsen(prior, result);
   return result;
@@ -716,6 +910,26 @@ async function persist(r: ScanResult, prior?: PhotoListingCheck | null): Promise
       r.bookingStatus = prior.bookingStatus as PlatformStatus;
       r.bookingMatches = parseStoredMatches(prior.bookingMatches);
     }
+    // Same inconclusive-outage rule for the address leg: don't repaint a
+    // known red/green address verdict to gray just because today's SERP
+    // failed. addressMatches is restored when we fall back to the prior
+    // status so the UI keeps the cited URLs.
+    let restoredAddress = false;
+    if (r.airbnbAddressStatus === "unknown" && (prior as any).airbnbAddressStatus) {
+      r.airbnbAddressStatus = (prior as any).airbnbAddressStatus as PlatformStatus;
+      restoredAddress = true;
+    }
+    if (r.vrboAddressStatus === "unknown" && (prior as any).vrboAddressStatus) {
+      r.vrboAddressStatus = (prior as any).vrboAddressStatus as PlatformStatus;
+      restoredAddress = true;
+    }
+    if (r.bookingAddressStatus === "unknown" && (prior as any).bookingAddressStatus) {
+      r.bookingAddressStatus = (prior as any).bookingAddressStatus as PlatformStatus;
+      restoredAddress = true;
+    }
+    if (restoredAddress && r.addressMatches.length === 0) {
+      r.addressMatches = parseStoredAddressMatches((prior as any).addressMatches);
+    }
     r.errorMessage = `${r.errorMessage} (kept previous status because the provider failure was inconclusive)`;
   }
 
@@ -727,10 +941,24 @@ async function persist(r: ScanResult, prior?: PhotoListingCheck | null): Promise
     airbnbMatches:  r.airbnbMatches.length  ? JSON.stringify(r.airbnbMatches)  : null,
     vrboMatches:    r.vrboMatches.length    ? JSON.stringify(r.vrboMatches)    : null,
     bookingMatches: r.bookingMatches.length ? JSON.stringify(r.bookingMatches) : null,
+    airbnbAddressStatus:  r.airbnbAddressStatus,
+    vrboAddressStatus:    r.vrboAddressStatus,
+    bookingAddressStatus: r.bookingAddressStatus,
+    addressMatches: r.addressMatches.length ? JSON.stringify(r.addressMatches) : null,
     photosChecked: r.photosChecked,
     lensCalls:     r.lensCalls,
     errorMessage:  r.errorMessage ?? null,
   });
+}
+
+function parseStoredAddressMatches(raw?: string | null): AddressMatch[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 // Returns folders that have photos (label rows or files on disk) AND
@@ -877,8 +1105,13 @@ export async function runPhotoListingCheckForFolders(
 // check is older than `maxAgeMs` (default: 7 days → WEEKLY cadence, per
 // the operator's 2026-06-26 "ensure that this is cron job once a week"
 // request; override with PHOTO_LISTING_SCAN_INTERVAL_DAYS), runs a fresh
-// check. Budgeted at PHOTOS_PER_FOLDER (3) Lens calls + up to ~3
-// verification SERP calls per folder. The 7-day default supersedes the
+// check. 2026-06-29: each stale folder now gets a DEEP scan
+// (PHOTO_LISTING_SCAN_MAX_PHOTOS, default = the full deduped interior
+// gallery) PLUS the address-on-OTA leg, so the unattended weekly audit has
+// the same ~95-100% recall as the on-demand deep button — not the old
+// 3-photo screen. Budgeted at up to PHOTO_LISTING_SCAN_MAX_PHOTOS Lens
+// calls + ~3 verification SERPs + 3 address SERPs per folder; tune depth
+// via PHOTO_LISTING_SCAN_MAX_PHOTOS. The 7-day default supersedes the
 // prior 24h daily cadence; the dashboard "Scanned" column shows each
 // property's most-recent folder checkedAt so a missed weekly run is
 // visible (it renders amber once older than the cadence).
@@ -891,8 +1124,8 @@ export function startPhotoListingScheduler(maxAgeMs = PHOTO_LISTING_SCAN_MAX_AGE
         console.error(`[photo-listing-scanner] tick: ${known.length} folders, all fresh`);
         return;
       }
-      console.error(`[photo-listing-scanner] tick: ${stale.length}/${known.length} folders stale — scanning`);
-      await runPhotoListingCheckForFolders(stale);
+      console.error(`[photo-listing-scanner] tick: ${stale.length}/${known.length} folders stale — scanning (deep, maxPhotos=${PHOTO_LISTING_SCAN_MAX_PHOTOS})`);
+      await runPhotoListingCheckForFolders(stale, { maxPhotos: PHOTO_LISTING_SCAN_MAX_PHOTOS });
     } catch (e: any) {
       console.error(`[photo-listing-scanner] scheduler crashed: ${e?.message}`);
     }
