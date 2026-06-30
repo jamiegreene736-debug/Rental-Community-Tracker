@@ -44,6 +44,39 @@ export function streetPortionOf(address: string): string {
   return (trimmed.includes(",") ? trimmed.split(",")[0] : trimmed).trim();
 }
 
+// Parse a free-form address into { street, city, state }, robust to an embedded
+// unit/building segment. "1831 Poipu Rd, Unit 423, Koloa, HI 96756" →
+// { street: "1831 Poipu Rd", city: "Koloa", state: "HI" }. The city is the first
+// comma-part after the street that is NOT a unit/building segment ("Unit 423",
+// "Bldg 3", "#5", "Apt 2") and NOT a bare state/zip token — fixing the old
+// `parts[1]` parse that mistook "Unit 423" for the city on 4-part addresses.
+const UNIT_SEGMENT_RE = /^(?:unit|apt\.?|apartment|suite|ste\.?|bldg\.?|building|villa|townhome|townhouse|#|no\.?)\b/i;
+const STATE_OR_ZIP_RE = /^[A-Za-z]{2}(?:\s+\d{5}(?:-\d{4})?)?$|^\d{5}(?:-\d{4})?$/;
+
+export function parseStreetCityState(address: string): { street: string; city: string; state: string } {
+  const raw = String(address ?? "").trim();
+  if (!raw) return { street: "", city: "", state: "" };
+  const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  const street = parts[0] ?? "";
+  let city = "";
+  let state = "";
+  for (let i = 1; i < parts.length; i++) {
+    const p = parts[i];
+    if (!city) {
+      if (UNIT_SEGMENT_RE.test(p)) continue;          // skip "Unit 423" / "Bldg 3" / "#5"
+      if (STATE_OR_ZIP_RE.test(p)) { state = p.split(/\s+/)[0]; continue; }
+      city = p;
+      continue;
+    }
+    if (!state && STATE_OR_ZIP_RE.test(p)) state = p.split(/\s+/)[0];
+  }
+  // Fallback: a 2-part "street, city" with no later state token.
+  if (!city && parts.length >= 2 && !UNIT_SEGMENT_RE.test(parts[1]) && !STATE_OR_ZIP_RE.test(parts[1])) {
+    city = parts[1];
+  }
+  return { street, city, state };
+}
+
 export function buildAddressQuery(site: string, street: string, city: string): string {
   const cityClause = city ? ` "${city}"` : "";
   return `site:${site} "${street}"${cityClause}`;
