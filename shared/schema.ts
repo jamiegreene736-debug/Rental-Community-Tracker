@@ -859,6 +859,8 @@ export const propertyMarketRates = pgTable("property_market_rates", {
       stateMatch: boolean;
       locationMatch: boolean;
       curated: boolean;
+      claudeConfirmed?: boolean;
+      verifiedResort?: string;
       confirmed: boolean;
       detail: string;
     };

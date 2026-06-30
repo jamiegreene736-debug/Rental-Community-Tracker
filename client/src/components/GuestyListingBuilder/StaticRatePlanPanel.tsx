@@ -21,6 +21,8 @@ type CommunityConfirmation = {
   stateMatch: boolean;
   locationMatch: boolean;
   curated: boolean;
+  claudeConfirmed?: boolean;
+  verifiedResort?: string;
   confirmed: boolean;
   detail: string;
 };
@@ -131,7 +133,7 @@ export default function StaticRatePlanPanel({ propertyId, version }: { propertyI
     <div style={{ marginTop: 8, marginBottom: 4, padding: "10px 12px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, fontSize: 11, color: "#374151" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
         <span style={{ fontWeight: 700, color: "#111827", fontSize: 12 }}>📊 Static rate plan</span>
-        <span style={{ color: "#6b7280" }}>Claude-researched buy-in cost basis · one rate per Low/High/Holiday per year · rolling 24 months · 20% markup on push</span>
+        <span style={{ color: "#6b7280" }}>Claude web-researches the resort (not an Airbnb scrape) · ONE static rate per Low/High/Holiday per year — every month in a season shares that rate · rolling 24 months · 20% markup on push</span>
         <button
           type="button"
           onClick={load}
@@ -166,12 +168,17 @@ export default function StaticRatePlanPanel({ propertyId, version }: { propertyI
               <span><span style={{ color: "#6b7280" }}>Listing community:</span> <b>{conf.community}</b></span>
               {loc && <span><span style={{ color: "#6b7280" }}>Location:</span> <b>{loc}</b></span>}
               <span><span style={{ color: "#6b7280" }}>Researching:</span> <b>{conf.searchLabel}</b></span>
-              <span style={{ color: conf.nameMatch ? "#166534" : "#92400e" }}>
-                Name {conf.nameMatch ? "✓" : conf.curated ? "(curated)" : "✕"}
+              <span style={{ color: (conf.nameMatch || conf.claudeConfirmed) ? "#166534" : "#92400e" }}>
+                Name {conf.nameMatch ? "✓" : conf.claudeConfirmed ? "✓ (Claude-verified)" : conf.curated ? "(curated)" : "✕"}
               </span>
               <span style={{ color: conf.locationMatch ? "#166534" : "#92400e" }}>
                 Location {conf.locationMatch ? "✓" : "✕"}
               </span>
+              {conf.verifiedResort && (
+                <span style={{ color: "#6b7280" }} title="The resort Claude confirmed via web search">
+                  Verified: {conf.verifiedResort}
+                </span>
+              )}
             </div>
           </div>
         );

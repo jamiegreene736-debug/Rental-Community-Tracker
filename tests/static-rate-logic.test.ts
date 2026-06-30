@@ -206,6 +206,68 @@ console.log("static-rate-logic: confirmResearchCommunity");
   });
   check("non-curated, no name match → not confirmed", nonCurated.confirmed === false, nonCurated);
   check("location still matched on non-curated", nonCurated.locationMatch === true, nonCurated);
+
+  // Claude web-verified the resort → confirmed even when non-curated and the
+  // community key isn't literally in the label. This is the Ko Olina case.
+  const claudeVerified = confirmResearchCommunity({
+    community: "Coconut Plantation at Ko Olina",
+    searchLabel: "Coconut Plantation at Ko Olina, Kapolei, Hawaii",
+    expectedCity: "Kapolei",
+    expectedState: "Hawaii",
+    curated: false,
+    claudeConfirmed: true,
+    verifiedResort: "Marriott's Ko Olina Beach Club / Coconut Plantation",
+    verifiedCity: "Kapolei",
+    verifiedState: "Hawaii",
+  });
+  check("Claude-verified → confirmed", claudeVerified.confirmed === true, claudeVerified);
+  check("claudeConfirmed flag set", claudeVerified.claudeConfirmed === true, claudeVerified);
+
+  // Claude's verified city satisfies the location even if the label omits it.
+  const verifiedCityOnly = confirmResearchCommunity({
+    community: "Hidden Resort",
+    searchLabel: "Hidden Resort vacation rental",
+    expectedCity: "Koloa",
+    expectedState: "Hawaii",
+    curated: false,
+    claudeConfirmed: true,
+    verifiedCity: "Koloa",
+    verifiedState: "Hawaii",
+  });
+  check("verified city/state satisfy location", verifiedCityOnly.locationMatch && verifiedCityOnly.confirmed, verifiedCityOnly);
+
+  // Even Claude confirmation can't override a genuine location contradiction.
+  const claudeButWrongState = confirmResearchCommunity({
+    community: "Poipu Kai",
+    searchLabel: "Poipu Kai, Louisiana",
+    expectedCity: "Koloa",
+    expectedState: "Hawaii",
+    curated: true,
+    claudeConfirmed: true,
+    verifiedCity: "Baton Rouge",
+    verifiedState: "Louisiana",
+  });
+  check("wrong state not overridden by claudeConfirmed", claudeButWrongState.confirmed === false, claudeButWrongState);
+}
+
+console.log("static-rate-logic: rates are STATIC per season per year (not per-month)");
+{
+  const anchors: StaticRateAnchors = {
+    year1: { LOW: 400, HIGH: 700, HOLIDAY: 1000 },
+    year2: { LOW: 420, HIGH: 720, HOLIDAY: 1050 },
+  };
+  const expanded = expandAnchorsToMonthlyRates(anchors, "Poipu Kai", ASOF, 24);
+  // Group year-1 months (offset 0-11) by season; every LOW month must share ONE
+  // value, every HIGH month one value, December (HOLIDAY) one value.
+  const months = Object.keys(expanded).sort();
+  const y1 = months.slice(0, 12);
+  const lowVals = new Set(y1.filter((m) => expanded[m].season === "LOW").map((m) => expanded[m].medianNightly));
+  const highVals = new Set(y1.filter((m) => expanded[m].season === "HIGH").map((m) => expanded[m].medianNightly));
+  check("all year-1 LOW months share one static rate", lowVals.size <= 1 && (lowVals.size === 0 || lowVals.has(400)), [...lowVals]);
+  check("all year-1 HIGH months share one static rate", highVals.size <= 1 && (highVals.size === 0 || highVals.has(700)), [...highVals]);
+  // At most 3 distinct values per year (LOW/HIGH/HOLIDAY).
+  const y1Distinct = new Set(y1.map((m) => expanded[m].medianNightly));
+  check("year 1 has at most 3 distinct nightly rates", y1Distinct.size <= 3, [...y1Distinct]);
 }
 
 console.log(`\nstatic-rate-logic: ${pass} passed, ${fail} failed`);
