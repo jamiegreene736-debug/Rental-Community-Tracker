@@ -54,12 +54,13 @@ import {
 } from "@shared/photo-folder-utils";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
-import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch } from "./photo-match-guardrails";
+import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "./photo-match-guardrails";
 import {
   communityEvidenceInResult,
   listingHaystackIncompatibleWithCommunity,
 } from "@shared/preflight-platform-match";
 import { communityAddressRuleForName } from "@shared/community-addresses";
+import { decidePlatformStatus } from "@shared/photo-listing-decision";
 import {
   ADDRESS_PLATFORMS,
   buildAddressQuery,
@@ -139,6 +140,22 @@ const PHOTO_LISTING_SCAN_MAX_PHOTOS = (() => {
   if (!raw) return PHOTO_AUDIT_MAX_PHOTOS; // deep by default
   const n = Number(raw);
   return Number.isFinite(n) && n >= 1 ? Math.min(PHOTO_AUDIT_MAX_PHOTOS, Math.floor(n)) : PHOTO_AUDIT_MAX_PHOTOS;
+})();
+// Balanced multi-photo agreement threshold (2026-06-29). Baseline: a platform is "found" when
+// >= MIN_MATCHES (2) distinct photos pass the FULL verify gate (community-compatible AND the unit
+// number appears in the listing's Google-indexed page text). But a determined repost can hide the unit
+// number from page text (JS-rendered, image-only, or simply omitted), which made the strict gate
+// silently drop real theft. So we ALSO flag "found" when >= MULTI_PHOTO_AGREEMENT (3) distinct interior
+// photos of OURS converge on the SAME host with a STRONG Lens score on a community-compatible listing —
+// even without the per-hit unit-text confirmation. Three of our own distinct interior shots landing on
+// one host is itself strong, neighbour-resistant evidence (a similar-looking neighbour unit does not own
+// three of our exact photos), and community/amenity photos are already excluded from the hero set while
+// our own authorized OTA URLs are suppressed — so this can never fire on shared amenities or our real
+// listings. Tunable via PHOTO_LISTING_AGREEMENT_THRESHOLD; values < 2 are ignored.
+const MULTI_PHOTO_AGREEMENT = (() => {
+  const n = Number(process.env.PHOTO_LISTING_AGREEMENT_THRESHOLD);
+  if (!Number.isFinite(n) || n < 2) return 3;
+  return Math.floor(n);
 })();
 // Address-on-OTA detection leg (the complement to the photo reverse-image leg). For each scanned unit
 // folder we also run one Google `site:` text search per platform for the unit's street + city and check
@@ -728,13 +745,18 @@ export async function runPhotoListingCheckForFolder(
     return result;
   }
 
-  // Tally per-host: how many of OUR photos produced at least one match
-  // on this host, and the list of (our photo URL → their listing URL)
-  // pairs for the UI.
-  const tally: Record<"airbnb" | "vrbo" | "booking", { photoHitCount: number; matches: Match[] }> = {
-    airbnb:  { photoHitCount: 0, matches: [] },
-    vrbo:    { photoHitCount: 0, matches: [] },
-    booking: { photoHitCount: 0, matches: [] },
+  // Tally per-host:
+  //  - photoHitCount  = how many of OUR photos produced at least one FULLY-VERIFIED match
+  //    (community-compatible AND unit number in the listing's page text). >= MIN_MATCHES → found.
+  //  - photoStrongCount = how many of OUR distinct photos produced at least one STRONG,
+  //    community-compatible match on this host, WHETHER OR NOT the unit number was confirmed in
+  //    page text. >= MULTI_PHOTO_AGREEMENT → found (the Balanced multi-photo-agreement signal;
+  //    photoStrongCount is always >= photoHitCount since a verified hit is also strong+community).
+  //  - matches = (our photo URL → their listing URL) pairs for the dashboard tooltip.
+  const tally: Record<"airbnb" | "vrbo" | "booking", { photoHitCount: number; photoStrongCount: number; matches: Match[] }> = {
+    airbnb:  { photoHitCount: 0, photoStrongCount: 0, matches: [] },
+    vrbo:    { photoHitCount: 0, photoStrongCount: 0, matches: [] },
+    booking: { photoHitCount: 0, photoStrongCount: 0, matches: [] },
   };
   let anyLensSucceeded = false;
   const lensErrors: string[] = [];
@@ -804,33 +826,53 @@ export async function runPhotoListingCheckForFolder(
         return true;
       });
       if (hits.length === 0) continue;
-      // Cross-validate up to MAX_VERIFY_PER_HOST_PER_PHOTO hits.
-      // A photo counts as "matched this platform" only when at least
-      // one of its verified hits mentions our unit number.
+      // Verify the STRONGEST hits first so the per-photo verification budget is never spent on
+      // weaker matches while a high-confidence repost ranked further down goes unverified.
+      hits.sort((a: any, b: any) =>
+        lensMatchConfidence(b, String(b.__lensSource || ""), Number(b.__lensPosition ?? b.position ?? 999)) -
+        lensMatchConfidence(a, String(a.__lensSource || ""), Number(a.__lensPosition ?? a.position ?? 999)),
+      );
+      // Cross-validate up to MAX_VERIFY_PER_HOST_PER_PHOTO hits. A photo counts as a VERIFIED match
+      // when at least one hit is community-compatible AND mentions our unit number; it counts toward
+      // multi-photo AGREEMENT when at least one hit is strong + community-compatible (unit text not
+      // required). Multi-photo agreement (>= MULTI_PHOTO_AGREEMENT distinct photos) is the Balanced
+      // fallback that catches reposts which hide the unit number from indexed page text.
       const verifiedHits: Match[] = [];
+      const strongHits: Match[] = [];
       for (const h of hits.slice(0, MAX_VERIFY_PER_HOST_PER_PHOTO)) {
         const link = String(h.link || "");
         if (!link) continue;
-        const ok = await verify(link, String(h.title || ""), String(h.source || ""));
-        if (!ok) continue;
-        verifiedHits.push({
-          photoUrl,
-          listingUrl: link,
-          title:  String(h.title  || ""),
-          source: String(h.source || ""),
-        });
+        const title = String(h.title || "");
+        const source = String(h.source || "");
+        const communityOk = listingMatchesFolderCommunity(title, source, link, communityCtx);
+        if (communityOk) strongHits.push({ photoUrl, listingUrl: link, title, source });
+        const ok = await verify(link, title, source);
+        if (ok) verifiedHits.push({ photoUrl, listingUrl: link, title, source });
       }
       if (verifiedHits.length > 0) {
         tally[host.key].photoHitCount += 1;
         tally[host.key].matches.push(...verifiedHits);
+      } else if (strongHits.length > 0) {
+        // No unit-text-verified hit, but a strong community-compatible one — keep a single piece of
+        // evidence so a found-by-agreement verdict still shows the operator a listing URL.
+        tally[host.key].matches.push(strongHits[0]);
       }
+      if (strongHits.length > 0) tally[host.key].photoStrongCount += 1;
     }
   }
 
-  const finalize = (key: "airbnb" | "vrbo" | "booking"): PlatformStatus => {
-    if (!anyLensSucceeded) return "unknown";
-    return tally[key].photoHitCount >= MIN_MATCHES ? "found" : "clean";
-  };
+  // Per-platform photo verdict. Address detection is a SEPARATE leg (its own columns), so this
+  // judges photos only — multi-photo agreement (>= MULTI_PHOTO_AGREEMENT strong photos) lets a
+  // repost that hides the unit number from page text still flag as "found".
+  const finalize = (key: "airbnb" | "vrbo" | "booking"): PlatformStatus =>
+    decidePlatformStatus({
+      photoHitCount: tally[key].photoHitCount,
+      photoStrongCount: tally[key].photoStrongCount,
+      hasAddressHit: false,
+      anyLensSucceeded,
+      minMatches: MIN_MATCHES,
+      agreementThreshold: MULTI_PHOTO_AGREEMENT,
+    });
 
   result.airbnbStatus  = finalize("airbnb");
   result.vrboStatus    = finalize("vrbo");
@@ -887,17 +929,26 @@ export async function runPhotoListingCheckForFolder(
     }
   }
 
-  await persist(result, priorRow);
+  // A scan where NO photo returned a Lens result is inconclusive by construction — it is not
+  // evidence that a previously-detected repost vanished. Flag it so persist() preserves prior
+  // non-unknown statuses regardless of whether the underlying error string happened to match
+  // isProviderUnavailableError (a 401/403/5xx can carry "SearchAPI" without the matched substrings).
+  await persist(result, priorRow, { inconclusive: !anyLensSucceeded });
   await alertOnStateWorsen(prior, result);
   return result;
 }
 
-async function persist(r: ScanResult, prior?: PhotoListingCheck | null): Promise<PhotoListingCheck> {
-  // Provider outages/quota errors are inconclusive, not evidence that
-  // previous matches disappeared. Preserve the last known platform
-  // statuses so one exhausted SearchAPI run cannot repaint the
-  // dashboard from red/green to gray.
-  if (prior && isProviderUnavailableError(r.errorMessage)) {
+async function persist(
+  r: ScanResult,
+  prior?: PhotoListingCheck | null,
+  opts: { inconclusive?: boolean } = {},
+): Promise<PhotoListingCheck> {
+  // Provider outages/quota errors — and ANY scan where no Lens call succeeded — are inconclusive, not
+  // evidence that previous matches disappeared. Preserve the last known platform statuses so one
+  // exhausted/failed SearchAPI run cannot repaint the dashboard from red/green to gray. (Previously this
+  // keyed only off isProviderUnavailableError's substring match, so an unrecognized 401/403/5xx could
+  // silently downgrade a confirmed "found" to "unknown".)
+  if (prior && (isProviderUnavailableError(r.errorMessage) || opts.inconclusive)) {
     if (r.airbnbStatus === "unknown") {
       r.airbnbStatus = prior.airbnbStatus as PlatformStatus;
       r.airbnbMatches = parseStoredMatches(prior.airbnbMatches);
