@@ -53,6 +53,32 @@ export function paymentAmount(payment: any): number {
   return asNum(payment?.amount ?? payment?.paidAmount ?? payment?.collectedAmount ?? payment?.total ?? payment?.value);
 }
 
+// The STABLE per-transaction identity Guesty assigns to a payment / transaction /
+// refund row. This is the authoritative "is this the same charge?" signal — far
+// more reliable than day+amount, because a 50% deposit and the auto-charged 50%
+// balance are two DISTINCT charges that share a calendar day and an amount but
+// carry different ids. Returns null when no id field is present (older shapes /
+// nested refund records), in which case callers fall back to the day+amount fold.
+export function transactionId(entry: any): string | null {
+  for (const field of [
+    "_id",
+    "id",
+    "transactionId",
+    "paymentId",
+    "chargeId",
+    "providerTransactionId",
+    "externalTransactionId",
+    "stripeChargeId",
+  ]) {
+    const raw = entry?.[field];
+    if (raw != null) {
+      const s = String(raw).trim();
+      if (s) return s;
+    }
+  }
+  return null;
+}
+
 // Resolve a reservation's check-in / check-out CALENDAR date (YYYY-MM-DD) the way
 // the guest experiences it. LOAD-BEARING: Guesty's raw `checkIn`/`checkOut` are
 // UTC timestamps of the local check-in/out MOMENT — e.g. a Hawaii (UTC-10) stay
@@ -223,13 +249,28 @@ export interface ReceiptTransaction {
   date: Date;
   dateIso: string; // full ISO timestamp
   description: string;
+  id?: string | null; // stable Guesty txn id (see transactionId), when present
 }
 
 function dedupeTransactions(items: ReceiptTransaction[]): ReceiptTransaction[] {
   const seen = new Set<string>();
   const out: ReceiptTransaction[] = [];
   for (const t of items) {
-    const key = `${t.dateIso.slice(0, 10)}|${t.amount.toFixed(2)}|${t.description.toLowerCase()}`;
+    // A stable Guesty transaction id is the authoritative identity: two charges
+    // with DIFFERENT ids are genuinely distinct — even on the same calendar day
+    // for the same amount (a 50% deposit + the auto-charged 50% balance, both
+    // captured the day a within-90-day-window booking is made). The same row
+    // surfaced twice under ONE id (e.g. from two money arrays) still folds.
+    // Rows with NO id keep the legacy day+amount+description fold unchanged.
+    //
+    // This trusts that a single capture is not surfaced from two different money
+    // arrays under TWO different ids — Guesty exposes payments under one shape
+    // per account/integration version (see the module header), so that does not
+    // occur in practice. If an account is ever found to do so, add a
+    // capture-timestamp+amount fold for id-bearing rows here.
+    const key = t.id
+      ? `id:${t.id}`
+      : `${t.dateIso.slice(0, 10)}|${t.amount.toFixed(2)}|${t.description.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(t);
@@ -247,7 +288,7 @@ export function collectedPaymentsForReceipts(reservation: any): ReceiptTransacti
     if (!(amount > 0)) continue;
     const date = paymentDate(item);
     if (!date) continue;
-    out.push({ amount, date, dateIso: date.toISOString(), description: paymentDescription(item) });
+    out.push({ amount, date, dateIso: date.toISOString(), description: paymentDescription(item), id: transactionId(item) });
   }
   return dedupeTransactions(out);
 }
@@ -261,7 +302,7 @@ export function realRefundsForReceipts(reservation: any): ReceiptTransaction[] {
     if (!(amount > 0)) continue;
     const date = refundDate(item);
     if (!date) continue;
-    out.push({ amount, date, dateIso: date.toISOString(), description: paymentDescription(item) });
+    out.push({ amount, date, dateIso: date.toISOString(), description: paymentDescription(item), id: transactionId(item) });
   }
   return dedupeTransactions(out);
 }

@@ -43,6 +43,30 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-30 (guest receipts: auto-charged FINAL payment got NO receipt — same-day 50/50 dedup
+  collapse): Operator reported that when Guesty auto-took the second 50% payment (booking made INSIDE
+  the "balance due ~90 days before arrival" window, so the balance is charged the SAME day as the
+  deposit), the guest got the deposit receipt but never a second "paid in full" receipt. SHIPPED
+  (`claude/receipt-final-payment-dedup`, PR #TBD). ROOT CAUSE: both receipt dedup layers keyed on
+  day+amount and IGNORED transaction identity — `dedupeTransactions` (`server/guesty-money.ts`,
+  `day|amount|desc`) and `receiptDedupKey` (`shared/receipt-message.ts`,
+  `reservationId|kind|day|amount`). Two equal $1,855 charges on the same day collapsed to ONE receipt.
+  This was the DOCUMENTED-but-wrong 2026-06-10 trade-off ("two same-day same-amount charges collapse;
+  do NOT add a txn id") — overridden here (AGENTS.md Load-Bearing #2 replaced + 2026-06-30 Decision
+  Log). FIX: distinguish charges by Guesty's stable txn `_id` (new `transactionId()`; appended to the
+  ledger key `|<id>`; `dedupeTransactions` splits by id). `_id` is immutable across polls so it does
+  NOT reintroduce the jitter double-send the old comment feared; id-less shapes reproduce the EXACT
+  legacy key (backward compatible). A self-expiring migration shim (`sameTransactionMoment` in
+  `processTransaction`) checks the legacy key too and skips ONLY when it was for THIS exact charge
+  moment — so the deploy doesn't re-send recent receipts while the balance still sends. FOR FAITH ITO
+  SPECIFICALLY: both her charges are now >48h old (outside the backfill window), so use the manual
+  `POST /api/inbox/guest-receipts/send-for-reservation` (reservationId or confirmationCode) — the
+  detection path now returns BOTH payments and the shim sends only the missing balance. Verified:
+  `tests/guesty-money-payments.test.ts` 13/0 (new), `tests/receipt-message.test.ts` 37/0, full
+  `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT
+  live-smoke the Guesty leg (no creds in session) — confirm post-deploy on the next within-window
+  booking.
+
 - 2026-06-30 (FOLLOW-UP: community double-check on the static-rate research target): Operator wanted
   glanceable proof that the community Claude web-researches is the CORRECT community for the listing —
   matching BOTH the community NAME and its LOCATION (city/state). SHIPPED
