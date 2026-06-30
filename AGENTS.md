@@ -1622,6 +1622,59 @@ established it so you can read the rationale in the commit message.
     only costs one SearchAPI call + one Nominatim call (or zero, on a
     cache hit).
 
+### Static buy-in rates are ALL-IN, 7-night, multi-channel (Load-Bearing, 2026-06-30)
+
+The Claude static-rate engine (`server/static-rate-engine.ts` +
+`shared/static-rate-logic.ts`) researches the **true all-in buy-in cost** — the
+nightly **rent + flat cleaning + channel service fee + lodging/occupancy taxes**,
+amortized over a **7-night** reference stay — across **PM/direct → VRBO →
+Booking.com → Airbnb → resort** (priority = cheapest acquisition path first).
+This replaced the bare-nightly prompt that excluded fees/taxes (the Menehune
+Shores loss class: a 15% markup on rent-only sells the doubled-flat-fee combo at
+a loss). Load-bearing invariants:
+
+1. **Server applies tax + reconciliation; Claude reports OBSERVED only.** The
+   prompt asks Claude for per-channel `evidence` (rent / cleaning / serviceFeePct
+   / stayNights / feesObserved + sourceUrl) and NEVER to compute tax. The server
+   computes `allInNightly = (rent×N + cleaning + service·(rent×N+cleaning) +
+   tax·(rent×N+cleaning)) / N` (`allInNightlyFromComponents`), tax from
+   `LODGING_TAX_PCT` (HI 0.18 / FL 0.125), then `reconcileChannelAllIn` picks the
+   anchor: **lowest credible** all-in, with a teaser drop (not-observed + rent <
+   0.5× rent basis), a **>15%-below-2nd-cheapest guard** (use the 2nd so one
+   mis-scrape can't price into a loss), and a **PM>VRBO>Booking>Airbnb** tie-break
+   within 5%. This is deterministic + unit-tested; do NOT move tax/reconciliation
+   into the LLM.
+
+2. **`defaultStaticAnchors` is ALL-IN (the fail-soft fix).** With no
+   `ANTHROPIC_API_KEY` / any Claude error / a truncated response, anchors fall
+   back to `allInSeasonalBasis` (rent grossed up via `grossUpRentToAllIn`), NOT
+   the rent-only `staticSeasonalBasis`. So the keyless/outage path can no longer
+   push rent-only (loss) numbers to live Guesty. Anchors clamp to **0.55×–3× of
+   the ALL-IN basis** (floor raised from 0.4×); seasons outside the band are
+   surfaced as `clampedSeasons`, not silently truncated.
+
+3. **The Guesty push math + `monthlyRates` shape are UNCHANGED.** All-in lives in
+   the anchor VALUES only. `buildBulkGuestySeasonalPlan` still sums each unit's
+   per-bedroom row (two 3BRs = 3BR row ×2; a 3BR+2BR = each row once — the
+   asymmetric combo already works) and applies the markup. **Cleaning is
+   amortized INTO the nightly**, so the operator must ZERO the Guesty
+   guest-facing cleaning fee on these combo listings (surfaced in the Pricing-tab
+   panel as "Includes ~$X/night amortized cleaning") — we deliberately did NOT
+   add a separate cleaning-fee push path.
+
+4. **`BUY_IN_RATES` / `SEASON_MULTIPLIERS` stay rent-only** (load-bearing for
+   `getBuyInRate`, the live/legacy paths, the inbox estimator). The all-in basis
+   is DERIVED from them; never mutate the rent tables to bake in fees.
+
+5. Budget: `STATIC_RATE_MAX_SEARCHES` (12) / `STATIC_RATE_MAX_TOKENS` (12000),
+   env-tunable; the prompt soft-caps evidence to ~8–10 points and
+   `callClaudeWebSearchText` returns a DISTINCT "truncated (max_tokens)" error so
+   a truncated multi-bedroom response is diagnosable, not mistaken for an outage.
+   Per-channel `evidence` + `reconciliation` + `allInBasis` + `clampedSeasons` +
+   `cleaningPerNight` persist on `static_plan` (JSONB, no migration) and render in
+   `StaticRatePlanPanel`. Designed + reviewed via adversarial workflows; see the
+   2026-06-30 Decision Log line.
+
 ### Market-rate AUTO-CURATION: every listing gets a geo-scoped scan (Load-Bearing, 2026-06-27)
 
 A "curated" market = a key in `BUY_IN_MARKETS` (`shared/buy-in-market.ts`),
@@ -3678,3 +3731,5 @@ Welcome. When in doubt, ask the human.
 2026-06-29 · Jamie: "re-audit the photo scan / unit audit and let me know if the 95-100% repost-detection goal is fixed." · AUDITED + shipped the residual delta (`claude/vibrant-nobel-39bb83`, PR #860) · Re-audit finding: PR #858 (merged to main while this session was working) ALREADY shipped the two big pieces of the goal — the weekly cron now deep-scans the full deduped gallery (`PHOTO_LISTING_SCAN_MAX_PHOTOS`, default 30) AND a separate address-on-OTA leg (`shared/address-listing-logic.ts` + 📍 dashboard mini-row). So "is it fixed?" = YES for deep photos + address detection. This session dropped its own (now-duplicate) deep-cron + address-backstop work and shipped ONLY the additive photo-recall levers #858 did not include, which the operator had approved as "Balanced detection": (1) multi-photo agreement — a platform is also `found` when ≥`MULTI_PHOTO_AGREEMENT`(3, env `PHOTO_LISTING_AGREEMENT_THRESHOLD`) distinct interior photos strongly match the same host on community-compatible listings even without the per-hit unit-number-in-page-text verify (catches a repost that hides the unit number; neighbour-resistant + amenity-safe); (2) broadened `persist()` downgrade guard — preserve prior non-unknown photo statuses on ANY scan where no Lens call succeeded, not just substring-recognized provider errors (an unrecognized 401/403/5xx could otherwise repaint a confirmed `found` to gray); (3) Lens hits sorted by `lensMatchConfidence` before the `MAX_VERIFY_PER_HOST_PER_PHOTO` slice (verify the strongest first). Per-platform photo verdict extracted to pure `shared/photo-listing-decision.ts` (`decidePlatformStatus`) + unit-tested (`tests/photo-listing-decision.test.ts`, 9 assertions, wired into `npm test`). Operator also chose dashboard-only alerting (no new infra). HONEST CEILING re-stated: single Lens engine + Google `site:` search reaches ~95%+ only for NAIVE reposts (our unmodified photos on a Google-indexed public listing); cropped/watermarked/mirrored photos, brand-new un-indexed listings, and "generic photos + address hidden until booking" remain out of reach without a 2nd image engine. Verified: `tests/photo-listing-decision.test.ts` 9/0, full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT live-smoke Lens/SERP (no SEARCHAPI key in session). See the "Photo/address OTA detection audit" Load-Bearing subsection (multi-photo-agreement bullet).
 
 2026-06-30 · Jamie: "the most recent photo-scan queue shows many properties' ADDRESS as inconclusive — check what went wrong and fix it." · DIAGNOSED (live data via `railway run` → `GET /api/photo-listing-check`) + shipped (`claude/address-inconclusive-fix`, PR #TBD) · 172 folders, 149 address-"inconclusive" (= status "unknown"). Root causes, in order of size: (1) DOMINANT = STALENESS — the address leg shipped in #858 (deployed Jun 29) but ~133 folders were last scanned BEFORE it (Apr–Jun 26), so they still carry the default "unknown" address; the weekly DEEP cron only re-scans folders >7d stale, and a full deep re-scan wastes ~30 Lens calls/folder just to populate addresses. (2) REAL BUG = `folderAddressContext` only handled negative-id drafts, so all 14 `replacement-p<N>-u<unit>` folders (POSITIVE propertyId) returned null → skipped → inconclusive forever. (3) `parts[1]` city misparse on 4-part addresses ("1831 Poipu Rd, Unit 423, Koloa, HI" → city "Unit 423"). (4) ~2 non-curated drafts with no `streetAddress` on file → genuinely unsearchable by street (left "unknown" by design — a bare community-name search risks false positives the operator hates). NOT a quota problem (the 50 "errors" were benign: 38 empty folders, 12 no-unit-number). FIX: (a) `folderAddressContext` now resolves replacement folders from the latest unit-swap's `newAddress`, and parses city via the new pure `parseStreetCityState` (skips "Unit N"/"Bldg N" segments; unit-tested in `tests/address-listing-logic.test.ts`). (b) New address-ONLY backfill — `runAddressOnlyCheckForFolder` / `runAddressBackfill` + `POST /api/photo-listing-check/address-backfill` — runs just the address SERPs (no Lens spend) for address-"unknown" folders and merges into the existing row, preserving the photo verdict; the cheap way to clear the staleness portfolio-wide after deploy. See the "Photo/address OTA detection audit" Load-Bearing subsection (folderAddressContext + backfill bullets). Verified: `tests/address-listing-logic.test.ts` 19/0 (+7 parse cases), full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Post-merge: Railway deploys main, then `POST /api/photo-listing-check/address-backfill` populates the 📍 address column for the stale folders (verified live).
+
+2026-06-30 · Jamie: "Look into the market rate update feature. I need it to accurately research online via Claude for the buy-in rate (VRBO, Booking.com, PM website(s), etc — as much data as possible), find the LOW/HIGH/HOLIDAY buy-in for the next 24 months INCLUDING all taxes and fees, use a 7-day sample if possible, then double it for the two units (sometimes a 3BR + a 2BR). Plan it out, implement, tell me why, push + merge." · ACCEPTED + shipped (`claude/practical-shamir-39ae8c`, PR #TBD) · Designed via a 4-lens design panel (revenue / tax-domain / software-correctness / adversarial) + a 3-dimension adversarial diff review (0 merge blockers; 2 MEDIUMs fixed). DIAGNOSIS: the Claude prompt asked for a BARE nightly rate — no taxes/fees, no 7-night sample, one number per season; `BUY_IN_RATES` are rent-only. The "double it" was ALREADY correct (the push sums per-bedroom rows per unit; 3BR+2BR asymmetric works). FIX = make the engine produce true ALL-IN (rent + cleaning + service + lodging tax, 7-night amortized) multi-channel anchors; full rationale in the new "Static buy-in rates are ALL-IN, 7-night, multi-channel" Load-Bearing subsection. KEY DECISIONS (don't re-litigate): (1) SERVER applies tax (HI 0.18/FL 0.125) + reconciliation deterministically; Claude reports OBSERVED rent/cleaning/service only (un-hallucinatable). (2) `reconcileChannelAllIn` = lowest credible all-in, drop teasers, >15%-below-2nd guard, PM>VRBO>Booking>Airbnb tie-break (a self-caught bug: the tie-break must only consider rows AT-OR-ABOVE the pick, else it re-includes the cheaper row the >15% guard just rejected — fixed + tested). (3) `defaultStaticAnchors` is now ALL-IN so the fail-soft/keyless path can't push rent-only loss numbers; clamp floor 0.4×→0.55× against the ALL-IN basis. (4) Guesty push math + `monthlyRates` shape UNCHANGED — cleaning is amortized into the nightly, so the UI tells the operator to ZERO the Guesty guest-facing cleaning fee (NOT a new cleaning-fee push path). (5) Budget 6→12 searches / 4000→12000 tokens, evidence soft-capped, + a DISTINCT "truncated (max_tokens)" error so a truncated multi-bedroom response isn't mistaken for an outage. (6) Observed `cleaningPerStay: 0` (no-cleaning PM/direct) is preserved, not overwritten with the estimate. Per-channel evidence + reconciliation persist on `static_plan` (JSONB, no migration) + render in `StaticRatePlanPanel` (channel comp table, estimated-fees/clamped chips, cleaning note). Verified: `tests/static-rate-logic.test.ts` 89/0 (+46), full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT live-smoke the Claude web-search leg in-session (no ANTHROPIC_API_KEY) — confirm post-deploy via the per-property "Update Market Rates Now" button or `POST /api/admin/refresh-all-market-rates`; the Pricing tab then shows the per-channel all-in breakdown + reconciliation.

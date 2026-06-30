@@ -58,7 +58,10 @@ export const STATIC_RATE_MODEL = process.env.STATIC_RATE_MODEL || "claude-sonnet
 // Research budget. Bumped for the multi-channel (PM/VRBO/Booking/Airbnb/resort)
 // × 3-season × multi-bedroom sweep. Env-tunable to dial credit cost down.
 const STATIC_RATE_MAX_SEARCHES = Number(process.env.STATIC_RATE_MAX_SEARCHES) || 12;
-const STATIC_RATE_MAX_TOKENS = Number(process.env.STATIC_RATE_MAX_TOKENS) || 8000;
+// Headroom for the multi-bedroom × multi-channel evidence JSON. The prompt also
+// soft-caps evidence volume; together they keep the response under the cap so it
+// doesn't truncate mid-JSON (which would discard every anchor → fail-soft).
+const STATIC_RATE_MAX_TOKENS = Number(process.env.STATIC_RATE_MAX_TOKENS) || 12000;
 
 // Same trigger union the hybrid engine uses (kept loose to avoid a server-type
 // import cycle).
@@ -276,7 +279,8 @@ function buildResearchPrompt(args: {
   lines.push(`  - stayNights: the stay length you priced (7 unless a longer minimum forced more).`);
   lines.push(`  - feesObserved: true ONLY if you actually saw BOTH the cleaning fee and the service fee on the page (not inferred).`);
   lines.push(`  - sourceUrl + channel ("pm" | "vrbo" | "booking" | "airbnb" | "resort").`);
-  lines.push(`NEVER report a teaser "from $X" headline as if it were the real all-in. If you can only see a bare nightly, report it with cleaningPerStay null and feesObserved false — we'll gross it up.`);
+  lines.push(`NEVER report a teaser "from $X" headline as if it were the real all-in. If you can only see a bare nightly, report it with cleaningPerStay null and feesObserved false — we'll gross it up. If a channel genuinely charges NO separate cleaning fee, report cleaningPerStay: 0 (not null).`);
+  lines.push(`Keep the evidence focused: report the cheapest credible channel(s) per season — you don't need every duplicate hit. Aim for roughly the 8–10 most decision-relevant data points total so the response isn't truncated.`);
   lines.push(``);
   lines.push(`Sanity references (the operator's BARE-RENT priors — taxes/cleaning/service are NOT included, so the real all-in should be roughly 1.2×–1.5× these; weigh against what you research, don't copy):`);
   if (args.trailing) {
@@ -401,7 +405,12 @@ function resolveBedroomAnchors(
     const channel = normalizeChannelKey(e.channel);
     const year: 1 | 2 = Number(e.year) === 2 ? 2 : 1;
     const nights = Number.isFinite(Number(e.stayNights)) && Number(e.stayNights) > 0 ? Math.round(Number(e.stayNights)) : ALL_IN_REFERENCE_NIGHTS;
-    const cleaningObs = num(e.cleaningPerStay);
+    // Distinguish ABSENT (null/undefined → estimate it) from an observed $0 (a
+    // PM/resort-direct listing with no separate cleaning fee — keep the 0, don't
+    // overwrite with the regional estimate, which would inflate the cheapest channel).
+    const cleaningObs = e.cleaningPerStay == null || !Number.isFinite(Number(e.cleaningPerStay)) || Number(e.cleaningPerStay) < 0
+      ? null
+      : Number(e.cleaningPerStay);
     const servicePctObs = e.serviceFeePct != null && Number.isFinite(Number(e.serviceFeePct)) && Number(e.serviceFeePct) >= 0
       ? normalizePct(Number(e.serviceFeePct))
       : null;

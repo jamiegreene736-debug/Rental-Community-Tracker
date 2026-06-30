@@ -314,6 +314,13 @@ console.log("static-rate-logic: allInNightlyFromComponents (taxes + fees, 7-nigh
   // nights=0 guards to the 7-night reference, never divides by zero.
   const guarded = allInNightlyFromComponents({ rentNightly: 500, nights: 0, cleaningPerStay: 250, serviceFeePct: 0, region: "hawaii" });
   check("nights<=0 falls back to reference nights (finite)", Number.isFinite(guarded) && guarded > 0, guarded);
+
+  // An observed $0 cleaning (PM/direct, no separate cleaning) prices BELOW a
+  // listing with a real cleaning fee — the engine must keep an observed 0, not
+  // overwrite it with the regional estimate.
+  const noClean = allInNightlyFromComponents({ rentNightly: 500, nights: 7, cleaningPerStay: 0, serviceFeePct: 0, region: "hawaii" });
+  const withClean = allInNightlyFromComponents({ rentNightly: 500, nights: 7, cleaningPerStay: 250, serviceFeePct: 0, region: "hawaii" });
+  check("cleaning $0 prices below a real cleaning fee", noClean < withClean, { noClean, withClean });
 }
 
 console.log("static-rate-logic: grossUpRentToAllIn + allInSeasonalBasis");
