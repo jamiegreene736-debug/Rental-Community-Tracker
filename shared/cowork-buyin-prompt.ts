@@ -82,18 +82,31 @@ export function buildCoworkBuyInPrompt(input: CoworkBuyInPromptInput): string {
   const cityLabel = city ? `${city}${state ? `, ${state}` : ""}` : "(unknown — infer from the resort/community)";
   const cityWideLabel = cityWideSearch ?? cityLabel;
 
-  return `# Task: Find the two cheapest buy-in units for a reservation and attach them
+  // The prompt is count-aware: a single-unit reservation needs one listing, a
+  // combo needs two. Word the "two cheapest" / "both" copy accordingly.
+  const n = input.units.length;
+  const unitWord = n === 1 ? "unit" : "units";
+  const countWord = n === 1 ? "the cheapest" : n === 2 ? "the cheapest two" : `the cheapest ${n}`;
+  const listingsTotal = n === 1 ? "one listing total" : `${n} listings total`;
+  const themOrIt = n === 1 ? "it" : "them";
+  const bothOrAll = n === 1 ? "the unit" : n === 2 ? "both units" : "all units";
+  const distinctNote =
+    n === 1
+      ? "."
+      : `, making sure the ${n === 2 ? "two" : n} picks are DISTINCT listings (never the same URL twice).`;
+
+  return `# Task: Find ${countWord} buy-in ${unitWord} for a reservation and attach ${themOrIt}
 
 You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
 Search the open web — Google, property-manager (PM) company websites, Airbnb,
-VRBO, and Booking.com — to find the **cheapest two replacement ("buy-in") units**
-for the reservation below, then **attach them using the manual-attach method**.
+VRBO, and Booking.com — to find ${countWord} replacement ("buy-in") ${unitWord}
+for the reservation below, then **attach ${themOrIt} using the manual-attach method**.
 
 ## Reservation
 - Reservation ID: ${input.reservationId}
 - Guest: ${input.guestName?.trim() || "(unknown)"}
 - Property: ${input.propertyName} (propertyId ${input.propertyId})
-- Community / resort: ${input.community}
+- Community / resort: ${input.community || "(unknown — infer from the property name)"}
 - Curated resort search name: ${resortSearchName}
 - City: ${cityLabel}
 - Check-in: ${input.checkIn}
@@ -103,17 +116,17 @@ for the reservation below, then **attach them using the manual-attach method**.
 ## Units to fill (the bedroom plan is ${bedroomPlan})
 ${unitLines}
 
-You must find ONE distinct listing per unit slot above (two listings total),
+You must find ONE distinct listing per unit slot above (${listingsTotal}),
 each matching that slot's exact bedroom count, available for the FULL stay
 (${input.checkIn} → ${input.checkOut}), and book-able for those exact dates.
 
 ## Where to search (in priority order)
-1. **Same community first.** Look for both units inside **${resortSearchName}**
+1. **Same community first.** Look for ${bothOrAll} inside **${resortSearchName}**
    (the resort/community itself). Search Google for the resort name + dates,
    the PM companies that manage that resort, and the resort's listings on
-   Airbnb, VRBO, and Booking.com. Prefer two listings in the SAME community.
-2. **City-wide fallback.** If you cannot find a qualifying listing for one
-   and/or both unit slots inside the community, widen to a
+   Airbnb, VRBO, and Booking.com. Prefer ${n === 1 ? "a listing" : "listings"} in the SAME community.
+2. **City-wide fallback.** If you cannot find a qualifying listing for ${n === 1 ? "the unit" : "one and/or more unit slots"}
+   inside the community, widen to a
    **city-wide search of ${cityWideLabel}** — any qualifying same-bedroom
    listing in that city.
 3. **STOP at city-wide.** Do **NOT** expand beyond the city: no nearby towns,
@@ -123,8 +136,7 @@ each matching that slot's exact bedroom count, available for the FULL stay
 
 For each candidate, capture: the listing URL, the bedroom count, and the TOTAL
 price for the exact ${input.checkIn} → ${input.checkOut} stay (all-in: nightly ×
-nights + cleaning/fees). Pick the **cheapest** qualifying listing for each slot,
-making sure the two picks are two DISTINCT listings (never the same URL twice).
+nights + cleaning/fees). Pick the **cheapest** qualifying listing for each slot${distinctNote}
 
 ## Attach using the manual-attach method
 For EACH unit slot, replicate the manual-attach flow (the "Manually add buy-in"
@@ -151,15 +163,14 @@ dialog). It is two API calls:
 2. Attach it to the reservation:
    POST ${apiRoot}/api/bookings/${input.reservationId}/attach-buy-in
    { "buyInId": <id from step 1> }
-   → If this returns 409 with "canForce": true, the two units may be flagged as
+   → If this returns 409 with "canForce": true, the units may be flagged as
      too far apart. Re-POST with { "buyInId": <id>, "force": true,
      "overrideNote": "<short reason these are an acceptable pair>" } ONLY if the
-     two listings are genuinely in the same community/city per your research.
-
-Repeat steps 1–2 for the second unit slot.
-
+     listings are genuinely in the same community/city per your research.
+${n === 1 ? "" : `
+Repeat steps 1–2 for each remaining unit slot.`}
 ## Done
-When both slots are attached, report: the two listings (URL + bedrooms + total
+When ${bothOrAll === "the unit" ? "the slot is" : "all slots are"} attached, report: the listing(s) (URL + bedrooms + total
 price), whether each came from the community or the city-wide fallback, the
 combined cost, and any slot you could not fill within ${cityLabel}.`;
 }

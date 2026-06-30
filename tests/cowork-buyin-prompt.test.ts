@@ -68,5 +68,25 @@ check("dates threaded into create body", prompt.includes('"checkIn": "2026-07-20
 const noBase = buildCoworkBuyInPrompt({ ...baseInput, baseUrl: undefined });
 check("placeholder when no baseUrl", noBase.includes("<APP_BASE_URL>/api/buy-ins"));
 
+// ── single-unit reservation (Unit 3104, 2BR off a non-combo listing) ─────────
+const single = buildCoworkBuyInPrompt({
+  reservationId: "HA-PGf8rgW",
+  guestName: "Cheryl Parker",
+  propertyId: 99,
+  propertyName: "Homeaway2 · Unit 3104",
+  community: "",
+  checkIn: "2026-07-03",
+  checkOut: "2026-07-06",
+  units: [{ unitId: "3104", unitLabel: "Unit 3104", bedrooms: 2 }],
+  baseUrl: "https://app.example.com",
+});
+check("single: count-aware heading", single.includes("Find the cheapest buy-in unit for a reservation"));
+check("single: one listing total", single.includes("one listing total"));
+check("single: still same-community first", single.includes("Same community first"));
+check("single: still forbids beyond city-wide", /STOP at city-wide/i.test(single));
+check("single: no 'repeat for second unit' line", !single.includes("second unit slot"));
+check("single: empty community → infer hint", single.includes("infer from the property name"));
+check("single: attach endpoint still present", single.includes("/api/bookings/HA-PGf8rgW/attach-buy-in"));
+
 console.log(`\ncowork-buyin-prompt: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
