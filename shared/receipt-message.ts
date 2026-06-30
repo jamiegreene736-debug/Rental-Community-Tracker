@@ -181,27 +181,53 @@ export function buildRefundReceiptBody(args: RefundReceiptArgs): string {
   return isBookingChannel(args.channel) ? sanitizeForBookingChannel(body) : body;
 }
 
-// Stable per-transaction identity so a given payment/refund is messaged
-// exactly once. Amount rounded to cents; date to the DAY.
+// Stable per-transaction identity so a given payment/refund is messaged exactly
+// once. `reservationId|kind|day|amount`, with the stable Guesty transaction id
+// appended (`|<id>`) when one is available.
 //
-// DELIBERATE TRADE-OFF (do not "fix" by adding a txn id/description): keying to
-// the day+amount makes the key STABLE across reads even when Guesty jitters the
-// transaction timestamp or relabels its description between polls. That
-// stability is what guarantees we never DOUBLE-send a money confirmation — the
-// cardinal sin for this feature. The cost is that two GENUINELY-DISTINCT
-// transactions of the exact same cents, on the same calendar day, on the same
-// reservation, of the same kind, collapse to one receipt. In vacation-rental
-// billing that case is effectively nonexistent, and under-sending one receipt
-// is far less harmful than double-confirming a refund. Adding a Guesty txn id
-// would distinguish them but reintroduces the double-send risk if that id is
-// ever absent/unstable across reads, so we accept the collision.
+// HISTORY (do not regress): the original key was day+amount ONLY, deliberately
+// dropping the txn id so the key stayed stable across polls (never double-send).
+// The accepted cost was that two GENUINELY-DISTINCT same-day, same-cent charges
+// collapse to ONE receipt. That case is NOT rare in vacation-rental billing — a
+// 50/50 deposit + balance split has two equal halves, and when a booking is made
+// inside the "balance due N days before arrival" window Guesty auto-charges the
+// balance the SAME day as the deposit. So the guest got one receipt for two
+// charges and no "paid in full" confirmation (operator-reported, see PR #TBD /
+// the 2026-06-30 Decision Log).
+//
+// FIX: the Guesty txn `_id` IS the right discriminator (and is itself stable
+// across polls — it is immutable, more so than the timestamp the old comment
+// feared). Appending it splits two same-day same-amount charges into two
+// receipts. The day+amount stay in the key as the human-readable, jitter-stable
+// base; the migration shim in guest-receipts.ts (sameTransactionMoment) keeps a
+// pre-id-upgrade legacy row (`reservationId|kind|day|amount`, no suffix) from
+// re-sending. Omitting the id reproduces the EXACT legacy key, so id-less shapes
+// are byte-for-byte backward compatible.
 export function receiptDedupKey(args: {
   reservationId: string;
   kind: ReceiptKind;
   dateIso: string;
   amount: number;
+  id?: string | null;
 }): string {
   const day = String(args.dateIso ?? "").slice(0, 10);
   const amt = (Number.isFinite(args.amount) ? Math.abs(args.amount) : 0).toFixed(2);
-  return `${args.reservationId}|${args.kind}|${day}|${amt}`;
+  const base = `${args.reservationId}|${args.kind}|${day}|${amt}`;
+  const id = String(args.id ?? "").trim();
+  return id ? `${base}|${id}` : base;
+}
+
+// Do two ISO timestamps name the SAME charge moment? Used by the guest-receipts
+// migration shim to tell whether a legacy (id-less) ledger row was for THIS exact
+// transaction or for a DIFFERENT same-day same-amount one (e.g. the deposit when
+// this is the balance). Exact-instant match only — no tolerance window — so two
+// genuinely-distinct charges are never merged.
+export function sameTransactionMoment(aIso?: string | null, bIso?: string | null): boolean {
+  const a = String(aIso ?? "").trim();
+  const b = String(bIso ?? "").trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const ta = new Date(a).getTime();
+  const tb = new Date(b).getTime();
+  return Number.isFinite(ta) && Number.isFinite(tb) && ta === tb;
 }
