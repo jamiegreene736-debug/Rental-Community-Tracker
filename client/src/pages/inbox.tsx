@@ -16,6 +16,10 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuLabel,
+  ContextMenuSeparator, ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { useToast } from "@/hooks/use-toast";
 import {
   aliasAttachmentHref,
@@ -29,7 +33,7 @@ import {
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
   FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
-  Search, Loader2, ExternalLink, Copy, Link2,
+  Search, Loader2, ExternalLink, Copy, Link2, MailOpen,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -944,6 +948,52 @@ function writeStoredAirbnbPreapprovals(ids: Set<string>) {
     window.localStorage.setItem(AIRBNB_PREAPPROVAL_STORAGE_KEY, JSON.stringify(Array.from(ids)));
   } catch {
     // localStorage can fail in private windows; the live Guesty state still refetches.
+  }
+}
+
+// ── Manual "Mark as read / unread" overrides for the conversation list ────────
+// Guesty's Open API for this tenant exposes no reliable "mark conversation
+// read" endpoint, so the operator's right-click Mark-as-read/unread is a
+// CLIENT-SIDE override layered over Guesty's live read state — the same idea as
+// `locallyRepliedAtByConversation` (reply-sent suppression), but DURABLE: it's
+// persisted to localStorage so a deliberate mark survives a refresh and keeps
+// the header unread count honest. Each entry stamps the moment it was set; a
+// "read" override is auto-dropped once a NEWER guest message arrives (so a fresh
+// reply still re-surfaces the thread), while an "unread" override sticks until
+// the operator marks it read or sends a reply.
+const INBOX_READ_OVERRIDE_STORAGE_KEY = "nexstay_inbox_read_overrides_v1";
+
+type InboxReadOverride = { state: "read" | "unread"; at: number };
+
+function readStoredInboxReadOverrides(): Record<string, InboxReadOverride> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(INBOX_READ_OVERRIDE_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, InboxReadOverride> = {};
+    for (const [id, value] of Object.entries(parsed as Record<string, any>)) {
+      if (!id || typeof id !== "string") continue;
+      if (
+        value &&
+        (value.state === "read" || value.state === "unread") &&
+        typeof value.at === "number"
+      ) {
+        out[id] = { state: value.state, at: value.at };
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredInboxReadOverrides(overrides: Record<string, InboxReadOverride>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(INBOX_READ_OVERRIDE_STORAGE_KEY, JSON.stringify(overrides));
+  } catch {
+    // localStorage can fail in private windows; the override just won't persist.
   }
 }
 
@@ -2394,6 +2444,15 @@ export default function InboxPage() {
   // soon as our send completes; if the guest replies again with a newer
   // last-message timestamp, the marker comes back.
   const [locallyRepliedAtByConversation, setLocallyRepliedAtByConversation] = useState<Record<string, number>>({});
+  // Manual right-click "Mark as read / unread" overrides — see
+  // readStoredInboxReadOverrides. Persisted so the operator's choice (and the
+  // header unread count it drives) survives a page refresh.
+  const [inboxReadOverrides, setInboxReadOverrides] = useState<Record<string, InboxReadOverride>>(
+    () => readStoredInboxReadOverrides(),
+  );
+  useEffect(() => {
+    writeStoredInboxReadOverrides(inboxReadOverrides);
+  }, [inboxReadOverrides]);
   // Receipt template state. Pre-populated from Guesty's money fields
   // when the dialog opens; every value is editable so the operator can
   // correct stale Guesty data on the spot. The body regenerates from
@@ -2541,6 +2600,24 @@ export default function InboxPage() {
       ...prev,
       [conversationId]: Date.now(),
     }));
+    // A sent reply means the thread is handled — drop any manual override so a
+    // stale "Mark as unread" can't keep the thread (and the header count) lit.
+    setInboxReadOverrides((prev) => {
+      if (!prev[conversationId]) return prev;
+      const next = { ...prev };
+      delete next[conversationId];
+      return next;
+    });
+  };
+
+  // Right-click "Mark as read / unread" from the conversation list. A pure
+  // client-side override (Guesty has no read-toggle API on this tenant) that
+  // feeds applyLocalReplyOverride below and therefore the row indicators + the
+  // header unread count.
+  const markConversationReadState = (conversationId: string | null, state: "read" | "unread") => {
+    if (!conversationId) return;
+    setInboxReadOverrides((prev) => ({ ...prev, [conversationId]: { state, at: Date.now() } }));
+    toast({ title: state === "read" ? "Marked as read" : "Marked as unread" });
   };
 
   const applyLocalReplyOverride = (raw: GuestyConversation) => {
@@ -2551,6 +2628,23 @@ export default function InboxPage() {
     const preapprovalPatched = locallyPreapproved
       ? { ...normalized, needsPreapprove: false }
       : normalized;
+    // Manual right-click "Mark as read / unread" wins over Guesty's live read
+    // state — unless a NEWER guest message has arrived since the mark, in which
+    // case a "read" mark is stale (the thread should re-surface) and an
+    // "unread" mark is moot (live state already shows it unread).
+    const override = inboxReadOverrides[normalized._id];
+    if (override) {
+      const overrideActivityAt = normalized.displayTimestamp
+        ? new Date(normalized.displayTimestamp).getTime()
+        : 0;
+      const supersededByNewActivity =
+        Number.isFinite(overrideActivityAt) && overrideActivityAt > override.at;
+      if (!supersededByNewActivity) {
+        return override.state === "unread"
+          ? { ...preapprovalPatched, isUnread: true, needsReply: true, lastMessageFromGuest: true }
+          : { ...preapprovalPatched, isUnread: false, needsReply: false, lastMessageFromGuest: false };
+      }
+    }
     if (!localReplyAt) return preapprovalPatched;
     const lastActivityAt = normalized.displayTimestamp
       ? new Date(normalized.displayTimestamp).getTime()
@@ -2625,7 +2719,20 @@ export default function InboxPage() {
       return Number.isFinite(t) ? t : 0;
     };
     return [...matched].sort((a, b) => ts(b) - ts(a));
-  }, [conversations, propertyFilter, replyStatusFilter, searchQuery, locallyRepliedAtByConversation]);
+  }, [conversations, propertyFilter, replyStatusFilter, searchQuery, locallyRepliedAtByConversation, inboxReadOverrides, airbnbPreapprovedIds]);
+
+  // Count of conversations still awaiting the host across the WHOLE inbox
+  // (deliberately ignores the property/search/status filters so the header
+  // badge is a true global signal). Drives the header "N unread" badge + the
+  // Messages tab counter, and updates live as the operator marks rows
+  // read/unread via the right-click menu.
+  const unreadConversationCount = useMemo(
+    () => conversations.reduce(
+      (n, raw) => n + (applyLocalReplyOverride(raw).needsReply ? 1 : 0),
+      0,
+    ),
+    [conversations, locallyRepliedAtByConversation, inboxReadOverrides, airbnbPreapprovedIds],
+  );
 
   useEffect(() => {
     const deepLinkKey = [
@@ -4114,15 +4221,24 @@ export default function InboxPage() {
                 : "Messages · Reservations · Auto-Messages"}
           </p>
         </div>
-        {!isAgent && pendingRes.length > 0 && (
-          <Badge className="sm:ml-auto bg-amber-500 text-white" data-testid="badge-pending-count">
-            {pendingRes.length} pending request{pendingRes.length > 1 ? "s" : ""}
-          </Badge>
-        )}
-        {missedCallCount > 0 && (
-          <Badge className="bg-red-600 text-white" data-testid="badge-missed-call-count">
-            {missedCallCount} missed call{missedCallCount === 1 ? "" : "s"}
-          </Badge>
+        {(unreadConversationCount > 0 || (!isAgent && pendingRes.length > 0) || missedCallCount > 0) && (
+          <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+            {unreadConversationCount > 0 && (
+              <Badge className="bg-primary text-primary-foreground" data-testid="badge-unread-count">
+                {unreadConversationCount} unread
+              </Badge>
+            )}
+            {!isAgent && pendingRes.length > 0 && (
+              <Badge className="bg-amber-500 text-white" data-testid="badge-pending-count">
+                {pendingRes.length} pending request{pendingRes.length > 1 ? "s" : ""}
+              </Badge>
+            )}
+            {missedCallCount > 0 && (
+              <Badge className="bg-red-600 text-white" data-testid="badge-missed-call-count">
+                {missedCallCount} missed call{missedCallCount === 1 ? "" : "s"}
+              </Badge>
+            )}
+          </div>
         )}
       </div>
 
@@ -4131,6 +4247,14 @@ export default function InboxPage() {
           <TabsList className="mb-4 sm:mb-6 flex h-auto w-full max-w-full justify-start overflow-x-auto p-1 sm:w-auto" data-testid="tabs-inbox">
             <TabsTrigger value="messages" data-testid="tab-messages">
               <MessageSquare className="h-4 w-4 mr-1.5" /> Messages
+              {unreadConversationCount > 0 && (
+                <span
+                  className="ml-1.5 rounded-full bg-primary text-primary-foreground text-[10px] min-w-4 h-4 px-1 flex items-center justify-center"
+                  data-testid="badge-messages-unread"
+                >
+                  {unreadConversationCount}
+                </span>
+              )}
             </TabsTrigger>
             {isAdmin && (
               <TabsTrigger value="ai-drafts" data-testid="tab-ai-drafts">
@@ -4582,13 +4706,18 @@ export default function InboxPage() {
                   const c = applyLocalReplyOverride(rawC);
                   const active = c._id === selectedConvId;
                   const conversationMissedCalls = missedCallsByConversation[c._id] ?? 0;
+                  // The row signals "unread" via either the blue dot (isUnread)
+                  // or the amber reply-owed marker (needsReply); the right-click
+                  // menu treats both together as the row's unread state.
+                  const rowIsUnread = c.isUnread || c.needsReply;
                   return (
-                    <button
-                      key={c._id}
-                      data-testid={`conversation-item-${c._id}`}
-                      onClick={() => setSelectedConvId(c._id)}
-                      className={`w-full text-left px-4 py-3 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/5 border-l-2 border-l-primary" : ""}`}
-                    >
+                    <ContextMenu key={c._id}>
+                      <ContextMenuTrigger asChild>
+                        <button
+                          data-testid={`conversation-item-${c._id}`}
+                          onClick={() => setSelectedConvId(c._id)}
+                          className={`w-full text-left px-4 py-3 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/5 border-l-2 border-l-primary" : ""}`}
+                        >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
                           <div
@@ -4676,7 +4805,29 @@ export default function InboxPage() {
                           {new Date(c.displayTimestamp).toLocaleDateString()}
                         </p>
                       )}
-                    </button>
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent className="w-48">
+                        <ContextMenuLabel className="max-w-[12rem] truncate">
+                          {c.displayGuestName}
+                        </ContextMenuLabel>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          disabled={!rowIsUnread}
+                          onSelect={() => markConversationReadState(c._id, "read")}
+                          data-testid={`context-mark-read-${c._id}`}
+                        >
+                          <MailOpen className="h-3.5 w-3.5 mr-2" /> Mark as read
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          disabled={rowIsUnread}
+                          onSelect={() => markConversationReadState(c._id, "unread")}
+                          data-testid={`context-mark-unread-${c._id}`}
+                        >
+                          <Mail className="h-3.5 w-3.5 mr-2" /> Mark as unread
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
                   );
                 })}
                 </TooltipProvider>
