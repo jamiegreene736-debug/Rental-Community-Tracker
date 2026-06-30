@@ -23,6 +23,11 @@ import {
   type ListingBedroomCoverage,
 } from "../shared/photo-bedroom-coverage-logic";
 import { isInteriorPhoto } from "../shared/photo-community-check-logic";
+import {
+  applySameRoomGroups,
+  needsSameRoomVision,
+} from "../shared/bedroom-same-room-logic";
+import { groupSameBedroomsViaVision, type SameRoomRep } from "./bedroom-same-room-vision";
 import { computeDhash } from "./photo-hashing";
 import type { CheckGroupInput } from "./photo-community-check";
 
@@ -173,6 +178,26 @@ async function loadBedroomPhotosForUnit(
 function pickClusterRepresentative(cluster: BedroomPhotoSample[]): BedroomPhotoSample {
   const nonAlt = cluster.find((p) => !/alt view/i.test(p.caption ?? ""));
   return nonAlt ?? cluster[0];
+}
+
+// Conservative vision fold: collapse bedroom clusters that are the SAME physical
+// room from a different angle (the bed head-on + the same room's TV/dresser wall),
+// which hash + caption merges miss. Runs before the cap so bedroomsFound reflects
+// the rooms actually photographed instead of masking a missing bedroom. Skips
+// entirely if any representative can't be encoded — fail-safe = no merge.
+async function visionFoldSameRoomBedroomSamples(
+  clusters: BedroomPhotoSample[][],
+): Promise<BedroomPhotoSample[][]> {
+  const reps = clusters.map(pickClusterRepresentative);
+  if (reps.length !== clusters.length || reps.length < 2) return clusters;
+  const repInputs: SameRoomRep[] = [];
+  for (const r of reps) {
+    if (!r.buffer || r.buffer.length === 0 || r.buffer.length > MAX_IMAGE_BYTES) return clusters;
+    repInputs.push({ id: r.id, mime: r.mime, base64: r.buffer.toString("base64"), caption: r.caption });
+  }
+  const partition = await groupSameBedroomsViaVision(repInputs, {});
+  if (!partition) return clusters;
+  return applySameRoomGroups(clusters, reps.map((r) => r.id), partition).clusters;
 }
 
 function clusterCountsAsBedroom(
@@ -355,6 +380,15 @@ async function analyzeUnitBedrooms(
   // room count and bed inventory reflect the real bedrooms — not duplicate views.
   const { clusters: mergedClusters } = mergeBedroomClustersByCaption(clusters, expected);
   clusters = mergedClusters;
+
+  // Vision same-room fold — the reliable signal for "same room, other angle" that
+  // hash distance + scraped captions can't see. Runs AFTER all expansion so it
+  // can't be undone, and BEFORE the cap so an over-count that equals the expected
+  // bedroom count (e.g. a 3BR photographed as master + master-angle + guest)
+  // collapses to the real room count and the missing bedroom is no longer masked.
+  if (needsSameRoomVision(clusters.length)) {
+    clusters = await visionFoldSameRoomBedroomSamples(clusters);
+  }
 
   // Expected bed inventory steers the cap so a unique bed type (e.g. a Queen)
   // is never trimmed in favour of a duplicate (e.g. a second King).
