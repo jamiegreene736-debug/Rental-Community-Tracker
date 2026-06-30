@@ -43,6 +43,22 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-30 (FOLLOW-UP: community double-check on the static-rate research target): Operator wanted
+  glanceable proof that the community Claude web-researches is the CORRECT community for the listing —
+  matching BOTH the community NAME and its LOCATION (city/state). SHIPPED
+  (`claude/static-rate-community-confirm`, PR #TBD). Pure `confirmResearchCommunity` in
+  `shared/static-rate-logic.ts` (43/0 incl. 9 new): normalizes the research `searchLabel` and checks
+  nameMatch (community token in label) + cityMatch + stateMatch (state full-name↔abbrev aliased, so
+  "Hawaii"↔"HI"); `confirmed = locationMatch && (nameMatch || curated)` — LOCATION is the load-bearing
+  geo guard (catches the Baton-Rouge-LA-vs-Kauai-HI class). `resolveStaticPricingTarget` now returns
+  `expectedCity/expectedState/curated` (curated market `location` for configured props + curated drafts;
+  draft's own city/state otherwise), the engine computes the `CommunityConfirmation` once and persists
+  it on `staticPlan.communityConfirmation` + emits it on the queue `pricingRecipe`. UI: green
+  "✓ Community confirmed — <community> · <city, state> · Researching: <label>" banner (amber
+  "⚠ Confirm community" + Name/Location ✓/✕ sub-checks) on the Pricing-tab `StaticRatePlanPanel`, and a
+  matching ✓/⚠ confirmation chip on each market-rate queue item in `home.tsx`. Verified: full `npm test`
+  exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new).
+
 - 2026-06-29 (REPLACED live Airbnb P40 sampler with Claude WEB-RESEARCHED static seasonal rates):
   Operator directive — stop the random-7-night SearchAPI Airbnb P40 sampler; instead have Claude
   ACTUALLY WEB-SEARCH (Google/OTAs) each resort's real nightly rates and produce ONE static buy-in

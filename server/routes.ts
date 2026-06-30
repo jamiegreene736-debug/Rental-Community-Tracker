@@ -1153,6 +1153,9 @@ async function resolveStaticPricingTarget(propertyId: number, fallbackLabel: str
   resortConfident: boolean;
   bedroomSplitInferred: boolean;
   searchLabel: string;
+  expectedCity?: string;
+  expectedState?: string;
+  curated: boolean;
 }> {
   if (propertyId > 0) {
     const config = PROPERTY_UNIT_CONFIGS[propertyId];
@@ -1162,7 +1165,8 @@ async function resolveStaticPricingTarget(propertyId: number, fallbackLabel: str
       .sort((a, b) => a - b);
     // A real, searchable resort label for the web research — the curated market's
     // "Resort, Town, Island, State" string when available, else the community key.
-    const searchLabel = BUY_IN_MARKETS[config.community]?.searchLocation || config.community;
+    const market = BUY_IN_MARKETS[config.community];
+    const searchLabel = market?.searchLocation || config.community;
     return {
       propertyId,
       propertyName: `${config.community} property ${propertyId}`,
@@ -1172,6 +1176,9 @@ async function resolveStaticPricingTarget(propertyId: number, fallbackLabel: str
       resortConfident: true,
       bedroomSplitInferred: false,
       searchLabel,
+      expectedCity: market?.location?.city,
+      expectedState: market?.location?.state,
+      curated: !!market,
     };
   }
   const draftId = Math.abs(propertyId);
@@ -1194,7 +1201,8 @@ async function resolveStaticPricingTarget(propertyId: number, fallbackLabel: str
   const draftCity = String(safeDraft.city || "").trim();
   const draftState = String(safeDraft.state || "").trim();
   const draftLocLabel = [draftName, draftCity, draftState].filter(Boolean).join(", ");
-  const searchLabel = draftLocLabel || BUY_IN_MARKETS[community]?.searchLocation || community;
+  const market = BUY_IN_MARKETS[community];
+  const searchLabel = draftLocLabel || market?.searchLocation || community;
   return {
     propertyId,
     propertyName: String(safeDraft.name || safeDraft.listingTitle || fallbackLabel || `Draft ${draftId}`),
@@ -1204,6 +1212,12 @@ async function resolveStaticPricingTarget(propertyId: number, fallbackLabel: str
     resortConfident,
     bedroomSplitInferred,
     searchLabel,
+    // When the draft resolved to a curated market, confirm the draft's OWN
+    // location matches that market's known city/state (catches a draft pinned to
+    // the wrong resort). Otherwise fall back to the draft's own location.
+    expectedCity: market?.location?.city || draftCity || undefined,
+    expectedState: market?.location?.state || draftState || undefined,
+    curated: !!market,
   };
 }
 
@@ -40425,6 +40439,7 @@ Return ONLY compact JSON with this exact shape:
             generatedAt: plan.generatedAt,
             model: plan.model,
             summary: plan.summary,
+            communityConfirmation: plan.communityConfirmation,
             refreshedAt: r.refreshedAt,
           }));
         })

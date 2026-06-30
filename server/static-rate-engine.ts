@@ -25,12 +25,14 @@ import {
   mergeLockedAnchors,
   expandAnchorsToMonthlyRates,
   seasonColumnsFromAnchors,
+  confirmResearchCommunity,
   STATIC_RATE_SEASONS,
   type SeasonAnchors,
   type StaticRateAnchors,
   type StaticRateLocks,
   type StaticRateBedroomPlan,
   type StaticRatePlan,
+  type CommunityConfirmation,
 } from "../shared/static-rate-logic";
 import { callClaudeWebSearchJson } from "./claude-json";
 
@@ -69,6 +71,7 @@ export type StaticPricingRecipe = {
   bedroomSplitInferred: boolean;
   model: string;
   metricsUsed: string[];
+  communityConfirmation?: CommunityConfirmation;
 };
 
 type BedroomMetrics = {
@@ -92,6 +95,11 @@ type GenerateArgs = {
   // A human-readable, searchable location label for the web research, e.g.
   // "Poipu Kai Resort, Koloa, Kauai, HI". Falls back to the community key.
   searchLabel?: string;
+  // The listing's known location + whether the community is a curated market,
+  // used to CONFIRM the research target matches this listing's community.
+  expectedCity?: string;
+  expectedState?: string;
+  curated?: boolean;
   asOf?: Date;
   onMonthScanned?: (event: StaticProgressEvent) => void | Promise<void>;
   shouldCancel?: () => boolean | Promise<boolean>;
@@ -294,6 +302,7 @@ async function persistBedroom(args: {
   reasoning: string;
   metricsUsed: string[];
   summary: string;
+  communityConfirmation?: CommunityConfirmation;
   triggerType: StaticTriggerType;
   notes?: string;
   asOf: Date;
@@ -320,6 +329,7 @@ async function persistBedroom(args: {
     model: STATIC_RATE_MODEL,
     source: args.usedClaude ? "claude-static" : "static-fallback",
     summary: args.summary,
+    communityConfirmation: args.communityConfirmation,
     bedrooms: [bedroomPlan],
   };
 
@@ -394,6 +404,15 @@ export async function generateStaticRatesForTarget(
     ? `${claude.summary || `Researched ${searchLabel}.`} (${claude.searchCount} web search${claude.searchCount === 1 ? "" : "es"})`
     : `Static seasonal rates for ${args.community} (web research unavailable — operator table fallback).`;
 
+  // Double-check the research target matches this listing's community + location.
+  const communityConfirmation = confirmResearchCommunity({
+    community: args.community,
+    searchLabel,
+    expectedCity: args.expectedCity,
+    expectedState: args.expectedState,
+    curated: args.curated,
+  });
+
   const rows: any[] = [];
   const logs: any[] = [];
   for (let i = 0; i < perBedroom.length; i += 1) {
@@ -411,6 +430,7 @@ export async function generateStaticRatesForTarget(
       bedroomSplitInferred: args.bedroomSplitInferred ?? false,
       model: resolved.usedClaude ? STATIC_RATE_MODEL : "static-fallback",
       metricsUsed: resolved.metricsUsed,
+      communityConfirmation,
     };
     const { row, log } = await persistBedroom({
       propertyId: args.propertyId,
@@ -424,6 +444,7 @@ export async function generateStaticRatesForTarget(
       reasoning: resolved.reasoning,
       metricsUsed: resolved.metricsUsed,
       summary,
+      communityConfirmation,
       triggerType: args.triggerType,
       notes: args.notes,
       asOf,
@@ -513,6 +534,7 @@ export async function applyStaticRateOverride(args: {
     model: plan?.model ?? STATIC_RATE_MODEL,
     source: "claude-static",
     summary: plan?.summary ?? "",
+    communityConfirmation: plan?.communityConfirmation,
     bedrooms: [bedroomPlan],
   };
 
