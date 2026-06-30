@@ -1864,6 +1864,20 @@ function AdminDashboard() {
       opened: boolean;
       openCount: number;
     }>;
+    // Refund confirmations that did NOT reach the guest's OTA channel — operator
+    // must resend so the refund still reaches the guest.
+    guestRefundReceiptIssues?: Array<{
+      reservationId: string;
+      token: string;
+      amount: number;
+      guestName: string | null;
+      listingNickname: string | null;
+      channel: string | null;
+      status: string;
+      createdAt: string;
+      errorMessage: string | null;
+    }>;
+    guestRefundReceiptIssueCount?: number;
     bookings: RevenueBookingSummary[];
     largestBooking: RevenueBookingSummary | null;
     highestGrossingBooking: RevenueBookingSummary | null;
@@ -2682,6 +2696,41 @@ function AdminDashboard() {
     onError: (e: any) => toast({ title: "Promote failed", description: e.message, variant: "destructive" }),
   });
 
+  // Resend a refund confirmation that did not reach the guest's OTA channel.
+  // Restricted to kind:"refund" so it can never re-fire an already-sent payment
+  // receipt; the OTA delivery path de-dupes so the guest's channel is never
+  // double-posted (an already-delivered copy is reused).
+  const [resendingRefundFor, setResendingRefundFor] = useState<string | null>(null);
+  const resendRefundReceiptMutation = useMutation({
+    mutationFn: async (reservationId: string) => {
+      const r = await apiRequest("POST", "/api/inbox/guest-receipts/send-for-reservation", {
+        reservationId,
+        kind: "refund",
+      });
+      // 422 = "could not deliver" — a real RESULT (handled in onSuccess), not a
+      // transport error. Only 5xx / network failures throw.
+      if (!r.ok && r.status !== 422) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? err.message ?? `HTTP ${r.status}`);
+      }
+      return r.json() as Promise<{ ok: boolean; message: string; results?: Array<{ outcome: string; reason?: string }> }>;
+    },
+    onMutate: (reservationId: string) => setResendingRefundFor(reservationId),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/revenue-30-days"] });
+      const sent = (data.results ?? []).filter((x) => x.outcome === "sent").length;
+      toast({
+        title: sent > 0 ? "Refund receipt sent" : "Refund receipt not delivered",
+        description: sent > 0
+          ? "The refund confirmation was sent to the guest on their booking channel."
+          : (data.message || "Could not deliver on the guest's OTA channel — check the conversation in Guesty."),
+        variant: sent > 0 ? undefined : "destructive",
+      });
+    },
+    onError: (e: any) => toast({ title: "Resend failed", description: e.message, variant: "destructive" }),
+    onSettled: () => setResendingRefundFor(null),
+  });
+
   const photoScanMutation = useMutation({
     mutationFn: async (vars?: { folders?: string[]; label?: string }) => {
       const folders = vars?.folders;
@@ -3046,6 +3095,38 @@ function AdminDashboard() {
                     {revenueSummary?.guestReceiptPaymentsSent30Days ?? 0} payment · {revenueSummary?.guestReceiptRefundsSent30Days ?? 0} refund · {revenueSummary?.guestReceiptsSent48Hours ?? 0} in last 48h
                   </p>
                 </div>
+                {revenueSummary?.guestRefundReceiptIssues?.length ? (
+                  <div className="rounded-md border border-red-300 bg-red-50/70 p-3 dark:border-red-900 dark:bg-red-950/30" data-testid="block-refund-receipt-issues">
+                    <p className="text-xs font-semibold text-red-700 dark:text-red-300">
+                      ⚠ {revenueSummary.guestRefundReceiptIssues.length} refund confirmation{revenueSummary.guestRefundReceiptIssues.length === 1 ? "" : "s"} did NOT reach the guest's channel
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      A refund was issued in Guesty but the receipt couldn't be delivered on the channel the guest booked through. Resend so the guest is notified.
+                    </p>
+                    <div className="mt-2 space-y-1.5">
+                      {revenueSummary.guestRefundReceiptIssues.map((issue) => (
+                        <div key={issue.token} className="flex flex-wrap items-center justify-between gap-2 rounded border border-red-200 bg-background p-2 dark:border-red-900" data-testid={`row-refund-issue-${issue.token}`}>
+                          <div className="min-w-0 text-xs">
+                            <span className="font-medium">{issue.guestName || "Guest"}</span>
+                            <span className="text-muted-foreground"> · {issue.listingNickname || "—"} · {formatCurrency(issue.amount)} refund</span>
+                            <span className="block text-muted-foreground">
+                              {issue.channel || "unknown channel"} · {issue.status === "misroute" ? "filed off the guest channel" : issue.status} · {formatShortDateTime(issue.createdAt)}
+                            </span>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={resendRefundReceiptMutation.isPending && resendingRefundFor === issue.reservationId}
+                            onClick={() => resendRefundReceiptMutation.mutate(issue.reservationId)}
+                            data-testid={`button-resend-refund-${issue.token}`}
+                          >
+                            {resendRefundReceiptMutation.isPending && resendingRefundFor === issue.reservationId ? "Resending…" : "Resend to guest"}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 <div className="rounded-md border bg-muted/30 p-3" data-testid="block-expected-deposits">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-xs font-medium text-muted-foreground">Expected bank deposits</p>

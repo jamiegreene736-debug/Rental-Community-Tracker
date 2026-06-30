@@ -231,3 +231,35 @@ export function sameTransactionMoment(aIso?: string | null, bIso?: string | null
   const tb = new Date(b).getTime();
   return Number.isFinite(ta) && Number.isFinite(tb) && ta === tb;
 }
+
+// How long a retryable receipt row (`error`/`pending`) may sit before it counts
+// as "stuck" and surfaces to the operator. Several 5-minute scheduler ticks.
+export const RECEIPT_STALE_MS = 30 * 60 * 1000;
+
+// Does a receipt ledger row represent a guest money-confirmation that did NOT
+// reach the guest's OTA channel and needs operator follow-up? This is the safety
+// net for the "a refund must ALWAYS reach the guest" guarantee — the scheduler
+// deliberately does NOT auto-retry a `misroute`/`unconfirmed` send (that would
+// re-post a duplicate; see AGENTS.md #51), so a genuinely non-delivered receipt
+// can only be guaranteed delivered by the operator acting on it.
+//
+//   misroute            → terminal, filed OFF the OTA (e.g. on email): always flag.
+//   error / pending     → retried by the 5-min scheduler, so flag ONLY once stale
+//                         (created `staleMs` ago and still not terminal-sent).
+//   sent / unconfirmed  → reached the OTA (unconfirmed = posted once, just not
+//                         confirmed): not flagged.
+//   page                → a manual standalone /receipt page, no message: not flagged.
+export function receiptNeedsAttention(
+  row: { status?: string | null; createdAtMs?: number | null },
+  nowMs: number,
+  staleMs: number = RECEIPT_STALE_MS,
+): boolean {
+  const status = String(row?.status ?? "").toLowerCase();
+  if (status === "misroute") return true;
+  if (status === "error" || status === "pending") {
+    const created = Number(row?.createdAtMs);
+    if (!Number.isFinite(created)) return true; // unknown age → surface it rather than hide it
+    return nowMs - created >= staleMs;
+  }
+  return false;
+}

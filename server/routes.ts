@@ -116,7 +116,7 @@ import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply
 import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { registerAssistantRoutes } from "./assistant/routes";
 import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar-automation";
-import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel } from "@shared/receipt-message";
+import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel, receiptNeedsAttention } from "@shared/receipt-message";
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation, createReceiptPage } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
@@ -8137,9 +8137,42 @@ export async function registerRoutes(
       let guestReceiptPaymentsSent30Days = 0;
       let guestReceiptRefundsSent30Days = 0;
       let guestReceiptsSent48Hours = 0;
+      // REFUND receipts that did NOT reach the guest's OTA channel (misroute, or a
+      // stale error/pending) — the operator MUST act so the refund still reaches
+      // the guest (the scheduler does not auto-retry these; see AGENTS.md #51).
+      const guestRefundReceiptIssues: Array<{
+        reservationId: string;
+        token: string;
+        amount: number;
+        guestName: string | null;
+        listingNickname: string | null;
+        channel: string | null;
+        status: string;
+        createdAt: string;
+        errorMessage: string | null;
+      }> = [];
       try {
         const receiptRows = await storage.getRecentGuestReceipts(300);
+        const nowMs = now.getTime();
         for (const row of receiptRows) {
+          // Refund confirmations that didn't reach the guest's booking channel —
+          // surface for manual follow-up (only recent ones, within the window).
+          if (row.kind === "refund" && receiptNeedsAttention({ status: row.status, createdAtMs: row.createdAt ? new Date(row.createdAt as any).getTime() : null }, nowMs)) {
+            const createdDate = row.createdAt ? new Date(row.createdAt as any) : null;
+            if (!createdDate || Number.isNaN(createdDate.getTime()) || createdDate >= start) {
+              guestRefundReceiptIssues.push({
+                reservationId: row.reservationId,
+                token: row.token,
+                amount: Number(row.amount ?? 0),
+                guestName: row.guestName ?? null,
+                listingNickname: row.listingNickname ?? null,
+                channel: row.channel ?? null,
+                status: row.status,
+                createdAt: (createdDate ?? now).toISOString(),
+                errorMessage: row.errorMessage ?? null,
+              });
+            }
+          }
           // "unconfirmed" = posted to the guest's OTA channel exactly once
           // (delivery just not confirmed within the verify window) — count it as
           // sent. "misroute"/"error"/"pending" did NOT reach the guest channel.
@@ -8220,6 +8253,11 @@ export async function registerRoutes(
         guestReceiptPaymentsSent30Days,
         guestReceiptRefundsSent30Days,
         guestReceiptsSent48Hours,
+        // Refund confirmations that did NOT reach the guest's OTA channel and
+        // need the operator to resend (safety net for "refunds always reach the
+        // guest"). Sorted newest-first.
+        guestRefundReceiptIssues: guestRefundReceiptIssues.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+        guestRefundReceiptIssueCount: guestRefundReceiptIssues.length,
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch 30-day revenue", message: err.message });
