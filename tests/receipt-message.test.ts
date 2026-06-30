@@ -4,6 +4,8 @@ import {
   sanitizeForBookingChannel,
   receiptDedupKey,
   sameTransactionMoment,
+  receiptNeedsAttention,
+  RECEIPT_STALE_MS,
   formatReceiptMoney,
   formatReceiptLongDate,
   RECEIPT_SENDER_NAME,
@@ -149,6 +151,22 @@ console.log("receipt-message: sameTransactionMoment (migration shim)");
   check("moment: same instant, different format -> same", sameTransactionMoment("2026-06-26T18:00:00Z", "2026-06-26T18:00:00.000+00:00"));
   check("moment: deposit vs balance same day -> DIFFERENT", !sameTransactionMoment("2026-06-26T18:00:00Z", "2026-06-26T18:02:30Z"));
   check("moment: missing -> false", !sameTransactionMoment(null, "2026-06-26T18:00:00Z") && !sameTransactionMoment("2026-06-26T18:00:00Z", ""));
+}
+
+console.log("receipt-message: receiptNeedsAttention (non-delivery safety net)");
+{
+  const now = 1_700_000_000_000;
+  const fresh = now - 60_000;                 // 1 min ago
+  const stale = now - (RECEIPT_STALE_MS + 60_000); // past the stale threshold
+  check("misroute always needs attention", receiptNeedsAttention({ status: "misroute", createdAtMs: fresh }, now));
+  check("sent never needs attention", !receiptNeedsAttention({ status: "sent", createdAtMs: stale }, now));
+  check("unconfirmed reached the OTA -> no attention", !receiptNeedsAttention({ status: "unconfirmed", createdAtMs: stale }, now));
+  check("manual page -> no attention", !receiptNeedsAttention({ status: "page", createdAtMs: stale }, now));
+  check("fresh error retries silently -> no attention", !receiptNeedsAttention({ status: "error", createdAtMs: fresh }, now));
+  check("STALE error -> needs attention", receiptNeedsAttention({ status: "error", createdAtMs: stale }, now));
+  check("fresh pending -> no attention", !receiptNeedsAttention({ status: "pending", createdAtMs: fresh }, now));
+  check("STALE pending -> needs attention", receiptNeedsAttention({ status: "pending", createdAtMs: stale }, now));
+  check("error with unknown age -> surfaced", receiptNeedsAttention({ status: "error", createdAtMs: null }, now));
 }
 
 console.log(`\nreceipt-message: ${pass} passed, ${fail} failed`);

@@ -241,7 +241,15 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
   // Forward match only: a configured token is treated as a substring of the
   // channel (e.g. "airbnb" mutes "airbnb2"). Do NOT also reverse-match — a
   // misconfigured longer token would silently swallow real channels.
-  if (SKIP_CHANNELS.some((s) => channelLc.includes(s))) return { outcome: "skipped", reason: `channel ${channel} is muted` };
+  //
+  // REFUNDS ALWAYS SEND (2026-06-30): the channel mute is for PAYMENT receipts —
+  // a channel might send its own payment confirmation, making ours redundant. A
+  // REFUND confirmation is never redundant and the operator wants it to ALWAYS
+  // reach the guest on the channel they booked through, so refunds bypass the
+  // mute. (See AGENTS.md "Guest payment/refund receipts auto-send" #10.)
+  if (kind === "payment" && SKIP_CHANNELS.some((s) => channelLc.includes(s))) {
+    return { outcome: "skipped", reason: `channel ${channel} is muted` };
+  }
 
   // Already handled? done. "sent" = delivery confirmed; "unconfirmed" = posted
   // but not confirmed; "misroute" = filed off the guest's OTA channel. For the

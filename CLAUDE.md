@@ -43,6 +43,26 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-30 (guest receipts: ensure REFUNDS always reach the guest on their OTA channel): Follow-up
+  to the same-day payment fix. SHIPPED (`claude/refund-receipt-always-ota`, PR #TBD). The refund
+  auto-send + OTA routing ALREADY existed (the `server/guest-receipts.ts` scheduler detects refunds via
+  `realRefundsForReceipts` and posts through `sendGuestyConversationMessage`, which routes to the guest's
+  `integration.platform` channel — Airbnb→Airbnb, VRBO→VRBO, Booking.com→Booking.com). Two gaps closed
+  for the "ALWAYS" guarantee: (1) `RECEIPT_SKIP_CHANNELS` muted both kinds — refunds now BYPASS the mute
+  (`processTransaction` applies it only when `kind === "payment"`), since a channel mute is for redundant
+  payment receipts, not refund confirmations. (2) Per AGENTS.md #51 the scheduler must NOT auto-retry a
+  `misroute`/`unconfirmed` send (would re-post a duplicate — the cardinal sin), so a genuinely
+  non-delivered refund could silently never reach the guest. Added a SAFETY NET: pure
+  `receiptNeedsAttention()` (`shared/receipt-message.ts`) flags refund rows that are `misroute` or a
+  STALE `error`/`pending`; the dashboard revenue payload exposes `guestRefundReceiptIssues` and
+  `home.tsx` renders a red alert + "Resend to guest" button (`kind:"refund"`-scoped force-send via
+  `POST /api/inbox/guest-receipts/send-for-reservation`; the OTA path de-dupes so the channel is never
+  double-posted). `unconfirmed` is deliberately NOT flagged (the message reached the OTA once already).
+  Verified: `tests/receipt-message.test.ts` 46/0, full `npm test` exit 0, build clean, `npm run check`
+  335 = baseline (0 new). Could NOT live-smoke (no Guesty creds) — confirm post-deploy by issuing a
+  refund: the guest gets a refund receipt on their booking channel within ~5 min; any misroute surfaces
+  in the dashboard alert with a working Resend.
+
 - 2026-06-30 (guest receipts: auto-charged FINAL payment got NO receipt — same-day 50/50 dedup
   collapse): Operator reported that when Guesty auto-took the second 50% payment (booking made INSIDE
   the "balance due ~90 days before arrival" window, so the balance is charged the SAME day as the
