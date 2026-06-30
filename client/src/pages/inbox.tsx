@@ -46,6 +46,7 @@ import { resolveIslandRegion } from "@shared/area-identity";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { usePortalSession } from "@/lib/auth";
 import { useAssistantContext } from "@/lib/assistant-context";
+import { setInboxUnreadCount } from "@/lib/inboxUnreadStore";
 
 type InboxBuyInRecord = ArrivalUnitDetail & {
   propertyName?: string;
@@ -2733,6 +2734,14 @@ export default function InboxPage() {
     ),
     [conversations, locallyRepliedAtByConversation, inboxReadOverrides, airbnbPreapprovedIds],
   );
+
+  // Publish the override-aware unread count to the shared store so the global
+  // AppHeader "Inbox" badge updates the moment the operator marks a row
+  // read/unread — the header lives in a separate component and can't read this
+  // page's state directly. See client/src/lib/inboxUnreadStore.ts.
+  useEffect(() => {
+    setInboxUnreadCount(unreadConversationCount);
+  }, [unreadConversationCount]);
 
   useEffect(() => {
     const deepLinkKey = [
