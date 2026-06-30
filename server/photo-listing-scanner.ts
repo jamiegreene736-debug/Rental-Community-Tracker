@@ -65,7 +65,7 @@ import {
   ADDRESS_PLATFORMS,
   buildAddressQuery,
   filterAddressSerpRows,
-  streetPortionOf,
+  parseStreetCityState,
   type AddressPlatformKey,
 } from "@shared/address-listing-logic";
 import { isDuplicateHash } from "./photo-hashing";
@@ -336,10 +336,13 @@ async function folderAddressContext(folder: string): Promise<FolderAddressContex
   );
   if (builder) {
     const rule = communityAddressRuleForName(builder.complexName);
-    const parts = (builder.address ?? "").split(",").map((s) => s.trim());
-    const street = (rule?.street || streetPortionOf(builder.address ?? "")).trim();
-    const city = (rule?.city || parts[1] || "").trim();
-    const state = (rule?.state || parts[2] || "").trim();
+    // parseStreetCityState skips an embedded "Unit N"/"Bldg N" segment so a 4-part
+    // address ("1831 Poipu Rd, Unit 423, Koloa, HI 96756") yields city "Koloa", not
+    // "Unit 423" (the old parts[1] parse fed a bogus city into the SERP query).
+    const parsed = parseStreetCityState(builder.address ?? "");
+    const street = (rule?.street || parsed.street).trim();
+    const city = (rule?.city || parsed.city).trim();
+    const state = (rule?.state || parsed.state).trim();
     if (street && city) return { street, city, state };
     return null;
   }
@@ -348,10 +351,24 @@ async function folderAddressContext(folder: string): Promise<FolderAddressContex
     const draft = await storage.getCommunityDraft(Math.abs(ref.propertyId));
     if (draft) {
       const rule = communityAddressRuleForName(String(draft.name ?? ""));
-      const street = (rule?.street || streetPortionOf(String((draft as any).streetAddress ?? ""))).trim();
-      const city = (rule?.city || String(draft.city ?? "")).trim();
-      const state = (rule?.state || String((draft as any).state ?? "")).trim();
+      const parsed = parseStreetCityState(String((draft as any).streetAddress ?? ""));
+      const street = (rule?.street || parsed.street).trim();
+      const city = (rule?.city || parsed.city || String(draft.city ?? "")).trim();
+      const state = (rule?.state || parsed.state || String((draft as any).state ?? "")).trim();
       if (street && city) return { street, city, state };
+    }
+  }
+  // Replacement / swap-backed folder (e.g. `replacement-p4-uunit-423`). These have a
+  // POSITIVE propertyId so they never hit the draft branch above — the prior code returned
+  // null here, which is why every replacement folder showed address "inconclusive". The
+  // candidate unit's real street address lives on the latest unit-swap row.
+  if (ref) {
+    const swap = await storage.getLatestUnitSwap(ref.propertyId, ref.oldUnitId);
+    if (swap?.newAddress) {
+      const parsed = parseStreetCityState(swap.newAddress);
+      if (parsed.street && parsed.city) {
+        return { street: parsed.street, city: parsed.city, state: parsed.state };
+      }
     }
   }
   return null;
@@ -1010,6 +1027,134 @@ function parseStoredAddressMatches(raw?: string | null): AddressMatch[] {
   } catch {
     return [];
   }
+}
+
+// Address-ONLY re-check (2026-06-30). Runs JUST the address-on-OTA leg for a folder and merges the
+// result into the existing row, WITHOUT touching the photo verdict or re-spending the (much costlier,
+// up to PHOTO_AUDIT_MAX_PHOTOS) reverse-image Lens calls. Why this exists: the address leg shipped in
+// PR #858, but every folder last scanned BEFORE that deploy still carries the default "unknown"
+// address status and reads as "inconclusive" on the dashboard until the next DEEP cron happens to
+// re-scan it (7-day cadence). A full deep re-scan just to populate the address columns would waste
+// ~30 Lens calls per folder; this backfill spends only the ~3-6 SERPs the address leg needs and
+// preserves the existing photo result verbatim. Returns null (no write) when the address leg is
+// disabled, there's no prior photo row, the folder has no unit identity, or no street is resolvable.
+export async function runAddressOnlyCheckForFolder(folder: string): Promise<ScanResult | null> {
+  if (PHOTO_LISTING_ADDRESS_SCAN_DISABLED || !SEARCHAPI_KEY) return null;
+  const prior = await storage.getPhotoListingCheckByFolder(folder);
+  if (!prior) return null; // first-time scan belongs to runPhotoListingCheckForFolder (it owns photos)
+  const rawVerifyTokens = await dynamicVerificationTokensForFolder(folder);
+  if (!rawVerifyTokens || rawVerifyTokens.length === 0) return null;
+  const allowUnverifiedStandalone = rawVerifyTokens.includes(STANDALONE_DRAFT_NO_UNIT_TOKEN);
+  const verifyTokens = rawVerifyTokens.filter((token) => token !== STANDALONE_DRAFT_NO_UNIT_TOKEN);
+  const addrCtx = await folderAddressContext(folder);
+  if (!addrCtx) return null; // no resolvable street — leave the row's address columns as-is
+
+  const authorizedUrls = await getAuthorizedChannelUrls();
+  const addressVerifyCache = new Map<string, boolean>();
+  const verifyUnitForAddress = async (url: string): Promise<boolean> => {
+    const cached = addressVerifyCache.get(url);
+    if (cached !== undefined) return cached;
+    for (const token of verifyTokens) {
+      if (await verifyUrlMentionsUnit(url, token)) {
+        addressVerifyCache.set(url, true);
+        return true;
+      }
+    }
+    addressVerifyCache.set(url, false);
+    return false;
+  };
+
+  const addr = await checkAddressOnOtas(addrCtx, {
+    authorizedUrls,
+    allowUnverifiedStandalone,
+    verifyUnit: verifyUnitForAddress,
+  });
+
+  // Outage preservation for the address leg: if every platform's SERP failed, keep the prior address
+  // statuses/matches rather than repainting a known red/green to gray.
+  const priorAddr = {
+    airbnb:  (prior as any).airbnbAddressStatus  as PlatformStatus | undefined,
+    vrbo:    (prior as any).vrboAddressStatus    as PlatformStatus | undefined,
+    booking: (prior as any).bookingAddressStatus as PlatformStatus | undefined,
+  };
+  const pick = (fresh: PlatformStatus, p?: PlatformStatus): PlatformStatus =>
+    (!addr.anySucceeded && fresh === "unknown" && p) ? p : fresh;
+
+  const addressMatches = (!addr.anySucceeded && addr.matches.length === 0)
+    ? parseStoredAddressMatches((prior as any).addressMatches)
+    : addr.matches.slice(0, 15);
+
+  // Merge: keep the prior PHOTO verdict + matches + photo error verbatim; write only the address leg.
+  await storage.upsertPhotoListingCheck({
+    photoFolder: folder,
+    airbnbStatus:  prior.airbnbStatus,
+    vrboStatus:    prior.vrboStatus,
+    bookingStatus: prior.bookingStatus,
+    airbnbMatches:  prior.airbnbMatches  ?? null,
+    vrboMatches:    prior.vrboMatches    ?? null,
+    bookingMatches: prior.bookingMatches ?? null,
+    airbnbAddressStatus:  pick(addr.statuses.airbnb,  priorAddr.airbnb),
+    vrboAddressStatus:    pick(addr.statuses.vrbo,    priorAddr.vrbo),
+    bookingAddressStatus: pick(addr.statuses.booking, priorAddr.booking),
+    addressMatches: addressMatches.length ? JSON.stringify(addressMatches) : null,
+    photosChecked: prior.photosChecked ?? 0,
+    lensCalls: prior.lensCalls ?? 0, // address-only — spent no NEW Lens calls
+    errorMessage: prior.errorMessage ?? null,
+  });
+
+  return {
+    folder,
+    airbnbStatus:  prior.airbnbStatus  as PlatformStatus,
+    vrboStatus:    prior.vrboStatus    as PlatformStatus,
+    bookingStatus: prior.bookingStatus as PlatformStatus,
+    airbnbMatches: [], vrboMatches: [], bookingMatches: [],
+    airbnbAddressStatus:  pick(addr.statuses.airbnb,  priorAddr.airbnb),
+    vrboAddressStatus:    pick(addr.statuses.vrbo,    priorAddr.vrbo),
+    bookingAddressStatus: pick(addr.statuses.booking, priorAddr.booking),
+    addressMatches,
+    photosChecked: prior.photosChecked ?? 0,
+    lensCalls: 0,
+  };
+}
+
+// Backfill the address leg across folders whose address status is still "unknown" (default: every such
+// folder with an existing photo row). Cheap relative to a deep re-scan — one address-only check per
+// folder. Sequential with a pause to stay under SearchAPI rate limits. Fire-and-forget from the admin
+// endpoint; returns a small tally for the manual/smoke caller.
+export async function runAddressBackfill(
+  opts: { folders?: string[]; pauseMs?: number; max?: number } = {},
+): Promise<{ scanned: number; updated: number; found: number }> {
+  let folders = opts.folders;
+  if (!folders) {
+    const rows = await storage.getAllPhotoListingChecks();
+    folders = rows
+      .filter((r) =>
+        [(r as any).airbnbAddressStatus, (r as any).vrboAddressStatus, (r as any).bookingAddressStatus]
+          .every((s) => (s ?? "unknown") === "unknown"),
+      )
+      .map((r) => r.photoFolder);
+  }
+  const pause = opts.pauseMs ?? 1200;
+  let scanned = 0, updated = 0, found = 0;
+  for (let i = 0; i < folders.length; i++) {
+    if (opts.max && scanned >= opts.max) break;
+    const f = folders[i];
+    try {
+      const r = await runAddressOnlyCheckForFolder(f);
+      scanned++;
+      if (r) {
+        updated++;
+        const anyFound = [r.airbnbAddressStatus, r.vrboAddressStatus, r.bookingAddressStatus].includes("found");
+        if (anyFound) found++;
+        console.error(`[photo-listing-scanner] address-backfill ${f}: a=${r.airbnbAddressStatus} v=${r.vrboAddressStatus} b=${r.bookingAddressStatus}`);
+      }
+    } catch (e: any) {
+      console.error(`[photo-listing-scanner] address-backfill ${f} crashed: ${e?.message}`);
+    }
+    if (i < folders.length - 1) await new Promise((rr) => setTimeout(rr, pause));
+  }
+  console.error(`[photo-listing-scanner] address-backfill done: ${updated}/${scanned} updated, ${found} found`);
+  return { scanned, updated, found };
 }
 
 // Returns folders that have photos (label rows or files on disk) AND

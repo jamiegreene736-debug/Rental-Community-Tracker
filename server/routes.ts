@@ -254,7 +254,7 @@ import {
   scanSeasonalAvailabilityCapacity,
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
-import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
+import { runPhotoListingCheckForFolders, runAddressBackfill, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
 import { evaluateComboPhotoCommunityGate, type ComboPhotoGateDecision } from "@shared/combo-photo-community-gate";
 import {
@@ -44593,6 +44593,27 @@ Return ONLY compact JSON with this exact shape:
       res.json({ started: true, folders, deep: true });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? "Failed to start photo-listing scan" });
+    }
+  });
+
+  // POST /api/photo-listing-check/address-backfill
+  // Cheap catch-up for the address-on-OTA leg: runs ONLY the address text-search (no reverse-image
+  // Lens spend) for folders whose address status is still "unknown", merging the result into the
+  // existing photo row. Use after the address leg (PR #858) deploys so folders last scanned before it
+  // populate their 📍 address column immediately instead of waiting for the next 7-day deep cron.
+  // Body: { folders?: string[] } — omit to backfill every address-unknown folder. Fire-and-forget.
+  app.post("/api/photo-listing-check/address-backfill", async (req, res) => {
+    try {
+      const folders = Array.isArray((req.body as any)?.folders)
+        ? ((req.body as any).folders as any[]).filter((f): f is string => typeof f === "string")
+        : undefined;
+      void runAddressBackfill(folders && folders.length > 0 ? { folders } : {});
+      res.json({
+        started: true,
+        scope: folders && folders.length > 0 ? `${folders.length} folder(s)` : "all address-unknown folders",
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to start address backfill" });
     }
   });
 
