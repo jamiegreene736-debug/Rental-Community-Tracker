@@ -4526,7 +4526,7 @@ function AdminDashboard() {
                     <SortIcon field="name" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[274px] px-1">
+                <TableHead className="w-[274px] pl-1 pr-2">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -4539,7 +4539,7 @@ function AdminDashboard() {
                     <SortIcon field="community" />
                   </Button>
                 </TableHead>
-                <TableHead className="w-[92px] px-0.5" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
+                <TableHead className="w-[92px] pl-1 pr-0.5" title="Community/resort-wide minimum-night rule from published evidence. Unknown is safer than guessing from one OTA listing.">
                   <Button
                     variant="ghost"
                     className="h-auto min-h-0 min-w-0 max-w-full gap-1.5 whitespace-normal px-0 py-0 text-[11px] font-medium leading-tight"
@@ -4909,7 +4909,7 @@ function AdminDashboard() {
                       const errorPreview = photoCheckErrorPreview(agg?.errorMessages?.[0]);
                       return (
                         <div className="flex flex-col items-center gap-0.5" data-testid={`photo-match-${property.id}`}>
-                          <div className="flex gap-[1px] justify-center items-center">
+                          <div className="flex gap-1 justify-center items-center">
                             {items.map((it) => {
                               const tone = toneOf(it.status);
                               const p = PAL[tone];
@@ -4952,7 +4952,7 @@ function AdminDashboard() {
                             </div>
                           ) : null}
                           {hasAddrData ? (
-                            <div className="flex gap-[1px] justify-center items-center" data-testid={`photo-addr-${property.id}`}>
+                            <div className="flex gap-1 justify-center items-center" data-testid={`photo-addr-${property.id}`}>
                               <span className="text-[8px] leading-none mr-[1px]" title="Address-on-OTA check: does this unit's street address appear on a real Airbnb / VRBO / Booking listing page? (unit-number gated; our own listings excluded)">📍</span>
                               {addrItems.map((it) => {
                                 const tone = toneOf(it.status);
@@ -5179,7 +5179,7 @@ function AdminDashboard() {
                       <p className="text-xs text-muted-foreground mt-0.5 truncate">{property.unitDetails}</p>
                     </div>
                   </TableCell>
-                  <TableCell className="px-1 py-2">
+                  <TableCell className="pl-1 pr-2 py-2">
                     <Badge
                       variant={communityVariant(property.pricingArea)}
                     className="no-default-hover-elevate no-default-active-elevate inline-flex max-w-[240px] justify-start truncate text-xs"
@@ -5189,7 +5189,7 @@ function AdminDashboard() {
                       {compactCommunityName(property.community)}
                     </Badge>
                   </TableCell>
-                  <TableCell className="px-0.5 py-2">
+                  <TableCell className="pl-1 pr-0.5 py-2">
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>
