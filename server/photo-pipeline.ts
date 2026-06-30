@@ -29,6 +29,11 @@ import {
   mergeBedroomClustersByCaption,
   mergeBedroomClustersSameRoom,
 } from "../shared/photo-bedroom-coverage-logic";
+import {
+  applySameRoomGroups,
+  needsSameRoomVision,
+} from "../shared/bedroom-same-room-logic";
+import { groupSameBedroomsViaVision, type SameRoomRep } from "./bedroom-same-room-vision";
 import { storage } from "./storage";
 
 // Category priority. Lower index = higher priority (kept first).
@@ -461,6 +466,54 @@ function coalesceBathrooms(items: LabeledResult[]): LabeledResult[] {
   return out;
 }
 
+// Magic-byte MIME sniff for the vision request — files land as .jpg but may be
+// PNG/WebP bytes, and Anthropic rejects a mismatched media_type. Falls back to
+// JPEG (the download pipeline's default extension).
+function sniffImageMime(buffer: Buffer): string {
+  if (buffer.length >= 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return "image/png";
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.length >= 12 && buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  const head = buffer.slice(0, 6).toString("ascii");
+  if (head.startsWith("GIF87") || head.startsWith("GIF89")) return "image/gif";
+  return "image/jpeg";
+}
+
+const SAME_ROOM_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+// Send one representative per bedroom cluster to the conservative same-room vision
+// pass and fold the clusters it confirms are the same physical room. If ANY
+// representative can't be loaded/encoded we skip entirely (a partial set could
+// make the model partition only some rooms and mis-merge) — fail-safe = no merge.
+async function visionFoldSameRoomBedrooms<T extends { id: string; caption?: string; item: LabeledResult }>(
+  groups: T[][],
+  folderPath: string,
+  apiKey: string,
+  expectedBedrooms?: number | null,
+): Promise<T[][]> {
+  const reps = groups.map((g) => g[0]).filter(Boolean) as T[];
+  if (reps.length !== groups.length || reps.length < 2) return groups;
+  const repInputs: SameRoomRep[] = [];
+  for (const ref of reps) {
+    try {
+      const buf = await fs.promises.readFile(path.join(folderPath, ref.item.tempName));
+      if (buf.length === 0 || buf.length > SAME_ROOM_MAX_IMAGE_BYTES) return groups;
+      repInputs.push({ id: ref.id, mime: sniffImageMime(buf), base64: buf.toString("base64"), caption: ref.caption });
+    } catch {
+      return groups;
+    }
+  }
+  const partition = await groupSameBedroomsViaVision(repInputs, { apiKey });
+  if (!partition) return groups;
+  // Floor: surface AT MOST one missing bedroom below the listing's claimed count;
+  // reject a partition implying two+ missing (likelier a vision over-merge).
+  const minClusters = expectedBedrooms && expectedBedrooms > 0 ? Math.max(1, expectedBedrooms - 1) : undefined;
+  const { clusters: folded, mergedCount } = applySameRoomGroups(groups, reps.map((r) => r.id), partition, minClusters);
+  if (mergedCount > 0) {
+    console.log(`[photo-pipeline] same-room vision folded ${mergedCount} bedroom angle cluster(s) → ${folded.length} room(s)`);
+  }
+  return folded;
+}
+
 // Label bedroom photos in place — NO DROPPING. Groups by visual cluster
 // like coalesceBedrooms did, picks a master cluster (King bed preferred,
 // else largest cluster), and re-captions each photo as "Master Bedroom",
@@ -469,7 +522,7 @@ function coalesceBathrooms(items: LabeledResult[]): LabeledResult[] {
 async function labelBedroomsInPlace(
   items: LabeledResult[],
   folderPath: string,
-  opts: { expectedBedrooms?: number | null } = {},
+  opts: { expectedBedrooms?: number | null; apiKey?: string | null } = {},
 ): Promise<LabeledResult[]> {
   if (items.length === 0) return items;
   const hashes = await Promise.all(
@@ -501,6 +554,18 @@ async function labelBedroomsInPlace(
       bedroomGroups,
       opts.expectedBedrooms,
     ).clusters;
+  }
+
+  // Vision same-room fold: hash + captions miss angles of one room that look
+  // different and were captioned independently ("King Bedroom" + "Bedroom With
+  // TV"). A conservative Sonnet pass reads the pixels and only merges clusters it
+  // can prove are the same physical room. This runs REGARDLESS of expectedBedrooms
+  // (the over-count usually equals expected — e.g. a 3BR whose 3rd bedroom was
+  // never photographed shows master + master-angle + guest = 3), so the room
+  // count reflects the rooms actually photographed and a coverage gap surfaces
+  // instead of being masked. No key / disabled / unreadable file → no-op.
+  if (opts.apiKey && needsSameRoomVision(bedroomGroups.length)) {
+    bedroomGroups = await visionFoldSameRoomBedrooms(bedroomGroups, folderPath, opts.apiKey, opts.expectedBedrooms);
   }
 
   const clusterBedType = (group: BedroomRef[]): string | null => {
@@ -746,6 +811,7 @@ export async function downloadAndPrioritize(opts: {
   const bathroomItems = survivors.filter((r) => r.category === "Bathrooms");
   const relabeledBedrooms = await labelBedroomsInPlace(bedroomItems, folderPath, {
     expectedBedrooms: opts.requiredBedrooms ?? null,
+    apiKey: anthropicKey,
   });
   const relabeledBathrooms = labelBathroomsInPlace(bathroomItems);
   // Rebuild survivors by overlaying the re-labeled bedrooms/bathrooms
@@ -834,6 +900,13 @@ export async function downloadAndPrioritize(opts: {
   }
 
   // Step 7b: persist bedroom cluster ids on photo_labels for fast community checks.
+  // NOTE: this precompute is the RAW dHash clustering — it does NOT see the
+  // same-room vision fold that labelBedroomsInPlace just applied, so its cluster
+  // COUNT can be higher than the real room count (e.g. a master shot from two
+  // angles → two precompute ids). That's intentional and harmless: the only
+  // consumer (the coverage engine, via builder-photo-groups) re-runs the caption
+  // + vision same-room fold on every check, so the persisted ids are a starting
+  // point, not the final room count.
   try {
     const bedroomFiles: Array<{ filename: string; label: string; absPath: string }> = [];
     for (let i = 0; i < kept.length; i++) {
@@ -988,7 +1061,7 @@ export async function relabelFolderPhotos(
   const bedroomItems = rows.filter((r) => r.category === "Bedrooms");
   const bathroomItems = rows.filter((r) => r.category === "Bathrooms");
   const expectedBedrooms = await readFolderExpectedBedrooms(folderPath);
-  const relabeledBedrooms = await labelBedroomsInPlace(bedroomItems, folderPath, { expectedBedrooms });
+  const relabeledBedrooms = await labelBedroomsInPlace(bedroomItems, folderPath, { expectedBedrooms, apiKey: anthropicKey });
   const relabeledBathrooms = labelBathroomsInPlace(bathroomItems);
   const labelByName = new Map<string, LabeledResult>();
   for (const r of [...relabeledBedrooms, ...relabeledBathrooms]) labelByName.set(r.tempName, r);

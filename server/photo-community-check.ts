@@ -919,6 +919,7 @@ export async function runPhotoCommunityCheck(
         (content) => callVisionJson(apiKey, content),
         unitInputs,
         expectedListingBedrooms,
+        apiKey,
       );
     } catch (e: any) {
       warning = warning

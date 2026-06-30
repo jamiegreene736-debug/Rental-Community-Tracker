@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
 import { OperationFailureActions } from "@/components/OperationFailureActions";
+import { useToast } from "@/hooks/use-toast";
 
 type PreflightReplacementFindJob = {
   id: string;
@@ -211,6 +212,7 @@ export function UnitReplacementFlow({
   onClose?: () => void;
   onUnitReplaced?: (oldUnitId: string, newUnit: ReplacementUnitData, swapId: number) => void;
 }) {
+  const { toast } = useToast();
   const [selectedUnitId, setSelectedUnitId] = useState(unit.id);
   const [stage, setStage] = useState<"idle" | "searching" | "checking" | "found" | "replacing" | "error">("idle");
   const [result, setResult] = useState<ReplacementUnitData | null>(null);
@@ -526,6 +528,19 @@ export function UnitReplacementFlow({
       const data = await resp.json();
       const swapId: number = data?.swap?.id ?? 0;
       const photoFolder = typeof data?.photoFolder === "string" ? data.photoFolder : undefined;
+      // Warn when the pulled photos cover fewer distinct bedrooms than the
+      // listing claims — e.g. a 3BR where only 2 bedrooms were actually
+      // photographed (the same-room scan no longer masks this as 3/3).
+      const shortfall = Number(data?.coverage?.bedroomsShortfall ?? 0);
+      if (shortfall > 0) {
+        const found = Number(data?.coverage?.bedroomsFound ?? data?.bedroomsFound ?? 0);
+        const expected = Number(data?.coverage?.bedroomsExpected ?? result.bedrooms ?? 0);
+        toast({
+          title: "Replacement saved — but a bedroom may be missing photos",
+          description: `Only ${found} of ${expected} bedrooms have distinct photos in this listing. Review the Photos tab and re-pull or pick a richer source if a bedroom is missing.`,
+          duration: 12000,
+        });
+      }
       saveReplacementJobRef(propertyId, null);
       setReplacementJobId(null);
       setReplacementJob(null);

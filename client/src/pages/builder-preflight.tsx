@@ -425,7 +425,7 @@ type PreflightRescrapeJob = {
   bathroomCount: number | null;
   sourceUrl: string | null;
   urlSource: string | null;
-  coverage: { bedroomsShortfall?: number; bathroomsShortfall?: number; bedroomsExpected?: number } | null;
+  coverage: { bedroomsShortfall?: number; bathroomsShortfall?: number; bedroomsExpected?: number; bedroomsFound?: number } | null;
   error: string | null;
 };
 
@@ -859,8 +859,15 @@ export default function BuilderPreflight() {
         const noInteriors = beds === 0 && baths === 0;
         const bedShortfall = Number(job.coverage?.bedroomsShortfall ?? 0);
         const expectedBeds = job.coverage?.bedroomsExpected;
+        // Use the true distinct-room count from coverage, NOT `beds` —
+        // `bedroomCount` is max(found, claimed) for display, so it would render the
+        // self-contradictory "Only 3 found — listing claims 3" when a gap exists.
+        const foundBeds = Number(
+          job.coverage?.bedroomsFound
+          ?? (typeof expectedBeds === "number" ? expectedBeds - bedShortfall : beds),
+        );
         const shortfallNote = bedShortfall > 0
-          ? ` ⚠ Only ${beds} unique bedrooms found — listing claims ${expectedBeds}. Click "Change" if you need a richer source.`
+          ? ` ⚠ Only ${foundBeds} unique bedrooms found — listing claims ${expectedBeds}. Click "Change" if you need a richer source.`
           : "";
         toast({
           title: noInteriors
