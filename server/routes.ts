@@ -1510,10 +1510,13 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   const rateChanges = summarizePricingRateChanges(pricingResult.logs);
   const confidenceSummary = summarizeMarketRateProgressConfidence(pricingResult.rows);
   const pricingRecipe = (item.progress as any)?.pricingRecipe ?? null;
+  const savedSourceLabel = usingStaticEngine
+    ? "Claude static seasonal rates"
+    : "SearchAPI Airbnb monthly pricing";
   item.progress = {
-    phase: "searchapi-airbnb",
+    phase: usingStaticEngine ? "claude-static" : "searchapi-airbnb",
     percent: 80,
-    label: `SearchAPI Airbnb monthly pricing saved for ${pricingResult.rows.length} bedroom count(s); pushing Guesty base rates plus lead-time scarcity pricing`,
+    label: `${savedSourceLabel} saved for ${pricingResult.rows.length} bedroom count(s); pushing Guesty base rates plus lead-time scarcity pricing`,
     rows: pricingResult.rows.length,
     confidence: confidenceSummary,
     pricingRecipe,
@@ -1521,7 +1524,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
-  await topQueueEvent("bulk-pricing", job.id, "item-searchapi-completed", `SearchAPI Airbnb monthly pricing completed for ${item.label}`, {
+  await topQueueEvent("bulk-pricing", job.id, usingStaticEngine ? "item-research-completed" : "item-searchapi-completed", `${savedSourceLabel} completed for ${item.label}`, {
     itemKey: item.id,
     meta: { propertyId: item.propertyId, rows: pricingResult.rows.length, confidence: confidenceSummary, pricingRecipe, blackoutCount: blackoutWindows.length },
   });

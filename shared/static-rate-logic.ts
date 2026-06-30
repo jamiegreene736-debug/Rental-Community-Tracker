@@ -75,6 +75,10 @@ export type CommunityConfirmation = {
   stateMatch: boolean;
   locationMatch: boolean;
   curated: boolean;
+  // Claude's own research-backed verification that the resort is real + located
+  // where expected (independent of the string match).
+  claudeConfirmed: boolean;
+  verifiedResort?: string;
   confirmed: boolean;
   detail: string;
 };
@@ -121,22 +125,42 @@ export function confirmResearchCommunity(args: {
   expectedCity?: string;
   expectedState?: string;
   curated?: boolean;
+  // Claude's own research verdict: it web-verified the resort exists where expected.
+  claudeConfirmed?: boolean;
+  verifiedResort?: string;
+  // Claude's verified city/state — when present, they count toward the location
+  // match too (so a draft whose listing name omits the city still confirms when
+  // Claude's research independently places it in the right city/state).
+  verifiedCity?: string;
+  verifiedState?: string;
 }): CommunityConfirmation {
   const label = normalizeText(args.searchLabel);
   const community = (args.community || "").trim();
-  const nameMatch = community.length > 0 && label.includes(normalizeText(community));
-  const cityMatch = args.expectedCity ? label.includes(normalizeText(args.expectedCity)) : true;
-  const stateMatch = args.expectedState ? labelMentionsState(label, args.expectedState) : true;
+  const claudeConfirmed = !!args.claudeConfirmed;
+  const nameMatch = (community.length > 0 && label.includes(normalizeText(community)))
+    || (!!args.verifiedResort && normalizeText(args.verifiedResort).includes(normalizeText(community)));
+  // City/state match against the research label OR Claude's verified location.
+  const cityMatch = args.expectedCity
+    ? (label.includes(normalizeText(args.expectedCity))
+        || (!!args.verifiedCity && normalizeText(args.verifiedCity).includes(normalizeText(args.expectedCity))))
+    : true;
+  const stateMatch = args.expectedState
+    ? (labelMentionsState(label, args.expectedState)
+        || (!!args.verifiedState && labelMentionsState(normalizeText(args.verifiedState), args.expectedState)))
+    : true;
   const locationMatch = cityMatch && stateMatch;
   const curated = !!args.curated;
-  const confirmed = locationMatch && (nameMatch || curated);
+  // Confirmed when the location lines up AND we have an identity signal: a name
+  // match, a curated market, OR Claude's own research confirmation.
+  const confirmed = locationMatch && (nameMatch || curated || claudeConfirmed);
   const loc = [args.expectedCity, args.expectedState].filter(Boolean).join(", ");
+  const how = claudeConfirmed ? " (Claude web-verified the resort)" : "";
   const detail = confirmed
-    ? `Confirmed: researching ${community}${loc ? ` in ${loc}` : ""}.`
+    ? `Confirmed: researching ${community}${loc ? ` in ${loc}` : ""}${how}.`
     : !locationMatch
       ? `⚠ Research location doesn’t match this listing’s ${loc || "expected location"} — verify the resort before pushing.`
       : `⚠ Couldn’t confirm the community name in the research target — verify it matches ${community}.`;
-  return { community, searchLabel: args.searchLabel, expectedCity: args.expectedCity, expectedState: args.expectedState, nameMatch, cityMatch, stateMatch, locationMatch, curated, confirmed, detail };
+  return { community, searchLabel: args.searchLabel, expectedCity: args.expectedCity, expectedState: args.expectedState, nameMatch, cityMatch, stateMatch, locationMatch, curated, claudeConfirmed, verifiedResort: args.verifiedResort, confirmed, detail };
 }
 
 export const STATIC_RATE_SEASONS: SeasonType[] = ["LOW", "HIGH", "HOLIDAY"];

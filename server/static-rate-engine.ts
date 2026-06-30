@@ -179,6 +179,16 @@ type ClaudeBedroomResult = {
   metricsUsed?: string[];
 };
 
+// Claude's own confirmation that the resort/community is real and at the expected
+// place — a genuine research-backed identity check (not just a string match).
+type ClaudeCommunityVerdict = {
+  confirmed?: boolean;
+  verifiedResort?: string;
+  verifiedCity?: string;
+  verifiedState?: string;
+  note?: string;
+};
+
 function buildResearchPrompt(args: {
   propertyName: string;
   community: string;
@@ -191,6 +201,8 @@ function buildResearchPrompt(args: {
   lines.push(`You are a vacation-rental revenue analyst. RESEARCH the real market and set BUY-IN COST BASIS rates: the nightly dollar amount we'd expect to PAY to secure ONE comparable rental unit (not the guest-facing price — a markup is applied downstream).`);
   lines.push(``);
   lines.push(`USE THE web_search TOOL. Search Google and vacation-rental sites (Airbnb, VRBO, Booking.com, the resort's own site) for ACTUAL current nightly rates at this specific resort/community for each bedroom size, in each season. Run multiple searches (e.g. "<resort> <N> bedroom nightly rate", "<resort> vacation rental winter holiday rates", "<resort> off-season rates"). Base your numbers on what you actually find, not on a formula.`);
+  lines.push(``);
+  lines.push(`FIRST, CONFIRM THE RESORT: use web search to verify that this resort/community is a real vacation-rental property and that it is located in the stated city/state. Report what you confirmed (its canonical name + real city/state). Only set community.confirmed=true if your research confirms the resort exists at that location.`);
   lines.push(``);
   lines.push(`Resort / community to research: ${args.searchLabel}`);
   lines.push(`(internal community key: ${args.community})`);
@@ -214,6 +226,7 @@ function buildResearchPrompt(args: {
   lines.push(`Keep LOW < HIGH < HOLIDAY within each year. After researching, respond with ONLY a JSON object (no prose outside it) of this exact shape:`);
   lines.push(`{`);
   lines.push(`  "summary": "<one sentence: what you researched and the headline finding>",`);
+  lines.push(`  "community": { "confirmed": <true|false>, "verifiedResort": "<canonical resort/community name you confirmed>", "verifiedCity": "<city>", "verifiedState": "<state>", "note": "<how you confirmed it>" },`);
   lines.push(`  "bedrooms": [`);
   lines.push(`    { "bedrooms": <int>, "year1": {"LOW": <int>, "HIGH": <int>, "HOLIDAY": <int>}, "year2": {"LOW": <int>, "HIGH": <int>, "HOLIDAY": <int>}, "confidence": <0-100 int>, "reasoning": "<what you found and the sources/rates it came from>", "metricsUsed": ["web-search", "<source/site>", ...] }`);
   lines.push(`  ]`);
@@ -230,9 +243,9 @@ async function researchAnchorsWithClaude(args: {
   unitCount: number;
   perBedroom: BedroomMetrics[];
   trailing: { revenue: number; bookings: number; windowDays: number } | null;
-}): Promise<{ summary: string; searchCount: number; byBedroom: Map<number, ClaudeBedroomResult> } | null> {
+}): Promise<{ summary: string; searchCount: number; byBedroom: Map<number, ClaudeBedroomResult>; community: ClaudeCommunityVerdict | null } | null> {
   const prompt = buildResearchPrompt(args);
-  const res = await callClaudeWebSearchJson<{ summary?: string; bedrooms?: ClaudeBedroomResult[] }>({
+  const res = await callClaudeWebSearchJson<{ summary?: string; community?: ClaudeCommunityVerdict; bedrooms?: ClaudeBedroomResult[] }>({
     model: STATIC_RATE_MODEL,
     maxTokens: 4000,
     system: "You are a precise vacation-rental pricing analyst. You research with web search, then return only valid JSON — no prose outside the JSON object.",
@@ -253,6 +266,7 @@ async function researchAnchorsWithClaude(args: {
     summary: typeof res.data.summary === "string" ? res.data.summary : "",
     searchCount: res.searchCount ?? 0,
     byBedroom,
+    community: res.data.community && typeof res.data.community === "object" ? res.data.community : null,
   };
 }
 
@@ -404,13 +418,19 @@ export async function generateStaticRatesForTarget(
     ? `${claude.summary || `Researched ${searchLabel}.`} (${claude.searchCount} web search${claude.searchCount === 1 ? "" : "es"})`
     : `Static seasonal rates for ${args.community} (web research unavailable — operator table fallback).`;
 
-  // Double-check the research target matches this listing's community + location.
+  // Double-check the research target matches this listing's community + location,
+  // backed by Claude's own web verification of the resort when available.
+  const verdict = claude?.community ?? null;
   const communityConfirmation = confirmResearchCommunity({
     community: args.community,
     searchLabel,
     expectedCity: args.expectedCity,
     expectedState: args.expectedState,
     curated: args.curated,
+    claudeConfirmed: verdict?.confirmed === true,
+    verifiedResort: typeof verdict?.verifiedResort === "string" ? verdict.verifiedResort : undefined,
+    verifiedCity: typeof verdict?.verifiedCity === "string" ? verdict.verifiedCity : undefined,
+    verifiedState: typeof verdict?.verifiedState === "string" ? verdict.verifiedState : undefined,
   });
 
   const rows: any[] = [];
@@ -426,7 +446,11 @@ export async function generateStaticRatesForTarget(
       percentileBasis: null,
       unitCount: args.unitCount,
       searchedBedrooms: bedroomCounts,
-      resortConfident: args.resortConfident ?? true,
+      // The community confirmation (name + location, backed by Claude's web
+      // verification) is now the authoritative resort-match signal — so the
+      // legacy "resort confident" flag agrees with the confirmation banner
+      // instead of flagging every non-curated draft.
+      resortConfident: communityConfirmation.confirmed,
       bedroomSplitInferred: args.bedroomSplitInferred ?? false,
       model: resolved.usedClaude ? STATIC_RATE_MODEL : "static-fallback",
       metricsUsed: resolved.metricsUsed,

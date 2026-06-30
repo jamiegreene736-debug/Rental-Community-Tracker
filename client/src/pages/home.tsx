@@ -3966,7 +3966,7 @@ function AdminDashboard() {
                                             </span>
                                           </span>
                                         )}
-                                        {resortUnconfident && (
+                                        {resortUnconfident && !communityConfirmation && (
                                           <span className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 font-medium text-amber-800" title="This draft's community could not be matched to a curated market, so the resort searched is a best-guess fallback. Verify the resort before trusting these rates.">
                                             ⚠ resort not confidently matched
                                           </span>
