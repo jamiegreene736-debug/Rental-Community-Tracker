@@ -11,6 +11,19 @@ type Season = "LOW" | "HIGH" | "HOLIDAY";
 type YearKey = "year1" | "year2";
 
 type SeasonAnchors = { LOW: number; HIGH: number; HOLIDAY: number };
+type CommunityConfirmation = {
+  community: string;
+  searchLabel: string;
+  expectedCity?: string;
+  expectedState?: string;
+  nameMatch: boolean;
+  cityMatch: boolean;
+  stateMatch: boolean;
+  locationMatch: boolean;
+  curated: boolean;
+  confirmed: boolean;
+  detail: string;
+};
 type BedroomPlan = {
   bedrooms: number;
   anchors: { year1: SeasonAnchors; year2: SeasonAnchors };
@@ -23,6 +36,7 @@ type BedroomPlan = {
   generatedAt?: string;
   model?: string;
   summary?: string;
+  communityConfirmation?: CommunityConfirmation;
 };
 
 const SEASONS: Season[] = ["LOW", "HIGH", "HOLIDAY"];
@@ -127,6 +141,41 @@ export default function StaticRatePlanPanel({ propertyId, version }: { propertyI
           {loading ? "Loading…" : "↻ Reload"}
         </button>
       </div>
+
+      {(() => {
+        const conf = plans?.find((p) => p.communityConfirmation)?.communityConfirmation;
+        if (!conf) return null;
+        const ok = conf.confirmed;
+        const loc = [conf.expectedCity, conf.expectedState].filter(Boolean).join(", ");
+        return (
+          <div
+            style={{
+              marginBottom: 8,
+              padding: "7px 10px",
+              borderRadius: 6,
+              border: `1px solid ${ok ? "#bbf7d0" : "#fde68a"}`,
+              background: ok ? "#f0fdf4" : "#fffbeb",
+              color: ok ? "#166534" : "#92400e",
+            }}
+            title={conf.detail}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>
+              {ok ? "✓ Community confirmed" : "⚠ Confirm community"} — {conf.detail}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 11 }}>
+              <span><span style={{ color: "#6b7280" }}>Listing community:</span> <b>{conf.community}</b></span>
+              {loc && <span><span style={{ color: "#6b7280" }}>Location:</span> <b>{loc}</b></span>}
+              <span><span style={{ color: "#6b7280" }}>Researching:</span> <b>{conf.searchLabel}</b></span>
+              <span style={{ color: conf.nameMatch ? "#166534" : "#92400e" }}>
+                Name {conf.nameMatch ? "✓" : conf.curated ? "(curated)" : "✕"}
+              </span>
+              <span style={{ color: conf.locationMatch ? "#166534" : "#92400e" }}>
+                Location {conf.locationMatch ? "✓" : "✕"}
+              </span>
+            </div>
+          </div>
+        );
+      })()}
 
       {error && <div style={{ color: "#991b1b", marginBottom: 6 }}>Couldn’t load static rates: {error}</div>}
       {!error && plans && plans.length === 0 && (

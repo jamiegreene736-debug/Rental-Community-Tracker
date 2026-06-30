@@ -849,6 +849,19 @@ export const propertyMarketRates = pgTable("property_market_rates", {
     model: string;
     source: "claude-static" | "static-fallback";
     summary: string;
+    communityConfirmation?: {
+      community: string;
+      searchLabel: string;
+      expectedCity?: string;
+      expectedState?: string;
+      nameMatch: boolean;
+      cityMatch: boolean;
+      stateMatch: boolean;
+      locationMatch: boolean;
+      curated: boolean;
+      confirmed: boolean;
+      detail: string;
+    };
     bedrooms: Array<{
       bedrooms: number;
       anchors: { year1: { LOW: number; HIGH: number; HOLIDAY: number }; year2: { LOW: number; HIGH: number; HOLIDAY: number } };

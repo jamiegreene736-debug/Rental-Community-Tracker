@@ -8,6 +8,7 @@ import {
   staticRateWindowMonths,
   expandAnchorsToMonthlyRates,
   seasonColumnsFromAnchors,
+  confirmResearchCommunity,
   STATIC_RATE_YOY_GROWTH,
   type StaticRateAnchors,
 } from "../shared/static-rate-logic";
@@ -147,6 +148,64 @@ console.log("static-rate-logic: seasonColumnsFromAnchors");
     year2: { LOW: 420, HIGH: 720, HOLIDAY: 1050 },
   });
   check("columns come from year1", cols.low === 400 && cols.high === 700 && cols.holiday === 1000, cols);
+}
+
+console.log("static-rate-logic: confirmResearchCommunity");
+{
+  // Curated positive property: searchLabel carries resort + city + state.
+  const ok = confirmResearchCommunity({
+    community: "Poipu Kai",
+    searchLabel: "Poipu Kai Resort, Koloa, Kauai, Hawaii",
+    expectedCity: "Koloa",
+    expectedState: "Hawaii",
+    curated: true,
+  });
+  check("curated match → confirmed", ok.confirmed === true, ok);
+  check("name + city + state all matched", ok.nameMatch && ok.cityMatch && ok.stateMatch, ok);
+
+  // State abbreviation alias: draft stores "HI", label says "Hawaii".
+  const abbrev = confirmResearchCommunity({
+    community: "Poipu Kai",
+    searchLabel: "Poipu Kai Resort, Koloa, Hawaii",
+    expectedCity: "Koloa",
+    expectedState: "HI",
+    curated: true,
+  });
+  check("state abbrev HI matches Hawaii", abbrev.stateMatch && abbrev.confirmed, abbrev);
+
+  // Wrong state (the Baton Rouge-LA vs Kauai-HI class of bug): not confirmed.
+  const wrongState = confirmResearchCommunity({
+    community: "Poipu Kai",
+    searchLabel: "Charming Baton Rouge Retreat, Baton Rouge, Louisiana",
+    expectedCity: "Koloa",
+    expectedState: "Hawaii",
+    curated: true,
+  });
+  check("wrong state → not confirmed", wrongState.confirmed === false, wrongState);
+  check("wrong state → stateMatch false", wrongState.stateMatch === false, wrongState);
+
+  // Draft whose listing name doesn't contain the community key but location
+  // matches and community is curated → still confirmed (location is the guard).
+  const draftCurated = confirmResearchCommunity({
+    community: "Kapaa Beachfront",
+    searchLabel: "Sunny Condo on the Sand, Kapaa, HI",
+    expectedCity: "Kapaa",
+    expectedState: "HI",
+    curated: true,
+  });
+  check("curated draft confirms on location", draftCurated.confirmed === true, draftCurated);
+  check("name not literally matched there", draftCurated.nameMatch === false, draftCurated);
+
+  // Non-curated draft, name absent → not confirmed (operator should verify).
+  const nonCurated = confirmResearchCommunity({
+    community: "Some Unknown Resort",
+    searchLabel: "Beach House, Kapaa, HI",
+    expectedCity: "Kapaa",
+    expectedState: "HI",
+    curated: false,
+  });
+  check("non-curated, no name match → not confirmed", nonCurated.confirmed === false, nonCurated);
+  check("location still matched on non-curated", nonCurated.locationMatch === true, nonCurated);
 }
 
 console.log(`\nstatic-rate-logic: ${pass} passed, ${fail} failed`);

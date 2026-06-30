@@ -3931,6 +3931,9 @@ function AdminDashboard() {
                             const sampleCount = typeof confidence?.sampleCount === "number" ? confidence.sampleCount : null;
                             const resortUnconfident = item.progress?.pricingRecipe?.resortConfident === false;
                             const bedroomSplitInferred = item.progress?.pricingRecipe?.bedroomSplitInferred === true;
+                            const communityConfirmation = (item.progress?.pricingRecipe as any)?.communityConfirmation as
+                              | { community: string; searchLabel: string; expectedCity?: string; expectedState?: string; nameMatch: boolean; locationMatch: boolean; curated: boolean; confirmed: boolean; detail: string }
+                              | undefined;
                             const perBedroomConfidence = Array.isArray(confidence?.perBedroom) ? confidence.perBedroom : [];
                             const anyWidened = confidence?.widened === true || perBedroomConfidence.some((b) => b.widened);
                             const blackoutCount = typeof item.progress?.blackoutCount === "number" ? item.progress.blackoutCount : 0;
@@ -3947,8 +3950,22 @@ function AdminDashboard() {
                                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                                       Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
                                     </p>
-                                    {(recipeResort || recipeScaling || confidenceScore != null || blackoutCount > 0 || resortUnconfident || bedroomSplitInferred) && (
+                                    {(communityConfirmation || recipeResort || recipeScaling || confidenceScore != null || blackoutCount > 0 || resortUnconfident || bedroomSplitInferred) && (
                                       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+                                        {communityConfirmation && (
+                                          <span
+                                            className={`inline-flex max-w-full items-center gap-1 rounded border px-2 py-0.5 font-medium ${communityConfirmation.confirmed ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-800"}`}
+                                            title={`${communityConfirmation.detail} · researching: ${communityConfirmation.searchLabel}`}
+                                          >
+                                            <span aria-hidden>{communityConfirmation.confirmed ? "✓" : "⚠"}</span>
+                                            <span className="truncate">
+                                              {communityConfirmation.confirmed ? "Community confirmed" : "Confirm community"}: {communityConfirmation.community}
+                                              {[communityConfirmation.expectedCity, communityConfirmation.expectedState].filter(Boolean).length > 0
+                                                ? ` · ${[communityConfirmation.expectedCity, communityConfirmation.expectedState].filter(Boolean).join(", ")}`
+                                                : ""}
+                                            </span>
+                                          </span>
+                                        )}
                                         {resortUnconfident && (
                                           <span className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 font-medium text-amber-800" title="This draft's community could not be matched to a curated market, so the resort searched is a best-guess fallback. Verify the resort before trusting these rates.">
                                             ⚠ resort not confidently matched

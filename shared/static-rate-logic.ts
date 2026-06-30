@@ -60,13 +60,84 @@ export type StaticRateBedroomPlan = {
   metricsUsed: string[];
 };
 
+// Double-check that the resort/location Claude is asked to research actually
+// corresponds to the listing's configured community + its known city/state.
+// Surfaced in the Pricing tab and the market-rate queue so the operator can SEE
+// that the research target was confirmed (and catch a wrong-resort / wrong-state
+// lookup before it prices a listing).
+export type CommunityConfirmation = {
+  community: string;
+  searchLabel: string;
+  expectedCity?: string;
+  expectedState?: string;
+  nameMatch: boolean;
+  cityMatch: boolean;
+  stateMatch: boolean;
+  locationMatch: boolean;
+  curated: boolean;
+  confirmed: boolean;
+  detail: string;
+};
+
 export type StaticRatePlan = {
   generatedAt: string;
   model: string;
   source: "claude-static" | "static-fallback";
   summary: string;
+  communityConfirmation?: CommunityConfirmation;
   bedrooms: StaticRateBedroomPlan[];
 };
+
+// US state full-name ↔ abbreviation aliases so "Hawaii" in the community config
+// still matches "HI" in a draft's stored state (and vice-versa). Only the markets
+// we operate in need entries; unknown states fall through to a literal match.
+const STATE_ALIASES: Record<string, string[]> = {
+  hawaii: ["hawaii", "hi"],
+  hi: ["hawaii", "hi"],
+  florida: ["florida", "fl"],
+  fl: ["florida", "fl"],
+};
+
+function normalizeText(s: string): string {
+  return (s || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function labelMentionsState(label: string, state: string): boolean {
+  const norm = normalizeText(state);
+  if (!norm) return true;
+  const aliases = STATE_ALIASES[norm] ?? [norm];
+  // Word-boundary-ish match so "fl" doesn't hit "florida" substrings spuriously.
+  return aliases.some((a) => new RegExp(`(^| )${a}( |$)`).test(label));
+}
+
+// Confirm the research target. `curated` = the community is a hand-tuned
+// BUY_IN_MARKETS key (its searchLabel is authoritative), which lets a draft whose
+// own listing name doesn't literally contain the community key still confirm on
+// location. `confirmed` is gated on LOCATION (the load-bearing geo guard) plus a
+// name OR curated signal.
+export function confirmResearchCommunity(args: {
+  community: string;
+  searchLabel: string;
+  expectedCity?: string;
+  expectedState?: string;
+  curated?: boolean;
+}): CommunityConfirmation {
+  const label = normalizeText(args.searchLabel);
+  const community = (args.community || "").trim();
+  const nameMatch = community.length > 0 && label.includes(normalizeText(community));
+  const cityMatch = args.expectedCity ? label.includes(normalizeText(args.expectedCity)) : true;
+  const stateMatch = args.expectedState ? labelMentionsState(label, args.expectedState) : true;
+  const locationMatch = cityMatch && stateMatch;
+  const curated = !!args.curated;
+  const confirmed = locationMatch && (nameMatch || curated);
+  const loc = [args.expectedCity, args.expectedState].filter(Boolean).join(", ");
+  const detail = confirmed
+    ? `Confirmed: researching ${community}${loc ? ` in ${loc}` : ""}.`
+    : !locationMatch
+      ? `⚠ Research location doesn’t match this listing’s ${loc || "expected location"} — verify the resort before pushing.`
+      : `⚠ Couldn’t confirm the community name in the research target — verify it matches ${community}.`;
+  return { community, searchLabel: args.searchLabel, expectedCity: args.expectedCity, expectedState: args.expectedState, nameMatch, cityMatch, stateMatch, locationMatch, curated, confirmed, detail };
+}
 
 export const STATIC_RATE_SEASONS: SeasonType[] = ["LOW", "HIGH", "HOLIDAY"];
 
