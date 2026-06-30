@@ -4457,7 +4457,7 @@ function AdminDashboard() {
             </colgroup>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[30px] text-center px-1">
+                <TableHead className="w-[30px] text-center px-1 sticky left-0 z-20 bg-background">
                   <Button
                     type="button"
                     variant="ghost"
@@ -4472,7 +4472,7 @@ function AdminDashboard() {
                     {allVisibleBulkPricingSelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
                   </Button>
                 </TableHead>
-                <TableHead className="w-[78px] sticky left-0 bg-background z-10">Actions</TableHead>
+                <TableHead className="w-[78px] sticky left-[29px] bg-background z-20 border-r">Actions</TableHead>
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
                 <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
                 <TableHead className="w-[80px] text-center px-0.5">
@@ -4682,7 +4682,10 @@ function AdminDashboard() {
                   id={`item-property-${property.id}`}
                   className={isResearchDraft ? "bg-amber-50/40 dark:bg-amber-900/10" : ""}
                 >
-                  <TableCell className="px-0.5 py-2 text-center">
+                  <TableCell
+                    className="sticky left-0 z-10 px-0.5 py-2 text-center bg-background"
+                    style={{ background: isResearchDraft ? "#fffbeb" : undefined }}
+                  >
                     <Button
                       type="button"
                       variant="ghost"
@@ -4698,8 +4701,8 @@ function AdminDashboard() {
                     </Button>
                   </TableCell>
                   <TableCell
-                    className="sticky left-0 z-10 px-1 py-2"
-                    style={{ background: isResearchDraft ? "rgba(254, 243, 199, 0.4)" : undefined }}
+                    className="sticky left-[29px] z-10 px-1 py-2 bg-background border-r"
+                    style={{ background: isResearchDraft ? "#fffbeb" : undefined }}
                   >
                     {isResearchDraft ? (
                       <div className="flex items-center gap-1">
@@ -4793,7 +4796,7 @@ function AdminDashboard() {
                       {displayPropertyId(property)}
                     </span>
                   </TableCell>
-                  <TableCell className="px-0.5 py-2 text-center">
+                  <TableCell className="px-0.5 py-2 text-center overflow-hidden">
                     {(() => {
                       // Dashboard channel indicators: three badges per row
                       // with three states:
@@ -4847,7 +4850,7 @@ function AdminDashboard() {
                       );
                     })()}
                   </TableCell>
-                  <TableCell className="px-0.5 py-2 text-center">
+                  <TableCell className="px-0.5 py-2 text-center overflow-hidden">
                     {(() => {
                       // Photo-match indicators mirror the Channels column:
                       // three badges per row with the same color palette.
@@ -4947,7 +4950,7 @@ function AdminDashboard() {
                             </Button>
                           </div>
                           {matchedSummary.length > 0 ? (
-                            <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-match-units-${property.id}`}>
+                            <div className="mx-auto max-w-[96px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-match-units-${property.id}`}>
                               {matchedSummary.join(" · ")}
                             </div>
                           ) : null}
@@ -4977,7 +4980,7 @@ function AdminDashboard() {
                             </div>
                           ) : null}
                           {addrFound.length > 0 ? (
-                            <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-addr-found-${property.id}`}>
+                            <div className="mx-auto max-w-[96px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-addr-found-${property.id}`}>
                               Addr on {addrFound.join(" · ")}
                             </div>
                           ) : null}
@@ -5038,7 +5041,7 @@ function AdminDashboard() {
                       );
                     })()}
                   </TableCell>
-                  <TableCell className="px-0.5 py-2 text-center">
+                  <TableCell className="px-0.5 py-2 text-center overflow-hidden">
                     {(() => {
                       const row = photoCommunityByProperty.get(property.id);
                       type Tone = "ok" | "bad" | "warn" | "unknown" | "running" | "na";
