@@ -29,6 +29,234 @@ export type SeasonAnchors = {
   HOLIDAY: number;
 };
 
+// ── ALL-IN (taxes + fees) buy-in cost model ──────────────────────────────────
+// Operator directive (2026-06-30): the buy-in rate MUST be the true ALL-IN cost
+// to secure ONE comparable unit — nightly rent PLUS the flat cleaning fee, the
+// channel service fee, and lodging/occupancy taxes — amortized over a 7-night
+// reference stay (the operator's real combo-booking pattern). This is what the
+// 15% markup is applied to, so the markup never gets eaten by the fees the old
+// rent-only basis silently excluded (the Menehune Shores loss class).
+//
+// IMPORTANT: this all-in number bakes the per-stay cleaning fee INTO the nightly
+// (amortized /7). The Guesty seasonal-rate push is unchanged (it still pushes a
+// per-night base rate), so the operator should ZERO the guest-facing cleaning
+// fee on these combo listings to avoid charging the guest cleaning twice. The UI
+// surfaces this note; we deliberately do NOT change the push math here.
+
+// Default 7-night reference stay used to amortize flat per-stay fees.
+export const ALL_IN_REFERENCE_NIGHTS = 7;
+
+// Combined lodging/occupancy tax applied to (rent + cleaning) when a channel
+// doesn't itemize taxes (the common case in a SERP snippet). Hawaii TAT 10.25%
+// + county TAT ~3% + GET ~4.7% gross-up ≈ ~18%; Florida state 6% + county
+// surtax + tourist-development tax ≈ ~12.5%. Server-applied so Claude can't
+// hallucinate it — Claude only reports observed rent/cleaning/service.
+export const LODGING_TAX_PCT: Record<RegionType, number> = {
+  hawaii: 0.18,
+  florida: 0.125,
+};
+
+// Flat per-stay cleaning fee estimate when a channel doesn't show one. Amortized
+// over ALL_IN_REFERENCE_NIGHTS. Conservative central values per region.
+export const CLEANING_FEE_ESTIMATE: Record<RegionType, number> = {
+  hawaii: 250,
+  florida: 175,
+};
+
+// Channel service-fee % (of rent + cleaning) when a channel doesn't show one.
+// PM/resort-direct carry no guest service fee (the operator's cheapest path);
+// OTAs do. Keyed by the normalized channel key.
+export const SERVICE_FEE_PCT_DEFAULT: Record<string, number> = {
+  pm: 0.0,
+  resort: 0.0,
+  vrbo: 0.10,
+  booking: 0.0, // Booking.com folds its margin into the displayed rate
+  airbnb: 0.14,
+  other: 0.08,
+};
+
+// Service % used to gross up a bare rent into an all-in BACKSTOP (the fail-soft
+// fallback and the prior/clamp basis). A modest blended rate so the backstop is
+// protective (leans slightly high) rather than assuming the rock-bottom PM path.
+export const BACKSTOP_SERVICE_PCT = 0.08;
+
+// Channels in operator-acquisition priority order (cheapest + most trustworthy
+// first). Used as the reconciliation tie-break and for normalizing Claude's
+// free-text channel labels.
+export type ChannelKey = "pm" | "resort" | "vrbo" | "booking" | "airbnb" | "other";
+export const CHANNEL_PRIORITY: ChannelKey[] = ["pm", "resort", "vrbo", "booking", "airbnb", "other"];
+
+// Normalize a free-text channel label from Claude into a ChannelKey.
+export function normalizeChannelKey(raw: unknown): ChannelKey {
+  const s = String(raw ?? "").toLowerCase();
+  if (/booking/.test(s)) return "booking";
+  if (/vrbo|homeaway|vacasa.*vrbo/.test(s)) return "vrbo";
+  if (/airbnb|abnb/.test(s)) return "airbnb";
+  if (/\bpm\b|property manager|management|realty|rentals?\b|direct/.test(s)) return "pm";
+  if (/resort|hotel|official|own site/.test(s)) return "resort";
+  return "other";
+}
+
+// One researched channel data point for a (bedroom, season, year), with the
+// server-computed all-in nightly. Persisted so the operator can audit the rate.
+export type ChannelEvidence = {
+  season: SeasonType;
+  year: 1 | 2;
+  channel: ChannelKey;
+  sourceUrl?: string;
+  stayNights: number;
+  rentNightly: number;
+  cleaningPerStay: number | null;
+  serviceFeePct: number | null;
+  feesObserved: boolean;
+  allInNightly: number;
+  feeBasis: "all-in-observed" | "grossed-up";
+};
+
+// The server's reconciliation of all channels for one (season, year) into the
+// single chosen anchor, with the spread + the rule it applied (auditable).
+export type SeasonReconciliation = {
+  season: SeasonType;
+  year: 1 | 2;
+  chosen: number;
+  channel: ChannelKey | null;
+  rule: string;
+  spread: { min: number; median: number; max: number; n: number };
+  dropped: string[];
+};
+
+// All-in nightly = (rent×nights + cleaning + service + tax(rent×nights+cleaning)) / nights.
+// Service and tax both apply to the rent+cleaning subtotal (both HI and FL tax
+// the cleaning charge as part of the rental). Pure + deterministic.
+export function allInNightlyFromComponents(args: {
+  rentNightly: number;
+  nights: number;
+  cleaningPerStay: number;
+  serviceFeePct: number;
+  region: RegionType;
+  taxPct?: number;
+}): number {
+  const nights = Number.isFinite(args.nights) && args.nights > 0 ? args.nights : ALL_IN_REFERENCE_NIGHTS;
+  const rent = Math.max(0, args.rentNightly) * nights;
+  const cleaning = Math.max(0, args.cleaningPerStay || 0);
+  const subtotal = rent + cleaning;
+  const service = subtotal * Math.max(0, args.serviceFeePct || 0);
+  const tax = subtotal * (args.taxPct ?? LODGING_TAX_PCT[args.region]);
+  const total = rent + cleaning + service + tax;
+  return Math.round(total / nights);
+}
+
+// Gross up a BARE nightly rent into an all-in nightly using region fee/tax
+// estimates (used for the fail-soft fallback, the prior/clamp basis, and any
+// channel that only exposed a bare nightly).
+export function grossUpRentToAllIn(
+  rentNightly: number,
+  region: RegionType,
+  opts?: { nights?: number; cleaning?: number; serviceFeePct?: number; taxPct?: number },
+): number {
+  return allInNightlyFromComponents({
+    rentNightly,
+    nights: opts?.nights ?? ALL_IN_REFERENCE_NIGHTS,
+    cleaningPerStay: opts?.cleaning ?? CLEANING_FEE_ESTIMATE[region],
+    serviceFeePct: opts?.serviceFeePct ?? BACKSTOP_SERVICE_PCT,
+    region,
+    taxPct: opts?.taxPct,
+  });
+}
+
+// Reconcile per-channel all-in nightlies for one (season, year) into ONE anchor.
+// Rule: the operator books the CHEAPEST credible channel, so we take the lowest
+// credible all-in — but with guards so a single mis-scraped bargain can't price
+// the whole combo into a loss:
+//   1. Drop teasers (a not-fee-observed row whose RENT is < 0.5× the rent basis —
+//      almost certainly a smaller/different unit or a per-person "from $X").
+//   2. If the single cheapest is >15% below the 2nd-cheapest, use the 2nd-cheapest
+//      (over-pricing slightly is recoverable; under-pricing sells at a loss).
+//   3. Tie-break within 5%: prefer the higher-trust channel (PM > VRBO > Booking > Airbnb).
+export function reconcileChannelAllIn(
+  rows: Array<{ channel: ChannelKey; rentNightly: number; allInNightly: number; feesObserved: boolean }>,
+  bareRentBasisSeason: number,
+): { chosen: number | null; channel: ChannelKey | null; rule: string; spread: { min: number; median: number; max: number; n: number }; dropped: string[] } {
+  const dropped: string[] = [];
+  const credible = rows.filter((r) => {
+    if (!(r.allInNightly > 0)) { dropped.push(`${r.channel}:invalid`); return false; }
+    if (!r.feesObserved && r.rentNightly > 0 && bareRentBasisSeason > 0 && r.rentNightly < 0.5 * bareRentBasisSeason) {
+      dropped.push(`${r.channel}:teaser`);
+      return false;
+    }
+    return true;
+  });
+  const sortedVals = credible.map((r) => r.allInNightly).sort((a, b) => a - b);
+  const spread = sortedVals.length
+    ? { min: sortedVals[0], median: sortedVals[Math.floor((sortedVals.length - 1) / 2)], max: sortedVals[sortedVals.length - 1], n: sortedVals.length }
+    : { min: 0, median: 0, max: 0, n: 0 };
+  if (credible.length === 0) return { chosen: null, channel: null, rule: "no-credible-evidence", spread, dropped };
+  const asc = [...credible].sort((a, b) => a.allInNightly - b.allInNightly);
+  let pick = asc[0];
+  let rule = "lowest-credible";
+  if (asc.length >= 2 && asc[0].allInNightly < 0.85 * asc[1].allInNightly) {
+    pick = asc[1];
+    rule = "second-cheapest (cheapest >15% below 2nd)";
+  }
+  // Tie-break: among rows within 5% ABOVE the pick (NOT cheaper rows — a much
+  // cheaper row was already rejected by the >15% guard above and must not
+  // re-enter), prefer the higher-trust channel.
+  const band = pick.allInNightly * 1.05;
+  const contenders = asc.filter((r) => r.allInNightly >= pick.allInNightly && r.allInNightly <= band);
+  contenders.sort((a, b) => CHANNEL_PRIORITY.indexOf(a.channel) - CHANNEL_PRIORITY.indexOf(b.channel));
+  const finalPick = contenders[0] ?? pick;
+  if (finalPick.channel !== pick.channel) rule += " · tie-break by channel priority";
+  return { chosen: finalPick.allInNightly, channel: finalPick.channel, rule, spread, dropped };
+}
+
+// The ALL-IN seasonal prior/clamp basis for a (community, bedrooms): the
+// operator's rent-only basis grossed up per season via the fee/tax model. This
+// is what Claude's anchors are clamped against (so a legit all-in number isn't
+// flagged as "too high" vs a rent-only reference) and the fail-soft fallback.
+export function allInSeasonalBasis(
+  community: string,
+  bedrooms: number,
+  opts?: { nights?: number; cleaning?: number; serviceFeePct?: number; taxPct?: number },
+): SeasonAnchors {
+  const rent = staticSeasonalBasis(community, bedrooms);
+  const region: RegionType = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+  return {
+    LOW: grossUpRentToAllIn(rent.LOW, region, opts),
+    HIGH: grossUpRentToAllIn(rent.HIGH, region, opts),
+    HOLIDAY: grossUpRentToAllIn(rent.HOLIDAY, region, opts),
+  };
+}
+
+// A representative 7-night sampling window per season per year, pinned by the
+// server and handed to Claude so the research is deterministic + reproducible.
+// HIGH = mid-July, LOW = mid-September (deep off-season; LOW in both region
+// maps), HOLIDAY = Dec 26–Jan 2. Year 2 = the same windows + 12 months.
+export type SeasonWindow = { season: SeasonType; year: 1 | 2; checkIn: string; checkOut: string };
+export function computeSeasonWindows(asOf: Date, _region?: RegionType): SeasonWindow[] {
+  const baseYear = asOf.getFullYear();
+  const fmt = (dt: Date) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  const win = (y: number, m: number, d: number): { checkIn: string; checkOut: string } => {
+    const ci = new Date(y, m - 1, d);
+    const co = new Date(y, m - 1, d + ALL_IN_REFERENCE_NIGHTS);
+    return { checkIn: fmt(ci), checkOut: fmt(co) };
+  };
+  // Pick the first occurrence at least ~45 days out for year 1; year 2 = +1.
+  const leadGate = new Date(asOf.getTime() + 45 * 86_400_000);
+  const yearFor = (month: number, day: number): number =>
+    new Date(baseYear, month - 1, day) >= leadGate ? baseYear : baseYear + 1;
+  const hiY = yearFor(7, 13);
+  const loY = yearFor(9, 14);
+  const hoY = yearFor(12, 26);
+  return [
+    { season: "HIGH", year: 1, ...win(hiY, 7, 13) },
+    { season: "LOW", year: 1, ...win(loY, 9, 14) },
+    { season: "HOLIDAY", year: 1, ...win(hoY, 12, 26) },
+    { season: "HIGH", year: 2, ...win(hiY + 1, 7, 13) },
+    { season: "LOW", year: 2, ...win(loY + 1, 9, 14) },
+    { season: "HOLIDAY", year: 2, ...win(hoY + 1, 12, 26) },
+  ];
+}
+
 export type StaticRateAnchors = {
   // Year 1 = the next 12 months; Year 2 = months 13–24. "Rolling" means the
   // window always starts at the current month, so as time passes year-1 anchors
@@ -53,11 +281,23 @@ export type StaticRateBedroomPlan = {
   bedrooms: number;
   anchors: StaticRateAnchors;
   locks: StaticRateLocks;
-  // The operator-validated static seasonal basis used as the prior/clamp.
+  // The operator-validated RENT-ONLY seasonal basis (prior, for reference).
   staticBasis: SeasonAnchors;
   confidence: number; // 0–100, Claude's self-reported confidence
   reasoning: string;
   metricsUsed: string[];
+  // ── ALL-IN provenance (optional; absent on legacy rows) ──
+  // The all-in (taxes + fees) seasonal basis the anchors were clamped against.
+  allInBasis?: SeasonAnchors;
+  // Per-channel research data points (rent/cleaning/service + server all-in).
+  evidence?: ChannelEvidence[];
+  // How each (season, year) anchor was reconciled from the channel evidence.
+  reconciliation?: SeasonReconciliation[];
+  // Seasons whose anchor hit the clamp band (surfaced so silent truncation shows).
+  clampedSeasons?: string[];
+  // The amortized per-night cleaning component baked into the all-in nightly
+  // (so the operator can see it + zero the Guesty guest-facing cleaning fee).
+  cleaningPerNight?: number;
 };
 
 // Double-check that the resort/location Claude is asked to research actually
@@ -195,10 +435,14 @@ export function staticSeasonalBasis(community: string, bedrooms: number): Season
   };
 }
 
-// Sane default anchors when Claude is unavailable: the static seasonal basis
-// for year 1, grown by STATIC_RATE_YOY_GROWTH for year 2.
+// Sane default anchors when Claude is unavailable: the ALL-IN seasonal basis
+// (rent grossed up with cleaning + service + taxes) for year 1, grown by
+// STATIC_RATE_YOY_GROWTH for year 2. Using the ALL-IN basis (not the rent-only
+// staticSeasonalBasis) is the load-bearing fail-soft fix: a keyless session or
+// any Claude outage now still pushes all-in cost numbers, so the markup is never
+// applied to bare rent (the Menehune Shores loss class).
 export function defaultStaticAnchors(community: string, bedrooms: number): StaticRateAnchors {
-  const basis = staticSeasonalBasis(community, bedrooms);
+  const basis = allInSeasonalBasis(community, bedrooms);
   const grow = (v: number) => Math.round(v * STATIC_RATE_YOY_GROWTH);
   return {
     year1: { ...basis },
@@ -206,14 +450,36 @@ export function defaultStaticAnchors(community: string, bedrooms: number): Stati
   };
 }
 
+// Clamp band around the (all-in) seasonal basis. Floor raised 0.4×→0.55× so an
+// implausibly-low scrape can't pull the anchor far below the all-in cost floor
+// (under-pricing sells at a loss); ceiling stays 3× so a legit holiday all-in
+// has room but a bad parse is blocked.
+export const CLAMP_FLOOR_RATIO = 0.55;
+export const CLAMP_CEIL_RATIO = 3;
 function clampToBasis(value: number, basisSeason: number): number {
   if (!Number.isFinite(value) || value <= 0) return basisSeason;
-  // Reject hallucinated/absurd anchors: keep within 0.4×–3× of the
-  // operator-validated seasonal basis. Wide enough to let Claude move the
-  // number meaningfully on real signal, tight enough to block a bad parse.
-  const lo = Math.round(basisSeason * 0.4);
-  const hi = Math.round(basisSeason * 3);
+  const lo = Math.round(basisSeason * CLAMP_FLOOR_RATIO);
+  const hi = Math.round(basisSeason * CLAMP_CEIL_RATIO);
   return Math.min(hi, Math.max(lo, Math.round(value)));
+}
+
+// Report which seasons of a year's anchors fall OUTSIDE the clamp band against
+// the given basis (i.e. would be truncated by clampToBasis). Used by the engine
+// to surface silent clamping to the operator. Pure; does not mutate.
+export function clampedSeasonsAgainst(
+  anchors: Partial<SeasonAnchors>,
+  basis: SeasonAnchors,
+  yearLabel?: string,
+): string[] {
+  const out: string[] = [];
+  (Object.keys(basis) as SeasonType[]).forEach((season) => {
+    const v = anchors[season];
+    if (v == null || !Number.isFinite(v) || v <= 0) return;
+    const lo = basis[season] * CLAMP_FLOOR_RATIO;
+    const hi = basis[season] * CLAMP_CEIL_RATIO;
+    if (v < lo || v > hi) out.push(yearLabel ? `${yearLabel} ${season}` : season);
+  });
+  return out;
 }
 
 // Enforce LOW ≤ HIGH ≤ HOLIDAY within a year and clamp each season to its
