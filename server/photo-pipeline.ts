@@ -488,6 +488,7 @@ async function visionFoldSameRoomBedrooms<T extends { id: string; caption?: stri
   groups: T[][],
   folderPath: string,
   apiKey: string,
+  expectedBedrooms?: number | null,
 ): Promise<T[][]> {
   const reps = groups.map((g) => g[0]).filter(Boolean) as T[];
   if (reps.length !== groups.length || reps.length < 2) return groups;
@@ -503,7 +504,10 @@ async function visionFoldSameRoomBedrooms<T extends { id: string; caption?: stri
   }
   const partition = await groupSameBedroomsViaVision(repInputs, { apiKey });
   if (!partition) return groups;
-  const { clusters: folded, mergedCount } = applySameRoomGroups(groups, reps.map((r) => r.id), partition);
+  // Floor: surface AT MOST one missing bedroom below the listing's claimed count;
+  // reject a partition implying two+ missing (likelier a vision over-merge).
+  const minClusters = expectedBedrooms && expectedBedrooms > 0 ? Math.max(1, expectedBedrooms - 1) : undefined;
+  const { clusters: folded, mergedCount } = applySameRoomGroups(groups, reps.map((r) => r.id), partition, minClusters);
   if (mergedCount > 0) {
     console.log(`[photo-pipeline] same-room vision folded ${mergedCount} bedroom angle cluster(s) → ${folded.length} room(s)`);
   }
@@ -561,7 +565,7 @@ async function labelBedroomsInPlace(
   // count reflects the rooms actually photographed and a coverage gap surfaces
   // instead of being masked. No key / disabled / unreadable file → no-op.
   if (opts.apiKey && needsSameRoomVision(bedroomGroups.length)) {
-    bedroomGroups = await visionFoldSameRoomBedrooms(bedroomGroups, folderPath, opts.apiKey);
+    bedroomGroups = await visionFoldSameRoomBedrooms(bedroomGroups, folderPath, opts.apiKey, opts.expectedBedrooms);
   }
 
   const clusterBedType = (group: BedroomRef[]): string | null => {
@@ -896,6 +900,13 @@ export async function downloadAndPrioritize(opts: {
   }
 
   // Step 7b: persist bedroom cluster ids on photo_labels for fast community checks.
+  // NOTE: this precompute is the RAW dHash clustering — it does NOT see the
+  // same-room vision fold that labelBedroomsInPlace just applied, so its cluster
+  // COUNT can be higher than the real room count (e.g. a master shot from two
+  // angles → two precompute ids). That's intentional and harmless: the only
+  // consumer (the coverage engine, via builder-photo-groups) re-runs the caption
+  // + vision same-room fold on every check, so the persisted ids are a starting
+  // point, not the final room count.
   try {
     const bedroomFiles: Array<{ filename: string; label: string; absPath: string }> = [];
     for (let i = 0; i < kept.length; i++) {

@@ -187,6 +187,9 @@ function pickClusterRepresentative(cluster: BedroomPhotoSample[]): BedroomPhotoS
 // entirely if any representative can't be encoded — fail-safe = no merge.
 async function visionFoldSameRoomBedroomSamples(
   clusters: BedroomPhotoSample[][],
+  expected: number | null,
+  apiKey: string,
+  unitLabel: string,
 ): Promise<BedroomPhotoSample[][]> {
   const reps = clusters.map(pickClusterRepresentative);
   if (reps.length !== clusters.length || reps.length < 2) return clusters;
@@ -195,9 +198,16 @@ async function visionFoldSameRoomBedroomSamples(
     if (!r.buffer || r.buffer.length === 0 || r.buffer.length > MAX_IMAGE_BYTES) return clusters;
     repInputs.push({ id: r.id, mime: r.mime, base64: r.buffer.toString("base64"), caption: r.caption });
   }
-  const partition = await groupSameBedroomsViaVision(repInputs, {});
+  const partition = await groupSameBedroomsViaVision(repInputs, { apiKey });
   if (!partition) return clusters;
-  return applySameRoomGroups(clusters, reps.map((r) => r.id), partition).clusters;
+  // Floor: surface at most one missing bedroom below the expected count; reject a
+  // partition implying two+ missing (likelier a vision over-merge than a real gap).
+  const minClusters = expected && expected > 0 ? Math.max(1, expected - 1) : undefined;
+  const { clusters: folded, mergedCount } = applySameRoomGroups(clusters, reps.map((r) => r.id), partition, minClusters);
+  if (mergedCount > 0) {
+    console.log(`[bedroom-coverage] same-room vision folded ${mergedCount} bedroom angle cluster(s) → ${folded.length} room(s) for ${unitLabel}`);
+  }
+  return folded;
 }
 
 function clusterCountsAsBedroom(
@@ -322,6 +332,7 @@ async function analyzeUnitBedrooms(
   callVision: VisionCaller,
   g: CheckGroupInput,
   idPrefix: string,
+  apiKey: string,
 ): Promise<{
   rooms: ReturnType<typeof summarizeBedroomCluster>[];
   repHashes: (string | undefined)[];
@@ -387,7 +398,7 @@ async function analyzeUnitBedrooms(
   // bedroom count (e.g. a 3BR photographed as master + master-angle + guest)
   // collapses to the real room count and the missing bedroom is no longer masked.
   if (needsSameRoomVision(clusters.length)) {
-    clusters = await visionFoldSameRoomBedroomSamples(clusters);
+    clusters = await visionFoldSameRoomBedroomSamples(clusters, expected, apiKey, g.label);
   }
 
   // Expected bed inventory steers the cap so a unique bed type (e.g. a Queen)
@@ -427,6 +438,10 @@ export async function analyzeBedroomCoverage(
   callVision: VisionCaller,
   unitInputs: CheckGroupInput[],
   expectedListingBedrooms: number | null,
+  // Same key the rest of the check threads to callVisionJson — used by the
+  // same-room vision fold so both vision calls draw from one key source rather
+  // than the fold silently falling back to process.env.
+  apiKey: string = process.env.ANTHROPIC_API_KEY ?? "",
 ): Promise<ListingBedroomCoverage> {
   const unitClusterResults: Array<{
     label: string;
@@ -440,7 +455,7 @@ export async function analyzeBedroomCoverage(
   for (let u = 0; u < unitInputs.length; u++) {
     const g = unitInputs[u];
     const idPrefix = `BR${u + 1}-`;
-    const result = await analyzeUnitBedrooms(callVision, g, idPrefix);
+    const result = await analyzeUnitBedrooms(callVision, g, idPrefix, apiKey);
     unitClusterResults.push({ label: g.label, ...result, group: g });
   }
 

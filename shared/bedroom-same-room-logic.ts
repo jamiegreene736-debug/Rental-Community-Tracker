@@ -82,11 +82,21 @@ export function parseSameRoomGroups(text: string, validIds: string[]): string[][
  * member so room ordering is stable. Returns the input unchanged when the groups
  * don't line up with the clusters (defensive — never throws, never drops a
  * cluster's photos).
+ *
+ * `minClusters` is the blast-radius floor (defense-in-depth against a vision
+ * over-merge). The fold is allowed to take the room count BELOW the expected
+ * bedroom count — that is the whole point, it surfaces a genuinely un-photographed
+ * bedroom — but only by a believable margin. Callers pass `expectedBedrooms - 1`,
+ * so a partition that would imply TWO+ missing bedrooms (far likelier a vision
+ * error collapsing two real rooms than a real double-gap) is rejected wholesale
+ * and the clusters are returned untouched. With `minClusters` unset there is no
+ * floor (union-find can never reach zero from a non-empty input).
  */
 export function applySameRoomGroups<T>(
   clusters: T[][],
   repIds: string[],
   groups: string[][],
+  minClusters?: number | null,
 ): { clusters: T[][]; mergedCount: number } {
   if (clusters.length !== repIds.length || clusters.length === 0) {
     return { clusters, mergedCount: 0 };
@@ -134,5 +144,10 @@ export function applySameRoomGroups<T>(
     byRoot.get(r)!.push(...clusters[i]);
   }
   const out = order.map((r) => byRoot.get(r)!);
+  // Blast-radius floor: distrust a partition that collapses the unit below the
+  // believable-gap floor (a likely vision over-merge) — leave clusters untouched.
+  if (minClusters != null && minClusters > 0 && out.length < minClusters) {
+    return { clusters, mergedCount: 0 };
+  }
   return { clusters: out, mergedCount: clusters.length - out.length };
 }

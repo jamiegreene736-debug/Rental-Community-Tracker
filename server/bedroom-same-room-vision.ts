@@ -21,6 +21,14 @@ import { parseSameRoomGroups } from "../shared/bedroom-same-room-logic";
 // so reliability beats speed for the one call per replace/relabel.
 const MODEL = "claude-sonnet-4-6";
 
+// Above this many cluster representatives the single-call grouping is both
+// expensive and unreliable (a unit with 12+ distinct bedroom clusters is almost
+// never all-the-same-room), so we skip the fold entirely — fail-safe = no merge.
+const MAX_REPS = (() => {
+  const n = Number(process.env.BEDROOM_SAME_ROOM_MAX_REPS);
+  return Number.isFinite(n) && n >= 2 ? Math.floor(n) : 12;
+})();
+
 export type SameRoomRep = {
   id: string;
   mime: string;
@@ -36,7 +44,7 @@ function buildPrompt(ids: string[]): string {
     "Group the photos by PHYSICAL ROOM.",
     "Put two photos in the SAME group ONLY when you can point to concrete SHARED features proving it is one space — the same headboard/bedding, the same window and the same outside view, the same wall art, the same flooring AND the same furniture layout.",
     "",
-    "Be conservative. If two photos merely look similar (same bed size, generic resort decor) but you cannot prove they are the same room, put them in SEPARATE groups.",
+    "Be conservative. Two photos sharing the same BED TYPE (two king rooms, two queen rooms) are usually DIFFERENT bedrooms — bed size alone is NOT evidence of the same room. If two photos merely look similar (same bed size, generic resort decor) but you cannot prove they are the same room, put them in SEPARATE groups.",
     "Merging two DIFFERENT bedrooms into one group is a serious error; leaving one room split across two groups is acceptable.",
     "",
     `There are ${ids.length} photos: ${ids.join(", ")}. Every photo id must appear in exactly one group.`,
@@ -58,14 +66,21 @@ export async function groupSameBedroomsViaVision(
   if (process.env.BEDROOM_SAME_ROOM_VISION_DISABLED === "1") return null;
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey || reps.length < 2) return null;
+  if (reps.length > MAX_REPS) {
+    console.warn(`[bedroom-same-room] ${reps.length} representatives exceeds cap ${MAX_REPS} — skipping same-room fold`);
+    return null;
+  }
 
+  // Captions are deliberately NOT sent: the scrape labeler emits bed-type-only
+  // captions ("King Bedroom"), so two DISTINCT king rooms carry identical text
+  // that would nudge the model toward a false merge. This pass is purely visual.
+  const ids = reps.map((r) => r.id);
   const content: any[] = [];
   for (const r of reps) {
-    const cap = r.caption ? ` · caption: "${r.caption}"` : "";
-    content.push({ type: "text", text: `--- Photo ${r.id}${cap} ---` });
+    content.push({ type: "text", text: `--- Photo ${r.id} ---` });
     content.push({ type: "image", source: { type: "base64", media_type: r.mime, data: r.base64 } });
   }
-  content.push({ type: "text", text: buildPrompt(reps.map((r) => r.id)) });
+  content.push({ type: "text", text: buildPrompt(ids) });
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -77,7 +92,9 @@ export async function groupSameBedroomsViaVision(
       },
       body: JSON.stringify({
         model: opts.model ?? MODEL,
-        max_tokens: 500,
+        // Roomy enough to hold an all-separate partition of MAX_REPS ids + a
+        // little slack, so a large folder never truncates into invalid JSON.
+        max_tokens: 1024,
         messages: [{ role: "user", content }],
       }),
       signal: AbortSignal.timeout(30000),
@@ -89,7 +106,13 @@ export async function groupSameBedroomsViaVision(
     }
     const data = (await resp.json()) as any;
     const text: string = data?.content?.[0]?.text ?? "";
-    return parseSameRoomGroups(text, reps.map((r) => r.id));
+    const parsed = parseSameRoomGroups(text, ids);
+    if (parsed == null) {
+      // Got a response but it wasn't a clean partition — log so the no-op is
+      // observable rather than a silent skip during triage.
+      console.warn(`[bedroom-same-room] rejected non-partition response for ${ids.length} reps: ${text.slice(0, 160)}`);
+    }
+    return parsed;
   } catch (e: any) {
     console.warn(`[bedroom-same-room] ${e?.message ?? e}`);
     return null;

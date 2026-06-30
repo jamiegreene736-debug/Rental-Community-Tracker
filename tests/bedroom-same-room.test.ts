@@ -75,6 +75,30 @@ const mismatched = applySameRoomGroups(clusters, ["a1", "b1"], [["a1", "b1"]]);
 check("repIds/clusters length mismatch is a safe no-op",
   mismatched.clusters.length === 3 && mismatched.mergedCount === 0);
 
+// ── minClusters blast-radius floor (defense against vision over-merge) ──
+// A 3BR (expected 3 → floor = expected-1 = 2). Folding the two master angles
+// to 2 rooms is ALLOWED (surfaces the 1-bedroom gap)…
+const floorAllows = applySameRoomGroups(clusters, repIds, [["a1", "c1"], ["b1"]], 2);
+check("floor allows a fold down to expected-1 (surfaces a believable gap)",
+  floorAllows.clusters.length === 2 && floorAllows.mergedCount === 1);
+
+// …but a partition that collapses everything to 1 (implying 2 missing bedrooms,
+// far likelier a vision error) is REJECTED wholesale → clusters untouched.
+const floorRejects = applySameRoomGroups(clusters, repIds, [["a1", "b1", "c1"]], 2);
+check("floor rejects an over-collapse below the floor (no merge, untouched)",
+  floorRejects.clusters.length === 3 && floorRejects.mergedCount === 0);
+
+check("no floor (undefined) still allows total collapse",
+  applySameRoomGroups(clusters, repIds, [["a1", "b1", "c1"]]).clusters.length === 1);
+
+// expected=2 → floor=1: a fold to 1 room is still allowed (can't distinguish a
+// real 1/2 gap from a merge at this count; reliability is the guard there).
+const floorTwo = applySameRoomGroups(
+  [[{ id: "x1" }], [{ id: "x2" }]] as Ref[][], ["x1", "x2"], [["x1", "x2"]], 1,
+);
+check("floor of 1 (expected 2) still permits a single-room fold",
+  floorTwo.clusters.length === 1 && floorTwo.mergedCount === 1);
+
 // End-to-end: a 3BR scrape where the master was shot twice (head-on + TV angle)
 // and the 3rd bedroom was never photographed → vision says master angles are one
 // room → 2 distinct rooms, surfacing the coverage gap instead of masking it.

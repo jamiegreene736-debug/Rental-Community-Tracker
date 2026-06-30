@@ -33944,7 +33944,7 @@ Return ONLY compact JSON with this exact shape:
       newSourceUrl: string;
     },
     opts: { useSidecar?: boolean } = {},
-  ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string; bedrooms?: number | null; bathrooms?: number | null }> => {
+  ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string; bedrooms?: number | null; bathrooms?: number | null; bedroomsFound?: number; coverage?: { bedroomsExpected: number | null; bedroomsFound: number; bedroomsShortfall: number; bathroomsExpected: number | null; bathroomsFound: number; bathroomsShortfall: number } }> => {
     const url = swap.newSourceUrl;
     const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
     if (!/^https?:\/\//i.test(url)) return { ok: false, folder, savedCount: 0, error: "Replacement source URL is invalid" };
@@ -34055,6 +34055,11 @@ Return ONLY compact JSON with this exact shape:
         savedCount: result.kept,
         bedrooms: listingFacts.bedrooms ?? swap.newBedrooms ?? swap.oldBedrooms ?? null,
         bathrooms: listingFacts.bathrooms ?? null,
+        // Post-fold distinct-bedroom count + coverage, so the replace flow can
+        // warn the operator when fewer bedrooms were photographed than the
+        // listing claims (the same gap the rescrape path already surfaces).
+        bedroomsFound: result.bedroomCount,
+        coverage: result.coverage,
       };
     } catch (e: any) {
       await cleanupStaging();
@@ -34159,6 +34164,8 @@ Return ONLY compact JSON with this exact shape:
       swap,
       photoFolder: hydrated.folder,
       savedPhotoCount: hydrated.savedCount,
+      bedroomsFound: hydrated.bedroomsFound,
+      coverage: hydrated.coverage,
       unit: {
         url,
         address: newAddress,
@@ -34219,7 +34226,13 @@ Return ONLY compact JSON with this exact shape:
     }
     const swap = await storage.createUnitSwap(parsed.data);
 
-    return res.json({ swap, photoFolder: hydrated.folder, savedPhotoCount: hydrated.savedCount });
+    return res.json({
+      swap,
+      photoFolder: hydrated.folder,
+      savedPhotoCount: hydrated.savedCount,
+      bedroomsFound: hydrated.bedroomsFound,
+      coverage: hydrated.coverage,
+    });
   });
 
   app.get("/api/unit-swaps/:propertyId", async (req, res) => {
