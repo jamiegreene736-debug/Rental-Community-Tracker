@@ -10834,17 +10834,30 @@ export default function Bookings() {
                                 {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · auto-pick the cheapest live listing for each
                               </div>
                               <div className="flex flex-wrap items-center gap-2">
-                                {selectedPropertyId && PROPERTY_UNIT_CONFIGS[selectedPropertyId] && (
+                                {/* "Create prompt for Cowork" — needs a resolvable buy-in
+                                    property target (same source as the per-unit Manual
+                                    attach) + at least one empty slot. Build the prompt from
+                                    the reservation's OWN empty slots so it works for
+                                    single-unit / unconfigured listings in the global view,
+                                    not just configured 2-unit combos. */}
+                                {reservationMeta && r.slots.some((s) => !s.buyIn) && (
                                   <CoworkBuyInPromptButton
                                     reservation={r}
-                                    propertyId={selectedPropertyId}
-                                    propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? PROPERTY_UNIT_CONFIGS[selectedPropertyId]!.community}
-                                    community={PROPERTY_UNIT_CONFIGS[selectedPropertyId]!.community}
-                                    units={PROPERTY_UNIT_CONFIGS[selectedPropertyId]!.units.map((u) => ({
-                                      unitId: u.unitId,
-                                      unitLabel: u.unitLabel,
-                                      bedrooms: u.bedrooms,
-                                    }))}
+                                    propertyId={reservationMeta.propertyId}
+                                    propertyName={reservationMeta.propertyName}
+                                    community={
+                                      (selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community : undefined)
+                                      ?? PROPERTY_UNIT_CONFIGS[reservationMeta.propertyId]?.community
+                                      ?? r.slots.find((s) => s.community)?.community
+                                      ?? ""
+                                    }
+                                    units={r.slots
+                                      .filter((s) => !s.buyIn)
+                                      .map((s) => ({
+                                        unitId: s.unitId,
+                                        unitLabel: s.unitLabel,
+                                        bedrooms: s.bedrooms,
+                                      }))}
                                   />
                                 )}
                                 <Button

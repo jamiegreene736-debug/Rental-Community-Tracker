@@ -3,6 +3,9 @@ import {
   buildRefundReceiptBody,
   sanitizeForBookingChannel,
   receiptDedupKey,
+  sameTransactionMoment,
+  receiptNeedsAttention,
+  RECEIPT_STALE_MS,
   formatReceiptMoney,
   formatReceiptLongDate,
   RECEIPT_SENDER_NAME,
@@ -122,6 +125,48 @@ console.log("receipt-message: dedup key");
   const refundKey = receiptDedupKey({ reservationId: "r1", kind: "refund", dateIso: "2026-06-10", amount: -1200 });
   check("dedup: refund keyed distinctly + abs amount", refundKey === "r1|refund|2026-06-10|1200.00", refundKey);
   check("dedup: different amount -> different key", receiptDedupKey({ reservationId: "r1", kind: "payment", dateIso: "2026-06-10", amount: 50 }) !== a);
+}
+
+console.log("receipt-message: dedup key with txn id (50/50 same-day fix)");
+{
+  // No id -> EXACT legacy key (backward compatible).
+  const noId = receiptDedupKey({ reservationId: "r1", kind: "payment", dateIso: "2026-06-26T18:00:00Z", amount: 1855 });
+  check("dedup(id): no id reproduces legacy key", noId === "r1|payment|2026-06-26|1855.00", noId);
+  check("dedup(id): blank id -> legacy key", receiptDedupKey({ reservationId: "r1", kind: "payment", dateIso: "2026-06-26", amount: 1855, id: "  " }) === noId);
+  // Two same-day, same-amount charges (deposit + auto-charged balance) with
+  // DISTINCT ids -> DISTINCT keys. This is the bug fix: previously they collapsed.
+  const depositKey = receiptDedupKey({ reservationId: "r1", kind: "payment", dateIso: "2026-06-26T18:00:00Z", amount: 1855, id: "pay_deposit" });
+  const balanceKey = receiptDedupKey({ reservationId: "r1", kind: "payment", dateIso: "2026-06-26T18:02:30Z", amount: 1855, id: "pay_balance" });
+  check("dedup(id): same day+amount, different id -> DIFFERENT keys", depositKey !== balanceKey, { depositKey, balanceKey });
+  check("dedup(id): id appended to legacy base", depositKey === "r1|payment|2026-06-26|1855.00|pay_deposit", depositKey);
+  // Same charge read twice (stable id, jittered timestamp/cents) -> SAME key,
+  // so the scheduler never double-sends across polls.
+  const reread = receiptDedupKey({ reservationId: "r1", kind: "payment", dateIso: "2026-06-26T18:00:00.456Z", amount: 1855.004, id: "pay_deposit" });
+  check("dedup(id): same id across reads -> stable key (no double-send)", reread === depositKey, { reread, depositKey });
+}
+
+console.log("receipt-message: sameTransactionMoment (migration shim)");
+{
+  check("moment: identical ISO -> same", sameTransactionMoment("2026-06-26T18:00:00Z", "2026-06-26T18:00:00Z"));
+  check("moment: same instant, different format -> same", sameTransactionMoment("2026-06-26T18:00:00Z", "2026-06-26T18:00:00.000+00:00"));
+  check("moment: deposit vs balance same day -> DIFFERENT", !sameTransactionMoment("2026-06-26T18:00:00Z", "2026-06-26T18:02:30Z"));
+  check("moment: missing -> false", !sameTransactionMoment(null, "2026-06-26T18:00:00Z") && !sameTransactionMoment("2026-06-26T18:00:00Z", ""));
+}
+
+console.log("receipt-message: receiptNeedsAttention (non-delivery safety net)");
+{
+  const now = 1_700_000_000_000;
+  const fresh = now - 60_000;                 // 1 min ago
+  const stale = now - (RECEIPT_STALE_MS + 60_000); // past the stale threshold
+  check("misroute always needs attention", receiptNeedsAttention({ status: "misroute", createdAtMs: fresh }, now));
+  check("sent never needs attention", !receiptNeedsAttention({ status: "sent", createdAtMs: stale }, now));
+  check("unconfirmed reached the OTA -> no attention", !receiptNeedsAttention({ status: "unconfirmed", createdAtMs: stale }, now));
+  check("manual page -> no attention", !receiptNeedsAttention({ status: "page", createdAtMs: stale }, now));
+  check("fresh error retries silently -> no attention", !receiptNeedsAttention({ status: "error", createdAtMs: fresh }, now));
+  check("STALE error -> needs attention", receiptNeedsAttention({ status: "error", createdAtMs: stale }, now));
+  check("fresh pending -> no attention", !receiptNeedsAttention({ status: "pending", createdAtMs: fresh }, now));
+  check("STALE pending -> needs attention", receiptNeedsAttention({ status: "pending", createdAtMs: stale }, now));
+  check("error with unknown age -> surfaced", receiptNeedsAttention({ status: "error", createdAtMs: null }, now));
 }
 
 console.log(`\nreceipt-message: ${pass} passed, ${fail} failed`);

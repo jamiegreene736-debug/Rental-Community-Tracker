@@ -30,6 +30,7 @@ import {
   buildPaymentReceiptBody,
   buildRefundReceiptBody,
   receiptDedupKey,
+  sameTransactionMoment,
   RECEIPT_SENDER_NAME,
   RECEIPT_BRAND_NAME,
   type ReceiptKind,
@@ -229,14 +230,26 @@ export async function runGuestReceipts(): Promise<NonNullable<typeof _lastRunRes
 async function processTransaction(item: PendingTxn, now: number, opts?: { allowResend?: boolean }): Promise<{ outcome: "sent" | "skipped" | "error"; body?: string; reason?: string }> {
   const { kind, txn, reservation } = item;
   const reservationId = String(reservation?._id ?? reservation?.id ?? "");
-  const dedupKey = receiptDedupKey({ reservationId, kind, dateIso: txn.dateIso, amount: txn.amount });
+  // Per-transaction key, disambiguated by the stable Guesty txn id so a 50%
+  // deposit and the auto-charged 50% balance (same day, same amount) get TWO
+  // receipts instead of collapsing to one. Id-less rows reproduce the exact
+  // legacy day+amount key (backward compatible).
+  const dedupKey = receiptDedupKey({ reservationId, kind, dateIso: txn.dateIso, amount: txn.amount, id: txn.id });
 
   const channel = channelForReservation(reservation);
   const channelLc = channel.toLowerCase();
   // Forward match only: a configured token is treated as a substring of the
   // channel (e.g. "airbnb" mutes "airbnb2"). Do NOT also reverse-match — a
   // misconfigured longer token would silently swallow real channels.
-  if (SKIP_CHANNELS.some((s) => channelLc.includes(s))) return { outcome: "skipped", reason: `channel ${channel} is muted` };
+  //
+  // REFUNDS ALWAYS SEND (2026-06-30): the channel mute is for PAYMENT receipts —
+  // a channel might send its own payment confirmation, making ours redundant. A
+  // REFUND confirmation is never redundant and the operator wants it to ALWAYS
+  // reach the guest on the channel they booked through, so refunds bypass the
+  // mute. (See AGENTS.md "Guest payment/refund receipts auto-send" #10.)
+  if (kind === "payment" && SKIP_CHANNELS.some((s) => channelLc.includes(s))) {
+    return { outcome: "skipped", reason: `channel ${channel} is muted` };
+  }
 
   // Already handled? done. "sent" = delivery confirmed; "unconfirmed" = posted
   // but not confirmed; "misroute" = filed off the guest's OTA channel. For the
@@ -254,6 +267,27 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
         : existing.status === "unconfirmed" ? "already posted (delivery unconfirmed) — not resending"
           : "previously misrouted off the guest channel — not resending";
     return { outcome: "skipped", reason, body: existing.messageBody ?? undefined };
+  }
+
+  // MIGRATION SHIM (self-expiring): receipts sent BEFORE the txn id was added to
+  // the key used a day+amount-only key with no `|<id>` suffix. For an id-bearing
+  // transaction whose new key has no row yet, also check that LEGACY key — but
+  // only treat it as "already handled" if the legacy row was for THIS exact
+  // charge (same capture moment). A legacy row for a DIFFERENT same-day,
+  // same-amount charge (the deposit, when THIS is the balance) does NOT match,
+  // so the balance still sends. Without this, every recently-receipted charge in
+  // the backfill window would re-send once on the deploy that ships the new key.
+  // Once pre-upgrade rows age out of the window this never matches again.
+  if (txn.id && !existing) {
+    const legacyKey = receiptDedupKey({ reservationId, kind, dateIso: txn.dateIso, amount: txn.amount });
+    const legacyRow = await storage.getGuestReceiptByDedupKey(legacyKey);
+    if (
+      legacyRow &&
+      terminalStatuses.includes(legacyRow.status) &&
+      sameTransactionMoment(legacyRow.transactionDate, txn.dateIso)
+    ) {
+      return { outcome: "skipped", reason: "already sent (pre-id-upgrade receipt)", body: legacyRow.messageBody ?? undefined };
+    }
   }
 
   // Need a conversation to post into. If none yet, do NOT write a row — retry
@@ -329,6 +363,7 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
     amount: txn.amount,
     currency: "USD",
     transactionDate: txn.dateIso,
+    transactionId: txn.id ?? null,
     bookingTotal,
     paymentHistory: kind === "payment" ? history : [],
     totalPaidToDate: kind === "payment" ? history.reduce((s, p) => s + p.amount, 0) : null,

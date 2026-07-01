@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { CalendarSearch, Home, ListTodo, LogIn, LogOut, MessageSquare, PhoneMissed, UserRound } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { usePortalSession } from "@/lib/auth";
+import { useInboxUnreadCount } from "@/lib/inboxUnreadStore";
 
 type AutoReplyLogSummary = {
   status?: string | null;
@@ -47,7 +48,14 @@ export default function AppHeader() {
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
-  const inboxAlertCount = pendingDraftCount + missedCallCount;
+  // Unread guest conversations, published by the inbox page (the only place
+  // that folds in the operator's manual "Mark as read / unread" overrides) — so
+  // this header badge moves the instant a row is marked read/unread. `null`
+  // until the inbox has been opened this session; fall back to the pending AI
+  // draft count so the badge still signals attention before the first visit.
+  const publishedUnread = useInboxUnreadCount();
+  const unreadMessageCount = publishedUnread ?? pendingDraftCount;
+  const inboxAlertCount = unreadMessageCount + missedCallCount;
   const unreadBadgeLabel = inboxAlertCount > 99 ? "99+" : String(inboxAlertCount);
 
   return (

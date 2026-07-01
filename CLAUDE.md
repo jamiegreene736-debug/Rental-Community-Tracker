@@ -76,6 +76,50 @@ Before making any changes:
   per-channel all-in breakdown. Full rationale: AGENTS.md "Static buy-in rates are ALL-IN, 7-night,
   multi-channel" + the 2026-06-30 Decision Log line.
 
+- 2026-06-30 (guest receipts: ensure REFUNDS always reach the guest on their OTA channel): Follow-up
+  to the same-day payment fix. SHIPPED (`claude/refund-receipt-always-ota`, PR #TBD). The refund
+  auto-send + OTA routing ALREADY existed (the `server/guest-receipts.ts` scheduler detects refunds via
+  `realRefundsForReceipts` and posts through `sendGuestyConversationMessage`, which routes to the guest's
+  `integration.platform` channel — Airbnb→Airbnb, VRBO→VRBO, Booking.com→Booking.com). Two gaps closed
+  for the "ALWAYS" guarantee: (1) `RECEIPT_SKIP_CHANNELS` muted both kinds — refunds now BYPASS the mute
+  (`processTransaction` applies it only when `kind === "payment"`), since a channel mute is for redundant
+  payment receipts, not refund confirmations. (2) Per AGENTS.md #51 the scheduler must NOT auto-retry a
+  `misroute`/`unconfirmed` send (would re-post a duplicate — the cardinal sin), so a genuinely
+  non-delivered refund could silently never reach the guest. Added a SAFETY NET: pure
+  `receiptNeedsAttention()` (`shared/receipt-message.ts`) flags refund rows that are `misroute` or a
+  STALE `error`/`pending`; the dashboard revenue payload exposes `guestRefundReceiptIssues` and
+  `home.tsx` renders a red alert + "Resend to guest" button (`kind:"refund"`-scoped force-send via
+  `POST /api/inbox/guest-receipts/send-for-reservation`; the OTA path de-dupes so the channel is never
+  double-posted). `unconfirmed` is deliberately NOT flagged (the message reached the OTA once already).
+  Verified: `tests/receipt-message.test.ts` 46/0, full `npm test` exit 0, build clean, `npm run check`
+  335 = baseline (0 new). Could NOT live-smoke (no Guesty creds) — confirm post-deploy by issuing a
+  refund: the guest gets a refund receipt on their booking channel within ~5 min; any misroute surfaces
+  in the dashboard alert with a working Resend.
+
+- 2026-06-30 (guest receipts: auto-charged FINAL payment got NO receipt — same-day 50/50 dedup
+  collapse): Operator reported that when Guesty auto-took the second 50% payment (booking made INSIDE
+  the "balance due ~90 days before arrival" window, so the balance is charged the SAME day as the
+  deposit), the guest got the deposit receipt but never a second "paid in full" receipt. SHIPPED
+  (`claude/receipt-final-payment-dedup`, PR #TBD). ROOT CAUSE: both receipt dedup layers keyed on
+  day+amount and IGNORED transaction identity — `dedupeTransactions` (`server/guesty-money.ts`,
+  `day|amount|desc`) and `receiptDedupKey` (`shared/receipt-message.ts`,
+  `reservationId|kind|day|amount`). Two equal $1,855 charges on the same day collapsed to ONE receipt.
+  This was the DOCUMENTED-but-wrong 2026-06-10 trade-off ("two same-day same-amount charges collapse;
+  do NOT add a txn id") — overridden here (AGENTS.md Load-Bearing #2 replaced + 2026-06-30 Decision
+  Log). FIX: distinguish charges by Guesty's stable txn `_id` (new `transactionId()`; appended to the
+  ledger key `|<id>`; `dedupeTransactions` splits by id). `_id` is immutable across polls so it does
+  NOT reintroduce the jitter double-send the old comment feared; id-less shapes reproduce the EXACT
+  legacy key (backward compatible). A self-expiring migration shim (`sameTransactionMoment` in
+  `processTransaction`) checks the legacy key too and skips ONLY when it was for THIS exact charge
+  moment — so the deploy doesn't re-send recent receipts while the balance still sends. FOR FAITH ITO
+  SPECIFICALLY: both her charges are now >48h old (outside the backfill window), so use the manual
+  `POST /api/inbox/guest-receipts/send-for-reservation` (reservationId or confirmationCode) — the
+  detection path now returns BOTH payments and the shim sends only the missing balance. Verified:
+  `tests/guesty-money-payments.test.ts` 13/0 (new), `tests/receipt-message.test.ts` 37/0, full
+  `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT
+  live-smoke the Guesty leg (no creds in session) — confirm post-deploy on the next within-window
+  booking.
+
 - 2026-06-30 (FOLLOW-UP: community double-check on the static-rate research target): Operator wanted
   glanceable proof that the community Claude web-researches is the CORRECT community for the listing —
   matching BOTH the community NAME and its LOCATION (city/state). SHIPPED
