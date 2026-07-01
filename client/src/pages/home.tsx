@@ -4517,25 +4517,19 @@ function AdminDashboard() {
             </div>
           )}
           <div className="overflow-x-auto overscroll-x-contain [&>div]:overflow-visible">
+          {/*
+            table-fixed layout: every column width is declared explicitly via the
+            per-<TableHead> `w-[Npx]` classes below (the first row drives the fixed
+            layout). Do NOT reintroduce a <colgroup> here — the previous one had
+            only 16 <col> entries for 20 columns (added incrementally: Scanned,
+            Added, Total Revenue, Last Price Scan) and its positional widths landed
+            on the wrong columns, starving the icon columns (Photos / Comm QA) so
+            their fixed-minWidth badge rows spilled into neighbouring cells. Keeping
+            the widths solely on the <th> keeps a single source of truth. The sum of
+            the column widths (~1766px) exceeds min-w so the wrapping
+            `overflow-x-auto` div scrolls horizontally on narrow / mobile viewports.
+          */}
           <Table id="list-properties" className="min-w-[1340px] table-fixed">
-            <colgroup>
-              <col style={{ width: "2.2%" }} />
-              <col style={{ width: "5.5%" }} />
-              <col style={{ width: "2.1%" }} />
-              <col style={{ width: "1.8%" }} />
-              <col style={{ width: "5.6%" }} />
-              <col style={{ width: "6.5%" }} />
-              <col style={{ width: "7.5%" }} />
-              <col style={{ width: "6.5%" }} />
-              <col style={{ width: "10.5%" }} />
-              <col style={{ width: "24.4%" }} />
-              <col style={{ width: "9.2%" }} />
-              <col style={{ width: "7.6%" }} />
-              <col style={{ width: "5.4%" }} />
-              <col style={{ width: "3.2%" }} />
-              <col style={{ width: "4.5%" }} />
-              <col style={{ width: "3.5%" }} />
-            </colgroup>
             <TableHeader>
               <TableRow>
                 <TableHead className="w-[30px] text-center px-1">
