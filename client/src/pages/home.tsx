@@ -1277,6 +1277,7 @@ function AdminDashboard() {
   const [bulkPricingStarting, setBulkPricingStarting] = useState(false);
   const [bulkPricingCancelling, setBulkPricingCancelling] = useState(false);
   const [bulkPricingRetrying, setBulkPricingRetrying] = useState(false);
+  const [bulkPricingClearing, setBulkPricingClearing] = useState(false);
   const [bulkAvailabilityOpen, setBulkAvailabilityOpen] = useState(false);
   const [bulkAvailabilityStarting, setBulkAvailabilityStarting] = useState(false);
   const [bulkAvailabilityAction, setBulkAvailabilityAction] = useState<"clear" | "pause" | "resume" | "cancel" | null>(null);
@@ -2652,6 +2653,30 @@ function AdminDashboard() {
       toast({ title: "Cancel failed", description: e.message, variant: "destructive" });
     } finally {
       setBulkPricingCancelling(false);
+    }
+  };
+
+  // Clear the whole queue out of the way. If it isn't already in a terminal
+  // state, force-terminate it server-side first (so a stuck/orphaned running
+  // item can't keep the job "running" and immediately re-surface via polling),
+  // then dismiss the local view.
+  const clearBulkPricingQueue = async () => {
+    if (!bulkPricingJob?.id) return;
+    if (!bulkPricingTerminal && !window.confirm("This queue is still running. Clear it anyway? Any in-progress pricing will stop.")) {
+      return;
+    }
+    setBulkPricingClearing(true);
+    try {
+      if (!bulkPricingTerminal) {
+        await apiRequest("POST", `/api/pricing/bulk-refresh/${bulkPricingJob.id}/cancel?force=1`);
+      }
+      setBulkPricingJob(null);
+      setSelectedPricingIds(new Set());
+      setBulkPricingEvents([]);
+    } catch (e: any) {
+      toast({ title: "Couldn’t clear the queue", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkPricingClearing(false);
     }
   };
 
@@ -4184,13 +4209,12 @@ function AdminDashboard() {
                           <Button
                             type="button"
                             variant="outline"
-                            onClick={() => {
-                              setBulkPricingJob(null);
-                              setSelectedPricingIds(new Set());
-                            }}
-                            disabled={!bulkPricingTerminal}
+                            onClick={clearBulkPricingQueue}
+                            disabled={bulkPricingClearing}
+                            title={bulkPricingTerminal ? "Dismiss this finished queue" : "Stop and clear the whole queue (including any stuck item)"}
                           >
-                            Clear completed queue
+                            {bulkPricingClearing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                            Clear queue
                           </Button>
                           <div className="flex items-center gap-2">
                             {bulkPricingJob.failed > 0 && bulkPricingTerminal && (
