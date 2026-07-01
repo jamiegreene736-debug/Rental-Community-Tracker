@@ -88,5 +88,33 @@ check("single: no 'repeat for second unit' line", !single.includes("second unit 
 check("single: empty community → infer hint", single.includes("infer from the property name"));
 check("single: attach endpoint still present", single.includes("/api/bookings/HA-PGf8rgW/attach-buy-in"));
 
+// ── MISLABELED community (Santa Maria condo mis-mapped to Bonita National) ───
+// The real incident: a Fort Myers Beach "Santa Maria Resort" condo whose configured
+// community resolved to the inland "Bonita National", sending the search to the wrong
+// place. The prompt must anchor on the property's own resort name, not the community.
+const mislabeled = buildCoworkBuyInPrompt({
+  reservationId: "6a2716f69466d1001379f5dd",
+  guestName: "Cheryl Parker",
+  propertyId: -5,
+  propertyName: "Santa Maria Resort - 2BR Condo - Sleeps",
+  community: "Bonita National", // MISLABELED for this property
+  checkIn: "2026-07-03",
+  checkOut: "2026-07-06",
+  units: [{ unitId: "main", unitLabel: "Unit 3104", bedrooms: 2 }],
+  baseUrl: "https://app.example.com",
+});
+check("mislabeled: anchors on the property resort name", mislabeled.includes("Resort to search (PRIMARY — anchor on this): Santa Maria Resort"), mislabeled.match(/Resort to search.*/)?.[0]);
+check("mislabeled: does NOT anchor the search on Bonita National", !/inside \*\*Bonita National\*\*/.test(mislabeled));
+check("mislabeled: warns the configured community may be wrong", /MAY BE MISLABELED/.test(mislabeled));
+check("mislabeled: requires the condo unit type", /a \*\*condo\*\*/.test(mislabeled));
+check("mislabeled: same-city does not qualify", mislabeled.includes("same CITY does NOT qualify"));
+check("mislabeled: distrusts the curated city", mislabeled.includes("determine it from the resort's own listing"));
+
+// A property whose name CORROBORATES the community keeps trusting the curated city.
+const corroborated = buildCoworkBuyInPrompt({ ...baseInput, propertyName: "Poipu Kai Resort - 3BR Condo" });
+check("corroborated: keeps the curated resort as anchor", corroborated.includes("anchor on this): Poipu Kai"), corroborated.match(/Resort to search.*/)?.[0]);
+check("corroborated: keeps the curated city-wide (Koloa)", corroborated.includes("city-wide search of Koloa, Hawaii"));
+check("corroborated: no mislabel warning", !/MAY BE MISLABELED/.test(corroborated));
+
 console.log(`\ncowork-buyin-prompt: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
