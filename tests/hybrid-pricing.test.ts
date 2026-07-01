@@ -232,7 +232,9 @@ try {
     checkIn: "2026-06-01",
     checkOut: "2026-06-08",
   });
-  assert.equal(poipuBasis.medianNightly, 440);
+  // Eligible 3BR nightlies are [400, 500] (7-night totals 2800/3500 ÷ 7); the
+  // median (50th percentile) = 450 (was 440 under the old P40).
+  assert.equal(poipuBasis.medianNightly, 450);
   assert.equal(poipuBasis.sampleCount, 2);
   assert.equal(requestedSearchApiUrls.length, 1);
   const params = new URL(requestedSearchApiUrls[0]).searchParams;
@@ -280,7 +282,7 @@ try {
   assert.match(
     distinctPoipuBasis.notes[0],
     /adjusted to nearest distinct monthly sample/,
-    "duplicate monthly p40 basis should choose the nearest distinct sampled rate",
+    "duplicate monthly median basis should choose the nearest distinct sampled rate",
   );
 } finally {
   globalThis.fetch = originalFetch;
@@ -647,7 +649,7 @@ process.env.SEARCHAPI_API_KEY = "test-key";
 const hybridPricingSource = readFileSync(new URL("../server/hybrid-pricing.ts", import.meta.url), "utf8");
 assert.ok(
   hybridPricingSource.includes('source: "airbnb"'),
-  "pricing refresh should persist raw SearchAPI 40th percentile bases without hybrid markup layers",
+  "pricing refresh should persist raw SearchAPI median bases without hybrid markup layers",
 );
 assert.equal(
   hybridPricingSource.includes("calculateBlendedRate({"),
@@ -684,13 +686,13 @@ assert.equal(
   "market-rate refresh must not fall back to amortized geo pricing when a monthly Airbnb SearchAPI query is empty",
 );
 assert.ok(
-  hybridPricingSource.includes("MARKET_PRICING_PERCENTILE = 40"),
-  "market pricing should use the 40th percentile basis",
+  hybridPricingSource.includes("MARKET_PRICING_PERCENTILE = 50"),
+  "market pricing should use the median (50th percentile) basis",
 );
 assert.equal(
   hybridPricingSource.includes("MIN_PERCENTILE_TO_MEDIAN_RATIO"),
   false,
-  "market pricing must use the raw P40 basis without a median-floor backup",
+  "market pricing must use the raw median basis without a separate percentile-to-median floor",
 );
 assert.equal(
   hybridPricingSource.includes("extracted_price_per_qualifier"),
@@ -736,7 +738,7 @@ assert.ok(
 assert.equal(
   hybridPricingSource.includes("avoidNightlyBasis: previousBasis"),
   false,
-  "monthly scan must not nudge P40 to avoid matching the prior month",
+  "monthly scan must not nudge the median to avoid matching the prior month",
 );
 assert.ok(
   !hybridPricingSource.includes("demandRank(resolveSeasonTier"),

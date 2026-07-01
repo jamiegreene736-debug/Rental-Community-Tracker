@@ -940,7 +940,7 @@ async function buildBulkGuestySeasonalPlan(
     const examples = Array.from(missingMonthlyRates).slice(0, 8);
     const more = missingMonthlyRates.size > examples.length ? ` and ${missingMonthlyRates.size - examples.length} more` : "";
     throw new Error(
-      `Market pricing push requires live monthly SearchAPI Airbnb p40 rates for every unit/month; missing ${examples.join(", ")}${more}. Re-run the market pricing refresh; refusing LOW/HIGH/HOLIDAY fallback.`,
+      `Market pricing push requires live monthly SearchAPI Airbnb median rates for every unit/month; missing ${examples.join(", ")}${more}. Re-run the market pricing refresh; refusing LOW/HIGH/HOLIDAY fallback.`,
     );
   }
 
@@ -1130,14 +1130,15 @@ async function refreshHybridPricingForDraft(
 }
 
 // ── Claude static-rate engine dispatch ──────────────────────────────────────
-// The market-rate refresh source is the Claude static-rate engine by default
-// (server/static-rate-engine.ts). Set STATIC_RATE_ENGINE_DISABLED=1 to revert to
-// the legacy live Airbnb SearchAPI P40 random-window scan (hybrid-pricing.ts),
-// which is kept dormant but intact for fallback. The Guesty push, markup,
-// scheduler, and bulk queue are all source-agnostic — they read the same
-// property_market_rates.monthlyRates shape either engine writes.
+// Operator directive 2026-07-01: the market-rate update (Pricing-tab "Update
+// Market Rates" button + dashboard bulk queue + weekly cron) is REVERTED to the
+// legacy live Airbnb SearchAPI scan (hybrid-pricing.ts), now using the Airbnb
+// MEDIAN comp (was P40). The Claude static-rate engine (server/static-rate-engine.ts)
+// is kept dormant but intact — set STATIC_RATE_ENGINE=1 to re-enable it. The
+// Guesty push, markup, scheduler, and bulk queue are all source-agnostic — they
+// read the same property_market_rates.monthlyRates shape either engine writes.
 function staticRateEngineEnabled(): boolean {
-  return process.env.STATIC_RATE_ENGINE_DISABLED !== "1";
+  return process.env.STATIC_RATE_ENGINE === "1";
 }
 
 // Resolve a static-rate generation target (community + bedroom slots) for both
@@ -1458,7 +1459,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       percent: Math.min(79, Math.round(10 + (70 * (event.monthOffset + 1)) / event.horizonMonths)),
       label: isStatic
         ? `Claude static rates ${event.bedrooms}BR (${event.monthOffset + 1}/${event.horizonMonths}) -> LOW $${event.medianNightly}/night${confidenceLabel}`
-        : `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) -> P40 $${event.medianNightly}/night${confidenceLabel}`,
+        : `SearchAPI Airbnb ${event.bedrooms}BR: ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths}) -> median $${event.medianNightly}/night${confidenceLabel}`,
       currentMonth: event.yearMonth,
       monthsScanned: event.monthOffset + 1,
       horizonMonths: event.horizonMonths,

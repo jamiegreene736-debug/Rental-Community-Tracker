@@ -2427,7 +2427,12 @@ function AdminDashboard() {
       const model = (recipe as any).model ? ` · ${(recipe as any).model}` : "";
       return `${recipe.searchName || recipe.community || "Market"} · ${unitCount} · ${searched} · Claude web research${model}`;
     }
-    const percentile = recipe.percentileBasis ? `p${recipe.percentileBasis}` : "p40";
+    // 50th percentile == the Airbnb median (operator directive 2026-07-01).
+    const percentile = recipe.percentileBasis === 50
+      ? "median"
+      : recipe.percentileBasis
+        ? `p${recipe.percentileBasis}`
+        : "median";
     const nights = recipe.stayNights ? `${recipe.stayNights}-night` : "7-night";
     return `${recipe.community || recipe.searchName || "Market"} · ${unitCount} · searching ${searched} · ${nights} ${percentile}`;
   };

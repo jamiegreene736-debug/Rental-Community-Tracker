@@ -161,7 +161,10 @@ function loadConfig(): HybridPricingConfig {
 export const HYBRID_PRICING_CONFIG = loadConfig();
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const MARKET_PRICING_PERCENTILE = 40;
+// Operator directive 2026-07-01: price from the Airbnb MEDIAN comp (50th
+// percentile), not the old P40. 50 = median by definition (interpolatedPercentile
+// at 50 == the median already computed alongside it in marketPricingBasis).
+const MARKET_PRICING_PERCENTILE = 50;
 // Airbnb dated search is reliable for ~12 months; months 13–24 extrapolate
 // from the same calendar month in year 1 with YEAR_TWO_MARKET_RATE_GROWTH.
 export const AIRBNB_MARKET_RATE_SEARCH_MONTHS = 12;
@@ -395,9 +398,9 @@ function marketPricingBasis(values: number[], avoidBasis?: number | null): { bas
 
 function marketPricingBasisNotes(stats: ReturnType<typeof marketPricingBasis>): string {
   if (stats.percentile != null && stats.median != null) {
-    return `using raw ${MARKET_PRICING_PERCENTILE}th percentile basis $${stats.basis} (median $${stats.median})${stats.tieAdjusted ? "; adjusted to nearest distinct monthly sample to avoid repeating the prior month" : ""}`;
+    return `using the Airbnb median comp basis $${stats.basis}${stats.tieAdjusted ? "; adjusted to nearest distinct monthly sample to avoid repeating the prior month" : ""}`;
   }
-  return `using raw ${MARKET_PRICING_PERCENTILE}th percentile basis`;
+  return `using the Airbnb median comp basis`;
 }
 
 function summarizeMonthlyHybridRates(monthlyRates: Record<string, HybridMonthlyRate>) {
