@@ -966,13 +966,13 @@ async function pushBulkGuestyPricingAfterRefresh(
   leadTime?: Awaited<ReturnType<typeof pushLeadTimePolicyPricesToGuesty>>;
   blackout?: PricingBlackoutReconcile;
 }> {
-  // Operator directive 2026-06-18: the market-rate update queue applies a FLAT
-  // 15% markup to every property (MARKET_RATE_TARGET_MARGIN). We intentionally
-  // do NOT read the polluted per-property scanner_schedules.target_margin column
-  // (legacy rows carry the old 0.2000 default). Operator 2026-06-27: a small
-  // explicit allow-list (PROPERTY_TARGET_MARGIN_OVERRIDES) may raise the margin
-  // for specific outlier listings (e.g. the Menehune Shores -3 Maui combo at
-  // 20%); every property NOT in that list still pushes at the flat 15%.
+  // Operator directive 2026-07-01: the market-rate update queue applies a FLAT
+  // 20% markup to every property (MARKET_RATE_TARGET_MARGIN; was 15%). We
+  // intentionally do NOT read the polluted per-property
+  // scanner_schedules.target_margin column (legacy rows carry a stale default).
+  // A small explicit allow-list (PROPERTY_TARGET_MARGIN_OVERRIDES) can still
+  // override the margin per listing; every property NOT in that list pushes at
+  // the flat 20%.
   const targetMargin = targetMarginForProperty(propertyId);
   const plan = await buildBulkGuestySeasonalPlan(propertyId, targetMargin);
   if (!plan) {

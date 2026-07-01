@@ -1183,7 +1183,8 @@ assert.equal(applyLodgingTaxGrossUp(1000, "Poipu Kai"), 1180, "HI median grossed
 assert.equal(applyLodgingTaxGrossUp(1000, "Windsor Hills"), 1125, "FL median grossed up ×1.125");
 assert.equal(applyLodgingTaxGrossUp(1000, "Totally Unknown Resort"), 1180, "unknown community defaults to Hawaii");
 assert.equal(applyLodgingTaxGrossUp(0, "Poipu Kai"), 0, "zero basis is left unchanged");
-assert.ok(applyLodgingTaxGrossUp(933, "Coconut Plantation at Ko Olina") > 933, "Ko Olina (HI) median grossed up above raw");
+// A real BUY_IN_RATES HI key (genuinely region-mapped, not the unknown default).
+assert.equal(applyLodgingTaxGrossUp(933, "Poipu Kai"), Math.round(933 * 1.18), "named HI community (Poipu Kai) grossed up ×1.18");
 console.log("  ✓ applyLodgingTaxGrossUp adds regional lodging tax to the buy-in basis");
 
 // Pili Mai 5BR is priced as its actual 3BR + 2BR component buy-ins, not
