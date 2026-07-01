@@ -43,6 +43,28 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-01 (REVERTED market-rate updates to the legacy SearchAPI Airbnb engine, now using the MEDIAN
+  not P40): Operator: "This new [Claude all-in] methodology is not working well. Revert to the old
+  methodology for market-rate updates (dashboard queue + Pricing-tab 'Update Market Rates' button), but
+  use the MEDIAN Airbnb price instead of P40." SHIPPED (`claude/revert-airbnb-median`, PR #TBD). This
+  UNWINDS the default of the 2026-06-29 static engine + the 2026-06-30 (#873) all-in work FOR THE UPDATE
+  PATH ONLY — the Claude static/all-in engine code stays intact but DORMANT (re-enable with
+  `STATIC_RATE_ENGINE=1`); do NOT delete it. Two edits: (1) `staticRateEngineEnabled()` in
+  `server/routes.ts` flipped to default OFF (`process.env.STATIC_RATE_ENGINE === "1"`, was
+  `STATIC_RATE_ENGINE_DISABLED !== "1"`). All three market-rate entry points route back to
+  `refreshHybridPricingFor{Property,Draft}` (hybrid-pricing.ts); `generateStaticRatesForTarget` is only
+  reachable behind that flag, so the revert is complete. (2) `MARKET_PRICING_PERCENTILE` in
+  `server/hybrid-pricing.ts` 40 → 50 (the median; `interpolatedPercentile(values,50)` == the `median`
+  already computed in `marketPricingBasis`; the prior-month tie-adjust `closestDistinctSampleBasis` is
+  unchanged). Relabeled operator-facing "P40" → "median" (routes progress + push-error, client
+  queue/refresh labels, `formatPricingRecipe`); `tests/hybrid-pricing.test.ts` recompute — source-grep
+  `= 40`→`= 50`, the one distinct-median fixture 440→450 (3BR `[400,500]`), tie-adjust `[100,100,200]`→200
+  and single `[400]`→400 unchanged. Verified: full `npm test` exit 0, `npm run build` clean,
+  `npm run check` 335 = baseline (0 new); adversarial diff review. Post-deploy: the dashboard "Update
+  market pricing" queue + Pricing-tab button now scan SearchAPI Airbnb and price from the median (the
+  Pricing tab shows "… · N-night median" and the queue phase reads "searchapi-airbnb"). Full rationale:
+  AGENTS.md 2026-07-01 Decision Log line.
+
 - 2026-06-30 (market-rate engine → ALL-IN, 7-night, multi-channel buy-in research): Operator wanted the
   market-rate update to web-research the REAL buy-in rate across VRBO/Booking.com/PM sites/Airbnb (as
   much data as possible), produce LOW/HIGH/HOLIDAY for the next 24 months INCLUDING all taxes + fees,
