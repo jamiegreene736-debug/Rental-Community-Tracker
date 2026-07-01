@@ -3917,7 +3917,7 @@ function AdminDashboard() {
                     <div className="rounded-md border bg-muted/20 p-3 text-sm">
                       <p className="font-medium">Runs one selected property at a time.</p>
                       <p className="mt-1 text-muted-foreground">
-                        For each property, Claude web-researches the resort's real market rates and generates one buy-in rate per season (Low / High / Holiday) per year, expanded across the rolling next 24 months. Operator-locked anchors are preserved. It then pushes the marked-up base rates to Guesty. The queue is saved on the server, so closing this tab will not stop it.
+                        For each property, this scans SearchAPI Airbnb for real market comps and sets each month's buy-in rate from the Airbnb median — a 7-night sample per calendar month across ~12 months, with year-2 extrapolation. It then pushes the marked-up base rates to Guesty. The queue is saved on the server, so closing this tab will not stop it.
                       </p>
                     </div>
                     {!bulkPricingJob ? (
@@ -4069,7 +4069,7 @@ function AdminDashboard() {
                                           >
                                             <span aria-hidden>🔎</span>
                                             <span className="truncate">
-                                              Researched <span className="font-medium text-foreground">{recipeResort}</span>
+                                              Scanned <span className="font-medium text-foreground">{recipeResort}</span>
                                             </span>
                                           </span>
                                         )}
