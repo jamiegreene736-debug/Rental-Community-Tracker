@@ -38,6 +38,9 @@ export type BuyinAgentRunParams = {
   groundFloorBedrooms: number[];
   expectedRevenue: number;
   dryRun: boolean;
+  // BUYIN_ALLOW_LOSS mode: attach the cheapest VALID combo even at a loss (the server
+  // still enforces it; this tells the agent to phrase its search accordingly).
+  allowLoss?: boolean;
 };
 
 // Discriminated outcome the runner reports (see plan §5: every run must say WHY,

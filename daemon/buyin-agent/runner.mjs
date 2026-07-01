@@ -140,6 +140,19 @@ genuine search no acceptable combo exists, finish with outcome "no-combo-found" 
 over-budget or wrong-community unit just to fill the slot. Always finish with the candidate set you
 evaluated (with a per-candidate reason) so a miss is debuggable.`;
 
+// Appended to the system prompt when the run is in BUYIN_ALLOW_LOSS mode (operator
+// 2026-06-27). Overrides the "don't attach over-budget" instruction: a displaced guest
+// must be rehoused, so always attach the cheapest VALID combo even at a loss. The
+// STRUCTURAL rules (right size, same-community/walkable, distinct units) still hold.
+const ALLOW_LOSS_DIRECTIVE = `
+
+COST MODE (BUYIN_ALLOW_LOSS): a guest must be rehoused, so do NOT skip a slot just because the
+only option loses money. ALWAYS attach the CHEAPEST VALID combo via propose_attach — "valid" still
+means the right bedroom size(s), same community or a walkable adjacent complex, distinct units, and
+a confirmed ground-floor snippet where required. You may ignore the profit gate when choosing what
+to attach, but still report the projected profit/loss. Only finish "no-combo-found" if NO valid
+combo exists at all (not merely because every option is a loss).`;
+
 function toolDefs() {
   const defs = [
     { name: "get_job_context", description: "Live job context: slots (with filled flag), dates, community, expected revenue, running committed cost, revenue available, ground-floor-required bedrooms.", input_schema: { type: "object", properties: { jobId: { type: "string" } }, required: ["jobId"] } },
@@ -226,6 +239,7 @@ async function runAgent(run, onStage) {
     return { outcome: "agent-error", message: "ANTHROPIC_API_KEY not set on the runner", candidates: [] };
   }
   const model = run.model || MODEL;
+  const system = SYSTEM_PROMPT + (run.params?.allowLoss ? ALLOW_LOSS_DIRECTIVE : "");
   const tools = toolDefs();
   const messages = [{
     role: "user",
@@ -238,7 +252,7 @@ async function runAgent(run, onStage) {
   let usage = { inputTokens: 0, outputTokens: 0, toolCalls: 0 };
   for (let step = 0; step < MAX_STEPS; step++) {
     onStage?.(`step ${step + 1}/${MAX_STEPS}`);
-    const resp = await callMessages({ model, max_tokens: 4096, system: SYSTEM_PROMPT, tools, messages });
+    const resp = await callMessages({ model, max_tokens: 4096, system, tools, messages });
     usage.inputTokens += resp.usage?.input_tokens || 0;
     usage.outputTokens += resp.usage?.output_tokens || 0;
     messages.push({ role: "assistant", content: resp.content });

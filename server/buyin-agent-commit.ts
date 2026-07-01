@@ -32,6 +32,15 @@ export function unregisterCommitContext(jobId: string): void {
   commitContexts.delete(jobId);
 }
 
+// BUYIN_ALLOW_LOSS (operator 2026-06-27): when on, the cowork engine attaches the
+// cheapest VALID combo even if it's over the profit cap (a displaced guest must be
+// rehoused). Only affects the AGENT path — the legacy ladder's gate is untouched.
+// Default off. Read at call time so a Railway env flip takes effect without a deploy.
+export function buyInAllowLoss(): boolean {
+  const v = String(process.env.BUYIN_ALLOW_LOSS ?? "").toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
 // ── pure guard: ground-floor evidence (plan §4) ──────────────────────────────
 // A boolean "confirmed" is something the agent could assert. Require a quoted
 // listing-text snippet that actually names a ground-floor signal, of non-trivial
@@ -151,22 +160,31 @@ export async function proposeAttach(input: ProposeAttachInput): Promise<ProposeA
     resolved.push({ pick, slot });
   }
 
-  // 1. PROFIT GATE on the running committed total + the SUM of these picks. The
-  // cheapest acceptable combo is what we want; an over-loss proposal is recorded as
-  // a loss option and refused (never attached) — identical to the legacy gate.
+  // 1. PROFIT GATE on the running committed total + the SUM of these picks.
+  // Default: an over-loss proposal is recorded as a loss option and REFUSED (never
+  // attached) — identical to the legacy gate.
+  // BUYIN_ALLOW_LOSS mode (operator 2026-06-27): the engine ATTACHES the cheapest
+  // VALID combo even at a loss (a displaced guest must be rehoused), recording the
+  // economics so the loss is visible on the booking but NOT refusing. Only the PROFIT
+  // rule is dropped — every structural guard below (bedrooms, ground-floor snippet,
+  // walkability/proximity, dedup) still applies.
   const comboCost = resolved.reduce((s, r) => s + (Number(r.pick.totalPrice) || 0), 0);
   const verdict = deps.gate(comboCost);
+  const label = resolved.map((r) => `${r.slot.bedrooms}BR`).join(" + ");
   if (!verdict.acceptable) {
-    const label = resolved.map((r) => `${r.slot.bedrooms}BR`).join(" + ");
-    deps.recordEconomics("home-city", `Agent proposal ${label}`, comboCost, verdict.profit, false, "over the $100 max-loss cap");
-    deps.recordLossComboOption(
-      `Agent: ${label}`,
-      { picks: resolved.map((r) => ({ bedrooms: r.slot.bedrooms, url: r.pick.url, title: r.pick.title, totalPrice: r.pick.totalPrice })) },
-      comboCost,
-      verdict.profit,
-      { scopeCategory: "home" },
-    );
-    return { ok: true, acceptable: false, profit: verdict.profit, reason: "profit gate: over the $100 max-loss cap", attached: [] };
+    if (!buyInAllowLoss()) {
+      deps.recordEconomics("home-city", `Agent proposal ${label}`, comboCost, verdict.profit, false, "over the $100 max-loss cap");
+      deps.recordLossComboOption(
+        `Agent: ${label}`,
+        { picks: resolved.map((r) => ({ bedrooms: r.slot.bedrooms, url: r.pick.url, title: r.pick.title, totalPrice: r.pick.totalPrice })) },
+        comboCost,
+        verdict.profit,
+        { scopeCategory: "home" },
+      );
+      return { ok: true, acceptable: false, profit: verdict.profit, reason: "profit gate: over the $100 max-loss cap", attached: [] };
+    }
+    // Loss allowed: record the loss for visibility, then fall through to attach.
+    deps.recordEconomics("home-city", `Agent proposal ${label} (attached at a loss)`, comboCost, verdict.profit, true, "BUYIN_ALLOW_LOSS: cheapest valid combo attached despite a projected loss");
   }
 
   // Coords only matter for a multi-unit combo (walkability between picks). A
@@ -229,5 +247,7 @@ export async function proposeAttach(input: ProposeAttachInput): Promise<ProposeA
     attached.push({ unitId: slot.unitId, attached: ok, reason: ok ? undefined : "attach rejected by server guard (see job.skipped)" });
   }
 
-  return { ok: true, acceptable: true, profit: verdict.profit, attached };
+  // `acceptable` reflects the PROFIT verdict honestly (false in a BUYIN_ALLOW_LOSS
+  // attach); `attached` tells whether the picks were committed.
+  return { ok: true, acceptable: verdict.acceptable, profit: verdict.profit, attached };
 }

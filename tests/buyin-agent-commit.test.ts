@@ -116,6 +116,40 @@ function makeCtx(over: { expectedRevenue?: number; groundFloor?: number[] } = {}
   console.log("  ✓ over-loss proposal refused + recorded as a loss option (never attached)");
 }
 
+// BUYIN_ALLOW_LOSS: an over-loss combo ATTACHES (cheapest valid combo, even at a loss)
+{
+  const prev = process.env.BUYIN_ALLOW_LOSS;
+  process.env.BUYIN_ALLOW_LOSS = "1";
+  const { job, captured } = makeCtx({ expectedRevenue: 2000 });
+  const r = await proposeAttach({ jobId: "afj_test", picks: [
+    { unitId: "A", url: "https://vrbo.com/a", title: "3BR", totalPrice: 4000, bedrooms: 3 },
+  ] });
+  assert.equal(r.ok, true);
+  assert.equal(r.acceptable, false, "profit verdict is still honestly 'not acceptable'");
+  assert.equal(r.attached[0].attached, true, "but the loss combo IS attached");
+  assert.equal(job.attached.length, 1, "slot filled despite the loss");
+  assert.equal(captured.loss.length, 0, "no loss-option card (it was attached, not surfaced)");
+  assert.ok(captured.econ.some((e: any[]) => e[4] === true), "economics recorded as accepted (visible loss)");
+  unregisterCommitContext("afj_test");
+  if (prev === undefined) delete process.env.BUYIN_ALLOW_LOSS; else process.env.BUYIN_ALLOW_LOSS = prev;
+  console.log("  ✓ BUYIN_ALLOW_LOSS attaches the cheapest valid combo even at a loss");
+}
+
+// BUYIN_ALLOW_LOSS still enforces STRUCTURAL guards (ground-floor snippet required)
+{
+  const prev = process.env.BUYIN_ALLOW_LOSS;
+  process.env.BUYIN_ALLOW_LOSS = "1";
+  const { job } = makeCtx({ expectedRevenue: 2000, groundFloor: [3] });
+  const r = await proposeAttach({ jobId: "afj_test", picks: [
+    { unitId: "A", url: "https://vrbo.com/a", title: "3BR", totalPrice: 4000, bedrooms: 3 }, // no ground-floor snippet
+  ] });
+  assert.equal(r.attached[0].attached, false, "ground-floor slot still rejected without a snippet, even in loss mode");
+  assert.equal(job.attached.length, 0);
+  unregisterCommitContext("afj_test");
+  if (prev === undefined) delete process.env.BUYIN_ALLOW_LOSS; else process.env.BUYIN_ALLOW_LOSS = prev;
+  console.log("  ✓ BUYIN_ALLOW_LOSS still enforces structural guards (ground-floor snippet)");
+}
+
 // ground-floor required slot: rejected without a snippet, attached with one
 {
   const { job, captured } = makeCtx({ groundFloor: [3] });
