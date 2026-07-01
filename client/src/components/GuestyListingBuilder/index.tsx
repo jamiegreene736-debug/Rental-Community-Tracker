@@ -5331,7 +5331,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             </div>
             {/* Async Guesty rate-push status. The pricing step queues a refresh
                 that pushes marked-up rates to Guesty only AFTER the SearchAPI
-                Airbnb P40 refresh finishes, so surface the live phase + the
+                Airbnb median refresh finishes, so surface the live phase + the
                 terminal "rates pushed" / failure outcome here under the button. */}
             {pricingPushStatus && (() => {
               const s = pricingPushStatus;
@@ -6338,8 +6338,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               </div>
                             )}
                             {/* Claude static-rate plan: editable/lockable seasonal
-                                anchors researched via web search (replaces the live
-                                SearchAPI P40 provenance as the rate source). */}
+                                anchors researched via web search. Dormant by default
+                                (the live SearchAPI Airbnb median scan is the rate
+                                source); shown when STATIC_RATE_ENGINE=1. */}
                             <StaticRatePlanPanel propertyId={propertyId} version={marketRatesVersion} />
                             {/* Live buy-in summary. One badge per bedroom-count
                                 showing the persisted Airbnb SearchAPI layered

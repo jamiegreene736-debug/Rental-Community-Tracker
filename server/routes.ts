@@ -1122,7 +1122,7 @@ async function refreshHybridPricingForDraft(
     derivedGeo: derivedGeo ?? undefined,
     bedroomSplitInferred,
     triggerType: "Manual Update",
-    notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
+    notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly median bases (no hybrid markup layers).",
     onMonthScanned,
     onMonthBlackout,
     shouldCancel,
@@ -1256,7 +1256,7 @@ async function refreshMarketRatesForProperty(
     : refreshHybridPricingForProperty({
       propertyId,
       triggerType: hooks?.triggerType ?? "Manual Update",
-      notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly 40th percentile bases (no hybrid markup layers).",
+      notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly median bases (no hybrid markup layers).",
       onMonthScanned: hooks?.onMonthScanned,
       onMonthBlackout: hooks?.onMonthBlackout,
       shouldCancel: hooks?.shouldCancel,
