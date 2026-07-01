@@ -19,9 +19,15 @@ import {
   SEASON_MULTIPLIERS,
   getCommunityRegion,
   getSeasonForMonth,
+  LODGING_TAX_PCT,
   type SeasonType,
   type RegionType,
 } from "./pricing-rates";
+
+// Re-exported from pricing-rates (single source of truth for the regional
+// lodging-tax table, now shared with the live median engine). Kept exported here
+// so existing importers of static-rate-logic's LODGING_TAX_PCT keep working.
+export { LODGING_TAX_PCT };
 
 export type SeasonAnchors = {
   LOW: number;
@@ -46,15 +52,9 @@ export type SeasonAnchors = {
 // Default 7-night reference stay used to amortize flat per-stay fees.
 export const ALL_IN_REFERENCE_NIGHTS = 7;
 
-// Combined lodging/occupancy tax applied to (rent + cleaning) when a channel
-// doesn't itemize taxes (the common case in a SERP snippet). Hawaii TAT 10.25%
-// + county TAT ~3% + GET ~4.7% gross-up ≈ ~18%; Florida state 6% + county
-// surtax + tourist-development tax ≈ ~12.5%. Server-applied so Claude can't
-// hallucinate it — Claude only reports observed rent/cleaning/service.
-export const LODGING_TAX_PCT: Record<RegionType, number> = {
-  hawaii: 0.18,
-  florida: 0.125,
-};
+// LODGING_TAX_PCT is imported + re-exported from pricing-rates above (single
+// source of truth). It is applied to (rent + cleaning) when a channel doesn't
+// itemize taxes — server-applied so Claude can't hallucinate it.
 
 // Flat per-stay cleaning fee estimate when a channel doesn't show one. Amortized
 // over ALL_IN_REFERENCE_NIGHTS. Conservative central values per region.
