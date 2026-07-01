@@ -42141,27 +42141,48 @@ Return ONLY compact JSON with this exact shape:
   app.post("/api/pricing/bulk-refresh/:jobId/cancel", async (req, res) => {
     const job = await loadBulkPricingJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Bulk pricing job not found" });
+    // `force` = the operator's "Clear queue" action: terminate + release the lease
+    // unconditionally so a stuck/orphaned running item can't keep the job "running"
+    // forever (which would leave the queue impossible to clear).
+    const force = req.query.force === "1" || req.body?.force === true;
     const now = Date.now();
     const activeLease = job.status === "running" && job.lockExpiresAt != null && job.lockExpiresAt > now;
     job.cancelRequested = true;
-    cancelRemainingBulkPricingItems(job, "Cancelled before starting");
-    for (const item of job.items.filter((candidate) => candidate.status === "cancelled" && candidate.startedAt != null)) {
-      if (activeLease) {
-        item.status = "running";
-        item.error = "Cancellation requested";
-        const percent = Number(item.progress?.percent);
-        item.progress = { phase: "cancelling", percent: Number.isFinite(percent) ? percent : 0, label: "Cancellation requested; stopping before the next SearchAPI month" };
-        item.heartbeatAt = Date.now();
-        item.finishedAt = null;
+    cancelRemainingBulkPricingItems(job, force ? "Cleared by operator" : "Cancelled before starting");
+    // Graceful path only: a LIVE worker (active lease, not forced) keeps its current
+    // item "running" so it can stop cleanly at the next SearchAPI-month boundary.
+    if (!force) {
+      for (const item of job.items.filter((candidate) => candidate.status === "cancelled" && candidate.startedAt != null)) {
+        if (activeLease) {
+          item.status = "running";
+          item.error = "Cancellation requested";
+          const percent = Number(item.progress?.percent);
+          item.progress = { phase: "cancelling", percent: Number.isFinite(percent) ? percent : 0, label: "Cancellation requested; stopping before the next SearchAPI month" };
+          item.heartbeatAt = Date.now();
+          item.finishedAt = null;
+        }
       }
     }
-    if (job.status === "queued") {
+    // Terminalize when FORCED (Clear queue) OR when there is no live worker to stop
+    // it (queued, or a dead/expired lease) — otherwise the job could hang at
+    // "running" indefinitely. Releasing the in-process lease + DB lock stops the
+    // boot-resume/discovery from ever re-surfacing it.
+    if (force || !activeLease) {
       job.status = "cancelled";
-      job.finishedAt = Date.now();
+      job.finishedAt = now;
+      job.lockedBy = null;
+      job.lockExpiresAt = null;
+      activeBulkPricingJobIds.delete(job.id);
     }
     refreshBulkPricingCounts(job);
     await persistBulkPricingJob(job);
-    await topQueueEvent("bulk-pricing", job.id, "cancel-requested", "Bulk market pricing cancellation requested", { level: "warn" });
+    await topQueueEvent(
+      "bulk-pricing",
+      job.id,
+      force ? "cleared" : "cancel-requested",
+      force ? "Bulk market pricing queue cleared by operator" : "Bulk market pricing cancellation requested",
+      { level: "warn" },
+    );
     res.json({ ok: true, job: summarizeBulkPricingJob(job) });
   });
 

@@ -43,6 +43,24 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-01 (bulk market-pricing queue: "Clear queue" button that always works): Operator couldn't
+  clear the queue — a STUCK/orphaned running item (worker heartbeat but never completes) kept
+  `job.status = "running"`, so `bulkPricingTerminal` was never true and the old "Clear completed queue"
+  button stayed disabled; "Cancel remaining" couldn't rescue it either because
+  `POST /api/pricing/bulk-refresh/:jobId/cancel` only terminalized a `"queued"` job (a running job with
+  a dead lease was left "running" forever). FIX (`claude/bulk-queue-clear-button`, PR #TBD): (1) the
+  cancel route now accepts `?force=1` — the operator "Clear queue" action — which unconditionally
+  terminalizes the job (all non-terminal items → cancelled, `status = "cancelled"`, lease released via
+  `job.lockedBy/lockExpiresAt = null` + `activeBulkPricingJobIds.delete`) so a stuck item can't hold it
+  open; it ALSO now terminalizes a non-force cancel when there's no live worker lease (dead/expired) —
+  fixing "Cancel remaining" for orphaned running jobs. Graceful stop (live worker keeps its current item
+  running to stop at the next SearchAPI-month boundary) is preserved for a normal non-force cancel. (2)
+  `home.tsx`: "Clear completed queue" → "Clear queue", always enabled; `clearBulkPricingQueue()`
+  force-cancels server-side when not terminal (with a confirm), then dismisses local state
+  (`setBulkPricingJob(null)` + selection + events). The discovery poll only re-surfaces queued/running
+  jobs, so a cleared (cancelled) job stays gone. Verified: full `npm test` exit 0, `npm run build` clean,
+  `npm run check` 335 = baseline (0 new).
+
 - 2026-07-01 (REVERTED market-rate updates to the legacy SearchAPI Airbnb engine, now using the MEDIAN
   not P40): Operator: "This new [Claude all-in] methodology is not working well. Revert to the old
   methodology for market-rate updates (dashboard queue + Pricing-tab 'Update Market Rates' button), but
