@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS, haversineMiles } from "@shared/buy-in-market";
-import { getBuyInRate, getCommunityRegion, getSeasonForMonth } from "@shared/pricing-rates";
+import { getBuyInRate, getCommunityRegion, getSeasonForMonth, applyLodgingTaxGrossUp, LODGING_TAX_PCT } from "@shared/pricing-rates";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
 import { extractBedroomsFromListing } from "./community-research";
 
@@ -1355,6 +1355,20 @@ export async function refreshHybridPricingForTarget(args: {
       let basis = airbnb?.medianNightly ?? null;
       let logKind: "scan" | "static-fallback" = "scan";
       const scanNotes = [...(airbnb?.notes ?? [])];
+      // Gross the SearchAPI median up by the regional lodging tax so the stored
+      // buy-in equals the ACTUAL guest checkout total. Airbnb's
+      // extracted_total_price (the median's basis) already includes cleaning +
+      // service fees but NOT occupancy tax, which Airbnb adds at checkout — so
+      // without this the buy-in understates real cost. Applied ONLY to a real
+      // SearchAPI median (not the static thin-comp fallback, which is a separate
+      // rent-only backstop). Kill-switch: MARKET_RATE_LODGING_TAX_DISABLED=1.
+      if (basis != null && basis > 0 && process.env.MARKET_RATE_LODGING_TAX_DISABLED !== "1") {
+        const preTax = basis;
+        basis = applyLodgingTaxGrossUp(basis, args.community);
+        if (basis > preTax) {
+          scanNotes.push(`Grossed up $${preTax} → $${basis} for ${Math.round(LODGING_TAX_PCT[getCommunityRegion(args.community)] * 100)}% ${getCommunityRegion(args.community)} lodging tax (all-in checkout total).`);
+        }
+      }
       if (basis == null || basis <= 0) {
         basis = staticMarketRateBasis(window.yearMonth);
         logKind = "static-fallback";

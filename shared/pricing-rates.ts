@@ -17,12 +17,12 @@ import { resolveBuyInMarket } from "./buy-in-market";
 // Guesty (the dashboard "Update market pricing" bulk queue + the weekly
 // availability scan). 0.15 = a flat 15% markup over cost.
 //
-// Operator directive 2026-06-18: the market-rate update queue must ALWAYS apply
-// a 15% markup. This is the single source of truth for that business margin —
-// the server market-rate pushes use it directly, overriding any legacy
-// per-property `scanner_schedules.target_margin` (which carried the old 0.2000
-// default). Change this one constant to retune the global markup.
-export const MARKET_RATE_TARGET_MARGIN = 0.15;
+// Operator directive 2026-07-01: the market-rate update queue applies a 20%
+// markup to every property (was 15% per the 2026-06-18 directive). This is the
+// single source of truth for that business margin — the server market-rate
+// pushes use it directly, overriding any legacy per-property
+// `scanner_schedules.target_margin`. Change this one constant to retune it.
+export const MARKET_RATE_TARGET_MARGIN = 0.20;
 
 // Per-property margin OVERRIDES. Default (no entry) = MARKET_RATE_TARGET_MARGIN.
 // Keyed by dashboard propertyId — negative ids are community drafts (the
@@ -153,6 +153,28 @@ const FLORIDA_SEASONS: Record<string, SeasonType> = {
 
 export function getCommunityRegion(community: string): RegionType {
   return BUY_IN_RATES[community]?.region ?? "hawaii";
+}
+
+// Combined lodging/occupancy tax by region, used to gross a market-rate median
+// up to the ACTUAL guest checkout total. Airbnb's `extracted_total_price` (the
+// basis of the SearchAPI median) already includes cleaning + service fees but
+// NOT occupancy tax — Airbnb adds that at the final checkout step — so the
+// buy-in understates real cost without this. Hawaii TAT 10.25% + county TAT ~3%
+// + GET ~4.7% ≈ ~18%; Florida state 6% + county tourist-development ≈ ~12.5%.
+// (shared/static-rate-logic.ts re-exports this so the dormant Claude all-in
+// engine and the live median engine share one tax table — keep it here.)
+export const LODGING_TAX_PCT: Record<RegionType, number> = {
+  hawaii: 0.18,
+  florida: 0.125,
+};
+
+// Gross a nightly buy-in basis up by the community's regional lodging tax so it
+// equals the actual Airbnb checkout total (fees + taxes). Rounded. Env-tunable
+// off via MARKET_RATE_LODGING_TAX_DISABLED handled at the call site.
+export function applyLodgingTaxGrossUp(basis: number, community: string): number {
+  if (!Number.isFinite(basis) || basis <= 0) return basis;
+  const region = getCommunityRegion(community);
+  return Math.round(basis * (1 + LODGING_TAX_PCT[region]));
 }
 
 function staticRateForSeason(

@@ -43,6 +43,23 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-01 (market-rate median → ALL-IN checkout cost + 20% markup): Live-diagnosed a running 6BR
+  scan in the Railway logs (propertyId -15, "Spacious 6BR for 14 at Ko Olina!") — the reverted median
+  engine correctly did resort lookup → exact-3BR → median (p50) → 7-night × 24 months → summed 2 units →
+  pushed 731/731 days to Guesty. Operator wanted two corrections: markup 20% (was 15%) and the buy-in to
+  equate to the ACTUAL Airbnb checkout total (the median = `extracted_total_price ÷ 7` includes
+  cleaning+service fees but NOT occupancy tax). SHIPPED (`claude/market-rate-allin-20pct`, PR #TBD):
+  (1) `MARKET_RATE_TARGET_MARGIN` 0.15→0.20 in `shared/pricing-rates.ts`. (2) new `LODGING_TAX_PCT`
+  (HI 0.18/FL 0.125) + `applyLodgingTaxGrossUp(basis, community)` there (single tax-table source;
+  `static-rate-logic.ts` now RE-EXPORTS it). `server/hybrid-pricing.ts` grosses the SearchAPI median up
+  by the regional tax at the point it becomes the stored `basis`. LOAD-BEARING: taxed ONLY on a real
+  SearchAPI median (NOT the thin-comp static fallback), and NOT double-applied in the year-2
+  extrapolation branch (year-2 = already-taxed year-1 basis × growth). Kill-switch
+  `MARKET_RATE_LODGING_TAX_DISABLED=1`. Net ≈ +23% vs prior 15%/no-tax for a HI combo; effective on the
+  NEXT push per property (re-run the queue for Ko Olina to apply). Verified: full `npm test` exit 0,
+  `npm run build` clean, `npm run check` 335 = baseline; adversarial diff review. Full rationale:
+  AGENTS.md 2026-07-01 Decision Log line.
+
 - 2026-07-01 (bulk market-pricing queue: "Clear queue" button that always works): Operator couldn't
   clear the queue — a STUCK/orphaned running item (worker heartbeat but never completes) kept
   `job.status = "running"`, so `bulkPricingTerminal` was never true and the old "Clear completed queue"
