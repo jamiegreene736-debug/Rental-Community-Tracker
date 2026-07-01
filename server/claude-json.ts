@@ -104,6 +104,12 @@ export async function callClaudeWebSearchText(opts: {
         messages.push({ role: "assistant", content });
         continue;
       }
+      if (data?.stop_reason === "max_tokens") {
+        // Output hit the token cap mid-JSON → the body would parse to null and be
+        // indistinguishable from a real outage. Return a DISTINCT error so the
+        // caller's log/operator message says "truncated", not "unavailable".
+        return { ok: false, error: `Web-search response truncated (max_tokens after ${searchCount} search${searchCount === 1 ? "" : "es"}) — raise maxTokens or reduce requested output` };
+      }
       const text = extractText(data);
       if (!text) return { ok: false, error: "Web-search response had no text content" };
       return { ok: true, text, searchCount };

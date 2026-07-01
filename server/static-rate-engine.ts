@@ -16,7 +16,10 @@
 // still gets a complete, sane 24-month plan and the Guesty push never breaks.
 
 import {
+  BUY_IN_RATES,
+  getCommunityRegion,
   type SeasonType,
+  type RegionType,
 } from "../shared/pricing-rates";
 import {
   staticSeasonalBasis,
@@ -26,6 +29,16 @@ import {
   expandAnchorsToMonthlyRates,
   seasonColumnsFromAnchors,
   confirmResearchCommunity,
+  allInSeasonalBasis,
+  allInNightlyFromComponents,
+  reconcileChannelAllIn,
+  clampedSeasonsAgainst,
+  computeSeasonWindows,
+  normalizeChannelKey,
+  CLEANING_FEE_ESTIMATE,
+  SERVICE_FEE_PCT_DEFAULT,
+  LODGING_TAX_PCT,
+  ALL_IN_REFERENCE_NIGHTS,
   STATIC_RATE_SEASONS,
   type SeasonAnchors,
   type StaticRateAnchors,
@@ -33,10 +46,22 @@ import {
   type StaticRateBedroomPlan,
   type StaticRatePlan,
   type CommunityConfirmation,
+  type ChannelEvidence,
+  type ChannelKey,
+  type SeasonReconciliation,
+  type SeasonWindow,
 } from "../shared/static-rate-logic";
 import { callClaudeWebSearchJson } from "./claude-json";
 
 export const STATIC_RATE_MODEL = process.env.STATIC_RATE_MODEL || "claude-sonnet-4-6";
+
+// Research budget. Bumped for the multi-channel (PM/VRBO/Booking/Airbnb/resort)
+// × 3-season × multi-bedroom sweep. Env-tunable to dial credit cost down.
+const STATIC_RATE_MAX_SEARCHES = Number(process.env.STATIC_RATE_MAX_SEARCHES) || 12;
+// Headroom for the multi-bedroom × multi-channel evidence JSON. The prompt also
+// soft-caps evidence volume; together they keep the response under the cap so it
+// doesn't truncate mid-JSON (which would discard every anchor → fail-soft).
+const STATIC_RATE_MAX_TOKENS = Number(process.env.STATIC_RATE_MAX_TOKENS) || 12000;
 
 // Same trigger union the hybrid engine uses (kept loose to avoid a server-type
 // import cycle).
@@ -170,13 +195,31 @@ async function gatherMetrics(args: {
   return { perBedroom, trailing };
 }
 
+// One raw per-channel research data point as REPORTED by Claude (observed
+// fields only — the server computes the all-in nightly + applies tax).
+type ClaudeEvidenceRaw = {
+  season?: string;
+  year?: number;
+  channel?: string;
+  sourceUrl?: string;
+  stayNights?: number;
+  rentNightly?: number;
+  cleaningPerStay?: number | null;
+  serviceFeePct?: number | null;
+  feesObserved?: boolean;
+};
+
 type ClaudeBedroomResult = {
   bedrooms: number;
+  // Claude's own all-in estimate per season/year — a BACKSTOP used only when no
+  // credible channel evidence exists for that (season, year).
   year1?: Partial<SeasonAnchors>;
   year2?: Partial<SeasonAnchors>;
   confidence?: number;
   reasoning?: string;
   metricsUsed?: string[];
+  // The real per-channel observations the server reconciles into anchors.
+  evidence?: ClaudeEvidenceRaw[];
 };
 
 // Claude's own confirmation that the resort/community is real and at the expected
@@ -196,23 +239,50 @@ function buildResearchPrompt(args: {
   unitCount: number;
   perBedroom: BedroomMetrics[];
   trailing: { revenue: number; bookings: number; windowDays: number } | null;
+  windows: SeasonWindow[];
 }): string {
   const lines: string[] = [];
-  lines.push(`You are a vacation-rental revenue analyst. RESEARCH the real market and set BUY-IN COST BASIS rates: the nightly dollar amount we'd expect to PAY to secure ONE comparable rental unit (not the guest-facing price — a markup is applied downstream).`);
+  const win = (season: SeasonType, year: 1 | 2) => args.windows.find((w) => w.season === season && w.year === year);
+  const winStr = (season: SeasonType, year: 1 | 2) => {
+    const w = win(season, year);
+    return w ? `${w.checkIn} → ${w.checkOut}` : "(a representative 7-night week)";
+  };
+
+  lines.push(`You are a vacation-rental acquisition analyst. RESEARCH the real market and report the BUY-IN COST: what we would actually PAY to secure ONE comparable rental unit for a guest's stay (NOT the guest-facing resale price — a markup is applied downstream).`);
   lines.push(``);
-  lines.push(`USE THE web_search TOOL. Search Google and vacation-rental sites (Airbnb, VRBO, Booking.com, the resort's own site) for ACTUAL current nightly rates at this specific resort/community for each bedroom size, in each season. Run multiple searches (e.g. "<resort> <N> bedroom nightly rate", "<resort> vacation rental winter holiday rates", "<resort> off-season rates"). Base your numbers on what you actually find, not on a formula.`);
+  lines.push(`We re-rent these units, so the buy-in cost is the ALL-IN total a guest pays at checkout: nightly rent + the flat cleaning fee + the channel service fee + lodging/occupancy taxes. We will compute the all-in math and taxes ourselves — YOU only need to FIND and REPORT the observed components (rent, cleaning, service %) per channel. Do NOT compute taxes.`);
   lines.push(``);
-  lines.push(`FIRST, CONFIRM THE RESORT: use web search to verify that this resort/community is a real vacation-rental property and that it is located in the stated city/state. Report what you confirmed (its canonical name + real city/state). Only set community.confirmed=true if your research confirms the resort exists at that location.`);
+  lines.push(`USE THE web_search TOOL extensively. For EACH bedroom size, gather as much real pricing data as you can across these channels, in PRIORITY order (cheapest acquisition path first — we book the cheapest credible one):`);
+  lines.push(`  1. Property-manager / resort-direct booking sites (usually 10–20% cheaper — no guest service fee). Search: "<resort> <N> bedroom rental rates", "<resort> property management vacation rental <N> bedroom".`);
+  lines.push(`  2. VRBO. Search: site:vrbo.com "<resort>" <N> bedroom  /  "<resort>" VRBO <N> bedroom nightly`);
+  lines.push(`  3. Booking.com. Search: site:booking.com "<resort>"  /  "<resort>" Booking.com <N> bedroom. (Card prices are teaser/partial — treat as a floor, not all-in.)`);
+  lines.push(`  4. Airbnb. Search: "<resort>" Airbnb <N> bedroom. (Headline under-prices, then adds ~14% service — treat as a floor signal.)`);
+  lines.push(`  5. The resort's own website.`);
+  lines.push(``);
+  lines.push(`FIRST, CONFIRM THE RESORT: verify via web search that this resort/community is a real vacation-rental property located in the stated city/state. Report its canonical name + real city/state. Only set community.confirmed=true if your research confirms it.`);
   lines.push(``);
   lines.push(`Resort / community to research: ${args.searchLabel}`);
   lines.push(`(internal community key: ${args.community})`);
   lines.push(`Property: ${args.propertyName} — ${args.unitCount} unit(s) behind this listing.`);
   lines.push(`Bedroom sizes to price: ${args.perBedroom.map((m) => `${m.bedrooms}BR`).join(", ")}`);
   lines.push(``);
-  lines.push(`Season tiers (price all three): LOW = off/shoulder season; HIGH = peak/summer; HOLIDAY = Christmas/New Year & major-holiday weeks.`);
-  lines.push(`For EACH bedroom size, give ONE nightly buy-in rate per tier for YEAR 1 (next 12 months) and YEAR 2 (months 13-24, modest inflation, roughly +0% to +8%).`);
+  lines.push(`7-NIGHT SAMPLE WINDOWS — price a 7-night stay for each season/year using THESE dates (so the flat cleaning fee amortizes the way a real week-long booking would). If a channel enforces a longer minimum stay, sample at that minimum and report that stayNights:`);
+  lines.push(`  LOW season (off/shoulder):  Year 1 ${winStr("LOW", 1)};  Year 2 ${winStr("LOW", 2)}`);
+  lines.push(`  HIGH season (peak/summer):  Year 1 ${winStr("HIGH", 1)};  Year 2 ${winStr("HIGH", 2)}`);
+  lines.push(`  HOLIDAY (Christmas/New Year):Year 1 ${winStr("HOLIDAY", 1)};  Year 2 ${winStr("HOLIDAY", 2)}`);
+  lines.push(`OTAs rarely quote 13–24 months out: for Year 2 windows you usually won't find live rates — estimate Year 2 as Year 1 + modest inflation (roughly +0% to +8%) and say so.`);
   lines.push(``);
-  lines.push(`Sanity references (DO NOT just copy these — they are priors to weigh against what you research):`);
+  lines.push(`For EVERY channel where you find a real dated listing at this resort for the right bedroom size, add an entry to "evidence" reporting the OBSERVED numbers only:`);
+  lines.push(`  - rentNightly: the displayed nightly rent (before cleaning/service/tax).`);
+  lines.push(`  - cleaningPerStay: the flat cleaning fee shown, or null if not shown.`);
+  lines.push(`  - serviceFeePct: the service-fee %, or null if not shown (we default it per channel).`);
+  lines.push(`  - stayNights: the stay length you priced (7 unless a longer minimum forced more).`);
+  lines.push(`  - feesObserved: true ONLY if you actually saw BOTH the cleaning fee and the service fee on the page (not inferred).`);
+  lines.push(`  - sourceUrl + channel ("pm" | "vrbo" | "booking" | "airbnb" | "resort").`);
+  lines.push(`NEVER report a teaser "from $X" headline as if it were the real all-in. If you can only see a bare nightly, report it with cleaningPerStay null and feesObserved false — we'll gross it up. If a channel genuinely charges NO separate cleaning fee, report cleaningPerStay: 0 (not null).`);
+  lines.push(`Keep the evidence focused: report the cheapest credible channel(s) per season — you don't need every duplicate hit. Aim for roughly the 8–10 most decision-relevant data points total so the response isn't truncated.`);
+  lines.push(``);
+  lines.push(`Sanity references (the operator's BARE-RENT priors — taxes/cleaning/service are NOT included, so the real all-in should be roughly 1.2×–1.5× these; weigh against what you research, don't copy):`);
   if (args.trailing) {
     lines.push(`- This property's trailing ${args.trailing.windowDays}-day realized revenue: $${Math.round(args.trailing.revenue).toLocaleString()} across ${args.trailing.bookings} booking(s).`);
   }
@@ -220,15 +290,27 @@ function buildResearchPrompt(args: {
     const live = m.lastLive && (m.lastLive.low || m.lastLive.high || m.lastLive.holiday)
       ? ` Last observed medians LOW/HIGH/HOLIDAY: ${m.lastLive.low ?? "n/a"}/${m.lastLive.high ?? "n/a"}/${m.lastLive.holiday ?? "n/a"}.`
       : "";
-    lines.push(`- ${m.bedrooms}BR operator estimate LOW/HIGH/HOLIDAY: ${m.staticBasis.LOW}/${m.staticBasis.HIGH}/${m.staticBasis.HOLIDAY}.${live}`);
+    lines.push(`- ${m.bedrooms}BR operator bare-rent reference LOW/HIGH/HOLIDAY: ${m.staticBasis.LOW}/${m.staticBasis.HIGH}/${m.staticBasis.HOLIDAY}.${live}`);
   }
   lines.push(``);
-  lines.push(`Keep LOW < HIGH < HOLIDAY within each year. After researching, respond with ONLY a JSON object (no prose outside it) of this exact shape:`);
+  lines.push(`Also give, per bedroom, your own ALL-IN estimate per tier (year1/year2) as a backstop when you couldn't find channel evidence. Keep LOW < HIGH < HOLIDAY within each year.`);
+  lines.push(``);
+  lines.push(`Respond with ONLY a JSON object (no prose outside it) of this exact shape:`);
   lines.push(`{`);
   lines.push(`  "summary": "<one sentence: what you researched and the headline finding>",`);
-  lines.push(`  "community": { "confirmed": <true|false>, "verifiedResort": "<canonical resort/community name you confirmed>", "verifiedCity": "<city>", "verifiedState": "<state>", "note": "<how you confirmed it>" },`);
+  lines.push(`  "community": { "confirmed": <true|false>, "verifiedResort": "<canonical name>", "verifiedCity": "<city>", "verifiedState": "<state>", "note": "<how you confirmed it>" },`);
   lines.push(`  "bedrooms": [`);
-  lines.push(`    { "bedrooms": <int>, "year1": {"LOW": <int>, "HIGH": <int>, "HOLIDAY": <int>}, "year2": {"LOW": <int>, "HIGH": <int>, "HOLIDAY": <int>}, "confidence": <0-100 int>, "reasoning": "<what you found and the sources/rates it came from>", "metricsUsed": ["web-search", "<source/site>", ...] }`);
+  lines.push(`    {`);
+  lines.push(`      "bedrooms": <int>,`);
+  lines.push(`      "year1": {"LOW": <int>, "HIGH": <int>, "HOLIDAY": <int>},`);
+  lines.push(`      "year2": {"LOW": <int>, "HIGH": <int>, "HOLIDAY": <int>},`);
+  lines.push(`      "confidence": <0-100 int>,`);
+  lines.push(`      "reasoning": "<what you found, the channels + rates it came from>",`);
+  lines.push(`      "metricsUsed": ["web-search", "<source/site>", ...],`);
+  lines.push(`      "evidence": [`);
+  lines.push(`        {"season": "LOW|HIGH|HOLIDAY", "year": 1, "channel": "pm|vrbo|booking|airbnb|resort", "sourceUrl": "<url>", "stayNights": 7, "rentNightly": <int>, "cleaningPerStay": <int|null>, "serviceFeePct": <number|null>, "feesObserved": <true|false>}`);
+  lines.push(`      ]`);
+  lines.push(`    }`);
   lines.push(`  ]`);
   lines.push(`}`);
   return lines.join("\n");
@@ -243,14 +325,15 @@ async function researchAnchorsWithClaude(args: {
   unitCount: number;
   perBedroom: BedroomMetrics[];
   trailing: { revenue: number; bookings: number; windowDays: number } | null;
+  windows: SeasonWindow[];
 }): Promise<{ summary: string; searchCount: number; byBedroom: Map<number, ClaudeBedroomResult>; community: ClaudeCommunityVerdict | null } | null> {
   const prompt = buildResearchPrompt(args);
   const res = await callClaudeWebSearchJson<{ summary?: string; community?: ClaudeCommunityVerdict; bedrooms?: ClaudeBedroomResult[] }>({
     model: STATIC_RATE_MODEL,
-    maxTokens: 4000,
-    system: "You are a precise vacation-rental pricing analyst. You research with web search, then return only valid JSON — no prose outside the JSON object.",
+    maxTokens: STATIC_RATE_MAX_TOKENS,
+    system: "You are a precise vacation-rental acquisition analyst. You research real channel prices with web search, then return only valid JSON — no prose outside the JSON object. Report only OBSERVED rent/cleaning/service per channel; never compute taxes.",
     prompt,
-    maxSearches: 6,
+    maxSearches: STATIC_RATE_MAX_SEARCHES,
     maxRounds: 5,
     timeoutMs: 150_000,
   });
@@ -270,37 +353,175 @@ async function researchAnchorsWithClaude(args: {
   };
 }
 
-// Resolve final anchors for one bedroom: start from Claude (clamped) or the
-// static fallback, then re-apply operator locks against the prior anchors.
+function normSeason(raw: unknown): SeasonType | null {
+  const s = String(raw ?? "").toUpperCase();
+  if (/HOLIDAY|CHRISTMAS|NEW.?YEAR|XMAS/.test(s)) return "HOLIDAY";
+  if (/HIGH|PEAK|SUMMER/.test(s)) return "HIGH";
+  if (/LOW|OFF|SHOULDER/.test(s)) return "LOW";
+  return null;
+}
+
+// Accept a service-fee % as either a fraction (0.10) or a whole number (10).
+function normalizePct(v: number): number {
+  return v > 1 ? v / 100 : v;
+}
+
+type ResolvedBedroom = {
+  anchors: StaticRateAnchors;
+  confidence: number;
+  reasoning: string;
+  metricsUsed: string[];
+  usedClaude: boolean;
+  allInBasis: SeasonAnchors;
+  evidence: ChannelEvidence[];
+  reconciliation: SeasonReconciliation[];
+  clampedSeasons: string[];
+  cleaningPerNight: number;
+};
+
+// Resolve final ALL-IN anchors for one bedroom: compute the all-in nightly per
+// channel from Claude's observed evidence (server-applied taxes/fees), reconcile
+// channels into ONE anchor per (season, year), clamp against the all-in basis,
+// then re-apply operator locks against the prior anchors. Falls back to Claude's
+// own all-in estimate per season (then the all-in basis) when no credible channel
+// evidence exists; falls all the way back to the all-in static basis with no Claude.
 function resolveBedroomAnchors(
   metric: BedroomMetrics,
   community: string,
   claude: ClaudeBedroomResult | undefined,
-): { anchors: StaticRateAnchors; confidence: number; reasoning: string; metricsUsed: string[]; usedClaude: boolean } {
-  const fallback = defaultStaticAnchors(community, metric.bedrooms);
+): ResolvedBedroom {
+  const region: RegionType = BUY_IN_RATES[community]?.region ?? getCommunityRegion(community);
+  const allInBasis = allInSeasonalBasis(community, metric.bedrooms);
+  const cleaningPerNight = Math.round(CLEANING_FEE_ESTIMATE[region] / ALL_IN_REFERENCE_NIGHTS);
+  const rentBasis = metric.staticBasis; // rent-only seasonal basis (teaser detection reference)
+
+  // 1. Server-compute the all-in nightly for each channel data point Claude reported.
+  const evidence: ChannelEvidence[] = [];
+  const rawEvidence = Array.isArray(claude?.evidence) ? claude!.evidence! : [];
+  for (const e of rawEvidence) {
+    const rentNightly = num(e.rentNightly);
+    const season = normSeason(e.season);
+    if (rentNightly == null || !season) continue;
+    const channel = normalizeChannelKey(e.channel);
+    const year: 1 | 2 = Number(e.year) === 2 ? 2 : 1;
+    const nights = Number.isFinite(Number(e.stayNights)) && Number(e.stayNights) > 0 ? Math.round(Number(e.stayNights)) : ALL_IN_REFERENCE_NIGHTS;
+    // Distinguish ABSENT (null/undefined → estimate it) from an observed $0 (a
+    // PM/resort-direct listing with no separate cleaning fee — keep the 0, don't
+    // overwrite with the regional estimate, which would inflate the cheapest channel).
+    const cleaningObs = e.cleaningPerStay == null || !Number.isFinite(Number(e.cleaningPerStay)) || Number(e.cleaningPerStay) < 0
+      ? null
+      : Number(e.cleaningPerStay);
+    const servicePctObs = e.serviceFeePct != null && Number.isFinite(Number(e.serviceFeePct)) && Number(e.serviceFeePct) >= 0
+      ? normalizePct(Number(e.serviceFeePct))
+      : null;
+    const feesObserved = e.feesObserved === true && cleaningObs != null;
+    const cleaning = cleaningObs ?? CLEANING_FEE_ESTIMATE[region];
+    const servicePct = servicePctObs ?? SERVICE_FEE_PCT_DEFAULT[channel] ?? SERVICE_FEE_PCT_DEFAULT.other;
+    const allIn = allInNightlyFromComponents({ rentNightly, nights, cleaningPerStay: cleaning, serviceFeePct: servicePct, region });
+    evidence.push({
+      season,
+      year,
+      channel,
+      sourceUrl: typeof e.sourceUrl === "string" ? e.sourceUrl.slice(0, 300) : undefined,
+      stayNights: nights,
+      rentNightly,
+      cleaningPerStay: cleaningObs,
+      serviceFeePct: servicePctObs,
+      feesObserved,
+      allInNightly: allIn,
+      feeBasis: feesObserved ? "all-in-observed" : "grossed-up",
+    });
+  }
+
+  // 2. Reconcile evidence → ONE anchor per (season, year); else Claude estimate; else basis.
+  const reconciliation: SeasonReconciliation[] = [];
+  const claudeYear = (year: 1 | 2): Partial<SeasonAnchors> | undefined => (year === 1 ? claude?.year1 : claude?.year2);
+  const resolveYear = (year: 1 | 2, y1?: SeasonAnchors): SeasonAnchors => {
+    const out = { LOW: 0, HIGH: 0, HOLIDAY: 0 } as SeasonAnchors;
+    for (const season of STATIC_RATE_SEASONS) {
+      const rows = evidence.filter((x) => x.season === season && x.year === year);
+      let value: number | null = null;
+      if (rows.length) {
+        const r = reconcileChannelAllIn(
+          rows.map((x) => ({ channel: x.channel, rentNightly: x.rentNightly, allInNightly: x.allInNightly, feesObserved: x.feesObserved })),
+          rentBasis[season],
+        );
+        reconciliation.push({ season, year, chosen: r.chosen ?? 0, channel: r.channel, rule: r.rule, spread: r.spread, dropped: r.dropped });
+        if (r.chosen != null && r.chosen > 0) value = r.chosen;
+      }
+      if (value == null) {
+        const est = num(claudeYear(year)?.[season]);
+        if (est != null) value = est;
+        else if (year === 2 && y1) value = Math.round(y1[season] * 1.04);
+        else value = allInBasis[season];
+      }
+      out[season] = value;
+    }
+    return out;
+  };
+
   let anchors: StaticRateAnchors;
+  let clampedSeasons: string[] = [];
+  let usedClaude = false;
+  let agreeingSeasons = 0;
+  if (claude && (claude.year1 || claude.year2 || evidence.length > 0)) {
+    usedClaude = true;
+    const rawYear1 = resolveYear(1);
+    const rawYear2 = resolveYear(2, rawYear1);
+    // Capture clamping BEFORE sanitize re-orders/bands the values.
+    clampedSeasons = [
+      ...clampedSeasonsAgainst(rawYear1, allInBasis, "Y1"),
+      ...clampedSeasonsAgainst(rawYear2, allInBasis, "Y2"),
+    ];
+    anchors = sanitizeAnchors({ year1: rawYear1, year2: rawYear2 }, allInBasis);
+    agreeingSeasons = reconciliation.filter(
+      (r) => r.spread.n >= 2 && r.spread.min > 0 && (r.spread.max - r.spread.min) / r.spread.min <= 0.15,
+    ).length;
+  } else {
+    anchors = defaultStaticAnchors(community, metric.bedrooms); // all-in fallback
+  }
+
+  // 3. Confidence + reasoning + sources.
+  const taxLabel = `${Math.round(LODGING_TAX_PCT[region] * 100)}%`;
   let confidence: number;
   let reasoning: string;
   let metricsUsed: string[];
-  let usedClaude = false;
-  if (claude && (claude.year1 || claude.year2)) {
-    anchors = sanitizeAnchors(
-      { year1: claude.year1 as SeasonAnchors, year2: claude.year2 as SeasonAnchors },
-      metric.staticBasis,
-    );
-    confidence = Math.max(0, Math.min(100, Math.round(Number(claude.confidence) || 60)));
-    reasoning = (claude.reasoning || "").slice(0, 600);
-    metricsUsed = Array.isArray(claude.metricsUsed) ? claude.metricsUsed.slice(0, 8).map(String) : [];
-    usedClaude = true;
+  if (usedClaude) {
+    const claudeConf = Math.max(0, Math.min(100, Math.round(Number(claude?.confidence) || 60)));
+    if (evidence.length === 0) confidence = Math.min(claudeConf, 60);
+    else if (agreeingSeasons >= 1) confidence = Math.min(90, Math.max(claudeConf, 80));
+    else confidence = Math.min(78, Math.max(claudeConf, 60));
+    const channels = Array.from(new Set(evidence.map((x) => x.channel)));
+    reasoning = [
+      (claude?.reasoning || "").slice(0, 460),
+      evidence.length
+        ? `All-in = rent + cleaning + service + ${taxLabel} tax, amortized over ${ALL_IN_REFERENCE_NIGHTS} nights; reconciled from ${evidence.length} channel data point(s) (${channels.join(", ") || "n/a"}).`
+        : `No live channel rates found — used Claude's all-in estimate clamped to the operator basis.`,
+    ].filter(Boolean).join(" ").slice(0, 600);
+    metricsUsed = Array.from(new Set([
+      ...(Array.isArray(claude?.metricsUsed) ? claude!.metricsUsed!.map(String) : []),
+      ...channels.map((c) => `channel:${c}`),
+    ])).slice(0, 12);
   } else {
-    anchors = fallback;
     confidence = 40;
-    reasoning = "Claude unavailable — used operator buy-in table × season multipliers.";
-    metricsUsed = ["operator-buy-in-table"];
+    reasoning = `Claude web research unavailable — used the operator buy-in table grossed up to an all-in basis (rent + est. cleaning + service + ${taxLabel} ${region} tax, ${ALL_IN_REFERENCE_NIGHTS}-night amortized).`;
+    metricsUsed = ["operator-buy-in-table", "all-in-grossed-up"];
   }
+
   // Operator lock overrides win over any regeneration.
   anchors = mergeLockedAnchors(anchors, metric.locks, metric.priorAnchors ?? undefined);
-  return { anchors, confidence, reasoning, metricsUsed, usedClaude };
+  return {
+    anchors,
+    confidence,
+    reasoning,
+    metricsUsed,
+    usedClaude,
+    allInBasis,
+    evidence: evidence.slice(0, 12),
+    reconciliation,
+    clampedSeasons,
+    cleaningPerNight,
+  };
 }
 
 // Persist one bedroom's plan into property_market_rates in the canonical shape.
@@ -321,6 +542,11 @@ async function persistBedroom(args: {
   notes?: string;
   asOf: Date;
   usedClaude: boolean;
+  allInBasis?: SeasonAnchors;
+  evidence?: ChannelEvidence[];
+  reconciliation?: SeasonReconciliation[];
+  clampedSeasons?: string[];
+  cleaningPerNight?: number;
 }): Promise<{ row: any; log: any; bedroomPlan: StaticRateBedroomPlan }> {
   const { storage } = await import("./storage");
   const monthlyRates = expandAnchorsToMonthlyRates(args.anchors, args.community, args.asOf, 24);
@@ -337,6 +563,11 @@ async function persistBedroom(args: {
     confidence: args.confidence,
     reasoning: args.reasoning,
     metricsUsed: args.metricsUsed,
+    allInBasis: args.allInBasis,
+    evidence: args.evidence,
+    reconciliation: args.reconciliation,
+    clampedSeasons: args.clampedSeasons && args.clampedSeasons.length ? args.clampedSeasons : undefined,
+    cleaningPerNight: args.cleaningPerNight,
   };
   const staticPlan: StaticRatePlan = {
     generatedAt: args.asOf.toISOString(),
@@ -359,7 +590,9 @@ async function persistBedroom(args: {
     monthlyRates: monthlyRates as any,
     lowNightly: String(lowNightly),
     highNightly: String(highNightly),
-    sampleCount: args.metricsUsed.length,
+    // Real comp count = number of channel data points reconciled (mirrors the
+    // prior provenance work where sampleCount drives the confidence pill).
+    sampleCount: args.evidence?.length ?? args.metricsUsed.length,
     source: "claude-static",
     staticPlan: staticPlan as any,
   });
@@ -406,6 +639,10 @@ export async function generateStaticRatesForTarget(
 
   if (await args.shouldCancel?.()) throw cancelledError();
   const searchLabel = args.searchLabel?.trim() || args.community;
+  const region: RegionType = BUY_IN_RATES[args.community]?.region ?? getCommunityRegion(args.community);
+  // Deterministic 7-night sampling windows handed to Claude so the research is
+  // reproducible (HIGH=mid-July, LOW=mid-Sept, HOLIDAY=Dec 26–Jan 2; Y2 = +1yr).
+  const windows = computeSeasonWindows(asOf, region);
   const claude = await researchAnchorsWithClaude({
     propertyName: args.propertyName,
     community: args.community,
@@ -413,6 +650,7 @@ export async function generateStaticRatesForTarget(
     unitCount: args.unitCount,
     perBedroom,
     trailing,
+    windows,
   });
   const summary = claude
     ? `${claude.summary || `Researched ${searchLabel}.`} (${claude.searchCount} web search${claude.searchCount === 1 ? "" : "es"})`
@@ -473,6 +711,11 @@ export async function generateStaticRatesForTarget(
       notes: args.notes,
       asOf,
       usedClaude: resolved.usedClaude,
+      allInBasis: resolved.allInBasis,
+      evidence: resolved.evidence,
+      reconciliation: resolved.reconciliation,
+      clampedSeasons: resolved.clampedSeasons,
+      cleaningPerNight: resolved.cleaningPerNight,
     });
     rows.push(row);
     logs.push(log);
@@ -516,6 +759,9 @@ export async function applyStaticRateOverride(args: {
   if (!existing) return null;
   const plan = (existing.staticPlan as StaticRatePlan | null) ?? null;
   const staticBasis = staticSeasonalBasis(args.community, args.bedrooms);
+  // Operator edits are clamped against the ALL-IN basis (same reference the
+  // generator uses), so a legit all-in edit isn't compressed toward rent-only.
+  const allInBasis = allInSeasonalBasis(args.community, args.bedrooms);
   const priorBedroom = plan?.bedrooms?.find((b) => b.bedrooms === args.bedrooms);
   const baseAnchors: StaticRateAnchors = priorBedroom?.anchors
     ?? defaultStaticAnchors(args.community, args.bedrooms);
@@ -528,7 +774,7 @@ export async function applyStaticRateOverride(args: {
   if (args.value != null && Number.isFinite(args.value) && args.value > 0) {
     nextAnchors[args.year][args.season] = Math.round(args.value);
   }
-  const sanitized = sanitizeAnchors(nextAnchors, staticBasis);
+  const sanitized = sanitizeAnchors(nextAnchors, allInBasis);
 
   // Update lock flags.
   const locks: StaticRateLocks = {
@@ -552,6 +798,13 @@ export async function applyStaticRateOverride(args: {
       ? `${priorBedroom.reasoning} (operator-edited ${args.year} ${args.season})`
       : `Operator-edited ${args.year} ${args.season}.`,
     metricsUsed: priorBedroom?.metricsUsed ?? ["operator-edit"],
+    // Preserve the all-in provenance from the last generation (an edit doesn't
+    // re-research, so the channel evidence + basis still describe the rate).
+    allInBasis: priorBedroom?.allInBasis ?? allInBasis,
+    evidence: priorBedroom?.evidence,
+    reconciliation: priorBedroom?.reconciliation,
+    clampedSeasons: priorBedroom?.clampedSeasons,
+    cleaningPerNight: priorBedroom?.cleaningPerNight,
   };
   const nextPlan: StaticRatePlan = {
     generatedAt: plan?.generatedAt ?? asOf.toISOString(),

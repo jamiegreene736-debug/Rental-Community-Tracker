@@ -26,6 +26,28 @@ type CommunityConfirmation = {
   confirmed: boolean;
   detail: string;
 };
+type ChannelEvidence = {
+  season: Season;
+  year: 1 | 2;
+  channel: string;
+  sourceUrl?: string;
+  stayNights: number;
+  rentNightly: number;
+  cleaningPerStay: number | null;
+  serviceFeePct: number | null;
+  feesObserved: boolean;
+  allInNightly: number;
+  feeBasis: "all-in-observed" | "grossed-up";
+};
+type SeasonReconciliation = {
+  season: Season;
+  year: 1 | 2;
+  chosen: number;
+  channel: string | null;
+  rule: string;
+  spread: { min: number; median: number; max: number; n: number };
+  dropped: string[];
+};
 type BedroomPlan = {
   bedrooms: number;
   anchors: { year1: SeasonAnchors; year2: SeasonAnchors };
@@ -39,11 +61,21 @@ type BedroomPlan = {
   model?: string;
   summary?: string;
   communityConfirmation?: CommunityConfirmation;
+  // ── ALL-IN provenance (optional; absent on legacy rows) ──
+  allInBasis?: SeasonAnchors;
+  evidence?: ChannelEvidence[];
+  reconciliation?: SeasonReconciliation[];
+  clampedSeasons?: string[];
+  cleaningPerNight?: number;
 };
 
 const SEASONS: Season[] = ["LOW", "HIGH", "HOLIDAY"];
 const YEARS: YearKey[] = ["year1", "year2"];
 const SEASON_LABEL: Record<Season, string> = { LOW: "Low", HIGH: "High", HOLIDAY: "Holiday" };
+const CHANNEL_LABEL: Record<string, string> = {
+  pm: "PM/direct", resort: "Resort", vrbo: "VRBO", booking: "Booking.com", airbnb: "Airbnb", other: "Other",
+};
+const channelLabel = (c: string | null | undefined) => (c ? CHANNEL_LABEL[c] ?? c : "—");
 
 function confidenceTone(score: number): { bg: string; fg: string } {
   if (score >= 80) return { bg: "#dcfce7", fg: "#166534" };
@@ -133,7 +165,7 @@ export default function StaticRatePlanPanel({ propertyId, version }: { propertyI
     <div style={{ marginTop: 8, marginBottom: 4, padding: "10px 12px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, fontSize: 11, color: "#374151" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
         <span style={{ fontWeight: 700, color: "#111827", fontSize: 12 }}>📊 Static rate plan</span>
-        <span style={{ color: "#6b7280" }}>Claude web-researches the resort (not an Airbnb scrape) · ONE static rate per Low/High/Holiday per year — every month in a season shares that rate · rolling 24 months · 20% markup on push</span>
+        <span style={{ color: "#6b7280" }}>Claude web-researches PM / VRBO / Booking.com / Airbnb for the real buy-in cost · ALL-IN nightly (rent + cleaning + service + taxes, amortized over a 7-night stay) · ONE rate per Low/High/Holiday per year, rolling 24 months · markup on push · per-unit rows are summed for the combo</span>
         <button
           type="button"
           onClick={load}
@@ -192,6 +224,11 @@ export default function StaticRatePlanPanel({ propertyId, version }: { propertyI
       {plans && plans.map((plan) => {
         const tone = confidenceTone(plan.confidence ?? 0);
         const isFallback = plan.source === "static-fallback";
+        const evidence = Array.isArray(plan.evidence) ? plan.evidence : [];
+        const hasEvidence = evidence.length > 0;
+        const estimatedFees = isFallback || !hasEvidence || evidence.some((e) => e.feeBasis !== "all-in-observed");
+        const clamped = Array.isArray(plan.clampedSeasons) ? plan.clampedSeasons : [];
+        const recon = Array.isArray(plan.reconciliation) ? plan.reconciliation : [];
         return (
           <div key={plan.bedrooms} style={{ marginBottom: 10, paddingBottom: 8, borderBottom: "1px dashed #e5e7eb" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
@@ -206,6 +243,21 @@ export default function StaticRatePlanPanel({ propertyId, version }: { propertyI
               ) : (
                 <span title={`Researched with ${plan.model ?? "Claude"} via web search.`} style={{ padding: "1px 7px", borderRadius: 4, background: "#ede9fe", color: "#5b21b6", fontWeight: 500 }}>
                   🔎 web-researched{plan.model ? ` · ${plan.model}` : ""}
+                </span>
+              )}
+              {hasEvidence && (
+                <span title="Number of real channel data points (PM/VRBO/Booking/Airbnb) reconciled into these anchors." style={{ padding: "1px 7px", borderRadius: 4, background: "#e0f2fe", color: "#075985", fontWeight: 500 }}>
+                  {evidence.length} channel comp{evidence.length === 1 ? "" : "s"}
+                </span>
+              )}
+              {estimatedFees && (
+                <span title="Some cleaning/service fees weren't shown on the source page, so they were estimated from regional defaults before taxes were applied." style={{ padding: "1px 7px", borderRadius: 4, background: "#fef3c7", color: "#92400e", fontWeight: 500 }}>
+                  ⚠ some fees estimated
+                </span>
+              )}
+              {clamped.length > 0 && (
+                <span title={`These season anchors hit the sanity clamp (0.55×–3× of the all-in basis): ${clamped.join(", ")}. Review/lock if a legit rate was capped.`} style={{ padding: "1px 7px", borderRadius: 4, background: "#fee2e2", color: "#991b1b", fontWeight: 500 }}>
+                  clamped: {clamped.join(", ")}
                 </span>
               )}
               {plan.generatedAt && (
@@ -270,6 +322,57 @@ export default function StaticRatePlanPanel({ propertyId, version }: { propertyI
                 Sources: {plan.metricsUsed.join(", ")}
               </div>
             )}
+
+            {(hasEvidence || plan.cleaningPerNight) && (
+              <div style={{ marginTop: 2, marginBottom: 6, padding: "6px 8px", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 5 }}>
+                <div style={{ fontWeight: 600, color: "#4b5563", marginBottom: 3 }}>All-in buy-in (taxes + fees, 7-night sample)</div>
+                {plan.cleaningPerNight ? (
+                  <div style={{ color: "#92400e", marginBottom: 4 }}>
+                    Includes ~${plan.cleaningPerNight}/night amortized cleaning. ⓘ Zero the Guesty guest-facing cleaning fee on this combo listing so the guest isn’t charged cleaning twice.
+                  </div>
+                ) : null}
+                {recon.filter((r) => r.year === 1 && r.chosen > 0).length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 1, marginBottom: 4 }}>
+                    {recon.filter((r) => r.year === 1 && r.chosen > 0).map((r, i) => (
+                      <div key={i} style={{ color: "#374151" }}>
+                        <b>{SEASON_LABEL[r.season]}</b> Yr 1 → <b>${r.chosen}</b>/night
+                        {r.channel ? ` via ${channelLabel(r.channel)}` : ""}
+                        {r.spread.n > 1 ? ` · ${r.spread.n} channels $${r.spread.min}–$${r.spread.max}` : ""}
+                        {/(second-cheapest|tie-break)/.test(r.rule) ? ` · ${r.rule}` : ""}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {hasEvidence && (
+                  <details>
+                    <summary style={{ cursor: "pointer", color: "#2563eb" }}>Channel evidence ({evidence.length})</summary>
+                    <table style={{ borderCollapse: "collapse", fontSize: 10.5, marginTop: 4 }}>
+                      <thead>
+                        <tr style={{ color: "#6b7280" }}>
+                          {["Season", "Channel", "Rent/n", "Clean", "Svc", "All-in/n", "Src"].map((h) => (
+                            <th key={h} style={{ textAlign: "left", padding: "1px 6px 1px 0", fontWeight: 600 }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {evidence.map((e, i) => (
+                          <tr key={i} style={{ color: "#374151" }}>
+                            <td style={{ padding: "1px 6px 1px 0", whiteSpace: "nowrap" }}>{SEASON_LABEL[e.season]} Y{e.year}</td>
+                            <td style={{ padding: "1px 6px 1px 0" }}>{channelLabel(e.channel)}</td>
+                            <td style={{ padding: "1px 6px 1px 0" }}>${e.rentNightly}{e.stayNights !== 7 ? ` (${e.stayNights}n)` : ""}</td>
+                            <td style={{ padding: "1px 6px 1px 0" }}>{e.cleaningPerStay != null ? `$${e.cleaningPerStay}` : <span style={{ color: "#9ca3af" }}>est</span>}</td>
+                            <td style={{ padding: "1px 6px 1px 0" }}>{e.serviceFeePct != null ? `${Math.round(e.serviceFeePct * 100)}%` : <span style={{ color: "#9ca3af" }}>est</span>}</td>
+                            <td style={{ padding: "1px 6px 1px 0", fontWeight: 600 }}>${e.allInNightly}{e.feeBasis === "grossed-up" ? <span title="some fees estimated" style={{ color: "#92400e" }}> ~</span> : ""}</td>
+                            <td style={{ padding: "1px 6px 1px 0" }}>{e.sourceUrl ? <a href={e.sourceUrl} target="_blank" rel="noreferrer" style={{ color: "#2563eb" }}>link</a> : "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </details>
+                )}
+              </div>
+            )}
+
             <button
               type="button"
               onClick={() => saveBedroom(plan)}

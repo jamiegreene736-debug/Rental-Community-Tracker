@@ -1656,6 +1656,59 @@ established it so you can read the rationale in the commit message.
     only costs one SearchAPI call + one Nominatim call (or zero, on a
     cache hit).
 
+### Static buy-in rates are ALL-IN, 7-night, multi-channel (Load-Bearing, 2026-06-30)
+
+The Claude static-rate engine (`server/static-rate-engine.ts` +
+`shared/static-rate-logic.ts`) researches the **true all-in buy-in cost** — the
+nightly **rent + flat cleaning + channel service fee + lodging/occupancy taxes**,
+amortized over a **7-night** reference stay — across **PM/direct → VRBO →
+Booking.com → Airbnb → resort** (priority = cheapest acquisition path first).
+This replaced the bare-nightly prompt that excluded fees/taxes (the Menehune
+Shores loss class: a 15% markup on rent-only sells the doubled-flat-fee combo at
+a loss). Load-bearing invariants:
+
+1. **Server applies tax + reconciliation; Claude reports OBSERVED only.** The
+   prompt asks Claude for per-channel `evidence` (rent / cleaning / serviceFeePct
+   / stayNights / feesObserved + sourceUrl) and NEVER to compute tax. The server
+   computes `allInNightly = (rent×N + cleaning + service·(rent×N+cleaning) +
+   tax·(rent×N+cleaning)) / N` (`allInNightlyFromComponents`), tax from
+   `LODGING_TAX_PCT` (HI 0.18 / FL 0.125), then `reconcileChannelAllIn` picks the
+   anchor: **lowest credible** all-in, with a teaser drop (not-observed + rent <
+   0.5× rent basis), a **>15%-below-2nd-cheapest guard** (use the 2nd so one
+   mis-scrape can't price into a loss), and a **PM>VRBO>Booking>Airbnb** tie-break
+   within 5%. This is deterministic + unit-tested; do NOT move tax/reconciliation
+   into the LLM.
+
+2. **`defaultStaticAnchors` is ALL-IN (the fail-soft fix).** With no
+   `ANTHROPIC_API_KEY` / any Claude error / a truncated response, anchors fall
+   back to `allInSeasonalBasis` (rent grossed up via `grossUpRentToAllIn`), NOT
+   the rent-only `staticSeasonalBasis`. So the keyless/outage path can no longer
+   push rent-only (loss) numbers to live Guesty. Anchors clamp to **0.55×–3× of
+   the ALL-IN basis** (floor raised from 0.4×); seasons outside the band are
+   surfaced as `clampedSeasons`, not silently truncated.
+
+3. **The Guesty push math + `monthlyRates` shape are UNCHANGED.** All-in lives in
+   the anchor VALUES only. `buildBulkGuestySeasonalPlan` still sums each unit's
+   per-bedroom row (two 3BRs = 3BR row ×2; a 3BR+2BR = each row once — the
+   asymmetric combo already works) and applies the markup. **Cleaning is
+   amortized INTO the nightly**, so the operator must ZERO the Guesty
+   guest-facing cleaning fee on these combo listings (surfaced in the Pricing-tab
+   panel as "Includes ~$X/night amortized cleaning") — we deliberately did NOT
+   add a separate cleaning-fee push path.
+
+4. **`BUY_IN_RATES` / `SEASON_MULTIPLIERS` stay rent-only** (load-bearing for
+   `getBuyInRate`, the live/legacy paths, the inbox estimator). The all-in basis
+   is DERIVED from them; never mutate the rent tables to bake in fees.
+
+5. Budget: `STATIC_RATE_MAX_SEARCHES` (12) / `STATIC_RATE_MAX_TOKENS` (12000),
+   env-tunable; the prompt soft-caps evidence to ~8–10 points and
+   `callClaudeWebSearchText` returns a DISTINCT "truncated (max_tokens)" error so
+   a truncated multi-bedroom response is diagnosable, not mistaken for an outage.
+   Per-channel `evidence` + `reconciliation` + `allInBasis` + `clampedSeasons` +
+   `cleaningPerNight` persist on `static_plan` (JSONB, no migration) and render in
+   `StaticRatePlanPanel`. Designed + reviewed via adversarial workflows; see the
+   2026-06-30 Decision Log line.
+
 ### Market-rate AUTO-CURATION: every listing gets a geo-scoped scan (Load-Bearing, 2026-06-27)
 
 A "curated" market = a key in `BUY_IN_MARKETS` (`shared/buy-in-market.ts`),
@@ -3716,3 +3769,5 @@ Welcome. When in doubt, ask the human.
 2026-06-30 · Jamie: "when the system took the initial 50% deposit it sent the guest a receipt, but when Guesty auto-took the final 50% (booking is inside the balance-due window) the guest never got a second receipt / paid-in-full confirmation. Fix it so this triggers correctly going forward." · ACCEPTED + shipped (`claude/receipt-final-payment-dedup`, PR #TBD) · OVERRIDES the 2026-06-10 Load-Bearing #2 "do NOT add a Guesty txn id to the dedup key" decision (entry REPLACED in place). Root cause: BOTH receipt dedup layers keyed on day+amount and dropped transaction identity — `dedupeTransactions` (`server/guesty-money.ts`, key `day|amount|desc`) and `receiptDedupKey` (`shared/receipt-message.ts`, key `reservationId|kind|day|amount`). Faith Ito / Menehune Shores booked ~Jun 26 for an Aug 20 check-in (~55 days out, INSIDE Guesty's "balance due ~90 days before arrival" window), so Guesty auto-charged the 50% balance the SAME day as the 50% deposit. Two equal $1,855 charges, same day → collapsed to ONE receipt; the balance got no "paid in full" confirmation. The 2026-06-10 author had bet that case was "effectively nonexistent" — it is routine for 50/50 splits. FIX: distinguish charges by Guesty's stable txn `_id` (new `transactionId()` in guesty-money.ts; appended to the ledger key as `|<id>`; `dedupeTransactions` splits by id). The `_id` is immutable across polls, so it does NOT reintroduce the jitter-driven double-send the old comment feared; id-less shapes reproduce the EXACT legacy key (byte-for-byte backward compatible, so existing rows + refund tests are unaffected). A self-expiring migration shim (`sameTransactionMoment`) in `processTransaction` also checks the legacy key and skips ONLY when that row was for THIS exact charge moment — so the deploy that ships the new key does not re-send recently-sent receipts, while the second (balance) charge still goes out. NOTE the operator's specific reservation may need a one-time manual force-send (`POST /api/inbox/guest-receipts/send-for-reservation`) since both its charges are now outside the 48h backfill window — the detection path now returns BOTH and the shim sends only the missing balance. Verified: `tests/guesty-money-payments.test.ts` 13/0 (new) + `tests/receipt-message.test.ts` 37/0 (+ id/shim cases), full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT live-smoke the Guesty leg (no creds in session) — confirm post-deploy on the next within-window booking (deposit + balance each get a receipt) and via the manual force-send for Faith Ito.
 
 2026-06-30 · Jamie (follow-up to the receipt fix): "ensure that when ANY refund is done in Guesty the message is ALWAYS sent to the guest via the inbox/message portal on the OTA they booked through." · ACCEPTED + shipped (`claude/refund-receipt-always-ota`, PR #TBD) · The refund auto-send + OTA routing already existed (the `guest-receipts.ts` scheduler detects refunds via `realRefundsForReceipts` and posts through the delivery-verified `sendGuestyConversationMessage`, which routes to the guest's `integration.platform` channel). Two real gaps closed for the "ALWAYS" guarantee: (1) `RECEIPT_SKIP_CHANNELS` muted BOTH kinds — refunds now bypass the mute (`kind === "payment"` gate), since a channel mute is for redundant payment receipts, not refund confirmations. (2) Per #51 the scheduler must NOT auto-retry a `misroute`/`unconfirmed` send (re-posts a duplicate), so a genuinely non-delivered refund could silently never reach the guest. Added a non-delivery SAFETY NET: pure `receiptNeedsAttention()` flags refund rows that are `misroute` or a stale `error`/`pending`; the dashboard payload exposes `guestRefundReceiptIssues` and `home.tsx` shows a red alert + "Resend to guest" button (`kind:"refund"`-scoped force-send; OTA path de-dupes so the channel is never double-posted). `unconfirmed` is deliberately NOT flagged (the message reached the OTA once; flagging would duplicate). See the "Guest payment/refund receipts auto-send" Load-Bearing subsection #4 + #10. Verified: `tests/receipt-message.test.ts` 46/0 (+ `receiptNeedsAttention` cases), full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT live-smoke the Guesty leg (no creds in session) — confirm post-deploy: issue a refund in Guesty → within ~5 min the guest gets a refund receipt on their booking channel; if one ever misroutes, it appears in the dashboard "refund confirmations did NOT reach the guest" alert with a working Resend.
+
+2026-06-30 · Jamie: "Look into the market rate update feature. I need it to accurately research online via Claude for the buy-in rate (VRBO, Booking.com, PM website(s), etc — as much data as possible), find the LOW/HIGH/HOLIDAY buy-in for the next 24 months INCLUDING all taxes and fees, use a 7-day sample if possible, then double it for the two units (sometimes a 3BR + a 2BR). Plan it out, implement, tell me why, push + merge." · ACCEPTED + shipped (`claude/practical-shamir-39ae8c`, PR #873) · Designed via a 4-lens design panel (revenue / tax-domain / software-correctness / adversarial) + a 3-dimension adversarial diff review (0 merge blockers; 2 MEDIUMs fixed). DIAGNOSIS: the Claude prompt asked for a BARE nightly rate — no taxes/fees, no 7-night sample, one number per season; `BUY_IN_RATES` are rent-only. The "double it" was ALREADY correct (the push sums per-bedroom rows per unit; 3BR+2BR asymmetric works). FIX = make the engine produce true ALL-IN (rent + cleaning + service + lodging tax, 7-night amortized) multi-channel anchors; full rationale in the new "Static buy-in rates are ALL-IN, 7-night, multi-channel" Load-Bearing subsection. KEY DECISIONS (don't re-litigate): (1) SERVER applies tax (HI 0.18/FL 0.125) + reconciliation deterministically; Claude reports OBSERVED rent/cleaning/service only (un-hallucinatable). (2) `reconcileChannelAllIn` = lowest credible all-in, drop teasers, >15%-below-2nd guard, PM>VRBO>Booking>Airbnb tie-break (a self-caught bug: the tie-break must only consider rows AT-OR-ABOVE the pick, else it re-includes the cheaper row the >15% guard just rejected — fixed + tested). (3) `defaultStaticAnchors` is now ALL-IN so the fail-soft/keyless path can't push rent-only loss numbers; clamp floor 0.4×→0.55× against the ALL-IN basis. (4) Guesty push math + `monthlyRates` shape UNCHANGED — cleaning is amortized into the nightly, so the UI tells the operator to ZERO the Guesty guest-facing cleaning fee (NOT a new cleaning-fee push path). (5) Budget 6→12 searches / 4000→12000 tokens, evidence soft-capped, + a DISTINCT "truncated (max_tokens)" error so a truncated multi-bedroom response isn't mistaken for an outage. (6) Observed `cleaningPerStay: 0` (no-cleaning PM/direct) is preserved, not overwritten with the estimate. Per-channel evidence + reconciliation persist on `static_plan` (JSONB, no migration) + render in `StaticRatePlanPanel` (channel comp table, estimated-fees/clamped chips, cleaning note). Verified: `tests/static-rate-logic.test.ts` 89/0 (+46), full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT live-smoke the Claude web-search leg in-session (no ANTHROPIC_API_KEY) — confirm post-deploy via the per-property "Update Market Rates Now" button or `POST /api/admin/refresh-all-market-rates`; the Pricing tab then shows the per-channel all-in breakdown + reconciliation.

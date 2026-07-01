@@ -872,6 +872,34 @@ export const propertyMarketRates = pgTable("property_market_rates", {
       confidence: number;
       reasoning: string;
       metricsUsed: string[];
+      // ── ALL-IN (taxes + fees) provenance — optional; absent on legacy rows.
+      // Mirror of the optional fields on StaticRateBedroomPlan in
+      // shared/static-rate-logic.ts (kept in sync by hand).
+      allInBasis?: { LOW: number; HIGH: number; HOLIDAY: number };
+      evidence?: Array<{
+        season: "LOW" | "HIGH" | "HOLIDAY";
+        year: 1 | 2;
+        channel: "pm" | "resort" | "vrbo" | "booking" | "airbnb" | "other";
+        sourceUrl?: string;
+        stayNights: number;
+        rentNightly: number;
+        cleaningPerStay: number | null;
+        serviceFeePct: number | null;
+        feesObserved: boolean;
+        allInNightly: number;
+        feeBasis: "all-in-observed" | "grossed-up";
+      }>;
+      reconciliation?: Array<{
+        season: "LOW" | "HIGH" | "HOLIDAY";
+        year: 1 | 2;
+        chosen: number;
+        channel: "pm" | "resort" | "vrbo" | "booking" | "airbnb" | "other" | null;
+        rule: string;
+        spread: { min: number; median: number; max: number; n: number };
+        dropped: string[];
+      }>;
+      clampedSeasons?: string[];
+      cleaningPerNight?: number;
     }>;
   }>(),
   refreshedAt: timestamp("refreshed_at").defaultNow().notNull(),

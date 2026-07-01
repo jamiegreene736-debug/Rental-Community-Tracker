@@ -43,6 +43,39 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-06-30 (market-rate engine → ALL-IN, 7-night, multi-channel buy-in research): Operator wanted the
+  market-rate update to web-research the REAL buy-in rate across VRBO/Booking.com/PM sites/Airbnb (as
+  much data as possible), produce LOW/HIGH/HOLIDAY for the next 24 months INCLUDING all taxes + fees,
+  use a 7-night sample, then double it for the 2-unit combo (sometimes 3BR + 2BR). SHIPPED
+  (`claude/practical-shamir-39ae8c`, PR #TBD). DIAGNOSIS: the Claude prompt asked for a BARE nightly rate
+  (no taxes/fees, no 7-night sample, one number/season); `BUY_IN_RATES` are rent-only — the Menehune
+  loss class. The "double it" was ALREADY correct (push sums per-bedroom rows per unit; 3BR+2BR works).
+  KEY SEAM (don't re-chase): all-in lives in the ANCHOR VALUES only — `buildBulkGuestySeasonalPlan`,
+  `cleanBaseRateFromBuyInServer`, the `monthlyRates` shape, markup, scheduler + queue are ALL unchanged.
+  Pieces: (1) `shared/static-rate-logic.ts` (pure, 89/0 incl. +46 new) — `allInNightlyFromComponents`
+  (rent + cleaning + service + server tax, /7), `grossUpRentToAllIn`, `allInSeasonalBasis`,
+  `reconcileChannelAllIn` (lowest credible; drop teasers; >15%-below-2nd guard; PM>VRBO>Booking>Airbnb
+  tie-break — the tie-break only considers rows AT-OR-ABOVE the pick), `computeSeasonWindows` (7-night
+  HIGH=Jul/LOW=Sep/HOLIDAY=Dec26), `clampedSeasonsAgainst`; `defaultStaticAnchors` now ALL-IN (fail-soft
+  can't push rent-only loss numbers); clamp floor 0.4×→0.55× vs the ALL-IN basis. (2)
+  `server/static-rate-engine.ts` — prompt rewrite (per-channel sweep, pinned 7-night windows, report
+  OBSERVED rent/cleaning/service ONLY — server applies tax `LODGING_TAX_PCT` HI 0.18/FL 0.125);
+  `resolveBedroomAnchors` computes per-channel all-in → reconciles → clamps vs all-in basis → persists
+  `evidence`/`reconciliation`/`allInBasis`/`clampedSeasons`/`cleaningPerNight`; budget 6→12 searches /
+  4000→12000 tokens (env-tunable); observed `cleaningPerStay:0` preserved (not overwritten with the
+  estimate). (3) `server/claude-json.ts` — DISTINCT "truncated (max_tokens)" error so a truncated
+  multi-bedroom response isn't mistaken for an outage. (4) `shared/schema.ts` mirrors the new optional
+  `static_plan` JSONB fields (no migration). (5) `StaticRatePlanPanel` — per-channel all-in evidence
+  table + reconciliation summary + comp-count/estimated-fees/clamped chips + a "ZERO the Guesty
+  guest-facing cleaning fee" note (cleaning is amortized into the nightly; we deliberately did NOT add a
+  cleaning-fee push path). Designed via a 4-lens design panel + reviewed via a 3-dimension adversarial
+  diff workflow (0 merge blockers; 2 MEDIUMs fixed). Verified: `tests/static-rate-logic.test.ts` 89/0,
+  full `npm test` exit 0, `npm run build` clean, `npm run check` 335 = baseline (0 new). Could NOT
+  live-smoke the Claude web-search leg in-session (no ANTHROPIC_API_KEY) — confirm post-deploy via
+  "Update Market Rates Now" or `POST /api/admin/refresh-all-market-rates`; the Pricing tab then shows the
+  per-channel all-in breakdown. Full rationale: AGENTS.md "Static buy-in rates are ALL-IN, 7-night,
+  multi-channel" + the 2026-06-30 Decision Log line.
+
 - 2026-06-30 (guest receipts: ensure REFUNDS always reach the guest on their OTA channel): Follow-up
   to the same-day payment fix. SHIPPED (`claude/refund-receipt-always-ota`, PR #TBD). The refund
   auto-send + OTA routing ALREADY existed (the `server/guest-receipts.ts` scheduler detects refunds via

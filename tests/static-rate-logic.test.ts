@@ -10,7 +10,18 @@ import {
   seasonColumnsFromAnchors,
   confirmResearchCommunity,
   STATIC_RATE_YOY_GROWTH,
+  allInSeasonalBasis,
+  allInNightlyFromComponents,
+  grossUpRentToAllIn,
+  reconcileChannelAllIn,
+  computeSeasonWindows,
+  clampedSeasonsAgainst,
+  normalizeChannelKey,
+  LODGING_TAX_PCT,
+  CLEANING_FEE_ESTIMATE,
+  ALL_IN_REFERENCE_NIGHTS,
   type StaticRateAnchors,
+  type ChannelKey,
 } from "../shared/static-rate-logic";
 
 let pass = 0;
@@ -45,16 +56,23 @@ console.log("static-rate-logic: staticSeasonalBasis");
   check("florida fallback uses 80/BR + 0.75 LOW", fl.LOW === Math.round(80 * 3 * 0.75), fl);
 }
 
-console.log("static-rate-logic: defaultStaticAnchors");
+console.log("static-rate-logic: defaultStaticAnchors (now ALL-IN)");
 {
   const a = defaultStaticAnchors("Poipu Kai", 3);
-  const basis = staticSeasonalBasis("Poipu Kai", 3);
-  check("year1 equals static basis", a.year1.LOW === basis.LOW && a.year1.HIGH === basis.HIGH);
+  const allIn = allInSeasonalBasis("Poipu Kai", 3);
+  const rent = staticSeasonalBasis("Poipu Kai", 3);
+  check("year1 equals the ALL-IN basis (not rent-only)", a.year1.LOW === allIn.LOW && a.year1.HIGH === allIn.HIGH, a.year1);
   check(
-    "year2 grown by YoY growth",
-    a.year2.LOW === Math.round(basis.LOW * STATIC_RATE_YOY_GROWTH),
+    "year2 grown by YoY growth off all-in",
+    a.year2.LOW === Math.round(allIn.LOW * STATIC_RATE_YOY_GROWTH),
     a.year2,
   );
+  // MENEHUNE REGRESSION LOCK: the fail-soft fallback must price ABOVE bare rent
+  // (rent + cleaning + service + taxes), so the 15% markup is never applied to
+  // rent-only numbers. All-in should be ~1.2×–1.5× the rent-only basis.
+  check("all-in LOW > rent-only LOW", a.year1.LOW > rent.LOW, { allIn: a.year1.LOW, rent: rent.LOW });
+  const ratio = a.year1.LOW / rent.LOW;
+  check("all-in uplift is in the 1.2×–1.5× band", ratio >= 1.2 && ratio <= 1.5, ratio);
 }
 
 console.log("static-rate-logic: sanitizeSeasonAnchors");
@@ -66,9 +84,9 @@ console.log("static-rate-logic: sanitizeSeasonAnchors");
   // Ordering re-asserted: HOLIDAY pulled up to ≥ HIGH.
   check("HOLIDAY >= HIGH after clamp", s.HOLIDAY >= s.HIGH, s);
 
-  // Too-low value clamped up to 0.4× basis floor.
+  // Too-low value clamped up to 0.55× basis floor (raised from 0.4×).
   const low = sanitizeSeasonAnchors({ LOW: 1, HIGH: 800, HOLIDAY: 1100 }, basis);
-  check("tiny LOW clamped to 0.4× basis floor", low.LOW === Math.round(500 * 0.4), low);
+  check("tiny LOW clamped to 0.55× basis floor", low.LOW === Math.round(500 * 0.55), low);
 
   // Inverted input (LOW > HIGH) gets corrected.
   const inv = sanitizeSeasonAnchors({ LOW: 700, HIGH: 600, HOLIDAY: 650 }, basis);
@@ -268,6 +286,165 @@ console.log("static-rate-logic: rates are STATIC per season per year (not per-mo
   // At most 3 distinct values per year (LOW/HIGH/HOLIDAY).
   const y1Distinct = new Set(y1.map((m) => expanded[m].medianNightly));
   check("year 1 has at most 3 distinct nightly rates", y1Distinct.size <= 3, [...y1Distinct]);
+}
+
+console.log("static-rate-logic: allInNightlyFromComponents (taxes + fees, 7-night amortized)");
+{
+  // VRBO HIGH 3BR: rent 950/n × 7 = 6650 + cleaning 285 + service 10% of (6650+285)
+  // + HI tax 18% of (6650+285), all ÷ 7.
+  const rent = 950, nights = 7, cleaning = 285, servicePct = 0.10, region = "hawaii" as const;
+  const subtotal = rent * nights + cleaning; // 6935
+  const expectedTotal = rent * nights + cleaning + subtotal * servicePct + subtotal * LODGING_TAX_PCT.hawaii;
+  const expected = Math.round(expectedTotal / nights);
+  const got = allInNightlyFromComponents({ rentNightly: rent, nights, cleaningPerStay: cleaning, serviceFeePct: servicePct, region });
+  check("exact all-in math (HI, VRBO, 7 nights)", got === expected, { got, expected });
+  check("all-in nightly exceeds bare rent", got > rent, got);
+
+  // Florida tax rate differs.
+  const fl = allInNightlyFromComponents({ rentNightly: 200, nights: 7, cleaningPerStay: 175, serviceFeePct: 0, region: "florida" });
+  const flSub = 200 * 7 + 175;
+  const flExpected = Math.round((200 * 7 + 175 + flSub * LODGING_TAX_PCT.florida) / 7);
+  check("exact all-in math (FL, PM 0% service)", fl === flExpected, { fl, flExpected });
+
+  // Longer min-stay amortizes the flat cleaning over more nights → lower nightly.
+  const seven = allInNightlyFromComponents({ rentNightly: 500, nights: 7, cleaningPerStay: 350, serviceFeePct: 0, region: "hawaii" });
+  const fourteen = allInNightlyFromComponents({ rentNightly: 500, nights: 14, cleaningPerStay: 350, serviceFeePct: 0, region: "hawaii" });
+  check("longer stay amortizes cleaning lower", fourteen < seven, { seven, fourteen });
+
+  // nights=0 guards to the 7-night reference, never divides by zero.
+  const guarded = allInNightlyFromComponents({ rentNightly: 500, nights: 0, cleaningPerStay: 250, serviceFeePct: 0, region: "hawaii" });
+  check("nights<=0 falls back to reference nights (finite)", Number.isFinite(guarded) && guarded > 0, guarded);
+
+  // An observed $0 cleaning (PM/direct, no separate cleaning) prices BELOW a
+  // listing with a real cleaning fee — the engine must keep an observed 0, not
+  // overwrite it with the regional estimate.
+  const noClean = allInNightlyFromComponents({ rentNightly: 500, nights: 7, cleaningPerStay: 0, serviceFeePct: 0, region: "hawaii" });
+  const withClean = allInNightlyFromComponents({ rentNightly: 500, nights: 7, cleaningPerStay: 250, serviceFeePct: 0, region: "hawaii" });
+  check("cleaning $0 prices below a real cleaning fee", noClean < withClean, { noClean, withClean });
+}
+
+console.log("static-rate-logic: grossUpRentToAllIn + allInSeasonalBasis");
+{
+  const hi = grossUpRentToAllIn(500, "hawaii");
+  const fl = grossUpRentToAllIn(500, "florida");
+  check("HI gross-up > bare rent", hi > 500, hi);
+  check("FL gross-up > bare rent", fl > 500, fl);
+  check("HI gross-up > FL gross-up (higher tax)", hi > fl, { hi, fl });
+  check("cleaning estimate amortized in (matches /7 component)", CLEANING_FEE_ESTIMATE.hawaii / ALL_IN_REFERENCE_NIGHTS > 0);
+
+  // allInSeasonalBasis grosses up EACH rent-only season.
+  const rent = staticSeasonalBasis("Poipu Kai", 3);
+  const allIn = allInSeasonalBasis("Poipu Kai", 3);
+  check("all-in LOW > rent LOW", allIn.LOW > rent.LOW, { allIn, rent });
+  check("all-in HIGH > rent HIGH", allIn.HIGH > rent.HIGH);
+  check("all-in HOLIDAY > rent HOLIDAY", allIn.HOLIDAY > rent.HOLIDAY);
+  check("all-in keeps LOW < HIGH < HOLIDAY", allIn.LOW < allIn.HIGH && allIn.HIGH < allIn.HOLIDAY, allIn);
+}
+
+console.log("static-rate-logic: reconcileChannelAllIn");
+{
+  type Row = { channel: ChannelKey; rentNightly: number; allInNightly: number; feesObserved: boolean };
+  const rentBasis = 500;
+
+  // Two credible channels close together → cheapest wins.
+  const a = reconcileChannelAllIn(
+    [
+      { channel: "vrbo", rentNightly: 520, allInNightly: 700, feesObserved: true },
+      { channel: "airbnb", rentNightly: 540, allInNightly: 740, feesObserved: true },
+    ] as Row[],
+    rentBasis,
+  );
+  check("lowest credible chosen", a.chosen === 700 && a.channel === "vrbo", a);
+  check("spread reported", a.spread.n === 2 && a.spread.min === 700 && a.spread.max === 740, a.spread);
+
+  // A too-cheap, fees-NOT-observed row whose rent is < 0.5× basis = teaser → dropped.
+  const b = reconcileChannelAllIn(
+    [
+      { channel: "booking", rentNightly: 200, allInNightly: 260, feesObserved: false }, // 200 < 250 → teaser
+      { channel: "vrbo", rentNightly: 520, allInNightly: 705, feesObserved: true },
+    ] as Row[],
+    rentBasis,
+  );
+  check("teaser dropped, real channel chosen", b.chosen === 705 && b.dropped.some((d) => /teaser/.test(d)), b);
+
+  // Cheapest >15% below 2nd-cheapest → use 2nd-cheapest (don't price into a loss).
+  const c = reconcileChannelAllIn(
+    [
+      { channel: "pm", rentNightly: 480, allInNightly: 500, feesObserved: true }, // 500 < 0.85×680=578
+      { channel: "vrbo", rentNightly: 560, allInNightly: 680, feesObserved: true },
+      { channel: "airbnb", rentNightly: 600, allInNightly: 760, feesObserved: true },
+    ] as Row[],
+    rentBasis,
+  );
+  check("cheapest >15% below 2nd → 2nd-cheapest used", c.chosen === 680 && /second-cheapest/.test(c.rule), c);
+
+  // Tie-break within 5%: prefer higher-trust channel (PM over VRBO).
+  const d = reconcileChannelAllIn(
+    [
+      { channel: "vrbo", rentNightly: 520, allInNightly: 700, feesObserved: true },
+      { channel: "pm", rentNightly: 520, allInNightly: 712, feesObserved: true }, // within 5% of 700
+    ] as Row[],
+    rentBasis,
+  );
+  check("tie-break prefers PM over VRBO", d.channel === "pm" && /tie-break/.test(d.rule), d);
+
+  // No credible rows → null chosen.
+  const e = reconcileChannelAllIn([], rentBasis);
+  check("no evidence → chosen null", e.chosen === null && e.channel === null, e);
+}
+
+console.log("static-rate-logic: computeSeasonWindows");
+{
+  const w = computeSeasonWindows(new Date(2026, 5, 30), "hawaii"); // 2026-06-30
+  check("6 windows (3 seasons × 2 years)", w.length === 6, w.length);
+  const y1High = w.find((x) => x.season === "HIGH" && x.year === 1)!;
+  const y1Low = w.find((x) => x.season === "LOW" && x.year === 1)!;
+  const y1Hol = w.find((x) => x.season === "HOLIDAY" && x.year === 1)!;
+  check("HIGH window is mid-July", /-07-/.test(y1High.checkIn), y1High);
+  check("LOW window is mid-September", /-09-/.test(y1Low.checkIn), y1Low);
+  check("HOLIDAY window is late December", /-12-/.test(y1Hol.checkIn), y1Hol);
+  const nights = (ci: string, co: string) => (new Date(co).getTime() - new Date(ci).getTime()) / 86400000;
+  check("each window is 7 nights", w.every((x) => nights(x.checkIn, x.checkOut) === ALL_IN_REFERENCE_NIGHTS), w.map((x) => nights(x.checkIn, x.checkOut)));
+  const y2High = w.find((x) => x.season === "HIGH" && x.year === 2)!;
+  check("year 2 HIGH is year 1 HIGH + 1 year", Number(y2High.checkIn.slice(0, 4)) === Number(y1High.checkIn.slice(0, 4)) + 1, { y1: y1High.checkIn, y2: y2High.checkIn });
+}
+
+console.log("static-rate-logic: clampedSeasonsAgainst");
+{
+  const basis = { LOW: 600, HIGH: 1000, HOLIDAY: 1400 };
+  // 1.4× basis survives (in band); 0.5× below floor (0.55); 4× above ceiling (3).
+  const flagged = clampedSeasonsAgainst({ LOW: Math.round(600 * 1.4), HIGH: Math.round(1000 * 0.5), HOLIDAY: Math.round(1400 * 4) }, basis, "Y1");
+  check("in-band LOW not flagged", !flagged.includes("Y1 LOW"), flagged);
+  check("below-floor HIGH flagged", flagged.includes("Y1 HIGH"), flagged);
+  check("above-ceiling HOLIDAY flagged", flagged.includes("Y1 HOLIDAY"), flagged);
+}
+
+console.log("static-rate-logic: clamp uses the ALL-IN basis (legit all-in survives)");
+{
+  // A legitimate all-in holiday rate ~2.2× the all-in basis must NOT be clamped
+  // (it's under the 3× ceiling), but a 4× outlier is capped.
+  const allIn = allInSeasonalBasis("Poipu Kai", 3);
+  const legit = Math.round(allIn.HOLIDAY * 2.2);
+  const sane = sanitizeAnchors(
+    { year1: { LOW: allIn.LOW, HIGH: allIn.HIGH, HOLIDAY: legit }, year2: { LOW: allIn.LOW, HIGH: allIn.HIGH, HOLIDAY: legit } },
+    allIn,
+  );
+  check("legit 2.2× all-in holiday survives clamp", sane.year1.HOLIDAY === legit, { legit, got: sane.year1.HOLIDAY });
+  const outlier = sanitizeAnchors(
+    { year1: { LOW: allIn.LOW, HIGH: allIn.HIGH, HOLIDAY: allIn.HOLIDAY * 4 }, year2: { LOW: allIn.LOW, HIGH: allIn.HIGH, HOLIDAY: allIn.HOLIDAY * 4 } },
+    allIn,
+  );
+  check("4× outlier holiday capped at 3× all-in basis", outlier.year1.HOLIDAY === Math.round(allIn.HOLIDAY * 3), outlier.year1.HOLIDAY);
+}
+
+console.log("static-rate-logic: normalizeChannelKey");
+{
+  check("VRBO → vrbo", normalizeChannelKey("VRBO") === "vrbo");
+  check("Booking.com → booking", normalizeChannelKey("Booking.com") === "booking");
+  check("Airbnb → airbnb", normalizeChannelKey("airbnb") === "airbnb");
+  check("property manager → pm", normalizeChannelKey("Property Manager direct") === "pm");
+  check("resort site → resort", normalizeChannelKey("resort official site") === "resort");
+  check("unknown → other", normalizeChannelKey("some travel blog") === "other");
 }
 
 console.log(`\nstatic-rate-logic: ${pass} passed, ${fail} failed`);
