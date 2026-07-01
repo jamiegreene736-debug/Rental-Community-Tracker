@@ -38,7 +38,7 @@ import {
   type BuyinAgentOutcome,
   type BuyinAgentRunResult,
 } from "./buyin-agent-queue";
-import { registerCommitContext, unregisterCommitContext, setCoordResolver } from "./buyin-agent-commit";
+import { registerCommitContext, unregisterCommitContext, setCoordResolver, buyInAllowLoss } from "./buyin-agent-commit";
 
 // Wire the SERVER-side coord re-derivation once (plan §4): for a combo commit, re-derive
 // each VRBO pick's coords via the sidecar (the same scrape Phase-4 enrichment uses) so
@@ -199,6 +199,7 @@ export async function runCoworkAutoFillJob(job: AutoFillJob, deps: CoworkDeps): 
         groundFloorBedrooms: Array.from(job.groundFloorBedrooms),
         expectedRevenue: job.expectedRevenue,
         dryRun: job.dryRun,
+        allowLoss: buyInAllowLoss(),
       },
       { origin: job.owner, model },
     );
