@@ -1500,7 +1500,7 @@ export const scannerSchedule = pgTable("scanner_schedule", {
   runInventory: boolean("run_inventory").notNull().default(true),
   runPricing: boolean("run_pricing").notNull().default(true),
   runSyncBlocks: boolean("run_sync_blocks").notNull().default(false),
-  // User's target margin for the pricing push. Default 15% (MARKET_RATE_TARGET_MARGIN).
+  // User's target margin for the pricing push. Default 20% (MARKET_RATE_TARGET_MARGIN).
   // NOTE: the server market-rate pushes (bulk queue + weekly scan) apply the flat
   // MARKET_RATE_TARGET_MARGIN constant and no longer read this column, so a legacy
   // 0.2000 here no longer forces a 20% push. Kept for the builder UI / future use.

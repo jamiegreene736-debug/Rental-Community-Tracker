@@ -1366,7 +1366,7 @@ export async function refreshHybridPricingForTarget(args: {
         const preTax = basis;
         basis = applyLodgingTaxGrossUp(basis, args.community);
         if (basis > preTax) {
-          scanNotes.push(`Grossed up $${preTax} → $${basis} for ${Math.round(LODGING_TAX_PCT[getCommunityRegion(args.community)] * 100)}% ${getCommunityRegion(args.community)} lodging tax (all-in checkout total).`);
+          scanNotes.push(`Grossed up $${preTax} → $${basis} for ${Number((LODGING_TAX_PCT[getCommunityRegion(args.community)] * 100).toFixed(1))}% ${getCommunityRegion(args.community)} lodging tax (all-in checkout total).`);
         }
       }
       if (basis == null || basis <= 0) {
@@ -1383,7 +1383,7 @@ export async function refreshHybridPricingForTarget(args: {
         );
       } else {
         scanNotes.push(
-          `Stored raw SearchAPI ${MARKET_PRICING_PERCENTILE}th percentile basis (no hybrid markup layers). Random ${stayNights}-night sample ${window.checkIn} to ${window.checkOut} in ${window.yearMonth}.`,
+          `Stored SearchAPI ${MARKET_PRICING_PERCENTILE}th percentile basis (median, grossed for lodging tax; no hybrid markup layers). Random ${stayNights}-night sample ${window.checkIn} to ${window.checkOut} in ${window.yearMonth}.`,
         );
       }
 
