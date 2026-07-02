@@ -225,7 +225,7 @@ function guestNameFromAlias(aliasEmail: string): string | null {
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || null;
 }
 
-function guestInboxImapConfig(): {
+export function guestInboxImapConfig(): {
   configured: boolean;
   host: string;
   port: number;

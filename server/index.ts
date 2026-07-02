@@ -12,6 +12,7 @@ import { startGuestReceiptScheduler } from "./guest-receipts";
 import { startPropertyRevenueScheduler } from "./property-revenue-scheduler";
 import { startMarketRateScheduler } from "./market-rate-scheduler";
 import { startGuestInboxSyncScheduler } from "./guest-inbox-sync";
+import { startBuyInVendorEmailSyncScheduler } from "./buy-in-email-sync";
 import { warmGuestyListingsCache } from "./guesty-listings-cache";
 import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 import { ensureRuntimeSchema } from "./schema-maintenance";
@@ -165,6 +166,7 @@ app.get("/api/auth/session", (_req, res) => {
       startBookingConfirmationScheduler();
       startGuestReceiptScheduler();
       startGuestInboxSyncScheduler();
+      startBuyInVendorEmailSyncScheduler();
       startPropertyRevenueScheduler();
       startMarketRateScheduler();
       // Prime the Operations Property dropdown + global-summary listing set so

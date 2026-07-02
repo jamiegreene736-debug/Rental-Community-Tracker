@@ -11886,6 +11886,16 @@ Requirements:
   app.get("/api/bookings/:reservationId/buy-in-communications", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
+      // Pull PM/vendor reverse-alias replies from the SimpleLogin forwarding
+      // mailbox before reading history — the inbound webhook is not configured in
+      // prod, so this IMAP poll is what surfaces incoming vendor emails (mirrors
+      // the guest-inbox on-fetch sync). Throttled + fail-soft.
+      try {
+        const { syncBuyInVendorEmailsForReservation } = await import("./buy-in-email-sync");
+        await syncBuyInVendorEmailsForReservation(reservationId);
+      } catch (syncErr: any) {
+        console.warn("[buy-in-email] on-fetch sync failed:", syncErr?.message ?? syncErr);
+      }
       const buyIns = await storage.getBuyInsByReservation(reservationId);
       const rawAliases = await db
         .select()
