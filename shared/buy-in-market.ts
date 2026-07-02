@@ -198,7 +198,16 @@ export const BUY_IN_MARKETS: Record<string, BuyInMarket> = {
   },
   "Bonita National": {
     key: "Bonita National",
-    aliases: [/\b(?:bonita\s+national|bonita\s+springs|estero|naples)\b/i],
+    aliases: [
+      /\b(?:bonita\s+national|bonita\s+springs|naples)\b/i,
+      // "Estero" the INLAND TOWN → Bonita National tier, but NOT the Fort Myers Beach
+      // coastal refs (Estero Blvd / Island / Beach / Bay). Those are Santa Maria Resort's
+      // OWN address ("7317 Estero Blvd"); because Bonita National sits earlier in this
+      // object and the old bare "estero" alias matched first, it stole Santa Maria's match
+      // and mislabeled a Fort Myers Beach condo as the inland Bonita Springs golf community
+      // (broke the cowork buy-in search). (2026-07-01)
+      /\bestero\b(?!\s*(?:blvd|boulevard|island|isl|beach|bay))/i,
+    ],
     searchLocation: "Bonita National Golf and Country Club, Bonita Springs, Florida",
     platformSearch: {
       airbnb: "Bonita National Golf and Country Club, Bonita Springs, FL",

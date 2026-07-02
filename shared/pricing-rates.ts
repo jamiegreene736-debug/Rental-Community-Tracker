@@ -245,7 +245,10 @@ export function suggestPricingArea(
     // STR-eligible communities there are within ~5mi of the parks, so default
     // to Windsor Hills tier when no specific name matched above.
     if (/\b(haines city|davenport)\b/.test(c)) return "Southern Dunes";
-    if (/\b(bonita springs|estero|naples)\b/.test(c)) return "Bonita National";
+    // "estero" narrowed to the inland TOWN — NOT the Fort Myers Beach coastal refs
+    // (Estero Blvd / Island / Beach / Bay), which are Santa Maria Resort, a different
+    // area (see buy-in-market.ts Bonita National alias, 2026-07-01).
+    if (/\b(bonita springs|naples)\b/.test(c) || /\bestero\b(?!\s*(?:blvd|boulevard|island|isl|beach|bay))/.test(c)) return "Bonita National";
     if (/\b(orlando|kissimmee)\b/.test(c)) return "Windsor Hills";
     return "Florida Generic";
   }
