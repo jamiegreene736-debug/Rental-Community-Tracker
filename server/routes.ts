@@ -11981,42 +11981,53 @@ Requirements:
         return res.status(400).json({ error: "reservationId, vendorEmail, subject, and body are required" });
       }
 
-      const { alias, contact } = await getOrCreateVendorContact({
-        buyInId,
-        reservationId,
-        guestName: String(req.body?.guestName ?? "").trim() || null,
-        vendorEmail,
-        vendorName,
-      });
-      if (!contact.reverseAliasEmail) {
-        return res.status(500).json({ error: "Vendor contact is missing a reverse alias email" });
-      }
-      if (reservationAliasIsExpired(alias)) {
-        return res.status(400).json({
-          error: "Booking email alias has expired",
-          message: "Create a new communication path before sending another PM/vendor email. Saved messages and attachments remain in history.",
+      // Prefer the SimpleLogin reverse alias (so the PM sees the guest alias and
+      // replies route back through the portal), but NEVER let a SimpleLogin
+      // hiccup block the operator from reaching the PM. If the reverse-alias path
+      // is unavailable — SimpleLogin not configured / contact creation failed /
+      // alias missing or expired — fall back to a DIRECT send to the vendor's real
+      // email so PMs like reservations@vtrips.com are always emailable.
+      let alias: Awaited<ReturnType<typeof getOrCreateVendorContact>>["alias"] | null = null;
+      let contact: Awaited<ReturnType<typeof getOrCreateVendorContact>>["contact"] | null = null;
+      try {
+        const result = await getOrCreateVendorContact({
+          buyInId,
+          reservationId,
+          guestName: String(req.body?.guestName ?? "").trim() || null,
+          vendorEmail,
+          vendorName,
         });
+        alias = result.alias;
+        contact = result.contact;
+      } catch (aliasErr: any) {
+        console.warn("[buy-in-email] reverse-alias unavailable, sending direct:", aliasErr?.message ?? aliasErr);
       }
+
+      const canUseReverseAlias = !!contact?.reverseAliasEmail && !(alias && reservationAliasIsExpired(alias));
       const from = process.env.SMTP_FROM || process.env.RESERVATIONS_EMAIL || SIMPLELOGIN_MAILBOX_EMAIL;
-      const sent = await sendBuyInEmail({ from, to: contact.reverseAliasEmail, subject, body, attachments });
+      const toEmail = canUseReverseAlias ? contact!.reverseAliasEmail! : vendorEmail;
+      const sent = await sendBuyInEmail({ from, to: toEmail, subject, body, attachments });
       const [email] = await db
         .insert(buyInEmails)
         .values({
           buyInId,
           reservationId,
-          vendorContactId: contact.id,
+          vendorContactId: contact?.id ?? null,
           direction: "outbound",
           fromEmail: from,
-          toEmail: contact.reverseAliasEmail,
+          toEmail,
           subject,
           body,
           attachmentsJson: attachments.length ? JSON.stringify(attachments) : null,
           providerMessageId: sent.messageId ?? null,
           rawPayload: JSON.stringify(sent),
-          status: "sent",
+          // "sent" = via the privacy reverse alias; "sent-direct" = plain email to
+          // the PM's real address (reverse alias unavailable). Both appear in the
+          // Alias email history.
+          status: canUseReverseAlias ? "sent" : "sent-direct",
         })
         .returning();
-      res.json({ alias, contact, email });
+      res.json({ alias, contact, email, delivery: canUseReverseAlias ? "reverse-alias" : "direct" });
     } catch (err: any) {
       const message = err?.message ?? "Unknown error";
       res.status(/attachment/i.test(message) ? 400 : 500).json({ error: "Failed to send buy-in vendor email", message });

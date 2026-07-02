@@ -12215,13 +12215,15 @@ function BuyInVendorEmailPanel({
   const [subject, setSubject] = useState(() => `Arrival details request for ${buyIn.unitLabel || buyIn.propertyName}`);
   const [attachments, setAttachments] = useState<AliasEmailAttachment[]>([]);
   const [body, setBody] = useState(() => [
-    `Aloha,`,
+    `Hi,`,
     ``,
     `We booked ${buyIn.propertyName}${buyIn.unitLabel ? ` - ${buyIn.unitLabel}` : ""} for ${guestName || "our guest"} from ${fmtDate(buyIn.checkIn)} to ${fmtDate(buyIn.checkOut)}.`,
     `Can you please send the arrival details, property address, access code, Wi-Fi, parking instructions, and any check-in notes when available?`,
     ``,
-    `Mahalo,`,
-    `John Carpenter`,
+    `Thank you,`,
+    // Sign as the guest on the reservation (operator request) so the PM ties the
+    // request to the booking; fall back to a neutral name when unknown.
+    `${guestName || "Reservations"}`,
   ].join("\n"));
 
   const queryKey = ["/api/bookings", reservation._id, "buy-in-communications"];
@@ -12269,10 +12271,15 @@ function BuyInVendorEmailPanel({
       body,
       attachments,
     }).then((r) => r.json()),
-    onSuccess: () => {
+    onSuccess: (result: { delivery?: string }) => {
       queryClient.invalidateQueries({ queryKey });
       setAttachments([]);
-      toast({ title: "Email sent", description: "The PM/vendor reply will come back through the alias." });
+      toast({
+        title: "Email sent",
+        description: result?.delivery === "direct"
+          ? `Sent directly to ${vendorEmail}. Replies come to the reservations mailbox.`
+          : "The PM/vendor reply will come back through the alias.",
+      });
     },
     onError: (err: any) => toast({ title: "Email failed", description: err?.message ?? "Could not send vendor email", variant: "destructive" }),
   });
