@@ -29,12 +29,14 @@ import { storage } from "./storage";
 import {
   buildPaymentReceiptBody,
   buildRefundReceiptBody,
+  buildRefundReceiptSmsBody,
   receiptDedupKey,
   sameTransactionMoment,
   RECEIPT_SENDER_NAME,
   RECEIPT_BRAND_NAME,
   type ReceiptKind,
 } from "@shared/receipt-message";
+import { getQuoSmsConfigStatus, normalizePhone, phoneLast10, sendQuoSms } from "./quo-sms";
 import {
   collectedPaymentsForReceipts,
   realRefundsForReceipts,
@@ -120,13 +122,121 @@ function channelForReservation(reservation: any): string {
   const src = String(reservation?.source ?? "").toLowerCase();
   if (/booking\.?com/.test(src)) return "bookingCom";
   if (/airbnb/.test(src)) return "airbnb2";
-  if (/vrbo|homeaway|expedia/.test(src)) return "homeaway";
+  if (/vrbo|homeaway/.test(src)) return "homeaway";
+  // Expedia is its OWN Guesty channel — folding it into homeaway misrouted the
+  // receipt onto the VRBO module (same rule as otaModuleTypeFromReservation).
+  if (/expedia/.test(src)) return "expedia";
   return "email";
 }
 
 function conversationIdForReservation(reservation: any): string | null {
   const id = reservation?.conversationId ?? reservation?.conversation?._id ?? reservation?.conversation?.id;
   return id ? String(id) : null;
+}
+
+// ── REFUND-only SMS leg ─────────────────────────────────────────────────────
+// For refunds the guest ALSO gets a text on their phone on file, in addition to
+// the booking-channel message, and the outcome is recorded on the ledger row
+// (sms_status) so the dashboard can confirm the text actually sent. Payments
+// deliberately have no SMS leg (the channel receipt is enough).
+
+function phoneFromGuestObject(guest: any): string {
+  const candidates: unknown[] = [
+    guest?.phone,
+    guest?.phoneNumber,
+    guest?.phone_number,
+    guest?.mobile,
+    guest?.cellphone,
+    guest?.homePhone,
+    ...(Array.isArray(guest?.phones) ? guest.phones : []),
+  ];
+  for (const c of candidates) {
+    const raw = c && typeof c === "object" ? (c as any).number ?? (c as any).phone ?? (c as any).value : c;
+    const normalized = normalizePhone(raw);
+    if (phoneLast10(normalized)) return normalized;
+  }
+  return "";
+}
+
+// "Phone on file": the operator-saved inbox number wins (it's the curated one),
+// then the Guesty guest profile's phone.
+async function guestPhoneForRefund(reservation: any, conversationId: string | null): Promise<string> {
+  if (conversationId) {
+    try {
+      const override = await storage.getGuestPhoneOverride(conversationId);
+      const saved = normalizePhone(override?.phone);
+      if (phoneLast10(saved)) return saved;
+    } catch {
+      /* fall through to the Guesty profile phone */
+    }
+  }
+  return phoneFromGuestObject(reservation?.guest ?? {});
+}
+
+// Never throws — an SMS failure must not block the channel receipt (and vice
+// versa). Retry semantics come from sms_status: anything except "sent" is
+// re-attempted on later scheduler ticks while the refund is in the backfill
+// window, and by the operator's "Resend to guest" force-send. That also makes
+// the leg RETROACTIVE: a refund receipted BEFORE this shipped (row already
+// "sent", sms_status null) still gets its text on the first tick after deploy.
+async function sendRefundReceiptSmsLeg(opts: {
+  token: string;
+  reservation: any;
+  conversationId: string | null;
+  reservationId: string;
+  amount: number;
+  dateIso: string;
+  currentSmsStatus?: string | null;
+}): Promise<void> {
+  if (String(opts.currentSmsStatus ?? "") === "sent") return;
+
+  const config = getQuoSmsConfigStatus();
+  if (!config.configured) {
+    if (opts.currentSmsStatus !== "not-configured") {
+      await storage.updateGuestReceiptSms(opts.token, {
+        smsStatus: "not-configured",
+        smsError: `Quo SMS not configured (missing ${config.missing.join(", ")})`,
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  const phone = await guestPhoneForRefund(opts.reservation, opts.conversationId);
+  if (!phone) {
+    await storage.updateGuestReceiptSms(opts.token, {
+      smsStatus: "no-phone",
+      smsTo: null,
+      smsError: "No guest phone number on file (Guesty guest profile or saved inbox phone). Save one in the Guest Inbox, then Resend.",
+    }).catch(() => {});
+    console.warn(`[guest-receipts] refund SMS skipped for reservation ${opts.reservationId}: no guest phone on file`);
+    return;
+  }
+
+  const body = buildRefundReceiptSmsBody({
+    guestFirstName: guestFirstName(opts.reservation),
+    propertyName: propertyNameForReceipt(opts.reservation),
+    refundAmount: opts.amount,
+    refundDateIso: opts.dateIso,
+    receiptUrl: `${baseUrl()}/receipt/${opts.token}`,
+  });
+
+  try {
+    await sendQuoSms({
+      conversationId: opts.conversationId,
+      reservationId: opts.reservationId,
+      guestName: guestFullName(opts.reservation),
+      to: phone,
+      body,
+    });
+    // If this mark fails the next tick would re-text — log loudly (same posture
+    // as the channel-send terminal marks) rather than swallowing silently.
+    await storage.updateGuestReceiptSms(opts.token, { smsStatus: "sent", smsTo: phone, smsError: null, smsSentAt: new Date() })
+      .catch((markErr) => console.error(`[guest-receipts] refund SMS SENT but failed to record for reservation ${opts.reservationId}: ${markErr?.message ?? markErr}`));
+    console.log(`[guest-receipts] refund SMS sent to ${phone} for reservation ${opts.reservationId} ($${opts.amount.toFixed(2)})`);
+  } catch (e: any) {
+    await storage.updateGuestReceiptSms(opts.token, { smsStatus: "error", smsTo: phone, smsError: e?.message ?? String(e) }).catch(() => {});
+    console.error(`[guest-receipts] refund SMS FAILED for reservation ${opts.reservationId}: ${e?.message ?? e}`);
+  }
 }
 
 type PendingTxn = { kind: ReceiptKind; txn: ReceiptTransaction; reservation: any };
@@ -262,6 +372,21 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
   const terminalStatuses = opts?.allowResend ? ["sent"] : ["sent", "unconfirmed", "misroute"];
   const existing = await storage.getGuestReceiptByDedupKey(dedupKey);
   if (existing && terminalStatuses.includes(existing.status)) {
+    // The channel message is terminal, but a REFUND may still owe its SMS leg —
+    // including RETROACTIVELY (a refund receipted before the SMS leg shipped
+    // has sms_status null and gets texted here on the next tick, as long as the
+    // transaction is still inside the backfill window).
+    if (kind === "refund") {
+      await sendRefundReceiptSmsLeg({
+        token: existing.token,
+        reservation,
+        conversationId: existing.conversationId ?? conversationIdForReservation(reservation),
+        reservationId,
+        amount: txn.amount,
+        dateIso: txn.dateIso,
+        currentSmsStatus: existing.smsStatus,
+      });
+    }
     const reason =
       existing.status === "sent" ? "already sent"
         : existing.status === "unconfirmed" ? "already posted (delivery unconfirmed) — not resending"
@@ -286,6 +411,18 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
       terminalStatuses.includes(legacyRow.status) &&
       sameTransactionMoment(legacyRow.transactionDate, txn.dateIso)
     ) {
+      // Same retroactive SMS treatment as the terminal-skip branch above.
+      if (kind === "refund") {
+        await sendRefundReceiptSmsLeg({
+          token: legacyRow.token,
+          reservation,
+          conversationId: legacyRow.conversationId ?? conversationIdForReservation(reservation),
+          reservationId,
+          amount: txn.amount,
+          dateIso: txn.dateIso,
+          currentSmsStatus: legacyRow.smsStatus,
+        });
+      }
       return { outcome: "skipped", reason: "already sent (pre-id-upgrade receipt)", body: legacyRow.messageBody ?? undefined };
     }
   }
@@ -419,6 +556,22 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
       payload,
       ...(conversationId ? { conversationId } : {}),
     }).catch(() => {});
+  }
+
+  // REFUNDS also text the guest's phone on file (operator ask 2026-07-03) —
+  // BEFORE the conversation gate, so a refund with no Guesty conversation yet
+  // still reaches the guest by SMS immediately. Never throws; outcome recorded
+  // on the row's sms_status for the dashboard confirmation chip.
+  if (kind === "refund") {
+    await sendRefundReceiptSmsLeg({
+      token,
+      reservation,
+      conversationId,
+      reservationId,
+      amount: txn.amount,
+      dateIso: txn.dateIso,
+      currentSmsStatus: existing?.smsStatus ?? null,
+    });
   }
 
   // Refund with no conversation: the pending ledger row above is the whole

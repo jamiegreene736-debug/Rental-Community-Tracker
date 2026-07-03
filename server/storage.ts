@@ -316,6 +316,8 @@ export interface IStorage {
   markGuestReceiptMisrouted(token: string, reason: string): Promise<void>;
   markGuestReceiptError(token: string, errorMessage: string): Promise<void>;
   updateGuestReceiptContent(token: string, fields: { messageBody: string; payload: unknown; conversationId?: string | null }): Promise<void>;
+  // Refund-only SMS leg outcome ("sent" | "error" | "no-phone" | "not-configured").
+  updateGuestReceiptSms(token: string, fields: { smsStatus: string; smsTo?: string | null; smsError?: string | null; smsSentAt?: Date | null }): Promise<void>;
   recordGuestReceiptOpen(token: string): Promise<void>;
   getRecentGuestReceipts(limit?: number): Promise<GuestReceipt[]>;
   getGuestReceiptsByReservationIds(reservationIds: string[]): Promise<GuestReceipt[]>;
@@ -1523,6 +1525,15 @@ export class DatabaseStorage implements IStorage {
       messageBody: fields.messageBody,
       payload: fields.payload as any,
       ...(fields.conversationId !== undefined ? { conversationId: fields.conversationId ?? null } : {}),
+    }).where(eq(guestReceipts.token, token));
+  }
+
+  async updateGuestReceiptSms(token: string, fields: { smsStatus: string; smsTo?: string | null; smsError?: string | null; smsSentAt?: Date | null }): Promise<void> {
+    await db.update(guestReceipts).set({
+      smsStatus: fields.smsStatus,
+      ...(fields.smsTo !== undefined ? { smsTo: fields.smsTo ?? null } : {}),
+      smsError: fields.smsError ? fields.smsError.slice(0, 1000) : null,
+      ...(fields.smsSentAt !== undefined ? { smsSentAt: fields.smsSentAt ?? null } : {}),
     }).where(eq(guestReceipts.token, token));
   }
 

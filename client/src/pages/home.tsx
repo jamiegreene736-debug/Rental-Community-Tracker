@@ -1924,9 +1924,13 @@ function AdminDashboard() {
       sentAt: string;
       opened: boolean;
       openCount: number;
+      // Refund-only SMS leg: "sent" | "error" | "no-phone" | "not-configured" | null
+      smsStatus?: string | null;
+      smsTo?: string | null;
+      smsSentAt?: string | null;
     }>;
-    // Refund confirmations that did NOT reach the guest's OTA channel — operator
-    // must resend so the refund still reaches the guest.
+    // Refund confirmations that did NOT reach the guest (OTA channel failure
+    // and/or the SMS-to-phone leg failed) — operator must resend.
     guestRefundReceiptIssues?: Array<{
       reservationId: string;
       token: string;
@@ -1937,6 +1941,8 @@ function AdminDashboard() {
       status: string;
       createdAt: string;
       errorMessage: string | null;
+      smsStatus?: string | null;
+      smsError?: string | null;
     }>;
     guestRefundReceiptIssueCount?: number;
     bookings: RevenueBookingSummary[];
@@ -3347,10 +3353,10 @@ function AdminDashboard() {
                 {revenueSummary?.guestRefundReceiptIssues?.length ? (
                   <div className="rounded-md border border-red-300 bg-red-50/70 p-3 dark:border-red-900 dark:bg-red-950/30" data-testid="block-refund-receipt-issues">
                     <p className="text-xs font-semibold text-red-700 dark:text-red-300">
-                      ⚠ {revenueSummary.guestRefundReceiptIssues.length} refund confirmation{revenueSummary.guestRefundReceiptIssues.length === 1 ? "" : "s"} did NOT reach the guest's channel
+                      ⚠ {revenueSummary.guestRefundReceiptIssues.length} refund confirmation{revenueSummary.guestRefundReceiptIssues.length === 1 ? "" : "s"} did NOT fully reach the guest
                     </p>
                     <p className="mt-0.5 text-xs text-muted-foreground">
-                      A refund was issued in Guesty but the receipt couldn't be delivered on the channel the guest booked through. Resend so the guest is notified.
+                      A refund was issued in Guesty but the receipt couldn't be delivered on the guest's booking channel and/or the confirmation text to their phone failed. Resend so the guest is notified.
                     </p>
                     <div className="mt-2 space-y-1.5">
                       {revenueSummary.guestRefundReceiptIssues.map((issue) => (
@@ -3361,6 +3367,11 @@ function AdminDashboard() {
                             <span className="block text-muted-foreground">
                               {issue.channel || "unknown channel"} · {issue.status === "misroute" ? "filed off the guest channel" : issue.status} · {formatShortDateTime(issue.createdAt)}
                             </span>
+                            {(issue.smsStatus === "error" || issue.smsStatus === "no-phone") && (
+                              <span className="block font-medium text-red-600 dark:text-red-400" data-testid={`text-refund-issue-sms-${issue.token}`}>
+                                📱 Text to guest {issue.smsStatus === "no-phone" ? "not sent — no phone number on file (save one in the Guest Inbox, then Resend)" : `failed${issue.smsError ? `: ${issue.smsError}` : ""}`}
+                              </span>
+                            )}
                           </div>
                           <Button
                             size="sm"
@@ -3476,7 +3487,7 @@ function AdminDashboard() {
                     <div className="border-b bg-sky-50 px-3 py-2 text-xs font-medium text-sky-700 dark:bg-sky-950/40 dark:text-sky-300">
                       Guest receipts auto-sent in this 30-day window (payment &amp; refund confirmations)
                     </div>
-                    <Table className="min-w-[820px] table-fixed">
+                    <Table className="min-w-[940px] table-fixed">
                       <TableHeader>
                         <TableRow>
                           <TableHead className="w-[140px]">Sent</TableHead>
@@ -3484,6 +3495,7 @@ function AdminDashboard() {
                           <TableHead className="w-[200px]">Listing</TableHead>
                           <TableHead className="w-[90px]">Type</TableHead>
                           <TableHead className="w-[110px]">Channel</TableHead>
+                          <TableHead className="w-[120px]">Text</TableHead>
                           <TableHead className="w-[90px]">Opened</TableHead>
                           <TableHead className="w-[100px] text-right">Amount</TableHead>
                           <TableHead className="w-[70px]">Receipt</TableHead>
@@ -3501,6 +3513,25 @@ function AdminDashboard() {
                               </span>
                             </TableCell>
                             <TableCell className="align-top">{receipt.channel || "—"}</TableCell>
+                            {/* Refund-only SMS confirmation: proves the text to the
+                                guest's phone actually sent (or shows why it didn't). */}
+                            <TableCell className="align-top" data-testid={`cell-receipt-sms-${receipt.id}`}>
+                              {receipt.kind !== "refund" ? (
+                                <span className="text-muted-foreground">—</span>
+                              ) : receipt.smsStatus === "sent" ? (
+                                <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300" title={`Text sent${receipt.smsTo ? ` to ${receipt.smsTo}` : ""}${receipt.smsSentAt ? ` · ${formatShortDateTime(receipt.smsSentAt)}` : ""}`}>
+                                  ✓ Text sent
+                                </span>
+                              ) : receipt.smsStatus === "error" ? (
+                                <span className="rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-800 dark:bg-red-950/50 dark:text-red-300">✕ Text failed</span>
+                              ) : receipt.smsStatus === "no-phone" ? (
+                                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">No phone</span>
+                              ) : receipt.smsStatus === "not-configured" ? (
+                                <span className="text-muted-foreground" title="Add QUO_API_KEY / QUO_FROM_NUMBER in Railway to enable refund texts">SMS off</span>
+                              ) : (
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </TableCell>
                             <TableCell className="align-top">{receipt.opened ? `✓${receipt.openCount > 1 ? ` ×${receipt.openCount}` : ""}` : "—"}</TableCell>
                             <TableCell className={`whitespace-nowrap text-right align-top font-medium ${receipt.kind === "refund" ? "text-amber-700 dark:text-amber-300" : ""}`}>{formatCurrency(receipt.amount)}</TableCell>
                             <TableCell className="align-top">

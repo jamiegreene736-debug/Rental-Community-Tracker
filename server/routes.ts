@@ -117,7 +117,7 @@ import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply
 import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
 import { registerAssistantRoutes } from "./assistant/routes";
 import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar-automation";
-import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel, receiptNeedsAttention } from "@shared/receipt-message";
+import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel, receiptNeedsAttention, refundSmsNeedsAttention } from "@shared/receipt-message";
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation, createReceiptPage } from "./guest-receipts";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
@@ -8238,6 +8238,10 @@ export async function registerRoutes(
         sentAt: string;
         opened: boolean;
         openCount: number;
+        // Refund-only SMS leg (null for payments / not attempted).
+        smsStatus: string | null;
+        smsTo: string | null;
+        smsSentAt: string | null;
       }> = [];
       let guestReceiptsSent30Days = 0;
       let guestReceiptPaymentsSent30Days = 0;
@@ -8256,14 +8260,20 @@ export async function registerRoutes(
         status: string;
         createdAt: string;
         errorMessage: string | null;
+        // Refund SMS leg detail (so the alert says WHICH leg failed).
+        smsStatus: string | null;
+        smsError: string | null;
       }> = [];
       try {
         const receiptRows = await storage.getRecentGuestReceipts(300);
         const nowMs = now.getTime();
         for (const row of receiptRows) {
           // Refund confirmations that didn't reach the guest's booking channel —
-          // surface for manual follow-up (only recent ones, within the window).
-          if (row.kind === "refund" && receiptNeedsAttention({ status: row.status, createdAtMs: row.createdAt ? new Date(row.createdAt as any).getTime() : null }, nowMs)) {
+          // OR whose SMS-to-phone leg failed (text send error / no phone on
+          // file) — surface for manual follow-up (only recent, in-window rows).
+          const channelIssue = row.kind === "refund" && receiptNeedsAttention({ status: row.status, createdAtMs: row.createdAt ? new Date(row.createdAt as any).getTime() : null }, nowMs);
+          const smsIssue = refundSmsNeedsAttention({ kind: row.kind, smsStatus: row.smsStatus ?? null });
+          if (channelIssue || smsIssue) {
             const createdDate = row.createdAt ? new Date(row.createdAt as any) : null;
             if (!createdDate || Number.isNaN(createdDate.getTime()) || createdDate >= start) {
               guestRefundReceiptIssues.push({
@@ -8276,6 +8286,8 @@ export async function registerRoutes(
                 status: row.status,
                 createdAt: (createdDate ?? now).toISOString(),
                 errorMessage: row.errorMessage ?? null,
+                smsStatus: row.smsStatus ?? null,
+                smsError: row.smsError ?? null,
               });
             }
           }
@@ -8303,6 +8315,9 @@ export async function registerRoutes(
             sentAt: sentDate.toISOString(),
             opened: (row.openCount ?? 0) > 0,
             openCount: row.openCount ?? 0,
+            smsStatus: row.smsStatus ?? null,
+            smsTo: row.smsTo ?? null,
+            smsSentAt: row.smsSentAt ? new Date(row.smsSentAt as any).toISOString() : null,
           });
         }
         guestReceipts.sort((a, b) => b.sentAt.localeCompare(a.sentAt));
@@ -12674,6 +12689,13 @@ Requirements:
         channelHint,
         logPrefix: "inbox-send",
         verifyDeadlineMs: INBOX_FAST_VERIFY_MS,
+        // SHORT delivered-dedup window for the INTERACTIVE send path. Unlimited
+        // (the background default) silently swallowed a repeated short reply
+        // ("Thank you!") as a duplicate of an OLD delivered copy — reported
+        // "sent" while the guest never received the new message (operator-
+        // reported on VRBO). 10 min still covers double-clicks + accidental
+        // re-sends of the same composed message.
+        dedupWindowMs: Math.max(0, Number(process.env.INBOX_SEND_DEDUP_WINDOW_MS ?? 600_000)),
       });
       if (responded) return;
       responded = true;
@@ -12721,11 +12743,15 @@ Requirements:
         body = sanitizeForBookingChannel(body);
       }
 
+      // Optional send timestamp from the client so a repeated body can't
+      // false-confirm against an older delivered copy of the same text.
+      const sentAtMsRaw = Number(req.body?.sentAtMs);
       const { verified, pending, deliveryModuleType, reason } = await checkOtaDeliveryStatus({
         conversationId: conversation.id,
         body,
         module: conversation.module,
         channelHint,
+        sentAtMs: Number.isFinite(sentAtMsRaw) && sentAtMsRaw > 0 ? sentAtMsRaw : null,
       });
       return res.json({
         ok: true,

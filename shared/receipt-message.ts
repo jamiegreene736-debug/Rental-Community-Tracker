@@ -181,6 +181,32 @@ export function buildRefundReceiptBody(args: RefundReceiptArgs): string {
   return isBookingChannel(args.channel) ? sanitizeForBookingChannel(body) : body;
 }
 
+// REFUND-only SMS companion to buildRefundReceiptBody: a short text to the
+// guest's phone on file (Quo/OpenPhone), sent IN ADDITION to the booking-channel
+// message so a refund confirmation can never be lost to an OTA delivery failure.
+// Plain ASCII (SMS-safe), single paragraph, well under the 1,600-char Quo cap.
+export function buildRefundReceiptSmsBody(args: RefundReceiptArgs): string {
+  const stayLabel = args.propertyName ? ` for your stay at ${args.propertyName}` : "";
+  const url = String(args.receiptUrl ?? "").trim();
+  const lines = [
+    `Hi ${args.guestFirstName || "there"}, this is ${RECEIPT_SENDER_NAME} with ${RECEIPT_BRAND_NAME}. Confirming a refund of ${formatReceiptMoney(args.refundAmount)} was issued on ${formatReceiptLongDate(args.refundDateIso)}${stayLabel}. It goes back to your original payment method, typically within 5-10 business days.`,
+    ...(url ? [`Receipt: ${url}`] : []),
+    `Questions? Just reply to this text.`,
+  ];
+  return sanitizeForBookingChannel(lines.join("\n"));
+}
+
+// Did the refund's SMS leg fail in a way the operator should see? Only ever
+// true for REFUND rows (payments have no SMS leg). "not-configured" (no Quo
+// key) and null (not attempted / pre-upgrade row) are NOT flagged — there is
+// nothing actionable on a per-refund basis; "error" (Quo rejected the send)
+// and "no-phone" (no number on file — add one in the inbox, then Resend) are.
+export function refundSmsNeedsAttention(row: { kind?: string | null; smsStatus?: string | null }): boolean {
+  if (String(row?.kind ?? "").toLowerCase() !== "refund") return false;
+  const s = String(row?.smsStatus ?? "").toLowerCase();
+  return s === "error" || s === "no-phone";
+}
+
 // Stable per-transaction identity so a given payment/refund is messaged exactly
 // once. `reservationId|kind|day|amount`, with the stable Guesty transaction id
 // appended (`|<id>`) when one is available.

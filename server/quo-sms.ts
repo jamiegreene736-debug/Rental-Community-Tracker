@@ -482,7 +482,9 @@ export async function backfillQuoMissedCalls(options: { hours?: number; force?: 
 }
 
 export async function sendQuoSms(input: {
-  conversationId: string;
+  // Null when no Guesty conversation exists yet (e.g. a refund receipt texted
+  // before the OTA conversation appears) — the mirror row still records the send.
+  conversationId: string | null;
   reservationId?: string | null;
   guestName?: string | null;
   to: string;

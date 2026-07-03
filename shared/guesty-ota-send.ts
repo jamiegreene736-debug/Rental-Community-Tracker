@@ -108,6 +108,14 @@ export function otaChannelRequested(module: Record<string, unknown>, channelHint
   return /airbnb|booking|vrbo|homeaway/.test(hint);
 }
 
+function isVrboChannel(channel?: string | null): boolean {
+  return /vrbo|homeaway/i.test(String(channel ?? ""));
+}
+
+function isAirbnbChannel(channel?: string | null): boolean {
+  return /airbnb/i.test(String(channel ?? ""));
+}
+
 export function bookingSendTypeVariants(
   reservation: { integration?: { platform?: string | null } | null; source?: string | null } | null | undefined,
   channelHint?: string | null,
@@ -121,6 +129,19 @@ export function bookingSendTypeVariants(
   if (platform) add(platform);
   if (isBookingChannel(channelHint) || isBookingChannel(platform)) {
     for (const t of ["bookingCom2", "bookingCom", "booking_com"]) add(t);
+  }
+  // VRBO and Airbnb each have TWO Guesty module generations (homeaway/homeaway2,
+  // airbnb/airbnb2), mirroring the Booking.com bookingCom/bookingCom2 split. The
+  // live integration.platform (added first, above) always LEADS; these variants
+  // only matter when Guesty REJECTS the POST for the lead type — previously a
+  // VRBO reply had no fallback variant at all, so a rejected homeaway2 send just
+  // failed instead of retrying as homeaway (send-once advances only on a POST
+  // rejection, so this can never double-send).
+  if (isVrboChannel(channelHint) || isVrboChannel(platform)) {
+    for (const t of ["homeaway2", "homeaway"]) add(t);
+  }
+  if (isAirbnbChannel(channelHint) || isAirbnbChannel(platform)) {
+    for (const t of ["airbnb2", "airbnb"]) add(t);
   }
   return out;
 }
@@ -162,7 +183,11 @@ export function postBodyText(post: { body?: unknown; text?: unknown; message?: u
 
 export function postTimestamp(post: Record<string, unknown>): number {
   const raw = post.sentAt ?? post.postedAt ?? post.createdAt;
-  const t = new Date(String(raw ?? 0)).getTime();
+  // 0 = "no timestamp" — callers treat unknown age conservatively. (A nullish
+  // raw must NOT fall through to new Date("0"), which parses as year 2000 and
+  // made timestamp-less posts look ancient instead of unknown.)
+  if (raw === undefined || raw === null || raw === "") return 0;
+  const t = new Date(String(raw)).getTime();
   return Number.isFinite(t) ? t : 0;
 }
 
@@ -251,12 +276,25 @@ export function verifyOtaHostPostDelivered(
   posts: unknown[],
   sentBody: string,
   requireOtaModule: boolean,
+  // `sinceMs`: ignore posts OLDER than this timestamp. Without it, a repeated
+  // body (the operator sends "Thank you!" twice in one stay) false-verified
+  // against LAST WEEK's delivered copy — reporting "delivered" while the new
+  // copy sat stuck `pending` and never reached the guest. Posts with an
+  // unparseable timestamp are kept (unknown age must never hide a real
+  // delivery confirmation).
+  opts?: { sinceMs?: number },
 ): { verified: boolean; deliveryModuleType?: string; reason?: string; pending?: boolean } {
   if (!Array.isArray(posts) || posts.length === 0) {
     return { verified: false, reason: "No conversation posts returned after send" };
   }
+  const sinceMs = Number(opts?.sinceMs ?? 0);
   const sorted = [...posts]
     .filter((p): p is Record<string, unknown> => !!p && typeof p === "object")
+    .filter((p) => {
+      if (!(sinceMs > 0)) return true;
+      const ts = postTimestamp(p);
+      return ts === 0 || ts >= sinceMs;
+    })
     .sort((a, b) => postTimestamp(b) - postTimestamp(a));
 
   // Scan the newest matching host posts. Only a post that STRICTLY matches the
@@ -311,4 +349,65 @@ export function verifyOtaHostPostDelivered(
   // matcher. This is UNCONFIRMED, not a wrong-channel misroute: report `pending`
   // (queued — don't resend) rather than a hard "saved on email" failure.
   return { verified: false, pending: true, reason: "Message was posted but delivery is not confirmed yet" };
+}
+
+/**
+ * Pre-send idempotency check: if this exact message is already on the thread we
+ * should NOT send a duplicate. Returns "delivered" (channel confirmed —
+ * idempotent success), "pending" (a prior identical send is still in flight
+ * within `pendingWindowMs` — resume polling, don't resend), or null (nothing
+ * matching/recent — safe to send).
+ *
+ * `deliveredWindowMs` bounds how OLD a delivered copy may be and still count as
+ * "this send already happened". Background senders (receipts, confirmations)
+ * pass null/undefined = unlimited — their bodies are unique per transaction and
+ * their 5-minute retry loops NEED an old delivered copy to be terminal. The
+ * INTERACTIVE inbox Send button must pass a short window: operators legitimately
+ * send the same short reply ("Thank you!", "Yes, that works") more than once per
+ * conversation, and the unlimited match silently SWALLOWED the new message —
+ * reported "delivered" against last week's copy while the guest never received
+ * today's (operator-reported on VRBO, 2026-07-03).
+ */
+export function classifyExistingSend(
+  posts: unknown[],
+  body: string,
+  requireOtaModule: boolean,
+  opts?: {
+    nowMs?: number;
+    pendingWindowMs?: number;
+    deliveredWindowMs?: number | null;
+  },
+): { state: "delivered"; deliveryModuleType?: string } | { state: "pending" } | null {
+  const now = Number(opts?.nowMs ?? Date.now());
+  const pendingWindowMs = Math.max(0, Number(opts?.pendingWindowMs ?? 240_000));
+  const deliveredWindowMs =
+    opts?.deliveredWindowMs === null || opts?.deliveredWindowMs === undefined
+      ? null
+      : Math.max(0, Number(opts.deliveredWindowMs));
+  let pendingMatch = false;
+  for (const raw of Array.isArray(posts) ? posts : []) {
+    if (!raw || typeof raw !== "object") continue;
+    const post = raw as Record<string, unknown>;
+    if (!isHostConversationPost(post)) continue;
+    if (!bodiesAreDuplicate(body, postBodyText(post as { body?: unknown; text?: unknown; message?: unknown }))) continue;
+    const modType = String((post.module as Record<string, unknown> | undefined)?.type ?? "").toLowerCase();
+    // A copy on a different (e.g. email) channel doesn't count as already-sent
+    // to the OTA channel — let the real send proceed.
+    if (requireOtaModule && !guestyModuleTypeLooksOta(modType)) continue;
+    const state = postDeliveryState(post);
+    if (state === "delivered") {
+      if (deliveredWindowMs !== null) {
+        const ts = postTimestamp(post);
+        // Outside the window (or unknown age) → an OLD identical message, not
+        // THIS send. Skip it so the new message actually posts.
+        if (!(ts > 0) || now - ts > deliveredWindowMs) continue;
+      }
+      return { state: "delivered", deliveryModuleType: modType || undefined };
+    }
+    if (state === "pending" && pendingWindowMs > 0) {
+      const ts = postTimestamp(post);
+      if (ts > 0 && now - ts <= pendingWindowMs) pendingMatch = true;
+    }
+  }
+  return pendingMatch ? { state: "pending" } : null;
 }

@@ -1200,6 +1200,12 @@ export const guestReceipts = pgTable("guest_receipts", {
   payload: jsonb("payload").notNull(),                          // render data for the /receipt page
   status: text("status").notNull().default("pending"),         // "pending" (not yet sent) | "sent" (delivery confirmed) | "unconfirmed" (posted, delivery not confirmed) | "misroute" (filed off the guest's OTA channel) | "error" (send threw)
   errorMessage: text("error_message"),
+  // REFUND-only SMS leg (Quo/OpenPhone text to the guest's phone on file):
+  // null (not attempted / n/a) | "sent" | "error" | "no-phone" | "not-configured"
+  smsStatus: text("sms_status"),
+  smsTo: text("sms_to"),
+  smsError: text("sms_error"),
+  smsSentAt: timestamp("sms_sent_at"),
   expiresAt: timestamp("expires_at"),
   messageSentAt: timestamp("message_sent_at"),
   firstOpenedAt: timestamp("first_opened_at"),
