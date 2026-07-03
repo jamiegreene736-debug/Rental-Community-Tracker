@@ -1,16 +1,12 @@
 import { guestyRequest } from "./guesty-sync";
 import {
-  bodiesAreDuplicate,
   buildOtaSendModuleAttempts,
+  classifyExistingSend,
   guestyChannelLabel,
   guestyModuleTypeLooksOta,
-  isHostConversationPost,
   mergeOtaModuleFromReservation,
   otaChannelRequested,
   parseGuestyConversationModule,
-  postBodyText,
-  postDeliveryState,
-  postTimestamp,
   verifyOtaHostPostDelivered,
 } from "@shared/guesty-ota-send";
 
@@ -216,12 +212,17 @@ async function fetchRecentConversationPosts(conversationId: string): Promise<Rec
 const VERIFY_DEADLINE_MS = Math.max(5_000, Number(process.env.GUESTY_OTA_VERIFY_DEADLINE_MS ?? 38_000));
 const VERIFY_INTERVAL_MS = Math.max(1_000, Number(process.env.GUESTY_OTA_VERIFY_INTERVAL_MS ?? 3_000));
 
+// Tolerance for our-clock vs Guesty-clock skew when filtering verification to
+// posts created by THIS send (see verifyOtaHostPostDelivered's sinceMs).
+const VERIFY_CLOCK_SKEW_MS = Math.max(0, Number(process.env.GUESTY_OTA_VERIFY_SKEW_MS ?? 180_000));
+
 async function waitForVerifiedHostPost(
   conversationId: string,
   body: string,
   requireOtaModule: boolean,
   logPrefix: string,
   deadlineMs: number = VERIFY_DEADLINE_MS,
+  sinceMs?: number,
 ): Promise<ReturnType<typeof verifyOtaHostPostDelivered>> {
   const start = Date.now();
   let last: ReturnType<typeof verifyOtaHostPostDelivered> = { verified: false, reason: "No matching host post found on the conversation after send" };
@@ -230,7 +231,7 @@ async function waitForVerifiedHostPost(
     if (!first) await new Promise((resolve) => setTimeout(resolve, VERIFY_INTERVAL_MS));
     first = false;
     const posts = await fetchRecentConversationPosts(conversationId);
-    last = verifyOtaHostPostDelivered(posts, body, requireOtaModule);
+    last = verifyOtaHostPostDelivered(posts, body, requireOtaModule, sinceMs ? { sinceMs } : undefined);
     if (last.verified) return last;
     // A definitive wrong-channel misroute (our message was filed on a non-OTA
     // channel, e.g. email) is terminal — don't burn the full window waiting for
@@ -245,34 +246,9 @@ async function waitForVerifiedHostPost(
 }
 
 // If this exact message is already on the thread we should NOT send a duplicate.
-// Returns "delivered" (channel confirmed — idempotent success), "pending" (a
-// prior send is still in flight within the resume window — resume polling, don't
-// resend), or null (nothing matching/recent — safe to send).
+// Logic lives in shared classifyExistingSend (unit-tested); this module supplies
+// the resume window from env.
 const RESUME_PENDING_WINDOW_MS = Math.max(0, Number(process.env.GUESTY_OTA_RESUME_PENDING_MS ?? 240_000));
-
-function classifyExistingSend(
-  posts: Record<string, unknown>[],
-  body: string,
-  requireOtaModule: boolean,
-): { state: "delivered"; deliveryModuleType?: string } | { state: "pending" } | null {
-  const now = Date.now();
-  let pendingMatch = false;
-  for (const post of posts) {
-    if (!isHostConversationPost(post)) continue;
-    if (!bodiesAreDuplicate(body, postBodyText(post as { body?: unknown; text?: unknown; message?: unknown }))) continue;
-    const modType = String((post.module as Record<string, unknown> | undefined)?.type ?? "").toLowerCase();
-    // A copy on a different (e.g. email) channel doesn't count as already-sent
-    // to the OTA channel — let the real send proceed.
-    if (requireOtaModule && !guestyModuleTypeLooksOta(modType)) continue;
-    const state = postDeliveryState(post);
-    if (state === "delivered") return { state: "delivered", deliveryModuleType: modType || undefined };
-    if (state === "pending" && RESUME_PENDING_WINDOW_MS > 0) {
-      const ts = postTimestamp(post);
-      if (ts > 0 && now - ts <= RESUME_PENDING_WINDOW_MS) pendingMatch = true;
-    }
-  }
-  return pendingMatch ? { state: "pending" } : null;
-}
 
 export async function sendGuestyConversationMessage(args: {
   conversationId: string;
@@ -289,6 +265,14 @@ export async function sendGuestyConversationMessage(args: {
   // back as `pending` for the client to confirm asynchronously via
   // checkOtaDeliveryStatus. Defaults to VERIFY_DEADLINE_MS.
   verifyDeadlineMs?: number;
+  // How OLD an already-DELIVERED identical copy on the thread may be and still
+  // count as "this send already happened" (idempotent success, skip the POST).
+  // undefined/null = unlimited — correct for BACKGROUND senders whose bodies are
+  // unique per transaction and whose retry ticks rely on it. INTERACTIVE callers
+  // (the inbox Send button) MUST pass a short window: operators re-send the same
+  // short reply ("Thank you!") legitimately, and the unlimited match silently
+  // swallowed the new message as a duplicate of last week's.
+  dedupWindowMs?: number | null;
 }): Promise<{ deliveredVia: string; deliveryModuleType?: string; verified: boolean; pending?: boolean; reason?: string }> {
   const {
     conversationId,
@@ -298,6 +282,7 @@ export async function sendGuestyConversationMessage(args: {
     channelHint,
     logPrefix = "guesty-ota-messaging",
     verifyDeadlineMs,
+    dedupWindowMs = null,
   } = args;
 
   const requireOta = otaChannelRequested(module, channelHint);
@@ -313,11 +298,15 @@ export async function sendGuestyConversationMessage(args: {
   // a prior identical send is still pending within the resume window, resume
   // polling instead of posting a duplicate. This is what stops the stuck-pending
   // pile-up (4 identical Booking.com copies were observed live before this fix).
+  const sendStartMs = Date.now();
   let postedModule: Record<string, unknown> = attempts[0] ?? guestySendMessageModuleSafe(module);
   let skipSend = false;
   try {
     const existing = await fetchRecentConversationPosts(conversationId);
-    const prior = classifyExistingSend(existing, body, requireOta);
+    const prior = classifyExistingSend(existing, body, requireOta, {
+      pendingWindowMs: RESUME_PENDING_WINDOW_MS,
+      deliveredWindowMs: dedupWindowMs,
+    });
     if (prior?.state === "delivered") {
       return { deliveredVia: guestyChannelLabel(postedModule), deliveryModuleType: prior.deliveryModuleType, verified: true };
     }
@@ -362,7 +351,12 @@ export async function sendGuestyConversationMessage(args: {
     return { deliveredVia: guestyChannelLabel(postedModule), verified: true };
   }
 
-  const verification = await waitForVerifiedHostPost(conversationId, body, requireOta, logPrefix, verifyDeadlineMs);
+  // Anchor verification to THIS send: an identical delivered copy from an older
+  // exchange must not false-verify a new post that is still stuck pending. When
+  // resuming a prior pending send (skipSend) the post predates us by up to the
+  // resume window, so extend the anchor back accordingly.
+  const verifySinceMs = sendStartMs - VERIFY_CLOCK_SKEW_MS - (skipSend ? RESUME_PENDING_WINDOW_MS : 0);
+  const verification = await waitForVerifiedHostPost(conversationId, body, requireOta, logPrefix, verifyDeadlineMs, verifySinceMs);
   if (verification.verified) {
     return { deliveredVia: guestyChannelLabel(postedModule), deliveryModuleType: verification.deliveryModuleType, verified: true };
   }
@@ -397,14 +391,19 @@ export async function checkOtaDeliveryStatus(args: {
   body: string;
   module: Record<string, unknown>;
   channelHint?: string | null;
+  // When the caller knows WHEN the send happened, only posts from that send
+  // forward are considered — so a repeated body can't false-confirm against an
+  // older delivered copy. Optional for backward compatibility.
+  sentAtMs?: number | null;
 }): Promise<{ verified: boolean; pending?: boolean; deliveryModuleType?: string; reason?: string }> {
-  const { conversationId, body, module, channelHint } = args;
+  const { conversationId, body, module, channelHint, sentAtMs } = args;
   const requireOta = otaChannelRequested(module, channelHint);
   // Non-OTA channels have no async portal to confirm — the accepted POST is the
   // send, same as the send path. Report verified so the client stops polling.
   if (!requireOta) return { verified: true };
   const posts = await fetchRecentConversationPosts(conversationId);
-  return verifyOtaHostPostDelivered(posts, body, requireOta);
+  const sinceMs = Number(sentAtMs) > 0 ? Number(sentAtMs) - VERIFY_CLOCK_SKEW_MS : 0;
+  return verifyOtaHostPostDelivered(posts, body, requireOta, sinceMs > 0 ? { sinceMs } : undefined);
 }
 
 function guestySendMessageModuleSafe(module: Record<string, unknown>): Record<string, unknown> {

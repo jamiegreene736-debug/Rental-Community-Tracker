@@ -474,7 +474,17 @@ export async function ensureRuntimeSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS guest_receipts_created_idx
       ON guest_receipts (created_at DESC)
   `);
-  console.log("[schema] ensured guest_receipts table");
+  // Refund-only SMS leg (2026-07-03): the scheduler also TEXTS the guest's
+  // phone on file for refunds and records the outcome here so the dashboard
+  // can confirm the text actually sent.
+  await db.execute(sql`
+    ALTER TABLE guest_receipts
+      ADD COLUMN IF NOT EXISTS sms_status text,
+      ADD COLUMN IF NOT EXISTS sms_to text,
+      ADD COLUMN IF NOT EXISTS sms_error text,
+      ADD COLUMN IF NOT EXISTS sms_sent_at timestamp
+  `);
+  console.log("[schema] ensured guest_receipts table (+ refund SMS columns)");
 
   // Platform AI assistant (dashboard chat agent). Created here too so a fresh
   // Railway deploy works before `npm run db:push` runs. The list/history

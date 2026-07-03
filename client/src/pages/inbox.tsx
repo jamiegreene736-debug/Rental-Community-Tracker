@@ -44,6 +44,7 @@ import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
+import { bodyWithoutAttachmentUrls, collectPostAttachments, type PostAttachment } from "@shared/guesty-post-attachments";
 import { usePortalSession } from "@/lib/auth";
 import { useAssistantContext } from "@/lib/assistant-context";
 import { setInboxUnreadCount } from "@/lib/inboxUnreadStore";
@@ -262,6 +263,12 @@ interface GuestyPost {
   direction?: string;
   isIncoming?: boolean;
   module?: GuestyModule;
+  // Guest photo/file attachments (VRBO/Airbnb/Booking messages can carry
+  // these). Shapes vary by channel — parsed by collectPostAttachments.
+  attachments?: unknown;
+  media?: unknown;
+  images?: unknown;
+  files?: unknown;
 }
 
 interface GuestyReservation {
@@ -857,6 +864,36 @@ function cleanMessageBody(raw: string): string {
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
   s = s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   return s;
+}
+
+// One attachment inside a message bubble: images render inline (click opens the
+// full-size original in a new tab); anything else (or an image URL that fails
+// to load, e.g. an expired signed URL) falls back to a download link.
+function PostAttachmentView({ attachment }: { attachment: PostAttachment }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  if (attachment.isImage && !imageFailed) {
+    return (
+      <a href={attachment.url} target="_blank" rel="noreferrer" className="block">
+        <img
+          src={attachment.url}
+          alt={attachment.name ?? "Photo from message"}
+          loading="lazy"
+          className="max-h-56 max-w-full rounded-md border border-black/10 object-cover"
+          onError={() => setImageFailed(true)}
+        />
+      </a>
+    );
+  }
+  return (
+    <a
+      href={attachment.url}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex items-center gap-1 rounded border border-black/10 bg-background/70 px-2 py-1 text-xs text-foreground underline"
+    >
+      📎 {attachment.name ?? (attachment.isImage ? "View photo" : "View attachment")}
+    </a>
+  );
 }
 
 function isHostPost(p: any): boolean {
@@ -2834,10 +2871,23 @@ export default function InboxPage() {
     queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"],
     enabled: !!selectedConvId,
     queryFn: async () => {
-      const r = await apiRequest(
+      // NOTE FOR CODEX: the empty `&fields=` is LOAD-BEARING, same as the
+      // conversation-list query (2026-05-04 note) — Guesty's communication
+      // endpoints return STRIPPED documents without it. Guest photo messages
+      // carry an `attachments` array that must survive to the client so the
+      // thread can render the photos; do not remove this "typo".
+      let r = await apiRequest(
         "GET",
-        `/api/guesty-proxy/communication/conversations/${selectedConvId}/posts?limit=100`,
+        `/api/guesty-proxy/communication/conversations/${selectedConvId}/posts?limit=100&fields=`,
       );
+      if (!r.ok) {
+        // Fail-soft: if this Guesty tenant ever rejects the empty fields param,
+        // fall back to the stripped shape rather than breaking the thread.
+        r = await apiRequest(
+          "GET",
+          `/api/guesty-proxy/communication/conversations/${selectedConvId}/posts?limit=100`,
+        );
+      }
       if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
       return r.json();
     },
@@ -3318,8 +3368,11 @@ export default function InboxPage() {
     channel: string | null;
     reservationId: string | null;
     via: string;
+    // When the send happened — lets the server ignore OLDER delivered copies of
+    // the same text so a repeated reply can't false-confirm.
+    sentAtMs: number;
   }) => {
-    const { conversationId, body, channel, reservationId, via } = params;
+    const { conversationId, body, channel, reservationId, via, sentAtMs } = params;
     // ~60s — Booking.com confirms ~30s out (AGENTS.md #51), so the old ~36s window
     // could exhaust before a legitimately-slow sync confirmed.
     const MAX_ATTEMPTS = 15;
@@ -3330,7 +3383,7 @@ export default function InboxPage() {
         const r = await apiRequest(
           "POST",
           `/api/inbox/conversations/${conversationId}/delivery-status`,
-          { body, channel, reservationId },
+          { body, channel, reservationId, sentAtMs },
         );
         const j = await r.json().catch(() => ({} as any));
         if (r.ok && j?.verified === true) {
@@ -3385,6 +3438,7 @@ export default function InboxPage() {
       const sentBody = normalizeGuestyManualMessageBody(replyText);
       const channel = selectedConv.module?.type ?? null;
       const reservationId = selectedConv.reservationId ?? null;
+      const sentAtMs = Date.now();
       const r = await apiRequest(
         "POST",
         `/api/inbox/conversations/${conversationId}/send`,
@@ -3404,7 +3458,7 @@ export default function InboxPage() {
             || "The message did not reach the guest's booking channel — it may have been saved on email instead. Verify on the channel's extranet.",
         );
       }
-      return { ...(body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string }), conversationId, sentBody, channel, reservationId };
+      return { ...(body as { ok: true; verified?: boolean; pending?: boolean; deliveredVia?: string }), conversationId, sentBody, channel, reservationId, sentAtMs };
     },
     onSuccess: (data) => {
       markConversationReplied(data.conversationId);
@@ -3428,6 +3482,7 @@ export default function InboxPage() {
           channel: data.channel,
           reservationId: data.reservationId,
           via,
+          sentAtMs: data.sentAtMs,
         });
       }
     },
@@ -4894,6 +4949,15 @@ export default function InboxPage() {
                         })
                         .map((p: any) => {
                           const bodyText = cleanMessageBody(p.body ?? p.text ?? p.message ?? "");
+                          // Photos/files the guest (or we) attached to this
+                          // message. VRBO/Airbnb photo messages arrive as an
+                          // `attachments` array (often with an EMPTY body) —
+                          // without this they rendered as a blank bubble and
+                          // the operator never saw the photo.
+                          const postAttachments = collectPostAttachments(p);
+                          const displayBody = postAttachments.length > 0
+                            ? bodyWithoutAttachmentUrls(bodyText, postAttachments)
+                            : bodyText;
                           const when = p.sentAt ?? p.postedAt ?? p.createdAt ?? "";
                           // Guesty inbox-v2 uses `sentBy: "guest" | "host"`.
                           // Older shapes used `authorType` / `direction` /
@@ -4983,7 +5047,18 @@ export default function InboxPage() {
                                       </Button>
                                     )}
                                   </div>
-                                ) : bodyText}
+                                ) : (
+                                  <>
+                                    {displayBody}
+                                    {postAttachments.length > 0 && (
+                                      <div className={`flex flex-wrap gap-1.5 ${displayBody ? "mt-2" : ""}`} data-testid={`attachments-${p._id}`}>
+                                        {postAttachments.map((att, i) => (
+                                          <PostAttachmentView key={`${p._id}-att-${i}`} attachment={att} />
+                                        ))}
+                                      </div>
+                                    )}
+                                  </>
+                                )}
                               </div>
                               {/* Timestamp + channel row, mirrors Guesty's portal */}
                               <div className="flex items-center gap-1.5 mt-1 text-[10px] text-muted-foreground px-1">

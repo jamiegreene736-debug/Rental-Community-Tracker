@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   buildOtaSendModuleAttempts,
+  classifyExistingSend,
   deliveryOutcome,
   guestyChannelLabel,
   guestyModuleTypeLooksOta,
@@ -243,5 +244,114 @@ assert.equal(guestyChannelLabel({ type: "homeaway2" }), "VRBO");
 assert.equal(guestyChannelLabel({ type: "bookingCom2" }), "Booking.com");
 assert.equal(guestyChannelLabel({ type: "expedia" }), "Expedia");
 assert.equal(guestyChannelLabel({ type: "email" }), "email");
+
+// ── VRBO / Airbnb module-generation fallback variants (2026-07-03) ──────────
+// VRBO has homeaway/homeaway2 module generations just like Booking.com's
+// bookingCom/bookingCom2. The live integration.platform LEADS; the sibling
+// variant is a fallback only if Guesty rejects the POST (send-once semantics).
+const vrboAttempts = buildOtaSendModuleAttempts(
+  { type: "homeaway", channelId: "ch-9" },
+  { integration: { platform: "homeaway2" } },
+  "vrbo",
+);
+assert.equal(vrboAttempts[0]?.type, "homeaway2", "VRBO lead attempt = integration.platform");
+assert.ok(vrboAttempts.some((a) => a.type === "homeaway" && a.channelId === undefined), "VRBO fallback variant homeaway present");
+const vrboLegacyAttempts = buildOtaSendModuleAttempts(
+  { type: "homeaway" },
+  { integration: { platform: "homeaway" } },
+  "vrbo",
+);
+assert.equal(vrboLegacyAttempts[0]?.type, "homeaway");
+assert.ok(vrboLegacyAttempts.some((a) => a.type === "homeaway2"), "legacy homeaway platform still gets homeaway2 fallback");
+const airbnbAttempts = buildOtaSendModuleAttempts(
+  { type: "airbnb2" },
+  { integration: { platform: "airbnb2" } },
+  "airbnb",
+);
+assert.ok(airbnbAttempts.some((a) => a.type === "airbnb"), "Airbnb gets the sibling airbnb variant as fallback");
+assert.ok(
+  !buildOtaSendModuleAttempts({ type: "bookingCom" }, { integration: { platform: "bookingCom2" } }, "booking")
+    .some((a) => String(a.type).toLowerCase().includes("homeaway") || String(a.type).toLowerCase().includes("airbnb")),
+  "Booking.com sends must not pick up VRBO/Airbnb variants",
+);
+
+// ── classifyExistingSend: pre-send idempotency + the repeated-short-reply fix ─
+const NOW = new Date("2026-07-03T20:00:00.000Z").getTime();
+const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+const REPLY = "Thank you!";
+
+// Delivered copy from LAST WEEK must NOT swallow a new identical send when a
+// delivered window is set (the interactive inbox path).
+const oldDelivered = [{
+  sentBy: "host",
+  body: REPLY,
+  module: { type: "homeaway2", externalId: "old-1" },
+  sentAt: iso(7 * 24 * 60 * 60 * 1000),
+}];
+assert.equal(
+  classifyExistingSend(oldDelivered, REPLY, true, { nowMs: NOW, deliveredWindowMs: 600_000 }),
+  null,
+  "week-old delivered duplicate must NOT block a new interactive send",
+);
+// …but the unlimited default (background senders) still treats it as terminal.
+assert.deepEqual(
+  classifyExistingSend(oldDelivered, REPLY, true, { nowMs: NOW }),
+  { state: "delivered", deliveryModuleType: "homeaway2" },
+  "background senders keep unlimited delivered dedup",
+);
+// A delivered copy INSIDE the window is an idempotent success (double-click).
+assert.equal(
+  classifyExistingSend(
+    [{ sentBy: "host", body: REPLY, module: { type: "homeaway2", externalId: "new-1" }, sentAt: iso(30_000) }],
+    REPLY, true, { nowMs: NOW, deliveredWindowMs: 600_000 },
+  )?.state,
+  "delivered",
+  "recent delivered duplicate is still an idempotent success",
+);
+// A recent identical PENDING copy → resume polling, don't resend.
+assert.equal(
+  classifyExistingSend(
+    [{ sentBy: "host", body: REPLY, module: { type: "homeaway2" }, status: "pending", sentAt: iso(60_000) }],
+    REPLY, true, { nowMs: NOW, pendingWindowMs: 240_000, deliveredWindowMs: 600_000 },
+  )?.state,
+  "pending",
+);
+// A STALE pending copy (outside the resume window) does not block the send.
+assert.equal(
+  classifyExistingSend(
+    [{ sentBy: "host", body: REPLY, module: { type: "homeaway2" }, status: "pending", sentAt: iso(60 * 60 * 1000) }],
+    REPLY, true, { nowMs: NOW, pendingWindowMs: 240_000, deliveredWindowMs: 600_000 },
+  ),
+  null,
+);
+// Guest posts and different bodies never match.
+assert.equal(
+  classifyExistingSend(
+    [{ sentBy: "guest", body: REPLY, module: { type: "homeaway2", externalId: "g" }, sentAt: iso(30_000) }],
+    REPLY, true, { nowMs: NOW, deliveredWindowMs: 600_000 },
+  ),
+  null,
+);
+
+// ── verifyOtaHostPostDelivered sinceMs: an OLD delivered copy of the same body
+// must not false-verify a NEW send whose own copy is still pending.
+const repeatedBodyPosts = [
+  { sentBy: "host", body: REPLY, module: { type: "homeaway2" }, status: "pending", sentAt: iso(10_000) }, // this send
+  { sentBy: "host", body: REPLY, module: { type: "homeaway2", externalId: "old-1" }, sentAt: iso(7 * 24 * 60 * 60 * 1000) }, // last week
+];
+const anchored = verifyOtaHostPostDelivered(repeatedBodyPosts, REPLY, true, { sinceMs: NOW - 120_000 });
+assert.equal(anchored.verified, false, "old delivered copy must not verify the new send");
+assert.equal(anchored.pending, true, "the new copy is honestly still pending");
+const unanchored = verifyOtaHostPostDelivered(repeatedBodyPosts, REPLY, true);
+assert.equal(unanchored.verified, true, "without an anchor the legacy behavior is unchanged");
+// A timestamp-less delivered post survives the sinceMs filter (unknown age must
+// never hide a real confirmation).
+assert.equal(
+  verifyOtaHostPostDelivered(
+    [{ sentBy: "host", body: REPLY, module: { type: "homeaway2", externalId: "x" } }],
+    REPLY, true, { sinceMs: NOW - 120_000 },
+  ).verified,
+  true,
+);
 
 console.log("  ✓ guesty OTA send module resolution + delivery-confirmed verification");

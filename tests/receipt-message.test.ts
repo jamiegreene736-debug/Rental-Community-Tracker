@@ -1,6 +1,8 @@
 import {
   buildPaymentReceiptBody,
   buildRefundReceiptBody,
+  buildRefundReceiptSmsBody,
+  refundSmsNeedsAttention,
   sanitizeForBookingChannel,
   receiptDedupKey,
   sameTransactionMoment,
@@ -167,6 +169,37 @@ console.log("receipt-message: receiptNeedsAttention (non-delivery safety net)");
   check("fresh pending -> no attention", !receiptNeedsAttention({ status: "pending", createdAtMs: fresh }, now));
   check("STALE pending -> needs attention", receiptNeedsAttention({ status: "pending", createdAtMs: stale }, now));
   check("error with unknown age -> surfaced", receiptNeedsAttention({ status: "error", createdAtMs: null }, now));
+}
+
+console.log("receipt-message: refund SMS leg (text to the guest's phone on file)");
+{
+  const sms = buildRefundReceiptSmsBody({
+    guestFirstName: "Cheryl",
+    propertyName: "Santa Maria 214",
+    refundAmount: 350,
+    refundDateIso: "2026-07-03T18:00:00Z",
+    receiptUrl: "https://admin.vacationrentalexpertz.com/receipt/abc123",
+  });
+  check("sms: greets the guest by first name", sms.startsWith("Hi Cheryl,"), sms);
+  check("sms: names sender + brand", sms.includes(RECEIPT_SENDER_NAME) && sms.includes(RECEIPT_BRAND_NAME));
+  check("sms: states the refund amount + date", sms.includes("$350.00") && sms.includes("July 3, 2026"));
+  check("sms: names the property", sms.includes("Santa Maria 214"));
+  check("sms: includes the durable receipt link", sms.includes("https://admin.vacationrentalexpertz.com/receipt/abc123"));
+  check("sms: sets the 5-10 business day expectation", /5-10 business days/.test(sms));
+  check("sms: ASCII-only (SMS-safe)", !/[^\x09\x0A\x0D\x20-\x7E]/.test(sms), sms);
+  check("sms: comfortably under the Quo 1600-char cap", sms.length <= 640, sms.length);
+  const noUrl = buildRefundReceiptSmsBody({ guestFirstName: "", refundAmount: 25, refundDateIso: "2026-07-01" });
+  check("sms: degrades without name/property/url", noUrl.startsWith("Hi there,") && !noUrl.includes("Receipt:"), noUrl);
+}
+
+console.log("receipt-message: refundSmsNeedsAttention (text confirmation safety net)");
+{
+  check("refund + sms error -> attention", refundSmsNeedsAttention({ kind: "refund", smsStatus: "error" }));
+  check("refund + no phone on file -> attention", refundSmsNeedsAttention({ kind: "refund", smsStatus: "no-phone" }));
+  check("refund + sms sent -> ok", !refundSmsNeedsAttention({ kind: "refund", smsStatus: "sent" }));
+  check("refund + not attempted (null) -> ok", !refundSmsNeedsAttention({ kind: "refund", smsStatus: null }));
+  check("refund + SMS not configured -> ok (nothing per-refund actionable)", !refundSmsNeedsAttention({ kind: "refund", smsStatus: "not-configured" }));
+  check("payment rows never flag on sms", !refundSmsNeedsAttention({ kind: "payment", smsStatus: "error" }));
 }
 
 console.log(`\nreceipt-message: ${pass} passed, ${fail} failed`);
