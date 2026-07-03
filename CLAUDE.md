@@ -43,6 +43,28 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-03 (dashboard duplicate-photos WARNING POPUP + "Confirm photos replaced" verify rescan):
+  Operator asked for a refund-style warning popup when a unit shows duplicate photos on
+  Airbnb/VRBO/Booking, with a "confirm you replaced the photos" action that rescans and confirms the
+  replaced photos are gone from all three OTAs. SHIPPED (`claude/duplicate-photos-warning-ymujum`,
+  PR #TBD): pure `shared/duplicate-photo-warning.ts` (13 tests) — dismissal signature (folder +
+  platforms + checkedAt, so a FRESH scan re-confirming duplicates re-raises a dismissed popup) +
+  `photoReplaceRescanVerdict` (pending until the row's checkedAt passes the rescan start, 1s
+  tolerance; any FOUND beats inconclusive; `clean` requires ALL THREE platforms clean — never a soft
+  green). `home.tsx`: `photoByProperty` folder loop now emits `duplicateUnits` (photo statuses only —
+  address-on-OTA hits deliberately excluded, the remedy here is "replace the photos"); auto-opening
+  red Dialog (refund-alert styling) + persistent "Review & fix" banner above the table; per-unit
+  "Confirm photos replaced" button → `window.confirm("Confirm that you have replaced the photos…")` →
+  `POST /api/photo-listing-check/run {folders:[folder]}` (the existing DEEP scan, scoped to that one
+  folder; no new server code) → inline pending spinner → green "no longer found on Airbnb, VRBO, or
+  Booking.com" / red STILL-found re-warning ("Rescan again"). A now-clean unit drops out of the
+  duplicate list but keeps its green row via the `photoReplaceRescans` state entry. Dismissal
+  persists in localStorage `nexstay_duplicate_photo_warning_dismissed`. NOT a reintroduction of the
+  ripped-out PR #318 "Replace & push" banner — no master-sync push; replacement stays manual/builder.
+  Verified: `tests/duplicate-photo-warning.test.ts` 13/0, full `npm test` exit 0, build clean,
+  `npm run check` 335 = baseline (0 new). Could NOT live-smoke a real rescan (no SEARCHAPI key in
+  session) — confirm post-deploy: the popup should auto-raise if any dashboard Photos cell is red.
+
 - 2026-07-03 (bulk market-pricing queue: leave-your-phone SURVIVABILITY — boot/watchdog resume +
   return-visit surfacing): Operator asked to be able to start the mass market update from his phone,
   leave Safari, and have it run to the end. AUDIT (don't re-chase): the queue was ALREADY fully

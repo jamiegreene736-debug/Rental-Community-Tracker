@@ -85,6 +85,12 @@ import {
   type GuestyPushProgress,
 } from "@shared/bulk-pricing-push-logic";
 import { selectBulkPricingJobToSurface } from "@shared/bulk-pricing-queue-surface";
+import {
+  duplicatePhotoWarningSignature,
+  formatDuplicatePhotoPlatforms,
+  photoReplaceRescanVerdict,
+  type DuplicatePhotoPlatform,
+} from "@shared/duplicate-photo-warning";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { usePortalSession } from "@/lib/auth";
@@ -286,6 +292,12 @@ function addDismissedBulkPricingJobId(jobId: string): void {
     // localStorage unavailable (private mode) — dismissal just won't persist.
   }
 }
+
+// Duplicate-photos warning popup: the signature of the currently-flagged
+// units is stored on dismiss so the popup doesn't nag every page load, but
+// re-raises whenever the facts change (new unit flagged, new platform, or a
+// fresh scan re-confirming the duplicates — see duplicatePhotoWarningSignature).
+const DUPLICATE_PHOTO_WARNING_DISMISSED_KEY = "nexstay_duplicate_photo_warning_dismissed";
 
 type BulkAvailabilityQueueItemStatus = "pending" | "running" | "success" | "error" | "cancelled";
 type BulkAvailabilityProgress = {
@@ -1322,6 +1334,18 @@ function AdminDashboard() {
   const [photoScanStartedAt, setPhotoScanStartedAt] = useState(0);
   const [photoScanLabel, setPhotoScanLabel] = useState("");
   const [photoScanSearch, setPhotoScanSearch] = useState("");
+  // Duplicate-photos warning popup ("Confirm photos replaced" → verify rescan).
+  // photoReplaceRescans is keyed by folder; an entry means the operator
+  // confirmed replacement and a verification rescan is pending/done. Entries
+  // keep the unit's display facts so a now-clean unit (which drops out of the
+  // duplicate list) can still render its green confirmation row.
+  const [duplicatePhotoWarningOpen, setDuplicatePhotoWarningOpen] = useState(false);
+  const [photoReplaceRescans, setPhotoReplaceRescans] = useState<Record<string, {
+    startedAt: number;
+    propertyName: string;
+    unitLabel: string;
+    platforms: DuplicatePhotoPlatform[];
+  }>>({});
   const [bulkPhotoCommunityJob, setBulkPhotoCommunityJob] = useState<BulkPhotoCommunityJob | null>(null);
   const [bulkPhotoCommunityStarting, setBulkPhotoCommunityStarting] = useState(false);
   const [bulkPhotoCommunityCancelling, setBulkPhotoCommunityCancelling] = useState(false);
@@ -2187,7 +2211,7 @@ function AdminDashboard() {
     queryKey: ["/api/photo-listing-check"],
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
-    refetchInterval: () => Date.now() < photoScanPollUntil ? (photoScanModalOpen ? 4_000 : 10_000) : false,
+    refetchInterval: () => Date.now() < photoScanPollUntil ? (photoScanModalOpen || duplicatePhotoWarningOpen ? 4_000 : 10_000) : false,
   });
 
   type PhotoCommunityStatusResponse = {
@@ -2289,6 +2313,16 @@ function AdminDashboard() {
     // Address-on-OTA leg: worst per-platform status + total address matches.
     addr: { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus };
     addressMatchCount: number;
+    // Per-folder duplicate-photo detail feeding the warning popup: every
+    // folder whose PHOTO status is FOUND on at least one OTA (address-only
+    // hits are excluded — the popup's remedy is "replace the photos").
+    duplicateUnits: Array<{
+      folder: string;
+      unitLabel: string;
+      platforms: DuplicatePhotoPlatform[];
+      matchCount: number;
+      checkedAt: string | null;
+    }>;
     hasScannableFolders: boolean;
     folders: string[];
     checkedRows: number;
@@ -2358,6 +2392,7 @@ function AdminDashboard() {
         matchedUnits: { airbnb: [], vrbo: [], booking: [] },
         addr: { airbnb: null, vrbo: null, booking: null },
         addressMatchCount: 0,
+        duplicateUnits: [],
         hasScannableFolders: folders.length > 0,
         folders,
         checkedRows: 0,
@@ -2396,6 +2431,23 @@ function AdminDashboard() {
         addMatchedUnits("airbnb", f, row.airbnbMatches?.length ?? 0);
         addMatchedUnits("vrbo", f, row.vrboMatches?.length ?? 0);
         addMatchedUnits("booking", f, row.bookingMatches?.length ?? 0);
+        const foundPlatforms: DuplicatePhotoPlatform[] = [];
+        if (row.airbnbStatus === "found") foundPlatforms.push("airbnb");
+        if (row.vrboStatus === "found") foundPlatforms.push("vrbo");
+        if (row.bookingStatus === "found") foundPlatforms.push("booking");
+        if (foundPlatforms.length > 0) {
+          const owners = Array.from(folderOwners.get(f)?.values() ?? []);
+          agg.duplicateUnits.push({
+            folder: f,
+            unitLabel: owners.length > 0 ? owners.map((o) => o.detailLabel).join(" + ") : f,
+            platforms: foundPlatforms,
+            matchCount:
+              (row.airbnbMatches?.length ?? 0) +
+              (row.vrboMatches?.length ?? 0) +
+              (row.bookingMatches?.length ?? 0),
+            checkedAt: row.checkedAt,
+          });
+        }
         if (row.errorMessage && !agg.errorMessages.includes(row.errorMessage)) {
           agg.errorMessages.push(row.errorMessage);
         }
@@ -2410,6 +2462,58 @@ function AdminDashboard() {
     }
     return out;
   }, [allProperties, activePhotoFolderByOriginal, communityDraftsDataForRows, photoCheckByFolder]);
+
+  // Duplicate-photos warning popup — one row per unit folder whose photos
+  // were FOUND on Airbnb / VRBO / Booking.com. De-duped by folder because a
+  // draft alias can surface the same folder under two dashboard rows.
+  const duplicatePhotoUnits = useMemo(() => {
+    const out: Array<{
+      propertyId: number;
+      propertyName: string;
+      folder: string;
+      unitLabel: string;
+      platforms: DuplicatePhotoPlatform[];
+      matchCount: number;
+      checkedAt: string | null;
+    }> = [];
+    const seen = new Set<string>();
+    for (const p of allProperties) {
+      const agg = photoByProperty.get(p.id);
+      for (const u of agg?.duplicateUnits ?? []) {
+        if (seen.has(u.folder)) continue;
+        seen.add(u.folder);
+        out.push({ propertyId: p.id, propertyName: p.name, ...u });
+      }
+    }
+    return out;
+  }, [allProperties, photoByProperty]);
+  const duplicatePhotoSignature = useMemo(
+    () => duplicatePhotoWarningSignature(duplicatePhotoUnits),
+    [duplicatePhotoUnits],
+  );
+  // Auto-raise the popup when duplicates exist and the operator hasn't
+  // dismissed THIS exact set of facts yet (same pattern as the refund alert:
+  // loud when actionable, silent once handled). Dismissal is persisted in
+  // closeDuplicatePhotoWarning below.
+  useEffect(() => {
+    if (!duplicatePhotoSignature) return;
+    let dismissed = "";
+    try {
+      dismissed = window.localStorage.getItem(DUPLICATE_PHOTO_WARNING_DISMISSED_KEY) ?? "";
+    } catch {
+      // localStorage unavailable (private mode) — the popup just re-raises.
+    }
+    if (dismissed === duplicatePhotoSignature) return;
+    setDuplicatePhotoWarningOpen(true);
+  }, [duplicatePhotoSignature]);
+  const closeDuplicatePhotoWarning = () => {
+    try {
+      window.localStorage.setItem(DUPLICATE_PHOTO_WARNING_DISMISSED_KEY, duplicatePhotoSignature);
+    } catch {
+      // localStorage unavailable — dismissal just won't persist across reloads.
+    }
+    setDuplicatePhotoWarningOpen(false);
+  };
 
   const isBulkPricingSelectable = (property: Property) => {
     if (property.draftStatus === "researching" || property.draftStatus === "draft_ready") return false;
@@ -2860,6 +2964,52 @@ function AdminDashboard() {
     onError: (e: any) => {
       setPhotoScanModalOpen(false);
       toast({ title: "Photo scan failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  // "Confirm photos replaced" — the duplicate-photos warning popup's action.
+  // Fires the same DEEP scan endpoint scoped to the one unit folder; the
+  // popup row then walks pending → clean / still-found off the re-fetched
+  // photo-check row (photoReplaceRescanVerdict). Deliberately does NOT open
+  // the big deep-scan progress modal — progress renders inline in the popup.
+  const confirmPhotosReplacedMutation = useMutation({
+    mutationFn: async (vars: { folder: string; propertyName: string; unitLabel: string; platforms: DuplicatePhotoPlatform[] }) => {
+      const r = await apiRequest("POST", "/api/photo-listing-check/run", { folders: [vars.folder] });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? `HTTP ${r.status}`);
+      }
+      return r.json() as Promise<{ started: boolean; folders: string[] }>;
+    },
+    onMutate: (vars) => {
+      setPhotoReplaceRescans((prev) => ({
+        ...prev,
+        [vars.folder]: {
+          startedAt: Date.now(),
+          propertyName: vars.propertyName,
+          unitLabel: vars.unitLabel,
+          platforms: vars.platforms,
+        },
+      }));
+    },
+    onSuccess: (_data, vars) => {
+      // Reuse the shared poll gate (never shrink an already-longer window).
+      setPhotoScanPollUntil((prev) => Math.max(prev, Date.now() + 5 * 60_000));
+      queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
+      toast({
+        title: "Verification rescan started",
+        description: `Deep-rescanning ${vars.propertyName} · ${vars.unitLabel} to confirm the replaced photos are no longer on Airbnb, VRBO, or Booking.com.`,
+      });
+    },
+    onError: (e: any, vars) => {
+      if (vars) {
+        setPhotoReplaceRescans((prev) => {
+          const next = { ...prev };
+          delete next[vars.folder];
+          return next;
+        });
+      }
+      toast({ title: "Rescan failed to start", description: e.message, variant: "destructive" });
     },
   });
 
@@ -4693,6 +4843,25 @@ function AdminDashboard() {
               </Badge>
             </div>
           </div>
+          {duplicatePhotoUnits.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-300 bg-red-50/70 px-3 py-2 text-sm dark:border-red-900 dark:bg-red-950/30" data-testid="banner-duplicate-photos">
+              <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span className="font-medium">
+                  {duplicatePhotoUnits.length} unit{duplicatePhotoUnits.length === 1 ? " has" : "s have"} duplicate photos on Airbnb / VRBO / Booking.com
+                </span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                onClick={() => setDuplicatePhotoWarningOpen(true)}
+                data-testid="button-open-duplicate-photo-warning"
+              >
+                Review &amp; fix
+              </Button>
+            </div>
+          )}
           {bulkPhotoCommunityJob && bulkPhotoCommunityActive && (
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm" data-testid="bulk-photo-community-progress">
               <div className="flex items-center gap-2">
@@ -5636,6 +5805,138 @@ function AdminDashboard() {
         onOpenChange={(open) => { if (!open) setConnectTarget(null); }}
       />
 
+      {/* Duplicate-photos warning popup — auto-raised when a unit's photos are
+          FOUND on Airbnb/VRBO/Booking (same visual language as the refund
+          alert). Action per unit: "Confirm photos replaced" → deep verification
+          rescan of that folder → inline green "no longer found" confirmation
+          (or a still-found re-warning). NOTE FOR CODEX: this does NOT
+          reintroduce the PR #318 dashboard "Replace & push" banner — no
+          master-sync push happens here. Replacement stays a manual/builder
+          action; this popup only nags, confirms, and VERIFIES via rescan
+          (operator ask 2026-07-03). */}
+      <Dialog
+        open={duplicatePhotoWarningOpen}
+        onOpenChange={(open) => (open ? setDuplicatePhotoWarningOpen(true) : closeDuplicatePhotoWarning())}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-700 dark:text-red-300">
+              <AlertTriangle className="h-4 w-4" /> Duplicate photos found on other listings
+            </DialogTitle>
+            <DialogDescription>
+              These units' photos were found on an Airbnb / VRBO / Booking.com listing that isn't ours.
+              Replace the photos, then confirm below — a deep rescan will verify the replaced photos are
+              no longer on Airbnb, VRBO, or Booking.com.
+            </DialogDescription>
+          </DialogHeader>
+          {(() => {
+            const rows = duplicatePhotoUnits.map((u) => ({ ...u, rescan: photoReplaceRescans[u.folder] }));
+            // Units whose verification rescan came back clean drop out of the
+            // duplicate list — keep them visible with their green confirmation.
+            for (const [folder, rescan] of Object.entries(photoReplaceRescans)) {
+              if (rows.some((r) => r.folder === folder)) continue;
+              rows.push({
+                propertyId: 0,
+                propertyName: rescan.propertyName,
+                unitLabel: rescan.unitLabel,
+                folder,
+                platforms: rescan.platforms,
+                matchCount: 0,
+                checkedAt: photoCheckByFolder.get(folder)?.checkedAt ?? null,
+                rescan,
+              });
+            }
+            if (rows.length === 0) {
+              return (
+                <p className="text-sm text-muted-foreground">
+                  No units currently show duplicate photos on Airbnb, VRBO, or Booking.com.
+                </p>
+              );
+            }
+            return (
+              <div className="max-h-96 space-y-1.5 overflow-y-auto">
+                {rows.map((r) => {
+                  const checkRow = photoCheckByFolder.get(r.folder);
+                  const verdict = r.rescan
+                    ? photoReplaceRescanVerdict({
+                        rescanStartedAtMs: r.rescan.startedAt,
+                        checkedAt: checkRow?.checkedAt,
+                        statuses: {
+                          airbnb: checkRow?.airbnbStatus,
+                          vrbo: checkRow?.vrboStatus,
+                          booking: checkRow?.bookingStatus,
+                        },
+                      })
+                    : null;
+                  const showConfirmButton = !verdict || verdict.state === "still_found" || verdict.state === "inconclusive";
+                  return (
+                    <div
+                      key={r.folder}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded border border-red-200 bg-background p-2 dark:border-red-900"
+                      data-testid={`row-duplicate-photos-${r.folder}`}
+                    >
+                      <div className="min-w-0 text-xs">
+                        <span className="font-medium">{r.propertyName}</span>
+                        <span className="text-muted-foreground"> · {r.unitLabel}</span>
+                        {!verdict || verdict.state === "still_found" ? (
+                          <span className="block text-red-700 dark:text-red-300">
+                            Photos found on {formatDuplicatePhotoPlatforms(verdict?.state === "still_found" ? verdict.platforms : r.platforms)}
+                            {!verdict && r.matchCount > 0 ? ` · ${r.matchCount} match${r.matchCount === 1 ? "" : "es"}` : ""}
+                            {verdict?.state === "still_found" ? " — STILL found after the rescan. Replace them and confirm again." : ""}
+                          </span>
+                        ) : null}
+                        {verdict?.state === "pending" ? (
+                          <span className="flex items-center gap-1 text-muted-foreground">
+                            <Loader2 className="h-3 w-3 animate-spin" /> Rescanning — verifying the replaced photos are off Airbnb, VRBO, and Booking.com…
+                          </span>
+                        ) : null}
+                        {verdict?.state === "clean" ? (
+                          <span className="flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> Confirmed — the replaced photos are no longer found on Airbnb, VRBO, or Booking.com.
+                          </span>
+                        ) : null}
+                        {verdict?.state === "inconclusive" ? (
+                          <span className="block text-amber-700 dark:text-amber-400">
+                            Rescan inconclusive on {formatDuplicatePhotoPlatforms(verdict.platforms)} — run it again.
+                          </span>
+                        ) : null}
+                        <span className="block text-muted-foreground">
+                          Last scanned {checkRow?.checkedAt ? formatShortDateTime(checkRow.checkedAt) : "—"}
+                        </span>
+                      </div>
+                      {showConfirmButton ? (
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={confirmPhotosReplacedMutation.isPending}
+                          onClick={() => {
+                            if (!window.confirm(
+                              `Confirm that you have replaced the photos for ${r.propertyName} · ${r.unitLabel}. A deep rescan will verify the replaced photos are no longer on Airbnb, VRBO, or Booking.com.`,
+                            )) return;
+                            confirmPhotosReplacedMutation.mutate({
+                              folder: r.folder,
+                              propertyName: r.propertyName,
+                              unitLabel: r.unitLabel,
+                              platforms: r.platforms,
+                            });
+                          }}
+                          data-testid={`button-confirm-photos-replaced-${r.folder}`}
+                        >
+                          {verdict ? "Rescan again" : "Confirm photos replaced"}
+                        </Button>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+          <p className="text-[11px] text-muted-foreground">
+            The rescan reverse-image-searches the unit's full photo gallery (same depth as the weekly scan)
+            and usually finishes within a minute or two. You can close this — the Photos column keeps updating.
+          </p>
+        </DialogContent>
+      </Dialog>
       <Dialog open={photoScanModalOpen} onOpenChange={setPhotoScanModalOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
