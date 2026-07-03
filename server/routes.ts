@@ -1837,6 +1837,65 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
   }
 }
 
+// ── Bulk pricing queue: server-side resume watchdog ─────────────────────────
+// The bulk market-pricing queue is a fully server-side background job (the
+// dashboard only POSTs to start it and polls to watch), so the operator can
+// start a mass update from a phone and close Safari — the queue keeps running.
+// But the ONLY resume trigger for an ORPHANED job (Railway restart/redeploy
+// mid-queue, or a crashed worker loop) used to be a client GET: with no
+// browser open, the job sat frozen "running" with an expired lease until the
+// next dashboard visit. This watchdog re-claims orphaned queued/running jobs
+// with no client involved — one pass shortly after boot (deferred so the
+// loopback push-seasonal-rates endpoint is live) and every couple of minutes
+// thereafter. Safety: claimBulkPricingJobLease is an atomic conditional
+// UPDATE, so a job whose live worker holds an unexpired lease (renewed on
+// every heartbeat by persistBulkPricingJob) can never be double-claimed, and
+// activeBulkPricingJobIds guards same-process re-entry. Disable with
+// BULK_PRICING_RESUME_DISABLED=1.
+const BULK_PRICING_WATCHDOG_INTERVAL_MS = 2 * 60 * 1000;
+let bulkPricingResumeWatchdogTimer: NodeJS.Timeout | null = null;
+
+export async function resumeOrphanedBulkPricingJobs(reason: string): Promise<number> {
+  const rows = await db
+    .select({ id: bulkPricingRefreshJobRows.id, status: bulkPricingRefreshJobRows.status })
+    .from(bulkPricingRefreshJobRows)
+    .where(inArray(bulkPricingRefreshJobRows.status, ["queued", "running"]));
+  let kicked = 0;
+  for (const row of rows) {
+    if (activeBulkPricingJobIds.has(row.id)) continue;
+    kicked += 1;
+    console.log(`[bulk-pricing] ${reason}: re-claiming orphaned ${row.status} job ${row.id} (no browser needed)`);
+    // runBulkPricingJob is a no-op when another live worker still holds the
+    // lease (e.g. the draining instance during a deploy overlap) — the next
+    // watchdog tick retries after that lease expires.
+    void runBulkPricingJob(row.id).catch((e: any) => {
+      console.error(`[bulk-pricing] ${reason} resume failed for ${row.id}:`, e?.message ?? e);
+    });
+  }
+  return kicked;
+}
+
+export function startBulkPricingResumeWatchdog(): void {
+  if (process.env.BULK_PRICING_RESUME_DISABLED === "1") {
+    console.log("[bulk-pricing] resume watchdog disabled via BULK_PRICING_RESUME_DISABLED=1");
+    return;
+  }
+  if (bulkPricingResumeWatchdogTimer) return;
+  const tick = (reason: string) => {
+    void resumeOrphanedBulkPricingJobs(reason).catch((e: any) => {
+      console.warn(`[bulk-pricing] resume watchdog tick failed: ${e?.message ?? e}`);
+    });
+  };
+  // Boot pass is deferred: the resumed job's Guesty push self-calls
+  // POST /api/builder/push-seasonal-rates over 127.0.0.1, so the HTTP server
+  // must be listening and warm first (same rationale as auto-fill-resume).
+  const bootTimer = setTimeout(() => tick("boot-resume"), 20_000);
+  bootTimer.unref?.();
+  bulkPricingResumeWatchdogTimer = setInterval(() => tick("watchdog"), BULK_PRICING_WATCHDOG_INTERVAL_MS);
+  bulkPricingResumeWatchdogTimer.unref?.();
+  console.log("[bulk-pricing] resume watchdog started (boot pass in ~20s, then every 2 min)");
+}
+
 function cleanupPricingRefreshLocks(): void {
   const now = Date.now();
   for (const [propertyKey, lock] of Array.from(pricingRefreshLocks.entries())) {

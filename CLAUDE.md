@@ -43,6 +43,26 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-03 (bulk market-pricing queue: leave-your-phone SURVIVABILITY — boot/watchdog resume +
+  return-visit surfacing): Operator asked to be able to start the mass market update from his phone,
+  leave Safari, and have it run to the end. AUDIT (don't re-chase): the queue was ALREADY fully
+  server-side (fire-and-forget worker, Postgres-persisted, lease renewed each heartbeat, loopback
+  pushes, no sidecar) — closing Safari never stopped it. The GAP: an ORPHANED job (Railway
+  redeploy/restart mid-queue) was only ever resumed by a client GET, so with no browser open it froze
+  "running" until the next dashboard visit. SHIPPED (`claude/mass-update-guesty-sync-5pff0c`, PR
+  #TBD): (1) `startBulkPricingResumeWatchdog` (routes.ts; wired in `server/index.ts` after listen) —
+  boot pass ~20s after listen (loopback push must be live) + 2-min interval calling
+  `resumeOrphanedBulkPricingJobs`; the atomic lease claim keeps it safe vs live workers/deploy
+  overlap; gate `BULK_PRICING_RESUME_DISABLED=1`. (2) Return-visit UX: pure
+  `shared/bulk-pricing-queue-surface.ts` (8 tests) — the discovery poll now surfaces a live queue OR
+  the most recent finished-≤24h queue (so the PR #885 push-confirmation banner is seen), honoring
+  "Clear queue" dismissals persisted in localStorage (`nexstay_dismissed_bulk_pricing_jobs`); a
+  surfaced terminal job fetches its events once. (3) The "Update market pricing" trigger button no
+  longer requires selected rows to OPEN the dialog when a queue exists, and shows a live status chip.
+  Verified: full `npm test` exit 0, build clean, `npm run check` 335 = baseline. Could NOT live-smoke
+  a restart-resume (no DB creds) — confirm post-deploy via the "[bulk-pricing] boot-resume:
+  re-claiming orphaned running job" Railway log line after a mid-run redeploy.
+
 - 2026-07-03 (bulk market-pricing queue: per-property GUESTY PUSH CONFIRMATION): Operator asked to
   ensure every property in a dashboard mass market update pushes its rates to Guesty AND to confirm
   it visibly. AUDIT (don't re-chase): the push was already robust — read-back verification

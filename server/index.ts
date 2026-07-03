@@ -1,5 +1,5 @@
 import express, { type Request, Response, NextFunction } from "express";
-import { registerRoutes } from "./routes";
+import { registerRoutes, startBulkPricingResumeWatchdog } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { startWeeklyScheduler, cleanupStaleRuns } from "./availability-scanner";
@@ -157,6 +157,11 @@ app.get("/api/auth/session", (_req, res) => {
           .then((m) => m.resumeInterruptedAutoFillWork())
           .catch((err) => console.error("[auto-fill-resume] boot resume failed:", err?.message ?? err));
       }, 15_000);
+      // Resume any dashboard bulk market-pricing queue a redeploy/restart
+      // orphaned, and keep watching for orphans — the operator starts a mass
+      // update from a phone and closes Safari, so no client poll can be relied
+      // on to re-claim the job. Gate: BULK_PRICING_RESUME_DISABLED=1.
+      startBulkPricingResumeWatchdog();
       await cleanupStaleRuns();
       startWeeklyScheduler();
       startAutoApproveScheduler();
