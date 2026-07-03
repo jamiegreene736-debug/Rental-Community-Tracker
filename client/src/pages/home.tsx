@@ -84,6 +84,7 @@ import {
   summarizeBulkPricingGuestyPush,
   type GuestyPushProgress,
 } from "@shared/bulk-pricing-push-logic";
+import { selectBulkPricingJobToSurface } from "@shared/bulk-pricing-queue-surface";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { usePortalSession } from "@/lib/auth";
@@ -262,6 +263,29 @@ type QueueJobEventPayload = {
   meta?: Record<string, unknown> | null;
   createdAt: string;
 };
+
+// "Clear queue" dismissals persist here so a bulk pricing queue that finished
+// while the operator was away (phone locked / Safari closed) re-surfaces its
+// terminal Guesty-push banner exactly once — and stays gone after dismissal,
+// across reloads. Capped so the key can't grow unbounded.
+const DISMISSED_BULK_PRICING_JOBS_KEY = "nexstay_dismissed_bulk_pricing_jobs";
+function getDismissedBulkPricingJobIds(): string[] {
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_BULK_PRICING_JOBS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function addDismissedBulkPricingJobId(jobId: string): void {
+  try {
+    const next = [...getDismissedBulkPricingJobIds().filter((id) => id !== jobId), jobId].slice(-20);
+    window.localStorage.setItem(DISMISSED_BULK_PRICING_JOBS_KEY, JSON.stringify(next));
+  } catch {
+    // localStorage unavailable (private mode) — dismissal just won't persist.
+  }
+}
 
 type BulkAvailabilityQueueItemStatus = "pending" | "running" | "success" | "error" | "cancelled";
 type BulkAvailabilityProgress = {
@@ -2547,9 +2571,33 @@ function AdminDashboard() {
         if (cancelled) return;
         const jobs = Array.isArray(data.jobs) ? data.jobs : [];
         setBulkPricingHistory(jobs);
-        const active = jobs.find((job: BulkPricingJob) => job.status === "queued" || job.status === "running");
-        if (active && !bulkPricingJob?.id) {
-          setBulkPricingJob(active);
+        if (!bulkPricingJob?.id) {
+          // Surface a live queue OR one that finished while the operator was
+          // away (started from a phone, Safari closed) — so the terminal
+          // Guesty push-confirmation banner is actually seen. "Clear queue"
+          // dismissals are honored via localStorage.
+          const surface = selectBulkPricingJobToSurface(
+            jobs as BulkPricingJob[],
+            getDismissedBulkPricingJobIds(),
+            Date.now(),
+          );
+          if (surface) {
+            setBulkPricingJob(surface);
+            const surfaceTerminal = surface.status !== "queued" && surface.status !== "running";
+            if (surfaceTerminal) {
+              // A terminal job never enters the live 2.5s poll (it only polls
+              // non-terminal jobs), so load its event history once here.
+              try {
+                const detail = await fetch(`/api/pricing/bulk-refresh/${surface.id}`, { credentials: "include" });
+                if (detail.ok) {
+                  const detailData = await detail.json();
+                  if (!cancelled && Array.isArray(detailData.events)) setBulkPricingEvents(detailData.events);
+                }
+              } catch {
+                // Event history is best-effort; the banner reads item progress.
+              }
+            }
+          }
         }
       } catch {
         // Dashboard history is best-effort; the active job poll handles recovery.
@@ -2684,6 +2732,10 @@ function AdminDashboard() {
       if (!bulkPricingTerminal) {
         await apiRequest("POST", `/api/pricing/bulk-refresh/${bulkPricingJob.id}/cancel?force=1`);
       }
+      // Persist the dismissal so the discovery poll (which now re-surfaces
+      // recently finished queues for operators returning from their phone)
+      // doesn't bring this queue back.
+      addDismissedBulkPricingJobId(bulkPricingJob.id);
       setBulkPricingJob(null);
       setSelectedPricingIds(new Set());
       setBulkPricingEvents([]);
@@ -3936,7 +3988,11 @@ function AdminDashboard() {
                     size="sm"
                     variant="outline"
                     className="h-8 gap-1.5"
-                    disabled={selectedBulkPricingCount === 0}
+                    // Stays clickable with zero rows selected whenever there's a
+                    // queue to show — an operator returning from their phone
+                    // must be able to open the dialog and see the running queue
+                    // or the finished Guesty push confirmation.
+                    disabled={selectedBulkPricingCount === 0 && !bulkPricingJob}
                     data-testid="button-bulk-market-pricing"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
@@ -3944,6 +4000,29 @@ function AdminDashboard() {
                     {selectedBulkPricingCount > 0 && (
                       <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-[10px]">
                         {selectedBulkPricingCount}
+                      </Badge>
+                    )}
+                    {bulkPricingJob && (
+                      <Badge
+                        variant="outline"
+                        className={`ml-1 h-5 px-1.5 text-[10px] ${
+                          bulkPricingJob.status === "running" || bulkPricingJob.status === "queued"
+                            ? "border-blue-300 bg-blue-50 text-blue-700"
+                            : bulkPricingJob.status === "completed"
+                              ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                              : bulkPricingJob.status === "failed"
+                                ? "border-red-300 bg-red-50 text-red-700"
+                                : "border-slate-300 bg-slate-50 text-slate-600"
+                        }`}
+                      >
+                        {bulkPricingJob.status === "running" || bulkPricingJob.status === "queued" ? (
+                          <>
+                            <Loader2 className="mr-0.5 h-3 w-3 animate-spin" />
+                            {bulkPricingJob.completed}/{bulkPricingJob.total}
+                          </>
+                        ) : (
+                          `queue ${bulkPricingJob.status}`
+                        )}
                       </Badge>
                     )}
                   </Button>
@@ -3956,7 +4035,7 @@ function AdminDashboard() {
                     <div className="rounded-md border bg-muted/20 p-3 text-sm">
                       <p className="font-medium">Runs one selected property at a time.</p>
                       <p className="mt-1 text-muted-foreground">
-                        For each property, this scans SearchAPI Airbnb for real market comps and sets each month's buy-in rate from the Airbnb median — a 7-night sample per calendar month across ~12 months, with year-2 extrapolation. It then pushes the marked-up base rates to Guesty. The queue is saved on the server, so closing this tab will not stop it.
+                        For each property, this scans SearchAPI Airbnb for real market comps and sets each month's buy-in rate from the Airbnb median — a 7-night sample per calendar month across ~12 months, with year-2 extrapolation. It then pushes the marked-up base rates to Guesty. The queue runs entirely on the server: you can close this tab, leave Safari, or lock your phone and it keeps going to the end (it even auto-resumes after a server restart). Come back any time — this dialog shows the live progress or the finished result with the Guesty push confirmation.
                       </p>
                     </div>
                     {!bulkPricingJob ? (
