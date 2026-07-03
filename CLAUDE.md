@@ -43,6 +43,25 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-03 (bulk market-pricing queue: per-property GUESTY PUSH CONFIRMATION): Operator asked to
+  ensure every property in a dashboard mass market update pushes its rates to Guesty AND to confirm
+  it visibly. AUDIT (don't re-chase): the push was already robust — read-back verification
+  (`verifiedDays`) inside `POST /api/builder/push-seasonal-rates`, item-level retry (2 attempts) on
+  any push throw, "Retry failed rows", and `markScannerGuestyRatePush` ok/error stamps feeding the
+  "Last Price Scan" column. The GAP was that a queue item can COMPLETE without pushing
+  (`guestyPush.skipped`: unmapped listing / no priced months) and nothing aggregated "did they ALL
+  push?". SHIPPED (`claude/mass-update-guesty-sync-5pff0c`, PR #TBD): pure
+  `shared/bulk-pricing-push-logic.ts` (29 tests) classifies each item from the already-persisted
+  `progress.guestyPush` (pushed/skipped/failed/cancelled/pending/unknown; failed status beats stale
+  pushed progress). Server `emitBulkPricingPushCoverage` writes a durable terminal queue event —
+  `guesty-push-confirmed` or `guesty-push-incomplete` with the per-property attention list — in both
+  terminal paths; `summarizeBulkPricingJob` exposes `dryRun`. UI (`home.tsx`): per-item chips
+  ("✓ Pushed to Guesty · N days · N verified" / amber "⚠ NOT pushed" / red "✕ not confirmed"), a live
+  "Pushed to Guesty X/Y" stat tile, and a terminal green all-pushed banner or amber/red banner listing
+  exactly which properties didn't push and why. Verified: full `npm test` exit 0, build clean,
+  `npm run check` 335 = baseline. Could NOT live-smoke (no Guesty creds) — confirm post-deploy by
+  running a mass update and checking for the green banner.
+
 - 2026-07-01 (market-rate median → ALL-IN checkout cost + 20% markup): Live-diagnosed a running 6BR
   scan in the Railway logs (propertyId -15, "Spacious 6BR for 14 at Ko Olina!") — the reverted median
   engine correctly did resort lookup → exact-3BR → median (p50) → 7-night × 24 months → summed 2 units →

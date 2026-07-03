@@ -79,6 +79,11 @@ import { cn } from "@/lib/utils";
 import type { CommunityDraft, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import { photoCommunityStatusLabel, type PhotoCommunityRowStatus } from "@shared/photo-community-status-logic";
+import {
+  guestyPushStatusForItem,
+  summarizeBulkPricingGuestyPush,
+  type GuestyPushProgress,
+} from "@shared/bulk-pricing-push-logic";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { usePortalSession } from "@/lib/auth";
@@ -182,6 +187,7 @@ type BulkPricingJob = {
   completed: number;
   failed: number;
   cancelled: number;
+  dryRun?: boolean;
   items: Array<{
     id?: string;
     propertyId: number;
@@ -237,6 +243,9 @@ type BulkPricingJob = {
         oldRate: string | number | null;
         newRate: string | number | null;
       }>;
+      // Written by the server once the item's Guesty push resolves — the
+      // per-property confirmation that rates actually landed on Guesty.
+      guestyPush?: GuestyPushProgress;
     } | null;
     error: string | null;
   }>;
@@ -2409,6 +2418,11 @@ function AdminDashboard() {
     bulkPricingLastHeartbeat &&
     Date.now() - bulkPricingLastHeartbeat > 5 * 60 * 1000
   );
+  // Per-property Guesty push confirmation for the mass market update — a
+  // completed item can still have SKIPPED the Guesty push, so this is the
+  // "did every property's rates actually land on Guesty?" answer.
+  const bulkPricingPushSummary =
+    bulkPricingJob && !bulkPricingJob.dryRun ? summarizeBulkPricingGuestyPush(bulkPricingJob.items) : null;
   const bulkAvailabilityRunning = bulkAvailabilityQueue?.status === "running";
   const bulkAvailabilityActive = bulkAvailabilityQueue?.status === "running" || bulkAvailabilityQueue?.status === "paused";
   const formatBulkPricingTime = (value?: string | null) => {
@@ -3990,6 +4004,45 @@ function AdminDashboard() {
                             This queue has not reported a heartbeat in over five minutes. It is saved on the server and will be re-claimed automatically if the worker died.
                           </div>
                         )}
+                        {bulkPricingTerminal && bulkPricingPushSummary && bulkPricingPushSummary.total > 0 && (
+                          bulkPricingPushSummary.allPushed ? (
+                            <div className="rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900" data-testid="bulk-pricing-push-confirmed">
+                              <p className="font-semibold">
+                                ✓ Guesty push confirmed — all {bulkPricingPushSummary.pushed} of {bulkPricingPushSummary.total} properties pushed their rates to Guesty
+                              </p>
+                              <p className="mt-0.5 text-xs text-emerald-800">
+                                Each push was verified against Guesty's calendar by read-back where Guesty allowed it. Per-property details are on each row below.
+                              </p>
+                            </div>
+                          ) : (
+                            <div
+                              className={`rounded-md border p-3 text-sm ${bulkPricingPushSummary.failed > 0 ? "border-red-300 bg-red-50 text-red-900" : "border-amber-300 bg-amber-50 text-amber-900"}`}
+                              data-testid="bulk-pricing-push-incomplete"
+                            >
+                              <p className="font-semibold">
+                                ⚠ Guesty push confirmed for only {bulkPricingPushSummary.pushed} of {bulkPricingPushSummary.total} properties
+                              </p>
+                              {bulkPricingPushSummary.attention.length > 0 && (
+                                <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
+                                  {bulkPricingPushSummary.attention.slice(0, 12).map((a) => (
+                                    <li key={`${a.propertyId}-${a.label}`}>
+                                      <span className="font-medium">{a.label}</span>: {a.detail}
+                                    </li>
+                                  ))}
+                                  {bulkPricingPushSummary.attention.length > 12 && (
+                                    <li>+{bulkPricingPushSummary.attention.length - 12} more — see the rows below</li>
+                                  )}
+                                </ul>
+                              )}
+                              {bulkPricingPushSummary.cancelled > 0 && (
+                                <p className="mt-1 text-xs">{bulkPricingPushSummary.cancelled} item(s) were cancelled before pushing.</p>
+                              )}
+                              <p className="mt-1 text-xs">
+                                Use "Retry failed rows" (or re-run the queue for the listed properties) so every property's rates land on Guesty.
+                              </p>
+                            </div>
+                          )
+                        )}
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                           <div className="rounded-md border p-2">
                             <p className="text-xs text-muted-foreground">Status</p>
@@ -3999,6 +4052,14 @@ function AdminDashboard() {
                             <p className="text-xs text-muted-foreground">Completed</p>
                             <p className="text-sm font-semibold">{bulkPricingJob.completed} / {bulkPricingJob.total}</p>
                           </div>
+                          {bulkPricingPushSummary && (
+                            <div className="rounded-md border p-2" title="Properties whose refreshed rates were confirmed pushed to Guesty (verified by read-back where available)">
+                              <p className="text-xs text-muted-foreground">Pushed to Guesty</p>
+                              <p className={`text-sm font-semibold ${bulkPricingPushSummary.pushed === bulkPricingPushSummary.total ? "text-emerald-700" : bulkPricingTerminal ? "text-amber-700" : ""}`}>
+                                {bulkPricingPushSummary.pushed} / {bulkPricingPushSummary.total}
+                              </p>
+                            </div>
+                          )}
                           <div className="rounded-md border p-2">
                             <p className="text-xs text-muted-foreground">Failed</p>
                             <p className="text-sm font-semibold">{bulkPricingJob.failed}</p>
@@ -4050,6 +4111,16 @@ function AdminDashboard() {
                             const blackoutCount = typeof item.progress?.blackoutCount === "number" ? item.progress.blackoutCount : 0;
                             const blackoutClosed = typeof item.progress?.blackoutClosed === "number" ? item.progress.blackoutClosed : 0;
                             const rateChanges = Array.isArray(item.progress?.rateChanges) ? item.progress.rateChanges : [];
+                            const pushStatus = bulkPricingJob.dryRun ? null : guestyPushStatusForItem(item);
+                            const pushChip = pushStatus && (pushStatus.outcome === "pushed" || pushStatus.outcome === "skipped" || pushStatus.outcome === "failed")
+                              ? pushStatus
+                              : null;
+                            const pushedDays = item.progress?.guestyPush && !item.progress.guestyPush.skipped
+                              ? item.progress.guestyPush.seasonal?.pushedDays
+                              : undefined;
+                            const verifiedDays = item.progress?.guestyPush && !item.progress.guestyPush.skipped
+                              ? item.progress.guestyPush.seasonal?.verifiedDays
+                              : undefined;
                             return (
                               <div key={`${item.propertyId}-${index}`} className="border-b px-3 py-3 last:border-b-0">
                                 <div className="flex items-start justify-between gap-3">
@@ -4061,8 +4132,29 @@ function AdminDashboard() {
                                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                                       Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
                                     </p>
-                                    {(communityConfirmation || recipeResort || recipeScaling || confidenceScore != null || blackoutCount > 0 || resortUnconfident || bedroomSplitInferred) && (
+                                    {(pushChip || communityConfirmation || recipeResort || recipeScaling || confidenceScore != null || blackoutCount > 0 || resortUnconfident || bedroomSplitInferred) && (
                                       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+                                        {pushChip && (
+                                          <span
+                                            className={`inline-flex max-w-full items-center gap-1 rounded border px-2 py-0.5 font-medium ${
+                                              pushChip.outcome === "pushed"
+                                                ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+                                                : pushChip.outcome === "skipped"
+                                                  ? "border-amber-300 bg-amber-50 text-amber-800"
+                                                  : "border-red-300 bg-red-50 text-red-800"
+                                            }`}
+                                            title={pushChip.detail}
+                                          >
+                                            <span aria-hidden>{pushChip.outcome === "pushed" ? "✓" : pushChip.outcome === "skipped" ? "⚠" : "✕"}</span>
+                                            <span className="truncate">
+                                              {pushChip.outcome === "pushed"
+                                                ? `Pushed to Guesty${typeof pushedDays === "number" ? ` · ${pushedDays} days` : ""}${typeof verifiedDays === "number" ? ` · ${verifiedDays} verified` : ""}`
+                                                : pushChip.outcome === "skipped"
+                                                  ? "NOT pushed to Guesty"
+                                                  : "Guesty push not confirmed"}
+                                            </span>
+                                          </span>
+                                        )}
                                         {communityConfirmation && (
                                           <span
                                             className={`inline-flex max-w-full items-center gap-1 rounded border px-2 py-0.5 font-medium ${communityConfirmation.confirmed ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-800"}`}
