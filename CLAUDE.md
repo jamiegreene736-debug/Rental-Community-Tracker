@@ -43,6 +43,34 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-03 (refund-receipt AUDIT + no-conversation hardening; header unread badge = REAL unread):
+  Operator asked to (a) make sure a Guesty refund always sends the guest a refund receipt on their
+  booking channel and (b) make the header unread-message badge match the actual unread messages.
+  (a) AUDIT (don't re-chase): the whole path already shipped 2026-06-30 and is code-verified intact —
+  `server/guest-receipts.ts` 5-min scheduler (auto-ON, `GUEST_RECEIPTS_DISABLED` to kill), refund
+  detection covers nested/negative/refund-array shapes (`realRefundsForReceipts`), refunds BYPASS
+  `RECEIPT_SKIP_CHANNELS`, delivery-verified OTA routing via `sendGuestyConversationMessage`
+  (Airbnb→Airbnb, VRBO→VRBO, Booking→Booking), misroute/stale surfaced in the dashboard revenue
+  dialog red alert with "Resend to guest". ONE real gap closed: a refund on a reservation with NO
+  Guesty conversation yet was skipped WITHOUT a ledger row — if a conversation never appeared within
+  the 48h backfill window the refund receipt died silently with no alert. Now a refund (only; payments
+  keep old behavior) writes the `pending` row anyway (`conversationId` null, schema already nullable),
+  later ticks retry it, and a stale pending row is flagged by `receiptNeedsAttention` → dashboard
+  alert + Resend. Retry-path `updateGuestReceiptContent` now omits `conversationId` when unknown so a
+  retry can't null-clobber a resolved one.
+  (b) ROOT CAUSE of badge mismatch: before the inbox page's first mount, AppHeader fell back to the
+  pending-AI-DRAFT count (a different signal), and it summed missed calls into the number. FIX: new
+  pure `shared/inbox-unread-count.ts` (18 tests) — `countUnreadConversations` mirrors inbox.tsx
+  semantics (`state.isLastPostFromGuest` explicit-first, legacy NEW/UNREAD/UNANSWERED fallback,
+  right-click override honored unless superseded by newer guest activity); AppHeader now fetches the
+  SAME conversations query (same queryKey → shared TanStack cache; the `&fields=` param is
+  LOAD-BEARING per the 2026-05-04 note) and derives the real count + persisted localStorage overrides
+  (`nexstay_inbox_read_overrides_v1`, key/parser now exported from the shared module and used by BOTH
+  inbox.tsx and the header so they can't drift). The inbox-published count still wins once available.
+  Badge now shows ONLY unread messages (missed calls keep their separate phone icon). Verified:
+  `tests/inbox-unread-count.test.ts` 18/0, `tests/receipt-message.test.ts` 46/0, full `npm test` exit
+  0, build clean, `npm run check` 335 = baseline. Could NOT live-smoke Guesty legs (no creds).
+
 - 2026-07-03 (dashboard duplicate-photos WARNING POPUP + "Confirm photos replaced" verify rescan):
   Operator asked for a refund-style warning popup when a unit shows duplicate photos on
   Airbnb/VRBO/Booking, with a "confirm you replaced the photos" action that rescans and confirms the

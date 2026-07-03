@@ -47,6 +47,11 @@ import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared
 import { usePortalSession } from "@/lib/auth";
 import { useAssistantContext } from "@/lib/assistant-context";
 import { setInboxUnreadCount } from "@/lib/inboxUnreadStore";
+import {
+  INBOX_READ_OVERRIDE_STORAGE_KEY,
+  parseStoredInboxReadOverrides,
+  type InboxReadOverride as SharedInboxReadOverride,
+} from "@shared/inbox-unread-count";
 
 type InboxBuyInRecord = ArrivalUnitDetail & {
   propertyName?: string;
@@ -962,28 +967,15 @@ function writeStoredAirbnbPreapprovals(ids: Set<string>) {
 // "read" override is auto-dropped once a NEWER guest message arrives (so a fresh
 // reply still re-surfaces the thread), while an "unread" override sticks until
 // the operator marks it read or sends a reply.
-const INBOX_READ_OVERRIDE_STORAGE_KEY = "nexstay_inbox_read_overrides_v1";
-
-type InboxReadOverride = { state: "read" | "unread"; at: number };
+// Key + parser live in @shared/inbox-unread-count so AppHeader's independent
+// unread derivation reads the SAME overrides with the SAME validation — the
+// two must stay in lockstep or the header badge drifts from the inbox count.
+type InboxReadOverride = SharedInboxReadOverride;
 
 function readStoredInboxReadOverrides(): Record<string, InboxReadOverride> {
   if (typeof window === "undefined") return {};
   try {
-    const raw = window.localStorage.getItem(INBOX_READ_OVERRIDE_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    if (!parsed || typeof parsed !== "object") return {};
-    const out: Record<string, InboxReadOverride> = {};
-    for (const [id, value] of Object.entries(parsed as Record<string, any>)) {
-      if (!id || typeof id !== "string") continue;
-      if (
-        value &&
-        (value.state === "read" || value.state === "unread") &&
-        typeof value.at === "number"
-      ) {
-        out[id] = { state: value.state, at: value.at };
-      }
-    }
-    return out;
+    return parseStoredInboxReadOverrides(window.localStorage.getItem(INBOX_READ_OVERRIDE_STORAGE_KEY));
   } catch {
     return {};
   }

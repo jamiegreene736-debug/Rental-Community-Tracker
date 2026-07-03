@@ -290,10 +290,19 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
     }
   }
 
-  // Need a conversation to post into. If none yet, do NOT write a row — retry
-  // on a later tick once Guesty has a conversation for the reservation.
+  // Need a conversation to post into. A PAYMENT with no conversation yet is
+  // retried silently on later ticks (no row) — the OTA's own payment
+  // confirmation covers the guest meanwhile. A REFUND must never die silently
+  // (the "always reach the guest" guarantee): fall through so a `pending`
+  // ledger row is written below even without a conversation. Later ticks keep
+  // retrying it, and if a conversation never appears, the stale pending row
+  // surfaces in the dashboard refund alert (receiptNeedsAttention) with a
+  // working "Resend to guest" — even after the transaction ages out of the
+  // 48h backfill window.
   const conversationId = conversationIdForReservation(reservation);
-  if (!conversationId) return { outcome: "skipped", reason: "no Guesty conversation for reservation yet" };
+  if (!conversationId && kind !== "refund") {
+    return { outcome: "skipped", reason: "no Guesty conversation for reservation yet" };
+  }
 
   // Reuse the token from a prior attempt so the durable link stays stable, but
   // ALWAYS rebuild the body/payload from the CURRENT reservation so a RETRY
@@ -403,8 +412,19 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
     }
   } else {
     // Retry path: refresh the stored body + page payload so the durable page and
-    // the re-sent message both reflect current data.
-    await storage.updateGuestReceiptContent(token, { messageBody: body, payload, conversationId }).catch(() => {});
+    // the re-sent message both reflect current data. conversationId is omitted
+    // when unknown so a retry can never clobber a previously-resolved one.
+    await storage.updateGuestReceiptContent(token, {
+      messageBody: body,
+      payload,
+      ...(conversationId ? { conversationId } : {}),
+    }).catch(() => {});
+  }
+
+  // Refund with no conversation: the pending ledger row above is the whole
+  // point (it keeps the refund visible + retryable). Nothing to post yet.
+  if (!conversationId) {
+    return { outcome: "skipped", reason: "no Guesty conversation for the reservation yet — pending refund receipt recorded; it will retry and surface in the dashboard refund alert if it stays undelivered" };
   }
 
   // Post the message through the delivery-verified OTA path (the same hardened
