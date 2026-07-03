@@ -1,22 +1,16 @@
+import { useMemo } from "react";
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { CalendarSearch, Home, ListTodo, LogIn, LogOut, MessageSquare, PhoneMissed, UserRound } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { usePortalSession } from "@/lib/auth";
 import { useInboxUnreadCount } from "@/lib/inboxUnreadStore";
-
-type AutoReplyLogSummary = {
-  status?: string | null;
-  replySent?: boolean | null;
-};
-
-function isPendingAutoReplyLog(log: AutoReplyLogSummary): boolean {
-  return (
-    !log.replySent &&
-    log.status !== "dismissed" &&
-    (log.status === "drafted" || log.status === "flagged" || log.status === "error")
-  );
-}
+import {
+  countUnreadConversations,
+  extractConversationList,
+  parseStoredInboxReadOverrides,
+  INBOX_READ_OVERRIDE_STORAGE_KEY,
+} from "@shared/inbox-unread-count";
 
 export default function AppHeader() {
   const [location] = useLocation();
@@ -26,13 +20,18 @@ export default function AppHeader() {
   const isInbox = location.startsWith("/inbox");
   const isOperations = location.startsWith("/bookings");
   const isListingQueue = location.startsWith("/listing-queue");
-  const { data: pendingDraftCount = 0 } = useQuery<number>({
-    queryKey: ["/api/inbox/auto-reply/logs", "pending-count"],
+  // The SAME Guesty conversations list the inbox page fetches — identical
+  // queryKey so TanStack shares one cache entry between the two components,
+  // and the identical load-bearing `&fields=` (without it Guesty strips
+  // `state` down to {read,status} and every conversation looks read — see
+  // the inbox query's NOTE FOR CODEX). This is what lets the header badge
+  // show the REAL unread count even before the inbox page is first opened.
+  const { data: convData } = useQuery<any>({
+    queryKey: ["/api/guesty-proxy/communication/conversations"],
     queryFn: async () => {
-      const response = await apiRequest("GET", "/api/inbox/auto-reply/logs?limit=200");
-      if (!response.ok) return 0;
-      const logs = await response.json();
-      return Array.isArray(logs) ? logs.filter(isPendingAutoReplyLog).length : 0;
+      const r = await apiRequest("GET", "/api/guesty-proxy/communication/conversations?limit=100&sort=-lastMessageAt&fields=");
+      if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
+      return r.json();
     },
     refetchInterval: 60_000,
     staleTime: 30_000,
@@ -48,15 +47,31 @@ export default function AppHeader() {
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
-  // Unread guest conversations, published by the inbox page (the only place
-  // that folds in the operator's manual "Mark as read / unread" overrides) — so
-  // this header badge moves the instant a row is marked read/unread. `null`
-  // until the inbox has been opened this session; fall back to the pending AI
-  // draft count so the badge still signals attention before the first visit.
+  // Unread guest conversations. Two sources, most-authoritative first:
+  //   1. The count PUBLISHED by the inbox page (it additionally folds the
+  //      session-only "reply just sent" suppression) — updates the instant the
+  //      operator marks a row read/unread. `null` until the inbox has mounted.
+  //   2. Our own derivation from the shared conversations query + the
+  //      PERSISTED right-click read/unread overrides (localStorage) — the
+  //      same rules the inbox uses, so the badge matches the actual unread
+  //      messages even before the inbox page is first opened. (Previously
+  //      this fell back to the pending-AI-draft count and also summed missed
+  //      calls into the number, so the badge routinely disagreed with the
+  //      inbox — missed calls now only drive the separate phone icon.)
   const publishedUnread = useInboxUnreadCount();
-  const unreadMessageCount = publishedUnread ?? pendingDraftCount;
-  const inboxAlertCount = unreadMessageCount + missedCallCount;
-  const unreadBadgeLabel = inboxAlertCount > 99 ? "99+" : String(inboxAlertCount);
+  const derivedUnread = useMemo(() => {
+    const conversations = extractConversationList(convData);
+    if (conversations.length === 0) return 0;
+    let storedOverrides: string | null = null;
+    try {
+      storedOverrides = window.localStorage.getItem(INBOX_READ_OVERRIDE_STORAGE_KEY);
+    } catch {
+      // localStorage unavailable — count without manual overrides.
+    }
+    return countUnreadConversations(conversations, parseStoredInboxReadOverrides(storedOverrides));
+  }, [convData]);
+  const unreadMessageCount = publishedUnread ?? derivedUnread;
+  const unreadBadgeLabel = unreadMessageCount > 99 ? "99+" : String(unreadMessageCount);
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-[hsl(var(--brand-blue)/0.12)] bg-[linear-gradient(180deg,hsl(var(--brand-teal)/0.06),hsl(var(--background)))] shadow-sm backdrop-blur">
@@ -115,10 +130,10 @@ export default function AppHeader() {
             >
               <span className="relative inline-flex h-5 w-5 items-center justify-center">
                 <MessageSquare className="h-4 w-4 text-primary" />
-                {inboxAlertCount > 0 && (
+                {unreadMessageCount > 0 && (
                   <span
                     className="absolute right-0 top-0 flex h-3 min-w-3 translate-x-1/4 -translate-y-1/4 items-center justify-center rounded-full border border-background bg-red-500 px-[2px] text-[8px] font-bold leading-none text-white shadow-sm"
-                    aria-label={`${inboxAlertCount} inbox alert${inboxAlertCount === 1 ? "" : "s"}`}
+                    aria-label={`${unreadMessageCount} unread message${unreadMessageCount === 1 ? "" : "s"}`}
                     data-testid="badge-header-inbox-unread"
                   >
                     {unreadBadgeLabel}
