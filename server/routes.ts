@@ -34,6 +34,7 @@ import {
   resolveComboUnitBedrooms,
   resolveDraftUnitBedrooms,
 } from "@shared/draft-unit-bedrooms";
+import { summarizeBulkPricingGuestyPush } from "@shared/bulk-pricing-push-logic";
 import path from "path";
 import fs from "fs";
 import sharp from "sharp";
@@ -670,6 +671,48 @@ function refreshBulkPricingCounts(job: BulkPricingJob): void {
   job.cancelled = job.items.filter((item) => item.status === "cancelled").length;
 }
 
+// Terminal Guesty push coverage event for a bulk market-pricing queue: the
+// operator's durable confirmation that EVERY property in a mass update
+// actually landed on Guesty — or exactly which ones didn't and why. A queue
+// item can complete without pushing (unmapped listing / no priced months), so
+// job.completed alone can't answer "did they all push?". Written to the queue
+// event log so it survives the dialog being dismissed; the UI banner reads the
+// same shared classification live from item progress.
+async function emitBulkPricingPushCoverage(job: BulkPricingJob): Promise<void> {
+  if (job.dryRun) return;
+  const summary = summarizeBulkPricingGuestyPush(job.items);
+  if (summary.total === 0) return;
+  const meta = {
+    total: summary.total,
+    pushed: summary.pushed,
+    skipped: summary.skipped,
+    failed: summary.failed,
+    cancelled: summary.cancelled,
+    pending: summary.pending,
+    unknown: summary.unknown,
+    attention: summary.attention.slice(0, 25),
+  };
+  if (summary.allPushed) {
+    await topQueueEvent("bulk-pricing", job.id, "guesty-push-confirmed", `Guesty push confirmed for all ${summary.pushed}/${summary.total} properties in this queue (verified by Guesty read-back where available)`, { meta });
+    return;
+  }
+  const attentionPreview = summary.attention
+    .slice(0, 10)
+    .map((a) => `${a.label}: ${a.detail}`)
+    .join(" · ");
+  const extras: string[] = [];
+  if (summary.cancelled > 0) extras.push(`${summary.cancelled} cancelled`);
+  if (summary.pending > 0) extras.push(`${summary.pending} still pending`);
+  const suffix = `${attentionPreview ? ` Needs attention: ${attentionPreview}.` : ""}${extras.length ? ` (${extras.join(", ")})` : ""}`;
+  await topQueueEvent(
+    "bulk-pricing",
+    job.id,
+    "guesty-push-incomplete",
+    `Guesty push confirmed for only ${summary.pushed}/${summary.total} properties in this queue.${suffix}`,
+    { level: summary.failed > 0 ? "error" : "warn", meta },
+  );
+}
+
 function cancelRemainingBulkPricingItems(job: BulkPricingJob, message = "Cancelled by operator"): void {
   const now = Date.now();
   for (const item of job.items) {
@@ -796,6 +839,7 @@ function summarizeBulkPricingJob(job: BulkPricingJob) {
     completed: job.completed,
     failed: job.failed,
     cancelled: job.cancelled,
+    dryRun: Boolean(job.dryRun),
     items: job.items.map((item) => ({
       ...item,
       startedAt: item.startedAt ? new Date(item.startedAt).toISOString() : null,
@@ -1751,6 +1795,7 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
       level: job.status === "failed" ? "error" : job.status === "cancelled" ? "warn" : "info",
       meta: { completed: job.completed, failed: job.failed, cancelled: job.cancelled, total: job.items.length },
     });
+    await emitBulkPricingPushCoverage(job).catch(() => {});
     console.log(
       `[bulk-pricing] job ${job.id} ${job.status}: ${job.completed}/${job.items.length} completed, ${job.failed} failed, ${job.cancelled} cancelled`,
     );
@@ -1773,6 +1818,7 @@ async function runBulkPricingJob(jobId: string): Promise<void> {
         level: cancelled ? "warn" : "error",
         meta: { error: e?.message ?? String(e) },
       });
+      await emitBulkPricingPushCoverage(failedJob).catch(() => {});
     }
   } finally {
     activeBulkPricingJobIds.delete(jobId);
