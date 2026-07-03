@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import {
+  collectDuplicateListingLinks,
   duplicatePhotoWarningSignature,
   formatDuplicatePhotoPlatforms,
   photoReplaceRescanVerdict,
@@ -87,6 +88,38 @@ check("all three clean after rescan → clean", photoReplaceRescanVerdict({
   });
   check("no FOUND but unknown/missing platforms → inconclusive, never a soft clean",
     v.state === "inconclusive" && v.platforms.join(",") === "vrbo,booking");
+}
+
+// ── offending-listing links ──────────────────────────────────────────────────
+{
+  const { links, more } = collectDuplicateListingLinks({
+    airbnb: [
+      { listingUrl: "https://www.airbnb.com/rooms/123?check_in=2026-08-01", title: "Poipu Kai 3BR" },
+      { listingUrl: "https://www.airbnb.com/rooms/123/", title: "Poipu Kai 3BR (2nd photo hit)" },
+    ],
+    vrbo: [{ listingUrl: "https://www.vrbo.com/998877", title: "" }],
+    booking: [],
+  });
+  check("same listing matched by two photos collapses to ONE link (query/slash-insensitive)",
+    links.filter((l) => l.platform === "airbnb").length === 1);
+  check("platform order is Airbnb, VRBO, Booking", links.map((l) => l.platform).join(",") === "airbnb,vrbo");
+  check("missing title falls back to the URL", links[1]?.title === "https://www.vrbo.com/998877");
+  check("first-seen URL (with its params) is what gets linked", links[0]?.url === "https://www.airbnb.com/rooms/123?check_in=2026-08-01");
+  check("no overflow when under the cap", more === 0);
+}
+
+{
+  const { links, more } = collectDuplicateListingLinks({
+    airbnb: Array.from({ length: 9 }, (_, i) => ({ listingUrl: `https://www.airbnb.com/rooms/${i}`, title: `L${i}` })),
+  }, 6);
+  check("link list capped with an accurate +N-more count", links.length === 6 && more === 3);
+}
+
+{
+  const { links } = collectDuplicateListingLinks({
+    airbnb: [{ listingUrl: "not-a-url", title: "junk" }, { listingUrl: null, title: "junk" }],
+  });
+  check("non-URL / null listingUrl rows are dropped", links.length === 0);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

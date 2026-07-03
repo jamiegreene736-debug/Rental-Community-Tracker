@@ -48,6 +48,41 @@ export function duplicatePhotoWarningSignature(units: DuplicatePhotoUnitFacts[])
     .join(";");
 }
 
+export type DuplicateListingLink = {
+  platform: DuplicatePhotoPlatform;
+  url: string;
+  title: string;
+};
+
+// Flatten the per-platform Lens match rows into de-duped, clickable links to
+// the actual OTA listings hosting the duplicated photos. The scanner has
+// ALREADY suppressed our own Guesty-authorized listing URLs (see
+// server/authorized-urls.ts), so every URL here is a listing that is NOT
+// ours. Multiple photos usually match the same thief listing — de-dupe by
+// URL so the popup shows one link per offending listing, platform-ordered
+// (Airbnb, VRBO, Booking.com). `limit` caps the rendered list; `more` is the
+// count of links beyond it.
+export function collectDuplicateListingLinks(
+  matches: Partial<Record<DuplicatePhotoPlatform, Array<{ listingUrl?: string | null; title?: string | null }> | null | undefined>>,
+  limit = 6,
+): { links: DuplicateListingLink[]; more: number } {
+  const links: DuplicateListingLink[] = [];
+  const seen = new Set<string>();
+  for (const platform of DUPLICATE_PHOTO_PLATFORMS) {
+    for (const m of matches[platform] ?? []) {
+      const url = (m.listingUrl ?? "").trim();
+      if (!/^https?:\/\//i.test(url)) continue;
+      // Normalize just enough that the same listing with/without a query
+      // string or trailing slash collapses to one link.
+      const key = url.replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      links.push({ platform, url, title: (m.title ?? "").trim() || url });
+    }
+  }
+  return { links: links.slice(0, limit), more: Math.max(0, links.length - limit) };
+}
+
 export type PhotoReplaceRescanVerdict =
   | { state: "pending" }
   | { state: "clean" }

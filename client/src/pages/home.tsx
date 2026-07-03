@@ -67,6 +67,7 @@ import {
   StopCircle,
   Pause,
   Play,
+  ExternalLink,
 } from "lucide-react";
 import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { occupancyForBedrooms } from "@/data/bedding-config";
@@ -86,9 +87,11 @@ import {
 } from "@shared/bulk-pricing-push-logic";
 import { selectBulkPricingJobToSurface } from "@shared/bulk-pricing-queue-surface";
 import {
+  collectDuplicateListingLinks,
   duplicatePhotoWarningSignature,
   formatDuplicatePhotoPlatforms,
   photoReplaceRescanVerdict,
+  DUPLICATE_PHOTO_PLATFORM_LABELS,
   type DuplicatePhotoPlatform,
 } from "@shared/duplicate-photo-warning";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
@@ -5900,6 +5903,43 @@ function AdminDashboard() {
                             Rescan inconclusive on {formatDuplicatePhotoPlatforms(verdict.platforms)} — run it again.
                           </span>
                         ) : null}
+                        {(() => {
+                          // Links to the actual OTA listings hosting the duplicated
+                          // photos. The scanner already suppressed our own
+                          // Guesty-authorized listing URLs, so every link here is a
+                          // listing that is NOT ours. Hidden once the verify rescan
+                          // confirms clean (the stale links are no longer evidence).
+                          if (verdict?.state === "clean") return null;
+                          const { links, more } = collectDuplicateListingLinks({
+                            airbnb: checkRow?.airbnbMatches,
+                            vrbo: checkRow?.vrboMatches,
+                            booking: checkRow?.bookingMatches,
+                          });
+                          if (links.length === 0) return null;
+                          return (
+                            <span className="mt-1 block space-y-0.5">
+                              {links.map((link) => (
+                                <a
+                                  key={link.url}
+                                  href={link.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="flex items-center gap-1 text-red-700 underline underline-offset-2 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200"
+                                  title={link.url}
+                                  data-testid={`link-duplicate-listing-${r.folder}-${link.platform}`}
+                                >
+                                  <ExternalLink className="h-3 w-3 shrink-0" />
+                                  <span className="truncate">
+                                    {DUPLICATE_PHOTO_PLATFORM_LABELS[link.platform]}: {link.title}
+                                  </span>
+                                </a>
+                              ))}
+                              {more > 0 ? (
+                                <span className="block text-muted-foreground">+{more} more matched listing{more === 1 ? "" : "s"}</span>
+                              ) : null}
+                            </span>
+                          );
+                        })()}
                         <span className="block text-muted-foreground">
                           Last scanned {checkRow?.checkedAt ? formatShortDateTime(checkRow.checkedAt) : "—"}
                         </span>

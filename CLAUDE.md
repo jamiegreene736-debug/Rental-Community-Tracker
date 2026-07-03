@@ -64,6 +64,13 @@ Before making any changes:
   Verified: `tests/duplicate-photo-warning.test.ts` 13/0, full `npm test` exit 0, build clean,
   `npm run check` 335 = baseline (0 new). Could NOT live-smoke a real rescan (no SEARCHAPI key in
   session) — confirm post-deploy: the popup should auto-raise if any dashboard Photos cell is red.
+  SHIPPED (PR #887). FOLLOW-UP same day (operator ask): each warning row now links to the ACTUAL
+  offending OTA listing(s) — pure `collectDuplicateListingLinks` (de-dupes the per-photo Lens match
+  rows by listing URL, query/slash-insensitive; platform-ordered; capped 6 + "+N more"; tests now
+  20/0) rendered as red external links under the warning text, hidden once a verify rescan confirms
+  clean. Safe to trust the links: the scanner's authorized-URL suppression (server/authorized-urls.ts,
+  Guesty `integrations[]`-derived) drops OUR OWN Airbnb/VRBO/Booking URLs before anything reaches
+  `*_matches`, so a "found" verdict + its links are always someone ELSE's listing.
 
 - 2026-07-03 (bulk market-pricing queue: leave-your-phone SURVIVABILITY — boot/watchdog resume +
   return-visit surfacing): Operator asked to be able to start the mass market update from his phone,
