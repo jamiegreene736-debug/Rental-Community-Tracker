@@ -75,6 +75,7 @@ import { isScannableFolder, replacementPhotoFolderRef } from "@shared/photo-fold
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
 import { UnitReplacementFlow, findLiveReplacementJobRef, type ReplacementUnitData } from "@/components/unit-replacement-flow";
+import { isAutoReplacePhaseActive, type AutoReplaceJobRecord, type AutoReplacePhase } from "@shared/auto-replace-job-logic";
 import { useToast } from "@/hooks/use-toast";
 import { extractBRList } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
@@ -1390,8 +1391,12 @@ function AdminDashboard() {
   // "Replace photos (Unit X)" from the duplicate-photos popup: mounts the
   // preflight UnitReplacementFlow (find another unit in the SAME community
   // with the SAME bedroom count, real-estate sources only, Claude-vision
-  // interior probe + OTA-clean gates) targeted at the flagged unit.
+  // interior probe + OTA-clean gates) targeted at the flagged unit. This is
+  // now the MANUAL path ("Pick manually") — the primary button fires the
+  // one-click server-side auto-replace job instead.
   const [replacePhotosTarget, setReplacePhotosTarget] = useState<{ propertyId: number; unitId: string } | null>(null);
+  // One-click auto-replace queue (server-side find → auto-commit → verify).
+  const [autoReplaceQueueOpen, setAutoReplaceQueueOpen] = useState(false);
   const [bulkPhotoCommunityJob, setBulkPhotoCommunityJob] = useState<BulkPhotoCommunityJob | null>(null);
   const [bulkPhotoCommunityStarting, setBulkPhotoCommunityStarting] = useState(false);
   const [bulkPhotoCommunityCancelling, setBulkPhotoCommunityCancelling] = useState(false);
@@ -2690,6 +2695,73 @@ function AdminDashboard() {
     },
     enabled: !!replacePhotosTarget && replacePhotosTarget.propertyId > 0,
     staleTime: 30_000,
+  });
+
+  // ── One-click auto-replace queue ────────────────────────────────────────
+  // The server orchestrates find → auto-commit → verify; the dashboard just
+  // watches the queue. Poll fast while anything is active, slow otherwise.
+  const { data: autoReplaceQueue } = useQuery<{ activeCount: number; jobs: AutoReplaceJobRecord[] }>({
+    queryKey: ["/api/replacement/auto-jobs"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/replacement/auto-jobs");
+      if (!r.ok) throw new Error(`Auto-replace queue returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: (query) => ((query.state.data?.activeCount ?? 0) > 0 ? 6_000 : 60_000),
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  });
+  // When a job this page watched goes terminal: refresh the duplicate-photos
+  // indicators (photo checks + Comm QA), keep the photo-check poll alive so
+  // the verification rescan's verdict lands, and toast the outcome once.
+  const autoReplaceSeenActiveRef = useRef<Set<string>>(new Set());
+  const autoReplaceToastedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const job of autoReplaceQueue?.jobs ?? []) {
+      if (isAutoReplacePhaseActive(job.phase)) {
+        autoReplaceSeenActiveRef.current.add(job.jobId);
+        continue;
+      }
+      if (!autoReplaceSeenActiveRef.current.has(job.jobId)) continue; // finished before this page load
+      if (autoReplaceToastedRef.current.has(job.jobId)) continue;
+      autoReplaceToastedRef.current.add(job.jobId);
+      queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/unit-swaps"] });
+      setPhotoScanPollUntil((prev) => Math.max(prev, Date.now() + 5 * 60_000));
+      if (job.phase === "completed") {
+        toast({
+          title: `Photos replaced — ${job.propertyName} · ${job.unitLabel}`,
+          description: job.message ?? "The new unit's photos are in place; verification is running.",
+        });
+      } else {
+        toast({
+          title: `Auto replace failed — ${job.propertyName} · ${job.unitLabel}`,
+          description: job.error ?? "See the replacement queue for details.",
+          variant: "destructive",
+        });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoReplaceQueue]);
+
+  // The one-click button: fire-and-forget. Everything (search, commit,
+  // verification) happens server-side; the queue chip is the only UI.
+  const startAutoReplaceMutation = useMutation({
+    mutationFn: async (vars: { propertyId: number; unitId: string; unitLabel: string }) => {
+      const r = await apiRequest("POST", "/api/replacement/auto-jobs", vars);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+      return data as { job: AutoReplaceJobRecord };
+    },
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replacement/auto-jobs"] });
+      toast({
+        title: `Auto replace started — ${vars.unitLabel}`,
+        description: "Finding a clean same-community unit, committing it, and verifying — all in the background. You can leave; track it via the replacement queue banner.",
+      });
+    },
+    onError: (e: any) => toast({ title: "Auto replace failed to start", description: e.message, variant: "destructive" }),
   });
 
   // After the flow commits a swap: the replacement folder is now the unit's
@@ -5120,6 +5192,31 @@ function AdminDashboard() {
               </Button>
             </div>
           )}
+          {(autoReplaceQueue?.jobs.length ?? 0) > 0 && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm dark:border-sky-900 dark:bg-sky-950/30" data-testid="banner-auto-replace-queue">
+              <div className="flex items-center gap-2">
+                {(autoReplaceQueue?.activeCount ?? 0) > 0 ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-sky-700 dark:text-sky-300" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                )}
+                <span>
+                  {(autoReplaceQueue?.activeCount ?? 0) > 0
+                    ? `Replacing photos for ${autoReplaceQueue!.activeCount} unit${autoReplaceQueue!.activeCount === 1 ? "" : "s"} in the background — safe to leave.`
+                    : "Photo replacement finished — indicators refresh as verification lands."}
+                </span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setAutoReplaceQueueOpen(true)}
+                data-testid="button-open-auto-replace-queue"
+              >
+                View queue
+              </Button>
+            </div>
+          )}
           {bulkPhotoCommunityJob && bulkPhotoCommunityActive && (
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm" data-testid="bulk-photo-community-progress">
               <div className="flex items-center gap-2">
@@ -6419,17 +6516,41 @@ function AdminDashboard() {
                       </div>
                       {showConfirmButton ? (
                         <div className="flex shrink-0 flex-col items-end gap-1.5">
-                          {resolveReplacePhotosUnits(r.propertyId, r.folder).map((target) => (
-                            <Button
-                              key={target.unit.id}
-                              size="sm"
-                              variant="destructive"
-                              onClick={() => setReplacePhotosTarget({ propertyId: r.propertyId, unitId: target.unit.id })}
-                              data-testid={`button-replace-photos-${r.folder}-${target.unit.id}`}
-                            >
-                              Replace photos ({target.letter})
-                            </Button>
-                          ))}
+                          {resolveReplacePhotosUnits(r.propertyId, r.folder).map((target) => {
+                            const unitLabelFull = `${target.letter}${target.unit.unitNumber ? ` (${target.unit.unitNumber})` : ""}`;
+                            const alreadyQueued = (autoReplaceQueue?.jobs ?? []).some(
+                              (j) => j.propertyId === r.propertyId && j.unitId === target.unit.id && isAutoReplacePhaseActive(j.phase),
+                            );
+                            return (
+                              <span key={target.unit.id} className="flex flex-col items-end gap-0.5">
+                                <Button
+                                  size="sm"
+                                  variant="destructive"
+                                  disabled={startAutoReplaceMutation.isPending || alreadyQueued}
+                                  onClick={() => startAutoReplaceMutation.mutate({
+                                    propertyId: r.propertyId,
+                                    unitId: target.unit.id,
+                                    unitLabel: unitLabelFull,
+                                  })}
+                                  data-testid={`button-replace-photos-${r.folder}-${target.unit.id}`}
+                                >
+                                  {alreadyQueued ? (
+                                    <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Replacing {target.letter}…</>
+                                  ) : (
+                                    <>Replace photos ({target.letter})</>
+                                  )}
+                                </Button>
+                                <button
+                                  type="button"
+                                  className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                                  onClick={() => setReplacePhotosTarget({ propertyId: r.propertyId, unitId: target.unit.id })}
+                                  data-testid={`button-replace-photos-manual-${r.folder}-${target.unit.id}`}
+                                >
+                                  pick manually
+                                </button>
+                              </span>
+                            );
+                          })}
                           <Button
                             size="sm"
                             variant="outline"
@@ -6464,11 +6585,62 @@ function AdminDashboard() {
           </p>
         </DialogContent>
       </Dialog>
+      {/* One-click auto-replace queue dialog — read-only view of the server-side
+          orchestrator jobs (find → auto-commit → verify). */}
+      <Dialog open={autoReplaceQueueOpen} onOpenChange={setAutoReplaceQueueOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RefreshCw className="h-4 w-4" /> Photo replacement queue
+            </DialogTitle>
+            <DialogDescription>
+              Each job finds a clean same-community unit (Claude-vision checked), commits its photos
+              automatically, then verifies the new gallery is off Airbnb/VRBO/Booking and in-community.
+              Runs fully server-side — closing this page never stops it.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-96 space-y-1.5 overflow-y-auto">
+            {(autoReplaceQueue?.jobs ?? []).length === 0 ? (
+              <p className="text-sm text-muted-foreground">No replacement jobs yet.</p>
+            ) : (autoReplaceQueue?.jobs ?? []).map((job) => {
+              const phaseTone: Record<AutoReplacePhase, string> = {
+                queued: "bg-slate-100 text-slate-700 border-slate-200",
+                finding: "bg-blue-50 text-blue-700 border-blue-200",
+                committing: "bg-amber-50 text-amber-700 border-amber-200",
+                verifying: "bg-sky-50 text-sky-700 border-sky-200",
+                completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                failed: "bg-red-50 text-red-700 border-red-200",
+              };
+              return (
+                <div key={job.jobId} className="rounded border p-2 text-xs" data-testid={`row-auto-replace-${job.jobId}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="min-w-0 font-medium">{job.propertyName} · {job.unitLabel}</span>
+                    <Badge variant="outline" className={`capitalize ${phaseTone[job.phase]}`}>
+                      {isAutoReplacePhaseActive(job.phase) && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                      {job.phase}
+                    </Badge>
+                  </div>
+                  {job.newUnitLabel || job.newAddress ? (
+                    <p className="mt-0.5 text-emerald-700 dark:text-emerald-400">
+                      New unit: {job.newUnitLabel || "—"}{job.newAddress ? ` · ${job.newAddress}` : ""}
+                    </p>
+                  ) : null}
+                  <p className={`mt-0.5 ${job.phase === "failed" ? "text-red-700 dark:text-red-300" : "text-muted-foreground"}`}>
+                    {job.phase === "failed" ? (job.error ?? "Failed") : (job.message ?? "—")}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Replace-photos dialog — hosts the preflight UnitReplacementFlow for the
-          unit flagged in the duplicate-photos popup. The flow itself owns the
-          whole search → candidate → commit lifecycle (background find-unit job,
-          resume, POST /api/unit-swaps); we only assemble its props the same way
-          builder-preflight does and react to the committed swap. */}
+          unit flagged in the duplicate-photos popup (the MANUAL "pick manually"
+          path). The flow itself owns the whole search → candidate → commit
+          lifecycle (background find-unit job, resume, POST /api/unit-swaps); we
+          only assemble its props the same way builder-preflight does and react
+          to the committed swap. */}
       {replacePhotosTarget && (() => {
         const builder = getUnitBuilderByPropertyId(replacePhotosTarget.propertyId);
         if (!builder?.communityPhotoFolder) return null;

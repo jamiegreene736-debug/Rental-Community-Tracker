@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { createHash, randomBytes } from "crypto";
 import { storage } from "./storage";
+import { listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
   bulkComboListingJobs as bulkComboListingJobRows,
@@ -67,6 +68,7 @@ import {
   getPreflightPhotoFetchJob,
   getPersistedReplacementFindJob,
   getPreflightReplacementFindJob,
+  // (auto-replace orchestrator lives in ./auto-replace-jobs)
   startPreflightPhotoFetchJob,
   startPreflightReplacementFindJob,
   getPreflightAuditJob,
@@ -31759,6 +31761,23 @@ Return ONLY compact JSON with this exact shape:
     if (!body.communityFolder) return res.status(400).json({ error: "communityFolder required" });
     const job = startPreflightReplacementFindJob(body);
     res.status(202).json({ job });
+  });
+
+  // One-click "Auto replace unit photos" — fire-and-forget orchestrator (find →
+  // auto-commit → verify). See server/auto-replace-jobs.ts.
+  app.post("/api/replacement/auto-jobs", async (req, res) => {
+    const body = (req.body ?? {}) as { propertyId?: number; unitId?: string; unitLabel?: string };
+    const result = await startAutoReplaceJob({
+      propertyId: Number(body.propertyId),
+      unitId: String(body.unitId ?? ""),
+      unitLabel: typeof body.unitLabel === "string" ? body.unitLabel : undefined,
+    });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    return res.status(202).json({ job: result.job });
+  });
+
+  app.get("/api/replacement/auto-jobs", async (_req, res) => {
+    res.json(await listAutoReplaceJobs());
   });
 
   app.get("/api/preflight/replacement-find-jobs/:jobId", async (req, res) => {
