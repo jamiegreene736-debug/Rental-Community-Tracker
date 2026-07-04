@@ -1,9 +1,11 @@
 import assert from "node:assert";
 import {
   collectDuplicateListingLinks,
+  distinctMatchedPhotoUrls,
   duplicatePhotoWarningSignature,
   formatDuplicatePhotoPlatforms,
   groupDuplicateListingLinksByUnit,
+  groupLinksByPlatform,
   photoFilenameFromMatchUrl,
   photoReplaceRescanVerdict,
 } from "../shared/duplicate-photo-warning";
@@ -210,6 +212,26 @@ const matchUrl = (n: number, photo: string) =>
 }
 
 check("no links → no groups", groupDuplicateListingLinksByUnit({ airbnb: [] }, []).length === 0);
+
+// ── distinctMatchedPhotoUrls + groupLinksByPlatform ──────────────────────────
+{
+  const links = collectDuplicateListingLinks({
+    airbnb: [
+      { listingUrl: "https://www.airbnb.com/rooms/1", title: "A1", photoUrl: "https://h/photos/f/x.jpg" },
+      { listingUrl: "https://www.airbnb.com/rooms/2", title: "A2", photoUrl: "https://h/photos/f/x.jpg" },
+    ],
+    vrbo: [{ listingUrl: "https://www.vrbo.com/9", title: "V", photoUrl: "https://h/photos/f/y.jpg" }],
+    booking: [{ listingUrl: "https://www.booking.com/hotel/us/z.html", title: "B", photoUrl: "https://h/photos/f/z.jpg" }],
+  }).links;
+  const photos = distinctMatchedPhotoUrls(links);
+  check("group photo rollup de-dupes the same photo matched on two listings",
+    photos.length === 3 && photos[0].endsWith("x.jpg") && photos[1].endsWith("y.jpg") && photos[2].endsWith("z.jpg"));
+  const byPlatform = groupLinksByPlatform(links);
+  check("platform breakout: Airbnb (2) / VRBO (1) / Booking.com (1), in order",
+    byPlatform.map((g) => `${g.platform}:${g.links.length}`).join(",") === "airbnb:2,vrbo:1,booking:1");
+  check("platform breakout drops empty platforms",
+    groupLinksByPlatform(links.filter((l) => l.platform === "vrbo")).length === 1);
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0);

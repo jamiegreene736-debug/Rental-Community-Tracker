@@ -90,9 +90,11 @@ import {
 } from "@shared/bulk-pricing-push-logic";
 import { selectBulkPricingJobToSurface } from "@shared/bulk-pricing-queue-surface";
 import {
+  distinctMatchedPhotoUrls,
   duplicatePhotoWarningSignature,
   formatDuplicatePhotoPlatforms,
   groupDuplicateListingLinksByUnit,
+  groupLinksByPlatform,
   photoFilenameFromMatchUrl,
   photoReplaceRescanVerdict,
   DUPLICATE_PHOTO_PLATFORM_LABELS,
@@ -6088,63 +6090,100 @@ function AdminDashboard() {
                           };
                           return (
                             <span className="mt-1 block space-y-1.5">
-                              {groups.map((g, gi) => (
-                                <span key={g.label ?? g.kind ?? gi} className="block space-y-0.5">
-                                  {g.kind === "unit" ? (
-                                    <span className="block font-semibold text-red-700 dark:text-red-300">
-                                      {g.label} — photos found on:
-                                    </span>
-                                  ) : null}
-                                  {g.kind === "unassigned" ? (
-                                    <span className="block font-medium text-muted-foreground">
-                                      Matched photos not in either unit's configured gallery:
-                                    </span>
-                                  ) : null}
-                                  {g.sharedGallery ? (
-                                    <span className="block text-muted-foreground">
-                                      One shared photo gallery serves {r.unitLabel} — each matched photo below is used by BOTH units.
-                                    </span>
-                                  ) : null}
-                                  {g.links.map((link) => (
-                                    <span key={link.url} className="block">
-                                      <a
-                                        href={link.url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="flex items-center gap-1 text-red-700 underline underline-offset-2 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200"
-                                        title={link.url}
-                                        data-testid={`link-duplicate-listing-${r.folder}-${link.platform}`}
-                                      >
-                                        <ExternalLink className="h-3 w-3 shrink-0" />
-                                        <span className="truncate">
-                                          {DUPLICATE_PHOTO_PLATFORM_LABELS[link.platform]}: {link.title}
+                              {groups.map((g, gi) => {
+                                const groupPhotos = distinctMatchedPhotoUrls(g.links);
+                                const groupPhotoNames = groupPhotos
+                                  .map((p) => photoFilenameFromMatchUrl(p))
+                                  .filter((f): f is string => !!f);
+                                const groupTitle = g.kind === "unit" ? g.label : r.unitLabel;
+                                return (
+                                  <span key={g.label ?? g.kind ?? gi} className="block space-y-0.5">
+                                    {g.kind === "unit" ? (
+                                      <span className="block font-semibold text-red-700 dark:text-red-300">
+                                        {g.label} — photos found on other listings:
+                                      </span>
+                                    ) : null}
+                                    {g.kind === "unassigned" ? (
+                                      <span className="block font-medium text-muted-foreground">
+                                        Matched photos not in either unit's configured gallery:
+                                      </span>
+                                    ) : null}
+                                    {g.sharedGallery ? (
+                                      <span className="block text-muted-foreground">
+                                        One shared photo gallery serves {r.unitLabel} — each matched photo below is used by BOTH units.
+                                      </span>
+                                    ) : null}
+                                    {groupPhotos.length > 0 ? (
+                                      // At-a-glance "is this a real match?" rollup: exactly
+                                      // WHICH of our photos matched, as thumbnails + names.
+                                      <span className="block rounded border border-red-200 bg-red-50/50 p-1.5 dark:border-red-900 dark:bg-red-950/20">
+                                        <span className="block font-medium text-red-700 dark:text-red-300">
+                                          {groupTitle} matched {groupPhotos.length} of your photo{groupPhotos.length === 1 ? "" : "s"}
+                                          {groupPhotoNames.length > 0 ? `: ${groupPhotoNames.slice(0, 5).join(", ")}${groupPhotoNames.length > 5 ? ", …" : ""}` : ""}
                                         </span>
-                                      </a>
-                                      {link.matchedPhotoUrls.length > 0 ? (
-                                        <span className="mt-0.5 flex flex-wrap items-center gap-1 pl-4">
-                                          <span className="text-muted-foreground">Your photos found there:</span>
-                                          {link.matchedPhotoUrls.slice(0, 4).map((p) => (
+                                        <span className="mt-1 flex flex-wrap items-center gap-1">
+                                          {groupPhotos.slice(0, 8).map((p) => (
                                             <img
                                               key={p}
                                               src={thumbSrc(p)}
                                               alt={photoFilenameFromMatchUrl(p) ?? "matched photo"}
                                               title={photoFilenameFromMatchUrl(p) ?? p}
                                               loading="lazy"
-                                              className="h-9 w-9 rounded border border-red-200 object-cover dark:border-red-900"
+                                              className="h-12 w-12 rounded border border-red-200 object-cover dark:border-red-900"
                                             />
                                           ))}
-                                          {link.matchedPhotoUrls.length > 4 ? (
-                                            <span className="text-muted-foreground">+{link.matchedPhotoUrls.length - 4} more</span>
+                                          {groupPhotos.length > 8 ? (
+                                            <span className="text-muted-foreground">+{groupPhotos.length - 8} more</span>
                                           ) : null}
                                         </span>
-                                      ) : null}
-                                    </span>
-                                  ))}
-                                  {g.more > 0 ? (
-                                    <span className="block text-muted-foreground">+{g.more} more matched listing{g.more === 1 ? "" : "s"}</span>
-                                  ) : null}
-                                </span>
-                              ))}
+                                      </span>
+                                    ) : null}
+                                    {groupLinksByPlatform(g.links).map((pg) => (
+                                      <span key={pg.platform} className="block space-y-0.5">
+                                        <span className="block font-medium text-red-700 dark:text-red-300">
+                                          {DUPLICATE_PHOTO_PLATFORM_LABELS[pg.platform]} ({pg.links.length} listing{pg.links.length === 1 ? "" : "s"}):
+                                        </span>
+                                        {pg.links.map((link) => (
+                                          <span key={link.url} className="block pl-2">
+                                            <a
+                                              href={link.url}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="flex items-center gap-1 text-red-700 underline underline-offset-2 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200"
+                                              title={link.url}
+                                              data-testid={`link-duplicate-listing-${r.folder}-${link.platform}`}
+                                            >
+                                              <ExternalLink className="h-3 w-3 shrink-0" />
+                                              <span className="truncate">{link.title}</span>
+                                            </a>
+                                            {link.matchedPhotoUrls.length > 0 ? (
+                                              <span className="mt-0.5 flex flex-wrap items-center gap-1 pl-4">
+                                                <span className="text-muted-foreground">Your photos found there:</span>
+                                                {link.matchedPhotoUrls.slice(0, 4).map((p) => (
+                                                  <img
+                                                    key={p}
+                                                    src={thumbSrc(p)}
+                                                    alt={photoFilenameFromMatchUrl(p) ?? "matched photo"}
+                                                    title={photoFilenameFromMatchUrl(p) ?? p}
+                                                    loading="lazy"
+                                                    className="h-9 w-9 rounded border border-red-200 object-cover dark:border-red-900"
+                                                  />
+                                                ))}
+                                                {link.matchedPhotoUrls.length > 4 ? (
+                                                  <span className="text-muted-foreground">+{link.matchedPhotoUrls.length - 4} more</span>
+                                                ) : null}
+                                              </span>
+                                            ) : null}
+                                          </span>
+                                        ))}
+                                      </span>
+                                    ))}
+                                    {g.more > 0 ? (
+                                      <span className="block text-muted-foreground">+{g.more} more matched listing{g.more === 1 ? "" : "s"}</span>
+                                    ) : null}
+                                  </span>
+                                );
+                              })}
                             </span>
                           );
                         })()}

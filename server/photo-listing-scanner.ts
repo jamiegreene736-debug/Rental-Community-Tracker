@@ -53,6 +53,7 @@ import {
   verificationTokensForFolder,
 } from "@shared/photo-folder-utils";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
+import { canonicalOtaUrlCandidates, otaPlatformForUrl } from "@shared/ota-host-match";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "./photo-match-guardrails";
 import {
@@ -93,11 +94,15 @@ const PUBLIC_HOST = (() => {
   return ""; // Dev: Lens won't be able to reach localhost photos.
 })();
 
-const HOSTS: Array<{ key: "airbnb" | "vrbo" | "booking"; host: string }> = [
-  { key: "airbnb",  host: "airbnb.com" },
-  { key: "vrbo",    host: "vrbo.com" },
-  { key: "booking", host: "booking.com" },
-];
+// Platform bucketing is HOST-FAMILY aware (shared/ota-host-match.ts): Lens
+// frequently returns regional/sibling domains — airbnb.co.uk / airbnb.ca,
+// VRBO's homeaway.com / abritel.fr / fewo-direkt.de / stayz.com.au /
+// bookabach.co.nz, m.booking.com — and the old bare substring checks
+// ("vrbo.com" etc.) silently dropped all of them, skewing the dashboard
+// toward Airbnb-only matches. Suppression of our own listings must check the
+// CANONICAL URL candidates too, or our own airbnb.co.uk mirror would flag as
+// theft (canonicalOtaUrlCandidates).
+const HOST_KEYS: Array<"airbnb" | "vrbo" | "booking"> = ["airbnb", "vrbo", "booking"];
 
 const PHOTOS_PER_FOLDER = 3;
 const MIN_MATCHES = 2;
@@ -830,16 +835,18 @@ export async function runPhotoListingCheckForFolder(
     const matches = lens.rows;
     anyLensSucceeded = true;
 
-    for (const host of HOSTS) {
+    for (const hostKey of HOST_KEYS) {
       const hits = matches.filter((m: any) => {
         const link = String(m.link || "").toLowerCase();
-        if (!link.includes(host.host)) return false;
+        if (otaPlatformForUrl(link) !== hostKey) return false;
         if (!isStrongLensMatch(m, String(m.__lensSource || ""), Number(m.__lensPosition ?? m.position ?? 999))) return false;
         // Drop OUR own listings right at the filter stage so they
         // never consume a verification budget slot below. A Lens hit
         // on our published Airbnb/VRBO/Booking URL is the expected
-        // outcome — not a theft signal.
-        if (isAuthorizedUrl(link, authorizedUrls)) return false;
+        // outcome — not a theft signal. Checked against the canonical
+        // URL candidates too, so our own listing served from a
+        // regional domain (airbnb.co.uk, abritel.fr) stays suppressed.
+        if (canonicalOtaUrlCandidates(link).some((c) => isAuthorizedUrl(c, authorizedUrls))) return false;
         return true;
       });
       if (hits.length === 0) continue;
@@ -867,14 +874,14 @@ export async function runPhotoListingCheckForFolder(
         if (ok) verifiedHits.push({ photoUrl, listingUrl: link, title, source });
       }
       if (verifiedHits.length > 0) {
-        tally[host.key].photoHitCount += 1;
-        tally[host.key].matches.push(...verifiedHits);
+        tally[hostKey].photoHitCount += 1;
+        tally[hostKey].matches.push(...verifiedHits);
       } else if (strongHits.length > 0) {
         // No unit-text-verified hit, but a strong community-compatible one — keep a single piece of
         // evidence so a found-by-agreement verdict still shows the operator a listing URL.
-        tally[host.key].matches.push(strongHits[0]);
+        tally[hostKey].matches.push(strongHits[0]);
       }
-      if (strongHits.length > 0) tally[host.key].photoStrongCount += 1;
+      if (strongHits.length > 0) tally[hostKey].photoStrongCount += 1;
     }
   }
 
