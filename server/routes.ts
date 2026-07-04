@@ -35,6 +35,12 @@ import {
   resolveDraftUnitBedrooms,
 } from "@shared/draft-unit-bedrooms";
 import { summarizeBulkPricingGuestyPush } from "@shared/bulk-pricing-push-logic";
+import {
+  collectReservationPaymentIssues,
+  PAYMENT_WARNING_WINDOW_DAYS,
+  PAYMENT_WARNING_WINDOW_MS,
+  type PaymentFailureWarning,
+} from "@shared/payment-failure-warning";
 import path from "path";
 import fs from "fs";
 import sharp from "sharp";
@@ -8387,6 +8393,111 @@ export async function registerRoutes(
 
   app.get("/api/dashboard/revenue-30-days", dashboardRevenue30DayHandler);
   app.get("/api/dashboard/revenue-week", dashboardRevenue30DayHandler);
+
+  // Failed / uncollected guest payments (dashboard warning popup). Detection is
+  // pure (shared/payment-failure-warning.ts); this route only fetches. TWO
+  // Guesty passes, merged by _id:
+  //   A. sort=-lastUpdatedAt until a page is entirely older than the 14-day
+  //      window — a failed charge ATTEMPT bumps lastUpdatedAt, so this catches
+  //      declines on reservations of any age (incl. past stays).
+  //   B. upcoming check-ins (next ~180d) — a scheduled balance charge that was
+  //      NEVER attempted doesn't bump lastUpdatedAt, so a dormant overdue
+  //      "balance due 90 days before arrival" row only surfaces here. Fail-soft
+  //      (some Guesty accounts reject checkIn filters; pass A still covers
+  //      every attempted charge).
+  // Cancelled bookings never warn (collectReservationPaymentIssues excludes
+  // them — the operator can't take a payment on a cancelled booking).
+  app.get("/api/dashboard/payment-failures", async (_req, res) => {
+    try {
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - PAYMENT_WARNING_WINDOW_MS;
+      const limit = 100;
+      const maxPages = 5;
+      const fields = encodeURIComponent(
+        "_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized listing listingId money payments guest source integration confirmationCode conversationId createdAt updatedAt lastUpdatedAt",
+      );
+      const unwrap = (payload: any): any[] => {
+        if (Array.isArray(payload)) return payload;
+        if (Array.isArray(payload?.results)) return payload.results;
+        if (Array.isArray(payload?.data?.results)) return payload.data.results;
+        if (Array.isArray(payload?.data)) return payload.data;
+        return [];
+      };
+      const updatedMsOf = (r: any): number => {
+        const raw = r?.lastUpdatedAt ?? r?.updatedAt ?? r?.createdAt;
+        const t = raw ? new Date(String(raw)).getTime() : NaN;
+        return Number.isFinite(t) ? t : 0;
+      };
+
+      const byId = new Map<string, any>();
+      const absorb = (rows: any[]) => {
+        for (const r of rows) {
+          const id = String(r?._id ?? r?.id ?? "").trim();
+          if (id) byId.set(id, r);
+        }
+      };
+
+      // Pass A — recently updated.
+      for (let page = 0; page < maxPages; page++) {
+        const data = await guestyRequest("GET", `/reservations?limit=${limit}&skip=${page * limit}&sort=-lastUpdatedAt&fields=${fields}`);
+        const rows = unwrap(data);
+        if (rows.length === 0) break;
+        absorb(rows);
+        if (rows.length < limit || rows.every((r) => updatedMsOf(r) < windowStartMs)) break;
+      }
+
+      // Pass B — upcoming stays with possibly-dormant payment schedules.
+      try {
+        const filters = encodeURIComponent(JSON.stringify([
+          { field: "checkIn", operator: "$gte", value: new Date(nowMs - 24 * 60 * 60 * 1000).toISOString() },
+          { field: "checkIn", operator: "$lte", value: new Date(nowMs + 180 * 24 * 60 * 60 * 1000).toISOString() },
+        ]));
+        for (let page = 0; page < maxPages; page++) {
+          const data = await guestyRequest("GET", `/reservations?filters=${filters}&limit=${limit}&skip=${page * limit}&sort=checkIn&fields=${fields}`);
+          const rows = unwrap(data);
+          if (rows.length === 0) break;
+          absorb(rows);
+          if (rows.length < limit) break;
+        }
+      } catch (passBErr: any) {
+        console.warn(`[payment-failures] upcoming-stays pass failed (continuing with recent-updates pass): ${passBErr?.message ?? passBErr}`);
+      }
+
+      const warnings: PaymentFailureWarning[] = [];
+      for (const reservation of Array.from(byId.values())) {
+        const issues = collectReservationPaymentIssues(reservation, nowMs, {
+          fallbackDateIso: reservation?.lastUpdatedAt ?? reservation?.updatedAt ?? null,
+        });
+        if (issues.length === 0) continue;
+        const guest = reservation?.guest ?? {};
+        const joinedName = [guest.firstName ?? guest.first_name, guest.lastName ?? guest.last_name].filter(Boolean).join(" ").trim();
+        const guestName = joinedName || guest.fullName || guest.full_name || guest.name || null;
+        warnings.push({
+          reservationId: String(reservation?._id ?? reservation?.id ?? ""),
+          confirmationCode: reservation?.confirmationCode ?? null,
+          guestName: guestName || null,
+          listingNickname: reservation?.listing?.nickname ?? reservation?.listing?.title ?? null,
+          channel: reservation?.integration?.platform ?? reservation?.source ?? null,
+          checkIn: reservation?.checkInDateLocalized ?? reservation?.checkIn ?? null,
+          checkOut: reservation?.checkOutDateLocalized ?? reservation?.checkOut ?? null,
+          conversationId: reservation?.conversationId ? String(reservation.conversationId) : null,
+          // Keep a real 0 (a failed FIRST payment means "Paid $0 of $X" — the
+          // most useful line in the popup); null only when Guesty omits it.
+          totalPrice: reservation?.money?.totalPrice != null && Number.isFinite(Number(reservation.money.totalPrice)) ? Number(reservation.money.totalPrice) : null,
+          totalPaid: reservation?.money?.totalPaid != null && Number.isFinite(Number(reservation.money.totalPaid)) ? Number(reservation.money.totalPaid) : null,
+          issues,
+        });
+      }
+      // Newest problem first.
+      const newestIssueMs = (w: PaymentFailureWarning): number =>
+        Math.max(0, ...w.issues.map((i) => (i.dateIso ? new Date(i.dateIso).getTime() : 0)));
+      warnings.sort((a, b) => newestIssueMs(b) - newestIssueMs(a));
+
+      res.json({ warnings, windowDays: PAYMENT_WARNING_WINDOW_DAYS, checkedAt: new Date(nowMs).toISOString() });
+    } catch (err: any) {
+      res.status(500).json({ error: "Payment-failure check failed", message: err?.message ?? String(err) });
+    }
+  });
 
   app.post("/api/guesty-token", async (_req, res) => {
     try {

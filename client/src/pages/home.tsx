@@ -101,6 +101,11 @@ import {
   type DuplicateLinkOwner,
   type DuplicatePhotoPlatform,
 } from "@shared/duplicate-photo-warning";
+import {
+  paymentFailureWarningSignature,
+  PAYMENT_ISSUE_KIND_LABELS,
+  type PaymentFailureWarning,
+} from "@shared/payment-failure-warning";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { usePortalSession } from "@/lib/auth";
@@ -328,6 +333,11 @@ function parsePropertyDisplayAddress(addr: string): { street: string; city: stri
 // re-raises whenever the facts change (new unit flagged, new platform, or a
 // fresh scan re-confirming the duplicates — see duplicatePhotoWarningSignature).
 const DUPLICATE_PHOTO_WARNING_DISMISSED_KEY = "nexstay_duplicate_photo_warning_dismissed";
+
+// Payment-failure warning popup (failed charge / overdue scheduled balance):
+// same dismissal pattern — signature persisted on dismiss, re-raised when the
+// facts change (new failed charge, new overdue balance, changed amount).
+const PAYMENT_FAILURE_WARNING_DISMISSED_KEY = "nexstay_payment_failure_warning_dismissed";
 
 type BulkAvailabilityQueueItemStatus = "pending" | "running" | "success" | "error" | "cancelled";
 type BulkAvailabilityProgress = {
@@ -1370,6 +1380,7 @@ function AdminDashboard() {
   // keep the unit's display facts so a now-clean unit (which drops out of the
   // duplicate list) can still render its green confirmation row.
   const [duplicatePhotoWarningOpen, setDuplicatePhotoWarningOpen] = useState(false);
+  const [paymentFailureWarningOpen, setPaymentFailureWarningOpen] = useState(false);
   const [photoReplaceRescans, setPhotoReplaceRescans] = useState<Record<string, {
     startedAt: number;
     propertyName: string;
@@ -1995,6 +2006,44 @@ function AdminDashboard() {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
+
+  // Failed / uncollected guest payments (14-day retroactive window; cancelled
+  // bookings excluded server-side). Drives the auto-opening red warning popup +
+  // persistent banner — same pattern as the duplicate-photos warning.
+  const { data: paymentFailureData } = useQuery<{
+    warnings: PaymentFailureWarning[];
+    windowDays: number;
+    checkedAt: string;
+  }>({
+    queryKey: ["/api/dashboard/payment-failures"],
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const paymentFailureWarnings = paymentFailureData?.warnings ?? [];
+  const paymentFailureSignature = useMemo(
+    () => paymentFailureWarningSignature(paymentFailureWarnings),
+    [paymentFailureWarnings],
+  );
+  useEffect(() => {
+    if (!paymentFailureSignature) return;
+    let dismissed = "";
+    try {
+      dismissed = window.localStorage.getItem(PAYMENT_FAILURE_WARNING_DISMISSED_KEY) ?? "";
+    } catch {
+      // localStorage unavailable (private mode) — the popup just re-raises.
+    }
+    if (dismissed === paymentFailureSignature) return;
+    setPaymentFailureWarningOpen(true);
+  }, [paymentFailureSignature]);
+  const closePaymentFailureWarning = () => {
+    try {
+      window.localStorage.setItem(PAYMENT_FAILURE_WARNING_DISMISSED_KEY, paymentFailureSignature);
+    } catch {
+      // localStorage unavailable — dismissal just won't persist across reloads.
+    }
+    setPaymentFailureWarningOpen(false);
+  };
   // Card payments captured through Guesty settle into the bank ~5 business days
   // after capture, so each collected payment is projected forward to its
   // expected deposit date. This surfaces the next bank deposit (amount + date)
@@ -5033,6 +5082,25 @@ function AdminDashboard() {
               </Badge>
             </div>
           </div>
+          {paymentFailureWarnings.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-300 bg-red-50/70 px-3 py-2 text-sm dark:border-red-900 dark:bg-red-950/30" data-testid="banner-payment-failures">
+              <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span className="font-medium">
+                  {paymentFailureWarnings.length} booking{paymentFailureWarnings.length === 1 ? " has" : "s have"} a failed or uncollected guest payment
+                </span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                onClick={() => setPaymentFailureWarningOpen(true)}
+                data-testid="button-open-payment-failure-warning"
+              >
+                Review payments
+              </Button>
+            </div>
+          )}
           {duplicatePhotoUnits.length > 0 && (
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-300 bg-red-50/70 px-3 py-2 text-sm dark:border-red-900 dark:bg-red-950/30" data-testid="banner-duplicate-photos">
               <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
@@ -5994,6 +6062,96 @@ function AdminDashboard() {
         open={connectTarget !== null}
         onOpenChange={(open) => { if (!open) setConnectTarget(null); }}
       />
+
+      {/* Payment-failure warning popup — auto-raised when a guest payment
+          FAILED or a scheduled balance charge blew past its due date without
+          collecting (14-day retroactive window; cancelled bookings excluded
+          server-side — can't take a payment on a cancelled booking). Same
+          visual language as the refund alert. Remediation is manual by design:
+          message the guest + reprocess the charge in Guesty — we never
+          auto-charge a card from the dashboard. */}
+      <Dialog
+        open={paymentFailureWarningOpen}
+        onOpenChange={(open) => (open ? setPaymentFailureWarningOpen(true) : closePaymentFailureWarning())}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-700 dark:text-red-300">
+              <AlertTriangle className="h-4 w-4" /> Guest payment failed or not collected
+            </DialogTitle>
+            <DialogDescription>
+              A guest payment failed, or a scheduled balance (e.g. the balance due before arrival) was not
+              collected on time — from the past {paymentFailureData?.windowDays ?? 14} days. Message the guest
+              and reprocess the payment in Guesty. Cancelled bookings are excluded.
+            </DialogDescription>
+          </DialogHeader>
+          {paymentFailureWarnings.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No failed or uncollected guest payments in the past {paymentFailureData?.windowDays ?? 14} days.
+            </p>
+          ) : (
+            <div className="max-h-96 space-y-1.5 overflow-y-auto">
+              {paymentFailureWarnings.map((w) => (
+                <div
+                  key={w.reservationId}
+                  className="rounded border border-red-200 bg-background p-2 dark:border-red-900"
+                  data-testid={`row-payment-failure-${w.reservationId}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0 text-xs">
+                      <span className="font-medium">{w.guestName || "Guest"}</span>
+                      <span className="text-muted-foreground">
+                        {" "}· {w.listingNickname || "—"}
+                        {w.checkIn ? ` · ${formatShortDate(w.checkIn)}${w.checkOut ? ` – ${formatShortDate(w.checkOut)}` : ""}` : ""}
+                        {w.channel ? ` · ${w.channel}` : ""}
+                        {w.confirmationCode ? ` · ${w.confirmationCode}` : ""}
+                      </span>
+                      {w.issues.map((issue, idx) => (
+                        <span
+                          key={`${issue.kind}-${idx}`}
+                          className={`block font-medium ${issue.kind === "failed" ? "text-red-600 dark:text-red-400" : "text-amber-600 dark:text-amber-400"}`}
+                          data-testid={`text-payment-issue-${w.reservationId}-${idx}`}
+                        >
+                          {issue.kind === "failed" ? "✕" : "⚠"} {PAYMENT_ISSUE_KIND_LABELS[issue.kind]} · {formatCurrency(issue.amount)}
+                          {issue.dateIso ? ` · ${issue.kind === "overdue" ? "was due" : "failed"} ${formatShortDate(issue.dateIso)}` : ""}
+                        </span>
+                      ))}
+                      {typeof w.totalPaid === "number" && typeof w.totalPrice === "number" && w.totalPrice > 0 ? (
+                        <span className="block text-muted-foreground">
+                          Paid {formatCurrency(w.totalPaid)} of {formatCurrency(w.totalPrice)}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => window.open(`https://app.guesty.com/reservations/${w.reservationId}`, "_blank")}
+                        data-testid={`button-reprocess-payment-${w.reservationId}`}
+                      >
+                        Reprocess in Guesty
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => window.open(`/inbox?reservationId=${encodeURIComponent(w.reservationId)}`, "_blank")}
+                        data-testid={`button-message-guest-payment-${w.reservationId}`}
+                      >
+                        Message guest
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <Button type="button" variant="outline" size="sm" onClick={closePaymentFailureWarning} data-testid="button-dismiss-payment-failure-warning">
+              Dismiss
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Duplicate-photos warning popup — auto-raised when a unit's photos are
           FOUND on Airbnb/VRBO/Booking (same visual language as the refund
