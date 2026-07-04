@@ -2560,6 +2560,18 @@ assert.ok(
     "Tier 2: the continuation decision still fires on capExceeded (not only budgetStopped)",
   );
 }
+// 2026-07-04 false-FOUND guard: the scanner's community-compat context must
+// resolve for replacement-p<prop>-u<unit> folders on builder properties
+// (positive embedded id). Without this OR-clause, a replaced unit's folder
+// scanned with NO community brake and generic look-alike Lens hits (wrong
+// island, hub pages) tripped multi-photo agreement into a false FOUND.
+{
+  const scannerSource = readFileSync("server/photo-listing-scanner.ts", "utf8");
+  assert.ok(
+    scannerSource.includes("ref !== null && ref.propertyId > 0 && b.propertyId === ref.propertyId"),
+    "folderCommunityContext must resolve builder community for replacement-* folders (false-FOUND guard)",
+  );
+}
 {
   const sharedOpDiagnosticsSource = readFileSync("shared/operation-diagnostics.ts", "utf8");
   assert.ok(
