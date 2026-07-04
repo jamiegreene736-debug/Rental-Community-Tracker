@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { createHash, randomBytes } from "crypto";
 import { storage } from "./storage";
-import { listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
+import { clearAutoReplaceQueue, listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
   bulkComboListingJobs as bulkComboListingJobRows,
@@ -31814,6 +31814,17 @@ Return ONLY compact JSON with this exact shape:
 
   app.get("/api/replacement/auto-jobs", async (_req, res) => {
     res.json(await listAutoReplaceJobs());
+  });
+
+  // Operator "Clear queue" — removes finished (and unresumably-stuck) jobs
+  // from memory + the persisted store. Jobs actively running in this process
+  // are never cleared; if any remain, the banner stays until they land.
+  app.post("/api/replacement/auto-jobs/clear", async (_req, res) => {
+    try {
+      res.json(await clearAutoReplaceQueue());
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to clear the replacement queue", message: err?.message ?? String(err) });
+    }
   });
 
   app.get("/api/preflight/replacement-find-jobs/:jobId", async (req, res) => {

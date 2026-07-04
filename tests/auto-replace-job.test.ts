@@ -4,6 +4,7 @@ import {
   AUTO_REPLACE_STORE_CAP,
   AUTO_REPLACE_SURFACE_TERMINAL_MS,
   MAX_AUTO_REPLACE_RESUMES,
+  clearableAutoReplaceJobIds,
   findActiveAutoReplaceJob,
   nextStepFromFindJob,
   parseAutoReplaceStore,
@@ -110,6 +111,26 @@ check("vanished find job → fail", nextStepFromFindJob(null) === "fail");
   check("active jobs first (oldest first), then recent terminals; stale terminals dropped",
     q.activeCount === 2 &&
     q.jobs.map((j) => j.jobId).join(",") === "oldActive,newActive,doneRecent");
+}
+
+// ── operator "Clear queue" ───────────────────────────────────────────────────
+{
+  const store = {
+    done: rec({ jobId: "done", phase: "completed" }),
+    dead: rec({ jobId: "dead", phase: "failed" }),
+    running: rec({ jobId: "running", phase: "finding", updatedAt: NOW - 60_000 }),
+    liveNow: rec({ jobId: "liveNow", phase: "committing", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
+    stuckStale: rec({ jobId: "stuckStale", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
+    stuckCapped: rec({ jobId: "stuckCapped", phase: "verifying", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
+  };
+  const cleared = clearableAutoReplaceJobIds(store, NOW, ["liveNow"]).sort();
+  check("terminal jobs are clearable", cleared.includes("done") && cleared.includes("dead"));
+  check("resumable active job is NOT clearable", !cleared.includes("running"));
+  check("actually-running job is NEVER clearable, even when it looks stale", !cleared.includes("liveNow"));
+  check("stuck active job outside the resume window IS clearable", cleared.includes("stuckStale"));
+  check("stuck active job at the resume cap IS clearable", cleared.includes("stuckCapped"));
+  check("exactly the expected set clears", cleared.join(",") === "dead,done,stuckCapped,stuckStale");
+  check("empty store clears nothing", clearableAutoReplaceJobIds({}, NOW).length === 0);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

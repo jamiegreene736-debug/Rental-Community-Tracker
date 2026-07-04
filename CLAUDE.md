@@ -43,6 +43,22 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (photo-replacement queue: operator "Clear queue"): Operator (screenshot of the finished
+  queue dialog) asked to be able to clear out the auto-replace queue. SHIPPED: pure
+  `clearableAutoReplaceJobIds` in shared/auto-replace-job-logic.ts (7 new tests, suite 27/0) —
+  clearable = TERMINAL jobs (completed/failed) + STUCK active records that can never resume
+  (resume cap hit or outside the 90-min window; they'd otherwise pin the banner until the 24h store
+  eviction); a job id in `liveJobIds` (the server's activeJobIds — actually running right now) is
+  NEVER cleared, so a mid-flight destructive commit keeps its record. Server
+  `clearAutoReplaceQueue()` (auto-replace-jobs.ts) deletes those ids from BOTH the in-memory map and
+  the persisted `auto_replace_jobs.v1` store (via the same mutateStore promise-tail), so the queue
+  clears on every device, then returns the fresh summary. Endpoint
+  POST /api/replacement/auto-jobs/clear. home.tsx: "Clear" ghost button on the sky queue banner
+  (shown only when a terminal job exists) + "Clear queue" in the View-queue dialog footer (disabled
+  when nothing is clearable; note "Running jobs are never cleared"); success setQueryData's the
+  fresh summary + closes the dialog when empty. Verified: full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline.
+
 - 2026-07-04 (dashboard MISSING-BUY-IN red-flag popup — units not purchased for a check-in within
   7 days): Operator asked for a card-failure-style red alert when a reservation's required units
   haven't been bought in within 7 days of check-in. SHIPPED: pure `shared/buyin-coverage-warning.ts`

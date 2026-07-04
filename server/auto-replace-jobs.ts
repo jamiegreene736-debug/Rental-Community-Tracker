@@ -24,6 +24,7 @@ import { parseStreetCityState } from "@shared/address-listing-logic";
 import { latestUnitSwapsByUnit, replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import {
   AUTO_REPLACE_STORE_SETTING_KEY,
+  clearableAutoReplaceJobIds,
   findActiveAutoReplaceJob,
   isAutoReplacePhaseActive,
   nextStepFromFindJob,
@@ -304,6 +305,23 @@ export async function listAutoReplaceJobs(): Promise<{ activeCount: number; jobs
   const store = parseAutoReplaceStore(raw ?? null);
   for (const record of Array.from(jobs.values())) store[record.jobId] = record;
   return summarizeAutoReplaceQueue(store, Date.now());
+}
+
+// Operator "Clear queue": drop finished (and unresumably-stuck) records from
+// memory AND the persisted store so the dashboard banner disappears. Jobs this
+// process is actively running keep their records (clearableAutoReplaceJobIds
+// protects them via activeJobIds).
+export async function clearAutoReplaceQueue(): Promise<{ removed: number; activeCount: number; jobs: AutoReplaceJobRecord[] }> {
+  const raw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY).catch(() => undefined);
+  const store = parseAutoReplaceStore(raw ?? null);
+  for (const record of Array.from(jobs.values())) store[record.jobId] = record;
+  const removable = clearableAutoReplaceJobIds(store, Date.now(), activeJobIds);
+  for (const jobId of removable) jobs.delete(jobId);
+  await mutateStore((persisted) => {
+    for (const jobId of removable) delete persisted[jobId];
+  });
+  const summary = await listAutoReplaceJobs();
+  return { removed: removable.length, ...summary };
 }
 
 // Boot/interval watchdog — resume orphaned active jobs after a restart.
