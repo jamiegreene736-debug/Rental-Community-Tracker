@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (SIBLING-UNIT look-alike false FOUND — Pili Mai 8J incident; diagnosed from RAILWAY
+  LOGS, now accessible via RAILWAY_TOKEN env): Operator ran the one-click auto-replace on prop32
+  Unit A; queue completed (committed Redfin unit #8J, 22 photos) and BOTH verification kicks fired
+  (loopback POSTs 200 at 19:53:45Z), but the deep rescan re-flagged the NEW folder:
+  "replacement-p32-uprop32-kia-3br: airbnb=clean, vrbo=found, booking=clean (19 photos)". Evidence
+  links were Pili Mai 8K / 08D / 13F / 7J — SIBLING units' own VRBO listings. ROOT CAUSE: same-model
+  condos in one community photograph nearly identically, so Lens VISUAL matches sibling listings for
+  ANY unit we put there; the multi-photo-agreement fallback (no unit-text required) then declares
+  FOUND forever = infinite replace loop. FIX: pure `shared/sibling-unit-lookalike.ts` (18 tests) —
+  `unitTokensFromListingText` (conservative: digit+letter bare tokens like 8K/13F — 3BR/2BA can't
+  match; marker-prefixed unit/apt/condo/# tokens; /unit-8j/ URL segments; leading-zero canonical
+  08D==8D) + `isSiblingUnitLookalikeHit`. The scanner's strongHits (agreement) tally now SKIPS a
+  community-compatible hit that names a DIFFERENT unit when the Lens source is merely "visual".
+  LOAD-BEARING SAFETY: "known-source" hits (page provably contains OUR image) are NEVER suppressed,
+  the VERIFIED path (page text mentions OUR unit token) is untouched, and unit-less reposts still
+  count toward agreement — real theft still trips FOUND. Logs a
+  "skipping sibling-unit visual look-alike" line per suppression. NOTE: the flagged row clears only
+  on the NEXT rescan of that folder — post-deploy, tap "Rescan again" on the Pili Mai row (or
+  re-run the photo scan) and it should walk to clean. `npm run check` baseline is now 338 (main
+  moved; 0 new from this change), full `npm test` REAL exit 0, build clean.
+
 - 2026-07-04 (ONE-CLICK auto-replace from the duplicate-photos warning): Operator asked for the
   Replace-photos button to be true one-click-and-done — no modal, background everything, progress
   via a dashboard queue. SHIPPED: server orchestrator `server/auto-replace-jobs.ts` chains the

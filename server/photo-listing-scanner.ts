@@ -54,6 +54,7 @@ import {
 } from "@shared/photo-folder-utils";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { canonicalOtaUrlCandidates, otaPlatformForUrl } from "@shared/ota-host-match";
+import { isSiblingUnitLookalikeHit } from "@shared/sibling-unit-lookalike";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "./photo-match-guardrails";
 import {
@@ -880,7 +881,26 @@ export async function runPhotoListingCheckForFolder(
         const title = String(h.title || "");
         const source = String(h.source || "");
         const communityOk = listingMatchesFolderCommunity(title, source, link, communityCtx);
-        if (communityOk) strongHits.push({ photoUrl, listingUrl: link, title, source });
+        // Same-community SIBLING-UNIT look-alike brake (Pili Mai 8J incident,
+        // 2026-07-04): a hit whose title/URL names a DIFFERENT unit of this
+        // community, when Lens only claims VISUAL similarity, is a sibling
+        // owner's own listing — same-model condos photograph nearly
+        // identically, and counting them toward multi-photo agreement made
+        // EVERY unit in the community scan "found on VRBO" forever (an
+        // infinite replace loop). "known-source" hits (the page provably
+        // contains OUR image) are never suppressed, and the VERIFIED path
+        // below (page text mentions OUR unit) is unaffected — real theft
+        // still gets caught.
+        const siblingLookalike = communityOk && isSiblingUnitLookalikeHit({
+          title,
+          link,
+          lensSource: String(h.__lensSource || ""),
+          ourUnitClaims: verifyTokens ?? [],
+        });
+        if (siblingLookalike) {
+          console.log(`[photo-listing-scanner] ${folder}: skipping sibling-unit visual look-alike ${link} ("${title.slice(0, 60)}")`);
+        }
+        if (communityOk && !siblingLookalike) strongHits.push({ photoUrl, listingUrl: link, title, source });
         const ok = await verify(link, title, source);
         if (ok) verifiedHits.push({ photoUrl, listingUrl: link, title, source });
       }
