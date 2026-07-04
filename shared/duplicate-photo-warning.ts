@@ -184,6 +184,32 @@ export function groupDuplicateListingLinksByUnit(
   return out;
 }
 
+// De-duped list of OUR photos matched across a group's links — powers the
+// "Unit A matched 3 of your photos: x, y, z" at-a-glance rollup that lets the
+// operator eyeball whether a verdict is a real match.
+export function distinctMatchedPhotoUrls(links: DuplicateListingLink[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const link of links) {
+    for (const url of link.matchedPhotoUrls) {
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      out.push(url);
+    }
+  }
+  return out;
+}
+
+// Break a group's links out per platform (Airbnb / VRBO / Booking.com
+// sub-headings), preserving platform order and dropping empty platforms.
+export function groupLinksByPlatform(
+  links: DuplicateListingLink[],
+): Array<{ platform: DuplicatePhotoPlatform; links: DuplicateListingLink[] }> {
+  return DUPLICATE_PHOTO_PLATFORMS
+    .map((platform) => ({ platform, links: links.filter((l) => l.platform === platform) }))
+    .filter((g) => g.links.length > 0);
+}
+
 export type PhotoReplaceRescanVerdict =
   | { state: "pending" }
   | { state: "clean" }

@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (duplicate-photos popup: per-unit MATCHED-PHOTO rollup + Airbnb/VRBO/Booking breakout;
+  scanner HOST-FAMILY bucketing fix): Operator asked to (a) see "Unit A matched photo x, y, z" at a
+  glance to judge real-vs-false matches, (b) break out VRBO and Booking.com matches, and (c) make
+  sure the scan actually matches those channels (he mostly saw Airbnb). (c) ROOT CAUSE FOUND: the
+  scanner's Lens tally bucketed by bare substring (`link.includes("vrbo.com")` etc.) — Lens hits on
+  regional/sibling domains were silently DROPPED: airbnb.co.uk/.ca/.com.au, VRBO's brand family
+  (homeaway.com, abritel.fr, fewo-direkt.de, stayz.com.au, bookabach.co.nz — same listing pool!),
+  m.booking.com. FIX: new pure `shared/ota-host-match.ts` (24 tests) — `otaPlatformForUrl`
+  host-family matcher (rejects lookalikes like airbnb.evil.com via the TLD-label heuristic) +
+  `canonicalOtaUrlCandidates` (regional URL → canonical airbnb.com path / vrbo.com/<numeric id> /
+  booking.com path). LOAD-BEARING: the scanner's authorized-URL suppression now checks the CANONICAL
+  candidates too — without that, widening hosts would flag OUR OWN airbnb.co.uk/abritel.fr mirrors
+  as theft. (a)+(b) UI: each popup unit group now shows a red rollup box "Unit A (7B) matched N of
+  your photos: x.jpg, y.jpg, z.jpg" with 48px thumbnails (dedup across links —
+  `distinctMatchedPhotoUrls`), and links render under per-platform sub-headings "Airbnb (2 listings):
+  / VRBO (1 listing): / Booking.com (…)" via `groupLinksByPlatform` (platform-ordered, empty
+  platforms dropped). Tests 33/0 duplicate-photo-warning + 24/0 ota-host-match, full `npm test` exit
+  0, build clean, `npm run check` 335 = baseline. Could NOT live-smoke a Lens scan (no SEARCHAPI
+  key) — post-deploy, re-run the photo scan: VRBO/Booking columns should start picking up
+  regional-domain reposts the old substring match missed.
+
 - 2026-07-04 (duplicate-photos popup: PER-UNIT link attribution + matched-photo thumbnails):
   Operator (screenshot: Anini Beach 6BR row "Unit A (7B) + Unit B (8)" with one clumped link list)
   asked to show which photos/URLs belong to Unit A vs Unit B. ROOT CAUSE: some properties share ONE
