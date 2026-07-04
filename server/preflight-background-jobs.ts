@@ -1,5 +1,10 @@
 import { preflightPhotoDiscoveryAttempts } from "@shared/preflight-photo-discovery";
 import {
+  decideReplacementContinuation,
+  mergeReplacementUnits,
+  REPLACEMENT_EXHAUSTIVE_OPTION_TARGET_DEFAULT,
+} from "@shared/replacement-search-continuation";
+import {
   buildUnitPhotoResolverProof,
   compareUnitPhotoProofs,
   MIN_INDEPENDENT_UNIT_PHOTOS,
@@ -606,13 +611,29 @@ async function runPreflightReplacementFindJob(
       progress: 12,
       startedAt: Date.now(),
     });
+    // Exhaustive mode ("find ALL possible replacement units", operator ask
+    // 2026-07-04): keep continuing after SUCCESSFUL passes too, accumulating
+    // viable units across passes until the candidate pool is drained, the
+    // option target is met, or the pass cap trips. Decision logic is pure —
+    // shared/replacement-search-continuation.ts (unit-tested). Legacy
+    // first-hit behavior is preserved when the flag is absent.
+    const collectAllOptions = body.collectAllOptions === true;
+    const optionTarget = Math.max(
+      1,
+      Number.isFinite(Number(process.env.REPLACEMENT_EXHAUSTIVE_TARGET))
+        ? Number(process.env.REPLACEMENT_EXHAUSTIVE_TARGET)
+        : REPLACEMENT_EXHAUSTIVE_OPTION_TARGET_DEFAULT,
+    );
+    let accumulatedUnits: Array<Record<string, unknown>> = [];
     let requestBody: Record<string, unknown> = { ...body };
     let data: any = null;
     for (let pass = 0; pass <= MAX_REPLACEMENT_FIND_CONTINUATIONS; pass += 1) {
       if (pass > 0) {
         touchReplacementJob(job, {
           phase: "checking",
-          message: `Continuing search (pass ${pass + 1})…`,
+          message: accumulatedUnits.length > 0
+            ? `${accumulatedUnits.length} option${accumulatedUnits.length === 1 ? "" : "s"} found — checking the rest of the community (pass ${pass + 1})…`
+            : `Continuing search (pass ${pass + 1})…`,
           progress: Math.min(92, 40 + pass * 6),
         });
       }
@@ -621,9 +642,13 @@ async function runPreflightReplacementFindJob(
         requestBody,
         REPLACEMENT_FIND_UNIT_LOOPBACK_TIMEOUT_MS,
       );
-      if (data?.unit) break;
-      if (!data?.error) break;
-      const diagnostic = data.diagnostic as {
+      const passUnits = Array.isArray(data?.units) && data.units.length > 0
+        ? data.units as Array<Record<string, unknown>>
+        : data?.unit
+          ? [data.unit as Record<string, unknown>]
+          : [];
+      accumulatedUnits = mergeReplacementUnits(accumulatedUnits, passUnits);
+      const diagnostic = data?.diagnostic as {
         budgetStopped?: boolean;
         capExceeded?: boolean;
         uncheckedCandidates?: Array<Record<string, unknown>>;
@@ -632,13 +657,27 @@ async function runPreflightReplacementFindJob(
       const unchecked = Array.isArray(diagnostic?.uncheckedCandidates)
         ? diagnostic!.uncheckedCandidates!
         : [];
-      // Continue when the route left candidates unchecked — either the route/SearchAPI
-      // budget tripped (budgetStopped) OR discovery overflowed one pass (capExceeded,
-      // the hundreds-unit case). Each continuation re-checks the leftover pool with
-      // skipDiscovery, so it drains a big community across passes without re-discovering.
-      if ((!diagnostic?.budgetStopped && !diagnostic?.capExceeded) || unchecked.length === 0) break;
-      const checkedUrls = (diagnostic.attempts ?? [])
+      const decision = decideReplacementContinuation({
+        collectAllOptions,
+        pass,
+        maxPasses: MAX_REPLACEMENT_FIND_CONTINUATIONS,
+        accumulatedUnits: accumulatedUnits.length,
+        optionTarget,
+        passHadUnit: passUnits.length > 0,
+        passHadError: !!data?.error,
+        budgetStopped: diagnostic?.budgetStopped === true,
+        capExceeded: diagnostic?.capExceeded === true,
+        uncheckedCount: unchecked.length,
+      });
+      if (decision !== "continue") break;
+      // Each continuation re-checks the leftover pool with skipDiscovery, so a
+      // big community drains across passes without re-discovering. Accepted
+      // unit URLs join skipUrls so a later pass can't re-propose them.
+      const checkedUrls = (diagnostic?.attempts ?? [])
         .map((row) => String(row?.sourceUrl ?? "").trim())
+        .filter(Boolean);
+      const acceptedUrls = accumulatedUnits
+        .map((u) => String((u as { url?: unknown }).url ?? "").trim())
         .filter(Boolean);
       const priorSkip = Array.isArray(requestBody.skipUrls)
         ? (requestBody.skipUrls as string[])
@@ -647,11 +686,11 @@ async function runPreflightReplacementFindJob(
         ...body,
         skipDiscovery: true,
         resumeCandidates: unchecked,
-        skipUrls: [...new Set([...priorSkip, ...checkedUrls])],
+        skipUrls: [...new Set([...priorSkip, ...checkedUrls, ...acceptedUrls])],
         expandedSearch: body.expandedSearch === true || requestBody.expandedSearch === true,
       };
     }
-    if (data?.error) {
+    if (accumulatedUnits.length === 0 && data?.error) {
       touchReplacementJob(job, {
         status: "failed",
         phase: "failed",
@@ -663,11 +702,7 @@ async function runPreflightReplacementFindJob(
       });
       return;
     }
-    const foundUnitList = Array.isArray(data.units) && data.units.length > 0
-      ? data.units as Array<Record<string, unknown>>
-      : data.unit
-        ? [data.unit as Record<string, unknown>]
-        : null;
+    const foundUnitList = accumulatedUnits.length > 0 ? accumulatedUnits : null;
     touchReplacementJob(job, {
       status: "completed",
       phase: "completed",
@@ -676,9 +711,9 @@ async function runPreflightReplacementFindJob(
         : "Replacement unit found",
       progress: 100,
       finishedAt: Date.now(),
-      unit: data.unit ?? null,
+      unit: foundUnitList?.[0] ?? data?.unit ?? null,
       units: foundUnitList,
-      diagnostic: data.diagnostic ?? null,
+      diagnostic: data?.diagnostic ?? null,
       error: null,
     });
   } catch (e: any) {

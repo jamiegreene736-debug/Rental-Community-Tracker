@@ -32095,6 +32095,7 @@ Return ONLY compact JSON with this exact shape:
       expandedSearch: requestedExpandedSearch = false,
       skipDiscovery: requestedSkipDiscovery = false,
       allowOtaListed: requestedAllowOtaListed = false,
+      collectAllOptions: requestedCollectAllOptions = false,
       resumeCandidates: requestedResumeCandidates = [],
     } = req.body as {
       communityFolder: string;
@@ -32112,6 +32113,7 @@ Return ONLY compact JSON with this exact shape:
       expandedSearch?: boolean;
       skipDiscovery?: boolean;
       allowOtaListed?: boolean;
+      collectAllOptions?: boolean;
       resumeCandidates?: Array<{
         sourceUrl: string;
         source: "zillow" | "realtor" | "redfin" | "homes";
@@ -32135,6 +32137,13 @@ Return ONLY compact JSON with this exact shape:
     // to also be OTA-listed, never OTA photos). The accepted unit is flagged
     // `otaListedOn` so the operator sees it is already listed elsewhere.
     const allowOtaListed = requestedAllowOtaListed === true;
+    // Exhaustive mode ("find ALL possible replacement units"): the background
+    // job keeps continuing after successful passes to drain the whole candidate
+    // pool, so each pass should also collect a bigger batch of viable units and
+    // report what's left unchecked even on SUCCESS (see the success-path
+    // diagnostic below — without it a successful pass gave the continuation
+    // loop nothing to resume from).
+    const collectAllOptions = requestedCollectAllOptions === true;
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
     const normalizedBodyName = typeof bodyCommunityName === "string" ? bodyCommunityName.trim() : "";
@@ -33654,11 +33663,18 @@ Return ONLY compact JSON with this exact shape:
       1,
       Number.isFinite(Number(process.env.REPLACEMENT_MAX_VIABLE_UNITS))
         ? Number(process.env.REPLACEMENT_MAX_VIABLE_UNITS)
-        : (expandedSearch ? 5 : 4),
+        : collectAllOptions
+          ? 8
+          : (expandedSearch ? 5 : 4),
     );
     const foundUnits: Array<Record<string, unknown>> = [];
 
     let budgetStopped = false;
+    // How many of the sorted pool this pass actually consumed. `attempts.length`
+    // undercounts on the SUCCESS path (accepted units + resort-gate skips are
+    // deliberately not pushed to attempts), so the success-path unchecked tail
+    // is sliced from this counter instead.
+    let processedCandidates = 0;
     const candidatesToCheck = candidates.slice(0, MAX_CANDIDATES_TO_CHECK);
     for (const candidate of candidatesToCheck) {
       if (!hasRouteBudget(PLATFORM_CHECK_RESERVE_MS)) {
@@ -33675,6 +33691,7 @@ Return ONLY compact JSON with this exact shape:
         console.warn(`[find-unit] SearchAPI call budget (${SEARCHAPI_CALL_BUDGET}) reached after ${searchApiCalls} calls / ${attempts.length} candidates — pausing for continuation`);
         break;
       }
+      processedCandidates += 1;
       try {
         let { sourceUrl, source, address, unitNumber, thumbnail } = candidate;
         // Set when the unit-name OTA check finds this unit on an enforced channel
@@ -33991,8 +34008,35 @@ Return ONLY compact JSON with this exact shape:
         seenUrls.add(key);
         return true;
       });
-      console.error(`[find-unit] returning ${units.length} viable unit(s)`);
-      return res.json({ unit: units[0], units });
+      // Success-path continuation data: which candidates this pass never got
+      // to (viable-unit cap hit, route/SearchAPI budget tripped, or discovery
+      // overflowed one pass). The exhaustive background job feeds these back
+      // as resumeCandidates so a big community's whole pool gets drained
+      // across passes instead of stopping at the first few finds. Shape
+      // mirrors the failure-path diagnostic below.
+      const successUnchecked = candidates.slice(processedCandidates).map((c) => ({
+        sourceUrl: c.sourceUrl,
+        source: c.source,
+        address: c.address,
+        unitNumber: c.unitNumber,
+        thumbnail: c.thumbnail,
+        contextText: c.contextText,
+        bedroomHint: c.bedroomHint,
+      }));
+      console.error(`[find-unit] returning ${units.length} viable unit(s); ${successUnchecked.length} candidates unchecked`);
+      return res.json({
+        unit: units[0],
+        units,
+        diagnostic: {
+          budgetStopped,
+          capExceeded: candidates.length > MAX_CANDIDATES_TO_CHECK,
+          checkedCandidates: processedCandidates,
+          attempts,
+          uncheckedCandidates: successUnchecked,
+          uncheckedCount: successUnchecked.length,
+          searchApiCalls,
+        },
+      });
     }
 
     // PR #322: build a diagnostic-rich failure message that tells
