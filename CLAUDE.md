@@ -43,6 +43,31 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (dashboard MISSING-BUY-IN red-flag popup — units not purchased for a check-in within
+  7 days): Operator asked for a card-failure-style red alert when a reservation's required units
+  haven't been bought in within 7 days of check-in. SHIPPED: pure `shared/buyin-coverage-warning.ts`
+  (41 tests) — `collectBuyInCoverageWarnings` warns when a committed reservation (same status
+  exclusions as the payment warning; manual rows pass) checks in within 7 days (inclusive, incl.
+  today AND in-house stays via the checkOut>=today clause — past stays never nag) and any unit slot
+  lacks an attached buy-in (a CANCELLED buy-in does not count as coverage; a status-less legacy row
+  does). Reservations with no configured slots are skipped (requirements unknown). Server
+  `GET /api/dashboard/buyin-coverage` (routes.ts, after payment-failures) deliberately does NOT
+  re-implement slot resolution — it loopback self-calls `GET /api/bookings/guesty-all?checkInTo=
+  today+8` (the property-revenue-scheduler pattern), which already returns every committed Guesty +
+  manual reservation with `slots[]` (required units + attached buyIn) across core properties,
+  promoted drafts, and ad-hoc listings; checkInFrom is deliberately unset so in-house stays (past
+  check-in, checkOut>=today default filter) come back. Client home.tsx: exact payment-failure
+  pattern — auto-opening red Dialog + persistent "Review units" banner, dismissal signature in
+  localStorage `nexstay_buyin_coverage_warning_dismissed` (re-raises when facts change: new
+  uncovered arrival, moved check-in, different missing-unit set — and yes, buying ONE of two units
+  re-raises with the remainder), per-booking rows show "✕ N of M units NOT purchased (Unit 812) ·
+  checks in in X days" (TODAY / ALREADY checked in variants) + "Find & attach units" (/bookings) +
+  "Open in Guesty" (hidden for manual: rows). Remediation stays MANUAL — no auto-purchase from a
+  popup. Verified: 41/0 new tests, full `npm test` exit 0, build clean, `npm run check` 338 =
+  baseline. Could NOT live-smoke the Guesty leg (no creds) — post-deploy the popup should
+  auto-raise if any upcoming-7-day booking has an unfilled slot (most do per the buy-ins-table
+  memory, so expect it to fire on first load).
+
 - 2026-07-04 (SIBLING-UNIT look-alike false FOUND — Pili Mai 8J incident; diagnosed from RAILWAY
   LOGS, now accessible via RAILWAY_TOKEN env): Operator ran the one-click auto-replace on prop32
   Unit A; queue completed (committed Redfin unit #8J, 22 photos) and BOTH verification kicks fired
