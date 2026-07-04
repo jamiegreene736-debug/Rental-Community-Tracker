@@ -104,6 +104,28 @@ const markReplacementJobRefAlive = (propertyId: number) => {
 // operator reopens the flow days later) must NOT silently launch a fresh,
 // SearchAPI-billed search — show the expired error and let them re-click.
 const REPLACEMENT_AUTO_RESUME_WINDOW_MS = 45 * 60 * 1000;
+
+// Most-recently-alive replacement search across a set of properties, if any is
+// still inside the auto-resume window. The dashboard uses this on mount to
+// auto-reopen the Replace-photos dialog after the operator left Safari (iOS
+// reloads the tab, wiping the dialog state while the job keeps running
+// server-side) — without it they had to remember to re-click "Replace photos"
+// to pick up the finished search.
+export function findLiveReplacementJobRef(
+  propertyIds: number[],
+): { propertyId: number; targetUnitId: string } | null {
+  let best: { propertyId: number; targetUnitId: string; aliveAt: number } | null = null;
+  for (const propertyId of propertyIds) {
+    const ref = loadReplacementJobRef(propertyId);
+    if (!ref) continue;
+    const aliveAt = ref.lastAliveAt ?? ref.startedAt ?? 0;
+    if (!aliveAt || Date.now() - aliveAt > REPLACEMENT_AUTO_RESUME_WINDOW_MS) continue;
+    if (!best || aliveAt > best.aliveAt) {
+      best = { propertyId, targetUnitId: ref.targetUnitId, aliveAt };
+    }
+  }
+  return best ? { propertyId: best.propertyId, targetUnitId: best.targetUnitId } : null;
+}
 // Hard cap on transparent restarts for ONE search (durable via `resumeCount`, so
 // it survives close/reopen remounts) — a crash-looping server can't keep driving
 // find-unit + its SearchAPI budget. A fresh operator-initiated search() resets it.
@@ -481,6 +503,12 @@ export function UnitReplacementFlow({
       skipUrls: [...skipUrls, ...nextExtra],
       expandedSearch: expanded,
       allowOtaListed: useAllowOtaListed,
+      // Exhaustive search (operator ask 2026-07-04): the background job keeps
+      // draining the community's whole candidate pool across passes instead of
+      // stopping at the first viable unit, so the options list shows every
+      // clean unit it could find (bounded by REPLACEMENT_EXHAUSTIVE_TARGET,
+      // default 12, and the existing pass/budget caps).
+      collectAllOptions: true,
     };
     lastSearchPayloadRef.current = startPayload;
     try {

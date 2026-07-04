@@ -2542,11 +2542,24 @@ assert.ok(
   routeSource.includes("capExceeded,") && routeSource.includes("searchApiCalls,"),
   "Tier 2/4: the diagnostic must return capExceeded + searchApiCalls (continuation trigger + observability)",
 );
+// 2026-07-04: the pass-continuation decision moved from an inline check in
+// preflight-background-jobs.ts into the pure, unit-tested
+// shared/replacement-search-continuation.ts (decideReplacementContinuation —
+// which still continues on capExceeded OR budgetStopped, plus the new
+// exhaustive collectAllOptions mode). The job runner must consume it and keep
+// the 12-pass cap.
 assert.ok(
-  preflightJobsSource.includes("!diagnostic?.capExceeded")
+  preflightJobsSource.includes("decideReplacementContinuation")
     && preflightJobsSource.includes("MAX_REPLACEMENT_FIND_CONTINUATIONS = 12"),
-  "Tier 2: the background job continues on capExceeded (not only budgetStopped) with more passes to drain a big pool",
+  "Tier 2: the background job delegates pass continuation to decideReplacementContinuation with the 12-pass cap",
 );
+{
+  const continuationSource = readFileSync("shared/replacement-search-continuation.ts", "utf8");
+  assert.ok(
+    continuationSource.includes("f.budgetStopped || f.capExceeded"),
+    "Tier 2: the continuation decision still fires on capExceeded (not only budgetStopped)",
+  );
+}
 {
   const sharedOpDiagnosticsSource = readFileSync("shared/operation-diagnostics.ts", "utf8");
   assert.ok(

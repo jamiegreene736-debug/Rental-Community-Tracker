@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (find-replacement-unit: EXHAUSTIVE mode + leave-your-phone auto-reopen): Operator asked
+  (a) can he leave Safari mid-search (screenshot: "Still checking candidates… 94% · 7:42") and (b) a
+  deep dive into how find-unit works + make it find ALL possible replacement units. (a) AUDIT: the
+  search ALREADY runs fully server-side (preflight-background-jobs loopback job; localStorage
+  payload ref auto-relaunches an evicted job, 45-min window, 3-restart cap) — the "Safe to leave
+  this tab" label is true. REAL GAP: iOS Safari reloads the tab on return, wiping
+  replacePhotosTarget, so the dashboard dialog (polling + the manual COMMIT step) vanished and the
+  operator had to re-click Replace photos to rediscover his own search. FIX: exported
+  `findLiveReplacementJobRef(propertyIds)` from unit-replacement-flow.tsx (most-recently-alive ref
+  within the window) + a once-per-load home.tsx mount effect that auto-reopens the dialog + toast.
+  Commit stays manual (destructive photo swap). (b) DEEP DIVE (don't re-chase): discovery = SearchAPI
+  site: queries (zillow/realtor/redfin/homes, bedroom-aware, aliases, sold-listing sweep, Ko Olina
+  branches) + Apify + RealtyAPI, pool target 40-80, per-pass cap 70/120 candidates + 220 SearchAPI
+  calls + 260-285s route budget; gates: resort-street, internal-duplicate, bedroom, OTA-text,
+  photo-floor, Haiku vision, reverse-image reuse. THE exhaustiveness gap: one pass returned after
+  MAX_VIABLE_UNITS (4/5) cleans and the job runner broke at the FIRST pass with a unit — big
+  communities never surfaced the rest. SHIPPED: `collectAllOptions` (client now always sends it) —
+  find-unit raises per-pass viable cap to 8 and (KEY) returns a SUCCESS-path diagnostic
+  (budgetStopped/capExceeded/uncheckedCandidates sliced from new `processedCandidates` counter —
+  attempts.length undercounts on success); the job runner accumulates units across passes (dedupe by
+  url, accepted urls join skipUrls) and continues while pool remains, until
+  REPLACEMENT_EXHAUSTIVE_TARGET (default 12) options or the 12-pass cap; a later "no eligible units"
+  failure AFTER options accumulated = pool drained = COMPLETED, not failed. Pass control is pure
+  `shared/replacement-search-continuation.ts` (15 tests; legacy first-hit mode preserved when flag
+  absent). NOTE: tests/pipeline-logic.test.ts Tier-2 meta-assertion repointed to the shared module.
+  Verified: 15/0 new, full `npm test` REAL exit 0, build clean, `npm run check` 335 = baseline.
+
 - 2026-07-04 (duplicate-photos popup: per-unit MATCHED-PHOTO rollup + Airbnb/VRBO/Booking breakout;
   scanner HOST-FAMILY bucketing fix): Operator asked to (a) see "Unit A matched photo x, y, z" at a
   glance to judge real-vs-false matches, (b) break out VRBO and Booking.com matches, and (c) make

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -74,7 +74,7 @@ import { occupancyForBedrooms } from "@/data/bedding-config";
 import { isScannableFolder, replacementPhotoFolderRef } from "@shared/photo-folder-utils";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
-import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
+import { UnitReplacementFlow, findLiveReplacementJobRef, type ReplacementUnitData } from "@/components/unit-replacement-flow";
 import { useToast } from "@/hooks/use-toast";
 import { extractBRList } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
@@ -2602,6 +2602,30 @@ function AdminDashboard() {
     });
     return owners;
   };
+
+  // Leave-your-phone survivability: the find-unit search runs SERVER-side, but
+  // iOS Safari reloads the tab after app-switching, wiping replacePhotosTarget
+  // — so the dialog (and its polling/commit UI) vanished while the job kept
+  // running. On mount, auto-reopen the dialog for the most recently alive
+  // replacement search (45-min freshness window, once per page load) so the
+  // operator comes back to the live progress or the finished options list.
+  const replaceFlowAutoReopenedRef = useRef(false);
+  useEffect(() => {
+    if (replaceFlowAutoReopenedRef.current || replacePhotosTarget) return;
+    const builderIds = allProperties
+      .filter((p) => p.id > 0 && !!getUnitBuilderByPropertyId(p.id))
+      .map((p) => p.id);
+    if (builderIds.length === 0) return;
+    const live = findLiveReplacementJobRef(builderIds);
+    if (!live) return;
+    replaceFlowAutoReopenedRef.current = true;
+    setReplacePhotosTarget({ propertyId: live.propertyId, unitId: live.targetUnitId });
+    toast({
+      title: "Resumed your replacement search",
+      description: "The find-a-new-unit search kept running on the server while you were away — reopened it so you can review and commit the result.",
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allProperties, replacePhotosTarget]);
 
   // Existing swaps for the target property — feeds replacementLabel/sourceUrl
   // into the flow's unit picker and the skipUrls list (never re-suggest a
