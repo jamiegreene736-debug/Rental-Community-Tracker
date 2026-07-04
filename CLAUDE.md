@@ -43,6 +43,25 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (duplicate-photos popup: PER-UNIT link attribution + matched-photo thumbnails):
+  Operator (screenshot: Anini Beach 6BR row "Unit A (7B) + Unit B (8)" with one clumped link list)
+  asked to show which photos/URLs belong to Unit A vs Unit B. ROOT CAUSE: some properties share ONE
+  photo folder between both units — prop20 mauna-kai-t3 (7B + 8) and prop29 kaiulani-52 even share
+  the IDENTICAL `photos` list — so the folder-keyed warning row inherently clumps them. SHIPPED:
+  `collectDuplicateListingLinks` now accumulates each de-duped listing's matched OUR-photo URLs
+  (scanner stamps `photoUrl = <host>/photos/<folder>/<file>`); new pure
+  `groupDuplicateListingLinksByUnit(matches, owners)` attributes each offending listing to the
+  unit(s) whose configured `photos[]` filename list contains the matched photo — a listing hosting
+  both units' photos shows under BOTH; unmatched files go to an "unassigned" group; and owners with
+  IDENTICAL galleries (the mauna-kai-t3 case) deliberately collapse to ONE group flagged
+  `sharedGallery` (honest "one gallery serves both units" note — never fake attribution). Popup rows
+  render per-unit "Unit A (7B) — photos found on:" sections + 36px THUMBNAILS of our matched photos
+  under every link ("Your photos found there:") so the operator can identify the photo even in the
+  shared-gallery case. ALSO: `resolveReplacePhotosUnit` → plural `resolveReplacePhotosUnits` — a
+  shared-folder row now gets a "Replace photos (Unit X)" button PER owning unit (screenshot showed
+  only Unit B's). Tests 30/0 (`tests/duplicate-photo-warning.test.ts`), full `npm test` exit 0,
+  build clean, `npm run check` 335 = baseline.
+
 - 2026-07-04 (duplicate-photos popup: per-unit "Replace photos (Unit X)" → find-new-unit flow +
   Claude-vision community confirmation): Operator asked for a button on each duplicate-photos
   warning to replace that unit's photos with another unit from the SAME community + SAME bedroom

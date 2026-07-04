@@ -90,11 +90,13 @@ import {
 } from "@shared/bulk-pricing-push-logic";
 import { selectBulkPricingJobToSurface } from "@shared/bulk-pricing-queue-surface";
 import {
-  collectDuplicateListingLinks,
   duplicatePhotoWarningSignature,
   formatDuplicatePhotoPlatforms,
+  groupDuplicateListingLinksByUnit,
+  photoFilenameFromMatchUrl,
   photoReplaceRescanVerdict,
   DUPLICATE_PHOTO_PLATFORM_LABELS,
+  type DuplicateLinkOwner,
   type DuplicatePhotoPlatform,
 } from "@shared/duplicate-photo-warning";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
@@ -2553,20 +2555,50 @@ function AdminDashboard() {
   };
 
   // ── "Replace photos (Unit X)" wiring for the duplicate-photos popup ────────
-  // Resolve a flagged folder back to its builder unit (the folder may already
-  // BE a replacement-* folder if a prior swap's photos got flagged again).
-  // Draft rows return null — their replacement flow lives in the builder
-  // pre-flight, which owns the draft-field repointing on commit.
-  const resolveReplacePhotosUnit = (propertyId: number, folder: string) => {
-    if (propertyId <= 0) return null;
+  // Resolve a flagged folder back to EVERY builder unit it serves — some
+  // properties share one folder between Unit A and Unit B (mauna-kai-t3,
+  // kaiulani-52), and the operator needs a Replace button PER unit, not just
+  // the first match. The folder may also already BE a replacement-* folder if
+  // a prior swap's photos got flagged again. Draft rows return [] — their
+  // replacement flow lives in the builder pre-flight, which owns the
+  // draft-field repointing on commit.
+  const resolveReplacePhotosUnits = (propertyId: number, folder: string) => {
+    if (propertyId <= 0) return [];
     const builder = getUnitBuilderByPropertyId(propertyId);
-    if (!builder?.communityPhotoFolder) return null;
+    if (!builder?.communityPhotoFolder) return [];
     const ref = replacementPhotoFolderRef(folder);
-    const index = builder.units.findIndex(
-      (u) => u.photoFolder === folder || (ref ? u.id === ref.oldUnitId : false),
-    );
-    if (index < 0) return null;
-    return { builder, unit: builder.units[index], index, letter: `Unit ${String.fromCharCode(65 + index)}` };
+    const out: Array<{ builder: typeof builder; unit: (typeof builder.units)[number]; index: number; letter: string }> = [];
+    builder.units.forEach((u, i) => {
+      const active = u.photoFolder
+        ? activePhotoFolderByOriginal.get(`${propertyId}:${u.photoFolder}`) ?? u.photoFolder
+        : undefined;
+      const owns = u.photoFolder === folder || active === folder || (ref ? u.id === ref.oldUnitId : false);
+      if (!owns) return;
+      out.push({ builder, unit: u, index: i, letter: `Unit ${String.fromCharCode(65 + i)}` });
+    });
+    return out;
+  };
+
+  // Per-unit photo galleries for a flagged folder, so the popup can attribute
+  // each offending listing to Unit A vs Unit B by the matched photo's
+  // filename (groupDuplicateListingLinksByUnit). Owners must mirror the
+  // photoByProperty folder loop: a unit owns the row when its ACTIVE (aliased)
+  // folder is the row's folder.
+  const duplicateLinkOwnersForRow = (propertyId: number, folder: string): DuplicateLinkOwner[] => {
+    if (propertyId <= 0) return [];
+    const builder = getUnitBuilderByPropertyId(propertyId);
+    if (!builder) return [];
+    const owners: DuplicateLinkOwner[] = [];
+    builder.units.forEach((u, i) => {
+      if (!u.photoFolder) return;
+      const active = activePhotoFolderByOriginal.get(`${propertyId}:${u.photoFolder}`) ?? u.photoFolder;
+      if (active !== folder) return;
+      owners.push({
+        label: `Unit ${String.fromCharCode(65 + i)}${u.unitNumber ? ` (${u.unitNumber})` : ""}`,
+        filenames: (u.photos ?? []).map((p) => p.filename),
+      });
+    });
+    return owners;
   };
 
   // Existing swaps for the target property — feeds replacementLabel/sourceUrl
@@ -6027,38 +6059,92 @@ function AdminDashboard() {
                         ) : null}
                         {(() => {
                           // Links to the actual OTA listings hosting the duplicated
-                          // photos. The scanner already suppressed our own
+                          // photos, ATTRIBUTED PER UNIT: when one folder serves two
+                          // units, each offending listing is grouped under the unit
+                          // whose configured gallery contains the matched photo(s),
+                          // with thumbnails of OUR matched photos under every link.
+                          // Units sharing one identical gallery (mauna-kai-t3) get
+                          // an honest "shared gallery" note instead of fake
+                          // attribution. The scanner already suppressed our own
                           // Guesty-authorized listing URLs, so every link here is a
                           // listing that is NOT ours. Hidden once the verify rescan
                           // confirms clean (the stale links are no longer evidence).
                           if (verdict?.state === "clean") return null;
-                          const { links, more } = collectDuplicateListingLinks({
-                            airbnb: checkRow?.airbnbMatches,
-                            vrbo: checkRow?.vrboMatches,
-                            booking: checkRow?.bookingMatches,
-                          });
-                          if (links.length === 0) return null;
+                          const groups = groupDuplicateListingLinksByUnit(
+                            {
+                              airbnb: checkRow?.airbnbMatches,
+                              vrbo: checkRow?.vrboMatches,
+                              booking: checkRow?.bookingMatches,
+                            },
+                            duplicateLinkOwnersForRow(r.propertyId, r.folder),
+                          );
+                          if (groups.length === 0) return null;
+                          const thumbSrc = (url: string) => {
+                            try {
+                              return new URL(url).pathname || url;
+                            } catch {
+                              return url;
+                            }
+                          };
                           return (
-                            <span className="mt-1 block space-y-0.5">
-                              {links.map((link) => (
-                                <a
-                                  key={link.url}
-                                  href={link.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="flex items-center gap-1 text-red-700 underline underline-offset-2 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200"
-                                  title={link.url}
-                                  data-testid={`link-duplicate-listing-${r.folder}-${link.platform}`}
-                                >
-                                  <ExternalLink className="h-3 w-3 shrink-0" />
-                                  <span className="truncate">
-                                    {DUPLICATE_PHOTO_PLATFORM_LABELS[link.platform]}: {link.title}
-                                  </span>
-                                </a>
+                            <span className="mt-1 block space-y-1.5">
+                              {groups.map((g, gi) => (
+                                <span key={g.label ?? g.kind ?? gi} className="block space-y-0.5">
+                                  {g.kind === "unit" ? (
+                                    <span className="block font-semibold text-red-700 dark:text-red-300">
+                                      {g.label} — photos found on:
+                                    </span>
+                                  ) : null}
+                                  {g.kind === "unassigned" ? (
+                                    <span className="block font-medium text-muted-foreground">
+                                      Matched photos not in either unit's configured gallery:
+                                    </span>
+                                  ) : null}
+                                  {g.sharedGallery ? (
+                                    <span className="block text-muted-foreground">
+                                      One shared photo gallery serves {r.unitLabel} — each matched photo below is used by BOTH units.
+                                    </span>
+                                  ) : null}
+                                  {g.links.map((link) => (
+                                    <span key={link.url} className="block">
+                                      <a
+                                        href={link.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="flex items-center gap-1 text-red-700 underline underline-offset-2 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200"
+                                        title={link.url}
+                                        data-testid={`link-duplicate-listing-${r.folder}-${link.platform}`}
+                                      >
+                                        <ExternalLink className="h-3 w-3 shrink-0" />
+                                        <span className="truncate">
+                                          {DUPLICATE_PHOTO_PLATFORM_LABELS[link.platform]}: {link.title}
+                                        </span>
+                                      </a>
+                                      {link.matchedPhotoUrls.length > 0 ? (
+                                        <span className="mt-0.5 flex flex-wrap items-center gap-1 pl-4">
+                                          <span className="text-muted-foreground">Your photos found there:</span>
+                                          {link.matchedPhotoUrls.slice(0, 4).map((p) => (
+                                            <img
+                                              key={p}
+                                              src={thumbSrc(p)}
+                                              alt={photoFilenameFromMatchUrl(p) ?? "matched photo"}
+                                              title={photoFilenameFromMatchUrl(p) ?? p}
+                                              loading="lazy"
+                                              className="h-9 w-9 rounded border border-red-200 object-cover dark:border-red-900"
+                                            />
+                                          ))}
+                                          {link.matchedPhotoUrls.length > 4 ? (
+                                            <span className="text-muted-foreground">+{link.matchedPhotoUrls.length - 4} more</span>
+                                          ) : null}
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  ))}
+                                  {g.more > 0 ? (
+                                    <span className="block text-muted-foreground">+{g.more} more matched listing{g.more === 1 ? "" : "s"}</span>
+                                  ) : null}
+                                </span>
                               ))}
-                              {more > 0 ? (
-                                <span className="block text-muted-foreground">+{more} more matched listing{more === 1 ? "" : "s"}</span>
-                              ) : null}
                             </span>
                           );
                         })()}
@@ -6102,20 +6188,17 @@ function AdminDashboard() {
                       </div>
                       {showConfirmButton ? (
                         <div className="flex shrink-0 flex-col items-end gap-1.5">
-                          {(() => {
-                            const target = resolveReplacePhotosUnit(r.propertyId, r.folder);
-                            if (!target) return null;
-                            return (
-                              <Button
-                                size="sm"
-                                variant="destructive"
-                                onClick={() => setReplacePhotosTarget({ propertyId: r.propertyId, unitId: target.unit.id })}
-                                data-testid={`button-replace-photos-${r.folder}`}
-                              >
-                                Replace photos ({target.letter})
-                              </Button>
-                            );
-                          })()}
+                          {resolveReplacePhotosUnits(r.propertyId, r.folder).map((target) => (
+                            <Button
+                              key={target.unit.id}
+                              size="sm"
+                              variant="destructive"
+                              onClick={() => setReplacePhotosTarget({ propertyId: r.propertyId, unitId: target.unit.id })}
+                              data-testid={`button-replace-photos-${r.folder}-${target.unit.id}`}
+                            >
+                              Replace photos ({target.letter})
+                            </Button>
+                          ))}
                           <Button
                             size="sm"
                             variant="outline"
