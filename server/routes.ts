@@ -65,6 +65,7 @@ import { consultGrokAboutVrbo } from "./grok-vrbo-consult";
 import { consultGrokAboutFindUnit } from "./grok-find-unit-consult";
 import {
   getPreflightPhotoFetchJob,
+  getPersistedReplacementFindJob,
   getPreflightReplacementFindJob,
   startPreflightPhotoFetchJob,
   startPreflightReplacementFindJob,
@@ -31760,10 +31761,16 @@ Return ONLY compact JSON with this exact shape:
     res.status(202).json({ job });
   });
 
-  app.get("/api/preflight/replacement-find-jobs/:jobId", (req, res) => {
+  app.get("/api/preflight/replacement-find-jobs/:jobId", async (req, res) => {
     const job = getPreflightReplacementFindJob(req.params.jobId);
-    if (!job) return res.status(404).json({ error: "Replacement find job not found" });
-    res.json({ job });
+    if (job) return res.json({ job });
+    // In-memory job gone (server restarted). The durable store can still serve
+    // a terminal result snapshot, or a RUNNING placeholder for a record the
+    // resume watchdog is about to re-launch under the SAME id — which keeps the
+    // polling phone waiting instead of firing its own duplicate relaunch.
+    const persisted = await getPersistedReplacementFindJob(req.params.jobId);
+    if (persisted) return res.json({ job: persisted });
+    return res.status(404).json({ error: "Replacement find job not found" });
   });
 
   // Full unit audit / "Run check" — server-side background job so the operator

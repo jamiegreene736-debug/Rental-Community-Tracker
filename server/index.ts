@@ -7,6 +7,7 @@ import { startAutoApproveScheduler } from "./auto-approve";
 import { startAutoReplyScheduler } from "./auto-reply";
 import { startAvailabilityScheduler } from "./availability-scheduler";
 import { startPhotoListingScheduler } from "./photo-listing-scanner";
+import { startReplacementFindResumeWatchdog } from "./preflight-background-jobs";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { startGuestReceiptScheduler } from "./guest-receipts";
 import { startPropertyRevenueScheduler } from "./property-revenue-scheduler";
@@ -162,6 +163,11 @@ app.get("/api/auth/session", (_req, res) => {
       // update from a phone and closes Safari, so no client poll can be relied
       // on to re-claim the job. Gate: BULK_PRICING_RESUME_DISABLED=1.
       startBulkPricingResumeWatchdog();
+      // Same survivability for the find-a-replacement-unit search: the operator
+      // taps Replace photos on a phone and hops to another app, so a
+      // redeploy/restart mid-search must be re-launched server-side (same job
+      // id) without waiting for a browser poll. Gate: REPLACEMENT_RESUME_DISABLED=1.
+      startReplacementFindResumeWatchdog();
       await cleanupStaleRuns();
       startWeeklyScheduler();
       startAutoApproveScheduler();

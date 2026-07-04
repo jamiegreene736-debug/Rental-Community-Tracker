@@ -149,8 +149,152 @@ const draftPhotoFetchProofs = new Map<number, Partial<Record<0 | 1, UnitPhotoRes
 const draftPhotoProofLockTails = new Map<number, Promise<void>>();
 
 import { loopbackRequestHeaders } from "./auth";
+import { storage } from "./storage";
+import {
+  REPLACEMENT_JOB_STORE_SETTING_KEY,
+  parseReplacementJobStore,
+  replacementJobFromTerminalRecord,
+  replacementJobResumingPlaceholder,
+  serializeReplacementJobStore,
+  shouldResumeReplacementJob,
+  supersedeRunningRecordsForProperty,
+  type PersistedReplacementJobRecord,
+} from "@shared/replacement-job-persistence";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
+
+// ── Durable replacement-find job store (leave-your-phone survivability) ───────
+// The in-memory job dies on every Railway redeploy/restart. The client's
+// localStorage relaunch only fires when the operator's TAB polls again — so a
+// restart while they were off in another app stalled the search until they
+// came back. Records in app_settings let the boot/interval watchdog below
+// re-launch orphaned running searches under the SAME job id (nothing for the
+// client to reconcile) and serve terminal RESULTS across restarts. All store
+// I/O is fail-soft: no DB just means the old memory-only behavior.
+// Sequenced through a single promise tail so concurrent job events can't
+// interleave read-modify-write cycles and drop each other's records.
+let replacementStoreTail: Promise<void> = Promise.resolve();
+function mutateReplacementJobStore(
+  mutate: (store: Record<string, PersistedReplacementJobRecord>, nowMs: number) => void,
+): Promise<void> {
+  replacementStoreTail = replacementStoreTail.then(async () => {
+    try {
+      const now = Date.now();
+      const raw = await storage.getSetting(REPLACEMENT_JOB_STORE_SETTING_KEY);
+      const store = parseReplacementJobStore(raw ?? null);
+      mutate(store, now);
+      await storage.setSetting(REPLACEMENT_JOB_STORE_SETTING_KEY, serializeReplacementJobStore(store, now));
+    } catch {
+      // Fail-soft: persistence is an upgrade, never a blocker for the search.
+    }
+  });
+  return replacementStoreTail;
+}
+
+function persistReplacementJobRunning(job: PreflightReplacementFindJob, payload: Record<string, unknown>, resumeCount = 0): void {
+  void mutateReplacementJobStore((store, now) => {
+    supersedeRunningRecordsForProperty(store, payload.propertyId, job.id, now);
+    const prior = store[job.id];
+    store[job.id] = {
+      jobId: job.id,
+      status: "running",
+      payload,
+      createdAt: prior?.createdAt ?? job.createdAt,
+      updatedAt: now,
+      resumeCount: Math.max(resumeCount, prior?.resumeCount ?? 0),
+    };
+  });
+}
+
+function persistReplacementJobTerminal(job: PreflightReplacementFindJob): void {
+  void mutateReplacementJobStore((store, now) => {
+    const prior = store[job.id];
+    store[job.id] = {
+      jobId: job.id,
+      status: job.status === "completed" ? "completed" : "failed",
+      payload: prior?.payload ?? {},
+      createdAt: prior?.createdAt ?? job.createdAt,
+      updatedAt: now,
+      resumeCount: prior?.resumeCount ?? 0,
+      message: job.message ?? null,
+      error: job.error ?? null,
+      unit: job.unit ?? null,
+      units: job.units ?? null,
+    };
+  });
+}
+
+// GET :jobId fallback when the in-memory job is gone (post-restart): a
+// terminal record serves its snapshotted result; a resumable running record
+// returns a RUNNING placeholder so the polling client keeps waiting for the
+// watchdog instead of launching a duplicate search of its own.
+export async function getPersistedReplacementFindJob(jobId: string): Promise<PreflightReplacementFindJob | null> {
+  try {
+    const raw = await storage.getSetting(REPLACEMENT_JOB_STORE_SETTING_KEY);
+    const record = parseReplacementJobStore(raw ?? null)[jobId];
+    if (!record) return null;
+    if (record.status !== "running") {
+      return replacementJobFromTerminalRecord(record) as PreflightReplacementFindJob;
+    }
+    if (shouldResumeReplacementJob(record, Date.now())) {
+      return replacementJobResumingPlaceholder(record, Date.now()) as PreflightReplacementFindJob;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Boot/interval watchdog: re-launch orphaned running records under the SAME
+// job id so the operator's phone (still polling that id, or returning later)
+// picks the search back up seamlessly. Gate: REPLACEMENT_RESUME_DISABLED=1.
+let replacementResumeSweepInFlight = false;
+export async function resumeOrphanedReplacementFindJobs(): Promise<void> {
+  if (replacementResumeSweepInFlight) return;
+  replacementResumeSweepInFlight = true;
+  try {
+    const raw = await storage.getSetting(REPLACEMENT_JOB_STORE_SETTING_KEY);
+    const store = parseReplacementJobStore(raw ?? null);
+    for (const record of Object.values(store)) {
+      if (!shouldResumeReplacementJob(record, Date.now())) continue;
+      if (replacementFindJobs.has(record.jobId) || activeReplacementFindJobIds.has(record.jobId)) continue;
+      console.warn(`[replacement-find] boot-resume: re-launching orphaned running job ${record.jobId} (resume ${record.resumeCount + 1})`);
+      const job: PreflightReplacementFindJob = {
+        id: record.jobId,
+        status: "queued",
+        phase: "queued",
+        message: "Resuming after server restart…",
+        progress: 8,
+        createdAt: record.createdAt || Date.now(),
+        updatedAt: Date.now(),
+        startedAt: null,
+        finishedAt: null,
+        error: null,
+        unit: null,
+        diagnostic: null,
+      };
+      replacementFindJobs.set(job.id, job);
+      persistReplacementJobRunning(job, record.payload, record.resumeCount + 1);
+      void runPreflightReplacementFindJob(job, record.payload);
+    }
+  } catch {
+    // Fail-soft — next sweep retries.
+  } finally {
+    replacementResumeSweepInFlight = false;
+  }
+}
+
+export function startReplacementFindResumeWatchdog(): void {
+  if (/^(1|true|yes|on)$/i.test(String(process.env.REPLACEMENT_RESUME_DISABLED ?? "").trim())) {
+    console.log("[replacement-find] resume watchdog disabled via REPLACEMENT_RESUME_DISABLED");
+    return;
+  }
+  // Boot pass waits for the loopback listener to be live (the job drives
+  // find-unit via loopback POSTs), then a slow interval catches anything the
+  // boot pass raced (e.g. DB not yet reachable).
+  setTimeout(() => void resumeOrphanedReplacementFindJobs(), 20_000).unref?.();
+  setInterval(() => void resumeOrphanedReplacementFindJobs(), 2 * 60_000).unref?.();
+}
 
 function newJobId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -573,6 +717,9 @@ export function startPreflightReplacementFindJob(body: Record<string, unknown>):
     diagnostic: null,
   };
   replacementFindJobs.set(id, job);
+  // Durable record first (supersedes any older running search for the same
+  // property), then launch. Fail-soft — no DB just means memory-only behavior.
+  persistReplacementJobRunning(job, body);
   void runPreflightReplacementFindJob(job, body);
   return job;
 }
@@ -700,6 +847,7 @@ async function runPreflightReplacementFindJob(
         error: data.error,
         diagnostic: data.diagnostic ?? null,
       });
+      persistReplacementJobTerminal(job);
       return;
     }
     const foundUnitList = accumulatedUnits.length > 0 ? accumulatedUnits : null;
@@ -716,6 +864,7 @@ async function runPreflightReplacementFindJob(
       diagnostic: data?.diagnostic ?? null,
       error: null,
     });
+    persistReplacementJobTerminal(job);
   } catch (e: any) {
     touchReplacementJob(job, {
       status: "failed",
@@ -725,6 +874,7 @@ async function runPreflightReplacementFindJob(
       finishedAt: Date.now(),
       error: e?.message || "Replacement search failed",
     });
+    persistReplacementJobTerminal(job);
   } finally {
     clearInterval(heartbeat);
     activeReplacementFindJobIds.delete(job.id);
