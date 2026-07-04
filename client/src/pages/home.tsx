@@ -2792,6 +2792,30 @@ function AdminDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoReplaceQueue]);
 
+  // "Clear queue": server drops finished (and unresumably-stuck) jobs from its
+  // memory + persisted store, so the banner clears on EVERY device — not just
+  // this browser. Actively-running jobs are never cleared server-side.
+  const clearAutoReplaceQueueMutation = useMutation({
+    mutationFn: async () => {
+      const r = await apiRequest("POST", "/api/replacement/auto-jobs/clear");
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+      return data as { removed: number; activeCount: number; jobs: AutoReplaceJobRecord[] };
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["/api/replacement/auto-jobs"], { activeCount: data.activeCount, jobs: data.jobs });
+      queryClient.invalidateQueries({ queryKey: ["/api/replacement/auto-jobs"] });
+      if (data.jobs.length === 0) setAutoReplaceQueueOpen(false);
+      toast({
+        title: "Replacement queue cleared",
+        description: data.activeCount > 0
+          ? `${data.removed} finished job${data.removed === 1 ? "" : "s"} removed — ${data.activeCount} still running.`
+          : `${data.removed} job${data.removed === 1 ? "" : "s"} removed.`,
+      });
+    },
+    onError: (e: any) => toast({ title: "Failed to clear the queue", description: e.message, variant: "destructive" }),
+  });
+
   // The one-click button: fire-and-forget. Everything (search, commit,
   // verification) happens server-side; the queue chip is the only UI.
   const startAutoReplaceMutation = useMutation({
@@ -5272,15 +5296,30 @@ function AdminDashboard() {
                     : "Photo replacement finished — indicators refresh as verification lands."}
                 </span>
               </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => setAutoReplaceQueueOpen(true)}
-                data-testid="button-open-auto-replace-queue"
-              >
-                View queue
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setAutoReplaceQueueOpen(true)}
+                  data-testid="button-open-auto-replace-queue"
+                >
+                  View queue
+                </Button>
+                {(autoReplaceQueue?.jobs ?? []).some((job) => !isAutoReplacePhaseActive(job.phase)) && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={clearAutoReplaceQueueMutation.isPending}
+                    onClick={() => clearAutoReplaceQueueMutation.mutate()}
+                    data-testid="button-clear-auto-replace-queue"
+                  >
+                    {clearAutoReplaceQueueMutation.isPending ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                    Clear
+                  </Button>
+                )}
+              </div>
             </div>
           )}
           {bulkPhotoCommunityJob && bulkPhotoCommunityActive && (
@@ -6791,6 +6830,27 @@ function AdminDashboard() {
                 </div>
               );
             })}
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-muted-foreground">
+              {(autoReplaceQueue?.activeCount ?? 0) > 0
+                ? "Running jobs are never cleared — they keep going server-side."
+                : ""}
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={
+                clearAutoReplaceQueueMutation.isPending ||
+                !(autoReplaceQueue?.jobs ?? []).some((job) => !isAutoReplacePhaseActive(job.phase))
+              }
+              onClick={() => clearAutoReplaceQueueMutation.mutate()}
+              data-testid="button-clear-auto-replace-queue-dialog"
+            >
+              {clearAutoReplaceQueueMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Clear queue
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

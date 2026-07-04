@@ -161,6 +161,30 @@ export function pickCommitCandidate<T extends { url?: unknown }>(
   return null;
 }
 
+// Operator "Clear queue": which records may be removed from the store.
+//   • terminal jobs (completed/failed) — always clearable; the operator has
+//     seen the outcome and wants the banner gone.
+//   • STUCK active jobs — an active-phase record that is NOT currently running
+//     in this process AND can never be resumed (resume cap hit, or outside the
+//     resume window) would otherwise hold the banner spinning until the 24h
+//     store eviction. Clearable.
+// A job the process is actually running right now (liveJobIds) is NEVER
+// cleared — mid-flight commits must not lose their record.
+export function clearableAutoReplaceJobIds(
+  store: Record<string, AutoReplaceJobRecord>,
+  nowMs: number,
+  liveJobIds: Iterable<string> = [],
+): string[] {
+  const live = new Set(liveJobIds);
+  return Object.values(store)
+    .filter((record) => {
+      if (live.has(record.jobId)) return false;
+      if (!isAutoReplacePhaseActive(record.phase)) return true;
+      return !shouldResumeAutoReplaceJob(record, nowMs);
+    })
+    .map((record) => record.jobId);
+}
+
 // Queue-chip summary: active jobs first (oldest first, the order they'll
 // finish), then recently-finished ones (newest first) within the surface
 // window so the operator sees the outcome without hunting.
