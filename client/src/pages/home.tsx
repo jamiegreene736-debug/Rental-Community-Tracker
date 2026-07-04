@@ -71,7 +71,10 @@ import {
 } from "lucide-react";
 import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { occupancyForBedrooms } from "@/data/bedding-config";
-import { isScannableFolder } from "@shared/photo-folder-utils";
+import { isScannableFolder, replacementPhotoFolderRef } from "@shared/photo-folder-utils";
+import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
+import { inferCommunityStreetAddress } from "@shared/community-addresses";
+import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
 import { useToast } from "@/hooks/use-toast";
 import { extractBRList } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
@@ -294,6 +297,26 @@ function addDismissedBulkPricingJobId(jobId: string): void {
   } catch {
     // localStorage unavailable (private mode) — dismissal just won't persist.
   }
+}
+
+// Parse street / city / state out of a property's display address — same
+// tolerant split builder-preflight uses ("1831 Poipu Rd, Unit 423, Koloa, HI
+// 96756" → street from parts[0], city/state from the last two segments), so
+// the popup's Replace-photos flow feeds find-unit identical geo hints.
+function parsePropertyDisplayAddress(addr: string): { street: string; city: string; state: string } {
+  const parts = (addr || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (parts.length < 2) return { street: addr || "", city: "", state: "" };
+  const street = parts[0];
+  let city = "";
+  let state = "";
+  if (parts.length >= 3) {
+    city = parts[parts.length - 2];
+    state = (parts[parts.length - 1].split(" ")[0] || "").trim();
+  } else {
+    city = parts[1];
+    state = parts[2] ?? "";
+  }
+  return { street, city, state };
 }
 
 // Duplicate-photos warning popup: the signature of the currently-flagged
@@ -1349,6 +1372,11 @@ function AdminDashboard() {
     unitLabel: string;
     platforms: DuplicatePhotoPlatform[];
   }>>({});
+  // "Replace photos (Unit X)" from the duplicate-photos popup: mounts the
+  // preflight UnitReplacementFlow (find another unit in the SAME community
+  // with the SAME bedroom count, real-estate sources only, Claude-vision
+  // interior probe + OTA-clean gates) targeted at the flagged unit.
+  const [replacePhotosTarget, setReplacePhotosTarget] = useState<{ propertyId: number; unitId: string } | null>(null);
   const [bulkPhotoCommunityJob, setBulkPhotoCommunityJob] = useState<BulkPhotoCommunityJob | null>(null);
   const [bulkPhotoCommunityStarting, setBulkPhotoCommunityStarting] = useState(false);
   const [bulkPhotoCommunityCancelling, setBulkPhotoCommunityCancelling] = useState(false);
@@ -2522,6 +2550,66 @@ function AdminDashboard() {
       // localStorage unavailable — dismissal just won't persist across reloads.
     }
     setDuplicatePhotoWarningOpen(false);
+  };
+
+  // ── "Replace photos (Unit X)" wiring for the duplicate-photos popup ────────
+  // Resolve a flagged folder back to its builder unit (the folder may already
+  // BE a replacement-* folder if a prior swap's photos got flagged again).
+  // Draft rows return null — their replacement flow lives in the builder
+  // pre-flight, which owns the draft-field repointing on commit.
+  const resolveReplacePhotosUnit = (propertyId: number, folder: string) => {
+    if (propertyId <= 0) return null;
+    const builder = getUnitBuilderByPropertyId(propertyId);
+    if (!builder?.communityPhotoFolder) return null;
+    const ref = replacementPhotoFolderRef(folder);
+    const index = builder.units.findIndex(
+      (u) => u.photoFolder === folder || (ref ? u.id === ref.oldUnitId : false),
+    );
+    if (index < 0) return null;
+    return { builder, unit: builder.units[index], index, letter: `Unit ${String.fromCharCode(65 + index)}` };
+  };
+
+  // Existing swaps for the target property — feeds replacementLabel/sourceUrl
+  // into the flow's unit picker and the skipUrls list (never re-suggest a
+  // listing already used by a sibling unit).
+  const { data: replaceUnitSwapsData } = useQuery<{
+    swaps: Array<{ oldUnitId: string; newUnitLabel: string; newAddress: string; newSourceUrl: string }>;
+  }>({
+    queryKey: ["/api/unit-swaps", replacePhotosTarget?.propertyId ?? 0],
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/unit-swaps/${replacePhotosTarget!.propertyId}`);
+      if (!r.ok) throw new Error(`Unit swaps returned HTTP ${r.status}`);
+      return r.json();
+    },
+    enabled: !!replacePhotosTarget && replacePhotosTarget.propertyId > 0,
+    staleTime: 30_000,
+  });
+
+  // After the flow commits a swap: the replacement folder is now the unit's
+  // ACTIVE folder everywhere (scanner, dashboard, Comm QA). Kick off both
+  // verification legs immediately: (1) deep OTA rescan of the NEW folder so
+  // the popup/Photos cell get a fresh duplicate verdict, (2) the Claude-vision
+  // photo-community check so the operator gets explicit confirmation the new
+  // unit's gallery belongs to the community.
+  const handleDuplicatePhotoUnitReplaced = (oldUnitId: string, newUnit: ReplacementUnitData) => {
+    const target = replacePhotosTarget;
+    if (!target) return;
+    const builder = getUnitBuilderByPropertyId(target.propertyId);
+    const index = builder?.units.findIndex((u) => u.id === oldUnitId) ?? -1;
+    const letter = index >= 0 ? `Unit ${String.fromCharCode(65 + index)}` : oldUnitId;
+    const replacementFolder = replacementPhotoFolderForUnit(target.propertyId, oldUnitId);
+    confirmPhotosReplacedMutation.mutate({
+      folder: replacementFolder,
+      propertyName: builder?.propertyName ?? `Property ${target.propertyId}`,
+      unitLabel: `${letter} — replacement (${newUnit.unitLabel || newUnit.address || "new unit"})`,
+      platforms: ["airbnb", "vrbo", "booking"],
+    });
+    void startBulkPhotoCommunityCheck([target.propertyId]);
+    queryClient.invalidateQueries({ queryKey: ["/api/unit-swaps", target.propertyId] });
+    toast({
+      title: `Photos replaced for ${letter}`,
+      description: `${newUnit.address || newUnit.unitLabel} is now the unit's photo source. Verifying the new photos are not on Airbnb/VRBO/Booking and that Claude vision confirms the unit is in the community…`,
+    });
   };
 
   const isBulkPricingSelectable = (property: Property) => {
@@ -5859,8 +5947,11 @@ function AdminDashboard() {
             </DialogTitle>
             <DialogDescription>
               These units' photos were found on an Airbnb / VRBO / Booking.com listing that isn't ours.
-              Replace the photos, then confirm below — a deep rescan will verify the replaced photos are
-              no longer on Airbnb, VRBO, or Booking.com.
+              Use <span className="font-medium">Replace photos (Unit X)</span> to find another unit in the
+              same community with the same bedroom count (real-estate sources only; Claude vision verifies
+              the interiors and that the unit belongs to the community). Or replace the photos yourself and
+              confirm below — either way a deep rescan verifies the final photos are no longer on Airbnb,
+              VRBO, or Booking.com.
             </DialogDescription>
           </DialogHeader>
           {(() => {
@@ -5971,30 +6062,81 @@ function AdminDashboard() {
                             </span>
                           );
                         })()}
+                        {(() => {
+                          // Claude-vision community confirmation for a REPLACEMENT
+                          // folder (post-"Replace photos"): surfaces the bulk
+                          // photo-community check verdict for this property so the
+                          // operator sees "the new unit is in the community" right
+                          // in the popup. Property id parses out of the folder name
+                          // (rescue rows carry propertyId 0).
+                          const ref = replacementPhotoFolderRef(r.folder);
+                          const refPid = ref && typeof ref.propertyId === "number" ? ref.propertyId : null;
+                          const st = refPid && refPid > 0 ? photoCommunityByProperty.get(refPid) : undefined;
+                          if (!st) return null;
+                          if (st.running) {
+                            return (
+                              <span className="flex items-center gap-1 text-muted-foreground">
+                                <Loader2 className="h-3 w-3 animate-spin" /> Claude vision is confirming the new unit belongs to the community…
+                              </span>
+                            );
+                          }
+                          if (st.sameCommunityOk === true) {
+                            return (
+                              <span className="flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+                                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> Claude vision confirmed the replacement unit is within the community.
+                              </span>
+                            );
+                          }
+                          if (st.sameCommunityOk === false) {
+                            return (
+                              <span className="block text-red-700 dark:text-red-300">
+                                ✕ Claude vision could NOT confirm the replacement unit is in the community — review it in the builder (Comm QA column).
+                              </span>
+                            );
+                          }
+                          return null;
+                        })()}
                         <span className="block text-muted-foreground">
                           Last scanned {checkRow?.checkedAt ? formatShortDateTime(checkRow.checkedAt) : "—"}
                         </span>
                       </div>
                       {showConfirmButton ? (
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          disabled={confirmPhotosReplacedMutation.isPending}
-                          onClick={() => {
-                            if (!window.confirm(
-                              `Confirm that you have replaced the photos for ${r.propertyName} · ${r.unitLabel}. A deep rescan will verify the replaced photos are no longer on Airbnb, VRBO, or Booking.com.`,
-                            )) return;
-                            confirmPhotosReplacedMutation.mutate({
-                              folder: r.folder,
-                              propertyName: r.propertyName,
-                              unitLabel: r.unitLabel,
-                              platforms: r.platforms,
-                            });
-                          }}
-                          data-testid={`button-confirm-photos-replaced-${r.folder}`}
-                        >
-                          {verdict ? "Rescan again" : "Confirm photos replaced"}
-                        </Button>
+                        <div className="flex shrink-0 flex-col items-end gap-1.5">
+                          {(() => {
+                            const target = resolveReplacePhotosUnit(r.propertyId, r.folder);
+                            if (!target) return null;
+                            return (
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                onClick={() => setReplacePhotosTarget({ propertyId: r.propertyId, unitId: target.unit.id })}
+                                data-testid={`button-replace-photos-${r.folder}`}
+                              >
+                                Replace photos ({target.letter})
+                              </Button>
+                            );
+                          })()}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950/40"
+                            disabled={confirmPhotosReplacedMutation.isPending}
+                            onClick={() => {
+                              if (!window.confirm(
+                                `Confirm that you have replaced the photos for ${r.propertyName} · ${r.unitLabel}. A deep rescan will verify the replaced photos are no longer on Airbnb, VRBO, or Booking.com.`,
+                              )) return;
+                              confirmPhotosReplacedMutation.mutate({
+                                folder: r.folder,
+                                propertyName: r.propertyName,
+                                unitLabel: r.unitLabel,
+                                platforms: r.platforms,
+                              });
+                            }}
+                            data-testid={`button-confirm-photos-replaced-${r.folder}`}
+                          >
+                            {verdict ? "Rescan again" : "Confirm photos replaced"}
+                          </Button>
+                        </div>
                       ) : null}
                     </div>
                   );
@@ -6008,6 +6150,75 @@ function AdminDashboard() {
           </p>
         </DialogContent>
       </Dialog>
+      {/* Replace-photos dialog — hosts the preflight UnitReplacementFlow for the
+          unit flagged in the duplicate-photos popup. The flow itself owns the
+          whole search → candidate → commit lifecycle (background find-unit job,
+          resume, POST /api/unit-swaps); we only assemble its props the same way
+          builder-preflight does and react to the committed swap. */}
+      {replacePhotosTarget && (() => {
+        const builder = getUnitBuilderByPropertyId(replacePhotosTarget.propertyId);
+        if (!builder?.communityPhotoFolder) return null;
+        const unitIndex = builder.units.findIndex((u) => u.id === replacePhotosTarget.unitId);
+        const targetUnit = unitIndex >= 0 ? builder.units[unitIndex] : builder.units[0];
+        const letterOf = (i: number) => `Unit ${String.fromCharCode(65 + i)}`;
+        const overridesByUnit = new Map((replaceUnitSwapsData?.swaps ?? []).map((s) => [s.oldUnitId, s]));
+        const parsed = parsePropertyDisplayAddress(builder.address);
+        const streetAddress = inferCommunityStreetAddress({
+          communityName: builder.complexName,
+          city: parsed.city,
+          state: parsed.state,
+          addressHint: parsed.street || builder.address,
+        }) || parsed.street;
+        const skipUrls = Array.from(new Set(
+          (replaceUnitSwapsData?.swaps ?? []).map((s) => s.newSourceUrl).filter(Boolean),
+        ));
+        return (
+          <Dialog open onOpenChange={(open) => { if (!open) setReplacePhotosTarget(null); }}>
+            <DialogContent className="max-h-[92vh] max-w-3xl overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>
+                  Replace photos — {builder.propertyName} · {unitIndex >= 0 ? letterOf(unitIndex) : targetUnit.unitNumber}
+                </DialogTitle>
+                <DialogDescription>
+                  Searches real-estate sources (never OTA galleries) for another {targetUnit.bedrooms}BR unit
+                  inside {builder.complexName}. Claude vision verifies the candidate has real furnished
+                  interiors, its photos are checked as NOT already on Airbnb / VRBO / Booking.com, and after
+                  you commit, Claude vision re-confirms the new unit's gallery belongs to {builder.complexName}.
+                </DialogDescription>
+              </DialogHeader>
+              <UnitReplacementFlow
+                unit={{
+                  id: targetUnit.id,
+                  unitNumber: targetUnit.unitNumber ?? "",
+                  bedrooms: targetUnit.bedrooms,
+                  photoFolder: targetUnit.photoFolder,
+                  positionLabel: unitIndex >= 0 ? letterOf(unitIndex) : undefined,
+                  replacementLabel: overridesByUnit.get(targetUnit.id)?.newUnitLabel,
+                }}
+                allUnits={builder.units.map((u, i) => ({
+                  id: u.id,
+                  unitNumber: u.unitNumber ?? "",
+                  bedrooms: u.bedrooms,
+                  photoFolder: u.photoFolder,
+                  positionLabel: letterOf(i),
+                  replacementLabel: overridesByUnit.get(u.id)?.newUnitLabel,
+                  replacementSourceUrl: overridesByUnit.get(u.id)?.newSourceUrl,
+                }))}
+                communityFolder={builder.communityPhotoFolder}
+                communityName={builder.complexName}
+                propertyAddress={builder.address}
+                streetAddress={streetAddress || undefined}
+                city={parsed.city || undefined}
+                state={parsed.state || undefined}
+                propertyId={replacePhotosTarget.propertyId}
+                skipUrls={skipUrls}
+                onClose={() => setReplacePhotosTarget(null)}
+                onUnitReplaced={handleDuplicatePhotoUnitReplaced}
+              />
+            </DialogContent>
+          </Dialog>
+        );
+      })()}
       <Dialog open={photoScanModalOpen} onOpenChange={setPhotoScanModalOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>

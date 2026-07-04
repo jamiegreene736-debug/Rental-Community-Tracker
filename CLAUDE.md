@@ -43,6 +43,35 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (duplicate-photos popup: per-unit "Replace photos (Unit X)" → find-new-unit flow +
+  Claude-vision community confirmation): Operator asked for a button on each duplicate-photos
+  warning to replace that unit's photos with another unit from the SAME community + SAME bedroom
+  count, Claude/Claude-vision-confirmed. KEY DECISION (don't rebuild): reused the preflight
+  `UnitReplacementFlow` component (client/src/components/unit-replacement-flow.tsx) wholesale — it
+  already owns the background find-unit job (real-estate sources ONLY per PR #338, resort-street
+  community gate, bedroom gate, Claude Haiku interior-vision probe, OTA text + reverse-image clean
+  checks, resume-after-redeploy) and the `POST /api/unit-swaps` commit that hydrates the
+  `replacement-p<prop>-u<unit>` folder which scanner/dashboard already treat as the unit's ACTIVE
+  folder. home.tsx mounts it in a Dialog from a new per-flagged-unit destructive "Replace photos
+  (Unit A/B)" button (only builder properties; drafts keep using builder pre-flight which owns
+  draft-field repointing); props assembled exactly like builder-preflight (parse address +
+  `inferCommunityStreetAddress`; skipUrls = existing swaps' newSourceUrl). On commit
+  (`handleDuplicatePhotoUnitReplaced`): auto verify-rescan of the NEW replacement folder (reuses
+  confirmPhotosReplacedMutation → popup pending→clean verdict + Photos cell) + auto
+  `startBulkPhotoCommunityCheck([propertyId])` = the Claude SONNET vision community check. REAL GAP
+  FIXED server-side: `buildPhotoCommunityCheckRequestForProperty` (server/builder-photo-groups.ts)
+  verified units' ORIGINAL folders even after a swap — now resolves the ACTIVE folder via new pure
+  `resolveActiveUnitPhotoFolders`/`latestUnitSwapsByUnit` (shared/unit-swap-photos.ts, 8 tests;
+  mirrors routes.ts activeUnitPhotoFoldersForBuilder, falls back to the original folder if the
+  replacement has no published photos yet). Popup rows for replacement-* folders show the community
+  verdict chip (running → "Claude vision is confirming…", sameCommunityOk true → green confirmed,
+  false → red review-in-builder); propertyId parsed from the folder name via
+  `replacementPhotoFolderRef`. Verified: `tests/unit-swap-active-folders.test.ts` 8/0, full
+  `npm test` exit 0, build clean, `npm run check` 335 = baseline (0 new). Could NOT live-smoke the
+  find-unit/vision legs (no SEARCHAPI/ANTHROPIC keys) — confirm post-deploy by clicking "Replace
+  photos (Unit X)" on a red-Photos unit: search ~2-5 min, commit, then the popup shows the OTA
+  rescan verdict + the community-vision chip, and Comm QA re-runs for the property.
+
 - 2026-07-03 (refund-receipt AUDIT + no-conversation hardening; header unread badge = REAL unread):
   Operator asked to (a) make sure a Guesty refund always sends the guest a refund receipt on their
   booking channel and (b) make the header unread-message badge match the actual unread messages.

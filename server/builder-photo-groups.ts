@@ -4,6 +4,7 @@
 import fs from "fs";
 import path from "path";
 import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "../client/src/data/unit-builder-data";
+import { resolveActiveUnitPhotoFolders } from "../shared/unit-swap-photos";
 import { resolveCanonicalCommunityPhotoFolder } from "../shared/community-photo-folders";
 import { resolveDraftUnitBedrooms, positiveDraftInteger } from "../shared/draft-unit-bedrooms";
 import { parseExpectedBedInventory } from "../shared/photo-bedroom-coverage-logic";
@@ -181,18 +182,46 @@ export async function buildPhotoCommunityCheckRequestForProperty(
       builder,
     );
     if (communityGroup) groups.push(communityGroup);
+    // Verify each unit's ACTIVE photo folder — the replacement-* folder once
+    // the operator swapped the unit's photos ("Replace photos" on the
+    // duplicate-photos warning / preflight), else the unit's own folder. This
+    // is what makes the Claude-vision community check confirm the photos the
+    // listing will actually use; checking the stale original after a swap
+    // verified the wrong gallery. Falls back to the original folder if the
+    // replacement folder has no published photos yet (hydration pending).
+    const activeFolders = resolveActiveUnitPhotoFolders(
+      propertyId,
+      builder.units,
+      await storage.getUnitSwaps(propertyId),
+    );
+    const activeFolderByUnitId = new Map(activeFolders.map((f) => [f.unitId, f]));
     for (let i = 0; i < builder.units.length; i++) {
       const u = builder.units[i];
       if (!u.photoFolder) continue;
       const letter = String.fromCharCode(65 + i);
-      const g = await buildGroupFromPublishedFolder(
-        "unit",
-        `Unit ${letter} (${u.bedrooms}BR)`,
-        u.photoFolder,
-        builder,
-        u.bedrooms,
-        unitDescriptionFromBuilder(u),
-      );
+      const active = activeFolderByUnitId.get(u.id);
+      const label = `Unit ${letter} (${u.bedrooms}BR)`;
+      let g: CheckGroupInput | null = null;
+      if (active?.replaced && active.activeFolder !== u.photoFolder) {
+        g = await buildGroupFromPublishedFolder(
+          "unit",
+          label,
+          active.activeFolder,
+          builder,
+          u.bedrooms,
+          unitDescriptionFromBuilder(u),
+        );
+      }
+      if (!g) {
+        g = await buildGroupFromPublishedFolder(
+          "unit",
+          label,
+          u.photoFolder,
+          builder,
+          u.bedrooms,
+          unitDescriptionFromBuilder(u),
+        );
+      }
       if (g) groups.push(g);
     }
     return groups.length > 0
