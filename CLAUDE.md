@@ -43,7 +43,7 @@ Before making any changes:
 
 ## Recent operational notes
 
-- 2026-07-04 (dashboard FAILED/UNCOLLECTED payment warning popup, PR #TBD): Operator asked for a
+- 2026-07-04 (dashboard FAILED/UNCOLLECTED payment warning popup, PR #898): Operator asked for a
   refund-style warning when (a) a guest payment FAILED (message guest + reprocess in Guesty) or (b) a
   scheduled balance (e.g. due ~90 days before arrival) blew past its due date uncollected; retroactive
   ~2 weeks; NEVER warn on cancelled bookings. SHIPPED: pure `shared/payment-failure-warning.ts`
