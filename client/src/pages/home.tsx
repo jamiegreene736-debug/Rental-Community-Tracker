@@ -3058,14 +3058,19 @@ function AdminDashboard() {
   const [resendingRefundFor, setResendingRefundFor] = useState<string | null>(null);
   const resendRefundReceiptMutation = useMutation({
     mutationFn: async (reservationId: string) => {
-      const r = await apiRequest("POST", "/api/inbox/guest-receipts/send-for-reservation", {
-        reservationId,
-        kind: "refund",
+      // Direct fetch, NOT apiRequest: apiRequest throws on EVERY non-2xx, which
+      // turned the endpoint's 422 "could not deliver" RESULT into a raw
+      // "Resend failed / 422: Sent 0 of 1 receipt(s)…" error toast and made the
+      // structured 422 handling below unreachable. Only auth/5xx/network
+      // failures should throw; 422 carries the per-receipt outcome JSON.
+      const r = await fetch("/api/inbox/guest-receipts/send-for-reservation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reservationId, kind: "refund" }),
+        credentials: "include",
       });
-      // 422 = "could not deliver" — a real RESULT (handled in onSuccess), not a
-      // transport error. Only 5xx / network failures throw.
       if (!r.ok && r.status !== 422) {
-        const err = await r.json().catch(() => ({}));
+        const err = await r.json().catch(() => ({} as { error?: string; message?: string }));
         throw new Error(err.error ?? err.message ?? `HTTP ${r.status}`);
       }
       return r.json() as Promise<{ ok: boolean; message: string; results?: Array<{ outcome: string; reason?: string }> }>;
@@ -3073,11 +3078,16 @@ function AdminDashboard() {
     onMutate: (reservationId: string) => setResendingRefundFor(reservationId),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/revenue-30-days"] });
-      const sent = (data.results ?? []).filter((x) => x.outcome === "sent").length;
+      const results = data.results ?? [];
+      const sent = results.filter((x) => x.outcome === "sent").length;
+      // A successful resend may be the SMS leg only (channel copy was already
+      // delivered) — the server's reason says which, so prefer it over the
+      // generic channel wording.
+      const sentReason = results.find((x) => x.outcome === "sent" && x.reason)?.reason;
       toast({
         title: sent > 0 ? "Refund receipt sent" : "Refund receipt not delivered",
         description: sent > 0
-          ? "The refund confirmation was sent to the guest on their booking channel."
+          ? (sentReason || "The refund confirmation was sent to the guest on their booking channel.")
           : (data.message || "Could not deliver on the guest's OTA channel — check the conversation in Guesty."),
         variant: sent > 0 ? undefined : "destructive",
       });

@@ -179,6 +179,15 @@ async function guestPhoneForRefund(reservation: any, conversationId: string | nu
 // window, and by the operator's "Resend to guest" force-send. That also makes
 // the leg RETROACTIVE: a refund receipted BEFORE this shipped (row already
 // "sent", sms_status null) still gets its text on the first tick after deploy.
+//
+// Returns the leg's outcome so the operator's manual "Resend to guest" can
+// report it: a row flagged ONLY for a failed SMS leg (channel status already
+// "sent") used to hit the terminal-skip and answer 422 "Sent 0 of 1" even when
+// this retry actually delivered the text.
+type RefundSmsLegResult = {
+  status: "sent" | "already-sent" | "not-configured" | "no-phone" | "error";
+  detail?: string;
+};
 async function sendRefundReceiptSmsLeg(opts: {
   token: string;
   reservation: any;
@@ -187,29 +196,31 @@ async function sendRefundReceiptSmsLeg(opts: {
   amount: number;
   dateIso: string;
   currentSmsStatus?: string | null;
-}): Promise<void> {
-  if (String(opts.currentSmsStatus ?? "") === "sent") return;
+}): Promise<RefundSmsLegResult> {
+  if (String(opts.currentSmsStatus ?? "") === "sent") return { status: "already-sent" };
 
   const config = getQuoSmsConfigStatus();
   if (!config.configured) {
+    const detail = `Quo SMS not configured (missing ${config.missing.join(", ")})`;
     if (opts.currentSmsStatus !== "not-configured") {
       await storage.updateGuestReceiptSms(opts.token, {
         smsStatus: "not-configured",
-        smsError: `Quo SMS not configured (missing ${config.missing.join(", ")})`,
+        smsError: detail,
       }).catch(() => {});
     }
-    return;
+    return { status: "not-configured", detail };
   }
 
   const phone = await guestPhoneForRefund(opts.reservation, opts.conversationId);
   if (!phone) {
+    const detail = "No guest phone number on file (Guesty guest profile or saved inbox phone). Save one in the Guest Inbox, then Resend.";
     await storage.updateGuestReceiptSms(opts.token, {
       smsStatus: "no-phone",
       smsTo: null,
-      smsError: "No guest phone number on file (Guesty guest profile or saved inbox phone). Save one in the Guest Inbox, then Resend.",
+      smsError: detail,
     }).catch(() => {});
     console.warn(`[guest-receipts] refund SMS skipped for reservation ${opts.reservationId}: no guest phone on file`);
-    return;
+    return { status: "no-phone", detail };
   }
 
   const body = buildRefundReceiptSmsBody({
@@ -233,13 +244,41 @@ async function sendRefundReceiptSmsLeg(opts: {
     await storage.updateGuestReceiptSms(opts.token, { smsStatus: "sent", smsTo: phone, smsError: null, smsSentAt: new Date() })
       .catch((markErr) => console.error(`[guest-receipts] refund SMS SENT but failed to record for reservation ${opts.reservationId}: ${markErr?.message ?? markErr}`));
     console.log(`[guest-receipts] refund SMS sent to ${phone} for reservation ${opts.reservationId} ($${opts.amount.toFixed(2)})`);
+    return { status: "sent" };
   } catch (e: any) {
-    await storage.updateGuestReceiptSms(opts.token, { smsStatus: "error", smsTo: phone, smsError: e?.message ?? String(e) }).catch(() => {});
-    console.error(`[guest-receipts] refund SMS FAILED for reservation ${opts.reservationId}: ${e?.message ?? e}`);
+    const detail = e?.message ?? String(e);
+    await storage.updateGuestReceiptSms(opts.token, { smsStatus: "error", smsTo: phone, smsError: detail }).catch(() => {});
+    console.error(`[guest-receipts] refund SMS FAILED for reservation ${opts.reservationId}: ${detail}`);
+    return { status: "error", detail };
   }
 }
 
 type PendingTxn = { kind: ReceiptKind; txn: ReceiptTransaction; reservation: any };
+
+// Manual "Resend to guest" verdict for a refund whose CHANNEL receipt is
+// already terminal (sent/unconfirmed/misroute-skip) but whose SMS leg was just
+// retried above. The operator clicked Resend because the dashboard flagged the
+// row — usually for the failed SMS leg — so the response must reflect what the
+// retry actually did, not a blanket "skipped" (which the route turns into a 422
+// "Sent 0 of 1" toast even when the text just went out). Returns null when the
+// SMS leg adds nothing to report (already-sent) so the caller falls through to
+// its normal skip.
+function manualResendVerdictFromSms(
+  sms: RefundSmsLegResult,
+  channelNote: string,
+  body?: string,
+): { outcome: "sent" | "error"; reason: string; body?: string } | null {
+  switch (sms.status) {
+    case "sent":
+      return { outcome: "sent", reason: `${channelNote}; confirmation text sent to the guest's phone`, body };
+    case "no-phone":
+    case "not-configured":
+    case "error":
+      return { outcome: "error", reason: `${channelNote}, but the text to the guest's phone failed: ${sms.detail ?? sms.status}`, body };
+    default:
+      return null; // already-sent — both legs delivered, nothing to resend
+  }
+}
 
 export async function runGuestReceipts(): Promise<NonNullable<typeof _lastRunResult>> {
   if (!_enabled) {
@@ -377,7 +416,7 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
     // has sms_status null and gets texted here on the next tick, as long as the
     // transaction is still inside the backfill window).
     if (kind === "refund") {
-      await sendRefundReceiptSmsLeg({
+      const sms = await sendRefundReceiptSmsLeg({
         token: existing.token,
         reservation,
         conversationId: existing.conversationId ?? conversationIdForReservation(reservation),
@@ -386,6 +425,18 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
         dateIso: txn.dateIso,
         currentSmsStatus: existing.smsStatus,
       });
+      // Operator force-send: the channel copy is terminal, so the SMS leg IS
+      // the resend — report its result instead of a blind "skipped" (the old
+      // blind skip made "Resend to guest" 422 forever on rows flagged only for
+      // a failed text).
+      if (opts?.allowResend) {
+        const verdict = manualResendVerdictFromSms(
+          sms,
+          "channel receipt was already delivered to the guest",
+          existing.messageBody ?? undefined,
+        );
+        if (verdict) return verdict;
+      }
     }
     const reason =
       existing.status === "sent" ? "already sent"
@@ -413,7 +464,7 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
     ) {
       // Same retroactive SMS treatment as the terminal-skip branch above.
       if (kind === "refund") {
-        await sendRefundReceiptSmsLeg({
+        const sms = await sendRefundReceiptSmsLeg({
           token: legacyRow.token,
           reservation,
           conversationId: legacyRow.conversationId ?? conversationIdForReservation(reservation),
@@ -422,6 +473,14 @@ async function processTransaction(item: PendingTxn, now: number, opts?: { allowR
           dateIso: txn.dateIso,
           currentSmsStatus: legacyRow.smsStatus,
         });
+        if (opts?.allowResend) {
+          const verdict = manualResendVerdictFromSms(
+            sms,
+            "channel receipt was already delivered to the guest",
+            legacyRow.messageBody ?? undefined,
+          );
+          if (verdict) return verdict;
+        }
       }
       return { outcome: "skipped", reason: "already sent (pre-id-upgrade receipt)", body: legacyRow.messageBody ?? undefined };
     }
@@ -713,11 +772,17 @@ export async function sendReceiptForReservation(opts: {
     }
   }
   const sent = results.filter((r) => r.outcome === "sent").length;
+  // Surface WHY the non-sent legs failed/skipped — the dashboard toast shows
+  // this message verbatim, and a bare "Sent 0 of 1" gave the operator nothing
+  // to act on (e.g. "no phone on file — save one in the Guest Inbox").
+  const failReasons = results
+    .filter((r) => r.outcome !== "sent" && r.reason)
+    .map((r) => `${r.kind} $${r.amount.toFixed(2)}: ${r.reason}`);
   return {
     ok: sent > 0,
     reservationId,
     results,
-    message: `Sent ${sent} of ${results.length} receipt(s) for reservation ${reservationId}`,
+    message: `Sent ${sent} of ${results.length} receipt(s) for reservation ${reservationId}${failReasons.length ? ` — ${failReasons.join("; ")}` : ""}`,
   };
 }
 
