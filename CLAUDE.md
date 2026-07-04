@@ -43,6 +43,28 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (find-replacement search: SERVER-side restart survivability — durable job store + boot
+  watchdog): Operator asked to click Replace photos, hop to another app (Twitter), and have the
+  search "carry on until finished". AUDIT: already true EXCEPT one hole — the find-unit job lives in
+  server memory, so a Railway redeploy/restart mid-search killed it, and the ONLY relauncher was the
+  operator's browser (localStorage payload, fires when the tab next polls). In another app = no tab
+  = search stalled until he returned. SHIPPED: pure `shared/replacement-job-persistence.ts` (13
+  tests) — compact job records persisted in app_settings (`replacement_find_jobs.v1`, cap 10 newest,
+  24h age eviction at write time, all I/O sequenced through a promise tail + fail-soft);
+  `startReplacementFindResumeWatchdog` (wired in server/index.ts next to the bulk-pricing watchdog;
+  boot pass ~20s after listen + 2-min interval; gate `REPLACEMENT_RESUME_DISABLED=1`) re-launches
+  orphaned RUNNING records under the SAME job id (60-min freshness window, 2-resume server cap —
+  separate from the client's 3), so the phone's stored jobId keeps working with nothing to
+  reconcile. A NEW search for a property SUPERSEDES older running records (marked failed) so the
+  watchdog can't run a duplicate sweep alongside a fresh operator search. GET
+  /api/preflight/replacement-find-jobs/:jobId now falls back to the store when memory is empty:
+  terminal records serve their snapshotted units/message (finished results survive restarts — the
+  operator can come back an hour later to the options list), resumable running records serve a
+  RUNNING "resuming after restart" placeholder so the polling client waits for the watchdog instead
+  of double-launching. Verified: 13/0 new, full `npm test` REAL exit 0, build clean, `npm run check`
+  335 = baseline. Post-deploy confirm: start a search, redeploy mid-run, watch
+  "[replacement-find] boot-resume: re-launching orphaned running job" in Railway logs.
+
 - 2026-07-04 (dashboard FAILED/UNCOLLECTED payment warning popup, PR #898): Operator asked for a
   refund-style warning when (a) a guest payment FAILED (message guest + reprocess in Guesty) or (b) a
   scheduled balance (e.g. due ~90 days before arrival) blew past its due date uncollected; retroactive
