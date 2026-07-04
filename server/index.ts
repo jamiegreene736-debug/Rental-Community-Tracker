@@ -8,6 +8,7 @@ import { startAutoReplyScheduler } from "./auto-reply";
 import { startAvailabilityScheduler } from "./availability-scheduler";
 import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startReplacementFindResumeWatchdog } from "./preflight-background-jobs";
+import { startAutoReplaceResumeWatchdog } from "./auto-replace-jobs";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { startGuestReceiptScheduler } from "./guest-receipts";
 import { startPropertyRevenueScheduler } from "./property-revenue-scheduler";
@@ -168,6 +169,9 @@ app.get("/api/auth/session", (_req, res) => {
       // redeploy/restart mid-search must be re-launched server-side (same job
       // id) without waiting for a browser poll. Gate: REPLACEMENT_RESUME_DISABLED=1.
       startReplacementFindResumeWatchdog();
+      // One-click auto-replace orchestrator (find → auto-commit → verify) —
+      // resume orphaned jobs the same way. Gate: AUTO_REPLACE_RESUME_DISABLED=1.
+      startAutoReplaceResumeWatchdog();
       await cleanupStaleRuns();
       startWeeklyScheduler();
       startAutoApproveScheduler();

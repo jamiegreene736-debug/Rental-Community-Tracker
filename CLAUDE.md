@@ -43,6 +43,29 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (ONE-CLICK auto-replace from the duplicate-photos warning): Operator asked for the
+  Replace-photos button to be true one-click-and-done — no modal, background everything, progress
+  via a dashboard queue. SHIPPED: server orchestrator `server/auto-replace-jobs.ts` chains the
+  EXISTING machinery: startPreflightReplacementFindJob (first-hit mode — exhaustive pool-draining is
+  wasted when auto-committing option 1) → auto-COMMIT via loopback POST /api/unit-swaps (a 409
+  duplicate-source burns that URL and falls through to the next option — `pickCommitCandidate`) →
+  kicks the deep OTA rescan of the new folder + the Claude-vision bulk photo-community check →
+  completed. Pure decisions in `shared/auto-replace-job-logic.ts` (20 tests): persisted store
+  (`auto_replace_jobs.v1`, same fail-soft promise-tail pattern), 90-min resume window + 2-resume cap
+  (`startAutoReplaceResumeWatchdog` in index.ts, gate `AUTO_REPLACE_RESUME_DISABLED=1`; the find leg
+  additionally survives via the #899 watchdog), one-active-job-per-property+unit double-tap guard,
+  `nextStepFromFindJob` (completed-EMPTY = fail, never commit nothing). Endpoints: POST/GET
+  /api/replacement/auto-jobs. home.tsx: the popup's destructive button now fires the auto job
+  (spinner + disabled while queued); tiny "pick manually" link keeps the old UnitReplacementFlow
+  dialog; sky-blue queue banner above the table ("Replacing photos for N units — safe to leave" /
+  "finished") + "View queue" dialog with phase chips (queued/finding/committing/verifying/
+  completed/failed); on a watched job going terminal the client invalidates photo-listing-check +
+  photo-community-status + unit-swaps, extends the photo poll window, and toasts once. NOTE: this
+  DOES auto-commit a destructive photo swap — operator explicitly chose that; the manual path
+  remains one tap away. Verified: 20/0 new, full `npm test` REAL exit 0, build clean, `npm run
+  check` 335 = baseline. Could NOT live-run (no SEARCHAPI key) — post-deploy: tap Replace photos,
+  leave, return ~5 min later: queue banner shows the result and the Photos cell walks to green.
+
 - 2026-07-04 (find-replacement search: SERVER-side restart survivability — durable job store + boot
   watchdog): Operator asked to click Replace photos, hop to another app (Twitter), and have the
   search "carry on until finished". AUDIT: already true EXCEPT one hole — the find-unit job lives in
