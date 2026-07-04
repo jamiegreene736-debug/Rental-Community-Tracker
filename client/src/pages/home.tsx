@@ -107,6 +107,10 @@ import {
   PAYMENT_ISSUE_KIND_LABELS,
   type PaymentFailureWarning,
 } from "@shared/payment-failure-warning";
+import {
+  buyInCoverageWarningSignature,
+  type BuyInCoverageWarning,
+} from "@shared/buyin-coverage-warning";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { usePortalSession } from "@/lib/auth";
@@ -339,6 +343,11 @@ const DUPLICATE_PHOTO_WARNING_DISMISSED_KEY = "nexstay_duplicate_photo_warning_d
 // same dismissal pattern — signature persisted on dismiss, re-raised when the
 // facts change (new failed charge, new overdue balance, changed amount).
 const PAYMENT_FAILURE_WARNING_DISMISSED_KEY = "nexstay_payment_failure_warning_dismissed";
+
+// Missing buy-in warning popup (units not purchased for a check-in within 7
+// days): same dismissal pattern — signature persisted on dismiss, re-raised
+// when the facts change (new uncovered arrival, changed dates/missing units).
+const BUYIN_COVERAGE_WARNING_DISMISSED_KEY = "nexstay_buyin_coverage_warning_dismissed";
 
 type BulkAvailabilityQueueItemStatus = "pending" | "running" | "success" | "error" | "cancelled";
 type BulkAvailabilityProgress = {
@@ -1382,6 +1391,7 @@ function AdminDashboard() {
   // duplicate list) can still render its green confirmation row.
   const [duplicatePhotoWarningOpen, setDuplicatePhotoWarningOpen] = useState(false);
   const [paymentFailureWarningOpen, setPaymentFailureWarningOpen] = useState(false);
+  const [buyInCoverageWarningOpen, setBuyInCoverageWarningOpen] = useState(false);
   const [photoReplaceRescans, setPhotoReplaceRescans] = useState<Record<string, {
     startedAt: number;
     propertyName: string;
@@ -2048,6 +2058,43 @@ function AdminDashboard() {
       // localStorage unavailable — dismissal just won't persist across reloads.
     }
     setPaymentFailureWarningOpen(false);
+  };
+  // Missing buy-in units for check-ins within the next 7 days (in-house stays
+  // included; cancelled bookings excluded server-side). Same red-flag popup +
+  // persistent banner pattern as the payment-failure warning.
+  const { data: buyInCoverageData } = useQuery<{
+    warnings: BuyInCoverageWarning[];
+    windowDays: number;
+    checkedAt: string;
+  }>({
+    queryKey: ["/api/dashboard/buyin-coverage"],
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const buyInCoverageWarnings = buyInCoverageData?.warnings ?? [];
+  const buyInCoverageSignature = useMemo(
+    () => buyInCoverageWarningSignature(buyInCoverageWarnings),
+    [buyInCoverageWarnings],
+  );
+  useEffect(() => {
+    if (!buyInCoverageSignature) return;
+    let dismissed = "";
+    try {
+      dismissed = window.localStorage.getItem(BUYIN_COVERAGE_WARNING_DISMISSED_KEY) ?? "";
+    } catch {
+      // localStorage unavailable (private mode) — the popup just re-raises.
+    }
+    if (dismissed === buyInCoverageSignature) return;
+    setBuyInCoverageWarningOpen(true);
+  }, [buyInCoverageSignature]);
+  const closeBuyInCoverageWarning = () => {
+    try {
+      window.localStorage.setItem(BUYIN_COVERAGE_WARNING_DISMISSED_KEY, buyInCoverageSignature);
+    } catch {
+      // localStorage unavailable — dismissal just won't persist across reloads.
+    }
+    setBuyInCoverageWarningOpen(false);
   };
   // Card payments captured through Guesty settle into the bank ~5 business days
   // after capture, so each collected payment is projected forward to its
@@ -5173,6 +5220,25 @@ function AdminDashboard() {
               </Button>
             </div>
           )}
+          {buyInCoverageWarnings.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-300 bg-red-50/70 px-3 py-2 text-sm dark:border-red-900 dark:bg-red-950/30" data-testid="banner-buyin-coverage">
+              <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span className="font-medium">
+                  {buyInCoverageWarnings.length} booking{buyInCoverageWarnings.length === 1 ? " checks" : "s check"} in within 7 days with units NOT purchased
+                </span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                onClick={() => setBuyInCoverageWarningOpen(true)}
+                data-testid="button-open-buyin-coverage-warning"
+              >
+                Review units
+              </Button>
+            </div>
+          )}
           {duplicatePhotoUnits.length > 0 && (
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-300 bg-red-50/70 px-3 py-2 text-sm dark:border-red-900 dark:bg-red-950/30" data-testid="banner-duplicate-photos">
               <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
@@ -6244,6 +6310,100 @@ function AdminDashboard() {
           )}
           <div className="flex justify-end">
             <Button type="button" variant="outline" size="sm" onClick={closePaymentFailureWarning} data-testid="button-dismiss-payment-failure-warning">
+              Dismiss
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Missing buy-in warning popup — auto-raised when a reservation checks
+          in within the next 7 days (in-house stays included) and the units
+          required to host it have NOT all been purchased. Same visual language
+          as the payment-failure alert. Remediation is manual by design: the
+          buttons jump to the Bookings page where the find-buy-in / auto-fill
+          flows live — we never auto-purchase a unit from a popup. */}
+      <Dialog
+        open={buyInCoverageWarningOpen}
+        onOpenChange={(open) => (open ? setBuyInCoverageWarningOpen(true) : closeBuyInCoverageWarning())}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-700 dark:text-red-300">
+              <AlertTriangle className="h-4 w-4" /> Units not purchased for upcoming stays
+            </DialogTitle>
+            <DialogDescription>
+              These bookings check in within the next {buyInCoverageData?.windowDays ?? 7} days but the unit
+              {buyInCoverageWarnings.length === 1 && buyInCoverageWarnings[0]?.missingUnits.length === 1 ? " has" : "s have"} not
+              been bought in yet. Find and attach the missing units on the Bookings page. Cancelled bookings are excluded.
+            </DialogDescription>
+          </DialogHeader>
+          {buyInCoverageWarnings.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Every booking checking in within the next {buyInCoverageData?.windowDays ?? 7} days has all its units purchased.
+            </p>
+          ) : (
+            <div className="max-h-96 space-y-1.5 overflow-y-auto">
+              {buyInCoverageWarnings.map((w) => (
+                <div
+                  key={w.reservationId}
+                  className="rounded border border-red-200 bg-background p-2 dark:border-red-900"
+                  data-testid={`row-buyin-coverage-${w.reservationId}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0 text-xs">
+                      <span className="font-medium">{w.guestName || "Guest"}</span>
+                      <span className="text-muted-foreground">
+                        {" "}· {w.listingNickname || w.propertyName || "—"}
+                        {w.checkIn ? ` · ${formatShortDate(w.checkIn)}${w.checkOut ? ` – ${formatShortDate(w.checkOut)}` : ""}` : ""}
+                        {w.channel ? ` · ${w.channel}` : ""}
+                        {w.confirmationCode ? ` · ${w.confirmationCode}` : ""}
+                      </span>
+                      <span
+                        className="block font-medium text-red-600 dark:text-red-400"
+                        data-testid={`text-buyin-coverage-issue-${w.reservationId}`}
+                      >
+                        ✕ {w.missingUnits.length} of {w.slotsTotal} unit{w.slotsTotal === 1 ? "" : "s"} NOT purchased
+                        {" "}({w.missingUnits.map((u) => u.unitLabel).join(", ")})
+                        {" "}·{" "}
+                        {w.daysUntilCheckIn < 0
+                          ? "guest is ALREADY checked in"
+                          : w.daysUntilCheckIn === 0
+                            ? "checks in TODAY"
+                            : `checks in in ${w.daysUntilCheckIn} day${w.daysUntilCheckIn === 1 ? "" : "s"}`}
+                      </span>
+                      {w.slotsFilled > 0 ? (
+                        <span className="block text-muted-foreground">
+                          {w.slotsFilled} of {w.slotsTotal} units already purchased
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => window.open("/bookings", "_blank")}
+                        data-testid={`button-find-units-${w.reservationId}`}
+                      >
+                        Find &amp; attach units
+                      </Button>
+                      {!w.reservationId.startsWith("manual:") ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => window.open(`https://app.guesty.com/reservations/${w.reservationId}`, "_blank")}
+                          data-testid={`button-open-guesty-buyin-${w.reservationId}`}
+                        >
+                          Open in Guesty
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <Button type="button" variant="outline" size="sm" onClick={closeBuyInCoverageWarning} data-testid="button-dismiss-buyin-coverage-warning">
               Dismiss
             </Button>
           </div>

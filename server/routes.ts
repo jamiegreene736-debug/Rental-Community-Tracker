@@ -42,6 +42,10 @@ import {
   PAYMENT_WARNING_WINDOW_MS,
   type PaymentFailureWarning,
 } from "@shared/payment-failure-warning";
+import {
+  collectBuyInCoverageWarnings,
+  BUYIN_COVERAGE_WINDOW_DAYS,
+} from "@shared/buyin-coverage-warning";
 import path from "path";
 import fs from "fs";
 import sharp from "sharp";
@@ -8499,6 +8503,38 @@ export async function registerRoutes(
       res.json({ warnings, windowDays: PAYMENT_WARNING_WINDOW_DAYS, checkedAt: new Date(nowMs).toISOString() });
     } catch (err: any) {
       res.status(500).json({ error: "Payment-failure check failed", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Missing buy-in units for imminent check-ins (dashboard red-flag popup).
+  // Detection is pure (shared/buyin-coverage-warning.ts). Rather than
+  // re-implement the listing→property mapping + unit-slot resolution + buy-in
+  // attachment lookup, this loopback self-calls the load-bearing
+  // GET /api/bookings/guesty-all (the property-revenue scheduler pattern) with
+  // a checkInTo bound — that endpoint already returns each committed
+  // reservation (Guesty AND manual) with `slots[]` (required units, each with
+  // its attached buyIn or null) for core properties, promoted drafts, and
+  // ad-hoc listings. checkInFrom is deliberately NOT set: in-house stays have
+  // a past check-in but are still covered by the endpoint's default
+  // checkOut>=today filter, and the pure window logic includes them.
+  app.get("/api/dashboard/buyin-coverage", async (_req, res) => {
+    try {
+      const nowMs = Date.now();
+      const checkInTo = new Date(nowMs + (BUYIN_COVERAGE_WINDOW_DAYS + 1) * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+      const port = process.env.PORT || "5000";
+      const url = `http://127.0.0.1:${port}/api/bookings/guesty-all?checkInTo=${checkInTo}`;
+      const resp = await fetch(url, { headers: loopbackRequestHeaders() });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        throw new Error(`guesty-all loopback ${resp.status}: ${body.slice(0, 200)}`);
+      }
+      const payload = (await resp.json()) as { reservations?: any[] };
+      const warnings = collectBuyInCoverageWarnings(payload?.reservations ?? [], nowMs);
+      res.json({ warnings, windowDays: BUYIN_COVERAGE_WINDOW_DAYS, checkedAt: new Date(nowMs).toISOString() });
+    } catch (err: any) {
+      res.status(500).json({ error: "Buy-in coverage check failed", message: err?.message ?? String(err) });
     }
   });
 
