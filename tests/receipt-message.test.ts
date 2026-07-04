@@ -202,5 +202,48 @@ console.log("receipt-message: refundSmsNeedsAttention (text confirmation safety 
   check("payment rows never flag on sms", !refundSmsNeedsAttention({ kind: "payment", smsStatus: "error" }));
 }
 
+// ── Source assertions: dashboard "Resend to guest" must be able to succeed ──
+// Regression guard for the 2026-07-04 operator report: a refund row flagged
+// ONLY for a failed SMS leg (channel status already "sent") 422'd forever on
+// "Resend to guest" — processTransaction blind-skipped ("already sent") even
+// though the SMS retry inside the skip branch actually ran, and the client's
+// apiRequest threw on the 422 before its structured handling could run.
+console.log("receipt-message: manual-resend source guards");
+{
+  const { readFileSync } = await import("node:fs");
+  const receiptsSource = readFileSync("server/guest-receipts.ts", "utf8");
+  check(
+    "guest-receipts: SMS leg reports its outcome (not void)",
+    /Promise<RefundSmsLegResult>/.test(receiptsSource),
+  );
+  check(
+    "guest-receipts: manual resend surfaces the SMS retry verdict on terminal channel rows",
+    (receiptsSource.match(/manualResendVerdictFromSms\(/g) ?? []).length >= 3, // 1 def + both terminal-skip branches
+  );
+  check(
+    "guest-receipts: a successful SMS retry counts as a SENT resend",
+    /case "sent":\s*\n\s*return \{ outcome: "sent"/.test(receiptsSource),
+  );
+  check(
+    "guest-receipts: manual-send message carries the failure reasons",
+    /failReasons/.test(receiptsSource),
+  );
+
+  const homeSource = readFileSync("client/src/pages/home.tsx", "utf8");
+  const mutationBlock = homeSource.slice(
+    homeSource.indexOf("resendRefundReceiptMutation = useMutation"),
+    homeSource.indexOf("onMutate: (reservationId: string)"),
+  );
+  check(
+    "home.tsx: resend mutation uses direct fetch (apiRequest throws on the 422 result)",
+    mutationBlock.includes("await fetch(") && !mutationBlock.includes("apiRequest("),
+    mutationBlock.slice(0, 200),
+  );
+  check(
+    "home.tsx: resend mutation treats 422 as a result, not a transport error",
+    mutationBlock.includes("r.status !== 422"),
+  );
+}
+
 console.log(`\nreceipt-message: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
