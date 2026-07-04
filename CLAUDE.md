@@ -69,6 +69,15 @@ Before making any changes:
   `shared/replacement-search-continuation.ts` (15 tests; legacy first-hit mode preserved when flag
   absent). NOTE: tests/pipeline-logic.test.ts Tier-2 meta-assertion repointed to the shared module.
   Verified: 15/0 new, full `npm test` REAL exit 0, build clean, `npm run check` 335 = baseline.
+  FOLLOW-UP same day (operator screenshot: replaced Kapaa Unit A re-flagged by a Maui "Kamaole
+  Sands" 1BD, a "Costa del Sol" house, and a "Wailea Hotels" Airbnb HUB page): FALSE POSITIVE —
+  `folderCommunityContext` only resolved original-unit + draft folders, so a builder property's
+  `replacement-p<prop>-u<unit>` folder scanned with ctx null → `listingMatchesFolderCommunity`
+  returned true for EVERY hit → generic tropical look-alikes tripped multi-photo agreement into
+  FOUND. FIX: the builder lookup now also matches `ref.propertyId > 0` from
+  `replacementPhotoFolderRef` (folderAddressContext already did the analog via the unit-swap row);
+  guarded by a pipeline-logic.test.ts source assertion. Post-deploy: "Rescan again" on the flagged
+  replacement row should come back clean.
 
 - 2026-07-04 (duplicate-photos popup: per-unit MATCHED-PHOTO rollup + Airbnb/VRBO/Booking breakout;
   scanner HOST-FAMILY bucketing fix): Operator asked to (a) see "Unit A matched photo x, y, z" at a

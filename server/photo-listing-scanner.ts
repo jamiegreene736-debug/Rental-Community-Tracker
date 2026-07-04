@@ -299,14 +299,25 @@ async function dynamicVerificationTokensForFolder(folder: string): Promise<strin
 type FolderCommunityContext = { complexName: string; city: string };
 
 async function folderCommunityContext(folder: string): Promise<FolderCommunityContext | null> {
+  const ref = draftPhotoFolderRef(folder) ?? replacementPhotoFolderRef(folder);
+  // The community-compat brake must ALSO resolve for replacement-p<prop>-u<unit>
+  // folders on BUILDER properties (positive embedded id) — before this, a
+  // replaced unit's folder got NO community context, listingMatchesFolderCommunity
+  // returned true for EVERY Lens hit, and generic tropical-interior look-alikes
+  // (a Maui "Kamaole Sands" 1BD, a "Costa del Sol" beach house, an Airbnb hub
+  // page) tripped the multi-photo-agreement rule into a false FOUND right after
+  // a photo swap (operator report 2026-07-04). folderAddressContext already
+  // resolves these via the unit-swap row; this brings the photo leg's community
+  // gate to parity.
   const builder = unitBuilderData.find((b) =>
-    b.communityPhotoFolder === folder || b.units.some((u) => u.photoFolder === folder),
+    b.communityPhotoFolder === folder ||
+    b.units.some((u) => u.photoFolder === folder) ||
+    (ref !== null && ref.propertyId > 0 && b.propertyId === ref.propertyId),
   );
   if (builder?.complexName) {
     const rule = communityAddressRuleForName(builder.complexName);
     return { complexName: builder.complexName, city: rule?.city || builder.address?.split(",")[1]?.trim() || "" };
   }
-  const ref = draftPhotoFolderRef(folder) ?? replacementPhotoFolderRef(folder);
   if (ref?.propertyId && ref.propertyId < 0) {
     const draft = await storage.getCommunityDraft(Math.abs(ref.propertyId));
     if (draft?.name) {
