@@ -43,6 +43,32 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (dashboard FAILED/UNCOLLECTED payment warning popup, PR #TBD): Operator asked for a
+  refund-style warning when (a) a guest payment FAILED (message guest + reprocess in Guesty) or (b) a
+  scheduled balance (e.g. due ~90 days before arrival) blew past its due date uncollected; retroactive
+  ~2 weeks; NEVER warn on cancelled bookings. SHIPPED: pure `shared/payment-failure-warning.ts`
+  (37 tests) — `collectReservationPaymentIssues` detects failed rows (STATUS-only /(fail|declin)/
+  match — description text like "retry if payment fails" must not trip it; refund-shaped rows are the
+  refund alert's job; payment-row status "cancel" = operator-voided, NOT failed) and overdue
+  scheduled rows (`paymentRowLooksScheduled` + `shouldBePaidAt` via scheduledChargeDateIso, 24h
+  processing grace, 14-day lookback). Skips: cancelled/inquiry/etc reservations
+  (isCommittedGuestyReservation's exclusion set) and fully-paid ones (`money.isFullyPaid===true` OR
+  totalPaid>=totalPrice — the Booking.com isFullyPaid-with-totalPaid:0 shape per the
+  payment-collected-detection memory). Dedupe: failed attempt + still-pending schedule row of the
+  SAME amount/day = ONE "failed" issue. Server `GET /api/dashboard/payment-failures`
+  (routes.ts, after the revenue handlers) does TWO Guesty passes merged by _id: sort=-lastUpdatedAt
+  until a page is older than 14d (a failed ATTEMPT bumps lastUpdatedAt) + upcoming check-ins
+  (now-1d..now+180d, fail-soft) because a NEVER-attempted scheduled charge doesn't bump
+  lastUpdatedAt — dropping pass B silently loses the dormant-overdue case. Client home.tsx:
+  auto-opening red Dialog + persistent "Review payments" banner (duplicate-photos pattern: dismissal
+  signature in localStorage `nexstay_payment_failure_warning_dismissed`, re-raises when facts
+  change); per-booking rows show issue chips ("✕ Payment FAILED — reprocess in Guesty" red /
+  "⚠ Scheduled balance NOT collected" amber), "Paid $X of $Y", and buttons "Reprocess in Guesty"
+  (app.guesty.com/reservations/<id>) + "Message guest" (/inbox?reservationId= deep link). Remediation
+  stays MANUAL by design — we never auto-charge a card from the dashboard. Verified: 37/0 new tests,
+  full `npm test` exit 0, build clean, `npm run check` 335 = baseline. Could NOT live-smoke the
+  Guesty leg (no creds) — post-deploy the popup should auto-raise if any recent payment failed.
+
 - 2026-07-04 (refund-alert "Resend to guest" 422 fix, PR #896): Operator screenshot — clicking
   Resend on the dashboard refund-attention row (Cheryl Parker, homeaway2) always toasted "Resend
   failed / 422: Sent 0 of 1 receipt(s)". TWO stacked bugs. (1) SERVER: the row's CHANNEL receipt was
