@@ -43,6 +43,26 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-04 (refund-alert "Resend to guest" 422 fix, PR #896): Operator screenshot — clicking
+  Resend on the dashboard refund-attention row (Cheryl Parker, homeaway2) always toasted "Resend
+  failed / 422: Sent 0 of 1 receipt(s)". TWO stacked bugs. (1) SERVER: the row's CHANNEL receipt was
+  already delivered (status "sent"); it was flagged only for the failed refund-SMS leg
+  (refundSmsNeedsAttention). The manual force-send hit processTransaction's terminal "already sent"
+  skip, which DID retry the SMS leg but threw the result away → ok:false → 422 forever, even when
+  the retry delivered the text. FIX: `sendRefundReceiptSmsLeg` returns its outcome
+  (sent/already-sent/no-phone/not-configured/error + detail); under allowResend BOTH terminal-skip
+  branches (current-key + legacy-key shim) convert it via `manualResendVerdictFromSms` — delivered
+  text = SENT resend (200, green toast), failed text = error with the actionable reason.
+  Scheduler-tick (no allowResend) semantics unchanged; the OTA channel is still never re-posted.
+  `sendReceiptForReservation.message` now appends per-receipt failure reasons. (2) CLIENT: the
+  mutation's "422 is a result" branch was DEAD — `apiRequest` throws on every non-2xx. It now
+  fetches directly, tolerates 422, and the success toast says which leg was resent. Guarded by 6
+  source assertions in tests/receipt-message.test.ts (67/0); full `npm test` exit 0, build clean,
+  `npm run check` 335 = baseline. Could NOT live-smoke Guesty/Quo (no creds). Post-deploy: HARD
+  refresh the dashboard (the operator's Safari had a stale pre-#890 bundle — old alert copy, no 📱
+  SMS-failure line), then Resend on Cheryl's row: green toast if her phone is on file, otherwise an
+  explicit "no phone on file — save one in the Guest Inbox" error.
+
 - 2026-07-04 (find-replacement-unit: EXHAUSTIVE mode + leave-your-phone auto-reopen): Operator asked
   (a) can he leave Safari mid-search (screenshot: "Still checking candidates… 94% · 7:42") and (b) a
   deep dive into how find-unit works + make it find ALL possible replacement units. (a) AUDIT: the
