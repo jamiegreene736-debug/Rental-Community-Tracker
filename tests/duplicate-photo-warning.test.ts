@@ -3,6 +3,8 @@ import {
   collectDuplicateListingLinks,
   duplicatePhotoWarningSignature,
   formatDuplicatePhotoPlatforms,
+  groupDuplicateListingLinksByUnit,
+  photoFilenameFromMatchUrl,
   photoReplaceRescanVerdict,
 } from "../shared/duplicate-photo-warning";
 
@@ -121,6 +123,93 @@ check("all three clean after rescan → clean", photoReplaceRescanVerdict({
   });
   check("non-URL / null listingUrl rows are dropped", links.length === 0);
 }
+
+// ── matched-photo accumulation on de-duped links ─────────────────────────────
+{
+  const { links } = collectDuplicateListingLinks({
+    airbnb: [
+      { listingUrl: "https://www.airbnb.com/rooms/123", title: "Thief", photoUrl: "https://host/photos/mauna-kai-t3/03-living.jpg" },
+      { listingUrl: "https://www.airbnb.com/rooms/123/", title: "Thief", photoUrl: "https://host/photos/mauna-kai-t3/07-master.jpg" },
+      { listingUrl: "https://www.airbnb.com/rooms/123", title: "Thief", photoUrl: "https://host/photos/mauna-kai-t3/03-living.jpg" },
+    ],
+  });
+  check("same listing accumulates its distinct matched photos",
+    links.length === 1 && links[0].matchedPhotoUrls.length === 2 &&
+    links[0].matchedPhotoUrls[0].endsWith("03-living.jpg"));
+}
+
+// ── photoFilenameFromMatchUrl ────────────────────────────────────────────────
+check("filename parses out of a scanner photoUrl (query stripped)",
+  photoFilenameFromMatchUrl("https://host/photos/mauna-kai-t3/07-master.jpg?w=640") === "07-master.jpg");
+check("URL-encoded filename decodes", photoFilenameFromMatchUrl("https://h/photos/f/my%20photo.jpg") === "my photo.jpg");
+check("non-image URL → null", photoFilenameFromMatchUrl("https://www.airbnb.com/rooms/123") === null);
+
+// ── groupDuplicateListingLinksByUnit ─────────────────────────────────────────
+const matchUrl = (n: number, photo: string) =>
+  ({ listingUrl: `https://www.airbnb.com/rooms/${n}`, title: `L${n}`, photoUrl: `https://host/photos/shared/${photo}` });
+
+{
+  // Distinct galleries → links split per unit by matched filename.
+  const groups = groupDuplicateListingLinksByUnit(
+    {
+      airbnb: [matchUrl(1, "a-living.jpg"), matchUrl(2, "b-lanai.jpg"), matchUrl(3, "mystery.jpg")],
+      vrbo: [matchUrl(1, "a-master.jpg")],
+    },
+    [
+      { label: "Unit A (7B)", filenames: ["a-living.jpg", "a-master.jpg"] },
+      { label: "Unit B (8)", filenames: ["b-lanai.jpg", "b-kitchen.jpg"] },
+    ],
+  );
+  const unitA = groups.find((g) => g.label === "Unit A (7B)");
+  const unitB = groups.find((g) => g.label === "Unit B (8)");
+  const rest = groups.find((g) => g.kind === "unassigned");
+  check("distinct galleries → per-unit groups by matched filename",
+    unitA?.links.length === 1 && unitA.links[0].url.endsWith("/1") &&
+    unitB?.links.length === 1 && unitB.links[0].url.endsWith("/2"));
+  check("photos in neither gallery land in an 'unassigned' group",
+    rest?.links.length === 1 && rest.links[0].url.endsWith("/3"));
+}
+
+{
+  // A listing hosting BOTH units' photos appears under both units.
+  const groups = groupDuplicateListingLinksByUnit(
+    { airbnb: [matchUrl(9, "a-living.jpg"), matchUrl(9, "b-lanai.jpg")] },
+    [
+      { label: "Unit A", filenames: ["a-living.jpg"] },
+      { label: "Unit B", filenames: ["b-lanai.jpg"] },
+    ],
+  );
+  check("a listing with both units' photos shows under BOTH units",
+    groups.filter((g) => g.kind === "unit").every((g) => g.links.some((l) => l.url.endsWith("/9"))) &&
+    groups.filter((g) => g.kind === "unit").length === 2);
+}
+
+{
+  // Identical galleries (mauna-kai-t3 pattern: both units use the same list)
+  // → one honest shared-gallery group, never fake per-unit attribution.
+  const shared = ["03-living.jpg", "07-master.jpg"];
+  const groups = groupDuplicateListingLinksByUnit(
+    { airbnb: [matchUrl(1, "03-living.jpg")] },
+    [
+      { label: "Unit A (7B)", filenames: [...shared] },
+      { label: "Unit B (8)", filenames: [...shared].reverse() },
+    ],
+  );
+  check("identical shared gallery → single group flagged sharedGallery",
+    groups.length === 1 && groups[0].kind === "all" && groups[0].sharedGallery === true);
+}
+
+{
+  // Single or no owners → one plain group (per-folder rows already are per-unit).
+  const groups = groupDuplicateListingLinksByUnit(
+    { airbnb: [matchUrl(1, "x.jpg")] },
+    [{ label: "Unit A", filenames: ["x.jpg"] }],
+  );
+  check("single owner → one plain group (no attribution needed)",
+    groups.length === 1 && groups[0].kind === "all" && !groups[0].sharedGallery);
+}
+
+check("no links → no groups", groupDuplicateListingLinksByUnit({ airbnb: [] }, []).length === 0);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0);
