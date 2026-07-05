@@ -558,7 +558,16 @@ ${BOT_WALL_PROTOCOL}
    PATCH ${apiRoot}/api/buy-ins/<buyInId>
    { "unitAddress": "<the confirmed full street address>",
      "notes": "<existing notes> · Community verified via Cowork: <building/complex name> — <same building / same complex / DIFFERENT community>" }
-4. **Report** (this is the deliverable):
+4. **Record the VERDICT in the app** (this is what flips the reservation's
+   walking-distance panel to a verified state):
+   POST ${apiRoot}/api/bookings/${input.reservationId}/community-verdict
+   { "verdict": "<same_building | same_community | different>", "source": "cowork" }
+   Pick the precise value: SAME BUILDING → "same_building"; same complex or
+   same community → "same_community"; anything else → "different". (The same
+   verdict can also be recorded by clicking the "✓ Same community/building" /
+   "✕ Not same" buttons on the reservation's walking-distance panel — the API
+   call and the buttons do the same thing; use the API.)
+5. **Report** (this is the deliverable):
    - Per unit: building/complex name, confirmed street address, and the
      evidence (map pin, listing text, web search result).
    - The verdict in one line: **SAME BUILDING / same complex / same community

@@ -11691,6 +11691,25 @@ Requirements:
     };
   }
 
+  // The pair-level verdict shown on the walking-distance panel: present only
+  // when EVERY attached buy-in carries the same non-null communityVerdict —
+  // a swapped/new unit has null, which correctly drops the stale verdict.
+  function communityVerdictForAttached(attached: BuyIn[]): { verdict: string; source: string | null; at: string | null } | null {
+    if (attached.length === 0) return null;
+    const first = String(attached[0].communityVerdict ?? "").trim();
+    if (!first) return null;
+    if (!attached.every((b) => String(b.communityVerdict ?? "").trim() === first)) return null;
+    const newest = attached
+      .map((b) => b.communityVerdictAt)
+      .filter((d): d is Date => d instanceof Date)
+      .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+    return {
+      verdict: first,
+      source: attached[0].communityVerdictSource ?? null,
+      at: newest ? newest.toISOString() : null,
+    };
+  }
+
   app.get("/api/bookings/:reservationId/unit-proximity", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
@@ -11719,10 +11738,52 @@ Requirements:
         status: "ready",
         reservationId,
         ...proximity,
+        communityVerdict: communityVerdictForAttached(attached),
         generatedAt: new Date().toISOString(),
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to estimate unit proximity", message: err.message });
+    }
+  });
+
+  // Record the operator's / Cowork's community verdict on ALL of a
+  // reservation's attached buy-ins at once (the "Verify community" flow's
+  // final step, or the ✓/✗ buttons on the walking-distance panel). The panel
+  // shows a verdict only while every currently-attached buy-in carries the
+  // SAME value — attaching/replacing a unit clears the consensus until the
+  // new pair is re-verified.
+  app.post("/api/bookings/:reservationId/community-verdict", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      const verdict = String(req.body?.verdict ?? "").trim();
+      const allowedVerdicts = ["same_building", "same_community", "different"];
+      if (!allowedVerdicts.includes(verdict)) {
+        return res.status(400).json({ error: `Invalid verdict (expected one of ${allowedVerdicts.join(", ")})` });
+      }
+      const source = String(req.body?.source ?? "operator").trim().toLowerCase() === "cowork" ? "cowork" : "operator";
+      const attached = (await storage.getBuyInsByReservation(reservationId)).filter((b) => b.status !== "cancelled");
+      if (attached.length === 0) {
+        return res.status(400).json({ error: "No attached buy-ins to record a verdict on" });
+      }
+      const at = new Date();
+      for (const b of attached) {
+        await storage.updateBuyIn(b.id, {
+          communityVerdict: verdict,
+          communityVerdictSource: source,
+          communityVerdictAt: at,
+        });
+      }
+      res.json({
+        ok: true,
+        reservationId,
+        verdict,
+        source,
+        at: at.toISOString(),
+        buyInIds: attached.map((b) => b.id),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to record community verdict", message: err.message });
     }
   });
 

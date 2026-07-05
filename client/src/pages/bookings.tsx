@@ -734,6 +734,7 @@ type UnitProximityResponse =
       confidence: "exact-address" | "listing-title" | "resort-default" | "unverified-cross-resort";
       withinLimit?: boolean;
       maxMinutes?: number;
+      communityVerdict?: { verdict: string; source: string | null; at: string | null } | null;
       generatedAt: string;
     };
 
@@ -1127,7 +1128,28 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
     staleTime: 10 * 60 * 1000,
   });
 
+  // Operator/Cowork verdict recording — the ✓/✗ buttons (operator spec
+  // 2026-07-05: give Cowork a place to click "yes same community/building" or
+  // "no"). Stamps every attached buy-in via the community-verdict endpoint.
+  const verdictMutation = useMutation({
+    mutationFn: async (verdict: "same_building" | "same_community" | "different") => {
+      const res = await apiRequest(
+        "POST",
+        `/api/bookings/${encodeURIComponent(reservation._id)}/community-verdict`,
+        { verdict, source: "operator" },
+      );
+      return res.json();
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["/api/bookings", reservation._id, "unit-proximity"] });
+    },
+  });
+
   if (attachedSlots.length < 2) return null;
+
+  const verdictInfo = query.data?.status === "ready" ? query.data.communityVerdict ?? null : null;
+  const verdictLabel = (v: string) =>
+    v === "same_building" ? "same building" : v === "same_community" ? "same community" : "NOT the same community";
 
   const sourceText = (data: Extract<UnitProximityResponse, { status: "ready" }>) => {
     if (data.confidence === "exact-address") return "address verified";
@@ -1154,7 +1176,8 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
     return new RegExp(`(?:#|unit\\s+|apt\\s+)${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(unit.address);
   };
 
-  const isTooFar = query.data?.status === "ready" && query.data.withinLimit === false;
+  const verdictDifferent = verdictInfo?.verdict === "different";
+  const isTooFar = (query.data?.status === "ready" && query.data.withinLimit === false) || verdictDifferent;
   const limit = query.data?.status === "ready" ? query.data.maxMinutes ?? 10 : 10;
   const cardClass = isTooFar
     ? "rounded border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-950 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-100"
@@ -1207,6 +1230,53 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
           ))}
         </div>
       )}
+      {/* Community verdict row — Cowork (or the operator) records the verify
+          outcome here. The verdict is stamped on every attached buy-in and
+          clears automatically when the attached pair changes. */}
+      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+        {verdictInfo ? (
+          <Badge
+            className={`${verdictDifferent ? "bg-red-700" : "bg-emerald-700"} text-white text-[10px]`}
+            data-testid={`badge-community-verdict-${reservation._id}`}
+          >
+            {verdictDifferent ? "✕" : "✓"} Verified {verdictLabel(verdictInfo.verdict)}
+            {verdictInfo.source ? ` · via ${verdictInfo.source}` : ""}
+            {verdictInfo.at ? ` · ${new Date(verdictInfo.at).toLocaleDateString()}` : ""}
+          </Badge>
+        ) : (
+          <span className={`text-[10px] ${tinyClass}`}>Community not verified yet — confirm after checking:</span>
+        )}
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 text-[10px] text-emerald-800 hover:bg-emerald-100 dark:text-emerald-300 dark:hover:bg-emerald-950"
+          disabled={verdictMutation.isPending}
+          onClick={(e) => {
+            e.stopPropagation();
+            verdictMutation.mutate("same_community");
+          }}
+          data-testid={`button-community-verdict-yes-${reservation._id}`}
+          title="Record that the attached units ARE in the same community/building (stamps every attached buy-in)"
+        >
+          ✓ Same community/building
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 text-[10px] text-red-800 hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-950"
+          disabled={verdictMutation.isPending}
+          onClick={(e) => {
+            e.stopPropagation();
+            verdictMutation.mutate("different");
+          }}
+          data-testid={`button-community-verdict-no-${reservation._id}`}
+          title="Record that the attached units are NOT in the same community (flags this pair red)"
+        >
+          ✕ Not same
+        </Button>
+      </div>
     </div>
   );
 }
