@@ -51,6 +51,49 @@ export function aliasPrefixForGuest(guestName: string | null | undefined, reserv
   return `${base}.${safeReservation || Date.now().toString(36)}`.replace(/^\.+|\.+$/g, "");
 }
 
+// Short slug for a unit label: "Unit B" -> "b", "Unit 812" -> "812". Empty when
+// the label carries no distinguishing token.
+export function aliasUnitToken(unitLabel: string | null | undefined): string {
+  return String(unitLabel ?? "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\bunit\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, ".");
+}
+
+// Ordered alias prefixes to try for a reservation(+unit) alias. The base prefix
+// is guest+reservation; two units on ONE reservation would collide on it, so a
+// unit-scoped alias appends the unit token. Later entries only matter when
+// SimpleLogin says an earlier one "already exists" (e.g. a prior attempt minted
+// the alias but the DB insert failed): buyInId is a guaranteed-unique
+// disambiguator, and the entropy tail is the last resort that always succeeds.
+export function aliasPrefixCandidates(input: {
+  guestName?: string | null;
+  reservationId: string;
+  unitLabel?: string | null;
+  buyInId?: number | null;
+  entropy?: string;
+}): string[] {
+  const unitToken = aliasUnitToken(input.unitLabel);
+  const base = [aliasPrefixForGuest(input.guestName, input.reservationId), unitToken]
+    .filter(Boolean)
+    .join(".");
+  const candidates = [base];
+  if (typeof input.buyInId === "number" && Number.isFinite(input.buyInId)) {
+    candidates.push(`${base}.b${input.buyInId}`);
+  }
+  candidates.push(`${base}.${(input.entropy || Date.now().toString(36)).toLowerCase().replace(/[^a-z0-9]+/g, "").slice(-6)}`);
+  return Array.from(new Set(candidates));
+}
+
+// SimpleLogin rejects a duplicate prefix with e.g. "alias x@y already exists".
+export function isSimpleLoginAliasExistsError(err: unknown): boolean {
+  return /already|in use|exist|duplicate|taken/i.test(String((err as any)?.message ?? err ?? ""));
+}
+
 export function extractEmailAddress(value: string | null | undefined): string {
   const raw = String(value ?? "").trim();
   const angle = raw.match(/<([^>]+)>/);
