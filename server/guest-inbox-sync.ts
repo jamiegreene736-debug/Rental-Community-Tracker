@@ -68,16 +68,31 @@ function decodeByTransferEncoding(body: string, contentTransferEncoding?: string
   return decodeQuotedPrintable(body);
 }
 
+// HTML → text that PRESERVES the email's line structure. Block-level tags and
+// <br> become newlines (an operator reading a long PM confirmation in the alias
+// email history needs the paragraphs the sender wrote); only horizontal
+// whitespace is collapsed. The old version collapsed ALL whitespace to single
+// spaces, which stored long HTML emails as one unreadable clump —
+// shared/email-body-format.ts reflows those legacy rows at display time.
 function stripHtml(html: string): string {
   return html
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<head[\s\S]*?<\/head>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(?:br|hr)[^>]*\/?>/gi, "\n")
+    .replace(/<\/(?:p|div|tr|table|h[1-6]|li|ul|ol|blockquote|pre|section|article|header|footer)>/gi, "\n")
+    .replace(/<(?:p|div|tr|h[1-6]|li|blockquote)(?:\s[^>]*)?>/gi, "\n")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
-    .replace(/\s+/g, " ")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0?39;|&apos;|&rsquo;/gi, "'")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/ ?\n ?/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
@@ -257,7 +272,10 @@ function surrogateMessageId(aliasEmail: string, parsed: ParsedRawEmail): string 
     aliasEmail,
     parsed.subject ?? "",
     parsed.receivedAt ? parsed.receivedAt.toISOString() : "",
-    (parsed.body ?? "").slice(0, 200),
+    // Whitespace-normalized so the key is stable across body-formatting changes
+    // (stripHtml now preserves newlines; rows imported before that were stored
+    // flattened — hashing the raw body would re-key + re-import those emails).
+    (parsed.body ?? "").replace(/\s+/g, " ").slice(0, 200),
   ].join("|");
   return `synth:${createHash("sha1").update(basis).digest("hex")}`;
 }
