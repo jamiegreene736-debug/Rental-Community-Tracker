@@ -334,7 +334,7 @@ export type SidecarVrboBookParams = {
   firstName: string;
   lastName: string;
   email: string; // unique per-unit traveler alias
-  phone: string; // fixed operator booking phone (407 449 7941)
+  phone: string; // fixed operator booking phone (808 460 6509)
   bedrooms?: number;
   // When true, the worker drives to the checkout page, reads the payment schedule
   // (due now / balance + balance-due date), and RETURNS — never fills traveler
