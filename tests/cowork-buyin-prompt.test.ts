@@ -113,8 +113,10 @@ check(
   /refundable damage deposit[\s\S]{0,120}host-mandated: proceed/i.test(checkout),
 );
 check(
-  "checkout: guest name for everything (name-on-card is the only exception)",
-  checkout.includes("The guest's name for everything") && checkout.includes("(Jane Traveler)") && /name-on-card field/.test(checkout),
+  "checkout: guest name for everything INCLUDING name-on-card",
+  checkout.includes("INCLUDING the name-on-card field") && checkout.includes("(Jane Traveler)") &&
+    /Do NOT use the\s+cardholder's own name/.test(checkout) &&
+    /name-on-card field, which\s+gets the GUEST's name/.test(checkout),
 );
 check(
   "checkout: traveler email = minted alias via the traveler-email endpoint",
@@ -137,7 +139,7 @@ check(
 check("checkout: one unit at a time", /One unit at a time/.test(checkout));
 // CARD HYGIENE — the load-bearing safety property of this prompt.
 check("checkout: card comes from the LOCAL file, path only", checkout.includes(DEFAULT_CARD_FILE_HINT));
-check("checkout: forbids pasting card details anywhere", checkout.includes("Do NOT paste card details"));
+check("checkout: forbids pasting card details anywhere", /Do NOT paste card\s+details/.test(checkout));
 check(
   "checkout: prompt can never contain card digits (no 13+ digit runs)",
   !/\d[\d\s-]{12,}\d/.test(checkout),

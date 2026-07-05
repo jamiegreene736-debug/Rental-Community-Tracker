@@ -51,7 +51,7 @@ Before making any changes:
   (shared/cowork-buyin-prompt.ts → the bookings-page "Create prompt for Cowork" button). The prompt
   now hard-stops after attach ("STOP and wait for my explicit approval") and, on the operator's go,
   books each unit on vrbo.com: DAMAGE WAIVER ONLY (all insurance/add-ons declined; deposit-only
-  host = proceed + note), guest's name for everything (name-on-card excepted), traveler email = the
+  host = proceed + note), guest's name for everything INCLUDING name-on-card (operator follow-up — never the cardholder's name), traveler email = the
   minted per-guest alias (POST /api/buy-ins/:id/traveler-email), phone 808-460-6509, 15% price
   guard vs costPaid, one unit at a time, never blind-retry Book-now (check My Trips first), then
   PATCH /api/buy-ins/:id {bookingStatus:"booked", bookingConfirmation} (allowlist widened +
@@ -59,8 +59,8 @@ Before making any changes:
   green "Bought in" badge. CARD RULE (load-bearing): card details never in the prompt/app/repo —
   the prompt reads the operator-maintained local file ~/Documents/vrbo-booking-card.txt
   (DEFAULT_CARD_FILE_HINT) at payment time only; a test asserts the prompt contains no 13+-digit
-  runs. OPERATOR SETUP: create that file on the Mac (number, expiry, CVC, name on card, billing
-  zip — one per line). DON'T RE-CHASE: the dormant AUTOMATED checkout scaffold (buy_ins booking
+  runs. OPERATOR SETUP: create that file on the Mac (number, expiry, CVC, billing address/zip —
+  one per line; NO name line needed — name-on-card gets the guest's name). DON'T RE-CHASE: the dormant AUTOMATED checkout scaffold (buy_ins booking
   columns, server/buy-in-checkout-job.ts, `vrbo_book` op type, "Buy this unit in"/"Payment terms"
   buttons) is already merged but its sidecar worker handler was never written — the operator chose
   the Cowork path instead; the scaffold stays dormant/intact. FOLLOW-UP same day (operator): the
