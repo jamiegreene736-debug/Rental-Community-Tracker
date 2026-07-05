@@ -46,6 +46,7 @@ import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-f
 import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
+import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
 import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt } from "@shared/cowork-buyin-prompt";
@@ -5387,6 +5388,79 @@ function hasArrivalDetailContent(unit: ArrivalUnitDetail): boolean {
   );
 }
 
+type ArrivalUnitDetailWithMeta = ArrivalUnitDetail & {
+  id?: number;
+  travelerEmail?: string | null;
+  arrivalExtraction?: ArrivalExtractionRecord | null;
+};
+
+const ARRIVAL_FIELD_LABELS: Record<string, string> = {
+  unitAddress: "Address",
+  accessCode: "Door/access code",
+  wifiName: "Wi-Fi name",
+  wifiPassword: "Wi-Fi password",
+  parkingInfo: "Parking",
+  arrivalNotes: "Notes",
+};
+
+/** Per-unit "which email did each arrival field come from" evidence chips. */
+function ArrivalProvenancePanel({ units }: { units: ArrivalUnitDetailWithMeta[] }) {
+  const rows = units.filter((u) => u.travelerEmail || u.arrivalExtraction);
+  if (!rows.length) return null;
+  return (
+    <div className="space-y-1.5">
+      {rows.map((u) => {
+        const extraction = u.arrivalExtraction ?? null;
+        const fields = Object.entries(extraction?.fields ?? {}).filter(([, rec]) => rec?.verified && rec.value);
+        return (
+          <div key={`${u.unitLabel}-${u.id ?? ""}`} className="rounded border bg-muted/20 px-2.5 py-1.5 text-[11px]" data-testid={`arrival-provenance-${u.id ?? u.unitLabel}`}>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="font-medium">{u.unitLabel}</span>
+              {extraction ? (
+                <Badge variant="secondary" className="text-[9px]">
+                  {extraction.method === "claude" ? "verified against email" : "parsed from email"}
+                  {" · "}{extraction.messageCount} email{extraction.messageCount === 1 ? "" : "s"}
+                </Badge>
+              ) : (
+                <span className="text-amber-700 dark:text-amber-400">
+                  no host email found in the booking-alias inbox yet
+                </span>
+              )}
+            </div>
+            {fields.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {fields.map(([key, rec]) => (
+                  <span
+                    key={key}
+                    className="inline-flex items-center gap-0.5 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200"
+                    title={[
+                      rec?.sourceSubject ? `From email: "${rec.sourceSubject}"` : null,
+                      rec?.sourceDate ? `Received: ${fmtDate(rec.sourceDate)}` : null,
+                      rec?.quote ? `Evidence: "${rec.quote}"` : null,
+                    ].filter(Boolean).join("\n")}
+                  >
+                    ✓ {ARRIVAL_FIELD_LABELS[key] ?? key}
+                  </span>
+                ))}
+              </div>
+            )}
+            {!!extraction?.conflicts?.length && (
+              <p className="mt-1 text-amber-700 dark:text-amber-400">
+                ⚠ Emails disagreed on {extraction.conflicts.map((c) => ARRIVAL_FIELD_LABELS[c] ?? c).join(", ")} — the newest email won. Double-check before sending.
+              </p>
+            )}
+            {extraction?.portalHint && (
+              <p className="mt-1 text-amber-700 dark:text-amber-400">
+                ⚠ The host email points at a guest portal — some details may only exist behind its login. Open the Guest inbox to review the email.
+              </p>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Draft + send arrival details from attached buy-ins through the booking channel. */
 function ArrivalDetailsMessageDialog({
   reservation,
@@ -5408,7 +5482,7 @@ function ArrivalDetailsMessageDialog({
     ?? reservation.slots.find((s) => s.buyIn)?.buyIn?.propertyName
     ?? "";
 
-  const { data, isLoading, refetch, isFetching } = useQuery<{ units: ArrivalUnitDetail[] }>({
+  const { data, isLoading, refetch, isFetching } = useQuery<{ units: ArrivalUnitDetailWithMeta[] }>({
     queryKey: ["/api/bookings", reservation._id, "arrival-details"],
     queryFn: ({ signal }) => apiGetJson(`/api/bookings/${encodeURIComponent(reservation._id)}/arrival-details`, signal),
     // Global queryClient uses staleTime: Infinity — without this override, opening
@@ -5423,6 +5497,33 @@ function ArrivalDetailsMessageDialog({
   // as an amber "queued, don't resend" notice (resending piles up duplicates).
   const [sendPending, setSendPending] = useState(false);
   const messageEditedRef = useRef(false);
+
+  // Pull arrival details straight from the guest booking-alias inbox: live IMAP
+  // sync + Claude extraction with verbatim verification (server rejects any
+  // value not literally present in the host's email). Auto-runs once on open so
+  // the draft reflects what the host actually emailed, not a stale parse.
+  const autoPulledRef = useRef(false);
+  const pullFromEmail = useMutation({
+    mutationFn: () =>
+      apiPostJsonWithTimeout<{ units: ArrivalUnitDetailWithMeta[] }>(
+        `/api/bookings/${encodeURIComponent(reservation._id)}/arrival-details/refresh`,
+        {},
+        240_000,
+      ),
+    onSuccess: (body) => {
+      queryClient.setQueryData(["/api/bookings", reservation._id, "arrival-details"], { units: body.units });
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+    },
+    onError: (e: any) =>
+      toast({ title: "Email pull failed", description: e?.message ?? String(e), variant: "destructive" }),
+  });
+  useEffect(() => {
+    if (autoPulledRef.current) return;
+    autoPulledRef.current = true;
+    pullFromEmail.mutate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!data || messageEditedRef.current) return;
@@ -5537,13 +5638,37 @@ function ArrivalDetailsMessageDialog({
             </div>
           ) : (
             <>
-              {unitsWithDetails.length === 0 && (
-                <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
-                  No saved arrival details yet — the draft notes that details are still being confirmed. Add details in each unit&apos;s
-                  Arrival details panel or wait for VRBO emails to populate them, then click Refresh.
+              {pullFromEmail.isPending && (
+                <div className="flex items-center gap-2 rounded border border-sky-200 bg-sky-50 px-3 py-2 text-[11px] text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200" data-testid="arrival-email-pull-status">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Checking the guest booking-email inbox for the host&apos;s arrival email (door codes, Wi-Fi, parking)…
                 </div>
               )}
-              <div className="flex justify-end">
+              {unitsWithDetails.length === 0 && !pullFromEmail.isPending && (
+                <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+                  No arrival details found yet — the alias inbox was just checked and no host email with details has arrived.
+                  The draft notes that details are still being confirmed. Add details manually in each unit&apos;s Arrival details
+                  panel, or click &quot;Pull from email&quot; again once the host sends them.
+                </div>
+              )}
+              <ArrivalProvenancePanel units={data?.units ?? []} />
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-[10px]"
+                  disabled={pullFromEmail.isPending}
+                  onClick={() => {
+                    messageEditedRef.current = false;
+                    pullFromEmail.mutate();
+                  }}
+                  data-testid="button-pull-arrival-from-email"
+                >
+                  {pullFromEmail.isPending
+                    ? <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Pulling…</>
+                    : <><Mail className="h-3 w-3 mr-1" /> Pull from email</>}
+                </Button>
                 <Button
                   type="button"
                   size="sm"

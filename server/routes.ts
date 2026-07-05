@@ -11296,10 +11296,57 @@ Requirements:
             managementCompany: b.managementCompany ?? "",
             managementContact: b.managementContact ?? "",
             arrivalNotes: b.arrivalNotes ?? "",
+            travelerEmail: b.travelerEmail ?? null,
+            arrivalExtraction: b.arrivalExtraction ?? null,
           })),
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch arrival details", message: err.message });
+    }
+  });
+
+  // POST /api/bookings/:reservationId/arrival-details/refresh
+  // Operator asked to "pull arrival details from the host's email": for each
+  // attached buy-in with a minted traveler alias, live-sync the SimpleLogin
+  // forwarding mailbox over IMAP, then extract door codes / Wi-Fi / parking /
+  // address with Claude and keep ONLY values that appear verbatim in the cited
+  // email (shared/arrival-email-verification.ts) before patching the buy-in.
+  // The Message AD dialog calls this on open, so the drafted guest message is
+  // built from what the host actually wrote, not a stale background parse.
+  app.post("/api/bookings/:reservationId/arrival-details/refresh", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      const { refreshArrivalDetailsForReservation } = await import("./arrival-email-extract");
+      const refreshed = await refreshArrivalDetailsForReservation(reservationId);
+      const attached = await storage.getBuyInsByReservation(reservationId);
+      res.json({
+        reservationId,
+        refresh: refreshed.units,
+        units: attached
+          .slice()
+          .sort((a, b) => String(a.unitLabel ?? "").localeCompare(String(b.unitLabel ?? "")))
+          .map((b) => ({
+            id: b.id,
+            unitId: b.unitId,
+            unitLabel: b.unitLabel,
+            propertyName: b.propertyName,
+            checkIn: b.checkIn,
+            checkOut: b.checkOut,
+            unitAddress: b.unitAddress ?? "",
+            accessCode: b.accessCode ?? "",
+            wifiName: b.wifiName ?? "",
+            wifiPassword: b.wifiPassword ?? "",
+            parkingInfo: b.parkingInfo ?? "",
+            managementCompany: b.managementCompany ?? "",
+            managementContact: b.managementContact ?? "",
+            arrivalNotes: b.arrivalNotes ?? "",
+            travelerEmail: b.travelerEmail ?? null,
+            arrivalExtraction: b.arrivalExtraction ?? null,
+          })),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to refresh arrival details from email", message: err?.message ?? String(err) });
     }
   });
 
