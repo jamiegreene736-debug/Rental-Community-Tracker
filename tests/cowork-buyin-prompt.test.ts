@@ -284,6 +284,20 @@ check(
   "verify: maps the verdict scale onto the enum",
   /SAME BUILDING → "same_building"/.test(verify) && /anything else → "different"/.test(verify),
 );
+// Operator spec 2026-07-05 follow-up: recording the verdict is what MARKS the
+// units in the portal UI — the prompt must say so and forbid skipping it.
+check(
+  "verify: verdict POST is framed as MARKING the units in the portal UI",
+  verify.includes("MARKS the units in the\n   portal UI") || /MARKS the units in the\s+portal UI/.test(verify),
+);
+check(
+  "verify: names the per-unit badges the POST produces",
+  verify.includes('"✓ Same building"') && verify.includes('"✓ Same community"') && verify.includes('"✕ Not the same community"'),
+);
+check(
+  "verify: forbids skipping the verdict POST even on a positive finding",
+  /NEVER skip this step/.test(verify) && /leaves the units UNMARKED/.test(verify),
+);
 check("verify: tidies up its tabs", /close every Chrome tab you opened/i.test(verify));
 check("verify: names the configured community", verify.includes("Configured community: Ilikai"));
 const verifySingle = buildCoworkCommunityVerifyPrompt({
@@ -469,6 +483,54 @@ const corroborated = buildCoworkBuyInPrompt({ ...baseInput, propertyName: "Poipu
 check("corroborated: keeps the curated resort as anchor", corroborated.includes("anchor on this): Poipu Kai"), corroborated.match(/Resort to search.*/)?.[0]);
 check("corroborated: keeps the curated city-wide (Koloa)", corroborated.includes("city-wide search of Koloa, Hawaii"));
 check("corroborated: no mislabel warning", !/MAY BE MISLABELED/.test(corroborated));
+
+// ── unitCommunityVerdictBadge: per-unit UI marker for the recorded verdict ───
+// (operator spec 2026-07-05: verified same-building units must be marked on
+// the unit cards themselves, not only on the walking-distance panel.)
+{
+  const { unitCommunityVerdictBadge } = await import("../shared/community-verdict-badge");
+  const building = unitCommunityVerdictBadge({
+    communityVerdict: "same_building",
+    communityVerdictSource: "cowork",
+    communityVerdictAt: "2026-07-05T18:30:00.000Z",
+  });
+  check("badge: same_building → ✓ Same building", building?.label === "✓ Same building" && building.different === false, building);
+  check(
+    "badge: title carries source + ISO day + meaning",
+    !!building && building.title.includes("via cowork") && building.title.includes("on 2026-07-05") && building.title.includes("SAME BUILDING"),
+    building?.title,
+  );
+  const community = unitCommunityVerdictBadge({ communityVerdict: "same_community", communityVerdictSource: "operator", communityVerdictAt: null });
+  check("badge: same_community → ✓ Same community", community?.label === "✓ Same community" && community.different === false, community);
+  check("badge: no date → title omits 'on'", !!community && !community.title.includes(" on ") && community.title.includes("via operator"), community?.title);
+  const different = unitCommunityVerdictBadge({ communityVerdict: "different", communityVerdictSource: "cowork", communityVerdictAt: new Date("2026-07-05T00:00:00Z") });
+  check("badge: different → red ✕ badge", different?.label === "✕ Not the same community" && different.different === true, different);
+  check("badge: no verdict → null", unitCommunityVerdictBadge({ communityVerdict: null }) === null);
+  check("badge: missing buy-in → null", unitCommunityVerdictBadge(null) === null && unitCommunityVerdictBadge(undefined) === null);
+  check("badge: junk legacy value → null (never render junk)", unitCommunityVerdictBadge({ communityVerdict: "maybe?" }) === null);
+  check(
+    "badge: whitespace/case tolerated, invalid date dropped from title",
+    unitCommunityVerdictBadge({ communityVerdict: "  SAME_BUILDING ", communityVerdictAt: "not-a-date" })?.label === "✓ Same building" &&
+      !unitCommunityVerdictBadge({ communityVerdict: "same_building", communityVerdictAt: "not-a-date" })!.title.includes(" on "),
+  );
+
+  // Source assertion: the bookings slot card actually renders this badge from
+  // the slot's OWN buy-in row (grep, not import — bookings.tsx drags in the
+  // whole client bundle).
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const bookingsSrc = fs.readFileSync(path.join(here, "../client/src/pages/bookings.tsx"), "utf8");
+  check(
+    "bookings: slot card derives the badge from slot.buyIn via unitCommunityVerdictBadge",
+    bookingsSrc.includes("unitCommunityVerdictBadge(slot.buyIn)"),
+  );
+  check(
+    "bookings: per-unit badge has a stable testid",
+    bookingsSrc.includes("badge-unit-community-verdict-${r._id}-${slot.unitId}"),
+  );
+}
 
 console.log(`\ncowork-buyin-prompt: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

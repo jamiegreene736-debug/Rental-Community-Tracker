@@ -603,8 +603,13 @@ ${BOT_WALL_PROTOCOL}
    PATCH ${apiRoot}/api/buy-ins/<buyInId>
    { "unitAddress": "<the confirmed full street address>",
      "notes": "<existing notes> · Community verified via Cowork: <building/complex name> — <same building / same complex / DIFFERENT community>" }
-4. **Record the VERDICT in the app** (this is what flips the reservation's
-   walking-distance panel to a verified state):
+4. **Record the VERDICT in the app — this is what MARKS the units in the
+   portal UI.** The POST below stamps every attached unit: each unit's card on
+   the bookings page gets its own "✓ Same building" / "✓ Same community" badge
+   ("✕ Not the same community" when different), and the reservation's
+   walking-distance panel flips to a verified state. NEVER skip this step —
+   even when everything checks out, a same-building/same-community finding
+   that is only written in your report leaves the units UNMARKED in the app:
    POST ${apiRoot}/api/bookings/${input.reservationId}/community-verdict
    { "verdict": "<same_building | same_community | different>", "source": "cowork" }
    Pick the precise value: SAME BUILDING → "same_building"; same complex or
