@@ -43,6 +43,29 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-05 (Cowork prompt now BOOKS the buy-ins on VRBO — approval-gated Phase 2): Operator asked
+  for the attached VRBO unit to actually get checked out/booked as the guest. He first asked for a
+  button + automation, then REDIRECTED mid-build: "no, I just want a cowork prompt to do all of
+  this" — research + attach, he double-checks, then it books. SHIPPED on
+  `claude/vrbo-checkout-automation-81t24i`: Phase 2 appended to `buildCoworkBuyInPrompt`
+  (shared/cowork-buyin-prompt.ts → the bookings-page "Create prompt for Cowork" button). The prompt
+  now hard-stops after attach ("STOP and wait for my explicit approval") and, on the operator's go,
+  books each unit on vrbo.com: DAMAGE WAIVER ONLY (all insurance/add-ons declined; deposit-only
+  host = proceed + note), guest's name for everything (name-on-card excepted), traveler email = the
+  minted per-guest alias (POST /api/buy-ins/:id/traveler-email), phone 407-449-7941, 15% price
+  guard vs costPaid, one unit at a time, never blind-retry Book-now (check My Trips first), then
+  PATCH /api/buy-ins/:id {bookingStatus:"booked", bookingConfirmation} (allowlist widened +
+  enum-validated, bookedAt stamped server-side) which arms the existing never-re-book guard and the
+  green "Bought in" badge. CARD RULE (load-bearing): card details never in the prompt/app/repo —
+  the prompt reads the operator-maintained local file ~/Documents/vrbo-booking-card.txt
+  (DEFAULT_CARD_FILE_HINT) at payment time only; a test asserts the prompt contains no 13+-digit
+  runs. OPERATOR SETUP: create that file on the Mac (number, expiry, CVC, name on card, billing
+  zip — one per line). DON'T RE-CHASE: the dormant AUTOMATED checkout scaffold (buy_ins booking
+  columns, server/buy-in-checkout-job.ts, `vrbo_book` op type, "Buy this unit in"/"Payment terms"
+  buttons) is already merged but its sidecar worker handler was never written — the operator chose
+  the Cowork path instead; the scaffold stays dormant/intact. Verified: cowork-buyin-prompt 54/0,
+  full `npm test` exit 0, build clean, `npm run check` 338 = baseline.
+
 - 2026-07-04 (photo-replacement queue: operator "Clear queue"): Operator (screenshot of the finished
   queue dialog) asked to be able to clear out the auto-replace queue. SHIPPED: pure
   `clearableAutoReplaceJobIds` in shared/auto-replace-job-logic.ts (7 new tests, suite 27/0) —

@@ -2261,7 +2261,7 @@ function CoworkBuyInPromptButton({
           void copy();
         }}
         data-testid={`button-cowork-prompt-${reservation._id}`}
-        title="Generate a prompt for Cowork to web-search + manually attach the two cheapest buy-in units"
+        title="Generate a prompt for Cowork: web-search + attach the cheapest buy-in units, then — after you approve — book them on VRBO (damage waiver only, guest name + alias email)"
       >
         <Sparkles className="mr-1 h-3.5 w-3.5" />
         Create prompt for Cowork
@@ -2272,8 +2272,13 @@ function CoworkBuyInPromptButton({
             <DialogTitle>Cowork buy-in prompt</DialogTitle>
             <DialogDescription>
               Copied to your clipboard. Paste this into Cowork — it searches Google, PM company sites,
-              Airbnb, VRBO and Booking.com for the two cheapest units (same community first, then a
-              city-wide fallback, never beyond the city) and attaches them with the manual-attach method.
+              Airbnb, VRBO and Booking.com for the cheapest units (same community first, then a
+              city-wide fallback, never beyond the city), attaches them with the manual-attach method,
+              then STOPS for your approval. Once you say go, it books each unit on VRBO: damage waiver
+              only (all insurance declined), the guest&apos;s name everywhere, the auto-minted guest
+              alias email, and your standing card read from the local card file on your Mac
+              (~/Documents/vrbo-booking-card.txt — keep it up to date; card details never live in this
+              app or the prompt).
             </DialogDescription>
           </DialogHeader>
           <textarea

@@ -5,6 +5,7 @@
 import {
   buildCoworkBuyInPrompt,
   resolveCoworkSearchTargets,
+  DEFAULT_CARD_FILE_HINT,
   type CoworkBuyInPromptInput,
 } from "../shared/cowork-buyin-prompt";
 
@@ -67,6 +68,54 @@ check("dates threaded into create body", prompt.includes('"checkIn": "2026-07-20
 // baseUrl optional → placeholder.
 const noBase = buildCoworkBuyInPrompt({ ...baseInput, baseUrl: undefined });
 check("placeholder when no baseUrl", noBase.includes("<APP_BASE_URL>/api/buy-ins"));
+
+// ── Phase 2: approval-gated VRBO checkout (operator spec 2026-07-05) ─────────
+check("title announces the booking phase", prompt.includes("after my approval — book"));
+check(
+  "HARD CHECKPOINT: stop + wait for explicit approval before booking",
+  prompt.includes("STOP and wait for my explicit approval") && /do \*\*NOT\*\* start it/.test(prompt),
+);
+check(
+  "damage waiver ONLY — everything else declined",
+  prompt.includes("Damage waiver ONLY") && /decline travel\/trip insurance/i.test(prompt) && /every other optional add-on/i.test(prompt),
+);
+check(
+  "deposit-only hosts are proceed + note (mandated, not an upsell)",
+  /refundable damage deposit[\s\S]{0,120}host-mandated: proceed/i.test(prompt),
+);
+check(
+  "guest name for everything (name-on-card is the only exception)",
+  prompt.includes("The guest's name for everything") && prompt.includes("(Jane Traveler)") && /name-on-card field/.test(prompt),
+);
+check(
+  "traveler email = minted alias via the traveler-email endpoint",
+  prompt.includes("/api/buy-ins/<buyInId>/traveler-email") && prompt.includes("emailprivaccy.com"),
+);
+check(
+  "guest first/last threaded into the mint call",
+  prompt.includes('"guestFirstName": "Jane"') && prompt.includes('"guestLastName": "Traveler"'),
+);
+check("fixed operator booking phone", prompt.includes("407-449-7941"));
+check("15% price guard", prompt.includes("15% above") && /do NOT book/.test(prompt));
+check("skip-if-booked idempotency guard", /"bookingStatus" is "booked"/.test(prompt));
+check("never blind-retry the final click", prompt.includes("Never blind-retry") && /My Trips/.test(prompt));
+check("dates set via the page's own picker, never URL params", /never edit URL parameters/.test(prompt));
+check(
+  "records the booking on the buy-in row",
+  prompt.includes('"bookingStatus": "booked"') && prompt.includes('"bookingConfirmation"'),
+);
+// CARD HYGIENE — the load-bearing safety property of this prompt.
+check("card comes from the LOCAL file, path only", prompt.includes(DEFAULT_CARD_FILE_HINT));
+check("forbids pasting card details anywhere", prompt.includes("Do NOT paste card details"));
+check(
+  "prompt can never contain card digits (no 13+ digit runs)",
+  !/\d[\d\s-]{12,}\d/.test(prompt),
+);
+const customCard = buildCoworkBuyInPrompt({ ...baseInput, cardFileHint: "~/Notes/card.txt" });
+check("cardFileHint override respected", customCard.includes("~/Notes/card.txt") && !customCard.includes(DEFAULT_CARD_FILE_HINT));
+// Unknown guest name → the prompt tells the agent to read it off the reservation.
+const nameless = buildCoworkBuyInPrompt({ ...baseInput, guestName: null });
+check("unknown guest name → read it off the reservation row", nameless.includes("read it off the reservation row"));
 
 // ── single-unit reservation (Unit 3104, 2BR off a non-combo listing) ─────────
 const single = buildCoworkBuyInPrompt({
