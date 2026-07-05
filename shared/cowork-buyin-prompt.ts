@@ -18,6 +18,14 @@
 // NEVER attach an airbnb.com link (operator, 2026-07-05): the attached URL
 // must be VRBO, Booking.com, or a direct booking/PM site. Airbnb is allowed
 // for DISCOVERY only — find the same unit's non-Airbnb page and attach that.
+// BOOKING MODE (operator, 2026-07-05: "I'm fine with request only but can it
+// try and find like a backup option too that is instantly bookable"): prefer
+// INSTANT-BOOK listings when otherwise comparable; a request-only pick is
+// still acceptable (never rejected over it), but MUST come with the cheapest
+// qualifying instant-book BACKUP for that slot recorded in the buy-in notes +
+// report (backup is never attached). The backup notes segment is " · "-joined
+// AFTER the listing title, which is safe: titleFromBuyInNoteText's capture
+// stops at "·", so appended segments never leak into the parsed title.
 // The attach path is the manual method: POST /api/buy-ins (create) then
 // POST /api/bookings/:reservationId/attach-buy-in (attach) — one pair, one per
 // unit slot. This mirrors `ManualBuyInDialog` in client/src/pages/bookings.tsx.
@@ -336,6 +344,27 @@ a same-complex pair still beats a cross-complex one regardless of channel.
 In your report, show each slot's cheapest VRBO total next to what you picked
 and which branch applied (VRBO preferred / non-VRBO >20% cheaper / no
 qualifying VRBO option).
+
+BOOKING MODE — prefer INSTANT BOOK; request-only is OK but needs a backup.
+Note every qualifying listing's booking mode:
+  - INSTANT BOOK — checkout confirms the stay immediately (VRBO "Instant
+    Book"/"Instant confirmation", Booking.com instant confirmation, a direct
+    booking site with real-time checkout).
+  - REQUEST-ONLY — the host must approve first ("Request to book", typically
+    a ~24h wait), so the stay is NOT locked in when the request is sent.
+When two qualifying options for a slot are otherwise comparable (similar
+all-in total, both satisfy every rule above), pick the INSTANT-BOOK one. A
+request-only listing is still acceptable — never reject the cheapest
+qualifying pick just because it is request-only, and this preference never
+overrides the CHANNEL PREFERENCE above or relaxes rules 1–5.
+BACKUP RULE — whenever the pick you ATTACH for a slot is REQUEST-ONLY, also
+find that slot's best backup: the **cheapest qualifying INSTANT-BOOK
+listing** (rules 1–5 apply in full; a DISTINCT URL from every attached pick${n === 1 ? "" : ";\nfor this combo, ideally in the same complex as the other attached unit(s)"}).
+Do NOT attach the backup and do NOT book it — record it in the attached
+buy-in's notes (see the notes field below) and in your report (URL + all-in
+total + channel + how you confirmed the location). If no qualifying
+instant-book listing exists for that slot after a genuine look, say so
+explicitly in the report.
 ${n === 1 ? "" : `
 PAIR RULE — the picks serve ONE guest group. All ${n === 2 ? "two" : n} picks must be in the
 SAME complex — ideally the SAME BUILDING. Two units in different complexes
@@ -364,8 +393,9 @@ next-cheapest alternatives you rejected and why.`}
    and report it.
 
 For each candidate, capture: the listing URL, the bedroom count, the unit type, the
-exact ADDRESS (to prove the location), and the TOTAL price for the exact
-${input.checkIn} → ${input.checkOut} stay (all-in: nightly × nights + cleaning/fees).
+exact ADDRESS (to prove the location), the TOTAL price for the exact
+${input.checkIn} → ${input.checkOut} stay (all-in: nightly × nights + cleaning/fees),
+and the BOOKING MODE (instant book vs request-only — see the booking-mode rule above).
 
 ${BOT_WALL_PROTOCOL}
 
@@ -388,9 +418,13 @@ dialog). It is two API calls:
      "managementCompany": "<PM company name if known, else null>",
      "groundFloorStatus": "unknown",
      "status": "active",
-     "notes": "Manually recorded buy-in for <unitLabel>. Found via Cowork web search — <resort or city scope> — <listing title>."
+     "notes": "Manually recorded buy-in for <unitLabel>. Found via Cowork web search — <resort or city scope> — <listing title>. · Booking mode: <instant book | request-only> · Instant-book backup: <backup listing URL> — $<backup all-in total>"
    }
    → returns the created record; keep its "id".
+   (Notes: keep the " · " separators exactly as shown. Include the
+   "Instant-book backup:" segment ONLY when this pick is request-only AND you
+   found a backup; drop that segment otherwise. Never put the backup URL
+   anywhere else in the notes.)
 
 2. Attach it to the reservation:
    POST ${apiRoot}/api/bookings/${input.reservationId}/attach-buy-in
@@ -406,7 +440,10 @@ Repeat steps 1–2 for each remaining unit slot.`}
 When ${bothOrAll === "the unit" ? "the slot is" : "all slots are"} attached, report for each pick: the listing URL,
 bedrooms, unit type, its ADDRESS and how you confirmed it's in/adjacent to
 **${primaryTarget}**, the total price, whether it came from the resort or the
-city-wide fallback, the combined cost, and any slot you could not fill.
+city-wide fallback, its BOOKING MODE (instant book / request-only) — and, for
+every request-only pick, the instant-book backup you found (URL + all-in
+total + channel) or an explicit "no qualifying instant-book backup exists" —
+plus the combined cost, and any slot you could not fill.
 
 This task ends at ATTACH. Do **NOT** book, open a checkout page, or enter any
 payment details — I review the attached picks first, and booking runs from a
