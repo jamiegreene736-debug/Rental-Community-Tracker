@@ -41,6 +41,7 @@ import {
   getPreflightReplacementFindJob,
   startPreflightReplacementFindJob,
 } from "./preflight-background-jobs";
+import { repushGuestyPhotosForProperty } from "./guesty-photo-repush";
 import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
 
@@ -192,6 +193,11 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
         const c = candidate as Record<string, unknown>;
         const url = String(c.url ?? "");
         const { status, data } = await postLoopback("/api/unit-swaps", {
+          // The route's fire-and-forget Guesty push is skipped here — this
+          // orchestrator runs its OWN awaited push below so the dashboard
+          // queue shows push progress and the completed message reports the
+          // real outcome. Without the flag the same swap would push twice.
+          skipGuestyPhotoPush: true,
           propertyId: record.propertyId,
           communityFolder: builder.communityPhotoFolder,
           oldUnitId: unit.id,
@@ -234,9 +240,40 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
         labels: { [String(record.propertyId)]: record.propertyName },
       }, 30_000).catch((e) => console.warn(`[auto-replace] community check kick failed: ${e?.message ?? e}`));
 
+      // Phase 3b — push the rebuilt gallery to Guesty (2026-07-05 operator
+      // ask). The PUT replaces the listing's entire pictures[] array, so this
+      // is what actually removes the OLD unit's duplicated photos from
+      // Guesty (and, via its channel fan-out, from Airbnb/VRBO/Booking).
+      // Awaited so the queue message reports the real outcome; a failure is
+      // surfaced but does NOT fail the job — the swap itself is committed and
+      // the builder's manual "Push Photos to Guesty" button remains the
+      // fallback. The commit POST above passed skipGuestyPhotoPush so the
+      // route's own fire-and-forget hook doesn't double-push.
+      touch(record, {
+        message: "Swap committed — pushing the new photos to Guesty (replaces the old unit's photos on the listing)…",
+      });
+      let guestyPushNote = "";
+      try {
+        const push = await repushGuestyPhotosForProperty(record.propertyId, {
+          reason: `auto-replace ${record.jobId} (${record.unitLabel})`,
+          waitForLabelsFolder: committed.photoFolder,
+        });
+        if (push.ok && !push.skipped) {
+          guestyPushNote = ` ${push.successCount ?? 0} photos re-pushed to Guesty (old photos replaced).`;
+        } else if (push.skipped === "no-guesty-mapping") {
+          guestyPushNote = " No Guesty listing is mapped to this property, so there were no old photos to replace on Guesty.";
+        } else if (push.skipped) {
+          guestyPushNote = ` ⚠ Guesty photo push skipped (${push.skipped}).`;
+        } else {
+          guestyPushNote = ` ⚠ Guesty photo push failed (${push.error ?? "unknown error"}) — open the builder's Photos tab and use "Push Photos to Guesty".`;
+        }
+      } catch (e: any) {
+        guestyPushNote = ` ⚠ Guesty photo push failed (${e?.message ?? e}) — open the builder's Photos tab and use "Push Photos to Guesty".`;
+      }
+
       touch(record, {
         phase: "completed",
-        message: `${record.unitLabel} now uses ${committed.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.`,
+        message: `${record.unitLabel} now uses ${committed.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.${guestyPushNote}`,
         error: null,
       });
     }

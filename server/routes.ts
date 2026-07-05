@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { createHash, randomBytes } from "crypto";
 import { storage } from "./storage";
 import { clearAutoReplaceQueue, listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
+import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
   bulkComboListingJobs as bulkComboListingJobRows,
@@ -34952,13 +34953,92 @@ Return ONLY compact JSON with this exact shape:
     }
     const swap = await storage.createUnitSwap(parsed.data);
 
+    // Fire-and-forget Guesty photo re-push (2026-07-05 operator ask): the
+    // swap just replaced this unit's ACTIVE folder, but the mapped Guesty
+    // listing keeps serving the OLD unit's photos (the duplicated-on-OTA
+    // set) until pictures[] is re-PUT. Covers BOTH commit paths — the manual
+    // "pick manually" dialog and the auto-replace orchestrator's loopback
+    // commit. The orchestrator opts out (skipGuestyPhotoPush, stripped by
+    // the zod parse above) and runs its own AWAITED push so the dashboard
+    // queue can show push progress — without the flag the same swap would
+    // be pushed twice. Properties without a Guesty mapping are skipped
+    // inside the helper (nothing stale to overwrite).
+    const skipGuestyPhotoPush = (req.body as any)?.skipGuestyPhotoPush === true;
+    if (!skipGuestyPhotoPush) {
+      void repushGuestyPhotosForProperty(parsed.data.propertyId, {
+        reason: `unit-swap #${swap.id} (${parsed.data.oldUnitId})`,
+        waitForLabelsFolder: hydrated.folder,
+      })
+        .then((result) => {
+          if (!result.ok) {
+            console.warn(`[unit-swaps] Guesty photo re-push after swap #${swap.id} did not complete: ${result.error ?? result.skipped ?? "unknown"}`);
+          }
+        })
+        .catch((e) => console.warn(`[unit-swaps] Guesty photo re-push after swap #${swap.id} threw: ${e?.message ?? e}`));
+    }
+
     return res.json({
       swap,
       photoFolder: hydrated.folder,
       savedPhotoCount: hydrated.savedCount,
       bedroomsFound: hydrated.bedroomsFound,
       coverage: hydrated.coverage,
+      guestyPhotoPush: skipGuestyPhotoPush ? "skipped" : "started",
     });
+  });
+
+  // POST /api/replacement/repush-guesty-photos
+  // Retroactive Guesty photo re-push for every property with a unit swap
+  // recorded in the trailing window (default 3 days) — or an explicit
+  // propertyIds list. Streams NDJSON (pushes run minutes each; heartbeats
+  // keep the edge from idle-closing the connection):
+  //   { type: "start", propertyIds, windowDays }
+  //   { type: "property-start", propertyId }
+  //   { type: "property", propertyId, ok, successCount?, verifiedCount?, skipped?, error? }
+  //   { type: "done", total, pushed, skipped, failed }
+  app.post("/api/replacement/repush-guesty-photos", async (req, res) => {
+    const body = (req.body ?? {}) as { days?: number; propertyIds?: number[] };
+    const windowDays = Number.isFinite(Number(body.days)) && Number(body.days) > 0 ? Number(body.days) : 3;
+    const explicitIds = Array.isArray(body.propertyIds)
+      ? body.propertyIds.map(Number).filter((n) => Number.isFinite(n))
+      : null;
+
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    const emit = (o: Record<string, unknown>) => res.write(JSON.stringify(o) + "\n");
+    const heartbeat = setInterval(() => emit({ type: "heartbeat", at: new Date().toISOString() }), 12_000);
+
+    try {
+      const results: Awaited<ReturnType<typeof repushGuestyPhotosForProperty>>[] = [];
+      if (explicitIds && explicitIds.length > 0) {
+        emit({ type: "start", propertyIds: explicitIds, windowDays: null });
+        for (const propertyId of explicitIds) {
+          emit({ type: "property-start", propertyId });
+          const result = await repushGuestyPhotosForProperty(propertyId, { reason: "manual repush request" });
+          results.push(result);
+          emit({ type: "property", ...result });
+        }
+      } else {
+        const swept = await repushGuestyPhotosForRecentSwaps(windowDays, (event) => {
+          emit(event as unknown as Record<string, unknown>);
+        });
+        results.push(...swept.results);
+      }
+      emit({
+        type: "done",
+        total: results.length,
+        pushed: results.filter((r) => r.ok && !r.skipped).length,
+        skipped: results.filter((r) => r.skipped).length,
+        failed: results.filter((r) => !r.ok).length,
+      });
+    } catch (e: any) {
+      emit({ type: "error", message: e?.message ?? String(e) });
+    } finally {
+      clearInterval(heartbeat);
+      res.end();
+    }
   });
 
   app.get("/api/unit-swaps/:propertyId", async (req, res) => {
