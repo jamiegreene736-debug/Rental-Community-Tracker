@@ -41,6 +41,7 @@ import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@sh
 import { PROPERTY_UNIT_CONFIGS, type UnitConfig } from "@shared/property-units";
 import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
+import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
@@ -13049,18 +13050,26 @@ function BuyInVendorEmailPanel({
           {emails.map((email) => {
             const emailAttachments = parseAliasEmailAttachments(email.attachmentsJson);
             return (
-              <div key={email.id} className="rounded border bg-muted/20 p-2 text-[11px]">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-medium truncate">{email.subject}</span>
-                  <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
+              <div key={email.id} className="rounded-md border bg-background p-3 text-[11px] shadow-sm">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="text-xs font-semibold leading-snug">{email.subject}</span>
+                  <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="shrink-0 text-[10px]">
                     {email.direction}
                   </Badge>
                 </div>
-                <div className="text-[10px] text-muted-foreground truncate">
-                  {email.fromEmail} → {email.toEmail} · {email.status ?? "saved"}
+                <div className="mt-1.5 space-y-0.5 border-b pb-2 text-[10px] text-muted-foreground">
+                  <div className="truncate">
+                    <span className="font-medium">From:</span> {email.fromEmail}
+                  </div>
+                  <div className="truncate">
+                    <span className="font-medium">To:</span> {email.toEmail}
+                  </div>
+                  <div>
+                    {formatEmailTimestampForDisplay(email.sentAt) ?? "—"} · {email.status ?? "saved"}
+                  </div>
                 </div>
-                <div className="mt-1 whitespace-pre-wrap leading-relaxed text-foreground">
-                  {email.body}
+                <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-foreground">
+                  {formatEmailBodyForDisplay(email.body)}
                 </div>
                 {emailAttachments.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
