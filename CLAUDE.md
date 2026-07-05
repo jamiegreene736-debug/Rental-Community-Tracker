@@ -43,6 +43,35 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-05 (Message AD pulls arrival details FROM the alias email — live scrape + verbatim-verified
+  Claude extraction): Operator asked the send-arrival-details button to pull door codes / arrival
+  instructions from the emails hosts send to the minted guest alias, and to be "100% or close" sure
+  they're correct. SHIPPED on `claude/arrival-details-email-scrape-2uzmyq`: the Message AD dialog
+  now AUTO-RUNS `POST /api/bookings/:reservationId/arrival-details/refresh` on open (+ a
+  "Pull from email" button) — per attached buy-in it live-syncs the traveler-alias inbox over IMAP
+  (`syncGuestInboxForAlias`, so the click sees mail the 5-min background tick hasn't ingested yet),
+  then `server/arrival-email-extract.ts` reads the FULL email text with Claude
+  (`ARRIVAL_EXTRACT_MODEL`, default claude-sonnet-4-6) — catching what the regex parser drops
+  (multi-code emails like the Santa Maria LOBBY/POOL/DOOR trio, unit numbers, check-in times as
+  arrivalNotes lines). ACCURACY IS ENFORCED, NOT TRUSTED (load-bearing —
+  `shared/arrival-email-verification.ts`): attribution is exact because the SimpleLogin alias is
+  unique per buy-in; every Claude field must cite a verbatim quote + emailIndex, and the server
+  REJECTS any value not literally present in the cited email (codes compared digit-for-digit;
+  note lines may reformat as "Label: value" but every digit token must come from their own quote;
+  paraphrases with invented numbers fail) — a hallucinated code cannot reach the guest. Address
+  additionally passes the existing state-plausibility gate. Verified values OVERWRITE stale
+  columns (that's the point of the button); fields no email mentions keep manual entries; regex
+  stays the no-ANTHROPIC_API_KEY fallback (fill-blank-only). Provenance persists in new
+  `buy_ins.arrival_extraction` jsonb (schema + schema-maintenance ALTER) and renders as per-unit
+  ✓ evidence chips (tooltip = source subject/date + quote) plus ⚠ warnings for email conflicts
+  (newest wins) and guest-portal-only emails (flagged, never scraped — behind login). Send stays
+  operator-reviewed. Verified: tests/arrival-email-extraction.test.ts green (incl.
+  hallucination-rejection + wrong-state-address cases modeled on the two real alias emails), full
+  `npm test` exit 0, build clean, `npm run check` 338 = baseline. Could NOT live-smoke the
+  IMAP/Claude legs (no creds in session) — post-deploy, open Message AD on a booked reservation:
+  the sky "Checking the guest booking-email inbox…" strip runs, then ✓ chips appear and the draft
+  contains the host's actual codes.
+
 - 2026-07-05 (Cowork prompt now BOOKS the buy-ins on VRBO — approval-gated Phase 2): Operator asked
   for the attached VRBO unit to actually get checked out/booked as the guest. He first asked for a
   button + automation, then REDIRECTED mid-build: "no, I just want a cowork prompt to do all of
