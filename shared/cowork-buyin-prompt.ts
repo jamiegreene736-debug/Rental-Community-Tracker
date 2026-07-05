@@ -22,7 +22,9 @@
 // LOAD-BEARING (checkout prompt, operator's spec 2026-07-05):
 //   - At VRBO checkout, select ONLY the damage waiver / property damage
 //     protection — decline travel/trip insurance and every other add-on.
-//   - The GUEST's name is used for everything name-related; the traveler email
+//   - The GUEST's name is used for everything name-related INCLUDING the
+//     name-on-card field (operator's explicit 2026-07-05 instruction — never
+//     the cardholder's own name); the traveler email
 //     is the per-guest alias minted by POST /api/buy-ins/:id/traveler-email
 //     (firstname.lastname@emailprivaccy.com); phone is the fixed operator
 //     booking phone (808 460 6509 — same constant as BUYIN_BOOKING_PHONE).
@@ -360,9 +362,10 @@ ${unitLines}
   and every other optional add-on or upsell. If the host offers only a
   refundable damage deposit (no waiver option), that's host-mandated: proceed,
   and note it in your report.
-- **The guest's name for everything.** Every name field on the traveler form
-  uses the guest's name${guestNameKnown ? ` (${guestFull})` : " (read it off the reservation row first)"}. The ONLY
-  exception is the name-on-card field, which must match the card file below.
+- **The guest's name for everything — INCLUDING the name-on-card field.**
+  Every name field, on the traveler form AND on the payment form, uses the
+  guest's name${guestNameKnown ? ` (${guestFull})` : " (read it off the reservation row first)"}. Do NOT use the
+  cardholder's own name anywhere, even if the card file contains one.
 - **Traveler email = the minted guest alias**, never a real/personal email.
 - **Phone:** ${COWORK_BOOKING_PHONE}.
 - **Price guard:** if the checkout total is more than **15% above** the
@@ -397,11 +400,12 @@ ${unitLines}
 6. **Traveler details:** guest first/last name, the minted alias email, the
    phone above.
 7. **Payment:** read the standing booking card from the local file
-   \`${cardFile}\` on this Mac (number, expiry, CVC, name on card, billing
-   zip). Fill the card fields from that file. Do NOT paste card details into
-   this chat, any report, or any app field outside VRBO's payment form.
-   Re-verify before the final click: dates, total within the price guard,
-   damage waiver only. Then click **Book now / Confirm and pay**.
+   \`${cardFile}\` on this Mac (number, expiry, CVC, billing address/zip).
+   Fill the card fields from that file — EXCEPT the name-on-card field, which
+   gets the GUEST's name per the standing rule above. Do NOT paste card
+   details into this chat, any report, or any app field outside VRBO's
+   payment form. Re-verify before the final click: dates, total within the
+   price guard, damage waiver only. Then click **Book now / Confirm and pay**.
 8. **Record the booking:** capture the confirmation/reservation number from
    the confirmation page (screenshot it), then:
    PATCH ${apiRoot}/api/buy-ins/<buyInId>
