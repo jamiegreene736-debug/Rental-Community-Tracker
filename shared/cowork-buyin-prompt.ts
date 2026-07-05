@@ -50,6 +50,31 @@ export const DEFAULT_CARD_FILE_HINT = "~/Documents/vrbo-booking-card.txt";
 // server/buy-in-checkout-job.ts (same number, formatted for a form).
 export const COWORK_BOOKING_PHONE = "808-460-6509";
 
+// Shared bot-wall / CAPTCHA protocol embedded in ALL Cowork prompts (operator
+// spec 2026-07-05: "It skips VRBO because of a VRBO bot check. I need Chrome
+// to sit there and wait for me to bypass the bot… make a big beep so I know
+// to get back to the laptop"). The alert commands are macOS-native (afplay /
+// say / osascript) — Cowork runs on the operator's Mac. NEVER let a prompt
+// skip VRBO on a bot check; the operator solves it by hand and the run
+// continues.
+const BOT_WALL_PROTOCOL = `## Bot-check protocol (VRBO especially — NEVER skip a site over this)
+If any site — especially VRBO — shows a bot check (slider puzzle, CAPTCHA,
+"verify you are human") or a sign-in wall you can't get past:
+
+1. **Do NOT skip that site and do NOT close the tab.** Leave the page open,
+   sitting exactly at the challenge — I will solve it by hand.
+2. **ALERT ME LOUDLY** — I may be away from the laptop. Run this in the
+   terminal (repeat the whole thing every ~60 seconds until I've solved it,
+   up to 15 times):
+   for i in 1 2 3 4 5; do afplay /System/Library/Sounds/Sosumi.aiff; done; say -r 170 "Bot check! Come back to the laptop and solve the V R B O bot check."; osascript -e 'display notification "Solve the bot check in the Chrome tab, then I will continue." with title "Cowork needs you" sound name "Sosumi"'
+3. **WAIT and WATCH.** Re-check the challenged tab every ~30 seconds. Do NOT
+   attempt the challenge yourself and do NOT reload the page — reloading can
+   make VRBO's wall stickier.
+4. The moment the page is past the challenge, **stop the alerts and CONTINUE
+   the task from exactly where you left off** — same tab, same step.
+5. If ~15 minutes pass unsolved, pause the task, leave the tab open, and
+   report exactly which unit/step is blocked so I can resume later.`;
+
 export interface CoworkBuyInUnit {
   unitId: string;
   unitLabel: string;
@@ -307,6 +332,8 @@ For each candidate, capture: the listing URL, the bedroom count, the unit type, 
 exact ADDRESS (to prove the location), and the TOTAL price for the exact
 ${input.checkIn} → ${input.checkOut} stay (all-in: nightly × nights + cleaning/fees).
 
+${BOT_WALL_PROTOCOL}
+
 ## Attach using the manual-attach method
 For EACH unit slot, replicate the manual-attach flow (the "Manually add buy-in"
 dialog). It is two API calls:
@@ -422,6 +449,8 @@ ${unitLines}
   alias inbox for a confirmation before even considering a retry — a double
   charge is the worst outcome. When unsure, stop and ask me.
 
+${BOT_WALL_PROTOCOL}
+
 ## For each unit, in order
 
 1. **Skip-if-booked guard:** GET ${apiRoot}/api/buy-ins/<buyInId>. If
@@ -439,8 +468,9 @@ ${unitLines}
    guest count, using the page's own date picker (never edit URL parameters).
    Confirm the listing matches the attached unit and the quoted total is
    within the price guard.
-4. **Click Book / Reserve** to reach the checkout page. If VRBO asks to sign
-   in or shows a CAPTCHA you can't pass, stop and ask me.
+4. **Click Book / Reserve** to reach the checkout page. If VRBO throws a bot
+   check or sign-in wall, follow the bot-check protocol above — alert me
+   loudly and WAIT at the challenge; never skip the unit over it.
 5. **Protection step:** apply the damage-waiver-only rule above. List in your
    report exactly what you selected and what you declined.
 6. **Traveler details:** guest first/last name, the minted alias email, the
@@ -506,6 +536,8 @@ updates in step 3.
 
 ## Units to verify
 ${unitLines}
+
+${BOT_WALL_PROTOCOL}
 
 ## Steps
 

@@ -256,6 +256,26 @@ check(
   verifySingle.includes("attached buy-in unit is") && verifySingle.includes("(none configured — judge against the property name and the units themselves)"),
 );
 
+// ── Bot-check protocol (operator 2026-07-05): beep loudly + WAIT, never skip ──
+for (const [label, p] of [["find", prompt], ["checkout", checkout], ["verify", verify]] as const) {
+  check(
+    `${label} prompt: bot check → never skip, leave the tab at the challenge`,
+    /NEVER skip a site over this/.test(p) && /Do NOT skip that site and do NOT close the tab/.test(p),
+  );
+  check(
+    `${label} prompt: loud repeating alert (afplay + say + notification)`,
+    p.includes("afplay /System/Library/Sounds/Sosumi.aiff") && /\bsay -r 170\b/.test(p) && p.includes("display notification"),
+  );
+  check(
+    `${label} prompt: waits and resumes where it left off`,
+    /Re-check the challenged tab every ~30 seconds/.test(p) && /CONTINUE\s+the task from exactly where you left off/.test(p),
+  );
+  check(
+    `${label} prompt: never reloads or self-solves the challenge`,
+    /do NOT reload the page/.test(p) && /Do NOT\s+attempt the challenge yourself/.test(p),
+  );
+}
+
 // ── Source assertions: the walking-distance card must digest Cowork notes ────
 // (2026-07-05 Waikiki incident: boilerplate notes became the "resort" label,
 // and a junk geocode produced a fake 0.4 mi walk.) These lock the routes.ts /
