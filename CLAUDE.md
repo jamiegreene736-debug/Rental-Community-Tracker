@@ -112,6 +112,15 @@ Before making any changes:
   feedback recorded via POST /api/bookings/:reservationId/guest-happy → buy_ins
   guestHappyVerdict/Feedback/Source/At columns (consensus display rule same as community
   verdict), rendered as a green/amber/red panel + feedback text on the walking-distance card.
+  10TH FOLLOW-UP (operator): sky "Find property on VRBO" button (Search icon, same strip;
+  shown when an attached UNBOOKED buy-in has a non-vrbo.com URL and no prior lookup) →
+  buildCoworkVrboLookupPrompt: hunt the SAME physical unit (unit number/address/photo match —
+  a similar unit in the building does NOT count) on vrbo.com; 20% hatch preserved (current
+  < 80% of VRBO total → keep + record). Outcomes via POST /api/buy-ins/:id/vrbo-lookup →
+  buy_ins vrboLookupStatus/Note/At: "switched" atomically re-points the listing URL
+  (vrbo.com host-validated) + costPaid, 409 on booked units; "not_on_vrbo" → slate
+  "Not on VRBO · checked <date>" slot badge; "kept_cheaper" → amber badge; switched →
+  emerald "Re-channeled to VRBO" badge and the unit then flows into the VRBO checkout prompt.
   5TH FOLLOW-UP (operator): VRBO bot checks made the
   agent SKIP VRBO — all three prompts now embed BOT_WALL_PROTOCOL: never skip/close on a bot
   check; alert loudly (5× afplay Sosumi + say + osascript notification, repeating ~60s up to 15×)

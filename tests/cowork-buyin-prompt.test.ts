@@ -7,6 +7,7 @@ import {
   buildCoworkCheckoutPrompt,
   buildCoworkCommunityVerifyPrompt,
   buildCoworkGuestHappyPrompt,
+  buildCoworkVrboLookupPrompt,
   resolveCoworkSearchTargets,
   DEFAULT_CARD_FILE_HINT,
   type CoworkBuyInPromptInput,
@@ -368,6 +369,47 @@ check(
   "guest-happy: done signal names the evaluation outcome",
   guestHappy.includes("the guest-happiness check is complete and the feedback is recorded"),
 );
+
+// ── buildCoworkVrboLookupPrompt: "Find property on VRBO" re-channel ─────────
+const vrboLookup = buildCoworkVrboLookupPrompt({
+  reservationId: "abc123",
+  propertyName: "Waikiki 4BR Combo",
+  checkIn: "2026-07-07",
+  checkOut: "2026-07-12",
+  units: [
+    { buyInId: 61, unitLabel: "Unit A", listingUrl: "https://waikikibeachrentals.com/unit-1834", unitAddress: "1777 Ala Moana Blvd, Honolulu, HI", costPaid: "1975.00" },
+    { buyInId: 62, unitLabel: "Unit B", listingUrl: "https://www.booking.com/hotel/us/some-condo.html", unitAddress: null, costPaid: 3935 },
+  ],
+  baseUrl: "https://app.example.com",
+});
+check("vrbo-lookup: hunts for the unit's OWN listing on VRBO", /OWN listing on VRBO and re-channel/.test(vrboLookup));
+check(
+  "vrbo-lookup: SAME-UNIT-ONLY match rule (similar unit is not a match)",
+  /SAME-UNIT-ONLY match rule/.test(vrboLookup) && /similar or nicer unit in the same\s+building is NOT a match/.test(vrboLookup),
+);
+check(
+  "vrbo-lookup: switch recorded atomically via the vrbo-lookup endpoint",
+  vrboLookup.includes("POST https://app.example.com/api/buy-ins/<buyInId>/vrbo-lookup") &&
+    vrboLookup.includes('"status": "switched"') && vrboLookup.includes('"vrboUrl"') && vrboLookup.includes('"vrboTotal"'),
+);
+check(
+  "vrbo-lookup: keeps the 20% price hatch (kept_cheaper)",
+  vrboLookup.includes('"status": "kept_cheaper"') && /more than 20%\s+cheaper/i.test(vrboLookup) && /current < 80% of VRBO/.test(vrboLookup),
+);
+check(
+  "vrbo-lookup: genuine no-listing outcome recorded as not_on_vrbo",
+  vrboLookup.includes('"status": "not_on_vrbo"'),
+);
+check(
+  "vrbo-lookup: never books, never touches booked units",
+  /Do NOT book\s+anything/.test(vrboLookup) && /never touch a unit that is\s+already booked/.test(vrboLookup),
+);
+check(
+  "vrbo-lookup: dates via the page's own picker, never URL params",
+  /never construct URLs with search\s+parameters/.test(vrboLookup),
+);
+check("vrbo-lookup: embeds the non-VRBO units + costs", vrboLookup.includes("buyInId 61") && vrboLookup.includes("buyInId 62") && vrboLookup.includes("$1975.00"));
+check("vrbo-lookup: has the bot-wall protocol + done signal", /NEVER skip a site over this/.test(vrboLookup) && /## Done signal/.test(vrboLookup));
 
 // ── Done signal (operator 2026-07-05): audible chime when the task finishes ──
 for (const [label, p] of [["find", prompt], ["checkout", checkout], ["verify", verify]] as const) {

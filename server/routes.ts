@@ -11849,6 +11849,69 @@ Requirements:
     }
   });
 
+  // "Find on VRBO" re-channel lookup (operator spec 2026-07-05: "Ideally I
+  // always want to book through the VRBO channel"). One atomic call per unit:
+  //   - status "switched"  → re-point the buy-in at the unit's OWN VRBO
+  //     listing (vrboUrl required, must be vrbo.com; vrboTotal optional →
+  //     becomes the new costPaid) — refused for already-booked buy-ins.
+  //   - status "not_on_vrbo" → durable "genuinely no VRBO listing" record,
+  //     displayed as a badge on the slot.
+  //   - status "kept_cheaper" → VRBO exists but the current channel is >20%
+  //     cheaper; nothing re-pointed, the note carries both totals.
+  app.post("/api/buy-ins/:id/vrbo-lookup", async (req, res) => {
+    try {
+      const buyInId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(buyInId)) return res.status(400).json({ error: "Invalid buy-in id" });
+      const status = String(req.body?.status ?? "").trim();
+      const allowedStatuses = ["switched", "not_on_vrbo", "kept_cheaper"];
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({ error: `Invalid status (expected one of ${allowedStatuses.join(", ")})` });
+      }
+      const buyIn = await storage.getBuyIn(buyInId);
+      if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
+      const note = String(req.body?.note ?? "").replace(/\s+/g, " ").trim().slice(0, 1000) || null;
+
+      const patch: Record<string, any> = {
+        vrboLookupStatus: status,
+        vrboLookupNote: note,
+        vrboLookupAt: new Date(),
+      };
+
+      if (status === "switched") {
+        if (buyIn.bookingStatus === "booked") {
+          return res.status(409).json({ error: "This buy-in is already BOOKED on its current channel — never re-point a booked unit" });
+        }
+        const vrboUrl = String(req.body?.vrboUrl ?? "").trim();
+        let host = "";
+        try {
+          host = new URL(vrboUrl).hostname.toLowerCase();
+        } catch {
+          /* handled below */
+        }
+        if (!/^(?:www\.)?vrbo\.com$/.test(host)) {
+          return res.status(400).json({ error: "vrboUrl must be a vrbo.com listing URL" });
+        }
+        patch.airbnbListingUrl = vrboUrl;
+        if (req.body?.vrboTotal !== undefined && req.body?.vrboTotal !== null) {
+          const total = parseFloat(String(req.body.vrboTotal));
+          if (!Number.isFinite(total) || total <= 0) {
+            return res.status(400).json({ error: "Invalid vrboTotal" });
+          }
+          patch.costPaid = total.toFixed(2);
+        }
+        const oldUrl = String(buyIn.airbnbListingUrl ?? "").trim();
+        patch.notes = [String(buyIn.notes ?? "").trim(), `Re-channeled to VRBO via Cowork${oldUrl ? ` — was ${oldUrl}` : ""}`]
+          .filter(Boolean)
+          .join(" · ");
+      }
+
+      const updated = await storage.updateBuyIn(buyInId, patch);
+      res.json({ ok: true, buyIn: updated });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to record VRBO lookup", message: err.message });
+    }
+  });
+
   app.get("/api/bookings/:reservationId/rental-agreement", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;

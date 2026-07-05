@@ -72,6 +72,15 @@ export const buyIns = pgTable("buy_ins", {
   guestHappyFeedback: text("guest_happy_feedback"), // the 2-4 sentence guest's-eye summary
   guestHappySource: text("guest_happy_source"), // cowork | operator
   guestHappyAt: timestamp("guest_happy_at"),
+  // --- "Find on VRBO" re-channel lookup (operator/Cowork, 2026-07-05) ---
+  // Outcome of hunting for THIS unit's own VRBO listing when it was attached
+  // from a direct site / Booking.com. Recorded by POST /api/buy-ins/:id/
+  // vrbo-lookup: "switched" (buy-in re-pointed at the VRBO listing),
+  // "not_on_vrbo" (genuinely no VRBO listing — displayed on the slot), or
+  // "kept_cheaper" (VRBO exists but the current channel is >20% cheaper).
+  vrboLookupStatus: text("vrbo_lookup_status"), // switched | not_on_vrbo | kept_cheaper
+  vrboLookupNote: text("vrbo_lookup_note"),
+  vrboLookupAt: timestamp("vrbo_lookup_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

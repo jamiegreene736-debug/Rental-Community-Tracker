@@ -742,3 +742,120 @@ ${doneSignalSection(
     "a bedding-layout downgrade or a quality gap the guest would notice",
   )}`;
 }
+
+/** One ALREADY-ATTACHED non-VRBO unit the VRBO-lookup prompt should re-channel. */
+export interface CoworkVrboLookupUnit {
+  buyInId: number;
+  unitLabel: string;
+  listingUrl: string | null;
+  unitAddress: string | null;
+  costPaid: string | number | null;
+}
+
+export interface CoworkVrboLookupPromptInput {
+  reservationId: string;
+  propertyName: string;
+  /** YYYY-MM-DD */
+  checkIn: string;
+  /** YYYY-MM-DD */
+  checkOut: string;
+  units: CoworkVrboLookupUnit[];
+  /** App origin for the API calls, e.g. "https://app.example.com". Optional. */
+  baseUrl?: string;
+}
+
+// "Find on VRBO" — re-channel an attached buy-in that lives on a direct
+// booking site / Booking.com onto the unit's OWN VRBO listing (operator spec
+// 2026-07-05: "Ideally I always want to book through the VRBO channel").
+// SAME-UNIT-ONLY: a similar unit in the same building is NOT a match — the
+// physical unit must be verified via unit number/address/photos. Keeps the
+// standing 20% price hatch: if the current channel is more than 20% cheaper
+// than the VRBO total, the current attach is KEPT and the finding recorded.
+// A genuine no-VRBO-listing outcome is recorded durably so the slot shows a
+// "Not on VRBO" badge instead of the operator re-asking.
+export function buildCoworkVrboLookupPrompt(input: CoworkVrboLookupPromptInput): string {
+  const base = (input.baseUrl ?? "").replace(/\/+$/, "");
+  const apiRoot = base || "<APP_BASE_URL>";
+  const n = input.units.length;
+  const money = (v: string | number | null | undefined): string => {
+    const num = Number(v);
+    return Number.isFinite(num) && num > 0 ? `$${num.toFixed(2)}` : "(not recorded)";
+  };
+  const unitLines = input.units
+    .map(
+      (u, i) =>
+        `  ${i + 1}. buyInId ${u.buyInId} — ${u.unitLabel}\n` +
+        `     Current listing (non-VRBO): ${u.listingUrl?.trim() || "(no URL recorded — GET the buy-in record; if it has none, say so)"}\n` +
+        `     Address on file: ${u.unitAddress?.trim() || "(none — pin it down from the listing first)"}\n` +
+        `     Current all-in total (costPaid): ${money(u.costPaid)}`,
+    )
+    .join("\n");
+
+  return `# Task: Find ${n === 1 ? "this attached unit's" : "these attached units'"} OWN listing on VRBO and re-channel the buy-in
+
+You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
+${n === 1 ? "The attached buy-in unit below is" : `The ${n} attached buy-in units below are`} currently on a NON-VRBO channel (direct
+booking site / Booking.com). I always prefer to book through VRBO — find the
+SAME physical unit on vrbo.com and re-point the buy-in at it. Do NOT book
+anything (checkout is a separate task), and never touch a unit that is
+already booked.
+
+## Reservation
+- Reservation ID: ${input.reservationId}
+- Property: ${input.propertyName}
+- Stay: ${input.checkIn} → ${input.checkOut}
+
+## Units to re-channel
+${unitLines}
+
+${BOT_WALL_PROTOCOL}
+
+## For each unit, in order
+
+1. **Pin down the exact physical unit** from its current listing: building/
+   complex, street address, unit number, and 3-4 distinctive photos
+   (furniture, view, layout) you can recognize it by.
+2. **Hunt for that unit on vrbo.com.** Search VRBO by the complex/building
+   name + city and work through the results; also try a web search like
+   "<complex name> <unit number> vrbo". Use pages' own search boxes and date
+   pickers — never construct URLs with search parameters.
+3. **SAME-UNIT-ONLY match rule:** a VRBO listing counts ONLY if it is the
+   same physical unit — the unit number/address matches and/or the photos are
+   unmistakably the same interior. A similar or nicer unit in the same
+   building is NOT a match (mention it in the report, but do not switch to it).
+4. **If you found the same unit on VRBO:** set the exact dates
+   ${input.checkIn} → ${input.checkOut} with the page's date picker and read
+   the ALL-IN total (nightly + fees).
+   - If the current channel's total (costPaid above) is **more than 20%
+     cheaper** than the VRBO total (current < 80% of VRBO), KEEP the current
+     attach and record the finding:
+     POST ${apiRoot}/api/buy-ins/<buyInId>/vrbo-lookup
+     { "status": "kept_cheaper",
+       "note": "VRBO listing exists (<vrbo url>) at $<vrbo total> but current channel is $<current total> — kept (>20% cheaper)" }
+   - Otherwise, SWITCH the buy-in to the VRBO listing:
+     POST ${apiRoot}/api/buy-ins/<buyInId>/vrbo-lookup
+     { "status": "switched",
+       "vrboUrl": "<the vrbo.com listing URL>",
+       "vrboTotal": <the all-in VRBO total for the stay, e.g. 2042.50>,
+       "note": "Same unit verified by <unit number / photos / address> — re-channeled from <old channel>" }
+     (This atomically re-points the buy-in's listing URL and updates its
+     cost — do not PATCH those fields separately.)
+5. **If, after a genuine hunt, the unit is NOT on VRBO:** record it so the
+   app shows it and I stop wondering:
+   POST ${apiRoot}/api/buy-ins/<buyInId>/vrbo-lookup
+   { "status": "not_on_vrbo",
+     "note": "Searched VRBO by <what you searched>; the unit is only bookable via <current channel>" }
+
+## Report
+Per unit: what you searched, what you found (with the VRBO URL if any), how
+you verified same-unit (unit number / address / photo match), both totals
+when a VRBO listing exists, and which status you recorded.
+
+Finally, TIDY UP THE BROWSER: close every Chrome tab you opened during this
+task. Leave any tabs that were already open before you started untouched.
+
+${doneSignalSection(
+    "the VRBO lookup is complete and every unit is re-channeled or recorded",
+    "a unit that is not on VRBO, or a same-building unit that is not the same unit",
+  )}`;
+}
