@@ -8742,10 +8742,27 @@ export async function registerRoutes(
         "managementCompany", "managementContact", "arrivalNotes",
         "groundFloorStatus", "groundFloorEvidence",
         "notes", "status",
+        // Booking lifecycle — writable so the Cowork checkout prompt (Phase 2 of
+        // shared/cowork-buyin-prompt.ts) can record a completed VRBO purchase.
+        // Setting bookingStatus "booked" also arms the buy-in-checkout-job
+        // idempotency guard (a booked row is never re-driven through checkout).
+        "bookingStatus", "bookingConfirmation",
       ];
       const filtered: Record<string, any> = {};
       for (const key of allowed) {
         if (key in req.body) filtered[key] = req.body[key];
+      }
+      if (filtered.bookingStatus !== undefined) {
+        const allowedBookingStatuses = ["not_started", "queued", "in_progress", "awaiting_payment", "booked", "failed"];
+        if (!allowedBookingStatuses.includes(String(filtered.bookingStatus))) {
+          return res.status(400).json({ error: `Invalid bookingStatus (expected one of ${allowedBookingStatuses.join(", ")})` });
+        }
+        // A manual/agent "booked" stamp should carry the purchase time like the
+        // automated checkout path does (bookedAt is not client-writable).
+        if (filtered.bookingStatus === "booked") filtered.bookedAt = new Date();
+      }
+      if (filtered.bookingConfirmation !== undefined && filtered.bookingConfirmation !== null) {
+        filtered.bookingConfirmation = String(filtered.bookingConfirmation).trim().slice(0, 100) || null;
       }
       if (filtered.costPaid !== undefined) {
         const cost = parseFloat(String(filtered.costPaid));

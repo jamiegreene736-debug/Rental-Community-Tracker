@@ -1,7 +1,9 @@
 // Builds the copy-to-clipboard prompt the operator hands to Cowork (an agent
 // session with access to this app) so it can search the open web — Google, PM
 // company sites, Airbnb / VRBO / Booking.com — for the cheapest TWO buy-in units
-// for a reservation and attach them via the existing manual-attach API.
+// for a reservation, attach them via the existing manual-attach API, and then —
+// ONLY after the operator's explicit approval — BOOK each attached unit on
+// vrbo.com (Phase 2, added 2026-07-05 per operator ask).
 //
 // LOAD-BEARING (operator's spec): same-community first; if one or both units
 // can't be found in the configured community, fall back to a CITY-WIDE search
@@ -9,7 +11,32 @@
 // the manual method: POST /api/buy-ins (create) then
 // POST /api/bookings/:reservationId/attach-buy-in (attach) — one pair, one per
 // unit slot. This mirrors `ManualBuyInDialog` in client/src/pages/bookings.tsx.
+//
+// LOAD-BEARING (Phase 2, operator's spec 2026-07-05):
+//   - HARD CHECKPOINT between attach and booking: the agent reports its picks
+//     and STOPS; nothing is purchased without the operator's explicit go.
+//   - At VRBO checkout, select ONLY the damage waiver / property damage
+//     protection — decline travel/trip insurance and every other add-on.
+//   - The GUEST's name is used for everything name-related; the traveler email
+//     is the per-guest alias minted by POST /api/buy-ins/:id/traveler-email
+//     (firstname.lastname@emailprivaccy.com); phone is the fixed operator
+//     booking phone (407 449 7941 — same constant as BUYIN_BOOKING_PHONE).
+//   - CARD DETAILS ARE NEVER IN THIS PROMPT, THIS APP, OR THE REPO. The prompt
+//     points the agent at a local file on the operator's Mac
+//     (DEFAULT_CARD_FILE_HINT) that the operator maintains themselves. Do not
+//     "improve" this by adding card fields to the builder input.
+//   - Price guard: never book past costPaid × 1.15 — pause and ask instead.
+//   - Never blind-retry the final Book-now click (double-charge risk).
 import { BUY_IN_MARKETS, resolveBuyInMarketFromText } from "./buy-in-market";
+
+// Where the operator keeps the standing booking card on the local Mac. The
+// operator creates/maintains this file by hand; the agent reads it only at the
+// payment step. Kept as an exported constant so the client dialog can show it.
+export const DEFAULT_CARD_FILE_HINT = "~/Documents/vrbo-booking-card.txt";
+
+// Fixed operator booking phone — mirrors BUYIN_BOOKING_PHONE in
+// server/buy-in-checkout-job.ts (same number, formatted for a form).
+export const COWORK_BOOKING_PHONE = "407-449-7941";
 
 export interface CoworkBuyInUnit {
   unitId: string;
@@ -31,6 +58,11 @@ export interface CoworkBuyInPromptInput {
   units: CoworkBuyInUnit[];
   /** App origin for the API calls, e.g. "https://app.example.com". Optional. */
   baseUrl?: string;
+  /**
+   * Local path of the operator-maintained card file the agent reads at the
+   * payment step. NEVER the card details themselves — a path only.
+   */
+  cardFileHint?: string;
 }
 
 function nightsBetween(checkIn: string, checkOut: string): number {
@@ -154,7 +186,16 @@ export function buildCoworkBuyInPrompt(input: CoworkBuyInPromptInput): string {
       ? "."
       : `, making sure the ${n === 2 ? "two" : n} picks are DISTINCT listings (never the same URL twice).`;
 
-  return `# Task: Find ${countWord} buy-in ${unitWord} for a reservation and attach ${themOrIt}
+  // Guest name split for the traveler-email mint + the traveler form. When the
+  // full name is unknown the prompt tells the agent to read it off the
+  // reservation row before Phase 2.
+  const guestFull = String(input.guestName ?? "").trim();
+  const guestFirst = guestFull.split(/\s+/)[0] ?? "";
+  const guestLast = guestFull.includes(" ") ? guestFull.slice(guestFull.indexOf(" ") + 1).trim() : "";
+  const guestNameKnown = Boolean(guestFirst && guestLast);
+  const cardFile = String(input.cardFileHint ?? "").trim() || DEFAULT_CARD_FILE_HINT;
+
+  return `# Task: Find ${countWord} buy-in ${unitWord} for a reservation and attach ${themOrIt}, then — after my approval — book ${themOrIt} on VRBO
 
 You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
 Search the open web — Google, property-manager (PM) company websites, Airbnb,
@@ -235,9 +276,75 @@ dialog). It is two API calls:
      listings are genuinely in the same community/city per your research.
 ${n === 1 ? "" : `
 Repeat steps 1–2 for each remaining unit slot.`}
-## Done
+## Report, then STOP — hard checkpoint before any booking
 When ${bothOrAll === "the unit" ? "the slot is" : "all slots are"} attached, report for each pick: the listing URL,
 bedrooms, unit type, its ADDRESS and how you confirmed it's in/adjacent to
 **${primaryTarget}**, the total price, whether it came from the resort or the
-city-wide fallback, the combined cost, and any slot you could not fill.`;
+city-wide fallback, the combined cost, and any slot you could not fill.
+
+Then **STOP and wait for my explicit approval** (e.g. "book it" / "go ahead").
+Phase 2 spends real money on my card — do **NOT** start it, open a checkout
+page, or enter any payment details until I approve. If I ask for changes,
+redo the research/attach and check in again instead.
+
+# Phase 2 — Book each attached unit on vrbo.com (ONLY after my approval)
+
+Standing rules for every booking (no exceptions):
+- **Damage waiver ONLY.** At checkout, select the damage waiver / property
+  damage protection option and NOTHING else — decline travel/trip insurance
+  and every other optional add-on or upsell. If the host offers only a
+  refundable damage deposit (no waiver option), that's host-mandated: proceed,
+  and note it in your report.
+- **The guest's name for everything.** Every name field on the traveler form
+  uses the guest's name${guestNameKnown ? ` (${guestFull})` : " (read it off the reservation row first)"}. The ONLY
+  exception is the name-on-card field, which must match the card file below.
+- **Traveler email = the minted guest alias**, never a real/personal email.
+- **Phone:** ${COWORK_BOOKING_PHONE}.
+- **Price guard:** if the checkout total is more than **15% above** the
+  buy-in's recorded costPaid, do NOT book — pause, screenshot, and ask me.
+- **One unit at a time**, in slot order. Never book in parallel.
+- **Never blind-retry a final Book-now click.** If the confirmation doesn't
+  appear (spinner, error, closed tab), FIRST check VRBO "My Trips" and the
+  alias inbox for a confirmation before even considering a retry — a double
+  charge is the worst outcome. When unsure, stop and ask me.
+
+For each attached unit, in order:
+
+1. **Skip-if-booked guard:** GET ${apiRoot}/api/buy-ins/<buyInId>. If
+   "bookingStatus" is "booked" or it already has a confirmation recorded,
+   skip this unit and say so.
+2. **Mint the guest booking email:**
+   POST ${apiRoot}/api/buy-ins/<buyInId>/traveler-email
+   { "reservationId": "${input.reservationId}", "guestFirstName": ${JSON.stringify(guestFirst || "<guest first name>")}, "guestLastName": ${JSON.stringify(guestLast || "<guest last name>")} }
+   → returns { "email": "firstname.lastname@emailprivaccy.com" }. Reuse
+   whatever it returns (it's stable per guest).
+3. **Open the unit's VRBO listing** (the attached listing URL) in the browser.
+   Set the EXACT dates ${input.checkIn} → ${input.checkOut} and a sensible
+   guest count, using the page's own date picker (never edit URL parameters).
+   Confirm the listing is the one attached and the quoted total is within the
+   price guard.
+4. **Click Book / Reserve** to reach the checkout page. If VRBO asks to sign
+   in or shows a CAPTCHA you can't pass, stop and ask me.
+5. **Protection step:** apply the damage-waiver-only rule above. List in your
+   report exactly what you selected and what you declined.
+6. **Traveler details:** guest first/last name, the minted alias email, the
+   phone above.
+7. **Payment:** read the standing booking card from the local file
+   \`${cardFile}\` on this Mac (number, expiry, CVC, name on card, billing
+   zip). Fill the card fields from that file. Do NOT paste card details into
+   this chat, any report, or any app field outside VRBO's payment form.
+   Re-verify before the final click: dates, total within the price guard,
+   damage waiver only. Then click **Book now / Confirm and pay**.
+8. **Record the booking:** capture the confirmation/reservation number from
+   the confirmation page (screenshot it), then:
+   PATCH ${apiRoot}/api/buy-ins/<buyInId>
+   { "bookingStatus": "booked", "bookingConfirmation": "<confirmation number>",
+     "airbnbConfirmation": "<confirmation number>",
+     "notes": "<existing notes> · Booked on VRBO via Cowork — damage waiver only, traveler <alias email>" }
+
+## Final report
+For each unit: listing URL, confirmation number, total charged, the payment
+plan if VRBO split it (due now / balance + date), what protection was selected
+and what was declined, the traveler name/email used, and anything that needs
+my attention (deposit-only host, price-guard pause, unfilled slot).`;
 }
