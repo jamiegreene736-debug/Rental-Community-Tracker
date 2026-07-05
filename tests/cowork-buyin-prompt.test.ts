@@ -4,9 +4,11 @@
 // the manual-attach API (create buy-in + attach-buy-in) per unit slot.
 import {
   buildCoworkBuyInPrompt,
+  buildCoworkCheckoutPrompt,
   resolveCoworkSearchTargets,
   DEFAULT_CARD_FILE_HINT,
   type CoworkBuyInPromptInput,
+  type CoworkCheckoutPromptInput,
 } from "../shared/cowork-buyin-prompt";
 
 let pass = 0;
@@ -69,53 +71,95 @@ check("dates threaded into create body", prompt.includes('"checkIn": "2026-07-20
 const noBase = buildCoworkBuyInPrompt({ ...baseInput, baseUrl: undefined });
 check("placeholder when no baseUrl", noBase.includes("<APP_BASE_URL>/api/buy-ins"));
 
-// ── Phase 2: approval-gated VRBO checkout (operator spec 2026-07-05) ─────────
-check("title announces the booking phase", prompt.includes("after my approval — book"));
+// ── SPLIT (operator spec 2026-07-05): the FIND prompt never books ────────────
+check("find prompt ends at attach — explicit do-not-book", prompt.includes("This task ends at ATTACH") && /Do \*\*NOT\*\* book/.test(prompt));
+check("find prompt has no booking/checkout steps", !prompt.includes("Book now / Confirm and pay") && !/damage waiver/i.test(prompt));
+check("find prompt never mentions the card file", !prompt.includes(DEFAULT_CARD_FILE_HINT) && !/card/i.test(prompt));
+check("find prompt points at the separate checkout prompt", /separate checkout prompt/i.test(prompt));
+
+// ── buildCoworkCheckoutPrompt: the separate BOOK-ONLY prompt ─────────────────
+const checkoutInput: CoworkCheckoutPromptInput = {
+  reservationId: "abc123",
+  guestName: "Jane Traveler",
+  propertyName: "Poipu Kai 6BR Combo",
+  checkIn: "2026-07-20",
+  checkOut: "2026-07-27",
+  units: [
+    { buyInId: 41, unitLabel: "Unit A", listingUrl: "https://www.vrbo.com/1234567", costPaid: "1820.00" },
+    { buyInId: 42, unitLabel: "Unit B", listingUrl: "https://www.vrbo.com/7654321", costPaid: 1990 },
+  ],
+  baseUrl: "https://app.example.com/",
+};
+const checkout = buildCoworkCheckoutPrompt(checkoutInput);
+
+check("checkout: book-only title", checkout.includes("Book the 2 attached buy-in units on vrbo.com"));
 check(
-  "HARD CHECKPOINT: stop + wait for explicit approval before booking",
-  prompt.includes("STOP and wait for my explicit approval") && /do \*\*NOT\*\* start it/.test(prompt),
+  "checkout: running the prompt IS the approval (no further checkpoint)",
+  checkout.includes("running this\nprompt is my approval") && !checkout.includes("STOP and wait for my explicit approval"),
+);
+check("checkout: never re-searches", checkout.includes("Do not re-run the search") && !checkout.includes("Same community first"));
+check(
+  "checkout: embeds the attached units (ids, URLs, approved costs)",
+  checkout.includes("buyInId 41") && checkout.includes("buyInId 42") &&
+    checkout.includes("https://www.vrbo.com/1234567") && checkout.includes("https://www.vrbo.com/7654321") &&
+    checkout.includes("$1820.00") && checkout.includes("$1990.00"),
 );
 check(
-  "damage waiver ONLY — everything else declined",
-  prompt.includes("Damage waiver ONLY") && /decline travel\/trip insurance/i.test(prompt) && /every other optional add-on/i.test(prompt),
+  "checkout: damage waiver ONLY — everything else declined",
+  checkout.includes("Damage waiver ONLY") && /decline travel\/trip insurance/i.test(checkout) && /every other optional add-on/i.test(checkout),
 );
 check(
-  "deposit-only hosts are proceed + note (mandated, not an upsell)",
-  /refundable damage deposit[\s\S]{0,120}host-mandated: proceed/i.test(prompt),
+  "checkout: deposit-only hosts are proceed + note (mandated, not an upsell)",
+  /refundable damage deposit[\s\S]{0,120}host-mandated: proceed/i.test(checkout),
 );
 check(
-  "guest name for everything (name-on-card is the only exception)",
-  prompt.includes("The guest's name for everything") && prompt.includes("(Jane Traveler)") && /name-on-card field/.test(prompt),
+  "checkout: guest name for everything (name-on-card is the only exception)",
+  checkout.includes("The guest's name for everything") && checkout.includes("(Jane Traveler)") && /name-on-card field/.test(checkout),
 );
 check(
-  "traveler email = minted alias via the traveler-email endpoint",
-  prompt.includes("/api/buy-ins/<buyInId>/traveler-email") && prompt.includes("emailprivaccy.com"),
+  "checkout: traveler email = minted alias via the traveler-email endpoint",
+  checkout.includes("POST https://app.example.com/api/buy-ins/<buyInId>/traveler-email") && checkout.includes("emailprivaccy.com"),
 );
 check(
-  "guest first/last threaded into the mint call",
-  prompt.includes('"guestFirstName": "Jane"') && prompt.includes('"guestLastName": "Traveler"'),
+  "checkout: guest first/last threaded into the mint call",
+  checkout.includes('"guestFirstName": "Jane"') && checkout.includes('"guestLastName": "Traveler"'),
 );
-check("fixed operator booking phone", prompt.includes("407-449-7941"));
-check("15% price guard", prompt.includes("15% above") && /do NOT book/.test(prompt));
-check("skip-if-booked idempotency guard", /"bookingStatus" is "booked"/.test(prompt));
-check("never blind-retry the final click", prompt.includes("Never blind-retry") && /My Trips/.test(prompt));
-check("dates set via the page's own picker, never URL params", /never edit URL parameters/.test(prompt));
+check("checkout: fixed operator booking phone", checkout.includes("407-449-7941"));
+check("checkout: 15% price guard", checkout.includes("15% above") && /do NOT book/.test(checkout));
+check("checkout: skip-if-booked idempotency guard", /"bookingStatus" is "booked"/.test(checkout));
+check("checkout: sanity-check attach data before booking", /on any mismatch, stop and ask/i.test(checkout));
+check("checkout: never blind-retry the final click", checkout.includes("Never blind-retry") && /My Trips/.test(checkout));
+check("checkout: dates via the page's own picker, never URL params", /never edit URL parameters/.test(checkout));
 check(
-  "records the booking on the buy-in row",
-  prompt.includes('"bookingStatus": "booked"') && prompt.includes('"bookingConfirmation"'),
+  "checkout: records the booking on the buy-in row",
+  checkout.includes('"bookingStatus": "booked"') && checkout.includes('"bookingConfirmation"'),
 );
+check("checkout: one unit at a time", /One unit at a time/.test(checkout));
 // CARD HYGIENE — the load-bearing safety property of this prompt.
-check("card comes from the LOCAL file, path only", prompt.includes(DEFAULT_CARD_FILE_HINT));
-check("forbids pasting card details anywhere", prompt.includes("Do NOT paste card details"));
+check("checkout: card comes from the LOCAL file, path only", checkout.includes(DEFAULT_CARD_FILE_HINT));
+check("checkout: forbids pasting card details anywhere", checkout.includes("Do NOT paste card details"));
 check(
-  "prompt can never contain card digits (no 13+ digit runs)",
-  !/\d[\d\s-]{12,}\d/.test(prompt),
+  "checkout: prompt can never contain card digits (no 13+ digit runs)",
+  !/\d[\d\s-]{12,}\d/.test(checkout),
 );
-const customCard = buildCoworkBuyInPrompt({ ...baseInput, cardFileHint: "~/Notes/card.txt" });
-check("cardFileHint override respected", customCard.includes("~/Notes/card.txt") && !customCard.includes(DEFAULT_CARD_FILE_HINT));
+const customCard = buildCoworkCheckoutPrompt({ ...checkoutInput, cardFileHint: "~/Notes/card.txt" });
+check("checkout: cardFileHint override respected", customCard.includes("~/Notes/card.txt") && !customCard.includes(DEFAULT_CARD_FILE_HINT));
 // Unknown guest name → the prompt tells the agent to read it off the reservation.
-const nameless = buildCoworkBuyInPrompt({ ...baseInput, guestName: null });
-check("unknown guest name → read it off the reservation row", nameless.includes("read it off the reservation row"));
+const namelessCheckout = buildCoworkCheckoutPrompt({ ...checkoutInput, guestName: null });
+check("checkout: unknown guest name → read it off the reservation row", namelessCheckout.includes("read it off the reservation row"));
+// Missing listing URL → explicit fallback instruction, never a silent blank.
+const noUrl = buildCoworkCheckoutPrompt({
+  ...checkoutInput,
+  units: [{ buyInId: 7, unitLabel: "Unit C", listingUrl: null, costPaid: null }],
+});
+check("checkout: single-unit title", noUrl.includes("Book the attached buy-in unit on vrbo.com"));
+check(
+  "checkout: missing URL/cost degrade loudly",
+  noUrl.includes("no URL recorded") && noUrl.includes("(not recorded)"),
+);
+// placeholder base URL when none provided.
+const noBaseCheckout = buildCoworkCheckoutPrompt({ ...checkoutInput, baseUrl: undefined });
+check("checkout: placeholder when no baseUrl", noBaseCheckout.includes("<APP_BASE_URL>/api/buy-ins"));
 
 // ── single-unit reservation (Unit 3104, 2BR off a non-combo listing) ─────────
 const single = buildCoworkBuyInPrompt({

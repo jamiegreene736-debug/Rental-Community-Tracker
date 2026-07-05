@@ -47,7 +47,7 @@ import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@sh
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBuyInPrompt } from "@shared/cowork-buyin-prompt";
+import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt } from "@shared/cowork-buyin-prompt";
 import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
@@ -2261,7 +2261,7 @@ function CoworkBuyInPromptButton({
           void copy();
         }}
         data-testid={`button-cowork-prompt-${reservation._id}`}
-        title="Generate a prompt for Cowork: web-search + attach the cheapest buy-in units, then — after you approve — book them on VRBO (damage waiver only, guest name + alias email)"
+        title="Generate a prompt for Cowork to web-search + manually attach the cheapest buy-in units (search only — booking has its own separate prompt)"
       >
         <Sparkles className="mr-1 h-3.5 w-3.5" />
         Create prompt for Cowork
@@ -2273,12 +2273,9 @@ function CoworkBuyInPromptButton({
             <DialogDescription>
               Copied to your clipboard. Paste this into Cowork — it searches Google, PM company sites,
               Airbnb, VRBO and Booking.com for the cheapest units (same community first, then a
-              city-wide fallback, never beyond the city), attaches them with the manual-attach method,
-              then STOPS for your approval. Once you say go, it books each unit on VRBO: damage waiver
-              only (all insurance declined), the guest&apos;s name everywhere, the auto-minted guest
-              alias email, and your standing card read from the local card file on your Mac
-              (~/Documents/vrbo-booking-card.txt — keep it up to date; card details never live in this
-              app or the prompt).
+              city-wide fallback, never beyond the city) and attaches them with the manual-attach
+              method, then stops. Review the attached picks, then use the separate &quot;Checkout
+              prompt&quot; button to book them on VRBO.
             </DialogDescription>
           </DialogHeader>
           <textarea
@@ -2290,6 +2287,98 @@ function CoworkBuyInPromptButton({
           />
           <DialogFooter>
             <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-prompt-copy-${reservation._id}`}>
+              <Copy className="mr-1 h-3.5 w-3.5" />
+              Copy again
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+// "Checkout prompt" — the SEPARATE book-only Cowork prompt (operator spec
+// 2026-07-05: booking must not ride along with the find prompt). Built from
+// the reservation's ALREADY-attached buy-ins after the operator reviewed them;
+// running the prompt is the approval, so it books without a further checkpoint
+// (damage waiver only, guest name everywhere, alias email, 15% price guard,
+// card read from the local card file — never stored in the app/prompt).
+function CoworkCheckoutPromptButton({
+  reservation,
+  propertyName,
+  units,
+}: {
+  reservation: GuestyReservation;
+  propertyName: string;
+  units: { buyInId: number; unitLabel: string; listingUrl: string | null; costPaid: string | number | null }[];
+}) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const toDateOnly = (s: string | undefined): string =>
+    !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
+  const prompt = useMemo(
+    () =>
+      buildCoworkCheckoutPrompt({
+        reservationId: reservation._id,
+        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? null,
+        propertyName,
+        checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
+        checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
+        units,
+        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
+      }),
+    [reservation, propertyName, units],
+  );
+  const copy = async () => {
+    try {
+      await navigator.clipboard?.writeText(prompt);
+      toast({ title: "Checkout prompt copied", description: "Paste it into Cowork to book the attached units on VRBO." });
+    } catch {
+      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
+    }
+  };
+  return (
+    <>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 px-2 text-xs border-emerald-300 text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+          void copy();
+        }}
+        data-testid={`button-cowork-checkout-prompt-${reservation._id}`}
+        title="Generate a prompt for Cowork to BOOK the attached unit(s) on VRBO — damage waiver only, guest name + alias email, your standing card. Run it only after you've reviewed the attached picks; pasting it is the approval."
+      >
+        <ShoppingCart className="mr-1 h-3.5 w-3.5" />
+        Checkout prompt (books on VRBO)
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Cowork checkout prompt — books the attached units</DialogTitle>
+            <DialogDescription>
+              Copied to your clipboard. This prompt BOOKS — pasting it into Cowork is your approval,
+              there is no further checkpoint. It checks each attached unit out on vrbo.com with the
+              damage waiver only (all insurance and add-ons declined), the guest&apos;s name on every
+              name field, the auto-minted guest alias email, and your standing card read from the
+              local file on your Mac (~/Documents/vrbo-booking-card.txt — keep it up to date; card
+              details never live in this app or the prompt). Built-in guards: already-booked units
+              are skipped, and it pauses to ask you if a checkout total runs more than 15% over the
+              attached cost.
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            readOnly
+            value={prompt}
+            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
+            data-testid={`textarea-cowork-checkout-prompt-${reservation._id}`}
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <DialogFooter>
+            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-checkout-prompt-copy-${reservation._id}`}>
               <Copy className="mr-1 h-3.5 w-3.5" />
               Copy again
             </Button>
@@ -10811,6 +10900,24 @@ export default function Bookings() {
                         {manualReservation && <ManualReservationContactPanel reservation={r} />}
                         {!manualReservation && <ReservationCancellationPolicyNotice reservation={r} />}
                         <div className="flex flex-wrap justify-end gap-2">
+                          {/* "Checkout prompt" — SEPARATE from the find prompt (operator
+                              spec 2026-07-05). Shown once at least one buy-in is attached
+                              and not yet booked; builds the book-only Cowork prompt from
+                              the attached slots' own buy-in rows. */}
+                          {r.slots.some((s) => s.buyIn && s.buyIn.bookingStatus !== "booked") && (
+                            <CoworkCheckoutPromptButton
+                              reservation={r}
+                              propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? "Vacation rental"}
+                              units={r.slots
+                                .filter((s): s is SlotInfo & { buyIn: BuyIn } => Boolean(s.buyIn && s.buyIn.bookingStatus !== "booked"))
+                                .map((s) => ({
+                                  buyInId: s.buyIn.id,
+                                  unitLabel: s.buyIn.unitLabel || s.unitLabel,
+                                  listingUrl: s.buyIn.airbnbListingUrl ?? null,
+                                  costPaid: s.buyIn.costPaid ?? null,
+                                }))}
+                            />
+                          )}
                           <Button
                             type="button"
                             size="sm"

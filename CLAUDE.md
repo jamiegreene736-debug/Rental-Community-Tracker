@@ -63,8 +63,16 @@ Before making any changes:
   zip — one per line). DON'T RE-CHASE: the dormant AUTOMATED checkout scaffold (buy_ins booking
   columns, server/buy-in-checkout-job.ts, `vrbo_book` op type, "Buy this unit in"/"Payment terms"
   buttons) is already merged but its sidecar worker handler was never written — the operator chose
-  the Cowork path instead; the scaffold stays dormant/intact. Verified: cowork-buyin-prompt 54/0,
-  full `npm test` exit 0, build clean, `npm run check` 338 = baseline.
+  the Cowork path instead; the scaffold stays dormant/intact. FOLLOW-UP same day (operator): the
+  checkout must be a SEPARATE prompt/button from the find prompt. buildCoworkBuyInPrompt reverted
+  to search+attach-only (ends "This task ends at ATTACH … do NOT book"); new
+  `buildCoworkCheckoutPrompt` (same shared file) is the book-only prompt — running it IS the
+  approval (no internal checkpoint), embeds the attached buy-ins (buyInId/listing URL/costPaid) and
+  keeps every money guard (waiver-only, guest name, alias email, 15% guard, skip-if-booked,
+  no-blind-retry, card file). New emerald "Checkout prompt (books on VRBO)" button
+  (`CoworkCheckoutPromptButton`, bookings.tsx expanded-row action strip) renders whenever a slot
+  has an attached buy-in with bookingStatus !== "booked". Verified: cowork-buyin-prompt 65/0, full
+  `npm test` exit 0, build clean, `npm run check` 338 = baseline.
 
 - 2026-07-04 (photo-replacement queue: operator "Clear queue"): Operator (screenshot of the finished
   queue dialog) asked to be able to clear out the auto-replace queue. SHIPPED: pure
