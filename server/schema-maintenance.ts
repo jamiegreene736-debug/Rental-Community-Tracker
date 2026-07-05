@@ -22,7 +22,10 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS guest_happy_verdict text,
       ADD COLUMN IF NOT EXISTS guest_happy_feedback text,
       ADD COLUMN IF NOT EXISTS guest_happy_source text,
-      ADD COLUMN IF NOT EXISTS guest_happy_at timestamp
+      ADD COLUMN IF NOT EXISTS guest_happy_at timestamp,
+      ADD COLUMN IF NOT EXISTS vrbo_lookup_status text,
+      ADD COLUMN IF NOT EXISTS vrbo_lookup_note text,
+      ADD COLUMN IF NOT EXISTS vrbo_lookup_at timestamp
   `);
   console.log("[schema] ensured buy_ins arrival detail + ground-floor + community-verdict + guest-happy columns");
 
