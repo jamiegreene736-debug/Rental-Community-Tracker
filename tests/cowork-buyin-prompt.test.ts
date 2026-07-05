@@ -76,6 +76,10 @@ check("find prompt ends at attach — explicit do-not-book", prompt.includes("Th
 check("find prompt has no booking/checkout steps", !prompt.includes("Book now / Confirm and pay") && !/damage waiver/i.test(prompt));
 check("find prompt never mentions the card file", !prompt.includes(DEFAULT_CARD_FILE_HINT) && !/card/i.test(prompt));
 check("find prompt points at the separate checkout prompt", /separate checkout prompt/i.test(prompt));
+check(
+  "find prompt closes its own tabs when done (operator: tabs clog the browser)",
+  /close every Chrome tab you opened/i.test(prompt) && /already open before you started untouched/i.test(prompt),
+);
 
 // ── buildCoworkCheckoutPrompt: the separate BOOK-ONLY prompt ─────────────────
 const checkoutInput: CoworkCheckoutPromptInput = {
@@ -137,6 +141,12 @@ check(
   checkout.includes('"bookingStatus": "booked"') && checkout.includes('"bookingConfirmation"'),
 );
 check("checkout: one unit at a time", /One unit at a time/.test(checkout));
+check(
+  "checkout: closes its own tabs when done, but never mid-booking",
+  /close every Chrome tab you opened/i.test(checkout) &&
+    /already open before you started untouched/i.test(checkout) &&
+    /Do NOT close a checkout tab\s+mid-booking/i.test(checkout),
+);
 // CARD HYGIENE — the load-bearing safety property of this prompt.
 check("checkout: card comes from the LOCAL file, path only", checkout.includes(DEFAULT_CARD_FILE_HINT));
 check("checkout: forbids pasting card details anywhere", /Do NOT paste card\s+details/.test(checkout));
