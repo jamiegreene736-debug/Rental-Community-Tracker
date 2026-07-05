@@ -70,7 +70,12 @@ Before making any changes:
   FOLLOW-UP (operator): the find prompt must NEVER attach an airbnb.com link — qualification
   rule 5 (CHANNEL): attach only VRBO / Booking.com / direct booking (PM) site URLs; Airbnb is
   discovery-only (find the same unit's non-Airbnb page and attach that); Airbnb-only units do
-  not qualify. 4TH FOLLOW-UP (operator screenshot, Waikiki 2-unit attach — $1,975 owner-direct +
+  not qualify. 7TH FOLLOW-UP (operator): CHANNEL PREFERENCE — VRBO FIRST with a 20% escape
+  hatch: per slot compare the cheapest qualifying VRBO listing vs the cheapest non-VRBO
+  (Booking.com/direct); pick VRBO unless the non-VRBO total is BELOW 80% of the VRBO total
+  (worked example locks the math direction: VRBO $2,000 → $1,590 wins, $1,700 does not); no
+  qualifying VRBO → cheapest non-VRBO wins; the preference never relaxes rules 1–5 or the
+  PAIR RULE, and the report must show each slot's cheapest VRBO total + which branch applied. 4TH FOLLOW-UP (operator screenshot, Waikiki 2-unit attach — $1,975 owner-direct +
   $4,074 Booking.com pair showing "0.4 mi apart · estimated from listing titles" when they should
   share a building): DIAGNOSED — the 0.4 mi was FAKE: the Cowork buy-in had no unitAddress, so the
   proximity estimator geocoded the boilerplate notes string to a city-centroid pin; ALSO
