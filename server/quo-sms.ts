@@ -538,6 +538,35 @@ export async function sendQuoSms(input: {
   return storage.createQuoSmsMessage(row);
 }
 
+// MMS media attached to a Quo/OpenPhone message webhook. Defensive on shape:
+// OpenPhone documents `media: [{url, type}]`, but accept bare URL strings and
+// the common alternate keys too. Pure — unit tested in tests/quo-sms-media.test.ts.
+export type QuoSmsMedia = { url: string; type?: string };
+
+export function extractQuoMediaUrls(object: any): QuoSmsMedia[] {
+  const candidates = [object?.media, object?.attachments, object?.mediaUrls, object?.files];
+  const out: QuoSmsMedia[] = [];
+  const seen = new Set<string>();
+  for (const list of candidates) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      let url = "";
+      let type: string | undefined;
+      if (typeof item === "string") {
+        url = item.trim();
+      } else if (item && typeof item === "object") {
+        url = String(item.url ?? item.href ?? item.src ?? item.link ?? "").trim();
+        const rawType = String(item.type ?? item.contentType ?? item.mimeType ?? "").trim();
+        if (rawType) type = rawType;
+      }
+      if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+      seen.add(url);
+      out.push(type ? { url, type } : { url });
+    }
+  }
+  return out;
+}
+
 export async function recordQuoWebhook(payload: any): Promise<{ message: QuoSmsMessage; matched: boolean }> {
   const object = payload?.data?.object ?? payload?.object ?? payload?.message ?? payload;
   const direction = String(object?.direction ?? payload?.type ?? "").toLowerCase().includes("out")
@@ -548,9 +577,12 @@ export async function recordQuoWebhook(payload: any): Promise<{ message: QuoSmsM
   const to = normalizePhone(toRaw ?? object?.recipient ?? getQuoFromNumber());
   const guestPhone = direction === "inbound" ? from : to;
   const body = String(object?.text ?? object?.content ?? object?.body ?? "").trim();
+  const media = extractQuoMediaUrls(object);
   const providerMessageId = String(object?.id ?? payload?.id ?? `quo-webhook-${Date.now()}`);
   if (!phoneLast10(guestPhone)) throw new Error("Webhook payload did not include a valid guest phone");
-  if (!body) throw new Error("Webhook payload did not include message text");
+  // A photo-only MMS (e.g. the ID-verification selfie) has media but no text —
+  // it must still be recorded, otherwise the guest's photo reply is lost.
+  if (!body && media.length === 0) throw new Error("Webhook payload did not include message text or media");
 
   const match = direction === "inbound" ? await findGuestyConversationByPhone(guestPhone) : null;
   const row: InsertQuoSmsMessage = {
@@ -564,6 +596,7 @@ export async function recordQuoWebhook(payload: any): Promise<{ message: QuoSmsM
     direction,
     body,
     status: String(object?.status ?? payload?.type ?? "received"),
+    mediaUrls: media.length > 0 ? JSON.stringify(media) : null,
     rawPayload: JSON.stringify(payload),
     sentAt: object?.createdAt ? new Date(object.createdAt) : new Date(),
   };

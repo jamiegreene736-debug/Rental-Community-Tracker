@@ -272,10 +272,14 @@ export async function ensureRuntimeSchema(): Promise<void> {
       direction text NOT NULL,
       body text NOT NULL,
       status text,
+      media_urls text,
       raw_payload text,
       sent_at timestamp NOT NULL DEFAULT now(),
       created_at timestamp NOT NULL DEFAULT now()
     )
+  `);
+  await db.execute(sql`
+    ALTER TABLE quo_sms_messages ADD COLUMN IF NOT EXISTS media_urls text
   `);
   await db.execute(sql`
     CREATE INDEX IF NOT EXISTS quo_sms_messages_conversation_sent_at_idx

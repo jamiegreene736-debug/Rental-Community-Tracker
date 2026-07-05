@@ -866,6 +866,22 @@ function cleanMessageBody(raw: string): string {
   return s;
 }
 
+// Parse the quo_sms_messages.media_urls column (JSON [{url, type?}]) back into
+// attachment objects for the thread. Fail-soft: bad/missing JSON renders as a
+// text-only SMS bubble rather than breaking the thread.
+function parseQuoSmsMedia(raw: unknown): Array<{ url: string; type?: string }> {
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item: any) => (typeof item === "string" ? { url: item } : item))
+      .filter((item: any) => item && typeof item.url === "string" && /^https?:\/\//i.test(item.url));
+  } catch {
+    return [];
+  }
+}
+
 // One attachment inside a message bubble: images render inline (click opens the
 // full-size original in a new tab); anything else (or an image URL that fails
 // to load, e.g. an expired signed URL) falls back to a download link.
@@ -1494,6 +1510,46 @@ function buildUnitSetupSmsBody(args: {
 }): string {
   const isHawaii = args.isHawaii ?? true;
   return `${guestGreeting(args.guestFirstName, isHawaii)} quick note${args.propertyName ? ` for ${args.propertyName}` : ""}: this stay is set up as nearby units, and your final arrival details will come before check-in. Reply here with any questions. ${guestSmsSignoff(isHawaii)}`;
+}
+
+// ID verification: asks the guest to reply with a selfie holding their
+// driver's license before arrival details are released. Guests reply with the
+// photo in this same thread — OTA photo attachments already render via
+// collectPostAttachments, and SMS/MMS photo replies land here through the Quo
+// webhook (media_urls) and render the same way.
+function buildIdVerificationBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  confirmationCode?: string;
+  isHawaii?: boolean;
+}): string {
+  const isHawaii = args.isHawaii ?? true;
+  const lines: string[] = [
+    guestGreeting(args.guestFirstName, isHawaii),
+    ``,
+    `As part of our standard security verification${args.propertyName ? ` for your stay at ${args.propertyName}` : ""}, could you please reply to this message with a photo of the primary guest's driver's license (or other government-issued ID) and a selfie of the primary guest holding that ID?`,
+  ];
+  if (args.checkInIso) lines.push(`Check-in date: ${formatLongDate(args.checkInIso.slice(0, 10))}`);
+  if (args.confirmationCode) lines.push(`Confirmation code: ${args.confirmationCode}`);
+  lines.push(``);
+  lines.push(`We need this quick verification before we can release your arrival details (unit address, access codes, and parking). Your photos are used only to confirm the reservation and are never shared.`);
+  lines.push(``);
+  lines.push(...guestSignoffLines(isHawaii));
+  return lines.join("\n");
+}
+
+function buildIdVerificationSmsBody(args: {
+  guestFirstName: string;
+  propertyName: string;
+  isHawaii?: boolean;
+}): string {
+  const isHawaii = args.isHawaii ?? true;
+  return [
+    `${guestGreeting(args.guestFirstName, isHawaii)} quick security step${args.propertyName ? ` for ${args.propertyName}` : ""}: please reply to this text with a photo of the primary guest's driver's license and a selfie holding it.`,
+    ``,
+    `We need this to verify the reservation and release your arrival details. Your photos stay private and are only used for verification. ${guestSmsSignoff(isHawaii)}`,
+  ].join("\n");
 }
 
 // ─── Response-shape normalizer ─────────────────────────────────────────────────
@@ -2978,6 +3034,10 @@ export default function InboxPage() {
     sentAt: m.sentAt ?? m.createdAt,
     sentBy: m.direction === "outbound" ? "host" : "guest",
     direction: m.direction === "outbound" ? "outbound" : "inbound",
+    // MMS photos the guest texted back (e.g. the ID-verification selfie).
+    // `media_urls` holds JSON [{url, type?}] — putting it on `media` lets the
+    // thread's collectPostAttachments render them like any OTA photo message.
+    media: parseQuoSmsMedia(m.mediaUrls),
     module: { type: "sms", provider: "quo" },
   }));
 
@@ -3294,7 +3354,7 @@ export default function InboxPage() {
   }: {
     title?: string;
     channel?: "guesty" | "sms";
-    kind: "booking" | "agreement-request" | "guesty-invoice-payment" | "representative-follow-up" | "local-tips" | "day-before" | "post-stay";
+    kind: "booking" | "agreement-request" | "guesty-invoice-payment" | "representative-follow-up" | "id-verification" | "local-tips" | "day-before" | "post-stay";
     guestFirstName: string;
     propertyName: string;
     checkInIso?: string;
@@ -3342,6 +3402,8 @@ export default function InboxPage() {
           ? buildGuestyInvoicePaymentSmsBody({ guestFirstName, propertyName, paymentUrl: effectivePaymentUrl, isHawaii })
         : channel === "sms" && kind === "representative-follow-up"
           ? buildUnitSetupSmsBody({ guestFirstName, propertyName, isHawaii })
+        : channel === "sms" && kind === "id-verification"
+          ? buildIdVerificationSmsBody({ guestFirstName, propertyName, isHawaii })
         : channel === "sms" && kind === "local-tips"
           ? buildLocalTipsSmsBody({ guestFirstName, propertyName, isHawaii })
         : channel === "sms" && kind === "day-before"
@@ -3356,6 +3418,8 @@ export default function InboxPage() {
           ? buildGuestyInvoicePaymentBody({ guestFirstName, propertyName, checkInIso, confirmationCode, isHawaii })
         : kind === "representative-follow-up"
           ? buildRepresentativeUnitsFollowUpBody({ guestFirstName, propertyName, checkInIso, isHawaii })
+        : kind === "id-verification"
+          ? buildIdVerificationBody({ guestFirstName, propertyName, checkInIso, confirmationCode, isHawaii })
           : kind === "local-tips"
             ? buildLocalTipsBody({ guestFirstName, propertyName, units, isHawaii })
             : kind === "day-before"
@@ -5962,6 +6026,17 @@ export default function InboxPage() {
                                 smsOnClick: () => draftStayTemplate({ title: "SMS: unit setup note", channel: "sms", kind: "representative-follow-up", ...draftCommon }),
                               },
                               {
+                                title: "ID verification (selfie + license)",
+                                due: checkInDate ? addDays(checkInDate, -16) : null,
+                                dueLabel: "Before arrival details go out",
+                                sent: wasSent(/driver'?s license|selfie|security verification/i),
+                                detail: "Selfie with driver's license — required to release arrival details",
+                                testId: "button-draft-id-verification",
+                                onClick: () => draftStayTemplate({ title: "ID verification (selfie + license)", kind: "id-verification", ...draftCommon }),
+                                smsTestId: "button-draft-sms-id-verification",
+                                smsOnClick: () => draftStayTemplate({ title: "SMS: ID verification request", channel: "sms", kind: "id-verification", ...draftCommon }),
+                              },
+                              {
                                 title: "14-day arrival details",
                                 due: checkInDate ? addDays(checkInDate, -14) : null,
                                 dueLabel: "14 days before arrival",
@@ -6009,7 +6084,7 @@ export default function InboxPage() {
                             ];
                             const visibleTimeline = isAgent
                               ? timeline.filter((item) =>
-                                  /arrival|parking|travel|day-before|unit setup|post-stay/i.test(item.title)
+                                  /arrival|parking|travel|day-before|unit setup|id verification|post-stay/i.test(item.title)
                                 )
                               : timeline;
                             return (
