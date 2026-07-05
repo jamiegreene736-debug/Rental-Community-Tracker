@@ -1530,6 +1530,12 @@ function unwrapList<T>(raw: unknown, hints: string[] = []): T[] {
   return visit(raw, 0) ?? [];
 }
 
+// Guesty's /posts endpoint started rejecting the `fields` query param with a
+// 400 VALIDATION_ERROR (`"fields" is not allowed`, observed 2026-07-05), which
+// used to blank every inbox thread ("No posts parsed"). Latched per page load
+// after the first rejection so the 30s refetches skip the doomed variant.
+let postsFieldsParamRejected = false;
+
 function normalizePhone(value: unknown): string {
   const raw = String(value ?? "").trim();
   if (!raw) return "";
@@ -2871,24 +2877,28 @@ export default function InboxPage() {
     queryKey: ["/api/guesty-proxy/communication/conversations", selectedConvId, "posts"],
     enabled: !!selectedConvId,
     queryFn: async () => {
-      // NOTE FOR CODEX: the empty `&fields=` is LOAD-BEARING, same as the
-      // conversation-list query (2026-05-04 note) — Guesty's communication
-      // endpoints return STRIPPED documents without it. Guest photo messages
-      // carry an `attachments` array that must survive to the client so the
-      // thread can render the photos; do not remove this "typo".
-      let r = await apiRequest(
-        "GET",
-        `/api/guesty-proxy/communication/conversations/${selectedConvId}/posts?limit=100&fields=`,
-      );
-      if (!r.ok) {
-        // Fail-soft: if this Guesty tenant ever rejects the empty fields param,
-        // fall back to the stripped shape rather than breaking the thread.
-        r = await apiRequest(
-          "GET",
-          `/api/guesty-proxy/communication/conversations/${selectedConvId}/posts?limit=100`,
-        );
+      // NOTE FOR CODEX: the empty `&fields=` mirrors the conversation-LIST
+      // query (2026-05-04 note), where it is load-bearing for un-stripped
+      // documents. As of 2026-07-05 Guesty's /posts endpoint REJECTS the param
+      // outright (400 VALIDATION_ERROR `"fields" is not allowed`) while the
+      // no-fields response still carries `attachments`, so we fall back — and
+      // remember the rejection so every 30s refetch doesn't burn a doomed
+      // request. apiRequest THROWS on non-2xx (see the apirequest-throws
+      // memory / PR #896), so the fallback must catch, not check `r.ok`.
+      const base = `/api/guesty-proxy/communication/conversations/${selectedConvId}/posts?limit=100`;
+      if (!postsFieldsParamRejected) {
+        try {
+          const r = await apiRequest("GET", `${base}&fields=`);
+          return await r.json();
+        } catch (err) {
+          // Only latch on a 4xx (Guesty rejected the param); transient 5xx /
+          // network failures should keep trying the richer variant later.
+          if (/^4\d\d:/.test(String((err as Error)?.message ?? ""))) {
+            postsFieldsParamRejected = true;
+          }
+        }
       }
-      if (!r.ok) throw new Error(`Guesty returned HTTP ${r.status}`);
+      const r = await apiRequest("GET", base);
       return r.json();
     },
     refetchInterval: 30_000,
