@@ -47,7 +47,18 @@ import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@sh
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt } from "@shared/cowork-buyin-prompt";
+import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt } from "@shared/cowork-buyin-prompt";
+
+// Is this attached buy-in already on the VRBO channel? Drives the
+// "Find on VRBO" re-channel button + slot badges (operator prefers to book
+// every buy-in through VRBO).
+function buyInUrlIsVrbo(url: string | null | undefined): boolean {
+  try {
+    return /^(?:www\.)?vrbo\.com$/.test(new URL(String(url ?? "")).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
 import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
 import { unitCommunityVerdictBadge } from "@shared/community-verdict-badge";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
@@ -2658,6 +2669,98 @@ function CoworkGuestHappyButton({
           />
           <DialogFooter>
             <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-guest-happy-copy-${reservation._id}`}>
+              <Copy className="mr-1 h-3.5 w-3.5" />
+              Copy again
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+// "Find on VRBO" — re-channel prompt for attached buy-ins that live on a
+// direct booking site / Booking.com (operator spec 2026-07-05: always prefer
+// booking through VRBO). Cowork hunts for the SAME physical unit on vrbo.com
+// and either re-points the buy-in at it (POST /api/buy-ins/:id/vrbo-lookup,
+// status "switched"), records that the current channel stays because it's
+// >20% cheaper ("kept_cheaper"), or records "not_on_vrbo" — which renders as
+// a badge on the slot so the operator stops wondering.
+function CoworkFindOnVrboButton({
+  reservation,
+  propertyName,
+  units,
+}: {
+  reservation: GuestyReservation;
+  propertyName: string;
+  units: { buyInId: number; unitLabel: string; listingUrl: string | null; unitAddress: string | null; costPaid: string | number | null }[];
+}) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const toDateOnly = (s: string | undefined): string =>
+    !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
+  const prompt = useMemo(
+    () =>
+      buildCoworkVrboLookupPrompt({
+        reservationId: reservation._id,
+        propertyName,
+        checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
+        checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
+        units,
+        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
+      }),
+    [reservation, propertyName, units],
+  );
+  const copy = async () => {
+    try {
+      await navigator.clipboard?.writeText(prompt);
+      toast({ title: "Find-on-VRBO prompt copied", description: "Paste it into Cowork to hunt for the same unit's VRBO listing." });
+    } catch {
+      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
+    }
+  };
+  return (
+    <>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 px-2 text-xs border-sky-300 text-sky-800 hover:bg-sky-50 dark:text-sky-300 dark:hover:bg-sky-950"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+          void copy();
+        }}
+        data-testid={`button-cowork-find-on-vrbo-${reservation._id}`}
+        title="Generate a Cowork prompt that hunts for the attached non-VRBO unit(s) on vrbo.com — same physical unit only — and re-points the buy-in at the VRBO listing, or records that it's genuinely not on VRBO"
+      >
+        <Search className="mr-1 h-3.5 w-3.5" />
+        Find property on VRBO
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Cowork find-on-VRBO prompt</DialogTitle>
+            <DialogDescription>
+              Copied to your clipboard. Paste this into Cowork — for each attached unit that lives on
+              a direct booking site or Booking.com, it pins down the exact physical unit and hunts
+              for that same unit&apos;s own listing on vrbo.com (verified by unit number, address, and
+              photos — a similar unit doesn&apos;t count). If found, it re-points the buy-in at the
+              VRBO listing (updating the cost) unless the current channel is more than 20% cheaper;
+              if the unit genuinely isn&apos;t on VRBO, it records that and the slot shows a
+              &quot;Not on VRBO&quot; badge. It never books anything, and it never touches units that
+              are already booked.
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            readOnly
+            value={prompt}
+            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
+            data-testid={`textarea-cowork-find-on-vrbo-${reservation._id}`}
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <DialogFooter>
+            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-find-on-vrbo-copy-${reservation._id}`}>
               <Copy className="mr-1 h-3.5 w-3.5" />
               Copy again
             </Button>
@@ -11202,6 +11305,40 @@ export default function Bookings() {
                                 }))}
                             />
                           )}
+                          {/* "Find property on VRBO" — re-channel prompt for attached
+                              buy-ins on direct sites / Booking.com (operator prefers
+                              booking through VRBO; 2026-07-05). Hidden once every
+                              non-VRBO unit is booked or already looked up as
+                              not_on_vrbo/kept_cheaper. */}
+                          {r.slots.some(
+                            (s) =>
+                              s.buyIn &&
+                              s.buyIn.bookingStatus !== "booked" &&
+                              !buyInUrlIsVrbo(s.buyIn.airbnbListingUrl) &&
+                              !s.buyIn.vrboLookupStatus,
+                          ) && (
+                            <CoworkFindOnVrboButton
+                              reservation={r}
+                              propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? "Vacation rental"}
+                              units={r.slots
+                                .filter(
+                                  (s): s is SlotInfo & { buyIn: BuyIn } =>
+                                    Boolean(
+                                      s.buyIn &&
+                                      s.buyIn.bookingStatus !== "booked" &&
+                                      !buyInUrlIsVrbo(s.buyIn.airbnbListingUrl) &&
+                                      !s.buyIn.vrboLookupStatus,
+                                    ),
+                                )
+                                .map((s) => ({
+                                  buyInId: s.buyIn.id,
+                                  unitLabel: s.buyIn.unitLabel || s.unitLabel,
+                                  listingUrl: s.buyIn.airbnbListingUrl ?? null,
+                                  unitAddress: s.buyIn.unitAddress ?? null,
+                                  costPaid: s.buyIn.costPaid ?? null,
+                                }))}
+                            />
+                          )}
                           {/* "Will guest be happy?" — guest's-eye evaluation of the
                               attached units vs the original listing (operator spec
                               2026-07-05). */}
@@ -11586,6 +11723,39 @@ export default function Bookings() {
                                           title="The direct booking website was found by reverse-image search from the Airbnb listing photos."
                                         >
                                           Found via Airbnb Google Lens
+                                        </Badge>
+                                      )}
+                                      {/* "Find on VRBO" lookup outcome (operator prefers VRBO;
+                                          2026-07-05). switched needs no badge — the "view on
+                                          Vrbo" link above already shows the new channel. */}
+                                      {slot.buyIn.vrboLookupStatus === "not_on_vrbo" && (
+                                        <Badge
+                                          variant="outline"
+                                          className="border-slate-300 bg-slate-50 text-[9px] text-slate-700 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300"
+                                          title={slot.buyIn.vrboLookupNote ?? "Cowork searched VRBO for this exact unit and could not find a listing."}
+                                          data-testid={`badge-not-on-vrbo-${slot.buyIn.id}`}
+                                        >
+                                          Not on VRBO{slot.buyIn.vrboLookupAt ? ` · checked ${fmtDate(String(slot.buyIn.vrboLookupAt))}` : ""}
+                                        </Badge>
+                                      )}
+                                      {slot.buyIn.vrboLookupStatus === "kept_cheaper" && (
+                                        <Badge
+                                          variant="outline"
+                                          className="border-amber-300 bg-amber-50 text-[9px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                                          title={slot.buyIn.vrboLookupNote ?? "A VRBO listing exists for this unit, but the current channel is more than 20% cheaper."}
+                                          data-testid={`badge-kept-cheaper-${slot.buyIn.id}`}
+                                        >
+                                          On VRBO too — current channel &gt;20% cheaper
+                                        </Badge>
+                                      )}
+                                      {slot.buyIn.vrboLookupStatus === "switched" && (
+                                        <Badge
+                                          variant="outline"
+                                          className="border-emerald-300 bg-emerald-50 text-[9px] text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+                                          title={slot.buyIn.vrboLookupNote ?? "Re-channeled to the unit's own VRBO listing by Cowork."}
+                                          data-testid={`badge-rechanneled-vrbo-${slot.buyIn.id}`}
+                                        >
+                                          Re-channeled to VRBO
                                         </Badge>
                                       )}
                                       {(() => {
