@@ -243,6 +243,16 @@ check(
   verify.includes("SAME BUILDING / same complex / same community") && verify.includes("DIFFERENT communities"),
 );
 check("verify: recommends, never detaches", /do NOT\s+detach or change anything yourself/.test(verify));
+check(
+  "verify: records the verdict via the community-verdict endpoint",
+  verify.includes("POST https://app.example.com/api/bookings/abc123/community-verdict") &&
+    verify.includes('"source": "cowork"') &&
+    /same_building \| same_community \| different/.test(verify),
+);
+check(
+  "verify: maps the verdict scale onto the enum",
+  /SAME BUILDING → "same_building"/.test(verify) && /anything else → "different"/.test(verify),
+);
 check("verify: tidies up its tabs", /close every Chrome tab you opened/i.test(verify));
 check("verify: names the configured community", verify.includes("Configured community: Ilikai"));
 const verifySingle = buildCoworkCommunityVerifyPrompt({

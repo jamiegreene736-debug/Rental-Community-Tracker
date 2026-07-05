@@ -89,7 +89,17 @@ Before making any changes:
   pins each attached unit's building/complex + street address (map pin, no guessing), gives a
   SAME BUILDING / same complex / same community / DIFFERENT verdict with real walking distance,
   and PATCHes the confirmed unitAddress back onto the buy-in so the walking-distance panel flips
-  to "address verified" with a real number. 5TH FOLLOW-UP (operator): VRBO bot checks made the
+  to "address verified" with a real number. 6TH FOLLOW-UP (operator screenshot): the verify
+  outcome needed a clickable/durable home in the UI — new buy_ins columns communityVerdict/
+  Source/At (schema + schema-maintenance ALTER), POST /api/bookings/:reservationId/
+  community-verdict (enum same_building|same_community|different, stamps ALL attached buy-ins,
+  source cowork|operator), verdict surfaced on the unit-proximity response ONLY when every
+  attached buy-in agrees (swapping a unit auto-clears it), walking-distance panel gains a
+  "✓ Verified same building/community · via cowork" badge (red card + "✕ NOT the same community"
+  when different) plus always-visible "✓ Same community/building" / "✕ Not same" ghost buttons
+  (data-testid button-community-verdict-yes/no-<reservationId>) any human or agent can click;
+  the verify prompt's step 4 now POSTs the verdict (API preferred over button-clicking).
+  5TH FOLLOW-UP (operator): VRBO bot checks made the
   agent SKIP VRBO — all three prompts now embed BOT_WALL_PROTOCOL: never skip/close on a bot
   check; alert loudly (5× afplay Sosumi + say + osascript notification, repeating ~60s up to 15×)
   so the operator hears it from another room; wait re-checking every ~30s (never reload — VRBO's

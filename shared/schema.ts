@@ -55,6 +55,14 @@ export const buyIns = pgTable("buy_ins", {
   bookedAt: timestamp("booked_at"), // when the purchase actually completed on vrbo.com
   travelerEmail: text("traveler_email"), // the unique per-unit alias used as the VRBO traveler email
   bookingError: text("booking_error"), // last checkout failure/skip reason for operator diagnostics
+  // --- Community verification verdict (operator/Cowork, 2026-07-05) ---
+  // Stamped on EVERY attached buy-in of a reservation at once by
+  // POST /api/bookings/:reservationId/community-verdict. The proximity panel
+  // shows a verdict only when all currently-attached buy-ins agree, so
+  // swapping a unit naturally clears it until the pair is re-verified.
+  communityVerdict: text("community_verdict"), // same_building | same_community | different
+  communityVerdictSource: text("community_verdict_source"), // cowork | operator
+  communityVerdictAt: timestamp("community_verdict_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
