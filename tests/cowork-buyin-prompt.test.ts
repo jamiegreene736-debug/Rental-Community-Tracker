@@ -117,6 +117,64 @@ check(
   /CHANNEL PREFERENCE — VRBO FIRST/.test(singleForPair) && /never relaxes rules 1–5 —/.test(singleForPair),
 );
 
+// Booking mode (operator 2026-07-05): prefer instant book; request-only is OK
+// but must come with an instant-book backup recorded in notes + report.
+check(
+  "find prompt: booking-mode section prefers INSTANT BOOK",
+  /BOOKING MODE — prefer INSTANT BOOK; request-only is OK but needs a backup/.test(prompt),
+);
+check(
+  "find prompt: defines both booking modes",
+  /INSTANT BOOK — checkout confirms the stay immediately/.test(prompt) &&
+    /REQUEST-ONLY — the host must approve first/.test(prompt),
+);
+check(
+  "find prompt: comparable options → pick the instant-book one",
+  /otherwise comparable[\s\S]*pick the INSTANT-BOOK one/.test(prompt),
+);
+check(
+  "find prompt: request-only stays acceptable (never rejected over it)",
+  /never reject the cheapest\s+qualifying pick just because it is request-only/.test(prompt),
+);
+check(
+  "find prompt: booking-mode preference never overrides channel preference or rules 1–5",
+  /never\s+overrides the CHANNEL PREFERENCE above or relaxes rules 1–5/.test(prompt),
+);
+check(
+  "find prompt: BACKUP RULE — request-only pick needs cheapest qualifying instant-book backup",
+  /BACKUP RULE — whenever the pick you ATTACH for a slot is REQUEST-ONLY/.test(prompt) &&
+    /cheapest qualifying INSTANT-BOOK\s+listing\*\*/.test(prompt),
+);
+check(
+  "find prompt: backup is never attached or booked",
+  /Do NOT attach the backup and do NOT book it/.test(prompt),
+);
+check(
+  "find prompt: backup must be a distinct URL; combo prefers same complex as siblings",
+  /a DISTINCT URL from every attached pick;\s*\nfor this combo, ideally in the same complex as the other attached unit\(s\)/.test(prompt),
+);
+check(
+  "single-unit find prompt: backup rule present without the combo clause",
+  /BACKUP RULE/.test(singleForPair) && !/other attached unit\(s\)/.test(singleForPair),
+);
+check(
+  "find prompt: candidate capture includes booking mode",
+  /and the BOOKING MODE \(instant book vs request-only/.test(prompt),
+);
+check(
+  "find prompt: notes template records booking mode + optional backup, ·-joined",
+  prompt.includes("· Booking mode: <instant book | request-only> · Instant-book backup: <backup listing URL> — $<backup all-in total>"),
+);
+check(
+  "find prompt: backup notes segment is conditional (request-only + found)",
+  /"Instant-book backup:" segment ONLY when this pick is request-only AND you\s+found a backup/.test(prompt),
+);
+check(
+  "find prompt: report carries booking mode + backup (or explicit none)",
+  /its BOOKING MODE \(instant book \/ request-only\)/.test(prompt) &&
+    /no qualifying instant-book backup exists/.test(prompt),
+);
+
 // Channel rule (operator 2026-07-05): never attach an Airbnb link.
 check(
   "find prompt forbids attaching airbnb.com links",

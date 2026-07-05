@@ -161,7 +161,21 @@ Before making any changes:
   verdict values render nothing). Verify prompt step 4 reworded: the POST "MARKS the units
   in the portal UI" and must NEVER be skipped even on a positive finding — a verdict only
   written in the chat report leaves the units unmarked. Verified: cowork-buyin-prompt 153/0,
-  full `npm test` exit 0, build clean, `npm run check` 338 = baseline.
+  full `npm test` exit 0, build clean, `npm run check` 338 = baseline. 12TH FOLLOW-UP
+  (operator): BOOKING MODE — the find prompt now prefers INSTANTLY BOOKABLE units.
+  buildCoworkBuyInPrompt gains a BOOKING MODE block (after CHANNEL PREFERENCE): capture each
+  qualifying listing's mode (INSTANT BOOK = immediate confirmation; REQUEST-ONLY = host
+  approval ~24h); comparable options → pick the instant-book one; request-only stays fully
+  acceptable (cheapest qualifying pick never rejected over it; subordinate to the channel
+  preference + rules 1–5). BACKUP RULE: a request-only ATTACHED pick must come with the
+  cheapest qualifying INSTANT-BOOK backup for that slot (rules 1–5, distinct URL, combo →
+  ideally same complex as the sibling pick), NEVER attached/booked — recorded in the buy-in
+  notes (" · Booking mode: <mode> · Instant-book backup: <url> — $<total>", conditional
+  segment) AND the report (or explicit "no qualifying instant-book backup exists").
+  NOTES-FORMAT SAFETY (load-bearing): segments are " · "-joined AFTER the listing title —
+  titleFromBuyInNoteText's capture stops at "·", verified against the live regex; never move
+  them before the title. Verified: cowork-buyin-prompt 175/0 (13 new), full `npm test` exit 0,
+  build clean, `npm run check` 338 = baseline.
   5TH FOLLOW-UP (operator): VRBO bot checks made the
   agent SKIP VRBO — all three prompts now embed BOT_WALL_PROTOCOL: never skip/close on a bot
   check; alert loudly (5× afplay Sosumi + say + osascript notification, repeating ~60s up to 15×)
