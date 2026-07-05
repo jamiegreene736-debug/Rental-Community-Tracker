@@ -3324,11 +3324,15 @@ function AdminDashboard() {
     },
   });
 
-  // "Confirm photos replaced" — the duplicate-photos warning popup's action.
-  // Fires the same DEEP scan endpoint scoped to the one unit folder; the
-  // popup row then walks pending → clean / still-found off the re-fetched
-  // photo-check row (photoReplaceRescanVerdict). Deliberately does NOT open
-  // the big deep-scan progress modal — progress renders inline in the popup.
+  // Verification rescan for one unit folder — fired automatically by the
+  // manual "pick manually" flow on commit (handleDuplicatePhotoUnitReplaced)
+  // and by the popup's "Rescan again" retry button (still-found/inconclusive
+  // rows only; the one-click auto-replace job runs its own server-side
+  // verification, so there is no standalone confirm step anymore). Fires the
+  // same DEEP scan endpoint scoped to the one folder; the popup row then
+  // walks pending → clean / still-found off the re-fetched photo-check row
+  // (photoReplaceRescanVerdict). Deliberately does NOT open the big
+  // deep-scan progress modal — progress renders inline in the popup.
   const confirmPhotosReplacedMutation = useMutation({
     mutationFn: async (vars: { folder: string; propertyName: string; unitLabel: string; platforms: DuplicatePhotoPlatform[] }) => {
       const r = await apiRequest("POST", "/api/photo-listing-check/run", { folders: [vars.folder] });
@@ -6451,13 +6455,14 @@ function AdminDashboard() {
 
       {/* Duplicate-photos warning popup — auto-raised when a unit's photos are
           FOUND on Airbnb/VRBO/Booking (same visual language as the refund
-          alert). Action per unit: "Confirm photos replaced" → deep verification
-          rescan of that folder → inline green "no longer found" confirmation
-          (or a still-found re-warning). NOTE FOR CODEX: this does NOT
-          reintroduce the PR #318 dashboard "Replace & push" banner — no
-          master-sync push happens here. Replacement stays a manual/builder
-          action; this popup only nags, confirms, and VERIFIES via rescan
-          (operator ask 2026-07-03). */}
+          alert). Action per unit: one-click "Replace photos (Unit X)" — the
+          server job finds, commits, AND verifies (deep rescan + Claude-vision
+          community check) on its own, so there is deliberately NO separate
+          "Confirm photos replaced" step (operator ask 2026-07-05: one click
+          and done). The only extra button is "Rescan again", shown when a
+          prior rescan came back still-found/inconclusive. NOTE FOR CODEX:
+          this does NOT reintroduce the PR #318 dashboard "Replace & push"
+          banner — no master-sync push happens here. */}
       <Dialog
         open={duplicatePhotoWarningOpen}
         onOpenChange={(open) => (open ? setDuplicatePhotoWarningOpen(true) : closeDuplicatePhotoWarning())}
@@ -6469,10 +6474,10 @@ function AdminDashboard() {
             </DialogTitle>
             <DialogDescription>
               These units' photos were found on an Airbnb / VRBO / Booking.com listing that isn't ours.
-              Use <span className="font-medium">Replace photos (Unit X)</span> to find another unit in the
-              same community with the same bedroom count (real-estate sources only; Claude vision verifies
-              the interiors and that the unit belongs to the community). Or replace the photos yourself and
-              confirm below — either way a deep rescan verifies the final photos are no longer on Airbnb,
+              <span className="font-medium"> Replace photos (Unit X)</span> is one click and done: it finds
+              another unit in the same community with the same bedroom count (real-estate sources only;
+              Claude vision verifies the interiors and that the unit belongs to the community), commits its
+              photos, then automatically deep-rescans to verify the new photos are no longer on Airbnb,
               VRBO, or Booking.com.
             </DialogDescription>
           </DialogHeader>
@@ -6515,7 +6520,7 @@ function AdminDashboard() {
                         },
                       })
                     : null;
-                  const showConfirmButton = !verdict || verdict.state === "still_found" || verdict.state === "inconclusive";
+                  const showRowActions = !verdict || verdict.state === "still_found" || verdict.state === "inconclusive";
                   return (
                     <div
                       key={r.folder}
@@ -6529,7 +6534,7 @@ function AdminDashboard() {
                           <span className="block text-red-700 dark:text-red-300">
                             Photos found on {formatDuplicatePhotoPlatforms(verdict?.state === "still_found" ? verdict.platforms : r.platforms)}
                             {!verdict && r.matchCount > 0 ? ` · ${r.matchCount} match${r.matchCount === 1 ? "" : "es"}` : ""}
-                            {verdict?.state === "still_found" ? " — STILL found after the rescan. Replace them and confirm again." : ""}
+                            {verdict?.state === "still_found" ? " — STILL found after the rescan. Replace them again." : ""}
                           </span>
                         ) : null}
                         {verdict?.state === "pending" ? (
@@ -6713,7 +6718,7 @@ function AdminDashboard() {
                           Last scanned {checkRow?.checkedAt ? formatShortDateTime(checkRow.checkedAt) : "—"}
                         </span>
                       </div>
-                      {showConfirmButton ? (
+                      {showRowActions ? (
                         <div className="flex shrink-0 flex-col items-end gap-1.5">
                           {resolveReplacePhotosUnits(r.propertyId, r.folder).map((target) => {
                             const unitLabelFull = `${target.letter}${target.unit.unitNumber ? ` (${target.unit.unitNumber})` : ""}`;
@@ -6750,26 +6755,28 @@ function AdminDashboard() {
                               </span>
                             );
                           })}
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950/40"
-                            disabled={confirmPhotosReplacedMutation.isPending}
-                            onClick={() => {
-                              if (!window.confirm(
-                                `Confirm that you have replaced the photos for ${r.propertyName} · ${r.unitLabel}. A deep rescan will verify the replaced photos are no longer on Airbnb, VRBO, or Booking.com.`,
-                              )) return;
-                              confirmPhotosReplacedMutation.mutate({
+                          {/* Rescan retry only — the one-click Replace job verifies
+                              itself, so a bare row never needs a manual confirm step.
+                              This appears only after a rescan came back still-found or
+                              inconclusive (and covers the "stale row after a scanner
+                              fix deployed" case — rescanning is non-destructive). */}
+                          {verdict ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950/40"
+                              disabled={confirmPhotosReplacedMutation.isPending}
+                              onClick={() => confirmPhotosReplacedMutation.mutate({
                                 folder: r.folder,
                                 propertyName: r.propertyName,
                                 unitLabel: r.unitLabel,
                                 platforms: r.platforms,
-                              });
-                            }}
-                            data-testid={`button-confirm-photos-replaced-${r.folder}`}
-                          >
-                            {verdict ? "Rescan again" : "Confirm photos replaced"}
-                          </Button>
+                              })}
+                              data-testid={`button-confirm-photos-replaced-${r.folder}`}
+                            >
+                              Rescan again
+                            </Button>
+                          ) : null}
                         </div>
                       ) : null}
                     </div>
