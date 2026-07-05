@@ -316,6 +316,30 @@ for (const [label, p] of [["find", prompt], ["checkout", checkout], ["verify", v
   );
 }
 
+// ── Done signal (operator 2026-07-05): audible chime when the task finishes ──
+for (const [label, p] of [["find", prompt], ["checkout", checkout], ["verify", verify]] as const) {
+  check(
+    `${label} prompt: done signal plays Glass on success + Basso on problems`,
+    p.includes("afplay /System/Library/Sounds/Glass.aiff") && p.includes("afplay /System/Library/Sounds/Basso.aiff"),
+  );
+  check(
+    `${label} prompt: speaks the actual outcome`,
+    p.includes('say -r 170 "Cowork is done —') && p.includes("Cowork finished, but needs your attention"),
+  );
+  check(
+    `${label} prompt: done signal is one burst, never a loop, and fires LAST`,
+    /ONE burst only, never loop these/.test(p) &&
+      p.indexOf("## Done signal") > p.indexOf("TIDY UP THE BROWSER"),
+  );
+  check(
+    `${label} prompt: done chime stays distinct from the Sosumi bot alarm`,
+    /\(Sosumi\) stays separate/.test(p),
+  );
+}
+check("find done signal: attached-units outcome", prompt.includes("both buy-in units are attached"));
+check("checkout done signal: booked-and-recorded outcome", checkout.includes("every unit is booked on VRBO and the confirmations are recorded"));
+check("verify done signal: verdict-recorded outcome", verify.includes("the community check is complete and the verdict is recorded"));
+
 // ── Source assertions: the walking-distance card must digest Cowork notes ────
 // (2026-07-05 Waikiki incident: boilerplate notes became the "resort" label,
 // and a junk geocode produced a fake 0.4 mi walk.) These lock the routes.ts /

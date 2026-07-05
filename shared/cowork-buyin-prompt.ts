@@ -57,6 +57,26 @@ export const COWORK_BOOKING_PHONE = "808-460-6509";
 // say / osascript) — Cowork runs on the operator's Mac. NEVER let a prompt
 // skip VRBO on a bot check; the operator solves it by hand and the run
 // continues.
+// Completion "done signal" appended to every Cowork prompt (operator spec
+// 2026-07-05: "when Cowork is done with a task make like a sound so I can come
+// back to the monitor"). Three acoustically distinct signals total: Sosumi =
+// come help MID-task (bot wall, repeating), Glass = done cleanly, Basso = done
+// but something needs review. One burst only — nothing is waiting on the
+// operator, so the done signals never loop.
+function doneSignalSection(successExample: string, problemExample: string): string {
+  return `## Done signal — let me HEAR that you've finished
+THE VERY LAST THING you do, after the report is delivered and the browser is
+tidied up (never before — the sound must mean "everything is saved"):
+- Finished cleanly:
+  for i in 1 2 3; do afplay /System/Library/Sounds/Glass.aiff; done; say -r 170 "Cowork is done — ${successExample}."; osascript -e 'display notification "<one-line outcome>" with title "Cowork finished" sound name "Glass"'
+- Finished but something needs my attention (e.g. ${problemExample}):
+  for i in 1 2 3; do afplay /System/Library/Sounds/Basso.aiff; done; say -r 170 "Cowork finished, but needs your attention — <the problem in a few words>."; osascript -e 'display notification "<the problem>" with title "Cowork needs review" sound name "Basso"'
+Speak the ACTUAL outcome (real counts, the real problem) — don't read the
+placeholder text. ONE burst only, never loop these. The bot-check alarm
+(Sosumi) stays separate: that one means "come help mid-task"; these mean
+"task over".`;
+}
+
 const BOT_WALL_PROTOCOL = `## Bot-check protocol (VRBO especially — NEVER skip a site over this)
 If any site — especially VRBO — shows a bot check (slider puzzle, CAPTCHA,
 "verify you are human") or a sign-in wall you can't get past:
@@ -395,7 +415,12 @@ separate checkout prompt I'll start myself.
 Finally, TIDY UP THE BROWSER: close every Chrome tab you opened during this
 task (search results, listings, PM sites — all of them). Leave any tabs that
 were already open before you started untouched. Your report has everything I
-need, so nothing needs to stay open.`;
+need, so nothing needs to stay open.
+
+${doneSignalSection(
+    n === 1 ? "the buy-in unit is attached" : "both buy-in units are attached",
+    "a slot you could not fill, or a price-sanity gap to review",
+  )}`;
 }
 
 export function buildCoworkCheckoutPrompt(input: CoworkCheckoutPromptInput): string {
@@ -514,7 +539,12 @@ Then TIDY UP THE BROWSER: after every unit is recorded (confirmation numbers
 captured + screenshots taken), close every Chrome tab you opened during this
 task — listings, checkout pages, My Trips, all of them. Leave any tabs that
 were already open before you started untouched. Do NOT close a checkout tab
-mid-booking or before its confirmation is captured and recorded.`;
+mid-booking or before its confirmation is captured and recorded.
+
+${doneSignalSection(
+    n === 1 ? "the unit is booked on VRBO and the confirmation is recorded" : "every unit is booked on VRBO and the confirmations are recorded",
+    "a price-guard pause, a deposit-only host, or a skipped already-booked unit",
+  )}`;
 }
 
 // Verify the attached buy-ins are genuinely in the same community — ideally
@@ -592,5 +622,10 @@ ${BOT_WALL_PROTOCOL}
      detach or change anything yourself.
 
 Finally, TIDY UP THE BROWSER: close every Chrome tab you opened during this
-task. Leave any tabs that were already open before you started untouched.`;
+task. Leave any tabs that were already open before you started untouched.
+
+${doneSignalSection(
+    "the community check is complete and the verdict is recorded",
+    "units that are NOT in the same community",
+  )}`;
 }
