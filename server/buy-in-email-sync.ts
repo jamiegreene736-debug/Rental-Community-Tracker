@@ -85,7 +85,10 @@ function surrogateMessageId(aliasEmail: string, parsed: ParsedVendorEmail): stri
     aliasEmail,
     parsed.subject ?? "",
     parsed.receivedAt ? parsed.receivedAt.toISOString() : "",
-    (parsed.body ?? "").slice(0, 200),
+    // Whitespace-normalized so the key is stable across body-formatting changes
+    // (stripHtml now preserves newlines; rows imported before that were stored
+    // flattened — hashing the raw body would re-key + re-import those emails).
+    (parsed.body ?? "").replace(/\s+/g, " ").slice(0, 200),
   ].join("|");
   return `synth:${createHash("sha1").update(basis).digest("hex")}`;
 }
