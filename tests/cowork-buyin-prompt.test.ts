@@ -117,6 +117,64 @@ check(
   /CHANNEL PREFERENCE — VRBO FIRST/.test(singleForPair) && /never relaxes rules 1–5 —/.test(singleForPair),
 );
 
+// Booking mode (operator 2026-07-05): prefer instant book; request-only is OK
+// but must come with an instant-book backup recorded in notes + report.
+check(
+  "find prompt: booking-mode section prefers INSTANT BOOK",
+  /BOOKING MODE — prefer INSTANT BOOK; request-only is OK but needs a backup/.test(prompt),
+);
+check(
+  "find prompt: defines both booking modes",
+  /INSTANT BOOK — checkout confirms the stay immediately/.test(prompt) &&
+    /REQUEST-ONLY — the host must approve first/.test(prompt),
+);
+check(
+  "find prompt: comparable options → pick the instant-book one",
+  /otherwise comparable[\s\S]*pick the INSTANT-BOOK one/.test(prompt),
+);
+check(
+  "find prompt: request-only stays acceptable (never rejected over it)",
+  /never reject the cheapest\s+qualifying pick just because it is request-only/.test(prompt),
+);
+check(
+  "find prompt: booking-mode preference never overrides channel preference or rules 1–5",
+  /never\s+overrides the CHANNEL PREFERENCE above or relaxes rules 1–5/.test(prompt),
+);
+check(
+  "find prompt: BACKUP RULE — request-only pick needs cheapest qualifying instant-book backup",
+  /BACKUP RULE — whenever the pick you ATTACH for a slot is REQUEST-ONLY/.test(prompt) &&
+    /cheapest qualifying INSTANT-BOOK\s+listing\*\*/.test(prompt),
+);
+check(
+  "find prompt: backup is never attached or booked",
+  /Do NOT attach the backup and do NOT book it/.test(prompt),
+);
+check(
+  "find prompt: backup must be a distinct URL; combo prefers same complex as siblings",
+  /a DISTINCT URL from every attached pick;\s*\nfor this combo, ideally in the same complex as the other attached unit\(s\)/.test(prompt),
+);
+check(
+  "single-unit find prompt: backup rule present without the combo clause",
+  /BACKUP RULE/.test(singleForPair) && !/other attached unit\(s\)/.test(singleForPair),
+);
+check(
+  "find prompt: candidate capture includes booking mode",
+  /and the BOOKING MODE \(instant book vs request-only/.test(prompt),
+);
+check(
+  "find prompt: notes template records booking mode + optional backup, ·-joined",
+  prompt.includes("· Booking mode: <instant book | request-only> · Instant-book backup: <backup listing URL> — $<backup all-in total>"),
+);
+check(
+  "find prompt: backup notes segment is conditional (request-only + found)",
+  /"Instant-book backup:" segment ONLY when this pick is request-only AND you\s+found a backup/.test(prompt),
+);
+check(
+  "find prompt: report carries booking mode + backup (or explicit none)",
+  /its BOOKING MODE \(instant book \/ request-only\)/.test(prompt) &&
+    /no qualifying instant-book backup exists/.test(prompt),
+);
+
 // Channel rule (operator 2026-07-05): never attach an Airbnb link.
 check(
   "find prompt forbids attaching airbnb.com links",
@@ -572,7 +630,80 @@ check("corroborated: no mislabel warning", !/MAY BE MISLABELED/.test(corroborate
     "bookings: per-unit badge has a stable testid",
     bookingsSrc.includes("badge-unit-community-verdict-${r._id}-${slot.unitId}"),
   );
+
+  // ── unitGuestHappyBadge: per-unit UI marker for the guest-happy verdict ───
+  // (operator spec 2026-07-05: after the guest-happiness evaluation, Cowork
+  // must PUT the verdict on the units in the portal — "yes, guest will be
+  // 100% happy" / "no — bedding is off" — not just report it in chat.)
+  const { unitGuestHappyBadge } = await import("../shared/guest-happy-badge");
+  const happy = unitGuestHappyBadge({
+    guestHappyVerdict: "happy",
+    guestHappyFeedback: "Yes, guest will be happy: bedding and finish match.",
+    guestHappySource: "cowork",
+    guestHappyAt: "2026-07-05T18:30:00.000Z",
+  });
+  check("gh-badge: happy → ★ emerald", happy?.label === "★ Guest happy" && happy.tone === "emerald", happy);
+  check(
+    "gh-badge: title carries source + ISO day + the recorded feedback",
+    !!happy &&
+      happy.title.includes("via cowork") &&
+      happy.title.includes("on 2026-07-05") &&
+      happy.title.includes("bedding and finish match"),
+    happy?.title,
+  );
+  const concerns = unitGuestHappyBadge({ guestHappyVerdict: "concerns", guestHappySource: "operator", guestHappyAt: null });
+  check("gh-badge: concerns → ⚠ amber", concerns?.label === "⚠ Guest concerns" && concerns.tone === "amber", concerns);
+  check("gh-badge: no date/feedback → title omits them", !!concerns && !concerns.title.includes(" on ") && !concerns.title.trimEnd().endsWith(":"), concerns?.title);
+  const unhappy = unitGuestHappyBadge({
+    guestHappyVerdict: "unhappy",
+    guestHappyFeedback: "No — bedding is off (2 Twins where they booked a King).",
+    guestHappySource: "cowork",
+    guestHappyAt: new Date("2026-07-05T00:00:00Z"),
+  });
+  check(
+    "gh-badge: unhappy → ✕ red with the why on hover",
+    unhappy?.label === "✕ Guest NOT happy" && unhappy.tone === "red" && unhappy.title.includes("bedding is off"),
+    unhappy,
+  );
+  check("gh-badge: no verdict → null", unitGuestHappyBadge({ guestHappyVerdict: null }) === null);
+  check("gh-badge: missing buy-in → null", unitGuestHappyBadge(null) === null && unitGuestHappyBadge(undefined) === null);
+  check("gh-badge: junk legacy value → null (never render junk)", unitGuestHappyBadge({ guestHappyVerdict: "maybe?" }) === null);
+  check(
+    "gh-badge: whitespace/case tolerated, invalid date dropped from title",
+    unitGuestHappyBadge({ guestHappyVerdict: "  HAPPY " })?.label === "★ Guest happy" &&
+      !unitGuestHappyBadge({ guestHappyVerdict: "happy", guestHappyAt: "not-a-date" })!.title.includes(" on "),
+  );
+
+  // Source assertions: the bookings slot card actually renders the badge.
+  check(
+    "bookings: slot card derives the guest-happy badge from slot.buyIn",
+    bookingsSrc.includes("unitGuestHappyBadge(slot.buyIn)"),
+  );
+  check(
+    "bookings: per-unit guest-happy badge has a stable testid",
+    bookingsSrc.includes("badge-unit-guest-happy-${r._id}-${slot.unitId}"),
+  );
 }
+
+// The guest-happy prompt's recording step must read as MANDATORY portal
+// marking (mirror of the community-verify step 4 rewording): a verdict only
+// written in the chat report leaves the units unmarked.
+check(
+  "guest-happy: recording step MARKS the units in the portal UI",
+  /Record the verdict \+ feedback in the app — this is what MARKS the units\s+in the portal UI/.test(guestHappy),
+);
+check(
+  "guest-happy: recording step must NEVER be skipped, even on a 100%-happy verdict",
+  /NEVER skip this step/.test(guestHappy) && /yes, guest will be 100% happy/.test(guestHappy) && /UNMARKED/.test(guestHappy),
+);
+check(
+  "guest-happy: names the per-unit badges the POST produces",
+  guestHappy.includes("★ Guest happy") && guestHappy.includes("✕ Guest NOT happy"),
+);
+check(
+  "guest-happy: feedback example covers the negative bedding case",
+  /bedding is off \(2 Twins where they booked a King\)/.test(guestHappy),
+);
 
 console.log(`\ncowork-buyin-prompt: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

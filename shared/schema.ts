@@ -81,6 +81,12 @@ export const buyIns = pgTable("buy_ins", {
   vrboLookupStatus: text("vrbo_lookup_status"), // switched | not_on_vrbo | kept_cheaper
   vrboLookupNote: text("vrbo_lookup_note"),
   vrboLookupAt: timestamp("vrbo_lookup_at"),
+  // --- Arrival-details email extraction provenance (2026-07-05) ---
+  // ArrivalExtractionRecord (shared/arrival-email-verification.ts): which
+  // alias email each arrival field came from + the verbatim evidence quote,
+  // written by refreshArrivalDetailsForReservation. Powers the ✓ "from email"
+  // badges in the Message AD dialog.
+  arrivalExtraction: jsonb("arrival_extraction"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
