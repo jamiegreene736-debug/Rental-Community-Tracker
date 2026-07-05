@@ -299,8 +299,23 @@ ${unitLines}
    but you must then find that same unit's VRBO / Booking.com / direct-site
    page and attach THAT; a unit bookable ONLY on Airbnb does not qualify.
 
-Find ONE distinct listing per unit slot above (${listingsTotal}). Among listings that
-satisfy ALL of 1–5, pick the **cheapest**${distinctNote}
+Find ONE distinct listing per unit slot above (${listingsTotal}), all satisfying
+rules 1–5${distinctNote}
+
+CHANNEL PREFERENCE — VRBO FIRST, with a 20% price escape hatch. For each slot,
+work out BOTH of these among the qualifying listings:
+  - the cheapest **VRBO** listing, and
+  - the cheapest non-VRBO listing (Booking.com / direct booking site).
+Pick the **VRBO** listing UNLESS the non-VRBO one is **more than 20% cheaper**
+— i.e. only pick non-VRBO when its all-in total is BELOW 80% of the VRBO
+total. Example: VRBO at $2,000 → a $1,590 direct-site unit wins (>20%
+cheaper), a $1,700 one does NOT (only 15% cheaper — book the VRBO unit).
+If NO qualifying VRBO listing exists for a slot, the cheapest qualifying
+non-VRBO listing wins as usual. This preference never relaxes rules 1–5${n === 1 ? "" : " or the\nPAIR RULE below"} —
+a same-complex pair still beats a cross-complex one regardless of channel.
+In your report, show each slot's cheapest VRBO total next to what you picked
+and which branch applied (VRBO preferred / non-VRBO >20% cheaper / no
+qualifying VRBO option).
 ${n === 1 ? "" : `
 PAIR RULE — the picks serve ONE guest group. All ${n === 2 ? "two" : n} picks must be in the
 SAME complex — ideally the SAME BUILDING. Two units in different complexes

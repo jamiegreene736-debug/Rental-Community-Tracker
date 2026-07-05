@@ -85,6 +85,36 @@ check(
 const singleForPair = buildCoworkBuyInPrompt({ ...baseInput, units: [baseInput.units[0]] });
 check("single-unit find prompt has no PAIR RULE", !/PAIR RULE/.test(singleForPair));
 
+// Channel preference (operator 2026-07-05): VRBO first, 20% escape hatch.
+check(
+  "find prompt: VRBO-first channel preference",
+  /CHANNEL PREFERENCE — VRBO FIRST/.test(prompt) && /Pick the \*\*VRBO\*\* listing UNLESS/.test(prompt),
+);
+check(
+  "find prompt: non-VRBO must be MORE than 20% cheaper (below 80% of VRBO total)",
+  /more than 20% cheaper/i.test(prompt) && /BELOW 80% of the VRBO\s+total/.test(prompt),
+);
+check(
+  "find prompt: worked example locks the math direction",
+  prompt.includes("$1,590 direct-site unit wins") && prompt.includes("$1,700 one does NOT"),
+);
+check(
+  "find prompt: no qualifying VRBO → cheapest non-VRBO wins",
+  /If NO qualifying VRBO listing exists for a slot, the cheapest qualifying\s+non-VRBO listing wins/.test(prompt),
+);
+check(
+  "find prompt: preference never relaxes the qualification or pair rules",
+  /never relaxes rules 1–5/.test(prompt) && /same-complex pair still beats a cross-complex one regardless of channel/.test(prompt),
+);
+check(
+  "find prompt: report shows the VRBO comparison + branch taken",
+  /show each slot's cheapest VRBO total next to what you picked/.test(prompt),
+);
+check(
+  "single-unit find prompt: preference present without the pair-rule clause",
+  /CHANNEL PREFERENCE — VRBO FIRST/.test(singleForPair) && /never relaxes rules 1–5 —/.test(singleForPair),
+);
+
 // Channel rule (operator 2026-07-05): never attach an Airbnb link.
 check(
   "find prompt forbids attaching airbnb.com links",
