@@ -11710,6 +11710,25 @@ Requirements:
     };
   }
 
+  // Same consensus rule for the guest-happiness evaluation ("Will guest be
+  // happy?"): shown only while every attached buy-in agrees on the verdict.
+  function guestHappyForAttached(attached: BuyIn[]): { verdict: string; feedback: string | null; source: string | null; at: string | null } | null {
+    if (attached.length === 0) return null;
+    const first = String(attached[0].guestHappyVerdict ?? "").trim();
+    if (!first) return null;
+    if (!attached.every((b) => String(b.guestHappyVerdict ?? "").trim() === first)) return null;
+    const newest = attached
+      .map((b) => b.guestHappyAt)
+      .filter((d): d is Date => d instanceof Date)
+      .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+    return {
+      verdict: first,
+      feedback: attached[0].guestHappyFeedback ?? null,
+      source: attached[0].guestHappySource ?? null,
+      at: newest ? newest.toISOString() : null,
+    };
+  }
+
   app.get("/api/bookings/:reservationId/unit-proximity", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
@@ -11739,6 +11758,7 @@ Requirements:
         reservationId,
         ...proximity,
         communityVerdict: communityVerdictForAttached(attached),
+        guestHappy: guestHappyForAttached(attached),
         generatedAt: new Date().toISOString(),
       });
     } catch (err: any) {
@@ -11784,6 +11804,48 @@ Requirements:
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to record community verdict", message: err.message });
+    }
+  });
+
+  // Record the "Will guest be happy?" evaluation (verdict + written feedback)
+  // on ALL of a reservation's attached buy-ins at once — the final step of the
+  // Cowork guest-happiness prompt. Same consensus display rule as the
+  // community verdict: shown only while every attached buy-in agrees.
+  app.post("/api/bookings/:reservationId/guest-happy", async (req, res) => {
+    try {
+      const reservationId = req.params.reservationId;
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      const verdict = String(req.body?.verdict ?? "").trim();
+      const allowedVerdicts = ["happy", "concerns", "unhappy"];
+      if (!allowedVerdicts.includes(verdict)) {
+        return res.status(400).json({ error: `Invalid verdict (expected one of ${allowedVerdicts.join(", ")})` });
+      }
+      const feedback = String(req.body?.feedback ?? "").replace(/\s+/g, " ").trim().slice(0, 2000) || null;
+      const source = String(req.body?.source ?? "operator").trim().toLowerCase() === "cowork" ? "cowork" : "operator";
+      const attached = (await storage.getBuyInsByReservation(reservationId)).filter((b) => b.status !== "cancelled");
+      if (attached.length === 0) {
+        return res.status(400).json({ error: "No attached buy-ins to record an evaluation on" });
+      }
+      const at = new Date();
+      for (const b of attached) {
+        await storage.updateBuyIn(b.id, {
+          guestHappyVerdict: verdict,
+          guestHappyFeedback: feedback,
+          guestHappySource: source,
+          guestHappyAt: at,
+        });
+      }
+      res.json({
+        ok: true,
+        reservationId,
+        verdict,
+        feedback,
+        source,
+        at: at.toISOString(),
+        buyInIds: attached.map((b) => b.id),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to record guest-happiness evaluation", message: err.message });
     }
   });
 
