@@ -21,7 +21,18 @@ export const AUTO_REPLACE_STORE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // Resume window is wider than the find job's own (60 min) — the orchestrator
 // may legitimately outlive one find-job resume cycle.
 export const AUTO_REPLACE_RESUME_WINDOW_MS = 90 * 60 * 1000;
-export const MAX_AUTO_REPLACE_RESUMES = 2;
+// 2026-07-05: raised 2 → 6 alongside MAX_REPLACEMENT_SERVER_RESUMES — a
+// routine 5-deploy merge burst killed the orchestrator and its find job in
+// lockstep, exhausting both cap-2 budgets and pinning the queue banner.
+export const MAX_AUTO_REPLACE_RESUMES = 6;
+// When the find leg dies UNRESUMABLY (its own resume budget exhausted), the
+// orchestrator starts a bounded number of FRESH searches instead of failing
+// with the misleading "no eligible unit found". Each restart is a full
+// SearchAPI sweep, so keep this small.
+export const MAX_AUTO_REPLACE_FIND_RESTARTS = 2;
+// Terminal error when even the fresh-search budget is exhausted.
+export const STUCK_AUTO_REPLACE_ERROR =
+  "The replacement search kept getting interrupted by server restarts — click Replace photos to retry.";
 // How long a finished job stays on the dashboard queue chip.
 export const AUTO_REPLACE_SURFACE_TERMINAL_MS = 2 * 60 * 60 * 1000;
 
@@ -52,6 +63,10 @@ export type AutoReplaceJobRecord = {
   createdAt: number;
   updatedAt: number;
   resumeCount: number;
+  // Fresh find searches launched after a find job died unresumably (bounded
+  // by MAX_AUTO_REPLACE_FIND_RESTARTS; separate from resumeCount, which
+  // counts orchestrator re-attaches).
+  findRestarts: number;
 };
 
 export function isAutoReplacePhaseActive(phase: AutoReplacePhase): boolean {
@@ -88,6 +103,7 @@ export function parseAutoReplaceStore(raw: string | null | undefined): Record<st
         createdAt: typeof v.createdAt === "number" ? v.createdAt : 0,
         updatedAt: typeof v.updatedAt === "number" ? v.updatedAt : 0,
         resumeCount: typeof v.resumeCount === "number" ? v.resumeCount : 0,
+        findRestarts: typeof v.findRestarts === "number" ? v.findRestarts : 0,
       };
     }
     return out;
@@ -126,17 +142,23 @@ export function findActiveAutoReplaceJob(
 }
 
 // What the orchestrator should do given the find job's current state.
-//   wait   — find job still running (or resumable after a restart)
-//   commit — find job completed with at least one viable unit
-//   fail   — find job failed, vanished unresumably, or completed empty
-export type AutoReplaceNextStep = "wait" | "commit" | "fail";
+//   wait    — find job still running (or resumable after a restart)
+//   commit  — find job completed with at least one viable unit
+//   restart — find job vanished or died unresumably (killed by restarts, never
+//             ran to a verdict): start a FRESH search (bounded by
+//             MAX_AUTO_REPLACE_FIND_RESTARTS) rather than reporting the
+//             misleading "no eligible unit found"
+//   fail    — find job genuinely failed or completed empty
+export type AutoReplaceNextStep = "wait" | "commit" | "restart" | "fail";
 
 export function nextStepFromFindJob(findJob: {
   status?: string | null;
   unit?: unknown;
   units?: unknown;
+  stuckUnresumable?: unknown;
 } | null): AutoReplaceNextStep {
-  if (!findJob) return "fail";
+  if (!findJob) return "restart";
+  if (findJob.stuckUnresumable === true) return "restart";
   const status = String(findJob.status ?? "");
   if (status === "queued" || status === "running") return "wait";
   if (status === "completed") {
@@ -159,6 +181,29 @@ export function pickCommitCandidate<T extends { url?: unknown }>(
     return unit;
   }
   return null;
+}
+
+// Active-phase records that can never resume (cap exhausted / outside the
+// window) used to pin the queue banner "active" until the 24h eviction. The
+// watchdog converts them to an honest terminal failure so the operator sees
+// the outcome and a retry click starts a genuinely fresh job. Records in
+// liveJobIds (running in this process) are never touched. Returns failed ids.
+export function failStuckAutoReplaceRecords(
+  store: Record<string, AutoReplaceJobRecord>,
+  nowMs: number,
+  liveJobIds: Iterable<string> = [],
+): string[] {
+  const live = new Set(liveJobIds);
+  const failedIds: string[] = [];
+  for (const record of Object.values(store)) {
+    if (!isAutoReplacePhaseActive(record.phase) || live.has(record.jobId)) continue;
+    if (shouldResumeAutoReplaceJob(record, nowMs)) continue;
+    record.phase = "failed";
+    record.error = STUCK_AUTO_REPLACE_ERROR;
+    record.updatedAt = nowMs;
+    failedIds.push(record.jobId);
+  }
+  return failedIds;
 }
 
 // Operator "Clear queue": which records may be removed from the store.

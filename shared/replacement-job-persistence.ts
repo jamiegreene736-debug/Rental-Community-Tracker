@@ -21,7 +21,15 @@ export const REPLACEMENT_JOB_STORE_SETTING_KEY = "replacement_find_jobs.v1";
 export const REPLACEMENT_JOB_RESUME_WINDOW_MS = 60 * 60 * 1000;
 // Server-side restart budget per search (the client keeps its own separate
 // 3-restart cap; both exist so a crash-looping deploy can't spin forever).
-export const MAX_REPLACEMENT_SERVER_RESUMES = 2;
+// 2026-07-05: raised 2 → 6 after a real deploy BURST (5 merges → 5 Railway
+// deploys inside ~35 min) killed a Pili Mai search three times and the cap-2
+// record stuck "running" forever. Merge bursts are routine on this repo; a
+// genuine crash-loop is still bounded at 6 aborted sweeps within the window.
+export const MAX_REPLACEMENT_SERVER_RESUMES = 6;
+// Error persisted onto a running record that can never resume (cap exhausted
+// or outside the window) — see failStuckReplacementRecords.
+export const STUCK_REPLACEMENT_SEARCH_ERROR =
+  "The search was interrupted by repeated server restarts and could not resume — run Replace photos again to retry.";
 // Keep the store small: newest records win, and anything older than a day is
 // history (terminal results older than that aren't worth serving either).
 export const REPLACEMENT_JOB_STORE_CAP = 10;
@@ -41,6 +49,11 @@ export type PersistedReplacementJobRecord = {
   error?: string | null;
   unit?: Record<string, unknown> | null;
   units?: Array<Record<string, unknown>> | null;
+  // True when the record was failed because it died mid-run and exhausted its
+  // resume budget (vs a genuine completed-empty / error outcome). The
+  // auto-replace orchestrator uses this to launch a FRESH search instead of
+  // reporting the misleading "no eligible unit found".
+  stuckUnresumable?: boolean;
 };
 
 export function parseReplacementJobStore(raw: string | null | undefined): Record<string, PersistedReplacementJobRecord> {
@@ -63,6 +76,7 @@ export function parseReplacementJobStore(raw: string | null | undefined): Record
         error: typeof value.error === "string" ? value.error : null,
         unit: value.unit && typeof value.unit === "object" ? value.unit : null,
         units: Array.isArray(value.units) ? value.units : null,
+        stuckUnresumable: value.stuckUnresumable === true,
       };
     }
     return out;
@@ -89,6 +103,32 @@ export function shouldResumeReplacementJob(record: PersistedReplacementJobRecord
   if (record.resumeCount >= MAX_REPLACEMENT_SERVER_RESUMES) return false;
   const aliveAt = record.updatedAt || record.createdAt;
   return !!aliveAt && nowMs - aliveAt <= REPLACEMENT_JOB_RESUME_WINDOW_MS;
+}
+
+// A "running" record the watchdog can never bring back (resume cap exhausted
+// or outside the window) used to sit in the store as running FOREVER — the
+// polling client 404'd, the auto-replace orchestrator reported the misleading
+// "no eligible unit found", and the queue banner spun until the 24h eviction
+// (the 2026-07-05 Pili Mai deploy-burst incident). The watchdog now converts
+// those to an honest terminal failure. Records in liveJobIds (actually running
+// in this process right now) are never touched. Returns the failed job ids.
+export function failStuckReplacementRecords(
+  store: Record<string, PersistedReplacementJobRecord>,
+  nowMs: number,
+  liveJobIds: Iterable<string> = [],
+): string[] {
+  const live = new Set(liveJobIds);
+  const failedIds: string[] = [];
+  for (const record of Object.values(store)) {
+    if (record.status !== "running" || live.has(record.jobId)) continue;
+    if (shouldResumeReplacementJob(record, nowMs)) continue;
+    record.status = "failed";
+    record.error = STUCK_REPLACEMENT_SEARCH_ERROR;
+    record.stuckUnresumable = true;
+    record.updatedAt = nowMs;
+    failedIds.push(record.jobId);
+  }
+  return failedIds;
 }
 
 // A NEW search for the same property supersedes any older running record —
@@ -129,7 +169,21 @@ export function replacementJobFromTerminalRecord(record: PersistedReplacementJob
     unit: record.unit ?? record.units?.[0] ?? null,
     units: record.units ?? (record.unit ? [record.unit] : null),
     diagnostic: null,
+    stuckUnresumable: record.stuckUnresumable === true,
   };
+}
+
+// GET :jobId fallback for a running record that can never resume, before the
+// watchdog's own sweep has persisted the failure: serve the same honest
+// terminal shape instead of a 404 so pollers stop waiting immediately.
+export function replacementJobStuckFallback(record: PersistedReplacementJobRecord, nowMs: number) {
+  return replacementJobFromTerminalRecord({
+    ...record,
+    status: "failed",
+    error: STUCK_REPLACEMENT_SEARCH_ERROR,
+    stuckUnresumable: true,
+    updatedAt: record.updatedAt || nowMs,
+  });
 }
 
 export function replacementJobResumingPlaceholder(record: PersistedReplacementJobRecord, nowMs: number) {

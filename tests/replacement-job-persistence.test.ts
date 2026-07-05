@@ -4,9 +4,12 @@ import {
   REPLACEMENT_JOB_RESUME_WINDOW_MS,
   REPLACEMENT_JOB_STORE_CAP,
   REPLACEMENT_JOB_STORE_MAX_AGE_MS,
+  STUCK_REPLACEMENT_SEARCH_ERROR,
+  failStuckReplacementRecords,
   parseReplacementJobStore,
   replacementJobFromTerminalRecord,
   replacementJobResumingPlaceholder,
+  replacementJobStuckFallback,
   serializeReplacementJobStore,
   shouldResumeReplacementJob,
   supersedeRunningRecordsForProperty,
@@ -103,6 +106,47 @@ check("server resume cap blocks a crash-looping deploy",
   const ph = replacementJobResumingPlaceholder(rec({}), NOW);
   check("resuming placeholder is a RUNNING job (stops the client's duplicate relaunch)",
     ph.status === "running" && /resuming/i.test(ph.message));
+}
+
+// ── deploy-burst survivability (2026-07-05 Pili Mai incident) ────────────────
+check("resume cap tolerates a 5-deploy merge burst", MAX_REPLACEMENT_SERVER_RESUMES >= 5);
+
+// ── stuck unresumable records terminalize honestly ───────────────────────────
+{
+  const store: Record<string, PersistedReplacementJobRecord> = {
+    resumable: rec({ jobId: "resumable" }),
+    liveNow: rec({ jobId: "liveNow", resumeCount: MAX_REPLACEMENT_SERVER_RESUMES }),
+    capped: rec({ jobId: "capped", resumeCount: MAX_REPLACEMENT_SERVER_RESUMES }),
+    stale: rec({ jobId: "stale", updatedAt: NOW - REPLACEMENT_JOB_RESUME_WINDOW_MS - 1 }),
+    done: rec({ jobId: "done", status: "completed", message: "Replacement unit found" }),
+  };
+  const failedIds = failStuckReplacementRecords(store, NOW, ["liveNow"]).sort();
+  check("cap-exhausted and stale running records become failed",
+    failedIds.join(",") === "capped,stale" &&
+    store.capped.status === "failed" && store.stale.status === "failed");
+  check("stuck failure carries the honest error + stuckUnresumable marker",
+    store.capped.error === STUCK_REPLACEMENT_SEARCH_ERROR && store.capped.stuckUnresumable === true);
+  check("resumable / live / terminal records untouched",
+    store.resumable.status === "running" && store.liveNow.status === "running" && store.done.status === "completed");
+  const synthesized = replacementJobFromTerminalRecord(store.capped);
+  check("terminalized stuck record synthesizes a failed job flagged stuckUnresumable (orchestrator restarts, client stops waiting)",
+    synthesized.status === "failed" && synthesized.stuckUnresumable === true && /server restarts/i.test(synthesized.error ?? ""));
+}
+
+// ── GET fallback for a stuck record the watchdog hasn't swept yet ────────────
+{
+  const fallback = replacementJobStuckFallback(rec({ resumeCount: MAX_REPLACEMENT_SERVER_RESUMES }), NOW);
+  check("stuck fallback is a terminal failed job (no more eternal 404s)",
+    fallback.status === "failed" && fallback.stuckUnresumable === true && /server restarts/i.test(fallback.error ?? ""));
+}
+
+// ── round-trip: stuckUnresumable survives parse/serialize ────────────────────
+{
+  const store: Record<string, PersistedReplacementJobRecord> = {
+    s: rec({ jobId: "s", status: "failed", stuckUnresumable: true, error: STUCK_REPLACEMENT_SEARCH_ERROR }),
+  };
+  const round = parseReplacementJobStore(serializeReplacementJobStore(store, NOW));
+  check("stuckUnresumable flag survives a store round-trip", round.s.stuckUnresumable === true);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

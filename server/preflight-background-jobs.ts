@@ -152,9 +152,11 @@ import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
 import {
   REPLACEMENT_JOB_STORE_SETTING_KEY,
+  failStuckReplacementRecords,
   parseReplacementJobStore,
   replacementJobFromTerminalRecord,
   replacementJobResumingPlaceholder,
+  replacementJobStuckFallback,
   serializeReplacementJobStore,
   shouldResumeReplacementJob,
   supersedeRunningRecordsForProperty,
@@ -239,7 +241,11 @@ export async function getPersistedReplacementFindJob(jobId: string): Promise<Pre
     if (shouldResumeReplacementJob(record, Date.now())) {
       return replacementJobResumingPlaceholder(record, Date.now()) as PreflightReplacementFindJob;
     }
-    return null;
+    // Running but unresumable (resume cap exhausted / outside the window): the
+    // search died with a past process and will never finish. Serve an honest
+    // terminal failure instead of the old null → 404 that left pollers
+    // spinning forever (the watchdog sweep persists the same failure).
+    return replacementJobStuckFallback(record, Date.now()) as PreflightReplacementFindJob;
   } catch {
     return null;
   }
@@ -276,6 +282,21 @@ export async function resumeOrphanedReplacementFindJobs(): Promise<void> {
       replacementFindJobs.set(job.id, job);
       persistReplacementJobRunning(job, record.payload, record.resumeCount + 1);
       void runPreflightReplacementFindJob(job, record.payload);
+    }
+    // Running records that can NEVER come back (resume cap exhausted / outside
+    // the window) get an honest terminal failure — otherwise they sit
+    // "running" until the 24h eviction while pollers 404 and the auto-replace
+    // orchestrator mis-reports "no eligible unit found" (2026-07-05 Pili Mai
+    // deploy-burst incident). Records live in THIS process are protected.
+    const liveIds = new Set([...Array.from(replacementFindJobs.keys()), ...Array.from(activeReplacementFindJobIds)]);
+    const stuckIds = Object.values(store).filter((r) =>
+      r.status === "running" && !liveIds.has(r.jobId) && !shouldResumeReplacementJob(r, Date.now()),
+    ).map((r) => r.jobId);
+    if (stuckIds.length > 0) {
+      console.warn(`[replacement-find] failing ${stuckIds.length} stuck unresumable job(s): ${stuckIds.join(", ")}`);
+      await mutateReplacementJobStore((liveStore, now) => {
+        failStuckReplacementRecords(liveStore, now, liveIds);
+      });
     }
   } catch {
     // Fail-soft — next sweep retries.
