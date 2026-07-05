@@ -63,7 +63,10 @@ Before making any changes:
   one per line; NO name line needed — name-on-card gets the guest's name). DON'T RE-CHASE: the dormant AUTOMATED checkout scaffold (buy_ins booking
   columns, server/buy-in-checkout-job.ts, `vrbo_book` op type, "Buy this unit in"/"Payment terms"
   buttons) is already merged but its sidecar worker handler was never written — the operator chose
-  the Cowork path instead; the scaffold stays dormant/intact. FOLLOW-UP same day (operator): the
+  the Cowork path instead; the scaffold stays dormant/intact. 2ND FOLLOW-UP (operator): both
+  prompts now end with a TIDY-UP step — close every Chrome tab the agent opened (never the
+  operator's pre-existing tabs; checkout never closes a tab mid-booking or before its
+  confirmation is captured) because leftover tabs were clogging/slowing the browser. FOLLOW-UP same day (operator): the
   checkout must be a SEPARATE prompt/button from the find prompt. buildCoworkBuyInPrompt reverted
   to search+attach-only (ends "This task ends at ATTACH … do NOT book"); new
   `buildCoworkCheckoutPrompt` (same shared file) is the book-only prompt — running it IS the

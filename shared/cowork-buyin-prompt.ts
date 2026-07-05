@@ -307,7 +307,12 @@ city-wide fallback, the combined cost, and any slot you could not fill.
 
 This task ends at ATTACH. Do **NOT** book, open a checkout page, or enter any
 payment details — I review the attached picks first, and booking runs from a
-separate checkout prompt I'll start myself.`;
+separate checkout prompt I'll start myself.
+
+Finally, TIDY UP THE BROWSER: close every Chrome tab you opened during this
+task (search results, listings, PM sites — all of them). Leave any tabs that
+were already open before you started untouched. Your report has everything I
+need, so nothing needs to stay open.`;
 }
 
 export function buildCoworkCheckoutPrompt(input: CoworkCheckoutPromptInput): string {
@@ -417,5 +422,11 @@ ${unitLines}
 For each unit: listing URL, confirmation number, total charged, the payment
 plan if VRBO split it (due now / balance + date), what protection was selected
 and what was declined, the traveler name/email used, and anything that needs
-my attention (deposit-only host, price-guard pause, skipped already-booked unit).`;
+my attention (deposit-only host, price-guard pause, skipped already-booked unit).
+
+Then TIDY UP THE BROWSER: after every unit is recorded (confirmation numbers
+captured + screenshots taken), close every Chrome tab you opened during this
+task — listings, checkout pages, My Trips, all of them. Leave any tabs that
+were already open before you started untouched. Do NOT close a checkout tab
+mid-booking or before its confirmation is captured and recorded.`;
 }
