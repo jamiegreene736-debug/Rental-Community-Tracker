@@ -121,6 +121,18 @@ Before making any changes:
   (vrbo.com host-validated) + costPaid, 409 on booked units; "not_on_vrbo" → slate
   "Not on VRBO · checked <date>" slot badge; "kept_cheaper" → amber badge; switched →
   emerald "Re-channeled to VRBO" badge and the unit then flows into the VRBO checkout prompt.
+  11TH FOLLOW-UP (operator): per-unit SAME-BUILDING marking in the UI — the verify prompt's
+  verdict POST already stamped every attached buy-in, but the only visible surface was the
+  walking-distance panel's consensus badge (renders only with 2+ attached units). New pure
+  shared/community-verdict-badge.ts (`unitCommunityVerdictBadge`) derives a badge from each
+  slot's OWN buy-in row (slots[] already carry full buy_ins rows, so no server change):
+  emerald "✓ Same building" / "✓ Same community", red "✕ Not the same community", tooltip
+  with source + ISO day, testid badge-unit-community-verdict-<res>-<unit>, rendered next to
+  the ground-floor badge on every attached unit slot card in bookings.tsx (unknown/legacy
+  verdict values render nothing). Verify prompt step 4 reworded: the POST "MARKS the units
+  in the portal UI" and must NEVER be skipped even on a positive finding — a verdict only
+  written in the chat report leaves the units unmarked. Verified: cowork-buyin-prompt 153/0,
+  full `npm test` exit 0, build clean, `npm run check` 338 = baseline.
   5TH FOLLOW-UP (operator): VRBO bot checks made the
   agent SKIP VRBO — all three prompts now embed BOT_WALL_PROTOCOL: never skip/close on a bot
   check; alert loudly (5× afplay Sosumi + say + osascript notification, repeating ~60s up to 15×)

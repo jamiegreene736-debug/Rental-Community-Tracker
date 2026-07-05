@@ -60,6 +60,7 @@ function buyInUrlIsVrbo(url: string | null | undefined): boolean {
   }
 }
 import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
+import { unitCommunityVerdictBadge } from "@shared/community-verdict-badge";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
@@ -11672,6 +11673,30 @@ export default function Bookings() {
                                         return (
                                           <Badge variant="outline" className={`text-[9px] ${badge.className}`} title={slot.buyIn.groundFloorEvidence ?? undefined}>
                                             {badge.label}
+                                          </Badge>
+                                        );
+                                      })()}
+                                      {/* Per-unit community-verdict marker (operator spec
+                                          2026-07-05): the Cowork "Verify community" prompt
+                                          (or the operator buttons) stamps every attached
+                                          buy-in via POST /community-verdict — this badge
+                                          marks THIS unit's card with its own verdict, so
+                                          same-building units read as such at a glance
+                                          (the walking-distance panel's consensus badge
+                                          only renders with 2+ attached units). */}
+                                      {(() => {
+                                        const cv = unitCommunityVerdictBadge(slot.buyIn);
+                                        if (!cv) return null;
+                                        return (
+                                          <Badge
+                                            variant="outline"
+                                            className={`text-[9px] ${cv.different
+                                              ? "border-red-300 bg-red-50 text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
+                                              : "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200"}`}
+                                            title={cv.title}
+                                            data-testid={`badge-unit-community-verdict-${r._id}-${slot.unitId}`}
+                                          >
+                                            {cv.label}
                                           </Badge>
                                         );
                                       })()}
