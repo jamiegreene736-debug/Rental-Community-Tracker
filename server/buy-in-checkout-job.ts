@@ -17,8 +17,8 @@ import { storage } from "./storage";
 import { bookVrboUnitViaSidecar, getHeartbeat } from "./vrbo-sidecar-queue";
 import { createSimpleLoginAlias, extractSimpleLoginAliasEmail } from "./simplelogin";
 
-// Operator's fixed VRBO traveler phone for every buy-in (407 449 7941).
-export const BUYIN_BOOKING_PHONE = process.env.BUYIN_BOOKING_PHONE || "4074497941";
+// Operator's fixed VRBO traveler phone for every buy-in (808 460 6509).
+export const BUYIN_BOOKING_PHONE = process.env.BUYIN_BOOKING_PHONE || "8084606509";
 
 // Per-GUEST booking email domain (operator, 2026-06-10). Each guest gets the
 // deterministic address firstname.lastname@emailprivaccy.com — a SimpleLogin

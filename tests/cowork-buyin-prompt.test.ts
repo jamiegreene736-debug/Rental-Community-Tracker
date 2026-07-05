@@ -124,7 +124,7 @@ check(
   "checkout: guest first/last threaded into the mint call",
   checkout.includes('"guestFirstName": "Jane"') && checkout.includes('"guestLastName": "Traveler"'),
 );
-check("checkout: fixed operator booking phone", checkout.includes("407-449-7941"));
+check("checkout: fixed operator booking phone", checkout.includes("808-460-6509"));
 check("checkout: 15% price guard", checkout.includes("15% above") && /do NOT book/.test(checkout));
 check("checkout: skip-if-booked idempotency guard", /"bookingStatus" is "booked"/.test(checkout));
 check("checkout: sanity-check attach data before booking", /on any mismatch, stop and ask/i.test(checkout));

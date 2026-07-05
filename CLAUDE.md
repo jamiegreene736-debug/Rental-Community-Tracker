@@ -52,7 +52,7 @@ Before making any changes:
   now hard-stops after attach ("STOP and wait for my explicit approval") and, on the operator's go,
   books each unit on vrbo.com: DAMAGE WAIVER ONLY (all insurance/add-ons declined; deposit-only
   host = proceed + note), guest's name for everything (name-on-card excepted), traveler email = the
-  minted per-guest alias (POST /api/buy-ins/:id/traveler-email), phone 407-449-7941, 15% price
+  minted per-guest alias (POST /api/buy-ins/:id/traveler-email), phone 808-460-6509, 15% price
   guard vs costPaid, one unit at a time, never blind-retry Book-now (check My Trips first), then
   PATCH /api/buy-ins/:id {bookingStatus:"booked", bookingConfirmation} (allowlist widened +
   enum-validated, bookedAt stamped server-side) which arms the existing never-re-book guard and the

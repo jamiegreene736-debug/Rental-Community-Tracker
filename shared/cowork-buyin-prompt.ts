@@ -25,7 +25,7 @@
 //   - The GUEST's name is used for everything name-related; the traveler email
 //     is the per-guest alias minted by POST /api/buy-ins/:id/traveler-email
 //     (firstname.lastname@emailprivaccy.com); phone is the fixed operator
-//     booking phone (407 449 7941 — same constant as BUYIN_BOOKING_PHONE).
+//     booking phone (808 460 6509 — same constant as BUYIN_BOOKING_PHONE).
 //   - CARD DETAILS ARE NEVER IN THIS PROMPT, THIS APP, OR THE REPO. The prompt
 //     points the agent at a local file on the operator's Mac
 //     (DEFAULT_CARD_FILE_HINT) that the operator maintains themselves. Do not
@@ -43,7 +43,7 @@ export const DEFAULT_CARD_FILE_HINT = "~/Documents/vrbo-booking-card.txt";
 
 // Fixed operator booking phone — mirrors BUYIN_BOOKING_PHONE in
 // server/buy-in-checkout-job.ts (same number, formatted for a form).
-export const COWORK_BOOKING_PHONE = "407-449-7941";
+export const COWORK_BOOKING_PHONE = "808-460-6509";
 
 export interface CoworkBuyInUnit {
   unitId: string;
