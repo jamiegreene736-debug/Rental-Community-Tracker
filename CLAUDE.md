@@ -43,6 +43,31 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-05 (guest PARTY SIZE — adults/children — on bookings rows, inbox panel + Cowork prompts):
+  Operator asked to see how many adults/children booked each reservation (VRBO/Booking/etc), on the
+  bookings page "when I am trying to buy in the unit" + anywhere relevant. SHIPPED: new pure
+  `shared/guest-party.ts` (22 tests) — `guestPartyFromReservation` parses Guesty's `guestsCount`
+  (total) + `numberOfGuests`, which is EITHER a plain number (legacy — inbox already fell back to
+  it) OR the `{numberOfAdults, numberOfChildren, numberOfInfants, numberOfPets}` breakdown object;
+  `formatGuestParty` → "4 guests (2 adults, 2 children)" (parens only when they add info; absence
+  of data returns null, never "0 guests"). Channel caveat: Airbnb/VRBO reliably send the breakdown,
+  Booking.com sometimes total-only, manual rows nothing (they render nothing). Server:
+  `guestsCount numberOfGuests` appended to the reservation `fields=` lists of BOTH bookings
+  endpoints (`/api/bookings/guesty-all` + `/api/bookings/listing/:listingId`) — enrichment spreads
+  the raw reservation so nothing else changed. UI: 👥 party line on the global-summary row (under
+  guest name, testid `text-guest-party-<resId>`) + the per-listing summary row (under dates), and
+  a 4th "Guests" cell in the inbox reservation panel's dates grid (total + breakdown sub-line;
+  the guesty-proxy reservation GET already returns the full document). COWORK PROMPTS (the buy-in
+  payoff): optional `party` input on `buildCoworkBuyInPrompt` (Reservation block "Party size:"
+  line + SIZE rule extension — single unit must SLEEP the whole party; combo picks' COMBINED
+  "sleeps N" must cover it) and `buildCoworkCheckoutPrompt` (VRBO guest-count picker set to the
+  real party instead of "a sensible guest count"; falls back to the old wording when unknown);
+  both bookings.tsx buttons pass `party: guestPartyFromReservation(reservation)`. Verified:
+  guest-party 22/0 (new, added to npm test chain), cowork-buyin-prompt 196/0 (6 new), full
+  `npm test` exit 0, build clean, `npm run check` 338 = baseline. Could NOT live-smoke the Guesty
+  leg (no creds) — post-deploy the 👥 line appears on any channel booking whose guest entered a
+  party size.
+
 - 2026-07-05 (Message AD pulls arrival details FROM the alias email — live scrape + verbatim-verified
   Claude extraction): Operator asked the send-arrival-details button to pull door codes / arrival
   instructions from the emails hosts send to the minted guest alias, and to be "100% or close" sure

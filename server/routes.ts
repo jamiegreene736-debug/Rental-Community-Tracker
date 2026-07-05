@@ -21155,7 +21155,11 @@ Requirements:
         targetByListingId.set(listingId, target);
       }
 
-      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState listing listingId terms cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy");
+      // guestsCount + numberOfGuests: the party size the guest entered on the
+      // channel (VRBO/Booking/Airbnb). numberOfGuests is either a plain number
+      // or the {numberOfAdults, numberOfChildren, ...} breakdown — the client
+      // parses both via shared/guest-party.ts.
+      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest guestsCount numberOfGuests money payments source integration confirmationCode preApproveState listing listingId terms cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy");
       const limit = 100;
       const maxRows = Math.min(Math.max(parseInt((req.query.maxRows as string) ?? "5000", 10) || 5000, 100), 10000);
       const filterArr: Array<Record<string, unknown>> = [];
@@ -21469,7 +21473,9 @@ Requirements:
       const resolvedUnitSlots = target.unitSlots;
 
       const today = new Date().toISOString().slice(0, 10);
-      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest money payments source integration confirmationCode preApproveState listing listingId terms cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy");
+      // guestsCount + numberOfGuests: party size for the bookings rows (see
+      // the guesty-all fields note above).
+      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest guestsCount numberOfGuests money payments source integration confirmationCode preApproveState listing listingId terms cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy");
       // Guesty Open API requires the JSON `filters=[...]` syntax for
       // listingId — the simple `listingId=X` query param is silently
       // ignored, so the account-wide reservation list comes back

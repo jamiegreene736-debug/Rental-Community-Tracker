@@ -301,6 +301,42 @@ check(
   "checkout: missing URL/cost degrade loudly",
   noUrl.includes("no URL recorded") && noUrl.includes("(not recorded)"),
 );
+
+// ── Party size (operator 2026-07-05: show adults/children so buy-ins sleep everyone) ──
+const party = { total: 8, adults: 4, children: 4, infants: null, pets: null };
+const partyPrompt = buildCoworkBuyInPrompt({ ...baseInput, party });
+check(
+  "find prompt: party size line renders",
+  partyPrompt.includes("- Party size: 8 guests (4 adults, 4 children)"),
+);
+check(
+  "find prompt (combo): SIZE rule requires combined sleeps capacity",
+  /COMBINED stated max occupancy/.test(partyPrompt) && /"sleeps N"/.test(partyPrompt),
+);
+const partySingle = buildCoworkBuyInPrompt({
+  ...baseInput,
+  units: [{ unitId: "A", unitLabel: "Unit A", bedrooms: 3 }],
+  party,
+});
+check(
+  "find prompt (single unit): SIZE rule requires the unit sleep the whole party",
+  /SLEEP the whole party/.test(partySingle),
+);
+check(
+  "find prompt: no party → no party line, no sleeps rule",
+  !prompt.includes("Party size:") && !/COMBINED stated max occupancy|SLEEP the whole party/.test(prompt),
+);
+const partyCheckout = buildCoworkCheckoutPrompt({ ...checkoutInput, party });
+check(
+  "checkout: party line + real guest count replace the 'sensible' guess",
+  partyCheckout.includes("- Party size: 8 guests (4 adults, 4 children)") &&
+    partyCheckout.includes("the guest count for the reservation's party — 8 guests (4 adults, 4 children)") &&
+    !/a sensible\s+guest count/.test(partyCheckout),
+);
+check(
+  "checkout: no party → sensible-guest-count fallback preserved",
+  /a sensible\s+guest count/.test(checkout) && !checkout.includes("Party size:"),
+);
 // placeholder base URL when none provided.
 const noBaseCheckout = buildCoworkCheckoutPrompt({ ...checkoutInput, baseUrl: undefined });
 check("checkout: placeholder when no baseUrl", noBaseCheckout.includes("<APP_BASE_URL>/api/buy-ins"));

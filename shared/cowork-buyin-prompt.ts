@@ -48,6 +48,7 @@
 //   - Skip-if-booked: a buy-in already at bookingStatus "booked" is never
 //     re-purchased (mirrors the buy-in-checkout-job idempotency guard).
 import { BUY_IN_MARKETS, resolveBuyInMarketFromText } from "./buy-in-market";
+import { formatGuestParty, type GuestParty } from "./guest-party";
 
 // Where the operator keeps the standing booking card on the local Mac. The
 // operator creates/maintains this file by hand; the agent reads it only at the
@@ -121,6 +122,12 @@ export interface CoworkBuyInPromptInput {
   /** YYYY-MM-DD */
   checkOut: string;
   units: CoworkBuyInUnit[];
+  /**
+   * Party size off the Guesty reservation (adults/children/…), when known.
+   * Lets the prompt enforce that picks actually SLEEP everyone — a 3BR that
+   * sleeps 6 doesn't fit a party of 8.
+   */
+  party?: GuestParty | null;
   /** App origin for the API calls, e.g. "https://app.example.com". Optional. */
   baseUrl?: string;
 }
@@ -144,6 +151,8 @@ export interface CoworkCheckoutPromptInput {
   /** YYYY-MM-DD */
   checkOut: string;
   units: CoworkCheckoutUnit[];
+  /** Party size off the Guesty reservation — drives VRBO's guest-count picker at checkout. */
+  party?: GuestParty | null;
   /** App origin for the API calls, e.g. "https://app.example.com". Optional. */
   baseUrl?: string;
   /**
@@ -293,6 +302,20 @@ export function buildCoworkBuyInPrompt(input: CoworkBuyInPromptInput): string {
       ? "."
       : `, making sure the ${n === 2 ? "two" : n} picks are DISTINCT listings (never the same URL twice).`;
 
+  // Party size (adults/children off the Guesty reservation) — when known it
+  // becomes a hard occupancy check: the pick(s) must actually SLEEP everyone.
+  const partyLabel = formatGuestParty(input.party ?? null);
+  const partyLine = partyLabel ? `\n- Party size: ${partyLabel}` : "";
+  const partySizeRule = partyLabel
+    ? n === 1
+      ? ` It must also SLEEP the whole party
+   (${partyLabel}) — check the listing's stated max occupancy ("sleeps N")
+   and reject a unit that cannot fit everyone.`
+      : ` The party is ${partyLabel},
+   split across the ${n} units — the picks' COMBINED stated max occupancy
+   ("sleeps N") must cover the whole party; reject a set that cannot.`
+    : "";
+
   return `# Task: Find ${countWord} buy-in ${unitWord} for a reservation and attach ${themOrIt}
 
 You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
@@ -302,7 +325,7 @@ for the reservation below, then **attach ${themOrIt} using the manual-attach met
 
 ## Reservation
 - Reservation ID: ${input.reservationId}
-- Guest: ${input.guestName?.trim() || "(unknown)"}
+- Guest: ${input.guestName?.trim() || "(unknown)"}${partyLine}
 - Property: ${input.propertyName} (propertyId ${input.propertyId})
 - Resort to search (PRIMARY — anchor on this): ${primaryTarget}
 - Configured community: ${input.community || "(none — infer from the property name)"}${mismatch ? "  ⚠ MAY BE MISLABELED — it does not match the property/resort name. TRUST the resort name above and verify the real location." : ""}
@@ -319,7 +342,7 @@ ${unitLines}
    ~10-minute walk of it. A listing merely in the same CITY does NOT qualify.
    If you cannot CONFIRM it is in/adjacent to ${primaryTarget}, reject it — do not guess.
 2. TYPE — it is ${typeRule}.
-3. SIZE — it has the exact bedroom count the slot needs.
+3. SIZE — it has the exact bedroom count the slot needs.${partySizeRule}
 4. DATES — available and book-able for the FULL stay (${input.checkIn} → ${input.checkOut}).
 5. CHANNEL — the URL you attach is a **VRBO**, **Booking.com**, or **direct
    booking site** (PM company / the property's own site) listing page. **NEVER
@@ -475,6 +498,14 @@ export function buildCoworkCheckoutPrompt(input: CoworkCheckoutPromptInput): str
   const guestNameKnown = Boolean(guestFirst && guestLast);
 
   const n = input.units.length;
+  // Party size off the reservation — sets VRBO's guest-count picker to the
+  // real party instead of a guess (falls back to "a sensible guest count").
+  const partyLabel = formatGuestParty(input.party ?? null);
+  const guestCountInstruction = partyLabel
+    ? `the guest count for the reservation's party — ${partyLabel}${
+        n > 1 ? " total across the units (split it sensibly per unit)" : ""
+      }`
+    : "a sensible\n   guest count";
   const money = (v: string | number | null | undefined): string => {
     const num = Number(v);
     return Number.isFinite(num) && num > 0 ? `$${num.toFixed(2)}` : "(not recorded)";
@@ -497,7 +528,7 @@ anything new; if the data below doesn't match what's in the app, stop and ask.
 
 ## Reservation
 - Reservation ID: ${input.reservationId}
-- Guest: ${guestFull || "(unknown — read it off the reservation row before booking)"}
+- Guest: ${guestFull || "(unknown — read it off the reservation row before booking)"}${partyLabel ? `\n- Party size: ${partyLabel}` : ""}
 - Property: ${input.propertyName}
 - Check-in: ${input.checkIn}
 - Check-out: ${input.checkOut}
@@ -541,8 +572,7 @@ ${BOT_WALL_PROTOCOL}
    → returns { "email": "firstname.lastname@emailprivaccy.com" }. Reuse
    whatever it returns (it's stable per guest).
 3. **Open the unit's VRBO listing** (the listing URL above) in the browser.
-   Set the EXACT dates ${input.checkIn} → ${input.checkOut} and a sensible
-   guest count, using the page's own date picker (never edit URL parameters).
+   Set the EXACT dates ${input.checkIn} → ${input.checkOut} and ${guestCountInstruction}, using the page's own date picker (never edit URL parameters).
    Confirm the listing matches the attached unit and the quoted total is
    within the price guard.
 4. **Click Book / Reserve** to reach the checkout page. If VRBO throws a bot

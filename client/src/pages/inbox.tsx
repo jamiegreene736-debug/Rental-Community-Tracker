@@ -45,6 +45,7 @@ import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { bodyWithoutAttachmentUrls, collectPostAttachments, type PostAttachment } from "@shared/guesty-post-attachments";
+import { guestPartyFromReservation, formatGuestParty } from "@shared/guest-party";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import { usePortalSession } from "@/lib/auth";
 import { useAssistantContext } from "@/lib/assistant-context";
@@ -5657,7 +5658,7 @@ export default function InboxPage() {
                       </div>
 
                       {/* Dates */}
-                      <div className="grid grid-cols-3 gap-3">
+                      <div className="grid grid-cols-4 gap-3">
                         <div>
                           <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Check-in</div>
                           <div className="mt-0.5 font-medium text-xs">
@@ -5674,6 +5675,30 @@ export default function InboxPage() {
                           <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Nights</div>
                           <div className="mt-0.5 font-medium text-xs">{nights ?? "—"}</div>
                         </div>
+                        {/* Party size the guest entered on the channel — the
+                            breakdown (adults/children) shows when the channel
+                            sent it; VRBO/Airbnb usually do, Booking.com
+                            sometimes only sends the total. */}
+                        {(() => {
+                          const party = guestPartyFromReservation(res);
+                          const label = formatGuestParty(party);
+                          // "4 guests (2 adults, 2 children)" → sub-line "2 adults, 2 children";
+                          // a total-only label has no parens → no sub-line.
+                          const breakdown = label && label.includes("(")
+                            ? label.slice(label.indexOf("(") + 1, label.lastIndexOf(")"))
+                            : null;
+                          return (
+                            <div>
+                              <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Guests</div>
+                              <div className="mt-0.5 font-medium text-xs" title={label ?? undefined} data-testid="text-inbox-guest-party">
+                                {party?.total ?? "—"}
+                              </div>
+                              {breakdown && (
+                                <div className="text-[10px] text-muted-foreground leading-tight">{breakdown}</div>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {/* Quoted rate — what the GUEST sees on Airbnb for

@@ -45,6 +45,7 @@ import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shar
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
+import { guestPartyFromReservation, guestPartyLabelFromReservation } from "@shared/guest-party";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
@@ -180,6 +181,14 @@ interface GuestyReservation {
   checkOutDateLocalized?: string;
   nightsCount?: number;
   guest?: { fullName?: string; firstName?: string; email?: string };
+  // Party size the guest entered on the booking channel (VRBO/Booking/Airbnb).
+  // numberOfGuests is EITHER a plain number (legacy) or the breakdown object —
+  // parse via shared/guest-party.ts, never directly.
+  guestsCount?: number | null;
+  numberOfGuests?:
+    | number
+    | { numberOfAdults?: number; numberOfChildren?: number; numberOfInfants?: number; numberOfPets?: number }
+    | null;
   money?: {
     hostPayout?: number;
     fareAccommodation?: number;
@@ -2351,6 +2360,9 @@ function CoworkBuyInPromptButton({
         checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
         checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
         units,
+        // Party size (adults/children) so the search rejects units that
+        // can't sleep everyone.
+        party: guestPartyFromReservation(reservation),
         baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
       }),
     [reservation, propertyId, propertyName, community, units],
@@ -2440,6 +2452,8 @@ function CoworkCheckoutPromptButton({
         checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
         checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
         units,
+        // Party size drives VRBO's guest-count picker at checkout.
+        party: guestPartyFromReservation(reservation),
         baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
       }),
     [reservation, propertyName, units],
@@ -10523,6 +10537,20 @@ export default function Bookings() {
                                   <p className="truncate text-[10px] text-muted-foreground">
                                     {reservation.confirmationCode ?? reservation._id}
                                   </p>
+                                  {(() => {
+                                    // Party size off the channel (adults/children) —
+                                    // manual rows have none and render nothing.
+                                    const party = guestPartyLabelFromReservation(reservation);
+                                    return party ? (
+                                      <p
+                                        className="truncate text-[10px] text-muted-foreground"
+                                        title="Party the guest entered on the booking channel"
+                                        data-testid={`text-guest-party-${reservation._id}`}
+                                      >
+                                        👥 {party}
+                                      </p>
+                                    ) : null;
+                                  })()}
                                 </div>
                                 <div className="min-w-0">
                                   <p className="truncate" title={queuedFor}>{queuedFor}</p>
@@ -11265,6 +11293,20 @@ export default function Bookings() {
                         <div className="text-sm col-span-2 md:col-span-1">
                           <p>{fmtDate(checkInOf(r))} → {fmtDate(checkOutOf(r))}</p>
                           <p className="text-xs text-muted-foreground">{nights} nights · <Badge variant="outline" className="text-[10px] capitalize ml-1">{channel}</Badge></p>
+                          {(() => {
+                            // Party size off the channel — the buy-in picks
+                            // below must sleep this many people.
+                            const party = guestPartyLabelFromReservation(r);
+                            return party ? (
+                              <p
+                                className="text-[10px] text-muted-foreground"
+                                title="Party the guest entered on the booking channel"
+                                data-testid={`text-guest-party-${r._id}`}
+                              >
+                                👥 {party}
+                              </p>
+                            ) : null;
+                          })()}
                         </div>
                         <div className="text-sm md:text-right">
                           <p className="text-[10px] uppercase tracking-wider text-muted-foreground md:hidden">Payout</p>
