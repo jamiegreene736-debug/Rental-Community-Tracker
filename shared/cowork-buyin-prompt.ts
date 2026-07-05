@@ -15,6 +15,9 @@
 // LOAD-BEARING (search prompt, operator's spec): same-community first; if one
 // or both units can't be found in the configured community, fall back to a
 // CITY-WIDE search and STOP THERE — never expand to nearby cities / regions.
+// NEVER attach an airbnb.com link (operator, 2026-07-05): the attached URL
+// must be VRBO, Booking.com, or a direct booking/PM site. Airbnb is allowed
+// for DISCOVERY only — find the same unit's non-Airbnb page and attach that.
 // The attach path is the manual method: POST /api/buy-ins (create) then
 // POST /api/bookings/:reservationId/attach-buy-in (attach) — one pair, one per
 // unit slot. This mirrors `ManualBuyInDialog` in client/src/pages/bookings.tsx.
@@ -246,9 +249,14 @@ ${unitLines}
 2. TYPE — it is ${typeRule}.
 3. SIZE — it has the exact bedroom count the slot needs.
 4. DATES — available and book-able for the FULL stay (${input.checkIn} → ${input.checkOut}).
+5. CHANNEL — the URL you attach is a **VRBO**, **Booking.com**, or **direct
+   booking site** (PM company / the property's own site) listing page. **NEVER
+   attach an airbnb.com link.** You may still use Airbnb to DISCOVER a unit,
+   but you must then find that same unit's VRBO / Booking.com / direct-site
+   page and attach THAT; a unit bookable ONLY on Airbnb does not qualify.
 
 Find ONE distinct listing per unit slot above (${listingsTotal}). Among listings that
-satisfy ALL of 1–4, pick the **cheapest**${distinctNote}
+satisfy ALL of 1–5, pick the **cheapest**${distinctNote}
 
 ## Where to search (in priority order)
 1. **Same community first.** Look for ${bothOrAll} inside **${primaryTarget}**
@@ -282,7 +290,7 @@ dialog). It is two API calls:
      "checkIn": "${input.checkIn}",
      "checkOut": "${input.checkOut}",
      "costPaid": "<total stay cost for this unit, e.g. 1820.00>",
-     "airbnbListingUrl": "<the listing URL you found>",
+     "airbnbListingUrl": "<the listing URL you found — VRBO/Booking.com/direct site ONLY, never airbnb.com; the field name is legacy>",
      "managementCompany": "<PM company name if known, else null>",
      "groundFloorStatus": "unknown",
      "status": "active",

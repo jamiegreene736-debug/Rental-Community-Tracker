@@ -61,6 +61,24 @@ check("names city-wide fallback", prompt.includes("city-wide search of Koloa, Ha
 check("forbids beyond city-wide", /STOP at city-wide/i.test(prompt) && /Do \*\*NOT\*\* expand beyond the city/.test(prompt));
 check("no nearby-city expansion", prompt.includes("no nearby towns"));
 
+// Channel rule (operator 2026-07-05): never attach an Airbnb link.
+check(
+  "find prompt forbids attaching airbnb.com links",
+  /NEVER\s+attach an airbnb\.com link/i.test(prompt) && prompt.includes("does not qualify"),
+);
+check(
+  "find prompt allows VRBO / Booking.com / direct sites",
+  /VRBO\*\*, \*\*Booking\.com\*\*, or \*\*direct\s+booking site/.test(prompt),
+);
+check(
+  "find prompt: Airbnb is discovery-only",
+  /use Airbnb to DISCOVER/i.test(prompt),
+);
+check(
+  "create-body URL field carries the never-airbnb note",
+  prompt.includes("never airbnb.com; the field name is legacy"),
+);
+
 // Manual-attach method = the two API calls.
 check("describes create endpoint", prompt.includes("POST https://app.example.com/api/buy-ins"));
 check("describes attach endpoint", prompt.includes("/api/bookings/abc123/attach-buy-in"));
