@@ -47,7 +47,7 @@ import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@sh
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt } from "@shared/cowork-buyin-prompt";
+import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt } from "@shared/cowork-buyin-prompt";
 import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
@@ -735,6 +735,7 @@ type UnitProximityResponse =
       withinLimit?: boolean;
       maxMinutes?: number;
       communityVerdict?: { verdict: string; source: string | null; at: string | null } | null;
+      guestHappy?: { verdict: string; feedback: string | null; source: string | null; at: string | null } | null;
       generatedAt: string;
     };
 
@@ -1277,6 +1278,32 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
           ✕ Not same
         </Button>
       </div>
+      {/* "Will guest be happy?" evaluation — recorded by the Cowork
+          guest-happiness prompt (POST /api/bookings/:id/guest-happy).
+          Same consensus rule as the community verdict. */}
+      {query.data?.status === "ready" && query.data.guestHappy ? (
+        <div
+          className={`mt-1.5 rounded border px-2 py-1.5 text-[10px] ${
+            query.data.guestHappy.verdict === "happy"
+              ? "border-emerald-300 bg-emerald-50/70 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-100"
+              : query.data.guestHappy.verdict === "concerns"
+                ? "border-amber-300 bg-amber-50/70 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-100"
+                : "border-red-300 bg-red-50/70 text-red-950 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-100"
+          }`}
+          data-testid={`panel-guest-happy-${reservation._id}`}
+        >
+          <span className="font-medium">
+            {query.data.guestHappy.verdict === "happy"
+              ? "★ Guest will be happy"
+              : query.data.guestHappy.verdict === "concerns"
+                ? "⚠ Guest-happiness concerns"
+                : "✕ Guest will NOT be happy"}
+            {query.data.guestHappy.source ? ` · via ${query.data.guestHappy.source}` : ""}
+            {query.data.guestHappy.at ? ` · ${new Date(query.data.guestHappy.at).toLocaleDateString()}` : ""}
+          </span>
+          {query.data.guestHappy.feedback ? <div className="mt-0.5">{query.data.guestHappy.feedback}</div> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2540,6 +2567,96 @@ function CoworkCommunityVerifyButton({
           />
           <DialogFooter>
             <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-verify-community-copy-${reservation._id}`}>
+              <Copy className="mr-1 h-3.5 w-3.5" />
+              Copy again
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+// "Will guest be happy?" — Cowork prompt that evaluates the attached buy-ins
+// through the GUEST's eyes (operator spec 2026-07-05): community match, size,
+// bedding layout, and photo quality vs the ORIGINAL listing they booked.
+// Cowork's vision judges the photos; the verdict + written feedback land on
+// the buy-ins via POST /api/bookings/:id/guest-happy and render on the
+// walking-distance panel.
+function CoworkGuestHappyButton({
+  reservation,
+  propertyName,
+  community,
+  units,
+}: {
+  reservation: GuestyReservation;
+  propertyName: string;
+  community: string;
+  units: { buyInId: number; unitLabel: string; listingUrl: string | null; bedrooms: number | null }[];
+}) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const prompt = useMemo(
+    () =>
+      buildCoworkGuestHappyPrompt({
+        reservationId: reservation._id,
+        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? null,
+        propertyName,
+        community,
+        bookedChannel: reservation.integration?.platform ?? reservation.source ?? null,
+        units,
+        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
+      }),
+    [reservation, propertyName, community, units],
+  );
+  const copy = async () => {
+    try {
+      await navigator.clipboard?.writeText(prompt);
+      toast({ title: "Guest-happiness prompt copied", description: "Paste it into Cowork to evaluate the attached units through the guest's eyes." });
+    } catch {
+      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
+    }
+  };
+  return (
+    <>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 px-2 text-xs border-amber-300 text-amber-800 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-950"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+          void copy();
+        }}
+        data-testid={`button-cowork-guest-happy-${reservation._id}`}
+        title="Generate a Cowork prompt that judges the attached unit(s) through the guest's eyes — community, size, bedding layout, and photo quality vs the listing they booked — and records the verdict + feedback"
+      >
+        <Star className="mr-1 h-3.5 w-3.5" />
+        Will guest be happy?
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Cowork guest-happiness prompt</DialogTitle>
+            <DialogDescription>
+              Copied to your clipboard. Paste this into Cowork — it studies the ORIGINAL listing the
+              guest booked (photos, bedding layout, community), studies each attached unit the same
+              way, and answers dimension by dimension: same community? same size? same bedding
+              layout (1 King, 1 Queen…)? similar photo quality? It records the verdict + a written
+              guest&apos;s-eye summary onto the reservation (shown on the walking-distance panel) and
+              never books, attaches, or detaches anything.
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            readOnly
+            value={prompt}
+            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
+            data-testid={`textarea-cowork-guest-happy-${reservation._id}`}
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <DialogFooter>
+            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-guest-happy-copy-${reservation._id}`}>
               <Copy className="mr-1 h-3.5 w-3.5" />
               Copy again
             </Button>
@@ -11081,6 +11198,29 @@ export default function Bookings() {
                                   unitLabel: s.buyIn.unitLabel || s.unitLabel,
                                   listingUrl: s.buyIn.airbnbListingUrl ?? null,
                                   unitAddress: s.buyIn.unitAddress ?? null,
+                                }))}
+                            />
+                          )}
+                          {/* "Will guest be happy?" — guest's-eye evaluation of the
+                              attached units vs the original listing (operator spec
+                              2026-07-05). */}
+                          {r.slots.some((s) => s.buyIn) && (
+                            <CoworkGuestHappyButton
+                              reservation={r}
+                              propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? "Vacation rental"}
+                              community={
+                                (selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community : undefined)
+                                ?? (reservationMeta ? PROPERTY_UNIT_CONFIGS[reservationMeta.propertyId]?.community : undefined)
+                                ?? r.slots.find((s) => s.community)?.community
+                                ?? ""
+                              }
+                              units={r.slots
+                                .filter((s): s is SlotInfo & { buyIn: BuyIn } => Boolean(s.buyIn))
+                                .map((s) => ({
+                                  buyInId: s.buyIn.id,
+                                  unitLabel: s.buyIn.unitLabel || s.unitLabel,
+                                  listingUrl: s.buyIn.airbnbListingUrl ?? null,
+                                  bedrooms: Number.isFinite(s.bedrooms) ? s.bedrooms : null,
                                 }))}
                             />
                           )}

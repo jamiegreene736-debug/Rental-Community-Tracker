@@ -629,3 +629,116 @@ ${doneSignalSection(
     "units that are NOT in the same community",
   )}`;
 }
+
+/** One ALREADY-ATTACHED unit the guest-happiness prompt should evaluate. */
+export interface CoworkGuestHappyUnit {
+  buyInId: number;
+  unitLabel: string;
+  listingUrl: string | null;
+  bedrooms: number | null;
+}
+
+export interface CoworkGuestHappyPromptInput {
+  reservationId: string;
+  guestName?: string | null;
+  /** The Guesty listing title the guest actually booked. */
+  propertyName: string;
+  /** Configured community for the property, if known. */
+  community?: string | null;
+  /** Channel the guest booked on (integration.platform), if known. */
+  bookedChannel?: string | null;
+  units: CoworkGuestHappyUnit[];
+  /** App origin for the API calls, e.g. "https://app.example.com". Optional. */
+  baseUrl?: string;
+}
+
+// "Will guest be happy?" — evaluate the attached buy-in units through the
+// GUEST's eyes (operator spec 2026-07-05): if they booked the original
+// listing, would these units feel like what they paid for? Community, size,
+// BEDDING LAYOUT (1 King vs 2 Twins matters), and photo QUALITY are the four
+// dimensions. Cowork's vision does the photo judgment; the verdict + written
+// feedback are recorded via POST /api/bookings/:id/guest-happy so they show
+// up in the app, not just in the chat report. Read-only otherwise.
+export function buildCoworkGuestHappyPrompt(input: CoworkGuestHappyPromptInput): string {
+  const base = (input.baseUrl ?? "").replace(/\/+$/, "");
+  const apiRoot = base || "<APP_BASE_URL>";
+  const n = input.units.length;
+  const unitLines = input.units
+    .map(
+      (u, i) =>
+        `  ${i + 1}. buyInId ${u.buyInId} — ${u.unitLabel}${u.bedrooms ? ` (needs to feel like a ${u.bedrooms}BR)` : ""}\n` +
+        `     Listing: ${u.listingUrl?.trim() || "(no URL recorded — GET the buy-in record; if it has none, say so)"}`,
+    )
+    .join("\n");
+
+  return `# Task: Will the guest be HAPPY with the ${n === 1 ? "attached buy-in unit" : `${n} attached buy-in units`}?
+
+You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
+This is a guest-experience EVALUATION: put yourself in the guest's shoes. They
+booked the listing below sight-unseen off its photos and description — if they
+walk into the attached ${n === 1 ? "unit" : "units"} instead, do they get what they paid for?
+Do NOT book, attach, or detach anything; the only writes are the verdict +
+feedback in step 4.
+
+## What the guest booked
+- Reservation ID: ${input.reservationId}
+- Guest: ${input.guestName?.trim() || "(unknown)"}
+- Original listing: ${input.propertyName}${input.bookedChannel ? ` (booked via ${input.bookedChannel})` : ""}
+- Community: ${input.community?.trim() || "(none configured — infer from the listing)"}
+
+## What we're giving them instead
+${unitLines}
+
+${BOT_WALL_PROTOCOL}
+
+## Steps
+
+1. **Study the ORIGINAL listing** — the one the guest actually booked. Find
+   its public page (search the listing title + community/city; it is the
+   operator's own listing${input.bookedChannel ? ` on ${input.bookedChannel}` : ""}). Study it like a guest would:
+   - the PHOTOS: finish level, furniture condition, view, vibe;
+   - the bedroom count and the BEDDING LAYOUT (the "Rooms & beds" /
+     "Sleeping arrangements" section — e.g. 1 King + 1 Queen);
+   - the community/resort it promises, and headline amenities (pool, ocean
+     view, lanai, A/C, parking).
+   If you genuinely cannot find the original listing's page, use the
+   property's photos and details in this app instead, and say so.
+2. **Study each attached unit the same way** — open its listing, LOOK at the
+   photos (this is a visual judgment: renovation level, furniture, view,
+   cleanliness as photographed), read its bedding layout, confirm its
+   building/community.
+3. **Compare, dimension by dimension** (be honest — the guest will be):
+   - COMMUNITY: ${n === 1 ? "is the unit" : "are BOTH units"} in the community the guest originally
+     booked? (If a community verdict is already recorded on the reservation,
+     it counts as evidence.)
+   - SIZE: does each unit have the bedroom count the guest expects?
+   - BEDDING LAYOUT: same or better than the original (a King where they
+     expected a King; 2 Twins replacing a King is a DOWNGRADE — flag it).
+   - QUALITY: are the photos of ${n === 1 ? "the unit" : "each unit"} similar or better in finish,
+     furniture, view, and condition than the original listing's photos?
+     Meaningfully dated/worse = flag it.
+4. **Record the verdict + feedback in the app**:
+   POST ${apiRoot}/api/bookings/${input.reservationId}/guest-happy
+   { "verdict": "<happy | concerns | unhappy>",
+     "feedback": "<2-4 sentences, guest's-eye summary — e.g. 'Yes, guest will
+       be happy: two 2BR condos in the same community they booked, bedding
+       layout matches (1 King + 1 Queen each), and the finish level in the
+       photos is comparable to the original listing.'>",
+     "source": "cowork" }
+   Verdict guide: everything matches or is better → "happy"; mostly fine but
+   something a guest would notice (older finish, different view, a Queen for
+   a King) → "concerns"; wrong community, wrong size, or clearly worse
+   quality → "unhappy".
+5. **Report** the full comparison: per dimension, what the original promises
+   vs what each unit delivers, with the specific evidence (photo observations,
+   bedding lists, building names) — then your verdict sentence, exactly what
+   you recorded in step 4.
+
+Finally, TIDY UP THE BROWSER: close every Chrome tab you opened during this
+task. Leave any tabs that were already open before you started untouched.
+
+${doneSignalSection(
+    "the guest-happiness check is complete and the feedback is recorded",
+    "a bedding-layout downgrade or a quality gap the guest would notice",
+  )}`;
+}

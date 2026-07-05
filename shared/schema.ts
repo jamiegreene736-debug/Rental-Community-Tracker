@@ -63,6 +63,15 @@ export const buyIns = pgTable("buy_ins", {
   communityVerdict: text("community_verdict"), // same_building | same_community | different
   communityVerdictSource: text("community_verdict_source"), // cowork | operator
   communityVerdictAt: timestamp("community_verdict_at"),
+  // --- Guest-happiness evaluation (operator/Cowork, 2026-07-05) ---
+  // "Will guest be happy?" verdict + written feedback, stamped on every
+  // attached buy-in at once by POST /api/bookings/:reservationId/guest-happy.
+  // Same consensus display rule as communityVerdict: shown only while all
+  // attached buy-ins agree, so swapping a unit clears the stale evaluation.
+  guestHappyVerdict: text("guest_happy_verdict"), // happy | concerns | unhappy
+  guestHappyFeedback: text("guest_happy_feedback"), // the 2-4 sentence guest's-eye summary
+  guestHappySource: text("guest_happy_source"), // cowork | operator
+  guestHappyAt: timestamp("guest_happy_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

@@ -6,6 +6,7 @@ import {
   buildCoworkBuyInPrompt,
   buildCoworkCheckoutPrompt,
   buildCoworkCommunityVerifyPrompt,
+  buildCoworkGuestHappyPrompt,
   resolveCoworkSearchTargets,
   DEFAULT_CARD_FILE_HINT,
   type CoworkBuyInPromptInput,
@@ -315,6 +316,58 @@ for (const [label, p] of [["find", prompt], ["checkout", checkout], ["verify", v
     /do NOT reload the page/.test(p) && /Do NOT\s+attempt the challenge yourself/.test(p),
   );
 }
+
+// ── buildCoworkGuestHappyPrompt: "Will guest be happy?" evaluation ──────────
+const guestHappy = buildCoworkGuestHappyPrompt({
+  reservationId: "abc123",
+  guestName: "Jane Traveler",
+  propertyName: "Spacious - 2 BR / 2 BA Condo w/ Beautiful Ocean Views",
+  community: "Ilikai",
+  bookedChannel: "homeaway2",
+  units: [
+    { buyInId: 41, unitLabel: "Unit A", listingUrl: "https://www.vrbo.com/1234567", bedrooms: 2 },
+    { buyInId: 42, unitLabel: "Unit B", listingUrl: null, bedrooms: 2 },
+  ],
+  baseUrl: "https://app.example.com",
+});
+check("guest-happy: framed through the guest's eyes", /put yourself in the guest's shoes/i.test(guestHappy));
+check(
+  "guest-happy: studies the ORIGINAL listing first",
+  guestHappy.includes("Study the ORIGINAL listing") && guestHappy.includes("Spacious - 2 BR / 2 BA Condo w/ Beautiful Ocean Views"),
+);
+check(
+  "guest-happy: four comparison dimensions",
+  /COMMUNITY:/.test(guestHappy) && /SIZE:/.test(guestHappy) && /BEDDING LAYOUT:/.test(guestHappy) && /QUALITY:/.test(guestHappy),
+);
+check(
+  "guest-happy: bedding downgrade is called out",
+  /2 Twins replacing a King is a DOWNGRADE/.test(guestHappy),
+);
+check(
+  "guest-happy: photo quality is a visual judgment",
+  /LOOK at the\s+photos/.test(guestHappy) && /finish, furniture, view/i.test(guestHappy.replace(/\s+/g, " ")),
+);
+check(
+  "guest-happy: records verdict + feedback via the endpoint",
+  guestHappy.includes("POST https://app.example.com/api/bookings/abc123/guest-happy") &&
+    /happy \| concerns \| unhappy/.test(guestHappy) &&
+    guestHappy.includes('"source": "cowork"'),
+);
+check(
+  "guest-happy: feedback example matches the operator's ask",
+  /guest will\s+be happy: two 2BR condos in the same community/i.test(guestHappy.replace(/\s+/g, " ")),
+);
+check(
+  "guest-happy: read-only apart from the verdict write",
+  /Do NOT book, attach, or detach anything/.test(guestHappy),
+);
+check("guest-happy: embeds the attached units", guestHappy.includes("buyInId 41") && guestHappy.includes("buyInId 42"));
+check("guest-happy: has the bot-wall protocol", /NEVER skip a site over this/.test(guestHappy));
+check("guest-happy: tidies tabs + done signal", /close every Chrome tab you opened/i.test(guestHappy) && /## Done signal/.test(guestHappy));
+check(
+  "guest-happy: done signal names the evaluation outcome",
+  guestHappy.includes("the guest-happiness check is complete and the feedback is recorded"),
+);
 
 // ── Done signal (operator 2026-07-05): audible chime when the task finishes ──
 for (const [label, p] of [["find", prompt], ["checkout", checkout], ["verify", verify]] as const) {

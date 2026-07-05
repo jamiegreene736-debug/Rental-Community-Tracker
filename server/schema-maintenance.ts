@@ -18,9 +18,13 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS ground_floor_evidence text,
       ADD COLUMN IF NOT EXISTS community_verdict text,
       ADD COLUMN IF NOT EXISTS community_verdict_source text,
-      ADD COLUMN IF NOT EXISTS community_verdict_at timestamp
+      ADD COLUMN IF NOT EXISTS community_verdict_at timestamp,
+      ADD COLUMN IF NOT EXISTS guest_happy_verdict text,
+      ADD COLUMN IF NOT EXISTS guest_happy_feedback text,
+      ADD COLUMN IF NOT EXISTS guest_happy_source text,
+      ADD COLUMN IF NOT EXISTS guest_happy_at timestamp
   `);
-  console.log("[schema] ensured buy_ins arrival detail + ground-floor + community-verdict columns");
+  console.log("[schema] ensured buy_ins arrival detail + ground-floor + community-verdict + guest-happy columns");
 
   // Claude static-rate engine: additive nullable JSONB for the persisted
   // seasonal anchor plan. The table itself is created by db:push; this keeps a

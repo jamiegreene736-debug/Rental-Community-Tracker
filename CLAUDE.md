@@ -103,7 +103,15 @@ Before making any changes:
   "✓ Verified same building/community · via cowork" badge (red card + "✕ NOT the same community"
   when different) plus always-visible "✓ Same community/building" / "✕ Not same" ghost buttons
   (data-testid button-community-verdict-yes/no-<reservationId>) any human or agent can click;
-  the verify prompt's step 4 now POSTs the verdict (API preferred over button-clicking).
+  the verify prompt's step 4 now POSTs the verdict (API preferred over button-clicking). 9TH
+  FOLLOW-UP (operator): NEW amber "Will guest be happy?" button (Star icon, same strip) →
+  buildCoworkGuestHappyPrompt: guest's-eye evaluation of the attached units vs the ORIGINAL
+  booked listing on 4 dimensions (community — recorded community-verdict counts as evidence;
+  size; BEDDING LAYOUT — 2 Twins for a King = flagged DOWNGRADE; photo QUALITY — Cowork
+  vision judges finish/furniture/view/condition). Verdict happy|concerns|unhappy + written
+  feedback recorded via POST /api/bookings/:reservationId/guest-happy → buy_ins
+  guestHappyVerdict/Feedback/Source/At columns (consensus display rule same as community
+  verdict), rendered as a green/amber/red panel + feedback text on the walking-distance card.
   5TH FOLLOW-UP (operator): VRBO bot checks made the
   agent SKIP VRBO — all three prompts now embed BOT_WALL_PROTOCOL: never skip/close on a bot
   check; alert loudly (5× afplay Sosumi + say + osascript notification, repeating ~60s up to 15×)
