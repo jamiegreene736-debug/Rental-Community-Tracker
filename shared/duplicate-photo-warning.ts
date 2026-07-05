@@ -2,11 +2,12 @@
 //
 // When the photo-listing scanner marks a unit's photos as FOUND on
 // Airbnb / VRBO / Booking.com, the dashboard raises a red warning dialog
-// (same visual language as the refund-receipt alert). The operator's
-// remediation is manual — replace the photos on the listing — so the
-// dialog's action is "Confirm photos replaced", which fires a deep
-// verification rescan of just that unit's folder and then reports
-// whether the replaced photos are genuinely gone from all three OTAs.
+// (same visual language as the refund-receipt alert). The dialog's action
+// is the one-click "Replace photos (Unit X)" auto-replace job, which
+// verifies itself server-side; the rescan verdict below also powers the
+// manual-pick flow's auto-rescan and the "Rescan again" retry button
+// (still-found/inconclusive rows), reporting whether the replaced photos
+// are genuinely gone from all three OTAs.
 //
 // Pure helpers only: signature (so a dismissed warning doesn't nag until
 // the facts change) and the rescan verdict state machine. The React side
@@ -216,7 +217,7 @@ export type PhotoReplaceRescanVerdict =
   | { state: "still_found"; platforms: DuplicatePhotoPlatform[] }
   | { state: "inconclusive"; platforms: DuplicatePhotoPlatform[] };
 
-// Classify a "Confirm photos replaced" verification rescan from the
+// Classify a post-replacement verification rescan from the
 // (re-fetched) photo-check row. `pending` until the row's checkedAt passes
 // the rescan start (1s tolerance, mirroring the deep-scan progress modal —
 // the server stamps checkedAt from its own clock). A verdict is only
