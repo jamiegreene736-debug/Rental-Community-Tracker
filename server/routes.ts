@@ -330,7 +330,7 @@ import {
   type PropertyUnitBuilder,
 } from "../client/src/data/unit-builder-data";
 import {
-  aliasPrefixForGuest,
+  aliasPrefixCandidates,
   createSimpleLoginAlias,
   createSimpleLoginContact,
   extractSimpleLoginAliasEmail,
@@ -339,6 +339,7 @@ import {
   extractSimpleLoginReverseAlias,
   extractEmailAddress,
   getSimpleLoginStatus,
+  isSimpleLoginAliasExistsError,
   SIMPLELOGIN_MAILBOX_EMAIL,
 } from "./simplelogin";
 import { isPlausiblePropertyAddressForBuyIn, normalizeBuyInEmailAttachments, parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
@@ -12194,11 +12195,33 @@ Requirements:
       return { alias, created: false };
     }
 
-    const payload = await createSimpleLoginAlias({
-      prefix: aliasPrefixForGuest(input.guestName, input.reservationId),
+    // Unit-scoped aliases append the unit token to the prefix — two units on
+    // ONE reservation share the guest+reservation base and SimpleLogin rejects
+    // the second create with "alias ... already exists" (the Unit B failure the
+    // operator hit 2026-07-05). Walk the candidate list, only continuing past a
+    // prefix when SimpleLogin says it's taken.
+    const prefixCandidates = aliasPrefixCandidates({
       guestName: input.guestName,
-      note: `Buy-in communication alias for Guesty reservation ${input.reservationId}${input.unitLabel ? ` — ${input.unitLabel}` : ""}`,
+      reservationId: input.reservationId,
+      unitLabel: hasBuyInId ? input.unitLabel : null,
+      buyInId: hasBuyInId ? (input.buyInId as number) : null,
     });
+    let payload: any = null;
+    let lastAliasError: unknown = null;
+    for (const prefix of prefixCandidates) {
+      try {
+        payload = await createSimpleLoginAlias({
+          prefix,
+          guestName: input.guestName,
+          note: `Buy-in communication alias for Guesty reservation ${input.reservationId}${input.unitLabel ? ` — ${input.unitLabel}` : ""}`,
+        });
+        break;
+      } catch (err) {
+        lastAliasError = err;
+        if (!isSimpleLoginAliasExistsError(err)) throw err;
+      }
+    }
+    if (!payload) throw lastAliasError ?? new Error("SimpleLogin alias creation failed");
     const aliasEmail = extractSimpleLoginAliasEmail(payload);
     const simpleloginAliasId = extractSimpleLoginAliasId(payload);
     if (!aliasEmail) throw new Error("SimpleLogin did not return an alias email");
