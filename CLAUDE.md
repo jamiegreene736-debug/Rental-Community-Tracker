@@ -66,7 +66,11 @@ Before making any changes:
   the Cowork path instead; the scaffold stays dormant/intact. 2ND FOLLOW-UP (operator): both
   prompts now end with a TIDY-UP step — close every Chrome tab the agent opened (never the
   operator's pre-existing tabs; checkout never closes a tab mid-booking or before its
-  confirmation is captured) because leftover tabs were clogging/slowing the browser. FOLLOW-UP same day (operator): the
+  confirmation is captured) because leftover tabs were clogging/slowing the browser. 3RD
+  FOLLOW-UP (operator): the find prompt must NEVER attach an airbnb.com link — qualification
+  rule 5 (CHANNEL): attach only VRBO / Booking.com / direct booking (PM) site URLs; Airbnb is
+  discovery-only (find the same unit's non-Airbnb page and attach that); Airbnb-only units do
+  not qualify. FOLLOW-UP same day (operator): the
   checkout must be a SEPARATE prompt/button from the find prompt. buildCoworkBuyInPrompt reverted
   to search+attach-only (ends "This task ends at ATTACH … do NOT book"); new
   `buildCoworkCheckoutPrompt` (same shared file) is the book-only prompt — running it IS the
