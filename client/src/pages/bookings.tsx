@@ -63,6 +63,7 @@ function buyInUrlIsVrbo(url: string | null | undefined): boolean {
 }
 import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
 import { unitCommunityVerdictBadge } from "@shared/community-verdict-badge";
+import { unitGuestHappyBadge } from "@shared/guest-happy-badge";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
@@ -11823,6 +11824,33 @@ export default function Bookings() {
                                             data-testid={`badge-unit-community-verdict-${r._id}-${slot.unitId}`}
                                           >
                                             {cv.label}
+                                          </Badge>
+                                        );
+                                      })()}
+                                      {/* Per-unit guest-happiness marker (operator spec
+                                          2026-07-05): the Cowork "Will guest be happy?"
+                                          prompt stamps every attached buy-in via
+                                          POST /guest-happy — this badge marks THIS
+                                          unit's card with the verdict (feedback on
+                                          hover), so "guest will be 100% happy" / "no —
+                                          bedding is off" reads at a glance even on
+                                          single-unit reservations (the walking-distance
+                                          panel only renders with 2+ attached units). */}
+                                      {(() => {
+                                        const gh = unitGuestHappyBadge(slot.buyIn);
+                                        if (!gh) return null;
+                                        return (
+                                          <Badge
+                                            variant="outline"
+                                            className={`text-[9px] ${gh.tone === "red"
+                                              ? "border-red-300 bg-red-50 text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
+                                              : gh.tone === "amber"
+                                                ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+                                                : "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200"}`}
+                                            title={gh.title}
+                                            data-testid={`badge-unit-guest-happy-${r._id}-${slot.unitId}`}
+                                          >
+                                            {gh.label}
                                           </Badge>
                                         );
                                       })()}

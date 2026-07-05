@@ -630,7 +630,80 @@ check("corroborated: no mislabel warning", !/MAY BE MISLABELED/.test(corroborate
     "bookings: per-unit badge has a stable testid",
     bookingsSrc.includes("badge-unit-community-verdict-${r._id}-${slot.unitId}"),
   );
+
+  // ── unitGuestHappyBadge: per-unit UI marker for the guest-happy verdict ───
+  // (operator spec 2026-07-05: after the guest-happiness evaluation, Cowork
+  // must PUT the verdict on the units in the portal — "yes, guest will be
+  // 100% happy" / "no — bedding is off" — not just report it in chat.)
+  const { unitGuestHappyBadge } = await import("../shared/guest-happy-badge");
+  const happy = unitGuestHappyBadge({
+    guestHappyVerdict: "happy",
+    guestHappyFeedback: "Yes, guest will be happy: bedding and finish match.",
+    guestHappySource: "cowork",
+    guestHappyAt: "2026-07-05T18:30:00.000Z",
+  });
+  check("gh-badge: happy → ★ emerald", happy?.label === "★ Guest happy" && happy.tone === "emerald", happy);
+  check(
+    "gh-badge: title carries source + ISO day + the recorded feedback",
+    !!happy &&
+      happy.title.includes("via cowork") &&
+      happy.title.includes("on 2026-07-05") &&
+      happy.title.includes("bedding and finish match"),
+    happy?.title,
+  );
+  const concerns = unitGuestHappyBadge({ guestHappyVerdict: "concerns", guestHappySource: "operator", guestHappyAt: null });
+  check("gh-badge: concerns → ⚠ amber", concerns?.label === "⚠ Guest concerns" && concerns.tone === "amber", concerns);
+  check("gh-badge: no date/feedback → title omits them", !!concerns && !concerns.title.includes(" on ") && !concerns.title.trimEnd().endsWith(":"), concerns?.title);
+  const unhappy = unitGuestHappyBadge({
+    guestHappyVerdict: "unhappy",
+    guestHappyFeedback: "No — bedding is off (2 Twins where they booked a King).",
+    guestHappySource: "cowork",
+    guestHappyAt: new Date("2026-07-05T00:00:00Z"),
+  });
+  check(
+    "gh-badge: unhappy → ✕ red with the why on hover",
+    unhappy?.label === "✕ Guest NOT happy" && unhappy.tone === "red" && unhappy.title.includes("bedding is off"),
+    unhappy,
+  );
+  check("gh-badge: no verdict → null", unitGuestHappyBadge({ guestHappyVerdict: null }) === null);
+  check("gh-badge: missing buy-in → null", unitGuestHappyBadge(null) === null && unitGuestHappyBadge(undefined) === null);
+  check("gh-badge: junk legacy value → null (never render junk)", unitGuestHappyBadge({ guestHappyVerdict: "maybe?" }) === null);
+  check(
+    "gh-badge: whitespace/case tolerated, invalid date dropped from title",
+    unitGuestHappyBadge({ guestHappyVerdict: "  HAPPY " })?.label === "★ Guest happy" &&
+      !unitGuestHappyBadge({ guestHappyVerdict: "happy", guestHappyAt: "not-a-date" })!.title.includes(" on "),
+  );
+
+  // Source assertions: the bookings slot card actually renders the badge.
+  check(
+    "bookings: slot card derives the guest-happy badge from slot.buyIn",
+    bookingsSrc.includes("unitGuestHappyBadge(slot.buyIn)"),
+  );
+  check(
+    "bookings: per-unit guest-happy badge has a stable testid",
+    bookingsSrc.includes("badge-unit-guest-happy-${r._id}-${slot.unitId}"),
+  );
 }
+
+// The guest-happy prompt's recording step must read as MANDATORY portal
+// marking (mirror of the community-verify step 4 rewording): a verdict only
+// written in the chat report leaves the units unmarked.
+check(
+  "guest-happy: recording step MARKS the units in the portal UI",
+  /Record the verdict \+ feedback in the app — this is what MARKS the units\s+in the portal UI/.test(guestHappy),
+);
+check(
+  "guest-happy: recording step must NEVER be skipped, even on a 100%-happy verdict",
+  /NEVER skip this step/.test(guestHappy) && /yes, guest will be 100% happy/.test(guestHappy) && /UNMARKED/.test(guestHappy),
+);
+check(
+  "guest-happy: names the per-unit badges the POST produces",
+  guestHappy.includes("★ Guest happy") && guestHappy.includes("✕ Guest NOT happy"),
+);
+check(
+  "guest-happy: feedback example covers the negative bedding case",
+  /bedding is off \(2 Twins where they booked a King\)/.test(guestHappy),
+);
 
 console.log(`\ncowork-buyin-prompt: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

@@ -759,13 +759,21 @@ ${BOT_WALL_PROTOCOL}
    - QUALITY: are the photos of ${n === 1 ? "the unit" : "each unit"} similar or better in finish,
      furniture, view, and condition than the original listing's photos?
      Meaningfully dated/worse = flag it.
-4. **Record the verdict + feedback in the app**:
+4. **Record the verdict + feedback in the app — this is what MARKS the units
+   in the portal UI.** The POST below stamps every attached unit: each unit's
+   card on the bookings page gets its own "★ Guest happy" / "⚠ Guest
+   concerns" / "✕ Guest NOT happy" badge (feedback on hover), and the
+   reservation's walking-distance panel shows the verdict + your written
+   feedback. NEVER skip this step — even a "yes, guest will be 100% happy"
+   verdict that is only written in your chat report leaves the units UNMARKED
+   in the app:
    POST ${apiRoot}/api/bookings/${input.reservationId}/guest-happy
    { "verdict": "<happy | concerns | unhappy>",
      "feedback": "<2-4 sentences, guest's-eye summary — e.g. 'Yes, guest will
        be happy: two 2BR condos in the same community they booked, bedding
        layout matches (1 King + 1 Queen each), and the finish level in the
-       photos is comparable to the original listing.'>",
+       photos is comparable to the original listing.' Or: 'No — guest will
+       NOT be happy: the bedding is off (2 Twins where they booked a King).'>",
      "source": "cowork" }
    Verdict guide: everything matches or is better → "happy"; mostly fine but
    something a guest would notice (older finish, different view, a Queen for
