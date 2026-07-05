@@ -100,6 +100,25 @@ export interface CoworkCheckoutPromptInput {
   cardFileHint?: string;
 }
 
+/** One ALREADY-ATTACHED unit the community-verify prompt should locate. */
+export interface CoworkVerifyUnit {
+  buyInId: number;
+  unitLabel: string;
+  listingUrl: string | null;
+  /** Whatever address the buy-in row already carries (often empty for Cowork attaches). */
+  unitAddress: string | null;
+}
+
+export interface CoworkCommunityVerifyPromptInput {
+  reservationId: string;
+  propertyName: string;
+  /** Configured community for the property, if known. */
+  community?: string | null;
+  units: CoworkVerifyUnit[];
+  /** App origin for the API calls, e.g. "https://app.example.com". Optional. */
+  baseUrl?: string;
+}
+
 function nightsBetween(checkIn: string, checkOut: string): number {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) return 0;
   const a = Date.parse(`${checkIn}T00:00:00Z`);
@@ -257,6 +276,18 @@ ${unitLines}
 
 Find ONE distinct listing per unit slot above (${listingsTotal}). Among listings that
 satisfy ALL of 1–5, pick the **cheapest**${distinctNote}
+${n === 1 ? "" : `
+PAIR RULE — the picks serve ONE guest group. All ${n === 2 ? "two" : n} picks must be in the
+SAME complex — ideally the SAME BUILDING. Two units in different complexes
+across town are NOT an acceptable pair even if each qualifies on its own.
+If you cannot find a qualifying same-complex pair, attach the closest
+qualifying pair ONLY if they are within a ~10-minute walk of each other, and
+LEAD your report with the pair's distance and both building names.
+
+PRICE SANITY — if the picks' prices differ by more than ~50% for the same
+bedroom count, re-verify the pricier one really is the cheapest qualifying
+option for its slot, and call the gap out in your report along with the
+next-cheapest alternatives you rejected and why.`}
 
 ## Where to search (in priority order)
 1. **Same community first.** Look for ${bothOrAll} inside **${primaryTarget}**
@@ -291,6 +322,7 @@ dialog). It is two API calls:
      "checkOut": "${input.checkOut}",
      "costPaid": "<total stay cost for this unit, e.g. 1820.00>",
      "airbnbListingUrl": "<the listing URL you found — VRBO/Booking.com/direct site ONLY, never airbnb.com; the field name is legacy>",
+     "unitAddress": "<the unit's exact street address, e.g. 1777 Ala Moana Blvd, Honolulu, HI — REQUIRED; you captured it to prove the location, and the app uses it to verify the units are in the same community>",
      "managementCompany": "<PM company name if known, else null>",
      "groundFloorStatus": "unknown",
      "status": "active",
@@ -304,7 +336,8 @@ dialog). It is two API calls:
    → If this returns 409 with "canForce": true, the units may be flagged as
      too far apart. Re-POST with { "buyInId": <id>, "force": true,
      "overrideNote": "<short reason these are an acceptable pair>" } ONLY if the
-     listings are genuinely in the same community/city per your research.
+     listings are genuinely in the same complex/community per your research —
+     never to push through units in different parts of the city.
 ${n === 1 ? "" : `
 Repeat steps 1–2 for each remaining unit slot.`}
 ## Done — report and STOP (do NOT book anything)
@@ -437,4 +470,71 @@ captured + screenshots taken), close every Chrome tab you opened during this
 task — listings, checkout pages, My Trips, all of them. Leave any tabs that
 were already open before you started untouched. Do NOT close a checkout tab
 mid-booking or before its confirmation is captured and recorded.`;
+}
+
+// Verify the attached buy-ins are genuinely in the same community — ideally
+// the SAME BUILDING (operator spec 2026-07-05: a combo pair serves one guest
+// group, so "same community" means same complex/building, and the app's
+// walking-distance panel can only show a real number once each buy-in has a
+// confirmed street address). READ-ONLY apart from PATCHing the confirmed
+// addresses back onto the buy-in rows — it never books, attaches, or detaches.
+export function buildCoworkCommunityVerifyPrompt(input: CoworkCommunityVerifyPromptInput): string {
+  const base = (input.baseUrl ?? "").replace(/\/+$/, "");
+  const apiRoot = base || "<APP_BASE_URL>";
+  const n = input.units.length;
+  const unitLines = input.units
+    .map(
+      (u, i) =>
+        `  ${i + 1}. buyInId ${u.buyInId} — ${u.unitLabel}\n` +
+        `     Listing: ${u.listingUrl?.trim() || "(no URL recorded — GET the buy-in record; if it has none, say so)"}\n` +
+        `     Address on file: ${u.unitAddress?.trim() || "(none — that's part of why this check exists)"}`,
+    )
+    .join("\n");
+
+  return `# Task: Verify the ${n === 1 ? "attached buy-in unit is" : `${n} attached buy-in units are`} in the same community${n === 1 ? " as the reservation's configured community" : " — ideally the SAME BUILDING"}
+
+You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
+This is a VERIFICATION task: locate each attached unit precisely and tell me
+whether ${n === 1 ? "it is inside the expected community" : "they belong together"}. Do NOT book anything, do NOT attach or
+detach anything, and do NOT modify any field other than the address/notes
+updates in step 3.
+
+## Reservation
+- Reservation ID: ${input.reservationId}
+- Property: ${input.propertyName}
+- Configured community: ${input.community?.trim() || "(none configured — judge against the property name and the units themselves)"}
+
+## Units to verify
+${unitLines}
+
+## Steps
+
+1. **Locate each unit exactly.** Open its listing page and pin down the
+   building/complex it is in and its full street address. Use every signal on
+   the page: the map pin (zoom in), the complex/resort name in the title or
+   description, host/PM details, and cross-check with a quick web search
+   (e.g. the complex name + city) when the listing is vague. If the listing
+   only reveals an approximate area, say so — do NOT guess an address.
+2. **Compare.** Determine, with evidence:
+   - Are ${n === 1 ? "the unit and the configured community the same place?" : "the units in the SAME BUILDING? If not, the same complex/community?"}
+   - The real walking distance between ${n === 1 ? "the unit and the community center" : "the units"} (use the map — building
+     to building, not city blocks apart "as the crow flies").
+   - Whether ${n === 1 ? "the unit matches" : "each unit matches"} the configured community above (or the
+     property's own resort name if no community is configured).
+3. **Record what you confirmed** so the app can show a real distance instead
+   of an estimate — for EACH unit where you confirmed the address:
+   PATCH ${apiRoot}/api/buy-ins/<buyInId>
+   { "unitAddress": "<the confirmed full street address>",
+     "notes": "<existing notes> · Community verified via Cowork: <building/complex name> — <same building / same complex / DIFFERENT community>" }
+4. **Report** (this is the deliverable):
+   - Per unit: building/complex name, confirmed street address, and the
+     evidence (map pin, listing text, web search result).
+   - The verdict in one line: **SAME BUILDING / same complex / same community
+     but different buildings (with walking distance) / DIFFERENT communities**.
+   - If ${n === 1 ? "the unit is NOT in the expected community" : "the units do NOT belong together (different complexes or an unacceptable distance for one guest group)"}, say so clearly and recommend
+     what I should do (e.g. re-run the find prompt for one slot) — but do NOT
+     detach or change anything yourself.
+
+Finally, TIDY UP THE BROWSER: close every Chrome tab you opened during this
+task. Leave any tabs that were already open before you started untouched.`;
 }
