@@ -89,7 +89,12 @@ Before making any changes:
   pins each attached unit's building/complex + street address (map pin, no guessing), gives a
   SAME BUILDING / same complex / same community / DIFFERENT verdict with real walking distance,
   and PATCHes the confirmed unitAddress back onto the buy-in so the walking-distance panel flips
-  to "address verified" with a real number. Verified: cowork-buyin-prompt 91/0 (incl. source
+  to "address verified" with a real number. 5TH FOLLOW-UP (operator): VRBO bot checks made the
+  agent SKIP VRBO — all three prompts now embed BOT_WALL_PROTOCOL: never skip/close on a bot
+  check; alert loudly (5× afplay Sosumi + say + osascript notification, repeating ~60s up to 15×)
+  so the operator hears it from another room; wait re-checking every ~30s (never reload — VRBO's
+  wall gets stickier; never self-solve); resume the exact step once solved; ~15 min unsolved →
+  pause with the tab open + a blocked-at report. Verified: cowork-buyin-prompt 91/0 (incl. source
   assertions on the routes/bookings fixes), full `npm test` exit 0, build clean, `npm run check`
   338 = baseline. FOLLOW-UP same day (operator): the
   checkout must be a SEPARATE prompt/button from the find prompt. buildCoworkBuyInPrompt reverted
