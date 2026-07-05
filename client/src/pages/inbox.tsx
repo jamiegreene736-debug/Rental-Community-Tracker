@@ -45,6 +45,7 @@ import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { bodyWithoutAttachmentUrls, collectPostAttachments, type PostAttachment } from "@shared/guesty-post-attachments";
+import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import { usePortalSession } from "@/lib/auth";
 import { useAssistantContext } from "@/lib/assistant-context";
 import { setInboxUnreadCount } from "@/lib/inboxUnreadStore";
@@ -2222,17 +2223,25 @@ function InboxBuyInPanel({
                         const attachments = parseAliasEmailAttachments(email.attachmentsJson);
                         return (
                           <>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="font-medium truncate">{email.subject}</span>
-                              <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
+                            <div className="flex items-start justify-between gap-2">
+                              <span className="text-xs font-semibold leading-snug">{email.subject}</span>
+                              <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="shrink-0 text-[10px]">
                                 {email.direction}
                               </Badge>
                             </div>
-                            <div className="text-[10px] text-muted-foreground truncate">
-                              {email.fromEmail} → {email.toEmail} · {email.status ?? "saved"}
+                            <div className="mt-1.5 space-y-0.5 border-b pb-2 text-[10px] text-muted-foreground">
+                              <div className="truncate">
+                                <span className="font-medium">From:</span> {email.fromEmail}
+                              </div>
+                              <div className="truncate">
+                                <span className="font-medium">To:</span> {email.toEmail}
+                              </div>
+                              <div>
+                                {formatEmailTimestampForDisplay(email.sentAt) ?? "—"} · {email.status ?? "saved"}
+                              </div>
                             </div>
-                            <div className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed">
-                              {email.body}
+                            <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed">
+                              {formatEmailBodyForDisplay(email.body)}
                             </div>
                             {attachments.length > 0 && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
