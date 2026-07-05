@@ -70,7 +70,28 @@ Before making any changes:
   FOLLOW-UP (operator): the find prompt must NEVER attach an airbnb.com link — qualification
   rule 5 (CHANNEL): attach only VRBO / Booking.com / direct booking (PM) site URLs; Airbnb is
   discovery-only (find the same unit's non-Airbnb page and attach that); Airbnb-only units do
-  not qualify. FOLLOW-UP same day (operator): the
+  not qualify. 4TH FOLLOW-UP (operator screenshot, Waikiki 2-unit attach — $1,975 owner-direct +
+  $4,074 Booking.com pair showing "0.4 mi apart · estimated from listing titles" when they should
+  share a building): DIAGNOSED — the 0.4 mi was FAKE: the Cowork buy-in had no unitAddress, so the
+  proximity estimator geocoded the boilerplate notes string to a city-centroid pin; ALSO
+  titleFromBuyInNoteText (routes.ts) had no branch for the Cowork note format, so
+  "Manually recorded buy-in for Unit" leaked in as the card's resort label, and the legend's
+  hardcoded "Buy-in #<token>" prefix made a scraped unit-number token look like a shared id.
+  FIXES: (1) find prompt now REQUIRES "unitAddress" in the create body + a PAIR RULE (multi-slot
+  picks must share a complex, ideally the SAME BUILDING; force-override is same-complex only) + a
+  PRICE SANITY rule (>~50% gap between same-BR picks must be re-verified + reported with rejected
+  alternatives); (2) routes.ts titleFromBuyInNoteText parses "Found via Cowork web search — <scope>
+  — <title>" (em/en-dash split, scope may contain hyphens) and rejects the bare boilerplate lead
+  (falls back to the honest resort-footprint estimate instead of geocoding junk);
+  commonResortNameFromTitles rejects record-keeping leads (manually/auto-filled/bought via/…);
+  legend prints "<slot> — unit #<token>"; (3) NEW "Verify community" button
+  (CoworkCommunityVerifyButton + buildCoworkCommunityVerifyPrompt) — read-only Cowork prompt that
+  pins each attached unit's building/complex + street address (map pin, no guessing), gives a
+  SAME BUILDING / same complex / same community / DIFFERENT verdict with real walking distance,
+  and PATCHes the confirmed unitAddress back onto the buy-in so the walking-distance panel flips
+  to "address verified" with a real number. Verified: cowork-buyin-prompt 91/0 (incl. source
+  assertions on the routes/bookings fixes), full `npm test` exit 0, build clean, `npm run check`
+  338 = baseline. FOLLOW-UP same day (operator): the
   checkout must be a SEPARATE prompt/button from the find prompt. buildCoworkBuyInPrompt reverted
   to search+attach-only (ends "This task ends at ATTACH … do NOT book"); new
   `buildCoworkCheckoutPrompt` (same shared file) is the book-only prompt — running it IS the

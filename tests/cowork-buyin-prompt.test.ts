@@ -5,6 +5,7 @@
 import {
   buildCoworkBuyInPrompt,
   buildCoworkCheckoutPrompt,
+  buildCoworkCommunityVerifyPrompt,
   resolveCoworkSearchTargets,
   DEFAULT_CARD_FILE_HINT,
   type CoworkBuyInPromptInput,
@@ -60,6 +61,29 @@ check("names community-first search", prompt.includes("Same community first"));
 check("names city-wide fallback", prompt.includes("city-wide search of Koloa, Hawaii"));
 check("forbids beyond city-wide", /STOP at city-wide/i.test(prompt) && /Do \*\*NOT\*\* expand beyond the city/.test(prompt));
 check("no nearby-city expansion", prompt.includes("no nearby towns"));
+
+// Pair proximity + price sanity (operator 2026-07-05, Waikiki incident:
+// $1,975 vs $4,074 picks that were supposed to share a building).
+check(
+  "find prompt: multi-slot picks must share a complex, ideally the building",
+  /PAIR RULE/.test(prompt) && /SAME complex — ideally the SAME BUILDING/.test(prompt) &&
+    /NOT an acceptable pair/.test(prompt),
+);
+check(
+  "find prompt: >50% price gap must be re-verified + reported",
+  /PRICE SANITY/.test(prompt) && /more than ~50%/.test(prompt),
+);
+check(
+  "find prompt: create body carries the unit's street address",
+  prompt.includes('"unitAddress"') && /exact street address/.test(prompt),
+);
+check(
+  "find prompt: force-override is same-complex only",
+  /same complex\/community per your research/.test(prompt) && /never to push through units in different parts of the city/.test(prompt),
+);
+// Single-unit prompt: no pair rule (there's no pair).
+const singleForPair = buildCoworkBuyInPrompt({ ...baseInput, units: [baseInput.units[0]] });
+check("single-unit find prompt has no PAIR RULE", !/PAIR RULE/.test(singleForPair));
 
 // Channel rule (operator 2026-07-05): never attach an Airbnb link.
 check(
@@ -190,6 +214,76 @@ check(
 // placeholder base URL when none provided.
 const noBaseCheckout = buildCoworkCheckoutPrompt({ ...checkoutInput, baseUrl: undefined });
 check("checkout: placeholder when no baseUrl", noBaseCheckout.includes("<APP_BASE_URL>/api/buy-ins"));
+
+// ── buildCoworkCommunityVerifyPrompt: the "Verify community" button ──────────
+const verify = buildCoworkCommunityVerifyPrompt({
+  reservationId: "abc123",
+  propertyName: "Waikiki 4BR Combo",
+  community: "Ilikai",
+  units: [
+    { buyInId: 51, unitLabel: "Unit A", listingUrl: "https://www.vrbo.com/1234567", unitAddress: "1777 Ala Moana Blvd, Honolulu, HI" },
+    { buyInId: 52, unitLabel: "Unit B", listingUrl: "https://www.booking.com/hotel/us/some-condo.html", unitAddress: null },
+  ],
+  baseUrl: "https://app.example.com",
+});
+check("verify: same-building framing for a pair", verify.includes("ideally the SAME BUILDING"));
+check(
+  "verify: read-only apart from address/notes recording",
+  /Do NOT book anything, do NOT attach or\s+detach anything/.test(verify),
+);
+check("verify: embeds both buy-ins", verify.includes("buyInId 51") && verify.includes("buyInId 52"));
+check("verify: shows the address on file + the missing one", verify.includes("1777 Ala Moana Blvd") && verify.includes("(none — that's part of why this check exists)"));
+check("verify: uses the map pin, forbids guessing", /map pin/.test(verify) && /do NOT guess an address/.test(verify));
+check(
+  "verify: records confirmed addresses via PATCH",
+  verify.includes("PATCH https://app.example.com/api/buy-ins/<buyInId>") && verify.includes('"unitAddress"'),
+);
+check(
+  "verify: verdict scale includes SAME BUILDING → DIFFERENT communities",
+  verify.includes("SAME BUILDING / same complex / same community") && verify.includes("DIFFERENT communities"),
+);
+check("verify: recommends, never detaches", /do NOT\s+detach or change anything yourself/.test(verify));
+check("verify: tidies up its tabs", /close every Chrome tab you opened/i.test(verify));
+check("verify: names the configured community", verify.includes("Configured community: Ilikai"));
+const verifySingle = buildCoworkCommunityVerifyPrompt({
+  reservationId: "r1",
+  propertyName: "Solo Condo",
+  community: null,
+  units: [{ buyInId: 9, unitLabel: "Unit", listingUrl: null, unitAddress: null }],
+});
+check(
+  "verify single: judges against configured community / property name",
+  verifySingle.includes("attached buy-in unit is") && verifySingle.includes("(none configured — judge against the property name and the units themselves)"),
+);
+
+// ── Source assertions: the walking-distance card must digest Cowork notes ────
+// (2026-07-05 Waikiki incident: boilerplate notes became the "resort" label,
+// and a junk geocode produced a fake 0.4 mi walk.) These lock the routes.ts /
+// bookings.tsx fixes; imports would drag the whole server up, so grep instead.
+{
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const routesSrc = fs.readFileSync(path.join(here, "../server/routes.ts"), "utf8");
+  const bookingsSrc = fs.readFileSync(path.join(here, "../client/src/pages/bookings.tsx"), "utf8");
+  check(
+    "routes: titleFromBuyInNoteText parses the Cowork note format",
+    /Found via Cowork web search\\s\*\[—–\]\[\^—–\]\*\[—–\]/.test(routesSrc),
+  );
+  check(
+    "routes: bare 'Manually recorded buy-in' lead is rejected as a title",
+    /\^Manually recorded buy-in\\b/.test(routesSrc),
+  );
+  check(
+    "routes: record-keeping boilerplate can never become the resort label",
+    /\^\(\?:manually\|auto-\?filled\|bought via\|attached\|recorded\)\\b/.test(routesSrc),
+  );
+  check(
+    "bookings: proximity legend no longer prints the token as 'Buy-in #'",
+    !bookingsSrc.includes("`Buy-in #${token} for") && bookingsSrc.includes("— unit #${token}"),
+  );
+}
 
 // ── single-unit reservation (Unit 3104, 2BR off a non-combo listing) ─────────
 const single = buildCoworkBuyInPrompt({

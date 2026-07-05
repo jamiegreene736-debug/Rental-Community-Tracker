@@ -47,7 +47,7 @@ import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@sh
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt } from "@shared/cowork-buyin-prompt";
+import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt } from "@shared/cowork-buyin-prompt";
 import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
@@ -1139,10 +1139,13 @@ function UnitProximityCard({ reservation }: { reservation: GuestyReservation }) 
   const displayUnitLabel = (unit: Extract<UnitProximityResponse, { status: "ready" }>["units"][number]) => {
     const token = String(unit.unitToken ?? "").trim();
     const slotLabel = String(unit.unitLabel ?? "").trim();
+    // The token is a UNIT NUMBER scraped from the listing title/notes, not the
+    // buy-in row id — the old "Buy-in #<token>" prefix read like an id and two
+    // slots could legitimately show the same number (2026-07-05 screenshot).
     if (token && slotLabel && !slotLabel.toLowerCase().includes(token.toLowerCase())) {
-      return `Buy-in #${token} for ${slotLabel}`;
+      return `${slotLabel} — unit #${token}`;
     }
-    return slotLabel || (token ? `Buy-in #${token}` : "Buy-in unit");
+    return slotLabel || (token ? `Unit #${token}` : "Buy-in unit");
   };
 
   const addressAlreadyShowsToken = (unit: Extract<UnitProximityResponse, { status: "ready" }>["units"][number]) => {
@@ -2379,6 +2382,94 @@ function CoworkCheckoutPromptButton({
           />
           <DialogFooter>
             <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-checkout-prompt-copy-${reservation._id}`}>
+              <Copy className="mr-1 h-3.5 w-3.5" />
+              Copy again
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+// "Verify community" — Cowork prompt that checks the ATTACHED buy-ins really
+// belong together (same building/complex — operator spec 2026-07-05, after a
+// Cowork attach where the pair "shouldn't be 0.4 mi apart"). Read-only apart
+// from PATCHing each unit's confirmed street address back onto the buy-in row,
+// which is what lets the walking-distance panel show a real measured distance
+// instead of a title-estimated fallback.
+function CoworkCommunityVerifyButton({
+  reservation,
+  propertyName,
+  community,
+  units,
+}: {
+  reservation: GuestyReservation;
+  propertyName: string;
+  community: string;
+  units: { buyInId: number; unitLabel: string; listingUrl: string | null; unitAddress: string | null }[];
+}) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const prompt = useMemo(
+    () =>
+      buildCoworkCommunityVerifyPrompt({
+        reservationId: reservation._id,
+        propertyName,
+        community,
+        units,
+        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
+      }),
+    [reservation, propertyName, community, units],
+  );
+  const copy = async () => {
+    try {
+      await navigator.clipboard?.writeText(prompt);
+      toast({ title: "Verify-community prompt copied", description: "Paste it into Cowork to confirm the attached units belong together." });
+    } catch {
+      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
+    }
+  };
+  return (
+    <>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 px-2 text-xs"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+          void copy();
+        }}
+        data-testid={`button-cowork-verify-community-${reservation._id}`}
+        title="Generate a Cowork prompt that verifies the attached unit(s) are in the buy-in community — same building/complex — and records each confirmed street address on the buy-in"
+      >
+        <Globe className="mr-1 h-3.5 w-3.5" />
+        Verify community
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Cowork verify-community prompt</DialogTitle>
+            <DialogDescription>
+              Copied to your clipboard. Paste this into Cowork — it opens each attached unit&apos;s
+              listing, pins down the exact building/complex and street address, and reports whether
+              the units are in the SAME BUILDING, the same complex, or different communities (with
+              real walking distance). It also saves each confirmed address onto the buy-in so the
+              walking-distance panel can show a measured number instead of an estimate. It never
+              books, attaches, or detaches anything.
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            readOnly
+            value={prompt}
+            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
+            data-testid={`textarea-cowork-verify-community-${reservation._id}`}
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <DialogFooter>
+            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-verify-community-copy-${reservation._id}`}>
               <Copy className="mr-1 h-3.5 w-3.5" />
               Copy again
             </Button>
@@ -10900,6 +10991,29 @@ export default function Bookings() {
                         {manualReservation && <ManualReservationContactPanel reservation={r} />}
                         {!manualReservation && <ReservationCancellationPolicyNotice reservation={r} />}
                         <div className="flex flex-wrap justify-end gap-2">
+                          {/* "Verify community" — Cowork prompt confirming the attached
+                              units are in the same building/complex; records confirmed
+                              addresses onto the buy-ins (operator spec 2026-07-05). */}
+                          {r.slots.some((s) => s.buyIn) && (
+                            <CoworkCommunityVerifyButton
+                              reservation={r}
+                              propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? "Vacation rental"}
+                              community={
+                                (selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community : undefined)
+                                ?? (reservationMeta ? PROPERTY_UNIT_CONFIGS[reservationMeta.propertyId]?.community : undefined)
+                                ?? r.slots.find((s) => s.community)?.community
+                                ?? ""
+                              }
+                              units={r.slots
+                                .filter((s): s is SlotInfo & { buyIn: BuyIn } => Boolean(s.buyIn))
+                                .map((s) => ({
+                                  buyInId: s.buyIn.id,
+                                  unitLabel: s.buyIn.unitLabel || s.unitLabel,
+                                  listingUrl: s.buyIn.airbnbListingUrl ?? null,
+                                  unitAddress: s.buyIn.unitAddress ?? null,
+                                }))}
+                            />
+                          )}
                           {/* "Checkout prompt" — SEPARATE from the find prompt (operator
                               spec 2026-07-05). Shown once at least one buy-in is attached
                               and not yet booked; builds the book-only Cowork prompt from

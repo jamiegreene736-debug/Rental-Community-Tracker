@@ -2602,13 +2602,26 @@ function titleFromBuyInNoteText(notes: string | null | undefined): string {
   // + relocation message as the community).
   const combo = raw.match(/Manually attached from combo\b[^—–-]*[—–-][^—–-]*[—–-]\s*([^·]+)/i);
   if (combo?.[1]?.trim()) return combo[1].trim();
+  // Cowork attach: "Manually recorded buy-in for <label>. Found via Cowork web
+  // search — <resort or city scope> — <TITLE>." (shared/cowork-buyin-prompt.ts).
+  // The scope segment can contain hyphens ("city-wide"), so split on em/en
+  // dashes only — the template uses "—". Without this branch the whole
+  // boilerplate note became the "title", and commonResortNameFromTitles turned
+  // the shared prefix into the fake resort label "Manually recorded buy-in for
+  // Unit" on the walking-distance card (2026-07-05 Waikiki incident).
+  const cowork = raw.match(/Found via Cowork web search\s*[—–][^—–]*[—–]\s*([^·]+)/i);
+  if (cowork?.[1]?.trim()) return cowork[1].trim().replace(/\.$/, "");
   const m =
     raw.match(/(?:Auto-filled from|Bought via)\s+[^—–-]+[—–-]\s*([^·]+)/i) ||
     raw.match(/^(?:Auto-filled from|Bought via)\s+([^·]+)/i);
   if (m?.[1]?.trim()) return m[1].trim();
-  // Last resort: the first segment, but never the bare combo-notes prefix.
+  // Last resort: the first segment, but never a bare manual-notes prefix —
+  // returning "" makes buildAddressGuess fall back to the resort footprint
+  // (honest "resort footprint estimate") instead of geocoding boilerplate
+  // text to an arbitrary city-centroid pin.
   const lead = (raw.split(" · ")[0] ?? "").trim();
   if (/^Manually attached from combo\b/i.test(lead)) return "";
+  if (/^Manually recorded buy-in\b/i.test(lead)) return "";
   return lead;
 }
 
@@ -2651,6 +2664,10 @@ function commonResortNameFromTitles(titles: Array<string | null | undefined>): s
   // resort guard). When this returns null the caller keeps the configured name.
   if (/^\d+\s*(?:br|bd|ba|bedrooms?|baths?)?\b/i.test(name)) return null;
   if (/^(?:gorgeous|beautiful|stunning|luxury|luxurious|spacious|cozy|charming|amazing|lovely|modern|new(?:ly)?|updated|renovated|private|oceanfront|beachfront|ocean|beach|sleeps?|bedrooms?|condos?|villas?|homes?|townhomes?|units?|studio)\b/i.test(name)) return null;
+  // Record-keeping boilerplate is never a resort: two manual/Cowork buy-ins
+  // share the "Manually recorded buy-in for Unit" prefix, which would (and
+  // did) become the walking-distance card's "within <resort>" label.
+  if (/^(?:manually|auto-?filled|bought via|attached|recorded)\b/i.test(name)) return null;
   return name;
 }
 
