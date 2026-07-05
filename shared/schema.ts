@@ -1345,6 +1345,10 @@ export const quoSmsMessages = pgTable("quo_sms_messages", {
   direction: text("direction").notNull(), // inbound | outbound
   body: text("body").notNull(),
   status: text("status"),
+  // JSON-serialized [{url, type?}] — MMS photos/files the guest texted back
+  // (e.g. the driver's-license selfie for ID verification). Body may be ""
+  // when the guest sends a photo with no text.
+  mediaUrls: text("media_urls"),
   rawPayload: text("raw_payload"),
   sentAt: timestamp("sent_at").defaultNow().notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
