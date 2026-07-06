@@ -2027,6 +2027,108 @@ function TemplateEditor({
   );
 }
 
+interface InboxAlternativePage {
+  token: string;
+  url: string;
+  channel: string | null;
+  guestName: string | null;
+  checkIn: string | null;
+  checkOut: string | null;
+  createdAt: string | null;
+  messageSentAt: string | null;
+  messageChannel: string | null;
+  opened: boolean;
+  firstOpenedAt: string | null;
+  lastOpenedAt: string | null;
+  openCount: number;
+  expiresAt: string | null;
+  unitCount: number;
+  unitTitles: string[];
+}
+
+// Surfaces the alternative-unit guest page (`/alternatives/:token`) for the
+// selected reservation so the operator can copy the URL straight into a text to
+// the guest — instead of digging the truncated "[url:...]" out of the sent
+// message bubble. Renders nothing when the reservation has no alternative page
+// (which is most of them), so it's safe to mount for every conversation.
+function InboxAlternativePagePanel({ reservationId }: { reservationId: string }) {
+  const { toast } = useToast();
+  const { data } = useQuery<{ page: InboxAlternativePage | null }>({
+    queryKey: ["/api/booking-alternatives/for-reservation", reservationId],
+    enabled: !!reservationId,
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/booking-alternatives/for-reservation/${encodeURIComponent(reservationId)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    },
+    staleTime: 30_000,
+  });
+  const page = data?.page ?? null;
+  if (!page) return null;
+
+  const copyUrl = async () => {
+    try {
+      // Throw (not silently no-op) when the Clipboard API is unavailable —
+      // `navigator.clipboard?.writeText` would short-circuit to undefined and
+      // `await undefined` resolves, falsely reporting success. Falling into the
+      // catch shows the honest "copy failed" prompt to use the field instead.
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(page.url);
+      toast({ title: "Alternative page link copied", description: "Paste it into a text or message to the guest." });
+    } catch {
+      toast({ title: "Copy failed", description: "Select the link in the field and copy it manually.", variant: "destructive" });
+    }
+  };
+
+  return (
+    <div data-testid="panel-inbox-alternative-page">
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1 flex items-center gap-1.5">
+        <Link2 className="h-3 w-3" /> Alternative unit page
+      </div>
+      <div className="rounded-lg border bg-muted/30 p-2.5 space-y-2">
+        <div className="text-[11px] text-muted-foreground">
+          Guest page for {page.unitCount} unit{page.unitCount === 1 ? "" : "s"}
+          {page.unitTitles.length > 0 ? ` · ${page.unitTitles.join(", ")}` : ""}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <input
+            readOnly
+            aria-label="Alternative unit guest page URL"
+            value={page.url}
+            onFocus={(e) => e.currentTarget.select()}
+            className="flex-1 min-w-0 h-7 px-2 text-[11px] font-mono border rounded bg-background"
+            data-testid="input-inbox-alternative-url"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2 text-[11px] shrink-0"
+            onClick={copyUrl}
+            data-testid="button-copy-inbox-alternative-url"
+          >
+            <Copy className="h-3 w-3 mr-1" /> Copy link
+          </Button>
+        </div>
+        <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+          <a
+            href={`${page.url}?preview=1`}
+            target="_blank"
+            rel="noreferrer"
+            className="underline inline-flex items-center gap-1"
+          >
+            <ExternalLink className="h-3 w-3" /> Open preview
+          </a>
+          <span className="text-right">
+            {page.messageSentAt
+              ? `Sent ${formatDate(page.messageSentAt)}${page.opened ? ` · opened${page.openCount ? ` ${page.openCount}×` : ""} ✓` : " · not opened yet"}`
+              : "Not sent to guest yet"}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function InboxBuyInPanel({
   reservationId,
   guestName,
@@ -5545,6 +5647,10 @@ export default function InboxPage() {
                         </div>
                         {guest.isReturning && <Badge variant="secondary" className="text-[10px] mt-1">Returning guest</Badge>}
                       </div>
+
+                      {!isAgent && reservationId && (
+                        <InboxAlternativePagePanel reservationId={reservationId} />
+                      )}
 
                       {callEvents.length > 0 && (
                         <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-red-950" data-testid="card-conversation-calls">

@@ -24,7 +24,7 @@ import {
   rentalAgreements,
   queueJobEvents as queueJobEventRows,
 } from "@shared/schema";
-import type { BuyIn } from "@shared/schema";
+import type { BuyIn, BookingAlternativePage } from "@shared/schema";
 import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
@@ -44,6 +44,7 @@ import {
   stripListingTitleCruftFromCommunityLabel,
 } from "@shared/relocation-scenario";
 import { upgradeListingPhotoUrlResolution } from "@shared/listing-photo-resolution";
+import { selectInboxAlternativePage, summarizeAlternativePagePayload } from "@shared/alternative-page-inbox";
 import { proxiedGuestPhotoUrl, registerGuestPhotoRoute } from "./guest-photo-upscale";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import {
@@ -11116,6 +11117,46 @@ Requirements:
       });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to read tracking", message: err?.message ?? String(err) });
+    }
+  });
+
+  // The existing alternative-unit guest page for a SINGLE reservation, so the
+  // Guest Inbox can surface the /alternatives/:token URL for one-click copy —
+  // the operator pastes it into a text to the guest instead of hunting for the
+  // truncated "[url:...]" inside the sent message bubble. Returns the most
+  // recently SENT page (the link the guest actually has), falling back to the
+  // most recently CREATED page when none was sent yet. `page` is null when the
+  // reservation has no alternative page. Operator-only (under /api).
+  app.get("/api/booking-alternatives/for-reservation/:reservationId", async (req, res) => {
+    try {
+      const reservationId = normalizeAlternativeText(req.params.reservationId, 120);
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      const pages: BookingAlternativePage[] = await storage.getBookingAlternativePagesByReservation(reservationId).catch(() => []);
+      const chosen = selectInboxAlternativePage(pages);
+      if (!chosen) return res.json({ page: null });
+      const summary = summarizeAlternativePagePayload(chosen.payload);
+      return res.json({
+        page: {
+          token: chosen.token,
+          url: `${agreementBaseUrl(req)}/alternatives/${chosen.token}`,
+          channel: chosen.channel ?? null,
+          guestName: chosen.guestName ?? null,
+          checkIn: chosen.checkIn ?? null,
+          checkOut: chosen.checkOut ?? null,
+          createdAt: chosen.createdAt,
+          messageSentAt: chosen.messageSentAt,
+          messageChannel: chosen.messageChannel ?? null,
+          opened: !!chosen.firstOpenedAt,
+          firstOpenedAt: chosen.firstOpenedAt,
+          lastOpenedAt: chosen.lastOpenedAt,
+          openCount: chosen.openCount ?? 0,
+          expiresAt: chosen.expiresAt,
+          unitCount: summary.unitCount,
+          unitTitles: summary.unitTitles,
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to read alternative page", message: err?.message ?? String(err) });
     }
   });
 

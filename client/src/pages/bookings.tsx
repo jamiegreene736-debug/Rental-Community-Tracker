@@ -17215,6 +17215,9 @@ function RelocateGuestDialog({
     onSuccess: (data) => {
       setCreatedPage({ url: data.url, token: data.token });
       setMessage(data.relocationMessage || "");
+      // The inbox surfaces this URL per-reservation (InboxAlternativePagePanel);
+      // invalidate its query so a page created here shows up there on return.
+      queryClient.invalidateQueries({ queryKey: ["/api/booking-alternatives/for-reservation"] });
     },
     onError: (e: any) => toast({ title: "Could not prepare message", description: e?.message ?? String(e), variant: "destructive" }),
   });
@@ -17257,6 +17260,9 @@ function RelocateGuestDialog({
       // Refresh the bookings-row "Guest messaged ✓" badge immediately so the
       // operator sees the recorded confirmation without reopening anything.
       queryClient.invalidateQueries({ queryKey: ["/api/booking-alternatives/sent-status"] });
+      // Also refresh the inbox per-reservation URL panel (it prefers the SENT
+      // page, and messageSentAt/opened status just changed).
+      queryClient.invalidateQueries({ queryKey: ["/api/booking-alternatives/for-reservation"] });
       if (data?.verified === true) {
         toast({ title: `Message sent through ${channelLabel}`, description: "Delivered and confirmed — tracking whether the guest opens the link." });
       } else {
