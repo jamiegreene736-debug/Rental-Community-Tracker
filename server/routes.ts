@@ -44,6 +44,7 @@ import {
   stripListingTitleCruftFromCommunityLabel,
 } from "@shared/relocation-scenario";
 import { upgradeListingPhotoUrlResolution } from "@shared/listing-photo-resolution";
+import { proxiedGuestPhotoUrl, registerGuestPhotoRoute } from "./guest-photo-upscale";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import {
   collectReservationPaymentIssues,
@@ -9971,6 +9972,10 @@ Requirements:
     }
   });
 
+  // Signed upscaling proxy for guest-page photos (see server/guest-photo-upscale.ts).
+  // Registered before the SPA catch-all, public in server/auth.ts like /alternatives/.
+  registerGuestPhotoRoute(app);
+
   app.get("/alternatives/:token", async (req, res) => {
     try {
       const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -10151,10 +10156,13 @@ Requirements:
       const safeGuestPhotoUrl = (value: unknown): string => {
         const url = String(value ?? "").trim().slice(0, 1400);
         if (!/^(?:https?:\/\/|\/)/i.test(url)) return "";
-        // Render-time sharpness upgrade: pages persisted with CDN THUMBNAIL
-        // variants (rw=297 srcset picks from the sidecar harvest) self-heal to
-        // the high-res variant of the same photo. Pure URL rewrite, no latency.
-        return upgradeListingPhotoUrlResolution(url);
+        // Render-time sharpness, two tiers: (1) CDN THUMBNAIL variants (rw=297
+        // srcset picks from the sidecar harvest) rewrite to the CDN's own
+        // high-res original — pure URL rewrite; (2) everything else external
+        // routes through the signed /guest-photo upscaling proxy, which
+        // upscales genuinely-small sources (418x270 PM-site originals) and
+        // passes large ones through untouched. Both heal EXISTING pages.
+        return proxiedGuestPhotoUrl(upgradeListingPhotoUrlResolution(url));
       };
       const communityPhotoUrls = Array.from(new Set(alternatives.flatMap((item: any) =>
         Array.isArray(item?.communityPhotos) ? item.communityPhotos.map(safeGuestPhotoUrl).filter(Boolean) : [],
@@ -34969,7 +34977,7 @@ Return ONLY compact JSON with this exact shape:
       newBedrooms?: number | null;
       newSourceUrl: string;
     },
-    opts: { useSidecar?: boolean } = {},
+    opts: { useSidecar?: boolean; fallbackPhotoUrls?: string[] } = {},
   ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string; bedrooms?: number | null; bathrooms?: number | null; bedroomsFound?: number; coverage?: { bedroomsExpected: number | null; bedroomsFound: number; bedroomsShortfall: number; bathroomsExpected: number | null; bathroomsFound: number; bathroomsShortfall: number } }> => {
     const url = swap.newSourceUrl;
     const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
@@ -34988,7 +34996,24 @@ Return ONLY compact JSON with this exact shape:
     try {
       const listingFacts: ListingFacts = {};
       const scrapeOpts = opts.useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR;
-      const scraped = await scrapeListingPhotos(url, undefined, listingFacts, scrapeOpts);
+      let scraped = await scrapeListingPhotos(url, undefined, listingFacts, scrapeOpts);
+      // FIND-PHASE PHOTO PASS-THROUGH (2026-07-06): the commit re-scrape can
+      // fail even when the FIND phase scraped the same gallery minutes
+      // earlier — the Mauna Lani commit hit Apify 403 + ScrapingBee monthly
+      // quota + a 0-photo sidecar run simultaneously while the find phase had
+      // 40 photos in hand. When the caller supplies the find phase's scraped
+      // photo URLs (CDN links — they download fine from Railway even when the
+      // listing PAGE is bot-walled), fall back to them instead of failing the
+      // whole replacement. Fresh-scrape-first is kept: a live scrape reflects
+      // gallery changes since the find.
+      if (!scraped.length && Array.isArray(opts.fallbackPhotoUrls) && opts.fallbackPhotoUrls.length > 0) {
+        const urls = opts.fallbackPhotoUrls
+          .filter((u): u is string => typeof u === "string" && /^https?:\/\//i.test(u));
+        if (urls.length > 0) {
+          console.warn(`[unit-swap rescrape] ${folder}: re-scrape returned 0 photos for ${url} — falling back to ${urls.length} find-phase photo URLs`);
+          scraped = urls.map((photoUrl) => ({ url: photoUrl, title: "", source: "", sourceLink: url }));
+        }
+      }
       if (!scraped.length) {
         console.warn(`[unit-swap rescrape] ${folder}: scraper returned 0 photos for ${url}`);
         return { ok: false, folder, savedCount: 0, error: "Replacement listing returned 0 photos" };
@@ -35206,7 +35231,14 @@ Return ONLY compact JSON with this exact shape:
   });
 
   app.post("/api/unit-swaps", async (req, res) => {
-    const { photoFolder: _legacyPhotoFolder, ...swapBody } = req.body as any;
+    // photoUrls: optional find-phase scraped gallery URLs — the hydration
+    // fallback when the commit-time re-scrape comes up empty (all scrape
+    // tiers can degrade at once; the find already proved the gallery).
+    // Stripped before schema parse like the legacy photoFolder field.
+    const { photoFolder: _legacyPhotoFolder, photoUrls: rawPhotoUrls, ...swapBody } = req.body as any;
+    const fallbackPhotoUrls = Array.isArray(rawPhotoUrls)
+      ? rawPhotoUrls.filter((u: unknown): u is string => typeof u === "string" && /^https?:\/\//i.test(u)).slice(0, 120)
+      : [];
     const parsed = insertUnitSwapSchema.safeParse(swapBody);
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid unit swap data", details: parsed.error.flatten() });
@@ -35249,7 +35281,7 @@ Return ONLY compact JSON with this exact shape:
     // The bounded 90s residential-IP sidecar tier (fires only when the
     // datacenter scrape comes up short) recovers exactly this; the
     // manual-URL swap route above has run with it since it shipped.
-    const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data, { useSidecar: true });
+    const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data, { useSidecar: true, fallbackPhotoUrls });
     if (!hydrated.ok) {
       return res.status(502).json({
         error: `Replacement unit found, but its photos could not be saved: ${hydrated.error ?? "unknown error"}. Choose a different replacement so the builder does not reuse duplicate photos.`,

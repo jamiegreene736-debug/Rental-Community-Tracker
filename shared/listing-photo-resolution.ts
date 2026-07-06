@@ -18,6 +18,19 @@ export const GUEST_PHOTO_TARGET_WIDTH = 1200;
 
 const VRBO_MEDIA_HOST_RE = /(?:^|\.)(?:media\.vrbo\.com|trvl-media\.com)$/i;
 
+/** True for the VRBO/Expedia media CDN family — hosts whose full-resolution
+ * variant we can request directly (see upgradeListingPhotoUrlResolution), so
+ * they never need the /guest-photo upscaling proxy. */
+export function isVrboMediaFamilyUrl(url: string | null | undefined): boolean {
+  const raw = String(url ?? "").trim();
+  if (!/^https?:\/\//i.test(raw)) return false;
+  try {
+    return VRBO_MEDIA_HOST_RE.test(new URL(raw).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function upgradeListingPhotoUrlResolution(url: string | null | undefined): string {
   const raw = String(url ?? "").trim();
   if (!raw) return "";

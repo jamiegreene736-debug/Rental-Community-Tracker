@@ -66,6 +66,32 @@ Before making any changes:
   id-less mail). Verified: guest-inbox-sync + email-body-format + buy-in-email-sync +
   arrival-email-extraction suites green, full `npm test` exit 0, build clean, `npm run check` 338 =
   baseline.
+- 2026-07-06 (FOLLOW-UP: /guest-photo signed upscaling proxy — PM-site originals really upscaled):
+  Operator screenshot: Unit B (VRBO, rw=1200 rewrite) sharp, Unit A (waikikibeachrentals.com,
+  genuine 418x270 originals — no larger variant exists) unchanged. SHIPPED the real-upscale leg:
+  `GET /guest-photo` (server/guest-photo-upscale.ts + pure shared/guest-photo-proxy.ts, 23 tests) —
+  the /alternatives renderer routes external non-VRBO-family photos through it at RENDER time
+  (existing pages heal; VRBO/trvl-media bypass; relative /photos/ untouched). Endpoint: HMAC sig
+  (GUEST_PHOTO_SIGN_KEY || ADMIN_SECRET) + SSRF host guard even with valid sig → fetch (12s/25MB,
+  browser UA) → sharp probe → >=900px wide streams ORIGINAL bytes untouched; smaller → lanczos3 to
+  1200w + unsharp + JPEG q82; LRU 80 + 7d immutable cache; ANY failure 302s to the source (never a
+  broken guest image). Smoked locally: 418x270→1200x775, 1ms cached, 404 bad sig, 404 signed
+  169.254.169.254, 302 on missing source, 2738px passthrough untouched. Classical interpolation +
+  sharpening by DESIGN, not generative SR (no invented detail, no storage pipeline — recomputed on
+  demand, deploy-safe). "/guest-photo" added to auth PUBLIC_PATH_EXACT (see AGENTS.md Decision Log
+  + the inline NOTE in server/auth.ts). Verified: 23/0 new, full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline.
+- 2026-07-06 (find→commit photo pass-through — "two units still can't find replacements", part 2):
+  Both re-runs FOUND units under the sidecar rescue but died at commit: the re-scrape hit Apify 403 +
+  ScrapingBee MONTHLY QUOTA EXHAUSTED (1000/1000) + a 0-photo sidecar run at once, while the find
+  phase had 40 photos in hand minutes earlier; the all-burned message then lied ("already used by
+  another listing"). SHIPPED: POST /api/unit-swaps accepts optional photoUrls (find-phase gallery,
+  stripped pre-parse, capped 120) and hydrateUnitSwapPhotoFolder falls back to them when the fresh
+  re-scrape returns 0 — both callers (orchestrator c.photos[], UnitReplacementFlow result.photos)
+  send them, so a find-proven gallery can never be lost at commit; the orchestrator's all-burned
+  error now reports real burn reasons (N already used; M gallery unscrapeable). NOTE: ScrapingBee's
+  monthly quota is exhausted — Zillow scrapes ride Apify+sidecar until reset. auto-replace-job 58/0.
+
 
 - 2026-07-06 (guest-page photo SHARPNESS — CDN full-res, not AI upscaling): Operator asked whether
   scraped unit photos can be upscaled to look sharp. GROUND TRUTH (live Thien Tran page): the VRBO

@@ -194,7 +194,14 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     /status === 502 && \/photo\/i\.test/.test(orch));
   const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
   check("POST /api/unit-swaps hydrates with the sidecar scrape tier (bot-walled galleries recover)",
-    /hydrateUnitSwapPhotoFolder\(parsed\.data, \{ useSidecar: true \}\)/.test(routes));
+    /hydrateUnitSwapPhotoFolder\(parsed\.data, \{ useSidecar: true, fallbackPhotoUrls \}\)/.test(routes));
+  // 2026-07-06: the commit re-scrape can fail while ALL scrape tiers are
+  // degraded (Apify 403 + ScrapingBee quota + 0-photo sidecar run) even
+  // though the FIND phase scraped the gallery minutes earlier — the found
+  // unit's photo URLs pass through so a proven gallery can never be lost
+  // between find and commit.
+  check("hydration falls back to the find phase's photo URLs when the re-scrape is empty",
+    routes.includes("fallbackPhotoUrls") && /falling back to \$\{urls\.length\} find-phase photo URLs/.test(routes));
 }
 
 // ── draft (negative-id) unit identity ─────────────────────────────────────────

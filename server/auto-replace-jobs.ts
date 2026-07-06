@@ -300,16 +300,26 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
       const unit = target.unit;
       touch(record, { phase: "committing", message: "Recording the swap and pulling the new unit's photos…" });
       let committed: { newUnitLabel: string; newAddress: string; photoFolder: string } | null = null;
+      // Per-reason burn counts so the all-burned failure message reports what
+      // ACTUALLY happened — a photo-hydration burn used to read as "already
+      // used by another listing" (Makahuena 2026-07-06: the single found
+      // unit's gallery was gone, but the failure blamed a duplicate).
+      let burnedInUse = 0;
+      let burnedPhotos = 0;
       for (;;) {
         const candidate = pickCommitCandidate(units as Array<{ url?: unknown }>, record.attemptedUrls);
         if (!candidate) {
+          const reasons = [
+            burnedInUse > 0 ? `${burnedInUse} already used by another listing` : null,
+            burnedPhotos > 0 ? `${burnedPhotos} had a gallery that could not be scraped (bot-walled or photos taken down)` : null,
+          ].filter(Boolean).join("; ");
           touch(record, {
             phase: "failed",
             error: units.length === 0
               // Resumed mid-commit but the find results are gone (store evicted
               // >24h later) — the search never said "no units", so don't claim it.
               ? "The search results were lost in a server restart — click Replace photos to run a fresh search."
-              : "Every found unit was rejected at commit (already used by another listing). Re-run the search.",
+              : `Every found option failed at commit${reasons ? ` (${reasons})` : ""}. Re-run the search.`,
           });
           return;
         }
@@ -331,8 +341,15 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           newBedrooms: typeof c.bedrooms === "number" ? c.bedrooms : unit.bedrooms,
           newSourceUrl: url,
           thumbnailUrl: Array.isArray(c.photos) ? String((c.photos[0] as any)?.url ?? "") || null : null,
+          // The find phase's scraped gallery — hydration's fallback when the
+          // commit-time re-scrape hits a bot-wall/quota outage (all scrape
+          // tiers can degrade at once; the find already proved this gallery).
+          photoUrls: Array.isArray(c.photos)
+            ? (c.photos as Array<{ url?: unknown }>).map((p) => String(p?.url ?? "")).filter((u) => /^https?:\/\//i.test(u))
+            : [],
         }, 300_000); // hydration may use the bounded 90s sidecar scrape tier
         if (status === 409) {
+          burnedInUse += 1;
           touch(record, { attemptedUrls: [...record.attemptedUrls, url], message: "Candidate already in use — trying the next option…" });
           continue;
         }
@@ -342,6 +359,7 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
         // the next option (the Pili Mai 9K case: option 1's Redfin gallery
         // came back empty while option 2 scraped fine).
         if (status === 502 && /photo/i.test(String(data?.error ?? ""))) {
+          burnedPhotos += 1;
           touch(record, {
             attemptedUrls: [...record.attemptedUrls, url],
             message: "Candidate's photos could not be scraped — trying the next option…",

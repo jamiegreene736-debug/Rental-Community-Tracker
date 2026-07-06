@@ -566,6 +566,9 @@ export function UnitReplacementFlow({
         newBedrooms: result.bedrooms,
         newSourceUrl: result.url,
         thumbnailUrl: result.photos[0]?.url || null,
+        // Find-phase gallery URLs — the server's hydration fallback when the
+        // commit-time re-scrape hits a bot-wall/quota outage.
+        photoUrls: result.photos.map((p) => p.url).filter(Boolean),
       });
       if (!resp.ok) {
         const err = await resp.json();
