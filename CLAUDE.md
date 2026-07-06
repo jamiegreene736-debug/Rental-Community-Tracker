@@ -43,6 +43,22 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-06 (guest-page photo SHARPNESS — CDN full-res, not AI upscaling): Operator asked whether
+  scraped unit photos can be upscaled to look sharp. GROUND TRUTH (live Thien Tran page): the VRBO
+  photos were OUR OWN fault — the sidecar harvest captures srcset THUMBNAILS
+  (media.vrbo.com …?impolicy=resizecrop&rw=297) while the CDN serves the identical photo at
+  2738x1825; the PM-site photos (waikikibeachrentals) are genuinely 418x270 with no larger variant
+  published. SHIPPED: pure `shared/listing-photo-resolution.ts`
+  (`upgradeListingPhotoUrlResolution`, 17 tests) rewrites verified-CDN thumbnail URLs to rw=1200
+  (VRBO/Expedia trvl-media family ONLY — deliberately no invented variants on unverified hosts,
+  which could 404 on a guest page; relative /photos/ + unknown hosts pass through; never
+  downgrades). Wired at BOTH chokepoints in routes.ts: `safeGuestPhotoUrl` (GET — every EXISTING
+  page self-heals at render, pure string rewrite, no latency) and page-build hydration post-vision
+  + `pageCommunityPhotos` (new pages persist high-res). Dedupe unaffected (normalizeVrboPhotoKey
+  strips the query). TRUE AI super-resolution for the genuinely-tiny PM photos was assessed and
+  deliberately NOT built (needs download→upscale→store/serve infra and invents detail on a
+  guest-facing page) — operator can ask if wanted.
+
 - 2026-07-06 (FOLLOW-UP: same-community detection WITHOUT verdicts + guest-page fixes — Thien Tran /
   Ilikai live incident): Operator screenshot of a live /alternatives page showed the DIFFERENT-community
   copy ("1-minute drive from your old community") for two units in the SAME BUILDING (1777 Ala Moana

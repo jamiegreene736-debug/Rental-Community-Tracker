@@ -43,6 +43,7 @@ import {
   sameCommunityLabelMatch,
   stripListingTitleCruftFromCommunityLabel,
 } from "@shared/relocation-scenario";
+import { upgradeListingPhotoUrlResolution } from "@shared/listing-photo-resolution";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import {
   collectReservationPaymentIssues,
@@ -10149,7 +10150,11 @@ Requirements:
         : "";
       const safeGuestPhotoUrl = (value: unknown): string => {
         const url = String(value ?? "").trim().slice(0, 1400);
-        return /^(?:https?:\/\/|\/)/i.test(url) ? url : "";
+        if (!/^(?:https?:\/\/|\/)/i.test(url)) return "";
+        // Render-time sharpness upgrade: pages persisted with CDN THUMBNAIL
+        // variants (rw=297 srcset picks from the sidecar harvest) self-heal to
+        // the high-res variant of the same photo. Pure URL rewrite, no latency.
+        return upgradeListingPhotoUrlResolution(url);
       };
       const communityPhotoUrls = Array.from(new Set(alternatives.flatMap((item: any) =>
         Array.isArray(item?.communityPhotos) ? item.communityPhotos.map(safeGuestPhotoUrl).filter(Boolean) : [],
@@ -10552,6 +10557,10 @@ Requirements:
         );
         if (localCommunityPhotos.length > 0) pageCommunityPhotos = localCommunityPhotos;
       }
+      // Persist high-res CDN variants for the community gallery too (the
+      // harvest hands thumbnail srcset URLs); render-time upgrade remains the
+      // backstop for pages already built.
+      pageCommunityPhotos = pageCommunityPhotos.map(upgradeListingPhotoUrlResolution);
       const sharedCommunityPhotoKeys = new Set(pageCommunityPhotos.map(normalizeVrboPhotoKey));
       const hydratedAlternatives = await Promise.all(alternatives.map(async (item: any, index: number) => {
         const sourceUrl = normalizeAlternativeUrl(item?.url);
@@ -10620,7 +10629,10 @@ Requirements:
         // error it keeps everything and the renderer's tail trim remains the
         // backstop; `photoFilter.filtered` tells the renderer to skip that trim.
         const photoFilter = await filterNonRentalUnitPhotos(mergedPhotos);
-        const photos = photoFilter.kept;
+        // Persist the HIGH-RES CDN variant of each kept photo (the harvest
+        // captures thumbnail srcset picks like rw=297) — the guest page then
+        // embeds sharp originals instead of upscaled thumbnails.
+        const photos = photoFilter.kept.map(upgradeListingPhotoUrlResolution);
         const photosVisionFiltered = photoFilter.filtered;
         const photosVisionVersion = photoFilter.filtered ? UNIT_PHOTO_VISION_VERSION : 0;
         const clientTitle = normalizeAlternativeText(item?.title, 160);
