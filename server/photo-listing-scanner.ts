@@ -70,6 +70,10 @@ import {
   parseStreetCityState,
   type AddressPlatformKey,
 } from "@shared/address-listing-logic";
+import {
+  selectDeepFetchCandidates,
+  matchAddressInText,
+} from "@shared/address-page-match";
 import { isDuplicateHash } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
@@ -187,12 +191,37 @@ const PHOTO_LISTING_SCAN_INTERVAL_DAYS = (() => {
 export const PHOTO_LISTING_SCAN_MAX_AGE_MS = PHOTO_LISTING_SCAN_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
 const LENS_TIMEOUT_MS = 45_000;
 const VERIFY_TIMEOUT_MS = 20_000;
+// Address-leg deep-fetch (recall booster): read the FULL page text of a
+// listing whose snippet didn't surface the street. Bounded + fail-open so it
+// can never break the cheap path. Kill with PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED=1.
+const ADDRESS_PAGE_FETCH_TIMEOUT_MS = 12_000;
+const ADDRESS_PAGE_MAX_BYTES = 3_000_000;
+const ADDRESS_PAGE_FETCH_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED ?? "").trim(),
+);
+// Max full-page reads PER FOLDER across all three platforms (bounds latency/cost).
+const ADDRESS_DEEP_FETCH_MAX = (() => {
+  const n = Number(process.env.PHOTO_LISTING_ADDRESS_DEEPFETCH_MAX);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 4;
+})();
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 const STANDALONE_DRAFT_NO_UNIT_TOKEN = "__standalone_draft_no_unit_token__";
 
 export type PlatformStatus = "clean" | "found" | "unknown";
 export type Match = { photoUrl: string; listingUrl: string; title: string; source: string };
-export type AddressMatch = { platform: AddressPlatformKey; url: string; title: string; snippet: string };
+// `matchType`/`evidence` are OPTIONAL and additive: legacy rows (and every
+// snippet-path match) omit them, so stored JSON and existing readers are
+// unaffected. Only the deep-fetch recall pass stamps them ("page-text").
+export type AddressMatch = {
+  platform: AddressPlatformKey;
+  url: string;
+  title: string;
+  snippet: string;
+  matchType?: "snippet" | "page-text";
+  evidence?: string;
+};
 type LensCallResult = { ok: true; rows: any[] } | { ok: false; error: string };
 type PhotoCandidate = {
   filename: string;
@@ -415,6 +444,32 @@ async function callGoogleTextSearch(query: string): Promise<LensCallResult> {
   }
 }
 
+// Best-effort full-page fetch for the address deep-fetch pass. Returns the raw
+// HTML (size-capped) or null on ANY failure — a bot wall (403), a JS shell, a
+// timeout, or a non-text response all resolve to null so the caller simply
+// skips that candidate and the cheap snippet result stands unchanged. This is
+// what keeps the recall pass strictly additive: it can only ever ADD a match.
+async function fetchListingPageText(url: string): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ADDRESS_PAGE_FETCH_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, {
+      signal: controller.signal,
+      redirect: "follow",
+      headers: { "user-agent": ADDRESS_PAGE_FETCH_UA, "accept-language": "en-US,en;q=0.9" },
+    });
+    if (!resp.ok) return null;
+    const ct = (resp.headers.get("content-type") ?? "").toLowerCase();
+    if (ct && !/text|html|json|xml/.test(ct)) return null;
+    const body = await resp.text();
+    return body.length > ADDRESS_PAGE_MAX_BYTES ? body.slice(0, ADDRESS_PAGE_MAX_BYTES) : body;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // Address-on-OTA leg. For each platform, one `site:host "street" "city"`
 // query, then keep only real listing-page URLs that surface the street.
 // Our own authorized listings are suppressed, and (unless this is a
@@ -427,6 +482,8 @@ async function checkAddressOnOtas(
     authorizedUrls: Awaited<ReturnType<typeof getAuthorizedChannelUrls>>;
     allowUnverifiedStandalone: boolean;
     verifyUnit: (url: string) => Promise<boolean>;
+    // Injectable for tests; defaults to the real bounded, fail-open fetch.
+    fetchPageText?: (url: string) => Promise<string | null>;
   },
 ): Promise<{
   statuses: Record<AddressPlatformKey, PlatformStatus>;
@@ -438,6 +495,9 @@ async function checkAddressOnOtas(
   const matches: AddressMatch[] = [];
   const errors: string[] = [];
   let anySucceeded = false;
+  const fetchPageText = deps.fetchPageText ?? fetchListingPageText;
+  const deepFetchEnabled = !PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED && ADDRESS_DEEP_FETCH_MAX > 0;
+  let deepFetchBudget = ADDRESS_DEEP_FETCH_MAX; // shared across all platforms this folder
 
   for (const platform of ADDRESS_PLATFORMS) {
     const query = buildAddressQuery(platform.site, ctx.street, ctx.city);
@@ -459,6 +519,29 @@ async function checkAddressOnOtas(
         if (!ok) continue;
       }
       kept.push({ platform: platform.key, url: c.url, title: c.title, snippet: c.snippet });
+    }
+    // Deep-fetch recall pass (ADDITIVE, fail-open, bounded). The snippet path
+    // above is untouched; here we read the FULL page text of listing URLs whose
+    // snippet did NOT surface the street (selectDeepFetchCandidates = the rows
+    // filterAddressSerpRows dropped). A confirmed exact-street hit still passes
+    // the SAME authorized-URL + unit-number gates before it can flip a platform
+    // to "found", so precision is unchanged — this can only recover misses.
+    if (deepFetchEnabled && deepFetchBudget > 0) {
+      const deepCandidates = selectDeepFetchCandidates(serp.rows as any[], platform, ctx.street);
+      for (const c of deepCandidates) {
+        if (deepFetchBudget <= 0) break;
+        if (isAuthorizedUrl(c.url.toLowerCase(), deps.authorizedUrls)) continue; // our own listing
+        deepFetchBudget--;
+        const html = await fetchPageText(c.url);
+        if (!html) continue; // bot wall / timeout / JS shell → skip, snippet result stands
+        const m = matchAddressInText(html, { street: ctx.street, city: ctx.city });
+        if (!m.matched) continue; // only an EXACT street hit counts (matchType "street")
+        if (!deps.allowUnverifiedStandalone) {
+          const ok = await deps.verifyUnit(c.url);
+          if (!ok) continue; // sibling owner at the same resort street — not our unit
+        }
+        kept.push({ platform: platform.key, url: c.url, title: c.title, snippet: c.snippet, matchType: "page-text", evidence: m.evidence });
+      }
     }
     statuses[platform.key] = kept.length > 0 ? "found" : "clean";
     matches.push(...kept.slice(0, 5));
