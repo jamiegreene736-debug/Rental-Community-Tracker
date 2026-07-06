@@ -26,8 +26,14 @@ async function throwIfResNotOk(res: Response) {
     let message = raw;
     try {
       const parsed = JSON.parse(raw);
-      if (typeof parsed?.error === "string" && parsed.error.trim()) message = parsed.error;
-      else if (typeof parsed?.message === "string" && parsed.message.trim()) message = parsed.message;
+      const errorLabel = typeof parsed?.error === "string" ? parsed.error.trim() : "";
+      const detail = typeof parsed?.message === "string" ? parsed.message.trim() : "";
+      // Server routes respond { error: <short label>, message: <actual cause> }.
+      // Show BOTH — the label alone ("Failed to send SMS") hides the reason
+      // and made the 2026-07-06 SMS incident undiagnosable from the toast.
+      if (errorLabel && detail && detail !== errorLabel) message = `${errorLabel} — ${detail}`;
+      else if (errorLabel) message = errorLabel;
+      else if (detail) message = detail;
     } catch {
       // Plain-text errors are fine; sanitize below.
     }

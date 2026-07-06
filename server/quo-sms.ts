@@ -535,7 +535,35 @@ export async function sendQuoSms(input: {
     rawPayload: JSON.stringify(data),
     sentAt: new Date(),
   };
-  return storage.createQuoSmsMessage(row);
+  // The text is ALREADY DELIVERED at this point — the mirror row is
+  // bookkeeping. A DB failure here must not bubble up as "Failed to send
+  // SMS": the operator would retry and double-text the guest (2026-07-06
+  // incident — the missing provider_message_id unique index made this
+  // insert fail on every send while the guest received each text).
+  try {
+    return await storage.createQuoSmsMessage(row);
+  } catch (err: any) {
+    console.error(
+      `[quo-sms] SMS ${providerMessageId} to ${to} was DELIVERED but the mirror row failed to persist (thread history will miss it): ${err?.message ?? err}`,
+    );
+    return {
+      id: -1,
+      providerMessageId,
+      conversationId: input.conversationId,
+      reservationId: input.reservationId ?? null,
+      guestName: input.guestName ?? null,
+      guestPhone: to,
+      fromNumber: from,
+      toNumber: to,
+      direction: "outbound",
+      body,
+      status: row.status ?? null,
+      mediaUrls: null,
+      rawPayload: row.rawPayload ?? null,
+      sentAt: row.sentAt ?? new Date(),
+      createdAt: new Date(),
+    } as QuoSmsMessage;
+  }
 }
 
 // MMS media attached to a Quo/OpenPhone message webhook. Defensive on shape:
