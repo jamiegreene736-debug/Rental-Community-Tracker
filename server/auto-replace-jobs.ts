@@ -341,6 +341,12 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           newBedrooms: typeof c.bedrooms === "number" ? c.bedrooms : unit.bedrooms,
           newSourceUrl: url,
           thumbnailUrl: Array.isArray(c.photos) ? String((c.photos[0] as any)?.url ?? "") || null : null,
+          // The find phase's scraped gallery — hydration's fallback when the
+          // commit-time re-scrape hits a bot-wall/quota outage (all scrape
+          // tiers can degrade at once; the find already proved this gallery).
+          photoUrls: Array.isArray(c.photos)
+            ? (c.photos as Array<{ url?: unknown }>).map((p) => String(p?.url ?? "")).filter((u) => /^https?:\/\//i.test(u))
+            : [],
         }, 300_000); // hydration may use the bounded 90s sidecar scrape tier
         if (status === 409) {
           burnedInUse += 1;
