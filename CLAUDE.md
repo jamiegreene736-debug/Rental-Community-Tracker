@@ -43,6 +43,36 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-06 (top-markets search → one-click combo pipeline overhaul): Operator asked to find MORE
+  condo communities, fix the two chronic constraints (units not on the major OTAs; usable street
+  addresses), integrate Claude/Claude-vision verification (same community, right bedroom-photo
+  count, not listed on Airbnb/VRBO/Booking), and make the queue one-click-and-done. SHIPPED on
+  `claude/top-markets-vacation-rental-search-jeqtxn`: (1) RECALL — `researchCommunitiesForCity`
+  `discoverBeyondSeeds` opt (sweep/scan-job/cache-refresh pass it): curated HI markets no longer
+  short-circuit to seeds-only (seeds still merge + win dedupe; missing-key falls back to seeds),
+  mainland sweep research upgraded Haiku→Sonnet with world-knowledge 3→10 / results 10→15, two
+  round-up queries added, prompt defaults availableBedrooms [2,3] when confident-but-unsure (empty
+  array HID real resorts from the sweep grid). (2) OTA-CLEAN FIX — strict combo mode never returns
+  an OTA-listed "best" gallery on exhaustion (`rejectOtaListedFallback`); failure messages count
+  OTA-rejected candidates; `COMBO_PHOTO_OTA_ATTEMPTS` env-tunable (default 8). (3) ADDRESS —
+  discovery ladder extended: maps → reverse-geocode → NEW portal-SERP slug rescue
+  (`selectSerpListingAddressCandidate`: title match or ≥2-listing snippet consensus; fixes the
+  "maps indexes the resort under another name" class) → NEW Claude web-search rescue
+  (deterministically gated by `acceptClaudeAddressCandidate`: numbered street + state + resort
+  named in cited evidence; kill `BULK_COMBO_ADDRESS_CLAUDE=0`). (4) POST-SAVE OTA DEEP-SCAN GATE —
+  new awaited `"ota-scan"` step (fresh drafts, kill `COMBO_POST_OTA_SCAN=0`) deep-scans
+  `draft-<id>-unit-a/b` with the dashboard/cron engine and rolls back + skips on a positive found
+  (fail-open on infra; events ota-scan-clean/found/infra; also seeds the Photos cell). Claude-vision
+  same-community + bedroom-count enforcement already existed (photo-community gate) — untouched.
+  (5) ONE-CLICK — sweep selections >12 auto-queue the next batch when the current job completes
+  (`sweepAutoContinueArmedRef`; disarmed on failure/cancel); progress bar gains
+  photo-community(90%)/ota-scan(94%) phases. Verified: combo-ota-scan-gate 11/0 (new),
+  community-address-discovery 37/0 (+12), full `npm test` exit 0, build clean, `npm run check`
+  338 = baseline. Could NOT live-smoke SearchAPI/Claude legs (no keys) — post-deploy: sweep a
+  curated HI market and expect NEW non-seed resorts; queue >12 and watch batches chain; item events
+  show "ota-scan-clean". See AGENTS.md "Bulk combo-listing post-save OTA deep-scan gate" + the
+  2026-07-06 Decision Log line.
+
 - 2026-07-05 (draft rows get the Replace photos button — Waikoloa/Mauna Lani missing-button report):
   Operator screenshot showed flagged DRAFT rows (draft-12-unit-b = Waikoloa Beach Villas Unit B,
   draft-13-unit-a = Mauna Lani Point) with NO Replace photos button — resolveReplacePhotosUnits

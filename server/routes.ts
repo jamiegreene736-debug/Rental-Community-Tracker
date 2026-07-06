@@ -37,6 +37,7 @@ import {
   resolveDraftUnitBedrooms,
 } from "@shared/draft-unit-bedrooms";
 import { summarizeBulkPricingGuestyPush } from "@shared/bulk-pricing-push-logic";
+import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import {
   collectReservationPaymentIssues,
   PAYMENT_WARNING_WINDOW_DAYS,
@@ -272,6 +273,7 @@ import {
 import { runPhotoListingCheckForFolders, runAddressBackfill, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
 import { evaluateComboPhotoCommunityGate, type ComboPhotoGateDecision } from "@shared/combo-photo-community-gate";
+import { evaluateComboOtaScanGate, type ComboOtaScanGateDecision } from "@shared/combo-ota-scan-gate";
 import {
   buildPhotoCommunityCheckRequestForProperty,
   cancelBulkPhotoCommunityJob,
@@ -3276,42 +3278,10 @@ function mergeFacts(primary: ListingFacts, fallback: ListingFacts): ListingFacts
   };
 }
 
-function parseListingAddressFromUrl(url: string): string | null {
-  const titleCase = (value: string) => value.replace(/\b[a-z]/g, (c) => c.toUpperCase());
-  const clean = (value: string): string | null => {
-    const decoded = decodeURIComponent(value)
-      .replace(/[_-]+/g, " ")
-      .replace(/\b(?:FL|HI|CA|TX|NY|GA|SC|NC|AL|MS|LA|WA|OR|CO|AZ|NV)\b/gi, " ")
-      .replace(/\b\d{5}(?: \d{4})?\b/g, " ")
-      .replace(/\bM\d{4,}(?: \d+)?\b/gi, " ")
-      .replace(/\bzpid\b.*$/i, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    const m = decoded.match(
-      /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{1,5}[A-Za-z]?)?)\b/i,
-    );
-    return m?.[1] ? titleCase(m[1].trim()) : null;
-  };
-
-  const zillowMatch = url.match(/\/homedetails\/([^/]+)\//i);
-  if (zillowMatch) return clean(zillowMatch[1]);
-
-  const realtorMatch = url.match(/\/realestateandhomes-detail\/([^/?#]+)/i);
-  if (realtorMatch) {
-    const slug = realtorMatch[1];
-    const firstSegment = slug.split("_")[0];
-    return clean(firstSegment) ?? clean(slug);
-  }
-
-  const redfinMatch = url.match(/redfin\.com\/[A-Z]{2}\/[^/]+\/([^/]+)(?:\/unit-([^/]+))?\/home\//i);
-  if (redfinMatch) {
-    const street = redfinMatch[1];
-    const unit = redfinMatch[2] ? ` Unit ${redfinMatch[2]}` : "";
-    return clean(`${street}${unit}`);
-  }
-
-  return null;
-}
+// Moved VERBATIM to shared/listing-url-address.ts (2026-07-06) so
+// community-address-discovery.ts can reuse it for the portal-SERP address rescue.
+// Imported below; keep ONE implementation.
+// (see import of parseListingAddressFromUrl at the top of this file)
 
 function parseListingAddressFromText(text: string): string | null {
   const cleaned = text.replace(/&[#a-z0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
@@ -35579,7 +35549,8 @@ Return ONLY compact JSON with this exact shape:
     abortKey?: string,
     signal?: AbortSignal,
     onOtaCheck?: (message: string) => void | Promise<void>,
-  ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean; proof: UnitPhotoResolverProof; bedrooms?: number | null }> => {
+    options: { rejectOtaListedFallback?: boolean } = {},
+  ): Promise<{ photos: Array<{ url: string; label?: string }>; sourceUrl: string | null; relaxed: boolean; proof: UnitPhotoResolverProof; bedrooms?: number | null; otaListedSkips?: number }> => {
     const seenUrls = new Set(blockedUrls.filter(Boolean));
     // Bedroom count scraped from the listing facts (Zillow/Realtor/Redfin/Homes
     // expose `facts.bedrooms`). In manual mode the unit has a url but no requested
@@ -35607,6 +35578,13 @@ Return ONLY compact JSON with this exact shape:
     };
     const maxOtaAttempts = unit?.url ? 1 : MAX_COMBO_PHOTO_OTA_ATTEMPTS;
     let otaSkips = 0;
+    // True when the CURRENT `best` candidate failed the OTA preflight. On
+    // attempt exhaustion the legacy behavior returned that best anyway — which,
+    // in the STRICT bulk queue, could publish a combo whose photos are KNOWN to
+    // be live on Airbnb/VRBO/Booking. Strict callers pass
+    // `rejectOtaListedFallback` so an OTA-tainted best is returned EMPTY instead
+    // (the unit reads as starved → the fallback ladder / resort skip owns it).
+    let bestFailedOta = false;
     while (otaSkips < maxOtaAttempts) {
       let otaRejectedThisRound = false;
       for (const attempt of attempts) {
@@ -35634,6 +35612,7 @@ Return ONLY compact JSON with this exact shape:
         const duplicatePhotos = avoidPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(avoidPhotos, photos);
         if (photos.length > best.photos.length && !duplicateSource && !duplicatePhotos) {
           best = { photos, sourceUrl, relaxed: attempt.relaxed, proof };
+          bestFailedOta = false;
         }
         if (sourceUrl) seenUrls.add(sourceUrl);
         if (proof.status === "rejected" || duplicateSource || duplicatePhotos) continue;
@@ -35658,6 +35637,7 @@ Return ONLY compact JSON with this exact shape:
         console.warn(
           `[combo-photo-fetch] ${item.communityName} ${unit?.title ?? "unit"}: photos listed on ${listed} — ${preflight.reason}; trying next listing (${otaSkips + 1}/${MAX_COMBO_PHOTO_OTA_ATTEMPTS})`,
         );
+        if (best.photos === photos || (!!sourceUrl && best.sourceUrl === sourceUrl)) bestFailedOta = true;
         otaSkips += 1;
         otaRejectedThisRound = true;
         await onOtaCheck?.(`Listed on ${listed}; searching for different unit photos`);
@@ -35665,7 +35645,21 @@ Return ONLY compact JSON with this exact shape:
       }
       if (!otaRejectedThisRound) break;
     }
-    return { ...best, bedrooms: scrapedBedroomsSeen };
+    // URL mode (manual "Add a community") is exempt: the operator chose that
+    // exact unit, so its photos flow through and the post-save OTA deep-scan
+    // gate delivers the verdict on the persisted gallery instead.
+    if (bestFailedOta && options.rejectOtaListedFallback && !unit?.url) {
+      await onOtaCheck?.(`All ${otaSkips} candidate listing(s) are already on an OTA — treating this unit as unsourced`);
+      return {
+        photos: [],
+        sourceUrl: null,
+        relaxed: best.relaxed,
+        proof: buildUnitPhotoResolverProof({ photos: [], sourceUrl: null, requestedBedrooms: unit?.bedrooms ?? null, relaxedSearch: best.relaxed }),
+        bedrooms: scrapedBedroomsSeen,
+        otaListedSkips: otaSkips,
+      };
+    }
+    return { ...best, bedrooms: scrapedBedroomsSeen, otaListedSkips: otaSkips };
   };
   const runComboPhotoFetchItem = async (
     job: ComboPhotoFetchJob,
@@ -35721,10 +35715,18 @@ Return ONLY compact JSON with this exact shape:
     let firstPhotos: Array<{ url: string; label?: string }> = [];
     let firstSourceUrl: string | null = null;
     let firstProof: UnitPhotoResolverProof | null = null;
+    // STRICT mode must never fall back to an OTA-listed candidate's photos on
+    // attempt exhaustion — the whole point of a combo is two OTA-clean units.
+    const otaFetchOptions = { rejectOtaListedFallback: strictDistinctBothUnits };
+    // Total candidates dropped for being live on Airbnb/VRBO/Booking across every
+    // search this item ran — surfaced in the strict failure message so an
+    // OTA-saturated resort reads differently from an empty-inventory one.
+    let otaListedSkipsTotal = 0;
     if (canComboPhotoFetchUnit(item, item.unit1)) {
       const first = await runWithHeartbeat("Searching for Unit A photos", () =>
-        fetchComboPhotosForUnit(job, item, item.unit1, [], [], abortKey, signal, otaProgress),
+        fetchComboPhotosForUnit(job, item, item.unit1, [], [], abortKey, signal, otaProgress, otaFetchOptions),
       );
+      otaListedSkipsTotal += first.otaListedSkips ?? 0;
       firstPhotos = first.photos;
       firstSourceUrl = first.sourceUrl;
       firstProof = first.proof;
@@ -35747,8 +35749,9 @@ Return ONLY compact JSON with this exact shape:
     if (canComboPhotoFetchUnit(item, item.unit2)) {
       const skipUrls = firstSourceUrl && !item.unit2?.url ? [firstSourceUrl] : [];
       const second = await runWithHeartbeat("Searching for Unit B photos", () =>
-        fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos, abortKey, signal, otaProgress),
+        fetchComboPhotosForUnit(job, item, item.unit2, skipUrls, firstPhotos, abortKey, signal, otaProgress, otaFetchOptions),
       );
+      otaListedSkipsTotal += second.otaListedSkips ?? 0;
       let secondPhotos = second.photos;
       if (!item.unit2?.url && firstPhotos.length > 0 && photoSetLooksSameForComboPhotoJob(firstPhotos, secondPhotos)) {
         secondPhotos = [];
@@ -35832,13 +35835,15 @@ Return ONLY compact JSON with this exact shape:
         const remixUnit2: ComboPhotoFetchUnit = { ...item.unit2, bedrooms: split.unit2Beds, title: `Unit B — ${split.unit2Beds}BR` };
         const reA = await runWithHeartbeat(
           `No distinct ${origUnit1Beds}BR+${origUnit2Beds}BR units — trying a ${totalNote} ${split.unit1Beds}BR + ${split.unit2Beds}BR combo (searching ${split.unit1Beds}BR)`,
-          () => fetchComboPhotosForUnit(job, item, remixUnit1, [], [], abortKey, signal, otaProgress),
+          () => fetchComboPhotosForUnit(job, item, remixUnit1, [], [], abortKey, signal, otaProgress, otaFetchOptions),
         );
+        otaListedSkipsTotal += reA.otaListedSkips ?? 0;
         if (reA.photos.length < MIN_INDEPENDENT_UNIT_PHOTOS) continue;
         const reB = await runWithHeartbeat(
           `${totalNote} ${split.unit1Beds}BR + ${split.unit2Beds}BR combo — searching a distinct ${split.unit2Beds}BR second unit`,
-          () => fetchComboPhotosForUnit(job, item, remixUnit2, reA.sourceUrl ? [reA.sourceUrl] : [], reA.photos, abortKey, signal, otaProgress),
+          () => fetchComboPhotosForUnit(job, item, remixUnit2, reA.sourceUrl ? [reA.sourceUrl] : [], reA.photos, abortKey, signal, otaProgress, otaFetchOptions),
         );
+        otaListedSkipsTotal += reB.otaListedSkips ?? 0;
         let reBPhotos = reB.photos;
         if (reA.photos.length > 0 && photoSetLooksSameForComboPhotoJob(reA.photos, reBPhotos)) reBPhotos = [];
         if (reBPhotos.length < MIN_INDEPENDENT_UNIT_PHOTOS) continue;
@@ -35920,6 +35925,9 @@ Return ONLY compact JSON with this exact shape:
     if (proofFailures.length > 0) {
       if (strictDistinctBothUnits && triedComboTypes.length > 0) {
         proofFailures.push(`no combination type produced two independently-photographed units (tried ${Array.from(new Set(triedComboTypes)).join(", ")})`);
+      }
+      if (strictDistinctBothUnits && otaListedSkipsTotal > 0) {
+        proofFailures.push(`${otaListedSkipsTotal} candidate listing(s) were rejected because their photos or address are already live on Airbnb/VRBO/Booking (OTA-clean rule)`);
       }
       const err = new Error(`Photo discovery failed proof checks: ${proofFailures.join(" | ")}`) as Error & { bulkComboNoRetry?: boolean };
       // STRICT: ladder-exhaustion is deterministic — re-running the same combos
@@ -36538,6 +36546,10 @@ Return ONLY compact JSON with this exact shape:
     // Generous headroom; a real timeout here is treated as INFRA (publish), never
     // a resort skip (see the gate block in runBulkComboListingItem).
     "photo-community": 6 * 60 * 1000,
+    // Deep Lens scan (full deduped gallery + address leg) of BOTH fresh draft
+    // unit folders. ~30 Lens calls + ~6 SERPs per folder; a timeout is INFRA
+    // (publish), never a resort skip.
+    "ota-scan": 10 * 60 * 1000,
   };
   const hydrateBulkComboListingItem = (item: BulkComboListingItem) => {
     const community = item.community || {};
@@ -37410,10 +37422,73 @@ Return ONLY compact JSON with this exact shape:
     } else {
       fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" }).catch(() => null);
     }
-    void runPhotoListingCheckForFolders([
-      `draft-${draftId}-unit-a`,
-      `draft-${draftId}-unit-b`,
-    ]).catch(() => null);
+    // ── Post-save OTA deep-scan GATE (fresh drafts only) ─────────────────────
+    // The discovery-time OTA preflight screens 3 photos per candidate; this step
+    // runs the SAME deep scanner the dashboard/weekly cron use (full deduped
+    // gallery + address leg) over the just-persisted unit folders and SKIPS the
+    // resort when either unit's photos are POSITIVELY found on Airbnb/VRBO/
+    // Booking. `unknown`/no-result/timeout = INFRA → publish (fail-open), same
+    // posture as the photo-community gate. The scan also writes the normal
+    // photo_listing_checks rows, so the new draft's dashboard Photos cell is
+    // populated immediately. Disable with COMBO_POST_OTA_SCAN=0. Reused drafts
+    // keep the legacy fire-and-forget scan (we never roll those back).
+    if (!reusedExistingDraft && process.env.COMBO_POST_OTA_SCAN !== "0") {
+      const scanFolders = [`draft-${draftId}-unit-a`, `draft-${draftId}-unit-b`];
+      let otaGate: ComboOtaScanGateDecision | null = null;
+      try {
+        otaGate = await runBulkComboListingStep(job, item, "ota-scan", "Deep-scanning Airbnb/VRBO/Booking for the new unit photos", async (): Promise<ComboOtaScanGateDecision> => {
+          const scanResults = await runPhotoListingCheckForFolders(scanFolders, {
+            maxPhotos: PHOTO_AUDIT_MAX_PHOTOS,
+            pauseMs: 750,
+          });
+          return evaluateComboOtaScanGate(
+            scanResults.map((r) => ({
+              folder: r.folder,
+              label: r.folder.endsWith("-unit-a") ? "Unit A" : r.folder.endsWith("-unit-b") ? "Unit B" : r.folder,
+              airbnbStatus: r.airbnbStatus,
+              vrboStatus: r.vrboStatus,
+              bookingStatus: r.bookingStatus,
+            })),
+            scanFolders,
+          );
+        });
+      } catch (e: any) {
+        await queueEvent("bulk-combo-listing", job.id, "ota-scan-error",
+          `Post-save OTA deep scan could not complete (${queueErrorLabel(e, "error")}); publishing without the gate`,
+          { itemKey: item.id, level: "warn" });
+        otaGate = null;
+      }
+      if (otaGate?.decision === "skip") {
+        await storage.deleteCommunityDraft(draftId).catch((delErr: any) =>
+          console.warn(`[bulk-combo-listings] could not roll back OTA-flagged draft ${draftId}: ${delErr?.message ?? delErr}`));
+        item.draftId = null;
+        item.phase = "done";
+        item.status = "completed";
+        item.error = null;
+        item.message = `Skipped — post-save OTA scan: ${otaGate.reasons.join("; ")}`;
+        item.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+        await queueEvent("bulk-combo-listing", job.id, "ota-scan-found", item.message, {
+          itemKey: item.id, level: "warn", meta: { reasons: otaGate.reasons },
+        });
+        await persistBulkComboListingSnapshot(job);
+        return;
+      }
+      if (otaGate?.infra) {
+        await queueEvent("bulk-combo-listing", job.id, "ota-scan-infra",
+          `Post-save OTA scan could not fully verify${otaGate.reasons[0] ? ` (${otaGate.reasons[0]})` : ""}; publishing without the gate`,
+          { itemKey: item.id, level: "warn" });
+      } else if (otaGate) {
+        await queueEvent("bulk-combo-listing", job.id, "ota-scan-clean",
+          "Post-save OTA deep scan clean — neither unit's photos were found on Airbnb, VRBO, or Booking.com",
+          { itemKey: item.id, level: "info" });
+      }
+    } else {
+      void runPhotoListingCheckForFolders([
+        `draft-${draftId}-unit-a`,
+        `draft-${draftId}-unit-b`,
+      ]).catch(() => null);
+    }
     await enqueueCommunityPricingRefreshJob(draftId).catch((e: any) => {
       item.message = `Draft saved; pricing queue warning: ${e?.message ?? e}`;
     });
@@ -44180,7 +44255,9 @@ Return ONLY compact JSON with this exact shape:
         job.updatedAt = Date.now();
         try {
           const researched = await withTopMarketScanTimeout(
-            researchCommunitiesForCity(market.city, market.state),
+            // Sweep/cache-refresh context: discover NEW resorts beyond the
+            // curated seeds (seeds still merge in and win the dedupe).
+            researchCommunitiesForCity(market.city, market.state, "combo", { discoverBeyondSeeds: true }),
             `${market.city}, ${market.state} research`,
           );
           const annotatedCommunities = job.cacheRefresh
@@ -44329,7 +44406,9 @@ Return ONLY compact JSON with this exact shape:
       emit({ type: "market-start", city, state, tag, estimatedComboLow, estimatedComboHigh, index: i + 1, total: markets.length });
       try {
         const annotatedCommunities = await annotateCommunitiesWithComboInventory(
-          await researchCommunitiesForCity(city, state),
+          // Sweep context: discover NEW resorts beyond the curated seeds (seeds
+          // still merge in and win the dedupe — see researchCommunitiesForCity).
+          await researchCommunitiesForCity(city, state, "combo", { discoverBeyondSeeds: true }),
           city,
           state,
         );

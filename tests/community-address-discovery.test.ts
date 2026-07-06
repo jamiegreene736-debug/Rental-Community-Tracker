@@ -6,9 +6,12 @@
 import {
   selectDiscoveredStreet,
   selectCoordinateFallbackCandidate,
+  selectSerpListingAddressCandidate,
+  acceptClaudeAddressCandidate,
   titleMatchesResort,
   distinctiveResortTokens,
   type MapsAddressCandidate,
+  type SerpListingResult,
 } from "../server/community-address-discovery";
 
 let pass = 0;
@@ -141,6 +144,85 @@ check("okina street candidate is now selected (was rejected by the char class)",
 // Precision preserved: folding does not let a DIFFERENT resort through the gate.
 check("okina fold does not match a different resort",
   titleMatchesResort("Kona Aliʻi", "Kona Makai") === false);
+
+// ── selectSerpListingAddressCandidate: the portal-SERP address rescue ─────────
+// Tier 1: a TITLE-matched Zillow detail URL yields its slug street immediately.
+{
+  const results: SerpListingResult[] = [
+    { title: "Kahaluu Reef 205, Kailua-Kona", link: "https://www.zillow.com/homedetails/78-6721-Alii-Dr-APT-205-Kailua-Kona-HI-96740/12345_zpid/", snippet: "Oceanfront condo" },
+  ];
+  const hit = selectSerpListingAddressCandidate(results, "Kahaluu Reef", "q");
+  check("SERP: title-matched detail URL yields the slug street",
+    hit?.street === "78 6721 Alii Dr", hit);
+}
+// Tier 1 precision: a wrong-resort title never matches, even with a clean street.
+check("SERP: wrong-resort title is rejected",
+  selectSerpListingAddressCandidate(
+    [{ title: "Kona Makai #302", link: "https://www.zillow.com/homedetails/75-6106-Alii-Dr-APT-302-Kailua-Kona-HI-96740/1_zpid/", snippet: "nice" }],
+    "Kahaluu Reef", "q",
+  ) === null);
+// A non-detail URL (no parseable slug) yields nothing even with a matching title.
+check("SERP: non-detail URL yields nothing",
+  selectSerpListingAddressCandidate(
+    [{ title: "Kahaluu Reef Condos For Sale", link: "https://www.zillow.com/kailua-kona-hi/kahaluu-reef_att/", snippet: "" }],
+    "Kahaluu Reef", "q",
+  ) === null);
+// Tier 2: snippet-only matches ("minutes from <resort>" neighbors) need >=2
+// DISTINCT listings agreeing on the same street root.
+{
+  const one: SerpListingResult[] = [
+    { title: "78-6721 Alii Dr APT 101, Kailua-Kona", link: "https://www.zillow.com/homedetails/78-6721-Alii-Dr-APT-101-Kailua-Kona-HI-96740/2_zpid/", snippet: "Condo in the Kahaluu Reef complex" },
+  ];
+  check("SERP: a single snippet-only match is NOT enough",
+    selectSerpListingAddressCandidate(one, "Kahaluu Reef", "q") === null);
+  const two: SerpListingResult[] = [
+    ...one,
+    { title: "78-6721 Alii Dr APT 304, Kailua-Kona", link: "https://www.zillow.com/homedetails/78-6721-Alii-Dr-APT-304-Kailua-Kona-HI-96740/3_zpid/", snippet: "Kahaluu Reef oceanfront unit" },
+  ];
+  const consensus = selectSerpListingAddressCandidate(two, "Kahaluu Reef", "q");
+  check("SERP: two snippet matches on the same street root → consensus accept",
+    consensus?.street === "78 6721 Alii Dr", consensus);
+  const disagree: SerpListingResult[] = [
+    one[0],
+    { title: "77-100 Other Rd, Kailua-Kona", link: "https://www.zillow.com/homedetails/77-100-Other-Rd-Kailua-Kona-HI-96740/4_zpid/", snippet: "near Kahaluu Reef" },
+  ];
+  check("SERP: two snippet matches on DIFFERENT streets → no consensus",
+    selectSerpListingAddressCandidate(disagree, "Kahaluu Reef", "q") === null);
+}
+
+// ── acceptClaudeAddressCandidate: deterministic gates on the Claude rescue ────
+const CLAUDE_INPUT = { communityName: "Kahaluu Reef", state: "Hawaii" };
+{
+  const ok = acceptClaudeAddressCandidate({
+    street: "78-6721 Alii Dr",
+    city: "Kailua-Kona",
+    state: "HI",
+    sourceUrl: "https://www.konarentals.example/kahaluu-reef",
+    sourceTitle: "Kahaluu Reef Condominium — Kailua-Kona Vacation Rentals",
+    evidence: "Kahaluu Reef is located at 78-6721 Alii Drive, Kailua-Kona, HI 96740.",
+  }, CLAUDE_INPUT);
+  check("Claude: valid candidate accepted (state abbrev↔full aware)",
+    !!ok && ok.street.toLowerCase().includes("alii dr"), ok);
+}
+check("Claude: wrong state rejected",
+  acceptClaudeAddressCandidate({
+    street: "78-6721 Alii Dr", city: "Kailua-Kona", state: "FL",
+    sourceTitle: "Kahaluu Reef Condominium", evidence: "Kahaluu Reef at 78-6721 Alii Dr",
+  }, CLAUDE_INPUT) === null);
+check("Claude: evidence that never names the community is rejected",
+  acceptClaudeAddressCandidate({
+    street: "78-6721 Alii Dr", city: "Kailua-Kona", state: "HI",
+    sourceTitle: "Kona condos for sale", evidence: "A great oceanfront building on Alii Drive.",
+  }, CLAUDE_INPUT) === null);
+check("Claude: a streetless answer is rejected",
+  acceptClaudeAddressCandidate({
+    street: "Alii Drive", city: "Kailua-Kona", state: "HI",
+    sourceTitle: "Kahaluu Reef", evidence: "Kahaluu Reef on Alii Drive",
+  }, CLAUDE_INPUT) === null);
+check("Claude: null street (honest miss) is rejected",
+  acceptClaudeAddressCandidate({ street: null }, CLAUDE_INPUT) === null);
+check("Claude: null candidate is rejected",
+  acceptClaudeAddressCandidate(null, CLAUDE_INPUT) === null);
 
 console.log(`\ncommunity-address-discovery: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
