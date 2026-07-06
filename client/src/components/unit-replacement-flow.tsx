@@ -36,6 +36,10 @@ type PreflightReplacementFindJob = {
   // operator can pick from several options instead of one. Absent on older jobs.
   units?: ReplacementUnitData[] | null;
   diagnostic?: Record<string, unknown> | null;
+  // Server marker: the search died mid-run and exhausted its SERVER resume
+  // budget (deploy burst). Terminal "failed" — but the client may still
+  // transparently relaunch it (its own cap/window), exactly like the old 404.
+  stuckUnresumable?: boolean;
 };
 
 const replacementJobStorageKey = (propertyId: number) => `preflight.replacementFindJob.v1:${propertyId}`;
@@ -438,6 +442,20 @@ export function UnitReplacementFlow({
         if (cancelled) return;
         if (data.job) {
           const job = data.job as PreflightReplacementFindJob;
+          // A stuck-unresumable record (the SERVER gave up resuming after a
+          // deploy burst) used to surface as a 404 here — keep the transparent
+          // client relaunch for it before falling back to the honest error.
+          if (job.status === "failed" && job.stuckUnresumable === true) {
+            const outcome = await attemptAutoResume(replacementJobId);
+            if (cancelled) return;
+            if (outcome === "resumed") {
+              cancelled = true;
+              return;
+            }
+            if (outcome === "in-progress") return;
+            // outcome === "cannot" → fall through: applyReplacementJob surfaces
+            // the server's "interrupted by server restarts" failure.
+          }
           // Refresh the freshness anchor while the job is genuinely alive, so a
           // long actively-watched search never ages out of auto-resume.
           if (job.status === "queued" || job.status === "running") {

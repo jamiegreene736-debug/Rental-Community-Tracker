@@ -24,7 +24,10 @@ import { parseStreetCityState } from "@shared/address-listing-logic";
 import { latestUnitSwapsByUnit, replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import {
   AUTO_REPLACE_STORE_SETTING_KEY,
+  MAX_AUTO_REPLACE_FIND_RESTARTS,
+  STUCK_AUTO_REPLACE_ERROR,
   clearableAutoReplaceJobIds,
+  failStuckAutoReplaceRecords,
   findActiveAutoReplaceJob,
   isAutoReplacePhaseActive,
   nextStepFromFindJob,
@@ -51,6 +54,9 @@ const FIND_POLL_INTERVAL_MS = 5_000;
 // The exhaustive manual search can run long; the auto flow uses first-hit mode
 // so ~45 min is a generous ceiling before declaring the find leg stuck.
 const FIND_WAIT_CEILING_MS = 45 * 60 * 1000;
+// Consecutive "restart" poll signals required before launching a fresh search
+// (~15s at the poll interval) — a lone signal can be a store blip/write lag.
+const RESTART_SIGNAL_CONFIRM_POLLS = 3;
 
 const jobs = new Map<string, AutoReplaceJobRecord>();
 const activeJobIds = new Set<string>();
@@ -128,31 +134,66 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
   if (activeJobIds.has(record.jobId)) return;
   activeJobIds.add(record.jobId);
   try {
-    // Phase 1 — finding.
-    if (!record.findJobId) {
-      const payload = await assembleFindPayload(record.propertyId, record.unitId);
-      if (!payload) {
-        touch(record, { phase: "failed", error: "Could not resolve this property/unit for a replacement search." });
-        return;
-      }
-      const findJob = startPreflightReplacementFindJob(payload);
-      touch(record, {
-        phase: "finding",
-        findJobId: findJob.id,
-        message: `Searching ${String(payload.communityName ?? "the community")} for a clean ${String(payload.requiredBedrooms ?? "?")}BR unit…`,
+    // Resumed mid-"verifying": the swap is already COMMITTED (newUnitLabel /
+    // replacementFolder were persisted in the same touch that flipped the
+    // phase) — never re-commit; just re-kick the idempotent verification legs
+    // + Guesty push and land. Without this, a job killed during the verify /
+    // push leg re-attached into a phase no block handled and sat "verifying"
+    // forever.
+    if (record.phase === "verifying") {
+      await runAutoReplaceVerifyPhase(record, {
+        newUnitLabel: record.newUnitLabel ?? "",
+        newAddress: record.newAddress ?? "",
+        photoFolder: record.replacementFolder || replacementPhotoFolderForUnit(record.propertyId, record.unitId),
       });
-    } else if (record.phase === "queued") {
-      touch(record, { phase: "finding" });
+      return;
     }
 
-    // Wait for the find job (it survives restarts on its own — PR #899).
+    // Phase 1 — finding. Restart-tolerant: a find job that vanished or died
+    // unresumably (killed by a deploy burst — the 2026-07-05 Pili Mai
+    // incident) gets a bounded number of FRESH searches instead of the old
+    // misleading "no eligible unit found" failure.
     let findJob: any = null;
-    if (record.phase === "finding") {
+    if (record.phase === "queued" || record.phase === "finding" || !record.findJobId) {
       const waitStart = Date.now();
+      // A single "restart" signal can be a store-write lag racing this poll —
+      // require a few consecutive signals before burning a bounded fresh
+      // search (each one is a full SearchAPI sweep).
+      let restartSignals = 0;
       for (;;) {
+        if (!record.findJobId) {
+          const payload = await assembleFindPayload(record.propertyId, record.unitId);
+          if (!payload) {
+            touch(record, { phase: "failed", error: "Could not resolve this property/unit for a replacement search." });
+            return;
+          }
+          const started = startPreflightReplacementFindJob(payload);
+          touch(record, {
+            phase: "finding",
+            findJobId: started.id,
+            message: `Searching ${String(payload.communityName ?? "the community")} for a clean ${String(payload.requiredBedrooms ?? "?")}BR unit…`,
+          });
+        } else if (record.phase === "queued") {
+          touch(record, { phase: "finding" });
+        }
         findJob = getPreflightReplacementFindJob(record.findJobId!) ?? await getPersistedReplacementFindJob(record.findJobId!);
         const step = nextStepFromFindJob(findJob);
+        if (step !== "restart") restartSignals = 0;
         if (step === "commit") break;
+        if (step === "restart" && ++restartSignals >= RESTART_SIGNAL_CONFIRM_POLLS) {
+          restartSignals = 0;
+          if (record.findRestarts >= MAX_AUTO_REPLACE_FIND_RESTARTS) {
+            touch(record, { phase: "failed", error: STUCK_AUTO_REPLACE_ERROR });
+            return;
+          }
+          console.warn(`[auto-replace] find job ${record.findJobId} died unresumably — starting a fresh search (restart ${record.findRestarts + 1}/${MAX_AUTO_REPLACE_FIND_RESTARTS})`);
+          touch(record, {
+            findJobId: null,
+            findRestarts: record.findRestarts + 1,
+            message: "The search was interrupted by a server restart — starting a fresh search…",
+          });
+          continue;
+        }
         if (step === "fail") {
           touch(record, {
             phase: "failed",
@@ -187,7 +228,14 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
       for (;;) {
         const candidate = pickCommitCandidate(units as Array<{ url?: unknown }>, record.attemptedUrls);
         if (!candidate) {
-          touch(record, { phase: "failed", error: "Every found unit was rejected at commit (already used by another listing). Re-run the search." });
+          touch(record, {
+            phase: "failed",
+            error: units.length === 0
+              // Resumed mid-commit but the find results are gone (store evicted
+              // >24h later) — the search never said "no units", so don't claim it.
+              ? "The search results were lost in a server restart — click Replace photos to run a fresh search."
+              : "Every found unit was rejected at commit (already used by another listing). Re-run the search.",
+          });
           return;
         }
         const c = candidate as Record<string, unknown>;
@@ -225,63 +273,74 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
         break;
       }
 
-      // Phase 3 — verifying: kick both verification legs, best-effort.
-      touch(record, {
-        phase: "verifying",
-        newUnitLabel: committed.newUnitLabel,
-        newAddress: committed.newAddress,
-        replacementFolder: committed.photoFolder,
-        message: "Swap committed — verifying the new photos are clean and in-community…",
-      });
-      await postLoopback("/api/photo-listing-check/run", { folders: [committed.photoFolder] }, 30_000)
-        .catch((e) => console.warn(`[auto-replace] verify rescan kick failed: ${e?.message ?? e}`));
-      await postLoopback("/api/builder/bulk-photo-community-check", {
-        propertyIds: [record.propertyId],
-        labels: { [String(record.propertyId)]: record.propertyName },
-      }, 30_000).catch((e) => console.warn(`[auto-replace] community check kick failed: ${e?.message ?? e}`));
-
-      // Phase 3b — push the rebuilt gallery to Guesty (2026-07-05 operator
-      // ask). The PUT replaces the listing's entire pictures[] array, so this
-      // is what actually removes the OLD unit's duplicated photos from
-      // Guesty (and, via its channel fan-out, from Airbnb/VRBO/Booking).
-      // Awaited so the queue message reports the real outcome; a failure is
-      // surfaced but does NOT fail the job — the swap itself is committed and
-      // the builder's manual "Push Photos to Guesty" button remains the
-      // fallback. The commit POST above passed skipGuestyPhotoPush so the
-      // route's own fire-and-forget hook doesn't double-push.
-      touch(record, {
-        message: "Swap committed — pushing the new photos to Guesty (replaces the old unit's photos on the listing)…",
-      });
-      let guestyPushNote = "";
-      try {
-        const push = await repushGuestyPhotosForProperty(record.propertyId, {
-          reason: `auto-replace ${record.jobId} (${record.unitLabel})`,
-          waitForLabelsFolder: committed.photoFolder,
-        });
-        if (push.ok && !push.skipped) {
-          guestyPushNote = ` ${push.successCount ?? 0} photos re-pushed to Guesty (old photos replaced).`;
-        } else if (push.skipped === "no-guesty-mapping") {
-          guestyPushNote = " No Guesty listing is mapped to this property, so there were no old photos to replace on Guesty.";
-        } else if (push.skipped) {
-          guestyPushNote = ` ⚠ Guesty photo push skipped (${push.skipped}).`;
-        } else {
-          guestyPushNote = ` ⚠ Guesty photo push failed (${push.error ?? "unknown error"}) — open the builder's Photos tab and use "Push Photos to Guesty".`;
-        }
-      } catch (e: any) {
-        guestyPushNote = ` ⚠ Guesty photo push failed (${e?.message ?? e}) — open the builder's Photos tab and use "Push Photos to Guesty".`;
-      }
-
-      touch(record, {
-        phase: "completed",
-        message: `${record.unitLabel} now uses ${committed.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.${guestyPushNote}`,
-        error: null,
-      });
+      // Phase 3 — verifying (shared with the resumed-mid-verifying path).
+      await runAutoReplaceVerifyPhase(record, committed);
     }
   } catch (e: any) {
     touch(record, { phase: "failed", error: e?.message ?? "Auto replace failed" });
   } finally {
     activeJobIds.delete(record.jobId);
   }
+}
+
+// Phase 3 — verifying: kick both verification legs (best-effort) + the awaited
+// Guesty photo push, then complete. Also the resume entry point for a job
+// killed mid-verify: every leg is safe to re-run (rescan + community check are
+// re-kicks; the Guesty push PUTs the full pictures[] array idempotently).
+async function runAutoReplaceVerifyPhase(
+  record: AutoReplaceJobRecord,
+  committed: { newUnitLabel: string; newAddress: string; photoFolder: string },
+): Promise<void> {
+  touch(record, {
+    phase: "verifying",
+    newUnitLabel: committed.newUnitLabel || record.newUnitLabel,
+    newAddress: committed.newAddress || record.newAddress,
+    replacementFolder: committed.photoFolder,
+    message: "Swap committed — verifying the new photos are clean and in-community…",
+  });
+  await postLoopback("/api/photo-listing-check/run", { folders: [committed.photoFolder] }, 30_000)
+    .catch((e) => console.warn(`[auto-replace] verify rescan kick failed: ${e?.message ?? e}`));
+  await postLoopback("/api/builder/bulk-photo-community-check", {
+    propertyIds: [record.propertyId],
+    labels: { [String(record.propertyId)]: record.propertyName },
+  }, 30_000).catch((e) => console.warn(`[auto-replace] community check kick failed: ${e?.message ?? e}`));
+
+  // Phase 3b — push the rebuilt gallery to Guesty (2026-07-05 operator
+  // ask). The PUT replaces the listing's entire pictures[] array, so this
+  // is what actually removes the OLD unit's duplicated photos from
+  // Guesty (and, via its channel fan-out, from Airbnb/VRBO/Booking).
+  // Awaited so the queue message reports the real outcome; a failure is
+  // surfaced but does NOT fail the job — the swap itself is committed and
+  // the builder's manual "Push Photos to Guesty" button remains the
+  // fallback. The commit POST passed skipGuestyPhotoPush so the route's
+  // own fire-and-forget hook doesn't double-push.
+  touch(record, {
+    message: "Swap committed — pushing the new photos to Guesty (replaces the old unit's photos on the listing)…",
+  });
+  let guestyPushNote = "";
+  try {
+    const push = await repushGuestyPhotosForProperty(record.propertyId, {
+      reason: `auto-replace ${record.jobId} (${record.unitLabel})`,
+      waitForLabelsFolder: committed.photoFolder,
+    });
+    if (push.ok && !push.skipped) {
+      guestyPushNote = ` ${push.successCount ?? 0} photos re-pushed to Guesty (old photos replaced).`;
+    } else if (push.skipped === "no-guesty-mapping") {
+      guestyPushNote = " No Guesty listing is mapped to this property, so there were no old photos to replace on Guesty.";
+    } else if (push.skipped) {
+      guestyPushNote = ` ⚠ Guesty photo push skipped (${push.skipped}).`;
+    } else {
+      guestyPushNote = ` ⚠ Guesty photo push failed (${push.error ?? "unknown error"}) — open the builder's Photos tab and use "Push Photos to Guesty".`;
+    }
+  } catch (e: any) {
+    guestyPushNote = ` ⚠ Guesty photo push failed (${e?.message ?? e}) — open the builder's Photos tab and use "Push Photos to Guesty".`;
+  }
+
+  touch(record, {
+    phase: "completed",
+    message: `${record.unitLabel} now uses ${committed.newUnitLabel || record.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.${guestyPushNote}`,
+    error: null,
+  });
 }
 
 export async function startAutoReplaceJob(input: {
@@ -328,6 +387,7 @@ export async function startAutoReplaceJob(input: {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     resumeCount: 0,
+    findRestarts: 0,
   };
   jobs.set(record.jobId, record);
   await mutateStore((store) => { store[record.jobId] = { ...record }; });
@@ -378,6 +438,20 @@ export async function resumeOrphanedAutoReplaceJobs(): Promise<void> {
       jobs.set(record.jobId, record);
       void mutateStore((store2) => { store2[record.jobId] = { ...record }; });
       void runAutoReplaceJob(record);
+    }
+    // Active-phase records that can NEVER come back (resume cap exhausted /
+    // outside the window) become an honest terminal failure instead of
+    // pinning the queue banner "active" until the 24h eviction (2026-07-05
+    // Pili Mai deploy-burst incident). In-process jobs are protected.
+    const liveIds = new Set([...Array.from(jobs.keys()), ...Array.from(activeJobIds)]);
+    const stuckIds = Object.values(store).filter((r) =>
+      isAutoReplacePhaseActive(r.phase) && !liveIds.has(r.jobId) && !shouldResumeAutoReplaceJob(r, Date.now()),
+    ).map((r) => r.jobId);
+    if (stuckIds.length > 0) {
+      console.warn(`[auto-replace] failing ${stuckIds.length} stuck unresumable job(s): ${stuckIds.join(", ")}`);
+      await mutateStore((liveStore, now) => {
+        failStuckAutoReplaceRecords(liveStore, now, liveIds);
+      });
     }
   } catch {
     // Fail-soft — next sweep retries.

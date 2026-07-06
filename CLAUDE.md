@@ -43,6 +43,32 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-05 ("Replace photos not finding replacements for Pili Mai" = DEPLOY-BURST kill, not a finder
+  gap): Operator's one-click auto-replace for prop32 (Pili Mai Bldg 38, unit prop32-kia-3br) started
+  21:20:07Z and was killed THREE times by the Railway deploys from his own 5 PR merges (21:23/21:26/
+  21:27/21:42/22:22Z); the server resume caps (2) exhausted, the persisted find record stuck
+  status="running" forever (found via `app_settings.replacement_find_jobs.v1` over DATABASE_PUBLIC_URL
+  psql — CLI logs had rotated), GET 404'd, and a retry re-attached to the dead find job →
+  nextStepFromFindJob(null)→"fail" → the MISLEADING "no eligible unit found". Sibling prop33 (same
+  community) completed fine between deploys — the finder itself was never broken. SHIPPED: resume caps
+  2→6 (deploy bursts are routine); both watchdogs terminalize stuck-unresumable records with
+  PHASE-AWARE errors (stuck "verifying" = swap COMMITTED → "use Push Photos to Guesty, do NOT re-run
+  Replace photos"; "committing" = ambiguous; only queued/finding say retry); GET :jobId serves a
+  terminal failure flagged `stuckUnresumable` instead of 404 (+ a RUNNING placeholder on store-READ
+  errors so a DB blip isn't "job vanished"); the CLIENT (unit-replacement-flow.tsx) relaunches on
+  failed+stuckUnresumable exactly like the old 404 (source-locked test — the 404 was its ONLY relaunch
+  trigger); the auto-replace orchestrator RESTARTS a bounded fresh search (findRestarts ≤ 2, debounced
+  3 polls) instead of fake-failing, and resumed mid-"verifying" jobs re-enter runAutoReplaceVerifyPhase
+  (previously fell through every phase guard and sat "verifying" forever) with the cap exempted for
+  that phase (verify legs are cheap/idempotent; window still bounds); supersedeRunningRecordsForProperty
+  is now UNIT-scoped (Unit A's restart must not kill Unit B's live search — two-unit properties are the
+  duplicate-photos norm), skips live in-process jobs, and is skipped entirely on watchdog resumes; a
+  throttled 5-min durable heartbeat keeps >60-min exhaustive searches inside the resume window.
+  Reviewed via a 3-dimension adversarial workflow (4 confirmed findings all fixed). Verified:
+  replacement-job-persistence 24/0, auto-replace-job 39/0, full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline. POST-DEPLOY: fired the operator's exact click live
+  (POST /api/replacement/auto-jobs prop32) — see PR for the outcome.
+
 - 2026-07-05 (guest PARTY SIZE — adults/children — on bookings rows, inbox panel + Cowork prompts):
   Operator asked to see how many adults/children booked each reservation (VRBO/Booking/etc), on the
   bookings page "when I am trying to buy in the unit" + anywhere relevant. SHIPPED: new pure

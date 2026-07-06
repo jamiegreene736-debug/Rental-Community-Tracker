@@ -3,8 +3,13 @@ import {
   AUTO_REPLACE_RESUME_WINDOW_MS,
   AUTO_REPLACE_STORE_CAP,
   AUTO_REPLACE_SURFACE_TERMINAL_MS,
+  MAX_AUTO_REPLACE_FIND_RESTARTS,
   MAX_AUTO_REPLACE_RESUMES,
+  STUCK_AUTO_REPLACE_COMMIT_ERROR,
+  STUCK_AUTO_REPLACE_ERROR,
+  STUCK_AUTO_REPLACE_VERIFY_ERROR,
   clearableAutoReplaceJobIds,
+  failStuckAutoReplaceRecords,
   findActiveAutoReplaceJob,
   nextStepFromFindJob,
   parseAutoReplaceStore,
@@ -42,6 +47,7 @@ const rec = (over: Partial<AutoReplaceJobRecord>): AutoReplaceJobRecord => ({
   createdAt: NOW - 5 * 60_000,
   updatedAt: NOW - 60_000,
   resumeCount: 0,
+  findRestarts: 0,
   ...over,
 });
 
@@ -70,6 +76,13 @@ check("terminal record never resumes",
 check("stale record outside the window does not resume",
   !shouldResumeAutoReplaceJob(rec({ updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 1 }), NOW));
 check("resume cap blocks crash loops", !shouldResumeAutoReplaceJob(rec({ resumeCount: MAX_AUTO_REPLACE_RESUMES }), NOW));
+// "verifying" = swap already committed; its remaining legs are cheap and
+// idempotent, so the cap (which bounds SearchAPI sweeps) does not apply —
+// only the window does. Abandoning it strands the Guesty photo push.
+check("verifying job at the resume cap is STILL resumable (swap committed; verify legs are cheap)",
+  shouldResumeAutoReplaceJob(rec({ phase: "verifying", resumeCount: MAX_AUTO_REPLACE_RESUMES }), NOW));
+check("verifying job outside the window does not resume",
+  !shouldResumeAutoReplaceJob(rec({ phase: "verifying", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 1 }), NOW));
 
 // ── one active job per property+unit ─────────────────────────────────────────
 {
@@ -87,7 +100,13 @@ check("completed with units → commit", nextStepFromFindJob({ status: "complete
 check("completed with only legacy `unit` → commit", nextStepFromFindJob({ status: "completed", unit: { url: "u" } }) === "commit");
 check("completed EMPTY → fail (never commit nothing)", nextStepFromFindJob({ status: "completed" }) === "fail");
 check("failed find job → fail", nextStepFromFindJob({ status: "failed" }) === "fail");
-check("vanished find job → fail", nextStepFromFindJob(null) === "fail");
+// 2026-07-05: a VANISHED or stuck-unresumable find job never reached a verdict
+// (killed by a deploy burst) — the orchestrator starts a FRESH search instead
+// of reporting the misleading "no eligible unit found".
+check("vanished find job → restart (fresh search, not a fake 'no units')", nextStepFromFindJob(null) === "restart");
+check("stuck-unresumable find job → restart", nextStepFromFindJob({ status: "failed", stuckUnresumable: true }) === "restart");
+check("fresh-search budget is bounded", MAX_AUTO_REPLACE_FIND_RESTARTS >= 1 && MAX_AUTO_REPLACE_FIND_RESTARTS <= 3);
+check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >= 5);
 
 // ── commit candidate picking ─────────────────────────────────────────────────
 {
@@ -121,7 +140,7 @@ check("vanished find job → fail", nextStepFromFindJob(null) === "fail");
     running: rec({ jobId: "running", phase: "finding", updatedAt: NOW - 60_000 }),
     liveNow: rec({ jobId: "liveNow", phase: "committing", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
     stuckStale: rec({ jobId: "stuckStale", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
-    stuckCapped: rec({ jobId: "stuckCapped", phase: "verifying", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
+    stuckCapped: rec({ jobId: "stuckCapped", phase: "finding", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
   };
   const cleared = clearableAutoReplaceJobIds(store, NOW, ["liveNow"]).sort();
   check("terminal jobs are clearable", cleared.includes("done") && cleared.includes("dead"));
@@ -131,6 +150,44 @@ check("vanished find job → fail", nextStepFromFindJob(null) === "fail");
   check("stuck active job at the resume cap IS clearable", cleared.includes("stuckCapped"));
   check("exactly the expected set clears", cleared.join(",") === "dead,done,stuckCapped,stuckStale");
   check("empty store clears nothing", clearableAutoReplaceJobIds({}, NOW).length === 0);
+}
+
+// ── watchdog terminalizes stuck unresumable records ──────────────────────────
+{
+  const store = {
+    running: rec({ jobId: "running", phase: "finding", updatedAt: NOW - 60_000 }),
+    liveNow: rec({ jobId: "liveNow", phase: "committing", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
+    stuckStale: rec({ jobId: "stuckStale", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
+    stuckCapped: rec({ jobId: "stuckCapped", phase: "committing", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
+    stuckVerify: rec({ jobId: "stuckVerify", phase: "verifying", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
+    done: rec({ jobId: "done", phase: "completed" }),
+  };
+  const failedIds = failStuckAutoReplaceRecords(store, NOW, ["liveNow"]).sort();
+  check("stuck records (stale window / cap exhausted) become failed",
+    failedIds.join(",") === "stuckCapped,stuckStale,stuckVerify" &&
+    store.stuckCapped.phase === "failed" && store.stuckStale.phase === "failed" && store.stuckVerify.phase === "failed");
+  check("finding-phase stuck record carries the honest retry error",
+    store.stuckStale.error === STUCK_AUTO_REPLACE_ERROR && store.stuckStale.updatedAt === NOW);
+  // Phase-aware messages: a stuck verify has a COMMITTED swap — "re-run
+  // Replace photos" would swap in a DIFFERENT unit; a stuck commit is ambiguous.
+  check("verifying-phase stuck record says the swap committed + push-photos fallback (never 'retry Replace photos')",
+    store.stuckVerify.error === STUCK_AUTO_REPLACE_VERIFY_ERROR && /do not re-run/i.test(store.stuckVerify.error ?? ""));
+  check("committing-phase stuck record warns the commit may have landed",
+    store.stuckCapped.error === STUCK_AUTO_REPLACE_COMMIT_ERROR && /swap history/i.test(store.stuckCapped.error ?? ""));
+  check("resumable / live / terminal records untouched",
+    store.running.phase === "finding" && store.liveNow.phase === "committing" && store.done.phase === "completed");
+  check("a terminalized stuck record no longer blocks a retry (double-tap guard clears)",
+    findActiveAutoReplaceJob({ s: store.stuckCapped }, 23, "prop23-kl-3br") === null);
+}
+
+// ── parse: findRestarts defaults for legacy records ──────────────────────────
+{
+  const store = parseAutoReplaceStore(JSON.stringify({
+    legacy: { phase: "finding", propertyId: 23, unitId: "u", createdAt: 1, updatedAt: 2 },
+    counted: { phase: "finding", propertyId: 23, unitId: "u", createdAt: 1, updatedAt: 2, findRestarts: 2 },
+  }));
+  check("legacy record without findRestarts parses to 0; explicit value kept",
+    store.legacy.findRestarts === 0 && store.counted.findRestarts === 2);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
