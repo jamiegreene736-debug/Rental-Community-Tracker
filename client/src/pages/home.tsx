@@ -75,7 +75,8 @@ import { isScannableFolder, replacementPhotoFolderRef } from "@shared/photo-fold
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
 import { UnitReplacementFlow, findLiveReplacementJobRef, type ReplacementUnitData } from "@/components/unit-replacement-flow";
-import { isAutoReplacePhaseActive, type AutoReplaceJobRecord, type AutoReplacePhase } from "@shared/auto-replace-job-logic";
+import { draftUnitIdForSlot, isAutoReplacePhaseActive, type AutoReplaceJobRecord, type AutoReplacePhase } from "@shared/auto-replace-job-logic";
+import { resolveCanonicalCommunityPhotoFolder } from "@shared/community-photo-folders";
 import { useToast } from "@/hooks/use-toast";
 import { extractBRList } from "@/data/quality-score";
 import { getBuyInRate } from "@shared/pricing-rates";
@@ -2521,8 +2522,15 @@ function AdminDashboard() {
         if ((draft as any).singleListing !== true) addFolder(draft.unit2PhotoFolder, unitOwner(1));
       }
       if (p.draftId !== undefined) {
-        addFolder(`draft-${p.draftId}-unit-a`, unitOwner(0));
-        if (p.multiUnit) addFolder(`draft-${p.draftId}-unit-b`, unitOwner(1));
+        // Conventional folder names are a FALLBACK for drafts whose folder
+        // fields haven't loaded/persisted — never in ADDITION to a set field.
+        // Adding them unconditionally kept ABANDONED pre-replacement folders
+        // in the scan set forever (Waikoloa draft-12-unit-b stayed flagged
+        // after the unit was replaced and repointed to its replacement-*
+        // folder — builder properties only scan the ACTIVE folder after a
+        // swap, and drafts must match).
+        if (!draft?.unit1PhotoFolder) addFolder(`draft-${p.draftId}-unit-a`, unitOwner(0));
+        if (p.multiUnit && !draft?.unit2PhotoFolder) addFolder(`draft-${p.draftId}-unit-b`, unitOwner(1));
       }
       const folders = Array.from(folderSet);
       let agg: PhotoAgg = {
@@ -2658,26 +2666,87 @@ function AdminDashboard() {
   };
 
   // ── "Replace photos (Unit X)" wiring for the duplicate-photos popup ────────
-  // Resolve a flagged folder back to EVERY builder unit it serves — some
-  // properties share one folder between Unit A and Unit B (mauna-kai-t3,
-  // kaiulani-52), and the operator needs a Replace button PER unit, not just
-  // the first match. The folder may also already BE a replacement-* folder if
-  // a prior swap's photos got flagged again. Draft rows return [] — their
-  // replacement flow lives in the builder pre-flight, which owns the
-  // draft-field repointing on commit.
+  // Builder-like shape for the replace flow: the real builder for the core
+  // properties (positive ids), or one synthesized from the community_drafts
+  // row for promoted drafts (negative ids). 2026-07-05: draft rows previously
+  // returned [] here ("their replacement flow lives in the builder
+  // pre-flight") — which left flagged drafts like Waikoloa Villas with NO
+  // Replace photos button at all. The server orchestrator + unit-swaps +
+  // draft repoint (PATCH /api/unit-swaps/commit) all support negative ids,
+  // so drafts now get the same one-click/manual actions.
+  type ReplaceBuilderLike = {
+    propertyName: string;
+    complexName: string;
+    address: string;
+    communityPhotoFolder: string;
+    units: Array<{ id: string; unitNumber: string; bedrooms: number; photoFolder?: string }>;
+  };
+  const replaceBuilderLikeFor = (propertyId: number): ReplaceBuilderLike | null => {
+    if (propertyId > 0) {
+      const builder = getUnitBuilderByPropertyId(propertyId);
+      if (!builder?.communityPhotoFolder) return null;
+      return {
+        propertyName: builder.propertyName || builder.complexName,
+        complexName: builder.complexName,
+        address: builder.address ?? "",
+        communityPhotoFolder: builder.communityPhotoFolder,
+        units: builder.units.map((u) => ({
+          id: u.id,
+          unitNumber: u.unitNumber ?? "",
+          bedrooms: u.bedrooms,
+          photoFolder: u.photoFolder,
+        })),
+      };
+    }
+    const draft = (communityDraftsDataForRows ?? []).find((d) => -d.id === propertyId);
+    if (!draft) return null;
+    // Unit ids/folders mirror adapt-draft.ts (`draft<id>-unit-a/b`); the
+    // unitNumber stays "" so labels read "Unit A", not "Unit A (A)".
+    const units: ReplaceBuilderLike["units"] = [{
+      id: draftUnitIdForSlot(draft.id, "a"),
+      unitNumber: "",
+      bedrooms: resolveDraftUnitBedrooms(draft, "unit1"),
+      photoFolder: draft.unit1PhotoFolder ?? `draft-${draft.id}-unit-a`,
+    }];
+    if ((draft as any).singleListing !== true) {
+      units.push({
+        id: draftUnitIdForSlot(draft.id, "b"),
+        unitNumber: "",
+        bedrooms: resolveDraftUnitBedrooms(draft, "unit2"),
+        photoFolder: draft.unit2PhotoFolder ?? `draft-${draft.id}-unit-b`,
+      });
+    }
+    return {
+      propertyName: draft.name,
+      complexName: draft.name,
+      address: [draft.streetAddress, draft.city, draft.state].filter(Boolean).join(", "),
+      communityPhotoFolder: resolveCanonicalCommunityPhotoFolder(draft.name) ?? `community-draft-${draft.id}`,
+      units,
+    };
+  };
+
+  // Resolve a flagged folder back to EVERY unit it serves — some properties
+  // share one folder between Unit A and Unit B (mauna-kai-t3, kaiulani-52),
+  // and the operator needs a Replace button PER unit, not just the first
+  // match. The folder may also already BE a replacement-* folder if a prior
+  // swap's photos got flagged again.
   const resolveReplacePhotosUnits = (propertyId: number, folder: string) => {
-    if (propertyId <= 0) return [];
-    const builder = getUnitBuilderByPropertyId(propertyId);
-    if (!builder?.communityPhotoFolder) return [];
+    const builderLike = replaceBuilderLikeFor(propertyId);
+    if (!builderLike) return [];
     const ref = replacementPhotoFolderRef(folder);
-    const out: Array<{ builder: typeof builder; unit: (typeof builder.units)[number]; index: number; letter: string }> = [];
-    builder.units.forEach((u, i) => {
+    const out: Array<{ unit: ReplaceBuilderLike["units"][number]; index: number; letter: string }> = [];
+    builderLike.units.forEach((u, i) => {
       const active = u.photoFolder
         ? activePhotoFolderByOriginal.get(`${propertyId}:${u.photoFolder}`) ?? u.photoFolder
         : undefined;
-      const owns = u.photoFolder === folder || active === folder || (ref ? u.id === ref.oldUnitId : false);
+      const owns = u.photoFolder === folder
+        || active === folder
+        // String-compare covers draft replacement folders too —
+        // replacementPhotoFolderRef only parses positive-id folder names.
+        || replacementPhotoFolderForUnit(propertyId, u.id) === folder
+        || (ref ? u.id === ref.oldUnitId : false);
       if (!owns) return;
-      out.push({ builder, unit: u, index: i, letter: `Unit ${String.fromCharCode(65 + i)}` });
+      out.push({ unit: u, index: i, letter: `Unit ${String.fromCharCode(65 + i)}` });
     });
     return out;
   };
@@ -2740,7 +2809,7 @@ function AdminDashboard() {
       if (!r.ok) throw new Error(`Unit swaps returned HTTP ${r.status}`);
       return r.json();
     },
-    enabled: !!replacePhotosTarget && replacePhotosTarget.propertyId > 0,
+    enabled: !!replacePhotosTarget && replacePhotosTarget.propertyId !== 0,
     staleTime: 30_000,
   });
 
@@ -2775,6 +2844,13 @@ function AdminDashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
       queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/unit-swaps"] });
+      // Draft jobs repoint unit{1,2}PhotoFolder server-side — refetch the
+      // drafts so photoByProperty tracks the NEW folder (the stale row would
+      // otherwise stay flagged and re-enable the Replace button for a second
+      // destructive swap; the drafts query never refetches on its own).
+      if (job.propertyId < 0) {
+        queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+      }
       setPhotoScanPollUntil((prev) => Math.max(prev, Date.now() + 5 * 60_000));
       if (job.phase === "completed") {
         toast({
@@ -2841,13 +2917,34 @@ function AdminDashboard() {
   // the popup/Photos cell get a fresh duplicate verdict, (2) the Claude-vision
   // photo-community check so the operator gets explicit confirmation the new
   // unit's gallery belongs to the community.
-  const handleDuplicatePhotoUnitReplaced = (oldUnitId: string, newUnit: ReplacementUnitData) => {
+  const handleDuplicatePhotoUnitReplaced = async (oldUnitId: string, newUnit: ReplacementUnitData) => {
     const target = replacePhotosTarget;
     if (!target) return;
-    const builder = getUnitBuilderByPropertyId(target.propertyId);
+    const builder = replaceBuilderLikeFor(target.propertyId);
     const index = builder?.units.findIndex((u) => u.id === oldUnitId) ?? -1;
     const letter = index >= 0 ? `Unit ${String.fromCharCode(65 + index)}` : oldUnitId;
     const replacementFolder = replacementPhotoFolderForUnit(target.propertyId, oldUnitId);
+    // Promoted drafts persist photos under unit{1,2}PhotoFolder — repoint the
+    // draft at the replacement folder + new unit identity BEFORE the community
+    // check kick, which reads the draft's own folder fields. Same PATCH as
+    // builder-preflight's "Commit Replacements & Continue" but SCOPED to this
+    // unit (an unscoped commit would silently apply a sibling unit's
+    // abandoned preflight pick). On failure, STOP: the community check would
+    // validate the OLD gallery and the success toast would lie.
+    if (target.propertyId < 0) {
+      try {
+        await apiRequest("PATCH", `/api/unit-swaps/commit/${target.propertyId}`, { oldUnitId });
+        queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+      } catch {
+        toast({
+          title: "Draft repoint failed",
+          description: "The swap was recorded but the draft still points at the old photos — open builder pre-flight and use \"Commit Replacements & Continue\".",
+          variant: "destructive",
+        });
+        queryClient.invalidateQueries({ queryKey: ["/api/unit-swaps", target.propertyId] });
+        return;
+      }
+    }
     confirmPhotosReplacedMutation.mutate({
       folder: replacementFolder,
       propertyName: builder?.propertyName ?? `Property ${target.propertyId}`,
@@ -6869,7 +6966,7 @@ function AdminDashboard() {
           only assemble its props the same way builder-preflight does and react
           to the committed swap. */}
       {replacePhotosTarget && (() => {
-        const builder = getUnitBuilderByPropertyId(replacePhotosTarget.propertyId);
+        const builder = replaceBuilderLikeFor(replacePhotosTarget.propertyId);
         if (!builder?.communityPhotoFolder) return null;
         const unitIndex = builder.units.findIndex((u) => u.id === replacePhotosTarget.unitId);
         const targetUnit = unitIndex >= 0 ? builder.units[unitIndex] : builder.units[0];

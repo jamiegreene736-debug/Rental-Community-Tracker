@@ -80,6 +80,25 @@ export function isAutoReplacePhaseActive(phase: AutoReplacePhase): boolean {
   return AUTO_REPLACE_ACTIVE_PHASES.includes(phase);
 }
 
+// ── Draft (negative-id) unit identity ─────────────────────────────────────────
+// Promoted community drafts address their units as `draft<id>-unit-a/b` — the
+// SAME convention client/src/data/adapt-draft.ts synthesizes for the builder
+// UI and the `/-unit-([ab])$/` slot parse in PATCH /api/unit-swaps/commit
+// expects. Centralized here so the dashboard button, the auto-replace
+// orchestrator, and the Guesty re-push agree on the id shape (2026-07-05:
+// draft rows in the duplicate-photos popup had NO Replace button at all).
+export function draftUnitIdForSlot(draftId: number, slot: "a" | "b"): string {
+  return `draft${draftId}-unit-${slot}`;
+}
+
+export function parseDraftUnitId(unitId: unknown): { draftId: number; slot: "a" | "b" } | null {
+  const m = /^draft(\d+)-unit-([ab])$/i.exec(String(unitId ?? "").trim());
+  if (!m) return null;
+  const draftId = Number(m[1]);
+  if (!Number.isFinite(draftId) || draftId <= 0) return null;
+  return { draftId, slot: m[2].toLowerCase() as "a" | "b" };
+}
+
 const PHASES: AutoReplacePhase[] = ["queued", "finding", "committing", "verifying", "completed", "failed"];
 
 export function parseAutoReplaceStore(raw: string | null | undefined): Record<string, AutoReplaceJobRecord> {

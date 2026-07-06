@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-05 (draft rows get the Replace photos button — Waikoloa/Mauna Lani missing-button report):
+  Operator screenshot showed flagged DRAFT rows (draft-12-unit-b = Waikoloa Beach Villas Unit B,
+  draft-13-unit-a = Mauna Lani Point) with NO Replace photos button — resolveReplacePhotosUnits
+  bailed on propertyId <= 0 by design (2026-07-04: "drafts keep using builder pre-flight"). SHIPPED
+  full draft parity: shared draftUnitIdForSlot/parseDraftUnitId (`draft<id>-unit-a/b`), orchestrator
+  resolveAutoReplaceTarget draft branch + UNIT-SCOPED repoint PATCH after commit, guesty-photo-repush
+  draft branch (live listing pictures[] replaced too), home.tsx replaceBuilderLikeFor (buttons +
+  pick-manually dialog from the drafts query). SIX adversarial-review findings fixed, the crucial
+  ones: replacementPhotoFolderRef's greedy regex made draft replacement folders
+  (replacement-pdraft-12-udraft12-unit-b) UNPARSEABLE → unscannable (rescan 400, cron skip,
+  dashboard drop) — fixed with a constrained (draft-\d+|\d+) prop slug (also fixes prop27-style
+  builder ids); the repoint PATCH was unscoped and would silently commit a SIBLING unit's abandoned
+  preflight pick — route + storage.commitUnitSwaps now take optional oldUnitId (preflight commit-all
+  unchanged); conventional draft-<id>-unit-a/b folders are now fallback-only in the dashboard loop
+  AND the scanner (an abandoned pre-replacement folder no longer pins the popup / burns Lens);
+  terminal draft jobs invalidate /api/community/drafts; manual repoint failure stops the handler;
+  verify phase surfaces a rejected rescan kick. tests/auto-replace-job.test.ts 56/0. NOTE draft-12's
+  flagged row was an ABANDONED folder (its unit was replaced Jun 30, swap 49 never committed) — the
+  aggregation fix clears the row; the live listing's photos get fixed by the (now draft-capable)
+  retroactive repush POST /api/replacement/repush-guesty-photos {propertyIds:[-12]}.
+
 - 2026-07-05 ("Replace photos not finding replacements for Pili Mai" = DEPLOY-BURST kill, not a finder
   gap): Operator's one-click auto-replace for prop32 (Pili Mai Bldg 38, unit prop32-kia-3br) started
   21:20:07Z and was killed THREE times by the Railway deploys from his own 5 PR merges (21:23/21:26/

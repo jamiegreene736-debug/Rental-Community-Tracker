@@ -206,7 +206,7 @@ export interface IStorage {
   getUnitSwaps(propertyId: number): Promise<UnitSwap[]>;
   getLatestUnitSwap(propertyId: number, unitId: string): Promise<UnitSwap | undefined>;
   deleteUnitSwap(id: number): Promise<boolean>;
-  commitUnitSwaps(propertyId: number): Promise<void>;
+  commitUnitSwaps(propertyId: number, oldUnitId?: string): Promise<void>;
 
   upsertGuestyPropertyMap(propertyId: number, guestyListingId: string): Promise<GuestyPropertyMap>;
   getGuestyPropertyMap(): Promise<GuestyPropertyMap[]>;
@@ -945,8 +945,16 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
-  async commitUnitSwaps(propertyId: number): Promise<void> {
-    await db.update(unitSwaps).set({ committed: true }).where(eq(unitSwaps.propertyId, propertyId));
+  async commitUnitSwaps(propertyId: number, oldUnitId?: string): Promise<void> {
+    // Optional unit scope (2026-07-05): the auto-fired repoint after a
+    // single-unit replace must not silently commit a SIBLING unit's pending
+    // (operator-unreviewed) swap row. No scope = preflight's explicit
+    // commit-all "Commit Replacements & Continue".
+    await db.update(unitSwaps).set({ committed: true }).where(
+      oldUnitId
+        ? and(eq(unitSwaps.propertyId, propertyId), eq(unitSwaps.oldUnitId, oldUnitId))
+        : eq(unitSwaps.propertyId, propertyId),
+    );
   }
 
   async upsertGuestyPropertyMap(propertyId: number, guestyListingId: string): Promise<GuestyPropertyMap> {

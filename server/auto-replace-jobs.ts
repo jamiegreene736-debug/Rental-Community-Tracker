@@ -22,11 +22,14 @@ import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
 import { parseStreetCityState } from "@shared/address-listing-logic";
 import { latestUnitSwapsByUnit, replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
+import { resolveCanonicalCommunityPhotoFolder } from "@shared/community-photo-folders";
+import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import {
   AUTO_REPLACE_STORE_SETTING_KEY,
   MAX_AUTO_REPLACE_FIND_RESTARTS,
   STUCK_AUTO_REPLACE_ERROR,
   clearableAutoReplaceJobIds,
+  parseDraftUnitId,
   failStuckAutoReplaceRecords,
   findActiveAutoReplaceJob,
   isAutoReplacePhaseActive,
@@ -85,36 +88,97 @@ function touch(record: AutoReplaceJobRecord, patch: Partial<AutoReplaceJobRecord
   });
 }
 
+// Unified property/unit resolution — the one seam that makes the flow work for
+// BOTH the 11 hardcoded builder properties (positive ids, unit-builder-data)
+// and promoted community drafts (negative ids, community_drafts rows). Draft
+// unit ids follow adapt-draft.ts's `draft<id>-unit-a/b`; the community folder
+// mirrors its canonical-name resolution so the find job's community gates see
+// the same folder the builder UI uses. 2026-07-05: draft rows in the
+// duplicate-photos popup previously had NO replace path at all.
+type AutoReplaceTarget = {
+  isDraft: boolean;
+  communityFolder: string;
+  communityName: string;
+  propertyName: string;
+  address: string;
+  street?: string;
+  city?: string;
+  state?: string;
+  unit: { id: string; unitNumber: string; bedrooms: number };
+  unitIndex: number;
+};
+
+async function resolveAutoReplaceTarget(propertyId: number, unitId: string): Promise<AutoReplaceTarget | null> {
+  if (Number.isFinite(propertyId) && propertyId > 0) {
+    const builder = getUnitBuilderByPropertyId(propertyId);
+    if (!builder?.communityPhotoFolder) return null;
+    const index = builder.units.findIndex((u) => u.id === unitId);
+    if (index < 0) return null;
+    const unit = builder.units[index];
+    const parsed = parseStreetCityState(builder.address ?? "");
+    return {
+      isDraft: false,
+      communityFolder: builder.communityPhotoFolder,
+      communityName: builder.complexName,
+      propertyName: builder.propertyName || builder.complexName,
+      address: builder.address ?? "",
+      street: parsed.street || undefined,
+      city: parsed.city || undefined,
+      state: parsed.state || undefined,
+      unit: { id: unit.id, unitNumber: unit.unitNumber ?? "", bedrooms: unit.bedrooms },
+      unitIndex: index,
+    };
+  }
+  if (!Number.isFinite(propertyId) || propertyId >= 0) return null;
+  const ref = parseDraftUnitId(unitId);
+  if (!ref || ref.draftId !== -propertyId) return null;
+  const draft = await storage.getCommunityDraft(ref.draftId).catch(() => undefined);
+  if (!draft) return null;
+  if (ref.slot === "b" && (draft as any).singleListing === true) return null;
+  const bedrooms = resolveDraftUnitBedrooms(draft as any, ref.slot === "a" ? "unit1" : "unit2");
+  if (!bedrooms) return null;
+  const street = (draft as any).streetAddress ?? "";
+  return {
+    isDraft: true,
+    communityFolder: resolveCanonicalCommunityPhotoFolder(draft.name) ?? `community-draft-${ref.draftId}`,
+    communityName: draft.name,
+    propertyName: draft.name,
+    address: [street, draft.city, draft.state].filter(Boolean).join(", "),
+    street: street || undefined,
+    city: draft.city || undefined,
+    state: draft.state || undefined,
+    unit: { id: unitId, unitNumber: ref.slot.toUpperCase(), bedrooms },
+    unitIndex: ref.slot === "a" ? 0 : 1,
+  };
+}
+
 // The same find payload the manual dialog assembles (builder-preflight parity):
 // parsed display address + inferred community street + existing swaps' source
 // URLs as skipUrls. First-hit mode (no collectAllOptions) — the auto flow
 // commits the first viable unit, so exhaustive pool-draining is wasted time.
 async function assembleFindPayload(propertyId: number, unitId: string): Promise<Record<string, unknown> | null> {
-  const builder = getUnitBuilderByPropertyId(propertyId);
-  if (!builder?.communityPhotoFolder) return null;
-  const unit = builder.units.find((u) => u.id === unitId);
-  if (!unit) return null;
-  const parsed = parseStreetCityState(builder.address ?? "");
+  const target = await resolveAutoReplaceTarget(propertyId, unitId);
+  if (!target) return null;
   const streetAddress = inferCommunityStreetAddress({
-    communityName: builder.complexName,
-    city: parsed.city,
-    state: parsed.state,
-    addressHint: parsed.street || builder.address,
-  }) || parsed.street;
+    communityName: target.communityName,
+    city: target.city,
+    state: target.state,
+    addressHint: target.street || target.address,
+  }) || target.street;
   const swaps = latestUnitSwapsByUnit(await storage.getUnitSwaps(propertyId).catch(() => []));
   const skipUrls = Array.from(new Set(
     Array.from(swaps.values()).map((s: any) => String(s?.newSourceUrl ?? "")).filter(Boolean),
   ));
   return {
-    communityFolder: builder.communityPhotoFolder,
-    communityName: builder.complexName,
-    propertyAddress: builder.address,
+    communityFolder: target.communityFolder,
+    communityName: target.communityName,
+    propertyAddress: target.address,
     streetAddress: streetAddress || undefined,
-    city: parsed.city || undefined,
-    state: parsed.state || undefined,
+    city: target.city || undefined,
+    state: target.state || undefined,
     propertyId,
-    targetUnitId: unit.id,
-    requiredBedrooms: unit.bedrooms,
+    targetUnitId: target.unit.id,
+    requiredBedrooms: target.unit.bedrooms,
     skipUrls,
   };
 }
@@ -124,6 +188,17 @@ async function postLoopback(path: string, body: unknown, timeoutMs: number): Pro
     method: "POST",
     headers: { "Content-Type": "application/json", ...loopbackRequestHeaders() },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const data = await resp.json().catch(() => ({}));
+  return { status: resp.status, data };
+}
+
+async function patchLoopback(path: string, body: unknown, timeoutMs: number): Promise<{ status: number; data: any }> {
+  const resp = await fetch(`${loopbackBaseUrl()}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...loopbackRequestHeaders() },
+    body: JSON.stringify(body ?? {}),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const data = await resp.json().catch(() => ({}));
@@ -217,12 +292,12 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
       const units: Array<Record<string, unknown>> = Array.isArray(findJob?.units)
         ? findJob.units
         : findJob?.unit ? [findJob.unit] : [];
-      const builder = getUnitBuilderByPropertyId(record.propertyId);
-      const unit = builder?.units.find((u) => u.id === record.unitId);
-      if (!builder || !unit) {
+      const target = await resolveAutoReplaceTarget(record.propertyId, record.unitId);
+      if (!target) {
         touch(record, { phase: "failed", error: "Property/unit no longer resolvable for commit." });
         return;
       }
+      const unit = target.unit;
       touch(record, { phase: "committing", message: "Recording the swap and pulling the new unit's photos…" });
       let committed: { newUnitLabel: string; newAddress: string; photoFolder: string } | null = null;
       for (;;) {
@@ -247,7 +322,7 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           // real outcome. Without the flag the same swap would push twice.
           skipGuestyPhotoPush: true,
           propertyId: record.propertyId,
-          communityFolder: builder.communityPhotoFolder,
+          communityFolder: target.communityFolder,
           oldUnitId: unit.id,
           oldUnitNumber: unit.unitNumber ?? "",
           oldBedrooms: unit.bedrooms,
@@ -282,6 +357,24 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           newAddress: String(data?.swap?.newAddress ?? c.address ?? ""),
           photoFolder: String(data?.photoFolder ?? replacementPhotoFolderForUnit(record.propertyId, record.unitId)),
         };
+        // Promoted drafts persist photos under unit{1,2}PhotoFolder — repoint
+        // the draft at the replacement folder + the new unit's identity NOW
+        // (one-click semantics; same PATCH as builder-preflight's "Commit
+        // Replacements & Continue", but SCOPED to this unit so a sibling
+        // unit's abandoned preflight pick is never silently committed).
+        // Without it the dashboard, scanner, and Guesty push keep reading the
+        // OLD folder/unit.
+        if (target.isDraft) {
+          const repoint = await patchLoopback(`/api/unit-swaps/commit/${record.propertyId}`, { oldUnitId: record.unitId }, 30_000)
+            .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+          if (repoint.status >= 400) {
+            touch(record, {
+              phase: "failed",
+              error: `The swap was recorded but the draft could not be repointed at the new unit (HTTP ${repoint.status}) — open builder pre-flight and use "Commit Replacements & Continue".`,
+            });
+            return;
+          }
+        }
         break;
       }
 
@@ -310,8 +403,21 @@ async function runAutoReplaceVerifyPhase(
     replacementFolder: committed.photoFolder,
     message: "Swap committed — verifying the new photos are clean and in-community…",
   });
+  // Track the kick outcome — an HTTP failure here (e.g. the folder rejected
+  // as unscannable) must surface in the completed message, not silently read
+  // as "rescan is running".
+  let rescanKickNote = "";
   await postLoopback("/api/photo-listing-check/run", { folders: [committed.photoFolder] }, 30_000)
-    .catch((e) => console.warn(`[auto-replace] verify rescan kick failed: ${e?.message ?? e}`));
+    .then(({ status, data }) => {
+      if (status >= 400) {
+        rescanKickNote = ` ⚠ OTA rescan did not start (${String((data as any)?.error ?? `HTTP ${status}`)}) — use "Rescan again" on the row.`;
+        console.warn(`[auto-replace] verify rescan kick rejected (${status}) for ${committed.photoFolder}`);
+      }
+    })
+    .catch((e) => {
+      rescanKickNote = " ⚠ OTA rescan did not start (request failed) — use \"Rescan again\" on the row.";
+      console.warn(`[auto-replace] verify rescan kick failed: ${e?.message ?? e}`);
+    });
   await postLoopback("/api/builder/bulk-photo-community-check", {
     propertyIds: [record.propertyId],
     labels: { [String(record.propertyId)]: record.propertyName },
@@ -350,7 +456,7 @@ async function runAutoReplaceVerifyPhase(
 
   touch(record, {
     phase: "completed",
-    message: `${record.unitLabel} now uses ${committed.newUnitLabel || record.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.${guestyPushNote}`,
+    message: `${record.unitLabel} now uses ${committed.newUnitLabel || record.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.${rescanKickNote}${guestyPushNote}`,
     error: null,
   });
 }
@@ -362,9 +468,10 @@ export async function startAutoReplaceJob(input: {
 }): Promise<{ ok: true; job: AutoReplaceJobRecord } | { ok: false; status: number; error: string }> {
   const propertyId = Number(input.propertyId);
   const unitId = String(input.unitId ?? "");
-  const builder = Number.isFinite(propertyId) && propertyId > 0 ? getUnitBuilderByPropertyId(propertyId) : undefined;
-  const unit = builder?.units.find((u) => u.id === unitId);
-  if (!builder || !unit) return { ok: false, status: 400, error: "Unknown property/unit for auto replace" };
+  // Resolves BOTH builder properties (positive ids) and promoted drafts
+  // (negative ids, `draft<id>-unit-a/b`).
+  const target = await resolveAutoReplaceTarget(propertyId, unitId);
+  if (!target) return { ok: false, status: 400, error: "Unknown property/unit for auto replace" };
 
   // Double-tap guard — one active auto-replace per property+unit (memory + store).
   for (const existing of Array.from(jobs.values())) {
@@ -380,15 +487,17 @@ export async function startAutoReplaceJob(input: {
     return { ok: true, job: persistedActive };
   }
 
-  const unitIndex = builder.units.findIndex((u) => u.id === unitId);
+  const letter = String.fromCharCode(65 + Math.max(0, target.unitIndex));
+  const numberSuffix = target.unit.unitNumber && target.unit.unitNumber !== letter
+    ? ` (${target.unit.unitNumber})`
+    : "";
   const record: AutoReplaceJobRecord = {
     jobId: `arj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
     phase: "queued",
     propertyId,
     unitId,
-    unitLabel: input.unitLabel
-      || `Unit ${unitIndex >= 0 ? String.fromCharCode(65 + unitIndex) : "?"}${unit.unitNumber ? ` (${unit.unitNumber})` : ""}`,
-    propertyName: builder.propertyName || builder.complexName,
+    unitLabel: input.unitLabel || `Unit ${letter}${numberSuffix}`,
+    propertyName: target.propertyName,
     findJobId: null,
     attemptedUrls: [],
     newUnitLabel: null,

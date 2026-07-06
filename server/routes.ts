@@ -35080,8 +35080,18 @@ Return ONLY compact JSON with this exact shape:
   app.patch("/api/unit-swaps/commit/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId);
     if (isNaN(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
-    const swaps = latestUnitSwaps(await storage.getUnitSwaps(propertyId));
-    await storage.commitUnitSwaps(propertyId);
+    // Optional UNIT scope (2026-07-05): the dashboard replace flows auto-fire
+    // this PATCH right after a single unit's swap. Unscoped, it committed +
+    // repointed EVERY pending swap row for the property — silently applying a
+    // sibling unit's abandoned (operator-unreviewed) preflight pick. With
+    // { oldUnitId } only that unit's latest swap commits/repoints. No body =
+    // preflight's explicit reviewed commit-all, unchanged.
+    const scopeOldUnitId = typeof (req.body as any)?.oldUnitId === "string" && (req.body as any).oldUnitId.trim()
+      ? String((req.body as any).oldUnitId).trim()
+      : undefined;
+    let swaps = latestUnitSwaps(await storage.getUnitSwaps(propertyId));
+    if (scopeOldUnitId) swaps = swaps.filter((s) => s.oldUnitId === scopeOldUnitId);
+    await storage.commitUnitSwaps(propertyId, scopeOldUnitId);
     // Promoted drafts (negative propertyId) persist photos under
     // unit1PhotoFolder / unit2PhotoFolder. Replacement swaps hydrate a
     // separate replacement-p* folder — point the draft at that folder on

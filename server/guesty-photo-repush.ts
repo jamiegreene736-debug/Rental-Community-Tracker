@@ -23,6 +23,8 @@
 import path from "node:path";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { resolveActiveUnitPhotoFolders } from "@shared/unit-swap-photos";
+import { resolveCanonicalCommunityPhotoFolder } from "@shared/community-photo-folders";
+import { draftUnitIdForSlot } from "@shared/auto-replace-job-logic";
 import {
   assembleGuestyPushPhotos,
   recentUnitSwapPropertyIds,
@@ -84,18 +86,50 @@ export type GuestyPhotoRepushResult = {
 // pictures[] would race (last writer wins with a possibly-shorter set).
 const pushTails = new Map<number, Promise<unknown>>();
 
+// Promoted drafts (negative ids) have no unit-builder-data entry — their
+// gallery structure lives on the community_drafts row (unit{1,2}PhotoFolder
+// + the canonical community folder adapt-draft.ts resolves). 2026-07-05: the
+// draft "Replace photos" flow needs the same auto re-push builder properties
+// get, otherwise the live listing keeps serving the flagged photos.
+async function draftPushUnits(propertyId: number): Promise<
+  { propertyName: string; units: Array<{ id: string; photoFolder?: string }>; communityFolder: string } | null
+> {
+  const draftId = -propertyId;
+  if (!Number.isFinite(draftId) || draftId <= 0) return null;
+  const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
+  if (!draft) return null;
+  // Conventional folder fallback mirrors the dashboard: a draft whose folder
+  // field never persisted still stores photos under draft-<id>-unit-a/b, and
+  // resolveActiveUnitPhotoFolders drops folder-less units entirely (which
+  // would silently exclude a REPLACED unit's gallery from the push).
+  const units: Array<{ id: string; photoFolder?: string }> = [
+    { id: draftUnitIdForSlot(draftId, "a"), photoFolder: draft.unit1PhotoFolder ?? `draft-${draftId}-unit-a` },
+  ];
+  if ((draft as any).singleListing !== true) {
+    units.push({ id: draftUnitIdForSlot(draftId, "b"), photoFolder: draft.unit2PhotoFolder ?? `draft-${draftId}-unit-b` });
+  }
+  return {
+    propertyName: draft.name,
+    units,
+    communityFolder: resolveCanonicalCommunityPhotoFolder(draft.name) ?? `community-draft-${draftId}`,
+  };
+}
+
 async function assemblePushPhotosForProperty(propertyId: number): Promise<
   | { photos: Array<{ localPath: string; caption: string }>; guestyListingId: string; propertyName: string }
   | { skipped: NonNullable<GuestyPhotoRepushResult["skipped"]>; propertyName?: string }
 > {
-  const builder = getUnitBuilderByPropertyId(propertyId);
-  if (!builder) return { skipped: "no-builder" };
-  const propertyName = builder.propertyName || builder.complexName;
+  const builder = propertyId > 0 ? getUnitBuilderByPropertyId(propertyId) : undefined;
+  const draft = !builder ? await draftPushUnits(propertyId) : null;
+  if (!builder && !draft) return { skipped: "no-builder" };
+  const propertyName = builder ? (builder.propertyName || builder.complexName) : draft!.propertyName;
   const guestyListingId = await storage.getGuestyListingId(propertyId).catch(() => undefined);
   if (!guestyListingId) return { skipped: "no-guesty-mapping", propertyName };
 
   const swaps = await storage.getUnitSwaps(propertyId).catch(() => []);
-  const activeFolders = resolveActiveUnitPhotoFolders(propertyId, builder.units, swaps);
+  const pushUnits: Array<{ id: string; photoFolder?: string; photos?: Array<{ filename: string; label: string }> }> =
+    builder ? builder.units : draft!.units;
+  const activeFolders = resolveActiveUnitPhotoFolders(propertyId, pushUnits, swaps);
 
   const galleries: GuestyPushGallery[] = [];
   const galleryFor = async (
@@ -111,9 +145,10 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
   });
 
   // Units first (A, B, …) — same across-gallery order as the builder Photos
-  // tab. Static unit-builder-data captions only apply to a unit's ORIGINAL
-  // folder; a replacement folder's photos are labeled by the Claude labeler.
-  for (const unit of builder.units) {
+  // tab. Static unit-builder-data captions only apply to a builder unit's
+  // ORIGINAL folder; replacement folders (and all draft folders) are labeled
+  // by the Claude labeler / photo_labels rows.
+  for (const unit of pushUnits) {
     const active = activeFolders.find((f) => f.unitId === unit.id);
     if (!active?.activeFolder) continue;
     const staticLabels = !active.replaced && Array.isArray(unit.photos)
@@ -122,11 +157,12 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
     galleries.push(await galleryFor(active.activeFolder, "unit", staticLabels));
   }
   // Community last.
-  if (builder.communityPhotoFolder) {
-    const staticLabels = Array.isArray(builder.communityPhotos)
+  const communityFolder = builder ? builder.communityPhotoFolder : draft!.communityFolder;
+  if (communityFolder) {
+    const staticLabels = builder && Array.isArray(builder.communityPhotos)
       ? Object.fromEntries(builder.communityPhotos.map((p) => [p.filename, p.label]))
       : undefined;
-    galleries.push(await galleryFor(builder.communityPhotoFolder, "community", staticLabels));
+    galleries.push(await galleryFor(communityFolder, "community", staticLabels));
   }
 
   const photos = assembleGuestyPushPhotos(galleries);

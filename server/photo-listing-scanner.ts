@@ -1234,8 +1234,15 @@ export async function listScanableFolders(): Promise<string[]> {
     const oldUnit = builder?.units.find((unit) => unit.id === swap.oldUnitId);
     if (oldUnit?.photoFolder) set.delete(oldUnit.photoFolder);
     set.add(replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId));
+    // Swapped DRAFT units mirror the builder semantics above: drop the
+    // conventional ORIGINAL folder (abandoned once the unit was replaced —
+    // scanning it burns Lens credits on dead photos and mis-attributes the
+    // NEW unit's tokens to them). The drafts loop below re-adds whichever
+    // folder the draft row CURRENTLY designates — the original again while a
+    // swap is pending/unrepointed (still the live gallery), the replacement
+    // folder once repointed.
     const draft = String(swap.oldUnitId).match(/^draft(\d+)-unit-([a-z0-9_-]+)$/i);
-    if (draft) set.add(`draft-${draft[1]}-unit-${draft[2]}`);
+    if (draft) set.delete(`draft-${draft[1]}-unit-${draft[2]}`);
   }
 
   // Published drafts can have valid local photo folders without any

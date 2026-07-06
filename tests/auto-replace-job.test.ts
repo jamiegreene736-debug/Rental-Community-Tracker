@@ -9,8 +9,10 @@ import {
   STUCK_AUTO_REPLACE_ERROR,
   STUCK_AUTO_REPLACE_VERIFY_ERROR,
   clearableAutoReplaceJobIds,
+  draftUnitIdForSlot,
   failStuckAutoReplaceRecords,
   findActiveAutoReplaceJob,
+  parseDraftUnitId,
   nextStepFromFindJob,
   parseAutoReplaceStore,
   pickCommitCandidate,
@@ -193,6 +195,74 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
   const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
   check("POST /api/unit-swaps hydrates with the sidecar scrape tier (bot-walled galleries recover)",
     /hydrateUnitSwapPhotoFolder\(parsed\.data, \{ useSidecar: true \}\)/.test(routes));
+}
+
+// ── draft (negative-id) unit identity ─────────────────────────────────────────
+// 2026-07-05 operator screenshot: flagged DRAFT rows (Waikoloa Villas Unit B —
+// draft-12-unit-b / draft-13-unit-a) had NO Replace photos button because the
+// popup resolver returned [] for negative ids. The whole flow now supports
+// drafts; these helpers keep the client button, the orchestrator, and the
+// Guesty re-push agreed on the `draft<id>-unit-a/b` id convention that
+// adapt-draft.ts synthesizes and PATCH /api/unit-swaps/commit's slot parse
+// expects.
+check("draft unit id round-trips through parse",
+  draftUnitIdForSlot(12, "b") === "draft12-unit-b" &&
+  JSON.stringify(parseDraftUnitId("draft12-unit-b")) === JSON.stringify({ draftId: 12, slot: "b" }) &&
+  JSON.stringify(parseDraftUnitId(draftUnitIdForSlot(7, "a"))) === JSON.stringify({ draftId: 7, slot: "a" }));
+check("non-draft / malformed unit ids parse to null",
+  parseDraftUnitId("prop23-kl-3br") === null &&
+  parseDraftUnitId("draft-12-unit-b") === null &&
+  parseDraftUnitId("draft12-unit-c") === null &&
+  parseDraftUnitId(null) === null);
+
+// ── draft replacement folders parse + stay scannable ──────────────────────────
+// Adversarial review (2026-07-05): replacementPhotoFolderRef's old greedy
+// (.+)-u(.+) split at the LAST "-u" — inside every draft unit id's "-unit-a/b"
+// suffix (and builder ids like prop27-unit-a) — so draft replacement folders
+// were unparseable → unscannable: the verify rescan 400'd, the weekly cron
+// skipped the new gallery forever, and the dashboard dropped the folder.
+{
+  const { replacementPhotoFolderRef, isScannableFolder } = await import("../shared/photo-folder-utils");
+  const draftRef = replacementPhotoFolderRef("replacement-pdraft-12-udraft12-unit-b");
+  check("draft replacement folder parses to its negative property id + full unit id",
+    draftRef?.propertyId === -12 && draftRef?.oldUnitId === "draft12-unit-b");
+  check("draft replacement folder is scannable (rescan + weekly cron + dashboard keep it)",
+    isScannableFolder("replacement-pdraft-12-udraft12-unit-b"));
+  const builderRef = replacementPhotoFolderRef("replacement-p32-uprop32-kia-3br");
+  check("builder replacement folder parses unchanged",
+    builderRef?.propertyId === 32 && builderRef?.oldUnitId === "prop32-kia-3br");
+  const p27 = replacementPhotoFolderRef("replacement-p27-uprop27-unit-a");
+  check("builder unit ids containing '-unit-' parse too (pre-existing prop27 gap)",
+    p27?.propertyId === 27 && p27?.oldUnitId === "prop27-unit-a");
+  check("junk replacement folder names still reject",
+    replacementPhotoFolderRef("replacement-punknown-uunit") === null);
+}
+
+// ── source locks: the draft replace path exists at every seam ─────────────────
+{
+  const { readFileSync } = await import("node:fs");
+  const orch = readFileSync(new URL("../server/auto-replace-jobs.ts", import.meta.url), "utf8");
+  check("orchestrator resolves draft targets (getCommunityDraft branch)",
+    orch.includes("resolveAutoReplaceTarget") && orch.includes("getCommunityDraft"));
+  check("orchestrator repoints the draft after a committed swap — SCOPED to the unit (never commits a sibling's pending pick)",
+    /target\.isDraft[\s\S]{0,600}\/api\/unit-swaps\/commit\/[\s\S]{0,80}oldUnitId: record\.unitId/.test(orch));
+  const repush = readFileSync(new URL("../server/guesty-photo-repush.ts", import.meta.url), "utf8");
+  check("Guesty re-push assembles draft galleries (unit1/unit2 photo folders + conventional fallback)",
+    repush.includes("draftPushUnits") && repush.includes("unit1PhotoFolder") && /\?\? `draft-\$\{draftId\}-unit-a`/.test(repush));
+  const homeSrc = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
+  check("dashboard popup resolves draft rows to Replace buttons (no propertyId <= 0 bail)",
+    homeSrc.includes("replaceBuilderLikeFor") && homeSrc.includes("draftUnitIdForSlot"));
+  check("manual draft repoint is unit-scoped and STOPS on failure (no misleading community check/toast)",
+    /unit-swaps\/commit\/\$\{target\.propertyId\}`, \{ oldUnitId \}/.test(homeSrc) &&
+    /Draft repoint failed[\s\S]{0,400}return;/.test(homeSrc));
+  check("terminal draft queue jobs refetch the drafts (stale flagged row would re-enable the button)",
+    /job\.propertyId < 0[\s\S]{0,200}\/api\/community\/drafts/.test(homeSrc));
+  const routesSrc = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  check("commit route honors the oldUnitId scope",
+    routesSrc.includes("scopeOldUnitId") && /commitUnitSwaps\(propertyId, scopeOldUnitId\)/.test(routesSrc));
+  const scannerSrc = readFileSync(new URL("../server/photo-listing-scanner.ts", import.meta.url), "utf8");
+  check("scanner drops the abandoned original draft folder after a swap (mirrors builder semantics)",
+    /if \(draft\) set\.delete\(`draft-\$\{draft\[1\]\}-unit-\$\{draft\[2\]\}`\)/.test(scannerSrc));
 }
 
 // ── parse: findRestarts defaults for legacy records ──────────────────────────
