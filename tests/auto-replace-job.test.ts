@@ -260,6 +260,13 @@ check("non-draft / malformed unit ids parse to null",
   const routesSrc = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
   check("commit route honors the oldUnitId scope",
     routesSrc.includes("scopeOldUnitId") && /commitUnitSwaps\(propertyId, scopeOldUnitId\)/.test(routesSrc));
+  // 2026-07-06: "N had too few photos" was the dominant find-phase failure
+  // (Mauna Lani 7/13, Pili Mai 4/9) — datacenter bot-walls on Zillow/Redfin
+  // galleries. A bounded sidecar re-scrape rescues an otherwise-qualified
+  // candidate BEFORE the skipped-too-few-photos verdict.
+  check("find-unit rescues photo-floor candidates through the bounded sidecar tier",
+    routesSrc.includes("MAX_SIDECAR_PHOTO_RESCUES") &&
+    /sidecarPhotoRescues < MAX_SIDECAR_PHOTO_RESCUES[\s\S]{0,600}SCRAPE_WITH_SIDECAR/.test(routesSrc));
   const scannerSrc = readFileSync(new URL("../server/photo-listing-scanner.ts", import.meta.url), "utf8");
   check("scanner drops the abandoned original draft folder after a swap (mirrors builder semantics)",
     /if \(draft\) set\.delete\(`draft-\$\{draft\[1\]\}-unit-\$\{draft\[2\]\}`\)/.test(scannerSrc));

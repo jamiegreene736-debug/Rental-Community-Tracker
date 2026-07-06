@@ -32953,6 +32953,22 @@ Return ONLY compact JSON with this exact shape:
     const PLATFORM_CHECK_RESERVE_MS = 12_000;
     const PHOTO_REVERSE_SEARCH_TIMEOUT_MS = expandedSearch ? 14_000 : 20_000;
     const PHOTO_PIPELINE_RESERVE_MS = PHOTO_SCRAPE_TIMEOUT_MS + 25_000;
+    // SIDECAR PHOTO RESCUE (2026-07-06): Zillow/Redfin intermittently bot-wall
+    // Railway's datacenter IP into a 0/1-photo scrape, so otherwise-QUALIFIED
+    // candidates died at the photo floor — Mauna Lani dropped 7 of 13 and Pili
+    // Mai 4 of 9 as "too few photos" while the SAME galleries scraped fine
+    // through the residential-IP sidecar tier (the unit-swap commit fix proved
+    // it: unit 9K scraped 0 photos direct, 24 via sidecar). When a candidate
+    // fails the floor AND survives every other gate so far, retry its gallery
+    // once through the bounded 90s sidecar wallet. Capped per pass (each
+    // rescue can hold the route for ~2 min) — continuation passes get a fresh
+    // budget, so a deep pool still drains across passes. 0 disables.
+    const MAX_SIDECAR_PHOTO_RESCUES = Number.isFinite(Number(process.env.REPLACEMENT_SIDECAR_PHOTO_RESCUES))
+      ? Math.max(0, Number(process.env.REPLACEMENT_SIDECAR_PHOTO_RESCUES))
+      : 2;
+    const SIDECAR_PHOTO_RESCUE_TIMEOUT_MS = 110_000;
+    const SIDECAR_PHOTO_RESCUE_RESERVE_MS = SIDECAR_PHOTO_RESCUE_TIMEOUT_MS + 25_000;
+    let sidecarPhotoRescues = 0;
     // Per-PASS candidate cap. Kept >= DISCOVERY_CANDIDATE_TARGET so one pass can
     // in principle clear its whole discovery pool; overflow beyond this is no longer
     // dropped — it's resumed across continuation passes via the capExceeded path
@@ -34558,6 +34574,48 @@ Return ONLY compact JSON with this exact shape:
               if (rejectOutsideResort(sourceUrl, source, address, unitNumber)) continue;
               platformCheck = await checkAllPlatforms(communityAddress, communityName, unitNumber);
             }
+          }
+          // Sidecar photo rescue — see the constant block for the why. Runs
+          // only when the datacenter scrape (and the equivalent-source
+          // fallback) still left the candidate under the floor; the rescued
+          // photos + facts feed the SAME bedroom/floor/vision gates below.
+          if (
+            scrapedPhotoUrls.length < MIN_PHOTOS
+            && sidecarPhotoRescues < MAX_SIDECAR_PHOTO_RESCUES
+            && hasRouteBudget(SIDECAR_PHOTO_RESCUE_RESERVE_MS)
+          ) {
+            sidecarPhotoRescues += 1;
+            try {
+              const rescueFacts: ListingFacts = {};
+              const rescued = await withStepTimeout(
+                scrapeListingPhotosDualSource(clusterUrls, rescueFacts, SCRAPE_WITH_SIDECAR),
+                SIDECAR_PHOTO_RESCUE_TIMEOUT_MS,
+                { photos: [] as ScrapedPhoto[], sourceUrl, platform: listingScrapePlatform(sourceUrl) },
+                `sidecar photo rescue ${sourceUrl}`,
+              );
+              if (rescued.photos.length >= MIN_PHOTOS) {
+                console.error(
+                  `[find-unit] [${source}] sidecar photo rescue recovered ${rescued.photos.length} photos ` +
+                  `for ${sourceUrl} (datacenter scrape saw ${scrapedPhotoUrls.length})`,
+                );
+                scrapedPhotoUrls = rescued.photos.map((p) => p.url);
+                candidateFacts = { ...candidateFacts, ...rescueFacts };
+                if (rescued.sourceUrl && rescued.sourceUrl !== sourceUrl) {
+                  const resolved = detectSource(rescued.sourceUrl);
+                  if (resolved) {
+                    sourceUrl = rescued.sourceUrl;
+                    source = resolved;
+                    address = displayAddressFromUrl(sourceUrl, source) || address;
+                    unitNumber = extractUnitNumber(sourceUrl, source, candidate.contextText) || unitNumber;
+                  }
+                }
+              } else {
+                console.error(
+                  `[find-unit] [${source}] sidecar photo rescue still short for ${sourceUrl} ` +
+                  `(${rescued.photos.length} photos)`,
+                );
+              }
+            } catch { /* fall through to the normal too-few-photos skip */ }
           }
           let actualBedrooms = candidateFacts.bedrooms;
           if (actualBedrooms == null && typeof candidate.bedroomHint === "number") {
