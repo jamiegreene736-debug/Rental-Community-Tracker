@@ -34950,7 +34950,13 @@ Return ONLY compact JSON with this exact shape:
         duplicateUnitClaim,
       });
     }
-    const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data);
+    // useSidecar (2026-07-05): Redfin/Zillow/Homes bot-wall Railway's
+    // datacenter IP intermittently — the Pili Mai 9K commit failed with
+    // "returned 0 photos" for a gallery the find phase had scraped fine.
+    // The bounded 90s residential-IP sidecar tier (fires only when the
+    // datacenter scrape comes up short) recovers exactly this; the
+    // manual-URL swap route above has run with it since it shipped.
+    const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data, { useSidecar: true });
     if (!hydrated.ok) {
       return res.status(502).json({
         error: `Replacement unit found, but its photos could not be saved: ${hydrated.error ?? "unknown error"}. Choose a different replacement so the builder does not reuse duplicate photos.`,

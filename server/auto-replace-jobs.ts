@@ -256,9 +256,21 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           newBedrooms: typeof c.bedrooms === "number" ? c.bedrooms : unit.bedrooms,
           newSourceUrl: url,
           thumbnailUrl: Array.isArray(c.photos) ? String((c.photos[0] as any)?.url ?? "") || null : null,
-        }, 180_000);
+        }, 300_000); // hydration may use the bounded 90s sidecar scrape tier
         if (status === 409) {
           touch(record, { attemptedUrls: [...record.attemptedUrls, url], message: "Candidate already in use — trying the next option…" });
+          continue;
+        }
+        // 502 from this route = photo hydration failed for THIS candidate
+        // (bot-walled gallery / photos taken down since the find phase) — a
+        // candidate-level problem, not a job-level one. Burn the URL and try
+        // the next option (the Pili Mai 9K case: option 1's Redfin gallery
+        // came back empty while option 2 scraped fine).
+        if (status === 502 && /photo/i.test(String(data?.error ?? ""))) {
+          touch(record, {
+            attemptedUrls: [...record.attemptedUrls, url],
+            message: "Candidate's photos could not be scraped — trying the next option…",
+          });
           continue;
         }
         if (status >= 400) {
