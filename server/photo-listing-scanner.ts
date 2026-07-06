@@ -76,7 +76,7 @@ import {
 } from "@shared/address-page-match";
 import { extractGeoFromPageText } from "@shared/address-geo-match";
 import { haversineFeet } from "@shared/walking-distance";
-import { geocode } from "./walking-distance";
+import { geocode, reverseGeocodeToStreetAddress } from "./walking-distance";
 import { agreementImageIdentityHolds, computeDhash, isDuplicateHash, THUMBNAIL_IDENTITY_DISTANCE } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
@@ -254,6 +254,14 @@ const ADDRESS_GEO_MATCH_MAX_FEET = (() => {
   const n = Number(process.env.PHOTO_LISTING_ADDRESS_GEO_MAX_FEET);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2640;
 })();
+// Phase-3 coverage fallback: when a folder has a resort name + city but no known
+// street (imported/draft listings with no curated rule and no parseable street),
+// derive a street by geocoding the resort and reverse-geocoding the pin to a
+// numbered street. Fail-open (any miss → the address leg is skipped as before).
+// Kill with PHOTO_LISTING_ADDRESS_GEOCODE_FALLBACK_DISABLED=1.
+const PHOTO_LISTING_ADDRESS_GEOCODE_FALLBACK_DISABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.PHOTO_LISTING_ADDRESS_GEOCODE_FALLBACK_DISABLED ?? "").trim(),
+);
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 const STANDALONE_DRAFT_NO_UNIT_TOKEN = "__standalone_draft_no_unit_token__";
 
@@ -417,6 +425,26 @@ function listingMatchesFolderCommunity(
 
 type FolderAddressContext = { street: string; city: string; state: string };
 
+// Coverage fallback: derive a NUMBERED street for a folder that has a resort
+// name + city but no curated/parseable street. Geocodes the resort, then
+// reverse-geocodes the pin to a house-number+road (the reverse-geocoder only
+// returns numbered streets). Both providers cache; fails open to null on any
+// blip so the address leg is simply skipped, exactly as before.
+async function deriveStreetViaGeocode(name: string, city: string, state: string): Promise<string | null> {
+  if (PHOTO_LISTING_ADDRESS_GEOCODE_FALLBACK_DISABLED) return null;
+  const resort = String(name ?? "").trim();
+  const q = [resort, String(city ?? "").trim(), String(state ?? "").trim()].filter(Boolean).join(", ");
+  if (!resort || !q) return null;
+  try {
+    const coord = await geocode(q);
+    if (!coord) return null;
+    const street = (await reverseGeocodeToStreetAddress(coord.lat, coord.lng) ?? "").trim();
+    return /^\d/.test(street) ? street : null; // require a leading house number
+  } catch {
+    return null;
+  }
+}
+
 // Resolve the street + city to text-search for this folder. Prefers the
 // resort's canonical street from community-addresses (shared across units;
 // the unit-number gate disambiguates), falling back to the unit-builder /
@@ -436,6 +464,11 @@ async function folderAddressContext(folder: string): Promise<FolderAddressContex
     const city = (rule?.city || parsed.city).trim();
     const state = (rule?.state || parsed.state).trim();
     if (street && city) return { street, city, state };
+    // No curated/parseable street — try the geocode coverage fallback.
+    if (city) {
+      const derived = await deriveStreetViaGeocode(builder.complexName, city, state);
+      if (derived) return { street: derived, city, state };
+    }
     return null;
   }
   const ref = draftPhotoFolderRef(folder) ?? replacementPhotoFolderRef(folder);
@@ -448,6 +481,10 @@ async function folderAddressContext(folder: string): Promise<FolderAddressContex
       const city = (rule?.city || parsed.city || String(draft.city ?? "")).trim();
       const state = (rule?.state || parsed.state || String((draft as any).state ?? "")).trim();
       if (street && city) return { street, city, state };
+      if (city) {
+        const derived = await deriveStreetViaGeocode(String(draft.name ?? ""), city, state);
+        if (derived) return { street: derived, city, state };
+      }
     }
   }
   // Replacement / swap-backed folder (e.g. `replacement-p4-uunit-423`). These have a
