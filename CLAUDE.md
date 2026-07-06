@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-06 (cowork buy-in prompt: LOSS-triggered city-wide rollback): Operator — "the cowork prompt
+  tries same-community units first; if that only yields LOSS-making results, roll back to a city-wide
+  search for two units of that bedroom size in the same community." Confirmed 2 decisions first:
+  loss = the app's standing $100 max-loss cap (`DEFAULT_PROFIT_MIN_FLAT_USD`, shared/buy-in-profit.ts),
+  rollback scope = a SAME-COMPLEX pair from the city scan. SHIPPED (`claude/recursing-fermi-50f5d8`):
+  `buildCoworkBuyInPrompt` (shared/cowork-buyin-prompt.ts) gained an optional `netRevenue` input + a
+  "## Profit guard" section — when net revenue is known, loss = (combined all-in pick cost) − netRevenue
+  > $100; the city-wide rung now fires on COVERAGE **or** a >$100 loss (was coverage-only); the rollback
+  hunts same-bedroom units in the SAME complex; rung 3 attaches the cheapest option anyway + FLAGS the
+  loss loudly when even the whole city can't beat the cap (never leave a guest slot empty); the report +
+  done-signal carry the profit math + which branch applied. LOAD-BEARING: the CLIENT
+  (CoworkBuyInPromptButton) passes REMAINING net revenue — `getNetRevenue(reservation)` MINUS
+  already-attached slot cost — because the button fills only the EMPTY slots (`units = slots.filter(!s.buyIn)`);
+  the full net revenue would inflate the budget on a partially-filled combo (mirrors bookings.tsx's
+  `remainingBudget = getNetRevenue − existingCost`). Unknown/<=0 net revenue disables the guard →
+  guard-off output is BYTE-IDENTICAL to the pre-2026-07-06 prompt (degrade-safe, mirrors buy-in-profit.ts).
+  Built + reviewed via a 3-lens adversarial workflow (1 MAJOR budget-basis bug caught + fixed; 2 cosmetics
+  folded in; invariants intact: never-mention-card, never-attach-airbnb, STOP-at-city-wide, 409
+  same-complex-only). Verified: cowork-buyin-prompt 209/0 (14 new), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline (0 new).
+
 - 2026-07-06 ("Text failed / 500: Failed to send SMS" — but the guest GOT the text): Operator
   screenshot of the inbox Send Text button failing. LIVE DIAGNOSIS (Railway GraphQL logs +
   OpenPhone API + X-Admin-Secret probes): the text to Thien Tran was DELIVERED at 15:48:53Z;
