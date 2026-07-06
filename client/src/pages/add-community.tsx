@@ -56,6 +56,10 @@ import {
 } from "@shared/bulk-combo-queue-progress";
 import { OperationFailureActions } from "@/components/OperationFailureActions";
 import { resolveLicenseComplianceProfile } from "@shared/license-compliance";
+import {
+  resortDedupKey as resortDedupKeyOf,
+  computeSweepResortOwnership,
+} from "@shared/sweep-resort-dedup";
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -1734,11 +1738,20 @@ export default function AddCommunity() {
   // Poipu both return Pili Mai), and the bulk endpoint keys duplicates by
   // name|city|state — so two different cities would NOT collapse server-side and
   // would mint two identical drafts. Collapse by normalized name + state here.
-  const resortDedupKey = useCallback((c: CommunityResult) => {
-    const name = String(c.name || "").trim().toLowerCase().replace(/\s+/g, " ");
-    const state = String(c.state || "").trim().toLowerCase();
-    return `${name}|${state}`;
-  }, []);
+  // Delegate to the shared pure key so the DISPLAY dedup (below) and the SELECTION
+  // dedup (sweepSelectedCommunities) can never drift apart — see
+  // shared/sweep-resort-dedup.ts.
+  const resortDedupKey = useCallback((c: CommunityResult) => resortDedupKeyOf(c), []);
+
+  // Cross-market ownership: the same resort can surface under two adjacent towns
+  // (overlapping search regions), so we render each resort ONCE — under the first
+  // scanned market that surfaced it — and note it as "also found here" under the
+  // later markets. Keyed by market order, so it's deterministic once the sweep is
+  // done (selection is only enabled at sweepDone). See shared/sweep-resort-dedup.ts.
+  const sweepResortOwnership = useMemo(
+    () => computeSweepResortOwnership(sweepMarkets),
+    [sweepMarkets],
+  );
 
   const toggleSweepResort = useCallback((key: string) => {
     setSweepResortSelection((prev) => {
@@ -1769,6 +1782,9 @@ export default function AddCommunity() {
     const next = new Set<string>();
     sweepMarkets.forEach((m, mi) => {
       (m.communities ?? []).forEach((c, ci) => {
+        // Only tick the VISIBLE (owner) checkbox for a resort — a resort that also
+        // surfaced under another city is rendered once and has no checkbox here.
+        if (!sweepResortOwnership.ownedIndicesByMarket.get(mi)?.has(ci)) return;
         if (!checkCommunityType(c.unitTypes, c.researchSummary).eligible) return;
         // Never auto-select a resort already in the system — the operator wants the
         // sweep to skip anything already covered (backstopped at queue + on the server).
@@ -1777,7 +1793,7 @@ export default function AddCommunity() {
       });
     });
     setSweepResortSelection(next);
-  }, [sweepMarkets]);
+  }, [sweepMarkets, sweepResortOwnership]);
 
   const clearSweepResorts = useCallback(() => setSweepResortSelection(new Set()), []);
 
@@ -3131,10 +3147,19 @@ export default function AddCommunity() {
               {sweepPhase === "running" && (
               <div className="space-y-2">
                 {sweepMarkets.map((m, mi) => {
-                  const best = m.communities?.[0];
-                  const bestScore = best ? best.confidenceScore + (best.combinabilityScore ?? 50) : 0;
                   const marketResorts = m.communities ?? [];
-                  const showResortBreakdown = m.status === "done" && marketResorts.length > 0;
+                  // Only the resorts THIS market owns are rendered here; the rest
+                  // surfaced first under an earlier city (shown there instead).
+                  const ownedIndices = sweepResortOwnership.ownedIndicesByMarket.get(mi);
+                  const ownsResort = (ci: number) => ownedIndices?.has(ci) === true;
+                  const ownedResorts = marketResorts.filter((_, ci) => ownsResort(ci));
+                  // "Best pick" summary should name a resort the operator can
+                  // actually see under this market — pick the first OWNED resort.
+                  const best = ownedResorts[0];
+                  const bestScore = best ? best.confidenceScore + (best.combinabilityScore ?? 50) : 0;
+                  // Resorts found here but displayed under an earlier city.
+                  const movedResorts = sweepResortOwnership.movedByMarket.get(mi) ?? [];
+                  const showResortBreakdown = m.status === "done" && (ownedResorts.length > 0 || movedResorts.length > 0);
                   const comboBadgeState = (
                     possible: boolean | undefined,
                     yesClassName: string,
@@ -3281,6 +3306,10 @@ export default function AddCommunity() {
                       {showResortBreakdown && (
                         <div className="mt-3 border-t pt-2.5 space-y-1.5">
                           {marketResorts.map((c, ci) => {
+                            // Render each resort ONCE: skip any that surfaced first
+                            // under an earlier city (listed in the "also found here"
+                            // note below instead of a second selectable checkbox).
+                            if (!ownsResort(ci)) return null;
                             const selKey = `${mi}:${ci}`;
                             const elig = checkCommunityType(c.unitTypes, c.researchSummary);
                             const checked = sweepResortSelection.has(selKey);
@@ -3362,6 +3391,26 @@ export default function AddCommunity() {
                               </label>
                             );
                           })}
+                          {/* Resorts this city also returned but that are shown
+                              under the first city that surfaced them — so each
+                              resort appears (and is selectable) exactly once. */}
+                          {movedResorts.length > 0 && (() => {
+                            const movedNames = Array.from(new Set(movedResorts.map((r) => r.name).filter(Boolean)));
+                            const ownerCities = Array.from(new Set(movedResorts.map((r) => r.shownUnderCity).filter(Boolean)));
+                            const whereShown = ownerCities.length === 1
+                              ? ` — shown under ${ownerCities[0]} to avoid a duplicate.`
+                              : " — shown under the earlier cities that found them first, to avoid duplicates.";
+                            return (
+                              <p
+                                className="text-[11px] italic text-muted-foreground pt-0.5"
+                                data-testid={`text-sweep-moved-resorts-${mi}`}
+                              >
+                                {movedNames.length === 1 ? "Also found here: " : `Also found here (${movedNames.length}): `}
+                                {movedNames.join(", ")}
+                                {whereShown}
+                              </p>
+                            );
+                          })()}
                         </div>
                       )}
                     </Card>
