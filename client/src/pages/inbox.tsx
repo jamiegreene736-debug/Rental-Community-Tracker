@@ -2068,10 +2068,15 @@ function InboxAlternativePagePanel({ reservationId }: { reservationId: string })
 
   const copyUrl = async () => {
     try {
-      await navigator.clipboard?.writeText(page.url);
+      // Throw (not silently no-op) when the Clipboard API is unavailable —
+      // `navigator.clipboard?.writeText` would short-circuit to undefined and
+      // `await undefined` resolves, falsely reporting success. Falling into the
+      // catch shows the honest "copy failed" prompt to use the field instead.
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(page.url);
       toast({ title: "Alternative page link copied", description: "Paste it into a text or message to the guest." });
     } catch {
-      toast({ title: "Copy failed", description: "Select the link and copy it manually.", variant: "destructive" });
+      toast({ title: "Copy failed", description: "Select the link in the field and copy it manually.", variant: "destructive" });
     }
   };
 
@@ -2088,6 +2093,7 @@ function InboxAlternativePagePanel({ reservationId }: { reservationId: string })
         <div className="flex items-center gap-1.5">
           <input
             readOnly
+            aria-label="Alternative unit guest page URL"
             value={page.url}
             onFocus={(e) => e.currentTarget.select()}
             className="flex-1 min-w-0 h-7 px-2 text-[11px] font-mono border rounded bg-background"
