@@ -3514,6 +3514,86 @@ async function scrapeZillowViaApify(url: string, timeoutMs = 180_000): Promise<{
   }
 }
 
+// Fetch Redfin listing photos via Apify — the Redfin rescue tier that
+// REPLACED ScrapingBee (operator decision 2026-07-06: the ScrapingBee
+// subscription lapsed with its monthly quota permanently exhausted, so its
+// Redfin leg was dead weight; Apify is already paid for at ~$0.01/result).
+// APIFY_REDFIN_ACTOR picks the actor — defaults to
+// kawsar/redfin-details-scraper, which takes Redfin detail URLs via
+// `startUrls` and returns one item per listing with an ordered full-size
+// `imageUrls` gallery plus beds/baths/category/status facts.
+// LOAD-BEARING actor constraint: the actor MUST be LIMITED_PERMISSIONS on
+// Apify. A FULL_PERMISSIONS actor (e.g. tri_angle/redfin-detail) 403s with
+// "full-permission-actor-not-approved" until the operator approves it in the
+// Apify console — the same silent-403 class as the 2026-07-06 commit-phase
+// incident. Check `actorPermissionLevel` on the authed actor GET before
+// repointing APIFY_REDFIN_ACTOR.
+async function scrapeRedfinViaApify(url: string, timeoutMs = 180_000): Promise<{ urls: string[]; facts: ListingFacts }> {
+  const token = process.env.APIFY_API_TOKEN;
+  if (!token) {
+    console.warn(`[scrapeRedfin:Apify] APIFY_API_TOKEN not set`);
+    return { urls: [], facts: {} };
+  }
+  const actor = (process.env.APIFY_REDFIN_ACTOR || "kawsar~redfin-details-scraper").replace("/", "~");
+  try {
+    const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+    const r = await fetch(api, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startUrls: [{ url }], maxItems: 1 }),
+      signal: AbortSignal.timeout(timeoutMs), // warm runs 5-7s; cold container start can add 15-30s
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.warn(`[scrapeRedfin:Apify] HTTP ${r.status} ${body.slice(0, 300)}`);
+      return { urls: [], facts: {} };
+    }
+    const items: any[] = await r.json().catch(() => []);
+    const item = Array.isArray(items) ? items[0] : null;
+    if (!item || typeof item !== "object") {
+      console.warn(`[scrapeRedfin:Apify] empty dataset for ${url}`);
+      return { urls: [], facts: {} };
+    }
+    const rawUrls: string[] = (Array.isArray(item.imageUrls) ? item.imageUrls : [])
+      .map((u: unknown) => String(u ?? "").trim())
+      .filter((u: string) => /^https?:\/\//i.test(u));
+    // Order-preserving dedupe, then the same dominant photo-set-id guard the
+    // sidecar leg applies: if the actor ever leaks the "Nearby similar homes"
+    // carousel (each comp card carries its own cdn-redfin set id), keep only
+    // the subject property's dominant set. See server/redfin-gallery.ts.
+    let urls = Array.from(new Set(rawUrls));
+    const setIdCounts: Record<string, number> = {};
+    for (const u of urls) {
+      const sid = redfinPhotoSetId(u);
+      if (sid) setIdCounts[sid] = (setIdCounts[sid] ?? 0) + 1;
+    }
+    const setIds = Object.keys(setIdCounts);
+    if (setIds.length > 1) {
+      const dominantSetId = setIds.reduce((a, b) => (setIdCounts[a] >= setIdCounts[b] ? a : b));
+      const before = urls.length;
+      urls = urls.filter((u) => {
+        if (!/cdn-redfin\.com/i.test(u)) return true;
+        return redfinPhotoSetId(u) === dominantSetId;
+      });
+      console.log(`[scrapeRedfin:Apify] photo-set isolation: dominantSetId=${dominantSetId}, kept ${urls.length}/${before}`);
+    }
+    const facts: ListingFacts = {};
+    if (item.beds != null && Number.isFinite(Number(item.beds))) facts.bedrooms = Number(item.beds);
+    if (item.baths != null && Number.isFinite(Number(item.baths))) facts.bathrooms = Number(item.baths);
+    if (typeof item.propertyCategory === "string" && item.propertyCategory) {
+      facts.homeType = item.propertyCategory;
+      facts.propertySubType = item.propertyCategory;
+    }
+    if (typeof item.listingStatus === "string" && item.listingStatus) facts.homeStatus = item.listingStatus;
+    if (urls.length > 0) facts.photoCount = urls.length;
+    console.log(`[scrapeRedfin:Apify] ${url} → ${rawUrls.length} raw → ${urls.length} unique photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
+    return { urls, facts };
+  } catch (e: any) {
+    console.warn(`[scrapeRedfin:Apify] ${url}: ${e?.message ?? e}`);
+    return { urls: [], facts: {} };
+  }
+}
+
 async function scrapeZillowViaScrapingBee(url: string, timeoutMs = 90_000): Promise<{ urls: string[]; facts: ListingFacts }> {
   const key = process.env.SCRAPINGBEE_API_KEY;
   if (!key) {
@@ -4963,7 +5043,31 @@ async function scrapeListingPhotos(
   // photo-count gate even when the listing has a full gallery.
   if (/redfin\.com|homes\.com/i.test(primaryUrl)) {
     let result = await scrapeGenericRealEstateViaFetch(primaryUrl);
-    if (result.urls.length === 0 && process.env.SCRAPINGBEE_API_KEY) {
+    const isRedfinTarget = /redfin\.com/i.test(primaryUrl);
+    if (result.urls.length === 0 && isRedfinTarget && process.env.APIFY_API_TOKEN) {
+      // Redfin's datacenter rescue tier is Apify (2026-07-06) — it replaced
+      // ScrapingBee here after the ScrapingBee subscription lapsed with its
+      // monthly quota permanently exhausted. Homes.com keeps the ScrapingBee
+      // leg below (no Apify actor wired for it); with a dead key that leg
+      // fails fast and falls through to the sidecar. The caller's
+      // scrapingBeeTimeoutMs bound is reused deliberately: bounded discovery
+      // loops cap their per-candidate rescue budget with it (18s) and the
+      // Apify actor's warm runs finish in 5-7s.
+      console.log(`[scrapeGenericRealEstate] fetch returned 0, trying Apify Redfin actor for ${primaryUrl}`);
+      const apify = await scrapeRedfinViaApify(primaryUrl, options?.scrapingBeeTimeoutMs ?? 180_000);
+      result = {
+        urls: apify.urls,
+        facts: {
+          bedrooms: result.facts.bedrooms ?? apify.facts.bedrooms,
+          bathrooms: result.facts.bathrooms ?? apify.facts.bathrooms,
+          homeType: result.facts.homeType ?? apify.facts.homeType,
+          homeStatus: result.facts.homeStatus ?? apify.facts.homeStatus,
+          propertySubType: result.facts.propertySubType ?? apify.facts.propertySubType,
+          photoCount: result.facts.photoCount ?? apify.facts.photoCount,
+        },
+      };
+    }
+    if (result.urls.length === 0 && !isRedfinTarget && process.env.SCRAPINGBEE_API_KEY) {
       console.log(`[scrapeGenericRealEstate] fetch returned 0, trying ScrapingBee for ${primaryUrl}`);
       result = await scrapeGenericRealEstateViaScrapingBee(primaryUrl, options?.scrapingBeeTimeoutMs);
     }
@@ -4984,7 +5088,7 @@ async function scrapeListingPhotos(
         const heartbeat = getHeartbeat();
         if (heartbeat.isOnline) {
           const sidecarHost = /redfin\.com/i.test(primaryUrl) ? "Redfin" : "Homes.com";
-          console.log(`[scrapeGenericRealEstate] sidecar fallback (0 photos from fetch/ScrapingBee) host=${sidecarHost} wallet=${gallerySidecarWalletMs}ms`);
+          console.log(`[scrapeGenericRealEstate] sidecar fallback (0 photos from fetch/${isRedfinTarget ? "Apify" : "ScrapingBee"}) host=${sidecarHost} wallet=${gallerySidecarWalletMs}ms`);
           const sidecar = await scrapeListingGalleryViaSidecar({
             url: primaryUrl,
             host: sidecarHost,
@@ -29374,7 +29478,7 @@ Return ONLY compact JSON with this exact shape:
         return res.status(400).json({ ok: false, error: "propertyIds[] required" });
       }
       const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
-      const searchApiKey = process.env.SEARCHAPI_API_KEY ?? process.env.SEARCHAPI_API_KEY_2 ?? "";
+      const searchApiKey = process.env.SEARCHAPI_API_KEY ?? "";
       if (!searchApiKey.trim()) {
         return res.status(500).json({ ok: false, error: "SEARCHAPI_API_KEY not configured" });
       }
@@ -31442,8 +31546,8 @@ Return ONLY compact JSON with this exact shape:
 
   // Platform check: searches Google for the property on Airbnb, VRBO, and Booking.com
   app.get("/api/preflight/platform-check", async (req, res) => {
-    // Resolve to the first available SearchAPI key (handles primary empty/dead → SEARCHAPI_API_KEY_2);
-    // the global fetch fallback rotates keys on a 429 from there.
+    // Resolve via the shared SearchAPI key resolver (single-key mode since
+    // 2026-07-06 — see server/searchapi.ts).
     const apiKey = getSearchApiKey();
     const imgbbKey = process.env.IMGBB_API_KEY;
 

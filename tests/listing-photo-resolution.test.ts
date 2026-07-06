@@ -57,8 +57,11 @@ const routesSrc = fs.readFileSync(path.join(here, "..", "server", "routes.ts"), 
 
 check("routes: imports the shared upgrader",
   routesSrc.includes('from "@shared/listing-photo-resolution"'));
+// 2026-07-06: the renderer now ALSO routes the upgraded URL through the signed
+// /guest-photo upscaling proxy (proxiedGuestPhotoUrl) — the resolution upgrade
+// still fires at render time, just wrapped one call deeper.
 check("routes: GET renderer self-heals thumbnails at render time (safeGuestPhotoUrl)",
-  routesSrc.includes("return upgradeListingPhotoUrlResolution(url);"));
+  routesSrc.includes("proxiedGuestPhotoUrl(upgradeListingPhotoUrlResolution(url))"));
 check("routes: page build persists high-res unit photos post-vision",
   routesSrc.includes("photoFilter.kept.map(upgradeListingPhotoUrlResolution)"));
 check("routes: community gallery persisted high-res too",

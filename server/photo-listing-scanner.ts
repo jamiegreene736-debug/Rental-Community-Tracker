@@ -74,12 +74,10 @@ import { isDuplicateHash } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 
-// Resolve to the FIRST available SearchAPI key (SEARCHAPI_API_KEY, then _2 / _SECONDARY). The
-// global fetch fallback (installSearchApiFetchFallback) rotates to the other keys on a 429/quota
-// response, so a dead primary key self-heals automatically. Reading via the resolver — instead of
-// `process.env.SEARCHAPI_API_KEY` directly — fixes the case where the primary env is empty/dead
-// but SEARCHAPI_API_KEY_2 holds the live key: the presence check and the initial request key both
-// pick the live key. (A dead primary used to make every Lens call 429 → "photos inconclusive".)
+// Resolve via the shared SearchAPI key resolver. Single-key mode since
+// 2026-07-06 (operator upgraded the main SearchAPI account): only
+// SEARCHAPI_API_KEY is read — see server/searchapi.ts for the rationale and
+// how to restore multi-key rotation if a second key is ever needed again.
 const SEARCHAPI_KEY = getSearchApiKeys()[0] ?? "";
 // The dashboard "Photos" match column depends on Google Lens reverse-image
 // search. It was hard-disabled to preserve SearchAPI quota, which left every
