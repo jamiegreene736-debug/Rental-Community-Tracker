@@ -43,6 +43,22 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-06 (FOLLOW-UP: /guest-photo signed upscaling proxy — PM-site originals really upscaled):
+  Operator screenshot: Unit B (VRBO, rw=1200 rewrite) sharp, Unit A (waikikibeachrentals.com,
+  genuine 418x270 originals — no larger variant exists) unchanged. SHIPPED the real-upscale leg:
+  `GET /guest-photo` (server/guest-photo-upscale.ts + pure shared/guest-photo-proxy.ts, 23 tests) —
+  the /alternatives renderer routes external non-VRBO-family photos through it at RENDER time
+  (existing pages heal; VRBO/trvl-media bypass; relative /photos/ untouched). Endpoint: HMAC sig
+  (GUEST_PHOTO_SIGN_KEY || ADMIN_SECRET) + SSRF host guard even with valid sig → fetch (12s/25MB,
+  browser UA) → sharp probe → >=900px wide streams ORIGINAL bytes untouched; smaller → lanczos3 to
+  1200w + unsharp + JPEG q82; LRU 80 + 7d immutable cache; ANY failure 302s to the source (never a
+  broken guest image). Smoked locally: 418x270→1200x775, 1ms cached, 404 bad sig, 404 signed
+  169.254.169.254, 302 on missing source, 2738px passthrough untouched. Classical interpolation +
+  sharpening by DESIGN, not generative SR (no invented detail, no storage pipeline — recomputed on
+  demand, deploy-safe). "/guest-photo" added to auth PUBLIC_PATH_EXACT (see AGENTS.md Decision Log
+  + the inline NOTE in server/auth.ts). Verified: 23/0 new, full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline.
+
 - 2026-07-06 (guest-page photo SHARPNESS — CDN full-res, not AI upscaling): Operator asked whether
   scraped unit photos can be upscaled to look sharp. GROUND TRUTH (live Thien Tran page): the VRBO
   photos were OUR OWN fault — the sidecar harvest captures srcset THUMBNAILS

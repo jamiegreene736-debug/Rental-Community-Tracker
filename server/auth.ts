@@ -99,6 +99,11 @@ const PUBLIC_PATH_EXACT = new Set<string>([
   "/logout",
   "/agreement",
   "/admin/agreement",
+  // NOTE FOR CODEX: /guest-photo is the SIGNED photo-upscaling proxy embedded
+  // in /alternatives/:token pages (guests are unauthenticated). It is NOT an
+  // open proxy: requests need an HMAC `sig` minted at page render, and the
+  // handler re-rejects IP-literal/internal hosts. See server/guest-photo-upscale.ts.
+  "/guest-photo",
   "/favicon.ico",
   "/favicon.png",
   "/favicon-16x16.png",
