@@ -215,20 +215,54 @@ check("non-draft / malformed unit ids parse to null",
   parseDraftUnitId("draft12-unit-c") === null &&
   parseDraftUnitId(null) === null);
 
+// ── draft replacement folders parse + stay scannable ──────────────────────────
+// Adversarial review (2026-07-05): replacementPhotoFolderRef's old greedy
+// (.+)-u(.+) split at the LAST "-u" — inside every draft unit id's "-unit-a/b"
+// suffix (and builder ids like prop27-unit-a) — so draft replacement folders
+// were unparseable → unscannable: the verify rescan 400'd, the weekly cron
+// skipped the new gallery forever, and the dashboard dropped the folder.
+{
+  const { replacementPhotoFolderRef, isScannableFolder } = await import("../shared/photo-folder-utils");
+  const draftRef = replacementPhotoFolderRef("replacement-pdraft-12-udraft12-unit-b");
+  check("draft replacement folder parses to its negative property id + full unit id",
+    draftRef?.propertyId === -12 && draftRef?.oldUnitId === "draft12-unit-b");
+  check("draft replacement folder is scannable (rescan + weekly cron + dashboard keep it)",
+    isScannableFolder("replacement-pdraft-12-udraft12-unit-b"));
+  const builderRef = replacementPhotoFolderRef("replacement-p32-uprop32-kia-3br");
+  check("builder replacement folder parses unchanged",
+    builderRef?.propertyId === 32 && builderRef?.oldUnitId === "prop32-kia-3br");
+  const p27 = replacementPhotoFolderRef("replacement-p27-uprop27-unit-a");
+  check("builder unit ids containing '-unit-' parse too (pre-existing prop27 gap)",
+    p27?.propertyId === 27 && p27?.oldUnitId === "prop27-unit-a");
+  check("junk replacement folder names still reject",
+    replacementPhotoFolderRef("replacement-punknown-uunit") === null);
+}
+
 // ── source locks: the draft replace path exists at every seam ─────────────────
 {
   const { readFileSync } = await import("node:fs");
   const orch = readFileSync(new URL("../server/auto-replace-jobs.ts", import.meta.url), "utf8");
   check("orchestrator resolves draft targets (getCommunityDraft branch)",
     orch.includes("resolveAutoReplaceTarget") && orch.includes("getCommunityDraft"));
-  check("orchestrator repoints the draft after a committed swap (PATCH /api/unit-swaps/commit)",
-    /target\.isDraft[\s\S]{0,400}\/api\/unit-swaps\/commit\//.test(orch));
+  check("orchestrator repoints the draft after a committed swap — SCOPED to the unit (never commits a sibling's pending pick)",
+    /target\.isDraft[\s\S]{0,600}\/api\/unit-swaps\/commit\/[\s\S]{0,80}oldUnitId: record\.unitId/.test(orch));
   const repush = readFileSync(new URL("../server/guesty-photo-repush.ts", import.meta.url), "utf8");
-  check("Guesty re-push assembles draft galleries (unit1/unit2 photo folders)",
-    repush.includes("draftPushUnits") && repush.includes("unit1PhotoFolder"));
+  check("Guesty re-push assembles draft galleries (unit1/unit2 photo folders + conventional fallback)",
+    repush.includes("draftPushUnits") && repush.includes("unit1PhotoFolder") && /\?\? `draft-\$\{draftId\}-unit-a`/.test(repush));
   const homeSrc = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
   check("dashboard popup resolves draft rows to Replace buttons (no propertyId <= 0 bail)",
     homeSrc.includes("replaceBuilderLikeFor") && homeSrc.includes("draftUnitIdForSlot"));
+  check("manual draft repoint is unit-scoped and STOPS on failure (no misleading community check/toast)",
+    /unit-swaps\/commit\/\$\{target\.propertyId\}`, \{ oldUnitId \}/.test(homeSrc) &&
+    /Draft repoint failed[\s\S]{0,400}return;/.test(homeSrc));
+  check("terminal draft queue jobs refetch the drafts (stale flagged row would re-enable the button)",
+    /job\.propertyId < 0[\s\S]{0,200}\/api\/community\/drafts/.test(homeSrc));
+  const routesSrc = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  check("commit route honors the oldUnitId scope",
+    routesSrc.includes("scopeOldUnitId") && /commitUnitSwaps\(propertyId, scopeOldUnitId\)/.test(routesSrc));
+  const scannerSrc = readFileSync(new URL("../server/photo-listing-scanner.ts", import.meta.url), "utf8");
+  check("scanner drops the abandoned original draft folder after a swap (mirrors builder semantics)",
+    /if \(draft\) set\.delete\(`draft-\$\{draft\[1\]\}-unit-\$\{draft\[2\]\}`\)/.test(scannerSrc));
 }
 
 // ── parse: findRestarts defaults for legacy records ──────────────────────────

@@ -15,13 +15,18 @@ export function draftPhotoFolderRef(folder: string): DynamicPhotoFolderRef | nul
 }
 
 export function replacementPhotoFolderRef(folder: string): DynamicPhotoFolderRef | null {
-  const m = folder.match(/^replacement-p(.+)-u(.+)$/i);
+  // The property slug is CONSTRAINED (draft-<n> or a bare number), never a
+  // greedy (.+): a greedy match split at the LAST "-u", which for any unit id
+  // containing "-u" (every draft unit — draft12-unit-b — and builder units
+  // like prop27-unit-a) landed inside the unit id and made the whole folder
+  // unparseable → unscannable (2026-07-05 Waikoloa draft-replace review).
+  const m = folder.match(/^replacement-p(draft-\d+|\d+)-u(.+)$/i);
   if (!m) return null;
   const propSlug = m[1];
   const unitSlug = m[2];
   const draft = propSlug.match(/^draft-(\d+)$/i);
   const propertyId = draft ? -Number(draft[1]) : Number(propSlug);
-  if (!Number.isFinite(propertyId)) return null;
+  if (!Number.isFinite(propertyId) || propertyId === 0) return null;
   return { propertyId, oldUnitId: unitSlug };
 }
 

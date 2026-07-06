@@ -2522,8 +2522,15 @@ function AdminDashboard() {
         if ((draft as any).singleListing !== true) addFolder(draft.unit2PhotoFolder, unitOwner(1));
       }
       if (p.draftId !== undefined) {
-        addFolder(`draft-${p.draftId}-unit-a`, unitOwner(0));
-        if (p.multiUnit) addFolder(`draft-${p.draftId}-unit-b`, unitOwner(1));
+        // Conventional folder names are a FALLBACK for drafts whose folder
+        // fields haven't loaded/persisted — never in ADDITION to a set field.
+        // Adding them unconditionally kept ABANDONED pre-replacement folders
+        // in the scan set forever (Waikoloa draft-12-unit-b stayed flagged
+        // after the unit was replaced and repointed to its replacement-*
+        // folder — builder properties only scan the ACTIVE folder after a
+        // swap, and drafts must match).
+        if (!draft?.unit1PhotoFolder) addFolder(`draft-${p.draftId}-unit-a`, unitOwner(0));
+        if (p.multiUnit && !draft?.unit2PhotoFolder) addFolder(`draft-${p.draftId}-unit-b`, unitOwner(1));
       }
       const folders = Array.from(folderSet);
       let agg: PhotoAgg = {
@@ -2837,6 +2844,13 @@ function AdminDashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
       queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/unit-swaps"] });
+      // Draft jobs repoint unit{1,2}PhotoFolder server-side — refetch the
+      // drafts so photoByProperty tracks the NEW folder (the stale row would
+      // otherwise stay flagged and re-enable the Replace button for a second
+      // destructive swap; the drafts query never refetches on its own).
+      if (job.propertyId < 0) {
+        queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+      }
       setPhotoScanPollUntil((prev) => Math.max(prev, Date.now() + 5 * 60_000));
       if (job.phase === "completed") {
         toast({
@@ -2913,10 +2927,13 @@ function AdminDashboard() {
     // Promoted drafts persist photos under unit{1,2}PhotoFolder — repoint the
     // draft at the replacement folder + new unit identity BEFORE the community
     // check kick, which reads the draft's own folder fields. Same PATCH as
-    // builder-preflight's "Commit Replacements & Continue".
+    // builder-preflight's "Commit Replacements & Continue" but SCOPED to this
+    // unit (an unscoped commit would silently apply a sibling unit's
+    // abandoned preflight pick). On failure, STOP: the community check would
+    // validate the OLD gallery and the success toast would lie.
     if (target.propertyId < 0) {
       try {
-        await apiRequest("PATCH", `/api/unit-swaps/commit/${target.propertyId}`);
+        await apiRequest("PATCH", `/api/unit-swaps/commit/${target.propertyId}`, { oldUnitId });
         queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
       } catch {
         toast({
@@ -2924,6 +2941,8 @@ function AdminDashboard() {
           description: "The swap was recorded but the draft still points at the old photos — open builder pre-flight and use \"Commit Replacements & Continue\".",
           variant: "destructive",
         });
+        queryClient.invalidateQueries({ queryKey: ["/api/unit-swaps", target.propertyId] });
+        return;
       }
     }
     confirmPhotosReplacedMutation.mutate({

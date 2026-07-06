@@ -98,11 +98,15 @@ async function draftPushUnits(propertyId: number): Promise<
   if (!Number.isFinite(draftId) || draftId <= 0) return null;
   const draft = await storage.getCommunityDraft(draftId).catch(() => undefined);
   if (!draft) return null;
+  // Conventional folder fallback mirrors the dashboard: a draft whose folder
+  // field never persisted still stores photos under draft-<id>-unit-a/b, and
+  // resolveActiveUnitPhotoFolders drops folder-less units entirely (which
+  // would silently exclude a REPLACED unit's gallery from the push).
   const units: Array<{ id: string; photoFolder?: string }> = [
-    { id: draftUnitIdForSlot(draftId, "a"), photoFolder: draft.unit1PhotoFolder ?? undefined },
+    { id: draftUnitIdForSlot(draftId, "a"), photoFolder: draft.unit1PhotoFolder ?? `draft-${draftId}-unit-a` },
   ];
   if ((draft as any).singleListing !== true) {
-    units.push({ id: draftUnitIdForSlot(draftId, "b"), photoFolder: draft.unit2PhotoFolder ?? undefined });
+    units.push({ id: draftUnitIdForSlot(draftId, "b"), photoFolder: draft.unit2PhotoFolder ?? `draft-${draftId}-unit-b` });
   }
   return {
     propertyName: draft.name,

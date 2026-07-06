@@ -194,10 +194,11 @@ async function postLoopback(path: string, body: unknown, timeoutMs: number): Pro
   return { status: resp.status, data };
 }
 
-async function patchLoopback(path: string, timeoutMs: number): Promise<{ status: number; data: any }> {
+async function patchLoopback(path: string, body: unknown, timeoutMs: number): Promise<{ status: number; data: any }> {
   const resp = await fetch(`${loopbackBaseUrl()}${path}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", ...loopbackRequestHeaders() },
+    body: JSON.stringify(body ?? {}),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const data = await resp.json().catch(() => ({}));
@@ -358,11 +359,13 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
         };
         // Promoted drafts persist photos under unit{1,2}PhotoFolder — repoint
         // the draft at the replacement folder + the new unit's identity NOW
-        // (one-click semantics; this is the same PATCH builder-preflight's
-        // "Commit Replacements & Continue" fires). Without it the dashboard,
-        // scanner, and Guesty push keep reading the OLD folder/unit.
+        // (one-click semantics; same PATCH as builder-preflight's "Commit
+        // Replacements & Continue", but SCOPED to this unit so a sibling
+        // unit's abandoned preflight pick is never silently committed).
+        // Without it the dashboard, scanner, and Guesty push keep reading the
+        // OLD folder/unit.
         if (target.isDraft) {
-          const repoint = await patchLoopback(`/api/unit-swaps/commit/${record.propertyId}`, 30_000)
+          const repoint = await patchLoopback(`/api/unit-swaps/commit/${record.propertyId}`, { oldUnitId: record.unitId }, 30_000)
             .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
           if (repoint.status >= 400) {
             touch(record, {
@@ -400,8 +403,21 @@ async function runAutoReplaceVerifyPhase(
     replacementFolder: committed.photoFolder,
     message: "Swap committed — verifying the new photos are clean and in-community…",
   });
+  // Track the kick outcome — an HTTP failure here (e.g. the folder rejected
+  // as unscannable) must surface in the completed message, not silently read
+  // as "rescan is running".
+  let rescanKickNote = "";
   await postLoopback("/api/photo-listing-check/run", { folders: [committed.photoFolder] }, 30_000)
-    .catch((e) => console.warn(`[auto-replace] verify rescan kick failed: ${e?.message ?? e}`));
+    .then(({ status, data }) => {
+      if (status >= 400) {
+        rescanKickNote = ` ⚠ OTA rescan did not start (${String((data as any)?.error ?? `HTTP ${status}`)}) — use "Rescan again" on the row.`;
+        console.warn(`[auto-replace] verify rescan kick rejected (${status}) for ${committed.photoFolder}`);
+      }
+    })
+    .catch((e) => {
+      rescanKickNote = " ⚠ OTA rescan did not start (request failed) — use \"Rescan again\" on the row.";
+      console.warn(`[auto-replace] verify rescan kick failed: ${e?.message ?? e}`);
+    });
   await postLoopback("/api/builder/bulk-photo-community-check", {
     propertyIds: [record.propertyId],
     labels: { [String(record.propertyId)]: record.propertyName },
@@ -440,7 +456,7 @@ async function runAutoReplaceVerifyPhase(
 
   touch(record, {
     phase: "completed",
-    message: `${record.unitLabel} now uses ${committed.newUnitLabel || record.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.${guestyPushNote}`,
+    message: `${record.unitLabel} now uses ${committed.newUnitLabel || record.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.${rescanKickNote}${guestyPushNote}`,
     error: null,
   });
 }
