@@ -43,6 +43,36 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-06 (FOLLOW-UP: same-community detection WITHOUT verdicts + guest-page fixes — Thien Tran /
+  Ilikai live incident): Operator screenshot of a live /alternatives page showed the DIFFERENT-community
+  copy ("1-minute drive from your old community") for two units in the SAME BUILDING (1777 Ala Moana
+  Blvd #1834 + bare), plus Unit A stuck on "Photos are still being gathered" and a lowball "Sleeps 4"
+  chip for a party of 6. DIAGNOSED FROM THE LIVE PAYLOAD (booking_alternative_pages via
+  DATABASE_PUBLIC_URL psql, token b0adb0b5…): (a) the buy-ins had NO communityVerdict stamps and the
+  "original community" was the raw Guesty LISTING TITLE ("Ilikai - 4BR Condos - Sleeps 12") leaking
+  through the client slot fallback → name match failed → sameCommunity:false persisted, and geocoding
+  the two labels for the same place minted the absurd 1-min drive; (b) Unit A's URL is a PM direct
+  site (waikikibeachrentals.com) with no photo marker in the Cowork notes → the VRBO-only scrape never
+  ran (photoSource "none"); (c) Unit A sleeps=null so the "total" sleeps was just Unit B's 4. FIXES
+  (shared/relocation-scenario.ts + routes.ts, 82 tests): `stripListingTitleCruftFromCommunityLabel`
+  (labels sanitized at POST + GET), `sameCommunityLabelMatch` (generic-word-stripped EXACT token
+  equality — "Ilikai" vs "Ilikai resort" matches; bare city "Princeville" can NEVER match
+  "Princeville Kamalii" — no subset matching), `sameBuildingFromAddresses` (all units resolve to the
+  same numbered street root → SAME BUILDING, no verdict needed). sameCommunity now = verdict flag OR
+  address proof OR label match, with the operator-verified "different" verdict as the ONLY binding
+  veto (persisted as payload.sameCommunityVeto; a persisted sameCommunity:false WITHOUT the veto is a
+  computation miss and the GET renderer self-heals old pages from the same signals — the live Thien
+  page fixes itself on next load, no regenerate needed for the copy). Same-building pages/messages
+  also drop the "N-minute walk between units" line/chip; the drive chip is gone whenever same
+  community. Combined "Sleeps N" (chip + message + fit claim) now only renders when EVERY unit has a
+  sleeps value — partial sums undercount and read as "too small for your party". Unit A photo fix:
+  page-build hydration falls back to the host-agnostic `scrapeListingGalleryViaSidecar` (operator
+  home-IP Chrome, 90s budget, kill SIDECAR_GALLERY_SCRAPE_ENABLED=0) when a unit has 0 photos and a
+  non-VRBO URL → photoSource "sidecar-gallery"; EXISTING pages need a regenerate (Guest page /
+  Alternative Unit button) to pick up photos. Also: guest-visible carousel alt text no longer uses the
+  raw listing title (it carried "5 nights x $279" pricing cruft). Verified: relocation-scenario 82/0,
+  full `npm test` exit 0, build clean, `npm run check` 338 = baseline.
+
 - 2026-07-06 (Alternative Unit button: SAME-COMMUNITY bedroom-downgrade messaging): Operator's case —
   6 guests booked a 4BR listing (2x2BR); only a 2BR + 1BR could be sourced, but in the SAME community.
   The relocation message/page wrongly framed that as a community move. SHIPPED: pure

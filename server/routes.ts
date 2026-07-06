@@ -37,7 +37,12 @@ import {
   resolveDraftUnitBedrooms,
 } from "@shared/draft-unit-bedrooms";
 import { summarizeBulkPricingGuestyPush } from "@shared/bulk-pricing-push-logic";
-import { buildSameCommunityRelocationLines } from "@shared/relocation-scenario";
+import {
+  buildSameCommunityRelocationLines,
+  sameBuildingFromAddresses,
+  sameCommunityLabelMatch,
+  stripListingTitleCruftFromCommunityLabel,
+} from "@shared/relocation-scenario";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import {
   collectReservationPaymentIssues,
@@ -9744,7 +9749,9 @@ Requirements:
         `You can see photos and full details of ${unitCount === 1 ? "the replacement" : unitCount === 2 ? "both units" : "the units"} on this page:`,
         args.alternativeUrl,
         "",
-        ...(walkLine ? [walkLine, ""] : []),
+        // Same BUILDING → a "minute walk between the units" line is nonsense
+        // (they're an elevator ride apart); the bedroom line already says so.
+        ...(walkLine && args.sameBuilding !== true ? [walkLine, ""] : []),
         "Please take a look and let me know if this works for you. If it does, I will send your full arrival details within 24 to 48 hours. If you would prefer not to move, I completely understand and will issue a full refund right away - the entire amount back, with no cancellation fees or penalties of any kind.",
         "",
         "Again, I am sorry for the inconvenience and I truly appreciate your understanding.",
@@ -10007,7 +10014,11 @@ Requirements:
         }
       }
       const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
-      const originalCommunity = normalizeCommunityContext(payload.originalCommunity);
+      // Sanitize persisted labels: older pages persisted the raw Guesty listing
+      // title as the "community" ("Ilikai - 4BR Condos - Sleeps 12").
+      const originalCommunity = normalizeCommunityContext(
+        stripListingTitleCruftFromCommunityLabel(payload.originalCommunity),
+      );
       // Derive the alternative community from the ATTACHED units' own titles/notes
       // (e.g. "Villas of Kamalii"), NOT the client-sent label, which is often the
       // ORIGINAL/configured resort ("Mauna Kai Princeville"). Same resolver the
@@ -10023,7 +10034,8 @@ Requirements:
         usableCommunityContext(alternatives.find((item: any) => usableCommunityContext(item?.alternativeCommunity))?.alternativeCommunity) ||
         usableCommunityContext(alternatives.find((item: any) => usableCommunityContext(item?.community))?.community) ||
         communityFromAlternativeTitle(alternatives.find((item: any) => communityFromAlternativeTitle(item?.title))?.title);
-      const areaName = normalizeCommunityContext(payload.areaName) || originalCommunity || alternativeCommunity;
+      const areaName = normalizeCommunityContext(stripListingTitleCruftFromCommunityLabel(payload.areaName))
+        || originalCommunity || alternativeCommunity;
       // The guest's ORIGINAL community is often stored as the bare market key /
       // city ("Princeville"). Show the configured resort NAME for that market
       // ("Mauna Kai Princeville") instead, so the line reads "your original
@@ -10050,18 +10062,33 @@ Requirements:
         .join(" to ");
       const totalBedrooms = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.bedrooms) > 0 ? Math.round(Number(item.bedrooms)) : 0), 0);
       const totalBathrooms = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.bathrooms) > 0 ? Number(item.bathrooms) : 0), 0);
-      const totalSleeps = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.sleeps) > 0 ? Math.round(Number(item.sleeps)) : 0), 0);
+      // A combined "Sleeps N" is only honest when EVERY unit has a sleeps value
+      // — a partial sum undercounts (live case: sleeps-unknown 2BR + sleeps-4
+      // 1BR rendered "Sleeps 4" to a party of 6). Incomplete data → no claim.
+      const allUnitSleepsKnown = alternatives.length > 0
+        && alternatives.every((item: any) => Number(item?.sleeps) > 0);
+      const totalSleeps = allUnitSleepsKnown
+        ? alternatives.reduce((sum: number, item: any) => sum + Math.round(Number(item.sleeps)), 0)
+        : 0;
       // SAME-COMMUNITY relocation: framed around the bedroom-count change, not
-      // a community move. The flag is persisted at page-build time from the
-      // attached buy-ins' operator/Cowork community verdicts; pages built
-      // before the flag existed fall back to the original vs alternative
-      // community name match (the branch that previously rendered a bare
-      // "We have availability in X for this stay.").
-      const pageSameCommunity = payload.sameCommunity === true
-        || (payload.sameCommunity !== false
-          && !!originalCommunity && !!alternativeCommunity
-          && sameCommunityContext(originalCommunity, alternativeCommunity));
-      const pageSameBuilding = pageSameCommunity && payload.sameBuilding === true;
+      // a community move. Persisted flag first; pages built without it (or
+      // whose build-time computation missed) self-heal at render time from the
+      // same signals the POST uses — the same-building address proof and the
+      // sanitized label match. Only an OPERATOR-VERIFIED "different" verdict
+      // (payload.sameCommunityVeto) is binding; a persisted sameCommunity:false
+      // without the veto is just a computation miss and may be overridden.
+      const pageSameCommunityVeto = payload.sameCommunityVeto === true;
+      const pageAddressSameBuilding = alternatives.length >= 2
+        && sameBuildingFromAddresses(alternatives.map((item: any) => item?.address));
+      const pageSameCommunity = !pageSameCommunityVeto && (
+        payload.sameCommunity === true
+        || pageAddressSameBuilding
+        || (!!originalCommunity && !!alternativeCommunity
+          && (sameCommunityContext(originalCommunity, alternativeCommunity)
+            || sameCommunityLabelMatch(originalCommunity, alternativeCommunity)))
+      );
+      const pageSameBuilding = pageSameCommunity
+        && (payload.sameBuilding === true || pageAddressSameBuilding);
       const pageOriginalBedrooms = Number(payload.originalBedrooms) > 0 ? Math.round(Number(payload.originalBedrooms)) : null;
       const pagePartySize = Number(payload.partySize) > 0 ? Math.round(Number(payload.partySize)) : null;
       const sameCommunityPlaceLabel = alternativeCommunityDisplay || originalCommunityDisplay;
@@ -10110,8 +10137,12 @@ Requirements:
           ? { icon: "community" as const, label: `Community: ${alternativeCommunityDisplay || sameCommunityPlaceLabel}` } : null,
         pageSameCommunity
           ? { icon: "community" as const, label: pageSameBuilding ? "Same Building as Your Original Booking" : "Same Community as Your Original Booking" } : null,
-        Number.isFinite(unitWalkMinutes) && unitWalkMinutes > 0 ? { icon: "walk" as const, label: `Unit A/B Walk: ${Math.round(unitWalkMinutes)} Minute Walk` } : null,
-        Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "route" as const, label: `Distance From Old Community: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
+        // Same BUILDING → a walk-between-units chip is nonsense; same COMMUNITY
+        // → there is no "old community" to be a drive away from (the persisted
+        // drive minutes on such pages came from geocoding two labels for the
+        // SAME place — the live "1 Minute Drive" artifact).
+        !pageSameBuilding && Number.isFinite(unitWalkMinutes) && unitWalkMinutes > 0 ? { icon: "walk" as const, label: `Unit A/B Walk: ${Math.round(unitWalkMinutes)} Minute Walk` } : null,
+        !pageSameCommunity && Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "route" as const, label: `Distance From Old Community: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
       ].filter(Boolean) as Array<{ icon: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "route" | "sleep" | "walk"; label: string }>;
       const overviewBlock = overviewDetails.length
         ? `<div class="overview">${overviewDetails.map((detail) => `<span class="overview-chip">${alternativeIconSvg(detail.icon)}<span class="chip-label">${escapeHtml(detail.label)}</span></span>`).join("")}</div>`
@@ -10188,7 +10219,7 @@ Requirements:
               <div class="carousel-track">
                 ${photos.map((url: string, photoIndex: number) => `
                   <figure class="slide">
-                    <img src="${escapeHtml(url)}" alt="${escapeHtml(item.title || item.community || "Alternative")} photo ${photoIndex + 1}" loading="${photoIndex === 0 ? "eager" : "lazy"}" />
+                    <img src="${escapeHtml(url)}" alt="${escapeHtml(displayAlternativeLabel(item.community, 100) || "Alternative stay")} photo ${photoIndex + 1}" loading="${photoIndex === 0 ? "eager" : "lazy"}" />
                     <figcaption>${photoIndex + 1} / ${photos.length}</figcaption>
                   </figure>`).join("")}
               </div>
@@ -10435,8 +10466,16 @@ Requirements:
         checkIn: normalizeAlternativeText(req.body?.checkIn, 20),
         checkOut: normalizeAlternativeText(req.body?.checkOut, 20),
       };
-      const originalCommunity = normalizeCommunityContext(req.body?.originalCommunity);
-      const areaName = normalizeCommunityContext(req.body?.areaName);
+      // The client's original-community/area fallback can hand through the raw
+      // Guesty LISTING TITLE ("Ilikai - 4BR Condos - Sleeps 12") when the
+      // ad-hoc listing has no configured community — strip the size/sleeps
+      // cruft so the guest copy reads "Ilikai" and matching can work.
+      const originalCommunity = normalizeCommunityContext(
+        stripListingTitleCruftFromCommunityLabel(req.body?.originalCommunity),
+      );
+      const areaName = normalizeCommunityContext(
+        stripListingTitleCruftFromCommunityLabel(req.body?.areaName),
+      );
       // Scrape VRBO listings up front so community names + photos resolve from the
       // real listing title/gallery even when manual buy-in notes only carry a
       // placeholder ("Manually recorded buy-in for Townhome A").
@@ -10464,22 +10503,32 @@ Requirements:
         alternatives.map((a: any) => a?.notes),
         req.body?.originalCommunity,
       ) ?? "") || bodyAlternativeCommunity || "";
-      // SAME-COMMUNITY detection. The client flag comes from the attached
-      // buy-ins' operator/Cowork community verdicts (buy_ins.communityVerdict
-      // consensus); a name match between the original and the units' resolved
-      // community corroborates it server-side. An explicit false (a "different"
-      // verdict on any attached unit) VETOES the name-equality inference —
-      // never claim "same community" over a verified DIFFERENT verdict.
+      // SAME-COMMUNITY detection, strongest-signal first:
+      // (1) client verdict flag — the attached buy-ins' operator/Cowork
+      //     community verdicts (buy_ins.communityVerdict consensus);
+      // (2) SAME-BUILDING address proof — every attached unit's saved street
+      //     address resolves to the same numbered street root ("1777 Ala Moana
+      //     Blvd #1834" + "1777 Ala Moana Blvd"), which needs no verdict;
+      // (3) label match — the sanitized original community vs the units'
+      //     resolved community name the same place ("Ilikai" vs "Ilikai resort").
+      // An explicit false (a "different" verdict on any attached unit) VETOES
+      // the address/label inference — never claim "same community" over a
+      // verified DIFFERENT verdict.
       // NOTE: extractNewCommunityFromUnits never returns the guest's original
       // community, so in the genuine same-community case cleanNewCommunity is
-      // usually empty and the client-sent verdict flag is the primary signal.
-      const bodySameCommunityFlag = req.body?.sameCommunity;
-      const sameCommunity = bodySameCommunityFlag === true
-        || (bodySameCommunityFlag !== false
-          && !!originalCommunity
-          && !!(cleanNewCommunity || bodyAlternativeCommunity)
-          && sameCommunityContext(originalCommunity, cleanNewCommunity || bodyAlternativeCommunity));
-      const sameBuilding = sameCommunity && req.body?.sameBuilding === true;
+      // usually empty and the verdict/address/label signals carry it.
+      const sameCommunityVeto = req.body?.sameCommunity === false;
+      const addressSameBuilding = alternatives.length >= 2
+        && sameBuildingFromAddresses(alternatives.map((item: any) => item?.address));
+      const alternativeLabelForMatch = cleanNewCommunity || bodyAlternativeCommunity;
+      const sameCommunity = !sameCommunityVeto && (
+        req.body?.sameCommunity === true
+        || addressSameBuilding
+        || (!!originalCommunity && !!alternativeLabelForMatch
+          && (sameCommunityContext(originalCommunity, alternativeLabelForMatch)
+            || sameCommunityLabelMatch(originalCommunity, alternativeLabelForMatch)))
+      );
+      const sameBuilding = sameCommunity && (req.body?.sameBuilding === true || addressSameBuilding);
       const bodyOriginalBedrooms = Number(req.body?.originalBedrooms);
       const originalBedrooms = Number.isFinite(bodyOriginalBedrooms) && bodyOriginalBedrooms > 0
         ? Math.round(bodyOriginalBedrooms) : null;
@@ -10525,7 +10574,45 @@ Requirements:
             ...initialPhotos,
             ...unitOnlyVrboPhotos,
           ].filter(Boolean))).slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
-        const mergedPhotos = unitPhotoCandidates;
+        let mergedPhotos = unitPhotoCandidates;
+        let galleryScrapeSource = "";
+        // NON-VRBO listing URLs (PM direct sites like waikikibeachrentals.com,
+        // Booking.com) get no photos from the VRBO scrape above, and Cowork
+        // manual buy-ins often carry no photo marker in the notes — the unit
+        // then renders "Photos are still being gathered" forever (live Unit A
+        // case). Last-resort: the host-agnostic sidecar gallery scrape
+        // (operator home-IP Chrome, same tier scrapeGenericRealEstate uses).
+        // Best-effort + bounded; page build is operator-initiated so the wait
+        // is visible ("Building guest page…"). Kill: SIDECAR_GALLERY_SCRAPE_ENABLED=0.
+        if (
+          mergedPhotos.length === 0
+          && sourceUrl
+          && !isVrboAlternativeUrl(sourceUrl)
+          && String(process.env.SIDECAR_GALLERY_SCRAPE_ENABLED ?? "1").trim() !== "0"
+        ) {
+          try {
+            const { getHeartbeat, scrapeListingGalleryViaSidecar } = await import("./vrbo-sidecar-queue");
+            if (getHeartbeat().isOnline) {
+              const sidecar = await scrapeListingGalleryViaSidecar({
+                url: sourceUrl,
+                maxPhotos: GUEST_ALTERNATIVE_GALLERY_MAX,
+                walletBudgetMs: 90_000,
+              });
+              if (sidecar.photos.length > 0) {
+                console.log(`[booking-alternatives] sidecar gallery recovered ${sidecar.photos.length} photos for unit ${index + 1} (${sourceUrl})`);
+                mergedPhotos = sidecar.photos
+                  .map((url) => normalizeAlternativeUrl(url))
+                  .filter(Boolean)
+                  .slice(0, GUEST_ALTERNATIVE_GALLERY_MAX);
+                galleryScrapeSource = "sidecar-gallery";
+              } else {
+                console.log(`[booking-alternatives] sidecar gallery found no photos for unit ${index + 1} (${sourceUrl}): ${sidecar.reason}`);
+              }
+            }
+          } catch (e: any) {
+            console.error(`[booking-alternatives] sidecar gallery scrape failed for unit ${index + 1}: ${e?.message ?? e}`);
+          }
+        }
         // Vision screen: drop photos that would let the guest identify the exact
         // listing (legible building/unit number, address, or PM logo) or that are
         // maps/screenshots/docs. Runs once here (build time), per unit, and the
@@ -10593,7 +10680,7 @@ Requirements:
           notes: normalizeAlternativeText(item?.notes, 1000),
           showSourceLink: item?.showSourceLink === true,
           communityPhotos: pageCommunityPhotos,
-          photoSource: vrboDetails?.photoSource ?? (initialPhotos.length > 0 ? "provided" : "none"),
+          photoSource: galleryScrapeSource || (vrboDetails?.photoSource ?? (initialPhotos.length > 0 ? "provided" : "none")),
           photoScrapeReason: vrboDetails?.scrapeReason ?? "",
         };
         // Guest copy refers to the unit as "Unit A/B" and the clean community —
@@ -10664,8 +10751,12 @@ Requirements:
         unitWalkMinutes,
         // Same-community relocation facts, persisted so the GET renderer can
         // frame the page around the bedroom-count change (not a community move).
+        // sameCommunityVeto distinguishes an operator-verified DIFFERENT verdict
+        // (binding) from a mere computation miss (the renderer may still detect
+        // same-community from addresses/labels on old or flag-less pages).
         sameCommunity,
         sameBuilding,
+        sameCommunityVeto,
         originalBedrooms,
         partySize,
         alternatives: hydratedAlternatives,
@@ -10705,7 +10796,15 @@ Requirements:
         ? (sameCommunityLabel || cleanNewCommunity || null)
         : (cleanNewCommunity || null);
       // Total capacity across the attached units for the friendly pitch line.
-      const totalSleeps = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : 0), 0) || null;
+      // Only claim a combined sleeps when EVERY unit has a sleeps value — a
+      // partial sum (one unit's sleeps unknown) UNDERCOUNTS and reads as "this
+      // is too small for your party" (live case: 2BR sleeps-unknown + 1BR
+      // sleeps-4 rendered "Sleeps 4" to a party of 6). Missing data → silence.
+      const allUnitsHaveSleeps = hydratedAlternatives.length > 0
+        && hydratedAlternatives.every((a) => Number(a.sleeps) > 0);
+      const totalSleeps = allUnitsHaveSleeps
+        ? hydratedAlternatives.reduce((sum, a) => sum + Math.round(Number(a.sleeps)), 0) || null
+        : null;
       const totalBedrooms = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : 0), 0) || null;
       return res.json({
         url,

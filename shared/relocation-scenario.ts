@@ -50,6 +50,85 @@ export function bedroomsFromListingTitleText(title: string | null | undefined): 
   return Number.isFinite(n) && n > 0 && n < 20 ? n : null;
 }
 
+/**
+ * Community/area labels sometimes arrive as a raw Guesty LISTING TITLE
+ * ("Ilikai - 4BR Condos - Sleeps 12") because ad-hoc listings have no
+ * configured community and the client's slot fallback hands the title through.
+ * Drop the size/sleeps marketing segments so the guest-facing copy reads
+ * "Ilikai" and same-community matching can work. Non-cruft segments are kept
+ * verbatim (legit dash-joined resort names survive).
+ */
+export function stripListingTitleCruftFromCommunityLabel(label: unknown): string {
+  const raw = String(label ?? "").trim();
+  if (!raw) return "";
+  const CRUFT = [
+    /\b\d+\s*(?:br|bd|bdrm|bedroom)s?\b/i,
+    /\b\d+\s*(?:ba|bath|bathroom)s?\b/i,
+    /\bsleeps?\s*\d+\b/i,
+    /^\s*condos?\s*$/i,
+    /^\s*villas?\s*$/i,
+    /^\s*units?\s*\d*\s*$/i,
+  ];
+  const kept = raw
+    .split(/\s+[-–—|·]\s+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0 && !CRUFT.some((re) => re.test(segment)));
+  return (kept.length > 0 ? kept.join(" - ") : raw).trim();
+}
+
+const GENERIC_COMMUNITY_TOKENS = new Set([
+  "resort", "resorts", "condo", "condos", "condominium", "condominiums",
+  "villa", "villas", "suite", "suites", "hotel", "the", "at",
+]);
+
+const communityTokenSet = (value: unknown): Set<string> => {
+  const tokens = stripListingTitleCruftFromCommunityLabel(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 0 && !GENERIC_COMMUNITY_TOKENS.has(t));
+  return new Set(tokens);
+};
+
+/**
+ * True when two community labels name the same place once generic words
+ * (resort/condos/hotel/…) and listing-title cruft are removed — e.g.
+ * "Ilikai - 4BR Condos - Sleeps 12" vs "Ilikai resort". Requires EXACT
+ * distinctive-token equality (never subset containment), so a bare market/
+ * city label ("Princeville") can NOT match a resort that merely contains it
+ * ("Princeville Kamalii").
+ */
+export function sameCommunityLabelMatch(a: unknown, b: unknown): boolean {
+  const ta = communityTokenSet(a);
+  const tb = communityTokenSet(b);
+  if (ta.size === 0 || tb.size === 0 || ta.size !== tb.size) return false;
+  return Array.from(ta).every((t) => tb.has(t));
+}
+
+/**
+ * Deterministic SAME-BUILDING signal from the attached units' saved street
+ * addresses: strip the unit designator ("#1834", "Apt 4B", "Unit 12") and the
+ * city tail, and require every unit to resolve to the SAME numbered street
+ * root ("1777 Ala Moana Blvd #1834" + "1777 Ala Moana Blvd" → same building).
+ * Needs >= 2 real numbered addresses; any missing/unparseable address → false
+ * (never claim a building match we can't prove).
+ */
+export function sameBuildingFromAddresses(addresses: Array<string | null | undefined>): boolean {
+  if (addresses.length < 2) return false;
+  const roots = addresses.map((value) => {
+    const beforeComma = String(value ?? "").trim().split(",")[0] ?? "";
+    const root = beforeComma
+      .toLowerCase()
+      .replace(/#\s*\S+/g, " ")
+      .replace(/\b(?:apt|apartment|unit|suite|ste|no)\.?\s*\S+/g, " ")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return /^\d+\s+\S/.test(root) ? root : "";
+  });
+  return roots.every((root) => root.length > 0 && root === roots[0]);
+}
+
 export type RelocationScenarioKind =
   | "different-community"
   | "same-community"
