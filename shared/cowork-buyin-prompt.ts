@@ -12,9 +12,17 @@
 //      this prompt IS the operator's approval; it books without a further
 //      checkpoint but keeps every money guard below.
 //
-// LOAD-BEARING (search prompt, operator's spec): same-community first; if one
-// or both units can't be found in the configured community, fall back to a
-// CITY-WIDE search and STOP THERE — never expand to nearby cities / regions.
+// LOAD-BEARING (search prompt, operator's spec): same-community first; fall
+// back to a CITY-WIDE search (and STOP THERE — never nearby cities / regions)
+// when EITHER a slot can't be filled in the configured community OR (operator
+// 2026-07-06) the cheapest same-community set would LOSE money on the
+// reservation. "Loss" = the combined all-in cost exceeds the reservation's NET
+// revenue (input.netRevenue = the client's getNetRevenue) by more than
+// DEFAULT_PROFIT_MIN_FLAT_USD ($100 — the app's standing max-loss cap from
+// ./buy-in-profit, the same number the bookings-page profit gate uses). The
+// city-wide rollback hunts the same-bedroom units in the SAME complex as each
+// other (the PAIR RULE holds). Unknown/<=0 net revenue disables the guard
+// (degrade-safe — manual rows / inquiries, mirroring buy-in-profit.ts).
 // NEVER attach an airbnb.com link (operator, 2026-07-05): the attached URL
 // must be VRBO, Booking.com, or a direct booking/PM site. Airbnb is allowed
 // for DISCOVERY only — find the same unit's non-Airbnb page and attach that.
@@ -49,6 +57,7 @@
 //     re-purchased (mirrors the buy-in-checkout-job idempotency guard).
 import { BUY_IN_MARKETS, resolveBuyInMarketFromText } from "./buy-in-market";
 import { formatGuestParty, type GuestParty } from "./guest-party";
+import { DEFAULT_PROFIT_MIN_FLAT_USD } from "./buy-in-profit";
 
 // Where the operator keeps the standing booking card on the local Mac. The
 // operator creates/maintains this file by hand; the agent reads it only at the
@@ -128,6 +137,15 @@ export interface CoworkBuyInPromptInput {
    * sleeps 6 doesn't fit a party of 8.
    */
   party?: GuestParty | null;
+  /**
+   * The reservation's NET revenue (what we keep after channel fees) — the
+   * client's getNetRevenue(reservation). Drives the PROFIT GUARD: if the
+   * cheapest qualifying same-community set would lose more than
+   * DEFAULT_PROFIT_MIN_FLAT_USD ($100) against this figure, the prompt rolls
+   * the search back to a city-wide same-complex pair. Omit / <=0 (manual rows,
+   * inquiries) disables the guard — same degrade-safe rule as buy-in-profit.ts.
+   */
+  netRevenue?: number | null;
   /** App origin for the API calls, e.g. "https://app.example.com". Optional. */
   baseUrl?: string;
 }
@@ -316,6 +334,59 @@ export function buildCoworkBuyInPrompt(input: CoworkBuyInPromptInput): string {
    ("sleeps N") must cover the whole party; reject a set that cannot.`
     : "";
 
+  // ── PROFIT GUARD (operator 2026-07-06) ──────────────────────────────────────
+  // A same-community set that would lose more than the app's standing max-loss
+  // cap ($DEFAULT_PROFIT_MIN_FLAT_USD) against the reservation's net revenue
+  // triggers a city-wide rollback for a cheaper SAME-COMPLEX pair. Unknown/<=0
+  // net revenue disables the guard (degrade-safe — mirrors shared/buy-in-profit.ts),
+  // and every helper below collapses to "" so the guard-off prompt is byte-
+  // identical to the pre-2026-07-06 output.
+  const netRevenueNum = Number(input.netRevenue);
+  const profitGuardOn = Number.isFinite(netRevenueNum) && netRevenueNum > 0;
+  const maxLoss = DEFAULT_PROFIT_MIN_FLAT_USD;
+  const netRevenueLabel = profitGuardOn ? `$${netRevenueNum.toFixed(2)}` : "";
+
+  const profitGuardSection = profitGuardOn
+    ? `## Profit guard — don't settle for a loss
+This reservation's NET revenue remaining for these units (what we keep after
+channel fees, minus any already-attached slots) is ${netRevenueLabel}. A candidate
+${n === 1 ? "pick" : "set"} is a LOSS when its COMBINED all-in cost (${n === 1 ? "the pick's total" : n === 2 ? "both picks' totals summed" : `all ${n} picks' totals summed`})
+exceeds that net revenue by more than $${maxLoss} — our standing max-loss cap.
+Projected loss = (combined all-in cost) − ${netRevenueLabel}.
+- Loss ≤ $${maxLoss}, or a profit: within budget — fine to attach.
+- Loss > $${maxLoss}: over budget — do NOT settle for it; widen to the city-wide
+  search (step 2 below) to find a cheaper ${n === 1 ? "same-bedroom unit" : "same-complex pair"}.
+
+`
+    : "";
+
+  const cityWideRung = profitGuardOn
+    ? `2. **City-wide fallback — for coverage OR to escape a loss.** Widen to a
+   **city-wide search of ${effectiveCityWideLabel}** in EITHER of these cases:
+   - COVERAGE: you cannot find a qualifying listing for ${n === 1 ? "the unit" : "one and/or more unit slots"} inside the resort/community; OR
+   - LOSS: the cheapest qualifying same-community ${n === 1 ? "pick" : "set"} you CAN find is a LOSS over the $${maxLoss} cap (see the profit guard above).
+   In that city-wide search, look for ${n === 1
+        ? `a cheaper qualifying same-bedroom ${unitType ?? "listing"}`
+        : `TWO qualifying ${bedroomPlan} ${unitType ?? "listing"}s that sit in the SAME complex as each other`} and take the CHEAPEST qualifying ${n === 1 ? "unit" : "same-complex pair"} that stays within the $${maxLoss} loss cap.${n === 1 ? "" : `
+   The PAIR RULE still holds — the two city-wide units must share ONE complex
+   (ideally one building); a cheaper but scattered cross-complex pair does NOT
+   qualify.`}`
+    : `2. **City-wide fallback.** If you cannot find a qualifying listing for ${n === 1 ? "the unit" : "one and/or more unit slots"}
+   inside the resort/community, widen to a
+   **city-wide search of ${effectiveCityWideLabel}** — any qualifying same-bedroom
+   ${unitType ?? "listing"} in that city.`;
+
+  const stopRungLossTail = profitGuardOn
+    ? ` If the CHEAPEST qualifying ${n === 1 ? "unit" : "same-complex pair"} anywhere in the
+   city is STILL a loss over the $${maxLoss} cap, attach that cheapest option anyway
+   (a covered guest beats an empty slot) but FLAG the loss prominently in your
+   report and end on the "needs attention" done signal so I can decide.`
+    : "";
+
+  const reportProfitTail = profitGuardOn
+    ? ` Also report the PROFIT MATH for the ${n === 1 ? "pick" : "set"} you attached: combined all-in cost vs the net revenue (${netRevenueLabel}) = projected profit or loss, and which branch applied — (a) same-community ${n === 1 ? "pick" : "set"} within the $${maxLoss} loss cap, (b) rolled back to a city-wide ${n === 1 ? "unit" : "same-complex pair"} to escape a same-community loss, or (c) attached at a loss because no option within the $${maxLoss} cap existed anywhere in the city (flag this loudly).`
+    : "";
+
   return `# Task: Find ${countWord} buy-in ${unitWord} for a reservation and attach ${themOrIt}
 
 You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
@@ -401,19 +472,16 @@ bedroom count, re-verify the pricier one really is the cheapest qualifying
 option for its slot, and call the gap out in your report along with the
 next-cheapest alternatives you rejected and why.`}
 
-## Where to search (in priority order)
+${profitGuardSection}## Where to search (in priority order)
 1. **Same community first.** Look for ${bothOrAll} inside **${primaryTarget}**
    (the resort itself) — search Google for the resort name + dates, the PM companies
    that manage it, and its listings on Airbnb, VRBO, and Booking.com. Search by the
    resort's REAL name, not the configured community if they differ.
-2. **City-wide fallback.** If you cannot find a qualifying listing for ${n === 1 ? "the unit" : "one and/or more unit slots"}
-   inside the resort/community, widen to a
-   **city-wide search of ${effectiveCityWideLabel}** — any qualifying same-bedroom
-   ${unitType ?? "listing"} in that city.
+${cityWideRung}
 3. **STOP at city-wide.** Do **NOT** expand beyond the city: no nearby towns,
    no neighboring cities, no county/region/island-wide search. If a slot still
    has no qualifying unit after the city-wide search, leave that slot unfilled
-   and report it.
+   and report it.${stopRungLossTail}
 
 For each candidate, capture: the listing URL, the bedroom count, the unit type, the
 exact ADDRESS (to prove the location), the TOTAL price for the exact
@@ -466,7 +534,7 @@ bedrooms, unit type, its ADDRESS and how you confirmed it's in/adjacent to
 city-wide fallback, its BOOKING MODE (instant book / request-only) — and, for
 every request-only pick, the instant-book backup you found (URL + all-in
 total + channel) or an explicit "no qualifying instant-book backup exists" —
-plus the combined cost, and any slot you could not fill.
+plus the combined cost, and any slot you could not fill.${reportProfitTail}
 
 This task ends at ATTACH. Do **NOT** book, open a checkout page, or enter any
 payment details — I review the attached picks first, and booking runs from a
@@ -479,7 +547,9 @@ need, so nothing needs to stay open.
 
 ${doneSignalSection(
     n === 1 ? "the buy-in unit is attached" : "both buy-in units are attached",
-    "a slot you could not fill, or a price-sanity gap to review",
+    profitGuardOn
+      ? "a slot you could not fill, a price-sanity gap, or a set you had to attach at a loss over the cap"
+      : "a slot you could not fill, or a price-sanity gap to review",
   )}`;
 }
 
