@@ -44,6 +44,7 @@ import {
   stripListingTitleCruftFromCommunityLabel,
 } from "@shared/relocation-scenario";
 import { upgradeListingPhotoUrlResolution } from "@shared/listing-photo-resolution";
+import { proxiedGuestPhotoUrl, registerGuestPhotoRoute } from "./guest-photo-upscale";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import {
   collectReservationPaymentIssues,
@@ -9971,6 +9972,10 @@ Requirements:
     }
   });
 
+  // Signed upscaling proxy for guest-page photos (see server/guest-photo-upscale.ts).
+  // Registered before the SPA catch-all, public in server/auth.ts like /alternatives/.
+  registerGuestPhotoRoute(app);
+
   app.get("/alternatives/:token", async (req, res) => {
     try {
       const token = String(req.params.token ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -10151,10 +10156,13 @@ Requirements:
       const safeGuestPhotoUrl = (value: unknown): string => {
         const url = String(value ?? "").trim().slice(0, 1400);
         if (!/^(?:https?:\/\/|\/)/i.test(url)) return "";
-        // Render-time sharpness upgrade: pages persisted with CDN THUMBNAIL
-        // variants (rw=297 srcset picks from the sidecar harvest) self-heal to
-        // the high-res variant of the same photo. Pure URL rewrite, no latency.
-        return upgradeListingPhotoUrlResolution(url);
+        // Render-time sharpness, two tiers: (1) CDN THUMBNAIL variants (rw=297
+        // srcset picks from the sidecar harvest) rewrite to the CDN's own
+        // high-res original — pure URL rewrite; (2) everything else external
+        // routes through the signed /guest-photo upscaling proxy, which
+        // upscales genuinely-small sources (418x270 PM-site originals) and
+        // passes large ones through untouched. Both heal EXISTING pages.
+        return proxiedGuestPhotoUrl(upgradeListingPhotoUrlResolution(url));
       };
       const communityPhotoUrls = Array.from(new Set(alternatives.flatMap((item: any) =>
         Array.isArray(item?.communityPhotos) ? item.communityPhotos.map(safeGuestPhotoUrl).filter(Boolean) : [],
