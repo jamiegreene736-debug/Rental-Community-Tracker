@@ -10,7 +10,14 @@ const PLATFORM_PATTERNS: Array<{ key: "airbnb" | "vrbo" | "booking"; site: strin
   { key: "booking", site: "booking.com", urlPattern: /booking\.com\/(hotel|apartments)\// },
 ];
 
-export const MAX_COMBO_PHOTO_OTA_ATTEMPTS = 8;
+// How many OTA-listed candidates the combo photo search skips past per unit
+// before giving up on that bedroom size. Env-tunable (COMBO_PHOTO_OTA_ATTEMPTS)
+// because OTA-saturated resorts are the #1 sourcing constraint — each extra
+// attempt costs one listing scrape + ~3 Lens calls + 3 SERPs.
+export const MAX_COMBO_PHOTO_OTA_ATTEMPTS = (() => {
+  const raw = Number(String(process.env.COMBO_PHOTO_OTA_ATTEMPTS ?? "").trim());
+  return Number.isFinite(raw) && raw >= 1 && raw <= 30 ? Math.round(raw) : 8;
+})();
 
 export type ComboOtaPreflightResult = {
   qualifies: boolean;

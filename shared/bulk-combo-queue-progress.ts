@@ -4,11 +4,15 @@ export const BULK_COMBO_STEP_BUDGET_MS: Record<string, number> = {
   copy: 90_000,
   save: 60_000,
   persist: 90_000,
+  // Typical durations for the two post-persist verification gates (server
+  // timeouts are 6/10 min, but a normal run is far shorter).
+  "photo-community": 3 * 60_000,
+  "ota-scan": 5 * 60_000,
 };
 
 export const BULK_COMBO_TYPICAL_ITEM_MS = Object.values(BULK_COMBO_STEP_BUDGET_MS).reduce((sum, ms) => sum + ms, 0);
 
-const PHASE_ORDER = ["photos", "copy", "save", "persist", "done"] as const;
+const PHASE_ORDER = ["photos", "copy", "save", "persist", "photo-community", "ota-scan", "done"] as const;
 
 export type BulkComboProgressItem = {
   status: string;
@@ -34,6 +38,10 @@ function phaseFloorPercent(phase: string): number {
       return 72;
     case "persist":
       return 86;
+    case "photo-community":
+      return 90;
+    case "ota-scan":
+      return 94;
     case "done":
       return 98;
     case "failed":

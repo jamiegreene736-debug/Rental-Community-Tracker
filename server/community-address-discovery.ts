@@ -38,7 +38,10 @@ import {
   normalizeCommunityAddressToken,
   streetRootFromAddress,
 } from "@shared/community-addresses";
+import { statesEquivalent } from "@shared/community-location-guard";
+import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import { reverseGeocodeToStreetAddress } from "./walking-distance";
+import { callClaudeWebSearchJson } from "./claude-json";
 
 export type DiscoveredStreetAddress = {
   street: string;
@@ -196,6 +199,140 @@ async function fetchMapsCandidates(query: string, apiKey: string): Promise<MapsA
   return out;
 }
 
+// ── Portal-SERP address rescue ───────────────────────────────────────────────
+// google_maps only resolves resorts it indexes by OUR name (the Kahaluu Reef
+// class fails: maps knows it as "Kahaluu Beach Villas"). But Zillow/Realtor/
+// Redfin DETAIL URLs encode each unit's full numbered street in the slug, and a
+// quoted-phrase SERP for the resort name surfaces those exact listings. Lifting
+// the street from a name-matched listing URL is the same trick manual mode uses
+// (parseListingAddressFromUrl on the pasted URLs) — the unit's street IS the
+// community's street.
+export type SerpListingResult = { title?: string | null; link?: string | null; snippet?: string | null };
+
+/**
+ * Pick a street from portal SERP results. PRECISION over recall, two tiers:
+ *   1. TITLE match — the resort's distinctive tokens appear in the result title
+ *      (same whole-word gate as the maps path) and the URL slug parses to a real
+ *      numbered street → accept immediately.
+ *   2. SNIPPET consensus — results that only mention the resort in the snippet
+ *      can be "minutes from <resort>" neighbors, so a snippet-only match is
+ *      accepted ONLY when >=2 DISTINCT listings agree on the same street root.
+ * Pure / no network so it is unit-testable.
+ */
+export function selectSerpListingAddressCandidate(
+  results: SerpListingResult[],
+  resortName: string,
+  query: string,
+): DiscoveredStreetAddress | null {
+  const snippetVotes = new Map<string, { street: string; fullAddress: string; matchedTitle: string; links: Set<string> }>();
+  for (const r of results) {
+    const link = String(r?.link ?? "").trim();
+    if (!link) continue;
+    const parsed = parseListingAddressFromUrl(link);
+    if (!parsed) continue;
+    const street = streetRootFromAddress(parsed);
+    if (!street || !isLikelyStreetAddress(street)) continue;
+    if (titleMatchesResort(r?.title, resortName)) {
+      return { street, fullAddress: parsed, matchedTitle: String(r?.title ?? "").trim(), query };
+    }
+    if (titleMatchesResort(r?.snippet, resortName)) {
+      const key = street.toLowerCase();
+      const vote = snippetVotes.get(key) ?? { street, fullAddress: parsed, matchedTitle: String(r?.title ?? "").trim(), links: new Set<string>() };
+      vote.links.add(link);
+      snippetVotes.set(key, vote);
+    }
+  }
+  for (const vote of Array.from(snippetVotes.values())) {
+    if (vote.links.size >= 2) {
+      return { street: vote.street, fullAddress: vote.fullAddress, matchedTitle: vote.matchedTitle, query: `${query} (snippet consensus ×${vote.links.size})` };
+    }
+  }
+  return null;
+}
+
+async function fetchPortalSerpResults(query: string, apiKey: string): Promise<SerpListingResult[]> {
+  const sp = new URLSearchParams({ engine: "google", q: query, num: "10", api_key: apiKey });
+  const r = await fetch(`https://www.searchapi.io/api/v1/search?${sp.toString()}`, {
+    signal: AbortSignal.timeout(12000),
+  });
+  // THROW on non-2xx (same transient contract as fetchMapsCandidates — never
+  // negative-cache a rate-limit blip).
+  if (!r.ok) throw new Error(`searchapi ${r.status}`);
+  const data = (await r.json()) as any;
+  return Array.isArray(data?.organic_results) ? (data.organic_results as SerpListingResult[]) : [];
+}
+
+// ── Claude web-search address rescue (LAST resort) ──────────────────────────
+// When maps + reverse-geocode + portal SERPs all come up empty, ask Claude (with
+// the server-side web_search tool) for the resort's street address. The answer is
+// NEVER trusted raw — `acceptClaudeAddressCandidate` applies the same
+// deterministic precision gates as every other leg (numbered street, state
+// equivalence, resort-token match in the cited source evidence). Kill switch:
+// BULK_COMBO_ADDRESS_CLAUDE=0.
+export type ClaudeAddressCandidate = {
+  street?: string | null;
+  city?: string | null;
+  state?: string | null;
+  sourceUrl?: string | null;
+  sourceTitle?: string | null;
+  evidence?: string | null;
+};
+
+/** Deterministic acceptance gate for a Claude-researched address. Pure. */
+export function acceptClaudeAddressCandidate(
+  candidate: ClaudeAddressCandidate | null | undefined,
+  input: { communityName: string; state?: string | null },
+): DiscoveredStreetAddress | null {
+  if (!candidate) return null;
+  const rawStreet = String(candidate.street ?? "").trim();
+  if (!rawStreet) return null;
+  const street = streetRootFromAddress(rawStreet);
+  if (!street || !isLikelyStreetAddress(street)) return null;
+  const expectedState = String(input.state ?? "").trim();
+  if (expectedState && !statesEquivalent(candidate.state, expectedState)) return null;
+  // The community must be named in the cited evidence (title or quote) — the
+  // same whole-word token gate the maps/SERP legs use, so a confidently wrong
+  // answer about a different resort is rejected.
+  const evidenceText = `${String(candidate.sourceTitle ?? "")} ${String(candidate.evidence ?? "")}`;
+  if (!titleMatchesResort(evidenceText, input.communityName)) return null;
+  const cityState = [String(candidate.city ?? "").trim(), String(candidate.state ?? "").trim()].filter(Boolean).join(", ");
+  return {
+    street,
+    fullAddress: cityState ? `${rawStreet}, ${cityState}` : rawStreet,
+    matchedTitle: String(candidate.sourceTitle ?? "").trim() || "Claude web research",
+    query: `claude web search${candidate.sourceUrl ? ` (${String(candidate.sourceUrl).trim()})` : ""}`,
+  };
+}
+
+async function discoverAddressViaClaudeWebSearch(input: {
+  communityName: string;
+  city: string;
+  state: string;
+}): Promise<{ found: DiscoveredStreetAddress | null; transient: boolean }> {
+  if (process.env.BULK_COMBO_ADDRESS_CLAUDE === "0") return { found: null, transient: false };
+  if (!process.env.ANTHROPIC_API_KEY) return { found: null, transient: false };
+  const model = process.env.ADDRESS_DISCOVERY_CLAUDE_MODEL || "claude-sonnet-4-6";
+  const locationHint = [input.city, input.state].filter(Boolean).join(", ");
+  const res = await callClaudeWebSearchJson<ClaudeAddressCandidate>({
+    model,
+    maxTokens: 800,
+    maxSearches: 4,
+    timeoutMs: 75_000,
+    prompt: `Find the real street address (house/lot number + street name) of the vacation-rental condo community "${input.communityName}"${locationHint ? ` in or near ${locationHint}` : ""}. Search the web (resort site, HOA, property managers, real-estate portals). The community may be indexed under a slightly different name — that is fine as long as it is the SAME physical resort.
+
+Reply with ONLY a JSON object:
+{"street":"<number + street, e.g. 78-6082 Alii Dr>","city":"<city>","state":"<state>","sourceUrl":"<page you got it from>","sourceTitle":"<that page's title>","evidence":"<verbatim sentence from the page that names the community and/or its address>"}
+
+If you cannot find a reliable numbered street address for this exact community, reply {"street":null}. Never guess or fabricate an address.`,
+  });
+  if (!res.ok) {
+    console.warn(`[address-discovery] claude web search "${input.communityName}": ${res.error}`);
+    return { found: null, transient: true };
+  }
+  const found = acceptClaudeAddressCandidate(res.data, input);
+  return { found, transient: false };
+}
+
 const discoveryCache = new Map<string, DiscoveredStreetAddress | null>();
 
 /**
@@ -265,6 +402,45 @@ export async function discoverCommunityStreetAddress(input: {
       anyTransientError = true;
       console.warn(`[address-discovery] reverse-geocode "${communityName}": ${e?.message ?? e}`);
     }
+  }
+
+  // RESCUE 2 (portal SERPs): google_maps only knows resorts indexed by OUR name.
+  // Zillow/Realtor/Redfin detail URLs carry the unit's numbered street in the
+  // slug, so a quoted-phrase SERP for the resort name can resolve the street even
+  // when maps can't (the Kahaluu Reef name-indexing class). Precision-gated by
+  // selectSerpListingAddressCandidate (title match, or >=2-listing snippet
+  // consensus).
+  if (!found) {
+    const serpQueries = [
+      `site:zillow.com "${communityName}" ${state}`.trim(),
+      `site:realtor.com "${communityName}" ${state}`.trim(),
+      `site:redfin.com "${communityName}" ${state}`.trim(),
+    ];
+    for (const query of serpQueries) {
+      let results: SerpListingResult[] = [];
+      try {
+        results = await fetchPortalSerpResults(query, apiKey);
+      } catch (e: any) {
+        anyTransientError = true;
+        console.warn(`[address-discovery] portal serp "${query}": ${e?.message ?? e}`);
+        continue;
+      }
+      const hit = selectSerpListingAddressCandidate(results, communityName, query);
+      if (hit) { found = hit; break; }
+    }
+  }
+
+  // RESCUE 3 (Claude web research, LAST resort): only when every deterministic
+  // leg came up empty. The answer passes the same precision gates (numbered
+  // street + state + resort named in the cited evidence) before it is used.
+  if (!found) {
+    const claude = await discoverAddressViaClaudeWebSearch({ communityName, city, state })
+      .catch((e: any) => {
+        console.warn(`[address-discovery] claude rescue "${communityName}": ${e?.message ?? e}`);
+        return { found: null, transient: true };
+      });
+    if (claude.found) found = claude.found;
+    if (claude.transient) anyTransientError = true;
   }
 
   // Only cache a DEFINITIVE outcome: a hit, or a clean "no match" where every

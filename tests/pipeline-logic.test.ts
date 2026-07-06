@@ -640,6 +640,60 @@ assert.match(
   /candidateScores/,
   "fetch-unit-photos diagnostics should explain candidate scores and reasons",
 );
+// 2026-07-06 top-markets/combo-queue hardening locks:
+// (1) STRICT bulk mode must never fall back to an OTA-listed candidate's photos
+// on attempt exhaustion — the strict callers pass rejectOtaListedFallback and
+// fetchComboPhotosForUnit returns the unit EMPTY when the best candidate failed
+// the OTA preflight.
+assert.match(
+  routesSource,
+  /rejectOtaListedFallback: strictDistinctBothUnits/,
+  "strict combo photo fetch must reject an OTA-listed fallback candidate",
+);
+assert.match(
+  routesSource,
+  /if \(bestFailedOta && options\.rejectOtaListedFallback && !unit\?\.url\)/,
+  "fetchComboPhotosForUnit must return empty when the exhausted best failed the OTA preflight (search mode; manual URLs are the deep gate's job)",
+);
+// (2) The bulk combo queue runs a POST-SAVE deep OTA scan gate over the fresh
+// draft unit folders (full-gallery Lens + address leg) and skips/rolls back on
+// a positive found — fail-open on infra, kill switch COMBO_POST_OTA_SCAN=0.
+assert.match(
+  routesSource,
+  /COMBO_POST_OTA_SCAN[\s\S]*?runBulkComboListingStep\(job, item, "ota-scan"[\s\S]*?evaluateComboOtaScanGate/,
+  "bulk combo queue must gate publish on the post-save OTA deep scan",
+);
+assert.match(
+  routesSource,
+  /"ota-scan": 10 \* 60 \* 1000/,
+  "ota-scan step needs its own timeout entry",
+);
+// (3) The top-markets sweep must research BEYOND the curated Hawaii seeds
+// (discoverBeyondSeeds) so curated markets can still surface NEW resorts.
+assert.match(
+  routesSource,
+  /researchCommunitiesForCity\(market\.city, market\.state, "combo", \{ discoverBeyondSeeds: true \}\)/,
+  "top-market scan job must pass discoverBeyondSeeds",
+);
+const communityResearchSource = readFileSync("server/community-research.ts", "utf8");
+assert.match(
+  communityResearchSource,
+  /mode === "combo" && isHawaii && knownComboSeeds\.length > 0 && !deepDiscovery/,
+  "the Hawaii seed short-circuit must be bypassable by discoverBeyondSeeds",
+);
+// (4) Address discovery carries the portal-SERP + Claude web-search rescues
+// (both precision-gated) behind the existing maps + reverse-geocode ladder.
+const addressDiscoverySource = readFileSync("server/community-address-discovery.ts", "utf8");
+assert.match(
+  addressDiscoverySource,
+  /selectSerpListingAddressCandidate\(results, communityName, query\)/,
+  "address discovery must run the portal-SERP slug rescue",
+);
+assert.match(
+  addressDiscoverySource,
+  /discoverAddressViaClaudeWebSearch\(\{ communityName, city, state \}\)/,
+  "address discovery must run the Claude web-search rescue as the last resort",
+);
 const dashboardSource = readFileSync("client/src/pages/home.tsx", "utf8");
 assert.match(
   dashboardSource,
@@ -3279,7 +3333,23 @@ assert.ok(
   bulkComboProgressPercent({ status: "running", phase: "photos", message: "OTA preflight (12 photos)" }) >= 20,
   "OTA preflight message should advance photos sub-progress",
 );
-assert.equal(MAX_COMBO_PHOTO_OTA_ATTEMPTS, 8, "combo photo OTA retry cap");
+assert.equal(MAX_COMBO_PHOTO_OTA_ATTEMPTS, 8, "combo photo OTA retry cap (default; env COMBO_PHOTO_OTA_ATTEMPTS overrides)");
+// The two post-persist verification gates have their own progress floors so the
+// bar no longer parks at 86-98% during Sonnet vision / the OTA deep scan.
+assert.ok(
+  bulkComboProgressPercent({ status: "running", phase: "photo-community" }) >= 90,
+  "photo-community phase should advance the progress bar past persist",
+);
+assert.ok(
+  bulkComboProgressPercent({ status: "running", phase: "ota-scan" }) >= 94,
+  "ota-scan phase should advance the progress bar past photo-community",
+);
+// One-click multi-batch: the sweep auto-queues the NEXT batch when the current
+// job completes, instead of asking the operator to click "Queue again".
+assert.ok(
+  addCommunitySource.includes("sweepAutoContinueArmedRef"),
+  "sweep overflow must auto-queue the next batch on job completion",
+);
 assert.ok(
   !routeSource.includes("assertQueueCircuitOpen(circuitKey)"),
   "bulk combo loopback photo fetch must not use endpoint circuit breakers",

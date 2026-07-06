@@ -3256,6 +3256,15 @@ export async function researchCommunitiesForCity(
   // research autonomously finds all qualifying VR-only condo/townhome
   // resorts without requiring manual Codex/Grok additions.
   mode: "combo" | "single" = "combo",
+  // discoverBeyondSeeds (2026-07-06, top-markets recall): background sweeps
+  // (Top Markets scan job / streaming sweep / cache refresh) pass true so a
+  // curated Hawaii market ALSO runs the live exhaustive research and can surface
+  // NEW resorts beyond the curated seeds (the old short-circuit returned seeds
+  // only, capping recall at whatever was hand-curated). It additionally deepens
+  // MAINLAND combo research (Sonnet + larger world-knowledge/result caps) —
+  // acceptable in a background sweep where wall time doesn't gate the operator.
+  // The interactive wizard keeps the fast seed short-circuit + Haiku defaults.
+  opts: { discoverBeyondSeeds?: boolean } = {},
 ): Promise<ResearchedCommunity[]> {
   // Normalize inputs so queries and downstream logic are consistent
   // regardless of how the operator typed the city (e.g. "fort myers beach"
@@ -3275,11 +3284,16 @@ export async function researchCommunitiesForCity(
   const isHawaii = /^(hi|hawaii)$/i.test(stateForQuery);
   const knownComboSeeds = mode === "combo" ? knownComboSeedsForCity(cityForQuery, stateForQuery) : [];
 
+  const deepDiscovery = opts.discoverBeyondSeeds === true;
+
   // Hawaii combo searches sit in an operator-facing wizard and top-market sweep.
   // When we already have curated market coverage, return it immediately instead
   // of making the user wait for SearchAPI/Claude; upstream timeouts should not
-  // make known resort markets look empty.
-  if (mode === "combo" && isHawaii && knownComboSeeds.length > 0) {
+  // make known resort markets look empty. Background sweeps opt OUT via
+  // discoverBeyondSeeds so curated markets can still surface NEW resorts (the
+  // seeds are merged back in below and win the dedupe, so nothing curated is
+  // ever lost).
+  if (mode === "combo" && isHawaii && knownComboSeeds.length > 0 && !deepDiscovery) {
     return [...knownComboSeeds].sort((a, b) =>
       (b.confidenceScore + (b.combinabilityScore ?? 50)) -
       (a.confidenceScore + (a.combinabilityScore ?? 50)),
@@ -3288,7 +3302,17 @@ export async function researchCommunitiesForCity(
 
   const searchApiKey = process.env.SEARCHAPI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  if (!searchApiKey) throw new Error("SEARCHAPI_API_KEY not configured");
+  if (!searchApiKey) {
+    // Deep sweeps must not turn a key outage into an EMPTY curated market —
+    // fall back to exactly what the short-circuit would have returned.
+    if (deepDiscovery && mode === "combo" && knownComboSeeds.length > 0) {
+      return [...knownComboSeeds].sort((a, b) =>
+        (b.confidenceScore + (b.combinabilityScore ?? 50)) -
+        (a.confidenceScore + (a.combinabilityScore ?? 50)),
+      );
+    }
+    throw new Error("SEARCHAPI_API_KEY not configured");
+  }
   const knownComboNames = knownComboSeeds.map((seed) => `"${seed.name}"`).join(" OR ");
 
   // Strong, uniform negative operators to keep Google results focused on
@@ -3321,6 +3345,12 @@ export async function researchCommunitiesForCity(
         ...(knownComboNames
           ? [`"${cityForQuery}" "${stateForQuery}" (${knownComboNames}) condo townhome vacation rental 2BR 3BR 4BR 5BR ${commonExclusions}`]
           : []),
+        // Round-up/list queries (ported from single mode, 2026-07-06): "best/top
+        // condo resorts in <city>" pages routinely NAME 5-10 specific resorts the
+        // per-BR listing-snippet queries miss — the cheapest recall lever for
+        // finding MORE communities per market.
+        `"best" OR "top" condo resorts "${cityForQuery}" "${stateForQuery}" vacation rental airbnb vrbo ${commonExclusions}`,
+        `"${cityForQuery}" "${stateForQuery}" condo resort complex list vacation rentals individually owned ${commonExclusions}`,
         // Extra HI-specific queries for exhaustive coverage on any Hawaii city (used only for HI to keep non-HI sweeps fast).
         ...(isHawaii ? [
           `"${cityForQuery}" hawaii (condo OR townhome OR condominium) ("vacation rental" OR airbnb OR vrbo) ("individually owned" OR "owner managed" OR "private owner") ${commonExclusions}`,
@@ -3350,7 +3380,7 @@ export async function researchCommunitiesForCity(
   allResults.push(...googleResults.flat());
 
   const seen = new Set<string>();
-  const uniqueCap = mode === "single" ? 30 : 15;
+  const uniqueCap = mode === "single" ? 30 : deepDiscovery ? 25 : 15;
   const unique = allResults.filter(r => {
     const key = r.title?.toLowerCase().slice(0, 60) ?? r.link;
     if (seen.has(key)) return false;
@@ -3512,7 +3542,7 @@ SCORING:
     30–49: mostly 1BR → 2BR combined (marginal)
     <30: mostly studios → skip
 
-Use (1) the search results below, and (2) your own knowledge — add up to ${isHawaii ? 12 : 3} well-known communities in "${city}, ${state}" that fit, marked fromWorldKnowledge:true.
+Use (1) the search results below, and (2) your own knowledge — add up to ${isHawaii ? 12 : deepDiscovery ? 10 : 3} well-known communities in "${city}, ${state}" that fit, marked fromWorldKnowledge:true.
 ${isHawaii ? `**HAWAII EXHAUSTIVE MODE (for Add Combo Listing tool):** For any Hawaii city, be exhaustive and complete. Surface EVERY qualifying individually-owned condo/townhome vacation-rental resort (majority condos or townhomes, no hotels, no timeshares, no single-family/villa complexes) that your knowledge or the results know for "${city}" or its resort market area. The operator must be able to discover new HI cities without manual intervention — do not under-report. ` : ""}If a resort markets attached condominium/townhome inventory as "villas", only call it a fit when the units are shared-wall condos/townhomes; detached villas remain disqualified. In that case, set unitTypes to "condos", "townhomes", or "condo-style villas" rather than generic "villas".
 
 KNOWN LOCAL CANDIDATES to consider for "${city}, ${state}" if the search results are sparse:
@@ -3526,6 +3556,7 @@ RESORT SIZE CONTEXT:
   - estimatedTotalUnits: rough total condos/townhomes in the resort, e.g. 122.
   - estimatedBedroomUnitCounts: rough per-bedroom inventory when known, e.g. {"2":45,"3":77}. Use {} when unknown.
   Rough counts are useful, but do not invent fake precision. If you only know the total, provide estimatedTotalUnits and leave estimatedBedroomUnitCounts as {}.
+  IMPORTANT: if you are confident the resort is a qualifying individually-owned condo/townhome community but genuinely unsure of its exact bedroom mix, default availableBedrooms to [2, 3] rather than [] — condo resorts of 10+ units almost always carry 2BR/3BR stock, and an empty array hides a real resort from the combo sweep entirely.
 
 ADDRESS HINT (critical for combo wizard address gen + photo discovery): For each, if confident, also include "addressHint": a real street address (e.g. "2611 Kiahuna Plantation Dr" or "9000 Treasure Trove Ln") for the resort from knowledge or results. This is used to anchor Zillow/Realtor discovery for unit photos when no hardcoded rule exists. Only include when you have a specific reliable one; do not fabricate.
 
@@ -3546,7 +3577,7 @@ Output JSON array. Each element:
 
 When credible public evidence shows 4BR or 5BR attached condo/townhome units, include those values in availableBedrooms and estimatedBedroomUnitCounts. Do not invent them; absence of 4BR/5BR evidence should remain absent so the UI can show "No 7/8BR combo".
 
-Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Max ${isHawaii ? 15 : 10} results${isHawaii ? " (exhaustive for Hawaii cities)" : ""}. Sort by (confidenceScore + combinabilityScore) descending. No markdown, no prose.`;
+Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Max ${isHawaii || deepDiscovery ? 15 : 10} results${isHawaii ? " (exhaustive for Hawaii cities)" : deepDiscovery ? " (exhaustive sweep)" : ""}. Sort by (confidenceScore + combinabilityScore) descending. No markdown, no prose.`;
 
     try {
       const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -3569,8 +3600,10 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
           // Sonnet + higher budget: exhaustive research for any HI city must
           // surface all qualifying VR condo/townhome resorts without operator
           // needing to ask Codex/Grok to manually add communities.
-          model: (mode === "single" || isHawaii) ? "claude-sonnet-4-6" : "claude-haiku-4-5-20251001",
-          max_tokens: (mode === "single" || isHawaii) ? 8000 : 4000,
+          // Background sweeps (discoverBeyondSeeds) get the same Sonnet
+          // treatment for MAINLAND markets too — recall over latency there.
+          model: (mode === "single" || isHawaii || deepDiscovery) ? "claude-sonnet-4-6" : "claude-haiku-4-5-20251001",
+          max_tokens: (mode === "single" || isHawaii || deepDiscovery) ? 8000 : 4000,
           messages: [{ role: "user", content: prompt }],
         }),
       });
@@ -3596,8 +3629,9 @@ Include ONLY entries with confidenceScore >= 60 AND combinabilityScore >= 50. Ma
         if (!scored) {
           console.error(`[research] Claude returned no JSON array for ${city}, ${state}. Raw text head: ${text.slice(0, 200)}`);
         } else {
-          // Single mode keeps up to 20; combo mode keeps the original 10.
-          const sliceCap = mode === "single" ? 20 : 10;
+          // Single mode keeps up to 20; combo mode keeps the original 10 except
+          // exhaustive contexts (Hawaii / background sweeps) which keep 15.
+          const sliceCap = mode === "single" ? 20 : (isHawaii || deepDiscovery) ? 15 : 10;
           for (const s of scored.slice(0, sliceCap)) {
             // Hard post-filter. The prompt warns against villas/SFH, but
             // Claude occasionally lets one through. Drop anything whose

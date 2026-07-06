@@ -533,6 +533,13 @@ export default function AddCommunity() {
   const [sweepResortSelection, setSweepResortSelection] = useState<Set<string>>(new Set());
   const [sweepQueueStarting, setSweepQueueStarting] = useState(false);
   const [sweepQueueProgress, setSweepQueueProgress] = useState<{ done: number; total: number } | null>(null);
+  // One-click multi-batch: when a sweep queue hit the per-job batch cap, the
+  // overflow stays selected and this arms an AUTO re-queue of the next batch as
+  // soon as the current job completes — the operator selects communities ONCE
+  // and the queue drains them all. Disarmed on job failure/cancel (operator
+  // attention needed) and when nothing is left selected.
+  const sweepAutoContinueArmedRef = useRef(false);
+  const sweepAutoContinuedForJobRef = useRef<string | null>(null);
   const [draftRestored, setDraftRestored] = useState(false);
   const draftHydratedRef = useRef(false);
   const [draftAutosaveReady, setDraftAutosaveReady] = useState(false);
@@ -1849,6 +1856,9 @@ export default function AddCommunity() {
         setBulkComboEvents([]);
         deselectConsumed();
         setBulkComboOpen(true);
+        // Arm the one-click auto-continue: the moment this job completes, the
+        // remaining (still-selected) overflow queues itself as the next batch.
+        sweepAutoContinueArmedRef.current = overflow > 0;
         const queuedCount = Array.isArray(jobData.job.items) ? jobData.job.items.length : items.length;
         const extras: string[] = [];
         if (skipped > 0) extras.push(`${skipped} skipped (all combos used)`);
@@ -1857,7 +1867,7 @@ export default function AddCommunity() {
         if (overflow > 0) {
           toast({
             title: "Bulk queued from sweep",
-            description: `${queuedCount} queued${extras.length ? ` · ${extras.join(" · ")}` : ""} · ${overflow} still selected — close the queue and click Queue again for the rest`,
+            description: `${queuedCount} queued${extras.length ? ` · ${extras.join(" · ")}` : ""} · ${overflow} still selected — the next batch queues automatically when this one finishes`,
           });
         } else {
           setSweepOpen(false);
@@ -1866,6 +1876,7 @@ export default function AddCommunity() {
       } else {
         // Nothing queued — the server dropped everything (all already in system or
         // collapsed as cross-city duplicates). De-select them so they don't re-run.
+        sweepAutoContinueArmedRef.current = false;
         deselectConsumed();
         toast({
           title: "Nothing new to queue",
@@ -1875,6 +1886,7 @@ export default function AddCommunity() {
         });
       }
     } catch (e: any) {
+      sweepAutoContinueArmedRef.current = false;
       const msg = String(e?.message || "");
       const isDuplicate = msg.startsWith("409") || /already (exists|has|active)|already queue/i.test(msg);
       toast({
@@ -1889,6 +1901,39 @@ export default function AddCommunity() {
       setSweepQueueProgress(null);
     }
   }, [sweepSelectedCommunities, sweepMarkets, resortDedupKey, buildBulkComboItemForCommunity, toast]);
+
+  // ONE-CLICK MULTI-BATCH: the server caps a bulk-combo job at
+  // BULK_COMBO_BATCH_MAX items, so a big "Select all" used to need a manual
+  // "Queue again" click per batch. When the active job COMPLETES and armed
+  // overflow selections remain, queue the next batch automatically — the
+  // operator selects communities once and walks away. A failed/cancelled job
+  // disarms (needs operator attention); each job id auto-continues at most once
+  // (guards double-fires from the 2.5s poll + the 15s history poll).
+  useEffect(() => {
+    const status = bulkComboJob?.status;
+    const jobId = bulkComboJob?.id;
+    if (!jobId || !status) return;
+    if (status === "failed" || status === "cancelled") {
+      sweepAutoContinueArmedRef.current = false;
+      return;
+    }
+    if (status !== "completed") return;
+    if (!sweepAutoContinueArmedRef.current) return;
+    if (sweepQueueStarting) return;
+    if (sweepAutoContinuedForJobRef.current === jobId) return;
+    const remaining = sweepSelectedCommunities.filter((c) => !resortAlreadyInSystem(c)).length;
+    if (remaining === 0) {
+      sweepAutoContinueArmedRef.current = false;
+      return;
+    }
+    sweepAutoContinuedForJobRef.current = jobId;
+    sweepAutoContinueArmedRef.current = false; // re-armed by queueSelectedSweepResorts if overflow remains
+    toast({
+      title: "Queueing next sweep batch",
+      description: `${remaining} selected resort${remaining === 1 ? "" : "s"} left — starting the next batch automatically.`,
+    });
+    void queueSelectedSweepResorts();
+  }, [bulkComboJob?.status, bulkComboJob?.id, sweepQueueStarting, sweepSelectedCommunities, queueSelectedSweepResorts, toast]);
 
   const toggleBulkPairing = useCallback((index: number) => {
     setBulkPairingIndexes((prev) => {
@@ -3359,7 +3404,7 @@ export default function AddCommunity() {
                     </div>
                     {uniqueSelected > BULK_COMBO_BATCH_MAX && !sweepQueueProgress && (
                       <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
-                        Up to {BULK_COMBO_BATCH_MAX} resorts queue per batch — the first {BULK_COMBO_BATCH_MAX} are queued now (the remaining {uniqueSelected - BULK_COMBO_BATCH_MAX} stay selected; click Queue again for the rest).
+                        Up to {BULK_COMBO_BATCH_MAX} resorts queue per batch — the first {BULK_COMBO_BATCH_MAX} are queued now, and the remaining {uniqueSelected - BULK_COMBO_BATCH_MAX} queue automatically as each batch finishes (leave this page open).
                       </div>
                     )}
                     <Button
