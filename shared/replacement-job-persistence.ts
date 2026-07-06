@@ -134,19 +134,36 @@ export function failStuckReplacementRecords(
 // A NEW search for the same property supersedes any older running record —
 // without this, the watchdog could resume an abandoned search alongside the
 // operator's fresh one and run two SearchAPI-billed sweeps concurrently.
+// 2026-07-05 scoping fixes (adversarial review of the deploy-burst fix):
+//   • UNIT-scoped when both sides know their targetUnitId — a two-unit
+//     property legitimately runs Unit A + Unit B searches concurrently (the
+//     duplicate-photos popup's common case), and Unit A's restart must not
+//     kill Unit B's live search. Falls back to property-only when either side
+//     lacks a unit id (legacy records), preserving the original guard.
+//   • liveJobIds (searches running in THIS process right now) are never
+//     superseded — clobbering the store record under a live sweep leaves a
+//     wrong terminal verdict if the process dies before the real one lands.
 export function supersedeRunningRecordsForProperty(
   store: Record<string, PersistedReplacementJobRecord>,
   propertyId: unknown,
   exceptJobId: string,
   nowMs: number,
+  opts: { targetUnitId?: unknown; liveJobIds?: Iterable<string> } = {},
 ): void {
   const pid = Number(propertyId);
   if (!Number.isFinite(pid)) return;
+  const live = new Set(opts.liveJobIds ?? []);
+  const newUnit = typeof opts.targetUnitId === "string" && opts.targetUnitId ? opts.targetUnitId : null;
   for (const record of Object.values(store)) {
     if (record.jobId === exceptJobId || record.status !== "running") continue;
     if (Number(record.payload?.propertyId) !== pid) continue;
+    if (live.has(record.jobId)) continue;
+    const recordUnit = typeof record.payload?.targetUnitId === "string" && record.payload.targetUnitId
+      ? (record.payload.targetUnitId as string)
+      : null;
+    if (newUnit && recordUnit && newUnit !== recordUnit) continue;
     record.status = "failed";
-    record.error = "Superseded by a newer search for this property";
+    record.error = "Superseded by a newer search for this unit";
     record.updatedAt = nowMs;
   }
 }

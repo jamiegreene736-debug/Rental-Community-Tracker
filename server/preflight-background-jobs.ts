@@ -195,7 +195,14 @@ function mutateReplacementJobStore(
 
 function persistReplacementJobRunning(job: PreflightReplacementFindJob, payload: Record<string, unknown>, resumeCount = 0): void {
   void mutateReplacementJobStore((store, now) => {
-    supersedeRunningRecordsForProperty(store, payload.propertyId, job.id, now);
+    // Only a genuinely NEW search supersedes siblings — a watchdog RESUME
+    // (resumeCount > 0) is the same search coming back, not competition.
+    if (resumeCount === 0) {
+      supersedeRunningRecordsForProperty(store, payload.propertyId, job.id, now, {
+        targetUnitId: payload.targetUnitId,
+        liveJobIds: [...Array.from(replacementFindJobs.keys()), ...Array.from(activeReplacementFindJobIds)],
+      });
+    }
     const prior = store[job.id];
     store[job.id] = {
       jobId: job.id,
@@ -209,6 +216,7 @@ function persistReplacementJobRunning(job: PreflightReplacementFindJob, payload:
 }
 
 function persistReplacementJobTerminal(job: PreflightReplacementFindJob): void {
+  replacementRecordHeartbeatAt.delete(job.id);
   void mutateReplacementJobStore((store, now) => {
     const prior = store[job.id];
     store[job.id] = {
@@ -247,7 +255,24 @@ export async function getPersistedReplacementFindJob(jobId: string): Promise<Pre
     // spinning forever (the watchdog sweep persists the same failure).
     return replacementJobStuckFallback(record, Date.now()) as PreflightReplacementFindJob;
   } catch {
-    return null;
+    // A transient store-READ failure (DB blip) is NOT "the job vanished" —
+    // null here would burn a client relaunch / an orchestrator fresh-search
+    // restart on a hiccup. Serve a running placeholder; the next successful
+    // read tells the truth.
+    return {
+      id: jobId,
+      status: "running",
+      phase: "checking",
+      message: "Job store temporarily unreadable — retrying…",
+      progress: 40,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+      unit: null,
+      diagnostic: null,
+    } as PreflightReplacementFindJob;
   }
 }
 
@@ -326,9 +351,28 @@ function touchPhotoJob(job: PreflightPhotoFetchJob, patch: Partial<PreflightPhot
   photoFetchJobs.set(job.id, job);
 }
 
+// Throttled durable heartbeat: the persisted record's updatedAt used to be
+// stamped only at launch/resume, so a single restart after minute ~60 of a
+// long exhaustive search fell outside the resume window (unresumable with
+// resumeCount 0). Refreshing it every few minutes keeps a genuinely-alive
+// search inside the window without hammering app_settings.
+const REPLACEMENT_RECORD_HEARTBEAT_MS = 5 * 60 * 1000;
+const replacementRecordHeartbeatAt = new Map<string, number>();
+
 function touchReplacementJob(job: PreflightReplacementFindJob, patch: Partial<PreflightReplacementFindJob> = {}) {
   Object.assign(job, patch, { updatedAt: Date.now() });
   replacementFindJobs.set(job.id, job);
+  if (job.status === "queued" || job.status === "running") {
+    const now = Date.now();
+    const last = replacementRecordHeartbeatAt.get(job.id) ?? 0;
+    if (now - last >= REPLACEMENT_RECORD_HEARTBEAT_MS) {
+      replacementRecordHeartbeatAt.set(job.id, now);
+      void mutateReplacementJobStore((store) => {
+        const record = store[job.id];
+        if (record && record.status === "running") record.updatedAt = now;
+      });
+    }
+  }
 }
 
 function touchAuditJob(job: PreflightAuditJob, patch: Partial<PreflightAuditJob> = {}) {

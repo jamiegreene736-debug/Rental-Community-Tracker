@@ -33,6 +33,13 @@ export const MAX_AUTO_REPLACE_FIND_RESTARTS = 2;
 // Terminal error when even the fresh-search budget is exhausted.
 export const STUCK_AUTO_REPLACE_ERROR =
   "The replacement search kept getting interrupted by server restarts — click Replace photos to retry.";
+// Phase-aware variants (adversarial review, 2026-07-05): a stuck "verifying"
+// record means the swap WAS committed — telling the operator to re-run
+// Replace photos there would swap in a DIFFERENT unit on top of the first.
+export const STUCK_AUTO_REPLACE_VERIFY_ERROR =
+  "The swap WAS committed, but the verification + Guesty photo push were interrupted by server restarts and never confirmed — open the builder's Photos tab and use \"Push Photos to Guesty\". Do NOT re-run Replace photos (that would swap in a different unit).";
+export const STUCK_AUTO_REPLACE_COMMIT_ERROR =
+  "Interrupted by server restarts mid-commit — the swap may or may not have landed. Check the unit's swap history before re-running Replace photos.";
 // How long a finished job stays on the dashboard queue chip.
 export const AUTO_REPLACE_SURFACE_TERMINAL_MS = 2 * 60 * 60 * 1000;
 
@@ -122,7 +129,13 @@ export function serializeAutoReplaceStore(store: Record<string, AutoReplaceJobRe
 
 export function shouldResumeAutoReplaceJob(record: AutoReplaceJobRecord, nowMs: number): boolean {
   if (!isAutoReplacePhaseActive(record.phase)) return false;
-  if (record.resumeCount >= MAX_AUTO_REPLACE_RESUMES) return false;
+  // "verifying" is exempt from the resume cap: the swap is already committed
+  // and the remaining legs (rescan/community-check kicks + Guesty photo push)
+  // are cheap and idempotent — abandoning them strands the operator's actual
+  // goal (the old unit's duplicated photos stay live on the OTAs). The resume
+  // WINDOW still bounds it. The cap exists to bound repeated SearchAPI
+  // sweeps, which the verify phase never runs.
+  if (record.phase !== "verifying" && record.resumeCount >= MAX_AUTO_REPLACE_RESUMES) return false;
   const aliveAt = record.updatedAt || record.createdAt;
   return !!aliveAt && nowMs - aliveAt <= AUTO_REPLACE_RESUME_WINDOW_MS;
 }
@@ -198,8 +211,16 @@ export function failStuckAutoReplaceRecords(
   for (const record of Object.values(store)) {
     if (!isAutoReplacePhaseActive(record.phase) || live.has(record.jobId)) continue;
     if (shouldResumeAutoReplaceJob(record, nowMs)) continue;
+    // Phase-aware message — a stuck "verifying" record has a COMMITTED swap
+    // (replacementFolder/newUnitLabel were persisted with the phase flip);
+    // "re-run Replace photos" there would swap in a different unit.
+    const error = record.phase === "verifying"
+      ? STUCK_AUTO_REPLACE_VERIFY_ERROR
+      : record.phase === "committing"
+        ? STUCK_AUTO_REPLACE_COMMIT_ERROR
+        : STUCK_AUTO_REPLACE_ERROR;
     record.phase = "failed";
-    record.error = STUCK_AUTO_REPLACE_ERROR;
+    record.error = error;
     record.updatedAt = nowMs;
     failedIds.push(record.jobId);
   }

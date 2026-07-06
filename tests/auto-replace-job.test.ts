@@ -5,7 +5,9 @@ import {
   AUTO_REPLACE_SURFACE_TERMINAL_MS,
   MAX_AUTO_REPLACE_FIND_RESTARTS,
   MAX_AUTO_REPLACE_RESUMES,
+  STUCK_AUTO_REPLACE_COMMIT_ERROR,
   STUCK_AUTO_REPLACE_ERROR,
+  STUCK_AUTO_REPLACE_VERIFY_ERROR,
   clearableAutoReplaceJobIds,
   failStuckAutoReplaceRecords,
   findActiveAutoReplaceJob,
@@ -74,6 +76,13 @@ check("terminal record never resumes",
 check("stale record outside the window does not resume",
   !shouldResumeAutoReplaceJob(rec({ updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 1 }), NOW));
 check("resume cap blocks crash loops", !shouldResumeAutoReplaceJob(rec({ resumeCount: MAX_AUTO_REPLACE_RESUMES }), NOW));
+// "verifying" = swap already committed; its remaining legs are cheap and
+// idempotent, so the cap (which bounds SearchAPI sweeps) does not apply —
+// only the window does. Abandoning it strands the Guesty photo push.
+check("verifying job at the resume cap is STILL resumable (swap committed; verify legs are cheap)",
+  shouldResumeAutoReplaceJob(rec({ phase: "verifying", resumeCount: MAX_AUTO_REPLACE_RESUMES }), NOW));
+check("verifying job outside the window does not resume",
+  !shouldResumeAutoReplaceJob(rec({ phase: "verifying", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 1 }), NOW));
 
 // ── one active job per property+unit ─────────────────────────────────────────
 {
@@ -131,7 +140,7 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     running: rec({ jobId: "running", phase: "finding", updatedAt: NOW - 60_000 }),
     liveNow: rec({ jobId: "liveNow", phase: "committing", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
     stuckStale: rec({ jobId: "stuckStale", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
-    stuckCapped: rec({ jobId: "stuckCapped", phase: "verifying", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
+    stuckCapped: rec({ jobId: "stuckCapped", phase: "finding", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
   };
   const cleared = clearableAutoReplaceJobIds(store, NOW, ["liveNow"]).sort();
   check("terminal jobs are clearable", cleared.includes("done") && cleared.includes("dead"));
@@ -149,15 +158,22 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     running: rec({ jobId: "running", phase: "finding", updatedAt: NOW - 60_000 }),
     liveNow: rec({ jobId: "liveNow", phase: "committing", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
     stuckStale: rec({ jobId: "stuckStale", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
-    stuckCapped: rec({ jobId: "stuckCapped", phase: "verifying", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
+    stuckCapped: rec({ jobId: "stuckCapped", phase: "committing", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
+    stuckVerify: rec({ jobId: "stuckVerify", phase: "verifying", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
     done: rec({ jobId: "done", phase: "completed" }),
   };
   const failedIds = failStuckAutoReplaceRecords(store, NOW, ["liveNow"]).sort();
   check("stuck records (stale window / cap exhausted) become failed",
-    failedIds.join(",") === "stuckCapped,stuckStale" &&
-    store.stuckCapped.phase === "failed" && store.stuckStale.phase === "failed");
-  check("stuck records carry the honest restart error",
-    store.stuckCapped.error === STUCK_AUTO_REPLACE_ERROR && store.stuckCapped.updatedAt === NOW);
+    failedIds.join(",") === "stuckCapped,stuckStale,stuckVerify" &&
+    store.stuckCapped.phase === "failed" && store.stuckStale.phase === "failed" && store.stuckVerify.phase === "failed");
+  check("finding-phase stuck record carries the honest retry error",
+    store.stuckStale.error === STUCK_AUTO_REPLACE_ERROR && store.stuckStale.updatedAt === NOW);
+  // Phase-aware messages: a stuck verify has a COMMITTED swap — "re-run
+  // Replace photos" would swap in a DIFFERENT unit; a stuck commit is ambiguous.
+  check("verifying-phase stuck record says the swap committed + push-photos fallback (never 'retry Replace photos')",
+    store.stuckVerify.error === STUCK_AUTO_REPLACE_VERIFY_ERROR && /do not re-run/i.test(store.stuckVerify.error ?? ""));
+  check("committing-phase stuck record warns the commit may have landed",
+    store.stuckCapped.error === STUCK_AUTO_REPLACE_COMMIT_ERROR && /swap history/i.test(store.stuckCapped.error ?? ""));
   check("resumable / live / terminal records untouched",
     store.running.phase === "finding" && store.liveNow.phase === "committing" && store.done.phase === "completed");
   check("a terminalized stuck record no longer blocks a retry (double-tap guard clears)",

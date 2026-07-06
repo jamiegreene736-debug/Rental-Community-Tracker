@@ -86,6 +86,28 @@ check("server resume cap blocks a crash-looping deploy",
   check("other property's search and the new job itself are untouched",
     store.otherProp.status === "running" && store.fresh.status === "running");
 }
+// 2026-07-05: supersede is UNIT-scoped when both sides know their unit — a
+// two-unit property (duplicate-photos popup's common case) legitimately runs
+// Unit A + Unit B searches concurrently; Unit A's fresh/restarted search must
+// not kill Unit B's live one. Live in-process jobs are never superseded.
+{
+  const store: Record<string, PersistedReplacementJobRecord> = {
+    unitB: rec({ jobId: "unitB", payload: { propertyId: 23, targetUnitId: "prop23-kl-2br" } }),
+    sameUnitOld: rec({ jobId: "sameUnitOld", payload: { propertyId: 23, targetUnitId: "prop23-kl-3br" } }),
+    legacyNoUnit: rec({ jobId: "legacyNoUnit", payload: { propertyId: 23 } }),
+    liveSibling: rec({ jobId: "liveSibling", payload: { propertyId: 23, targetUnitId: "prop23-kl-3br" } }),
+  };
+  supersedeRunningRecordsForProperty(store, 23, "fresh-3br", NOW, {
+    targetUnitId: "prop23-kl-3br",
+    liveJobIds: ["liveSibling"],
+  });
+  check("sibling UNIT's concurrent search survives a same-property supersede",
+    store.unitB.status === "running");
+  check("same-unit older search is superseded; legacy unit-less record falls back to property scope",
+    store.sameUnitOld.status === "failed" && store.legacyNoUnit.status === "failed");
+  check("a search live in THIS process is never superseded in the store",
+    store.liveSibling.status === "running");
+}
 
 // ── synthesized jobs for the GET fallback ────────────────────────────────────
 {
@@ -147,6 +169,20 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_REPLACEMENT_SERVER_RESU
   };
   const round = parseReplacementJobStore(serializeReplacementJobStore(store, NOW));
   check("stuckUnresumable flag survives a store round-trip", round.s.stuckUnresumable === true);
+}
+
+// ── source lock: the CLIENT half of the stuck-record contract ────────────────
+// GET :jobId used to 404 for a running-unresumable record, and the 404 was the
+// client's ONLY trigger for its transparent localStorage relaunch. The server
+// now returns 200 failed+stuckUnresumable — the client must relaunch on that
+// too, or deploy-burst victims silently lose the "safe to leave this tab"
+// contract. Guards client/src/components/unit-replacement-flow.tsx.
+{
+  const { readFileSync } = await import("node:fs");
+  const clientSrc = readFileSync(new URL("../client/src/components/unit-replacement-flow.tsx", import.meta.url), "utf8");
+  check("client poll relaunches on a stuckUnresumable failed job (the old 404 path's replacement)",
+    clientSrc.includes('job.stuckUnresumable === true') &&
+    /stuckUnresumable === true[\s\S]{0,200}attemptAutoResume/.test(clientSrc));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -54,6 +54,9 @@ const FIND_POLL_INTERVAL_MS = 5_000;
 // The exhaustive manual search can run long; the auto flow uses first-hit mode
 // so ~45 min is a generous ceiling before declaring the find leg stuck.
 const FIND_WAIT_CEILING_MS = 45 * 60 * 1000;
+// Consecutive "restart" poll signals required before launching a fresh search
+// (~15s at the poll interval) — a lone signal can be a store blip/write lag.
+const RESTART_SIGNAL_CONFIRM_POLLS = 3;
 
 const jobs = new Map<string, AutoReplaceJobRecord>();
 const activeJobIds = new Set<string>();
@@ -153,6 +156,10 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
     let findJob: any = null;
     if (record.phase === "queued" || record.phase === "finding" || !record.findJobId) {
       const waitStart = Date.now();
+      // A single "restart" signal can be a store-write lag racing this poll —
+      // require a few consecutive signals before burning a bounded fresh
+      // search (each one is a full SearchAPI sweep).
+      let restartSignals = 0;
       for (;;) {
         if (!record.findJobId) {
           const payload = await assembleFindPayload(record.propertyId, record.unitId);
@@ -171,8 +178,10 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
         }
         findJob = getPreflightReplacementFindJob(record.findJobId!) ?? await getPersistedReplacementFindJob(record.findJobId!);
         const step = nextStepFromFindJob(findJob);
+        if (step !== "restart") restartSignals = 0;
         if (step === "commit") break;
-        if (step === "restart") {
+        if (step === "restart" && ++restartSignals >= RESTART_SIGNAL_CONFIRM_POLLS) {
+          restartSignals = 0;
           if (record.findRestarts >= MAX_AUTO_REPLACE_FIND_RESTARTS) {
             touch(record, { phase: "failed", error: STUCK_AUTO_REPLACE_ERROR });
             return;
