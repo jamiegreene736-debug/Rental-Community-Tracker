@@ -2594,9 +2594,22 @@ function AdminDashboard() {
         agg.airbnb  = worst(agg.airbnb,  row.airbnbStatus);
         agg.vrbo    = worst(agg.vrbo,    row.vrboStatus);
         agg.booking = worst(agg.booking, row.bookingStatus);
-        agg.addr.airbnb  = worst(agg.addr.airbnb,  row.airbnbAddressStatus  ?? "unknown");
-        agg.addr.vrbo    = worst(agg.addr.vrbo,    row.vrboAddressStatus    ?? "unknown");
-        agg.addr.booking = worst(agg.addr.booking, row.bookingAddressStatus ?? "unknown");
+        // The address-on-OTA leg aggregates DIFFERENTLY from the photo leg. A
+        // folder whose address check was SKIPPED (no resolvable unit street —
+        // every community-*/amenity folder, plus unit folders with no saved
+        // address) reports "unknown", and must NOT mask a real clean/found
+        // result from a sibling unit folder. worst()'s unknown>clean ranking is
+        // correct for the PHOTO leg (an inconclusive Lens result should surface)
+        // but here it let a single community folder paint the whole property's
+        // 📍 row grey — hiding that the actual units are address-clean. So fold
+        // ONLY meaningful clean/found statuses and skip unknown/null. A property
+        // with no address-checkable folder keeps addr=null → the 📍 row is
+        // hidden (hasAddrData) instead of rendering an alarming all-grey row.
+        const foldAddr = (cur: PhotoAggStatus, next: PhotoStatus | null | undefined): PhotoAggStatus =>
+          next === "clean" || next === "found" ? worst(cur, next) : cur;
+        agg.addr.airbnb  = foldAddr(agg.addr.airbnb,  row.airbnbAddressStatus);
+        agg.addr.vrbo    = foldAddr(agg.addr.vrbo,    row.vrboAddressStatus);
+        agg.addr.booking = foldAddr(agg.addr.booking, row.bookingAddressStatus);
         agg.addressMatchCount += row.addressMatches?.length ?? 0;
         agg.matchCounts.airbnb  += row.airbnbMatches?.length  ?? 0;
         agg.matchCounts.vrbo    += row.vrboMatches?.length    ?? 0;
