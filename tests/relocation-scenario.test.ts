@@ -12,6 +12,9 @@ import {
   bedroomsFromListingTitleText,
   classifyRelocationScenario,
   buildSameCommunityRelocationLines,
+  stripListingTitleCruftFromCommunityLabel,
+  sameCommunityLabelMatch,
+  sameBuildingFromAddresses,
 } from "../shared/relocation-scenario";
 
 let pass = 0;
@@ -110,6 +113,39 @@ const equal = buildSameCommunityRelocationLines({
 check("equal bedrooms → no 'instead of' change line", !equal.bedroomLine.includes("instead of"), equal.bedroomLine);
 check("equal bedrooms → states the total", equal.bedroomLine.includes("with 4 bedrooms in total"), equal.bedroomLine);
 
+console.log("relocation-scenario: stripListingTitleCruftFromCommunityLabel (Ilikai live incident)");
+check("listing-title label → community name",
+  stripListingTitleCruftFromCommunityLabel("Ilikai - 4BR Condos - Sleeps 12") === "Ilikai");
+check("case-insensitive cruft", stripListingTitleCruftFromCommunityLabel("Ilikai - 4br Condos - Sleeps 12") === "Ilikai");
+check("legit dash-joined name preserved",
+  stripListingTitleCruftFromCommunityLabel("Regency - Poipu Kai") === "Regency - Poipu Kai");
+check("plain community untouched", stripListingTitleCruftFromCommunityLabel("Ilikai Resort") === "Ilikai Resort");
+check("all-cruft label falls back to raw", stripListingTitleCruftFromCommunityLabel("Sleeps 12") === "Sleeps 12");
+check("empty → empty", stripListingTitleCruftFromCommunityLabel("") === "" && stripListingTitleCruftFromCommunityLabel(null) === "");
+
+console.log("relocation-scenario: sameCommunityLabelMatch");
+check("Ilikai title-label vs Ilikai resort → match",
+  sameCommunityLabelMatch("Ilikai - 4BR Condos - Sleeps 12", "Ilikai resort") === true);
+check("generic words ignored (Hotel vs resort)", sameCommunityLabelMatch("Ilikai Hotel", "Ilikai resort") === true);
+check("bare market/city never matches a containing resort (no subset match)",
+  sameCommunityLabelMatch("Princeville", "Princeville Kamalii") === false);
+check("sibling resorts don't match", sameCommunityLabelMatch("Poipu Kai", "Poipu Sands") === false);
+check("empty side → false", sameCommunityLabelMatch("", "Ilikai resort") === false);
+check("generic-only label → false", sameCommunityLabelMatch("The Resort", "Ilikai resort") === false);
+
+console.log("relocation-scenario: sameBuildingFromAddresses (1777 Ala Moana live incident)");
+check("unit-suffixed + bare same street → same building",
+  sameBuildingFromAddresses(["1777 Ala Moana Blvd #1834", "1777 Ala Moana Blvd"]) === true);
+check("with city tails + Apt marker",
+  sameBuildingFromAddresses(["1777 Ala Moana Blvd Apt 4B, Honolulu, HI", "1777 Ala Moana Blvd #212, Honolulu, HI 96815"]) === true);
+check("different street numbers → false",
+  sameBuildingFromAddresses(["1777 Ala Moana Blvd", "1778 Ala Moana Blvd"]) === false);
+check("missing address on one unit → false",
+  sameBuildingFromAddresses(["1777 Ala Moana Blvd #1834", ""]) === false);
+check("unnumbered resort-name 'address' → false",
+  sameBuildingFromAddresses(["Ilikai Resort", "Ilikai Resort"]) === false);
+check("single unit → false (nothing to compare)", sameBuildingFromAddresses(["1777 Ala Moana Blvd"]) === false);
+
 // ── Source assertions: the wiring in routes.ts + bookings.tsx ───────────────
 console.log("relocation-scenario: source wiring");
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -120,16 +156,37 @@ check("routes: message builder uses the shared same-community lines",
   routesSrc.includes('from "@shared/relocation-scenario"') && routesSrc.includes("buildSameCommunityRelocationLines({"));
 check("routes: relocation message takes the same-community branch on the flag",
   routesSrc.includes("if (args.sameCommunity === true) {"));
-check("routes: POST resolves sameCommunity from client verdict flag + name match (with explicit-false veto)",
-  routesSrc.includes("bodySameCommunityFlag === true") && routesSrc.includes('bodySameCommunityFlag !== false'));
+check("routes: POST resolves sameCommunity from verdict flag OR address proof OR label match, with the different-verdict veto",
+  routesSrc.includes("const sameCommunityVeto = req.body?.sameCommunity === false;")
+  && routesSrc.includes("addressSameBuilding")
+  && routesSrc.includes("sameCommunityLabelMatch(originalCommunity, alternativeLabelForMatch)"));
 check("routes: POST parses originalBedrooms + partySize",
   routesSrc.includes("req.body?.originalBedrooms") && routesSrc.includes("req.body?.partySize"));
+check("routes: POST sanitizes listing-title community/area labels",
+  routesSrc.includes("stripListingTitleCruftFromCommunityLabel(req.body?.originalCommunity)")
+  && routesSrc.includes("stripListingTitleCruftFromCommunityLabel(req.body?.areaName)"));
 check("routes: same community suppresses the drive-minutes framing",
   routesSrc.includes("const communityDriveMinutes = sameCommunity\n        ? null"));
-check("routes: flags persisted on the page payload for the GET renderer",
-  routesSrc.includes("sameCommunity,\n        sameBuilding,\n        originalBedrooms,\n        partySize,"));
+check("routes: flags (incl. the binding veto) persisted on the page payload",
+  routesSrc.includes("sameCommunity,\n        sameBuilding,\n        sameCommunityVeto,\n        originalBedrooms,\n        partySize,"));
 check("routes: GET renders the same-community page framing",
   routesSrc.includes("payload.sameCommunity === true") && routesSrc.includes("Same Community as Your Original Booking"));
+check("routes: GET self-heals flag-less pages from address + label signals (veto binding)",
+  routesSrc.includes("const pageSameCommunityVeto = payload.sameCommunityVeto === true;")
+  && routesSrc.includes("pageAddressSameBuilding")
+  && routesSrc.includes("sameCommunityLabelMatch(originalCommunity, alternativeCommunity)"));
+check("routes: GET suppresses the walk chip in-building and the drive chip in-community",
+  routesSrc.includes("!pageSameBuilding && Number.isFinite(unitWalkMinutes)")
+  && routesSrc.includes("!pageSameCommunity && Number.isFinite(communityDriveMinutes)"));
+check("routes: combined sleeps only claimed when every unit has a sleeps value",
+  routesSrc.includes("allUnitSleepsKnown") && routesSrc.includes("allUnitsHaveSleeps"));
+check("routes: message walk line dropped for same-building replacements",
+  routesSrc.includes("walkLine && args.sameBuilding !== true"));
+check("routes: non-VRBO 0-photo units fall back to the sidecar gallery scrape at page build",
+  routesSrc.includes("[booking-alternatives] sidecar gallery recovered")
+  && routesSrc.includes("!isVrboAlternativeUrl(sourceUrl)"));
+check("routes: guest-visible carousel alt text never uses the raw listing title",
+  !routesSrc.includes('alt="${escapeHtml(item.title || item.community'));
 check("routes: AI unit description told not to frame a move",
   routesSrc.includes("sameCommunityAsOriginal") && routesSrc.includes("When sameCommunityAsOriginal is true"));
 
