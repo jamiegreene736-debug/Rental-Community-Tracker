@@ -459,6 +459,32 @@ assert.match(
   /subjectGalleryFromJsonLd\(html\)[\s\S]*MIN_JSONLD_SUBJECT_GALLERY/,
   "generic gallery scrape must isolate the subject unit via its JSON-LD gallery for non-Redfin portals too",
 );
+// 2026-07-06 (operator): Redfin's datacenter rescue tier is Apify, replacing
+// ScrapingBee (subscription lapsed, quota permanently exhausted). The actor
+// must default to a LIMITED_PERMISSIONS Apify actor — a FULL_PERMISSIONS one
+// 403s ("full-permission-actor-not-approved") until console-approved, the
+// silent-403 class from the 2026-07-06 commit-phase incident.
+assert.ok(
+  routesSource.includes('(process.env.APIFY_REDFIN_ACTOR || "kawsar~redfin-details-scraper")'),
+  "Redfin Apify tier must default to the verified limited-permissions detail actor (APIFY_REDFIN_ACTOR overridable)",
+);
+assert.match(
+  routesSource,
+  /isRedfinTarget && process\.env\.APIFY_API_TOKEN[\s\S]{0,900}scrapeRedfinViaApify\(primaryUrl, options\?\.scrapingBeeTimeoutMs \?\? 180_000\)/,
+  "Redfin branch must rescue via the Apify actor (bounded by the caller's rescue-tier timeout) when the direct fetch returns 0 photos",
+);
+assert.match(
+  routesSource,
+  /result\.urls\.length === 0 && !isRedfinTarget && process\.env\.SCRAPINGBEE_API_KEY/,
+  "ScrapingBee must no longer run for Redfin URLs (Homes.com keeps its ScrapingBee leg)",
+);
+// The Apify tier must keep the dominant photo-set-id isolation so a leaked
+// comparable-homes carousel can never contaminate a unit folder.
+assert.match(
+  routesSource,
+  /scrapeRedfinViaApify[\s\S]{0,3000}redfinPhotoSetId\(u\)/,
+  "Redfin Apify tier must apply the dominant photo-set-id isolation guard",
+);
 assert.match(
   preflightSource,
   /\/api\/preflight\/photo-fetch-jobs/,
@@ -3795,9 +3821,17 @@ assert.ok(
   routesSource.includes("airbnbDirectLensEnabled = false"),
   "find-buy-in direct Lens discovery should be hard-disabled by default",
 );
+// 2026-07-06 (operator): single-key mode — the main SearchAPI account was
+// upgraded, so the _2/_SECONDARY fallback env vars must NOT be read anymore.
 assert.ok(
-  searchApiSource.includes("SEARCHAPI_API_KEY_2"),
-  "SearchAPI calls should support a second Railway key for quota fallback",
+  !searchApiSource.includes("process.env.SEARCHAPI_API_KEY_2") &&
+    !searchApiSource.includes("process.env.SEARCHAPI_API_KEY_SECONDARY") &&
+    !routesSource.includes("process.env.SEARCHAPI_API_KEY_2"),
+  "SearchAPI key resolution should be single-key (SEARCHAPI_API_KEY only)",
+);
+assert.ok(
+  searchApiSource.includes("process.env.SEARCHAPI_API_KEY"),
+  "SearchAPI key resolution should read SEARCHAPI_API_KEY",
 );
 assert.ok(
   routesSource.includes("type DirectBookingProof"),

@@ -2,15 +2,15 @@ const SEARCHAPI_QUOTA_RE = /used all of the searches|quota|rate.?limit|too many 
 const SEARCHAPI_FALLBACK_INSTALLED = Symbol.for("rct.searchapiFallbackInstalled");
 const nativeFetch = globalThis.fetch.bind(globalThis);
 
+// SINGLE-KEY MODE (2026-07-06, operator): the main SearchAPI account was
+// upgraded, so SEARCHAPI_API_KEY is the ONLY key — the old SEARCHAPI_API_KEY_2
+// / SEARCHAPI_API_KEY_SECONDARY fallback env vars are deliberately no longer
+// read. The rotation machinery below (fetchSearchApiWithFallback + the global
+// fetch fallback) is kept but inert with one key: both short-circuit at
+// keys.length <= 1, so re-adding keys here is all it takes to restore rotation.
 export function getSearchApiKeys(): string[] {
-  const keys = [
-    process.env.SEARCHAPI_API_KEY,
-    process.env.SEARCHAPI_API_KEY_2,
-    process.env.SEARCHAPI_API_KEY_SECONDARY,
-  ]
-    .map((key) => String(key ?? "").trim())
-    .filter(Boolean);
-  return Array.from(new Set(keys));
+  const key = String(process.env.SEARCHAPI_API_KEY ?? "").trim();
+  return key ? [key] : [];
 }
 
 export function getSearchApiKey(): string {
