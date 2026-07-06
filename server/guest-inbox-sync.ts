@@ -5,7 +5,13 @@
 
 import { createHash } from "node:crypto";
 import { extractEmailAddress, SIMPLELOGIN_MAILBOX_EMAIL } from "./simplelogin";
+import { extractReadableTextFromMimeEmail, parseEmailHeaders } from "@shared/email-mime";
 import type { InsertGuestInboxMessage } from "@shared/schema";
+
+// Re-exported for the existing importers/tests (buy-in-email-sync.ts,
+// tests/pipeline-logic.test.ts) — the implementation moved to shared/email-mime.ts
+// so the client-side display healer (shared/email-body-format.ts) can reuse it.
+export { parseEmailHeaders };
 
 const DEFAULT_GUEST_EMAIL_DOMAIN = "emailprivaccy.com";
 
@@ -21,118 +27,14 @@ type ParsedRawEmail = {
   receivedAt: Date | null;
 };
 
-export function parseEmailHeaders(raw: string): Record<string, string> {
-  const headerBlock = raw.split(/\r?\n\r?\n/)[0] ?? "";
-  const headers: Record<string, string> = {};
-  let currentName = "";
-  for (const line of headerBlock.split(/\r?\n/)) {
-    if (/^\s/.test(line) && currentName) {
-      headers[currentName] += ` ${line.trim()}`;
-      continue;
-    }
-    const match = line.match(/^([^:]+):\s*(.*)$/);
-    if (!match) continue;
-    currentName = match[1].trim().toLowerCase();
-    headers[currentName] = match[2].trim();
-  }
-  return headers;
-}
-
-function decodeQuotedPrintable(input: string): string {
-  // Drop soft line breaks, then decode RUNS of =XX hex escapes as raw bytes and
-  // UTF-8-decode them together — so multi-byte sequences (=C3=A9 -> é) render
-  // correctly instead of as Latin-1 mojibake (CafÃ©).
-  return input
-    .replace(/=\r?\n/g, "")
-    .replace(/(?:=[0-9A-Fa-f]{2})+/g, (seq) => {
-      const bytes = seq.split("=").filter(Boolean).map((h) => parseInt(h, 16));
-      return Buffer.from(bytes).toString("utf8");
-    });
-}
-
-// Decode a MIME part body by its own Content-Transfer-Encoding. VRBO/forwarded
-// host emails are frequently base64-encoded; without this the body was stored as
-// raw base64 garbage ("SGVsbG8...") and arrival-detail extraction silently failed.
-function decodeByTransferEncoding(body: string, contentTransferEncoding?: string): string {
-  const enc = String(contentTransferEncoding ?? "").trim().toLowerCase();
-  if (enc === "base64") {
-    try {
-      return Buffer.from(body.replace(/\s+/g, ""), "base64").toString("utf8");
-    } catch {
-      return body;
-    }
-  }
-  if (enc === "quoted-printable") return decodeQuotedPrintable(body);
-  // 7bit / 8bit / binary / none — but quoted-printable markers can appear even
-  // without a declared CTE, so run the (idempotent on plain text) QP decoder.
-  return decodeQuotedPrintable(body);
-}
-
-// HTML → text that PRESERVES the email's line structure. Block-level tags and
-// <br> become newlines (an operator reading a long PM confirmation in the alias
-// email history needs the paragraphs the sender wrote); only horizontal
-// whitespace is collapsed. The old version collapsed ALL whitespace to single
-// spaces, which stored long HTML emails as one unreadable clump —
-// shared/email-body-format.ts reflows those legacy rows at display time.
-function stripHtml(html: string): string {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<head[\s\S]*?<\/head>/gi, " ")
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<(?:br|hr)[^>]*\/?>/gi, "\n")
-    .replace(/<\/(?:p|div|tr|table|h[1-6]|li|ul|ol|blockquote|pre|section|article|header|footer)>/gi, "\n")
-    .replace(/<(?:p|div|tr|h[1-6]|li|blockquote)(?:\s[^>]*)?>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#0?39;|&apos;|&rsquo;/gi, "'")
-    .replace(/[^\S\n]+/g, " ")
-    .replace(/ ?\n ?/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
+// The readable body of a raw MIME email. Implementation lives in
+// shared/email-mime.ts: a real multipart walk that recurses into NESTED
+// multiparts (multipart/mixed → multipart/alternative), reads each part's OWN
+// headers, and strips HTML shipped inside a mislabeled text/plain part — the
+// old top-level-only regex scan stored nested emails (e.g. the Generali policy
+// email) with the inner boundary + part headers as literal body text.
 export function extractBodyFromRawEmail(raw: string): string {
-  const headers = parseEmailHeaders(raw);
-  const contentType = headers["content-type"] || "text/plain";
-  const splitAt = raw.search(/\r?\n\r?\n/);
-  const body = splitAt >= 0 ? raw.slice(splitAt).replace(/^\r?\n\r?\n/, "") : "";
-
-  if (/multipart/i.test(contentType)) {
-    const boundaryMatch = contentType.match(/boundary="?([^";\s]+)"?/i);
-    if (boundaryMatch) {
-      const boundary = boundaryMatch[1];
-      const parts = body.split(`--${boundary}`);
-      // Decode each candidate part by ITS OWN Content-Transfer-Encoding (base64 /
-      // quoted-printable), not a single global pass — VRBO host parts are often
-      // base64 and were previously stored as garbage.
-      for (const part of parts) {
-        if (/content-type:\s*text\/plain/i.test(part)) {
-          const partHeaders = parseEmailHeaders(part);
-          const partBody = part.split(/\r?\n\r?\n/).slice(1).join("\n\n");
-          const text = decodeByTransferEncoding(partBody.trim(), partHeaders["content-transfer-encoding"]);
-          if (text.trim()) return text.slice(0, 500_000);
-        }
-      }
-      for (const part of parts) {
-        if (/content-type:\s*text\/html/i.test(part)) {
-          const partHeaders = parseEmailHeaders(part);
-          const partBody = part.split(/\r?\n\r?\n/).slice(1).join("\n\n");
-          const text = stripHtml(decodeByTransferEncoding(partBody.trim(), partHeaders["content-transfer-encoding"]));
-          if (text.trim()) return text.slice(0, 500_000);
-        }
-      }
-    }
-  }
-
-  const cte = headers["content-transfer-encoding"];
-  const decodedRaw = decodeByTransferEncoding(body.trim(), cte);
-  const decoded = /text\/html/i.test(contentType) ? stripHtml(decodedRaw) : decodedRaw;
-  return decoded.slice(0, 500_000);
+  return extractReadableTextFromMimeEmail(raw);
 }
 
 function guestAliasFromHeaders(headers: Record<string, string>): string | null {

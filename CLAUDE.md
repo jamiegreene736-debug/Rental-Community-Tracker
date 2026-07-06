@@ -43,6 +43,30 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-06 (alias-inbox emails rendering as RAW MIME source — Generali/Thien Tran screenshot):
+  Operator screenshot showed an inbound email on the Operations alias-inbox panel rendering as raw
+  MIME: the inner boundary line ("------=_Part_1_…"), Content-Type/Content-Transfer-Encoding part
+  headers, and raw `<html>` tags. ROOT CAUSE (two stacked): (a) `extractBodyFromRawEmail` regex-
+  tested whole TOP-LEVEL multipart parts for "content-type: text/plain", so a NESTED
+  multipart/alternative wrapper (inside multipart/mixed) matched via its inner part's header text
+  and everything after the wrapper's first blank line — inner boundary + headers included — was
+  stored as the body; (b) the Generali email declares that part text/plain while shipping a full
+  Aspose-generated HTML document, so no tag-stripping ran. FIX: MIME extraction moved to pure
+  browser-safe `shared/email-mime.ts` (`extractReadableTextFromMimeEmail`) — real multipart walk
+  (per-part headers, recursion into nested multiparts depth ≤6, attachment-disposition parts
+  skipped, numeric character references &#xa0;/&#8217; decoded) + `looksLikeHtmlContent` so a
+  mislabeled text/plain part with `<html`/`<body` markers gets stripHtml'd; genuinely-plain parts
+  still win over HTML. Server `server/guest-inbox-sync.ts` delegates to it (buy-in-email-sync
+  inherits), `parseEmailHeaders` re-exported for existing importers/tests. STORED rows are immutable
+  — `extractReadableFromStoredMimeBody` in shared/email-body-format.ts heals them at DISPLAY time
+  (fires only when the first non-blank line is a boundary delimiter AND a Content-Type header
+  follows; wraps the fragment in a synthetic multipart header and reuses the same walk), wired into
+  `formatEmailBodyForDisplay` ahead of the legacy clump-reflow — so the live Thien Tran row renders
+  readable on next load, no re-import. Dedup unaffected (real Message-ID keys; surrogate only for
+  id-less mail). Verified: guest-inbox-sync + email-body-format + buy-in-email-sync +
+  arrival-email-extraction suites green, full `npm test` exit 0, build clean, `npm run check` 338 =
+  baseline.
+
 - 2026-07-06 (guest-page photo SHARPNESS — CDN full-res, not AI upscaling): Operator asked whether
   scraped unit photos can be upscaled to look sharp. GROUND TRUTH (live Thien Tran page): the VRBO
   photos were OUR OWN fault — the sidecar harvest captures srcset THUMBNAILS
