@@ -1,17 +1,31 @@
-// Booking-confirmation auto-send.
+// Booking-confirmation auto-send ("unit setup confirmation").
 //
 // Fires once per newly-booked Guesty reservation, posting a warm
-// "thanks for booking" message into the matching conversation. The
-// message includes:
-//   - Hawaiian tone (Aloha greeting / Mahalo sign-off, John Carpenter
-//     / VacationRentalExpertz signature) — every active property is
-//     in HI today; if/when mainland properties are added we'd
-//     introduce a tone variant gated on the listing's address.
-//   - A reminder that the listing is two separate units within the
-//     resort, with the approximate walking distance pulled from
-//     `shared/walking-distance.ts` (`RESORT_DEFAULT_WALK_MINUTES`).
+// "here's how your stay is set up" message into the matching
+// conversation so the guest 100% knows what's going on the day they
+// book. The body (built by the pure `shared/booking-confirmation-
+// message.ts`) includes:
+//   - Region-aware tone: Hawaii stays open "Aloha" / close "Mahalo"
+//     and say "'ohana"; mainland stays (Florida, etc.) use
+//     "Hi" / "Thanks" / "family". Region is derived from the
+//     property/draft address (`@shared/listing-geo` mentionsHawaii /
+//     mentionsNonHawaiiState) — default Hawaii unless clearly a
+//     non-Hawaii state. Signature stays John Carpenter /
+//     VacationRentalExpertz.
+//   - A clear explanation of the setup: how many separate units the
+//     booking spans within the resort, the approximate walking
+//     distance between them (`shared/walking-distance.ts`), combined
+//     bedrooms, and the advertised "sleeps N" (occupancyForBedrooms).
+//     Single-unit listings get a single-unit variant (no "separate
+//     units" language).
 //   - The 14-day arrival-info promise so guests know when to expect
 //     check-in instructions, parking notes, etc.
+//
+// Coverage: fires for BOTH the hard-coded core properties
+// (`unitBuilderData`) AND published community drafts (mapped in
+// `guesty_property_map` with a NEGATIVE propertyId = -draft.id) — see
+// `lookupStayForListing`. A booking on any listing not mapped to one
+// of our managed properties/drafts is skipped without erroring.
 //
 // Idempotency: a row in `booking_confirmations` (unique on
 // reservationId) is what stops a second send. We insert AFTER a
@@ -29,8 +43,12 @@ import { guestyRequest } from "./guesty-sync";
 import { findGuestyConversationForReservation, sendGuestyConversationMessage, deliveryOutcome } from "./guesty-ota-messaging";
 import { storage } from "./storage";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
+import type { PropertyUnitBuilder } from "../client/src/data/unit-builder-data";
 import { fallbackWalkForResort } from "@shared/walking-distance";
-import type { InsertBookingConfirmation } from "@shared/schema";
+import { buildBookingConfirmationMessage } from "@shared/booking-confirmation-message";
+import { guestPartyFromReservation } from "@shared/guest-party";
+import { mentionsHawaii, mentionsNonHawaiiState } from "@shared/listing-geo";
+import type { InsertBookingConfirmation, CommunityDraft } from "@shared/schema";
 
 let _enabled = process.env.BOOKING_CONFIRMATIONS_DISABLED !== "true";
 let _lastRunAt: Date | null = null;
@@ -56,48 +74,81 @@ const BOOKED_STATUSES = new Set([
 
 const BACKFILL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
-// Map a Guesty listingId → the unit-builder property entry. Goes via
+// Normalized stay context the message builder needs, resolved from EITHER a
+// hard-coded core property OR a published community draft. `label` is for logs.
+interface ConfirmationStayContext {
+  propertyName: string;
+  resortName: string;
+  unitCount: number;
+  totalBedrooms: number;
+  walkMinutes: number;
+  isHawaii: boolean;
+  label: string;
+}
+
+// Default to the Hawaiian voice (the portfolio is HI-majority) unless the
+// location CLEARLY names a non-Hawaii state — that's the only case we flip to
+// the mainland voice, so an HI property whose address lacks a recognizable
+// token never gets "Hi/Thanks" by accident.
+function isHawaiiLocation(text: string | null | undefined): boolean {
+  if (mentionsHawaii(text)) return true;
+  return !mentionsNonHawaiiState(text);
+}
+
+function stayFromBuilder(property: PropertyUnitBuilder): ConfirmationStayContext {
+  const totalBedrooms = property.units.reduce((sum, u) => sum + (Number(u.bedrooms) || 0), 0);
+  return {
+    propertyName: property.propertyName,
+    resortName: property.complexName,
+    unitCount: property.units.length,
+    totalBedrooms,
+    walkMinutes: fallbackWalkForResort(property.complexName).minutes,
+    isHawaii: isHawaiiLocation(property.address),
+    label: `property ${property.propertyId}`,
+  };
+}
+
+function stayFromDraft(draft: CommunityDraft): ConfirmationStayContext {
+  // A draft is a combo when its second unit is populated; otherwise it's a
+  // single-unit listing.
+  const hasUnit2 = !!(draft.unit2Url || (draft.unit2Bedrooms ?? 0) > 0 || draft.unit2Bedding);
+  const unitCount = hasUnit2 ? 2 : 1;
+  const totalBedrooms =
+    (draft.combinedBedrooms ?? 0) > 0
+      ? (draft.combinedBedrooms as number)
+      : (draft.unit1Bedrooms ?? 0) + (hasUnit2 ? (draft.unit2Bedrooms ?? 0) : 0);
+  const resortName = draft.name;
+  const location = [draft.streetAddress, draft.city, draft.state, draft.name].filter(Boolean).join(", ");
+  return {
+    propertyName: draft.bookingTitle || draft.listingTitle || draft.name,
+    resortName,
+    unitCount,
+    totalBedrooms,
+    walkMinutes: fallbackWalkForResort(resortName).minutes,
+    isHawaii: isHawaiiLocation(location),
+    label: `draft ${draft.id}`,
+  };
+}
+
+// Map a Guesty listingId → a normalized stay context. Goes via
 // `guestyPropertyMap` (the table the dashboard uses to flag connected
-// listings) and then unit-builder-data. Returns null when the listing
-// isn't mapped to one of our managed properties — those skip without
-// erroring.
-async function lookupPropertyForListing(listingId: string) {
+// listings). Positive propertyIds resolve against the hard-coded
+// `unitBuilderData`; NEGATIVE propertyIds are published community drafts
+// (mapped as -draft.id) and resolve against the `community_drafts` table.
+// Returns null when the listing isn't mapped to one of our managed
+// properties/drafts — those skip without erroring.
+async function lookupStayForListing(listingId: string): Promise<ConfirmationStayContext | null> {
   if (!listingId) return null;
   const maps = await storage.getGuestyPropertyMap();
   const row = maps.find((m) => m.guestyListingId === listingId);
   if (!row) return null;
-  return unitBuilderData.find((p) => p.propertyId === row.propertyId) ?? null;
-}
 
-// Build the confirmation message body. Pure function — easy to unit
-// test and reason about. Always closes with the canonical signature
-// so guests recognize who's writing.
-function buildConfirmationMessage(args: {
-  guestFirstName: string;
-  propertyName: string;
-  complexName: string;
-  walkMinutes: number;
-}): string {
-  const { guestFirstName, propertyName, complexName, walkMinutes } = args;
-  const greeting = guestFirstName ? `Aloha ${guestFirstName},` : "Aloha,";
-  const walkPhrase =
-    walkMinutes <= 1
-      ? "just steps apart within the resort grounds"
-      : `about a ${walkMinutes}-minute walk apart within the resort grounds`;
-
-  return [
-    greeting,
-    "",
-    `Mahalo for booking with us! We're so excited to host your 'ohana at ${propertyName}.`,
-    "",
-    `Quick logistics so you know what to expect: this stay is two separate units within ${complexName}, ${walkPhrase}. You'll have your own private spaces but stay connected during your time here.`,
-    "",
-    "Your detailed arrival information — check-in instructions, lockbox codes, parking, WiFi, and a few local recommendations — will be sent to you about 14 days before your check-in date. If you have any questions before then, just reply here.",
-    "",
-    "Mahalo,",
-    "John Carpenter",
-    "VacationRentalExpertz",
-  ].join("\n");
+  if (row.propertyId < 0) {
+    const draft = await storage.getCommunityDraft(-row.propertyId);
+    return draft ? stayFromDraft(draft) : null;
+  }
+  const property = unitBuilderData.find((p) => p.propertyId === row.propertyId);
+  return property ? stayFromBuilder(property) : null;
 }
 
 export async function runBookingConfirmations(): Promise<NonNullable<typeof _lastRunResult>> {
@@ -136,16 +187,9 @@ export async function runBookingConfirmations(): Promise<NonNullable<typeof _las
         if (prior) { skipped++; continue; }
 
         const listingId: string = r.listingId ?? r.listing?._id ?? "";
-        const property = await lookupPropertyForListing(listingId);
-        if (!property) {
-          console.log(`[booking-confirmation] reservation ${reservationId}: listingId ${listingId} not in guestyPropertyMap — skipping`);
-          skipped++;
-          continue;
-        }
-
-        // Single-unit listings shouldn't get the "two units" message.
-        if (property.units.length < 2) {
-          console.log(`[booking-confirmation] reservation ${reservationId}: property ${property.propertyId} is single-unit — skipping`);
+        const stay = await lookupStayForListing(listingId);
+        if (!stay) {
+          console.log(`[booking-confirmation] reservation ${reservationId}: listingId ${listingId} not mapped to a managed property/draft — skipping`);
           skipped++;
           continue;
         }
@@ -155,12 +199,18 @@ export async function runBookingConfirmations(): Promise<NonNullable<typeof _las
           (typeof r.guest?.fullName === "string" ? r.guest.fullName.split(" ")[0] : "") ??
           "";
 
-        const walk = fallbackWalkForResort(property.complexName);
-        const body = buildConfirmationMessage({
+        // Guest's booked party size, when the channel provided it — the message
+        // only surfaces it when it comfortably fits the listing.
+        const partyTotal = guestPartyFromReservation(r)?.total ?? null;
+        const body = buildBookingConfirmationMessage({
           guestFirstName,
-          propertyName: property.propertyName,
-          complexName: property.complexName,
-          walkMinutes: walk.minutes,
+          propertyName: stay.propertyName,
+          resortName: stay.resortName,
+          unitCount: stay.unitCount,
+          totalBedrooms: stay.totalBedrooms,
+          walkMinutes: stay.walkMinutes,
+          isHawaii: stay.isHawaii,
+          partyTotal,
         });
 
         // Resolve the conversation + the proven-delivering OTA module via the
@@ -213,7 +263,7 @@ export async function runBookingConfirmations(): Promise<NonNullable<typeof _las
             console.warn(`[booking-confirmation] POSTED to reservation ${reservationId} but ${channel} delivery unconfirmed — not resending: ${delivery.reason ?? ""}`);
           } else {
             sent++;
-            console.log(`[booking-confirmation] sent to reservation ${reservationId} (${guestFirstName || "Guest"} @ ${property.propertyName}, via ${channel})`);
+            console.log(`[booking-confirmation] sent to reservation ${reservationId} (${guestFirstName || "Guest"} @ ${stay.propertyName} [${stay.label}], via ${channel})`);
           }
         } catch (e: any) {
           // POST threw (Guesty rejected every module / network) — leave NO row so
