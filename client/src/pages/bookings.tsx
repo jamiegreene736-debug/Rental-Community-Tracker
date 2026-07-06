@@ -2368,6 +2368,23 @@ function CoworkBuyInPromptButton({
         // Party size (adults/children) so the search rejects units that
         // can't sleep everyone.
         party: guestPartyFromReservation(reservation),
+        // REMAINING net revenue = full net revenue minus what's ALREADY spent
+        // on attached slots (mirrors the bookings-page profit gate's
+        // `remainingBudget = getNetRevenue(reservation) - existingCost`, ~L3979).
+        // LOAD-BEARING: `units` above is only the EMPTY slots (filter !s.buyIn),
+        // so the prompt's "combined all-in cost" is just the picks it will
+        // attach — it must be measured against the budget LEFT after the sibling
+        // slots. Passing the FULL net revenue would inflate the budget by every
+        // already-bought unit and under-detect losses on a partially-filled
+        // combo. Resolves to <=0 (guard degrades off) for money-less rows OR an
+        // already-underwater reservation — matching buy-in-profit.ts's
+        // revenue<=0 disable rule.
+        netRevenue:
+          getNetRevenue(reservation) -
+          reservation.slots.reduce(
+            (sum, s) => sum + parseFloat(String(s.buyIn?.costPaid ?? 0)),
+            0,
+          ),
         baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
       }),
     [reservation, propertyId, propertyName, community, units],

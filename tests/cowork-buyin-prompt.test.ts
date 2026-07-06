@@ -13,6 +13,7 @@ import {
   type CoworkBuyInPromptInput,
   type CoworkCheckoutPromptInput,
 } from "../shared/cowork-buyin-prompt";
+import { DEFAULT_PROFIT_MIN_FLAT_USD } from "../shared/buy-in-profit";
 
 let pass = 0;
 let fail = 0;
@@ -211,6 +212,84 @@ check("find prompt points at the separate checkout prompt", /separate checkout p
 check(
   "find prompt closes its own tabs when done (operator: tabs clog the browser)",
   /close every Chrome tab you opened/i.test(prompt) && /already open before you started untouched/i.test(prompt),
+);
+
+// ── PROFIT GUARD → loss-triggered city-wide rollback (operator 2026-07-06) ────
+// When the reservation's net revenue is known, the cheapest same-community set
+// that would lose more than the app's $100 max-loss cap must roll the search
+// back to a cheaper city-wide SAME-COMPLEX pair — not just settle for the loss.
+const lossPrompt = buildCoworkBuyInPrompt({ ...baseInput, netRevenue: 4200 });
+check(
+  "loss guard: profit-guard section names the net revenue + $100 cap",
+  /## Profit guard — don't settle for a loss/.test(lossPrompt) &&
+    lossPrompt.includes("$4200.00") &&
+    lossPrompt.includes("$100"),
+);
+check(
+  "loss guard: $100 cap is sourced from DEFAULT_PROFIT_MIN_FLAT_USD",
+  lossPrompt.includes(`$${DEFAULT_PROFIT_MIN_FLAT_USD}`),
+);
+check(
+  "loss guard: city-wide rung fires on coverage OR a loss",
+  /City-wide fallback — for coverage OR to escape a loss/.test(lossPrompt) &&
+    /LOSS: the cheapest qualifying same-community set you CAN find is a LOSS over the \$100 cap/.test(lossPrompt) &&
+    lossPrompt.includes("city-wide search of Koloa, Hawaii"),
+);
+check(
+  "loss guard: rollback hunts a same-complex pair of the required bedroom size",
+  lossPrompt.includes("TWO qualifying 3BR + 3BR listings that sit in the SAME complex as each other") &&
+    lossPrompt.includes("take the CHEAPEST qualifying same-complex pair that stays within the $100 loss cap") &&
+    lossPrompt.includes("The PAIR RULE still holds"),
+);
+check(
+  "loss guard: if the whole city is still a loss, attach cheapest + flag (never leave empty)",
+  lossPrompt.includes("attach that cheapest option") &&
+    lossPrompt.includes("a covered guest beats an empty slot") &&
+    /FLAG the loss prominently/.test(lossPrompt),
+);
+check(
+  "loss guard: report carries the profit math + which branch applied",
+  lossPrompt.includes("Also report the PROFIT MATH") &&
+    lossPrompt.includes("(b) rolled back to a city-wide same-complex pair") &&
+    lossPrompt.includes("(c) attached at a loss because no option within the $100 cap"),
+);
+check(
+  "loss guard: done signal's problem example mentions an unavoidable loss",
+  lossPrompt.includes("a set you had to attach at a loss over the cap"),
+);
+check(
+  "loss guard: the search ladder is otherwise intact (community-first + STOP at city-wide)",
+  lossPrompt.includes("Same community first") && /STOP at city-wide/i.test(lossPrompt),
+);
+check(
+  "loss guard: find prompt still never mentions a payment card",
+  !/card/i.test(lossPrompt),
+);
+// Single-unit + guard on → the rollback is the SINGLE variant, no pair language.
+const lossSingle = buildCoworkBuyInPrompt({ ...baseInput, units: [baseInput.units[0]], netRevenue: 4200 });
+check(
+  "loss guard (single): rollback seeks a cheaper same-bedroom unit, not a pair",
+  lossSingle.includes("a cheaper qualifying same-bedroom listing") &&
+    !lossSingle.includes("TWO qualifying") &&
+    !lossSingle.includes("The PAIR RULE still holds") &&
+    lossSingle.includes("(b) rolled back to a city-wide unit to escape a same-community loss"),
+);
+// Degrade-safe: unknown / <=0 net revenue disables the guard entirely, and the
+// guard-off output is byte-identical to the pre-2026-07-06 prompt.
+const guardOffZero = buildCoworkBuyInPrompt({ ...baseInput, netRevenue: 0 });
+const guardOffNeg = buildCoworkBuyInPrompt({ ...baseInput, netRevenue: -50 });
+check(
+  "loss guard: net revenue 0 / negative disables the guard (no profit-guard section)",
+  !guardOffZero.includes("Profit guard") && !guardOffNeg.includes("Profit guard"),
+);
+check(
+  "loss guard: no netRevenue disables the guard (baseInput prompt has no guard) + keeps the original city-wide fallback wording",
+  !prompt.includes("Profit guard") &&
+    prompt.includes("2. **City-wide fallback.** If you cannot find a qualifying listing"),
+);
+check(
+  "loss guard: guard-off output is byte-identical to omitting netRevenue",
+  guardOffZero === prompt,
 );
 
 // ── buildCoworkCheckoutPrompt: the separate BOOK-ONLY prompt ─────────────────

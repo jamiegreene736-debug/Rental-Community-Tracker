@@ -74,7 +74,10 @@ import {
   selectDeepFetchCandidates,
   matchAddressInText,
 } from "@shared/address-page-match";
-import { isDuplicateHash } from "./photo-hashing";
+import { extractGeoFromPageText } from "@shared/address-geo-match";
+import { haversineFeet } from "@shared/walking-distance";
+import { geocode } from "./walking-distance";
+import { agreementImageIdentityHolds, computeDhash, isDuplicateHash, THUMBNAIL_IDENTITY_DISTANCE } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 
@@ -165,6 +168,37 @@ const MULTI_PHOTO_AGREEMENT = (() => {
   if (!Number.isFinite(n) || n < 2) return 3;
   return Math.floor(n);
 })();
+// Image-identity gate for the multi-photo-AGREEMENT path (2026-07-06). The
+// agreement fallback flags "found" from strong VISUAL Lens matches WITHOUT
+// per-hit unit-text confirmation — which, in same-model resort communities,
+// fired on SIBLING units and shared VIEWS that merely photograph alike
+// (Makahuena at Poipu + Mauna Lani Point live incident: every unit's lanai
+// sees the same golf course; same-floorplan condos share a room shell, just
+// different furniture). SearchAPI returns look-alikes AND genuine reposts in
+// `visual_matches` at the same rank/confidence — there is no
+// `pages_with_matching_images` split to lean on — so the ONLY way to tell "our
+// actual photo was reposted" from "a look-alike" is to compare our photo's
+// perceptual hash against the matched listing's thumbnail. A genuine repost of
+// our image stays close even through Google's re-cropped thumbnail (measured
+// dist 11); look-alikes sit at 25-36. So an agreement hit must ALSO be
+// image-identical to count. The unit-text VERIFIED path is UNAFFECTED, and any
+// hashing failure FAILS TOWARD COUNTING (no theft-detection regression). Kill
+// with PHOTO_LISTING_IDENTITY_GATE_DISABLED=1; tune with
+// PHOTO_LISTING_AGREEMENT_IDENTITY_DISTANCE.
+const PHOTO_LISTING_IDENTITY_GATE_DISABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.PHOTO_LISTING_IDENTITY_GATE_DISABLED ?? "").trim(),
+);
+const AGREEMENT_IDENTITY_DISTANCE = (() => {
+  const n = Number(process.env.PHOTO_LISTING_AGREEMENT_IDENTITY_DISTANCE);
+  if (!Number.isFinite(n) || n < 1) return THUMBNAIL_IDENTITY_DISTANCE;
+  return Math.floor(n);
+})();
+const THUMBNAIL_FETCH_TIMEOUT_MS = 8_000;
+const THUMBNAIL_MAX_BYTES = 3_000_000;
+// Bound per-folder thumbnail fetches so a pathological folder (many
+// community-compatible OTA hits, all with slow thumbnails) can't stack the 8s
+// timeout into a multi-minute scan. Beyond the cap we fail toward counting.
+const MAX_THUMBNAIL_HASHES_PER_SCAN = 80;
 // Address-on-OTA detection leg (the complement to the photo reverse-image leg). For each scanned unit
 // folder we also run one Google `site:` text search per platform for the unit's street + city and check
 // whether the unit's address surfaces on a real Airbnb/VRBO/Booking listing page. A thief can swap the
@@ -206,6 +240,20 @@ const ADDRESS_DEEP_FETCH_MAX = (() => {
   const n = Number(process.env.PHOTO_LISTING_ADDRESS_DEEPFETCH_MAX);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 4;
 })();
+// Phase-2 coordinate cross-check: on an already-deep-fetched page (Airbnb/
+// Booking only — VRBO strips per-listing coords), if the exact street text
+// missed, compare the page's published coordinate to our unit's geocode. It
+// still passes the unit-number gate, so this is a precise corroborating signal,
+// not a fuzzy net. Kill with PHOTO_LISTING_ADDRESS_GEO_DISABLED=1.
+const PHOTO_LISTING_ADDRESS_GEO_DISABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.PHOTO_LISTING_ADDRESS_GEO_DISABLED ?? "").trim(),
+);
+// Match radius in feet. Default 2640 ft (0.5 mi) accommodates Airbnb's fuzzed
+// pin + our own geocode slop; the unit-number gate provides the real precision.
+const ADDRESS_GEO_MATCH_MAX_FEET = (() => {
+  const n = Number(process.env.PHOTO_LISTING_ADDRESS_GEO_MAX_FEET);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2640;
+})();
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 const STANDALONE_DRAFT_NO_UNIT_TOKEN = "__standalone_draft_no_unit_token__";
 
@@ -219,7 +267,7 @@ export type AddressMatch = {
   url: string;
   title: string;
   snippet: string;
-  matchType?: "snippet" | "page-text";
+  matchType?: "snippet" | "page-text" | "coordinate";
   evidence?: string;
 };
 type LensCallResult = { ok: true; rows: any[] } | { ok: false; error: string };
@@ -484,6 +532,8 @@ async function checkAddressOnOtas(
     verifyUnit: (url: string) => Promise<boolean>;
     // Injectable for tests; defaults to the real bounded, fail-open fetch.
     fetchPageText?: (url: string) => Promise<string | null>;
+    // Injectable for tests; defaults to the real cached/throttled geocoder.
+    geocodeAddress?: (query: string) => Promise<{ lat: number; lng: number } | null>;
   },
 ): Promise<{
   statuses: Record<AddressPlatformKey, PlatformStatus>;
@@ -496,8 +546,22 @@ async function checkAddressOnOtas(
   const errors: string[] = [];
   let anySucceeded = false;
   const fetchPageText = deps.fetchPageText ?? fetchListingPageText;
+  const geocodeAddress = deps.geocodeAddress ?? geocode;
   const deepFetchEnabled = !PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED && ADDRESS_DEEP_FETCH_MAX > 0;
+  const geoCheckEnabled = deepFetchEnabled && !PHOTO_LISTING_ADDRESS_GEO_DISABLED;
   let deepFetchBudget = ADDRESS_DEEP_FETCH_MAX; // shared across all platforms this folder
+  // Our unit's own coordinate, geocoded once per folder and only when a
+  // coordinate candidate actually turns up (lazy — avoids a geocode call on the
+  // common no-candidate path). The geocoder caches forever + fails open to null.
+  let ourCoordResolved = false;
+  let ourCoord: { lat: number; lng: number } | null = null;
+  const resolveOurCoord = async (): Promise<{ lat: number; lng: number } | null> => {
+    if (ourCoordResolved) return ourCoord;
+    ourCoordResolved = true;
+    const query = [ctx.street, ctx.city, ctx.state].filter(Boolean).join(", ");
+    ourCoord = query ? await geocodeAddress(query) : null;
+    return ourCoord;
+  };
 
   for (const platform of ADDRESS_PLATFORMS) {
     const query = buildAddressQuery(platform.site, ctx.street, ctx.city);
@@ -535,12 +599,30 @@ async function checkAddressOnOtas(
         const html = await fetchPageText(c.url);
         if (!html) continue; // bot wall / timeout / JS shell → skip, snippet result stands
         const m = matchAddressInText(html, { street: ctx.street, city: ctx.city });
-        if (!m.matched) continue; // only an EXACT street hit counts (matchType "street")
+        let matchType: "page-text" | "coordinate" | null = m.matched ? "page-text" : null;
+        let evidence = m.matched ? m.evidence : "";
+        // Phase-2 coordinate cross-check: only when the exact street text missed
+        // (a variant/diacritic spelling, or the page hides the street), only on
+        // Airbnb/Booking (VRBO strips per-listing coords), and only when the
+        // unit-number gate is available to corroborate — never for standalone,
+        // where a loose radius with no unit number could match a neighbor.
+        if (!matchType && geoCheckEnabled && !deps.allowUnverifiedStandalone && platform.key !== "vrbo") {
+          const our = await resolveOurCoord();
+          const geo = our ? extractGeoFromPageText(html) : null;
+          if (our && geo) {
+            const feet = haversineFeet(our.lat, our.lng, geo.lat, geo.lng);
+            if (feet <= ADDRESS_GEO_MATCH_MAX_FEET) {
+              matchType = "coordinate";
+              evidence = `coordinate ~${Math.round(feet)} ft from unit`;
+            }
+          }
+        }
+        if (!matchType) continue;
         if (!deps.allowUnverifiedStandalone) {
           const ok = await deps.verifyUnit(c.url);
           if (!ok) continue; // sibling owner at the same resort street — not our unit
         }
-        kept.push({ platform: platform.key, url: c.url, title: c.title, snippet: c.snippet, matchType: "page-text", evidence: m.evidence });
+        kept.push({ platform: platform.key, url: c.url, title: c.title, snippet: c.snippet, matchType, evidence });
       }
     }
     statuses[platform.key] = kept.length > 0 ? "found" : "clean";
@@ -647,6 +729,35 @@ async function callGoogleLens(imageUrl: string): Promise<LensCallResult> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Fetch a Lens match's thumbnail image and dHash it, so the multi-photo-
+// AGREEMENT path can require IMAGE identity (our actual photo was reposted),
+// not merely a strong VISUAL similarity (a sibling unit / shared resort view
+// that photographs alike). Returns null on any failure — the caller then fails
+// toward counting the hit. Results are cached per run by thumbnail URL.
+async function fetchThumbnailDhash(url: string, cache: Map<string, string | null>): Promise<string | null> {
+  if (!url) return null;
+  const cached = cache.get(url);
+  if (cached !== undefined) return cached;
+  let hash: string | null = null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), THUMBNAIL_FETCH_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (resp.ok) {
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length > 0 && buf.length <= THUMBNAIL_MAX_BYTES) {
+        hash = await computeDhash(buf);
+      }
+    }
+  } catch {
+    // Network / timeout / decode failure — fail toward counting (null).
+  } finally {
+    clearTimeout(timeout);
+  }
+  cache.set(url, hash);
+  return hash;
 }
 
 // Confirm that a Lens-matched listing URL actually references the unit
@@ -892,6 +1003,10 @@ export async function runPhotoListingCheckForFolder(
   // on a URL pays the SERP cost(s); later checks reuse the answer
   // even when a different photo surfaces the same listing.
   const verifyCache = new Map<string, boolean>();
+  // Per-run cache + budget for the agreement-path image-identity gate. Maps a
+  // Lens thumbnail URL → its dHash (or null when it couldn't be fetched).
+  const thumbnailHashCache = new Map<string, string | null>();
+  let thumbnailHashCount = 0;
   // Cap verifications per (photo × host) so a Lens response with 30
   // airbnb.com hits doesn't burn the SERP budget. 3 is plenty — the
   // tally threshold is ≥ 2 photos matching anyway.
@@ -981,7 +1096,31 @@ export async function runPhotoListingCheckForFolder(
         if (siblingLookalike) {
           console.log(`[photo-listing-scanner] ${folder}: skipping sibling-unit visual look-alike ${link} ("${title.slice(0, 60)}")`);
         }
-        if (communityOk && !siblingLookalike) strongHits.push({ photoUrl, listingUrl: link, title, source });
+        // Image-identity gate for the AGREEMENT tally only (2026-07-06): a
+        // strong community-compatible visual match counts toward multi-photo
+        // agreement ONLY when the matched listing's thumbnail is perceptually
+        // the SAME image as our photo — not a sibling unit / shared view that
+        // merely photographs alike. Missing our-photo hash, missing thumbnail,
+        // or a failed thumbnail fetch all FAIL TOWARD COUNTING. The unit-text
+        // VERIFIED path (verifiedHits below) is unaffected.
+        let imageIdentityOk = true;
+        if (communityOk && !siblingLookalike && !PHOTO_LISTING_IDENTITY_GATE_DISABLED) {
+          const thumb = String((h as any).thumbnail ?? (h as any).image ?? "");
+          let thumbHash: string | null = null;
+          if (thumb) {
+            if (thumbnailHashCache.has(thumb)) {
+              thumbHash = thumbnailHashCache.get(thumb) ?? null;
+            } else if (thumbnailHashCount < MAX_THUMBNAIL_HASHES_PER_SCAN) {
+              thumbnailHashCount += 1;
+              thumbHash = await fetchThumbnailDhash(thumb, thumbnailHashCache);
+            }
+          }
+          imageIdentityOk = agreementImageIdentityHolds(label.perceptualHash ?? null, thumbHash, AGREEMENT_IDENTITY_DISTANCE);
+          if (!imageIdentityOk) {
+            console.log(`[photo-listing-scanner] ${folder}: agreement hit is a visual LOOK-ALIKE, not our image — dropping ${link} ("${title.slice(0, 50)}")`);
+          }
+        }
+        if (communityOk && !siblingLookalike && imageIdentityOk) strongHits.push({ photoUrl, listingUrl: link, title, source });
         const ok = await verify(link, title, source);
         if (ok) verifiedHits.push({ photoUrl, listingUrl: link, title, source });
       }
