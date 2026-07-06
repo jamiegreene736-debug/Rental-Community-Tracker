@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import {
+  extractReadableFromStoredMimeBody,
   formatEmailBodyForDisplay,
   formatEmailTimestampForDisplay,
   looksClumpedEmailBody,
@@ -97,6 +98,58 @@ run("body with real newlines passes through untouched (blank runs capped)", () =
 run("null/empty-safe", () => {
   assert.strictEqual(formatEmailBodyForDisplay(""), "");
   assert.strictEqual(formatEmailBodyForDisplay(undefined as unknown as string), "");
+});
+
+// ── extractReadableFromStoredMimeBody (raw-MIME rows healed at display) ──────
+// Rows imported before nested-multipart parsing (2026-07-06) can hold a raw
+// MIME fragment: inner boundary + part headers + HTML (live incident: the
+// Generali policy email on the Thien Tran alias inbox).
+
+const STORED_MIME_FRAGMENT = [
+  "------=_Part_1_1270391341.1783316108108",
+  "Content-Type: text/plain; charset=us-ascii",
+  "Content-Transfer-Encoding: 7bit",
+  "",
+  "<html>",
+  "  <head>",
+  '    <meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1" />',
+  "    <title>Generali Travel Protection Plan</title>",
+  "  </head>",
+  "  <body style=\"font-family:'Arial Narrow'; font-size:10pt\">",
+  "    <p><span>Insured:</span><span>&#xa0;</span><span>Thien Tran</span></p>",
+  "    <p><span>Address: </span><span>131 Continental Drive</span><br /><span>Newark</span><br /><span>DE 19702</span></p>",
+  "  </body>",
+  "</html>",
+  "------=_Part_1_1270391341.1783316108108",
+  "Content-Type: text/html; charset=us-ascii",
+  "Content-Transfer-Encoding: 7bit",
+  "",
+  "<html><body><p>Insured: Thien Tran</p></body></html>",
+  "------=_Part_1_1270391341.1783316108108--",
+].join("\n");
+
+run("stored raw-MIME fragment is healed to readable text", () => {
+  const out = formatEmailBodyForDisplay(STORED_MIME_FRAGMENT);
+  assert.ok(!out.includes("_Part_1_"), `boundary must not render: ${JSON.stringify(out.slice(0, 200))}`);
+  assert.ok(!/content-transfer-encoding/i.test(out), "part headers must not render");
+  assert.ok(!out.includes("<html"), "raw HTML tags must not render");
+  assert.ok(!out.includes("Travel Protection Plan"), "head/title content stripped");
+  assert.match(out, /Insured:\s*Thien Tran/, "readable content survives");
+  assert.match(out, /131 Continental Drive/, "address content survives");
+});
+
+run("healer returns null for normal bodies (never rewrites real prose)", () => {
+  assert.strictEqual(extractReadableFromStoredMimeBody("Aloha,\n\nThe door code is 4821."), null);
+  assert.strictEqual(
+    extractReadableFromStoredMimeBody("-- \nJohn Carpenter\nReservationist"),
+    null,
+    "signature dashes are not a boundary",
+  );
+  assert.strictEqual(
+    extractReadableFromStoredMimeBody("--------------------\nContent-Type: discussed below\nAll dashes divider"),
+    null,
+    "dashes-only divider is not a boundary",
+  );
 });
 
 // ── formatEmailTimestampForDisplay ───────────────────────────────────────────

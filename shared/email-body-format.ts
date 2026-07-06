@@ -8,10 +8,19 @@
 //    so reflowClumpedEmailBody() heuristically restores line structure by
 //    breaking before "Label:" phrases ("Guest's Name:", "WiFi Password:", …).
 //
-// 2. Bodies stored after the stripHtml fix keep their real newlines and pass
+// 2. Bodies stored BEFORE nested-multipart parsing (2026-07-06) can be a raw
+//    MIME fragment — a boundary line + part headers + (often) raw HTML — when
+//    the email nested multipart/alternative inside multipart/mixed (e.g. the
+//    Generali policy email). Those rows are healed at display time by
+//    extractReadableFromStoredMimeBody(), which reuses the shared MIME walk.
+//
+// 3. Bodies stored after the stripHtml fix keep their real newlines and pass
 //    through untouched (aside from trimming runaway blank-line runs).
 //
-// Pure + dependency-free so both client render sites and tests can import it.
+// Pure (browser-safe, no Node-only globals) so both client render sites and
+// tests can import it.
+
+import { extractReadableTextFromMimeEmail } from "./email-mime";
 
 /** True when a body was stored with its line structure collapsed away. */
 export function looksClumpedEmailBody(body: string): boolean {
@@ -91,13 +100,36 @@ export function reflowClumpedEmailBody(body: string): string {
 }
 
 /**
+ * Heal a body that was STORED as a raw MIME fragment (nested-multipart emails
+ * imported before 2026-07-06): first non-blank line is a boundary delimiter
+ * ("------=_Part_1_…") and a Content-Type part header follows. Wraps the
+ * fragment in a synthetic multipart header and reuses the shared MIME walk, so
+ * part headers/boundaries are dropped and mislabeled-HTML content is stripped
+ * to text. Returns null when the body is not such a fragment (the normal case)
+ * or nothing readable could be extracted. Display only — never re-stored.
+ */
+export function extractReadableFromStoredMimeBody(body: string): string | null {
+  const text = String(body ?? "").trimStart();
+  const firstLine = (text.split(/\r?\n/, 1)[0] ?? "").trim();
+  // A boundary delimiter is "--" + a non-trivial token; signature dashes
+  // ("-- ") and dashes-only divider lines don't qualify.
+  if (!/^--\S{2,}$/.test(firstLine) || !/[A-Za-z0-9]/.test(firstLine)) return null;
+  if (!/^content-type:/im.test(text.slice(0, 4000))) return null;
+  const boundary = firstLine.slice(2);
+  const synthetic = `Content-Type: multipart/mixed; boundary="${boundary}"\r\n\r\n${text}`;
+  const extracted = extractReadableTextFromMimeEmail(synthetic).trim();
+  return extracted || null;
+}
+
+/**
  * What the alias-email history panels render inside their whitespace-pre-wrap
  * body block. Never used for storage, parsing, or dedup — display only.
  */
 export function formatEmailBodyForDisplay(body: string): string {
   const text = String(body ?? "").replace(/\r\n/g, "\n").trim();
   if (!text) return text;
-  const flowed = looksClumpedEmailBody(text) ? reflowClumpedEmailBody(text) : text;
+  const healed = extractReadableFromStoredMimeBody(text) ?? text;
+  const flowed = looksClumpedEmailBody(healed) ? reflowClumpedEmailBody(healed) : healed;
   return flowed.replace(/\n{3,}/g, "\n\n").trim();
 }
 

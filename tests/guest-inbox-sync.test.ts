@@ -77,6 +77,93 @@ const multipartHtmlOnly = [
 ].join("\r\n");
 assert.match(extractBodyFromRawEmail(multipartHtmlOnly), /Check-in is\s+3pm/, "base64 html decodes + strips tags");
 
+// ── NESTED multipart (multipart/mixed → multipart/alternative) --------------
+// The old parser regex-tested whole TOP-LEVEL parts for "content-type:
+// text/plain", so the alternative wrapper matched via its inner part's header
+// text and the stored body kept the INNER boundary + part headers as literal
+// garbage (live incident: the Generali policy email on the Thien Tran alias).
+// The Generali email also declares its part text/plain while shipping a full
+// HTML document — that must be detected and stripped.
+const generaliRaw = [
+  "From: 0101019f@us-west-2.amazonses.com",
+  "X-SimpleLogin-Envelope-To: thien.tran.4c015c@emailprivaccy.com",
+  "Subject: Generali Policy #26186Z8458 for Thien Tran",
+  "Message-ID: <gen-1@ses>",
+  'Content-Type: multipart/mixed; boundary="----=_Part_0_99.11"',
+  "",
+  "------=_Part_0_99.11",
+  'Content-Type: multipart/alternative; boundary="----=_Part_1_1270391341.1783316108108"',
+  "",
+  "------=_Part_1_1270391341.1783316108108",
+  "Content-Type: text/plain; charset=us-ascii",
+  "Content-Transfer-Encoding: 7bit",
+  "",
+  "<html><head><title>Generali Travel Protection Plan</title></head>",
+  '<body><p>Insured:&#xa0;Thien Tran</p><p>Plan Number: 26186Z8458</p></body></html>',
+  "------=_Part_1_1270391341.1783316108108",
+  "Content-Type: text/html; charset=us-ascii",
+  "Content-Transfer-Encoding: 7bit",
+  "",
+  "<html><body><p>Insured: Thien Tran</p></body></html>",
+  "------=_Part_1_1270391341.1783316108108--",
+  "",
+  "------=_Part_0_99.11--",
+  "",
+].join("\r\n");
+
+const generaliBody = extractBodyFromRawEmail(generaliRaw);
+assert.ok(!generaliBody.includes("_Part_1_"), `nested boundary must not leak into the body: ${JSON.stringify(generaliBody.slice(0, 200))}`);
+assert.ok(!/content-transfer-encoding/i.test(generaliBody), "part headers must not leak into the body");
+assert.ok(!generaliBody.includes("<html"), "mislabeled text/plain HTML must be stripped to text");
+assert.ok(!generaliBody.includes("Travel Protection Plan"), "head/title content must be stripped");
+assert.match(generaliBody, /Insured:\s*Thien Tran/, "readable content survives (numeric entity decoded)");
+assert.match(generaliBody, /Plan Number: 26186Z8458/, "policy number survives");
+
+// A genuinely-plain part nested one level down is still preferred over HTML.
+const nestedPlain = [
+  "Subject: nested",
+  'Content-Type: multipart/mixed; boundary="outer"',
+  "",
+  "--outer",
+  'Content-Type: multipart/alternative; boundary="inner"',
+  "",
+  "--inner",
+  "Content-Type: text/plain; charset=utf-8",
+  "",
+  "Aloha! Door code 4821.",
+  "--inner",
+  "Content-Type: text/html; charset=utf-8",
+  "",
+  "<html><body><p>Aloha! Door code 4821.</p></body></html>",
+  "--inner--",
+  "--outer--",
+  "",
+].join("\r\n");
+assert.equal(
+  extractBodyFromRawEmail(nestedPlain).trim(),
+  "Aloha! Door code 4821.",
+  "nested text/plain part is found and preferred",
+);
+
+// An ATTACHED text file is not the message body.
+const attachmentOnlyPlain = [
+  "Subject: att",
+  'Content-Type: multipart/mixed; boundary="bnd"',
+  "",
+  "--bnd",
+  "Content-Type: text/plain; charset=utf-8",
+  'Content-Disposition: attachment; filename="terms.txt"',
+  "",
+  "Long attached terms text.",
+  "--bnd",
+  "Content-Type: text/html; charset=utf-8",
+  "",
+  "<p>See attached terms.</p>",
+  "--bnd--",
+  "",
+].join("\r\n");
+assert.match(extractBodyFromRawEmail(attachmentOnlyPlain), /See attached terms\./, "attachment part skipped, HTML body used");
+
 // ── End-to-end parse: envelope alias + decoded body ------------------------
 const fullRaw = [
   "X-SimpleLogin-Envelope-To: jane.doe.abc123@emailprivaccy.com",
