@@ -74,6 +74,9 @@ import {
   selectDeepFetchCandidates,
   matchAddressInText,
 } from "@shared/address-page-match";
+import { extractGeoFromPageText } from "@shared/address-geo-match";
+import { haversineFeet } from "@shared/walking-distance";
+import { geocode } from "./walking-distance";
 import { agreementImageIdentityHolds, computeDhash, isDuplicateHash, THUMBNAIL_IDENTITY_DISTANCE } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
@@ -237,6 +240,20 @@ const ADDRESS_DEEP_FETCH_MAX = (() => {
   const n = Number(process.env.PHOTO_LISTING_ADDRESS_DEEPFETCH_MAX);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 4;
 })();
+// Phase-2 coordinate cross-check: on an already-deep-fetched page (Airbnb/
+// Booking only — VRBO strips per-listing coords), if the exact street text
+// missed, compare the page's published coordinate to our unit's geocode. It
+// still passes the unit-number gate, so this is a precise corroborating signal,
+// not a fuzzy net. Kill with PHOTO_LISTING_ADDRESS_GEO_DISABLED=1.
+const PHOTO_LISTING_ADDRESS_GEO_DISABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.PHOTO_LISTING_ADDRESS_GEO_DISABLED ?? "").trim(),
+);
+// Match radius in feet. Default 2640 ft (0.5 mi) accommodates Airbnb's fuzzed
+// pin + our own geocode slop; the unit-number gate provides the real precision.
+const ADDRESS_GEO_MATCH_MAX_FEET = (() => {
+  const n = Number(process.env.PHOTO_LISTING_ADDRESS_GEO_MAX_FEET);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2640;
+})();
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 const STANDALONE_DRAFT_NO_UNIT_TOKEN = "__standalone_draft_no_unit_token__";
 
@@ -250,7 +267,7 @@ export type AddressMatch = {
   url: string;
   title: string;
   snippet: string;
-  matchType?: "snippet" | "page-text";
+  matchType?: "snippet" | "page-text" | "coordinate";
   evidence?: string;
 };
 type LensCallResult = { ok: true; rows: any[] } | { ok: false; error: string };
@@ -515,6 +532,8 @@ async function checkAddressOnOtas(
     verifyUnit: (url: string) => Promise<boolean>;
     // Injectable for tests; defaults to the real bounded, fail-open fetch.
     fetchPageText?: (url: string) => Promise<string | null>;
+    // Injectable for tests; defaults to the real cached/throttled geocoder.
+    geocodeAddress?: (query: string) => Promise<{ lat: number; lng: number } | null>;
   },
 ): Promise<{
   statuses: Record<AddressPlatformKey, PlatformStatus>;
@@ -527,8 +546,22 @@ async function checkAddressOnOtas(
   const errors: string[] = [];
   let anySucceeded = false;
   const fetchPageText = deps.fetchPageText ?? fetchListingPageText;
+  const geocodeAddress = deps.geocodeAddress ?? geocode;
   const deepFetchEnabled = !PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED && ADDRESS_DEEP_FETCH_MAX > 0;
+  const geoCheckEnabled = deepFetchEnabled && !PHOTO_LISTING_ADDRESS_GEO_DISABLED;
   let deepFetchBudget = ADDRESS_DEEP_FETCH_MAX; // shared across all platforms this folder
+  // Our unit's own coordinate, geocoded once per folder and only when a
+  // coordinate candidate actually turns up (lazy — avoids a geocode call on the
+  // common no-candidate path). The geocoder caches forever + fails open to null.
+  let ourCoordResolved = false;
+  let ourCoord: { lat: number; lng: number } | null = null;
+  const resolveOurCoord = async (): Promise<{ lat: number; lng: number } | null> => {
+    if (ourCoordResolved) return ourCoord;
+    ourCoordResolved = true;
+    const query = [ctx.street, ctx.city, ctx.state].filter(Boolean).join(", ");
+    ourCoord = query ? await geocodeAddress(query) : null;
+    return ourCoord;
+  };
 
   for (const platform of ADDRESS_PLATFORMS) {
     const query = buildAddressQuery(platform.site, ctx.street, ctx.city);
@@ -566,12 +599,30 @@ async function checkAddressOnOtas(
         const html = await fetchPageText(c.url);
         if (!html) continue; // bot wall / timeout / JS shell → skip, snippet result stands
         const m = matchAddressInText(html, { street: ctx.street, city: ctx.city });
-        if (!m.matched) continue; // only an EXACT street hit counts (matchType "street")
+        let matchType: "page-text" | "coordinate" | null = m.matched ? "page-text" : null;
+        let evidence = m.matched ? m.evidence : "";
+        // Phase-2 coordinate cross-check: only when the exact street text missed
+        // (a variant/diacritic spelling, or the page hides the street), only on
+        // Airbnb/Booking (VRBO strips per-listing coords), and only when the
+        // unit-number gate is available to corroborate — never for standalone,
+        // where a loose radius with no unit number could match a neighbor.
+        if (!matchType && geoCheckEnabled && !deps.allowUnverifiedStandalone && platform.key !== "vrbo") {
+          const our = await resolveOurCoord();
+          const geo = our ? extractGeoFromPageText(html) : null;
+          if (our && geo) {
+            const feet = haversineFeet(our.lat, our.lng, geo.lat, geo.lng);
+            if (feet <= ADDRESS_GEO_MATCH_MAX_FEET) {
+              matchType = "coordinate";
+              evidence = `coordinate ~${Math.round(feet)} ft from unit`;
+            }
+          }
+        }
+        if (!matchType) continue;
         if (!deps.allowUnverifiedStandalone) {
           const ok = await deps.verifyUnit(c.url);
           if (!ok) continue; // sibling owner at the same resort street — not our unit
         }
-        kept.push({ platform: platform.key, url: c.url, title: c.title, snippet: c.snippet, matchType: "page-text", evidence: m.evidence });
+        kept.push({ platform: platform.key, url: c.url, title: c.title, snippet: c.snippet, matchType, evidence });
       }
     }
     statuses[platform.key] = kept.length > 0 ? "found" : "clean";
