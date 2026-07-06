@@ -46,6 +46,11 @@ import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-f
 import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
 import { guestPartyFromReservation, guestPartyLabelFromReservation } from "@shared/guest-party";
+import {
+  sameCommunityConsensusFromVerdicts,
+  anyDifferentCommunityVerdict,
+  bedroomsFromListingTitleText,
+} from "@shared/relocation-scenario";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
@@ -8350,7 +8355,9 @@ export default function Bookings() {
           url: b.airbnbListingUrl,
           image: photoUrls[0] ?? "",
           photos: photoUrls,
-          bedrooms: s.bedrooms,
+          // Actual bedrooms from the listing's own title when parseable — a
+          // smaller unit filling a slot must not inherit the slot's count.
+          bedrooms: bedroomsFromListingTitleText(listingTitle) ?? s.bedrooms,
           unitLabel: b.unitLabel,
           address: b.unitAddress,
           sourceLabel: sourceLabelForUrl(b.airbnbListingUrl),
@@ -8361,6 +8368,16 @@ export default function Bookings() {
         const label = usableGuestAlternativeCommunity(item.alternativeCommunity);
         return label && label !== originalArea && label !== originalCommunityName;
       })?.alternativeCommunity || alternatives[0]?.alternativeCommunity || sharedAlternativeCommunity || "";
+      // Same-community relocation facts (verdicts + booked bedrooms + party) —
+      // mirrors RelocateGuestDialog so the guest page framing matches the message.
+      const pageVerdicts = slotsForPage.map((s) => s.buyIn.communityVerdict);
+      const pageVerdictConsensus = sameCommunityConsensusFromVerdicts(pageVerdicts);
+      const pageSameCommunity = pageVerdictConsensus
+        ? true
+        : anyDifferentCommunityVerdict(pageVerdicts) ? false : undefined;
+      const pageOriginalBedrooms = reservation.slots.reduce(
+        (sum, s) => sum + (Number(s.bedrooms) > 0 ? Number(s.bedrooms) : 0), 0,
+      ) || null;
       const response = await apiRequest("POST", "/api/booking-alternatives", {
         reservationId: reservation._id,
         guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
@@ -8372,6 +8389,10 @@ export default function Bookings() {
         unitWalkMinutes: readyProximity?.walk?.minutes ?? null,
         walkMinutes: readyProximity?.walk?.minutes ?? null,
         alternatives,
+        sameCommunity: pageSameCommunity,
+        sameBuilding: pageVerdictConsensus === "same_building",
+        originalBedrooms: pageOriginalBedrooms,
+        partySize: guestPartyFromReservation(reservation)?.total ?? null,
       }).then((r) => r.json());
       if (!response?.url) throw new Error(response?.message || response?.error || "Alternative page create failed");
       return response as { url: string; expiresAt?: string };
@@ -17098,6 +17119,12 @@ function RelocateGuestDialog({
       : "the booking channel";
   const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
   const attachedSlots = reservation.slots.filter((s): s is SlotInfo & { buyIn: BuyIn } => !!s.buyIn);
+  // Verified same-community/building consensus across the attached buy-ins —
+  // when present, the drafted message focuses on the bedroom-count change
+  // instead of a community move (the units never left the community).
+  const relocateVerdictConsensus = sameCommunityConsensusFromVerdicts(
+    attachedSlots.map((s) => s.buyIn.communityVerdict),
+  );
   const [createdPage, setCreatedPage] = useState<{ url: string; token: string } | null>(null);
   const [message, setMessage] = useState("");
   const [sent, setSent] = useState(false);
@@ -17140,13 +17167,30 @@ function RelocateGuestDialog({
           url: b.airbnbListingUrl,
           image: photoUrls[0] ?? "",
           photos: photoUrls,
-          bedrooms: s.bedrooms,
+          // The slot config is what the guest BOOKED — the attached unit can be
+          // smaller (e.g. a 1BR filling a 2BR slot). Prefer the actual bedroom
+          // count from the listing's own title so the message is honest.
+          bedrooms: bedroomsFromListingTitleText(listingTitle) ?? s.bedrooms,
           unitLabel: b.unitLabel,
           address: b.unitAddress,
           sourceLabel: sourceLabelForUrl(b.airbnbListingUrl),
           notes: b.notes,
         };
       });
+      // Same-community relocation facts: the verified community verdicts on the
+      // attached buy-ins (Verify community / operator buttons), the bedroom
+      // count the guest originally booked (sum of the slot configs), and the
+      // actual party size — the server pivots the message to the bedroom-count
+      // change when the units stayed in the same community/building.
+      const attachedVerdicts = attachedSlots.map((s) => s.buyIn.communityVerdict);
+      const verdictConsensus = sameCommunityConsensusFromVerdicts(attachedVerdicts);
+      const sameCommunity = verdictConsensus
+        ? true
+        : anyDifferentCommunityVerdict(attachedVerdicts) ? false : undefined;
+      const originalBedrooms = reservation.slots.reduce(
+        (sum, s) => sum + (Number(s.bedrooms) > 0 ? Number(s.bedrooms) : 0), 0,
+      ) || null;
+      const partySize = guestPartyFromReservation(reservation)?.total ?? null;
       const resp = await apiRequest("POST", "/api/booking-alternatives", {
         reservationId: reservation._id,
         guestName,
@@ -17160,6 +17204,10 @@ function RelocateGuestDialog({
         areaName: originalCommunity,
         alternativeCommunity,
         alternatives,
+        sameCommunity,
+        sameBuilding: verdictConsensus === "same_building",
+        originalBedrooms,
+        partySize,
       }).then((r) => r.json());
       if (!resp?.url || !resp?.token) throw new Error(resp?.message || resp?.error || "Guest page create failed");
       return resp as { url: string; token: string; relocationMessage?: string };
@@ -17247,9 +17295,9 @@ function RelocateGuestDialog({
         <DialogHeader>
           <DialogTitle>Alternative unit message</DialogTitle>
           <DialogDescription>
-            Drafts an apology that we've moved {guestName.split(/\s+/)[0] || "the guest"} to a comparable
-            property, includes the new listing's guest page link, and sends it through {channelLabel} (the
-            channel they booked with). You can edit the text before sending.
+            {relocateVerdictConsensus
+              ? `Drafts a note that ${guestName.split(/\s+/)[0] || "the guest"}'s stay is still in the same ${relocateVerdictConsensus === "same_building" ? "building" : "community"} — focused on the bedroom-count change, not a move — includes the guest page link, and sends it through ${channelLabel} (the channel they booked with). You can edit the text before sending.`
+              : `Drafts an apology that we've moved ${guestName.split(/\s+/)[0] || "the guest"} to a comparable property, includes the new listing's guest page link, and sends it through ${channelLabel} (the channel they booked with). You can edit the text before sending.`}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">

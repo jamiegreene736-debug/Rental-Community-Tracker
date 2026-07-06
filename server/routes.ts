@@ -37,6 +37,7 @@ import {
   resolveDraftUnitBedrooms,
 } from "@shared/draft-unit-bedrooms";
 import { summarizeBulkPricingGuestyPush } from "@shared/bulk-pricing-push-logic";
+import { buildSameCommunityRelocationLines } from "@shared/relocation-scenario";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import {
   collectReservationPaymentIssues,
@@ -9418,6 +9419,10 @@ export async function registerRoutes(
       bedrooms: Number(item.bedrooms) || null,
       bathrooms: Number(item.bathrooms) || null,
       sleeps: Number(item.sleeps) || null,
+      // True when the unit is in the SAME community the guest originally
+      // booked (verdict-confirmed) — the copy must not frame it as a move to a
+      // new/different community.
+      sameCommunityAsOriginal: item.sameCommunityAsOriginal === true ? true : null,
     };
 
     try {
@@ -9449,6 +9454,7 @@ Requirements:
 - Do not promise amenities, bathroom counts, or sleep capacities that are not in the facts (some may be null — if so, do not invent them or say they are "being confirmed").
 - Do not mention photo counts, photos available, or that photos can be reviewed.
 - Focus only on the concrete details present in the facts: the unit label, bedroom count, bathroom/sleeps count when present, and the community.
+- When sameCommunityAsOriginal is true, this unit is in the SAME community the guest originally booked. Do not describe it as a new, different, or comparable community and do not frame this as a move - frame it as staying right in the community they already chose.
 - Return only the copy.`,
           }],
         }),
@@ -9632,6 +9638,13 @@ Requirements:
     sleeps?: number | null;
     bedrooms?: number | null;
     units?: Array<{ bedrooms?: number | null; sleeps?: number | null }>;
+    // Same-community relocation (verdict-confirmed): the message pivots to the
+    // BEDROOM COUNT change instead of the community change. See
+    // shared/relocation-scenario.ts.
+    sameCommunity?: boolean;
+    sameBuilding?: boolean;
+    originalBedrooms?: number | null;
+    partySize?: number | null;
   }): string => {
     const firstName = firstNameForGuestMessage(args.guestName);
     const greeting = firstName ? `Hi ${firstName},` : "Hi,";
@@ -9671,8 +9684,8 @@ Requirements:
       const unitSleeps = Number(unit?.sleeps);
       const hasBeds = Number.isFinite(unitBeds) && unitBeds > 0;
       const hasSleeps = Number.isFinite(unitSleeps) && unitSleeps > 0;
-      if (hasBeds && hasSleeps) return `${Math.round(unitBeds)} bedrooms and sleeps up to ${Math.round(unitSleeps)} guests`;
-      if (hasBeds) return `${Math.round(unitBeds)} bedrooms`;
+      if (hasBeds && hasSleeps) return `${Math.round(unitBeds)} bedroom${Math.round(unitBeds) === 1 ? "" : "s"} and sleeps up to ${Math.round(unitSleeps)} guests`;
+      if (hasBeds) return `${Math.round(unitBeds)} bedroom${Math.round(unitBeds) === 1 ? "" : "s"}`;
       if (hasSleeps) return `sleeps up to ${Math.round(unitSleeps)} guests`;
       return "";
     };
@@ -9694,6 +9707,54 @@ Requirements:
       sleepsClause = ` It comfortably sleeps up to ${Math.round(sleeps)} guests${Number.isFinite(bedrooms) && bedrooms > 0 ? ` across ${Math.round(bedrooms)} bedrooms` : ""}.`;
     }
     const pitchLine = `Honestly, this is a really nice, well-kept place and a great comparable to the unit you booked.${sleepsClause} I think you and your group will really enjoy it.`;
+    // SAME-COMMUNITY relocation (verdict-confirmed by the operator/Cowork, or
+    // name-matched): the guest is NOT moving communities, so the "comparable
+    // stay / same city drive" narrative is wrong. The message instead leads
+    // with "same community/building" and focuses on the bedroom-count change
+    // (e.g. a 4BR booking re-filled as a 2BR + 1BR pair = one less bedroom),
+    // plus the combined sleeps vs the guest's actual party size.
+    if (args.sameCommunity === true) {
+      const unitCount = (args.units ?? []).length || 1;
+      const sc = buildSameCommunityRelocationLines({
+        placeLabel: place || null,
+        sameBuilding: args.sameBuilding === true,
+        originalBedrooms: args.originalBedrooms,
+        newBedrooms: Number.isFinite(bedrooms) && bedrooms > 0 ? bedrooms : null,
+        totalSleeps: Number.isFinite(sleeps) && sleeps > 0 ? sleeps : null,
+        partySize: args.partySize,
+        unitCount,
+      });
+      const unitsBreakdownSentence = namedUnits.length >= 2
+        ? (() => {
+          const unitsSentence = `${namedUnits.slice(0, -1).join(", ")}, and ${namedUnits[namedUnits.length - 1]}`;
+          return `${unitsSentence.charAt(0).toUpperCase()}${unitsSentence.slice(1)}.`;
+        })()
+        : "";
+      const sameCommunityLines = [
+        greeting,
+        "",
+        sc.arrangeLine,
+        "",
+        [sc.bedroomLine, unitsBreakdownSentence].filter(Boolean).join(" "),
+        "",
+        sc.pitchLine,
+        "",
+        "There is no price difference and no increase at all to you - the replacement is at the exact same price as your original booking, fully covered on our end.",
+        "",
+        `You can see photos and full details of ${unitCount === 1 ? "the replacement" : unitCount === 2 ? "both units" : "the units"} on this page:`,
+        args.alternativeUrl,
+        "",
+        ...(walkLine ? [walkLine, ""] : []),
+        "Please take a look and let me know if this works for you. If it does, I will send your full arrival details within 24 to 48 hours. If you would prefer not to move, I completely understand and will issue a full refund right away - the entire amount back, with no cancellation fees or penalties of any kind.",
+        "",
+        "Again, I am sorry for the inconvenience and I truly appreciate your understanding.",
+        "",
+        "Mahalo,",
+        "John Carpenter",
+      ];
+      const sameCommunityBody = sameCommunityLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+      return channel.includes("booking") ? sanitizeForBookingChannel(sameCommunityBody) : sameCommunityBody;
+    }
     const lines = [
       greeting,
       "",
@@ -9987,16 +10048,47 @@ Requirements:
       const stayDateText = [formatAlternativeDisplayDate(payload.checkIn), formatAlternativeDisplayDate(payload.checkOut)]
         .filter(Boolean)
         .join(" to ");
-      const availabilityContext = originalCommunity && alternativeCommunity && !sameCommunityContext(originalCommunity, alternativeCommunity)
-        ? Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0
-          ? `We have availability in ${escapeHtml(alternativeCommunityDisplay)}. This community is in ${escapeHtml(areaNameDisplay)}, like your original community of ${escapeHtml(originalCommunityDisplay)}, and the two communities are only a short ${Math.round(communityDriveMinutes)}-minute drive from each other.`
-          : `We have availability in ${escapeHtml(alternativeCommunityDisplay)}. This community is in ${escapeHtml(areaNameDisplay)}, like your original community of ${escapeHtml(originalCommunityDisplay)}, and the two communities are only a short drive from each other.`
-        : alternativeCommunity
-          ? `We have availability in ${escapeHtml(alternativeCommunityDisplay)} for this stay.`
-          : `We prepared ${alternatives.length === 1 ? "this unit" : "these units"} so you can review a comparable stay in the same general area.`;
       const totalBedrooms = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.bedrooms) > 0 ? Math.round(Number(item.bedrooms)) : 0), 0);
       const totalBathrooms = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.bathrooms) > 0 ? Number(item.bathrooms) : 0), 0);
       const totalSleeps = alternatives.reduce((sum: number, item: any) => sum + (Number(item?.sleeps) > 0 ? Math.round(Number(item.sleeps)) : 0), 0);
+      // SAME-COMMUNITY relocation: framed around the bedroom-count change, not
+      // a community move. The flag is persisted at page-build time from the
+      // attached buy-ins' operator/Cowork community verdicts; pages built
+      // before the flag existed fall back to the original vs alternative
+      // community name match (the branch that previously rendered a bare
+      // "We have availability in X for this stay.").
+      const pageSameCommunity = payload.sameCommunity === true
+        || (payload.sameCommunity !== false
+          && !!originalCommunity && !!alternativeCommunity
+          && sameCommunityContext(originalCommunity, alternativeCommunity));
+      const pageSameBuilding = pageSameCommunity && payload.sameBuilding === true;
+      const pageOriginalBedrooms = Number(payload.originalBedrooms) > 0 ? Math.round(Number(payload.originalBedrooms)) : null;
+      const pagePartySize = Number(payload.partySize) > 0 ? Math.round(Number(payload.partySize)) : null;
+      const sameCommunityPlaceLabel = alternativeCommunityDisplay || originalCommunityDisplay;
+      const availabilityContext = pageSameCommunity
+        ? (() => {
+          const bc = pageSameBuilding ? "building" : "community";
+          const lead = sameCommunityPlaceLabel
+            ? `Good news - your stay is still at ${escapeHtml(sameCommunityPlaceLabel)}, the same ${bc} as your original booking.`
+            : `Good news - your stay is still in the same ${bc} as your original booking.`;
+          const bedroomChange = pageOriginalBedrooms && totalBedrooms > 0 && totalBedrooms < pageOriginalBedrooms
+            ? ` The only change is the bedroom count: ${totalBedrooms} bedrooms in total instead of ${pageOriginalBedrooms}.`
+            : "";
+          const fitClause = pagePartySize && totalSleeps >= pagePartySize
+            ? `, so your party of ${pagePartySize} will fit comfortably`
+            : "";
+          const sleepsLine = totalSleeps > 0
+            ? ` Together the ${alternatives.length === 1 ? "unit sleeps" : "units sleep"} up to ${totalSleeps} guests${fitClause}.`
+            : "";
+          return `${lead}${bedroomChange}${sleepsLine}`;
+        })()
+        : originalCommunity && alternativeCommunity && !sameCommunityContext(originalCommunity, alternativeCommunity)
+          ? Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0
+            ? `We have availability in ${escapeHtml(alternativeCommunityDisplay)}. This community is in ${escapeHtml(areaNameDisplay)}, like your original community of ${escapeHtml(originalCommunityDisplay)}, and the two communities are only a short ${Math.round(communityDriveMinutes)}-minute drive from each other.`
+            : `We have availability in ${escapeHtml(alternativeCommunityDisplay)}. This community is in ${escapeHtml(areaNameDisplay)}, like your original community of ${escapeHtml(originalCommunityDisplay)}, and the two communities are only a short drive from each other.`
+          : alternativeCommunity
+            ? `We have availability in ${escapeHtml(alternativeCommunityDisplay)} for this stay.`
+            : `We prepared ${alternatives.length === 1 ? "this unit" : "these units"} so you can review a comparable stay in the same general area.`;
       const bedroomCounts = new Map<number, number>();
       for (const item of alternatives) {
         const bedrooms = Number(item?.bedrooms);
@@ -10014,7 +10106,10 @@ Requirements:
         totalBedrooms > 0 ? { icon: "bed" as const, label: `${totalBedrooms} Bedroom Total` } : null,
         totalBathrooms > 0 ? { icon: "bath" as const, label: `${formatAlternativeNumber(totalBathrooms)} Bathroom Total` } : null,
         totalSleeps > 0 ? { icon: "sleep" as const, label: `Sleeps ${totalSleeps}` } : null,
-        alternativeCommunityDisplay ? { icon: "community" as const, label: `Community: ${alternativeCommunityDisplay}` } : null,
+        (alternativeCommunityDisplay || (pageSameCommunity && sameCommunityPlaceLabel))
+          ? { icon: "community" as const, label: `Community: ${alternativeCommunityDisplay || sameCommunityPlaceLabel}` } : null,
+        pageSameCommunity
+          ? { icon: "community" as const, label: pageSameBuilding ? "Same Building as Your Original Booking" : "Same Community as Your Original Booking" } : null,
         Number.isFinite(unitWalkMinutes) && unitWalkMinutes > 0 ? { icon: "walk" as const, label: `Unit A/B Walk: ${Math.round(unitWalkMinutes)} Minute Walk` } : null,
         Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "route" as const, label: `Distance From Old Community: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
       ].filter(Boolean) as Array<{ icon: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "route" | "sleep" | "walk"; label: string }>;
@@ -10369,6 +10464,28 @@ Requirements:
         alternatives.map((a: any) => a?.notes),
         req.body?.originalCommunity,
       ) ?? "") || bodyAlternativeCommunity || "";
+      // SAME-COMMUNITY detection. The client flag comes from the attached
+      // buy-ins' operator/Cowork community verdicts (buy_ins.communityVerdict
+      // consensus); a name match between the original and the units' resolved
+      // community corroborates it server-side. An explicit false (a "different"
+      // verdict on any attached unit) VETOES the name-equality inference —
+      // never claim "same community" over a verified DIFFERENT verdict.
+      // NOTE: extractNewCommunityFromUnits never returns the guest's original
+      // community, so in the genuine same-community case cleanNewCommunity is
+      // usually empty and the client-sent verdict flag is the primary signal.
+      const bodySameCommunityFlag = req.body?.sameCommunity;
+      const sameCommunity = bodySameCommunityFlag === true
+        || (bodySameCommunityFlag !== false
+          && !!originalCommunity
+          && !!(cleanNewCommunity || bodyAlternativeCommunity)
+          && sameCommunityContext(originalCommunity, cleanNewCommunity || bodyAlternativeCommunity));
+      const sameBuilding = sameCommunity && req.body?.sameBuilding === true;
+      const bodyOriginalBedrooms = Number(req.body?.originalBedrooms);
+      const originalBedrooms = Number.isFinite(bodyOriginalBedrooms) && bodyOriginalBedrooms > 0
+        ? Math.round(bodyOriginalBedrooms) : null;
+      const bodyPartySize = Number(req.body?.partySize);
+      const partySize = Number.isFinite(bodyPartySize) && bodyPartySize > 0
+        ? Math.round(bodyPartySize) : null;
       const allVrboGalleries = vrboDetailsList.map((detail) => detail?.photos ?? []);
       const sharedResortPhotos = sharedVrboResortPhotos(allVrboGalleries);
       const keywordCommunityPhotos = Array.from(new Set(
@@ -10483,7 +10600,15 @@ Requirements:
         // never the raw listing name/number (e.g. "Villas of Kamalii 39").
         const guestUnitLabel = guestFacingUnitLabel(item?.unitLabel, index);
         const drafted = await draftAlternativeGuestDescription(
-          { ...base, guestUnitLabel, community: cleanNewCommunity || base.community },
+          {
+            ...base,
+            guestUnitLabel,
+            // Same-community relocations keep the guest's ORIGINAL community
+            // name for the copy (the unit-derived extractor deliberately never
+            // returns it) and tell the writer not to frame it as a new place.
+            community: cleanNewCommunity || (sameCommunity ? originalCommunity : "") || base.community,
+            sameCommunityAsOriginal: sameCommunity,
+          },
           stay,
         );
         return {
@@ -10504,12 +10629,18 @@ Requirements:
       const explicitCommunityDriveMinutes = Number(req.body?.communityDriveMinutes);
       const fallbackDriveMinutes = Number(req.body?.driveMinutes);
       const explicitUnitWalkMinutes = Number(req.body?.unitWalkMinutes ?? req.body?.walkMinutes);
-      const estimatedCommunityDriveMinutes = await estimateCommunityDriveMinutes(originalCommunity, alternativeCommunity, areaName);
-      const communityDriveMinutes = Number.isFinite(explicitCommunityDriveMinutes) && explicitCommunityDriveMinutes > 0
-        ? Math.round(explicitCommunityDriveMinutes)
-        : estimatedCommunityDriveMinutes ?? (Number.isFinite(fallbackDriveMinutes) && fallbackDriveMinutes > 0
-          ? Math.round(fallbackDriveMinutes)
-          : null);
+      const estimatedCommunityDriveMinutes = sameCommunity
+        ? null
+        : await estimateCommunityDriveMinutes(originalCommunity, alternativeCommunity, areaName);
+      // Same community → no "drive from your old community" framing at all,
+      // even when the client sent an explicit minutes value.
+      const communityDriveMinutes = sameCommunity
+        ? null
+        : Number.isFinite(explicitCommunityDriveMinutes) && explicitCommunityDriveMinutes > 0
+          ? Math.round(explicitCommunityDriveMinutes)
+          : estimatedCommunityDriveMinutes ?? (Number.isFinite(fallbackDriveMinutes) && fallbackDriveMinutes > 0
+            ? Math.round(fallbackDriveMinutes)
+            : null);
       const unitWalkMinutes = Number.isFinite(explicitUnitWalkMinutes) && explicitUnitWalkMinutes > 0
         ? Math.round(explicitUnitWalkMinutes)
         : null;
@@ -10531,6 +10662,12 @@ Requirements:
         communityDescription: communityDescriptionDraft.description,
         communityDriveMinutes,
         unitWalkMinutes,
+        // Same-community relocation facts, persisted so the GET renderer can
+        // frame the page around the bedroom-count change (not a community move).
+        sameCommunity,
+        sameBuilding,
+        originalBedrooms,
+        partySize,
         alternatives: hydratedAlternatives,
         createdAt: new Date().toISOString(),
         expiresAt,
@@ -10553,7 +10690,20 @@ Requirements:
       // the same unit-derived community resolved above from the units' own
       // titles/notes (Decision Log 2026-06-06). Null → neutral "in the same area"
       // copy when nothing confident resolves; never the guest's original community.
-      const propertyLabel = cleanNewCommunity || null;
+      // EXCEPTION: a verdict-confirmed SAME-community relocation — there the
+      // original community IS the units' community (the extractor deliberately
+      // never returns it), so name it.
+      const sameCommunityLabel = sameCommunity
+        ? (bodyAlternativeCommunity
+          || (() => {
+            const loc: any = (COMMUNITY_LOCATION_BY_KEY as any)[originalCommunity] ?? BUY_IN_MARKET_LOCATIONS[originalCommunity];
+            const resort = normalizeCommunityContext(loc?.searchName);
+            return resort && resort.length >= 4 ? resort : originalCommunity;
+          })())
+        : null;
+      const propertyLabel = sameCommunity
+        ? (sameCommunityLabel || cleanNewCommunity || null)
+        : (cleanNewCommunity || null);
       // Total capacity across the attached units for the friendly pitch line.
       const totalSleeps = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : 0), 0) || null;
       const totalBedrooms = hydratedAlternatives.reduce((sum, a) => sum + (Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : 0), 0) || null;
@@ -10583,6 +10733,10 @@ Requirements:
             bedrooms: Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : null,
             sleeps: Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : null,
           })),
+          sameCommunity,
+          sameBuilding,
+          originalBedrooms,
+          partySize,
         }),
       });
     } catch (err: any) {

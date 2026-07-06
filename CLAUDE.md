@@ -43,6 +43,28 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-06 (Alternative Unit button: SAME-COMMUNITY bedroom-downgrade messaging): Operator's case —
+  6 guests booked a 4BR listing (2x2BR); only a 2BR + 1BR could be sourced, but in the SAME community.
+  The relocation message/page wrongly framed that as a community move. SHIPPED: pure
+  `shared/relocation-scenario.ts` (57 tests) — verdict consensus over the attached buy-ins'
+  `communityVerdict` columns (any missing/"different" verdict → no same-community claim; explicit
+  "different" VETOES the server's name-match inference), `bedroomsFromListingTitleText` (honest
+  per-unit bedrooms from the listing title; slot config = what the guest BOOKED stays the fallback),
+  and `buildSameCommunityRelocationLines` (ASCII; "will fit your party comfortably" only when
+  totalSleeps >= partySize). Client sends sameCommunity/sameBuilding + originalBedrooms (slot-config
+  sum) + partySize (`guestPartyFromReservation`) from BOTH the Alternative Unit dialog and the Guest
+  page button. Server: `buildRelocationGuestMessage` same-community branch leads with "same
+  community/building you originally booked" then the bedroom change ("3 bedrooms in total instead of
+  4, just one less bedroom" + combined sleeps vs party); drive-minutes framing nulled; flags persisted
+  on the page payload; GET /alternatives/:token renders the same-community headline + a "Same
+  Community/Building as Your Original Booking" chip; AI unit-description prompt told not to frame a
+  move. LOAD-BEARING: this is a documented EXCEPTION to the 2026-06-06 "never name the original
+  community" rule — propertyLabel names the original community ONLY when sameCommunity is
+  verdict-confirmed; the different-community path is byte-identical. NOTE: the same-community pivot
+  fires from the buy-ins' communityVerdict stamps (Verify community / operator ✓ buttons) — verify
+  first, then send. Verified: relocation-scenario 57/0, full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline.
+
 - 2026-07-06 (top-markets search → one-click combo pipeline overhaul): Operator asked to find MORE
   condo communities, fix the two chronic constraints (units not on the major OTAs; usable street
   addresses), integrate Claude/Claude-vision verification (same community, right bedroom-photo
