@@ -180,6 +180,21 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     findActiveAutoReplaceJob({ s: store.stuckCapped }, 23, "prop23-kl-3br") === null);
 }
 
+// ── source locks: hydration failures fall through, and hydration can sidecar ─
+// The Pili Mai 9K incident (2026-07-05): option 1's Redfin gallery bot-walled
+// Railway ("returned 0 photos") and the whole job failed even though option 2
+// scraped fine. The commit loop must burn a photo-hydration 502 like a 409,
+// and POST /api/unit-swaps must hydrate with the bounded sidecar scrape tier.
+{
+  const { readFileSync } = await import("node:fs");
+  const orch = readFileSync(new URL("../server/auto-replace-jobs.ts", import.meta.url), "utf8");
+  check("commit loop burns a 502 photo-hydration failure and tries the next option",
+    /status === 502 && \/photo\/i\.test/.test(orch));
+  const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  check("POST /api/unit-swaps hydrates with the sidecar scrape tier (bot-walled galleries recover)",
+    /hydrateUnitSwapPhotoFolder\(parsed\.data, \{ useSidecar: true \}\)/.test(routes));
+}
+
 // ── parse: findRestarts defaults for legacy records ──────────────────────────
 {
   const store = parseAutoReplaceStore(JSON.stringify({

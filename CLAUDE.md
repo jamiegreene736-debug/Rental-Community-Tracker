@@ -66,8 +66,18 @@ Before making any changes:
   throttled 5-min durable heartbeat keeps >60-min exhaustive searches inside the resume window.
   Reviewed via a 3-dimension adversarial workflow (4 confirmed findings all fixed). Verified:
   replacement-job-persistence 24/0, auto-replace-job 39/0, full `npm test` exit 0, build clean,
-  `npm run check` 338 = baseline. POST-DEPLOY: fired the operator's exact click live
-  (POST /api/replacement/auto-jobs prop32) — see PR for the outcome.
+  `npm run check` 338 = baseline. POST-DEPLOY LIVE RUN exposed the SECOND stacked failure (also the
+  reason prop33-kia-3br-b's earlier find "succeeded" but never committed — the operator's "another
+  unit"): the find leg surfaced Pili Mai units 9K + 2J, but the COMMIT's photo hydration
+  (`hydrateUnitSwapPhotoFolder` in POST /api/unit-swaps) scraped 9K's Redfin gallery from Railway's
+  datacenter IP WITHOUT the sidecar tier → bot-walled → "returned 0 photos" → 502 → the orchestrator
+  treated it as job-fatal and never tried 2J. FOLLOW-UP FIX (same day): POST /api/unit-swaps now
+  hydrates with `{ useSidecar: true }` (the bounded 90s residential-IP tier the manual-URL route
+  already used; fires only when the datacenter scrape comes up short), and the orchestrator's commit
+  loop burns a 502 photo-hydration failure like a 409 (candidate-level, not job-level — tries the
+  next option; loopback timeout 180s→300s for the sidecar window). Both source-locked in
+  tests/auto-replace-job.test.ts (41/0). Live-verified post-deploy: prop32 auto-replace ran
+  find → commit → verify end-to-end and the swap landed.
 
 - 2026-07-05 (guest PARTY SIZE — adults/children — on bookings rows, inbox panel + Cowork prompts):
   Operator asked to see how many adults/children booked each reservation (VRBO/Booking/etc), on the
