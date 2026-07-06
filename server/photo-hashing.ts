@@ -23,9 +23,25 @@ import sharp from "sharp";
 import path from "path";
 import fs from "fs";
 import { storage } from "./storage";
+import {
+  agreementImageIdentityHolds,
+  DUPLICATE_DISTANCE,
+  hammingDistance,
+  HASH_BITS,
+  isDuplicateHash,
+  THUMBNAIL_IDENTITY_DISTANCE,
+} from "@shared/photo-hash-distance";
 
-const HASH_BITS = 64;
-export const DUPLICATE_DISTANCE = 5;
+// The distance math lives in the zero-dependency shared module so it stays
+// unit-testable without the sharp/DB imports this file pulls in. Re-exported
+// here so existing `./photo-hashing` importers are unaffected.
+export {
+  agreementImageIdentityHolds,
+  DUPLICATE_DISTANCE,
+  hammingDistance,
+  isDuplicateHash,
+  THUMBNAIL_IDENTITY_DISTANCE,
+};
 
 // Compute a 16-char hex dHash from a JPEG/PNG/WebP buffer. Throws on
 // unreadable input — caller decides whether to swallow.
@@ -59,31 +75,6 @@ export async function computeDhash(buffer: Buffer): Promise<string> {
     hex += byte.toString(16).padStart(2, "0");
   }
   return hex;
-}
-
-// Hamming distance between two equal-length hex hashes. Returns
-// HASH_BITS (worst case) for malformed input rather than throwing —
-// callers treat unknown-vs-known as "not a match" and move on.
-export function hammingDistance(a: string, b: string): number {
-  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return HASH_BITS;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 2) {
-    const x = parseInt(a.slice(i, i + 2), 16);
-    const y = parseInt(b.slice(i, i + 2), 16);
-    if (Number.isNaN(x) || Number.isNaN(y)) return HASH_BITS;
-    let xor = x ^ y;
-    while (xor) {
-      diff += xor & 1;
-      xor >>>= 1;
-    }
-  }
-  return diff;
-}
-
-// True if two hashes are within DUPLICATE_DISTANCE — i.e. likely the
-// same image up to recompression / light crop / watermark removal.
-export function isDuplicateHash(a: string, b: string, tolerance = DUPLICATE_DISTANCE): boolean {
-  return hammingDistance(a, b) <= tolerance;
 }
 
 // Backfill perceptual_hash for any photos in a folder that don't have

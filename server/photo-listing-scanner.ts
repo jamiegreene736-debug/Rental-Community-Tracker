@@ -70,7 +70,7 @@ import {
   parseStreetCityState,
   type AddressPlatformKey,
 } from "@shared/address-listing-logic";
-import { isDuplicateHash } from "./photo-hashing";
+import { agreementImageIdentityHolds, computeDhash, isDuplicateHash, THUMBNAIL_IDENTITY_DISTANCE } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 
@@ -161,6 +161,37 @@ const MULTI_PHOTO_AGREEMENT = (() => {
   if (!Number.isFinite(n) || n < 2) return 3;
   return Math.floor(n);
 })();
+// Image-identity gate for the multi-photo-AGREEMENT path (2026-07-06). The
+// agreement fallback flags "found" from strong VISUAL Lens matches WITHOUT
+// per-hit unit-text confirmation — which, in same-model resort communities,
+// fired on SIBLING units and shared VIEWS that merely photograph alike
+// (Makahuena at Poipu + Mauna Lani Point live incident: every unit's lanai
+// sees the same golf course; same-floorplan condos share a room shell, just
+// different furniture). SearchAPI returns look-alikes AND genuine reposts in
+// `visual_matches` at the same rank/confidence — there is no
+// `pages_with_matching_images` split to lean on — so the ONLY way to tell "our
+// actual photo was reposted" from "a look-alike" is to compare our photo's
+// perceptual hash against the matched listing's thumbnail. A genuine repost of
+// our image stays close even through Google's re-cropped thumbnail (measured
+// dist 11); look-alikes sit at 25-36. So an agreement hit must ALSO be
+// image-identical to count. The unit-text VERIFIED path is UNAFFECTED, and any
+// hashing failure FAILS TOWARD COUNTING (no theft-detection regression). Kill
+// with PHOTO_LISTING_IDENTITY_GATE_DISABLED=1; tune with
+// PHOTO_LISTING_AGREEMENT_IDENTITY_DISTANCE.
+const PHOTO_LISTING_IDENTITY_GATE_DISABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.PHOTO_LISTING_IDENTITY_GATE_DISABLED ?? "").trim(),
+);
+const AGREEMENT_IDENTITY_DISTANCE = (() => {
+  const n = Number(process.env.PHOTO_LISTING_AGREEMENT_IDENTITY_DISTANCE);
+  if (!Number.isFinite(n) || n < 1) return THUMBNAIL_IDENTITY_DISTANCE;
+  return Math.floor(n);
+})();
+const THUMBNAIL_FETCH_TIMEOUT_MS = 8_000;
+const THUMBNAIL_MAX_BYTES = 3_000_000;
+// Bound per-folder thumbnail fetches so a pathological folder (many
+// community-compatible OTA hits, all with slow thumbnails) can't stack the 8s
+// timeout into a multi-minute scan. Beyond the cap we fail toward counting.
+const MAX_THUMBNAIL_HASHES_PER_SCAN = 80;
 // Address-on-OTA detection leg (the complement to the photo reverse-image leg). For each scanned unit
 // folder we also run one Google `site:` text search per platform for the unit's street + city and check
 // whether the unit's address surfaces on a real Airbnb/VRBO/Booking listing page. A thief can swap the
@@ -566,6 +597,35 @@ async function callGoogleLens(imageUrl: string): Promise<LensCallResult> {
   }
 }
 
+// Fetch a Lens match's thumbnail image and dHash it, so the multi-photo-
+// AGREEMENT path can require IMAGE identity (our actual photo was reposted),
+// not merely a strong VISUAL similarity (a sibling unit / shared resort view
+// that photographs alike). Returns null on any failure — the caller then fails
+// toward counting the hit. Results are cached per run by thumbnail URL.
+async function fetchThumbnailDhash(url: string, cache: Map<string, string | null>): Promise<string | null> {
+  if (!url) return null;
+  const cached = cache.get(url);
+  if (cached !== undefined) return cached;
+  let hash: string | null = null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), THUMBNAIL_FETCH_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (resp.ok) {
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length > 0 && buf.length <= THUMBNAIL_MAX_BYTES) {
+        hash = await computeDhash(buf);
+      }
+    }
+  } catch {
+    // Network / timeout / decode failure — fail toward counting (null).
+  } finally {
+    clearTimeout(timeout);
+  }
+  cache.set(url, hash);
+  return hash;
+}
+
 // Confirm that a Lens-matched listing URL actually references the unit
 // identified by `unitHint`. Runs one targeted Google site: query
 // scoped to the listing's path. If the candidate page doesn't surface
@@ -809,6 +869,10 @@ export async function runPhotoListingCheckForFolder(
   // on a URL pays the SERP cost(s); later checks reuse the answer
   // even when a different photo surfaces the same listing.
   const verifyCache = new Map<string, boolean>();
+  // Per-run cache + budget for the agreement-path image-identity gate. Maps a
+  // Lens thumbnail URL → its dHash (or null when it couldn't be fetched).
+  const thumbnailHashCache = new Map<string, string | null>();
+  let thumbnailHashCount = 0;
   // Cap verifications per (photo × host) so a Lens response with 30
   // airbnb.com hits doesn't burn the SERP budget. 3 is plenty — the
   // tally threshold is ≥ 2 photos matching anyway.
@@ -898,7 +962,31 @@ export async function runPhotoListingCheckForFolder(
         if (siblingLookalike) {
           console.log(`[photo-listing-scanner] ${folder}: skipping sibling-unit visual look-alike ${link} ("${title.slice(0, 60)}")`);
         }
-        if (communityOk && !siblingLookalike) strongHits.push({ photoUrl, listingUrl: link, title, source });
+        // Image-identity gate for the AGREEMENT tally only (2026-07-06): a
+        // strong community-compatible visual match counts toward multi-photo
+        // agreement ONLY when the matched listing's thumbnail is perceptually
+        // the SAME image as our photo — not a sibling unit / shared view that
+        // merely photographs alike. Missing our-photo hash, missing thumbnail,
+        // or a failed thumbnail fetch all FAIL TOWARD COUNTING. The unit-text
+        // VERIFIED path (verifiedHits below) is unaffected.
+        let imageIdentityOk = true;
+        if (communityOk && !siblingLookalike && !PHOTO_LISTING_IDENTITY_GATE_DISABLED) {
+          const thumb = String((h as any).thumbnail ?? (h as any).image ?? "");
+          let thumbHash: string | null = null;
+          if (thumb) {
+            if (thumbnailHashCache.has(thumb)) {
+              thumbHash = thumbnailHashCache.get(thumb) ?? null;
+            } else if (thumbnailHashCount < MAX_THUMBNAIL_HASHES_PER_SCAN) {
+              thumbnailHashCount += 1;
+              thumbHash = await fetchThumbnailDhash(thumb, thumbnailHashCache);
+            }
+          }
+          imageIdentityOk = agreementImageIdentityHolds(label.perceptualHash ?? null, thumbHash, AGREEMENT_IDENTITY_DISTANCE);
+          if (!imageIdentityOk) {
+            console.log(`[photo-listing-scanner] ${folder}: agreement hit is a visual LOOK-ALIKE, not our image — dropping ${link} ("${title.slice(0, 50)}")`);
+          }
+        }
+        if (communityOk && !siblingLookalike && imageIdentityOk) strongHits.push({ photoUrl, listingUrl: link, title, source });
         const ok = await verify(link, title, source);
         if (ok) verifiedHits.push({ photoUrl, listingUrl: link, title, source });
       }
