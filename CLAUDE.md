@@ -124,6 +124,21 @@ Before making any changes:
   curated HI market and expect NEW non-seed resorts; queue >12 and watch batches chain; item events
   show "ota-scan-clean". See AGENTS.md "Bulk combo-listing post-save OTA deep-scan gate" + the
   2026-07-06 Decision Log line.
+- 2026-07-06 (find-unit SIDECAR PHOTO RESCUE — "two units still can't find replacements"): Mauna Lani
+  draft-13 re-run failed "13 for-sale listings — 5 OTA-found, 1 too few bedrooms, 7 had TOO FEW
+  PHOTOS"; Pili Mai's earlier re-run dropped 4/9 the same way. The find-unit candidate loop scraped
+  galleries with SCRAPE_WITHOUT_SIDECAR only, so Zillow/Redfin datacenter bot-walls killed
+  otherwise-qualified candidates at the photo floor — the exact class the commit-phase useSidecar fix
+  (PR #929) recovers (9K: 0 direct → 24 via sidecar). SHIPPED: bounded sidecar photo rescue in the
+  candidate loop — under-floor candidates (after the equivalent-source fallback) get ONE
+  scrapeListingPhotosDualSource(SCRAPE_WITH_SIDECAR) retry (110s step timeout), rescued photos/facts
+  feed the unchanged bedroom/floor/vision gates; MAX_SIDECAR_PHOTO_RESCUES=2/pass (env
+  REPLACEMENT_SIDECAR_PHOTO_RESCUES, 0 disables) + 135s budget reserve; continuation passes refresh
+  the rescue budget. NEVER widen the primary scrape to sidecar wholesale (70-120 candidates × 90s
+  wallet vs the 260-285s route budget). Note: draft-13 re-runs now require 4BR (the J201 repoint set
+  unit1Bedrooms=4 — correct; the unit IS 4BR). Source-locked (auto-replace-job 57/0), full npm test
+  exit 0, build clean, check 338 = baseline.
+
 
 - 2026-07-05 (draft rows get the Replace photos button — Waikoloa/Mauna Lani missing-button report):
   Operator screenshot showed flagged DRAFT rows (draft-12-unit-b = Waikoloa Beach Villas Unit B,
