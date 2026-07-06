@@ -282,6 +282,24 @@ export async function ensureRuntimeSchema(): Promise<void> {
   await db.execute(sql`
     ALTER TABLE quo_sms_messages ADD COLUMN IF NOT EXISTS media_urls text
   `);
+  // Boot-time heal for the upsert target (mirrors quo_call_events below).
+  // The Dockerfile CMD runs `db:push` before the server starts, and any
+  // UNIQUE constraint shared/schema.ts doesn't declare gets DROPPED by
+  // drizzle-kit — the inline UNIQUE in the CREATE TABLE above only applies
+  // when the table is first created, so it can't restore it. Without this
+  // index createQuoSmsMessage's onConflictDoUpdate fails on EVERY insert
+  // ("no unique or exclusion constraint...") after the SMS already went out
+  // (the 2026-07-06 "500: Failed to send SMS" incident). Guarded: a unique
+  // index can't be created over pre-existing duplicate rows, and a schema
+  // heal must never brick boot.
+  await db
+    .execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS quo_sms_messages_provider_message_id_idx
+        ON quo_sms_messages (provider_message_id)
+    `)
+    .catch((err: any) =>
+      console.error(`[schema] FAILED to ensure quo_sms_messages provider_message_id unique index (SMS mirror upserts will fail): ${err?.message ?? err}`),
+    );
   await db.execute(sql`
     CREATE INDEX IF NOT EXISTS quo_sms_messages_conversation_sent_at_idx
       ON quo_sms_messages (conversation_id, sent_at DESC)
@@ -384,6 +402,16 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS pre_arrival_form_url text,
       ADD COLUMN IF NOT EXISTS payment_url text
   `);
+  // Same db:push constraint-drop heal as quo_sms_messages above —
+  // upsertGuestPhoneOverride conflicts on conversation_id.
+  await db
+    .execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS guest_phone_overrides_conversation_id_idx
+        ON guest_phone_overrides (conversation_id)
+    `)
+    .catch((err: any) =>
+      console.error(`[schema] FAILED to ensure guest_phone_overrides conversation_id unique index (phone saves will fail): ${err?.message ?? err}`),
+    );
   console.log("[schema] ensured guest_phone_overrides table");
 
   await db.execute(sql`

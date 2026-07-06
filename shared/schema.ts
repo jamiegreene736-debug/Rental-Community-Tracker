@@ -1350,7 +1350,15 @@ export type CancellationNotice = typeof cancellationNotices.$inferSelect;
 // to a Guesty conversation when we can match the guest phone number.
 export const quoSmsMessages = pgTable("quo_sms_messages", {
   id: serial("id").primaryKey(),
-  providerMessageId: text("provider_message_id").notNull(),
+  // NOTE FOR CODEX — .unique() is LOAD-BEARING, don't strip it: the
+  // Dockerfile CMD runs `db:push` on EVERY boot, and drizzle-kit drops any
+  // live UNIQUE constraint the schema doesn't declare. createQuoSmsMessage
+  // upserts with onConflictDoUpdate on this column; without the constraint
+  // every insert fails ("no unique or exclusion constraint matching the ON
+  // CONFLICT specification") AFTER the text was already delivered — the
+  // 2026-07-06 "500: Failed to send SMS" incident. The name matches the
+  // boot-heal index in server/schema-maintenance.ts so push sees no diff.
+  providerMessageId: text("provider_message_id").notNull().unique("quo_sms_messages_provider_message_id_idx"),
   conversationId: text("conversation_id"),
   reservationId: text("reservation_id"),
   guestName: text("guest_name"),
@@ -1379,7 +1387,9 @@ export type QuoSmsMessage = typeof quoSmsMessages.$inferSelect;
 
 export const quoCallEvents = pgTable("quo_call_events", {
   id: serial("id").primaryKey(),
-  providerCallId: text("provider_call_id").notNull(),
+  // .unique() load-bearing for upsertQuoCallEvent's onConflictDoUpdate —
+  // same boot-time db:push constraint-drop hazard as quoSmsMessages above.
+  providerCallId: text("provider_call_id").notNull().unique("quo_call_events_provider_call_id_idx"),
   conversationId: text("conversation_id"),
   reservationId: text("reservation_id"),
   guestName: text("guest_name"),
@@ -1436,7 +1446,9 @@ export type GuestInboxInternalNote = typeof guestInboxInternalNotes.$inferSelect
 
 export const guestPhoneOverrides = pgTable("guest_phone_overrides", {
   id: serial("id").primaryKey(),
-  conversationId: text("conversation_id").notNull(),
+  // .unique() load-bearing for upsertGuestPhoneOverride's onConflictDoUpdate —
+  // same boot-time db:push constraint-drop hazard as quoSmsMessages above.
+  conversationId: text("conversation_id").notNull().unique("guest_phone_overrides_conversation_id_idx"),
   reservationId: text("reservation_id"),
   guestName: text("guest_name"),
   phone: text("phone").notNull(),

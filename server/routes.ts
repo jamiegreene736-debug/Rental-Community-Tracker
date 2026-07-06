@@ -22121,6 +22121,7 @@ Requirements:
       });
       res.json({ ok: true, message });
     } catch (err: any) {
+      console.error(`[quo-sms] manual-reservation send failed for row ${req.params.id}: ${err?.message ?? err}`);
       res.status(500).json({ error: "Failed to send manual reservation SMS", message: err.message });
     }
   });
@@ -48406,6 +48407,9 @@ CONSTRAINTS
       });
       return res.json({ ok: true, message });
     } catch (err: any) {
+      // Without this log line the 2026-07-06 send failures were invisible in
+      // Railway — the client toast only showed the generic error label.
+      console.error(`[quo-sms] send failed for conversation ${req.params.conversationId}: ${err?.message ?? err}`);
       return res.status(500).json({ error: "Failed to send SMS", message: err.message });
     }
   });

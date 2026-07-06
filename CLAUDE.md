@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-06 ("Text failed / 500: Failed to send SMS" — but the guest GOT the text): Operator
+  screenshot of the inbox Send Text button failing. LIVE DIAGNOSIS (Railway GraphQL logs +
+  OpenPhone API + X-Admin-Secret probes): the text to Thien Tran was DELIVERED at 15:48:53Z;
+  the 500 came AFTER the send, from `storage.createQuoSmsMessage` — the Dockerfile CMD runs
+  `db:push` on EVERY boot and drizzle-kit DROPS any UNIQUE constraint `shared/schema.ts`
+  doesn't declare, so `quo_sms_messages.provider_message_id` lost its UNIQUE and every
+  onConflictDoUpdate insert failed ("no unique or exclusion constraint matching the ON
+  CONFLICT specification"). quo_call_events never broke the same way ONLY because it has a
+  separate CREATE UNIQUE INDEX IF NOT EXISTS boot heal. FIXES: `.unique(<boot-heal index
+  name>)` declared in schema.ts for quo_sms_messages.provider_message_id +
+  quo_call_events.provider_call_id + guest_phone_overrides.conversation_id (names match so
+  push sees no diff); matching guarded CREATE UNIQUE INDEX boot heals added to
+  schema-maintenance; `sendQuoSms` no longer bubbles a post-delivery mirror-insert failure
+  as a send failure (logs loudly, returns synthetic row — prevents operator-retry
+  double-texting); both SMS send routes now console.error the real cause; client
+  `throwIfResNotOk` shows "error — message" so toasts carry the underlying reason. OPERATOR
+  TODO: `QUO_WEBHOOK_SECRET` is unset on Railway → inbound Quo webhooks 500 and guest
+  text/MMS replies are NOT mirrored into the inbox; set it + configure the OpenPhone webhook.
+  Verified: full `npm test` exit 0 (repointed one pre-existing drifted #936 source assertion
+  in listing-photo-resolution), build clean, `npm run check` 338 = baseline.
+
 - 2026-07-06 (alias-inbox emails rendering as RAW MIME source — Generali/Thien Tran screenshot):
   Operator screenshot showed an inbound email on the Operations alias-inbox panel rendering as raw
   MIME: the inner boundary line ("------=_Part_1_…"), Content-Type/Content-Transfer-Encoding part
