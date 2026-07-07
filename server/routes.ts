@@ -39797,6 +39797,17 @@ Return ONLY compact JSON with this exact shape:
     return deletedIds;
   }
 
+  // Community drafts the operator has explicitly asked to remove from the
+  // system entirely. The dashboard shows drafts under a cosmetic property id of
+  // 900000 + draftId (see `displayId` in server/assistant/tools.ts and
+  // client/src/pages/home.tsx), so property 900070 = draft id 70 (2026-07-07
+  // request to remove it completely). Removal is code-driven — it runs lazily
+  // whenever the dashboard lists drafts and deletes the community_drafts row via
+  // `storage.deleteCommunityDraft`, which is what makes the property disappear
+  // everywhere drafts are resolved — so the cleanup happens on Railway without
+  // needing live DB credentials. Add a draft id here to permanently retire it.
+  const OPERATOR_REMOVED_DRAFT_IDS = new Set<number>([70]);
+
   // Community drafts that must be removed from the system because they were
   // saved under the wrong state. Property 900039 (draft id 39) is the "Bay
   // Watch" unit the operator added as a Florida community even though Bay Watch
@@ -39812,7 +39823,9 @@ Return ONLY compact JSON with this exact shape:
     for (const draft of drafts as any[]) {
       const draftId = Number(draft.id);
       if (!Number.isFinite(draftId)) continue;
-      const explicitlyRemoved = MISLOCATED_REMOVED_DRAFT_IDS.has(draftId);
+      const explicitlyRemoved =
+        OPERATOR_REMOVED_DRAFT_IDS.has(draftId) ||
+        MISLOCATED_REMOVED_DRAFT_IDS.has(draftId);
       const wrongState =
         isCommunityInWrongState(draft.name, draft.state) ||
         isCommunityInWrongState(draft.listingTitle, draft.state) ||
@@ -39822,7 +39835,7 @@ Return ONLY compact JSON with this exact shape:
       if (deleted) deletedIds.push(draftId);
     }
     if (deletedIds.length > 0) {
-      console.log(`[community-drafts] pruned mis-located community draft(s) during ${reason}: ${deletedIds.join(", ")}`);
+      console.log(`[community-drafts] pruned removed community draft(s) during ${reason}: ${deletedIds.join(", ")}`);
     }
     return deletedIds;
   }
