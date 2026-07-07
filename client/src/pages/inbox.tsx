@@ -45,6 +45,7 @@ import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { bodyWithoutAttachmentUrls, collectPostAttachments, type PostAttachment } from "@shared/guesty-post-attachments";
+import { vendorVisibleEmailAddresses } from "@shared/buy-in-email-display";
 import { guestPartyFromReservation, formatGuestParty } from "@shared/guest-party";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import { usePortalSession } from "@/lib/auth";
@@ -74,6 +75,8 @@ type InboxVendorContactRecord = {
 
 type InboxBuyInCommunications = {
   alias: { aliasEmail: string; mailboxEmail: string; status?: string | null; expiresAt?: string | null } | null;
+  // Per-unit guest aliases (one per buy-in); back-compat `alias` is the reservation-level fallback.
+  aliases?: Array<{ buyInId?: number | null; aliasEmail: string }>;
   buyIns: InboxBuyInRecord[];
   contacts: InboxVendorContactRecord[];
   emails: Array<{
@@ -2257,6 +2260,9 @@ function InboxBuyInPanel({
         {units.map((unit) => {
           const contact = data?.contacts?.find((row) => row.buyInId === unit.id);
           const emails = (data?.emails ?? []).filter((row) => row.buyInId === unit.id);
+          // This unit's own guest alias (reverse alias belongs to it); fall back to
+          // the reservation-level alias for legacy single-alias rows.
+          const unitAliasEmail = data?.aliases?.find((row) => row.buyInId === unit.id)?.aliasEmail ?? data?.alias?.aliasEmail ?? null;
           const editing = editingId === unit.id;
           const composing = composeId === unit.id;
           const draft = emailDrafts[unit.id] ?? buildDefaultVendorEmailDraft(unit, guestName);
@@ -2324,6 +2330,18 @@ function InboxBuyInPanel({
                     <div key={email.id} className="rounded border bg-muted/20 p-2">
                       {(() => {
                         const attachments = parseAliasEmailAttachments(email.attachmentsJson);
+                        // What the PM actually saw: reverse-alias sends show the guest
+                        // alias as sender (SimpleLogin masks the reservations mailbox).
+                        // Resolve THIS email's vendor by matching its recipient to the
+                        // reverse alias (a buy-in can have >1 vendor contact).
+                        const emailContact = data?.contacts?.find(
+                          (c) => c.reverseAliasEmail && c.reverseAliasEmail.toLowerCase() === (email.toEmail ?? "").trim().toLowerCase(),
+                        ) ?? contact;
+                        const seen = vendorVisibleEmailAddresses(email, {
+                          aliasEmail: unitAliasEmail,
+                          vendorEmail: emailContact?.vendorEmail,
+                          reverseAliasEmail: emailContact?.reverseAliasEmail,
+                        });
                         return (
                           <>
                             <div className="flex items-start justify-between gap-2">
@@ -2334,11 +2352,16 @@ function InboxBuyInPanel({
                             </div>
                             <div className="mt-1.5 space-y-0.5 border-b pb-2 text-[10px] text-muted-foreground">
                               <div className="truncate">
-                                <span className="font-medium">From:</span> {email.fromEmail}
+                                <span className="font-medium">From:</span> {seen.from}
                               </div>
                               <div className="truncate">
-                                <span className="font-medium">To:</span> {email.toEmail}
+                                <span className="font-medium">To:</span> {seen.to}
                               </div>
+                              {seen.mailboxFrom && (
+                                <div className="text-[9px] italic opacity-80">
+                                  What the PM sees — masked by SimpleLogin. Routed via {seen.mailboxFrom} → {email.toEmail}.
+                                </div>
+                              )}
                               <div>
                                 {formatEmailTimestampForDisplay(email.sentAt) ?? "—"} · {email.status ?? "saved"}
                               </div>
