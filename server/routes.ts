@@ -354,7 +354,7 @@ import {
   isSimpleLoginAliasExistsError,
   SIMPLELOGIN_MAILBOX_EMAIL,
 } from "./simplelogin";
-import { isPlausiblePropertyAddressForBuyIn, normalizeBuyInEmailAttachments, parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
+import { buyInEmailSendConfigured, isPlausiblePropertyAddressForBuyIn, normalizeBuyInEmailAttachments, parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
 import {
   type OtaVisibilityCandidate,
   otaVisibilitySidecarFailureMessage,
@@ -12800,7 +12800,9 @@ Requirements:
       const simplelogin = await getSimpleLoginStatus();
       res.json({
         ...simplelogin,
-        smtpConfigured: !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS),
+        // True when we can actually send — includes the reservations-mailbox
+        // IMAP-credential fallback, not just the dedicated SMTP_* trio.
+        smtpConfigured: buyInEmailSendConfigured(),
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to check SimpleLogin status", message: err.message });
