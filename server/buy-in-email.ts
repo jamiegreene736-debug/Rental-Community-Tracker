@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { guestInboxImapConfig } from "./guest-inbox-sync";
 
 export type BuyInEmailAttachment = {
   filename: string;
@@ -269,6 +270,62 @@ export function parseArrivalDetailsFromText(
   };
 }
 
+// Derive the SMTP host for a mailbox from its IMAP host — the send + receive
+// legs of one mailbox live on the same provider. `imap.gmail.com` → `smtp.gmail.com`,
+// `imap-mail.outlook.com` → `smtp-mail.outlook.com`, `imap.fastmail.com` →
+// `smtp.fastmail.com`. Returns null when the host doesn't start with an `imap`
+// label (we can't safely guess), so the caller falls back / reports unconfigured.
+export function smtpHostFromImapHost(imapHost: string): string | null {
+  const h = String(imapHost ?? "").trim().toLowerCase();
+  if (!h || !/^imap/.test(h)) return null;
+  return h.replace(/^imap/, "smtp");
+}
+
+export type ResolvedSmtpConfig = {
+  host: string;
+  port: number;
+  user: string;
+  pass: string;
+  secure: boolean;
+  source: "smtp-env" | "reservations-mailbox";
+};
+
+// Resolve outbound SMTP credentials. Prefer the dedicated SMTP_* env vars, but
+// when they're absent fall back to the reservations-mailbox credentials the app
+// already uses to READ alias mail over IMAP (guestInboxImapConfig). The same
+// Gmail app password authenticates both IMAP and SMTP, so the outbound leg works
+// with zero extra config whenever the inbound alias inbox is working — which is
+// exactly the state a live deploy is in (SimpleLogin forwards to the mailbox and
+// we poll it over IMAP). Returns null only when no password exists anywhere or
+// the host can't be resolved (set SMTP_HOST explicitly for a non-`imap.*` host).
+export function resolveBuyInSmtpConfig(): ResolvedSmtpConfig | null {
+  const envHost = (process.env.SMTP_HOST || "").trim();
+  const envUser = (process.env.SMTP_USER || "").trim();
+  const envPass = process.env.SMTP_PASS || "";
+  const envPortRaw = Number(process.env.SMTP_PORT || 0);
+  const envPort = Number.isFinite(envPortRaw) && envPortRaw > 0 ? envPortRaw : null;
+  const secureEnv = String(process.env.SMTP_SECURE || "").toLowerCase() === "true";
+
+  // Full dedicated SMTP config present → use it verbatim (unchanged behavior).
+  if (envHost && envUser && envPass) {
+    const port = envPort ?? 587;
+    return { host: envHost, port, user: envUser, pass: envPass, secure: secureEnv || port === 465, source: "smtp-env" };
+  }
+
+  // Fall back to the reservations-mailbox (IMAP) credentials for any missing piece.
+  const imap = guestInboxImapConfig();
+  const user = envUser || imap.user;
+  const pass = envPass || imap.pass;
+  const host = envHost || smtpHostFromImapHost(imap.host);
+  if (!user || !pass || !host) return null;
+  const port = envPort ?? (secureEnv ? 465 : 587);
+  return { host, port, user, pass, secure: secureEnv || port === 465, source: "reservations-mailbox" };
+}
+
+export function buyInEmailSendConfigured(): boolean {
+  return resolveBuyInSmtpConfig() != null;
+}
+
 export async function sendBuyInEmail(input: {
   from: string;
   to: string;
@@ -276,21 +333,24 @@ export async function sendBuyInEmail(input: {
   body: string;
   attachments?: BuyInEmailAttachment[];
 }): Promise<{ messageId?: string }> {
-  const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT || 587);
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  if (!host || !user || !pass) {
-    throw new Error("SMTP_HOST, SMTP_USER, and SMTP_PASS are required to send buy-in emails");
+  const config = resolveBuyInSmtpConfig();
+  if (!config) {
+    throw new Error(
+      "Email sending is not configured — set SMTP_HOST/SMTP_USER/SMTP_PASS, or the reservations-mailbox IMAP credentials (RESERVATIONS_IMAP_PASSWORD / GMAIL_APP_PASSWORD) used to read the alias inbox",
+    );
   }
   const transporter = nodemailer.createTransport({
-    host,
-    port: Number.isFinite(port) ? port : 587,
-    secure: String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465,
-    auth: { user, pass },
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    auth: { user: config.user, pass: config.pass },
   });
   const result = await transporter.sendMail({
     from: input.from,
+    // Envelope MAIL FROM = the authenticated mailbox, so Gmail accepts the send
+    // even when the visible From header is a send-as address (e.g. SMTP_FROM /
+    // RESERVATIONS_EMAIL). When they're equal, nodemailer adds no Sender: header.
+    sender: config.user,
     to: input.to,
     subject: input.subject,
     text: input.body,
