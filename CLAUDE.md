@@ -43,6 +43,20 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-07 (header Hawaii clock): Operator asked for a simple, nice-looking clock showing Hawaii
+  time + date + weekday locked into the header by the logo, so he always knows the guests' local
+  time. SHIPPED: pure `shared/hawaii-time.ts` (`hawaiiClockParts` — Intl with Pacific/Honolulu +
+  a fixed UTC-10 offset fallback, correct because HST has never observed DST; U+202F meridiem
+  space normalized; 22 tests) + `client/src/components/HawaiiClock.tsx` (leaf component, 1s tick)
+  mounted in AppHeader TWICE: a two-line pill immediately right of the logo (>= sm) and a one-line
+  strip under the header row on phones (the xs row has no spare width — hiding the clock on mobile
+  would defeat its purpose). AppHeader's load-bearing `&fields=` conversations query untouched.
+  Verified: hawaii-time 22/0 (added to the npm test chain), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline; both variants screenshotted against the BUILT bundle via a
+  static `python3 -m http.server` on `dist/public` — do NOT `npm run dev` locally just for a UI
+  check (server/index.ts boots the schedulers/watchdogs, incl. auto-ON guest receipts, against
+  whatever DATABASE_URL the local .env holds).
+
 - 2026-07-06 (bulk-combo drafts NOT showing on the dashboard — every fresh combo silently deleted):
   Operator: "I just added a lot of properties via the queue for the add bulk combo listing and none
   of them are showing on the dashboard." DIAGNOSED live (ADMIN_SECRET API + DATABASE_PUBLIC_URL psql,
