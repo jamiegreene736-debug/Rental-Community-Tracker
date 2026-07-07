@@ -43,6 +43,32 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-06 (bulk-combo drafts NOT showing on the dashboard — every fresh combo silently deleted):
+  Operator: "I just added a lot of properties via the queue for the add bulk combo listing and none
+  of them are showing on the dashboard." DIAGNOSED live (ADMIN_SECRET API + DATABASE_PUBLIC_URL psql,
+  Railway logs too noisy — sidecar-poll flood): today's 3 bulk-combo jobs reported 17 "completed"
+  items but `community_drafts` had ZERO new rows (max id still 46 from Jun 18). Every "completed" item
+  was a SILENT SKIP — `Skipped — photo check: Unit A shows only 0/N bedrooms … Unit B 0/N` — uniformly
+  0/N for EVERY unit even though items carried 30/24 scraped photos + valid Redfin URLs (the 5 `failed`
+  items = genuine "no for-sale listings found" Kona scarcity, separate). ROOT CAUSE: the photo-community
+  GATE (`runBulkComboListingItem`, server/routes.ts) fed `runPhotoCommunityCheck` FOLDER-ONLY groups
+  (no captions/categories), but the bedroom-coverage engine (`server/bedroom-coverage-engine.ts`
+  `matchesBedroomMode`) picks candidate bedroom photos BY caption/category — with none it selected ZERO
+  → `bedroomsFound:0` → `matchesListing:"no"` → the gate rolled back (`deleteCommunityDraft`) every
+  fresh draft. PROVED via a live A/B on published draft 46: folder-only groups → 0/2+0/2 FAIL vs the
+  hydrated `propertyId=-46` path → 2/2+2/2 PASS; the rolled-back combos (draft-47…56) still had proper
+  `photo_labels` with a `Bedrooms` category on disk, confirming labels existed and only the gate
+  discarded them. FIX: the gate now builds groups via `buildPhotoCommunityCheckRequestForProperty(-draftId)`
+  (the SAME photo_labels-hydrated path the pricing-tab check uses) — `persist-photos` already awaits
+  `queueMissingPhotoLabels` + sets `unit1/2PhotoFolder` before the gate, so labels + folders resolve the
+  same `draft-<id>-unit-a/b` folders WITH captions. Bed-TYPE inventory stays ignored (predicate only
+  skips on bedroom COUNT + real community mismatch) so hydration can't reintroduce a bed-type nitpick.
+  REPLACES the 2026-06-26 "folder-only groups" constraint (AGENTS.md combo-gate #3 + Decision Log).
+  Verified: combo-photo-community-gate suite + new source guard green, full `npm test` exit 0, `npm run
+  check` 338 = baseline (0 new), build clean. NOTE: this only un-blocks the FALSE 0/N skips — a resort
+  with genuinely too few bedroom photos, or no for-sale listings to source at all, still legitimately
+  skips/fails.
+
 - 2026-07-06 (cowork buy-in prompt: LOSS-triggered city-wide rollback): Operator — "the cowork prompt
   tries same-community units first; if that only yields LOSS-making results, roll back to a city-wide
   search for two units of that bedroom size in the same community." Confirmed 2 decisions first:

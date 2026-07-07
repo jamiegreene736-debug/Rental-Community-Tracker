@@ -240,4 +240,33 @@ assert.equal(isComboPhotoGateInfraWarning("Unit B verification failed: vision ti
   assert.equal(d.reasons.length, 1);
 }
 
+// ── Source guard: the bulk-combo gate must feed the check HYDRATED groups ─────
+// Regression (root-caused 2026-07-06): the gate ran the photo-community check on
+// FOLDER-ONLY groups (no captions/categories). The bedroom-coverage engine picks
+// candidate bedroom photos by caption/category, so with none it found 0/N
+// bedrooms for EVERY unit and this gate deleted every fresh combo draft — nothing
+// reached the dashboard. The fix builds groups via
+// buildPhotoCommunityCheckRequestForProperty(-draftId) (photo_labels-hydrated),
+// the same path the pricing-tab check uses. Lock the fix + the absence of the old
+// caption-less folder-only unit-group literal inside the gate step.
+{
+  const { readFileSync } = await import("node:fs");
+  const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  const stepIdx = routes.indexOf('"Verifying photo community"');
+  assert.ok(stepIdx > 0, "combo photo-community gate step anchor present");
+  const region = routes.slice(stepIdx, stepIdx + 3000);
+  assert.ok(
+    region.includes("buildPhotoCommunityCheckRequestForProperty(-draftId)"),
+    "gate builds hydrated groups via buildPhotoCommunityCheckRequestForProperty(-draftId)",
+  );
+  assert.ok(
+    region.includes("evaluateComboPhotoCommunityGate("),
+    "gate still evaluates the decision from the check result",
+  );
+  assert.ok(
+    !/folder:\s*`draft-\$\{draftId\}-unit-a`/.test(region),
+    "gate no longer passes a caption-less folder-only Unit A group",
+  );
+}
+
 console.log("combo-photo-community-gate suite passed");
