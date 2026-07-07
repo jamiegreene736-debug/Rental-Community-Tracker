@@ -42,6 +42,7 @@ import { PROPERTY_UNIT_CONFIGS, type UnitConfig } from "@shared/property-units";
 import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
+import { vendorVisibleEmailAddresses } from "@shared/buy-in-email-display";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
@@ -13262,7 +13263,7 @@ function BuyInVendorEmailPanel({
           </div>
           <div className="flex items-center justify-between gap-2">
             <div className="text-[11px] text-muted-foreground">
-              Sends from reservations mailbox to the SimpleLogin reverse alias so the vendor sees the guest alias.
+              The PM sees this from the guest's alias (…@emailprivaccy.com), not your reservations mailbox — SimpleLogin masks it and routes replies back through the alias.
             </div>
             <Button
               size="sm"
@@ -13282,6 +13283,20 @@ function BuyInVendorEmailPanel({
           )}
           {emails.map((email) => {
             const emailAttachments = parseAliasEmailAttachments(email.attachmentsJson);
+            // Show what the PM actually saw: for a reverse-alias send SimpleLogin
+            // rewrites the visible From to the guest alias (…@emailprivaccy.com) and
+            // hides the reservations mailbox. The stored fromEmail/toEmail are only the
+            // raw routing on our leg to SimpleLogin.
+            // Resolve THIS email's vendor by matching its recipient to the reverse
+            // alias (a buy-in can have >1 vendor contact) — never the arbitrary first.
+            const emailContact = data?.contacts?.find(
+              (c) => c.reverseAliasEmail && c.reverseAliasEmail.toLowerCase() === (email.toEmail ?? "").trim().toLowerCase(),
+            ) ?? contact;
+            const seen = vendorVisibleEmailAddresses(email, {
+              aliasEmail: alias?.aliasEmail,
+              vendorEmail: emailContact?.vendorEmail,
+              reverseAliasEmail: emailContact?.reverseAliasEmail,
+            });
             return (
               <div key={email.id} className="rounded-md border bg-background p-3 text-[11px] shadow-sm">
                 <div className="flex items-start justify-between gap-2">
@@ -13292,11 +13307,16 @@ function BuyInVendorEmailPanel({
                 </div>
                 <div className="mt-1.5 space-y-0.5 border-b pb-2 text-[10px] text-muted-foreground">
                   <div className="truncate">
-                    <span className="font-medium">From:</span> {email.fromEmail}
+                    <span className="font-medium">From:</span> {seen.from}
                   </div>
                   <div className="truncate">
-                    <span className="font-medium">To:</span> {email.toEmail}
+                    <span className="font-medium">To:</span> {seen.to}
                   </div>
+                  {seen.mailboxFrom && (
+                    <div className="text-[9px] italic opacity-80">
+                      What the PM sees — masked by SimpleLogin. Routed via {seen.mailboxFrom} → {email.toEmail}.
+                    </div>
+                  )}
                   <div>
                     {formatEmailTimestampForDisplay(email.sentAt) ?? "—"} · {email.status ?? "saved"}
                   </div>
