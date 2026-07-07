@@ -80,7 +80,10 @@ export function inferTypicalComboPair(community: TypicalComboBedroomFields): Typ
       const b1 = availableTypes[i];
       const b2 = availableTypes[j];
       const total = b1 + b2;
-      if (total < 3 || total > 10) continue;
+      // Combo listings are a 4BR-or-higher combination (operator rule
+      // 2026-07-07) — a 3BR pair (e.g. 2BR+1BR) is never a valid combo, so it
+      // must not surface as the typical/headline combo either.
+      if (total < 4 || total > 10) continue;
       const counts = getComboBedroomCounts(community);
       if (b1 === b2 && counts.size > 0 && (counts.get(b1) ?? 0) < 2) continue;
       const fourBrBoost = availableTypes.includes(4) && (b1 === 4 || b2 === 4) ? 2 : 0;
