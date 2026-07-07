@@ -37698,6 +37698,28 @@ Return ONLY compact JSON with this exact shape:
     const effUnit1Beds = Number(item.effectiveUnit1Beds) || pairing.unit1Beds;
     const effUnit2Beds = Number(item.effectiveUnit2Beds) || pairing.unit2Beds;
     const effTotalBeds = effUnit1Beds + effUnit2Beds;
+    // 4BR-minimum floor (operator rule 2026-07-07): a combo listing must be a
+    // 4-bedroom-or-higher combination. The suggested pairing is already gated
+    // >= 4 at generation, but the units we actually SCRAPED can resolve to
+    // fewer bedrooms (a "2BR" that is really 1BR) or a manual-URL combo can
+    // carry genuine 1BR+2BR facts — either collapses effTotalBeds below 4. Skip
+    // the resort cleanly here (BEFORE copy-gen/save and BEFORE dedup-attach)
+    // rather than persist a 3BR combo draft. The legitimate 2+2=4 remix floor
+    // passes (effTotalBeds === 4). Not gated on allowDuplicate — manual mode
+    // must obey the floor too.
+    if (effTotalBeds < 4) {
+      item.phase = "done";
+      item.status = "completed";
+      item.message = `Skipped — a ${effUnit1Beds}BR + ${effUnit2Beds}BR combo is only ${effTotalBeds} combined bedrooms; combos must be at least 4 combined bedrooms`;
+      item.finishedAt = Date.now();
+      job.updatedAt = Date.now();
+      await queueEvent("bulk-combo-listing", job.id, "min-bedrooms-skip", item.message, {
+        itemKey: item.id, level: "info",
+        meta: { effUnit1Beds, effUnit2Beds, effTotalBeds },
+      });
+      await persistBulkComboListingSnapshot(job);
+      return;
+    }
     job.updatedAt = Date.now();
     await persistBulkComboListingSnapshot(job);
     if (item.remixApplied) {
@@ -41730,6 +41752,14 @@ Return ONLY compact JSON with this exact shape:
       throw new Error(singleListing
         ? "unit1Bedrooms is required for single-listing drafts"
         : "unit1Bedrooms and unit2Bedrooms are required for combo drafts");
+    }
+    // 4BR-minimum floor (operator rule 2026-07-07): every combo draft must be a
+    // 4-bedroom-or-higher combination. This is the single save choke point every
+    // creation caller flows through (the bulk-combo runner loopback save AND the
+    // add-community wizard's direct POST /api/community/save), so a 3BR combo
+    // (e.g. 2BR+1BR) can never be persisted. Single-listing drafts are exempt.
+    if (!singleListing && unit1Bedrooms + unit2Bedrooms! < 4) {
+      throw new Error("Combo drafts must have at least 4 combined bedrooms (e.g. 2BR + 2BR)");
     }
     return {
       ...draft,
@@ -47044,7 +47074,11 @@ Return ONLY compact JSON with this exact shape:
         const b1 = typeArr[i], b2 = typeArr[j];
         const total = b1 + b2;
         if (blockFourBedroomCombos && total === 4) continue;
-        if (total < 3 || total > 10) continue;
+        // Combo listings must be a 4-bedroom-or-higher combination (operator
+        // rule 2026-07-07) — never suggest/queue a 3BR combo (e.g. 2BR+1BR).
+        // The 4BR floor here is independent of the Waikiki `total === 4` block
+        // above (which pushes those communities' floor to 5).
+        if (total < 4 || total > 10) continue;
         const r1 = baseRatePerBR[b1] ?? b1 * basePricePerBR;
         const r2 = baseRatePerBR[b2] ?? b2 * basePricePerBR;
         const buyCost = r1 + r2;

@@ -3404,6 +3404,38 @@ assert.equal(
 );
 console.log("  ✓ typical combo labels distinguish 2×same-BR vs mixed-BR pairs");
 
+// 4BR-minimum combo floor (operator rule 2026-07-07): a combo is a 4BR-or-higher
+// combination — a 3BR pair (e.g. 2BR+1BR) is never a valid/typical combo.
+// With a single 2BR unit the only same-total-3 pairing (1BR+2BR) must be
+// rejected rather than surfaced as the headline combo (locks the shared
+// inferTypicalComboPair floor).
+assert.equal(
+  inferTypicalComboPair({ availableBedrooms: [1, 2], estimatedBedroomUnitCounts: { "2": 1 } }),
+  null,
+  "a lone 2BR beside a 1BR must not surface a 3BR (1BR+2BR) combo",
+);
+// Two 2BR units still make a valid 4BR combo (the floor is inclusive of 4).
+assert.deepEqual(
+  inferTypicalComboPair({ availableBedrooms: [1, 2], estimatedBedroomUnitCounts: { "2": 2 } }),
+  { unitBeds: 2, secondUnitBeds: 2, totalBeds: 4 },
+  "two 2BR units make a 4BR combo (4BR floor is inclusive)",
+);
+// Server generator gate (search-units) enforces the same 4BR floor, and the
+// two save/runner choke points reject a resolved <4BR combo.
+assert.ok(
+  routesSource.includes("4-bedroom-or-higher combination"),
+  "search-units pairing generator must enforce the 4BR combo floor",
+);
+assert.ok(
+  routesSource.includes("Combo drafts must have at least 4 combined bedrooms"),
+  "community/save must reject combo drafts below 4 combined bedrooms",
+);
+assert.ok(
+  routesSource.includes("min-bedrooms-skip") && routesSource.includes("effTotalBeds < 4"),
+  "bulk-combo runner must skip a resolved <4BR combo before persisting a draft",
+);
+console.log("  ✓ combo listings enforce a 4BR-minimum combined-bedroom floor");
+
 const sixBrPairing = {
   unit1Beds: 3,
   unit2Beds: 3,
