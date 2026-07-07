@@ -43,6 +43,34 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-07 (bulk-combo STILL deleting every fresh draft — "added Wavecrest 2BR+2BR but nothing on
+  the dashboard"): The EXACT symptom #951 (2026-07-06) claimed to fix, recurring — item "Completed"
+  but message `Skipped — photo check: Unit A (2BR) shows only 0/2 bedrooms … Unit B 0/2`, no draft.
+  DIAGNOSED live (ADMIN_SECRET API, DB URL not reachable this session): job `bcj_mrau4net_skfeia`
+  skipped Wavecrest (34+16 photos → 0/2+0/2) AND Molokai Shores (16+36 → 0/1+0/2); the event log shows
+  `persist` "completed" in 0.8s and the photo-community gate starting 65ms later. ROOT CAUSE — the #951
+  fix was INCOMPLETE: `queueMissingPhotoLabels` is FIRE-AND-FORGET (a `void (async …)()` loop, ~1.4s +
+  a Claude vision call per photo, returns after merely QUEUING), so #951's claim that `persist-photos`
+  "already awaited" it is FALSE. The hydrated `buildPhotoCommunityCheckRequestForProperty(-draftId)`
+  path therefore read an EMPTY `photo_labels` table; the bedroom-coverage engine selects bedroom
+  candidates BY caption/category at EVERY mode (no caption-free fallback), found zero, reported 0/N for
+  every unit, and the gate `deleteCommunityDraft`'d each draft. PROVEN: the rolled-back folders draft-67
+  (Wavecrest) + draft-68 (Molokai Shores) NOW carry full `Bedrooms`-category labels (5/4 and 1/4),
+  written by the background labeler MINUTES after the gate had already deleted them; #951's A/B on draft
+  46 passed only because 46 was already published (labels long since written). FIX (this branch): the
+  gate calls new `waitForFolderPhotoLabels(folder)` (bounded 240s/folder, polls `getPhotoLabelsByFolder`
+  until every on-disk file is labeled), overlapped with the community-photo persist, BEFORE building the
+  request; and passes `bedroomCoverageReliable = allLabelsReady` to `evaluateComboPhotoCommunityGate`
+  (shared/combo-photo-community-gate.ts) so a 0/N from unwritten labels (timeout / no ANTHROPIC key /
+  vision failures) is INFRA → never skips (community + unit-vision legs, which need no labels, still skip
+  on a real mismatch). `"photo-community"` step timeout 6→10 min for headroom (a timeout there is already
+  publish, never skip). Verified: `combo-photo-community-gate` suite green (new tests lock the exact live
+  0/N signature → publish, reliable-true short-count → still skip, + source guards on the wait/flag),
+  full `npm test` exit 0, `npm run check` 338 = baseline (0 new), build clean. Could NOT live-run the
+  queue (booting the server here drives prod schedulers per the note below) — post-deploy, re-queue a
+  previously-skipped Molokai/Kona resort and confirm it saves + appears. Drafts already lost to this bug
+  (folders + labels on disk, DB row deleted) recover by simply re-running the queue for those resorts.
+
 - 2026-07-07 (header Hawaii clock): Operator asked for a simple, nice-looking clock showing Hawaii
   time + date + weekday locked into the header by the logo, so he always knows the guests' local
   time. SHIPPED: pure `shared/hawaii-time.ts` (`hawaiiClockParts` — Intl with Pacific/Honolulu +
