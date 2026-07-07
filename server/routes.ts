@@ -37841,34 +37841,37 @@ Return ONLY compact JSON with this exact shape:
       try {
         gate = await runBulkComboListingStep(job, item, "photo-community", "Verifying photo community", async (): Promise<ComboPhotoGateDecision> => {
           // 1) Persist community photos SYNCHRONOUSLY (normally fire-and-forget) so
-          //    the check can read them, and capture the folder it wrote to. For a
-          //    known resort this is the shared canonical `community-<slug>` folder.
-          let communityFolder: string | null = null;
+          //    the check can read them from disk. For a known resort this writes to
+          //    the shared canonical `community-<slug>` folder — the SAME folder
+          //    buildPhotoCommunityCheckRequestForProperty resolves below.
           try {
-            const persistResp = await fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" });
-            const persistJson: any = await persistResp.json().catch(() => null);
-            if (persistJson && typeof persistJson.folder === "string" && persistJson.folder) {
-              communityFolder = persistJson.folder;
-            }
-          } catch { /* best-effort — derive the canonical folder below */ }
-          if (!communityFolder) {
-            communityFolder = resolveCanonicalCommunityPhotoFolder(community.name) || `community-draft-${draftId}`;
-          }
-          // 2) Run the SAME engine the pricing-tab button uses, in-process. Pass
-          //    FOLDER-ONLY groups (no captions / expectedBedInventory) so no
-          //    bed-label nitpick can leak into the verdict.
+            await fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" });
+          } catch { /* best-effort — the community leg only skips on a POSITIVE mismatch */ }
+          // 2) Run the SAME engine the pricing-tab button uses, in-process — and
+          //    build the groups the SAME way it does, via
+          //    buildPhotoCommunityCheckRequestForProperty, so every unit photo
+          //    carries its photo_labels caption + category.
+          //    LOAD-BEARING (root-caused 2026-07-06): the previous FOLDER-ONLY
+          //    groups had NO captions/categories, and the bedroom-coverage engine
+          //    selects candidate bedroom photos by caption/category — with none it
+          //    selected ZERO photos and reported 0/N bedrooms for EVERY unit, so
+          //    this gate silently skipped (deleted) every fresh combo draft and
+          //    nothing reached the dashboard. persist-photos already awaited
+          //    queueMissingPhotoLabels (captions/categories written) and set the
+          //    draft's unit1/2PhotoFolder before this step, so the hydrated groups
+          //    resolve the SAME `draft-<id>-unit-a/b` folders — now with labels.
+          //    (The 2026-06-26 "no bed-inventory nitpick" posture is unaffected:
+          //    the gate only skips on bedroom COUNT / a real community mismatch,
+          //    never on bed-TYPE inventory — see shared/combo-photo-community-gate.ts.)
           let check: PhotoCommunityCheckResult;
           try {
+            const built = await buildPhotoCommunityCheckRequestForProperty(-draftId);
+            if (!built) {
+              // No published unit photos resolvable yet → infra, publish (fail-open).
+              return { decision: "publish", infra: true, reasons: ["no published unit photos to verify"] };
+            }
             check = await runPhotoCommunityCheck(
-              {
-                expectedCommunity: community.name,
-                expectedListingBedrooms: effTotalBeds,
-                groups: [
-                  { role: "community", label: community.name || "Community", folder: communityFolder },
-                  { role: "unit", label: "Unit A", folder: `draft-${draftId}-unit-a`, expectedBedrooms: effUnit1Beds },
-                  { role: "unit", label: "Unit B", folder: `draft-${draftId}-unit-b`, expectedBedrooms: effUnit2Beds },
-                ],
-              },
+              built.request,
               process.env.ANTHROPIC_API_KEY ?? "",
               Date.now(),
             );
