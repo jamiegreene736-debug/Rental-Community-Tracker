@@ -5,6 +5,7 @@ import { CalendarSearch, Home, ListTodo, LogIn, LogOut, MessageSquare, PhoneMiss
 import { apiRequest } from "@/lib/queryClient";
 import { usePortalSession } from "@/lib/auth";
 import { useInboxUnreadCount } from "@/lib/inboxUnreadStore";
+import HawaiiClock from "@/components/HawaiiClock";
 import {
   countUnreadConversations,
   extractConversationList,
@@ -77,20 +78,26 @@ export default function AppHeader() {
     <header className="sticky top-0 z-50 w-full border-b border-[hsl(var(--brand-blue)/0.12)] bg-[linear-gradient(180deg,hsl(var(--brand-teal)/0.06),hsl(var(--background)))] shadow-sm backdrop-blur">
       <div className="max-w-[1400px] mx-auto px-3 py-2 sm:px-4">
         <div className="flex min-h-12 items-center justify-between gap-2 sm:gap-3">
-          <Link
-            href="/"
-            className="group inline-flex min-w-0 items-center gap-3 rounded-lg border border-[hsl(var(--brand-teal)/0.18)] bg-background/92 px-2 py-2 shadow-sm transition-colors hover:border-[hsl(var(--brand-teal)/0.35)] hover:bg-background sm:px-3"
-            data-testid="link-brand-home"
-          >
-            <span className="flex h-9 w-[132px] max-w-[42vw] items-center sm:w-[180px] sm:max-w-[52vw]">
-              <img
-                src="/brand/vacation-rental-expertz-horizontal-transparent.png"
-                alt="VacationRentalExpertz"
-                className="h-8 w-auto max-w-full object-contain select-none"
-                draggable={false}
-              />
-            </span>
-          </Link>
+          <div className="flex min-w-0 shrink items-center gap-2 sm:gap-3">
+            <Link
+              href="/"
+              className="group inline-flex min-w-0 shrink-0 items-center gap-3 rounded-lg border border-[hsl(var(--brand-teal)/0.18)] bg-background/92 px-2 py-2 shadow-sm transition-colors hover:border-[hsl(var(--brand-teal)/0.35)] hover:bg-background sm:px-3"
+              data-testid="link-brand-home"
+            >
+              <span className="flex h-9 w-[132px] max-w-[42vw] items-center sm:w-[180px] sm:max-w-[52vw]">
+                <img
+                  src="/brand/vacation-rental-expertz-horizontal-transparent.png"
+                  alt="VacationRentalExpertz"
+                  className="h-8 w-auto max-w-full object-contain select-none"
+                  draggable={false}
+                />
+              </span>
+            </Link>
+            {/* Hawaii (HST) clock — pinned right of the logo so the operator
+                always sees the guests' local time (>= sm; phones get the
+                strip under the row instead). */}
+            <HawaiiClock variant="pill" />
+          </div>
 
           <nav className="flex shrink-0 items-center gap-1 sm:gap-2" aria-label="Primary navigation">
             <Link
@@ -193,6 +200,9 @@ export default function AppHeader() {
             )}
           </nav>
         </div>
+        {/* Phone-width fallback for the Hawaii clock (the main row has no
+            spare width below `sm`). */}
+        <HawaiiClock variant="strip" />
       </div>
     </header>
   );
