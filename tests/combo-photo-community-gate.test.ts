@@ -123,6 +123,84 @@ const clean: ComboPhotoGateInput = {
   assert.match(d.reasons[0], /Unit B shows only 1\/3 bedrooms/);
 }
 
+// 6a-i. bedroomCoverageReliable=false suppresses a SHORT-count skip → publish.
+//   Root cause 2026-07-07: the unit photos' labels are written asynchronously, so
+//   the bedroom engine reads 0/N before they land. The caller sets this false until
+//   it has waited for labeling, so a 0/N caused by unwritten labels never deletes a
+//   draft. Same input as test 6 (a genuine 1/3), but unreliable → do not skip.
+{
+  const d = evaluateComboPhotoCommunityGate({
+    ...clean,
+    bedroomCoverageReliable: false,
+    bedroomCoverage: {
+      tier: "fail",
+      units: [
+        { label: "Unit A", matchesListing: "yes", bedroomsFound: 3, expectedBedrooms: 3 },
+        { label: "Unit B", matchesListing: "no", bedroomsFound: 1, expectedBedrooms: 3 },
+      ],
+    },
+  });
+  assert.equal(d.decision, "publish");
+  assert.deepEqual(d.reasons, []);
+}
+
+// 6a-ii. The EXACT live failure signature — every unit 0/N with unreliable labels
+//   → publish (this is what deleted Wavecrest 2BR+2BR / Molokai Shores 1BR+2BR).
+{
+  const d = evaluateComboPhotoCommunityGate({
+    ...clean,
+    bedroomCoverageReliable: false,
+    bedroomCoverage: {
+      tier: "fail",
+      units: [
+        { label: "Unit A (2BR)", matchesListing: "no", bedroomsFound: 0, expectedBedrooms: 2 },
+        { label: "Unit B (2BR)", matchesListing: "no", bedroomsFound: 0, expectedBedrooms: 2 },
+      ],
+    },
+  });
+  assert.equal(d.decision, "publish");
+  assert.deepEqual(d.reasons, []);
+}
+
+// 6a-iii. bedroomCoverageReliable=true (labels ready) keeps the real short-count
+//   skip — the gate still catches a 1BR sourced for a 3BR slot once labels exist.
+{
+  const d = evaluateComboPhotoCommunityGate({
+    ...clean,
+    bedroomCoverageReliable: true,
+    bedroomCoverage: {
+      tier: "fail",
+      units: [
+        { label: "Unit A", matchesListing: "yes", bedroomsFound: 3, expectedBedrooms: 3 },
+        { label: "Unit B", matchesListing: "no", bedroomsFound: 1, expectedBedrooms: 3 },
+      ],
+    },
+  });
+  assert.equal(d.decision, "skip");
+  assert.match(d.reasons[0], /Unit B shows only 1\/3 bedrooms/);
+}
+
+// 6a-iv. bedroomCoverageReliable=false must NOT mask a REAL community mismatch —
+//   the community + unit-vision legs read the images directly (no labels needed),
+//   so they still skip even when bedroom coverage is untrusted.
+{
+  const d = evaluateComboPhotoCommunityGate({
+    ...clean,
+    bedroomCoverageReliable: false,
+    community: { matchesExpected: "no", overallStatus: "mismatch", identifiedCommunity: "Poipu Sands" },
+    bedroomCoverage: {
+      tier: "fail",
+      units: [
+        { label: "Unit A", matchesListing: "no", bedroomsFound: 0, expectedBedrooms: 2 },
+        { label: "Unit B", matchesListing: "no", bedroomsFound: 0, expectedBedrooms: 2 },
+      ],
+    },
+  });
+  assert.equal(d.decision, "skip");
+  assert.equal(d.reasons.length, 1);
+  assert.match(d.reasons[0], /Poipu Sands/);
+}
+
 // 6b. Bedroom coverage "n/a" (unknown expected) → publish (can't confirm count).
 {
   const d = evaluateComboPhotoCommunityGate({
@@ -254,7 +332,7 @@ assert.equal(isComboPhotoGateInfraWarning("Unit B verification failed: vision ti
   const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
   const stepIdx = routes.indexOf('"Verifying photo community"');
   assert.ok(stepIdx > 0, "combo photo-community gate step anchor present");
-  const region = routes.slice(stepIdx, stepIdx + 3000);
+  const region = routes.slice(stepIdx, stepIdx + 6000);
   assert.ok(
     region.includes("buildPhotoCommunityCheckRequestForProperty(-draftId)"),
     "gate builds hydrated groups via buildPhotoCommunityCheckRequestForProperty(-draftId)",
@@ -266,6 +344,38 @@ assert.equal(isComboPhotoGateInfraWarning("Unit B verification failed: vision ti
   assert.ok(
     !/folder:\s*`draft-\$\{draftId\}-unit-a`/.test(region),
     "gate no longer passes a caption-less folder-only Unit A group",
+  );
+  // Root-caused 2026-07-07: hydrated groups are not enough — the async auto-labeler
+  // hadn't WRITTEN the photo_labels when the gate ran (~65ms after persist), so the
+  // hydrated groups still carried no captions/categories → 0/N → every fresh draft
+  // deleted. The gate must WAIT for labeling and pass the reliability flag through.
+  assert.ok(
+    region.includes("waitForFolderPhotoLabels("),
+    "gate waits for the async auto-labeler before building the check groups",
+  );
+  assert.ok(
+    /bedroomCoverageReliable:\s*allLabelsReady/.test(region),
+    "gate passes bedroomCoverageReliable so an unlabeled 0/N cannot skip",
+  );
+}
+
+// Source guard: waitForFolderPhotoLabels must exist and be driven by the async
+// (fire-and-forget) queueMissingPhotoLabels — the whole reason the wait is needed.
+{
+  const { readFileSync } = await import("node:fs");
+  const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  assert.ok(
+    routes.includes("const waitForFolderPhotoLabels = async"),
+    "waitForFolderPhotoLabels helper present",
+  );
+  const qIdx = routes.indexOf("const queueMissingPhotoLabels = async");
+  assert.ok(qIdx > 0, "queueMissingPhotoLabels present");
+  const qRegion = routes.slice(qIdx, qIdx + 2600);
+  // It returns immediately after kicking a background `void (async () => …)()` loop
+  // — i.e. it does NOT await the labeling. This is exactly why the gate must wait.
+  assert.ok(
+    /void \(async \(\) =>/.test(qRegion),
+    "queueMissingPhotoLabels labels in a fire-and-forget background loop",
   );
 }
 

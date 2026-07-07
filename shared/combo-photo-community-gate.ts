@@ -72,6 +72,20 @@ export type ComboPhotoGateInput = {
   community: ComboPhotoGateCommunity;
   units: ComboPhotoGateUnit[];
   bedroomCoverage: ComboPhotoGateBedroomCoverage;
+  /**
+   * Whether the bedroom-coverage result can be trusted for a SKIP. The coverage
+   * engine selects candidate bedroom photos BY caption/category from photo_labels,
+   * which the bulk-combo caller writes ASYNCHRONOUSLY after a fresh draft's photos
+   * are persisted. Before those labels land, EVERY unit reports 0/N bedrooms — an
+   * infra/timing artifact, NOT a positive short-count. The caller passes `false`
+   * until it has waited for labeling to finish; a `false` value suppresses the
+   * bedroom-count skip (the community + unit checks above, which read the images
+   * directly and need no labels, still apply). Undefined defaults to reliable so
+   * the pricing-tab path and existing tests are unaffected. Root-caused 2026-07-07:
+   * the queue silently deleted every fresh combo draft on a uniform 0/N produced by
+   * labels that had not been written when the gate ran.
+   */
+  bedroomCoverageReliable?: boolean;
 };
 
 export type ComboPhotoGateDecision = {
@@ -150,9 +164,12 @@ export function evaluateComboPhotoCommunityGate(input: ComboPhotoGateInput): Com
 
   // (d) Each unit covers its bedroom count with bedroom photos. matchesListing
   // "no" fires exactly when bedroomsFound < expectedBedrooms (bed-TYPE inventory
-  // does not affect this), so a 1BR sourced for a 3BR slot is caught here.
+  // does not affect this), so a 1BR sourced for a 3BR slot is caught here. This
+  // skip is trustworthy ONLY when the unit photos were actually labeled — with
+  // `bedroomCoverageReliable === false` (labels not yet written) a 0/N is an infra
+  // artifact and must not skip (see the field's doc + the 2026-07-07 root cause).
   const bc = input.bedroomCoverage;
-  if (bc) {
+  if (bc && input.bedroomCoverageReliable !== false) {
     for (const u of bc.units ?? []) {
       if (u.matchesListing === "no") {
         const want = u.expectedBedrooms ?? "?";

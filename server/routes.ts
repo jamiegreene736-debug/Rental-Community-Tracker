@@ -30981,6 +30981,66 @@ Return ONLY compact JSON with this exact shape:
     return { queued: true, missing: missing.length, total: files.length };
   };
 
+  // Bounded wait for a folder's photo labels to finish writing.
+  //
+  // queueMissingPhotoLabels above kicks a FIRE-AND-FORGET background pass (~1.4s +
+  // a Claude vision call per photo) and returns immediately after merely queuing.
+  // A caller that needs the labels PRESENT — the bulk-combo photo-community gate,
+  // whose bedroom-coverage engine selects candidate bedroom photos BY caption /
+  // category — must therefore WAIT for that pass, or it reads an empty photo_labels
+  // table and reports 0/N bedrooms for every unit. Root-caused 2026-07-07: the bulk
+  // combo queue silently deleted every fresh draft because the gate ran ~65ms after
+  // persist, before ANY label was written (proven on drafts 67/68: their folders
+  // carried full Bedrooms-category labels minutes later, but 0/N at gate time).
+  //
+  // Returns `complete: true` once every on-disk file has a label row. On timeout /
+  // missing ANTHROPIC key / vision failures it returns `complete: false` with the
+  // partial count — the caller then treats bedroom coverage as INCONCLUSIVE and
+  // PUBLISHES (never skips), matching the gate's fail-open posture.
+  const waitForFolderPhotoLabels = async (
+    folder: string,
+    opts: { timeoutMs?: number; pollMs?: number } = {},
+  ): Promise<{ complete: boolean; labeled: number; total: number; reason?: string }> => {
+    const { timeoutMs = 240_000, pollMs = 2500 } = opts;
+    if (!folder || !/^[\w-]+$/.test(folder)) {
+      return { complete: false, labeled: 0, total: 0, reason: "invalid folder" };
+    }
+    const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+    const stat = await fs.promises.stat(folderPath).catch(() => null);
+    if (!stat?.isDirectory()) {
+      return { complete: false, labeled: 0, total: 0, reason: "folder not found" };
+    }
+    const files = await listPhotoFiles(folderPath);
+    if (files.length === 0) {
+      return { complete: false, labeled: 0, total: 0, reason: "no files" };
+    }
+    // Ensure a labeling pass is running (idempotent: a no-op if one is already
+    // active or every file is already labeled). No ANTHROPIC key → nothing to wait
+    // for, so don't spin — return immediately as not-complete.
+    const kicked = await queueMissingPhotoLabels(folder, "combo-gate-wait").catch(() => null);
+    if (kicked?.skippedReason === "ANTHROPIC_API_KEY not configured") {
+      return { complete: false, labeled: 0, total: files.length, reason: "no ANTHROPIC key" };
+    }
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const labels = await storage.getPhotoLabelsByFolder(folder);
+      const labeledNames = new Set(labels.map((l) => l.filename));
+      const missing = files.filter((f) => !labeledNames.has(f));
+      if (missing.length === 0) {
+        return { complete: true, labeled: files.length, total: files.length };
+      }
+      // The background pass ended (its finally-block cleared the folder from the job
+      // set) but some files stayed unlabeled — vision failures. Waiting won't help.
+      if (!autoLabelFolderJobs.has(folder)) {
+        return { complete: false, labeled: files.length - missing.length, total: files.length, reason: "labeling ended with unlabeled files" };
+      }
+      if (Date.now() >= deadline) {
+        return { complete: false, labeled: files.length - missing.length, total: files.length, reason: "timeout" };
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+  };
+
   // Returns the Claude-vision-generated captions for a given folder plus
   // any human overrides (userLabel / userCategory / hidden). The curation
   // UI needs BOTH sets so it can show the model's output and let the user
@@ -37045,10 +37105,13 @@ Return ONLY compact JSON with this exact shape:
     copy: 120_000,
     save: 120_000,
     persist: 120_000,
-    // Lens on <=50 community photos + Claude vision on <=60 photos/unit (batched).
-    // Generous headroom; a real timeout here is treated as INFRA (publish), never
-    // a resort skip (see the gate block in runBulkComboListingItem).
-    "photo-community": 6 * 60 * 1000,
+    // Waits (bounded 240s/folder) for the async auto-labeler to finish so the
+    // bedroom engine has captions/categories (root cause 2026-07-07), overlapped
+    // with the community-photo persist, THEN Lens on <=50 community photos + Claude
+    // vision on <=60 photos/unit (batched). Generous headroom so the label wait +
+    // check fit; a real timeout here is treated as INFRA (publish), never a resort
+    // skip (see the gate block in runBulkComboListingItem).
+    "photo-community": 10 * 60 * 1000,
     // Deep Lens scan (full deduped gallery + address leg) of BOTH fresh draft
     // unit folders. ~30 Lens calls + ~6 SERPs per folder; a timeout is INFRA
     // (publish), never a resort skip.
@@ -37842,29 +37905,56 @@ Return ONLY compact JSON with this exact shape:
       let gate: ComboPhotoGateDecision | null = null;
       try {
         gate = await runBulkComboListingStep(job, item, "photo-community", "Verifying photo community", async (): Promise<ComboPhotoGateDecision> => {
-          // 1) Persist community photos SYNCHRONOUSLY (normally fire-and-forget) so
-          //    the check can read them from disk. For a known resort this writes to
-          //    the shared canonical `community-<slug>` folder — the SAME folder
-          //    buildPhotoCommunityCheckRequestForProperty resolves below.
-          try {
-            await fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" });
-          } catch { /* best-effort — the community leg only skips on a POSITIVE mismatch */ }
-          // 2) Run the SAME engine the pricing-tab button uses, in-process — and
-          //    build the groups the SAME way it does, via
-          //    buildPhotoCommunityCheckRequestForProperty, so every unit photo
-          //    carries its photo_labels caption + category.
-          //    LOAD-BEARING (root-caused 2026-07-06): the previous FOLDER-ONLY
-          //    groups had NO captions/categories, and the bedroom-coverage engine
-          //    selects candidate bedroom photos by caption/category — with none it
-          //    selected ZERO photos and reported 0/N bedrooms for EVERY unit, so
-          //    this gate silently skipped (deleted) every fresh combo draft and
-          //    nothing reached the dashboard. persist-photos already awaited
-          //    queueMissingPhotoLabels (captions/categories written) and set the
-          //    draft's unit1/2PhotoFolder before this step, so the hydrated groups
-          //    resolve the SAME `draft-<id>-unit-a/b` folders — now with labels.
-          //    (The 2026-06-26 "no bed-inventory nitpick" posture is unaffected:
-          //    the gate only skips on bedroom COUNT / a real community mismatch,
-          //    never on bed-TYPE inventory — see shared/combo-photo-community-gate.ts.)
+          // Resolve the just-persisted unit folders so we can wait for their labels.
+          const gateDraft = await storage.getCommunityDraft(draftId);
+          const unitFolders = [gateDraft?.unit1PhotoFolder, gateDraft?.unit2PhotoFolder]
+            .filter((f): f is string => typeof f === "string" && f.trim().length > 0);
+          // 1) Run the community-photo persist AND wait for unit-photo LABELS
+          //    CONCURRENTLY:
+          //    • persist-community-photos writes the shared canonical
+          //      `community-<slug>` folder buildPhotoCommunityCheckRequestForProperty
+          //      reads for the community-match leg (normally fire-and-forget; awaited
+          //      here so the check can read it from disk).
+          //    • waitForFolderPhotoLabels BLOCKS until the async auto-labeler has
+          //      written a caption + category for every unit photo.
+          //    LOAD-BEARING (root-caused 2026-07-07): persist-photos kicks labeling
+          //    FIRE-AND-FORGET (queueMissingPhotoLabels returns after merely queuing),
+          //    so this gate used to run ~65ms later against an EMPTY photo_labels
+          //    table. The bedroom-coverage engine selects candidate bedroom photos BY
+          //    caption/category, so with no labels it found ZERO, reported 0/N
+          //    bedrooms for EVERY unit, and this gate deleted every fresh combo draft
+          //    — nothing reached the dashboard (proven on drafts 67/68, which carried
+          //    full Bedrooms-category labels minutes AFTER the gate had already
+          //    rolled them back). Overlapping the two keeps the added latency ≈ the
+          //    labeling time, not labeling + community persist. This SUPERSEDES the
+          //    2026-07-06 note's false premise that persist-photos "already awaited"
+          //    queueMissingPhotoLabels (it awaited only the enqueue).
+          const [, labelResults] = await Promise.all([
+            fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" })
+              .catch(() => null),
+            Promise.all(unitFolders.map((f) =>
+              waitForFolderPhotoLabels(f, { timeoutMs: 240_000 })
+                .catch(() => ({ complete: false, labeled: 0, total: 0, reason: "wait threw" })))),
+          ]);
+          // The bedroom-count SKIP is trustworthy ONLY when EVERY unit's labels are in.
+          // If any unit's labeling did not finish (timeout / no key / vision failures)
+          // a 0/N is an INFRA artifact — pass bedroomCoverageReliable=false so the gate
+          // never skips on it (the community + unit-vision legs, which read the images
+          // directly and need no labels, still run and can skip on a real mismatch).
+          const allLabelsReady = unitFolders.length > 0 && labelResults.every((r) => r.complete);
+          if (!allLabelsReady) {
+            const detail = labelResults
+              .map((r, i) => `${unitFolders[i] ?? `unit${i}`}: ${r.labeled}/${r.total}${r.reason ? ` (${r.reason})` : ""}`)
+              .join("; ");
+            console.warn(`[bulk-combo-listings] draft ${draftId}: unit photo labels not fully ready before gate — bedroom-count skip suppressed [${detail || "no unit folders"}]`);
+          }
+          // 2) Run the SAME engine the pricing-tab button uses, in-process — building
+          //    the groups the SAME way (buildPhotoCommunityCheckRequestForProperty),
+          //    so every unit photo carries its photo_labels caption + category, now
+          //    guaranteed present by the wait above. (The 2026-06-26 "no bed-inventory
+          //    nitpick" posture is unaffected: the gate only skips on bedroom COUNT /
+          //    a real community mismatch, never bed-TYPE — see
+          //    shared/combo-photo-community-gate.ts.)
           let check: PhotoCommunityCheckResult;
           try {
             const built = await buildPhotoCommunityCheckRequestForProperty(-draftId);
@@ -37887,6 +37977,7 @@ Return ONLY compact JSON with this exact shape:
             community: check.community,
             units: check.units,
             bedroomCoverage: check.bedroomCoverage,
+            bedroomCoverageReliable: allLabelsReady,
           });
         });
       } catch (e: any) {
