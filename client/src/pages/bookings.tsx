@@ -13102,7 +13102,11 @@ function BuyInVendorEmailPanel({
   // Per-unit alias: this unit's own alias (legacy reservation-level rows are
   // backfilled to the earliest buy-in by schema-maintenance, so this matches).
   const alias = data?.aliases?.find((row) => row.buyInId === buyIn.id) ?? null;
-  const emails = (data?.emails ?? []).filter((row) => row.buyInId === buyIn.id).slice(0, 3);
+  // Show EVERY inbound + outbound email for this unit — the server already
+  // returns the full history (ordered newest-first, capped at 100). A prior
+  // `.slice(0, 3)` here hid the rest and made the "(N)" count lie (see the
+  // matching uncapped list in inbox.tsx).
+  const emails = (data?.emails ?? []).filter((row) => row.buyInId === buyIn.id);
 
   const createAlias = useMutation({
     mutationFn: () => apiRequest("POST", `/api/bookings/${reservation._id}/simplelogin/alias`, { guestName, buyInId: buyIn.id }).then((r) => r.json()),
