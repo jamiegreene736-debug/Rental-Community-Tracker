@@ -2,7 +2,7 @@
 //
 // Operator ask (2026-07-04): raise a red-flag alert — same visual language as
 // the failed-payment popup — whenever a reservation checks in within the next
-// 7 days and the units required to host it have NOT all been purchased
+// 15 days (widened from 7 on 2026-07-07) and the units required to host it have NOT all been purchased
 // (bought in) yet. A guest arriving with no physical unit behind the listing
 // is the most expensive failure in this business, worse than a declined card.
 //
@@ -17,7 +17,7 @@
 // (slot.buyIn from enrichGuestyReservationForOperations). A cancelled buy-in
 // does NOT count as coverage — the unit was un-bought.
 
-export const BUYIN_COVERAGE_WINDOW_DAYS = 7;
+export const BUYIN_COVERAGE_WINDOW_DAYS = 15;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 

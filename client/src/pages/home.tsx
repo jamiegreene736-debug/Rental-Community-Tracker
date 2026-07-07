@@ -5452,7 +5452,7 @@ function AdminDashboard() {
               <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 <span className="font-medium">
-                  {buyInCoverageWarnings.length} booking{buyInCoverageWarnings.length === 1 ? " checks" : "s check"} in within 7 days with units NOT purchased
+                  {buyInCoverageWarnings.length} booking{buyInCoverageWarnings.length === 1 ? " checks" : "s check"} in within {buyInCoverageData?.windowDays ?? 15} days with units NOT purchased
                 </span>
               </div>
               <Button
@@ -6593,14 +6593,14 @@ function AdminDashboard() {
               <AlertTriangle className="h-4 w-4" /> Units not purchased for upcoming stays
             </DialogTitle>
             <DialogDescription>
-              These bookings check in within the next {buyInCoverageData?.windowDays ?? 7} days but the unit
+              These bookings check in within the next {buyInCoverageData?.windowDays ?? 15} days but the unit
               {buyInCoverageWarnings.length === 1 && buyInCoverageWarnings[0]?.missingUnits.length === 1 ? " has" : "s have"} not
               been bought in yet. Find and attach the missing units on the Bookings page. Cancelled bookings are excluded.
             </DialogDescription>
           </DialogHeader>
           {buyInCoverageWarnings.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              Every booking checking in within the next {buyInCoverageData?.windowDays ?? 7} days has all its units purchased.
+              Every booking checking in within the next {buyInCoverageData?.windowDays ?? 15} days has all its units purchased.
             </p>
           ) : (
             <div className="max-h-96 space-y-1.5 overflow-y-auto">
