@@ -1,6 +1,7 @@
 // Missing buy-in warning for imminent check-ins — pure-logic tests.
-// Operator rules (2026-07-04): red-flag any reservation checking in within the
-// next 7 days whose required units have NOT all been purchased (buy-ins
+// Operator rules (2026-07-04, window widened to 15 days on 2026-07-07): red-flag
+// any reservation checking in within the next 15 days whose required units have
+// NOT all been purchased (buy-ins
 // attached); include stays already in-house; never warn on cancelled bookings
 // or reservations with no configured unit slots.
 import {
@@ -62,12 +63,12 @@ console.log("buyin-coverage-warning: window + urgency");
   check("check-in 3 days out is in window", checkInWithinBuyInWarningWindow(reservation(), NOW));
   check("check-in today (0 days) is in window", checkInWithinBuyInWarningWindow(reservation({ checkInDays: 0 }), NOW));
   check(
-    "check-in exactly 7 days out is in window (inclusive)",
-    checkInWithinBuyInWarningWindow(reservation({ checkInDays: 7 }), NOW),
+    "check-in exactly 15 days out is in window (inclusive)",
+    checkInWithinBuyInWarningWindow(reservation({ checkInDays: 15, checkOutDays: 20 }), NOW),
   );
   check(
-    "check-in 8 days out is OUT of window",
-    !checkInWithinBuyInWarningWindow(reservation({ checkInDays: 8 }), NOW),
+    "check-in 16 days out is OUT of window",
+    !checkInWithinBuyInWarningWindow(reservation({ checkInDays: 16, checkOutDays: 21 }), NOW),
   );
   check(
     "in-house stay (checked in 2 days ago, out in 4) is in window",
@@ -84,7 +85,7 @@ console.log("buyin-coverage-warning: window + urgency");
     "full ISO checkIn falls back when localized missing",
     daysUntilCheckIn({ checkIn: new Date(NOW + 2 * 86400000).toISOString() }, NOW) === 2,
   );
-  check("window constant is 7 days", BUYIN_COVERAGE_WINDOW_DAYS === 7);
+  check("window constant is 15 days", BUYIN_COVERAGE_WINDOW_DAYS === 15);
 }
 
 console.log("buyin-coverage-warning: slot coverage");
