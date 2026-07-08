@@ -25,6 +25,8 @@ import {
   type QuoSmsMessage, type InsertQuoSmsMessage,
   type QuoCallEvent, type InsertQuoCallEvent,
   type GuestInboxInternalNote, type InsertGuestInboxInternalNote,
+  type GuestIssue, type InsertGuestIssue,
+  type GuestIssueComment,
   type GuestPhoneOverride, type InsertGuestPhoneOverride,
   type PhotoLabel, type InsertPhotoLabel,
   type PhotoListingCheck, type InsertPhotoListingCheck,
@@ -36,7 +38,7 @@ import {
   type ScannerOverride, type InsertScannerOverride,
   type ScannerSchedule, type InsertScannerSchedule,
   type ScannerRunHistory, type InsertScannerRunHistory,
-  users, buyIns, guestInboxMessages, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, builderBookingRules, messageTemplates, autoReplyLog, autoReplyStyleExamples, appSettings, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, sourceabilityObservations, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
+  users, buyIns, guestInboxMessages, reservationCancellationAudits, manualReservations, lodgifyBookings, scannerRuns, availabilityScans, communityDrafts, lodgifyPropertyMap, unitSwaps, guestyPropertyMap, builderBookingRules, messageTemplates, autoReplyLog, autoReplyStyleExamples, appSettings, bookingConfirmations, quoSmsMessages, quoCallEvents, guestInboxInternalNotes, guestIssues, guestIssueComments, guestPhoneOverrides, photoLabels, photoListingChecks, photoListingAlerts, photoSync, photoSyncAudit, scannerBlocks, sourceabilityObservations, scannerOverrides, scannerSchedule, scannerRunHistory, propertyMarketRates, pricingUpdateLogs,
   type PropertyMarketRate, type InsertPropertyMarketRate,
   type PricingUpdateLog, type InsertPricingUpdateLog,
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
@@ -122,6 +124,27 @@ function identitySetsOverlap(a: Set<string>, b: Set<string>): boolean {
   }
   return false;
 }
+
+// Partial update for a guest issue. `resolvedAt` / `lastCommentAt` accept null so
+// a reopen can clear the resolved stamp; a field left `undefined` is untouched.
+export type GuestIssuePatch = {
+  status?: string;
+  resolvedAt?: Date | null;
+  lastCommentAt?: Date | null;
+  title?: string;
+  description?: string | null;
+  severity?: string;
+};
+
+// The fields a comment carries; issueId + conversationId are resolved atomically
+// inside commentOnGuestIssue against the locked parent issue.
+export type GuestIssueCommentInput = {
+  body: string;
+  statusChange: string | null;
+  authorName: string;
+  authorRole: string;
+  source: string;
+};
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -338,6 +361,16 @@ export interface IStorage {
   acknowledgeQuoCallEventsByConversation(conversationId: string): Promise<number>;
   createGuestInboxInternalNote(input: InsertGuestInboxInternalNote): Promise<GuestInboxInternalNote>;
   getGuestInboxInternalNotes(conversationId: string, limit?: number): Promise<GuestInboxInternalNote[]>;
+  createGuestIssue(input: InsertGuestIssue): Promise<GuestIssue>;
+  getGuestIssuesByConversation(conversationId: string, limit?: number): Promise<GuestIssue[]>;
+  getGuestIssueCommentsForIssues(issueIds: number[]): Promise<GuestIssueComment[]>;
+  listGuestIssues(opts?: { status?: string; limit?: number }): Promise<GuestIssue[]>;
+  commentOnGuestIssue(
+    issueId: number,
+    comment: GuestIssueCommentInput,
+    issuePatch: GuestIssuePatch,
+  ): Promise<{ issue: GuestIssue; comment: GuestIssueComment } | null>;
+  deleteGuestIssue(id: number): Promise<boolean>;
   upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride>;
   getGuestPhoneOverride(conversationId: string): Promise<GuestPhoneOverride | undefined>;
   getGuestPhoneOverrideByPhone(phone: string): Promise<GuestPhoneOverride | undefined>;
@@ -1711,6 +1744,84 @@ export class DatabaseStorage implements IStorage {
       .where(eq(guestInboxInternalNotes.conversationId, conversationId))
       .orderBy(desc(guestInboxInternalNotes.createdAt))
       .limit(limit);
+  }
+
+  async createGuestIssue(input: InsertGuestIssue): Promise<GuestIssue> {
+    const [row] = await db.insert(guestIssues).values(input).returning();
+    return row;
+  }
+
+  async getGuestIssuesByConversation(conversationId: string, limit = 50): Promise<GuestIssue[]> {
+    return db.select()
+      .from(guestIssues)
+      .where(eq(guestIssues.conversationId, conversationId))
+      .orderBy(desc(guestIssues.createdAt))
+      .limit(limit);
+  }
+
+  async getGuestIssueCommentsForIssues(issueIds: number[]): Promise<GuestIssueComment[]> {
+    if (issueIds.length === 0) return [];
+    return db.select()
+      .from(guestIssueComments)
+      .where(inArray(guestIssueComments.issueId, issueIds))
+      .orderBy(guestIssueComments.createdAt);
+  }
+
+  async listGuestIssues(opts: { status?: string; limit?: number } = {}): Promise<GuestIssue[]> {
+    const limit = Math.min(500, Math.max(1, opts.limit ?? 100));
+    // "unresolved" = open OR ongoing; a concrete status filters exactly; else all.
+    const where =
+      opts.status === "unresolved"
+        ? ne(guestIssues.status, "resolved")
+        : opts.status && opts.status !== "all"
+          ? eq(guestIssues.status, opts.status)
+          : undefined;
+    const base = db.select().from(guestIssues);
+    const filtered = where ? base.where(where) : base;
+    return filtered.orderBy(desc(guestIssues.updatedAt)).limit(limit);
+  }
+
+  // Atomic: locks the parent issue, appends the comment, and applies the status
+  // patch in ONE transaction — so a concurrent delete can't orphan a comment and
+  // a failed status update can't leave a comment claiming a change that never
+  // landed. Returns null (rolled back) when the issue no longer exists.
+  async commentOnGuestIssue(
+    issueId: number,
+    comment: GuestIssueCommentInput,
+    issuePatch: GuestIssuePatch,
+  ): Promise<{ issue: GuestIssue; comment: GuestIssueComment } | null> {
+    return db.transaction(async (tx) => {
+      const [issue] = await tx
+        .select()
+        .from(guestIssues)
+        .where(eq(guestIssues.id, issueId))
+        .limit(1)
+        .for("update");
+      if (!issue) return null;
+      const [row] = await tx.insert(guestIssueComments).values({
+        issueId,
+        conversationId: issue.conversationId,
+        body: comment.body,
+        statusChange: comment.statusChange,
+        authorName: comment.authorName,
+        authorRole: comment.authorRole,
+        source: comment.source,
+      }).returning();
+      const set: Record<string, unknown> = { updatedAt: new Date() };
+      if (issuePatch.status !== undefined) set.status = issuePatch.status;
+      if ("resolvedAt" in issuePatch) set.resolvedAt = issuePatch.resolvedAt;
+      if ("lastCommentAt" in issuePatch) set.lastCommentAt = issuePatch.lastCommentAt;
+      const [updated] = await tx.update(guestIssues).set(set).where(eq(guestIssues.id, issueId)).returning();
+      return { issue: updated, comment: row };
+    });
+  }
+
+  async deleteGuestIssue(id: number): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      await tx.delete(guestIssueComments).where(eq(guestIssueComments.issueId, id));
+      const rows = await tx.delete(guestIssues).where(eq(guestIssues.id, id)).returning({ id: guestIssues.id });
+      return rows.length > 0;
+    });
   }
 
   async upsertGuestPhoneOverride(input: InsertGuestPhoneOverride): Promise<GuestPhoneOverride> {

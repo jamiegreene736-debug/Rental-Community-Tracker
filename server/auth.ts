@@ -245,6 +245,13 @@ function agentApiMethodAllowed(req: Request): boolean {
   if (method === "POST" && /^\/api\/inbox\/calls\/(\d+|conversations\/[^/]+)\/acknowledge$/.test(path)) return true;
   if (method === "POST" && path === "/api/inbox/ai-draft") return true;
 
+  // Guest issues tracker — remote agents open issues, read them, and comment /
+  // change status ("resolved" / "ongoing"). DELETE is deliberately NOT listed,
+  // so only the operator (admin) can remove an issue.
+  if (method === "GET" && /^\/api\/inbox\/guest-issues(\/[^/]+)?$/.test(path)) return true;
+  if (method === "POST" && path === "/api/inbox/guest-issues") return true;
+  if (method === "POST" && /^\/api\/inbox\/guest-issues\/\d+\/comments$/.test(path)) return true;
+
   if (method === "GET" && /^\/api\/bookings\/[^/]+\/(arrival-details|buy-in-communications|rental-agreement)$/.test(path)) return true;
 
   return false;

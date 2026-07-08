@@ -1444,6 +1444,61 @@ export const insertGuestInboxInternalNoteSchema = createInsertSchema(guestInboxI
 export type InsertGuestInboxInternalNote = z.infer<typeof insertGuestInboxInternalNoteSchema>;
 export type GuestInboxInternalNote = typeof guestInboxInternalNotes.$inferSelect;
 
+// ── Guest issues tracker (guest inbox) ──
+// A lightweight per-conversation issue log so the operator AND remote agents
+// (the "agent" portal role in server/auth.ts) can record guest problems, comment
+// on them, and move them through open → ongoing → resolved. Author attribution
+// (createdBy / createdByRole) comes from the portal session, never the client, so
+// every issue records who opened it. See shared/guest-issue-logic.ts for the pure
+// status/severity rules shared with the client.
+export const guestIssues = pgTable("guest_issues", {
+  id: serial("id").primaryKey(),
+  conversationId: text("conversation_id").notNull(),        // Guesty inbox conversation this issue belongs to
+  reservationId: text("reservation_id"),
+  guestName: text("guest_name"),
+  listingId: text("listing_id"),
+  title: text("title").notNull(),
+  description: text("description"),
+  severity: text("severity").notNull().default("normal"),   // low | normal | high | urgent
+  status: text("status").notNull().default("open"),         // open | ongoing | resolved
+  createdBy: text("created_by").notNull().default("agent"),        // portal username who opened it
+  createdByRole: text("created_by_role").notNull().default("agent"), // admin | agent
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  lastCommentAt: timestamp("last_comment_at"),
+  resolvedAt: timestamp("resolved_at"),
+});
+
+export const insertGuestIssueSchema = createInsertSchema(guestIssues).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertGuestIssue = z.infer<typeof insertGuestIssueSchema>;
+export type GuestIssue = typeof guestIssues.$inferSelect;
+
+// Threaded comments on a guest issue — where a remote agent writes "this is
+// resolved" / "still ongoing". A comment can also carry a statusChange, which
+// flips the parent issue's status while leaving the comment as the audit trail.
+export const guestIssueComments = pgTable("guest_issue_comments", {
+  id: serial("id").primaryKey(),
+  issueId: integer("issue_id").notNull(),
+  conversationId: text("conversation_id").notNull(),        // denormalized from the parent issue
+  body: text("body").notNull(),
+  statusChange: text("status_change"),                      // null | open | ongoing | resolved
+  authorName: text("author_name").notNull().default("agent"),
+  authorRole: text("author_role").notNull().default("agent"), // admin | agent
+  source: text("source").notNull().default("portal"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertGuestIssueCommentSchema = createInsertSchema(guestIssueComments).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertGuestIssueComment = z.infer<typeof insertGuestIssueCommentSchema>;
+export type GuestIssueComment = typeof guestIssueComments.$inferSelect;
+
 export const guestPhoneOverrides = pgTable("guest_phone_overrides", {
   id: serial("id").primaryKey(),
   // .unique() load-bearing for upsertGuestPhoneOverride's onConflictDoUpdate —

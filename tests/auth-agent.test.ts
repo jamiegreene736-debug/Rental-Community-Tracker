@@ -28,6 +28,15 @@ assert.equal(isAgentAllowedPath(req("GET", "/api/bookings/res123/arrival-details
 assert.equal(isAgentAllowedPath(req("GET", "/alternatives/abc123")), true);
 console.log("  ✓ allows inbox, call, message, and arrival-detail routes");
 
+// Guest issues tracker — agents read/create/comment but cannot delete.
+assert.equal(isAgentAllowedPath(req("GET", "/api/inbox/guest-issues")), true);
+assert.equal(isAgentAllowedPath(req("GET", "/api/inbox/guest-issues/conv123")), true);
+assert.equal(isAgentAllowedPath(req("POST", "/api/inbox/guest-issues")), true);
+assert.equal(isAgentAllowedPath(req("POST", "/api/inbox/guest-issues/42/comments")), true);
+assert.equal(isAgentAllowedPath(req("DELETE", "/api/inbox/guest-issues/42")), false);
+assert.equal(isAgentAllowedPath(req("POST", "/api/inbox/guest-issues/42")), false);
+console.log("  ✓ allows agents to read/create/comment on guest issues but not delete");
+
 assert.equal(isAgentAllowedPath(req("GET", "/api/property/market-rates")), false);
 assert.equal(isAgentAllowedPath(req("POST", "/api/pricing/bulk-refresh")), false);
 assert.equal(isAgentAllowedPath(req("POST", "/api/community/drafts")), false);
