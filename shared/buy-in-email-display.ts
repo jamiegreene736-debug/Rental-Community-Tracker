@@ -77,3 +77,64 @@ export function vendorVisibleEmailAddresses(
     mailboxFrom: rawFrom,
   };
 }
+
+// ── Replying to a stored alias email ─────────────────────────────────────────
+//
+// The "Reply" button in the Alias email history reuses the SAME send path as a
+// fresh PM email (`POST /api/buy-ins/:id/vendor-email`), which takes the vendor's
+// REAL address and resolves the SimpleLogin reverse alias itself. So a reply just
+// needs (a) a "Re: …" subject and (b) the vendor's real address to reply to — the
+// two pure helpers below. Keeping this logic here (not inline in the two React
+// panels that render the history) means bookings.tsx and inbox.tsx can't drift and
+// the resolution is unit-tested.
+
+const EMAIL_ADDRESS_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+// "Re: <original>" without stacking on a subject that already opens with a reply
+// marker ("Re:", "RE :", "Re[2]:"). An empty subject still threads as a reply.
+export function replySubjectForBuyInEmail(subject?: string | null): string {
+  const base = String(subject ?? "").trim();
+  if (!base) return "Re: (no subject)";
+  if (/^\s*re\s*(\[\d+\])?\s*:/i.test(base)) return base;
+  return `Re: ${base}`;
+}
+
+// The vendor's REAL address to reply to (never a SimpleLogin reverse alias, our
+// reservations mailbox, or the guest's own privacy alias — the send route masks
+// the reply itself). Returns null when no deliverable vendor address is known, so
+// the UI can disable the Reply action rather than send somewhere useless.
+export function replyRecipientForBuyInEmail(
+  email: BuyInEmailRowForDisplay,
+  ctx: VendorVisibleContext = {},
+): string | null {
+  const aliasEmail = norm(ctx.aliasEmail);
+  const reverseAlias = norm(ctx.reverseAliasEmail);
+  const vendor = norm(ctx.vendorEmail);
+  const isDeliverableVendor = (addr: string): boolean =>
+    !!addr
+    && EMAIL_ADDRESS_RE.test(addr)
+    && !addr.endsWith("@simplelogin.co") // reverse-alias domain — SimpleLogin routing, not a mailbox
+    && addr !== reverseAlias
+    && addr !== aliasEmail; // the guest's own privacy alias, never a reply target
+
+  const direction = norm(email.direction) || "inbound";
+  if (direction !== "outbound") {
+    // Inbound: the stored From IS the vendor's real address (the inbound webhook
+    // records the PM's actual sender). Prefer it so the reply reaches whoever
+    // actually emailed, even when the buy-in has more than one vendor contact.
+    const from = norm(email.fromEmail);
+    if (isDeliverableVendor(from)) return from;
+    return isDeliverableVendor(vendor) ? vendor : null;
+  }
+  // Outbound follow-up: reply to whoever the message actually went to. A
+  // sent-direct row's stored To IS the vendor's real recipient and is authoritative
+  // over ctx.vendorEmail — on a multi-vendor buy-in the render side can only resolve
+  // a sent-direct row's contact to the buy-in's FIRST vendor (the reverse-alias
+  // lookup misses a real-address To), so trusting ctx.vendorEmail here would reply to
+  // the wrong PM. A reverse-alias row's To is the …@simplelogin.co alias (rejected),
+  // so its resolved vendor real address wins instead.
+  const to = norm(email.toEmail);
+  if (norm(email.status) === "sent-direct" && isDeliverableVendor(to)) return to;
+  if (isDeliverableVendor(vendor)) return vendor;
+  return isDeliverableVendor(to) ? to : null;
+}

@@ -33,7 +33,7 @@ import {
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
   FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
-  Search, Loader2, ExternalLink, Copy, Link2, MailOpen,
+  Search, Loader2, ExternalLink, Copy, Link2, MailOpen, Reply,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -45,7 +45,7 @@ import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { bodyWithoutAttachmentUrls, collectPostAttachments, type PostAttachment } from "@shared/guesty-post-attachments";
-import { vendorVisibleEmailAddresses } from "@shared/buy-in-email-display";
+import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
 import { guestPartyFromReservation, formatGuestParty } from "@shared/guest-party";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import { usePortalSession } from "@/lib/auth";
@@ -2184,6 +2184,62 @@ function InboxBuyInPanel({
     onError: (err: any) => toast({ title: "Email failed", description: err?.message ?? "Could not send PM email", variant: "destructive" }),
   });
 
+  // ── Inline reply to a specific email in the Alias email history ─────────────
+  // Freeform body + "Re: …" subject, sent to the vendor's real address via the
+  // same reverse-alias send path. One reply composer open across all units.
+  const [replyingEmailId, setReplyingEmailId] = useState<number | null>(null);
+  const [replySubjectValue, setReplySubjectValue] = useState("");
+  const [replyBody, setReplyBody] = useState("");
+  const [replyAttachments, setReplyAttachments] = useState<AliasEmailAttachment[]>([]);
+  const closeReply = () => {
+    setReplyingEmailId(null);
+    setReplySubjectValue("");
+    setReplyBody("");
+    setReplyAttachments([]);
+  };
+  const startReply = (email: { id: number; subject: string }) => {
+    setReplyingEmailId(email.id);
+    setReplySubjectValue(replySubjectForBuyInEmail(email.subject));
+    setReplyBody("");
+    setReplyAttachments([]);
+  };
+  const addReplyAttachments = async (files: FileList | null) => {
+    if (!files?.length) return;
+    try {
+      const next = await filesToAliasEmailAttachments(files);
+      setReplyAttachments((prev) => [...prev, ...next]);
+    } catch (err: any) {
+      toast({ title: "Attachment skipped", description: err?.message ?? "Could not read attachment", variant: "destructive" });
+    }
+  };
+  const replyVendorEmail = useMutation({
+    // Takes the whole `unit` (like sendVendorEmail) so the buy-in id flows through a
+    // template literal — InboxBuyInRecord.id is typed number|undefined.
+    mutationFn: (vars: { unit: InboxBuyInRecord; emailId: number; toEmail: string; vendorName: string; subject: string; body: string; attachments: AliasEmailAttachment[] }) =>
+      apiRequest("POST", `/api/buy-ins/${vars.unit.id}/vendor-email`, {
+        reservationId,
+        guestName: guestName ?? "",
+        vendorName: vars.vendorName,
+        vendorEmail: vars.toEmail,
+        subject: vars.subject,
+        body: vars.body,
+        attachments: vars.attachments,
+      }).then((r) => r.json()),
+    onSuccess: (result: { delivery?: string }, vars) => {
+      qc.invalidateQueries({ queryKey: ["/api/bookings", reservationId, "buy-in-communications"] });
+      // Only close if THIS email's composer is still the open one — defensive so an
+      // in-flight reply resolving can't wipe a composer opened on a different email.
+      if (replyingEmailId === vars.emailId) closeReply();
+      toast({
+        title: "Reply sent",
+        description: result?.delivery === "direct"
+          ? "Sent directly to the PM/vendor. Replies come to the reservations mailbox."
+          : "Sent from the guest alias — the PM's reply routes back through the portal.",
+      });
+    },
+    onError: (err: any) => toast({ title: "Reply failed", description: err?.message ?? "Could not send reply", variant: "destructive" }),
+  });
+
   const units = data?.buyIns ?? [];
   if (units.length === 0 && !data?.alias) return null;
 
@@ -2337,18 +2393,36 @@ function InboxBuyInPanel({
                         const emailContact = data?.contacts?.find(
                           (c) => c.reverseAliasEmail && c.reverseAliasEmail.toLowerCase() === (email.toEmail ?? "").trim().toLowerCase(),
                         ) ?? contact;
-                        const seen = vendorVisibleEmailAddresses(email, {
+                        const emailCtx = {
                           aliasEmail: unitAliasEmail,
                           vendorEmail: emailContact?.vendorEmail,
                           reverseAliasEmail: emailContact?.reverseAliasEmail,
-                        });
+                        };
+                        const seen = vendorVisibleEmailAddresses(email, emailCtx);
+                        const replyTo = replyRecipientForBuyInEmail(email, emailCtx);
+                        const isReplying = replyingEmailId === email.id;
                         return (
                           <>
                             <div className="flex items-start justify-between gap-2">
                               <span className="text-xs font-semibold leading-snug">{email.subject}</span>
-                              <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="shrink-0 text-[10px]">
-                                {email.direction}
-                              </Badge>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
+                                  {email.direction}
+                                </Badge>
+                                {replyTo && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-6 gap-1 px-1.5 text-[10px]"
+                                    onClick={() => isReplying ? closeReply() : startReply(email)}
+                                    disabled={replyVendorEmail.isPending}
+                                    title={isReplying ? "Cancel reply" : `Reply to ${replyTo}`}
+                                  >
+                                    <Reply className="h-3 w-3" />
+                                    {isReplying ? "Cancel" : "Reply"}
+                                  </Button>
+                                )}
+                              </div>
                             </div>
                             <div className="mt-1.5 space-y-0.5 border-b pb-2 text-[10px] text-muted-foreground">
                               <div className="truncate">
@@ -2396,6 +2470,88 @@ function InboxBuyInPanel({
                                     </span>
                                   );
                                 })}
+                              </div>
+                            )}
+                            {isReplying && replyTo && (
+                              <div className="mt-2.5 space-y-1.5 rounded-md border bg-background/70 p-2">
+                                <div className="text-[10px] text-muted-foreground">
+                                  Reply to <span className="font-mono">{replyTo}</span>
+                                  {unitAliasEmail
+                                    ? <> · sent from the guest alias <span className="font-mono">{unitAliasEmail}</span></>
+                                    : <> · sent directly to the PM/vendor</>}
+                                </div>
+                                <Input
+                                  className="h-8 text-xs"
+                                  value={replySubjectValue}
+                                  onChange={(e) => setReplySubjectValue(e.target.value)}
+                                  placeholder="Subject"
+                                  aria-label="Reply subject"
+                                />
+                                <Textarea
+                                  rows={5}
+                                  className="text-xs"
+                                  value={replyBody}
+                                  onChange={(e) => setReplyBody(e.target.value)}
+                                  placeholder="Type your reply…"
+                                  aria-label="Reply message"
+                                  autoFocus
+                                />
+                                <div className="rounded-md border bg-background/60 p-2">
+                                  <Label htmlFor={`inbox-reply-attachments-${email.id}`} className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium">
+                                    <Paperclip className="h-3 w-3" />
+                                    Attachments
+                                  </Label>
+                                  <Input
+                                    id={`inbox-reply-attachments-${email.id}`}
+                                    type="file"
+                                    multiple
+                                    className="h-8 text-xs"
+                                    onChange={(event) => {
+                                      void addReplyAttachments(event.currentTarget.files);
+                                      event.currentTarget.value = "";
+                                    }}
+                                  />
+                                  {replyAttachments.length > 0 && (
+                                    <div className="mt-2 flex flex-wrap gap-1.5">
+                                      {replyAttachments.map((attachment, index) => (
+                                        <Badge key={`${attachment.filename}-${index}`} variant="secondary" className="gap-1 text-[10px]">
+                                          <Paperclip className="h-3 w-3" />
+                                          <span className="max-w-[180px] truncate">{attachment.filename}</span>
+                                          {formatAttachmentSize(attachment.size) && <span>{formatAttachmentSize(attachment.size)}</span>}
+                                          <button
+                                            type="button"
+                                            className="ml-0.5 rounded-sm hover:bg-background/70"
+                                            onClick={() => setReplyAttachments((prev) => prev.filter((_, i) => i !== index))}
+                                            aria-label={`Remove ${attachment.filename}`}
+                                          >
+                                            <X className="h-3 w-3" />
+                                          </button>
+                                        </Badge>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex items-center justify-end gap-2">
+                                  <Button size="sm" variant="ghost" className="h-8" onClick={closeReply} disabled={replyVendorEmail.isPending}>
+                                    Cancel
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    className="h-8"
+                                    onClick={() => replyVendorEmail.mutate({
+                                      unit,
+                                      emailId: email.id,
+                                      toEmail: replyTo,
+                                      vendorName: emailContact?.vendorName ?? unit.managementCompany ?? "",
+                                      subject: replySubjectValue.trim() || replySubjectForBuyInEmail(email.subject),
+                                      body: replyBody,
+                                      attachments: replyAttachments,
+                                    })}
+                                    disabled={replyVendorEmail.isPending || !replyBody.trim()}
+                                  >
+                                    {replyVendorEmail.isPending ? "Sending…" : "Send reply"}
+                                  </Button>
+                                </div>
                               </div>
                             )}
                           </>
