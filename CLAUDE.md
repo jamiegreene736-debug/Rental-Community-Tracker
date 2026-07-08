@@ -43,6 +43,36 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-08 (bulk-combo "many listings: Photo/Zillow step failed … missing-source-url, no-photos,
+  too-few-distinct-photos:0 … no combination type produced two independently-photographed units
+  (tried 2BR+2BR)"): DIAGNOSED live (ADMIN_SECRET API + the scrape tiers directly — no combo job
+  needed). Infra HEALTHY: SearchAPI returns the right Zillow/Redfin for-sale URLs, Apify runs &
+  succeeds (3.5/29 USD), Zillow scrapes fine (live Island Colony unit → 15 photos), Redfin returns
+  FULL galleries for ACTIVE listings (Kiahuna/Turtle Bay units → 24–30). Two failure classes: (a)
+  GENUINE SCARCITY (not a bug) — 1BR/studio-dominant buildings (Island Colony, Kepuhi/Kaluakoi
+  Molokai), leasehold Kona condotels (Country Club Villas/Kona Pacific = the documented 0-portal-hit
+  class), non-resort Kaneohe residential (Aikahi Gardens); no 2BR+ for-sale gallery exists, correctly
+  skipped with the "Add a manual community" message. (b) THE FIXED BUG — discovery (#742) surfaces
+  SOLD + active listings mixed; Redfin SOLD rows are stripped to ~1 og:image (Apify agrees, gallery
+  genuinely gone) and often score at/above the active listing, and the `/api/community/fetch-unit-photos`
+  discovery loop returned on the FIRST candidate with >=1 photo (`if (photos.length === 0) continue`),
+  so a 1-photo sold row SHORT-CIRCUITED discovery before reaching an ACTIVE listing with a full 20+
+  gallery LATER in the same pool → combo failed. PROVEN: Ocean Villas at Turtle Bay returned 1 photo
+  one run, 24 (active unit-12) the next, purely on ordering. FIX (`claude/combo-photo-best-gallery`,
+  PR #964, discovery loop only): a bedroom-matched candidate under MIN_INDEPENDENT_UNIT_PHOTOS no longer
+  short-circuits — held as `bestThinMatch` while the loop scans on for a >= MIN gallery, returned only
+  if the whole pool has none (preserves the old best-thin outcome for gallery-less resorts → proof
+  still rejects → correct skip). `bestThinMatch` returns BEFORE the >=3BR representative/configured
+  fallbacks (bedroom-EXACT still beats a wrong-BR representative — no >=3BR wizard change), and the
+  UNBOUNDED add-community path gained a 130s wall budget so the extra scanning can't hit the 180s
+  client timeout and surface as ZERO photos. DESCOPED (no current benefit): widening the Redfin/Homes
+  rescue trigger `=== 0` → `< MIN`; the ≤1-photo Redfin cases are genuinely sold/stripped (Apify also
+  ≤1). Reviewed via a 3-lens adversarial workflow (both real findings fixed). DO NOT "simplify" the
+  scan-past-thin back to first-hit — it reintroduces this bug. Verified: full `npm test` exit 0,
+  `npm run check` 338 = baseline, build clean; POST-DEPLOY smoked — Ocean Villas at Turtle Bay now
+  reliably returns its 24-photo gallery; Coconut Plantation (all sold/stripped) scans all 6 →
+  best-thin → correct skip. AGENTS.md Decision Log 2026-07-08.
+
 - 2026-07-07 (bulk-combo STILL deleting every fresh draft — "added Wavecrest 2BR+2BR but nothing on
   the dashboard"): The EXACT symptom #951 (2026-07-06) claimed to fix, recurring — item "Completed"
   but message `Skipped — photo check: Unit A (2BR) shows only 0/2 bedrooms … Unit B 0/2`, no draft.
