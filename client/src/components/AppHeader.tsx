@@ -6,6 +6,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { usePortalSession } from "@/lib/auth";
 import { useInboxUnreadCount } from "@/lib/inboxUnreadStore";
 import HawaiiClock from "@/components/HawaiiClock";
+import PhilippinesClock from "@/components/PhilippinesClock";
 import {
   countUnreadConversations,
   extractConversationList,
@@ -93,10 +94,12 @@ export default function AppHeader() {
                 />
               </span>
             </Link>
-            {/* Hawaii (HST) clock — pinned right of the logo so the operator
-                always sees the guests' local time (>= sm; phones get the
-                strip under the row instead). */}
+            {/* Hawaii (HST) + Philippines (PHT) clocks — pinned right of the
+                logo so the operator always sees the guests' local time and the
+                Philippines team's local time (>= sm; phones get the strips
+                under the row instead). */}
             <HawaiiClock variant="pill" />
+            <PhilippinesClock variant="pill" />
           </div>
 
           <nav className="flex shrink-0 items-center gap-1 sm:gap-2" aria-label="Primary navigation">
@@ -200,9 +203,10 @@ export default function AppHeader() {
             )}
           </nav>
         </div>
-        {/* Phone-width fallback for the Hawaii clock (the main row has no
-            spare width below `sm`). */}
+        {/* Phone-width fallback for the Hawaii + Philippines clocks (the main
+            row has no spare width below `sm`). */}
         <HawaiiClock variant="strip" />
+        <PhilippinesClock variant="strip" />
       </div>
     </header>
   );
