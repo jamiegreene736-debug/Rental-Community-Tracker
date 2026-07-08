@@ -34,7 +34,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick, Download,
-  ShieldCheck, Paperclip, X, Minimize2, Plus, Send, Ban, Sparkles,
+  ShieldCheck, Paperclip, X, Minimize2, Plus, Send, Ban, Sparkles, Reply,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -42,7 +42,7 @@ import { PROPERTY_UNIT_CONFIGS, type UnitConfig } from "@shared/property-units";
 import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
-import { vendorVisibleEmailAddresses } from "@shared/buy-in-email-display";
+import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
@@ -13164,6 +13164,62 @@ function BuyInVendorEmailPanel({
     }
   };
 
+  // ── Inline reply to a specific email in the Alias email history ─────────────
+  // Freeform body, "Re: …" subject, sent to whoever the email is with (the PM's
+  // real address) via the SAME reverse-alias send path as the composer above. One
+  // reply composer open at a time.
+  const [replyingId, setReplyingId] = useState<number | null>(null);
+  const [replySubjectValue, setReplySubjectValue] = useState("");
+  const [replyBody, setReplyBody] = useState("");
+  const [replyAttachments, setReplyAttachments] = useState<AliasEmailAttachment[]>([]);
+
+  const closeReply = () => {
+    setReplyingId(null);
+    setReplySubjectValue("");
+    setReplyBody("");
+    setReplyAttachments([]);
+  };
+  const startReply = (email: BuyInEmailRecord) => {
+    setReplyingId(email.id);
+    setReplySubjectValue(replySubjectForBuyInEmail(email.subject));
+    setReplyBody("");
+    setReplyAttachments([]);
+  };
+  const addReplyAttachments = async (files: FileList | null) => {
+    if (!files?.length) return;
+    try {
+      const next = await filesToAliasEmailAttachments(files);
+      setReplyAttachments((prev) => [...prev, ...next]);
+    } catch (err: any) {
+      toast({ title: "Attachment skipped", description: err?.message ?? "Could not read attachment", variant: "destructive" });
+    }
+  };
+  const replyEmail = useMutation({
+    mutationFn: (vars: { emailId: number; toEmail: string; vendorName: string; subject: string; body: string; attachments: AliasEmailAttachment[] }) =>
+      apiRequest("POST", `/api/buy-ins/${buyIn.id}/vendor-email`, {
+        reservationId: reservation._id,
+        guestName,
+        vendorName: vars.vendorName,
+        vendorEmail: vars.toEmail,
+        subject: vars.subject,
+        body: vars.body,
+        attachments: vars.attachments,
+      }).then((r) => r.json()),
+    onSuccess: (result: { delivery?: string }, vars) => {
+      queryClient.invalidateQueries({ queryKey });
+      // Only close if THIS email's composer is still the open one — defensive so an
+      // in-flight reply resolving can't wipe a composer opened on a different email.
+      if (replyingId === vars.emailId) closeReply();
+      toast({
+        title: "Reply sent",
+        description: result?.delivery === "direct"
+          ? "Sent directly to the PM/vendor. Replies come to the reservations mailbox."
+          : "Sent from the guest alias — the PM's reply routes back through the portal.",
+      });
+    },
+    onError: (err: any) => toast({ title: "Reply failed", description: err?.message ?? "Could not send reply", variant: "destructive" }),
+  });
+
   return (
     <div className="border-t bg-muted/15 px-3 py-2.5 space-y-2">
       {showAliasControls && (
@@ -13296,18 +13352,38 @@ function BuyInVendorEmailPanel({
             const emailContact = data?.contacts?.find(
               (c) => c.reverseAliasEmail && c.reverseAliasEmail.toLowerCase() === (email.toEmail ?? "").trim().toLowerCase(),
             ) ?? contact;
-            const seen = vendorVisibleEmailAddresses(email, {
+            const emailCtx = {
               aliasEmail: alias?.aliasEmail,
               vendorEmail: emailContact?.vendorEmail,
               reverseAliasEmail: emailContact?.reverseAliasEmail,
-            });
+            };
+            const seen = vendorVisibleEmailAddresses(email, emailCtx);
+            // Who a reply reaches (the PM's real address). Null → no known vendor
+            // address, so Reply is hidden rather than sent nowhere.
+            const replyTo = replyRecipientForBuyInEmail(email, emailCtx);
+            const isReplying = replyingId === email.id;
             return (
               <div key={email.id} className="rounded-md border bg-background p-3 text-[11px] shadow-sm">
                 <div className="flex items-start justify-between gap-2">
                   <span className="text-xs font-semibold leading-snug">{email.subject}</span>
-                  <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="shrink-0 text-[10px]">
-                    {email.direction}
-                  </Badge>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
+                      {email.direction}
+                    </Badge>
+                    {replyTo && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 gap-1 px-1.5 text-[10px]"
+                        onClick={() => isReplying ? closeReply() : startReply(email)}
+                        disabled={replyEmail.isPending}
+                        title={isReplying ? "Cancel reply" : `Reply to ${replyTo}`}
+                      >
+                        <Reply className="h-3 w-3" />
+                        {isReplying ? "Cancel" : "Reply"}
+                      </Button>
+                    )}
+                  </div>
                 </div>
                 <div className="mt-1.5 space-y-0.5 border-b pb-2 text-[10px] text-muted-foreground">
                   <div className="truncate">
@@ -13355,6 +13431,87 @@ function BuyInVendorEmailPanel({
                         </span>
                       );
                     })}
+                  </div>
+                )}
+                {isReplying && replyTo && (
+                  <div className="mt-2.5 space-y-1.5 rounded-md border bg-muted/20 p-2">
+                    <div className="text-[10px] text-muted-foreground">
+                      Reply to <span className="font-mono">{replyTo}</span>
+                      {alias?.aliasEmail
+                        ? <> · sent from the guest alias <span className="font-mono">{alias.aliasEmail}</span>, replies route back here</>
+                        : <> · sent directly; replies come to the reservations mailbox</>}
+                    </div>
+                    <Input
+                      value={replySubjectValue}
+                      onChange={(e) => setReplySubjectValue(e.target.value)}
+                      placeholder="Subject"
+                      aria-label="Reply subject"
+                      className="h-8 text-xs"
+                    />
+                    <Textarea
+                      rows={5}
+                      value={replyBody}
+                      onChange={(e) => setReplyBody(e.target.value)}
+                      placeholder="Type your reply…"
+                      aria-label="Reply message"
+                      className="text-xs"
+                      autoFocus
+                    />
+                    <div className="rounded-md border bg-background/60 p-2">
+                      <Label htmlFor={`reply-attachments-${email.id}`} className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium">
+                        <Paperclip className="h-3 w-3" />
+                        Attachments
+                      </Label>
+                      <Input
+                        id={`reply-attachments-${email.id}`}
+                        type="file"
+                        multiple
+                        className="h-8 text-xs"
+                        onChange={(event) => {
+                          void addReplyAttachments(event.currentTarget.files);
+                          event.currentTarget.value = "";
+                        }}
+                      />
+                      {replyAttachments.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {replyAttachments.map((attachment, index) => (
+                            <Badge key={`${attachment.filename}-${index}`} variant="secondary" className="gap-1 text-[10px]">
+                              <Paperclip className="h-3 w-3" />
+                              <span className="max-w-[180px] truncate">{attachment.filename}</span>
+                              {formatAttachmentSize(attachment.size) && <span>{formatAttachmentSize(attachment.size)}</span>}
+                              <button
+                                type="button"
+                                className="ml-0.5 rounded-sm hover:bg-background/70"
+                                onClick={() => setReplyAttachments((prev) => prev.filter((_, i) => i !== index))}
+                                aria-label={`Remove ${attachment.filename}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-end gap-2">
+                      <Button size="sm" variant="ghost" className="h-8" onClick={closeReply} disabled={replyEmail.isPending}>
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="h-8"
+                        onClick={() => replyEmail.mutate({
+                          emailId: email.id,
+                          toEmail: replyTo,
+                          vendorName: emailContact?.vendorName ?? vendorName,
+                          subject: replySubjectValue.trim() || replySubjectForBuyInEmail(email.subject),
+                          body: replyBody,
+                          attachments: replyAttachments,
+                        })}
+                        disabled={replyEmail.isPending || !replyBody.trim()}
+                      >
+                        {replyEmail.isPending ? "Sending…" : "Send reply"}
+                      </Button>
+                    </div>
                   </div>
                 )}
               </div>
