@@ -30,6 +30,13 @@ import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-or
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { occupancyForBedrooms } from "@shared/occupancy";
 import {
+  validateGuestIssueTitle,
+  normalizeGuestIssueSeverity,
+  normalizeGuestIssueStatus,
+  defaultCommentBodyForStatus,
+  resolvedAtForStatus,
+} from "@shared/guest-issue-logic";
+import {
   comboBedroomSplitIsInferred,
   inferCombinedBedroomsFromDraft,
   positiveDraftInteger,
@@ -48432,6 +48439,133 @@ CONSTRAINTS
       return res.json({ notes });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to load internal notes", message: err.message });
+    }
+  });
+
+  // ── Guest issues tracker (guest inbox) ─────────────────────────────────────
+  // A per-conversation issue log the operator AND remote agents (the "agent"
+  // portal role) can use: open an issue, comment on it ("this is resolved" /
+  // "still ongoing"), and flip its status. Authorship is taken from the portal
+  // session (res.locals.portalSession) — never trusted from the client — so the
+  // audit trail is honest. Agent-role access to these endpoints is allowlisted
+  // in server/auth.ts `agentApiMethodAllowed`; deletion is admin-only.
+  function guestIssueAuthor(res: Response): { name: string; role: string } {
+    const session = res.locals.portalSession as { role?: string; username?: string } | undefined;
+    const role = session?.role === "agent" ? "agent" : "admin";
+    const name = (session?.username && session.username.trim()) || role;
+    return { name, role };
+  }
+
+  // Cross-conversation list (e.g. "all open guest issues" for the agent portal).
+  // ?status = open | ongoing | resolved | unresolved | all (default: all).
+  app.get("/api/inbox/guest-issues", async (req, res) => {
+    try {
+      const statusRaw = String(req.query.status ?? "").trim().toLowerCase();
+      const status = statusRaw && statusRaw !== "all" ? statusRaw : undefined;
+      const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
+      const issues = await storage.listGuestIssues({ status, limit });
+      return res.json({ issues });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to load guest issues", message: err.message });
+    }
+  });
+
+  // Per-conversation issues, each with its comment thread attached.
+  app.get("/api/inbox/guest-issues/:conversationId", async (req, res) => {
+    try {
+      const conversationId = req.params.conversationId;
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50));
+      const issues = await storage.getGuestIssuesByConversation(conversationId, limit);
+      const comments = await storage.getGuestIssueCommentsForIssues(issues.map((i) => i.id));
+      const byIssue = new Map<number, typeof comments>();
+      for (const c of comments) {
+        const arr = byIssue.get(c.issueId) ?? [];
+        arr.push(c);
+        byIssue.set(c.issueId, arr);
+      }
+      return res.json({ issues: issues.map((i) => ({ ...i, comments: byIssue.get(i.id) ?? [] })) });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to load guest issues", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/guest-issues", async (req, res) => {
+    try {
+      const conversationId = String(req.body?.conversationId ?? "").trim();
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+      const titleCheck = validateGuestIssueTitle(req.body?.title);
+      if (!titleCheck.ok) return res.status(400).json({ error: titleCheck.error });
+      const description = req.body?.description != null ? String(req.body.description).trim() : "";
+      const severity = normalizeGuestIssueSeverity(req.body?.severity);
+      const author = guestIssueAuthor(res);
+      const issue = await storage.createGuestIssue({
+        conversationId,
+        reservationId: req.body?.reservationId ? String(req.body.reservationId) : null,
+        guestName: req.body?.guestName ? String(req.body.guestName) : null,
+        listingId: req.body?.listingId ? String(req.body.listingId) : null,
+        title: titleCheck.title,
+        description: description || null,
+        severity,
+        status: "open",
+        createdBy: author.name,
+        createdByRole: author.role,
+      });
+      return res.json({ issue: { ...issue, comments: [] } });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to create guest issue", message: err.message });
+    }
+  });
+
+  // Add a comment, optionally flipping the issue's status in the same action.
+  app.post("/api/inbox/guest-issues/:id/comments", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid issue id" });
+
+      const statusChange = normalizeGuestIssueStatus(req.body?.statusChange);
+      const rawBody = String(req.body?.body ?? "").trim();
+      if (!rawBody && !statusChange) {
+        return res.status(400).json({ error: "Comment text or a status change is required" });
+      }
+      const body = rawBody || defaultCommentBodyForStatus(statusChange!);
+      const author = guestIssueAuthor(res);
+      const now = new Date();
+
+      // Comment + status change land atomically; a vanished issue rolls back → 404.
+      const result = await storage.commentOnGuestIssue(
+        id,
+        { body, statusChange: statusChange ?? null, authorName: author.name, authorRole: author.role, source: "portal" },
+        statusChange
+          ? { status: statusChange, resolvedAt: resolvedAtForStatus(statusChange, now), lastCommentAt: now }
+          : { lastCommentAt: now },
+      );
+      if (!result) return res.status(404).json({ error: "Guest issue not found" });
+
+      return res.json({ issue: result.issue, comment: result.comment });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to add comment", message: err.message });
+    }
+  });
+
+  app.delete("/api/inbox/guest-issues/:id", async (req, res) => {
+    try {
+      // Governance: agents report/comment/resolve; only the operator (admin) can
+      // permanently delete an issue. Belt-and-suspenders with the auth allowlist,
+      // which already withholds DELETE from the agent role. Fail CLOSED — a
+      // request with no resolved session (e.g. an unexpected path to this route)
+      // is denied rather than treated as admin.
+      const session = res.locals.portalSession as { role?: string } | undefined;
+      if (!session || session.role !== "admin") {
+        return res.status(403).json({ error: "Only the operator can delete a guest issue" });
+      }
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid issue id" });
+      const deleted = await storage.deleteGuestIssue(id);
+      if (!deleted) return res.status(404).json({ error: "Guest issue not found" });
+      return res.json({ ok: true });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to delete guest issue", message: err.message });
     }
   });
 

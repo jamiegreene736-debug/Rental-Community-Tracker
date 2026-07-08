@@ -601,4 +601,56 @@ export async function ensureRuntimeSchema(): Promise<void> {
     )
   `);
   console.log("[schema] ensured property_trailing_revenue table");
+
+  // Guest issues tracker + threaded comments for the guest inbox (operator +
+  // remote "agent" portal role). Created here so a fresh Railway deploy works
+  // before `npm run db:push` runs; the inbox endpoints fail-soft (empty) until
+  // then. Indexes live only here (shared/schema.ts declares none).
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS guest_issues (
+      id serial PRIMARY KEY,
+      conversation_id text NOT NULL,
+      reservation_id text,
+      guest_name text,
+      listing_id text,
+      title text NOT NULL,
+      description text,
+      severity text NOT NULL DEFAULT 'normal',
+      status text NOT NULL DEFAULT 'open',
+      created_by text NOT NULL DEFAULT 'agent',
+      created_by_role text NOT NULL DEFAULT 'agent',
+      created_at timestamp NOT NULL DEFAULT now(),
+      updated_at timestamp NOT NULL DEFAULT now(),
+      last_comment_at timestamp,
+      resolved_at timestamp
+    )
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS guest_issues_conversation_created_idx
+      ON guest_issues (conversation_id, created_at DESC)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS guest_issues_status_updated_idx
+      ON guest_issues (status, updated_at DESC)
+  `);
+  console.log("[schema] ensured guest_issues table");
+
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS guest_issue_comments (
+      id serial PRIMARY KEY,
+      issue_id integer NOT NULL,
+      conversation_id text NOT NULL,
+      body text NOT NULL,
+      status_change text,
+      author_name text NOT NULL DEFAULT 'agent',
+      author_role text NOT NULL DEFAULT 'agent',
+      source text NOT NULL DEFAULT 'portal',
+      created_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS guest_issue_comments_issue_created_idx
+      ON guest_issue_comments (issue_id, created_at ASC)
+  `);
+  console.log("[schema] ensured guest_issue_comments table");
 }

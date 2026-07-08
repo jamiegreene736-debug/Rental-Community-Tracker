@@ -39,6 +39,7 @@ import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { MessageTemplate } from "@shared/schema";
+import { GuestIssuesPanel } from "@/components/GuestIssuesPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
@@ -5925,6 +5926,15 @@ export default function InboxPage() {
                           </div>
                         </div>
                       )}
+
+                      {/* Guest issues — operator + remote agents track & resolve */}
+                      <GuestIssuesPanel
+                        conversationId={selectedConvId ?? ""}
+                        reservationId={reservationId ?? null}
+                        guestName={guest?.fullName ?? (selectedConv as any)?.guestName ?? null}
+                        listingId={listing?._id ?? null}
+                        canDelete={isAdmin}
+                      />
 
                       {/* Listing */}
                       <div>
