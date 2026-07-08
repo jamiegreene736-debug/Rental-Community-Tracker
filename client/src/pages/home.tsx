@@ -355,7 +355,7 @@ const ADDRESS_ALERT_WARNING_DISMISSED_KEY = "nexstay_address_alert_warning_dismi
 // facts change (new failed charge, new overdue balance, changed amount).
 const PAYMENT_FAILURE_WARNING_DISMISSED_KEY = "nexstay_payment_failure_warning_dismissed";
 
-// Missing buy-in warning popup (units not purchased for a check-in within 7
+// Missing buy-in warning popup (units not purchased for a check-in within 15
 // days): same dismissal pattern — signature persisted on dismiss, re-raised
 // when the facts change (new uncovered arrival, changed dates/missing units).
 const BUYIN_COVERAGE_WARNING_DISMISSED_KEY = "nexstay_buyin_coverage_warning_dismissed";
@@ -2071,7 +2071,7 @@ function AdminDashboard() {
     }
     setPaymentFailureWarningOpen(false);
   };
-  // Missing buy-in units for check-ins within the next 7 days (in-house stays
+  // Missing buy-in units for check-ins within the next 15 days (in-house stays
   // included; cancelled bookings excluded server-side). Same red-flag popup +
   // persistent banner pattern as the payment-failure warning.
   const { data: buyInCoverageData } = useQuery<{
@@ -6578,7 +6578,7 @@ function AdminDashboard() {
       </Dialog>
 
       {/* Missing buy-in warning popup — auto-raised when a reservation checks
-          in within the next 7 days (in-house stays included) and the units
+          in within the next 15 days (in-house stays included) and the units
           required to host it have NOT all been purchased. Same visual language
           as the payment-failure alert. Remediation is manual by design: the
           buttons jump to the Bookings page where the find-buy-in / auto-fill
