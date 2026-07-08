@@ -39063,7 +39063,16 @@ Return ONLY compact JSON with this exact shape:
         ? Math.max(1, Math.min(50, Math.floor(Number(maxCandidates))))
         : null;
       const isBoundedDiscovery = candidateLimit !== null;
-      const discoveryWallBudgetMs = isBoundedDiscovery ? 175_000 : null;
+      // Wall budget so the candidate loop always returns a result rather than
+      // running to a client timeout. Bounded (combo queue) gets 175s. Unbounded
+      // (the interactive add-community wizard, PHOTO_FETCH_REQUEST_TIMEOUT_MS =
+      // 180s) gets 130s — leaving headroom for one in-flight scrape + response
+      // serialization so the server returns its best gallery / best thin match
+      // instead of letting the fetch abort and surface as ZERO photos. Since the
+      // best-gallery scan (2026-07-08) no longer short-circuits on a thin
+      // candidate, the unbounded path can now scrape more of the pool per attempt,
+      // so it needs its own budget too (it had none before).
+      const discoveryWallBudgetMs = isBoundedDiscovery ? 175_000 : 130_000;
       const discoveryElapsedMs = () => Date.now() - startedAt;
       const requestedStateAbbr = String(state ?? "").trim().toLowerCase().match(/^(hi|hawaii)$/) ? "hi" : null;
       const urlStatePattern = /(?:^|[-_/])([A-Z]{2})(?:[-_/]|$)/i;
@@ -39425,6 +39434,19 @@ Return ONLY compact JSON with this exact shape:
         facts: ListingFacts;
         scrapedBedrooms: number;
       } | null = null;
+      // A bedroom-MATCHED candidate that scraped some photos but fewer than the
+      // independent-photo minimum — almost always a SOLD portal listing stripped
+      // down to a single og:image. Returning on it short-circuits discovery
+      // before a full gallery deeper in the pool is reached (see the loop body).
+      // We remember the best thin match and only fall back to it if the ENTIRE
+      // pool yields no >= MIN gallery.
+      let bestThinMatch: {
+        photos: Array<{ url: string; label: string }>;
+        sourceUrl: string;
+        facts: ListingFacts;
+        platform: string;
+        clusterUrls: string[];
+      } | null = null;
       const triedListingClusters = new Set<string>();
       const considerRepresentativeFallback = (
         candidate: { url: string; source: DiscoverySource },
@@ -39505,12 +39527,29 @@ Return ONLY compact JSON with this exact shape:
             console.warn(`[fetch-unit-photos] skipping ${sourceUrl}: ${scrapedBR}BR is below requested minimum ${minimumBedrooms}BR`);
             continue;
           }
+          const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
+          // Thin gallery (typically a SOLD listing stripped to ~1 og:image, verified
+          // live 2026-07-08: the same building's ACTIVE for-sale unit carries a full
+          // 20+ gallery but scores BELOW the sold rows, landing LATER in the pool).
+          // Don't short-circuit on it — remember the best thin match and keep
+          // scanning for a >= MIN gallery. This is what lets a Redfin-heavy resort
+          // (Ocean Villas at Turtle Bay, Ko Olina Beach Villas) reach its one
+          // full-gallery listing instead of failing the whole combo on a 1-photo
+          // sold row that happened to sort first.
+          if (responsePhotos.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
+            if (!bestThinMatch || responsePhotos.length > bestThinMatch.photos.length) {
+              bestThinMatch = { photos: responsePhotos, sourceUrl, facts: { ...facts }, platform: dual.platform, clusterUrls: [...clusterUrls] };
+            }
+            console.warn(
+              `[fetch-unit-photos] thin candidate ${sourceUrl} (${responsePhotos.length} photo${responsePhotos.length === 1 ? "" : "s"} < ${MIN_INDEPENDENT_UNIT_PHOTOS}); keeping best and scanning for a full gallery`,
+            );
+            continue;
+          }
           console.log(
             `[fetch-unit-photos] success community="${communityName ?? ""}" ` +
             `source=${sourceLabel} photos=${photos.length} url=${sourceUrl} ` +
             `clusterUrls=${clusterUrls.length} elapsedMs=${Date.now() - startedAt}`,
           );
-          const responsePhotos = photos.map((p) => ({ url: p.url, label: p.title || "Photo" }));
           const resolverProof = buildUnitPhotoResolverProof({
             photos: responsePhotos,
             sourceUrl,
@@ -39539,6 +39578,49 @@ Return ONLY compact JSON with this exact shape:
         } catch (e: any) {
           console.warn(`[fetch-unit-photos] cluster scrape failed (${clusterUrls.join(" | ")}): ${e.message}`);
         }
+      }
+
+      // The whole pool was scanned without a >= MIN gallery, but a BEDROOM-MATCHED
+      // thin listing (typically the only inventory is sold/stripped) was seen.
+      // Return the best one BEFORE the representative/configured fallbacks so a
+      // correct-bedroom thin match wins over a wrong-bedroom representative gallery
+      // — this preserves the pre-2026-07-08 behavior where a bedroom-exact
+      // candidate with photos returned immediately (representativeFallback fired
+      // only when NO bedroom-exact candidate had photos at all). The proof flags
+      // < MIN as rejected, which is correct: the resort genuinely lacks a
+      // gallery-bearing for-sale listing right now. Combos request 2BR, so
+      // representativeFallback (>=3BR only) never populates there and this ordering
+      // is a no-op for them; it only matters for the >=3BR add-community wizard.
+      if (bestThinMatch) {
+        console.log(
+          `[fetch-unit-photos] thin-fallback community="${communityName ?? ""}" ` +
+          `photos=${bestThinMatch.photos.length} url=${bestThinMatch.sourceUrl} ` +
+          `elapsedMs=${Date.now() - startedAt}`,
+        );
+        const resolverProof = buildUnitPhotoResolverProof({
+          photos: bestThinMatch.photos,
+          sourceUrl: bestThinMatch.sourceUrl,
+          foundVia: "search",
+          requestedBedrooms,
+          minimumBedrooms,
+          facts: bestThinMatch.facts,
+          relaxedSearch: relaxedBedroomDiscovery,
+        });
+        return res.json({
+          photos: bestThinMatch.photos,
+          sourceUrl: bestThinMatch.sourceUrl,
+          foundVia: "search",
+          facts: bestThinMatch.facts,
+          resolverProof,
+          diagnostic: {
+            code: resolverProof.status === "accepted" ? "unit-photo-proof-accepted" : "unit-photo-proof-review",
+            triedCandidateUrls,
+            resolverProof,
+            dualSourceCluster: bestThinMatch.clusterUrls,
+            winningPlatform: bestThinMatch.platform,
+            candidateScores: candidateDiagnostics(candidatesToTry),
+          },
+        });
       }
 
       const representativeFallback = bestRepresentativeFallback as {
