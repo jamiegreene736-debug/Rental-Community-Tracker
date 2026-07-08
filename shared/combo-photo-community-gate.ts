@@ -14,7 +14,10 @@
 //     just isn't indexed online), and skipping them would drop valid resorts.
 //   • Skip a unit ONLY on a STRONG contradiction (wrong resort signage / wrong
 //     community / incompatible climate), NOT on "too few interior photos to tell".
-//   • Skip on a SHORT bedroom count (e.g. a 1BR sourced for a 3BR slot).
+//   • Skip on a SHORT bedroom count that misses MORE THAN ONE bedroom (e.g. a
+//     1BR sourced for a 3BR slot). Tolerate a SINGLE missing bedroom (2 of 3) —
+//     vision routinely under-counts a genuine unit by one because the sourced
+//     gallery does not always picture every bedroom (operator decision 2026-07-08).
 //   • IGNORE bed-TYPE inventory entirely — a mislabeled queen or a missing
 //     sleeper sofa is already stripped upstream (shared/photo-bedroom-coverage-
 //     logic.ts) and must never reach a skip here. That is why the caller passes
@@ -125,6 +128,17 @@ function sameCommunityName(a: string, b: string): boolean {
   return na === nb || ` ${na} `.includes(` ${nb} `) || ` ${nb} `.includes(` ${na} `);
 }
 
+/**
+ * How many bedrooms a unit may be SHORT in its photos and still publish. Vision
+ * commonly detects one fewer bedroom than a genuine unit has — the sourced
+ * gallery simply does not always picture every bedroom — which was skipping
+ * nearly every resort ("Unit A (3BR) shows only 2/3 bedrooms …"). At 1, a unit
+ * passes when it shows all-but-one of its bedrooms (2 of 3); a unit missing 2+
+ * bedrooms (1 of 3, or a 1BR sourced for a 3BR slot) still skips. Operator
+ * decision, 2026-07-08.
+ */
+const MAX_BEDROOM_SHORTFALL = 1;
+
 export function evaluateComboPhotoCommunityGate(input: ComboPhotoGateInput): ComboPhotoGateDecision {
   // Fail-open: the check could not run → publish (never skip a whole batch on an
   // ops problem like a missing API key or an empty community folder).
@@ -164,16 +178,22 @@ export function evaluateComboPhotoCommunityGate(input: ComboPhotoGateInput): Com
 
   // (d) Each unit covers its bedroom count with bedroom photos. matchesListing
   // "no" fires exactly when bedroomsFound < expectedBedrooms (bed-TYPE inventory
-  // does not affect this), so a 1BR sourced for a 3BR slot is caught here. This
-  // skip is trustworthy ONLY when the unit photos were actually labeled — with
-  // `bedroomCoverageReliable === false` (labels not yet written) a 0/N is an infra
-  // artifact and must not skip (see the field's doc + the 2026-07-07 root cause).
+  // does not affect this). We SKIP only when a unit is short by MORE THAN
+  // MAX_BEDROOM_SHORTFALL bedrooms — a unit that shows all-but-one of its
+  // bedrooms (2 of 3) publishes, because vision routinely under-counts a genuine
+  // unit by one; a unit missing 2+ (1 of 3, or a 1BR sourced for a 3BR slot) is
+  // still caught here. This skip is trustworthy ONLY when the unit photos were
+  // actually labeled — with `bedroomCoverageReliable === false` (labels not yet
+  // written) a 0/N is an infra artifact and must not skip (see the field's doc +
+  // the 2026-07-07 root cause).
   const bc = input.bedroomCoverage;
   if (bc && input.bedroomCoverageReliable !== false) {
     for (const u of bc.units ?? []) {
-      if (u.matchesListing === "no") {
-        const want = u.expectedBedrooms ?? "?";
-        reasons.push(`${u.label} shows only ${u.bedroomsFound}/${want} bedrooms in its photos`);
+      if (u.matchesListing === "no" && u.expectedBedrooms != null) {
+        const shortfall = u.expectedBedrooms - u.bedroomsFound;
+        if (shortfall > MAX_BEDROOM_SHORTFALL) {
+          reasons.push(`${u.label} shows only ${u.bedroomsFound}/${u.expectedBedrooms} bedrooms in its photos`);
+        }
       }
     }
   }
