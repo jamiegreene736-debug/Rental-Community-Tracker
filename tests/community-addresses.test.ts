@@ -168,5 +168,45 @@ check("numberless address falls back to the first segment",
 check("plain Hawaii hyphen house number still validates",
   isLikelyStreetAddress("78-261 Manukai St") === true);
 
+// ── Ko Olina: Hillside Villas / Fairways (2026-07-08 live queue failure) ──────
+// The sweep research stamped Ko Olina Hillside Villas with "92-1001 Olani Street"
+// — COCONUT PLANTATION's street — so photo discovery queried/ordered against the
+// wrong street and skipped the resort as "no for-sale listings found". The real
+// community spans 92-1483…92-1526 ALIINUI DR.
+check('"Ko Olina Hillside Villas" resolves to its Aliinui Dr curated street',
+  inferCommunityStreetAddress({ communityName: "Ko Olina Hillside Villas", city: "Ko Olina", state: "HI" }) === "92-1518 Aliinui Dr",
+  inferCommunityStreetAddress({ communityName: "Ko Olina Hillside Villas", city: "Ko Olina", state: "HI" }));
+check('"The Fairways at Ko Olina" resolves to its curated street',
+  inferCommunityStreetAddress({ communityName: "The Fairways at Ko Olina", city: "Ko Olina", state: "HI" }) === "92-1479 Aliinui Dr",
+  inferCommunityStreetAddress({ communityName: "The Fairways at Ko Olina", city: "Ko Olina", state: "HI" }));
+// The curated rule must WIN over a wrong-but-plausible stored street, so a
+// queued/failed item heals on retry (this is the exact live poisoning).
+check("curated rule overrides a wrong stored street on hydrate (rule-first)",
+  resolveBulkComboListingStreet({
+    communityName: "Ko Olina Hillside Villas",
+    city: "Ko Olina",
+    state: "Hawaii",
+    streetAddress: "92-1001 Olani Street",
+  }) === "92-1518 Aliinui Dr",
+  resolveBulkComboListingStreet({ communityName: "Ko Olina Hillside Villas", city: "Ko Olina", state: "Hawaii", streetAddress: "92-1001 Olani Street" }));
+// No-rule communities keep trusting the stored street (unchanged behavior).
+check("no-rule community still trusts its stored street",
+  resolveBulkComboListingStreet({
+    communityName: "Some Unknown Resort",
+    city: "Kihei",
+    state: "HI",
+    streetAddress: "123 Fake St",
+  }) === "123 Fake St",
+  resolveBulkComboListingStreet({ communityName: "Some Unknown Resort", city: "Kihei", state: "HI", streetAddress: "123 Fake St" }));
+// Save-step validation passes with either the mailing city or the sweep's label.
+for (const city of ["Kapolei", "Ko Olina"]) {
+  const verdict = validateCommunityStreetAddress({ communityName: "Ko Olina Hillside Villas", city, state: "HI", streetAddress: "92-1518 Aliinui Dr" });
+  check(`"Ko Olina Hillside Villas" passes save validation with city "${city}"`, verdict.ok === true, verdict);
+}
+// Coconut Plantation must be unaffected (it legitimately owns Olani St).
+check('"Coconut Plantation" keeps its own Olani St rule',
+  communityAddressRuleForName("Coconut Plantation")?.street === "92-1070 Olani St",
+  communityAddressRuleForName("Coconut Plantation")?.street);
+
 console.log(`\ncommunity-addresses: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
