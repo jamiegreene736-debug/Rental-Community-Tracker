@@ -892,18 +892,30 @@ assert.ok(
   routesSource.includes("res.status(200).json({ job: null, skipped, deduped })"),
   "bulk-combo enqueue must report (not error) when every item was a duplicate or already in the system",
 );
-// Client: Select all must not tick resorts already in the system, and the queue path
-// must stamp skipIfCommunityInSystem + drop in-system resorts as a backstop.
+// Client: Select all must not tick resorts already in the system, and the bulk queue
+// now hands the RAW community list to the SERVER (research + skip-in-system happen
+// server-side, so the whole sweep survives the phone leaving Safari mid-run instead
+// of stalling in a client-side "Preparing X/Y…" loop).
 assert.ok(
   addCommunitySource.includes("const resortAlreadyInSystem = ")
     && /if \(resortAlreadyInSystem\(c\)\) return;/.test(addCommunitySource),
   "Select-all-eligible sweep must skip resorts already in the system",
 );
 assert.ok(
-  /buildBulkComboItemForCommunity\([^)]*\{ skipIfCommunityInSystem: true \}\)/.test(addCommunitySource),
-  "bulk sweep/community queue must stamp skipIfCommunityInSystem on every item it builds",
+  /bulk-combo-listing-jobs\/from-communities/.test(addCommunitySource),
+  "bulk sweep/community queue must hand the raw community list to the server-side research endpoint (not build items in the browser)",
 );
-console.log("  ✓ bulk sweep dedups resorts across cities and skips already-in-system communities");
+// Server: the from-communities endpoint resolves each combo (needsResearch →
+// "researching" phase) and drops already-in-system resorts as the backstop.
+assert.ok(
+  /from-communities[\s\S]{0,4000}isCommunityAlreadyInSystem/.test(routesSource),
+  "from-communities endpoint must drop resorts already in the system server-side",
+);
+assert.ok(
+  /item\.needsResearch[\s\S]{0,2000}researchBulkComboPairingForItem/.test(routesSource),
+  "the durable job must research each sweep item's best combo server-side (needsResearch → researching phase)",
+);
+console.log("  ✓ bulk sweep dedups resorts across cities and skips already-in-system communities (server-side research)");
 
 // Case 7: Primary Bathroom — valid (has \"Primary\" + \"Bathroom\").
 assert.equal(

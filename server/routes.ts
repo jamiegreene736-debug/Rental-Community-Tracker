@@ -324,7 +324,7 @@ import {
   subjectGalleryFromJsonLd,
   MIN_JSONLD_SUBJECT_GALLERY,
 } from "./redfin-gallery";
-import { remixBedroomSplits, comboFallbackPairings } from "@shared/community-combo";
+import { remixBedroomSplits, comboFallbackPairings, pickBestAvailableComboPairing } from "@shared/community-combo";
 import { classifyManualComboUnitUrl } from "@shared/manual-combo-url";
 import { getGuestyToken, setGuestyTokenManually, getGuestyTokenStatus, RateLimitedError } from "./guesty-token";
 import { insertMessageTemplateSchema } from "@shared/schema";
@@ -37021,18 +37021,29 @@ Return ONLY compact JSON with this exact shape:
   });
 
   type BulkComboListingStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+  type BulkComboListingPairing = {
+    unit1Beds: number;
+    unit2Beds: number;
+    totalBeds: number;
+    estimatedUnit1Rate: number;
+    estimatedUnit2Rate: number;
+    estimatedSellRate: number;
+    estimatedSellRateHigh?: number;
+  };
   type BulkComboListingInput = {
     id?: string;
     community: any;
-    pairing: {
-      unit1Beds: number;
-      unit2Beds: number;
-      totalBeds: number;
-      estimatedUnit1Rate: number;
-      estimatedUnit2Rate: number;
-      estimatedSellRate: number;
-      estimatedSellRateHigh?: number;
-    };
+    // Null/placeholder when needsResearch is set — the pairing is resolved
+    // SERVER-SIDE inside the durable job (see the "researching" phase in
+    // runBulkComboListingItem). Non-research inputs always carry a real pairing.
+    pairing: BulkComboListingPairing;
+    // From-communities (sweep/bulk "auto-pick best") mode: the operator handed the
+    // server a raw list of researched communities and the job itself researches each
+    // one (loopback /api/community/search-units → pickBestAvailableComboPairing) to
+    // resolve the best available combo. This moves the old client-side "Preparing
+    // X/Y…" loop server-side so the whole sweep survives the phone backgrounding
+    // Safari — the durable job runs to completion with nothing pinned to the browser.
+    needsResearch?: boolean;
     allowDuplicate?: boolean;
     streetAddress?: string;
     pricingArea?: string | null;
@@ -37253,6 +37264,84 @@ Return ONLY compact JSON with this exact shape:
       .update(bulkComboListingJobItemRows)
       .set({ payload, updatedAt: new Date() })
       .where(and(eq(bulkComboListingJobItemRows.jobId, jobId), eq(bulkComboListingJobItemRows.itemKey, itemKey)));
+  };
+  // Persist a SERVER-RESEARCHED pairing (and clear needsResearch) into the item's
+  // payload so a worker restart mid-job does not re-research (loadBulkComboListingJob
+  // rebuilds items by spreading `...payload`, and persistBulkComboListingSnapshot does
+  // NOT write payload). Mirrors persistBulkComboItemStreetAddress.
+  const persistBulkComboItemPairing = async (
+    jobId: string,
+    itemKey: string,
+    pairing: BulkComboListingPairing,
+    label: string,
+  ) => {
+    const [row] = await db
+      .select({ payload: bulkComboListingJobItemRows.payload })
+      .from(bulkComboListingJobItemRows)
+      .where(and(eq(bulkComboListingJobItemRows.jobId, jobId), eq(bulkComboListingJobItemRows.itemKey, itemKey)))
+      .limit(1);
+    const payload = (row?.payload && typeof row.payload === "object" ? { ...(row.payload as Record<string, unknown>) } : {}) as Record<string, unknown>;
+    payload.pairing = pairing;
+    payload.needsResearch = false;
+    await db
+      .update(bulkComboListingJobItemRows)
+      .set({ payload, label, updatedAt: new Date() })
+      .where(and(eq(bulkComboListingJobItemRows.jobId, jobId), eq(bulkComboListingJobItemRows.itemKey, itemKey)));
+  };
+  // Server-side combo research for a from-communities (sweep) item: loopback the
+  // SAME /api/community/search-units the client used, then pick the best AVAILABLE
+  // combo (largest unused 4BR+ pairing — search-units already marks
+  // existing/reserved combos, so this never re-picks a built one). Returns null when
+  // nothing is available (all combos used, or no priced units found). A network/
+  // transient failure THROWS (the item's attempt loop retries it).
+  const BULK_COMBO_RESEARCH_LOOPBACK_TIMEOUT_MS = 120_000;
+  const researchBulkComboPairingForItem = async (
+    item: BulkComboListingItem,
+  ): Promise<BulkComboListingPairing | null> => {
+    const community = item.community || {};
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BULK_COMBO_RESEARCH_LOOPBACK_TIMEOUT_MS);
+    let data: any;
+    try {
+      const resp = await fetch(
+        `http://127.0.0.1:${process.env.PORT || "5000"}/api/community/search-units`,
+        {
+          method: "POST",
+          headers: { ...loopbackRequestHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({
+            communityName: community.name,
+            city: community.city,
+            state: community.state,
+            unitTypes: community.unitTypes,
+            streetAddress: item.streetAddress,
+            availableBedrooms: community.availableBedrooms,
+            bedroomMix: community.bedroomMix,
+          }),
+          signal: controller.signal,
+        },
+      );
+      if (!resp.ok) {
+        throw new Error(`search-units returned ${resp.status}`);
+      }
+      data = await resp.json();
+    } finally {
+      clearTimeout(timer);
+    }
+    const pairings = Array.isArray(data?.suggestedPairings) ? data.suggestedPairings : [];
+    const best = pickBestAvailableComboPairing(pairings) as any;
+    if (!best) return null;
+    const unit1Beds = Math.round(Number(best.unit1Beds));
+    const unit2Beds = Math.round(Number(best.unit2Beds));
+    if (!Number.isFinite(unit1Beds) || !Number.isFinite(unit2Beds) || unit1Beds < 1 || unit2Beds < 1) return null;
+    return {
+      unit1Beds,
+      unit2Beds,
+      totalBeds: best.totalBeds ?? unit1Beds + unit2Beds,
+      estimatedUnit1Rate: Number(best.estimatedUnit1Rate) || 0,
+      estimatedUnit2Rate: Number(best.estimatedUnit2Rate) || 0,
+      estimatedSellRate: Number(best.estimatedSellRate) || 0,
+      estimatedSellRateHigh: best.estimatedSellRateHigh != null ? Number(best.estimatedSellRateHigh) : undefined,
+    };
   };
   const loadBulkComboListingJob = async (jobId: string): Promise<BulkComboListingJob | null> => {
     const [jobRow] = await db.select().from(bulkComboListingJobRows).where(eq(bulkComboListingJobRows.id, jobId)).limit(1);
@@ -37615,6 +37704,39 @@ Return ONLY compact JSON with this exact shape:
       item.message = `Re-running ${item.label} from scratch (a previous run was interrupted before photos saved)`;
       job.updatedAt = Date.now();
       await persistBulkComboListingSnapshot(job);
+    }
+    // SERVER-SIDE RESEARCH (from-communities/sweep mode). The operator handed us a
+    // raw community list and left; resolve the best available combo HERE (not in the
+    // browser) so the whole sweep survives Safari backgrounding. A transient failure
+    // throws (retried by the attempt loop); "no available combo" is deterministic and
+    // fails the item without burning retries (bulkComboNoRetry).
+    if (item.needsResearch && !(item.pairing && item.pairing.unit1Beds)) {
+      item.status = "running";
+      item.phase = "researching";
+      item.message = `Researching units for ${item.community?.name ?? "this community"}`;
+      item.startedAt = item.startedAt ?? Date.now();
+      item.heartbeatAt = Date.now();
+      job.updatedAt = Date.now();
+      await persistBulkComboListingSnapshot(job);
+      const researched = await researchBulkComboPairingForItem(item);
+      if (!researched) {
+        const err: any = new Error(
+          `No available 4BR+ combo could be sourced for "${item.community?.name ?? "this community"}" (all combos are already built/queued, or no priced units were found).`,
+        );
+        err.bulkComboNoRetry = true;
+        throw err;
+      }
+      item.pairing = researched;
+      item.needsResearch = false;
+      item.label = `${item.community?.name ?? "Community"} ${researched.unit1Beds}BR + ${researched.unit2Beds}BR`;
+      await persistBulkComboItemPairing(job.id, item.id, researched, item.label);
+      item.message = `Sourcing ${item.label}`;
+      job.updatedAt = Date.now();
+      await persistBulkComboListingSnapshot(job);
+      await queueEvent("bulk-combo-listing", job.id, "researched", `Resolved best combo ${researched.unit1Beds}BR + ${researched.unit2Beds}BR for "${item.community?.name ?? "this community"}"`, {
+        itemKey: item.id,
+        meta: { unit1Beds: researched.unit1Beds, unit2Beds: researched.unit2Beds, totalBeds: researched.totalBeds },
+      });
     }
     const community = item.community || {};
     const pairing = item.pairing;
@@ -38397,12 +38519,18 @@ Return ONLY compact JSON with this exact shape:
   // Build + persist + start a bulk combo-listing job from a list of inputs.
   // Shared by the bulk queue endpoint (which dedup-checks first) and the manual
   // "Add a community" endpoint (which supplies a single URL-seeded input).
-  const createBulkComboListingJob = async (inputs: BulkComboListingInput[]): Promise<BulkComboListingJob> => {
+  const createBulkComboListingJob = async (
+    inputs: BulkComboListingInput[],
+    maxItems: number = 12,
+  ): Promise<BulkComboListingJob> => {
     const now = Date.now();
     const id = `bcj_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const items: BulkComboListingItem[] = inputs.slice(0, 12).map((input, index) => {
+    const items: BulkComboListingItem[] = inputs.slice(0, Math.max(1, maxItems)).map((input, index) => {
       const communityName = input.community?.name || "Community";
-      const label = `${communityName} ${input.pairing?.unit1Beds ?? "?"}BR + ${input.pairing?.unit2Beds ?? "?"}BR`;
+      // Research (sweep) items have no pairing yet — the job resolves it server-side.
+      const label = input.needsResearch
+        ? `${communityName} — researching best combo`
+        : `${communityName} ${input.pairing?.unit1Beds ?? "?"}BR + ${input.pairing?.unit2Beds ?? "?"}BR`;
       const streetAddress = resolveBulkComboListingStreet({
         communityName,
         city: input.community?.city,
@@ -38476,6 +38604,9 @@ Return ONLY compact JSON with this exact shape:
         id: item.id,
         community: item.community,
         pairing: item.pairing,
+        // Sweep/from-communities items carry this until the job researches them;
+        // persisted so a resumed job re-researches only if it hadn't finished.
+        needsResearch: item.needsResearch ?? false,
         allowDuplicate: item.allowDuplicate,
         streetAddress: item.streetAddress,
         pricingArea: item.pricingArea,
@@ -38608,6 +38739,85 @@ Return ONLY compact JSON with this exact shape:
       return res.status(200).json({ job: null, skipped, deduped });
     }
     const job = await createBulkComboListingJob(queueable);
+    res.status(202).json({ job: serializeBulkComboListingJob(job), skipped, deduped });
+  });
+
+  // ── Sweep / bulk "auto-pick best" — RESEARCH ON THE SERVER ───────────────────
+  // The operator ticks resorts in the top-markets sweep (or a city search) and hits
+  // "Queue selected". The client used to research each community IN THE BROWSER (the
+  // "Preparing X/Y…" loop → /api/community/search-units per resort) and only THEN
+  // POST the job — so backgrounding Safari mid-preparation (or the >12 client-side
+  // batch auto-continue) stalled the whole thing. This endpoint takes the RAW
+  // community list, does the dedup + already-in-system skip cheaply, then creates
+  // ONE durable job whose items each research + resolve their own best combo
+  // SERVER-SIDE (see the "researching" phase in runBulkComboListingItem). The client
+  // hands off in a single fast POST and can leave immediately; the durable job (boot
+  // + interval resume, sidecar lane, per-item retry) runs the entire selection to
+  // completion with nothing pinned to the browser.
+  const BULK_COMBO_RESEARCH_MAX = Math.max(
+    1,
+    Math.min(120, Number(process.env.BULK_COMBO_RESEARCH_MAX) || 60),
+  );
+  app.post("/api/community/bulk-combo-listing-jobs/from-communities", async (req, res) => {
+    const rawCommunities = Array.isArray(req.body?.communities) ? req.body.communities as any[] : [];
+    if (rawCommunities.length === 0) return res.status(400).json({ error: "communities required" });
+
+    // Cross-resort dedup by normalized name|state (same resort under two towns).
+    const dedupSeen = new Set<string>();
+    const deduped: Array<{ communityName: string; city: string }> = [];
+    const dedupedCommunities: any[] = [];
+    for (const community of rawCommunities) {
+      const nameKey = normalizeQueueText(community?.name);
+      const stateKey = normalizeQueueText(community?.state);
+      const dk = `${nameKey}|${stateKey}`;
+      if (nameKey && dedupSeen.has(dk)) {
+        deduped.push({ communityName: String(community?.name || ""), city: String(community?.city || "") });
+        continue;
+      }
+      if (nameKey) dedupSeen.add(dk);
+      dedupedCommunities.push(community);
+    }
+
+    // Drop anything already in the system (sweep never re-adds a covered resort).
+    const skipped: Array<{ communityName: string }> = [];
+    const keep: any[] = [];
+    for (const community of dedupedCommunities.slice(0, BULK_COMBO_RESEARCH_MAX)) {
+      const communityName = String(community?.name || "").trim();
+      if (!communityName) continue;
+      const already = await isCommunityAlreadyInSystem({
+        communityName,
+        state: String(community?.state || ""),
+      }).catch(() => false);
+      if (already) {
+        skipped.push({ communityName });
+        continue;
+      }
+      keep.push(community);
+    }
+
+    if (keep.length === 0) {
+      return res.status(200).json({ job: null, skipped, deduped });
+    }
+
+    // Build research-mode inputs — pairing is a placeholder resolved server-side.
+    const placeholderPairing: BulkComboListingPairing = {
+      unit1Beds: 0,
+      unit2Beds: 0,
+      totalBeds: 0,
+      estimatedUnit1Rate: 0,
+      estimatedUnit2Rate: 0,
+      estimatedSellRate: 0,
+    };
+    const inputs: BulkComboListingInput[] = keep.map((community, index) => ({
+      id: `sweep_${Date.now().toString(36)}_${index}_${Math.random().toString(36).slice(2, 7)}`,
+      community,
+      pairing: placeholderPairing,
+      needsResearch: true,
+      // The sweep never re-adds a covered resort; the researched combo is picked
+      // only from AVAILABLE pairings, so this is belt-and-suspenders.
+      skipIfCommunityInSystem: true,
+    }));
+    const job = await createBulkComboListingJob(inputs, BULK_COMBO_RESEARCH_MAX);
     res.status(202).json({ job: serializeBulkComboListingJob(job), skipped, deduped });
   });
 
