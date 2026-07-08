@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import {
-  AlertCircle, Plus, Trash2, Loader2, CheckCircle, Clock, RotateCcw, Send, X,
+  AlertCircle, Plus, Trash2, Loader2, CheckCircle, Clock, RotateCcw, Send, X, MessageSquare,
 } from "lucide-react";
 import {
   GUEST_ISSUE_SEVERITIES,
@@ -18,6 +18,11 @@ import {
   guestIssueSeverityLabel,
   summarizeGuestIssueStatuses,
 } from "@shared/guest-issue-logic";
+
+// All guest-issue queries are keyed under this prefix (per-conversation panel,
+// the tab list, and the tab's open-count badge), so invalidating the prefix
+// refreshes every surface at once — the badge clears the moment one is resolved.
+const GUEST_ISSUES_KEY = "/api/inbox/guest-issues";
 
 // Mirrors the server shapes (shared/schema.ts guestIssues / guestIssueComments).
 type GuestIssueComment = {
@@ -106,7 +111,7 @@ export function GuestIssuesPanel({
   const [description, setDescription] = useState("");
   const [severity, setSeverity] = useState("normal");
 
-  const queryKey = ["/api/inbox/guest-issues", conversationId];
+  const queryKey = [GUEST_ISSUES_KEY, conversationId];
 
   const { data, isLoading } = useQuery<{ issues: GuestIssue[] }>({
     queryKey,
@@ -119,7 +124,8 @@ export function GuestIssuesPanel({
   const issues = data?.issues ?? [];
   const counts = summarizeGuestIssueStatuses(issues);
 
-  const invalidate = () => qc.invalidateQueries({ queryKey });
+  // Invalidate the whole prefix so the tab list + tab badge refresh too.
+  const invalidate = () => qc.invalidateQueries({ queryKey: [GUEST_ISSUES_KEY] });
 
   const createIssue = useMutation({
     mutationFn: async () => {
@@ -257,10 +263,13 @@ function IssueCard({
   issue,
   canDelete,
   onChanged,
+  onOpenConversation,
 }: {
   issue: GuestIssue;
   canDelete: boolean;
   onChanged: () => void;
+  /** When set (tab view), shows the guest + a jump-to-conversation link. */
+  onOpenConversation?: (conversationId: string) => void;
 }) {
   const { toast } = useToast();
   const [comment, setComment] = useState("");
@@ -321,8 +330,20 @@ function IssueCard({
             <div className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{issue.description}</div>
           )}
           <div className="mt-1 text-[10px] text-muted-foreground">
+            {onOpenConversation && issue.guestName ? `${issue.guestName} · ` : ""}
             Opened by {authorLabel(issue.createdBy, issue.createdByRole)} · {fmtWhen(issue.createdAt)}
           </div>
+          {onOpenConversation && (
+            <button
+              type="button"
+              className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-primary hover:underline"
+              onClick={() => onOpenConversation(issue.conversationId)}
+              data-testid={`button-guest-issue-open-conv-${issue.id}`}
+            >
+              <MessageSquare className="h-3 w-3" />
+              {issue.guestName ? `Open ${issue.guestName}'s conversation` : "Open conversation"}
+            </button>
+          )}
         </div>
         {canDelete && (
           <Button
@@ -426,6 +447,113 @@ function IssueCard({
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
         </div>
       </div>
+    </div>
+  );
+}
+
+const TAB_FILTERS: { key: string; label: string }[] = [
+  { key: "unresolved", label: "Needs attention" },
+  { key: "open", label: "Open" },
+  { key: "ongoing", label: "Ongoing" },
+  { key: "resolved", label: "Resolved" },
+  { key: "all", label: "All" },
+];
+
+// Cross-conversation "Guest Issues" inbox tab: every issue across all guests,
+// filterable by status, with the same comment / status / delete actions as the
+// per-conversation panel plus a jump-to-conversation link. Creation stays in the
+// per-conversation panel (an issue must attach to a guest thread).
+export function GuestIssuesTab({
+  canDelete = false,
+  onOpenConversation,
+}: {
+  canDelete?: boolean;
+  onOpenConversation?: (conversationId: string) => void;
+}) {
+  const qc = useQueryClient();
+  const [filter, setFilter] = useState("unresolved");
+
+  const { data, isLoading, isError } = useQuery<{ issues: GuestIssue[] }>({
+    queryKey: [GUEST_ISSUES_KEY, "tab", filter],
+    queryFn: async () =>
+      (await apiRequest("GET", `${GUEST_ISSUES_KEY}?status=${filter}&withComments=1&limit=200`)).json(),
+    refetchInterval: 30_000,
+  });
+
+  const issues = data?.issues ?? [];
+  const counts = summarizeGuestIssueStatuses(issues);
+  const invalidate = () => qc.invalidateQueries({ queryKey: [GUEST_ISSUES_KEY] });
+
+  return (
+    <div className="space-y-4" data-testid="panel-guest-issues-tab">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <AlertCircle className="h-5 w-5 text-rose-600" />
+          <h2 className="text-base font-semibold">Guest issues</h2>
+          {filter === "unresolved" && counts.total > 0 && (
+            <Badge className="bg-rose-100 text-rose-800 hover:bg-rose-100">{counts.unresolved} open</Badge>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {TAB_FILTERS.map((f) => (
+            <Button
+              key={f.key}
+              size="sm"
+              variant={filter === f.key ? "default" : "outline"}
+              className="h-7 px-2.5 text-xs"
+              onClick={() => setFilter(f.key)}
+              data-testid={`button-guest-issues-filter-${f.key}`}
+            >
+              {f.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      <p className="text-xs text-muted-foreground">
+        Every issue reported across your guests. Comment and mark each one ongoing or resolved — the tab badge
+        clears as issues are resolved. To log a new issue, open the guest's conversation and use the Guest issues panel.
+      </p>
+
+      {isLoading ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading issues…
+        </div>
+      ) : isError ? (
+        <div
+          className="rounded-lg border border-red-200 bg-red-50 p-6 text-center text-sm text-red-800"
+          data-testid="panel-guest-issues-tab-error"
+        >
+          <AlertCircle className="mx-auto mb-1 h-5 w-5 text-red-500" />
+          Couldn't load guest issues — this is an alert surface, so it won't show "all clear" on a failure. Retrying automatically…
+        </div>
+      ) : issues.length === 0 ? (
+        <div
+          className="rounded-lg border border-dashed bg-card p-6 text-center text-sm text-muted-foreground"
+          data-testid="panel-guest-issues-tab-empty"
+        >
+          <AlertCircle className="mx-auto mb-1 h-5 w-5 text-muted-foreground/60" />
+          {filter === "resolved"
+            ? "No resolved issues yet."
+            : filter === "all"
+              ? "No guest issues logged yet."
+              : filter === "unresolved"
+                ? "Nothing needs attention — no open guest issues."
+                : `No ${filter} issues.`}
+        </div>
+      ) : (
+        <div className="grid gap-2 lg:grid-cols-2">
+          {issues.map((issue) => (
+            <IssueCard
+              key={issue.id}
+              issue={issue}
+              canDelete={canDelete}
+              onChanged={invalidate}
+              onOpenConversation={onOpenConversation}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

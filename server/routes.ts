@@ -48456,15 +48456,25 @@ CONSTRAINTS
     return { name, role };
   }
 
-  // Cross-conversation list (e.g. "all open guest issues" for the agent portal).
-  // ?status = open | ongoing | resolved | unresolved | all (default: all).
+  // Cross-conversation list — powers the "Guest Issues" inbox tab (its badge
+  // reads ?status=unresolved) + the agent portal. ?status = open | ongoing |
+  // resolved | unresolved | all (default: all). ?withComments=1 attaches each
+  // issue's comment thread (for the tab); omit it for the lightweight badge count.
   app.get("/api/inbox/guest-issues", async (req, res) => {
     try {
       const statusRaw = String(req.query.status ?? "").trim().toLowerCase();
       const status = statusRaw && statusRaw !== "all" ? statusRaw : undefined;
       const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
       const issues = await storage.listGuestIssues({ status, limit });
-      return res.json({ issues });
+      if (!req.query.withComments) return res.json({ issues });
+      const comments = await storage.getGuestIssueCommentsForIssues(issues.map((i) => i.id));
+      const byIssue = new Map<number, typeof comments>();
+      for (const c of comments) {
+        const arr = byIssue.get(c.issueId) ?? [];
+        arr.push(c);
+        byIssue.set(c.issueId, arr);
+      }
+      return res.json({ issues: issues.map((i) => ({ ...i, comments: byIssue.get(i.id) ?? [] })) });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to load guest issues", message: err.message });
     }

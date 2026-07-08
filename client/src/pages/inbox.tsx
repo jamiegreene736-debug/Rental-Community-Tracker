@@ -31,7 +31,7 @@ import {
 import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
-  ToggleRight, Bot, Flag, X, ShieldAlert, MessageCircle, DollarSign,
+  ToggleRight, X, ShieldAlert, MessageCircle, DollarSign,
   FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
   Search, Loader2, ExternalLink, Copy, Link2, MailOpen, Reply,
 } from "lucide-react";
@@ -39,7 +39,7 @@ import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { MessageTemplate } from "@shared/schema";
-import { GuestIssuesPanel } from "@/components/GuestIssuesPanel";
+import { GuestIssuesPanel, GuestIssuesTab } from "@/components/GuestIssuesPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
@@ -989,12 +989,6 @@ function normalizeGuestyManualMessageBody(body: string): string {
 const OUTBOUND_SENDER_NAME = "John Carpenter";
 const OUTBOUND_BRAND_NAME = "VacationRentalExpertz";
 const AIRBNB_PREAPPROVAL_STORAGE_KEY = "nexstay_airbnb_preapproved_reservation_ids";
-
-// Display-only urgency highlight for the AI auto-reply attention banner. The
-// server is the authority on whether a message is HELD (urgent messages hit the
-// RISK keyword list → flagged → never auto-sent); this regex only decides which
-// held items get the red "Urgent" treatment + float to the top of the banner.
-const AUTO_REPLY_URGENT_RE = /\b(urgent|urgently|asap|a\.?s\.?a\.?p|as soon as possible|right away|right now|immediately|emergency|locked out|lockout|can'?t get in|no power|no water|no a\/?c|no air ?condition|flood|flooding|leak|leaking|medical|injur|hurt|ambulance|911|fire\b|smoke|stranded|stuck|help me|evacuat)\b/i;
 
 function readStoredAirbnbPreapprovals(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -2800,7 +2794,7 @@ export default function InboxPage() {
   const isAgent = session?.role === "agent";
   const isAdmin = session?.role === "admin";
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
-  // Controlled so the AI Drafts tab's "Open thread" can jump to Messages.
+  // Controlled so the Guest Issues tab's "Open conversation" can jump to Messages.
   const [activeTab, setActiveTab] = useState<string>("messages");
   const [replyText, setReplyText] = useState("");
   const [draftLoading, setDraftLoading] = useState(false);
@@ -4367,141 +4361,17 @@ export default function InboxPage() {
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
 
-  // ── AI Draft Approval ──
-  const { data: autoReplyStatus } = useQuery<any>({
-    queryKey: ["/api/inbox/auto-reply/status"],
-    enabled: isAdmin,
+  // ── Guest issues open-count (drives the "Guest Issues" tab badge) ──
+  // Lightweight count of unresolved (open + ongoing) issues across all guests.
+  // Shared query-key prefix ["/api/inbox/guest-issues", ...] means resolving an
+  // issue anywhere invalidates + refetches this, so the tab flag clears itself.
+  const { data: guestIssuesOpenData } = useQuery<{ issues: any[] }>({
+    queryKey: ["/api/inbox/guest-issues", "open-count"],
+    queryFn: async () =>
+      (await apiRequest("GET", "/api/inbox/guest-issues?status=unresolved&limit=200")).json(),
     refetchInterval: 30_000,
   });
-
-  const { data: autoReplyLogs = [], isLoading: logsLoading } = useQuery<any[]>({
-    queryKey: ["/api/inbox/auto-reply/logs"],
-    enabled: isAdmin,
-    refetchInterval: 60_000,
-  });
-  const [editedAutoReplyDrafts, setEditedAutoReplyDrafts] = useState<Record<number, string>>({});
-  // Messages the operator must still look at — the AI did NOT auto-send these
-  // (flagged as uncertain/urgent/out-of-scope, errored, or held because auto-send
-  // is off or the listing is unmapped). Surfaced in the top attention banner.
-  // "queued" rows are clean drafts auto-sending after the review window — they are
-  // intentionally NOT in this list (they need no action); shown only as a count.
-  const attentionAutoReplyLogs = autoReplyLogs.filter((log: any) =>
-    !log.replySent && (log.status === "drafted" || log.status === "flagged" || log.status === "error")
-  );
-  const isUrgentAutoReplyLog = (log: any) =>
-    AUTO_REPLY_URGENT_RE.test(`${log.guestMessage ?? ""} ${log.flagReason ?? ""}`);
-  const sortedAttentionAutoReplyLogs = [...attentionAutoReplyLogs].sort(
-    (a, b) => (isUrgentAutoReplyLog(b) ? 1 : 0) - (isUrgentAutoReplyLog(a) ? 1 : 0)
-  );
-  const hasUrgentAutoReply = sortedAttentionAutoReplyLogs.some(isUrgentAutoReplyLog);
-  const queuedAutoReplyCount = autoReplyLogs.filter(
-    (log: any) => !log.replySent && log.status === "queued"
-  ).length;
-  const autoReplyDraftValue = (log: any) =>
-    Object.prototype.hasOwnProperty.call(editedAutoReplyDrafts, log.id)
-      ? editedAutoReplyDrafts[log.id]
-      : (log.replyDraft ?? "");
-
-  const toggleAutoSend = useMutation({
-    mutationFn: (enabled: boolean) =>
-      apiRequest("POST", "/api/inbox/auto-reply/auto-send/toggle", { enabled }).then(r => r.json()),
-    onSuccess: (_d, enabled) => {
-      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] });
-      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      toast({ title: enabled ? "Auto-send ON" : "Auto-send OFF", description: enabled ? "Clean drafts will send themselves after the review window." : "Queued drafts moved back to manual review." });
-    },
-    onError: (e: any) => toast({ title: "Failed to toggle auto-send", description: e.message, variant: "destructive" }),
-  });
-
-  const setAutoSendWindow = useMutation({
-    mutationFn: (reviewWindowSeconds: number) =>
-      apiRequest("POST", "/api/inbox/auto-reply/auto-send/config", { reviewWindowSeconds }).then(r => r.json()),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] }),
-  });
-
-  const runAutoReply = useMutation({
-    mutationFn: () => apiRequest("POST", "/api/inbox/auto-reply/run").then(r => r.json()),
-    onSuccess: (data: any) => {
-      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/status"] });
-      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      toast({ title: data.message ?? "Draft check complete" });
-    },
-    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
-  });
-
-  const sendDraftReply = useMutation({
-    mutationFn: ({ id, replyDraft }: { id: number; replyDraft: string }) =>
-      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/send`, { replyDraft }).then(r => r.json()),
-    onSuccess: (data: any, vars) => {
-      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      setEditedAutoReplyDrafts(prev => {
-        const next = { ...prev };
-        delete next[vars.id];
-        return next;
-      });
-      if (data.ok) toast({ title: "Reply sent to guest" });
-      else toast({ title: "Send failed", description: data.error, variant: "destructive" });
-    },
-    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
-  });
-
-  const saveDraftReply = useMutation({
-    mutationFn: ({ id, replyDraft }: { id: number; replyDraft: string }) =>
-      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/draft`, { replyDraft }).then(r => r.json()),
-    onSuccess: (data: any, vars) => {
-      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      setEditedAutoReplyDrafts(prev => {
-        const next = { ...prev };
-        delete next[vars.id];
-        return next;
-      });
-      if (data.ok) toast({ title: "Draft saved" });
-      else toast({ title: "Save failed", description: data.error, variant: "destructive" });
-    },
-    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
-  });
-
-  const analyzeDraftReply = useMutation({
-    mutationFn: ({ id, replyDraft }: { id: number; replyDraft: string }) =>
-      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/analyze`, { replyDraft }).then(r => r.json()),
-    onSuccess: (data: any, vars) => {
-      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      setEditedAutoReplyDrafts(prev => {
-        const next = { ...prev };
-        delete next[vars.id];
-        return next;
-      });
-      if (data.ok) toast({ title: "Saved — taught the AI from your edit", description: data.analysis });
-      else toast({ title: "Save failed", description: data.error, variant: "destructive" });
-    },
-    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
-  });
-
-  const redoDraftReply = useMutation({
-    mutationFn: (id: number) =>
-      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/redo`).then(r => r.json()),
-    onSuccess: (data: any, id) => {
-      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      setEditedAutoReplyDrafts(prev => {
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
-      if (data.ok) toast({ title: "AI draft refreshed" });
-      else toast({ title: "Redo failed", description: data.error, variant: "destructive" });
-    },
-    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
-  });
-
-  const dismissDraft = useMutation({
-    mutationFn: (id: number) =>
-      apiRequest("POST", `/api/inbox/auto-reply/logs/${id}/dismiss`).then(r => r.json()),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/api/inbox/auto-reply/logs"] });
-      toast({ title: "Draft declined" });
-    },
-    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
-  });
+  const openGuestIssueCount = guestIssuesOpenData?.issues?.length ?? 0;
 
   const approveReservation = useMutation({
     mutationFn: (id: string) =>
@@ -4637,10 +4507,8 @@ export default function InboxPage() {
           <h1 className="font-semibold text-lg leading-tight">Guest Inbox</h1>
           <p className="text-xs text-muted-foreground">
             {isAgent
-              ? "Messages · Missed calls · Arrival details"
-              : isAdmin
-                ? "Messages · AI Drafts · Reservations · Auto-Messages"
-                : "Messages · Reservations · Auto-Messages"}
+              ? "Messages · Guest Issues · Missed calls · Arrival details"
+              : "Messages · Guest Issues · Reservations · Auto-Messages"}
           </p>
         </div>
         {(unreadConversationCount > 0 || (!isAgent && pendingRes.length > 0) || missedCallCount > 0) && (
@@ -4678,20 +4546,17 @@ export default function InboxPage() {
                 </span>
               )}
             </TabsTrigger>
-            {isAdmin && (
-              <TabsTrigger value="ai-drafts" data-testid="tab-ai-drafts">
-                <Bot className="h-4 w-4 mr-1.5" /> AI Drafts
-                {sortedAttentionAutoReplyLogs.length > 0 && (
-                  <span
-                    className={`ml-1.5 rounded-full text-white text-[10px] min-w-4 h-4 px-1 flex items-center justify-center ${
-                      hasUrgentAutoReply ? "bg-red-600" : "bg-amber-500"
-                    }`}
-                  >
-                    {sortedAttentionAutoReplyLogs.length}
-                  </span>
-                )}
-              </TabsTrigger>
-            )}
+            <TabsTrigger value="guest-issues" data-testid="tab-guest-issues">
+              <AlertCircle className="h-4 w-4 mr-1.5" /> Guest Issues
+              {openGuestIssueCount > 0 && (
+                <span
+                  className="ml-1.5 rounded-full bg-red-600 text-white text-[10px] min-w-4 h-4 px-1 flex items-center justify-center"
+                  data-testid="badge-guest-issues-open"
+                >
+                  {openGuestIssueCount >= 200 ? "200+" : openGuestIssueCount}
+                </span>
+              )}
+            </TabsTrigger>
             {!isAgent && (
               <TabsTrigger value="reservations" data-testid="tab-reservations">
                 <Calendar className="h-4 w-4 mr-1.5" /> Reservations
@@ -4709,237 +4574,19 @@ export default function InboxPage() {
             )}
           </TabsList>
 
-          {/* ── AI DRAFTS TAB ──
-              The AI auto-reply review queue. Was the top attention banner
-              (2026-06-09), and before that the "AI Draft Approval" tab; the
-              operator asked for it back as its own tab (2026-06-12). Auto-send is
-              OFF by default so EVERY AI draft surfaces here for the operator to
-              edit + Save (which teaches the AI) or Send. If the operator flips
-              Auto-send ON, clean drafts send themselves and only held messages
-              surface. The trigger badge surfaces the needs-review count so it
-              stays discoverable while another tab is active. */}
-          <TabsContent value="ai-drafts">
-            {isAdmin && (
-              <div className="mb-4" data-testid="panel-auto-reply">
-            {/* Status + automation controls */}
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border bg-card px-3 py-2">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <Bot className="h-4 w-4 text-primary" />
-                AI auto-reply
-                {autoReplyStatus?.autoSendEnabled ? (
-                  <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-                    <span className="h-2 w-2 rounded-full bg-emerald-500" /> On
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1 text-muted-foreground">
-                    <span className="h-2 w-2 rounded-full bg-muted-foreground/50" /> Drafts only
-                  </span>
-                )}
-              </div>
-              <span className="text-xs text-muted-foreground">
-                {autoReplyStatus?.autoSendEnabled
-                  ? "Clean replies send automatically — only the messages below need you."
-                  : "Nothing sends automatically — every reply waits for you below."}
-                {queuedAutoReplyCount > 0 && ` · ${queuedAutoReplyCount} sending now`}
-              </span>
-              <div className="ml-auto flex items-center gap-3">
-                <div className="flex items-center gap-1.5">
-                  <Switch
-                    id="banner-auto-send"
-                    checked={!!autoReplyStatus?.autoSendEnabled}
-                    onCheckedChange={(v) => toggleAutoSend.mutate(v)}
-                    className="data-[state=checked]:bg-emerald-600"
-                    data-testid="switch-auto-send"
-                  />
-                  <Label htmlFor="banner-auto-send" className="text-xs cursor-pointer">Auto-send</Label>
-                </div>
-                <select
-                  className="h-7 rounded-md border bg-background px-1.5 text-xs"
-                  value={String(autoReplyStatus?.reviewWindowSeconds ?? 90)}
-                  onChange={(e) => setAutoSendWindow.mutate(Number(e.target.value))}
-                  title="How long a clean reply waits before it sends"
-                  data-testid="select-auto-send-window"
-                >
-                  <option value="0">Send instantly</option>
-                  <option value="60">1 min delay</option>
-                  <option value="90">90s delay</option>
-                  <option value="180">3 min delay</option>
-                  <option value="300">5 min delay</option>
-                  <option value="600">10 min delay</option>
-                </select>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 px-2 text-xs"
-                  onClick={() => runAutoReply.mutate()}
-                  disabled={runAutoReply.isPending}
-                  data-testid="button-run-auto-reply"
-                >
-                  <RefreshCw className={`h-3.5 w-3.5 mr-1 ${runAutoReply.isPending ? "animate-spin" : ""}`} /> Check now
-                </Button>
-              </div>
-            </div>
-
-            {/* Messages that need a human */}
-            {sortedAttentionAutoReplyLogs.length > 0 && (
-              <div
-                className={`mt-2 rounded-lg border p-3 ${
-                  hasUrgentAutoReply
-                    ? "border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/30"
-                    : "border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30"
-                }`}
-                data-testid="panel-auto-reply-attention"
-              >
-                <div
-                  className={`flex items-center gap-2 text-sm font-semibold ${
-                    hasUrgentAutoReply ? "text-red-700 dark:text-red-300" : "text-amber-800 dark:text-amber-300"
-                  }`}
-                >
-                  {hasUrgentAutoReply ? <ShieldAlert className="h-4 w-4" /> : <Flag className="h-4 w-4" />}
-                  {sortedAttentionAutoReplyLogs.length}{" "}
-                  {sortedAttentionAutoReplyLogs.length === 1 ? "message needs" : "messages need"} your review
-                  {hasUrgentAutoReply ? " — some may be urgent" : ""}
-                </div>
-                <p className={`mt-0.5 text-xs ${hasUrgentAutoReply ? "text-red-700/80 dark:text-red-300/80" : "text-amber-800/80 dark:text-amber-300/80"}`}>
-                  These weren't auto-sent — the AI wasn't fully sure or they need a person. Send, edit, or open the thread.
-                </p>
-                <div className="mt-3 space-y-2">
-                  {sortedAttentionAutoReplyLogs.map((log: any) => {
-                    const urgent = isUrgentAutoReplyLog(log);
-                    return (
-                      <Card key={log.id} className={`bg-card ${urgent ? "border-red-300 dark:border-red-800" : ""}`} data-testid={`auto-reply-attn-${log.id}`}>
-                        <CardContent className="py-3">
-                          <div className="flex items-center gap-2 flex-wrap mb-1.5">
-                            {urgent && (
-                              <Badge className="bg-red-600 text-white text-[10px]">
-                                <ShieldAlert className="h-2.5 w-2.5 mr-1" /> Urgent
-                              </Badge>
-                            )}
-                            <span className="font-medium text-sm">{log.guestName ?? "Guest"}</span>
-                            {log.channel && <Badge variant="outline" className="text-[10px]">{log.channel}</Badge>}
-                            {log.status === "flagged" && (
-                              <Badge className="bg-amber-500 text-white text-[10px]"><Flag className="h-2.5 w-2.5 mr-1" /> Flagged</Badge>
-                            )}
-                            {log.status === "error" && (
-                              <Badge variant="destructive" className="text-[10px]"><AlertCircle className="h-2.5 w-2.5 mr-1" /> Error</Badge>
-                            )}
-                            {log.status === "drafted" && (
-                              <Badge className="bg-blue-600 text-white text-[10px]"><Pencil className="h-2.5 w-2.5 mr-1" /> Needs you</Badge>
-                            )}
-                            <span className="text-[11px] text-muted-foreground ml-auto">
-                              {log.createdAt ? new Date(log.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}
-                            </span>
-                          </div>
-
-                          <p className="text-[11px] font-medium text-muted-foreground mb-0.5">GUEST SAID</p>
-                          <p className="bg-muted/40 rounded px-3 py-2 whitespace-pre-wrap text-[13px]">{log.guestMessage}</p>
-
-                          {(log.errorMessage || log.flagReason) && (
-                            <p className={`text-xs mt-1.5 ${log.errorMessage ? "text-red-600 dark:text-red-400" : "text-amber-700 dark:text-amber-400"}`}>
-                              {log.errorMessage ? <AlertCircle className="h-3 w-3 inline mr-1" /> : <Flag className="h-3 w-3 inline mr-1" />}
-                              {log.errorMessage ?? log.flagReason}
-                            </p>
-                          )}
-
-                          {log.replyDraft != null && (
-                            <div className="mt-2">
-                              <p className="text-[11px] font-medium text-muted-foreground mb-0.5">AI DRAFT — EDIT BEFORE SENDING</p>
-                              <Textarea
-                                value={autoReplyDraftValue(log)}
-                                onChange={(e) => setEditedAutoReplyDrafts((prev) => ({ ...prev, [log.id]: e.target.value }))}
-                                rows={Math.max(4, Math.min(10, autoReplyDraftValue(log).split("\n").length + 2))}
-                                className="bg-primary/5 border-primary/20 text-[13px] leading-relaxed resize-y"
-                                data-testid={`textarea-attn-draft-${log.id}`}
-                              />
-                            </div>
-                          )}
-
-                          <div className="flex gap-2 mt-2.5 flex-wrap">
-                            {log.replyDraft != null && (
-                              <>
-                                <Button
-                                  size="sm"
-                                  onClick={() => sendDraftReply.mutate({ id: log.id, replyDraft: autoReplyDraftValue(log) })}
-                                  disabled={sendDraftReply.isPending || !autoReplyDraftValue(log).trim()}
-                                  data-testid={`button-attn-send-${log.id}`}
-                                >
-                                  <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> Send
-                                </Button>
-                                {/* Save teaches the AI whenever you actually edited
-                                    the draft (it records the original→edited diff as
-                                    a style example); an unchanged draft just saves,
-                                    so we don't burn an LLM analysis on a no-op. */}
-                                {(() => {
-                                  const edited = autoReplyDraftValue(log).trim() !== (log.replyDraft ?? "").trim();
-                                  const pending = saveDraftReply.isPending || analyzeDraftReply.isPending;
-                                  return (
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => {
-                                        const replyDraft = autoReplyDraftValue(log);
-                                        if (edited) analyzeDraftReply.mutate({ id: log.id, replyDraft });
-                                        else saveDraftReply.mutate({ id: log.id, replyDraft });
-                                      }}
-                                      disabled={pending || !autoReplyDraftValue(log).trim()}
-                                      title={edited ? "Save your edit — the AI learns from your changes" : "Save this draft for later"}
-                                      data-testid={`button-attn-save-${log.id}`}
-                                    >
-                                      <Sparkles className={`h-3.5 w-3.5 mr-1.5 ${analyzeDraftReply.isPending ? "animate-spin" : ""}`} />
-                                      {edited ? "Save & teach AI" : "Save"}
-                                    </Button>
-                                  );
-                                })()}
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => redoDraftReply.mutate(log.id)}
-                                  disabled={redoDraftReply.isPending}
-                                  data-testid={`button-attn-redo-${log.id}`}
-                                >
-                                  <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${redoDraftReply.isPending ? "animate-spin" : ""}`} /> Redo
-                                </Button>
-                              </>
-                            )}
-                            {log.conversationId && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => { setSelectedConvId(log.conversationId); setActiveTab("messages"); }}
-                                data-testid={`button-attn-open-${log.id}`}
-                              >
-                                <MessageSquare className="h-3.5 w-3.5 mr-1.5" /> Open thread
-                              </Button>
-                            )}
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => dismissDraft.mutate(log.id)}
-                              disabled={dismissDraft.isPending}
-                              data-testid={`button-attn-dismiss-${log.id}`}
-                            >
-                              <X className="h-3.5 w-3.5 mr-1.5" /> Decline
-                            </Button>
-                          </div>
-                        </CardContent>
-                      </Card>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {sortedAttentionAutoReplyLogs.length === 0 && (
-              <div
-                className="mt-2 rounded-lg border border-dashed bg-card p-4 text-center text-sm text-muted-foreground"
-                data-testid="panel-auto-reply-empty"
-              >
-                <Bot className="h-5 w-5 mx-auto mb-1 text-muted-foreground/60" />
-                No AI drafts need your review right now.
-              </div>
-            )}
-          </div>
-            )}
+          {/* ── GUEST ISSUES TAB ──
+              Cross-conversation view of every guest issue. The trigger badge shows
+              the open (unresolved) count and clears as issues are resolved. Visible
+              to the operator AND remote agents; new issues are logged from the
+              per-conversation Guest issues panel in the message thread. */}
+          <TabsContent value="guest-issues">
+            <GuestIssuesTab
+              canDelete={isAdmin}
+              onOpenConversation={(conversationId) => {
+                setSelectedConvId(conversationId);
+                setActiveTab("messages");
+              }}
+            />
           </TabsContent>
 
           {/* ── MESSAGES TAB ── */}
