@@ -1690,20 +1690,10 @@ export default function AddCommunity() {
     setBulkComboStarting(true);
     setBulkComboOpen(true);
     try {
-      const items: any[] = [];
-      for (const community of selected) {
-        try {
-          const item = await buildBulkComboItemForCommunity(community, `bcomm_${items.length}`, { skipIfCommunityInSystem: true });
-          if (item) items.push(item);
-        } catch {
-          // skip one on error; continue others
-        }
-      }
-      if (items.length === 0) {
-        toast({ title: "No combos queued", description: "No valid best pairings found for selection.", variant: "destructive" });
-        return;
-      }
-      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", { items });
+      // Research happens SERVER-SIDE (one durable job resolves each community's best
+      // combo), so this hands off the raw list in a single POST and the operator can
+      // leave the page — nothing is pinned to the browser.
+      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs/from-communities", { communities: selected });
       const jobData = await resp.json();
       const serverSkipped = Array.isArray(jobData.skipped) ? jobData.skipped.length : 0;
       const serverDeduped = Array.isArray(jobData.deduped) ? jobData.deduped.length : 0;
@@ -1712,11 +1702,11 @@ export default function AddCommunity() {
         setBulkComboJob(jobData.job);
         setBulkComboJobId(jobData.job.id);
         setBulkComboEvents([]);
-        const queuedCount = Array.isArray(jobData.job.items) ? jobData.job.items.length : items.length;
+        const queuedCount = Array.isArray(jobData.job.items) ? jobData.job.items.length : selected.length;
         const extras: string[] = [];
         if (inSystemTotal > 0) extras.push(`${inSystemTotal} already in the system`);
         if (serverDeduped > 0) extras.push(`${serverDeduped} duplicate${serverDeduped === 1 ? "" : "s"}`);
-        toast({ title: "Bulk queued", description: [`${queuedCount} community best-combo draft${queuedCount === 1 ? "" : "s"}`, ...extras].join(" · ") });
+        toast({ title: "Bulk queued", description: [`${queuedCount} community best-combo draft${queuedCount === 1 ? "" : "s"} — safe to leave, the server does the rest`, ...extras].join(" · ") });
       } else {
         toast({
           title: "Nothing new to queue",
@@ -1731,7 +1721,7 @@ export default function AddCommunity() {
     } finally {
       setBulkComboStarting(false);
     }
-  }, [communities, toast, buildBulkComboItemForCommunity]);
+  }, [communities, toast]);
 
   // ── Cross-market sweep resort breakdown helpers ──────────────
   // De-dupe key: the same resort can surface under two adjacent towns (Koloa /
@@ -1800,7 +1790,12 @@ export default function AddCommunity() {
   // Queue every resort the operator ticked across all scanned markets. Respects
   // the server's 12-item-per-batch cap (warns on overflow) and skips resorts
   // whose combos are all already built/queued.
-  const BULK_COMBO_BATCH_MAX = 12;
+  // One durable server job now holds the whole batch and researches each resort
+  // SERVER-SIDE, so the operator can start the sweep and background Safari — the
+  // queue runs to completion with nothing pinned to the phone. Keep this in sync
+  // with the server's BULK_COMBO_RESEARCH_MAX (default 60); a selection beyond it
+  // still auto-continues in the next batch when the current job finishes.
+  const BULK_COMBO_BATCH_MAX = 60;
   const queueSelectedSweepResorts = useCallback(async () => {
     // sweepSelectedCommunities is already deduped across cities (same resort in two
     // towns → one entry). 100%-sure backstop: also drop anything already in the
@@ -1820,31 +1815,14 @@ export default function AddCommunity() {
     const capped = selected.slice(0, BULK_COMBO_BATCH_MAX);
     const overflow = selected.length - capped.length;
     setSweepQueueStarting(true);
-    setSweepQueueProgress({ done: 0, total: capped.length });
     try {
-      const items: any[] = [];
-      let skipped = 0;
-      for (const community of capped) {
-        try {
-          const item = await buildBulkComboItemForCommunity(community, `sweep_${items.length}`, { skipIfCommunityInSystem: true });
-          if (item) items.push(item);
-          else skipped += 1;
-        } catch {
-          skipped += 1; // research failed for this resort; keep going
-        }
-        setSweepQueueProgress((p) => (p ? { done: p.done + 1, total: p.total } : p));
-      }
-      if (items.length === 0) {
-        toast({
-          title: "No combos queued",
-          description: "The selected resorts have no available combo left (all built or queued already).",
-          variant: "destructive",
-        });
-        return;
-      }
-      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs", { items });
+      // Hand the RAW community list to the server in ONE fast POST. The server
+      // dedups + skips already-in-system, then a single durable job researches each
+      // resort's best combo SERVER-SIDE (no per-resort "Preparing" loop in the
+      // browser), so the sweep survives the phone leaving Safari mid-run.
+      const resp = await apiRequest("POST", "/api/community/bulk-combo-listing-jobs/from-communities", { communities: capped });
       const jobData = await resp.json();
-      // Server may DROP items it caught as duplicates of each other (cross-city) or
+      // Server may DROP resorts it caught as duplicates of each other (cross-city) or
       // already-in-system; surface those counts alongside the client-side skips.
       const serverSkippedNames: string[] = Array.isArray(jobData.skipped) ? jobData.skipped.map((s: any) => String(s?.communityName || "")).filter(Boolean) : [];
       const serverDeduped = Array.isArray(jobData.deduped) ? jobData.deduped.length : 0;
@@ -1853,8 +1831,8 @@ export default function AddCommunity() {
       const inSystemNames = Array.from(new Set([...alreadyInSystem.map((c) => c.name), ...serverSkippedNames])).filter(Boolean);
       const inSystemTotal = inSystemNames.length;
       const namedList = (names: string[]) => names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3} more` : "");
-      // De-select every resort this run accounted for (queued + all-combos-used +
-      // already-in-system) so >12 overflow stays ticked for a one-click "run again".
+      // De-select every resort this run accounted for (queued + already-in-system) so
+      // any overflow stays ticked for a one-click "run again".
       const consumed = new Set([...capped, ...alreadyInSystem].map(resortDedupKey));
       const deselectConsumed = () => setSweepResortSelection((prev) => {
         const next = new Set<string>();
@@ -1875,19 +1853,18 @@ export default function AddCommunity() {
         // Arm the one-click auto-continue: the moment this job completes, the
         // remaining (still-selected) overflow queues itself as the next batch.
         sweepAutoContinueArmedRef.current = overflow > 0;
-        const queuedCount = Array.isArray(jobData.job.items) ? jobData.job.items.length : items.length;
+        const queuedCount = Array.isArray(jobData.job.items) ? jobData.job.items.length : capped.length;
         const extras: string[] = [];
-        if (skipped > 0) extras.push(`${skipped} skipped (all combos used)`);
         if (inSystemTotal > 0) extras.push(`${inSystemTotal} already in the system (${namedList(inSystemNames)})`);
         if (serverDeduped > 0) extras.push(`${serverDeduped} duplicate${serverDeduped === 1 ? "" : "s"} across cities`);
         if (overflow > 0) {
           toast({
             title: "Bulk queued from sweep",
-            description: `${queuedCount} queued${extras.length ? ` · ${extras.join(" · ")}` : ""} · ${overflow} still selected — the next batch queues automatically when this one finishes`,
+            description: `${queuedCount} queued${extras.length ? ` · ${extras.join(" · ")}` : ""} · ${overflow} still selected — the next batch queues automatically when this one finishes. Safe to leave — the server researches and builds each one.`,
           });
         } else {
           setSweepOpen(false);
-          toast({ title: "Bulk queued from sweep", description: [`${queuedCount} resort${queuedCount === 1 ? "" : "s"} queued`, ...extras].join(" · ") });
+          toast({ title: "Bulk queued from sweep", description: [`${queuedCount} resort${queuedCount === 1 ? "" : "s"} queued — safe to leave, the server does the rest`, ...extras].join(" · ") });
         }
       } else {
         // Nothing queued — the server dropped everything (all already in system or
@@ -1916,7 +1893,7 @@ export default function AddCommunity() {
       setSweepQueueStarting(false);
       setSweepQueueProgress(null);
     }
-  }, [sweepSelectedCommunities, sweepMarkets, resortDedupKey, buildBulkComboItemForCommunity, toast]);
+  }, [sweepSelectedCommunities, sweepMarkets, resortDedupKey, toast]);
 
   // ONE-CLICK MULTI-BATCH: the server caps a bulk-combo job at
   // BULK_COMBO_BATCH_MAX items, so a big "Select all" used to need a manual
@@ -3427,8 +3404,8 @@ export default function AddCommunity() {
                 const marketsTouched = new Set(
                   Array.from(sweepResortSelection).map((k) => k.split(":")[0]),
                 ).size;
-                const queueLabel = sweepQueueProgress
-                  ? `Preparing ${sweepQueueProgress.done}/${sweepQueueProgress.total}…`
+                const queueLabel = sweepQueueStarting
+                  ? "Queuing…"
                   : `Queue ${Math.min(uniqueSelected, BULK_COMBO_BATCH_MAX)} selected resort${uniqueSelected === 1 ? "" : "s"} (best combo each)`;
                 return (
                   <div className="mt-4 space-y-2 border-t pt-3">
@@ -3451,9 +3428,9 @@ export default function AddCommunity() {
                         {collapsed > 0 ? ` · ${collapsed} duplicate collapsed` : ""}
                       </span>
                     </div>
-                    {uniqueSelected > BULK_COMBO_BATCH_MAX && !sweepQueueProgress && (
+                    {uniqueSelected > BULK_COMBO_BATCH_MAX && !sweepQueueStarting && (
                       <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
-                        Up to {BULK_COMBO_BATCH_MAX} resorts queue per batch — the first {BULK_COMBO_BATCH_MAX} are queued now, and the remaining {uniqueSelected - BULK_COMBO_BATCH_MAX} queue automatically as each batch finishes (leave this page open).
+                        Up to {BULK_COMBO_BATCH_MAX} resorts queue per batch — the first {BULK_COMBO_BATCH_MAX} start now and run entirely on the server (safe to leave), and the remaining {uniqueSelected - BULK_COMBO_BATCH_MAX} queue automatically when this batch finishes (keep this page open for the hand-off).
                       </div>
                     )}
                     <Button
