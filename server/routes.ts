@@ -288,7 +288,7 @@ import {
 } from "./seasonal-availability";
 import { runPhotoListingCheckForFolders, runAddressBackfill, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
-import { evaluateComboPhotoCommunityGate, type ComboPhotoGateDecision } from "@shared/combo-photo-community-gate";
+import { evaluateComboPhotoCommunityGate, planComboBedroomRetry, type ComboPhotoGateDecision, type ComboPhotoGateInput, type ComboBedroomRetryPlan } from "@shared/combo-photo-community-gate";
 import { evaluateComboOtaScanGate, type ComboOtaScanGateDecision } from "@shared/combo-ota-scan-gate";
 import {
   buildPhotoCommunityCheckRequestForProperty,
@@ -38053,91 +38053,211 @@ Return ONLY compact JSON with this exact shape:
     // (unit-tested). Keep the "skip only on a positive finding, publish on infra"
     // posture — it is an explicit operator decision (2026-06-26), not an oversight.
     if (!reusedExistingDraft && process.env.COMBO_PHOTO_COMMUNITY_GATE !== "0") {
-      let gate: ComboPhotoGateDecision | null = null;
-      try {
-        gate = await runBulkComboListingStep(job, item, "photo-community", "Verifying photo community", async (): Promise<ComboPhotoGateDecision> => {
-          // Resolve the just-persisted unit folders so we can wait for their labels.
-          const gateDraft = await storage.getCommunityDraft(draftId);
-          const unitFolders = [gateDraft?.unit1PhotoFolder, gateDraft?.unit2PhotoFolder]
-            .filter((f): f is string => typeof f === "string" && f.trim().length > 0);
-          // 1) Run the community-photo persist AND wait for unit-photo LABELS
-          //    CONCURRENTLY:
-          //    • persist-community-photos writes the shared canonical
-          //      `community-<slug>` folder buildPhotoCommunityCheckRequestForProperty
-          //      reads for the community-match leg (normally fire-and-forget; awaited
-          //      here so the check can read it from disk).
-          //    • waitForFolderPhotoLabels BLOCKS until the async auto-labeler has
-          //      written a caption + category for every unit photo.
-          //    LOAD-BEARING (root-caused 2026-07-07): persist-photos kicks labeling
-          //    FIRE-AND-FORGET (queueMissingPhotoLabels returns after merely queuing),
-          //    so this gate used to run ~65ms later against an EMPTY photo_labels
-          //    table. The bedroom-coverage engine selects candidate bedroom photos BY
-          //    caption/category, so with no labels it found ZERO, reported 0/N
-          //    bedrooms for EVERY unit, and this gate deleted every fresh combo draft
-          //    — nothing reached the dashboard (proven on drafts 67/68, which carried
-          //    full Bedrooms-category labels minutes AFTER the gate had already
-          //    rolled them back). Overlapping the two keeps the added latency ≈ the
-          //    labeling time, not labeling + community persist. This SUPERSEDES the
-          //    2026-07-06 note's false premise that persist-photos "already awaited"
-          //    queueMissingPhotoLabels (it awaited only the enqueue).
-          const [, labelResults] = await Promise.all([
-            fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" })
-              .catch(() => null),
-            Promise.all(unitFolders.map((f) =>
-              waitForFolderPhotoLabels(f, { timeoutMs: 240_000 })
-                .catch(() => ({ complete: false, labeled: 0, total: 0, reason: "wait threw" })))),
-          ]);
-          // The bedroom-count SKIP is trustworthy ONLY when EVERY unit's labels are in.
-          // If any unit's labeling did not finish (timeout / no key / vision failures)
-          // a 0/N is an INFRA artifact — pass bedroomCoverageReliable=false so the gate
-          // never skips on it (the community + unit-vision legs, which read the images
-          // directly and need no labels, still run and can skip on a real mismatch).
-          const allLabelsReady = unitFolders.length > 0 && labelResults.every((r) => r.complete);
-          if (!allLabelsReady) {
-            const detail = labelResults
-              .map((r, i) => `${unitFolders[i] ?? `unit${i}`}: ${r.labeled}/${r.total}${r.reason ? ` (${r.reason})` : ""}`)
-              .join("; ");
-            console.warn(`[bulk-combo-listings] draft ${draftId}: unit photo labels not fully ready before gate — bedroom-count skip suppressed [${detail || "no unit folders"}]`);
-          }
-          // 2) Run the SAME engine the pricing-tab button uses, in-process — building
-          //    the groups the SAME way (buildPhotoCommunityCheckRequestForProperty),
-          //    so every unit photo carries its photo_labels caption + category, now
-          //    guaranteed present by the wait above. (The 2026-06-26 "no bed-inventory
-          //    nitpick" posture is unaffected: the gate only skips on bedroom COUNT /
-          //    a real community mismatch, never bed-TYPE — see
-          //    shared/combo-photo-community-gate.ts.)
-          let check: PhotoCommunityCheckResult;
+      // RETRY LADDER (operator rule 2026-07-08): when the photo-community check
+      // would SKIP a resort SOLELY because a unit's photos don't cover its bedroom
+      // count, re-source that unit from the NEXT for-sale candidate (blocking the
+      // URLs already tried) and re-run the check — looping until it passes or the
+      // candidate pool is exhausted, instead of skipping the resort outright. A
+      // wrong-community folder / wrong-community unit is NOT retried (re-sourcing a
+      // unit can't fix that — see planComboBedroomRetry), and manual-URL combos are
+      // exempt (the operator chose those exact units; there is no pool to walk).
+      // Disable the ladder with COMBO_BEDROOM_RETRY_MAX=0.
+      const manualUnitMode = !!(manualUnit1Url || manualUnit2Url);
+      const triedSourceUrls: Record<"unit1" | "unit2", Set<string>> = {
+        unit1: new Set<string>(item.unit1SourceUrl ? [item.unit1SourceUrl] : []),
+        unit2: new Set<string>(item.unit2SourceUrl ? [item.unit2SourceUrl] : []),
+      };
+      const sourceUrlAlreadyTried = (slot: "unit1" | "unit2", url: string | null): boolean => {
+        if (!url) return false;
+        const key = canonicalListingKey(url);
+        return Array.from(triedSourceUrls[slot]).some((u) => canonicalListingKey(u) === key);
+      };
+      const MAX_BEDROOM_RETRIES = (() => {
+        const n = Number(process.env.COMBO_BEDROOM_RETRY_MAX);
+        return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 6;
+      })();
+      // Re-source the bedroom-short unit(s) from a fresh candidate and re-persist
+      // ONLY that unit's folder (persist-photos replaces one folder + re-labels).
+      // Returns true when at least one unit was swapped for a new candidate (worth
+      // re-running the gate); false means the pool is exhausted → the resort skips.
+      const resourceBedroomShortUnits = async (plan: ComboBedroomRetryPlan): Promise<boolean> => {
+        let progressed = false;
+        for (const failing of plan.units) {
+          if (job.cancelRequested) break;
+          const beds = failing.slot === "unit1" ? effUnit1Beds : effUnit2Beds;
+          const unitSpec: ComboPhotoFetchUnit = {
+            title: failing.slot === "unit1" ? "Unit A" : "Unit B",
+            bedrooms: beds,
+          };
+          // Keep the two units distinct: block the sibling's current photos.
+          const siblingPhotos = failing.slot === "unit1" ? item.unit2Photos : item.unit1Photos;
+          let candidate: Awaited<ReturnType<typeof fetchComboPhotosForUnit>> | null = null;
           try {
-            const built = await buildPhotoCommunityCheckRequestForProperty(-draftId);
-            if (!built) {
-              // No published unit photos resolvable yet → infra, publish (fail-open).
-              return { decision: "publish", infra: true, reasons: ["no published unit photos to verify"] };
-            }
-            check = await runPhotoCommunityCheck(
-              built.request,
-              process.env.ANTHROPIC_API_KEY ?? "",
-              Date.now(),
-            );
+            candidate = await runBulkComboListingStep(job, item, "photos", `Sourcing another ${failing.label} candidate (bedroom photos)`, () =>
+              fetchComboPhotosForUnit(
+                job as unknown as ComboPhotoFetchJob,
+                photoItem,
+                unitSpec,
+                Array.from(triedSourceUrls[failing.slot]),
+                siblingPhotos.map((p) => ({ url: p.url, label: p.label })),
+                abortKey,
+                undefined,
+                undefined,
+                { rejectOtaListedFallback: true },
+              ));
           } catch (e: any) {
-            // The check itself failed to run → infra, publish (fail-open).
-            return { decision: "publish", infra: true, reasons: [String(e?.message ?? e)] };
+            if (job.cancelRequested || e?.cancelled) throw e;
+            console.warn(`[bulk-combo-listings] draft ${draftId}: re-source of ${failing.label} threw: ${e?.message ?? e}`);
+            continue;
           }
-          return evaluateComboPhotoCommunityGate({
-            expectedCommunity: community.name,
-            warning: check.warning,
-            community: check.community,
-            units: check.units,
-            bedroomCoverage: check.bedroomCoverage,
-            bedroomCoverageReliable: allLabelsReady,
+          const candUrl = candidate?.sourceUrl ?? null;
+          if (!candidate || !candUrl || candidate.photos.length < MIN_INDEPENDENT_UNIT_PHOTOS || sourceUrlAlreadyTried(failing.slot, candUrl)) {
+            // No NEW, distinct, sufficiently-photographed candidate → this unit's
+            // pool is exhausted.
+            continue;
+          }
+          triedSourceUrls[failing.slot].add(candUrl);
+          const persistBody = failing.slot === "unit1"
+            ? { unit1Photos: candidate.photos.map((p) => p.url), unit1SourceUrl: candUrl }
+            : { unit2Photos: candidate.photos.map((p) => p.url), unit2SourceUrl: candUrl };
+          let persistData: any;
+          try {
+            persistData = await runBulkComboListingStep(job, item, "persist", `Persisting the new ${failing.label} photos`, () =>
+              fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-photos`, persistBody, { abortKey, timeoutMs: 120_000 }));
+          } catch (e: any) {
+            if (job.cancelRequested || e?.cancelled) throw e;
+            // 409 duplicate / save failure → candidate no good; its URL is already
+            // blocked, so the next round tries a different one.
+            console.warn(`[bulk-combo-listings] draft ${draftId}: re-persist of ${failing.label} failed: ${e?.message ?? e}`);
+            continue;
+          }
+          const savedCount = Number(persistData?.[failing.slot]?.saved ?? 0);
+          if (!persistData?.ok || savedCount < MIN_INDEPENDENT_UNIT_PHOTOS) continue;
+          if (failing.slot === "unit1") {
+            item.unit1Photos = candidate.photos;
+            item.unit1SourceUrl = candUrl;
+          } else {
+            item.unit2Photos = candidate.photos;
+            item.unit2SourceUrl = candUrl;
+          }
+          progressed = true;
+        }
+        if (progressed) {
+          job.updatedAt = Date.now();
+          await persistBulkComboListingSnapshot(job);
+        }
+        return progressed;
+      };
+      let gate: ComboPhotoGateDecision | null = null;
+      let lastGateInput: ComboPhotoGateInput | null = null;
+      let bedroomRetries = 0;
+      while (true) {
+        // Only read for a bedroom-only SKIP (evaluate path); the infra early-returns
+        // below leave it null and the loop breaks on their non-skip decision.
+        lastGateInput = null;
+        try {
+          gate = await runBulkComboListingStep(job, item, "photo-community", "Verifying photo community", async (): Promise<ComboPhotoGateDecision> => {
+            // Resolve the just-persisted unit folders so we can wait for their labels.
+            const gateDraft = await storage.getCommunityDraft(draftId);
+            const unitFolders = [gateDraft?.unit1PhotoFolder, gateDraft?.unit2PhotoFolder]
+              .filter((f): f is string => typeof f === "string" && f.trim().length > 0);
+            // 1) Run the community-photo persist AND wait for unit-photo LABELS
+            //    CONCURRENTLY:
+            //    • persist-community-photos writes the shared canonical
+            //      `community-<slug>` folder buildPhotoCommunityCheckRequestForProperty
+            //      reads for the community-match leg (normally fire-and-forget; awaited
+            //      here so the check can read it from disk).
+            //    • waitForFolderPhotoLabels BLOCKS until the async auto-labeler has
+            //      written a caption + category for every unit photo.
+            //    LOAD-BEARING (root-caused 2026-07-07): persist-photos kicks labeling
+            //    FIRE-AND-FORGET (queueMissingPhotoLabels returns after merely queuing),
+            //    so this gate used to run ~65ms later against an EMPTY photo_labels
+            //    table. The bedroom-coverage engine selects candidate bedroom photos BY
+            //    caption/category, so with no labels it found ZERO, reported 0/N
+            //    bedrooms for EVERY unit, and this gate deleted every fresh combo draft
+            //    — nothing reached the dashboard (proven on drafts 67/68, which carried
+            //    full Bedrooms-category labels minutes AFTER the gate had already
+            //    rolled them back). Overlapping the two keeps the added latency ≈ the
+            //    labeling time, not labeling + community persist. This SUPERSEDES the
+            //    2026-07-06 note's false premise that persist-photos "already awaited"
+            //    queueMissingPhotoLabels (it awaited only the enqueue).
+            const [, labelResults] = await Promise.all([
+              fetch(`${comboPhotoBaseUrl()}/api/community/${draftId}/persist-community-photos`, { method: "POST" })
+                .catch(() => null),
+              Promise.all(unitFolders.map((f) =>
+                waitForFolderPhotoLabels(f, { timeoutMs: 240_000 })
+                  .catch(() => ({ complete: false, labeled: 0, total: 0, reason: "wait threw" })))),
+            ]);
+            // The bedroom-count SKIP is trustworthy ONLY when EVERY unit's labels are in.
+            // If any unit's labeling did not finish (timeout / no key / vision failures)
+            // a 0/N is an INFRA artifact — pass bedroomCoverageReliable=false so the gate
+            // never skips on it (the community + unit-vision legs, which read the images
+            // directly and need no labels, still run and can skip on a real mismatch).
+            const allLabelsReady = unitFolders.length > 0 && labelResults.every((r) => r.complete);
+            if (!allLabelsReady) {
+              const detail = labelResults
+                .map((r, i) => `${unitFolders[i] ?? `unit${i}`}: ${r.labeled}/${r.total}${r.reason ? ` (${r.reason})` : ""}`)
+                .join("; ");
+              console.warn(`[bulk-combo-listings] draft ${draftId}: unit photo labels not fully ready before gate — bedroom-count skip suppressed [${detail || "no unit folders"}]`);
+            }
+            // 2) Run the SAME engine the pricing-tab button uses, in-process — building
+            //    the groups the SAME way (buildPhotoCommunityCheckRequestForProperty),
+            //    so every unit photo carries its photo_labels caption + category, now
+            //    guaranteed present by the wait above. (The 2026-06-26 "no bed-inventory
+            //    nitpick" posture is unaffected: the gate only skips on bedroom COUNT /
+            //    a real community mismatch, never bed-TYPE — see
+            //    shared/combo-photo-community-gate.ts.)
+            let check: PhotoCommunityCheckResult;
+            try {
+              const built = await buildPhotoCommunityCheckRequestForProperty(-draftId);
+              if (!built) {
+                // No published unit photos resolvable yet → infra, publish (fail-open).
+                return { decision: "publish", infra: true, reasons: ["no published unit photos to verify"] };
+              }
+              check = await runPhotoCommunityCheck(
+                built.request,
+                process.env.ANTHROPIC_API_KEY ?? "",
+                Date.now(),
+              );
+            } catch (e: any) {
+              // The check itself failed to run → infra, publish (fail-open).
+              return { decision: "publish", infra: true, reasons: [String(e?.message ?? e)] };
+            }
+            // Capture the exact gate input so the retry ladder can ask
+            // planComboBedroomRetry which unit(s) to re-source on a bedroom-only skip.
+            const gateInput: ComboPhotoGateInput = {
+              expectedCommunity: community.name,
+              warning: check.warning,
+              community: check.community,
+              units: check.units,
+              bedroomCoverage: check.bedroomCoverage,
+              bedroomCoverageReliable: allLabelsReady,
+            };
+            lastGateInput = gateInput;
+            return evaluateComboPhotoCommunityGate(gateInput);
           });
-        });
-      } catch (e: any) {
-        // Step timed out / threw → infra, publish (fail-open). Never fail a resort
-        // because the gate could not complete.
-        await queueEvent("bulk-combo-listing", job.id, "photo-community-error",
-          `Photo-community check could not complete (${queueErrorLabel(e, "error")}); publishing without the gate`,
-          { itemKey: item.id, level: "warn" });
-        gate = null;
+        } catch (e: any) {
+          // Step timed out / threw → infra, publish (fail-open). Never fail a resort
+          // because the gate could not complete.
+          await queueEvent("bulk-combo-listing", job.id, "photo-community-error",
+            `Photo-community check could not complete (${queueErrorLabel(e, "error")}); publishing without the gate`,
+            { itemKey: item.id, level: "warn" });
+          gate = null;
+          break;
+        }
+        // Publish / infra → done. A SKIP that is ONLY a bedroom-photo shortfall gets
+        // another chance: re-source the failing unit(s) and re-run the gate, until it
+        // passes or the candidate pool is exhausted.
+        if (!gate || gate.decision !== "skip") break;
+        if (manualUnitMode || !lastGateInput || bedroomRetries >= MAX_BEDROOM_RETRIES) break;
+        const bedroomRetryPlan = planComboBedroomRetry(lastGateInput);
+        if (!bedroomRetryPlan.retryable) break;
+        await queueEvent("bulk-combo-listing", job.id, "photo-community-retry",
+          `Bedroom photos incomplete (${bedroomRetryPlan.units.map((u) => `${u.label} ${u.bedroomsFound}/${u.expectedBedrooms}`).join(", ")}); trying another unit candidate`,
+          { itemKey: item.id, level: "info", meta: { attempt: bedroomRetries + 1, units: bedroomRetryPlan.units.map((u) => u.slot) } });
+        const bedroomRetryProgressed = await resourceBedroomShortUnits(bedroomRetryPlan);
+        if (!bedroomRetryProgressed) break; // candidate pool exhausted → skip below
+        bedroomRetries += 1;
       }
       if (gate?.decision === "skip") {
         // Roll the freshly-saved draft back so the resort is simply skipped (no
