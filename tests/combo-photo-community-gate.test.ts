@@ -201,6 +201,81 @@ const clean: ComboPhotoGateInput = {
   assert.match(d.reasons[0], /Poipu Sands/);
 }
 
+// 6c-i. TOLERANCE (operator decision 2026-07-08): a unit short by exactly ONE
+//   bedroom (2 of 3) PUBLISHES — vision under-counts a genuine unit by one, which
+//   was skipping nearly every resort. matchesListing is "no" (2 < 3) but the
+//   1-bedroom shortfall is tolerated. This is the Maui Hill / Kamaole Sands fix.
+{
+  const d = evaluateComboPhotoCommunityGate({
+    ...clean,
+    bedroomCoverageReliable: true,
+    bedroomCoverage: {
+      tier: "fail",
+      units: [
+        { label: "Unit A (3BR)", matchesListing: "no", bedroomsFound: 2, expectedBedrooms: 3 },
+        { label: "Unit B (3BR)", matchesListing: "yes", bedroomsFound: 3, expectedBedrooms: 3 },
+      ],
+    },
+  });
+  assert.equal(d.decision, "publish");
+  assert.deepEqual(d.reasons, []);
+}
+
+// 6c-ii. BOTH units short by one (2/3 each) → publish. Nearly every skipped
+//   resort in the screenshot was this shape.
+{
+  const d = evaluateComboPhotoCommunityGate({
+    ...clean,
+    bedroomCoverageReliable: true,
+    bedroomCoverage: {
+      tier: "fail",
+      units: [
+        { label: "Unit A (3BR)", matchesListing: "no", bedroomsFound: 2, expectedBedrooms: 3 },
+        { label: "Unit B (3BR)", matchesListing: "no", bedroomsFound: 2, expectedBedrooms: 3 },
+      ],
+    },
+  });
+  assert.equal(d.decision, "publish");
+  assert.deepEqual(d.reasons, []);
+}
+
+// 6c-iii. MIXED (the Koa Resort case): Unit A 2/3 (tolerated) but Unit B 1/3
+//   (short by two) → skip, and ONLY Unit B is named.
+{
+  const d = evaluateComboPhotoCommunityGate({
+    ...clean,
+    bedroomCoverageReliable: true,
+    bedroomCoverage: {
+      tier: "fail",
+      units: [
+        { label: "Unit A (3BR)", matchesListing: "no", bedroomsFound: 2, expectedBedrooms: 3 },
+        { label: "Unit B (3BR)", matchesListing: "no", bedroomsFound: 1, expectedBedrooms: 3 },
+      ],
+    },
+  });
+  assert.equal(d.decision, "skip");
+  assert.equal(d.reasons.length, 1);
+  assert.match(d.reasons[0], /Unit B \(3BR\) shows only 1\/3 bedrooms/);
+}
+
+// 6c-iv. The tolerance is ONE bedroom, not a ratio: a 2/4 unit is short by two
+//   and still skips.
+{
+  const d = evaluateComboPhotoCommunityGate({
+    ...clean,
+    bedroomCoverageReliable: true,
+    bedroomCoverage: {
+      tier: "fail",
+      units: [
+        { label: "Unit A", matchesListing: "no", bedroomsFound: 2, expectedBedrooms: 4 },
+        { label: "Unit B", matchesListing: "yes", bedroomsFound: 4, expectedBedrooms: 4 },
+      ],
+    },
+  });
+  assert.equal(d.decision, "skip");
+  assert.match(d.reasons[0], /Unit A shows only 2\/4 bedrooms/);
+}
+
 // 6b. Bedroom coverage "n/a" (unknown expected) → publish (can't confirm count).
 {
   const d = evaluateComboPhotoCommunityGate({
@@ -251,8 +326,9 @@ for (const w of ["no-photos", "SEARCHAPI_API_KEY not configured", "ANTHROPIC_API
     ],
     bedroomCoverage: {
       tier: "fail",
+      // 1/3 is short by TWO bedrooms (beyond the 1-bedroom tolerance) → still fires.
       units: [
-        { label: "Unit A", matchesListing: "no", bedroomsFound: 2, expectedBedrooms: 3 },
+        { label: "Unit A", matchesListing: "no", bedroomsFound: 1, expectedBedrooms: 3 },
         { label: "Unit B", matchesListing: "yes", bedroomsFound: 3, expectedBedrooms: 3 },
       ],
     },
