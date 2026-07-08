@@ -5051,7 +5051,7 @@ async function scrapeListingPhotos(
   if (/redfin\.com|homes\.com/i.test(primaryUrl)) {
     let result = await scrapeGenericRealEstateViaFetch(primaryUrl);
     const isRedfinTarget = /redfin\.com/i.test(primaryUrl);
-    if (result.urls.length === 0 && isRedfinTarget && process.env.APIFY_API_TOKEN) {
+    if (result.urls.length < MIN_INDEPENDENT_UNIT_PHOTOS && isRedfinTarget && process.env.APIFY_API_TOKEN) {
       // Redfin's datacenter rescue tier is Apify (2026-07-06) — it replaced
       // ScrapingBee here after the ScrapingBee subscription lapsed with its
       // monthly quota permanently exhausted. Homes.com keeps the ScrapingBee
@@ -5060,10 +5060,22 @@ async function scrapeListingPhotos(
       // scrapingBeeTimeoutMs bound is reused deliberately: bounded discovery
       // loops cap their per-candidate rescue budget with it (18s) and the
       // Apify actor's warm runs finish in 5-7s.
-      console.log(`[scrapeGenericRealEstate] fetch returned 0, trying Apify Redfin actor for ${primaryUrl}`);
+      //
+      // TRIGGER WIDENED === 0 → < MIN (2026-07-08, the lever #964 kept in
+      // reserve): Redfin's bot wall serves Railway a page whose static HTML
+      // carries ONLY the og:image, so an ACTIVE listing scrapes to exactly 1
+      // photo — which never fired the old zero-only rescue and stranded the
+      // candidate as a thin match (proven live: Kuilima Dr units that returned
+      // 24-30 photos on 2026-07-07 scraped 0-1 on 2026-07-08 while the Apify
+      // actor still returned the full 25). A genuinely-sold stripped row costs
+      // one cheap extra Apify call (~5-7s warm) and stays thin. KEEP-BETTER
+      // GUARD: the rescue must never downgrade — a 1-photo fetch result
+      // survives an empty/failed Apify run so bestThinMatch still gets a
+      // sourceUrl.
+      console.log(`[scrapeGenericRealEstate] fetch returned ${result.urls.length} (< ${MIN_INDEPENDENT_UNIT_PHOTOS}), trying Apify Redfin actor for ${primaryUrl}`);
       const apify = await scrapeRedfinViaApify(primaryUrl, options?.scrapingBeeTimeoutMs ?? 180_000);
       result = {
-        urls: apify.urls,
+        urls: apify.urls.length > result.urls.length ? apify.urls : result.urls,
         facts: {
           bedrooms: result.facts.bedrooms ?? apify.facts.bedrooms,
           bathrooms: result.facts.bathrooms ?? apify.facts.bathrooms,
@@ -5074,34 +5086,39 @@ async function scrapeListingPhotos(
         },
       };
     }
-    if (result.urls.length === 0 && !isRedfinTarget && process.env.SCRAPINGBEE_API_KEY) {
-      console.log(`[scrapeGenericRealEstate] fetch returned 0, trying ScrapingBee for ${primaryUrl}`);
-      result = await scrapeGenericRealEstateViaScrapingBee(primaryUrl, options?.scrapingBeeTimeoutMs);
+    if (result.urls.length < MIN_INDEPENDENT_UNIT_PHOTOS && !isRedfinTarget && process.env.SCRAPINGBEE_API_KEY) {
+      console.log(`[scrapeGenericRealEstate] fetch returned ${result.urls.length} (< ${MIN_INDEPENDENT_UNIT_PHOTOS}), trying ScrapingBee for ${primaryUrl}`);
+      const sb = await scrapeGenericRealEstateViaScrapingBee(primaryUrl, options?.scrapingBeeTimeoutMs);
+      // Keep-better: a dead/exhausted ScrapingBee key returns 0 — never clobber
+      // the direct fetch's photos (even a lone og:image anchors bestThinMatch).
+      if (sb.urls.length > result.urls.length) result = sb;
     }
     // Last-resort tier: the operator's home-IP Chrome sidecar. Railway's
     // datacenter IP frequently bot-walls Redfin/Homes down to a single
     // og:image (the failure described above), so when the cheaper datacenter
-    // tiers returned 0 photos AND the sidecar is online, recover the full
-    // gallery from a residential IP. SEQUENTIAL fallback only — fires solely
-    // on result.urls.length === 0, so it never unions with or reorders an
-    // existing photo set (Load-Bearing #5). Naturally inert when the worker is
-    // offline; env SIDECAR_GALLERY_SCRAPE_ENABLED=0 kills it (Load-Bearing #45).
+    // tiers came up SHORT (< MIN photos — widened from zero-only 2026-07-08,
+    // same rationale as the Apify trigger above) AND the sidecar is online,
+    // recover the full gallery from a residential IP. SEQUENTIAL fallback only
+    // — it REPLACES the short set wholesale when strictly larger, never unions
+    // with or reorders an existing photo set (Load-Bearing #5). Naturally inert
+    // when the worker is offline; env SIDECAR_GALLERY_SCRAPE_ENABLED=0 kills it
+    // (Load-Bearing #45).
     const galleryScrapeEnabled =
       String(process.env.SIDECAR_GALLERY_SCRAPE_ENABLED ?? "1").trim() !== "0";
     const gallerySidecarWalletMs = options?.sidecarWalletMs ?? 90_000;
-    if (galleryScrapeEnabled && gallerySidecarWalletMs > 0 && result.urls.length === 0) {
+    if (galleryScrapeEnabled && gallerySidecarWalletMs > 0 && result.urls.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
       try {
         const { getHeartbeat, scrapeListingGalleryViaSidecar } = await import("./vrbo-sidecar-queue");
         const heartbeat = getHeartbeat();
         if (heartbeat.isOnline) {
           const sidecarHost = /redfin\.com/i.test(primaryUrl) ? "Redfin" : "Homes.com";
-          console.log(`[scrapeGenericRealEstate] sidecar fallback (0 photos from fetch/${isRedfinTarget ? "Apify" : "ScrapingBee"}) host=${sidecarHost} wallet=${gallerySidecarWalletMs}ms`);
+          console.log(`[scrapeGenericRealEstate] sidecar fallback (${result.urls.length} photos from fetch/${isRedfinTarget ? "Apify" : "ScrapingBee"}) host=${sidecarHost} wallet=${gallerySidecarWalletMs}ms`);
           const sidecar = await scrapeListingGalleryViaSidecar({
             url: primaryUrl,
             host: sidecarHost,
             walletBudgetMs: gallerySidecarWalletMs,
           });
-          if (sidecar.photos.length > 0) {
+          if (sidecar.photos.length > result.urls.length) {
             console.log(`[scrapeGenericRealEstate] sidecar recovered ${sidecar.photos.length} photos in ${sidecar.durationMs}ms (facts ${sidecar.facts ? "yes" : "no"})`);
             // Defence-in-depth: if the sidecar returned photos from multiple
             // cdn-redfin photo-set ids, the "Nearby similar homes" carousel
@@ -5137,7 +5154,7 @@ async function scrapeListingPhotos(
               },
             };
           } else {
-            console.log(`[scrapeGenericRealEstate] sidecar returned 0 photos in ${sidecar.durationMs}ms (reason: ${sidecar.reason})`);
+            console.log(`[scrapeGenericRealEstate] sidecar returned ${sidecar.photos.length} photos (no improvement over ${result.urls.length}) in ${sidecar.durationMs}ms (reason: ${sidecar.reason})`);
           }
         } else {
           console.log(`[scrapeGenericRealEstate] sidecar offline (heartbeat ageMs=${heartbeat.ageMs ?? "—"}); skipping`);

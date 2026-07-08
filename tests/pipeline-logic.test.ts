@@ -484,15 +484,33 @@ assert.ok(
   routesSource.includes('(process.env.APIFY_REDFIN_ACTOR || "kawsar~redfin-details-scraper")'),
   "Redfin Apify tier must default to the verified limited-permissions detail actor (APIFY_REDFIN_ACTOR overridable)",
 );
+// 2026-07-08 (operator, bulk-combo queue skipping Ko Olina resorts): the Redfin
+// rescue trigger is WIDENED from zero-only to < MIN_INDEPENDENT_UNIT_PHOTOS —
+// Redfin's bot wall serves Railway a page whose static HTML carries ONLY the
+// og:image, so an ACTIVE listing scraped to exactly 1 photo and the old === 0
+// trigger never fired (proven live: Kuilima Dr units returning 24-30 photos via
+// the healthy Apify actor scraped 0-1 direct). The rescue must also KEEP-BETTER:
+// an empty/failed Apify run must never clobber the fetch's photos (a lone
+// og:image still anchors bestThinMatch's sourceUrl). Do NOT narrow back to === 0.
 assert.match(
   routesSource,
-  /isRedfinTarget && process\.env\.APIFY_API_TOKEN[\s\S]{0,900}scrapeRedfinViaApify\(primaryUrl, options\?\.scrapingBeeTimeoutMs \?\? 180_000\)/,
-  "Redfin branch must rescue via the Apify actor (bounded by the caller's rescue-tier timeout) when the direct fetch returns 0 photos",
+  /result\.urls\.length < MIN_INDEPENDENT_UNIT_PHOTOS && isRedfinTarget && process\.env\.APIFY_API_TOKEN[\s\S]{0,2200}scrapeRedfinViaApify\(primaryUrl, options\?\.scrapingBeeTimeoutMs \?\? 180_000\)/,
+  "Redfin branch must rescue via the Apify actor (bounded by the caller's rescue-tier timeout) when the direct fetch returns fewer than MIN photos",
 );
 assert.match(
   routesSource,
-  /result\.urls\.length === 0 && !isRedfinTarget && process\.env\.SCRAPINGBEE_API_KEY/,
-  "ScrapingBee must no longer run for Redfin URLs (Homes.com keeps its ScrapingBee leg)",
+  /urls: apify\.urls\.length > result\.urls\.length \? apify\.urls : result\.urls/,
+  "Redfin Apify rescue must keep the direct fetch's photos when Apify does not improve on them",
+);
+assert.match(
+  routesSource,
+  /result\.urls\.length < MIN_INDEPENDENT_UNIT_PHOTOS && !isRedfinTarget && process\.env\.SCRAPINGBEE_API_KEY/,
+  "ScrapingBee must no longer run for Redfin URLs (Homes.com keeps its ScrapingBee leg, also on the widened thin trigger)",
+);
+assert.match(
+  routesSource,
+  /result\.urls\.length < MIN_INDEPENDENT_UNIT_PHOTOS[\s\S]{0,1600}sidecar\.photos\.length > result\.urls\.length/,
+  "sidecar gallery tier must fire on a thin (not just empty) result and only replace when strictly larger",
 );
 // The Apify tier must keep the dominant photo-set-id isolation so a leaked
 // comparable-homes carousel can never contaminate a unit folder.

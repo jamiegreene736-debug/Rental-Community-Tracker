@@ -60,6 +60,12 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   { names: ["Grand Champions Villas", "Wailea Grand Champions"], street: "155 Wailea Ike Pl", city: "Kihei", cityAliases: ["Wailea"], state: "HI" },
   { names: ["Ko Olina Beach Villas", "Beach Villas at Ko Olina", "Beach Villas Ko Olina"], street: "92-102 Waialii Pl", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
   { names: ["Coconut Plantation at Ko Olina", "Coconut Plantation", "Coconut Plantation Ko Olina"], street: "92-1070 Olani St", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
+  // Ko Olina Hillside Villas sits on ALIINUI DR (buildings 92-1483…92-1526; Zillow's
+  // named building page is 92-1518). Root-caused 2026-07-08: the sweep research
+  // stamped the item "92-1001 Olani Street" — Coconut Plantation's street — so
+  // photo discovery queried/ordered against the wrong street and surfaced nothing.
+  { names: ["Ko Olina Hillside Villas", "Hillside Villas at Ko Olina", "Hillside Villas Ko Olina"], street: "92-1518 Aliinui Dr", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI", buildingStreetRoots: ["92-1518 Aliinui Dr", "92-1483 Aliinui Dr", "92-1498 Aliinui Dr", "92-1500 Aliinui Dr", "92-1508 Aliinui Dr", "92-1514 Aliinui Dr", "92-1520 Aliinui Dr", "92-1524 Aliinui Dr", "92-1526 Aliinui Dr"] },
+  { names: ["The Fairways at Ko Olina", "Fairways at Ko Olina", "Fairways Ko Olina", "Ko Olina Fairways"], street: "92-1479 Aliinui Dr", city: "Kapolei", cityAliases: ["Ko Olina", "Ewa Beach", "Ewa"], state: "HI" },
   // Oahu North Shore — Turtle Bay / Kuilima resort zone. LOAD-BEARING city alias:
   // Zillow/Realtor/Redfin/Homes index these condos under KAHUKU, HI 96731 — "Turtle
   // Bay" is the resort name, NOT a USPS city. The bulk-combo sweep market is literally
@@ -237,6 +243,15 @@ export function resolveBulkComboListingStreet(input: {
   streetAddress?: string | null;
   addressHint?: string | null;
 }): string {
+  // A curated rule WINS over the item's stored street (2026-07-08). Research can
+  // stamp a plausible-looking but WRONG street (Ko Olina Hillside Villas got
+  // Coconut Plantation's "92-1001 Olani Street") — the old stored-street-first
+  // order preserved the bad value on every retry, pointed photo discovery at the
+  // wrong street, and validateCommunityStreetAddress would then hard-fail the
+  // save against the very rule meant to fix it. Rule-first is this function's
+  // documented purpose ("backfills rules added after a job was queued").
+  const rule = communityAddressRuleForName(input.communityName);
+  if (rule) return rule.street;
   const trimmed = String(input.streetAddress ?? "").trim();
   if (trimmed && isLikelyStreetAddress(trimmed)) return streetRootFromAddress(trimmed);
   return inferCommunityStreetAddress({
