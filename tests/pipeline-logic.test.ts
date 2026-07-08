@@ -279,6 +279,22 @@ assert.match(
   /location root[\s\S]*does not match requested/,
   "bounded unit photo discovery must reject off-street candidates instead of accepting broad-city fallback photos",
 );
+// Best-gallery scan (2026-07-08): a thin candidate (typically a SOLD listing
+// stripped to ~1 og:image) must NOT short-circuit discovery. The loop remembers
+// the best thin match, keeps scanning for a >= MIN gallery, and only falls back
+// to the thin match if the whole pool comes up short. This is what stops a
+// Redfin-heavy resort from failing on a 1-photo sold row that sorted before its
+// one full-gallery active listing.
+assert.match(
+  routesSource,
+  /if \(responsePhotos\.length < MIN_INDEPENDENT_UNIT_PHOTOS\) \{[\s\S]*bestThinMatch = \{[\s\S]*continue;/,
+  "bounded unit photo discovery must defer thin (<MIN) candidates instead of returning the first >=1-photo listing",
+);
+assert.match(
+  routesSource,
+  /if \(bestThinMatch\) \{[\s\S]*return res\.json\(\{[\s\S]*photos: bestThinMatch\.photos/,
+  "bounded unit photo discovery must fall back to the best thin match only after scanning the whole pool for a full gallery",
+);
 assert.match(
   routesSource,
   /photo set duplicates .*existing photo source/,
@@ -522,8 +538,8 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /discoveryWallBudgetMs = isBoundedDiscovery \? 175_000 : null/,
-  "bounded preflight photo discovery must have a hard wall budget",
+  /discoveryWallBudgetMs = isBoundedDiscovery \? 175_000 : 130_000/,
+  "bounded photo discovery gets a 175s wall budget; the unbounded add-community path gets a 130s budget so the best-gallery scan can't run to the 180s client timeout and surface as zero photos",
 );
 assert.match(
   routesSource,
