@@ -17,6 +17,7 @@ import {
   guestIssueStatusLabel,
   guestIssueSeverityLabel,
   summarizeGuestIssueStatuses,
+  orderGuestIssuesResolvedLast,
   validateGuestIssueTitle,
 } from "../shared/guest-issue-logic";
 
@@ -107,6 +108,20 @@ assert.deepEqual(summarizeGuestIssueStatuses([]), {
   total: 0,
 });
 console.log("  ✓ summarizeGuestIssueStatuses rolls up counts");
+
+// ── orderGuestIssuesResolvedLast: resolved sink, order stable, no mutation ──
+const src = [
+  { id: 1, status: "resolved" },
+  { id: 2, status: "open" },
+  { id: 3, status: "resolved" },
+  { id: 4, status: "ongoing" },
+];
+const ordered = orderGuestIssuesResolvedLast(src);
+assert.deepEqual(ordered.map((i) => i.id), [2, 4, 1, 3]); // unresolved keep order, resolved keep order, resolved last
+assert.deepEqual(src.map((i) => i.id), [1, 2, 3, 4]); // input array untouched (not mutated)
+assert.deepEqual(orderGuestIssuesResolvedLast([]).length, 0);
+assert.deepEqual(orderGuestIssuesResolvedLast([{ id: 9, status: "open" }]).map((i) => i.id), [9]);
+console.log("  ✓ orderGuestIssuesResolvedLast sinks resolved, stable, non-mutating");
 
 // ── title validation ──
 assert.equal(validateGuestIssueTitle("  AC broken  ").ok, true);

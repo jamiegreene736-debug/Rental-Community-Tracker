@@ -140,6 +140,20 @@ export function summarizeGuestIssueStatuses(issues: Array<{ status: string }>): 
   return counts;
 }
 
+/**
+ * Order issues so RESOLVED ones sink to the bottom, preserving the incoming
+ * order within each group (storage returns newest-first). Used by the panel +
+ * tab so a resolved issue — which the UI collapses to a compact row — never
+ * pushes an active, still-needs-attention issue down the list. Pure + stable
+ * (Array.prototype.sort is a stable sort in every supported runtime), and it
+ * never mutates the caller's array.
+ */
+export function orderGuestIssuesResolvedLast<T extends { status: string }>(issues: T[]): T[] {
+  return issues
+    .slice()
+    .sort((a, b) => Number(a.status === "resolved") - Number(b.status === "resolved"));
+}
+
 /** Server-side validation for a new issue's title (2–200 chars after trim). */
 export function validateGuestIssueTitle(
   raw: unknown,
