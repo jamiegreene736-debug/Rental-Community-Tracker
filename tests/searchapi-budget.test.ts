@@ -37,6 +37,23 @@ console.log("searchapi-budget: quota parsing");
 
   check("malformed payload parses to null (fail-open)", parseSearchApiQuota({ nope: true }, 0) === null);
   check("null snapshot is never exhausted (fail-open)", !searchApiQuotaExhausted(null, 25));
+
+  // The live 2026-07-09 shape of the second rotation key: a subscription plan
+  // reports remaining_credits: 0 (the unused prepaid balance) while the real
+  // monthly allowance has 34,971/35,000 free — searches succeed. It must NOT be
+  // read as exhausted, or the bulk-combo gate would false-block on a healthy key.
+  const planKey = parseSearchApiQuota(
+    { account: { current_month_usage: 29, monthly_allowance: 35000, remaining_credits: 0 } },
+    0,
+  );
+  check("plan key: remaining_credits 0 but allowance free -> NOT exhausted", !searchApiQuotaExhausted(planKey, 25), planKey);
+  check(
+    "plan key becomes exhausted when the monthly allowance is spent",
+    searchApiQuotaExhausted(
+      parseSearchApiQuota({ account: { current_month_usage: 34999, monthly_allowance: 35000, remaining_credits: 0 } }, 0),
+      25,
+    ),
+  );
 }
 
 console.log("searchapi-budget: 429 circuit breaker");
