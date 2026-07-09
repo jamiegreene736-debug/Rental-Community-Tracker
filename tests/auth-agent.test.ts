@@ -17,6 +17,20 @@ assert.equal(resolveLoginRole("admin", "admin-secret", "admin-secret"), "admin")
 assert.equal(resolveLoginRole("agent", "admin-secret", "admin-secret"), null);
 console.log("  ✓ classifies admin and agent credentials");
 
+// christalh is a second agent-role login (Christal) — identical rights to `agent`.
+assert.equal(resolveLoginRole("christalh", "VacationRentalz@12", "admin-secret"), "agent");
+assert.equal(resolveLoginRole("ChristalH", "VacationRentalz@12", "admin-secret"), "agent"); // username case-insensitive
+assert.equal(resolveLoginRole("christalh", "wrong", "admin-secret"), null);
+assert.equal(resolveLoginRole("christalh", "vacationrentalz@12", "admin-secret"), null); // password IS case-sensitive
+console.log("  ✓ christalh resolves to the agent role (identical permissions)");
+
+// Agent identity constants (login greeting + reply sign-off name).
+const { AGENT_DISPLAY_NAME, AGENT_LOGIN_GREETING, AGENT_REPLY_SIGNOFF_NAME } = await import("../shared/agent-identity");
+assert.equal(AGENT_DISPLAY_NAME, "Christal");
+assert.equal(AGENT_LOGIN_GREETING, "Aloha Christal");
+assert.equal(AGENT_REPLY_SIGNOFF_NAME, "Christal");
+console.log("  ✓ agent identity = Christal (greeting + sign-off name)");
+
 assert.equal(isAgentAllowedPath(req("GET", "/api/auth/session")), true);
 assert.equal(isAgentAllowedPath(req("GET", "/api/guesty-property-map")), true);
 assert.equal(isAgentAllowedPath(req("GET", "/api/agent/properties/12/bookings")), true);

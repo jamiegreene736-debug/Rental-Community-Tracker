@@ -65,6 +65,7 @@ import {
   collectBuyInCoverageWarnings,
   BUYIN_COVERAGE_WINDOW_DAYS,
 } from "@shared/buyin-coverage-warning";
+import { AGENT_REPLY_SIGNOFF_NAME } from "@shared/agent-identity";
 import path from "path";
 import fs from "fs";
 import sharp from "sharp";
@@ -49818,17 +49819,26 @@ CONSTRAINTS
     // over-season — sounds like a local host, not a tourist brochure.
     // Standard tone: friendly + professional, no Hawaiian vocabulary.
     //
-    // Signature block — same name + company in both variants; only
-    // the sign-off word swaps. Hawaii listings close with "Mahalo,"
-    // (the Hawaiian word for thank you) instead of "Thank You,",
-    // which also avoids two "thank you"s in the same message when the
-    // body already thanks the guest.
+    // Signature block — same company in both variants; only the sign-off
+    // word swaps. Hawaii listings close with "Mahalo," (the Hawaiian word
+    // for thank you) instead of "Thank You,", which also avoids two "thank
+    // you"s in the same message when the body already thanks the guest.
+    //
+    // The SENDER NAME is the operator persona "John Carpenter" by default,
+    // but when a remote AGENT (Christal) is the one drafting the reply we sign
+    // it in her name — so her guest replies read "Mahalo, Christal". Keyed off
+    // the session ROLE (both the `agent` and `christalh` logins are Christal);
+    // admin + automated drafts keep John Carpenter. See shared/agent-identity.ts.
+    const replySenderName =
+      (res.locals.portalSession as { role?: string } | undefined)?.role === "agent"
+        ? AGENT_REPLY_SIGNOFF_NAME
+        : "John Carpenter";
     const SIGNATURE = isHawaii
       ? `Mahalo,
-John Carpenter
+${replySenderName}
 VacationRentalExpertz`
       : `Thank You,
-John Carpenter
+${replySenderName}
 VacationRentalExpertz`;
 
     const PLAIN_TEXT_RULES = `FORMATTING RULES (strict — these replies go into email and OTA messaging channels that render plain text):
@@ -50052,7 +50062,7 @@ Structure:
 4. Explain that the units shown are example/representative units: the exact assigned units may vary, but they will be very similar quality and will always match the same bedroom counts.
 5. ${balanceDueSentence ? `Include this payment timing sentence exactly once: "${balanceDueSentence}"` : `Do NOT mention the 120-day remaining-balance rule or a balance due date. That sentence is only for VRBO/HomeAway/Booking.com reservations, and this channel is ${platformName}.`}
 6. Say that detailed arrival information will be sent 14 days prior to arrival, including access details and other check-in details.
-7. Sign off with the canonical signature block (Mahalo, / John Carpenter / VacationRentalExpertz).
+7. Sign off with the canonical signature block (Mahalo, / ${replySenderName} / VacationRentalExpertz).
 
 Hard rules:
 - Do NOT say "Thanks for reaching out" or imply the guest asked a question. They did not.
@@ -50078,7 +50088,7 @@ Write a helpful, polite, BRIEF reply. Polite but to the point. NO conversational
 Structure:
 1. A one-line greeting ("Aloha [Name],"). Nothing more — do NOT add "Thanks for reaching out!", "We're excited to host you", "We're thrilled to have you", or any variation. Skip it.
 2. Lead straight into answering the guest's questions in the order they asked. One sentence per question when possible.
-3. Sign off with the canonical signature block (Mahalo, / John Carpenter / VacationRentalExpertz).
+3. Sign off with the canonical signature block (Mahalo, / ${replySenderName} / VacationRentalExpertz).
 
 Hard rules — every one of these has been a real failure mode:
 - Do NOT restate the booking dates ("you've got two beautiful townhomes reserved from December 27th through January 1st"). The guest sent the inquiry; they know their dates.

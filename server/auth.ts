@@ -266,13 +266,25 @@ export function isAgentAllowedPath(req: Request): boolean {
   return false;
 }
 
+// Agent-role logins (role "agent" → identical rights/views, gated by
+// isAgentAllowedPath). Both are operated by Christal: the shared `agent` login
+// and her personal `christalh` login. Passwords are compared in constant time.
+// To add another agent, add a { username, password } entry here — nothing else
+// changes, since permissions are role-based.
+const AGENT_LOGINS: ReadonlyArray<{ username: string; password: string }> = [
+  { username: "agent", password: "agent" },
+  { username: "christalh", password: "VacationRentalz@12" },
+];
+
 export function resolveLoginRole(usernameRaw: string, password: string, adminSecret: string): PortalRole | null {
   const username = usernameRaw.trim().toLowerCase();
   if ((username === "" || username === "admin") && constantTimeEqual(password, adminSecret)) {
     return "admin";
   }
-  if (username === "agent" && constantTimeEqual(password, "agent")) {
-    return "agent";
+  for (const login of AGENT_LOGINS) {
+    if (username === login.username && constantTimeEqual(password, login.password)) {
+      return "agent";
+    }
   }
   return null;
 }
