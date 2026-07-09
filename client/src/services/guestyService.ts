@@ -381,7 +381,8 @@ class GuestyService {
       "firm";
 
     const terms: Record<string, unknown> = {
-      minNights:          settings.minNights  ?? 3,
+      // Fallback aligns with the standing 5-night minimum policy (2026-07-09).
+      minNights:          settings.minNights  ?? 5,
       maxNights:          settings.maxNights  ?? 365,
       cancellationPolicy: universalPolicy,
       instantBooking:     settings.instantBooking ?? true,

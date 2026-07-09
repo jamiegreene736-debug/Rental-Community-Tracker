@@ -13,11 +13,14 @@ import {
   parseStoredInboxReadOverrides,
   INBOX_READ_OVERRIDE_STORAGE_KEY,
 } from "@shared/inbox-unread-count";
+import { AGENT_DISPLAY_NAME } from "@shared/agent-identity";
 
 export default function AppHeader() {
   const [location] = useLocation();
   const { data: session } = usePortalSession();
   const isAgent = session?.role === "agent";
+  // The agent login is operated by Christal — show her name, not "agent".
+  const userDisplayName = isAgent ? AGENT_DISPLAY_NAME : session?.username;
   const isHome = location === "/";
   const isInbox = location.startsWith("/inbox");
   const isOperations = location.startsWith("/bookings");
@@ -172,11 +175,11 @@ export default function AppHeader() {
               <div className="flex items-center gap-1">
                 <span
                   className="hidden h-10 items-center gap-2 rounded-lg border border-[hsl(var(--brand-blue)/0.14)] bg-background/80 px-3 text-sm font-medium text-muted-foreground md:inline-flex"
-                  title={`Signed in as ${session.username}`}
+                  title={`Signed in as ${userDisplayName}`}
                   data-testid="header-current-user"
                 >
                   <UserRound className="h-4 w-4 text-[hsl(var(--brand-blue))]" />
-                  <span className="max-w-24 truncate capitalize">{session.username}</span>
+                  <span className="max-w-24 truncate capitalize">{userDisplayName}</span>
                 </span>
                 <form method="POST" action="/logout">
                   <button

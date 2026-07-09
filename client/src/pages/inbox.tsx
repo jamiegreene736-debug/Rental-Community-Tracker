@@ -44,6 +44,7 @@ import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
+import { AGENT_COMPOSE_SEED, AGENT_REPLY_SIGNOFF } from "@shared/agent-identity";
 import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { bodyWithoutAttachmentUrls, collectPostAttachments, type PostAttachment } from "@shared/guesty-post-attachments";
 import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
@@ -2797,6 +2798,31 @@ export default function InboxPage() {
   // Controlled so the Guest Issues tab's "Open conversation" can jump to Messages.
   const [activeTab, setActiveTab] = useState<string>("messages");
   const [replyText, setReplyText] = useState("");
+  // Christal (agent) writes every guest message signed "Mahalo, Christal": her
+  // compose box is pre-seeded with the sign-off (she types above it). Seed when
+  // she opens a conversation with an empty box; the send handlers re-seed after
+  // each send. Admin/operator boxes are untouched (start empty). The functional
+  // updater reads the latest text, so switching conversations never clobbers a
+  // draft in progress — it only fills an empty box.
+  useEffect(() => {
+    if (!isAgent || !selectedConvId) return;
+    setReplyText((prev) => (prev.trim() ? prev : AGENT_COMPOSE_SEED));
+  }, [isAgent, selectedConvId]);
+  // True when the agent's box holds ONLY the seeded sign-off (no message yet) —
+  // used to keep Send disabled so a signature-only reply can't be sent by mistake.
+  const replyIsOnlySignoff = isAgent && replyText.trim() === AGENT_REPLY_SIGNOFF;
+  const replyRef = useRef<HTMLTextAreaElement>(null);
+  // After a send the box re-seeds while the textarea may still hold focus (a
+  // Cmd/Ctrl+Enter send never blurs it, so onFocus won't re-fire) — drop the
+  // caret above the sign-off imperatively once the seeded value has committed,
+  // so her next message is typed above "Mahalo, Christal".
+  const caretToTopPendingRef = useRef(false);
+  useEffect(() => {
+    if (!caretToTopPendingRef.current) return;
+    caretToTopPendingRef.current = false;
+    const el = replyRef.current;
+    if (el && el.value === AGENT_COMPOSE_SEED) el.setSelectionRange(0, 0);
+  }, [replyText]);
   const [draftLoading, setDraftLoading] = useState(false);
   const [templateDialog, setTemplateDialog] = useState<{ open: boolean; template: Partial<MessageTemplate> | null }>({ open: false, template: null });
   const [templatePreview, setTemplatePreview] = useState<{ open: boolean; title: string; body: string; channel: "guesty" | "sms" }>({ open: false, title: "", body: "", channel: "guesty" });
@@ -3822,7 +3848,9 @@ export default function InboxPage() {
     },
     onSuccess: (data) => {
       markConversationReplied(data.conversationId);
-      setReplyText("");
+      // Re-seed the agent's box with her sign-off for the next message.
+      setReplyText(isAgent ? AGENT_COMPOSE_SEED : "");
+      caretToTopPendingRef.current = isAgent;
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", data.conversationId] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations", data.conversationId, "posts"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
@@ -3874,7 +3902,9 @@ export default function InboxPage() {
     },
     onSuccess: () => {
       markConversationReplied(selectedConvId);
-      setReplyText("");
+      // Re-seed the agent's box with her sign-off for the next text.
+      setReplyText(isAgent ? AGENT_COMPOSE_SEED : "");
+      caretToTopPendingRef.current = isAgent;
       qc.invalidateQueries({ queryKey: ["/api/inbox/sms/conversations", selectedConvId, "messages"] });
       qc.invalidateQueries({ queryKey: ["/api/guesty-proxy/communication/conversations"] });
       toast({ title: "Text sent via Quo" });
@@ -5173,14 +5203,22 @@ export default function InboxPage() {
                         the column layout). */}
                     <div className="border-t px-3 py-3 sm:px-4 space-y-2">
                       <Textarea
+                        ref={replyRef}
                         data-testid="textarea-reply"
                         placeholder="Write a reply…"
                         value={replyText}
                         onChange={e => setReplyText(e.target.value)}
                         rows={10}
                         className="resize-y min-h-[180px]"
+                        onFocus={e => {
+                          // Agent box seeded with only the sign-off: drop the caret at
+                          // the very top so she types her message ABOVE "Mahalo, Christal".
+                          if (replyIsOnlySignoff && e.target.value === AGENT_COMPOSE_SEED) {
+                            e.target.setSelectionRange(0, 0);
+                          }
+                        }}
                         onKeyDown={e => {
-                          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && replyText.trim()) {
+                          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && replyText.trim() && !replyIsOnlySignoff) {
                             sendMessage.mutate();
                           }
                         }}
@@ -5202,8 +5240,8 @@ export default function InboxPage() {
                           size="sm"
                           className="w-full sm:w-auto"
                           onClick={() => sendTextMessage.mutate()}
-                          disabled={!replyText.trim() || sendTextMessage.isPending || Boolean(smsDisabledReason)}
-                          title={smsDisabledReason ?? `Send SMS to ${effectiveGuestPhone}`}
+                          disabled={!replyText.trim() || replyIsOnlySignoff || sendTextMessage.isPending || Boolean(smsDisabledReason)}
+                          title={replyIsOnlySignoff ? "Write a message above your sign-off first" : (smsDisabledReason ?? `Send SMS to ${effectiveGuestPhone}`)}
                           data-testid="button-send-text"
                         >
                           <MessageCircle className="h-3.5 w-3.5 mr-1.5" />
@@ -5213,7 +5251,7 @@ export default function InboxPage() {
                           size="sm"
                           className="w-full sm:w-auto"
                           onClick={() => sendMessage.mutate()}
-                          disabled={!replyText.trim() || sendMessage.isPending || sendTextMessage.isPending}
+                          disabled={!replyText.trim() || replyIsOnlySignoff || sendMessage.isPending || sendTextMessage.isPending}
                           data-testid="button-send-reply"
                           // The send route returns as soon as the message is
                           // posted (a short inline verify), so this clears in a
