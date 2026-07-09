@@ -1,4 +1,5 @@
 import {
+  createConcurrencyLimiter,
   createSearchApiCircuit,
   describeSearchApiQuota,
   parseSearchApiQuota,
@@ -67,6 +68,51 @@ console.log("searchapi-budget: 429 circuit breaker");
   circuit.recordOk();
   check("successful probe closes for good", !circuit.isOpen());
 }
+
+console.log("searchapi-budget: shared concurrency limiter");
+await (async () => {
+  const limiter = createConcurrencyLimiter(2);
+  let inFlight = 0;
+  let peak = 0;
+  const order: number[] = [];
+  const gate: Array<() => void> = [];
+  const task = (id: number) =>
+    limiter(async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise<void>((resolve) => gate.push(resolve));
+      order.push(id);
+      inFlight -= 1;
+    });
+  const all = Promise.all([task(1), task(2), task(3), task(4)]);
+  await new Promise((r) => setTimeout(r, 10));
+  check("only max slots start immediately", gate.length === 2 && limiter.stats().queued === 2, limiter.stats());
+  gate.shift()!();
+  await new Promise((r) => setTimeout(r, 10));
+  check("releasing a slot admits the next waiter (FIFO)", gate.length === 2);
+  while (gate.length) gate.shift()!();
+  await new Promise((r) => setTimeout(r, 10));
+  while (gate.length) gate.shift()!();
+  await all;
+  check("never exceeds max concurrency", peak === 2, peak);
+  check("all tasks complete", order.length === 4, order);
+
+  // A throwing task must release its slot.
+  const limiter2 = createConcurrencyLimiter(1);
+  let threw = false;
+  try {
+    await limiter2(async () => {
+      throw new Error("boom");
+    });
+  } catch {
+    threw = true;
+  }
+  let ran = false;
+  await limiter2(async () => {
+    ran = true;
+  });
+  check("a throwing task releases its slot", threw && ran);
+})();
 
 console.log(`\nsearchapi-budget: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

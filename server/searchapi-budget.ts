@@ -93,8 +93,54 @@ export function createSearchApiCircuit(opts: {
   };
 }
 
+// Simple FIFO concurrency limiter (pure; unit-tested). SearchAPI producers
+// used to fan out unbounded — on 2026-07-08 the bulk-combo sweep and a
+// concurrent top-markets scan together fired 8,398 queries in one hour, each
+// starving the other into 429s. One shared limiter puts a ceiling on the
+// account-wide burst rate no matter how many jobs run at once.
+export function createConcurrencyLimiter(maxConcurrent: number) {
+  const max = Number.isFinite(maxConcurrent) && maxConcurrent >= 1 ? Math.floor(maxConcurrent) : 1;
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  const acquire = () =>
+    new Promise<void>((resolve) => {
+      if (active < max) {
+        active += 1;
+        resolve();
+      } else {
+        waiters.push(() => {
+          active += 1;
+          resolve();
+        });
+      }
+    });
+  const release = () => {
+    active -= 1;
+    const next = waiters.shift();
+    if (next) next();
+  };
+  const run = async <T>(fn: () => Promise<T>): Promise<T> => {
+    await acquire();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
+  (run as any).stats = () => ({ active, queued: waiters.length, max });
+  return run as (<T>(fn: () => Promise<T>) => Promise<T>) & { stats: () => { active: number; queued: number; max: number } };
+}
+
 // ---------------------------------------------------------------------------
 // App singletons (fetch-backed; not exercised by unit tests).
+
+// Shared across ALL SearchAPI producers that opt in (bulk-combo discovery,
+// top-market research). Create the fetch's AbortSignal INSIDE the wrapped fn —
+// a signal minted before the slot is acquired would count queue-wait time
+// against the request timeout.
+export const runWithSearchApiSlot = createConcurrencyLimiter(
+  Number(process.env.SEARCHAPI_MAX_CONCURRENCY ?? 6),
+);
 
 // One shared circuit for the fetch-unit-photos discovery SERP queries. Scoped
 // to that path on purpose — other SearchAPI consumers (Lens photo scans,

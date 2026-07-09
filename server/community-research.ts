@@ -11,6 +11,7 @@ import {
   type TypicalComboPair,
 } from "@shared/community-combo";
 import { geocode } from "./walking-distance";
+import { runWithSearchApiSlot } from "./searchapi-budget";
 
 export { formatTypicalComboLabel, inferTypicalComboPair, normalizeCombinedBedroomsTypical, type TypicalComboPair };
 
@@ -3130,10 +3131,10 @@ export async function fetchAmortizedNightlyByBR(
       sp.ne_lat = String(bbox.ne_lat);
       sp.ne_lng = String(bbox.ne_lng);
     }
-    const resp = await fetch(
+    const resp = await runWithSearchApiSlot(() => fetch(
       `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
       { signal: options?.signal },
-    );
+    ));
     if (!resp.ok) return { ratesByBR, bboxApplied: !!bbox, bboxCenter, drops };
     const data = await resp.json() as any;
     const properties: any[] = Array.isArray(data?.properties) ? data.properties : [];
@@ -3214,10 +3215,10 @@ export async function fetchAmortizedNightlyByBR(
         sp.ne_lat = String(bbox.ne_lat);
         sp.ne_lng = String(bbox.ne_lng);
       }
-      const resp2 = await fetch(
+      const resp2 = await runWithSearchApiSlot(() => fetch(
         `https://www.searchapi.io/api/v1/search?${new URLSearchParams(sp).toString()}`,
         { signal: options?.signal },
-      );
+      ));
       if (resp2.ok) {
         const data2 = await resp2.json() as any;
         const props2 = Array.isArray(data2?.properties) ? data2.properties : [];
@@ -3365,10 +3366,15 @@ export async function researchCommunitiesForCity(
   const numPerQuery = mode === "single" ? 12 : 8;
   const googleResults = await Promise.all(queries.map(async (q) => {
     try {
-      const resp = await fetch(
+      // Shared account-wide SearchAPI limiter (2026-07-09): this research
+      // sweep ran concurrently with the bulk-combo queue on 2026-07-08 and the
+      // two starved each other into 429s (8,398 queries in one hour). The
+      // AbortSignal is minted inside the wrapped fn so queue-wait time never
+      // counts against the request timeout.
+      const resp = await runWithSearchApiSlot(() => fetch(
         `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=${numPerQuery}&api_key=${searchApiKey}`,
         { signal: AbortSignal.timeout(COMMUNITY_RESEARCH_SEARCH_TIMEOUT_MS) },
-      );
+      ));
       if (!resp.ok) return [];
       const data = await resp.json() as any;
       return (data.organic_results || []) as Array<{ title: string; link: string; snippet: string }>;
