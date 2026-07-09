@@ -1014,7 +1014,10 @@ export const builderBookingRules = pgTable("builder_booking_rules", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull(),
   guestyListingId: text("guesty_listing_id").notNull(),
-  minNights: integer("min_nights").notNull().default(3),
+  // Standing operator policy (2026-07-09): the default nightly minimum is 5.
+  // Inserts always specify minNights (see normalizeBuilderBookingRules), so this
+  // default only governs fresh rows that omit it — kept at 5 for intent-consistency.
+  minNights: integer("min_nights").notNull().default(5),
   maxNights: integer("max_nights").notNull().default(365),
   advanceNotice: integer("advance_notice").notNull().default(7),
   preparationTime: integer("preparation_time").notNull().default(1),

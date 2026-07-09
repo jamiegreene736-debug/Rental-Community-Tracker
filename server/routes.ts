@@ -24337,6 +24337,12 @@ Requirements:
     };
   };
 
+  // Standing operator policy (2026-07-09): every listing's nightly minimum is 5.
+  // This is the single source of truth used by the booking-rules default, the
+  // per-push enforcement piggybacked onto every seasonal-rate push, and the
+  // bulk push-min-nights-all endpoint below.
+  const DEFAULT_MIN_NIGHTS = 5;
+
   const clampInt = (value: unknown, fallback: number, min: number, max: number): number => {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return fallback;
@@ -24344,7 +24350,7 @@ Requirements:
   };
 
   const normalizeBuilderBookingRules = (input: BuilderBookingRulesPayload) => ({
-    minNights: clampInt(input.minNights, 3, 1, 90),
+    minNights: clampInt(input.minNights, DEFAULT_MIN_NIGHTS, 1, 90),
     maxNights: clampInt(input.maxNights, 365, 1, 730),
     advanceNotice: clampInt(input.advanceNotice, 7, 0, 365),
     preparationTime: clampInt(input.preparationTime, 1, 0, 30),
@@ -24556,6 +24562,146 @@ Requirements:
     return { row, readback, availabilityReadback, mismatches, summary };
   };
 
+  // Enforce the standing DEFAULT_MIN_NIGHTS as a FLOOR on a single listing, without
+  // disturbing any other setting. Design (hardened via adversarial review 2026-07-09):
+  //  • Reads Guesty's LIVE terms and ONLY acts on a confident read. A failed/empty
+  //    read short-circuits to a no-op — enforcement must never write from stale or
+  //    absent state, which could clobber real terms.
+  //  • It is a FLOOR, not an exact set: a listing already at >= 5 nights is left
+  //    untouched, so an operator-set higher minimum (e.g. Menehune Shores' 7-night
+  //    loss-prevention rule) is never lowered. Only listings below 5 (or with no
+  //    minimum) are raised to 5.
+  //  • The write updates ONLY terms.minNights (carrying the other KNOWN booking-rule
+  //    terms — maxNights, cancellationPolicy, instantBooking — straight back so a
+  //    field-replace PUT can't drop them). availability-settings (advance notice /
+  //    prep time) are deliberately never touched.
+  // Idempotent + self-healing: the gate reads live Guesty state every call, so it
+  // re-asserts the floor if the minimum ever drifts and skips (one GET) once set.
+  const listingTermsMinNights = (terms: Record<string, any>): number | null =>
+    firstFiniteNumber(terms.minNights, terms.minimumNights, terms.minLOS, terms.minimumStay);
+
+  const enforceListingMinNights = async (
+    listingId: string,
+  ): Promise<
+    | { changed: false; reason: "unreadable-terms" | "already-at-floor"; minNights: number | null }
+    | { changed: true; minNights: number; previous: number | null; verified: boolean }
+  > => {
+    const liveTerms = await readGuestyTerms(listingId).catch(() => null);
+    if (!liveTerms || typeof liveTerms !== "object" || Object.keys(liveTerms).length === 0) {
+      return { changed: false, reason: "unreadable-terms", minNights: null };
+    }
+    const liveMin = listingTermsMinNights(liveTerms);
+    if (liveMin != null && liveMin >= DEFAULT_MIN_NIGHTS) {
+      return { changed: false, reason: "already-at-floor", minNights: liveMin };
+    }
+
+    const nextTerms: Record<string, any> = { minNights: DEFAULT_MIN_NIGHTS };
+    const maxN = firstFiniteNumber(liveTerms.maxNights, liveTerms.maximumNights, liveTerms.maxLOS, liveTerms.maximumStay);
+    if (maxN != null) nextTerms.maxNights = maxN;
+    if (typeof liveTerms.cancellationPolicy === "string") nextTerms.cancellationPolicy = liveTerms.cancellationPolicy;
+    if (typeof liveTerms.instantBooking === "boolean") nextTerms.instantBooking = liveTerms.instantBooking;
+
+    await guestyRequest("PUT", `/listings/${encodeURIComponent(listingId)}`, { terms: nextTerms });
+
+    const after = await readGuestyTerms(listingId).catch(() => ({} as Record<string, any>));
+    const verified = listingTermsMinNights(after) === DEFAULT_MIN_NIGHTS;
+    if (!verified) {
+      console.warn(
+        `[booking-rules] min-nights write to listing ${listingId} did not read back as ${DEFAULT_MIN_NIGHTS} (Guesty may echo the field under an unexpected key)`,
+      );
+    }
+    return { changed: true, minNights: DEFAULT_MIN_NIGHTS, previous: liveMin ?? null, verified };
+  };
+
+  // POST /api/builder/booking-rules/push-min-nights-all
+  // One-shot bulk apply of the standing 5-night FLOOR to EVERY mapped Guesty
+  // listing (core listings + promoted drafts) via enforceListingMinNights — so the
+  // operator can roll it out immediately instead of waiting for each listing's next
+  // rate push. Idempotent: listings already at >= 5 are skipped; only listings
+  // below 5 are raised, and only terms.minNights is touched.
+  app.post("/api/builder/booking-rules/push-min-nights-all", async (_req: Request, res: Response) => {
+    const mappings = await storage.getGuestyPropertyMap();
+    const results: Array<{
+      propertyId: number;
+      listingId: string;
+      status: "ok" | "skipped" | "error";
+      changed: boolean;
+      minNights: number | null;
+      previous: number | null;
+      summary: string;
+    }> = [];
+
+    for (const mapping of mappings) {
+      const listingId = mapping.guestyListingId;
+      try {
+        const outcome = await enforceListingMinNights(listingId);
+        if (!outcome.changed) {
+          results.push({
+            propertyId: mapping.propertyId,
+            listingId,
+            status: outcome.reason === "already-at-floor" ? "skipped" : "error",
+            changed: false,
+            minNights: outcome.minNights,
+            previous: null,
+            summary: outcome.reason === "already-at-floor"
+              ? `Already at or above the ${DEFAULT_MIN_NIGHTS}-night floor (min ${outcome.minNights})`
+              : "Could not read current Guesty terms — left unchanged",
+          });
+        } else {
+          results.push({
+            propertyId: mapping.propertyId,
+            listingId,
+            status: outcome.verified ? "ok" : "error",
+            changed: true,
+            minNights: outcome.minNights,
+            previous: outcome.previous,
+            summary: outcome.verified
+              ? `Raised minimum to ${DEFAULT_MIN_NIGHTS} nights (was ${outcome.previous ?? "unset"})`
+              : `Pushed ${DEFAULT_MIN_NIGHTS}-night minimum but Guesty read-back did not confirm it`,
+          });
+        }
+      } catch (err: any) {
+        const summary = err?.message ?? String(err);
+        console.error("[booking-rules] bulk min-nights push failed", {
+          propertyId: mapping.propertyId,
+          listingId,
+          minNights: DEFAULT_MIN_NIGHTS,
+          error: summary,
+        });
+        results.push({
+          propertyId: mapping.propertyId,
+          listingId,
+          status: "error",
+          changed: false,
+          minNights: DEFAULT_MIN_NIGHTS,
+          previous: null,
+          summary,
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+
+    const errorCount = results.filter((result) => result.status === "error").length;
+    const changedCount = results.filter((result) => result.changed).length;
+    const skippedCount = results.filter((result) => result.status === "skipped").length;
+    console.log("[booking-rules] bulk min-nights push complete", {
+      minNights: DEFAULT_MIN_NIGHTS,
+      total: results.length,
+      changed: changedCount,
+      skipped: skippedCount,
+      error: errorCount,
+    });
+    return res.status(errorCount === 0 ? 200 : 207).json({
+      ok: errorCount === 0,
+      minNights: DEFAULT_MIN_NIGHTS,
+      total: results.length,
+      changedCount,
+      skippedCount,
+      errorCount,
+      results,
+    });
+  });
+
   app.post("/api/builder/booking-rules/push-advance-notice-all", async (req: Request, res: Response) => {
     const advanceNotice = clampInt(req.body?.advanceNotice, 7, 0, 365);
     const mappings = await storage.getGuestyPropertyMap();
@@ -24756,6 +24902,27 @@ Requirements:
         error: summary,
         sampleRange: ranges[0],
       });
+    }
+
+    // Standing operator policy (2026-07-09): every time rates are pushed to
+    // Guesty, ensure the listing's nightly minimum is at least 5. This is the
+    // single chokepoint every rate push funnels through — the market-rate queue,
+    // the weekly scheduler, the Pricing-tab button, and draft pricing all POST
+    // here — so enforcing it here makes every listing default to a 5-night floor
+    // on its next push. Strictly non-fatal (a terms hiccup must never undo a
+    // successful calendar push) and a floor (never lowers a higher operator-set
+    // minimum; no-ops on an unreadable read — see enforceListingMinNights).
+    try {
+      const minNightsOutcome = await enforceListingMinNights(listingId);
+      if (minNightsOutcome.changed) {
+        console.log(
+          `[push-seasonal-rates] raised listing ${listingId} to a ${DEFAULT_MIN_NIGHTS}-night minimum (was ${minNightsOutcome.previous ?? "unset"})`,
+        );
+      }
+    } catch (err: any) {
+      console.warn(
+        `[push-seasonal-rates] ${DEFAULT_MIN_NIGHTS}-night minimum enforcement failed for listing ${listingId} (non-fatal): ${err?.message ?? err}`,
+      );
     }
 
     try {
