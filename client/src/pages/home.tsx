@@ -5452,7 +5452,7 @@ function AdminDashboard() {
               <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 <span className="font-medium">
-                  {buyInCoverageWarnings.length} booking{buyInCoverageWarnings.length === 1 ? " checks" : "s check"} in within {buyInCoverageData?.windowDays ?? 15} days with units NOT purchased
+                  {buyInCoverageWarnings.length} booking{buyInCoverageWarnings.length === 1 ? " checks" : "s check"} in within {buyInCoverageData?.windowDays ?? 15} days with units NOT bought in
                 </span>
               </div>
               <Button
@@ -6590,12 +6590,14 @@ function AdminDashboard() {
         <DialogContent className="max-w-xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-700 dark:text-red-300">
-              <AlertTriangle className="h-4 w-4" /> Units not purchased for upcoming stays
+              <AlertTriangle className="h-4 w-4" /> Units not bought in for upcoming stays
             </DialogTitle>
             <DialogDescription>
               These bookings check in within the next {buyInCoverageData?.windowDays ?? 15} days but the unit
               {buyInCoverageWarnings.length === 1 && buyInCoverageWarnings[0]?.missingUnits.length === 1 ? " has" : "s have"} not
-              been bought in yet. Find and attach the missing units on the Bookings page. Cancelled bookings are excluded.
+              been bought in yet. A unit counts as bought in only once its alias inbox has received a booking
+              email — attaching a unit is not enough. Book the missing units (or confirm the email arrived) on the
+              Bookings page. Cancelled bookings are excluded.
             </DialogDescription>
           </DialogHeader>
           {buyInCoverageWarnings.length === 0 ? (
@@ -6623,8 +6625,10 @@ function AdminDashboard() {
                         className="block font-medium text-red-600 dark:text-red-400"
                         data-testid={`text-buyin-coverage-issue-${w.reservationId}`}
                       >
-                        ✕ {w.missingUnits.length} of {w.slotsTotal} unit{w.slotsTotal === 1 ? "" : "s"} NOT purchased
-                        {" "}({w.missingUnits.map((u) => u.unitLabel).join(", ")})
+                        ✕ {w.missingUnits.length} of {w.slotsTotal} unit{w.slotsTotal === 1 ? "" : "s"} NOT bought in
+                        {" "}({w.missingUnits
+                          .map((u) => `${u.unitLabel} — ${u.reason === "no-email" ? "attached, no booking email yet" : "not attached"}`)
+                          .join("; ")})
                         {" "}·{" "}
                         {w.daysUntilCheckIn < 0
                           ? "guest is ALREADY checked in"
@@ -6634,7 +6638,7 @@ function AdminDashboard() {
                       </span>
                       {w.slotsFilled > 0 ? (
                         <span className="block text-muted-foreground">
-                          {w.slotsFilled} of {w.slotsTotal} units already purchased
+                          {w.slotsFilled} of {w.slotsTotal} units already bought in (booking email received)
                         </span>
                       ) : null}
                     </div>
