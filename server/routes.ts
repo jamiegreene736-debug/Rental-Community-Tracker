@@ -318,6 +318,13 @@ import {
   unitGalleryMaxKeep,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
+import { createKeepBetterScrapeCache, createSearchQueryCache } from "./discovery-cache";
+import {
+  describeSearchApiQuota,
+  getSearchApiQuota,
+  searchApiDiscoveryCircuit,
+  searchApiQuotaExhausted,
+} from "./searchapi-budget";
 import {
   isolateRedfinSubjectGallery,
   redfinPhotoSetId,
@@ -4522,6 +4529,18 @@ function listingScrapePlatform(url: string): "realtor" | "zillow" | "redfin" | "
   if (/homes\.com\/property\//i.test(url)) return "homes";
   return "other";
 }
+
+// Per-listing scrape cache + per-query SERP cache for the fetch-unit-photos
+// discovery loop (2026-07-09, see server/discovery-cache.ts for the live root
+// cause). Keyed by listingClusterKey. KEEP-BETTER is load-bearing: a bot-walled
+// re-scrape (0-1 photos) must never evict a full gallery already won — on the
+// 2026-07-08 sweep the same Redfin unit scraped 25 photos once, then 0 forever
+// after, and the combo failed even though the gallery had been in hand.
+const listingScrapeCache = createKeepBetterScrapeCache<{
+  dual: { photos: ScrapedPhoto[]; sourceUrl: string; platform: "realtor" | "zillow" | "redfin" | "homes" | "other" };
+  facts: ListingFacts;
+}>({ minFullPhotos: MIN_INDEPENDENT_UNIT_PHOTOS });
+const discoverySerpCache = createSearchQueryCache<Array<{ link?: string; title?: string; snippet?: string }>>();
 
 function mergeListingFactsInto(target: ListingFacts, source: ListingFacts): void {
   if (source.bedrooms != null) target.bedrooms = source.bedrooms;
@@ -37738,6 +37757,27 @@ Return ONLY compact JSON with this exact shape:
       job.updatedAt = Date.now();
       await persistBulkComboListingSnapshot(job);
     }
+    // SEARCH QUOTA PREFLIGHT (2026-07-09): a cheap cached /me probe (no search
+    // credits consumed) before ANY research/scraping. On the 2026-07-08 sweep
+    // the SearchAPI monthly allowance died MID-RUN and the queue churned for
+    // hours — burning Apify credits, thickening portal bot-walls, and
+    // reporting the outage as "no listings found". With the allowance gone,
+    // every remaining item fails fast (seconds, not 12-min photo budgets) with
+    // an explicit quota message; "Retry failed" re-runs them after the
+    // reset/upgrade. FAIL-OPEN: a probe error or missing key never blocks.
+    if (process.env.SEARCHAPI_API_KEY) {
+      const quota = await getSearchApiQuota();
+      if (searchApiQuotaExhausted(quota)) {
+        const err: any = new Error(
+          `SearchAPI monthly quota exhausted (${describeSearchApiQuota(quota!)}) — the queue cannot run listing discovery, ` +
+          `so this resort was NOT searched (infrastructure outage, not scarcity). Upgrade the SearchAPI plan or wait for ` +
+          `the monthly reset, then use "Retry failed".`,
+        );
+        err.bulkComboNoRetry = true;
+        err.bulkComboQuotaOutage = true;
+        throw err;
+      }
+    }
     // SERVER-SIDE RESEARCH (from-communities/sweep mode). The operator handed us a
     // raw community list and left; resolve the best available combo HERE (not in the
     // browser) so the whole sweep survives Safari backgrounding. A transient failure
@@ -38575,8 +38615,14 @@ Return ONLY compact JSON with this exact shape:
                   // "Add a manual community" by pasting the two unit URLs — instead of
                   // the generic "could not create a fully-photographed listing".
                   const noSourceInventory = /missing-source-url|no-photos|too-few-distinct-photos:0/i.test(item.error || "");
+                  // A quota outage is an INFRA failure, not a resort verdict —
+                  // surface it verbatim (never as a "Skipped — no listings /
+                  // could not photograph" resort skip, which reads as scarcity).
+                  const quotaOutage = !!e?.bulkComboQuotaOutage || /SearchAPI\s+\S*\s*quota exhausted/i.test(item.error || "");
                   item.message = e?.bulkComboNoRetry
-                    ? (noSourceInventory
+                    ? (quotaOutage
+                        ? (item.error || "SearchAPI quota exhausted — retry after the reset/upgrade")
+                        : noSourceInventory
                         ? `Skipped — no for-sale or recently-sold listings were found for "${item.community?.name ?? "this resort"}" on Zillow/Realtor/Redfin/Homes, so there are no unit photos to source automatically. Add it via "Add a manual community" (paste the two unit listing URLs) to list it. ${item.error || ""}`.trim()
                         : `Skipped — could not create a fully-photographed listing for this resort. ${item.error || ""}`.trim())
                     : (item.error || "Bulk combo listing failed");
@@ -39567,19 +39613,50 @@ Return ONLY compact JSON with this exact shape:
         homesQueries.push(`site:homes.com "${name}"`);
       }
 
+      // Shared SERP fetch for all discovery sweeps (2026-07-09): consult the
+      // 6h query cache first (the same portal queries re-fire every pass /
+      // attempt / retry with identical results — only our SearchAPI budget
+      // changes), then the 429 circuit breaker (once the monthly allowance or
+      // hourly rate limit is blown, EVERY further query 429s — stop paying
+      // latency for them and let the circuit half-open probe recovery). The
+      // stats feed the quota-blackout classification below so an all-429 run is
+      // reported as an infrastructure outage, never as "no listings exist".
+      const searchApiSerpStats = { attempted: 0, rateLimited: 0 };
+      const fetchDiscoverySerp = async (
+        q: string,
+      ): Promise<Array<{ link?: string; title?: string; snippet?: string }> | null> => {
+        const cached = discoverySerpCache.get(q);
+        if (cached) return cached;
+        searchApiSerpStats.attempted += 1;
+        if (searchApiDiscoveryCircuit.isOpen()) {
+          searchApiSerpStats.rateLimited += 1;
+          return null;
+        }
+        const resp = await fetch(
+          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
+          { signal: AbortSignal.timeout(COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS) },
+        );
+        if (resp.status === 429) {
+          searchApiDiscoveryCircuit.record429();
+          searchApiSerpStats.rateLimited += 1;
+          console.warn(`[fetch-unit-photos] SearchAPI 429 for "${q}"`);
+          return null;
+        }
+        if (!resp.ok) {
+          console.warn(`[fetch-unit-photos] SearchAPI ${resp.status} for "${q}"`);
+          return null;
+        }
+        searchApiDiscoveryCircuit.recordOk();
+        const data = await resp.json() as any;
+        const organic = (data.organic_results || []) as Array<{ link?: string; title?: string; snippet?: string }>;
+        discoverySerpCache.remember(q, organic);
+        return organic;
+      };
       const runDiscoveryQueries = async (queries: string[], pattern: RegExp, source: DiscoverySource) => {
         await Promise.all(queries.map(async (q) => {
           try {
-            const resp = await fetch(
-              `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
-              { signal: AbortSignal.timeout(COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS) },
-            );
-            if (!resp.ok) {
-              console.warn(`[fetch-unit-photos] SearchAPI ${resp.status} for "${q}"`);
-              return;
-            }
-            const data = await resp.json() as any;
-            const organic = (data.organic_results || []) as Array<{ link?: string; title?: string; snippet?: string }>;
+            const organic = await fetchDiscoverySerp(q);
+            if (!organic) return;
             for (const r of organic) {
               const link = String(r.link ?? "");
               if (!pattern.test(link)) continue;
@@ -39606,13 +39683,8 @@ Return ONLY compact JSON with this exact shape:
         console.log(`[fetch-unit-photos] market-recon sweep: ${queries.length} aggregator queries`);
         await Promise.all(queries.map(async (q) => {
           try {
-            const resp = await fetch(
-              `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
-              { signal: AbortSignal.timeout(COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS) },
-            );
-            if (!resp.ok) return;
-            const data = await resp.json() as any;
-            const organic = (data.organic_results || []) as Array<{ link?: string; title?: string; snippet?: string }>;
+            const organic = await fetchDiscoverySerp(q);
+            if (!organic) return;
             for (const r of organic) {
               const link = String(r.link ?? "");
               const portal = detectMarketReconPortal(link);
@@ -39887,7 +39959,28 @@ Return ONLY compact JSON with this exact shape:
             scrapingBeeTimeoutMs: Math.min(18_000, remainingBudgetMs ?? 18_000),
             ...SCRAPE_WITHOUT_SIDECAR,
           } : SCRAPE_WITHOUT_SIDECAR;
-          let dual = await scrapeListingPhotosDualSource(clusterUrls, facts, scrapeOpts);
+          // Scrape cache (2026-07-09): the exact + relaxed passes, retry
+          // attempts, and same-day re-queues all walk the same candidate pool —
+          // re-scraping burned SearchAPI/Apify budget, provoked 429s/bot-walls,
+          // and could LOSE a gallery already won (keep-better in the cache
+          // module is what prevents that). A hit skips the datacenter scrape
+          // entirely; a thin hit still flows into the sidecar rescue below
+          // unless a rescue already ran for this listing within the thin TTL.
+          const cachedScrape = listingScrapeCache.get(clusterKey);
+          let cachedSidecarTried = false;
+          let sidecarRescueAttempted = false;
+          let dual: { photos: ScrapedPhoto[]; sourceUrl: string; platform: "realtor" | "zillow" | "redfin" | "homes" | "other" };
+          if (cachedScrape) {
+            cachedSidecarTried = cachedScrape.sidecarTried;
+            mergeListingFactsInto(facts, cachedScrape.result.facts);
+            dual = cachedScrape.result.dual;
+            console.log(
+              `[fetch-unit-photos] scrape cache hit for ${candidate.url} ` +
+              `(${dual.photos.length} photos, age ${Math.round((Date.now() - cachedScrape.at) / 1000)}s)`,
+            );
+          } else {
+            dual = await scrapeListingPhotosDualSource(clusterUrls, facts, scrapeOpts);
+          }
           // Bounded sidecar rescue (see the constants above): a thin scrape on a
           // bedroom-compatible candidate gets ONE residential-IP retry while
           // budget and rescue credits remain. Bedroom compatibility is checked
@@ -39903,6 +39996,7 @@ Return ONLY compact JSON with this exact shape:
           // same datacenter tiers that just came up thin.
           if (
             isBoundedDiscovery &&
+            !cachedSidecarTried &&
             /redfin\.com|homes\.com|zillow\.com/i.test(candidate.url) &&
             dual.photos.length < MIN_INDEPENDENT_UNIT_PHOTOS &&
             sidecarPhotoRescuesUsed < maxSidecarPhotoRescues
@@ -39917,6 +40011,7 @@ Return ONLY compact JSON with this exact shape:
                 const { getHeartbeat } = await import("./vrbo-sidecar-queue");
                 if (getHeartbeat().isOnline) {
                   sidecarPhotoRescuesUsed += 1;
+                  sidecarRescueAttempted = true;
                   const walletMs = Math.max(30_000, Math.min(90_000, (remainingMs ?? 110_000) - 20_000));
                   console.log(
                     `[fetch-unit-photos] sidecar photo rescue ${sidecarPhotoRescuesUsed}/${maxSidecarPhotoRescues} ` +
@@ -39940,6 +40035,12 @@ Return ONLY compact JSON with this exact shape:
               }
             }
           }
+          listingScrapeCache.remember(
+            clusterKey,
+            { dual, facts: { ...facts } },
+            dual.photos.length,
+            { sidecarTried: cachedSidecarTried || sidecarRescueAttempted },
+          );
           const photos = dual.photos;
           const sourceUrl = dual.sourceUrl || candidate.url;
           const sourceLabel = (dual.platform === "other" ? candidate.source : dual.platform) as DiscoverySource;
@@ -40157,6 +40258,34 @@ Return ONLY compact JSON with this exact shape:
       }
 
       if (!listingUrl) {
+        // QUOTA-BLACKOUT CLASSIFICATION (2026-07-09): when discovery found ZERO
+        // candidates AND every SearchAPI query it attempted was rate/credit
+        // limited (or short-circuited by the open circuit), the honest verdict
+        // is "search is down", NOT "this resort has no listings" — on the
+        // 2026-07-08 sweep the monthly allowance died mid-run and Island
+        // Colony's all-429 sweep was reported with the genuine-scarcity skip
+        // message. A 503 here keeps the bulk runner's retry semantics (it is a
+        // transient infra failure, never a bulkComboNoRetry resort skip) and
+        // the wording deliberately avoids the no-source-inventory tokens the
+        // runner maps to the "Add a manual community" skip.
+        if (
+          candidateUrls.length === 0 &&
+          searchApiSerpStats.attempted > 0 &&
+          searchApiSerpStats.rateLimited >= searchApiSerpStats.attempted
+        ) {
+          console.warn(
+            `[fetch-unit-photos] discovery blackout community="${communityName ?? ""}": ` +
+            `every SearchAPI query rate-limited (${searchApiSerpStats.rateLimited}/${searchApiSerpStats.attempted}) ` +
+            `and the portal harvests returned no candidates`,
+          );
+          return res.status(503).json({
+            error:
+              "Listing discovery is temporarily unavailable — every SearchAPI query was rate/credit-limited (HTTP 429). " +
+              "This is an infrastructure outage, NOT proof this resort has no listings. " +
+              "Retry after the SearchAPI quota resets or the plan is upgraded.",
+            diagnostic: { code: "search-quota-blackout", searchApiSerpStats },
+          });
+        }
         // No matching real-estate listing — return empty so the page's
         // empty state covers it. Not an error.
         console.log(

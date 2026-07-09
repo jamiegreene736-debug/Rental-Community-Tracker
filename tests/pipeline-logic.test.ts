@@ -309,7 +309,7 @@ assert.match(
 // find-unit rescue cap (2026-07-06).
 assert.match(
   routesSource,
-  /isBoundedDiscovery &&\s*\n\s*\/redfin\\\.com\|homes\\\.com\|zillow\\\.com\/i\.test\(candidate\.url\) &&\s*\n\s*dual\.photos\.length < MIN_INDEPENDENT_UNIT_PHOTOS &&\s*\n\s*sidecarPhotoRescuesUsed < maxSidecarPhotoRescues/,
+  /isBoundedDiscovery &&\s*\n\s*!cachedSidecarTried &&\s*\n\s*\/redfin\\\.com\|homes\\\.com\|zillow\\\.com\/i\.test\(candidate\.url\) &&\s*\n\s*dual\.photos\.length < MIN_INDEPENDENT_UNIT_PHOTOS &&\s*\n\s*sidecarPhotoRescuesUsed < maxSidecarPhotoRescues/,
   "bounded unit photo discovery must run a bounded, host-gated sidecar rescue when the datacenter tiers scrape thin",
 );
 assert.match(
@@ -326,6 +326,52 @@ assert.match(
   routesSource,
   /if \(rescued\.photos\.length > dual\.photos\.length\) \{[\s\S]{0,400}dual = rescued;/,
   "the discovery sidecar rescue must keep-better: only a strictly larger rescued gallery replaces the thin result",
+);
+// Discovery caching + SearchAPI budget guard (2026-07-09, P0 after the quota
+// burnout): the same listing URL was re-scraped 8-20x per job and the same
+// SERP queries re-fired every pass — burning the entire 100k/month SearchAPI
+// allowance (8,398 queries in one hour) and LOSING already-won galleries.
+// Wiring guards; the cache/circuit semantics themselves are unit-tested in
+// tests/discovery-cache.test.ts + tests/searchapi-budget.test.ts.
+assert.match(
+  routesSource,
+  /const cachedScrape = listingScrapeCache\.get\(clusterKey\);/,
+  "the discovery loop must consult the keep-better scrape cache before re-scraping a candidate",
+);
+assert.match(
+  routesSource,
+  /listingScrapeCache\.remember\(\s*clusterKey,\s*\{ dual, facts: \{ \.\.\.facts \} \},\s*dual\.photos\.length,\s*\{ sidecarTried: cachedSidecarTried \|\| sidecarRescueAttempted \}/,
+  "the discovery loop must remember every scrape (incl. rescue outcome) so later passes never re-scrape or re-rescue the same listing",
+);
+assert.match(
+  routesSource,
+  /createKeepBetterScrapeCache<[\s\S]{0,300}minFullPhotos: MIN_INDEPENDENT_UNIT_PHOTOS/,
+  "the scrape cache's thin/full TTL split must key off the same MIN photo floor the proof gates use",
+);
+assert.match(
+  routesSource,
+  /const cached = discoverySerpCache\.get\(q\);[\s\S]{0,600}searchApiDiscoveryCircuit\.isOpen\(\)[\s\S]{0,900}searchApiDiscoveryCircuit\.record429\(\);[\s\S]{0,900}discoverySerpCache\.remember\(q, organic\);/,
+  "discovery SERP queries must go through the shared cache + 429 circuit wrapper",
+);
+assert.match(
+  routesSource,
+  /searchApiSerpStats\.attempted > 0 &&\s*\n\s*searchApiSerpStats\.rateLimited >= searchApiSerpStats\.attempted/,
+  "an all-429 zero-candidate discovery must be classified as a quota blackout (503), never as 'no listings exist'",
+);
+assert.match(
+  routesSource,
+  /const quota = await getSearchApiQuota\(\);[\s\S]{0,200}searchApiQuotaExhausted\(quota\)/,
+  "the bulk combo runner must preflight the SearchAPI quota before research/scraping each item",
+);
+assert.match(
+  routesSource,
+  /err\.bulkComboQuotaOutage = true;/,
+  "a quota-exhausted preflight must flag the error so the failure message is the outage, not a resort skip",
+);
+assert.match(
+  routesSource,
+  /quotaOutage\s*\?\s*\(item\.error \|\| "SearchAPI quota exhausted[\s\S]{0,120}noSourceInventory/,
+  "the failure classifier must surface a quota outage verbatim ahead of the genuine-scarcity skip messages",
 );
 // Exact-pass loopback timeout (2026-07-09): must outlive the endpoint's 175s
 // bounded discovery wall. The old 75s abort silently discarded exact-pass scans
