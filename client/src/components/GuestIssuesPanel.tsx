@@ -11,12 +11,14 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import {
   AlertCircle, Plus, Trash2, Loader2, CheckCircle, Clock, RotateCcw, Send, X, MessageSquare, ScanSearch,
+  ChevronRight, ChevronDown,
 } from "lucide-react";
 import {
   GUEST_ISSUE_SEVERITIES,
   guestIssueStatusLabel,
   guestIssueSeverityLabel,
   summarizeGuestIssueStatuses,
+  orderGuestIssuesResolvedLast,
 } from "@shared/guest-issue-logic";
 import { parseComplaintNote } from "@shared/guest-complaint-logic";
 
@@ -321,7 +323,7 @@ export function GuestIssuesPanel({
             No issues logged for this guest yet.
           </div>
         ) : (
-          issues.map((issue) => (
+          orderGuestIssuesResolvedLast(issues).map((issue) => (
             <IssueCard
               key={issue.id}
               issue={issue}
@@ -384,66 +386,92 @@ function IssueCard({
   const isResolved = issue.status === "resolved";
   const busy = addComment.isPending;
 
+  // A RESOLVED issue collapses to a single row by default (it's done — keep it
+  // out of the way) but can be expanded back to the full card; an unresolved
+  // issue defaults to expanded. `override` is the user's explicit chevron click
+  // (null = follow the status default). A manual toggle wins UNTIL the issue's
+  // status changes, at which point we snap back to the status default — so
+  // marking an issue resolved AUTO-collapses it and reopening AUTO-expands even
+  // after the operator has toggled it (the reopen button lives inside the body,
+  // so reopening a collapsed issue always starts with a manual expand). This is
+  // the "adjust state while rendering when a prop changes" pattern — a status
+  // transition clears the stale override without an effect or a visible flash.
+  const [override, setOverride] = useState<boolean | null>(null);
+  const [prevStatus, setPrevStatus] = useState(issue.status);
+  if (issue.status !== prevStatus) {
+    setPrevStatus(issue.status);
+    setOverride(null);
+  }
+  const expanded = override ?? !isResolved;
+  const bodyId = `guest-issue-body-${issue.id}`;
+  const collapsedWhen = isResolved ? fmtWhen(issue.resolvedAt ?? issue.updatedAt) : fmtWhen(issue.createdAt);
+  const noteCount = issue.comments.length;
+
   return (
-    <div className="rounded-md border bg-background p-2.5" data-testid={`guest-issue-${issue.id}`}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span
-              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${STATUS_TONE[issue.status] ?? STATUS_TONE.open}`}
-              data-testid={`badge-guest-issue-status-${issue.id}`}
-            >
-              {guestIssueStatusLabel(issue.status)}
-            </span>
-            {issue.severity && issue.severity !== "normal" && (
-              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${SEVERITY_TONE[issue.severity] ?? SEVERITY_TONE.normal}`}>
-                {guestIssueSeverityLabel(issue.severity)}
-              </span>
-            )}
-            {issue.createdByRole === "system" && (
-              <span
-                className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-800"
-                title="Opened automatically by the guest-inbox complaint scanner"
-                data-testid={`badge-guest-issue-auto-${issue.id}`}
-              >
-                Auto-detected
-              </span>
-            )}
-            {issue.kind === "back_office" && (
-              <span
-                className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800"
-                title="Back-office matter (refund / billing / cancellation)"
-                data-testid={`badge-guest-issue-kind-${issue.id}`}
-              >
-                Back-office
-              </span>
-            )}
-            <span className="truncate text-sm font-medium">{issue.title}</span>
-          </div>
-          {issue.description && (
-            <GuestIssueNoteBody body={issue.description} className="mt-1 text-xs text-muted-foreground" />
+    <div className="rounded-md border bg-background" data-testid={`guest-issue-${issue.id}`}>
+      <div className="flex items-start justify-between gap-2 p-2.5">
+        <button
+          type="button"
+          onClick={() => setOverride(!expanded)}
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          className="flex min-w-0 flex-1 items-start gap-1.5 rounded text-left hover:opacity-80"
+          data-testid={`button-guest-issue-toggle-${issue.id}`}
+        >
+          {expanded ? (
+            <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+          ) : (
+            <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
           )}
-          <div className="mt-1 text-[10px] text-muted-foreground">
-            {onOpenConversation && issue.guestName ? `${issue.guestName} · ` : ""}
-            Opened by {authorLabel(issue.createdBy, issue.createdByRole)} · {fmtWhen(issue.createdAt)}
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span
+                className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${STATUS_TONE[issue.status] ?? STATUS_TONE.open}`}
+                data-testid={`badge-guest-issue-status-${issue.id}`}
+              >
+                {guestIssueStatusLabel(issue.status)}
+              </span>
+              {issue.severity && issue.severity !== "normal" && (
+                <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${SEVERITY_TONE[issue.severity] ?? SEVERITY_TONE.normal}`}>
+                  {guestIssueSeverityLabel(issue.severity)}
+                </span>
+              )}
+              {issue.createdByRole === "system" && (
+                <span
+                  className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-800"
+                  title="Opened automatically by the guest-inbox complaint scanner"
+                  data-testid={`badge-guest-issue-auto-${issue.id}`}
+                >
+                  Auto-detected
+                </span>
+              )}
+              {issue.kind === "back_office" && (
+                <span
+                  className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800"
+                  title="Back-office matter (refund / billing / cancellation)"
+                  data-testid={`badge-guest-issue-kind-${issue.id}`}
+                >
+                  Back-office
+                </span>
+              )}
+              <span className={`text-sm font-medium ${expanded ? "" : "truncate"}`}>{issue.title}</span>
+            </div>
+            {/* Collapsed one-liner so a resolved (or manually-collapsed) issue still
+                says who / when / how many notes at a glance without opening it. */}
+            {!expanded && (
+              <div className="mt-0.5 truncate text-[10px] text-muted-foreground" data-testid={`guest-issue-collapsed-meta-${issue.id}`}>
+                {onOpenConversation && issue.guestName ? `${issue.guestName} · ` : ""}
+                {isResolved ? "Resolved" : "Opened"}{collapsedWhen ? ` ${collapsedWhen}` : ""}
+                {noteCount > 0 ? ` · ${noteCount} note${noteCount === 1 ? "" : "s"}` : ""}
+              </div>
+            )}
           </div>
-          {onOpenConversation && (
-            <button
-              type="button"
-              className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-primary hover:underline"
-              onClick={() => onOpenConversation(issue.conversationId)}
-              data-testid={`button-guest-issue-open-conv-${issue.id}`}
-            >
-              <MessageSquare className="h-3 w-3" />
-              {issue.guestName ? `Open ${issue.guestName}'s conversation` : "Open conversation"}
-            </button>
-          )}
-        </div>
+        </button>
         {canDelete && (
           <Button
             size="sm"
             variant="ghost"
-            className="h-6 w-6 p-0 text-muted-foreground hover:text-red-600"
+            className="h-6 w-6 shrink-0 p-0 text-muted-foreground hover:text-red-600"
             title="Delete issue"
             aria-label="Delete issue"
             disabled={deleteIssue.isPending}
@@ -459,88 +487,112 @@ function IssueCard({
         )}
       </div>
 
-      {issue.comments.length > 0 && (
-        <div className="mt-2 space-y-1.5 border-l-2 border-muted pl-2">
-          {issue.comments.map((c) => (
-            <div key={c.id} className="text-xs" data-testid={`guest-issue-comment-${c.id}`}>
-              <GuestIssueNoteBody body={c.body} />
-              <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                <span>{authorLabel(c.authorName, c.authorRole)}</span>
-                <span>· {fmtWhen(c.createdAt)}</span>
-                {c.statusChange && (
-                  <span className={`rounded px-1 py-0.5 font-semibold ${STATUS_TONE[c.statusChange] ?? ""}`}>
-                    → {guestIssueStatusLabel(c.statusChange)}
-                  </span>
-                )}
-              </div>
+      {expanded && (
+        <div id={bodyId} className="px-2.5 pb-2.5 pl-7">
+          {issue.description && (
+            <GuestIssueNoteBody body={issue.description} className="text-xs text-muted-foreground" />
+          )}
+          <div className="mt-1 text-[10px] text-muted-foreground">
+            {onOpenConversation && issue.guestName ? `${issue.guestName} · ` : ""}
+            Opened by {authorLabel(issue.createdBy, issue.createdByRole)} · {fmtWhen(issue.createdAt)}
+            {isResolved && collapsedWhen ? ` · Resolved ${collapsedWhen}` : ""}
+          </div>
+          {onOpenConversation && (
+            <button
+              type="button"
+              className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-primary hover:underline"
+              onClick={() => onOpenConversation(issue.conversationId)}
+              data-testid={`button-guest-issue-open-conv-${issue.id}`}
+            >
+              <MessageSquare className="h-3 w-3" />
+              {issue.guestName ? `Open ${issue.guestName}'s conversation` : "Open conversation"}
+            </button>
+          )}
+
+          {issue.comments.length > 0 && (
+            <div className="mt-2 space-y-1.5 border-l-2 border-muted pl-2">
+              {issue.comments.map((c) => (
+                <div key={c.id} className="text-xs" data-testid={`guest-issue-comment-${c.id}`}>
+                  <GuestIssueNoteBody body={c.body} />
+                  <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <span>{authorLabel(c.authorName, c.authorRole)}</span>
+                    <span>· {fmtWhen(c.createdAt)}</span>
+                    {c.statusChange && (
+                      <span className={`rounded px-1 py-0.5 font-semibold ${STATUS_TONE[c.statusChange] ?? ""}`}>
+                        → {guestIssueStatusLabel(c.statusChange)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
+
+          <div className="mt-2">
+            <Textarea
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              placeholder="Add an update for this issue…"
+              aria-label="Add an update for this issue"
+              className="min-h-[44px] text-xs"
+              data-testid={`textarea-guest-issue-comment-${issue.id}`}
+            />
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                disabled={busy || comment.trim().length === 0}
+                onClick={() => addComment.mutate(undefined)}
+                data-testid={`button-guest-issue-comment-${issue.id}`}
+              >
+                <Send className="h-3.5 w-3.5" />
+                <span className="ml-1">Comment</span>
+              </Button>
+              {issue.status !== "ongoing" && !isResolved && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2 text-xs text-blue-700"
+                  disabled={busy}
+                  onClick={() => addComment.mutate("ongoing")}
+                  data-testid={`button-guest-issue-ongoing-${issue.id}`}
+                >
+                  <Clock className="h-3.5 w-3.5" />
+                  <span className="ml-1">Mark ongoing</span>
+                </Button>
+              )}
+              {!isResolved && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2 text-xs text-green-700"
+                  disabled={busy}
+                  onClick={() => addComment.mutate("resolved")}
+                  data-testid={`button-guest-issue-resolve-${issue.id}`}
+                >
+                  <CheckCircle className="h-3.5 w-3.5" />
+                  <span className="ml-1">Mark resolved</span>
+                </Button>
+              )}
+              {isResolved && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2 text-xs text-amber-700"
+                  disabled={busy}
+                  onClick={() => addComment.mutate("open")}
+                  data-testid={`button-guest-issue-reopen-${issue.id}`}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span className="ml-1">Reopen</span>
+                </Button>
+              )}
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+            </div>
+          </div>
         </div>
       )}
-
-      <div className="mt-2">
-        <Textarea
-          value={comment}
-          onChange={(e) => setComment(e.target.value)}
-          placeholder="Add an update for this issue…"
-          aria-label="Add an update for this issue"
-          className="min-h-[44px] text-xs"
-          data-testid={`textarea-guest-issue-comment-${issue.id}`}
-        />
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 px-2 text-xs"
-            disabled={busy || comment.trim().length === 0}
-            onClick={() => addComment.mutate(undefined)}
-            data-testid={`button-guest-issue-comment-${issue.id}`}
-          >
-            <Send className="h-3.5 w-3.5" />
-            <span className="ml-1">Comment</span>
-          </Button>
-          {issue.status !== "ongoing" && !isResolved && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 px-2 text-xs text-blue-700"
-              disabled={busy}
-              onClick={() => addComment.mutate("ongoing")}
-              data-testid={`button-guest-issue-ongoing-${issue.id}`}
-            >
-              <Clock className="h-3.5 w-3.5" />
-              <span className="ml-1">Mark ongoing</span>
-            </Button>
-          )}
-          {!isResolved && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 px-2 text-xs text-green-700"
-              disabled={busy}
-              onClick={() => addComment.mutate("resolved")}
-              data-testid={`button-guest-issue-resolve-${issue.id}`}
-            >
-              <CheckCircle className="h-3.5 w-3.5" />
-              <span className="ml-1">Mark resolved</span>
-            </Button>
-          )}
-          {isResolved && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 px-2 text-xs text-amber-700"
-              disabled={busy}
-              onClick={() => addComment.mutate("open")}
-              data-testid={`button-guest-issue-reopen-${issue.id}`}
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              <span className="ml-1">Reopen</span>
-            </Button>
-          )}
-          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
-        </div>
-      </div>
     </div>
   );
 }
@@ -679,8 +731,8 @@ export function GuestIssuesTab({
                 : `No ${filter} issues.`}
         </div>
       ) : (
-        <div className="grid gap-2 lg:grid-cols-2">
-          {issues.map((issue) => (
+        <div className="grid items-start gap-2 lg:grid-cols-2">
+          {orderGuestIssuesResolvedLast(issues).map((issue) => (
             <IssueCard
               key={issue.id}
               issue={issue}
