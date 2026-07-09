@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import {
-  AlertCircle, Plus, Trash2, Loader2, CheckCircle, Clock, RotateCcw, Send, X, MessageSquare,
+  AlertCircle, Plus, Trash2, Loader2, CheckCircle, Clock, RotateCcw, Send, X, MessageSquare, ScanSearch,
 } from "lucide-react";
 import {
   GUEST_ISSUE_SEVERITIES,
@@ -90,6 +90,9 @@ function fmtWhen(iso: string | null | undefined): string {
 }
 
 function authorLabel(name: string, role: string): string {
+  // The automatic complaint scanner writes issues/comments with role "system"
+  // (author "auto-scan") — show a single friendly label, not "auto-scan (system)".
+  if (role === "system") return "auto-detected";
   const roleWord = role === "admin" ? "operator" : role === "agent" ? "agent" : (role || "agent");
   // The shared "agent" login has username === role, so just show the role word;
   // a distinct username (future per-agent accounts) gets "name (role)".
@@ -324,6 +327,15 @@ function IssueCard({
                 {guestIssueSeverityLabel(issue.severity)}
               </span>
             )}
+            {issue.createdByRole === "system" && (
+              <span
+                className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-800"
+                title="Opened automatically by the guest-inbox complaint scanner"
+                data-testid={`badge-guest-issue-auto-${issue.id}`}
+              >
+                Auto-detected
+              </span>
+            )}
             <span className="truncate text-sm font-medium">{issue.title}</span>
           </div>
           {issue.description && (
@@ -471,6 +483,7 @@ export function GuestIssuesTab({
   onOpenConversation?: (conversationId: string) => void;
 }) {
   const qc = useQueryClient();
+  const { toast } = useToast();
   const [filter, setFilter] = useState("unresolved");
 
   const { data, isLoading, isError } = useQuery<{ issues: GuestIssue[] }>({
@@ -484,6 +497,27 @@ export function GuestIssuesTab({
   const counts = summarizeGuestIssueStatuses(issues);
   const invalidate = () => qc.invalidateQueries({ queryKey: [GUEST_ISSUES_KEY] });
 
+  // Operator-only manual sweep of the guest inbox for complaints. The scanner
+  // also runs automatically every ~5 min; this is the on-demand trigger. Any
+  // issues/notes it opens flow into the same queries, so the list refreshes.
+  const scanInbox = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/inbox/complaint-scan/run", {})).json(),
+    onSuccess: (r: any) => {
+      invalidate();
+      const opened = r?.created ?? 0;
+      const appended = r?.appended ?? 0;
+      toast({
+        title: r?.backfillComplete === false ? "Scanning inbox…" : "Inbox scanned",
+        description:
+          r?.backfillComplete === false
+            ? "First-time full scan is still working through the inbox — run again in a moment."
+            : `${opened} new issue(s) opened, ${appended} note(s) added.`,
+      });
+    },
+    onError: (e: any) =>
+      toast({ title: "Scan failed", description: e.message, variant: "destructive" }),
+  });
+
   return (
     <div className="space-y-4" data-testid="panel-guest-issues-tab">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -494,7 +528,21 @@ export function GuestIssuesTab({
             <Badge className="bg-rose-100 text-rose-800 hover:bg-rose-100">{counts.unresolved} open</Badge>
           )}
         </div>
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap items-center gap-1">
+          {canDelete && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 px-2.5 text-xs"
+              disabled={scanInbox.isPending}
+              onClick={() => scanInbox.mutate()}
+              title="Scan the whole guest inbox now and auto-log any complaints as issues"
+              data-testid="button-guest-issues-scan"
+            >
+              {scanInbox.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanSearch className="h-3.5 w-3.5" />}
+              <span className="ml-1">Scan for complaints</span>
+            </Button>
+          )}
           {TAB_FILTERS.map((f) => (
             <Button
               key={f.key}
@@ -512,7 +560,8 @@ export function GuestIssuesTab({
 
       <p className="text-xs text-muted-foreground">
         Every issue reported across your guests. Comment and mark each one ongoing or resolved — the tab badge
-        clears as issues are resolved. To log a new issue, open the guest's conversation and use the Guest issues panel.
+        clears as issues are resolved. New issues are logged from the per-conversation Guest issues panel, and the
+        inbox complaint scanner opens them automatically (marked “Auto-detected”).
       </p>
 
       {isLoading ? (
