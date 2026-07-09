@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-09 (FOLLOW-UP: Guesty `/communication/conversations` now 400s on `skip` — broke the complaint
+  scanner AND auto-reply): Operator asked to run the retroactive scan; it created 0 issues. LIVE-DIAGNOSED
+  (ADMIN_SECRET API + Railway logs, via `railway run` to keep the secret out of logs): the scanner status
+  showed `backfillComplete:true, conversations:0, errors:1`, and the logs revealed
+  `[guesty-error] … /communication/conversations?…&skip=0… → 400: "skip" is not allowed` PLUS
+  `[auto-reply] Top-level error: … "skip" is not allowed` — Guesty removed `skip` support, silently
+  breaking BOTH the new scanner's pagination and auto-reply's inbox poll (2026-05-04-class outage). Its
+  cursor is ALSO unreliable on this endpoint (every `cursor[after]`/`cursor=`/`after=` variant returned an
+  empty page in live probing), but a large `limit` returns the whole inbox in one request (verified:
+  `limit=150`→all 113 conversations). FIX (`claude/guest-complaint-pagination-fix`): dropped skip-paging in
+  BOTH `server/guest-complaint-scanner.ts` and `server/auto-reply.ts` `fetchOpenConversations` — single
+  `limit=500` fetch (`GUEST_COMPLAINT_CONV_FETCH_LIMIT`/`AUTO_REPLY_CONV_SCAN_MAX`), ordered in-process;
+  scanner backfill resumes by COUNT over a stable createdAt-ascending order and a fetch THROW leaves state
+  untouched (a transient Guesty error can no longer falsely "complete" the backfill — the second bug that
+  made it scan nothing). Also fixed my own false-complete-on-empty-page bug. `backfillSkip`→`backfillDoneCount`.
+  NOTE: the other conversation fetches (`quo-sms`, the inbox list route, `guesty-ota-messaging`) never used
+  `skip` (they cap at `limit=100`) so were unaffected — but they DO silently cap the inbox at 100. Verified:
+  guest-complaint-logic 12/0, full `npm test` exit 0, build clean, `npm run check` 338 = baseline; then LIVE
+  post-deploy — `POST /api/inbox/complaint-scan/run {full:true}` scanned all conversations and opened
+  Auto-detected issues.
+
 - 2026-07-09 (guest inbox: AUTOMATIC complaint scanner → guest-issue tracker): Operator asked to make
   the guest inbox scannable — detect a guest complaint, decide if it's already a complaint in the
   system (if so add timestamped notes; else create it as a task), scan the whole inbox ONCE then every

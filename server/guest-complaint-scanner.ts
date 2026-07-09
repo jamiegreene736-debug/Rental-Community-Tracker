@@ -67,8 +67,12 @@ const MAX_CONV_PER_RUN = Number(process.env.GUEST_COMPLAINT_MAX_CONV_PER_RUN) > 
 // to the heuristic verdict so a candidate is never silently dropped).
 const MAX_CLASSIFY_PER_RUN = Number(process.env.GUEST_COMPLAINT_MAX_CLASSIFY_PER_RUN) > 0 ? Number(process.env.GUEST_COMPLAINT_MAX_CLASSIFY_PER_RUN) : 40;
 const CLASSIFY_MODEL = process.env.GUEST_COMPLAINT_MODEL || "claude-haiku-4-5-20251001";
-const PAGE = 50;
-const MAX_SCAN = Math.max(PAGE, Number(process.env.GUEST_COMPLAINT_CONV_SCAN_MAX) || 500);
+// The whole inbox is fetched in ONE request: Guesty's /communication/conversations
+// rejects `skip` (400 "skip is not allowed") and its cursor is unreliable, but it
+// honors a large `limit`. This ceiling is generous headroom over the real inbox
+// size; if it is ever exceeded the OLDEST conversations beyond it are not scanned
+// (logged), and incremental still catches all new activity.
+const CONV_FETCH_LIMIT = Math.max(100, Number(process.env.GUEST_COMPLAINT_CONV_FETCH_LIMIT) || 500);
 
 let _enabled = process.env.GUEST_COMPLAINT_SCANNER_DISABLED !== "true";
 let _isRunning = false;
@@ -128,15 +132,14 @@ function unwrapPosts(raw: any): any[] {
   return [];
 }
 
-// Trailing `&fields=` IS LOAD-BEARING (same as auto-reply/inbox): without it
-// Guesty returns a stripped conversation state and we lose state.lastMessage.
-// Backfill pages ASCENDING (oldest-first) — that order is stable across ticks
-// (lastMessageAt falls back to createdAt, which never changes) so skip-paging
-// the whole inbox can't skip a thread. Incremental pages DESCENDING so the
-// freshest threads surface first and we can stop once a page is all stale.
-async function fetchConversationsPage(skip: number, sort: "asc" | "desc"): Promise<any[]> {
-  const sortParam = sort === "asc" ? "lastMessageAt" : "-lastMessageAt";
-  const data = await guestyRequest("GET", `/communication/conversations?limit=${PAGE}&skip=${skip}&sort=${sortParam}&fields=`);
+// Fetch the whole inbox in ONE request. Trailing `&fields=` IS LOAD-BEARING (same
+// as auto-reply/inbox): without it Guesty returns a stripped conversation state
+// and we lose state.lastMessage. NO `skip` (Guesty 400s on it) and NO cursor
+// (unreliable on this endpoint) — a large `limit` returns everything. Sort is
+// omitted; both phases order the result themselves (backfill by createdAt for a
+// stable resume, incremental by activity).
+async function fetchAllConversations(): Promise<any[]> {
+  const data = await guestyRequest("GET", `/communication/conversations?limit=${CONV_FETCH_LIMIT}&fields=`);
   return unwrapConversations(data);
 }
 
@@ -169,6 +172,13 @@ function convLastActivityMs(conv: any): number {
     if (Number.isFinite(t) && t > 0) return t;
   }
   return 0;
+}
+
+// Creation time (ms) — a STABLE key for backfill ordering (never changes, so a
+// count-based resume can't skip or double a thread as new messages arrive).
+function convCreatedAtMs(conv: any): number {
+  const t = conv?.createdAt ? new Date(String(conv.createdAt)).getTime() : NaN;
+  return Number.isFinite(t) && t > 0 ? t : 0;
 }
 
 // Guest / listing / reservation identity, same extraction as runAutoReply.
@@ -391,81 +401,55 @@ export async function runGuestComplaintScan(opts?: { full?: boolean }): Promise<
     let state = parseComplaintScanState(await storage.getSetting(STATE_KEY).catch(() => undefined));
     // Manual "full rescan" resets progress; the idempotency markers make a full
     // re-read of the inbox safe (no duplicate issues/notes).
-    if (opts?.full) state = { backfillComplete: false, backfillSkip: 0, watermarkMs: 0, lastRunAt: state.lastRunAt };
+    if (opts?.full) state = { backfillComplete: false, backfillDoneCount: 0, watermarkMs: 0, lastRunAt: state.lastRunAt };
 
     const backfillCutoff = now - BACKFILL_DAYS * 24 * 60 * 60 * 1000;
     let watermarkMs = state.watermarkMs;
     let backfillComplete = state.backfillComplete;
-    let backfillSkip = state.backfillSkip;
+    let backfillDoneCount = state.backfillDoneCount;
+
+    // ONE fetch for the whole inbox. If it THROWS, the outer catch handles it and
+    // the persisted state is left UNTOUCHED — a transient Guesty error can never
+    // falsely "complete" the backfill (the old skip-paging bug scanned nothing).
+    const allConvs = await fetchAllConversations();
+    if (allConvs.length >= CONV_FETCH_LIMIT) {
+      console.warn(`[guest-complaints] inbox returned ${allConvs.length} conversations at the fetch ceiling ${CONV_FETCH_LIMIT} — oldest beyond it are not scanned; raise GUEST_COMPLAINT_CONV_FETCH_LIMIT`);
+    }
 
     const accumulate = (r: ConvScanResult) => {
       detected += r.detected; created += r.created; appended += r.appended; skipped += r.skipped; errors += r.errors;
     };
 
     if (!backfillComplete) {
-      // ── BACKFILL: one bounded page slice per tick, ascending/stable order. ──
-      let page: any[] = [];
-      try {
-        page = await fetchConversationsPage(backfillSkip, "asc");
-      } catch (e: any) {
-        errors++;
-        console.error(`[guest-complaints] backfill page fetch failed at skip=${backfillSkip}: ${e?.message ?? e}`);
+      // ── BACKFILL: scan every thread once. Order by createdAt (STABLE — never
+      // changes, new threads append at the end) and resume by COUNT, so a thread
+      // arriving mid-backfill can't shift the cursor and skip an unscanned one. ──
+      const ordered = [...allConvs].sort((a, b) => convCreatedAtMs(a) - convCreatedAtMs(b));
+      const total = ordered.length;
+      const slice = ordered.slice(backfillDoneCount, backfillDoneCount + MAX_CONV_PER_RUN);
+      for (const conv of slice) {
+        const lastMs = convLastActivityMs(conv);
+        // Prune ancient threads — nothing worth actioning in a year-old chat. Still
+        // counted as "done" (via slice.length) so the backfill advances past it.
+        if (lastMs && lastMs < backfillCutoff) continue;
+        conversations++;
+        const r = await scanConversation(conv, backfillCutoff, budget);
+        accumulate(r);
+        if (r.maxPostMs > watermarkMs) watermarkMs = r.maxPostMs;
       }
-      if (page.length === 0) {
+      backfillDoneCount += slice.length;
+      if (backfillDoneCount >= total) {
+        // Every thread scanned once — incremental takes over from here.
         backfillComplete = true;
         watermarkMs = Math.max(watermarkMs, now);
-      } else {
-        for (const conv of page) {
-          if (conversations >= MAX_CONV_PER_RUN) break;
-          const lastMs = convLastActivityMs(conv);
-          // Prune ancient threads — nothing worth actioning in a year-old chat.
-          if (lastMs && lastMs < backfillCutoff) continue;
-          conversations++;
-          const r = await scanConversation(conv, backfillCutoff, budget);
-          accumulate(r);
-          if (r.maxPostMs > watermarkMs) watermarkMs = r.maxPostMs;
-        }
-        backfillSkip += page.length;
-        if (page.length < PAGE) {
-          // Reached the end of the inbox — backfill done; incremental takes over.
-          backfillComplete = true;
-          watermarkMs = Math.max(watermarkMs, now);
-        }
       }
     } else {
-      // ── INCREMENTAL: only conversations with activity past the watermark. ──
-      const convs: any[] = [];
-      const seen = new Set<string>();
-      for (let skip = 0; skip < MAX_SCAN; skip += PAGE) {
-        let page: any[] = [];
-        try {
-          page = await fetchConversationsPage(skip, "desc");
-        } catch (e: any) {
-          errors++;
-          console.error(`[guest-complaints] incremental page fetch failed at skip=${skip}: ${e?.message ?? e}`);
-          break;
-        }
-        if (page.length === 0) break;
-        let addedNew = false;
-        let anyFresh = false;
-        for (const c of page) {
-          const id = conversationId(c);
-          if (id && seen.has(id)) continue;
-          if (id) { seen.add(id); addedNew = true; }
-          convs.push(c);
-          if (convLastActivityMs(c) > state.watermarkMs) anyFresh = true;
-        }
-        if (!addedNew) break; // skip unsupported / exhausted
-        if (page.length < PAGE) break;
-        // Sorted newest-first: once a whole page is entirely older than the
-        // watermark there is nothing fresh deeper in the list.
-        if (!anyFresh) break;
-      }
-      // Process the OLDEST fresh threads first so the watermark advances over a
-      // CONTIGUOUS prefix. If the per-run cap truncates a big burst, the newest
-      // un-processed threads stay above the watermark for the next tick — never
-      // skipped (the "middle gap" a newest-first + jump-to-now would leave).
-      const fresh = convs
+      // ── INCREMENTAL: only threads with activity past the watermark, OLDEST-fresh
+      // first so the watermark advances over a CONTIGUOUS prefix. If the per-run cap
+      // truncates a big burst, the newest un-processed threads stay above the
+      // watermark for the next tick — never skipped (the "middle gap" a
+      // newest-first + jump-to-now would leave). ──
+      const fresh = allConvs
         .filter((c) => convLastActivityMs(c) > state.watermarkMs)
         .sort((a, b) => convLastActivityMs(a) - convLastActivityMs(b));
       let capped = false;
@@ -478,12 +462,11 @@ export async function runGuestComplaintScan(opts?: { full?: boolean }): Promise<
         if (activity > lastProcessedActivity) lastProcessedActivity = activity;
       }
       // Capped → advance only to the last fully-processed thread's activity (a
-      // gap-free prefix). Not capped → everything fresh was considered, so we
-      // are caught up to now.
+      // gap-free prefix). Not capped → everything fresh was considered → caught up.
       watermarkMs = capped ? Math.max(watermarkMs, lastProcessedActivity) : Math.max(watermarkMs, now);
     }
 
-    const newState: ComplaintScanState = { backfillComplete, backfillSkip, watermarkMs, lastRunAt: new Date().toISOString() };
+    const newState: ComplaintScanState = { backfillComplete, backfillDoneCount, watermarkMs, lastRunAt: new Date().toISOString() };
     await storage.setSetting(STATE_KEY, serializeComplaintScanState(newState)).catch((e) =>
       console.error(`[guest-complaints] failed to persist scan state: ${e?.message ?? e}`),
     );

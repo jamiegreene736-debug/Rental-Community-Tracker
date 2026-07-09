@@ -148,11 +148,11 @@ console.log("  ✓ builders quote the guest verbatim + stamp the marker");
 // ── scan state (de)serialization ──
 assert.deepEqual(parseComplaintScanState(null), EMPTY_SCAN_STATE);
 assert.deepEqual(parseComplaintScanState("not json"), EMPTY_SCAN_STATE);
-const st = { backfillComplete: true, backfillSkip: 150, watermarkMs: 1720000000000, lastRunAt: iso };
+const st = { backfillComplete: true, backfillDoneCount: 150, watermarkMs: 1720000000000, lastRunAt: iso };
 assert.deepEqual(parseComplaintScanState(serializeComplaintScanState(st)), st);
 // negative / garbage numbers clamp
-const clamped = parseComplaintScanState(JSON.stringify({ backfillComplete: false, backfillSkip: -5, watermarkMs: "x", lastRunAt: 1 }));
-assert.equal(clamped.backfillSkip, 0);
+const clamped = parseComplaintScanState(JSON.stringify({ backfillComplete: false, backfillDoneCount: -5, watermarkMs: "x", lastRunAt: 1 }));
+assert.equal(clamped.backfillDoneCount, 0);
 assert.equal(clamped.watermarkMs, 0);
 assert.equal(clamped.lastRunAt, null);
 console.log("  ✓ scan state round-trips + sanitizes");
