@@ -13,9 +13,21 @@
 // and client/src/pages/home.tsx owns rendering. This module only decides,
 // from an enriched reservation row, whether it warrants a warning.
 //
-// "Purchased" = a buy-in row attached to the reservation's unit slot
-// (slot.buyIn from enrichGuestyReservationForOperations). A cancelled buy-in
-// does NOT count as coverage — the unit was un-bought.
+// "Purchased" (2026-07-09 change — operator): attaching a buy-in row to a slot
+// is NOT proof the unit was actually booked/paid. The definitive proof is EMAIL
+// ACTIVITY in the unit's SimpleLogin alias inbox — when the operator books the
+// unit on VRBO/Booking/PM with the guest alias as the traveler email, the
+// booking confirmation lands there and is stored as an INBOUND buy_in_emails row.
+// So a slot is only covered when a non-cancelled buy-in is attached AND that
+// buy-in's alias inbox has >= 1 inbound email. "Even one email means the unit
+// was bought in." A slot that is attached but has no email yet is still flagged
+// (reason "no-email") so a merely-attached-but-not-purchased unit can't hide.
+//
+// The email signal reaches the pure logic via slot.buyIn.hasInboundEmail, which
+// the server route stamps from a buy_in_emails lookup before calling
+// collectBuyInCoverageWarnings. When that signal is unavailable (email query
+// failed) the route sets hasInboundEmail=true so coverage degrades to the old
+// attachment-only rule instead of false-alarming on every attached unit.
 
 export const BUYIN_COVERAGE_WINDOW_DAYS = 15;
 
@@ -24,7 +36,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export type BuyInCoverageSlot = {
   unitId: string;
   unitLabel?: string | null;
-  buyIn?: { status?: string | null } | null;
+  buyIn?: { status?: string | null; hasInboundEmail?: boolean | null } | null;
 };
 
 // Shape of a row from GET /api/bookings/guesty-all (Guesty-enriched or the
@@ -47,7 +59,12 @@ export type BuyInCoverageReservationLike = {
   slots?: BuyInCoverageSlot[] | null;
 };
 
-export type BuyInMissingUnit = { unitId: string; unitLabel: string };
+// Why a required unit still counts as un-bought:
+//  - "not-attached": no non-cancelled buy-in is attached to the slot.
+//  - "no-email":     a buy-in is attached but its alias inbox has no email yet,
+//                    so there's no proof the unit was actually booked/paid.
+export type BuyInMissingReason = "not-attached" | "no-email";
+export type BuyInMissingUnit = { unitId: string; unitLabel: string; reason: BuyInMissingReason };
 
 export type BuyInCoverageWarning = {
   reservationId: string;
@@ -108,11 +125,25 @@ export function daysUntilCheckIn(
   return Math.round((dayMs(checkInDay) - dayMs(todayDay)) / DAY_MS);
 }
 
-// A slot counts as purchased when a buy-in is attached and not cancelled.
-export function buyInSlotCovered(slot: BuyInCoverageSlot | null | undefined): boolean {
+// A non-cancelled buy-in is attached to the slot.
+export function buyInSlotAttached(slot: BuyInCoverageSlot | null | undefined): boolean {
   const buyIn = slot?.buyIn;
   if (!buyIn || typeof buyIn !== "object") return false;
   return !/cancel/i.test(String(buyIn.status ?? ""));
+}
+
+// The slot's buy-in has >= 1 email in its alias inbox (server-stamped signal) —
+// the proof the unit was actually booked/paid, not merely attached.
+export function buyInSlotHasEmailActivity(slot: BuyInCoverageSlot | null | undefined): boolean {
+  const buyIn = slot?.buyIn;
+  if (!buyIn || typeof buyIn !== "object") return false;
+  return buyIn.hasInboundEmail === true;
+}
+
+// A slot counts as purchased only when a non-cancelled buy-in is attached AND
+// its alias inbox has email activity.
+export function buyInSlotCovered(slot: BuyInCoverageSlot | null | undefined): boolean {
+  return buyInSlotAttached(slot) && buyInSlotHasEmailActivity(slot);
 }
 
 export function missingBuyInUnits(reservation: BuyInCoverageReservationLike): BuyInMissingUnit[] {
@@ -122,6 +153,8 @@ export function missingBuyInUnits(reservation: BuyInCoverageReservationLike): Bu
     .map((slot) => ({
       unitId: String(slot?.unitId ?? ""),
       unitLabel: String(slot?.unitLabel ?? slot?.unitId ?? "Unit"),
+      // Attached but no email = "no-email"; otherwise nothing is attached.
+      reason: buyInSlotAttached(slot) ? "no-email" : "not-attached",
     }));
 }
 
@@ -210,7 +243,9 @@ export function buyInCoverageWarningSignature(warnings: BuyInCoverageWarning[]):
     .map(
       (w) =>
         `${w.reservationId}:${w.checkIn ?? ""}:${w.missingUnits
-          .map((u) => u.unitId)
+          // Include the reason so a unit going from not-attached → attached-but-
+          // -no-email (or vice-versa) re-raises a dismissed popup — the facts changed.
+          .map((u) => `${u.unitId}#${u.reason}`)
           .sort()
           .join(",")}`,
     )

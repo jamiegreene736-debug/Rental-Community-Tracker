@@ -1,12 +1,15 @@
 // Missing buy-in warning for imminent check-ins — pure-logic tests.
 // Operator rules (2026-07-04, window widened to 15 days on 2026-07-07): red-flag
 // any reservation checking in within the next 15 days whose required units have
-// NOT all been purchased (buy-ins
-// attached); include stays already in-house; never warn on cancelled bookings
-// or reservations with no configured unit slots.
+// NOT all been bought in; include stays already in-house; never warn on
+// cancelled bookings or reservations with no configured unit slots.
+// 2026-07-09: "bought in" now REQUIRES email activity in the unit's alias inbox
+// (slot.buyIn.hasInboundEmail === true), not merely an attached buy-in row.
 import {
   buyInCoverageWarningSignature,
+  buyInSlotAttached,
   buyInSlotCovered,
+  buyInSlotHasEmailActivity,
   checkInWithinBuyInWarningWindow,
   collectBuyInCoverageWarnings,
   daysUntilCheckIn,
@@ -31,8 +34,14 @@ const check = (name: string, ok: boolean, extra?: unknown) => {
 const NOW = new Date("2026-07-04T18:00:00Z").getTime();
 const dayAhead = (d: number) => new Date(NOW + d * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-const attached = { status: "active" } as const;
-const slot = (unitId: string, buyIn: { status?: string | null } | null = null) => ({
+// "attached" now means fully bought in: a live buy-in AND a booking email in
+// the alias inbox. "attachedNoEmail" is attached-but-not-yet-purchased.
+const attached = { status: "active", hasInboundEmail: true } as const;
+const attachedNoEmail = { status: "active", hasInboundEmail: false } as const;
+const slot = (
+  unitId: string,
+  buyIn: { status?: string | null; hasInboundEmail?: boolean | null } | null = null,
+) => ({
   unitId,
   unitLabel: `Unit ${unitId}`,
   buyIn,
@@ -90,13 +99,22 @@ console.log("buyin-coverage-warning: window + urgency");
 
 console.log("buyin-coverage-warning: slot coverage");
 {
-  check("attached active buy-in covers the slot", buyInSlotCovered(slot("721", attached)));
+  check("attached buy-in WITH inbound email covers the slot", buyInSlotCovered(slot("721", attached)));
+  check("attached buy-in with NO email does NOT cover", !buyInSlotCovered(slot("721", attachedNoEmail)));
   check("no buy-in = uncovered", !buyInSlotCovered(slot("721")));
-  check("cancelled buy-in does NOT cover", !buyInSlotCovered(slot("721", { status: "cancelled" })));
-  check("buy-in with no status counts as covered (legacy rows)", buyInSlotCovered(slot("721", {})));
+  check("cancelled buy-in does NOT cover even with email", !buyInSlotCovered(slot("721", { status: "cancelled", hasInboundEmail: true })));
+  check("buy-in with no status but an email counts as covered", buyInSlotCovered(slot("721", { hasInboundEmail: true })));
+  check("attach helper: active buy-in is attached", buyInSlotAttached(slot("721", attachedNoEmail)));
+  check("attach helper: cancelled buy-in is NOT attached", !buyInSlotAttached(slot("721", { status: "cancelled" })));
+  check("email helper: hasInboundEmail true", buyInSlotHasEmailActivity(slot("721", attached)));
+  check("email helper: hasInboundEmail false", !buyInSlotHasEmailActivity(slot("721", attachedNoEmail)));
+
   const missing = missingBuyInUnits(reservation({ slots: [slot("721", attached), slot("812")] }));
   check("missing units lists only uncovered slots", missing.length === 1 && missing[0].unitId === "812", missing);
   check("missing unit keeps its label", missing[0]?.unitLabel === "Unit 812");
+  check("missing unit with no buy-in has reason not-attached", missing[0]?.reason === "not-attached");
+  const missingNoEmail = missingBuyInUnits(reservation({ slots: [slot("721", attached), slot("812", attachedNoEmail)] }));
+  check("attached-but-no-email unit is missing with reason no-email", missingNoEmail.length === 1 && missingNoEmail[0]?.reason === "no-email", missingNoEmail);
 }
 
 console.log("buyin-coverage-warning: collection rules");
@@ -119,6 +137,26 @@ console.log("buyin-coverage-warning: collection rules");
   );
   check("partially purchased reservation warns with the missing unit only", partial.length === 1 && partial[0].missingUnits.length === 1 && partial[0].missingUnits[0].unitId === "812");
   check("partial warning slotsFilled counts the purchased unit", partial[0]?.slotsFilled === 1);
+
+  // Core 2026-07-09 behavior: units attached but never actually booked (no email
+  // in the alias inbox) still red-flag — attachment alone is not proof of purchase.
+  const attachedButUnpaid = collectBuyInCoverageWarnings(
+    [reservation({ slots: [slot("721", attachedNoEmail), slot("812", attachedNoEmail)] })],
+    NOW,
+  );
+  check(
+    "reservation with both units attached but NO email still warns",
+    attachedButUnpaid.length === 1 && attachedButUnpaid[0].missingUnits.length === 2,
+    attachedButUnpaid,
+  );
+  check(
+    "attached-no-email warning slotsFilled is 0 (nothing bought in)",
+    attachedButUnpaid[0]?.slotsFilled === 0,
+  );
+  check(
+    "attached-no-email missing units carry reason no-email",
+    attachedButUnpaid[0]?.missingUnits.every((u) => u.reason === "no-email"),
+  );
 
   check(
     "cancelled reservation never warns",
@@ -175,6 +213,20 @@ console.log("buyin-coverage-warning: dismissal signature");
   check(
     "check-in date change changes the signature",
     buyInCoverageWarningSignature(a) !== buyInCoverageWarningSignature(dateMoved),
+  );
+  // Attaching a unit without booking it (not-attached → no-email) is a fact
+  // change that must re-raise a dismissed popup.
+  const attachedNoEmailWarn = collectBuyInCoverageWarnings(
+    [reservation({ slots: [slot("721", attachedNoEmail), slot("812")] })],
+    NOW,
+  );
+  const bothUnattached = collectBuyInCoverageWarnings(
+    [reservation({ slots: [slot("721"), slot("812")] })],
+    NOW,
+  );
+  check(
+    "reason change (attach without email) changes the signature",
+    buyInCoverageWarningSignature(attachedNoEmailWarn) !== buyInCoverageWarningSignature(bothUnattached),
   );
   const two = collectBuyInCoverageWarnings(
     [reservation({ _id: "r1" }), reservation({ _id: "r2", checkInDays: 5 })],

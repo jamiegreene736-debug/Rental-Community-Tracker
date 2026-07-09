@@ -8720,7 +8720,59 @@ export async function registerRoutes(
         throw new Error(`guesty-all loopback ${resp.status}: ${body.slice(0, 200)}`);
       }
       const payload = (await resp.json()) as { reservations?: any[] };
-      const warnings = collectBuyInCoverageWarnings(payload?.reservations ?? [], nowMs);
+      const reservations: any[] = Array.isArray(payload?.reservations) ? payload.reservations : [];
+
+      // A unit is only truly "bought in" when its SimpleLogin alias inbox has
+      // received an email (the OTA/PM booking confirmation) — attaching a buy-in
+      // row alone doesn't prove the operator actually booked/paid. Stamp each
+      // attached buy-in with hasInboundEmail from a single batched buy_in_emails
+      // lookup so the pure warning logic (shared/buyin-coverage-warning.ts) can
+      // require email activity for coverage. The background IMAP sync
+      // (buy-in-email-sync.ts, every 5 min) keeps buy_in_emails fresh.
+      const reservationIds = Array.from(
+        new Set(reservations.map((r) => String(r?._id ?? r?.id ?? "").trim()).filter(Boolean)),
+      );
+      let emailSignalReady = false;
+      const buyInsWithInboundEmail = new Set<number>();
+      if (reservationIds.length > 0) {
+        try {
+          const emailRows = await db
+            .select({ buyInId: buyInEmails.buyInId })
+            .from(buyInEmails)
+            .where(
+              and(
+                inArray(buyInEmails.reservationId, reservationIds),
+                eq(buyInEmails.direction, "inbound"),
+              ),
+            );
+          for (const row of emailRows) {
+            const id = Number(row.buyInId);
+            if (Number.isFinite(id)) buyInsWithInboundEmail.add(id);
+          }
+          emailSignalReady = true;
+        } catch (emailErr: any) {
+          // Degrade to the old attachment-only rule rather than false-alarming
+          // on every attached unit when the email lookup is unavailable.
+          console.warn(
+            "[buyin-coverage] inbound-email lookup failed; falling back to attachment-only coverage:",
+            emailErr?.message ?? emailErr,
+          );
+        }
+      }
+      for (const reservation of reservations) {
+        const slots = Array.isArray(reservation?.slots) ? reservation.slots : [];
+        for (const slot of slots) {
+          const buyIn = slot?.buyIn;
+          if (buyIn && typeof buyIn === "object") {
+            const id = Number((buyIn as any).id);
+            (buyIn as any).hasInboundEmail = emailSignalReady
+              ? Number.isFinite(id) && buyInsWithInboundEmail.has(id)
+              : true; // fallback: treat any attached buy-in as covered
+          }
+        }
+      }
+
+      const warnings = collectBuyInCoverageWarnings(reservations, nowMs);
       res.json({ warnings, windowDays: BUYIN_COVERAGE_WINDOW_DAYS, checkedAt: new Date(nowMs).toISOString() });
     } catch (err: any) {
       res.status(500).json({ error: "Buy-in coverage check failed", message: err?.message ?? String(err) });
