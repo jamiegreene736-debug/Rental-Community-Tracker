@@ -26,6 +26,8 @@ import Bookings from "@/pages/bookings";
 import Agreement from "@/pages/agreement";
 import { setLivePropertyMarketRates, type LivePropertyMarketRateInput } from "@shared/pricing-rates";
 import { usePortalSession } from "@/lib/auth";
+import { useToast } from "@/hooks/use-toast";
+import { AGENT_LOGIN_GREETING } from "@shared/agent-identity";
 import AssistantDock from "@/components/AssistantDock";
 
 function AgentRouteGate({ children }: { children: React.ReactNode }) {
@@ -104,6 +106,28 @@ function MarketRatesHydrator() {
   return null;
 }
 
+// Greets the agent (Christal) with "Aloha Christal" once per browser session
+// after login. sessionStorage scopes it to one greeting per tab-session, so it
+// fires when she opens the portal but not on every route change; it re-greets
+// the next time the app is opened in a fresh tab.
+const AGENT_WELCOMED_KEY = "agent_welcomed_v1";
+function AgentWelcome() {
+  const { data: session } = usePortalSession();
+  const { toast } = useToast();
+  const role = session?.role;
+  useEffect(() => {
+    if (role !== "agent") return;
+    try {
+      if (sessionStorage.getItem(AGENT_WELCOMED_KEY)) return;
+      sessionStorage.setItem(AGENT_WELCOMED_KEY, "1");
+    } catch {
+      // sessionStorage unavailable (private mode / blocked) — greet anyway.
+    }
+    toast({ title: `${AGENT_LOGIN_GREETING} 🌺`, description: "Welcome back to the VacationRentalExpertz inbox." });
+  }, [role, toast]);
+  return null;
+}
+
 function App() {
   const [location] = useLocation();
   const isAgreementRoute = location.startsWith("/agreement/") || location.startsWith("/admin/agreement/");
@@ -113,6 +137,7 @@ function App() {
       <TooltipProvider>
         <Toaster />
         {!isAgreementRoute && <MarketRatesHydrator />}
+        {!isAgreementRoute && <AgentWelcome />}
         <Router />
         {!isAgreementRoute && <AssistantDock />}
       </TooltipProvider>
