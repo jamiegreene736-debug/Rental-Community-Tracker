@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-09 (amenities tab: photo-driven amenity scan → auto-fill + Guesty sync + combo step): Operator
+  asked for a button that scans the community folder + ALL units' photos, adds amenities to the amenities
+  tab, syncs to Guesty if the listing exists (else save in-system), fills out ALL amenities where
+  available, and to add this step to the add-combo-listing function. TWO clarifying decisions FIRST:
+  ADD-ONLY (never uncheck — "not visible in a photo" doesn't prove absence) + BASELINE + DETECTED (fresh
+  listing starts from the Hawaii baseline, then adds detected; an existing curated selection only GAINS
+  extras). SHIPPED (`claude/amenity-photo-scan`): (1) MOVED the amenity catalog + `HAWAII_BASE` to
+  `shared/guesty-amenity-catalog.ts` (server+client single source; client re-exports + keeps the
+  per-property profile map) + a curated `AMENITY_VISION_TARGETS` (~70 visually-detectable keys w/ hints);
+  catalog/baseline/profiles proven byte-identical. (2) pure `shared/amenity-scan-logic.ts` (prompt/parse/
+  add-only merge, 29 tests). (3) `server/amenity-scan.ts` `scanAmenitiesForProperty(propertyId)` — resolves
+  folders via the SAME `buildPhotoCommunityCheckRequestForProperty` (positive core id AND negative
+  `-draftId`), batched Claude vision (`claude-sonnet-4-6`), fail-soft (no key/photos → still fills baseline).
+  (4) NEW `property_amenities` table (propertyId PK; FIRST durable home for amenity data — before this it
+  was a static client map with NO persistence) + storage upsert + boot-migration. (5) routes
+  `POST /api/builder/scan-amenities` (persist + Guesty sync), `/save-amenities`, `GET /property-amenities`.
+  (6) Amenities tab: "🔎 Scan photos for amenities" + result panel + "💾 Save to system"; hydrates from the
+  store. (7) bulk add-combo-listing: fail-soft `"amenities"` step on fresh drafts (`COMBO_AMENITY_SCAN=0`;
+  never rolls back the draft). LOAD-BEARING (review fix): the Guesty sync is ADD-ONLY despite
+  `push-amenities` being a full PUT-replace — the scan route UNIONS the scanned set with the listing's
+  CURRENT Guesty amenities before pushing, so a Guesty-curated amenity is never dropped. Reviewed via a
+  3-lens adversarial workflow (3 fixes: add-only Guesty union; savePropertyAmenities preserving scan
+  provenance on a manual save; evenSampleIndices NaN-at-cap-1 guard). Verified: amenity-scan-logic 29/0,
+  full `npm test` exit 0, build clean, `npm run check` 338 = baseline (0 new). Could NOT live-smoke the
+  Claude-vision/Guesty legs (no creds) — post-deploy: open the Amenities tab, click Scan; a fresh combo
+  draft auto-fills its amenities. See AGENTS.md 2026-07-09 Decision Log.
+
 - 2026-07-09 (FOLLOW-UP: split guest issues → property vs Back-Office Issues tab): Operator, after the
   retroactive scan: "only genuine property-related issues / directions in [Guest Issues]; do NOT put
   refund requests here — make a Back-Office Issues tab with refund + cancellation requests." SHIPPED
