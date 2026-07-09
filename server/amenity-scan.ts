@@ -92,6 +92,7 @@ function mimeForBuffer(buffer: Buffer, filename: string): string {
 /** Evenly spread `cap` indices across `n` items (keeps a representative spread). */
 function evenSampleIndices(n: number, cap: number): number[] {
   if (n <= 0) return [];
+  if (cap <= 1) return [0]; // cap 1 (or misconfigured 0) → the first photo, never NaN
   if (n <= cap) return Array.from({ length: n }, (_, i) => i);
   const out = new Set<number>();
   for (let i = 0; i < cap; i++) {

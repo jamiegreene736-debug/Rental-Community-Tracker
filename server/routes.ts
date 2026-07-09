@@ -23525,8 +23525,10 @@ Requirements:
   // property's community + unit photos, ADD-ONLY merges the detected amenities
   // into the selection (filling the standard baseline for a fresh listing),
   // persists the result in-system, and — if a Guesty listing is mapped — syncs
-  // it to Guesty (add-only, so the sync is safe). A fresh draft with no Guesty
-  // listing is just saved in-system; the operator pushes it later.
+  // it to Guesty. The Guesty sync is ALSO add-only: it unions the scanned set
+  // with the listing's current Guesty amenities before the push, so an amenity
+  // curated in Guesty is never dropped. A fresh draft with no Guesty listing is
+  // just saved in-system; the operator pushes it later.
   app.post("/api/builder/scan-amenities", async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as { propertyId?: number; listingId?: string; currentKeys?: string[] };
     const propertyId = Number(body.propertyId);
@@ -23564,12 +23566,30 @@ Requirements:
         guesty.listingId = listingId;
         try {
           const base = `http://127.0.0.1:${process.env.PORT || "5000"}`;
-          // Send both the label AND the key for each amenity so the route's
+          // ADD-ONLY sync: push-amenities does a full PUT-replace of the Guesty
+          // amenity array, so to honor the operator's "never remove" rule we
+          // UNION the scanned set with the listing's CURRENT Guesty amenities —
+          // an amenity curated directly in Guesty is preserved, never dropped.
+          // (Fetch is best-effort; if it fails we fall back to the app set.)
+          let existingGuestyAmenities: string[] = [];
+          try {
+            const curRes = await fetch(`${base}/api/builder/guesty-amenities?listingId=${encodeURIComponent(listingId)}`);
+            const curData = await curRes.json().catch(() => null) as any;
+            if (curRes.ok && curData) {
+              existingGuestyAmenities = [
+                ...(Array.isArray(curData.amenities) ? curData.amenities : []),
+                ...(Array.isArray(curData.otherAmenities) ? curData.otherAmenities : []),
+              ].filter((s: unknown): s is string => typeof s === "string" && s.length > 0);
+            }
+          } catch { /* current-set read failed — proceed with the app set only */ }
+          // Send both the label AND the key for each app amenity so the route's
           // canonical resolver (byNorm on labels + aliasMap on keys) has the best
-          // chance to map each one; unmatched strings are ignored by Guesty.
-          const amenityInputs = Array.from(new Set(
-            scan.next.flatMap((k) => [getAmenityLabel(k), k]),
-          ));
+          // chance to map each one, PLUS the listing's existing canonical names
+          // so they survive the replace. Unmatched strings are ignored by Guesty.
+          const amenityInputs = Array.from(new Set([
+            ...scan.next.flatMap((k) => [getAmenityLabel(k), k]),
+            ...existingGuestyAmenities,
+          ]));
           const pushRes = await fetch(`${base}/api/builder/push-amenities`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },

@@ -1529,19 +1529,23 @@ export class DatabaseStorage implements IStorage {
   async savePropertyAmenities(row: InsertPropertyAmenities): Promise<PropertyAmenities> {
     const now = new Date();
     const values: InsertPropertyAmenities = { ...row, updatedAt: now };
+    // On update, only overwrite the scan-provenance columns when the caller
+    // actually supplies them — so a manual "Save to system" (which sends only
+    // amenityKeys + source) does NOT wipe the last scan's detected/photos/at.
+    const updateSet: Record<string, unknown> = {
+      amenityKeys: values.amenityKeys,
+      source: values.source ?? null,
+      updatedAt: now,
+    };
+    if (row.detected !== undefined) updateSet.detected = row.detected;
+    if (row.photosScanned !== undefined) updateSet.photosScanned = row.photosScanned;
+    if (row.scannedAt !== undefined) updateSet.scannedAt = row.scannedAt;
     const [saved] = await db
       .insert(propertyAmenities)
       .values(values)
       .onConflictDoUpdate({
         target: propertyAmenities.propertyId,
-        set: {
-          amenityKeys: values.amenityKeys,
-          detected: values.detected ?? null,
-          source: values.source ?? null,
-          photosScanned: values.photosScanned ?? null,
-          scannedAt: values.scannedAt ?? null,
-          updatedAt: now,
-        },
+        set: updateSet,
       })
       .returning();
     return saved;
