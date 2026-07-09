@@ -150,6 +150,7 @@ import { registerAssistantRoutes } from "./assistant/routes";
 import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar-automation";
 import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel, receiptNeedsAttention, refundSmsNeedsAttention } from "@shared/receipt-message";
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation, createReceiptPage } from "./guest-receipts";
+import { getGuestComplaintScannerStatus, setGuestComplaintScannerEnabled, runGuestComplaintScan } from "./guest-complaint-scanner";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
 import { runPropertyRevenueRefresh, getPropertyRevenueStatus } from "./property-revenue-scheduler";
@@ -49395,6 +49396,43 @@ CONSTRAINTS
       return res.json({ ok: true });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to delete guest issue", message: err.message });
+    }
+  });
+
+  // ── Automatic guest-complaint scanner (server/guest-complaint-scanner.ts) ──
+  // The scanner reads the guest inbox and, for each detected complaint, opens a
+  // new guest issue or appends a timestamped note to the matching unresolved
+  // one. These control endpoints are ADMIN-only (the agent portal still
+  // reports/comments on issues via /api/inbox/guest-issues, but does NOT run an
+  // account-wide scan). When ADMIN_SECRET is unset the auth layer resolves every
+  // request to an admin session, so this never locks out a keyless deploy.
+  app.get("/api/inbox/complaint-scan/status", (_req, res) => {
+    res.json(getGuestComplaintScannerStatus());
+  });
+
+  app.post("/api/inbox/complaint-scan/toggle", async (req, res) => {
+    const session = res.locals.portalSession as { role?: string } | undefined;
+    if (!session || session.role !== "admin") return res.status(403).json({ error: "Only the operator can toggle the complaint scanner" });
+    try {
+      await setGuestComplaintScannerEnabled(!!(req.body as { enabled?: boolean })?.enabled);
+      return res.json(getGuestComplaintScannerStatus());
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to toggle complaint scanner", message: err.message });
+    }
+  });
+
+  // Manual run. `{ full: true }` resets the backfill cursor and re-reads the
+  // whole inbox from scratch — safe (idempotent) because every auto issue/note
+  // carries the source message's marker.
+  app.post("/api/inbox/complaint-scan/run", async (req, res) => {
+    const session = res.locals.portalSession as { role?: string } | undefined;
+    if (!session || session.role !== "admin") return res.status(403).json({ error: "Only the operator can run the complaint scanner" });
+    try {
+      const full = !!(req.body as { full?: boolean })?.full;
+      const result = await runGuestComplaintScan({ full });
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({ error: "Complaint scan failed", message: err.message });
     }
   });
 

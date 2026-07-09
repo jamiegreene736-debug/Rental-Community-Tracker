@@ -11,6 +11,7 @@ import { startReplacementFindResumeWatchdog } from "./preflight-background-jobs"
 import { startAutoReplaceResumeWatchdog } from "./auto-replace-jobs";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { startGuestReceiptScheduler } from "./guest-receipts";
+import { startGuestComplaintScanner } from "./guest-complaint-scanner";
 import { startPropertyRevenueScheduler } from "./property-revenue-scheduler";
 import { startMarketRateScheduler } from "./market-rate-scheduler";
 import { startGuestInboxSyncScheduler } from "./guest-inbox-sync";
@@ -180,6 +181,7 @@ app.get("/api/auth/session", (_req, res) => {
       startPhotoListingScheduler();
       startBookingConfirmationScheduler();
       startGuestReceiptScheduler();
+      startGuestComplaintScanner();
       startGuestInboxSyncScheduler();
       startBuyInVendorEmailSyncScheduler();
       startPropertyRevenueScheduler();

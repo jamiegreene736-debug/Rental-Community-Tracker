@@ -43,6 +43,36 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-09 (guest inbox: AUTOMATIC complaint scanner → guest-issue tracker): Operator asked to make
+  the guest inbox scannable — detect a guest complaint, decide if it's already a complaint in the
+  system (if so add timestamped notes; else create it as a task), scan the whole inbox ONCE then every
+  new incoming message. KEY: the app ALREADY has the exact data model — the guest-issue tracker
+  (`guest_issues` = complaint/task, `guest_issue_comments` = timestamped note, open→ongoing→resolved,
+  per-conversation `GuestIssuesPanel` + cross-conversation `GuestIssuesTab`, routes `/api/inbox/guest-issues*`).
+  So this is PURELY an auto-detection layer, no new tables/UI framework. SHIPPED (`claude/guest-complaint-scanner`):
+  (1) pure `shared/guest-complaint-logic.ts` (unit-tested, in npm chain) — complaint keyword/heuristic
+  gate (plural-tolerant, COMPLAINT-shaped so it ignores logistics/policy questions), Claude-JSON
+  classification parse, `matchExistingComplaintIssue` (dedup vs UNRESOLVED same-category, category
+  INFERRED from issue title/desc since guest_issues has no category column), a `[msg:<postIso>]`
+  idempotency marker, note/title builders, scan-state (de)serialize. (2) `server/guest-complaint-scanner.ts`
+  (5-min scheduler, modeled on guest-receipts, registered in index.ts) — two-phase: one-time BACKFILL
+  (pages the whole inbox ASCENDING/stable, `GUEST_COMPLAINT_BACKFILL_DAYS`=365) → INCREMENTAL past a
+  persisted `app_settings` watermark (`guest_complaint_scan.state`); per incoming guest post: keyword
+  gate → Claude(Haiku `GUEST_COMPLAINT_MODEL`) confirm+classify (heuristic fallback w/ no key) → append
+  a timestamped note to the matching unresolved issue OR open a new one. Auto rows attributed
+  `auto-scan`/`system` → violet "Auto-detected" badge + friendly `authorLabel`. Internal-only (never
+  messages the guest). (3) admin-only endpoints `/api/inbox/complaint-scan/{run,status,toggle}` (NOT in
+  the agent allowlist + re-checked role==="admin"; auth-off resolves to admin) + a "Scan for complaints"
+  button in the Guest Issues tab (`canDelete`/admin gated). LOAD-BEARING (see AGENTS.md "Guest issues
+  tracker" point 6): the message marker makes re-scans / crash-replays / the `{full:true}` manual
+  rescan idempotent (no dup issues/notes, no dedup table); the incremental watermark advances over a
+  CONTIGUOUS oldest-first prefix and, when the per-run cap truncates a burst, only to the last
+  fully-processed thread — a newest-first jump-to-now would leave a middle GAP of skipped fresh threads
+  (caught in adversarial self-review). Verified: guest-complaint-logic 12/0, full `npm test` exit 0,
+  build clean, `npm run check` 338 = baseline (0 new); bundle-grep confirms the scan button + badge.
+  Could NOT live-smoke Guesty/Claude (no creds; don't boot prod schedulers locally) — post-deploy the
+  scanner backfills over a few ticks, then a complaint message opens/updates an "Auto-detected" issue.
+
 - 2026-07-08 (bulk-combo "many listings: Photo/Zillow step failed … missing-source-url, no-photos,
   too-few-distinct-photos:0 … no combination type produced two independently-photographed units
   (tried 2BR+2BR)"): DIAGNOSED live (ADMIN_SECRET API + the scrape tiers directly — no combo job

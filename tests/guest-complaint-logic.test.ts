@@ -1,0 +1,160 @@
+import assert from "node:assert/strict";
+
+import {
+  COMPLAINT_CATEGORIES,
+  normalizeComplaintCategory,
+  complaintKeywordSignal,
+  looksLikeComplaint,
+  heuristicComplaintVerdict,
+  parseClaudeComplaintClassification,
+  inferComplaintCategoryFromText,
+  matchExistingComplaintIssue,
+  messageMarker,
+  textReferencesMessage,
+  messageAlreadyCaptured,
+  buildComplaintCommentBody,
+  buildComplaintIssueDescription,
+  parseComplaintScanState,
+  serializeComplaintScanState,
+  EMPTY_SCAN_STATE,
+  AUTO_COMPLAINT_AUTHOR,
+  AUTO_COMPLAINT_ROLE,
+  AUTO_COMPLAINT_SOURCE,
+  type ComplaintVerdict,
+} from "../shared/guest-complaint-logic";
+
+console.log("guest-complaint-logic suite");
+
+// ── attribution constants ──
+assert.equal(AUTO_COMPLAINT_AUTHOR, "auto-scan");
+assert.equal(AUTO_COMPLAINT_ROLE, "system");
+assert.equal(AUTO_COMPLAINT_SOURCE, "auto-scan");
+console.log("  ✓ auto-scan attribution constants are stable");
+
+// ── categories ──
+assert.ok(COMPLAINT_CATEGORIES.includes("maintenance"));
+assert.equal(normalizeComplaintCategory("NOISE"), "noise");
+assert.equal(normalizeComplaintCategory("gibberish"), "other");
+assert.equal(normalizeComplaintCategory(null), "other");
+console.log("  ✓ category normalization");
+
+// ── keyword signal: complaints trip, logistics do not ──
+assert.ok(complaintKeywordSignal("The AC is broken and it's boiling in here").matched.length > 0);
+assert.ok(looksLikeComplaint("there are cockroaches in the kitchen"));
+assert.ok(looksLikeComplaint("the shower does not work at all")); // negated-function phrase
+assert.ok(looksLikeComplaint("the wifi is not working"));
+// Benign logistics / positive feedback must NOT look like complaints.
+assert.equal(looksLikeComplaint("What time is check-in?"), false);
+assert.equal(looksLikeComplaint("Can I bring my dog? Is early check-in possible?"), false);
+assert.equal(looksLikeComplaint("Thank you so much, the place was perfect!"), false);
+assert.equal(looksLikeComplaint("Where should we park the rental car?"), false);
+console.log("  ✓ keyword/heuristic gate separates complaints from logistics");
+
+// ── severity escalation ──
+assert.equal(complaintKeywordSignal("we are locked out and can't get in").severity, "urgent");
+assert.equal(complaintKeywordSignal("there is a bed bug in the bedroom").severity, "urgent");
+assert.equal(complaintKeywordSignal("small stain on the couch").severity, "low");
+console.log("  ✓ severity escalates for urgent classes");
+
+// ── heuristic verdict ──
+const hv = heuristicComplaintVerdict("The kitchen sink is leaking everywhere");
+assert.equal(hv.isComplaint, true);
+assert.equal(hv.category, "maintenance");
+assert.equal(hv.source, "heuristic");
+assert.ok(hv.title.length > 0);
+const hvClean = heuristicComplaintVerdict("What's the wifi password?");
+assert.equal(hvClean.isComplaint, false);
+console.log("  ✓ heuristic verdict flags real problems, clears benign");
+
+// ── Claude classification parsing ──
+const parsed = parseClaudeComplaintClassification({
+  isComplaint: true, severity: "high", category: "cleanliness", title: "Dirty towels on arrival", summary: "The towels were dirty when the guest arrived.",
+});
+assert.ok(parsed);
+assert.equal(parsed!.isComplaint, true);
+assert.equal(parsed!.category, "cleanliness");
+assert.equal(parsed!.severity, "high");
+assert.equal(parsed!.source, "claude");
+// snake_case + bad enums degrade safely
+const parsed2 = parseClaudeComplaintClassification({ is_complaint: true, severity: "nuclear", category: "weird", title: "", summary: "" });
+assert.equal(parsed2!.isComplaint, true);
+assert.equal(parsed2!.severity, "normal");
+assert.equal(parsed2!.category, "other");
+assert.ok(parsed2!.title.length > 0); // falls back to a category title
+assert.equal(parseClaudeComplaintClassification("nope"), null);
+assert.equal(parseClaudeComplaintClassification({ isComplaint: false }).isComplaint, false);
+// overly long titles are clamped
+const longTitle = parseClaudeComplaintClassification({ isComplaint: true, title: "x".repeat(400) });
+assert.ok(longTitle!.title.length <= 121);
+console.log("  ✓ Claude JSON parses, snake_case + bad enums degrade safely");
+
+// ── category inference from free text (no DB column) ──
+assert.equal(inferComplaintCategoryFromText("AC not cooling in the master bedroom"), "maintenance");
+assert.equal(inferComplaintCategoryFromText("noisy neighbors kept us up"), "noise");
+assert.equal(inferComplaintCategoryFromText("Nice weather question"), "other");
+console.log("  ✓ category inferred from issue text");
+
+// ── matchExistingComplaintIssue: dedup by category, ignore resolved ──
+const verdictMaint: ComplaintVerdict = { isComplaint: true, severity: "high", category: "maintenance", title: "AC out again", summary: "", source: "claude" };
+const issues = [
+  { id: 10, status: "resolved", title: "AC not cooling", description: "" },       // resolved → ignored
+  { id: 11, status: "open", title: "AC not cooling in bedroom", description: "" }, // unresolved maintenance → match
+  { id: 12, status: "ongoing", title: "Noisy pool at night", description: "" },
+];
+assert.equal(matchExistingComplaintIssue(verdictMaint, issues, ["ac not working"]), 11);
+// No unresolved match of that category → open a new one.
+const verdictBilling: ComplaintVerdict = { isComplaint: true, severity: "normal", category: "billing", title: "Overcharged", summary: "", source: "claude" };
+assert.equal(matchExistingComplaintIssue(verdictBilling, issues, ["overcharged"]), null);
+// Only a RESOLVED matching issue exists → new one (fresh occurrence).
+assert.equal(matchExistingComplaintIssue(verdictMaint, [{ id: 5, status: "resolved", title: "AC not cooling", description: "" }], ["ac"]), null);
+// "other" category still matches via keyword overlap against title/description.
+const verdictOther: ComplaintVerdict = { isComplaint: true, severity: "normal", category: "other", title: "problem", summary: "", source: "heuristic" };
+assert.equal(matchExistingComplaintIssue(verdictOther, [{ id: 7, status: "open", title: "Guest complaint", description: "the balcony railing is loose" }], ["railing"]), 7);
+assert.equal(matchExistingComplaintIssue(verdictOther, [], []), null);
+console.log("  ✓ dedup matches unresolved same-category, ignores resolved, opens new otherwise");
+
+// ── idempotency markers ──
+const iso = "2026-07-09T10:00:00.000Z";
+assert.equal(messageMarker(iso), `[msg:${iso}]`);
+assert.equal(textReferencesMessage(`note ${messageMarker(iso)}`, iso), true);
+assert.equal(textReferencesMessage("unrelated note", iso), false);
+assert.equal(
+  messageAlreadyCaptured(iso, [
+    { description: "opened from inbox " + messageMarker(iso), comments: [] },
+  ]),
+  true,
+);
+assert.equal(
+  messageAlreadyCaptured(iso, [
+    { description: "some other issue", comments: [{ body: "follow-up " + messageMarker(iso) }] },
+  ]),
+  true,
+);
+assert.equal(messageAlreadyCaptured(iso, [{ description: "x", comments: [{ body: "y" }] }]), false);
+console.log("  ✓ message marker makes create/append idempotent");
+
+// ── note / description builders quote the guest + carry the marker ──
+const note = buildComplaintCommentBody({ guestMessage: "AC still broken!!", postIso: iso, channel: "airbnb2" });
+assert.ok(note.includes("> AC still broken!!"));
+assert.ok(note.includes(messageMarker(iso)));
+assert.ok(note.includes("airbnb2"));
+const desc = buildComplaintIssueDescription({
+  verdict: verdictMaint, guestMessage: "The AC has been broken since check-in", postIso: iso, channel: null,
+});
+assert.ok(desc.includes("> The AC has been broken since check-in"));
+assert.ok(desc.includes(messageMarker(iso)));
+console.log("  ✓ builders quote the guest verbatim + stamp the marker");
+
+// ── scan state (de)serialization ──
+assert.deepEqual(parseComplaintScanState(null), EMPTY_SCAN_STATE);
+assert.deepEqual(parseComplaintScanState("not json"), EMPTY_SCAN_STATE);
+const st = { backfillComplete: true, backfillSkip: 150, watermarkMs: 1720000000000, lastRunAt: iso };
+assert.deepEqual(parseComplaintScanState(serializeComplaintScanState(st)), st);
+// negative / garbage numbers clamp
+const clamped = parseComplaintScanState(JSON.stringify({ backfillComplete: false, backfillSkip: -5, watermarkMs: "x", lastRunAt: 1 }));
+assert.equal(clamped.backfillSkip, 0);
+assert.equal(clamped.watermarkMs, 0);
+assert.equal(clamped.lastRunAt, null);
+console.log("  ✓ scan state round-trips + sanitizes");
+
+console.log("guest-complaint-logic suite passed");
