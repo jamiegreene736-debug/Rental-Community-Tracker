@@ -1131,6 +1131,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   );
   const [guestyLiveAmenities, setGuestyLiveAmenities] = useState<Set<string> | null>(null);
   const [fetchingLiveAmenities, setFetchingLiveAmenities] = useState(false);
+  // Photo-driven amenity scan ("Scan photos for amenities" button).
+  const [amenityScanState, setAmenityScanState] = useState<"idle" | "scanning" | "done" | "error">("idle");
+  const [amenityScanResult, setAmenityScanResult] = useState<{
+    added: string[];
+    detected: string[];
+    detail: { key: string; confidence: string; evidence: string }[];
+    photosScanned: number;
+    groupsScanned: number;
+    community: string;
+    warning?: string;
+    guesty?: { synced: boolean; listingId: string | null; saved?: number; error?: string };
+  } | null>(null);
+  const [amenitySaveState, setAmenitySaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   // Guesty's canonical amenity catalog: list of { name } strings (Guesty's supported amenities
   // endpoint returns only a name field — no id — so name is the key we send on PUT).
   const [guesty_amenityCatalog, setGuesty_amenityCatalog] = useState<{ name: string }[]>([]);
@@ -1197,7 +1210,28 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (propertyId !== prevPropertyIdRef.current) {
       prevPropertyIdRef.current = propertyId;
       setPendingAmenities(new Set(propertyId ? getGuestyAmenities(propertyId) : []));
+      setAmenityScanState("idle");
+      setAmenityScanResult(null);
     }
+  }, [propertyId]);
+
+  // Hydrate the amenity selection from the in-system store (last scan / manual
+  // save) so a saved set survives reloads and shows the scanned amenities. Falls
+  // back to the static profile when nothing is persisted. Runs on propertyId
+  // change; the profile reset above wins only until this async load resolves.
+  useEffect(() => {
+    if (!propertyId) return;
+    let cancelled = false;
+    fetch(`/api/builder/property-amenities?propertyId=${propertyId}`)
+      .then((r) => r.json())
+      .then((data: { amenityKeys?: string[] | null }) => {
+        if (cancelled) return;
+        if (Array.isArray(data?.amenityKeys) && data.amenityKeys.length > 0) {
+          setPendingAmenities(new Set(data.amenityKeys));
+        }
+      })
+      .catch(() => {}); // non-fatal — keep the static profile
+    return () => { cancelled = true; };
   }, [propertyId]);
 
   // ── Booking rules state ────────────────────────────────────────────────────
@@ -3089,6 +3123,90 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       toast({ title: "Amenities push failed", description: (e as Error).message, variant: "destructive" });
     }
   }, [amenityPushState, pushAmenitiesToGuesty, recordDataPush, toast]);
+
+  // Scan the property's community + unit photos for amenities. ADD-ONLY: turns
+  // detected amenities ON (never off) and fills the standard baseline, then
+  // persists in-system + syncs to Guesty when a listing is selected. Works for
+  // drafts too (propertyId is the negative -draftId).
+  const scanAmenitiesFromPhotos = useCallback(async () => {
+    if (!propertyId) {
+      toast({ title: "No property to scan", description: "Open a property/draft to scan its photos.", variant: "destructive" });
+      return;
+    }
+    if (amenityScanState === "scanning") return;
+    setAmenityScanState("scanning");
+    setAmenityScanResult(null);
+    try {
+      const res = await fetch("/api/builder/scan-amenities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          propertyId,
+          listingId: selectedId || undefined,
+          currentKeys: Array.from(pendingAmenities),
+        }),
+      });
+      const data = await res.json() as {
+        ok: boolean; error?: string;
+        next?: string[]; added?: string[]; detected?: string[];
+        detail?: { key: string; confidence: string; evidence: string }[];
+        photosScanned?: number; groupsScanned?: number; community?: string; warning?: string;
+        guesty?: { synced: boolean; listingId: string | null; saved?: number; error?: string };
+      };
+      if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      if (Array.isArray(data.next)) setPendingAmenities(new Set(data.next));
+      setAmenityScanResult({
+        added: data.added ?? [],
+        detected: data.detected ?? [],
+        detail: data.detail ?? [],
+        photosScanned: data.photosScanned ?? 0,
+        groupsScanned: data.groupsScanned ?? 0,
+        community: data.community ?? "",
+        warning: data.warning,
+        guesty: data.guesty,
+      });
+      setAmenityScanState("done");
+      // Reflect that the selection now matches what was persisted in-system.
+      if (amenityPushState !== "idle") setAmenityPushState("idle");
+      const addedN = data.added?.length ?? 0;
+      toast({
+        title: "Amenity scan complete",
+        description: `${addedN} amenit${addedN === 1 ? "y" : "ies"} added from ${data.photosScanned ?? 0} photo${(data.photosScanned ?? 0) === 1 ? "" : "s"}`
+          + (data.guesty?.synced ? " · synced to Guesty" : data.guesty?.listingId ? " · Guesty sync failed" : " · saved in-system")
+          + (data.warning ? ` · ${data.warning}` : ""),
+        duration: 9000,
+      });
+    } catch (e) {
+      setAmenityScanState("error");
+      toast({ title: "Amenity scan failed", description: (e as Error).message, variant: "destructive" });
+    }
+  }, [propertyId, selectedId, pendingAmenities, amenityScanState, amenityPushState, toast]);
+
+  // Persist the current amenity selection in-system (no Guesty push). Lets manual
+  // checkbox edits survive a reload even before a listing exists in Guesty.
+  const saveAmenitiesToSystem = useCallback(async () => {
+    if (!propertyId) {
+      toast({ title: "No property to save", description: "Open a property/draft first.", variant: "destructive" });
+      return;
+    }
+    if (amenitySaveState === "saving") return;
+    setAmenitySaveState("saving");
+    try {
+      const res = await fetch("/api/builder/save-amenities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ propertyId, amenityKeys: Array.from(pendingAmenities), source: "manual" }),
+      });
+      const data = await res.json() as { ok: boolean; error?: string; amenityKeys?: string[] };
+      if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setAmenitySaveState("saved");
+      toast({ title: "Saved to system", description: `${data.amenityKeys?.length ?? pendingAmenities.size} amenities saved in-system.` });
+      setTimeout(() => setAmenitySaveState("idle"), 2500);
+    } catch (e) {
+      setAmenitySaveState("error");
+      toast({ title: "Save failed", description: (e as Error).message, variant: "destructive" });
+    }
+  }, [propertyId, pendingAmenities, amenitySaveState, toast]);
 
   const pushBookableToGuestyOnce = useCallback(async () => {
     if (!selectedId) throw new Error("Select a Guesty listing first.");
@@ -6028,6 +6146,66 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
                   return (
                     <div>
+                      {/* Photo amenity scan — detect amenities from the community + unit photos */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, padding: "12px 14px", background: "linear-gradient(90deg,#faf5ff,#f5f3ff)", border: "1px solid #ddd6fe", borderRadius: 8 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontWeight: 700, fontSize: 13, color: "#6d28d9" }}>🔎 Scan photos for amenities</div>
+                          <div style={{ fontSize: 11, color: "#7c6ba8", marginTop: 2 }}>
+                            AI reads the community + unit photos and checks the amenities it can see, on top of the standard baseline.
+                            Add-only — it never unchecks anything.{selectedId ? " Syncs to Guesty after scanning." : " Saved in-system (no Guesty listing selected)."}
+                          </div>
+                        </div>
+                        <button
+                          onClick={scanAmenitiesFromPhotos}
+                          disabled={amenityScanState === "scanning" || !propertyId}
+                          style={{
+                            padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 6, whiteSpace: "nowrap",
+                            cursor: propertyId ? "pointer" : "not-allowed", border: "none", color: "white",
+                            background: amenityScanState === "error" ? "var(--red)" : "#7c3aed",
+                            opacity: amenityScanState === "scanning" || !propertyId ? 0.7 : 1,
+                          }}
+                          data-testid="button-scan-amenities"
+                        >
+                          {amenityScanState === "scanning" ? "Scanning photos…" : amenityScanState === "done" ? "↻ Scan again" : amenityScanState === "error" ? "✗ Retry scan" : "Scan photos for amenities"}
+                        </button>
+                      </div>
+
+                      {/* Scan result summary */}
+                      {amenityScanResult && (
+                        <div style={{ marginBottom: 12, padding: "10px 12px", border: "1px solid #ddd6fe", borderRadius: 8, background: "#faf5ff", fontSize: 11 }}>
+                          <div style={{ fontWeight: 700, color: "#6d28d9", marginBottom: 4 }}>
+                            Scan detected {amenityScanResult.detected.length} amenit{amenityScanResult.detected.length === 1 ? "y" : "ies"} across {amenityScanResult.photosScanned} photo{amenityScanResult.photosScanned === 1 ? "" : "s"} · added {amenityScanResult.added.length} new
+                          </div>
+                          {amenityScanResult.added.length > 0 && (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: amenityScanResult.warning || amenityScanResult.guesty ? 6 : 0 }}>
+                              {amenityScanResult.added.map(k => (
+                                <span key={k} style={{ padding: "2px 7px", borderRadius: 12, background: "#ede9fe", border: "1px solid #ddd6fe", color: "#5b21b6" }}
+                                  title={amenityScanResult.detail.find(d => d.key === k)?.evidence || undefined}>
+                                  + {GUESTY_AMENITY_CATALOG.find(e => e.key === k)?.label ?? k}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {amenityScanResult.added.length === 0 && (
+                            <div style={{ color: "#7c6ba8", marginBottom: amenityScanResult.warning || amenityScanResult.guesty ? 6 : 0 }}>
+                              No new amenities to add — everything the photos show was already selected.
+                            </div>
+                          )}
+                          {amenityScanResult.guesty?.synced && (
+                            <div style={{ color: "#15803d" }}>✓ Synced to Guesty ({amenityScanResult.guesty.saved ?? 0} confirmed).</div>
+                          )}
+                          {amenityScanResult.guesty && !amenityScanResult.guesty.synced && amenityScanResult.guesty.listingId && (
+                            <div style={{ color: "#b45309" }}>⚠ Saved in-system, but the Guesty sync failed{amenityScanResult.guesty.error ? `: ${amenityScanResult.guesty.error}` : ""}. Use "Push Amenities to Guesty".</div>
+                          )}
+                          {amenityScanResult.guesty && !amenityScanResult.guesty.listingId && (
+                            <div style={{ color: "#6b7280" }}>Saved in-system. Select a Guesty listing above, then push when the listing is live.</div>
+                          )}
+                          {amenityScanResult.warning && (
+                            <div style={{ color: "#b45309", marginTop: 4 }}>{amenityScanResult.warning}</div>
+                          )}
+                        </div>
+                      )}
+
                       {/* Push header */}
                       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, padding: "10px 12px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8 }}>
                         <div style={{ flex: 1 }}>
@@ -6044,6 +6222,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             style={{ padding: "5px 10px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 6, background: "white", cursor: "pointer", color: "var(--muted)" }}
                           >
                             Reset to profile
+                          </button>
+                          <button
+                            onClick={saveAmenitiesToSystem}
+                            disabled={amenitySaveState === "saving" || !propertyId}
+                            title="Save the current selection in-system (survives reload; no Guesty push)"
+                            style={{ padding: "5px 10px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 6, background: "white", cursor: propertyId ? "pointer" : "not-allowed", color: "var(--muted)", opacity: amenitySaveState === "saving" || !propertyId ? 0.6 : 1 }}
+                            data-testid="button-save-amenities"
+                          >
+                            {amenitySaveState === "saving" ? "Saving…" : amenitySaveState === "saved" ? "✓ Saved" : amenitySaveState === "error" ? "✗ Save failed" : "💾 Save to system"}
                           </button>
                           <button
                             disabled={fetchingLiveAmenities || !selectedId}

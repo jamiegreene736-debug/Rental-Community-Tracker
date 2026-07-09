@@ -19,6 +19,7 @@ import {
   type BookingAlternativePage, bookingAlternativePages,
   type GuestReceipt, type InsertGuestReceipt, guestReceipts,
   type PropertyTrailingRevenue, type InsertPropertyTrailingRevenue, propertyTrailingRevenue,
+  type PropertyAmenities, type InsertPropertyAmenities, propertyAmenities,
   type AutoFillLossOptions, autoFillLossOptions,
   type BulkAutoFillState, bulkAutoFillState,
   type CancellationNotice, cancellationNotices,
@@ -350,6 +351,11 @@ export interface IStorage {
   // all rows keyed by propertyId (= operationsPropertyId).
   getPropertyTrailingRevenue(): Promise<PropertyTrailingRevenue[]>;
   replacePropertyTrailingRevenue(rows: InsertPropertyTrailingRevenue[]): Promise<void>;
+
+  // In-system amenity selection per property (positive core id OR negative
+  // -draftId). Written by the photo amenity scan + the bulk-combo listing job.
+  getPropertyAmenities(propertyId: number): Promise<PropertyAmenities | undefined>;
+  savePropertyAmenities(row: InsertPropertyAmenities): Promise<PropertyAmenities>;
 
   createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
   getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
@@ -1509,6 +1515,40 @@ export class DatabaseStorage implements IStorage {
       await tx.delete(propertyTrailingRevenue);
       if (rows.length > 0) await tx.insert(propertyTrailingRevenue).values(rows);
     });
+  }
+
+  async getPropertyAmenities(propertyId: number): Promise<PropertyAmenities | undefined> {
+    const [row] = await db
+      .select()
+      .from(propertyAmenities)
+      .where(eq(propertyAmenities.propertyId, propertyId))
+      .limit(1);
+    return row;
+  }
+
+  async savePropertyAmenities(row: InsertPropertyAmenities): Promise<PropertyAmenities> {
+    const now = new Date();
+    const values: InsertPropertyAmenities = { ...row, updatedAt: now };
+    // On update, only overwrite the scan-provenance columns when the caller
+    // actually supplies them — so a manual "Save to system" (which sends only
+    // amenityKeys + source) does NOT wipe the last scan's detected/photos/at.
+    const updateSet: Record<string, unknown> = {
+      amenityKeys: values.amenityKeys,
+      source: values.source ?? null,
+      updatedAt: now,
+    };
+    if (row.detected !== undefined) updateSet.detected = row.detected;
+    if (row.photosScanned !== undefined) updateSet.photosScanned = row.photosScanned;
+    if (row.scannedAt !== undefined) updateSet.scannedAt = row.scannedAt;
+    const [saved] = await db
+      .insert(propertyAmenities)
+      .values(values)
+      .onConflictDoUpdate({
+        target: propertyAmenities.propertyId,
+        set: updateSet,
+      })
+      .returning();
+    return saved;
   }
 
   async createGuestReceipt(r: InsertGuestReceipt): Promise<GuestReceipt> {

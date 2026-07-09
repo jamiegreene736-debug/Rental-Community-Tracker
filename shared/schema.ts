@@ -1277,6 +1277,27 @@ export const propertyTrailingRevenue = pgTable("property_trailing_revenue", {
 export type PropertyTrailingRevenue = typeof propertyTrailingRevenue.$inferSelect;
 export type InsertPropertyTrailingRevenue = typeof propertyTrailingRevenue.$inferInsert;
 
+// In-system amenity selection per property, keyed by the app propertyId — a
+// POSITIVE core id OR a NEGATIVE -draftId (same convention as guesty_property_map).
+// This is the ONLY durable home for a property's amenity set: before this table
+// (2026-07-09) amenities were a static client map pushed straight to Guesty with
+// nothing persisted. The photo-driven amenity scanner + the bulk-combo listing
+// job write here so a scan/edit survives reloads and a fresh draft (no Guesty
+// listing yet) is saved in-system until the operator pushes it. `amenityKeys` is
+// the resolved selection (catalog keys); `detected` is the last scan's per-key
+// vision detail (key/confidence/evidence) for the UI. `source` = scan | combo-scan | manual.
+export const propertyAmenities = pgTable("property_amenities", {
+  propertyId: integer("property_id").primaryKey(),
+  amenityKeys: jsonb("amenity_keys").notNull().default(sql`'[]'::jsonb`),
+  detected: jsonb("detected"),
+  source: text("source"),
+  photosScanned: integer("photos_scanned"),
+  scannedAt: timestamp("scanned_at"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+export type PropertyAmenities = typeof propertyAmenities.$inferSelect;
+export type InsertPropertyAmenities = typeof propertyAmenities.$inferInsert;
+
 // Durable per-reservation "over-budget combos" the auto-fill search found but did
 // not attach (would have lost money). Persisted so the operator can review the
 // options + one-click attach a loss combo even after the in-memory job expires

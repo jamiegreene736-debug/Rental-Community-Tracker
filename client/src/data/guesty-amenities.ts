@@ -1,236 +1,29 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Guesty Amenity System
-// All strings here are the exact Guesty API amenity identifiers.
-// Organized into display categories for the builder UI.
+// Guesty Amenity System — per-property profile map (client)
+//
+// The amenity CATALOG + the Hawaii baseline moved to @shared/guesty-amenity-catalog
+// (2026-07-09) so the SERVER (photo amenity scan + bulk-combo listing job) and
+// this client share one source of truth. This file re-exports them and keeps the
+// client-only per-property profile map (PROPERTY_AMENITY_MAP / getGuestyAmenities).
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type AmenityEntry = {
-  key: string;        // Guesty API string (sent to API)
-  label: string;      // Human-readable label (shown in UI)
-  category: string;   // Display category
+import {
+  GUESTY_AMENITY_CATALOG,
+  HAWAII_BASE_AMENITY_KEYS,
+  getCatalogByCategory,
+  getAmenityLabel,
+  type AmenityEntry,
+} from "@shared/guesty-amenity-catalog";
+
+export {
+  GUESTY_AMENITY_CATALOG,
+  getCatalogByCategory,
+  getAmenityLabel,
+  type AmenityEntry,
 };
 
-export const GUESTY_AMENITY_CATALOG: AmenityEntry[] = [
-  // ── Essentials ────────────────────────────────────────────────────────────
-  { key: "WIFI",                        label: "WiFi",                          category: "Essentials" },
-  { key: "WIRELESS_INTERNET",           label: "Wireless Internet",             category: "Essentials" },
-  { key: "INTERNET",                    label: "Internet (Ethernet)",           category: "Essentials" },
-  { key: "ESSENTIALS",                  label: "Essentials (towels, soap, TP)", category: "Essentials" },
-  { key: "HANGERS",                     label: "Hangers",                       category: "Essentials" },
-  { key: "AIR_CONDITIONING",            label: "Air Conditioning",              category: "Essentials" },
-  { key: "HEATING",                     label: "Heating",                       category: "Essentials" },
-  { key: "CEILING_FAN",                 label: "Ceiling Fans",                  category: "Essentials" },
-  { key: "WASHER",                      label: "Washer",                        category: "Essentials" },
-  { key: "DRYER",                       label: "Dryer",                         category: "Essentials" },
-  { key: "IRON",                        label: "Iron & Ironing Board",          category: "Essentials" },
-  { key: "HAIR_DRYER",                  label: "Hair Dryer",                    category: "Essentials" },
-  { key: "DEDICATED_WORKSPACE",         label: "Laptop-Friendly Workspace",     category: "Essentials" },
-  { key: "LONG_TERM_STAYS_ALLOWED",     label: "Long-Term Stays Allowed",       category: "Essentials" },
-  { key: "ELEVATOR",                    label: "Elevator Access",               category: "Essentials" },
-  { key: "LUGGAGE_DROPOFF",             label: "Luggage Drop-off",              category: "Essentials" },
-  { key: "KEYPAD",                      label: "Keyless Entry",                 category: "Essentials" },
-  { key: "PRIVATE_ENTRANCE",            label: "Private Entrance",              category: "Essentials" },
-
-  // ── Kitchen ───────────────────────────────────────────────────────────────
-  { key: "KITCHEN",                     label: "Full Kitchen",                  category: "Kitchen" },
-  { key: "REFRIGERATOR",                label: "Refrigerator",                  category: "Kitchen" },
-  { key: "FREEZER",                     label: "Freezer",                       category: "Kitchen" },
-  { key: "ICE_MAKER",                   label: "Ice Maker",                     category: "Kitchen" },
-  { key: "MICROWAVE",                   label: "Microwave",                     category: "Kitchen" },
-  { key: "DISHWASHER",                  label: "Dishwasher",                    category: "Kitchen" },
-  { key: "STOVE",                       label: "Stove",                         category: "Kitchen" },
-  { key: "OVEN",                        label: "Oven",                          category: "Kitchen" },
-  { key: "COFFEE_MAKER",                label: "Coffee Maker",                  category: "Kitchen" },
-  { key: "KETTLE",                      label: "Electric Kettle",               category: "Kitchen" },
-  { key: "TOASTER",                     label: "Toaster",                       category: "Kitchen" },
-  { key: "BLENDER",                     label: "Blender",                       category: "Kitchen" },
-  { key: "COOKING_BASICS",              label: "Cookware & Utensils",           category: "Kitchen" },
-  { key: "BAKING_SHEET",                label: "Baking Sheet",                  category: "Kitchen" },
-  { key: "DISHES_AND_SILVERWARE",       label: "Dishes & Silverware",           category: "Kitchen" },
-  { key: "DINING_TABLE",                label: "Dining Table",                  category: "Kitchen" },
-  { key: "WINE_GLASSES",                label: "Wine Glasses",                  category: "Kitchen" },
-  { key: "SPICES",                      label: "Spices & Cooking Basics",       category: "Kitchen" },
-
-  // ── Entertainment ─────────────────────────────────────────────────────────
-  { key: "TV",                          label: "Smart TV",                      category: "Entertainment" },
-  { key: "CABLE_TV",                    label: "Cable TV",                      category: "Entertainment" },
-  { key: "STREAMING_SERVICES",          label: "Streaming Services",            category: "Entertainment" },
-  { key: "SOUND_SYSTEM",                label: "Sound System",                  category: "Entertainment" },
-  { key: "GAME_ROOM",                   label: "Game Room",                     category: "Entertainment" },
-  { key: "PING_PONG_TABLE",             label: "Ping Pong Table",               category: "Entertainment" },
-  { key: "POOL_TABLE",                  label: "Pool Table / Billiards",        category: "Entertainment" },
-  { key: "BOARD_GAMES",                 label: "Board Games",                   category: "Entertainment" },
-
-  // ── Bedrooms & Sleeping ───────────────────────────────────────────────────
-  { key: "BED_LINENS",                  label: "Bed Linens Provided",           category: "Bedrooms" },
-  { key: "EXTRA_PILLOWS_AND_BLANKETS",  label: "Extra Pillows & Blankets",      category: "Bedrooms" },
-  { key: "CLOTHING_STORAGE",            label: "Clothing Storage (closet/wardrobe)", category: "Bedrooms" },
-  { key: "BLACKOUT_SHADES",             label: "Blackout Curtains",             category: "Bedrooms" },
-  { key: "LOCK_ON_BEDROOM_DOOR",        label: "Lock on Bedroom Door",          category: "Bedrooms" },
-
-  // ── Bathroom ──────────────────────────────────────────────────────────────
-  { key: "SHAMPOO",                     label: "Shampoo & Toiletries",          category: "Bathroom" },
-  { key: "BODY_SOAP",                   label: "Body Soap",                     category: "Bathroom" },
-  { key: "BATHTUB",                     label: "Bathtub",                       category: "Bathroom" },
-  { key: "JETTED_TUB",                  label: "Jetted / Soaking Tub",          category: "Bathroom" },
-  { key: "WALK_IN_SHOWER",              label: "Walk-in Shower",                category: "Bathroom" },
-  { key: "HOT_WATER",                   label: "Hot Water",                     category: "Bathroom" },
-  { key: "TOWELS_PROVIDED",             label: "Bath Towels Provided",          category: "Bathroom" },
-
-  // ── Pool & Water ──────────────────────────────────────────────────────────
-  { key: "POOL",                        label: "Swimming Pool (Shared)",        category: "Pool & Water" },
-  { key: "OUTDOOR_POOL",                label: "Outdoor Pool",                  category: "Pool & Water" },
-  { key: "COMMUNAL_POOL",               label: "Communal Pool",                 category: "Pool & Water" },
-  { key: "PRIVATE_POOL",                label: "Private Pool",                  category: "Pool & Water" },
-  { key: "HOT_TUB",                     label: "Hot Tub / Jacuzzi (Shared)",    category: "Pool & Water" },
-  { key: "PRIVATE_HOT_TUB",             label: "Private Hot Tub",               category: "Pool & Water" },
-  { key: "LAP_POOL",                    label: "Lap Pool",                      category: "Pool & Water" },
-  { key: "INDOOR_POOL",                 label: "Indoor Pool",                   category: "Pool & Water" },
-  { key: "WADING_POOL",                 label: "Wading / Kids Pool",            category: "Pool & Water" },
-
-  // ── Outdoor & Recreation ──────────────────────────────────────────────────
-  { key: "PATIO_OR_BALCONY",            label: "Lanai / Balcony / Patio",       category: "Outdoor" },
-  { key: "COVERED_PATIO",               label: "Covered Lanai / Patio",         category: "Outdoor" },
-  { key: "BBQ_GRILL",                   label: "BBQ / Grill",                   category: "Outdoor" },
-  { key: "FIRE_PIT",                    label: "Fire Pit",                      category: "Outdoor" },
-  { key: "OUTDOOR_FURNITURE",           label: "Outdoor Furniture",             category: "Outdoor" },
-  { key: "OUTDOOR_SEATING",             label: "Outdoor Seating / Dining",      category: "Outdoor" },
-  { key: "OUTDOOR_KITCHEN",             label: "Outdoor Kitchen",               category: "Outdoor" },
-  { key: "GARDEN",                      label: "Garden / Yard",                 category: "Outdoor" },
-  { key: "PICKLEBALL_COURT",            label: "Pickleball Court",              category: "Outdoor" },
-  { key: "EXERCISE_EQUIPMENT",          label: "Exercise Equipment",            category: "Outdoor" },
-  { key: "BICYCLE",                     label: "Bicycle",                       category: "Outdoor" },
-  { key: "KAYAK",                       label: "Kayak",                         category: "Outdoor" },
-  { key: "BOAT",                        label: "Boat / Canoe",                  category: "Outdoor" },
-
-  // ── Activities (Nearby) ───────────────────────────────────────────────────
-  { key: "CYCLING",                     label: "Cycling / Bike Path Nearby",    category: "Activities" },
-  { key: "FISHING",                     label: "Fishing Nearby",                category: "Activities" },
-  { key: "HIKING",                      label: "Hiking Trails Nearby",          category: "Activities" },
-  { key: "GOLF",                        label: "Golf Nearby",                   category: "Activities" },
-  { key: "SHOPPING",                    label: "Shopping Nearby",               category: "Activities" },
-  { key: "WATER_PARK",                  label: "Water Park Nearby",             category: "Activities" },
-  { key: "THEME_PARK",                  label: "Theme Park Nearby",             category: "Activities" },
-
-  // ── Beach & Water Access ──────────────────────────────────────────────────
-  { key: "BEACH_ESSENTIALS",            label: "Beach Essentials (gear/towels)",category: "Beach" },
-  { key: "BEACH_UMBRELLA",              label: "Beach Umbrella",                category: "Beach" },
-
-  // ── Location & Views ──────────────────────────────────────────────────────
-  { key: "BEACHFRONT",                  label: "Beachfront (on the beach)",     category: "Location & Views" },
-  { key: "OCEAN_FRONT",                 label: "Oceanfront (direct ocean access)",category: "Location & Views" },
-  { key: "OCEAN_VIEW",                  label: "Ocean View",                    category: "Location & Views" },
-  { key: "WATERFRONT",                  label: "Waterfront",                    category: "Location & Views" },
-  { key: "LAKE_FRONT",                  label: "Lakefront",                     category: "Location & Views" },
-  { key: "NEAR_BEACH",                  label: "Near Beach (walking distance)", category: "Location & Views" },
-  { key: "BEACH_VIEW",                  label: "Beach View",                    category: "Location & Views" },
-  { key: "BEACH_ACCESS",                label: "Beach Access (direct)",         category: "Location & Views" },
-  { key: "SEA_VIEW",                    label: "Sea View",                      category: "Location & Views" },
-  { key: "WATER_VIEW",                  label: "Water View",                    category: "Location & Views" },
-  { key: "MOUNTAIN_VIEW",               label: "Mountain / Valley View",        category: "Location & Views" },
-  { key: "GARDEN_VIEW",                 label: "Garden / Tropical View",        category: "Location & Views" },
-  { key: "POOL_VIEW",                   label: "Pool View",                     category: "Location & Views" },
-  { key: "CITY_VIEW",                   label: "City View",                     category: "Location & Views" },
-  { key: "GOLF_VIEW",                   label: "Golf Course View",              category: "Location & Views" },
-  { key: "NEAR_GOLF_COURSE",            label: "Near Golf Course",              category: "Location & Views" },
-  { key: "NEAR_RESTAURANTS",            label: "Near Restaurants & Dining",     category: "Location & Views" },
-  { key: "NEAR_SHOPPING",               label: "Near Shopping",                 category: "Location & Views" },
-  { key: "RESORT_ACCESS",               label: "Resort Community Access",       category: "Location & Views" },
-
-  // ── Parking & Transport ───────────────────────────────────────────────────
-  { key: "FREE_PARKING_ON_PREMISES",    label: "Free Parking",                  category: "Parking" },
-  { key: "COVERED_PARKING",             label: "Covered Parking",               category: "Parking" },
-  { key: "GARAGE",                      label: "Garage",                        category: "Parking" },
-  { key: "EV_CHARGER",                  label: "EV Charger",                    category: "Parking" },
-
-  // ── Wellness ──────────────────────────────────────────────────────────────
-  { key: "GYM",                         label: "Fitness Center / Gym",          category: "Wellness" },
-  { key: "SPA",                         label: "Spa Services",                  category: "Wellness" },
-
-  // ── Family ────────────────────────────────────────────────────────────────
-  { key: "CHILDREN_WELCOME",            label: "Children Welcome",              category: "Family" },
-  { key: "CRIB",                        label: "Crib / Pack-n-Play",            category: "Family" },
-  { key: "HIGH_CHAIR",                  label: "High Chair",                    category: "Family" },
-  { key: "BOARD_GAMES_KIDS",            label: "Children's Toys & Games",       category: "Family" },
-
-  // ── Safety ────────────────────────────────────────────────────────────────
-  { key: "SMOKE_ALARM",                        label: "Smoke Detector",                    category: "Safety" },
-  { key: "CARBON_MONOXIDE_ALARM",              label: "Carbon Monoxide Alarm",             category: "Safety" },
-  { key: "FIRE_EXTINGUISHER",                  label: "Fire Extinguisher",                 category: "Safety" },
-  { key: "FIRST_AID_KIT",                      label: "First Aid Kit",                     category: "Safety" },
-  { key: "SECURITY_CAMERA",                    label: "Security Camera (exterior)",        category: "Safety" },
-  { key: "HIGH_TOUCH_SURFACES_DISINFECTED",    label: "High-Touch Surfaces Disinfected",   category: "Safety" },
-];
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Base amenity set shared by ALL Hawaii vacation rental condos/homes
-// ─────────────────────────────────────────────────────────────────────────────
-const HAWAII_BASE = [
-  // Essentials
-  "WIFI",
-  "WIRELESS_INTERNET",   // Guesty/Airbnb "Wireless Internet" — distinct from WIFI in some OTA mappings
-  "INTERNET",            // Guesty/Airbnb "Internet" (general/ethernet)
-  "ESSENTIALS",
-  "HANGERS",
-  "AIR_CONDITIONING",    // Not every Hawaii unit has A/C — deselect in the builder if needed
-  "CEILING_FAN",
-  "WASHER",
-  "DRYER",
-  "IRON",
-  "HAIR_DRYER",
-  "DEDICATED_WORKSPACE",
-  "LONG_TERM_STAYS_ALLOWED",
-  "KEYPAD",              // Keyless entry — standard for all managed units
-  "PRIVATE_ENTRANCE",
-  // Kitchen
-  "KITCHEN",
-  "REFRIGERATOR",
-  "FREEZER",
-  "ICE_MAKER",
-  "MICROWAVE",
-  "DISHWASHER",
-  "STOVE",
-  "OVEN",
-  "COFFEE_MAKER",
-  "KETTLE",
-  "TOASTER",
-  "BLENDER",
-  "COOKING_BASICS",
-  "BAKING_SHEET",
-  "DISHES_AND_SILVERWARE",
-  "DINING_TABLE",
-  "WINE_GLASSES",
-  // Entertainment
-  "TV",
-  "CABLE_TV",
-  "STREAMING_SERVICES",
-  // Bedrooms
-  "BED_LINENS",
-  "EXTRA_PILLOWS_AND_BLANKETS",
-  "CLOTHING_STORAGE",    // Guesty/Airbnb "Clothing storage" (closet/wardrobe)
-  // Bathroom
-  "SHAMPOO",
-  "BODY_SOAP",           // Body soap provided in all units
-  "TOWELS_PROVIDED",
-  "HOT_WATER",
-  "BATHTUB",
-  // Outdoor
-  "PATIO_OR_BALCONY",
-  "COVERED_PATIO",       // All units have a covered lanai/patio
-  "OUTDOOR_FURNITURE",
-  // Beach
-  "BEACH_ESSENTIALS",
-  // Parking
-  "FREE_PARKING_ON_PREMISES",
-  // Family
-  "CHILDREN_WELCOME",
-  // Safety
-  "SMOKE_ALARM",
-  "CARBON_MONOXIDE_ALARM",
-  "FIRE_EXTINGUISHER",
-  "FIRST_AID_KIT",
-  "HIGH_TOUCH_SURFACES_DISINFECTED",
-];
+// Alias kept so the per-property profiles below read the same as before.
+const HAWAII_BASE = HAWAII_BASE_AMENITY_KEYS;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Beach-location bonus amenities — added to any community with direct beach /
@@ -518,30 +311,10 @@ const PROPERTY_AMENITY_MAP: Record<number, string[]> = {
 };
 
 /**
- * Returns the Guesty API amenity strings for a given property.
- * Deduplicates and returns a sorted list.
+ * Returns the amenity keys for a given property's static profile.
+ * Deduplicates and returns a sorted list. Falls back to the Hawaii baseline.
  */
 export function getGuestyAmenities(propertyId: number): string[] {
   const amenities = PROPERTY_AMENITY_MAP[propertyId] || HAWAII_BASE;
   return [...new Set(amenities)];
-}
-
-/**
- * Returns the human-readable label for a Guesty amenity key.
- */
-export function getAmenityLabel(key: string): string {
-  const entry = GUESTY_AMENITY_CATALOG.find(a => a.key === key);
-  return entry?.label || key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-}
-
-/**
- * Returns a grouped view of the catalog for display in settings UIs.
- */
-export function getCatalogByCategory(): Record<string, AmenityEntry[]> {
-  const groups: Record<string, AmenityEntry[]> = {};
-  for (const entry of GUESTY_AMENITY_CATALOG) {
-    if (!groups[entry.category]) groups[entry.category] = [];
-    groups[entry.category].push(entry);
-  }
-  return groups;
 }
