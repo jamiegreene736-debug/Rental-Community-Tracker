@@ -23,3 +23,18 @@ export const AGENT_LOGIN_GREETING = `Aloha ${AGENT_DISPLAY_NAME}`;
  * Hawaii reply signs "Mahalo, Christal".
  */
 export const AGENT_REPLY_SIGNOFF_NAME = AGENT_DISPLAY_NAME;
+
+/**
+ * The agent's two-line sign-off block, pre-seeded into her inbox compose box so
+ * every message/text she writes automatically ends "Mahalo, Christal". (The
+ * manual-compose seed is deliberately the Hawaii "Mahalo," form regardless of
+ * listing region — the portfolio is Hawaii-dominant and the operator asked for
+ * this exact wording; the AI-draft path stays region-aware separately.)
+ */
+export const AGENT_REPLY_SIGNOFF = `Mahalo,\n${AGENT_DISPLAY_NAME}`;
+
+/**
+ * What the agent's compose box is seeded with: two blank lines then the
+ * sign-off, so the caret sits at the top and the sign-off trails her message.
+ */
+export const AGENT_COMPOSE_SEED = `\n\n${AGENT_REPLY_SIGNOFF}`;
