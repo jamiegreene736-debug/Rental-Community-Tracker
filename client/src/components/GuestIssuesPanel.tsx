@@ -18,6 +18,7 @@ import {
   guestIssueSeverityLabel,
   summarizeGuestIssueStatuses,
 } from "@shared/guest-issue-logic";
+import { parseComplaintNote } from "@shared/guest-complaint-logic";
 
 // All guest-issue queries are keyed under this prefix (per-conversation panel,
 // the tab list, and the tab's open-count badge), so invalidating the prefix
@@ -88,6 +89,77 @@ function fmtWhen(iso: string | null | undefined): string {
   } catch {
     return "";
   }
+}
+
+// ICU inserts a narrow/no-break space before the meridiem on some builds;
+// normalize to a plain space so "1:37 AM HST" reads cleanly everywhere.
+const normalizeClockSpaces = (s: string) => s.replace(/[\u202f\u00a0]/g, " ").trim();
+
+// A guest message's send time, in the operator's local timezone WITH the zone
+// abbreviation (e.g. "Jul 9, 2026 at 1:37 AM HST") — so it's never ambiguous
+// which clock the time is on. `title` carries the exact UTC instant on hover.
+function fmtMessageSentAt(iso: string | null): { label: string; title: string } | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  try {
+    const datePart = new Intl.DateTimeFormat([], {
+      month: "short", day: "numeric", year: "numeric",
+    }).format(d);
+    const timePart = normalizeClockSpaces(
+      new Intl.DateTimeFormat([], {
+        hour: "numeric", minute: "2-digit", timeZoneName: "short",
+      }).format(d),
+    );
+    return { label: `${datePart} at ${timePart}`, title: d.toISOString() };
+  } catch {
+    return { label: normalizeClockSpaces(d.toLocaleString()), title: d.toISOString() };
+  }
+}
+
+// Renders a guest-issue note body. Auto-detected complaint notes are stored in a
+// machine format (shared/guest-complaint-logic.ts builders): a summary lead, an
+// "Auto-detected …" heading, the guest's words quoted line-by-line with "> ", and
+// a trailing [msg:…] marker. We parse that back and render the guest's message as
+// a clean quote block — no raw "> ", no marker — with an unambiguous "Sent …"
+// line carrying the timezone. Human-typed notes render as plain wrapped text.
+function GuestIssueNoteBody({ body, className }: { body: string | null; className?: string }) {
+  const parsed = parseComplaintNote(body);
+
+  if (!parsed.isAutoDetected) {
+    const text = parsed.summary ?? "";
+    if (!text) return null;
+    return <div className={`whitespace-pre-wrap ${className ?? ""}`.trim()}>{text}</div>;
+  }
+
+  const sent = fmtMessageSentAt(parsed.messageIso);
+  const quote = parsed.quotedLines.join("\n").trim();
+
+  return (
+    <div className={className} data-testid="guest-issue-note-auto">
+      {parsed.summary && <div className="whitespace-pre-wrap">{parsed.summary}</div>}
+      {quote && (
+        <blockquote
+          className={`${parsed.summary ? "mt-1.5 " : ""}whitespace-pre-wrap rounded-r border-l-2 border-rose-200 bg-rose-50/60 px-2 py-1 not-italic text-foreground/80`}
+          data-testid="guest-issue-note-quote"
+        >
+          {quote}
+        </blockquote>
+      )}
+      {(sent || parsed.channel) && (
+        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-muted-foreground">
+          {sent && (
+            <span className="inline-flex items-center gap-1" title={sent.title} data-testid="guest-issue-note-sent">
+              <Clock className="h-3 w-3" />
+              Sent {sent.label}
+            </span>
+          )}
+          {sent && parsed.channel && <span aria-hidden="true">·</span>}
+          {parsed.channel && <span>via {parsed.channel}</span>}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function authorLabel(name: string, role: string): string {
@@ -349,7 +421,7 @@ function IssueCard({
             <span className="truncate text-sm font-medium">{issue.title}</span>
           </div>
           {issue.description && (
-            <div className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{issue.description}</div>
+            <GuestIssueNoteBody body={issue.description} className="mt-1 text-xs text-muted-foreground" />
           )}
           <div className="mt-1 text-[10px] text-muted-foreground">
             {onOpenConversation && issue.guestName ? `${issue.guestName} · ` : ""}
@@ -391,7 +463,7 @@ function IssueCard({
         <div className="mt-2 space-y-1.5 border-l-2 border-muted pl-2">
           {issue.comments.map((c) => (
             <div key={c.id} className="text-xs" data-testid={`guest-issue-comment-${c.id}`}>
-              <div className="whitespace-pre-wrap">{c.body}</div>
+              <GuestIssueNoteBody body={c.body} />
               <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                 <span>{authorLabel(c.authorName, c.authorRole)}</span>
                 <span>· {fmtWhen(c.createdAt)}</span>

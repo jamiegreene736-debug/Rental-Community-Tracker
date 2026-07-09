@@ -15,6 +15,7 @@ import {
   messageAlreadyCaptured,
   buildComplaintCommentBody,
   buildComplaintIssueDescription,
+  parseComplaintNote,
   parseComplaintScanState,
   serializeComplaintScanState,
   EMPTY_SCAN_STATE,
@@ -170,6 +171,55 @@ const desc = buildComplaintIssueDescription({
 assert.ok(desc.includes("> The AC has been broken since check-in"));
 assert.ok(desc.includes(messageMarker(iso)));
 console.log("  ✓ builders quote the guest verbatim + stamp the marker");
+
+// ── parseComplaintNote: reverse the stored body into display parts ──
+// Round-trip a NEW-issue description: summary lead + verbatim quote + marker.
+const descBody = buildComplaintIssueDescription({
+  verdict: { isComplaint: true, severity: "normal", category: "maintenance", title: "Bathtub clogged", summary: "The bathtub in the main bedroom is clogged.", source: "claude" },
+  guestMessage: "Hi,\n\nThe bathtub to the main bedroom is clogged and drains very slowly.",
+  postIso: iso,
+  channel: "homeaway2",
+});
+const parsedDesc = parseComplaintNote(descBody);
+assert.equal(parsedDesc.isAutoDetected, true);
+assert.equal(parsedDesc.summary, "The bathtub in the main bedroom is clogged.");
+assert.equal(parsedDesc.channel, "homeaway2");
+assert.equal(parsedDesc.messageIso, iso);
+// Verbatim lines have the "> " stripped; the blank paragraph break is preserved.
+assert.deepEqual(parsedDesc.quotedLines, ["Hi,", "", "The bathtub to the main bedroom is clogged and drains very slowly."]);
+// The raw marker + quote prefixes never survive into any display field.
+assert.ok(!parsedDesc.quotedLines.some((l) => l.startsWith(">")));
+assert.ok(!(parsedDesc.summary ?? "").includes("[msg:"));
+assert.ok(!parsedDesc.quotedLines.join("\n").includes("[msg:"));
+
+// Round-trip a follow-up COMMENT: no summary lead, quote + marker only.
+const commentBody = buildComplaintCommentBody({ guestMessage: "It's still not draining!", postIso: iso, channel: "airbnb2" });
+const parsedComment = parseComplaintNote(commentBody);
+assert.equal(parsedComment.isAutoDetected, true);
+assert.equal(parsedComment.summary, null);
+assert.equal(parsedComment.channel, "airbnb2");
+assert.equal(parsedComment.messageIso, iso);
+assert.deepEqual(parsedComment.quotedLines, ["It's still not draining!"]);
+
+// A no-channel description still parses (channel null).
+const noChan = parseComplaintNote(buildComplaintIssueDescription({
+  verdict: verdictMaint, guestMessage: "AC is broken", postIso: iso, channel: null,
+}));
+assert.equal(noChan.channel, null);
+assert.equal(noChan.messageIso, iso);
+assert.deepEqual(noChan.quotedLines, ["AC is broken"]);
+
+// A human-typed note (no heading, no marker) is NOT auto-detected: whole text is
+// the summary, nothing is treated as a quote.
+const human = parseComplaintNote("Called the plumber, arriving tomorrow 9am.");
+assert.equal(human.isAutoDetected, false);
+assert.equal(human.summary, "Called the plumber, arriving tomorrow 9am.");
+assert.deepEqual(human.quotedLines, []);
+assert.equal(human.messageIso, null);
+// Empty / null bodies degrade to an empty non-auto note.
+assert.equal(parseComplaintNote("").summary, null);
+assert.equal(parseComplaintNote(null).isAutoDetected, false);
+console.log("  ✓ parseComplaintNote reverses stored bodies, strips markers/quotes, keeps human notes plain");
 
 // ── scan state (de)serialization ──
 assert.deepEqual(parseComplaintScanState(null), EMPTY_SCAN_STATE);

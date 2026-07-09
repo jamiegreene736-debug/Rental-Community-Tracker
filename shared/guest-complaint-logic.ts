@@ -430,6 +430,69 @@ function quoteGuestMessage(message: string): string {
     .join("\n");
 }
 
+// ── Parse an auto-detected note body back into its parts (for display) ───────
+// The stored body is machine-formatted (see the two builders above): an optional
+// summary paragraph, an "Auto-detected …" heading carrying the channel, the
+// guest's verbatim message quoted line-by-line with "> ", and a trailing
+// [msg:<iso>] idempotency marker. The UI must NOT show the raw "> " prefixes or
+// the marker, so this reverses the format into structured pieces the panel can
+// render nicely. Kept here (next to the builders) so the two can never drift.
+//
+// A human-typed note (no heading, no marker) is NOT auto-detected: everything is
+// returned as `summary` with no quoted lines, and the panel renders it plainly.
+export type ParsedComplaintNote = {
+  /** True when the body carries the auto-scanner's structured shape. */
+  isAutoDetected: boolean;
+  /** Free-text lead before the "Auto-detected …" heading (issue descriptions carry the Claude summary here); null when absent. */
+  summary: string | null;
+  /** The channel the guest message arrived on (e.g. "homeaway2"), or null. */
+  channel: string | null;
+  /** The guest's verbatim message lines, with the "> " quote prefix removed. Blank lines are preserved as "". */
+  quotedLines: string[];
+  /** ISO timestamp the guest sent the message (from [msg:…]), or null. */
+  messageIso: string | null;
+};
+
+const AUTO_COMPLAINT_HEADING_RE =
+  /^Auto-detected (?:follow-up from the guest|from the guest inbox)(?: · via (.+?))?:\s*$/;
+const MESSAGE_MARKER_RE = /\[msg:([^\]]+)\]/;
+
+export function parseComplaintNote(body: string | null | undefined): ParsedComplaintNote {
+  const raw = String(body ?? "");
+
+  // Pull the guest-send timestamp out of the marker, then strip every marker
+  // occurrence (and the whitespace it leaves behind) from the visible text.
+  const markerMatch = raw.match(MESSAGE_MARKER_RE);
+  const messageIso = markerMatch ? markerMatch[1].trim() : null;
+  const withoutMarker = raw.replace(/[ \t]*\[msg:[^\]]+\][ \t]*/g, "").replace(/\n{3,}/g, "\n\n");
+
+  const lines = withoutMarker.split("\n");
+  const headingIdx = lines.findIndex((l) => AUTO_COMPLAINT_HEADING_RE.test(l.trim()));
+
+  if (headingIdx < 0) {
+    // Not the auto-scanner shape (human-typed note). Render as-is.
+    const text = withoutMarker.trim();
+    return {
+      isAutoDetected: false,
+      summary: text || null,
+      channel: null,
+      quotedLines: [],
+      messageIso,
+    };
+  }
+
+  const headingMatch = lines[headingIdx].trim().match(AUTO_COMPLAINT_HEADING_RE);
+  const channel = headingMatch?.[1]?.trim() || null;
+
+  const summary = lines.slice(0, headingIdx).join("\n").trim() || null;
+  const quotedLines = lines
+    .slice(headingIdx + 1)
+    .filter((l) => /^>/.test(l))
+    .map((l) => l.replace(/^>\s?/, ""));
+
+  return { isAutoDetected: true, summary, channel, quotedLines, messageIso };
+}
+
 // ── Scanner persisted state (app_settings) ──────────────────────────────────
 // One JSON blob tracks the one-time backfill progress + the incremental
 // watermark so a redeploy resumes instead of re-scanning the whole inbox.
