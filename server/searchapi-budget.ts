@@ -18,6 +18,8 @@
 // Both are FAIL-OPEN: a probe error or missing key never blocks a search —
 // only a POSITIVE "quota exhausted" reading does.
 
+import { getSearchApiKeys } from "./searchapi";
+
 export type SearchApiQuotaSnapshot = {
   used: number;
   allowance: number;
@@ -150,22 +152,46 @@ export const searchApiDiscoveryCircuit = createSearchApiCircuit();
 const QUOTA_PROBE_TTL_MS = 5 * 60_000;
 let quotaProbe: { snapshot: SearchApiQuotaSnapshot | null; at: number } | null = null;
 
+async function probeSingleKeyQuota(key: string, at: number): Promise<SearchApiQuotaSnapshot | null> {
+  const resp = await fetch(`https://www.searchapi.io/api/v1/me?api_key=${key}`, {
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return parseSearchApiQuota(await resp.json(), at);
+}
+
+// ROTATION-AWARE (2026-07-09): probes EVERY configured key (primary +
+// SEARCHAPI_API_KEY_2…) and returns the HEALTHIEST snapshot — the one with the
+// most remaining credits. This is what the bulk-combo gate keys off, so the
+// queue is only blocked as "quota exhausted" when ALL keys are dry; a primary
+// that hit its monthly cap no longer stalls discovery while a rotation key still
+// has room. Still fail-open: probe errors / no keys never block.
 export async function getSearchApiQuota(force = false): Promise<SearchApiQuotaSnapshot | null> {
-  const key = process.env.SEARCHAPI_API_KEY;
-  if (!key) return null;
+  const keys = getSearchApiKeys();
+  if (keys.length === 0) return null;
   const at = Date.now();
   if (!force && quotaProbe && at - quotaProbe.at < QUOTA_PROBE_TTL_MS) return quotaProbe.snapshot;
-  try {
-    const resp = await fetch(`https://www.searchapi.io/api/v1/me?api_key=${key}`, {
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const snapshot = parseSearchApiQuota(await resp.json(), at);
-    quotaProbe = { snapshot, at };
-    return snapshot;
-  } catch (e: any) {
-    console.warn(`[searchapi-budget] quota probe failed (fail-open): ${e?.message ?? e}`);
-    quotaProbe = { snapshot: null, at };
-    return null;
+  const snapshots = await Promise.all(
+    keys.map((key) =>
+      probeSingleKeyQuota(key, at).catch((e: any) => {
+        console.warn(`[searchapi-budget] quota probe failed (fail-open): ${e?.message ?? e}`);
+        return null;
+      }),
+    ),
+  );
+  // Pick the key with the most remaining credits; a null (probe error) key wins
+  // outright so a transient probe failure fails open rather than reporting a
+  // sibling key's exhaustion.
+  let best: SearchApiQuotaSnapshot | null = snapshots[0] ?? null;
+  let sawNull = false;
+  for (const snapshot of snapshots) {
+    if (!snapshot) {
+      sawNull = true;
+      continue;
+    }
+    if (!best || snapshot.remaining > best.remaining) best = snapshot;
   }
+  const snapshot = sawNull ? null : best;
+  quotaProbe = { snapshot, at };
+  return snapshot;
 }
