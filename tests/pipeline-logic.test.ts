@@ -295,6 +295,62 @@ assert.match(
   /if \(bestThinMatch\) \{[\s\S]*return res\.json\(\{[\s\S]*photos: bestThinMatch\.photos/,
   "bounded unit photo discovery must fall back to the best thin match only after scanning the whole pool for a full gallery",
 );
+// Sidecar photo rescue in the BOUNDED discovery loop (2026-07-09): with
+// ScrapingBee dead and Redfin bot-walling BOTH Railway's direct fetch and the
+// Apify actor (live: bcj_mrco70f7 — the same unit returned 25 photos once,
+// then 0 on every later call), every candidate scraped thin while the
+// operator's home-IP Chrome sidecar sat online but unreachable, because the
+// loop hardcoded SCRAPE_WITHOUT_SIDECAR. The rescue is BOUNDED (default 2 per
+// request, env COMBO_SIDECAR_PHOTO_RESCUES, 0 disables), host-gated to portals
+// that HAVE a sidecar leg, bedroom-gated so a wrong-BR candidate never burns a
+// credit, budget-gated against the discovery wall, and KEEP-BETTER (a 0-photo
+// sidecar run never clobbers the thin result anchoring bestThinMatch). Do NOT
+// widen the primary scrape to sidecar wholesale — same rationale as the
+// find-unit rescue cap (2026-07-06).
+assert.match(
+  routesSource,
+  /isBoundedDiscovery &&\s*\n\s*\/redfin\\\.com\|homes\\\.com\|zillow\\\.com\/i\.test\(candidate\.url\) &&\s*\n\s*dual\.photos\.length < MIN_INDEPENDENT_UNIT_PHOTOS &&\s*\n\s*sidecarPhotoRescuesUsed < maxSidecarPhotoRescues/,
+  "bounded unit photo discovery must run a bounded, host-gated sidecar rescue when the datacenter tiers scrape thin",
+);
+assert.match(
+  routesSource,
+  /COMBO_SIDECAR_PHOTO_RESCUES \?\? 2/,
+  "the discovery sidecar rescue cap must stay env-tunable with a default of 2 per request",
+);
+assert.match(
+  routesSource,
+  /bedroomCompatible && \(remainingMs === null \|\| remainingMs >= SIDECAR_PHOTO_RESCUE_MIN_BUDGET_MS\)/,
+  "the discovery sidecar rescue must be bedroom-compatible and leave wall-budget headroom before firing",
+);
+assert.match(
+  routesSource,
+  /if \(rescued\.photos\.length > dual\.photos\.length\) \{[\s\S]{0,400}dual = rescued;/,
+  "the discovery sidecar rescue must keep-better: only a strictly larger rescued gallery replaces the thin result",
+);
+// Exact-pass loopback timeout (2026-07-09): must outlive the endpoint's 175s
+// bounded discovery wall. The old 75s abort silently discarded exact-pass scans
+// (including sidecar rescues) that ran past 75s, letting a wrong-BR relaxed
+// gallery win over a bedroom-EXACT one the server had already found.
+assert.match(
+  routesSource,
+  /timeoutMs: attempt\.relaxed \? undefined : 190_000/,
+  "the combo photo exact pass must not abort before the endpoint's bounded discovery wall (175s) elapses",
+);
+// Interrupted-attempt refund (2026-07-09): a deploy/restart that kills an item
+// mid-attempt must refund that attempt (bounded by the interruption credits) —
+// previously only an item already AT max attempts got one back, so a deploy
+// landing mid-attempt-1/2 silently ate a genuine retry (live: Ocean Villas
+// "Max attempts reached (3)" on bcj_mrco70f7 after the 23:52 deploy).
+assert.match(
+  routesSource,
+  /if \(canRefundAttempt && item\.attemptCount > 0\) \{[\s\S]{0,300}item\.attemptCount -= 1;/,
+  "bulk combo recovery must refund the interrupted attempt while interruption credits remain",
+);
+assert.match(
+  routesSource,
+  /item\.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item\.draftId && !canRefundAttempt/,
+  "bulk combo recovery must still drop an item at max attempts once its interruption credits are exhausted",
+);
 assert.match(
   routesSource,
   /photo set duplicates .*existing photo source/,

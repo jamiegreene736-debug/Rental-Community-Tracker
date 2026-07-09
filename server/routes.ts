@@ -36182,7 +36182,15 @@ Return ONLY compact JSON with this exact shape:
           data = await fetchComboPhotoJson(
             `${comboPhotoBaseUrl()}/api/community/fetch-unit-photos`,
             body,
-            { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 75_000 },
+            // The exact pass must outlive the endpoint's BOUNDED discovery wall
+            // (175s, routes fetch-unit-photos) plus response overhead. The old
+            // 75s abort predated that server-side budget and silently threw away
+            // any exact-pass scan (incl. sidecar photo rescues) that ran past
+            // 75s — the server kept scraping while the caller had already moved
+            // on to the relaxed (any-bedroom) pass, so a bedroom-EXACT gallery
+            // lost to a wrong-BR relaxed one. Relaxed stays uncapped here; the
+            // server wall bounds it.
+            { abortKey, signal, timeoutMs: attempt.relaxed ? undefined : 190_000 },
           );
         } catch (error: any) {
           if (attempt.relaxed || job.cancelRequested || error?.cancelled) throw error;
@@ -37136,7 +37144,12 @@ Return ONLY compact JSON with this exact shape:
   const BULK_COMBO_LISTING_RESUME_INTERVAL_MS = 60 * 1000;
   const BULK_COMBO_LISTING_RETRY_BACKOFF_MS = [15_000, 45_000];
   const BULK_COMBO_LISTING_STEP_TIMEOUTS_MS: Record<string, number> = {
-    photos: 12 * 60 * 1000,
+    // 12 → 15 min (2026-07-09): the exact photo pass now runs to the endpoint's
+    // full 175s discovery wall (was aborted at 75s) and may spend up to 2
+    // bounded sidecar rescues per pass, so the worst-case two-unit step grew by
+    // ~4 min. A timeout here fails the ITEM, so headroom matters (same
+    // rationale as photo-community 6→10 min, 2026-07-07).
+    photos: 15 * 60 * 1000,
     copy: 120_000,
     save: 120_000,
     persist: 120_000,
@@ -37425,33 +37438,36 @@ Return ONLY compact JSON with this exact shape:
     for (const item of job.items) {
       if (item.status !== "running" || (!leaseExpired && !isBulkComboListingStale(item))) continue;
       // A "running" item here was INTERRUPTED (deploy/restart/crash) — genuine
-      // failures exit the retry loop as status="failed", never "running". So don't
-      // permanently drop it just because the interruption consumed its last attempt;
-      // give it a bounded number of fresh restarts (one more genuine attempt each).
-      if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId) {
-        if ((item.interruptions ?? 0) < BULK_COMBO_LISTING_MAX_INTERRUPTIONS) {
-          item.interruptions = (item.interruptions ?? 0) + 1;
-          item.attemptCount = BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS - 1; // one more genuine attempt
-          item.status = "queued";
-          item.phase = "retrying";
-          item.message = `Worker stopped mid-listing (restart ${item.interruptions}/${BULK_COMBO_LISTING_MAX_INTERRUPTIONS}); re-queued for another attempt`;
-          item.error = null;
-          item.finishedAt = null;
-          item.heartbeatAt = null;
-          reset += 1;
-        } else {
-          item.status = "failed";
-          item.phase = "failed";
-          item.message = `Dropped after ${BULK_COMBO_LISTING_MAX_INTERRUPTIONS} worker restarts mid-listing without completing`;
-          item.error = item.message;
-          item.finishedAt = now;
-          item.heartbeatAt = now;
-          dropped += 1;
-        }
+      // failures exit the retry loop as status="failed", never "running". The
+      // interrupted attempt never ran to completion, so REFUND it (2026-07-09):
+      // decrement attemptCount and spend one bounded interruption credit —
+      // previously only an item already AT max attempts got its attempt back,
+      // so a deploy landing mid-attempt-1 or -2 silently ate a genuine retry
+      // (live case: Ocean Villas 4BR+4BR on bcj_mrco70f7 failed "Max attempts
+      // reached (3)" after the 23:52 deploy killed its heartbeat mid-attempt).
+      // The credit cap keeps a crash-looping item from cycling forever; once
+      // credits are exhausted, an item at max attempts drops and an item with
+      // genuine attempts left re-queues without a refund.
+      const interruptions = item.interruptions ?? 0;
+      const canRefundAttempt = interruptions < BULK_COMBO_LISTING_MAX_INTERRUPTIONS;
+      if (item.attemptCount >= BULK_COMBO_LISTING_ITEM_MAX_ATTEMPTS && !item.draftId && !canRefundAttempt) {
+        item.status = "failed";
+        item.phase = "failed";
+        item.message = `Dropped after ${BULK_COMBO_LISTING_MAX_INTERRUPTIONS} worker restarts mid-listing without completing`;
+        item.error = item.message;
+        item.finishedAt = now;
+        item.heartbeatAt = now;
+        dropped += 1;
       } else {
+        if (canRefundAttempt && item.attemptCount > 0) {
+          item.interruptions = interruptions + 1;
+          item.attemptCount -= 1; // the interrupted attempt didn't count
+          item.message = `Worker stopped mid-listing (restart ${item.interruptions}/${BULK_COMBO_LISTING_MAX_INTERRUPTIONS}); re-queued without losing the attempt`;
+        } else {
+          item.message = "Worker stopped mid-listing; re-queued to retry";
+        }
         item.status = "queued";
         item.phase = "retrying";
-        item.message = "Worker stopped mid-listing; re-queued to retry";
         item.error = null;
         item.finishedAt = null;
         item.heartbeatAt = null;
@@ -39421,6 +39437,28 @@ Return ONLY compact JSON with this exact shape:
       // so it needs its own budget too (it had none before).
       const discoveryWallBudgetMs = isBoundedDiscovery ? 175_000 : 130_000;
       const discoveryElapsedMs = () => Date.now() - startedAt;
+      // SIDECAR PHOTO RESCUE (2026-07-09): bounded residential-IP retries inside
+      // the BOUNDED (combo queue) discovery loop. Live-diagnosed on the
+      // 2026-07-08 Oahu sweep (bcj_mrco70f7): with ScrapingBee dead, Redfin
+      // bot-walling Railway to 0-1 photos, AND the Apify Redfin actor now ALSO
+      // intermittently walled (the same unit returned 25 photos at 23:55 then 0
+      // on every later call), every candidate scraped thin, the loop scanned the
+      // whole pool, and items failed on 1-photo bestThinMatch galleries — while
+      // the operator's home-IP Chrome sidecar sat online and unused because this
+      // loop hardcoded SCRAPE_WITHOUT_SIDECAR. Mirror of the find-unit rescue
+      // (2026-07-06, REPLACEMENT_SIDECAR_PHOTO_RESCUES): at most N rescues per
+      // request, fired only for street-root-gated, bedroom-compatible candidates
+      // that scraped < MIN, with the wallet capped by the remaining wall budget.
+      // NEVER widen the primary scrape to sidecar wholesale — a 90s residential
+      // hop per candidate across a 6-10 candidate pool would blow the wall
+      // budget and monopolize the operator's Chrome (same rationale as the
+      // find-unit rescue cap). 0 disables.
+      const maxSidecarPhotoRescues = (() => {
+        const raw = Number(process.env.COMBO_SIDECAR_PHOTO_RESCUES ?? 2);
+        return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 2;
+      })();
+      const SIDECAR_PHOTO_RESCUE_MIN_BUDGET_MS = 60_000;
+      let sidecarPhotoRescuesUsed = 0;
       const requestedStateAbbr = String(state ?? "").trim().toLowerCase().match(/^(hi|hawaii)$/) ? "hi" : null;
       const urlStatePattern = /(?:^|[-_/])([A-Z]{2})(?:[-_/]|$)/i;
       type DiscoverySource = "zillow" | "realtor" | "redfin" | "homes";
@@ -39849,7 +39887,59 @@ Return ONLY compact JSON with this exact shape:
             scrapingBeeTimeoutMs: Math.min(18_000, remainingBudgetMs ?? 18_000),
             ...SCRAPE_WITHOUT_SIDECAR,
           } : SCRAPE_WITHOUT_SIDECAR;
-          const dual = await scrapeListingPhotosDualSource(clusterUrls, facts, scrapeOpts);
+          let dual = await scrapeListingPhotosDualSource(clusterUrls, facts, scrapeOpts);
+          // Bounded sidecar rescue (see the constants above): a thin scrape on a
+          // bedroom-compatible candidate gets ONE residential-IP retry while
+          // budget and rescue credits remain. Bedroom compatibility is checked
+          // from whatever facts the thin scrape recovered (the Apify actor often
+          // returns facts with a 1-photo wall page) so a wrong-BR candidate —
+          // which the gates below would discard anyway — never burns a rescue.
+          // KEEP-BETTER: the rescue result only replaces a strictly larger
+          // gallery; a 0-photo sidecar run never clobbers a 1-photo direct fetch
+          // (the og:image still anchors bestThinMatch with a sourceUrl).
+          // Host gate: only Redfin/Homes/Zillow scrape paths HAVE a sidecar leg
+          // (Realtor's tier stack is Apify → direct → ScrapingBee, no sidecar),
+          // so a rescue on any other host would burn a credit re-running the
+          // same datacenter tiers that just came up thin.
+          if (
+            isBoundedDiscovery &&
+            /redfin\.com|homes\.com|zillow\.com/i.test(candidate.url) &&
+            dual.photos.length < MIN_INDEPENDENT_UNIT_PHOTOS &&
+            sidecarPhotoRescuesUsed < maxSidecarPhotoRescues
+          ) {
+            const factsBR = facts.bedrooms ?? null;
+            const bedroomCompatible =
+              (requestedBedrooms == null || factsBR == null || factsBR === requestedBedrooms) &&
+              (minimumBedrooms == null || factsBR == null || factsBR >= minimumBedrooms);
+            const remainingMs = discoveryWallBudgetMs === null ? null : discoveryWallBudgetMs - discoveryElapsedMs();
+            if (bedroomCompatible && (remainingMs === null || remainingMs >= SIDECAR_PHOTO_RESCUE_MIN_BUDGET_MS)) {
+              try {
+                const { getHeartbeat } = await import("./vrbo-sidecar-queue");
+                if (getHeartbeat().isOnline) {
+                  sidecarPhotoRescuesUsed += 1;
+                  const walletMs = Math.max(30_000, Math.min(90_000, (remainingMs ?? 110_000) - 20_000));
+                  console.log(
+                    `[fetch-unit-photos] sidecar photo rescue ${sidecarPhotoRescuesUsed}/${maxSidecarPhotoRescues} ` +
+                    `for ${candidate.url} (${dual.photos.length} photos < ${MIN_INDEPENDENT_UNIT_PHOTOS}, wallet=${walletMs}ms)`,
+                  );
+                  const rescued = await scrapeListingPhotosDualSource(clusterUrls, facts, {
+                    detailTimeoutMs: Math.min(28_000, remainingMs ?? 28_000),
+                    scrapingBeeTimeoutMs: Math.min(18_000, remainingMs ?? 18_000),
+                    sidecarWalletMs: walletMs,
+                  });
+                  if (rescued.photos.length > dual.photos.length) {
+                    console.log(
+                      `[fetch-unit-photos] sidecar photo rescue recovered ${rescued.photos.length} photos ` +
+                      `for ${rescued.sourceUrl || candidate.url}`,
+                    );
+                    dual = rescued;
+                  }
+                }
+              } catch (e: any) {
+                console.warn(`[fetch-unit-photos] sidecar photo rescue failed for ${candidate.url}: ${e?.message ?? e}`);
+              }
+            }
+          }
           const photos = dual.photos;
           const sourceUrl = dual.sourceUrl || candidate.url;
           const sourceLabel = (dual.platform === "other" ? candidate.source : dual.platform) as DiscoverySource;
