@@ -492,37 +492,22 @@ async function fetchOpenConversations(limit = 100): Promise<GuestyConversation[]
   // NOTE FOR CODEX: Guesty's /conversations returns the full document only
   // when `fields=` is present. Don't strip it as a redundant query param.
   //
-  // PAGINATION (load-bearing): `lastMessageAt` is null on the inbox-v2 list shape
-  // (real recency lives at state.lastMessage.date), so `sort=-lastMessageAt`
-  // silently falls back to CREATION-date order. A thread with FRESH guest activity
-  // but an old creation date can therefore sit past the first page and never get
-  // drafted — the exact "auto-reply silently skips a real guest message" failure
-  // class. We PAGE through the list (skip-based) up to a bounded total and apply
-  // the OPEN filter across the full accumulated set so no awaiting-reply thread is
-  // hidden by a single-page cap. The zero-new-items guard self-corrects if a
-  // Guesty shape ever ignores `skip` (returns the same page) — we stop instead of
-  // burning the full budget. Tunable via AUTO_REPLY_CONV_SCAN_MAX.
-  const PAGE = Math.max(1, Math.min(100, limit || 100));
-  const MAX_SCAN = Math.max(PAGE, Number(process.env.AUTO_REPLY_CONV_SCAN_MAX) || 500);
-  const all: GuestyConversation[] = [];
-  const seen = new Set<string>();
-  for (let skip = 0; skip < MAX_SCAN; skip += PAGE) {
-    const data = await guestyRequest(
-      "GET",
-      `/communication/conversations?limit=${PAGE}&skip=${skip}&sort=-lastMessageAt&fields=`
-    );
-    const page = unwrapConversations(data);
-    if (page.length === 0) break; // exhausted
-    const before = all.length;
-    for (const c of page) {
-      const id = String((c as any)?._id ?? (c as any)?.id ?? "");
-      if (id && seen.has(id)) continue;
-      if (id) seen.add(id);
-      all.push(c);
-    }
-    if (all.length === before) break; // no NEW conversations (skip unsupported or exhausted)
-    if (page.length < PAGE) break; // last page
-  }
+  // PAGINATION (load-bearing, updated 2026-07-09): Guesty's /communication/conversations
+  // now REJECTS the `skip` param — `400: "skip" is not allowed` — which silently broke
+  // this fetch entirely (every tick threw, and auto-reply skipped every guest message,
+  // the exact 2026-05-04-class outage). Its cursor is also unreliable on this endpoint.
+  // But it HONORS a large `limit` and returns the whole inbox in ONE request, so we fetch
+  // once at a generous ceiling instead of skip-paging. `sort=-lastMessageAt` (recency,
+  // with the creation-date fallback the note below describes) still orders the result.
+  // Tunable via AUTO_REPLY_CONV_SCAN_MAX. If the inbox ever exceeds it, the OLDEST
+  // conversations beyond the ceiling are not fetched (they're the least likely to hold a
+  // guest message still awaiting a first reply).
+  const FETCH_LIMIT = Math.max(limit || 100, Number(process.env.AUTO_REPLY_CONV_SCAN_MAX) || 500);
+  const data = await guestyRequest(
+    "GET",
+    `/communication/conversations?limit=${FETCH_LIMIT}&sort=-lastMessageAt&fields=`
+  );
+  const all = unwrapConversations(data);
   return all.filter((c) => {
     const status =
       (typeof c.state === "object" && c.state?.status) ||

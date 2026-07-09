@@ -398,7 +398,12 @@ function quoteGuestMessage(message: string): string {
 // watermark so a redeploy resumes instead of re-scanning the whole inbox.
 export type ComplaintScanState = {
   backfillComplete: boolean;
-  backfillSkip: number;
+  // Count of oldest conversations already scanned during backfill — an index into
+  // the createdAt-ascending inbox (stable across ticks: createdAt never changes and
+  // new threads append at the end). Guesty's conversations endpoint rejects `skip`
+  // and its cursor is unreliable, so the whole inbox is fetched in ONE large-`limit`
+  // request and sliced by this count rather than server-paginated.
+  backfillDoneCount: number;
   // Newest guest-post time (ms) the scanner has already considered. Incremental
   // runs only look at conversations/posts newer than this.
   watermarkMs: number;
@@ -407,7 +412,7 @@ export type ComplaintScanState = {
 
 export const EMPTY_SCAN_STATE: ComplaintScanState = {
   backfillComplete: false,
-  backfillSkip: 0,
+  backfillDoneCount: 0,
   watermarkMs: 0,
   lastRunAt: null,
 };
@@ -418,7 +423,7 @@ export function parseComplaintScanState(raw: string | null | undefined): Complai
     const o = JSON.parse(raw) as Partial<ComplaintScanState>;
     return {
       backfillComplete: o.backfillComplete === true,
-      backfillSkip: Number.isFinite(o.backfillSkip) ? Math.max(0, Number(o.backfillSkip)) : 0,
+      backfillDoneCount: Number.isFinite(o.backfillDoneCount) ? Math.max(0, Number(o.backfillDoneCount)) : 0,
       watermarkMs: Number.isFinite(o.watermarkMs) ? Math.max(0, Number(o.watermarkMs)) : 0,
       lastRunAt: typeof o.lastRunAt === "string" ? o.lastRunAt : null,
     };
