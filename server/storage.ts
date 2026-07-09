@@ -362,6 +362,7 @@ export interface IStorage {
   createGuestInboxInternalNote(input: InsertGuestInboxInternalNote): Promise<GuestInboxInternalNote>;
   getGuestInboxInternalNotes(conversationId: string, limit?: number): Promise<GuestInboxInternalNote[]>;
   createGuestIssue(input: InsertGuestIssue): Promise<GuestIssue>;
+  getGuestIssueById(id: number): Promise<GuestIssue | undefined>;
   getGuestIssuesByConversation(conversationId: string, limit?: number): Promise<GuestIssue[]>;
   getGuestIssueCommentsForIssues(issueIds: number[]): Promise<GuestIssueComment[]>;
   listGuestIssues(opts?: { status?: string; kind?: string; limit?: number }): Promise<GuestIssue[]>;
@@ -1748,6 +1749,11 @@ export class DatabaseStorage implements IStorage {
 
   async createGuestIssue(input: InsertGuestIssue): Promise<GuestIssue> {
     const [row] = await db.insert(guestIssues).values(input).returning();
+    return row;
+  }
+
+  async getGuestIssueById(id: number): Promise<GuestIssue | undefined> {
+    const [row] = await db.select().from(guestIssues).where(eq(guestIssues.id, id)).limit(1);
     return row;
   }
 

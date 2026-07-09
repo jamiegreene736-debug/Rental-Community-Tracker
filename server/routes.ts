@@ -49287,7 +49287,12 @@ CONSTRAINTS
       const status = statusRaw && statusRaw !== "all" ? statusRaw : undefined;
       // kind = which tab (property | back_office); unset/"all" returns both.
       const kindRaw = String(req.query.kind ?? "").trim().toLowerCase();
-      const kind = kindRaw === "property" || kindRaw === "back_office" ? kindRaw : undefined;
+      let kind = kindRaw === "property" || kindRaw === "back_office" ? kindRaw : undefined;
+      // Back-office issues (refunds/cancellations/billing) are OPERATOR-ONLY — the
+      // remote agent login never sees them anywhere. Force property-only for the
+      // agent role regardless of the requested kind (the badge query sends no kind).
+      const isAgentRole = (res.locals.portalSession as { role?: string } | undefined)?.role === "agent";
+      if (isAgentRole) kind = "property";
       const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
       const issues = await storage.listGuestIssues({ status, kind, limit });
       if (!req.query.withComments) return res.json({ issues });
@@ -49310,7 +49315,12 @@ CONSTRAINTS
       const conversationId = req.params.conversationId;
       if (!conversationId) return res.status(400).json({ error: "conversationId required" });
       const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50));
-      const issues = await storage.getGuestIssuesByConversation(conversationId, limit);
+      const allIssues = await storage.getGuestIssuesByConversation(conversationId, limit);
+      // Operator-only back-office issues are withheld from the agent role even in
+      // the per-conversation panel (an agent viewing a thread must not see a
+      // guest's refund/cancellation issue).
+      const isAgentRole = (res.locals.portalSession as { role?: string } | undefined)?.role === "agent";
+      const issues = isAgentRole ? allIssues.filter((i) => i.kind !== "back_office") : allIssues;
       const comments = await storage.getGuestIssueCommentsForIssues(issues.map((i) => i.id));
       const byIssue = new Map<number, typeof comments>();
       for (const c of comments) {
@@ -49332,7 +49342,10 @@ CONSTRAINTS
       if (!titleCheck.ok) return res.status(400).json({ error: titleCheck.error });
       const description = req.body?.description != null ? String(req.body.description).trim() : "";
       const severity = normalizeGuestIssueSeverity(req.body?.severity);
-      const kind = normalizeGuestIssueKind(req.body?.kind); // property (default) | back_office
+      // property (default) | back_office — but the agent role can never file a
+      // back-office issue (that tab is operator-only), so coerce it to property.
+      const isAgentRole = (res.locals.portalSession as { role?: string } | undefined)?.role === "agent";
+      const kind = isAgentRole ? "property" : normalizeGuestIssueKind(req.body?.kind);
       const author = guestIssueAuthor(res);
       const issue = await storage.createGuestIssue({
         conversationId,
@@ -49358,6 +49371,17 @@ CONSTRAINTS
     try {
       const id = parseInt(req.params.id, 10);
       if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid issue id" });
+
+      // Back-office issues are operator-only — the agent role can't comment on or
+      // change the status of one even by id (those ids are never exposed to agents,
+      // but fail CLOSED anyway). A missing issue falls through to the 404 below.
+      const isAgentRole = (res.locals.portalSession as { role?: string } | undefined)?.role === "agent";
+      if (isAgentRole) {
+        const existing = await storage.getGuestIssueById(id);
+        if (existing && existing.kind === "back_office") {
+          return res.status(403).json({ error: "Guest issue not found" });
+        }
+      }
 
       const statusChange = normalizeGuestIssueStatus(req.body?.statusChange);
       const rawBody = String(req.body?.body ?? "").trim();
