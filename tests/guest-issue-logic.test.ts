@@ -3,10 +3,14 @@ import assert from "node:assert/strict";
 import {
   GUEST_ISSUE_STATUSES,
   GUEST_ISSUE_SEVERITIES,
+  GUEST_ISSUE_KINDS,
   isGuestIssueStatus,
   isGuestIssueSeverity,
+  isGuestIssueKind,
   normalizeGuestIssueStatus,
   normalizeGuestIssueSeverity,
+  normalizeGuestIssueKind,
+  guestIssueKindLabel,
   resolvedAtForStatus,
   isGuestIssueUnresolved,
   defaultCommentBodyForStatus,
@@ -21,7 +25,20 @@ console.log("guest-issue-logic suite");
 // ── status / severity constants ──
 assert.deepEqual([...GUEST_ISSUE_STATUSES], ["open", "ongoing", "resolved"]);
 assert.deepEqual([...GUEST_ISSUE_SEVERITIES], ["low", "normal", "high", "urgent"]);
-console.log("  ✓ status + severity vocabularies are stable");
+assert.deepEqual([...GUEST_ISSUE_KINDS], ["property", "back_office"]);
+console.log("  ✓ status + severity + kind vocabularies are stable");
+
+// ── kind guards / normalize / label ──
+assert.equal(isGuestIssueKind("back_office"), true);
+assert.equal(isGuestIssueKind("nope"), false);
+assert.equal(normalizeGuestIssueKind(" Back_Office "), "back_office");
+assert.equal(normalizeGuestIssueKind("property"), "property");
+assert.equal(normalizeGuestIssueKind("garbage"), "property"); // default
+assert.equal(normalizeGuestIssueKind(undefined), "property");
+assert.equal(guestIssueKindLabel("back_office"), "Back-office");
+assert.equal(guestIssueKindLabel("property"), "Property");
+assert.equal(guestIssueKindLabel(""), "Property");
+console.log("  ✓ kind guard/normalize/label");
 
 // ── type guards ──
 assert.equal(isGuestIssueStatus("ongoing"), true);

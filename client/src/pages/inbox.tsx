@@ -4371,7 +4371,11 @@ export default function InboxPage() {
       (await apiRequest("GET", "/api/inbox/guest-issues?status=unresolved&limit=200")).json(),
     refetchInterval: 30_000,
   });
-  const openGuestIssueCount = guestIssuesOpenData?.issues?.length ?? 0;
+  // Split the unresolved count by KIND so each tab shows its own flag. A row with
+  // no kind (legacy) counts as property (the DB default).
+  const unresolvedIssues = guestIssuesOpenData?.issues ?? [];
+  const openGuestIssueCount = unresolvedIssues.filter((i) => i?.kind !== "back_office").length;
+  const openBackOfficeIssueCount = unresolvedIssues.filter((i) => i?.kind === "back_office").length;
 
   const approveReservation = useMutation({
     mutationFn: (id: string) =>
@@ -4557,6 +4561,17 @@ export default function InboxPage() {
                 </span>
               )}
             </TabsTrigger>
+            <TabsTrigger value="back-office-issues" data-testid="tab-back-office-issues">
+              <DollarSign className="h-4 w-4 mr-1.5" /> Back-Office Issues
+              {openBackOfficeIssueCount > 0 && (
+                <span
+                  className="ml-1.5 rounded-full bg-red-600 text-white text-[10px] min-w-4 h-4 px-1 flex items-center justify-center"
+                  data-testid="badge-back-office-issues-open"
+                >
+                  {openBackOfficeIssueCount >= 200 ? "200+" : openBackOfficeIssueCount}
+                </span>
+              )}
+            </TabsTrigger>
             {!isAgent && (
               <TabsTrigger value="reservations" data-testid="tab-reservations">
                 <Calendar className="h-4 w-4 mr-1.5" /> Reservations
@@ -4581,6 +4596,22 @@ export default function InboxPage() {
               per-conversation Guest issues panel in the message thread. */}
           <TabsContent value="guest-issues">
             <GuestIssuesTab
+              kind="property"
+              canDelete={isAdmin}
+              onOpenConversation={(conversationId) => {
+                setSelectedConvId(conversationId);
+                setActiveTab("messages");
+              }}
+            />
+          </TabsContent>
+
+          {/* ── BACK-OFFICE ISSUES TAB ──
+              Refund requests, billing disputes, and cancellation requests — the
+              money/booking-admin counterpart to Guest Issues. Same component, kind
+              filtered to back_office. */}
+          <TabsContent value="back-office-issues">
+            <GuestIssuesTab
+              kind="back_office"
               canDelete={isAdmin}
               onOpenConversation={(conversationId) => {
                 setSelectedConvId(conversationId);

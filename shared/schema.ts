@@ -1460,6 +1460,7 @@ export const guestIssues = pgTable("guest_issues", {
   title: text("title").notNull(),
   description: text("description"),
   severity: text("severity").notNull().default("normal"),   // low | normal | high | urgent
+  kind: text("kind").notNull().default("property"),         // property | back_office (Guest Issues vs Back-Office Issues tab)
   status: text("status").notNull().default("open"),         // open | ongoing | resolved
   createdBy: text("created_by").notNull().default("agent"),        // portal username who opened it
   createdByRole: text("created_by_role").notNull().default("agent"), // admin | agent

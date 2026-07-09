@@ -364,7 +364,7 @@ export interface IStorage {
   createGuestIssue(input: InsertGuestIssue): Promise<GuestIssue>;
   getGuestIssuesByConversation(conversationId: string, limit?: number): Promise<GuestIssue[]>;
   getGuestIssueCommentsForIssues(issueIds: number[]): Promise<GuestIssueComment[]>;
-  listGuestIssues(opts?: { status?: string; limit?: number }): Promise<GuestIssue[]>;
+  listGuestIssues(opts?: { status?: string; kind?: string; limit?: number }): Promise<GuestIssue[]>;
   commentOnGuestIssue(
     issueId: number,
     comment: GuestIssueCommentInput,
@@ -1767,17 +1767,16 @@ export class DatabaseStorage implements IStorage {
       .orderBy(guestIssueComments.createdAt);
   }
 
-  async listGuestIssues(opts: { status?: string; limit?: number } = {}): Promise<GuestIssue[]> {
+  async listGuestIssues(opts: { status?: string; kind?: string; limit?: number } = {}): Promise<GuestIssue[]> {
     const limit = Math.min(500, Math.max(1, opts.limit ?? 100));
     // "unresolved" = open OR ongoing; a concrete status filters exactly; else all.
-    const where =
-      opts.status === "unresolved"
-        ? ne(guestIssues.status, "resolved")
-        : opts.status && opts.status !== "all"
-          ? eq(guestIssues.status, opts.status)
-          : undefined;
+    const conds = [] as any[];
+    if (opts.status === "unresolved") conds.push(ne(guestIssues.status, "resolved"));
+    else if (opts.status && opts.status !== "all") conds.push(eq(guestIssues.status, opts.status));
+    // kind = which tab (property | back_office); "all"/unset returns both.
+    if (opts.kind === "property" || opts.kind === "back_office") conds.push(eq(guestIssues.kind, opts.kind));
     const base = db.select().from(guestIssues);
-    const filtered = where ? base.where(where) : base;
+    const filtered = conds.length ? base.where(conds.length === 1 ? conds[0] : and(...conds)) : base;
     return filtered.orderBy(desc(guestIssues.updatedAt)).limit(limit);
   }
 
