@@ -2,15 +2,30 @@ const SEARCHAPI_QUOTA_RE = /used all of the searches|quota|rate.?limit|too many 
 const SEARCHAPI_FALLBACK_INSTALLED = Symbol.for("rct.searchapiFallbackInstalled");
 const nativeFetch = globalThis.fetch.bind(globalThis);
 
-// SINGLE-KEY MODE (2026-07-06, operator): the main SearchAPI account was
-// upgraded, so SEARCHAPI_API_KEY is the ONLY key — the old SEARCHAPI_API_KEY_2
-// / SEARCHAPI_API_KEY_SECONDARY fallback env vars are deliberately no longer
-// read. The rotation machinery below (fetchSearchApiWithFallback + the global
-// fetch fallback) is kept but inert with one key: both short-circuit at
-// keys.length <= 1, so re-adding keys here is all it takes to restore rotation.
+// KEY ROTATION (2026-07-09, operator): SEARCHAPI_API_KEY is the primary key;
+// SEARCHAPI_API_KEY_2 (plus optional SEARCHAPI_API_KEY_3.._5 and the
+// SEARCHAPI_API_KEY_SECONDARY alias) are rotation targets. When 2+ keys are
+// configured, EVERY searchapi.io call rotates to the next key on a quota /
+// rate-limit response — automatically, because installSearchApiFetchFallback()
+// patches the global fetch and both it and fetchSearchApiWithFallback() read
+// this list. With a single key the machinery short-circuits (keys.length <= 1)
+// and behaves exactly as before. Order matters: the primary is always tried
+// first; duplicate/blank values are dropped so a copy-paste can't skew rotation.
 export function getSearchApiKeys(): string[] {
-  const key = String(process.env.SEARCHAPI_API_KEY ?? "").trim();
-  return key ? [key] : [];
+  const candidates = [
+    process.env.SEARCHAPI_API_KEY,
+    process.env.SEARCHAPI_API_KEY_2,
+    process.env.SEARCHAPI_API_KEY_3,
+    process.env.SEARCHAPI_API_KEY_4,
+    process.env.SEARCHAPI_API_KEY_5,
+    process.env.SEARCHAPI_API_KEY_SECONDARY,
+  ];
+  const keys: string[] = [];
+  for (const candidate of candidates) {
+    const key = String(candidate ?? "").trim();
+    if (key && !keys.includes(key)) keys.push(key);
+  }
+  return keys;
 }
 
 export function getSearchApiKey(): string {

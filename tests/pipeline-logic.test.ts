@@ -4059,17 +4059,16 @@ assert.ok(
   routesSource.includes("airbnbDirectLensEnabled = false"),
   "find-buy-in direct Lens discovery should be hard-disabled by default",
 );
-// 2026-07-06 (operator): single-key mode — the main SearchAPI account was
-// upgraded, so the _2/_SECONDARY fallback env vars must NOT be read anymore.
+// 2026-07-09 (operator): key rotation restored — a second SearchAPI key
+// (SEARCHAPI_API_KEY_2) rotates in on quota/rate-limit responses.
 assert.ok(
-  !searchApiSource.includes("process.env.SEARCHAPI_API_KEY_2") &&
-    !searchApiSource.includes("process.env.SEARCHAPI_API_KEY_SECONDARY") &&
-    !routesSource.includes("process.env.SEARCHAPI_API_KEY_2"),
-  "SearchAPI key resolution should be single-key (SEARCHAPI_API_KEY only)",
+  searchApiSource.includes("process.env.SEARCHAPI_API_KEY_2") &&
+    searchApiSource.includes("process.env.SEARCHAPI_API_KEY_SECONDARY"),
+  "SearchAPI key resolution should read the SEARCHAPI_API_KEY_2 rotation key",
 );
 assert.ok(
   searchApiSource.includes("process.env.SEARCHAPI_API_KEY"),
-  "SearchAPI key resolution should read SEARCHAPI_API_KEY",
+  "SearchAPI key resolution should read the primary SEARCHAPI_API_KEY",
 );
 assert.ok(
   routesSource.includes("type DirectBookingProof"),
