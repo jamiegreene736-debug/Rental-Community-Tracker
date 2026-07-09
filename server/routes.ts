@@ -290,6 +290,8 @@ import {
 } from "./seasonal-availability";
 import { runPhotoListingCheckForFolders, runAddressBackfill, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
+import { scanAmenitiesForProperty } from "./amenity-scan";
+import { getAmenityLabel, AMENITY_CATALOG_KEYS } from "@shared/guesty-amenity-catalog";
 import { evaluateComboPhotoCommunityGate, planComboBedroomRetry, type ComboPhotoGateDecision, type ComboPhotoGateInput, type ComboBedroomRetryPlan } from "@shared/combo-photo-community-gate";
 import { evaluateComboOtaScanGate, type ComboOtaScanGateDecision } from "@shared/combo-ota-scan-gate";
 import {
@@ -23471,6 +23473,127 @@ Requirements:
     }
   });
 
+  // GET /api/builder/property-amenities?propertyId=N — the in-system amenity
+  // selection persisted for a property (positive core id OR negative -draftId).
+  // Null until a scan/save writes it. Lets the amenities tab hydrate from the
+  // saved set (incl. the last photo scan) instead of only the static profile.
+  app.get("/api/builder/property-amenities", async (req: Request, res: Response) => {
+    const propertyId = Number((req.query as { propertyId?: string }).propertyId);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "propertyId required" });
+    try {
+      const row = await storage.getPropertyAmenities(propertyId);
+      if (!row) return res.json({ propertyId, amenityKeys: null });
+      return res.json({
+        propertyId,
+        amenityKeys: Array.isArray(row.amenityKeys) ? row.amenityKeys : [],
+        detected: row.detected ?? null,
+        source: row.source ?? null,
+        photosScanned: row.photosScanned ?? null,
+        scannedAt: row.scannedAt ?? null,
+        updatedAt: row.updatedAt ?? null,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/builder/save-amenities — persist an amenity selection in-system
+  // (the "Save to system" button + the tab's manual edits). Add-only is NOT
+  // enforced here — this is the operator's explicit selection. Optionally syncs
+  // to Guesty when a listing is mapped or provided.
+  app.post("/api/builder/save-amenities", async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { propertyId?: number; amenityKeys?: string[]; source?: string };
+    const propertyId = Number(body.propertyId);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ ok: false, error: "propertyId required" });
+    if (!Array.isArray(body.amenityKeys)) return res.status(400).json({ ok: false, error: "amenityKeys must be an array" });
+    try {
+      const keys = Array.from(new Set(body.amenityKeys.filter((k) => AMENITY_CATALOG_KEYS.has(k))));
+      const saved = await storage.savePropertyAmenities({
+        propertyId,
+        amenityKeys: keys,
+        source: body.source === "manual" || body.source === "scan" ? body.source : "manual",
+      });
+      return res.json({ ok: true, propertyId, amenityKeys: keys, updatedAt: saved.updatedAt });
+    } catch (err: any) {
+      console.error("[save-amenities]", err?.message ?? err);
+      return res.status(500).json({ ok: false, error: err?.message ?? "save failed" });
+    }
+  });
+
+  // POST /api/builder/scan-amenities — the "Scan photos for amenities" button.
+  // Body: { propertyId, listingId?, currentKeys? }. Runs Claude vision over the
+  // property's community + unit photos, ADD-ONLY merges the detected amenities
+  // into the selection (filling the standard baseline for a fresh listing),
+  // persists the result in-system, and — if a Guesty listing is mapped — syncs
+  // it to Guesty (add-only, so the sync is safe). A fresh draft with no Guesty
+  // listing is just saved in-system; the operator pushes it later.
+  app.post("/api/builder/scan-amenities", async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { propertyId?: number; listingId?: string; currentKeys?: string[] };
+    const propertyId = Number(body.propertyId);
+    if (!Number.isFinite(propertyId)) return res.status(400).json({ ok: false, error: "propertyId required" });
+    try {
+      // Base the merge on the caller's live selection when provided, else the
+      // last persisted set; null → the scan fills from the standard baseline.
+      let currentKeys: string[] | null = Array.isArray(body.currentKeys) ? body.currentKeys : null;
+      if (!currentKeys) {
+        const saved = await storage.getPropertyAmenities(propertyId).catch(() => undefined);
+        currentKeys = saved && Array.isArray(saved.amenityKeys) ? (saved.amenityKeys as string[]) : null;
+      }
+
+      const scan = await scanAmenitiesForProperty(propertyId, { currentKeys });
+
+      await storage.savePropertyAmenities({
+        propertyId,
+        amenityKeys: scan.next,
+        detected: scan.detail,
+        source: "scan",
+        photosScanned: scan.photosScanned,
+        scannedAt: new Date(),
+      });
+
+      // Sync to Guesty only when a listing is mapped. Reuse the existing
+      // push-amenities route over loopback (127.0.0.1 bypasses the auth gate)
+      // so the canonical-name translation + read-back verification stay in ONE
+      // place. Best-effort — a push failure never fails the scan/save.
+      let guesty: { synced: boolean; listingId: string | null; saved?: number; error?: string } = {
+        synced: false,
+        listingId: null,
+      };
+      const listingId = body.listingId || (await storage.getGuestyListingId(propertyId).catch(() => null));
+      if (listingId) {
+        guesty.listingId = listingId;
+        try {
+          const base = `http://127.0.0.1:${process.env.PORT || "5000"}`;
+          // Send both the label AND the key for each amenity so the route's
+          // canonical resolver (byNorm on labels + aliasMap on keys) has the best
+          // chance to map each one; unmatched strings are ignored by Guesty.
+          const amenityInputs = Array.from(new Set(
+            scan.next.flatMap((k) => [getAmenityLabel(k), k]),
+          ));
+          const pushRes = await fetch(`${base}/api/builder/push-amenities`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ listingId, amenities: amenityInputs }),
+          });
+          const pushData = await pushRes.json().catch(() => null) as any;
+          if (pushRes.ok && pushData?.success) {
+            guesty.synced = true;
+            guesty.saved = pushData.saved ?? undefined;
+          } else {
+            guesty.error = pushData?.error ?? `HTTP ${pushRes.status}`;
+          }
+        } catch (e: any) {
+          guesty.error = e?.message ?? "Guesty sync failed";
+        }
+      }
+
+      return res.json({ ...scan, ok: true, guesty });
+    } catch (err: any) {
+      console.error("[scan-amenities]", err?.message ?? err);
+      return res.status(500).json({ ok: false, error: err?.message ?? "amenity scan failed" });
+    }
+  });
+
   // GET /api/builder/inspect-listing?listingId=xxx  — returns raw Guesty listing JSON
   app.get("/api/builder/inspect-listing", async (req: Request, res: Response) => {
     const { listingId } = req.query as { listingId?: string };
@@ -37281,6 +37404,10 @@ Return ONLY compact JSON with this exact shape:
     // unit folders. ~30 Lens calls + ~6 SERPs per folder; a timeout is INFRA
     // (publish), never a resort skip.
     "ota-scan": 10 * 60 * 1000,
+    // Claude-vision amenity detection over the just-persisted community + unit
+    // folders (batched, ~3 calls). Non-critical: a timeout/failure is logged and
+    // the draft still saves with the baseline amenities (never a skip/rollback).
+    "amenities": 5 * 60 * 1000,
   };
   const hydrateBulkComboListingItem = (item: BulkComboListingItem) => {
     const community = item.community || {};
@@ -38528,6 +38655,38 @@ Return ONLY compact JSON with this exact shape:
         `draft-${draftId}-unit-b`,
       ]).catch(() => null);
     }
+
+    // ── Amenity detection (fresh drafts) ─────────────────────────────────────
+    // Scan the just-persisted community + unit photos for amenities and save the
+    // set in-system (propertyId = -draftId; no Guesty listing exists yet, so
+    // there's nothing to sync — the operator pushes amenities when the listing
+    // goes live). NON-CRITICAL: any failure is logged and the draft still saves
+    // (the scan itself fills the baseline even with no vision key). Disable with
+    // COMBO_AMENITY_SCAN=0.
+    if (!reusedExistingDraft && process.env.COMBO_AMENITY_SCAN !== "0") {
+      try {
+        const amenityScan = await runBulkComboListingStep(job, item, "amenities", "Detecting amenities from photos", () =>
+          scanAmenitiesForProperty(-draftId, { currentKeys: null }));
+        if (amenityScan) {
+          await storage.savePropertyAmenities({
+            propertyId: -draftId,
+            amenityKeys: amenityScan.next,
+            detected: amenityScan.detail,
+            source: "combo-scan",
+            photosScanned: amenityScan.photosScanned,
+            scannedAt: new Date(),
+          });
+          await queueEvent("bulk-combo-listing", job.id, "amenities-detected",
+            `Amenities filled — ${amenityScan.next.length} total (${amenityScan.added.length} detected from photos)${amenityScan.warning ? ` · ${amenityScan.warning}` : ""}`,
+            { itemKey: item.id, level: "info", meta: { total: amenityScan.next.length, added: amenityScan.added } });
+        }
+      } catch (e: any) {
+        await queueEvent("bulk-combo-listing", job.id, "amenities-infra",
+          `Amenity scan could not complete (${queueErrorLabel(e, "error")}); draft saved without a photo amenity scan`,
+          { itemKey: item.id, level: "warn" });
+      }
+    }
+
     await enqueueCommunityPricingRefreshJob(draftId).catch((e: any) => {
       item.message = `Draft saved; pricing queue warning: ${e?.message ?? e}`;
     });

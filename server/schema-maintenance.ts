@@ -428,6 +428,21 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured property_compliance_overrides table");
 
+  // In-system amenity selection per property (photo-scan / combo / manual).
+  // property_id is a positive core id OR a negative -draftId (see schema.ts).
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS property_amenities (
+      property_id integer PRIMARY KEY,
+      amenity_keys jsonb NOT NULL DEFAULT '[]'::jsonb,
+      detected jsonb,
+      source text,
+      photos_scanned integer,
+      scanned_at timestamp,
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured property_amenities table");
+
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS top_market_scan_cache (
       market_key text PRIMARY KEY,

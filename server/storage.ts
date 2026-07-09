@@ -19,6 +19,7 @@ import {
   type BookingAlternativePage, bookingAlternativePages,
   type GuestReceipt, type InsertGuestReceipt, guestReceipts,
   type PropertyTrailingRevenue, type InsertPropertyTrailingRevenue, propertyTrailingRevenue,
+  type PropertyAmenities, type InsertPropertyAmenities, propertyAmenities,
   type AutoFillLossOptions, autoFillLossOptions,
   type BulkAutoFillState, bulkAutoFillState,
   type CancellationNotice, cancellationNotices,
@@ -350,6 +351,11 @@ export interface IStorage {
   // all rows keyed by propertyId (= operationsPropertyId).
   getPropertyTrailingRevenue(): Promise<PropertyTrailingRevenue[]>;
   replacePropertyTrailingRevenue(rows: InsertPropertyTrailingRevenue[]): Promise<void>;
+
+  // In-system amenity selection per property (positive core id OR negative
+  // -draftId). Written by the photo amenity scan + the bulk-combo listing job.
+  getPropertyAmenities(propertyId: number): Promise<PropertyAmenities | undefined>;
+  savePropertyAmenities(row: InsertPropertyAmenities): Promise<PropertyAmenities>;
 
   createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
   getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
@@ -1509,6 +1515,36 @@ export class DatabaseStorage implements IStorage {
       await tx.delete(propertyTrailingRevenue);
       if (rows.length > 0) await tx.insert(propertyTrailingRevenue).values(rows);
     });
+  }
+
+  async getPropertyAmenities(propertyId: number): Promise<PropertyAmenities | undefined> {
+    const [row] = await db
+      .select()
+      .from(propertyAmenities)
+      .where(eq(propertyAmenities.propertyId, propertyId))
+      .limit(1);
+    return row;
+  }
+
+  async savePropertyAmenities(row: InsertPropertyAmenities): Promise<PropertyAmenities> {
+    const now = new Date();
+    const values: InsertPropertyAmenities = { ...row, updatedAt: now };
+    const [saved] = await db
+      .insert(propertyAmenities)
+      .values(values)
+      .onConflictDoUpdate({
+        target: propertyAmenities.propertyId,
+        set: {
+          amenityKeys: values.amenityKeys,
+          detected: values.detected ?? null,
+          source: values.source ?? null,
+          photosScanned: values.photosScanned ?? null,
+          scannedAt: values.scannedAt ?? null,
+          updatedAt: now,
+        },
+      })
+      .returning();
+    return saved;
   }
 
   async createGuestReceipt(r: InsertGuestReceipt): Promise<GuestReceipt> {
