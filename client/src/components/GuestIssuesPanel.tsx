@@ -46,6 +46,7 @@ type GuestIssue = {
   title: string;
   description: string | null;
   severity: string;
+  kind: string; // property | back_office
   status: string;
   createdBy: string;
   createdByRole: string;
@@ -336,6 +337,15 @@ function IssueCard({
                 Auto-detected
               </span>
             )}
+            {issue.kind === "back_office" && (
+              <span
+                className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800"
+                title="Back-office matter (refund / billing / cancellation)"
+                data-testid={`badge-guest-issue-kind-${issue.id}`}
+              >
+                Back-office
+              </span>
+            )}
             <span className="truncate text-sm font-medium">{issue.title}</span>
           </div>
           {issue.description && (
@@ -471,25 +481,29 @@ const TAB_FILTERS: { key: string; label: string }[] = [
   { key: "all", label: "All" },
 ];
 
-// Cross-conversation "Guest Issues" inbox tab: every issue across all guests,
+// Cross-conversation issues inbox tab: every issue across all guests of ONE kind
+// (property → "Guest Issues" tab, back_office → "Back-Office Issues" tab),
 // filterable by status, with the same comment / status / delete actions as the
 // per-conversation panel plus a jump-to-conversation link. Creation stays in the
 // per-conversation panel (an issue must attach to a guest thread).
 export function GuestIssuesTab({
+  kind = "property",
   canDelete = false,
   onOpenConversation,
 }: {
+  kind?: "property" | "back_office";
   canDelete?: boolean;
   onOpenConversation?: (conversationId: string) => void;
 }) {
   const qc = useQueryClient();
   const { toast } = useToast();
   const [filter, setFilter] = useState("unresolved");
+  const backOffice = kind === "back_office";
 
   const { data, isLoading, isError } = useQuery<{ issues: GuestIssue[] }>({
-    queryKey: [GUEST_ISSUES_KEY, "tab", filter],
+    queryKey: [GUEST_ISSUES_KEY, "tab", kind, filter],
     queryFn: async () =>
-      (await apiRequest("GET", `${GUEST_ISSUES_KEY}?status=${filter}&withComments=1&limit=200`)).json(),
+      (await apiRequest("GET", `${GUEST_ISSUES_KEY}?status=${filter}&kind=${kind}&withComments=1&limit=200`)).json(),
     refetchInterval: 30_000,
   });
 
@@ -519,24 +533,26 @@ export function GuestIssuesTab({
   });
 
   return (
-    <div className="space-y-4" data-testid="panel-guest-issues-tab">
+    <div className="space-y-4" data-testid={`panel-guest-issues-tab${backOffice ? "-back-office" : ""}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <AlertCircle className="h-5 w-5 text-rose-600" />
-          <h2 className="text-base font-semibold">Guest issues</h2>
+          <AlertCircle className={`h-5 w-5 ${backOffice ? "text-violet-600" : "text-rose-600"}`} />
+          <h2 className="text-base font-semibold">{backOffice ? "Back-office issues" : "Guest issues"}</h2>
           {filter === "unresolved" && counts.total > 0 && (
             <Badge className="bg-rose-100 text-rose-800 hover:bg-rose-100">{counts.unresolved} open</Badge>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-1">
-          {canDelete && (
+          {/* One scan sweeps the whole inbox and fills BOTH tabs — show the button
+              only on the property tab to avoid a redundant control. */}
+          {canDelete && !backOffice && (
             <Button
               size="sm"
               variant="outline"
               className="h-7 px-2.5 text-xs"
               disabled={scanInbox.isPending}
               onClick={() => scanInbox.mutate()}
-              title="Scan the whole guest inbox now and auto-log any complaints as issues"
+              title="Scan the whole guest inbox now and auto-log any complaints/requests as issues"
               data-testid="button-guest-issues-scan"
             >
               {scanInbox.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanSearch className="h-3.5 w-3.5" />}
@@ -559,9 +575,9 @@ export function GuestIssuesTab({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Every issue reported across your guests. Comment and mark each one ongoing or resolved — the tab badge
-        clears as issues are resolved. New issues are logged from the per-conversation Guest issues panel, and the
-        inbox complaint scanner opens them automatically (marked “Auto-detected”).
+        {backOffice
+          ? "Refund requests, billing disputes, and cancellation requests across your guests — auto-detected from the inbox (marked “Auto-detected”) or logged manually. Comment and mark each one ongoing or resolved."
+          : "Property-side issues (maintenance, cleanliness, noise, access, safety, amenities) across your guests. Comment and mark each one ongoing or resolved — the tab badge clears as issues are resolved. Logged from the per-conversation panel or opened automatically by the inbox scanner (marked “Auto-detected”)."}
       </p>
 
       {isLoading ? (
@@ -585,9 +601,9 @@ export function GuestIssuesTab({
           {filter === "resolved"
             ? "No resolved issues yet."
             : filter === "all"
-              ? "No guest issues logged yet."
+              ? backOffice ? "No back-office issues logged yet." : "No guest issues logged yet."
               : filter === "unresolved"
-                ? "Nothing needs attention — no open guest issues."
+                ? backOffice ? "Nothing needs attention — no open refund/cancellation requests." : "Nothing needs attention — no open guest issues."
                 : `No ${filter} issues.`}
         </div>
       ) : (

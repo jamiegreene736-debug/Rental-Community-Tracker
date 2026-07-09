@@ -625,13 +625,29 @@ export async function ensureRuntimeSchema(): Promise<void> {
       resolved_at timestamp
     )
   `);
+  // kind added 2026-07-09 (Guest Issues vs Back-Office Issues tabs). The table
+  // predates it, so ADD COLUMN IF NOT EXISTS on boot; new rows default to
+  // 'property'. A one-time re-classification below routes existing auto-detected
+  // billing/refund/cancellation issues to 'back_office' so the split applies
+  // retroactively (idempotent — only property-kind system rows are touched).
+  await db.execute(sql`ALTER TABLE guest_issues ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'property'`);
+  await db.execute(sql`
+    UPDATE guest_issues
+       SET kind = 'back_office'
+     WHERE kind = 'property'
+       AND created_by_role = 'system'
+       AND (
+         lower(coalesce(title, '')) ~ '(refund|cancel|charge|billing|money back|overcharg|chargeback)'
+         OR lower(coalesce(description, '')) ~ '(refund|cancel|overcharg|chargeback|money back|dispute the charge)'
+       )
+  `);
   await db.execute(sql`
     CREATE INDEX IF NOT EXISTS guest_issues_conversation_created_idx
       ON guest_issues (conversation_id, created_at DESC)
   `);
   await db.execute(sql`
-    CREATE INDEX IF NOT EXISTS guest_issues_status_updated_idx
-      ON guest_issues (status, updated_at DESC)
+    CREATE INDEX IF NOT EXISTS guest_issues_kind_status_updated_idx
+      ON guest_issues (kind, status, updated_at DESC)
   `);
   console.log("[schema] ensured guest_issues table");
 

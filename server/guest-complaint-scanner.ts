@@ -203,8 +203,11 @@ type ClassifyBudget = { left: number };
 
 const CLASSIFY_SYSTEM =
   "You triage short-term vacation-rental guest messages for a property manager. " +
-  "A COMPLAINT is a message where the guest reports something WRONG with the property or their stay, or expresses clear dissatisfaction that needs the operator to DO something (fix, clean, replace, refund, respond). " +
-  "It is NOT a complaint if the guest is only asking a logistics/policy question (check-in time, parking, wifi password, can I bring a pet), thanking, chatting, or leaving positive feedback. " +
+  "Flag a message as an ISSUE (isComplaint=true) when it needs the operator to DO something: " +
+  "(a) a PROPERTY problem or clear dissatisfaction — something wrong/broken/dirty/unsafe, noise, access trouble, an amenity not working; " +
+  "(b) a BACK-OFFICE request — the guest asks for a REFUND / money back, disputes a CHARGE (billing), or asks to CANCEL their booking. " +
+  "It is NOT an issue if the guest is only asking a logistics/policy question (check-in time, parking, wifi password, can I bring a pet), giving directions/arrival questions you just answer, thanking, chatting, or leaving positive feedback. " +
+  "Pick the CATEGORY that fits: use 'billing' for refund/charge disputes and 'cancellation' for cancellation requests; property categories otherwise. " +
   "Respond with STRICT JSON only.";
 
 function classifyPrompt(message: string): string {
@@ -217,10 +220,11 @@ function classifyPrompt(message: string): string {
     '"""',
     "",
     "Return JSON exactly like:",
-    '{"isComplaint": true|false, "severity": "low|normal|high|urgent", "category": "' + COMPLAINT_CATEGORIES.join("|") + '", "title": "<=8 word issue title", "summary": "one sentence describing the problem"}',
+    '{"isComplaint": true|false, "severity": "low|normal|high|urgent", "category": "' + COMPLAINT_CATEGORIES.join("|") + '", "title": "<=8 word issue title", "summary": "one sentence describing the issue"}',
     "",
-    "severity: urgent = safety / no water-power / locked out / medical; high = major function broken (AC out, big leak, pests); normal = ordinary problem; low = minor.",
-    "If it is not a complaint, set isComplaint false (other fields can be defaults).",
+    "category: billing = refund/overcharge/chargeback disputes; cancellation = wants to cancel the booking; the rest are property-side.",
+    "severity: urgent = safety / no water-power / locked out / medical; high = major function broken (AC out, big leak, pests); normal = ordinary problem or a routine refund/cancellation request; low = minor.",
+    "If it is not an issue (a plain question, thanks, or positive feedback), set isComplaint false (other fields can be defaults).",
   ].join("\n");
 }
 
@@ -268,7 +272,7 @@ async function loadConversationIssues(convId: string): Promise<IssueWithComments
 }
 
 function toExistingLike(i: IssueWithComments): ExistingIssueLike {
-  return { id: i.id, status: i.status, title: i.title, description: i.description };
+  return { id: i.id, status: i.status, kind: i.kind, title: i.title, description: i.description };
 }
 
 async function scanConversation(conv: any, lowerBoundMs: number, budget: ClassifyBudget): Promise<ConvScanResult> {
@@ -372,6 +376,7 @@ async function openIssue(
     title: verdict.title,
     description,
     severity: verdict.severity,
+    kind: verdict.kind, // property | back_office → which inbox tab
     status: "open",
     createdBy: AUTO_COMPLAINT_AUTHOR,
     createdByRole: AUTO_COMPLAINT_ROLE,

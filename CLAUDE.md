@@ -43,6 +43,21 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-09 (FOLLOW-UP: split guest issues → property vs Back-Office Issues tab): Operator, after the
+  retroactive scan: "only genuine property-related issues / directions in [Guest Issues]; do NOT put
+  refund requests here — make a Back-Office Issues tab with refund + cancellation requests." SHIPPED
+  (`claude/back-office-issues-tab`): a `guest_issues.kind` column (`property` | `back_office`, default
+  property; schema.ts + schema-maintenance ALTER-on-boot + a one-time re-classification of existing auto
+  rows by title/desc). KIND is DERIVED from the complaint category (`complaintKindForCategory` in
+  `shared/guest-complaint-logic.ts`) — billing (refund/overcharge/chargeback) + a NEW `cancellation`
+  category → back_office; everything else → property. The Claude classifier scope widened past "something
+  wrong" to also flag refund/cancellation REQUESTS, and dedup is now kind-aware (a refund can't fold into
+  a maintenance issue). UI: one `GuestIssuesTab` parameterized by `kind`; new "Back-Office Issues" inbox
+  tab (DollarSign icon) beside "Guest Issues"; `GET /api/inbox/guest-issues?kind=`; inbox splits the
+  unresolved count into two tab badges; per-issue indigo "Back-office" chip. The "Scan for complaints"
+  button stays only on the property tab (one sweep fills both). Verified: guest-complaint-logic 16/0,
+  guest-issue-logic kind guards, full `npm test` exit 0, build clean, `npm run check` 338 = baseline.
+
 - 2026-07-09 (FOLLOW-UP: Guesty `/communication/conversations` now 400s on `skip` — broke the complaint
   scanner AND auto-reply): Operator asked to run the retroactive scan; it created 0 issues. LIVE-DIAGNOSED
   (ADMIN_SECRET API + Railway logs, via `railway run` to keep the secret out of logs): the scanner status

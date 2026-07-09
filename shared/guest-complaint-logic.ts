@@ -35,6 +35,7 @@ export const COMPLAINT_CATEGORIES = [
   "noise",
   "access",
   "billing",
+  "cancellation",
   "safety",
   "amenities",
   "other",
@@ -47,6 +48,18 @@ export function normalizeComplaintCategory(value: unknown): ComplaintCategory {
     if ((COMPLAINT_CATEGORIES as readonly string[]).includes(v)) return v as ComplaintCategory;
   }
   return "other";
+}
+
+// ── Issue KIND: property vs back-office ─────────────────────────────────────
+// The operator wants two inbox tabs. PROPERTY = genuine property-side matters the
+// on-site team acts on (maintenance, cleanliness, noise, access, safety,
+// amenities, directions, general dissatisfaction). BACK_OFFICE = money/booking
+// admin the office handles (refund requests, billing disputes, cancellation
+// requests). Kind is DERIVED from the category so there is one source of truth.
+export const GUEST_ISSUE_KIND_BACK_OFFICE_CATEGORIES: readonly ComplaintCategory[] = ["billing", "cancellation"];
+
+export function complaintKindForCategory(category: ComplaintCategory): "property" | "back_office" {
+  return GUEST_ISSUE_KIND_BACK_OFFICE_CATEGORIES.includes(category) ? "back_office" : "property";
 }
 
 // ── Complaint keyword / heuristic pre-filter ────────────────────────────────
@@ -123,11 +136,22 @@ const COMPLAINT_KEYWORDS: Array<{ keyword: string; category: ComplaintCategory; 
   { keyword: "unsanitary", category: "safety", severity: "high" },
   { keyword: "gas leak", category: "safety", severity: "urgent" },
   { keyword: "smoke detector", category: "safety", severity: "high" },
-  // Billing / money complaints
+  // Billing / money complaints + refund requests (→ back-office kind)
   { keyword: "overcharged", category: "billing", severity: "high" },
   { keyword: "double charged", category: "billing", severity: "high" },
   { keyword: "wrong charge", category: "billing", severity: "normal" },
   { keyword: "refund", category: "billing", severity: "normal" },
+  { keyword: "money back", category: "billing", severity: "normal" },
+  { keyword: "chargeback", category: "billing", severity: "high" },
+  { keyword: "dispute the charge", category: "billing", severity: "high" },
+  { keyword: "billing", category: "billing", severity: "normal" },
+  // Cancellation requests (→ back-office kind)
+  { keyword: "cancel", category: "cancellation", severity: "normal" },
+  { keyword: "cancellation", category: "cancellation", severity: "normal" },
+  { keyword: "cancel my booking", category: "cancellation", severity: "normal" },
+  { keyword: "cancel my reservation", category: "cancellation", severity: "normal" },
+  { keyword: "cancel the reservation", category: "cancellation", severity: "normal" },
+  { keyword: "cancel our trip", category: "cancellation", severity: "normal" },
   // General dissatisfaction
   { keyword: "complaint", category: "other", severity: "normal" },
   { keyword: "complain", category: "other", severity: "normal" },
@@ -200,6 +224,9 @@ export type ComplaintVerdict = {
   isComplaint: boolean;
   severity: GuestIssueSeverity;
   category: ComplaintCategory;
+  // Which inbox tab this belongs in — derived from the category so it can never
+  // disagree with it. property = Guest Issues, back_office = Back-Office Issues.
+  kind: "property" | "back_office";
   title: string;
   summary: string;
   source: "claude" | "heuristic";
@@ -217,6 +244,7 @@ export function heuristicComplaintVerdict(text: string): ComplaintVerdict {
     isComplaint,
     severity: normalizeGuestIssueSeverity(signal.severity),
     category,
+    kind: complaintKindForCategory(category),
     title: buildHeuristicTitle(category, signal.matched),
     summary: firstSentence(text),
     source: "heuristic",
@@ -234,7 +262,8 @@ const CATEGORY_TITLE: Record<ComplaintCategory, string> = {
   cleanliness: "Cleanliness issue",
   noise: "Noise complaint",
   access: "Access problem",
-  billing: "Billing complaint",
+  billing: "Billing / refund request",
+  cancellation: "Cancellation request",
   safety: "Safety concern",
   amenities: "Amenity problem",
   other: "Guest complaint",
@@ -255,7 +284,7 @@ export function parseClaudeComplaintClassification(raw: unknown): ComplaintVerdi
     typeof r.summary === "string" && r.summary.trim()
       ? r.summary.trim().slice(0, 500)
       : "";
-  return { isComplaint, severity, category, title, summary, source: "claude" };
+  return { isComplaint, severity, category, kind: complaintKindForCategory(category), title, summary, source: "claude" };
 }
 
 function clampTitle(t: string): string {
@@ -318,6 +347,8 @@ export type ExistingIssueLike = {
   id: number;
   status: string;
   category?: ComplaintCategory | null;
+  // property | back_office (the DB column). Absent on legacy rows → inferred.
+  kind?: string | null;
   title?: string | null;
   description?: string | null;
 };
@@ -327,11 +358,17 @@ export function matchExistingComplaintIssue(
   issues: ExistingIssueLike[],
   matchedKeywords: string[] = [],
 ): number | null {
-  const unresolved = issues.filter((i) => isGuestIssueUnresolved(i.status));
-  if (unresolved.length === 0) return null;
-
   const categoryOf = (i: ExistingIssueLike): ComplaintCategory =>
     i.category ? normalizeComplaintCategory(i.category) : inferComplaintCategoryFromText(`${i.title ?? ""} ${i.description ?? ""}`);
+  const kindOf = (i: ExistingIssueLike): "property" | "back_office" =>
+    i.kind === "back_office" || i.kind === "property" ? i.kind : complaintKindForCategory(categoryOf(i));
+
+  // Only ever merge into an issue of the SAME KIND — a refund request must never
+  // fold into a maintenance issue (different tab, different owner).
+  const unresolved = issues
+    .filter((i) => isGuestIssueUnresolved(i.status))
+    .filter((i) => kindOf(i) === verdict.kind);
+  if (unresolved.length === 0) return null;
 
   // 1) Same category (both known, both equal) — the most recently updated wins
   //    (issues arrive newest-first from storage; keep that order).

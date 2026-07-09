@@ -33,6 +33,7 @@ import {
   validateGuestIssueTitle,
   normalizeGuestIssueSeverity,
   normalizeGuestIssueStatus,
+  normalizeGuestIssueKind,
   defaultCommentBodyForStatus,
   resolvedAtForStatus,
 } from "@shared/guest-issue-logic";
@@ -49284,8 +49285,11 @@ CONSTRAINTS
     try {
       const statusRaw = String(req.query.status ?? "").trim().toLowerCase();
       const status = statusRaw && statusRaw !== "all" ? statusRaw : undefined;
+      // kind = which tab (property | back_office); unset/"all" returns both.
+      const kindRaw = String(req.query.kind ?? "").trim().toLowerCase();
+      const kind = kindRaw === "property" || kindRaw === "back_office" ? kindRaw : undefined;
       const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
-      const issues = await storage.listGuestIssues({ status, limit });
+      const issues = await storage.listGuestIssues({ status, kind, limit });
       if (!req.query.withComments) return res.json({ issues });
       const comments = await storage.getGuestIssueCommentsForIssues(issues.map((i) => i.id));
       const byIssue = new Map<number, typeof comments>();
@@ -49328,6 +49332,7 @@ CONSTRAINTS
       if (!titleCheck.ok) return res.status(400).json({ error: titleCheck.error });
       const description = req.body?.description != null ? String(req.body.description).trim() : "";
       const severity = normalizeGuestIssueSeverity(req.body?.severity);
+      const kind = normalizeGuestIssueKind(req.body?.kind); // property (default) | back_office
       const author = guestIssueAuthor(res);
       const issue = await storage.createGuestIssue({
         conversationId,
@@ -49337,6 +49342,7 @@ CONSTRAINTS
         title: titleCheck.title,
         description: description || null,
         severity,
+        kind,
         status: "open",
         createdBy: author.name,
         createdByRole: author.role,

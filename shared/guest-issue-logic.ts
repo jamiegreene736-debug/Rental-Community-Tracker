@@ -16,6 +16,29 @@ export type GuestIssueStatus = (typeof GUEST_ISSUE_STATUSES)[number];
 export const GUEST_ISSUE_SEVERITIES = ["low", "normal", "high", "urgent"] as const;
 export type GuestIssueSeverity = (typeof GUEST_ISSUE_SEVERITIES)[number];
 
+// A guest issue is filed under one of two KINDS, each its own inbox tab:
+//   property    → Guest Issues        (maintenance, cleanliness, noise, access,
+//                                       safety, amenities, directions, general)
+//   back_office → Back-Office Issues   (refund requests, billing disputes,
+//                                       cancellation requests)
+export const GUEST_ISSUE_KINDS = ["property", "back_office"] as const;
+export type GuestIssueKind = (typeof GUEST_ISSUE_KINDS)[number];
+
+export function isGuestIssueKind(value: unknown): value is GuestIssueKind {
+  return typeof value === "string" && (GUEST_ISSUE_KINDS as readonly string[]).includes(value);
+}
+
+/** Coerce a client/DB value into a valid kind, defaulting to "property". */
+export function normalizeGuestIssueKind(value: unknown): GuestIssueKind {
+  if (typeof value !== "string") return "property";
+  const v = value.trim().toLowerCase();
+  return isGuestIssueKind(v) ? v : "property";
+}
+
+export function guestIssueKindLabel(kind: string): string {
+  return kind === "back_office" ? "Back-office" : "Property";
+}
+
 export function isGuestIssueStatus(value: unknown): value is GuestIssueStatus {
   return typeof value === "string" && (GUEST_ISSUE_STATUSES as readonly string[]).includes(value);
 }

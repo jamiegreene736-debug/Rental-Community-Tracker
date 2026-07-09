@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   COMPLAINT_CATEGORIES,
   normalizeComplaintCategory,
+  complaintKindForCategory,
   complaintKeywordSignal,
   looksLikeComplaint,
   heuristicComplaintVerdict,
@@ -94,24 +95,49 @@ assert.equal(inferComplaintCategoryFromText("noisy neighbors kept us up"), "nois
 assert.equal(inferComplaintCategoryFromText("Nice weather question"), "other");
 console.log("  ✓ category inferred from issue text");
 
-// ── matchExistingComplaintIssue: dedup by category, ignore resolved ──
-const verdictMaint: ComplaintVerdict = { isComplaint: true, severity: "high", category: "maintenance", title: "AC out again", summary: "", source: "claude" };
+// ── KIND: property vs back-office ──
+assert.ok(COMPLAINT_CATEGORIES.includes("cancellation"));
+assert.equal(complaintKindForCategory("billing"), "back_office");
+assert.equal(complaintKindForCategory("cancellation"), "back_office");
+for (const c of ["maintenance", "cleanliness", "noise", "access", "safety", "amenities", "other"] as const) {
+  assert.equal(complaintKindForCategory(c), "property");
+}
+// Refund + cancellation requests trip the gate and land back-office.
+assert.ok(looksLikeComplaint("Can I get a refund for last night?"));
+assert.equal(complaintKeywordSignal("I'd like a refund please").category, "billing");
+assert.ok(looksLikeComplaint("We need to cancel our reservation"));
+assert.equal(complaintKeywordSignal("I want to cancel my booking").category, "cancellation");
+assert.equal(heuristicComplaintVerdict("I want a refund").kind, "back_office");
+assert.equal(heuristicComplaintVerdict("the AC is broken").kind, "property");
+assert.equal(parseClaudeComplaintClassification({ isComplaint: true, category: "cancellation", title: "wants to cancel" })!.kind, "back_office");
+console.log("  ✓ billing/cancellation → back_office; property categories → property");
+
+// ── matchExistingComplaintIssue: dedup by category + KIND, ignore resolved ──
+const verdictMaint: ComplaintVerdict = { isComplaint: true, severity: "high", category: "maintenance", kind: "property", title: "AC out again", summary: "", source: "claude" };
 const issues = [
   { id: 10, status: "resolved", title: "AC not cooling", description: "" },       // resolved → ignored
   { id: 11, status: "open", title: "AC not cooling in bedroom", description: "" }, // unresolved maintenance → match
   { id: 12, status: "ongoing", title: "Noisy pool at night", description: "" },
 ];
 assert.equal(matchExistingComplaintIssue(verdictMaint, issues, ["ac not working"]), 11);
-// No unresolved match of that category → open a new one.
-const verdictBilling: ComplaintVerdict = { isComplaint: true, severity: "normal", category: "billing", title: "Overcharged", summary: "", source: "claude" };
+// A back-office (billing) verdict must NOT fold into a property issue — different kind.
+const verdictBilling: ComplaintVerdict = { isComplaint: true, severity: "normal", category: "billing", kind: "back_office", title: "Overcharged", summary: "", source: "claude" };
 assert.equal(matchExistingComplaintIssue(verdictBilling, issues, ["overcharged"]), null);
+// …but it DOES fold into an existing unresolved back-office issue (same kind).
+assert.equal(
+  matchExistingComplaintIssue(verdictBilling, [{ id: 20, status: "open", kind: "back_office", title: "Billing / refund request", description: "wants a refund" }], ["refund"]),
+  20,
+);
+// A property verdict ignores a same-keyword back-office issue.
+const verdictCancel: ComplaintVerdict = { isComplaint: true, severity: "normal", category: "cancellation", kind: "back_office", title: "Cancellation request", summary: "", source: "claude" };
+assert.equal(matchExistingComplaintIssue(verdictCancel, [{ id: 21, status: "open", kind: "property", title: "Noise", description: "" }], []), null);
 // Only a RESOLVED matching issue exists → new one (fresh occurrence).
 assert.equal(matchExistingComplaintIssue(verdictMaint, [{ id: 5, status: "resolved", title: "AC not cooling", description: "" }], ["ac"]), null);
 // "other" category still matches via keyword overlap against title/description.
-const verdictOther: ComplaintVerdict = { isComplaint: true, severity: "normal", category: "other", title: "problem", summary: "", source: "heuristic" };
+const verdictOther: ComplaintVerdict = { isComplaint: true, severity: "normal", category: "other", kind: "property", title: "problem", summary: "", source: "heuristic" };
 assert.equal(matchExistingComplaintIssue(verdictOther, [{ id: 7, status: "open", title: "Guest complaint", description: "the balcony railing is loose" }], ["railing"]), 7);
 assert.equal(matchExistingComplaintIssue(verdictOther, [], []), null);
-console.log("  ✓ dedup matches unresolved same-category, ignores resolved, opens new otherwise");
+console.log("  ✓ dedup matches unresolved same-category+kind, ignores resolved/other-kind, opens new otherwise");
 
 // ── idempotency markers ──
 const iso = "2026-07-09T10:00:00.000Z";
