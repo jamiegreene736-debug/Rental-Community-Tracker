@@ -373,6 +373,64 @@ assert.match(
   /quotaOutage\s*\?\s*\(item\.error \|\| "SearchAPI quota exhausted[\s\S]{0,120}noSourceInventory/,
   "the failure classifier must surface a quota outage verbatim ahead of the genuine-scarcity skip messages",
 );
+// P2 cleanups (2026-07-09):
+// (a) The default Zillow harvest actor (igolaizola) is LOCATION-driven and has
+// no URL input — the harvest passed city="" state="" and got 0 items on every
+// query (Zillow discovery dead weight). city/state + leg + minBeds must thread
+// through, and the sold leg must use the actor's native operation switch.
+assert.match(
+  routesSource,
+  /harvestZillowUrlsViaApifySearchForUrl\(forSaleUrl, forSaleMax, timeoutMs, options, actor, token, "for-sale", city, state\)/,
+  "the Zillow Apify harvest must thread real city/state into the location-driven actor input (empty strings dead the whole leg)",
+);
+assert.match(
+  routesSource,
+  /if \(leg === "sold"\) input\.operation = "sold";/,
+  "the Zillow sold leg must use the actor's native operation switch (the sold search URL is ignored by the location-driven actor)",
+);
+assert.match(
+  routesSource,
+  /homeTypes: \["condos", "townhomes"\]/,
+  "the Zillow harvest must include townhomes (parity with the Realtor condo-townhome filter; villa communities are townhome-typed)",
+);
+// (b) Discovery fan-out early-stop: queries run in priority-ordered batches
+// and stop once the pool holds ~3x the bounded try limit; in street-gated
+// bounded mode only ON-STREET candidates count so off-street noise can't
+// starve the queries that find the real building. The sold list is fetched
+// ONCE with all four portal patterns (it used to fire 4x for identical SERPs).
+assert.match(
+  routesSource,
+  /if \(enoughDiscoveryCandidates\(\)\) \{[\s\S]{0,400}skipping \$\{unique\.length - i\} remaining \$\{source\} queries/,
+  "discovery SERP queries must early-stop once enough candidates are pooled",
+);
+assert.match(
+  routesSource,
+  /if \(!\(isBoundedDiscovery && suppliedStreetRoot\)\) return candidateUrls\.length;/,
+  "the early-stop target must count only on-street candidates in bounded street-gated mode",
+);
+assert.match(
+  routesSource,
+  /runSoldDiscoveryQueries\(\),\s*\]\);/,
+  "the sold sweep must run as ONE multi-pattern pass, not four per-portal re-fetches of the same queries",
+);
+assert.match(
+  routesSource,
+  /searchApiSerpStats\.attempted >= maxSerpQueriesPerRequest/,
+  "each fetch-unit-photos request must cap its live SERP query spend",
+);
+// (c) Shared SearchAPI limiter: bulk-combo discovery and the top-market
+// research sweep starved each other into 429s when run concurrently — both
+// must route their SearchAPI fetches through the shared slot.
+assert.match(
+  routesSource,
+  /const resp = await runWithSearchApiSlot\(\(\) => fetch\(/,
+  "bulk-combo discovery SERP fetches must go through the shared SearchAPI limiter",
+);
+assert.match(
+  readFileSync("server/community-research.ts", "utf8"),
+  /runWithSearchApiSlot\(\(\) => fetch\(/,
+  "top-market research SearchAPI fetches must go through the shared SearchAPI limiter",
+);
 // Exact-pass loopback timeout (2026-07-09): must outlive the endpoint's 175s
 // bounded discovery wall. The old 75s abort silently discarded exact-pass scans
 // (including sidecar rescues) that ran past 75s, letting a wrong-BR relaxed

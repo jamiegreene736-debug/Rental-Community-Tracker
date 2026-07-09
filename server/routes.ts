@@ -322,6 +322,7 @@ import { createKeepBetterScrapeCache, createSearchQueryCache } from "./discovery
 import {
   describeSearchApiQuota,
   getSearchApiQuota,
+  runWithSearchApiSlot,
   searchApiDiscoveryCircuit,
   searchApiQuotaExhausted,
 } from "./searchapi-budget";
@@ -4136,13 +4137,39 @@ async function harvestZillowBuildingPageUrls(buildingUrl: string, timeoutMs = 15
   }
 }
 
-function buildZillowSearchActorInput(actor: string, city: string, state: string, searchUrl: string, maxItems: number): Record<string, unknown> {
+function buildZillowSearchActorInput(
+  actor: string,
+  city: string,
+  state: string,
+  searchUrl: string,
+  maxItems: number,
+  // igolaizola-only knobs (2026-07-09): the actor takes NO URL input — it is
+  // entirely location/filter driven (verified live against its input schema:
+  // location, operation, homeTypes, minBeds, keywords, ...). The harvest was
+  // passing city="" state="" and relying on searchUrl, so the actor received
+  // location=", " and returned 0 items for EVERY query — Zillow discovery has
+  // been dead weight (Apify spend, zero candidates) since the actor swap.
+  leg?: "for-sale" | "sold",
+  minBeds?: number | null,
+  streetKeywords?: string | null,
+): Record<string, unknown> {
   const a = actor.toLowerCase();
   if (a.includes("igolaizola")) {
-    return {
+    const input: Record<string, unknown> = {
       location: `${city}, ${stateToAbbrev(state)}`,
+      // Parity with the Realtor harvest's condo-townhome-row-home filter (the
+      // old /condos/ URL was condos-only; Ko Olina's villa communities are
+      // townhome-typed on Zillow). Enum verified live: "condos"/"townhomes".
+      homeTypes: ["condos", "townhomes"],
       maxItems,
     };
+    if (leg === "sold") input.operation = "sold"; // for-sale is the actor default
+    if (minBeds && Number.isFinite(minBeds) && minBeds > 0) input.minBeds = Math.round(minBeds);
+    // Street-scoped searches can't be a URL either — bias the location search
+    // with the street as keywords; downstream street-root gates drop any
+    // off-street noise, so a fuzzy match costs nothing.
+    if (streetKeywords && streetKeywords.trim()) input.keywords = streetKeywords.trim();
+    return input;
   }
   if (a.includes("maxcopell") || a.includes("api-ninja")) {
     return {
@@ -4173,8 +4200,23 @@ async function harvestZillowUrlsViaApifySearchForUrl(
   actor: string,
   token: string,
   label: string,
+  // city/state MUST be threaded through (2026-07-09): the default igolaizola
+  // actor is location-driven and ignores searchUrl entirely — empty strings
+  // here produced location=", " and 0 dataset items on every harvest (the
+  // fetch-unit-photos Zillow leg was silently dead).
+  city = "",
+  state = "",
 ): Promise<string[]> {
-  const input = buildZillowSearchActorInput(actor, "", "", searchUrl, maxItems);
+  const input = buildZillowSearchActorInput(
+    actor,
+    city,
+    state,
+    searchUrl,
+    maxItems,
+    label === "sold" ? "sold" : "for-sale",
+    options?.minBedrooms ?? null,
+    options?.streetAddress ?? null,
+  );
   const zillowDetailPattern = /^https?:\/\/(www\.)?zillow\.com\/homedetails\//i;
   try {
     const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
@@ -4228,7 +4270,7 @@ async function harvestZillowUrlsViaApifySearch(
     ? zillowStreetSearchUrl(street, city, state)
     : `https://www.zillow.com/${slug}/condos/`;
   const legs = [
-    harvestZillowUrlsViaApifySearchForUrl(forSaleUrl, forSaleMax, timeoutMs, options, actor, token, "for-sale"),
+    harvestZillowUrlsViaApifySearchForUrl(forSaleUrl, forSaleMax, timeoutMs, options, actor, token, "for-sale", city, state),
   ];
   if (includeSold && soldMax > 0) {
     legs.push(
@@ -4240,6 +4282,8 @@ async function harvestZillowUrlsViaApifySearch(
         actor,
         token,
         "sold",
+        city,
+        state,
       ),
     );
   }
@@ -39621,21 +39665,33 @@ Return ONLY compact JSON with this exact shape:
       // latency for them and let the circuit half-open probe recovery). The
       // stats feed the quota-blackout classification below so an all-429 run is
       // reported as an infrastructure outage, never as "no listings exist".
-      const searchApiSerpStats = { attempted: 0, rateLimited: 0 };
+      const searchApiSerpStats = { attempted: 0, rateLimited: 0, capped: 0 };
+      // Hard per-request SERP cap (2026-07-09): a final backstop under the
+      // early-stop below — no single fetch-unit-photos call may spend more
+      // than this many live SearchAPI queries (cache hits are free). The
+      // 2026-07-08 quota burnout measured 8,398 queries in ONE hour.
+      const maxSerpQueriesPerRequest = (() => {
+        const raw = Number(process.env.COMBO_DISCOVERY_MAX_SERP_QUERIES ?? 40);
+        return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 40;
+      })();
       const fetchDiscoverySerp = async (
         q: string,
       ): Promise<Array<{ link?: string; title?: string; snippet?: string }> | null> => {
         const cached = discoverySerpCache.get(q);
         if (cached) return cached;
+        if (searchApiSerpStats.attempted >= maxSerpQueriesPerRequest) {
+          searchApiSerpStats.capped += 1;
+          return null;
+        }
         searchApiSerpStats.attempted += 1;
         if (searchApiDiscoveryCircuit.isOpen()) {
           searchApiSerpStats.rateLimited += 1;
           return null;
         }
-        const resp = await fetch(
+        const resp = await runWithSearchApiSlot(() => fetch(
           `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(q)}&num=10&api_key=${searchApiKey}`,
           { signal: AbortSignal.timeout(COMBO_PHOTO_DISCOVERY_SEARCH_TIMEOUT_MS) },
-        );
+        ));
         if (resp.status === 429) {
           searchApiDiscoveryCircuit.record429();
           searchApiSerpStats.rateLimited += 1;
@@ -39652,20 +39708,50 @@ Return ONLY compact JSON with this exact shape:
         discoverySerpCache.remember(q, organic);
         return organic;
       };
+      // EARLY-STOP (2026-07-09): discovery used to fire the FULL ~25-query
+      // fan-out (names x cities x portals x sold variants) for every resort,
+      // even when the first few queries had already surfaced more candidates
+      // than the bounded loop will ever try (candidateLimit 6-10). Queries now
+      // run in small batches, priority order preserved (street-scoped queries
+      // are pushed first in each portal list), and stop once the pool holds
+      // ~3x the try limit. In bounded street-gated mode only ON-STREET
+      // candidates count toward the target, so cheap off-street noise can't
+      // starve the queries that find the real building.
+      const discoveryCandidateTarget = candidateLimit ? candidateLimit * 3 : 30;
+      const usefulCandidateCount = () => {
+        if (!(isBoundedDiscovery && suppliedStreetRoot)) return candidateUrls.length;
+        let n = 0;
+        for (const c of candidateUrls) {
+          if (listingStreetRoot(c.url) === suppliedStreetRoot) n += 1;
+        }
+        return n;
+      };
+      const enoughDiscoveryCandidates = () => usefulCandidateCount() >= discoveryCandidateTarget;
+      const DISCOVERY_SERP_BATCH = 4;
       const runDiscoveryQueries = async (queries: string[], pattern: RegExp, source: DiscoverySource) => {
-        await Promise.all(queries.map(async (q) => {
-          try {
-            const organic = await fetchDiscoverySerp(q);
-            if (!organic) return;
-            for (const r of organic) {
-              const link = String(r.link ?? "");
-              if (!pattern.test(link)) continue;
-              addCandidate(link, source, String(r.title ?? ""), String(r.snippet ?? ""));
-            }
-          } catch (e: any) {
-            console.warn(`[fetch-unit-photos] discovery search failed for "${q}": ${e.message}`);
+        const unique = Array.from(new Set(queries));
+        for (let i = 0; i < unique.length; i += DISCOVERY_SERP_BATCH) {
+          if (enoughDiscoveryCandidates()) {
+            console.log(
+              `[fetch-unit-photos] discovery early-stop (${usefulCandidateCount()} candidates >= ${discoveryCandidateTarget}); ` +
+              `skipping ${unique.length - i} remaining ${source} queries`,
+            );
+            return;
           }
-        }));
+          await Promise.all(unique.slice(i, i + DISCOVERY_SERP_BATCH).map(async (q) => {
+            try {
+              const organic = await fetchDiscoverySerp(q);
+              if (!organic) return;
+              for (const r of organic) {
+                const link = String(r.link ?? "");
+                if (!pattern.test(link)) continue;
+                addCandidate(link, source, String(r.title ?? ""), String(r.snippet ?? ""));
+              }
+            } catch (e: any) {
+              console.warn(`[fetch-unit-photos] discovery search failed for "${q}": ${e.message}`);
+            }
+          }));
+        }
       };
 
       const marketReconInput = {
@@ -39769,16 +39855,49 @@ Return ONLY compact JSON with this exact shape:
         bedroomHint: brHint,
       });
 
+      // Sold-sweep restructure (2026-07-09): the sold query list used to be
+      // fired FOUR times — once per portal pattern — quadrupling its SearchAPI
+      // spend for identical SERPs. One fetch per query now matches every
+      // portal's pattern against the same organic rows.
+      const SOLD_DISCOVERY_PATTERNS: Array<{ pattern: RegExp; source: DiscoverySource }> = [
+        { pattern: /zillow\.com\/homedetails\//i, source: "zillow" },
+        { pattern: /realtor\.com\/realestateandhomes-detail\//i, source: "realtor" },
+        { pattern: /redfin\.com\/.+\/home\/\d+/i, source: "redfin" },
+        { pattern: /homes\.com\/property\//i, source: "homes" },
+      ];
+      const runSoldDiscoveryQueries = async (): Promise<void> => {
+        const unique = Array.from(new Set(soldQueries));
+        for (let i = 0; i < unique.length; i += DISCOVERY_SERP_BATCH) {
+          if (enoughDiscoveryCandidates()) {
+            console.log(
+              `[fetch-unit-photos] discovery early-stop (${usefulCandidateCount()} candidates >= ${discoveryCandidateTarget}); ` +
+              `skipping ${unique.length - i} remaining sold queries`,
+            );
+            return;
+          }
+          await Promise.all(unique.slice(i, i + DISCOVERY_SERP_BATCH).map(async (q) => {
+            try {
+              const organic = await fetchDiscoverySerp(q);
+              if (!organic) return;
+              for (const r of organic) {
+                const link = String(r.link ?? "");
+                const matched = SOLD_DISCOVERY_PATTERNS.find(({ pattern }) => pattern.test(link));
+                if (!matched) continue;
+                addCandidate(link, matched.source, String(r.title ?? ""), String(r.snippet ?? ""));
+              }
+            } catch (e: any) {
+              console.warn(`[fetch-unit-photos] sold discovery search failed for "${q}": ${e.message}`);
+            }
+          }));
+        }
+      };
       const runSupplementalSearchApiDiscovery = async (): Promise<void> => {
         if (!searchApiKey) return;
         await Promise.all([
           runDiscoveryQueries(realtorQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
           runDiscoveryQueries(redfinQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
           runDiscoveryQueries(homesQueries, /homes\.com\/property\//i, "homes"),
-          runDiscoveryQueries(soldQueries, /zillow\.com\/homedetails\//i, "zillow"),
-          runDiscoveryQueries(soldQueries, /realtor\.com\/realestateandhomes-detail\//i, "realtor"),
-          runDiscoveryQueries(soldQueries, /redfin\.com\/.+\/home\/\d+/i, "redfin"),
-          runDiscoveryQueries(soldQueries, /homes\.com\/property\//i, "homes"),
+          runSoldDiscoveryQueries(),
         ]);
       };
 
