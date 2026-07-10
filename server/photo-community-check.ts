@@ -105,6 +105,12 @@ export type PhotoCommunityCheckRequest = {
   expectedCommunity?: string;
   /** Combined listing bedroom count (e.g. 6 for two 3BR units). */
   expectedListingBedrooms?: number;
+  /**
+   * Check ONLY the community folder photos (the preflight "are the current
+   * community photos correct?" button). Unit groups are dropped and the result
+   * is NOT persisted to the dashboard Community QA status.
+   */
+  communityOnly?: boolean;
   groups: CheckGroupInput[];
 };
 
@@ -196,6 +202,8 @@ export {
   isInteriorPhoto,
   pickInteriorPhotos,
   isStrongContradiction,
+  communityOnlyCheckRequest,
+  communityPhotosCorrectAnswer,
 } from "../shared/photo-community-check-logic";
 
 // ── Disk helpers ────────────────────────────────────────────────────────────
@@ -1104,7 +1112,9 @@ export async function runPhotoCommunityCheck(
   if (verdict === "pass") {
     summary = units.length >= 2
       ? `Confirmed: community folder and all ${units.length} units are the same community (${expectedCommunity || community?.identifiedCommunity || "verified"}).${bedroomHeadline}${sourceHeadline}`
-      : `Confirmed: community folder and unit photos are the same community.${bedroomHeadline}${sourceHeadline}`;
+      : units.length === 1
+      ? `Confirmed: community folder and unit photos are the same community.${bedroomHeadline}${sourceHeadline}`
+      : `Confirmed: the community folder photos are ${expectedCommunity || community?.identifiedCommunity || "the expected community"}.${bedroomHeadline}${sourceHeadline}`;
   } else if (hasFail) {
     summary = bedroomCoverage?.matchesListing === "no"
       ? `Problem found — bedroom photo coverage is incomplete (${bedroomCoverage.bedroomsFoundCombined}/${bedroomCoverage.expectedListingBedrooms} listing bedrooms). Review details below.`

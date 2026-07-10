@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
 import {
   communityNamesMatch,
   computeUnitVerdict,
@@ -6,6 +7,8 @@ import {
   isInteriorPhoto,
   pickInteriorPhotos,
   isStrongContradiction,
+  communityOnlyCheckRequest,
+  communityPhotosCorrectAnswer,
 } from "../shared/photo-community-check-logic";
 
 let passed = 0;
@@ -82,6 +85,109 @@ check("filterUnitOutliers keeps mismatched interior outliers",
   filterUnitOutliers([
     { id: "U1-2", caption: "Updated Kitchen", reason: "different kitchen finishes than other unit photos" },
   ]).length === 1);
+
+// ── communityOnlyCheckRequest (preflight "Check photos are correct") ─────────
+
+console.log("\nphoto-community-check: community-only request narrowing");
+
+const fullRequest = {
+  expectedCommunity: "Kamaole Beach Club",
+  expectedListingBedrooms: 4,
+  groups: [
+    { role: "community", folder: "kamaole-beach-club-community" },
+    { role: "unit", folder: "kamaole-unit-a" },
+    { role: "unit", folder: "kamaole-unit-b" },
+  ],
+};
+const narrowed = communityOnlyCheckRequest(fullRequest);
+check("communityOnlyCheckRequest keeps only the community group",
+  narrowed.groups.length === 1 && narrowed.groups[0].role === "community");
+check("communityOnlyCheckRequest keeps expectedCommunity",
+  narrowed.expectedCommunity === "Kamaole Beach Club");
+check("communityOnlyCheckRequest drops expectedListingBedrooms (bedroom coverage is a unit-leg concern)",
+  !("expectedListingBedrooms" in narrowed));
+check("communityOnlyCheckRequest yields no groups when the request has no community folder",
+  communityOnlyCheckRequest({ groups: [{ role: "unit", folder: "u" }] }).groups.length === 0);
+
+// ── communityPhotosCorrectAnswer (YES / NO / review headline) ────────────────
+
+console.log("\nphoto-community-check: community-photos yes/no answer");
+
+const yes = communityPhotosCorrectAnswer("Kamaole Beach Club", "pass", {
+  identifiedCommunity: "Kamaole Beach Club",
+  matchesExpected: "yes",
+  overallStatus: "verified",
+});
+check("positive identification → YES", yes.answer === "yes" && yes.headline.includes("YES") && yes.headline.includes("Kamaole Beach Club"));
+
+const yesWithWarnings = communityPhotosCorrectAnswer("Kamaole Beach Club", "warn", {
+  identifiedCommunity: "Kamaole Beach Club",
+  matchesExpected: "yes",
+  overallStatus: "likely",
+});
+check("positive identification with minor warnings stays YES (warnings render below)",
+  yesWithWarnings.answer === "yes");
+
+const noNamed = communityPhotosCorrectAnswer("Kamaole Beach Club", "fail", {
+  identifiedCommunity: "Maui Banyan",
+  matchesExpected: "no",
+  overallStatus: "mismatch",
+});
+check("mismatch naming a different resort → NO with the identified name",
+  noNamed.answer === "no" && noNamed.headline.includes("Maui Banyan") && noNamed.headline.includes("not Kamaole Beach Club"));
+
+const noGeneric = communityPhotosCorrectAnswer("Kamaole Beach Club", "fail", {
+  identifiedCommunity: "",
+  matchesExpected: "no",
+  overallStatus: "mismatch",
+});
+check("mismatch without an identified name → generic NO",
+  noGeneric.answer === "no" && noGeneric.headline.includes("do not match"));
+
+// A fail verdict whose identifiedCommunity is an ALIAS of the expected name
+// (e.g. an outlier photo failed the folder, not the identification) must not
+// claim "X, not X".
+const noAlias = communityPhotosCorrectAnswer("Regency at Poipu Kai", "fail", {
+  identifiedCommunity: "Poipu Kai Regency",
+  matchesExpected: "no",
+  overallStatus: "mismatch",
+});
+check("fail with an alias-equivalent identified name avoids the self-contradicting headline",
+  noAlias.answer === "no" && !noAlias.headline.includes("appear to be"));
+
+const unconfirmed = communityPhotosCorrectAnswer("Kamaole Beach Club", "warn", {
+  identifiedCommunity: "",
+  matchesExpected: "no",
+  overallStatus: "unconfirmed",
+});
+check("unconfirmed (no positive ID, no hard fail) → review",
+  unconfirmed.answer === "review" && unconfirmed.headline.toLowerCase().includes("could not"));
+
+check("missing community analysis → review",
+  communityPhotosCorrectAnswer("Kamaole Beach Club", "warn", null).answer === "review");
+
+check("empty expected community falls back to a readable phrase",
+  communityPhotosCorrectAnswer("", "pass", { identifiedCommunity: "X", matchesExpected: "yes" })
+    .headline.includes("the expected community"));
+
+// ── Source assertions: the wiring the above logic assumes ────────────────────
+
+console.log("\nphoto-community-check: source wiring assertions");
+
+const routesSource = readFileSync("server/routes.ts", "utf8");
+check("photo-community-check endpoint narrows communityOnly requests via communityOnlyCheckRequest",
+  routesSource.includes("communityOnlyCheckRequest(request)"));
+check("community-only results are NOT persisted over the dashboard Community QA status",
+  routesSource.includes("propertyId != null && !communityOnly"));
+
+const preflightPageSource = readFileSync("client/src/pages/builder-preflight.tsx", "utf8");
+check("preflight Community Photos card sends communityOnly: true",
+  preflightPageSource.includes("communityOnly: true"));
+check("preflight renders the yes/no verdict via communityPhotosCorrectAnswer",
+  preflightPageSource.includes("communityPhotosCorrectAnswer("));
+check("re-pull button is renamed to 'Find new community photos'",
+  preflightPageSource.includes("Find new community photos")
+  && !preflightPageSource.includes("Re-pull community photos</>"));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

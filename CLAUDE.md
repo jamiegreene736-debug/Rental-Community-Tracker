@@ -43,6 +43,31 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 (preflight Community Photos: "Check photos are correct" YES/NO button + re-pull renamed):
+  Operator asked for a button on the preflight Community Photos card that has Claude vision scan the
+  CURRENT community-folder photos and answer plainly in the UI "yes, these are X community / no they're
+  not", and to rename "Re-pull community photos" → "Find new community photos" (its real function).
+  SHIPPED (`claude/elegant-haibt-cc4fe2`): the EXISTING photo-community-check engine (Google Lens per
+  photo + Claude vision — the same community leg the Photos-tab / Community Match checks run) gains a
+  `communityOnly: true` mode on POST /api/builder/photo-community-check — the server builds groups from
+  propertyId as usual, then narrows to the community group via pure `communityOnlyCheckRequest`
+  (shared/photo-community-check-logic.ts; also DROPS expectedListingBedrooms so a community-only run
+  doesn't demand the ANTHROPIC key — bedroom coverage is a unit-leg concern). LOAD-BEARING: a
+  community-only result is NOT persisted (`propertyId != null && !communityOnly` guard before
+  savePhotoCommunityCheckResult) — it has no unit legs, so persisting would overwrite the dashboard
+  Community QA status (derived from FULL checks) with a units-free "pass". UI (builder-preflight.tsx):
+  new "Check photos are correct" button beside the renamed "Find new community photos" on the Community
+  Photos card; the verdict renders via pure `communityPhotosCorrectAnswer` — green "YES — the photos in
+  this folder are of X" / red "NO — these photos appear to be Y, not X" (alias-safe: an identified name
+  that alias-matches the expected community never renders a self-contradicting "X, not X") / amber
+  review — plus identified-as, N of M photos checked, and a flagged-photo list (the synthetic
+  "pre-screen" dHash outlier is filtered from that list). Engine pass-summary for a 0-unit run no longer
+  claims "unit photos" match. Verified: photo-community-check 30/0 (incl. source assertions on the
+  routes guard + the rename), full `npm test` exit 0, build clean, `npm run check` 338 = baseline
+  (0 new); UI verified against the BUILT bundle (static SPA server on dist/public + mocked engine
+  responses — YES, NO, and error states all render). Could NOT live-smoke the Lens/vision legs (no keys
+  in session) — post-deploy: open any preflight page and click "Check photos are correct".
+
 - 2026-07-10 ("Check photo community" → also verify each unit's SOURCE PAGE, not just its photos):
   Operator asked for a button (already exists: "🔎 Check photo community" on the Photos tab) that
   confirms Unit A + Unit B are in the same community as the community folder by scanning their photos
