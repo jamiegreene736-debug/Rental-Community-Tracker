@@ -7798,6 +7798,9 @@ export async function registerRoutes(
         return res.status(400).json({ error: "guestyListingId (non-empty string) required" });
       }
       const row = await storage.upsertGuestyPropertyMap(propertyId, guestyListingId.trim());
+      // New mapping → deliver any in-system saved amenities to the listing
+      // automatically (fire-and-forget, add-only union; no-op when none saved).
+      void autoPushSavedAmenitiesForProperty(propertyId, guestyListingId.trim(), "guesty-property-map");
       res.json(row);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to upsert Guesty property map", message: err.message });
@@ -23315,6 +23318,93 @@ Requirements:
     }
   });
 
+  // ── Amenity Guesty-sync helpers (scan route + auto-push hooks) ─────────────
+  // ONE implementation of the ADD-ONLY Guesty amenity sync: union the app's
+  // amenity keys with the listing's CURRENT Guesty amenities, then push through
+  // the push-amenities route over loopback (127.0.0.1 bypasses the auth gate)
+  // so the canonical-name translation + read-back verification stay in one
+  // place. push-amenities is a full PUT-replace, so the union is what honors
+  // the operator's "never remove" rule — an amenity curated directly in Guesty
+  // is preserved, never dropped.
+  async function pushAmenityKeysToGuestyListing(
+    listingId: string,
+    amenityKeys: string[],
+  ): Promise<{ synced: boolean; saved?: number; error?: string }> {
+    try {
+      const base = `http://127.0.0.1:${process.env.PORT || "5000"}`;
+      // Current Guesty set (best-effort; if it fails we push the app set only).
+      let existingGuestyAmenities: string[] = [];
+      try {
+        const curRes = await fetch(`${base}/api/builder/guesty-amenities?listingId=${encodeURIComponent(listingId)}`);
+        const curData = await curRes.json().catch(() => null) as any;
+        if (curRes.ok && curData) {
+          existingGuestyAmenities = [
+            ...(Array.isArray(curData.amenities) ? curData.amenities : []),
+            ...(Array.isArray(curData.otherAmenities) ? curData.otherAmenities : []),
+          ].filter((s: unknown): s is string => typeof s === "string" && s.length > 0);
+        }
+      } catch { /* current-set read failed — proceed with the app set only */ }
+      // Send both the label AND the key for each app amenity so the route's
+      // canonical resolver (byNorm on labels + aliasMap on keys) has the best
+      // chance to map each one, PLUS the listing's existing canonical names
+      // so they survive the replace. Unmatched strings are ignored by Guesty.
+      const amenityInputs = Array.from(new Set([
+        ...amenityKeys.flatMap((k) => [getAmenityLabel(k), k]),
+        ...existingGuestyAmenities,
+      ]));
+      const pushRes = await fetch(`${base}/api/builder/push-amenities`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listingId, amenities: amenityInputs }),
+      });
+      const pushData = await pushRes.json().catch(() => null) as any;
+      if (pushRes.ok && pushData?.success) {
+        return { synced: true, saved: pushData.saved ?? undefined };
+      }
+      return { synced: false, error: pushData?.error ?? `HTTP ${pushRes.status}` };
+    } catch (e: any) {
+      return { synced: false, error: e?.message ?? "Guesty sync failed" };
+    }
+  }
+
+  // Auto-push the IN-SYSTEM saved amenity selection to Guesty the moment a
+  // property↔listing mapping is established (listing created via the builder,
+  // dashboard "Connect to Guesty", Guesty import). This is what makes the
+  // scan → save → push chain fully automatic for drafts that were scanned
+  // BEFORE their Guesty listing existed (bulk combo drafts, pre-publish scans):
+  // publish/connect the listing and the saved amenities land in Guesty with no
+  // operator click. Fire-and-forget at every call site; add-only via the union
+  // helper above; a short cooldown absorbs the create flow calling
+  // import-guesty-listing + schedule-sync back-to-back for the same mapping.
+  const amenityAutoPushRecent = new Map<number, { listingId: string; at: number }>();
+  const AMENITY_AUTO_PUSH_COOLDOWN_MS = 2 * 60 * 1000;
+  async function autoPushSavedAmenitiesForProperty(
+    propertyId: number,
+    guestyListingId: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      if (!Number.isFinite(propertyId) || !guestyListingId) return;
+      const now = Date.now();
+      const recent = amenityAutoPushRecent.get(propertyId);
+      if (recent && recent.listingId === guestyListingId && now - recent.at < AMENITY_AUTO_PUSH_COOLDOWN_MS) return;
+      const saved = await storage.getPropertyAmenities(propertyId).catch(() => undefined);
+      const keys = saved && Array.isArray(saved.amenityKeys)
+        ? (saved.amenityKeys as string[]).filter((k) => AMENITY_CATALOG_KEYS.has(k))
+        : [];
+      if (keys.length === 0) return; // nothing saved in-system → nothing to push
+      amenityAutoPushRecent.set(propertyId, { listingId: guestyListingId, at: now });
+      const result = await pushAmenityKeysToGuestyListing(guestyListingId, keys);
+      if (result.synced) {
+        console.log(`[amenity-auto-push] ${reason}: pushed ${keys.length} saved amenities for property ${propertyId} → listing ${guestyListingId} (${result.saved ?? 0} confirmed)`);
+      } else {
+        console.warn(`[amenity-auto-push] ${reason}: push failed for property ${propertyId} → listing ${guestyListingId}: ${result.error}`);
+      }
+    } catch (e: any) {
+      console.warn(`[amenity-auto-push] ${reason}: error for property ${propertyId}:`, e?.message ?? e);
+    }
+  }
+
   // POST /api/builder/push-amenities — writes canonical amenity names to Guesty's
   // properties-api, which drives the Popular-Amenities checkboxes in the UI.
   // Body: { listingId, amenities: string[] } where amenities are Guesty canonical
@@ -23595,10 +23685,11 @@ Requirements:
         scannedAt: new Date(),
       });
 
-      // Sync to Guesty only when a listing is mapped. Reuse the existing
-      // push-amenities route over loopback (127.0.0.1 bypasses the auth gate)
-      // so the canonical-name translation + read-back verification stay in ONE
-      // place. Best-effort — a push failure never fails the scan/save.
+      // Sync to Guesty only when a listing is mapped (client-selected listing or
+      // the guesty_property_map row). ADD-ONLY via the shared union helper.
+      // Best-effort — a push failure never fails the scan/save. When NO listing
+      // exists yet, the auto-push-on-mapping hook (autoPushSavedAmenitiesForProperty)
+      // delivers this saved set the moment the listing is created/connected.
       let guesty: { synced: boolean; listingId: string | null; saved?: number; error?: string } = {
         synced: false,
         listingId: null,
@@ -23606,47 +23697,12 @@ Requirements:
       const listingId = body.listingId || (await storage.getGuestyListingId(propertyId).catch(() => null));
       if (listingId) {
         guesty.listingId = listingId;
-        try {
-          const base = `http://127.0.0.1:${process.env.PORT || "5000"}`;
-          // ADD-ONLY sync: push-amenities does a full PUT-replace of the Guesty
-          // amenity array, so to honor the operator's "never remove" rule we
-          // UNION the scanned set with the listing's CURRENT Guesty amenities —
-          // an amenity curated directly in Guesty is preserved, never dropped.
-          // (Fetch is best-effort; if it fails we fall back to the app set.)
-          let existingGuestyAmenities: string[] = [];
-          try {
-            const curRes = await fetch(`${base}/api/builder/guesty-amenities?listingId=${encodeURIComponent(listingId)}`);
-            const curData = await curRes.json().catch(() => null) as any;
-            if (curRes.ok && curData) {
-              existingGuestyAmenities = [
-                ...(Array.isArray(curData.amenities) ? curData.amenities : []),
-                ...(Array.isArray(curData.otherAmenities) ? curData.otherAmenities : []),
-              ].filter((s: unknown): s is string => typeof s === "string" && s.length > 0);
-            }
-          } catch { /* current-set read failed — proceed with the app set only */ }
-          // Send both the label AND the key for each app amenity so the route's
-          // canonical resolver (byNorm on labels + aliasMap on keys) has the best
-          // chance to map each one, PLUS the listing's existing canonical names
-          // so they survive the replace. Unmatched strings are ignored by Guesty.
-          const amenityInputs = Array.from(new Set([
-            ...scan.next.flatMap((k) => [getAmenityLabel(k), k]),
-            ...existingGuestyAmenities,
-          ]));
-          const pushRes = await fetch(`${base}/api/builder/push-amenities`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ listingId, amenities: amenityInputs }),
-          });
-          const pushData = await pushRes.json().catch(() => null) as any;
-          if (pushRes.ok && pushData?.success) {
-            guesty.synced = true;
-            guesty.saved = pushData.saved ?? undefined;
-          } else {
-            guesty.error = pushData?.error ?? `HTTP ${pushRes.status}`;
-          }
-        } catch (e: any) {
-          guesty.error = e?.message ?? "Guesty sync failed";
-        }
+        const push = await pushAmenityKeysToGuestyListing(listingId, scan.next);
+        guesty.synced = push.synced;
+        if (push.saved != null) guesty.saved = push.saved;
+        if (push.error) guesty.error = push.error;
+        // A successful scan push covers the mapping hooks' job for this listing.
+        if (push.synced) amenityAutoPushRecent.set(propertyId, { listingId, at: Date.now() });
       }
 
       return res.json({ ...scan, ok: true, guesty });
@@ -30314,6 +30370,10 @@ Return ONLY compact JSON with this exact shape:
     }
 
     await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
+    // Listing just created/linked via the builder → auto-push the in-system
+    // saved amenity selection (photo scan + area research) to it. This closes
+    // the automation loop for drafts scanned BEFORE their listing existed.
+    void autoPushSavedAmenitiesForProperty(propertyId, guestyListingId, "schedule-sync");
     const delayMs = Math.min(delayMinutes, 180) * 60 * 1000;
     setTimeout(() => {
       runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 }).catch((err) => {
@@ -30331,6 +30391,7 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
+      void autoPushSavedAmenitiesForProperty(propertyId, guestyListingId, "sync-now");
       const summary = await runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 });
       res.json({ ok: !summary.startsWith("skipped:"), status: summary.startsWith("skipped:") ? "skipped" : "ok", summary });
     } catch (err: any) {
@@ -38905,12 +38966,14 @@ Return ONLY compact JSON with this exact shape:
     }
 
     // ── Amenity detection (fresh drafts) ─────────────────────────────────────
-    // Scan the just-persisted community + unit photos for amenities and save the
-    // set in-system (propertyId = -draftId; no Guesty listing exists yet, so
-    // there's nothing to sync — the operator pushes amenities when the listing
-    // goes live). NON-CRITICAL: any failure is logged and the draft still saves
-    // (the scan itself fills the baseline even with no vision key). Disable with
-    // COMBO_AMENITY_SCAN=0.
+    // Scan the just-persisted community + unit photos for amenities (plus the
+    // surrounding-area web research for "nearby" amenities) and save the set
+    // in-system (propertyId = -draftId). No Guesty listing exists yet at this
+    // point — the saved set is pushed to Guesty AUTOMATICALLY the moment the
+    // listing is created/connected (autoPushSavedAmenitiesForProperty on the
+    // mapping routes). NON-CRITICAL: any failure is logged and the draft still
+    // saves (the scan itself fills the baseline even with no vision key).
+    // Disable with COMBO_AMENITY_SCAN=0.
     if (!reusedExistingDraft && process.env.COMBO_AMENITY_SCAN !== "0") {
       try {
         const amenityScan = await runBulkComboListingStep(job, item, "amenities", "Detecting amenities from photos", () =>
@@ -38924,9 +38987,12 @@ Return ONLY compact JSON with this exact shape:
             photosScanned: amenityScan.photosScanned,
             scannedAt: new Date(),
           });
+          const nearbyNote = amenityScan.location?.researched
+            ? ` + ${amenityScan.location.detected.length} nearby from area research`
+            : "";
           await queueEvent("bulk-combo-listing", job.id, "amenities-detected",
-            `Amenities filled — ${amenityScan.next.length} total (${amenityScan.added.length} detected from photos)${amenityScan.warning ? ` · ${amenityScan.warning}` : ""}`,
-            { itemKey: item.id, level: "info", meta: { total: amenityScan.next.length, added: amenityScan.added } });
+            `Amenities filled — ${amenityScan.next.length} total (${amenityScan.added.length} detected from photos${nearbyNote}); pushes to Guesty automatically when the listing goes live${amenityScan.warning ? ` · ${amenityScan.warning}` : ""}`,
+            { itemKey: item.id, level: "info", meta: { total: amenityScan.next.length, added: amenityScan.added, nearby: amenityScan.location?.detected ?? [] } });
         }
       } catch (e: any) {
         await queueEvent("bulk-combo-listing", job.id, "amenities-infra",
@@ -41160,6 +41226,10 @@ Return ONLY compact JSON with this exact shape:
         : null;
       if (requestedPropertyId) {
         const mapping = await storage.upsertGuestyPropertyMap(requestedPropertyId, guestyListingId);
+        // Fresh mapping → auto-deliver the in-system saved amenities (the
+        // builder create flow calls schedule-sync right after this; the
+        // cooldown inside the helper absorbs the duplicate).
+        void autoPushSavedAmenitiesForProperty(requestedPropertyId, guestyListingId, "guesty-import");
         const staleRows = existingMaps.filter(
           (row) => row.guestyListingId === guestyListingId && row.propertyId < 0 && row.propertyId !== requestedPropertyId,
         );
@@ -41215,6 +41285,7 @@ Return ONLY compact JSON with this exact shape:
       const draft = await storage.createCommunityDraft(parsed.data);
       const photoBackfill = await persistImportedGuestyDraftPhotos(draft, listing);
       const mapping = await storage.upsertGuestyPropertyMap(-draft.id, guestyListingId);
+      void autoPushSavedAmenitiesForProperty(-draft.id, guestyListingId, "guesty-import-create");
 
       const staleRows = existingMaps.filter(
         (row) => row.guestyListingId === guestyListingId && row.propertyId < 0 && row.propertyId !== -draft.id,
