@@ -1038,8 +1038,16 @@ export default function BuilderPreflight() {
       })
     : null;
 
-  const handleScrapePhotosForUnit = async (unitIndex: 0 | 1, unit: { id: string; bedrooms: number; photos?: { url: string }[]; photoFolder?: string }) => {
+  const handleScrapePhotosForUnit = async (
+    unitIndex: 0 | 1,
+    unit: { id: string; bedrooms: number; photos?: { url: string }[]; photoFolder?: string },
+    opts?: { findNewSource?: boolean },
+  ) => {
     if (id >= 0 || !property) return; // promoted drafts only
+    // "Find new photos": discovery for a DIFFERENT source listing — the current
+    // source + sibling sources go into skipUrls and the saved-listing rescrape is
+    // skipped, so the job can only land a gallery from a NEW listing page.
+    const findNewSource = opts?.findNewSource === true;
     const draftId = -id;
     const { street: parsedStreet, city, state } = parsePropertyAddress(property.address);
     const street = inferCommunityStreetAddress({
@@ -1076,7 +1084,7 @@ export default function BuilderPreflight() {
       )).filter((u): u is string => !!u);
       const skipUrls = Array.from(new Set([
         ...(skippedUrlsByUnit[unit.id] ?? []),
-        ...(replacingExistingPhotos && currentSourceUrl ? [currentSourceUrl] : []),
+        ...((replacingExistingPhotos || findNewSource) && currentSourceUrl ? [currentSourceUrl] : []),
         ...siblingSourceUrls,
       ]));
       const startPayload = {
@@ -1095,7 +1103,10 @@ export default function BuilderPreflight() {
         // "Re-pull all photos" rescrapes THIS unit's own saved listing first
         // (full gallery), instead of discovering a different listing. Discovery
         // only runs as a fallback if the saved source is off-market / too thin.
-        rescrapeSourceUrl: replacingExistingPhotos && currentSourceUrl ? currentSourceUrl : undefined,
+        // "Find new photos" (findNewSource) does the opposite: no rescrape of the
+        // saved listing — discovery hunts a NEW source (current one excluded).
+        rescrapeSourceUrl: !findNewSource && replacingExistingPhotos && currentSourceUrl ? currentSourceUrl : undefined,
+        findNewSource,
       };
       photoFetchStartPayloadByUnit.current[unit.id] = startPayload;
       const resp = await apiRequest("POST", "/api/preflight/photo-fetch-jobs", startPayload);
@@ -1980,8 +1991,11 @@ export default function BuilderPreflight() {
                     <strong>{property.complexName}</strong>. The Platform Check
                     can use the photos on file when you click <strong>Run check</strong>{" "}
                     below. Use <strong>Re-pull all photos</strong> to rescrape this
-                    unit&apos;s own listing and refresh its full gallery. To swap in a
-                    different unit entirely, use <strong>Replace with URL</strong> (paste a listing you chose) or <strong>Find / Replace a Unit</strong> (automatic search).
+                    unit&apos;s own listing and refresh its full gallery — if the source
+                    still has the same photos it reports &ldquo;already current&rdquo;. Use{" "}
+                    <strong>Find new photos</strong> to search live for a{" "}
+                    <em>different</em> source listing and replace the gallery from it.
+                    To swap in a different unit entirely, use <strong>Replace with URL</strong> (paste a listing you chose) or <strong>Find / Replace a Unit</strong> (automatic search).
                   </p>
                 );
               }
@@ -2049,6 +2063,19 @@ export default function BuilderPreflight() {
                         <><Search className="h-3 w-3 mr-1" /> Find Photos</>
                       )}
                     </Button>
+                    {folderHasPhotos && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleScrapePhotosForUnit(i === 0 ? 0 : 1, unit as unknown as Parameters<typeof handleScrapePhotosForUnit>[1], { findNewSource: true })}
+                        disabled={isScrapingThisUnit}
+                        className="h-8 text-xs flex-shrink-0"
+                        data-testid={`button-find-new-photos-${unit.id}`}
+                        title="Search live for a DIFFERENT listing of this unit size at this community (the current source is excluded, caches bypassed) and replace the gallery from that new source. Keeps the current gallery if nothing better is found."
+                      >
+                        <Search className="h-3 w-3 mr-1" /> Find new photos
+                      </Button>
+                    )}
                     {folderHasPhotos && (
                       <Button
                         size="sm"

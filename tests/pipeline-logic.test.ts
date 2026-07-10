@@ -333,10 +333,15 @@ assert.match(
 // allowance (8,398 queries in one hour) and LOSING already-won galleries.
 // Wiring guards; the cache/circuit semantics themselves are unit-tested in
 // tests/discovery-cache.test.ts + tests/searchapi-budget.test.ts.
+// 2026-07-10: the cache READ is now gated by the operator nocache bypass
+// (bypassDiscoveryCaches) — a deliberate preflight "re-pull"/"find new photos"
+// click must hit the live portals. Bulk-combo never sets nocache, so its
+// budget/keep-better protections are unchanged; tests/discovery-cache.test.ts
+// locks the bypass wiring from the other side.
 assert.match(
   routesSource,
-  /const cachedScrape = listingScrapeCache\.get\(clusterKey\);/,
-  "the discovery loop must consult the keep-better scrape cache before re-scraping a candidate",
+  /const cachedScrape = bypassDiscoveryCaches \? null : listingScrapeCache\.get\(clusterKey\);/,
+  "the discovery loop must consult the keep-better scrape cache before re-scraping a candidate (skippable only via the operator nocache bypass)",
 );
 assert.match(
   routesSource,
@@ -350,8 +355,8 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /const cached = discoverySerpCache\.get\(q\);[\s\S]{0,600}searchApiDiscoveryCircuit\.isOpen\(\)[\s\S]{0,900}searchApiDiscoveryCircuit\.record429\(\);[\s\S]{0,900}discoverySerpCache\.remember\(q, organic\);/,
-  "discovery SERP queries must go through the shared cache + 429 circuit wrapper",
+  /const cached = bypassDiscoveryCaches \? null : discoverySerpCache\.get\(q\);[\s\S]{0,600}searchApiDiscoveryCircuit\.isOpen\(\)[\s\S]{0,900}searchApiDiscoveryCircuit\.record429\(\);[\s\S]{0,900}discoverySerpCache\.remember\(q, organic\);/,
+  "discovery SERP queries must go through the shared cache (read skippable only via the operator nocache bypass) + 429 circuit wrapper",
 );
 assert.match(
   routesSource,
@@ -603,10 +608,13 @@ assert.match(
 // operator wants the full original gallery, not a discovery wander to a
 // different/wrong-community listing). Safe because the Redfin comp-carousel
 // isolation below guarantees the rescrape returns only the subject listing.
+// 2026-07-10: the operator "Find new photos" mode (findNewSource) deliberately
+// SKIPS the own-source rescrape — discovery hunts a NEW listing with the current
+// source in skipUrls. Plain Re-pull keeps rescraping the saved source first.
 assert.match(
   preflightSource,
-  /rescrapeSourceUrl: replacingExistingPhotos && currentSourceUrl/,
-  "preflight Re-pull all photos must rescrape the unit's own saved source first",
+  /rescrapeSourceUrl: !findNewSource && replacingExistingPhotos && currentSourceUrl/,
+  "preflight Re-pull all photos must rescrape the unit's own saved source first (except in find-new-source mode)",
 );
 assert.match(
   preflightJobsSource,

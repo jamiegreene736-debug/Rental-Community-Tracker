@@ -502,6 +502,17 @@ export type StartPreflightPhotoFetchInput = {
    * land a usable gallery instead of saving nothing.
    */
   rescrapeSourceUrl?: string;
+  /**
+   * "Find new photos": skip the saved-listing rescrape entirely and run
+   * DISCOVERY for a DIFFERENT source listing even though the unit already has
+   * photos (the caller puts the current source + sibling sources in skipUrls so
+   * the same listing can never be re-picked). Discovery stays exact-bedroom in
+   * this mode — a wrong-BR representative gallery must never replace a real
+   * gallery. On success the new gallery replaces the old one and _source.json
+   * is re-stamped by persist-photos; if nothing qualifying is found, the
+   * existing gallery is kept.
+   */
+  findNewSource?: boolean;
 };
 
 export function startPreflightPhotoFetchJob(input: StartPreflightPhotoFetchInput): PreflightPhotoFetchJob {
@@ -540,10 +551,15 @@ async function runPreflightPhotoFetchJob(
   activePhotoFetchJobIds.add(job.id);
   const base = loopbackBaseUrl();
   const replacingExistingPhotos = input.replacingExistingPhotos === true;
-  const rescrapeSourceUrl = typeof input.rescrapeSourceUrl === "string" && /^https?:\/\//i.test(input.rescrapeSourceUrl)
+  const findNewSource = input.findNewSource === true;
+  const rescrapeSourceUrl = !findNewSource
+    && typeof input.rescrapeSourceUrl === "string" && /^https?:\/\//i.test(input.rescrapeSourceUrl)
     ? input.rescrapeSourceUrl.trim()
     : null;
-  const attempts = preflightPhotoDiscoveryAttempts(input.bedrooms, replacingExistingPhotos);
+  // Find-new mode keeps discovery EXACT-bedroom (drops the relaxed "any" rung):
+  // it replaces a real gallery, so a wrong-BR representative must never win.
+  const attempts = preflightPhotoDiscoveryAttempts(input.bedrooms, replacingExistingPhotos)
+    .filter((a) => !findNewSource || a.bedrooms !== "any");
   let reservedProof: UnitPhotoResolverProof | null = null;
   try {
     touchPhotoJob(job, {
@@ -590,6 +606,8 @@ async function runPreflightPhotoFetchJob(
           // it fails soft to the discovery loop below (current behavior). The
           // sidecar is inert/fast when the worker is offline. See LB #45.
           useSidecar: true,
+          // Operator-initiated: never serve a cached scrape for a deliberate re-pull.
+          nocache: true,
         }, 300_000);
         lastNote = typeof fetchData?.note === "string" ? fetchData.note : lastNote;
         const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
@@ -622,9 +640,11 @@ async function runPreflightPhotoFetchJob(
     // supply at least MIN_INDEPENDENT_UNIT_PHOTOS usable photos (or there's no saved
     // source URL at all) we KEEP the existing gallery rather than silently
     // substituting a DIFFERENT listing's photos (which is exactly what this discovery
-    // loop does). Discovery still runs for "Find Photos" on an EMPTY unit, which is
-    // the only flow through this handler that passes replacingExistingPhotos=false.
-    const allowDiscoveryFallback = !replacingExistingPhotos;
+    // loop does). Discovery runs for "Find Photos" on an EMPTY unit AND for the
+    // operator's explicit "Find new photos" (findNewSource) — there, substituting a
+    // different listing is the point, and skipUrls carries the current source so the
+    // same listing can't be re-picked.
+    const allowDiscoveryFallback = !replacingExistingPhotos || findNewSource;
     for (let i = 0; allowDiscoveryFallback && photos.length === 0 && i < attempts.length; i += 1) {
       const attempt = attempts[i];
       touchPhotoJob(job, {
@@ -642,6 +662,9 @@ async function runPreflightPhotoFetchJob(
         skipUrls: Array.from(triedUrls),
         skipFirst: triedUrls.size === 0 && replacingExistingPhotos ? (input.skipFirst ?? 1) : 0,
         maxCandidates: attempt.maxCandidates,
+        // Operator-initiated: bypass the discovery cache reads (SERP + scrape) so a
+        // deliberate retry hits the live portals instead of a day-old cached result.
+        nocache: true,
       }, 120_000);
       lastNote = typeof fetchData?.note === "string" ? fetchData.note : undefined;
       const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
@@ -666,7 +689,13 @@ async function runPreflightPhotoFetchJob(
         proof: nextProof,
         diagnostic: lastDiagnostic,
       });
-      if (nextPhotos.length > 0 && nextProof.status !== "rejected") {
+      // Find-new mode replaces a REAL gallery, and persist-photos replaces the
+      // folder BEFORE the post-persist MIN check — so a thin discovery result
+      // must be rejected HERE (falls through to the next attempt) or it would
+      // clobber the existing gallery and then fail. Empty-unit discovery keeps
+      // the old >0 acceptance (any photos beat none).
+      const minAcceptable = findNewSource ? MIN_INDEPENDENT_UNIT_PHOTOS : 1;
+      if (nextPhotos.length >= minAcceptable && nextProof.status !== "rejected") {
         photos = nextPhotos;
         sourceUrl = nextSourceUrl;
         break;
@@ -683,7 +712,9 @@ async function runPreflightPhotoFetchJob(
       // listing — the discovery loop above is gated off — so the unit's existing
       // gallery is left untouched (we never reach persist) and the message says so.
       const replaceOnlyFailure = replacingExistingPhotos
-        ? (rescrapeSourceUrl
+        ? (findNewSource
+            ? `Couldn't find a NEW ${input.bedrooms}BR source listing with usable photos at ${input.communityName} (the current source is excluded from the search)${lastNote ? ` — ${lastNote}` : ""}. Kept the existing gallery and source.`
+            : rescrapeSourceUrl
             ? `This unit's saved listing didn't return at least ${MIN_INDEPENDENT_UNIT_PHOTOS} usable photos${lastNote ? ` — ${lastNote}` : ""}. Kept the existing gallery; no substitute listing was pulled.`
             : `This unit has no saved source listing to re-pull from. Kept the existing gallery — set a source under “Photo Sources” to refresh it.`)
         : null;
