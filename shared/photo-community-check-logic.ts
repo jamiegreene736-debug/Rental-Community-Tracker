@@ -142,3 +142,76 @@ export function isCommunityExteriorInUnitGallery(caption?: string, reason?: stri
 export function filterUnitOutliers(outliers: FlaggedPhoto[]): FlaggedPhoto[] {
   return outliers.filter((o) => !isCommunityExteriorInUnitGallery(o.caption, o.reason));
 }
+
+// ── Community-only check (preflight "are the current community photos correct?") ──
+
+/**
+ * Narrow a full photo-community-check request to the COMMUNITY folder group
+ * only. Unit groups are dropped, and so is `expectedListingBedrooms` — bedroom
+ * coverage is a unit-leg concern, and leaving it set would make the engine
+ * demand an ANTHROPIC key even though a community-only run can complete on
+ * Google Lens alone.
+ */
+export function communityOnlyCheckRequest<
+  G extends { role?: string },
+  R extends { expectedCommunity?: string; expectedListingBedrooms?: number; groups: G[] },
+>(request: R): { expectedCommunity?: string; groups: G[] } {
+  const groups = Array.isArray(request.groups) ? request.groups : [];
+  return {
+    expectedCommunity: request.expectedCommunity,
+    groups: groups.filter((g) => g?.role === "community"),
+  };
+}
+
+export type CommunityPhotosAnswer = {
+  /** The operator-facing answer: yes = photos are the community, no = they are not, review = could not confirm. */
+  answer: "yes" | "no" | "review";
+  headline: string;
+};
+
+/**
+ * Map a community-only check result to the glanceable YES / NO / review answer
+ * the preflight Community Photos card renders. Mirrors the engine's own
+ * severity rules: a hard `fail` verdict (mismatch / different place) is a NO;
+ * a positive identification of the expected community is a YES even when
+ * minor warnings exist (those render as flagged items below the headline);
+ * everything else — unconfirmed, likely, missing analysis — is a review.
+ */
+export function communityPhotosCorrectAnswer(
+  expectedCommunity: string,
+  verdict: "pass" | "warn" | "fail",
+  community: {
+    identifiedCommunity?: string;
+    matchesExpected?: "yes" | "no";
+    overallStatus?: string;
+  } | null | undefined,
+): CommunityPhotosAnswer {
+  const expected = expectedCommunity.trim() || "the expected community";
+  if (!community) {
+    return {
+      answer: "review",
+      headline: "Could not analyze the community folder photos — run the check again.",
+    };
+  }
+  if (verdict === "fail") {
+    const identified = (community.identifiedCommunity ?? "").trim();
+    const namesDiffer =
+      community.matchesExpected === "no" && identified && !communityNamesMatch(identified, expected);
+    return {
+      answer: "no",
+      headline: namesDiffer
+        ? `NO — these photos appear to be ${identified}, not ${expected}.`
+        : `NO — some photos in this folder do not match ${expected}.`,
+    };
+  }
+  if (community.matchesExpected === "yes") {
+    return {
+      answer: "yes",
+      headline: `YES — the photos in this folder are of ${expected}.`,
+    };
+  }
+  return {
+    answer: "review",
+    headline: `Could not fully confirm these photos are ${expected} — review recommended.`,
+  };
+}

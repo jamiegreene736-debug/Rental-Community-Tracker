@@ -34,6 +34,7 @@ import {
 } from "@shared/community-addresses";
 import { mergeUnitVerdict, DEEP_PHOTO_MIN } from "@shared/preflight-verdict";
 import { confirmCommunityLocation, type LocationConfirmation } from "@shared/photo-location-confirmation";
+import { communityPhotosCorrectAnswer } from "@shared/photo-community-check-logic";
 
 type PreflightPhotoFetchJob = {
   id: string;
@@ -448,6 +449,7 @@ type CommunityMatchSourcePage = {
   reason: string;
   unreadable?: boolean;
 };
+type CommunityMatchFlaggedPhoto = { id: string; caption?: string; reason: string };
 type CommunityMatchResult = {
   ok: boolean;
   verdict: "pass" | "warn" | "fail";
@@ -460,6 +462,12 @@ type CommunityMatchResult = {
     identifiedCommunity: string;
     matchesExpected: "yes" | "no";
     overallStatus?: string;
+    photosChecked?: number;
+    photosTotal?: number;
+    matchReason?: string;
+    recommendation?: string;
+    outliers?: CommunityMatchFlaggedPhoto[];
+    junk?: CommunityMatchFlaggedPhoto[];
   } | null;
   units: Array<{ label: string; sameAsCommunity: "yes" | "no"; reason: string }>;
   sourcePages?: CommunityMatchSourcePage[];
@@ -544,6 +552,41 @@ export default function BuilderPreflight() {
       setCommunityMatchError(e?.message ?? String(e));
     } finally {
       setCommunityMatchRunning(false);
+    }
+  };
+
+  // Community Photos card: "are the CURRENT community folder photos actually of
+  // this community?" — same engine as the Community Match card but scoped to the
+  // community folder only ({ communityOnly: true }); the server never persists a
+  // community-only result over the dashboard Community QA status.
+  const [communityPhotosCheckRunning, setCommunityPhotosCheckRunning] = useState(false);
+  const [communityPhotosCheckResult, setCommunityPhotosCheckResult] = useState<CommunityMatchResult | null>(null);
+  const [communityPhotosCheckError, setCommunityPhotosCheckError] = useState<string | null>(null);
+  const runCommunityPhotosCheck = async () => {
+    setCommunityPhotosCheckRunning(true);
+    setCommunityPhotosCheckError(null);
+    setCommunityPhotosCheckResult(null);
+    try {
+      // Plain fetch (not apiRequest): Lens runs per community photo, so this can
+      // take minutes; we also want the JSON error body on a non-2xx.
+      const resp = await fetch("/api/builder/photo-community-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ propertyId: id, communityOnly: true }),
+      });
+      const data = (await resp.json().catch(() => null)) as
+        | CommunityMatchResult
+        | { error?: string }
+        | null;
+      if (!resp.ok || !data || !("verdict" in data)) {
+        setCommunityPhotosCheckError((data as { error?: string } | null)?.error || `HTTP ${resp.status}`);
+        return;
+      }
+      setCommunityPhotosCheckResult(data);
+    } catch (e: any) {
+      setCommunityPhotosCheckError(e?.message ?? String(e));
+    } finally {
+      setCommunityPhotosCheckRunning(false);
     }
   };
 
@@ -1121,7 +1164,7 @@ export default function BuilderPreflight() {
     }
   };
 
-  // ── Re-pull community photos ──────────────────────────────────────────────
+  // ── Find new community photos (re-pull) ──────────────────────────────────
   // Researches the community via Claude, finds correct community photo URLs,
   // scrapes them into the community folder, then verifies every photo with AI
   // vision + Google Lens reverse image search (deleting any mismatches).
@@ -1169,9 +1212,9 @@ export default function BuilderPreflight() {
           setCommunityRepullJobId(null);
           persistRepullJobId(null);
           if (job.status === "completed") {
-            toast({ title: "Community photos refreshed", description: job.message });
+            toast({ title: "New community photos found", description: job.message });
           } else if (job.error) {
-            toast({ title: "Re-pull failed", description: job.error, variant: "destructive" });
+            toast({ title: "Finding new photos failed", description: job.error, variant: "destructive" });
           }
         }
       } catch { /* keep polling */ }
@@ -1199,9 +1242,9 @@ export default function BuilderPreflight() {
       setCommunityRepullJob(data.job as CommunityRepullJob);
       setCommunityRepullJobId(data.job.id as string);
       persistRepullJobId(data.job.id as string);
-      toast({ title: "Re-pull started", description: "Researching the community and finding fresh photos — safe to leave this tab." });
+      toast({ title: "Finding new community photos", description: "Researching the community and finding fresh photos — safe to leave this tab." });
     } catch (e: any) {
-      toast({ title: "Could not start re-pull", description: e?.message || String(e), variant: "destructive" });
+      toast({ title: "Could not start photo search", description: e?.message || String(e), variant: "destructive" });
     }
   };
 
@@ -1843,37 +1886,135 @@ export default function BuilderPreflight() {
           </p>
         </div>
 
-        {/* ── Community Photos re-pull ──
-            One button that researches the community via Claude, finds the
-            correct community photo URLs, scrapes them into the community
-            folder, then double-checks every photo with AI vision + Google Lens
+        {/* ── Community Photos ──
+            Two buttons: "Check photos are correct" verifies the CURRENT folder
+            photos with Claude vision + Google Lens and answers YES/NO; "Find
+            new community photos" researches the community via Claude, finds
+            correct photo URLs, scrapes them into the community folder, then
+            double-checks every photo with AI vision + Google Lens
             reverse-image search and removes any that aren't this community. */}
         {property.communityPhotoFolder && (
           <Card className="p-6 mb-6">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
               <h2 className="text-base font-semibold">Community Photos</h2>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void handleRepullCommunityPhotos()}
-                disabled={repullActive}
-                className="h-8 text-xs"
-                data-testid="button-repull-community-photos"
-              >
-                {repullActive ? (
-                  <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Re-pulling…</>
-                ) : (
-                  <><RefreshCw className="h-3 w-3 mr-1" /> Re-pull community photos</>
-                )}
-              </Button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void runCommunityPhotosCheck()}
+                  disabled={communityPhotosCheckRunning || repullActive}
+                  className="h-8 text-xs"
+                  data-testid="button-check-community-photos"
+                  title={`Claude vision + Google Lens reverse-image search on every photo in the community folder — confirms they really show ${property.complexName}.`}
+                >
+                  {communityPhotosCheckRunning ? (
+                    <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Checking photos…</>
+                  ) : (
+                    <><Search className="h-3 w-3 mr-1" /> Check photos are correct</>
+                  )}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleRepullCommunityPhotos()}
+                  disabled={repullActive}
+                  className="h-8 text-xs"
+                  data-testid="button-repull-community-photos"
+                >
+                  {repullActive ? (
+                    <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Finding new photos…</>
+                  ) : (
+                    <><RefreshCw className="h-3 w-3 mr-1" /> Find new community photos</>
+                  )}
+                </Button>
+              </div>
             </div>
             <p className="text-sm text-muted-foreground mb-3">
-              Refreshes the community amenity photos (pool, grounds, building exteriors)
-              for <strong>{property.complexName}</strong>. We research the community with
-              Claude, find the correct photo URLs, scrape them, then verify every photo
-              with AI vision and Google Lens reverse-image search — removing any that
-              aren&apos;t actually this community.
+              Use <strong>Check photos are correct</strong> to confirm the photos already in
+              the folder are really <strong>{property.complexName}</strong> — Claude vision
+              scans each one (with Google Lens reverse-image search) and answers yes or no.
+              Use <strong>Find new community photos</strong> to research the community with
+              Claude, find the correct photo URLs, scrape fresh amenity photos (pool,
+              grounds, building exteriors), then verify every photo the same way — removing
+              any that aren&apos;t actually this community.
             </p>
+
+            {communityPhotosCheckRunning && (
+              <p className="mb-3 text-xs text-cyan-700 dark:text-cyan-300">
+                Scanning each community photo with Google Lens reverse-image search + Claude
+                vision — this can take a few minutes for large folders…
+              </p>
+            )}
+            {communityPhotosCheckError && (
+              <p className="mb-3 text-sm text-red-600" data-testid="text-community-photos-check-error">
+                ✗ {communityPhotosCheckError}
+              </p>
+            )}
+            {communityPhotosCheckResult && (() => {
+              const r = communityPhotosCheckResult;
+              const a = communityPhotosCorrectAnswer(
+                r.expectedCommunity || property.complexName,
+                r.verdict,
+                r.community,
+              );
+              const headline =
+                a.answer === "yes"
+                  ? {
+                      cls: "border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300",
+                      Icon: CheckCircle2,
+                    }
+                  : a.answer === "no"
+                    ? {
+                        cls: "border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-200",
+                        Icon: XCircle,
+                      }
+                    : {
+                        cls: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200",
+                        Icon: AlertTriangle,
+                      };
+              // The "pre-screen" outlier is the dHash diversity note, not a photo.
+              const flagged = [
+                ...(r.community?.outliers ?? []),
+                ...(r.community?.junk ?? []),
+              ].filter((f) => f.id !== "pre-screen");
+              return (
+                <div className="mb-3" data-testid="result-community-photos-check">
+                  <div className={`flex items-start gap-2 rounded-md border px-3 py-2 text-sm font-medium ${headline.cls}`}>
+                    <headline.Icon className="h-4 w-4 mt-0.5 shrink-0" />
+                    <span>{a.headline}</span>
+                  </div>
+                  {r.community && (
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                      <span>
+                        Identified as <strong className="text-foreground">{r.community.identifiedCommunity || "—"}</strong>
+                      </span>
+                      {typeof r.community.photosChecked === "number" && (
+                        <span>
+                          {r.community.photosChecked}
+                          {typeof r.community.photosTotal === "number" ? ` of ${r.community.photosTotal}` : ""} photos checked
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {flagged.length > 0 && (
+                    <ul className="mt-2 list-disc pl-5 text-xs text-red-700 dark:text-red-300">
+                      {flagged.slice(0, 6).map((f, i) => (
+                        <li key={i}>
+                          {f.caption || f.id}: {f.reason}
+                        </li>
+                      ))}
+                      {flagged.length > 6 && <li>…and {flagged.length - 6} more flagged photo(s).</li>}
+                    </ul>
+                  )}
+                  {a.answer !== "yes" && (r.community?.recommendation || r.community?.matchReason) && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {r.community?.recommendation || r.community?.matchReason}
+                    </p>
+                  )}
+                  <p className="mt-2 text-xs text-muted-foreground">{r.summary}</p>
+                </div>
+              );
+            })()}
 
             {repullActive && communityRepullJob && (
               <div className="rounded-md border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
@@ -1886,7 +2027,7 @@ export default function BuilderPreflight() {
                 <div
                   className="h-2 overflow-hidden rounded-full bg-blue-100 dark:bg-blue-900"
                   role="progressbar"
-                  aria-label="Re-pulling community photos"
+                  aria-label="Finding new community photos"
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={Math.round(communityRepullJob.progress)}

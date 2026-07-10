@@ -290,7 +290,7 @@ import {
   type SeasonalAvailabilityWindow,
 } from "./seasonal-availability";
 import { runPhotoListingCheckForFolders, runAddressBackfill, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
-import { runPhotoCommunityCheck, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
+import { runPhotoCommunityCheck, communityOnlyCheckRequest, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
 import { scanAmenitiesForProperty } from "./amenity-scan";
 import { getAmenityLabel, AMENITY_CATALOG_KEYS } from "@shared/guesty-amenity-catalog";
 import { evaluateComboPhotoCommunityGate, planComboBedroomRetry, type ComboPhotoGateDecision, type ComboPhotoGateInput, type ComboBedroomRetryPlan } from "@shared/combo-photo-community-gate";
@@ -29899,13 +29899,26 @@ Return ONLY compact JSON with this exact shape:
         request = built.request;
       }
 
+      // Preflight "are the current community photos correct?" — check ONLY the
+      // community folder (unit groups + bedroom coverage dropped).
+      const communityOnly = body.communityOnly === true;
+      if (communityOnly) {
+        request = communityOnlyCheckRequest(request);
+        if (request.groups.length === 0) {
+          return res.status(400).json({ ok: false, error: "No community folder photos found for this listing." });
+        }
+      }
+
       const result = await runPhotoCommunityCheck(
         request,
         process.env.ANTHROPIC_API_KEY ?? "",
         Date.now(),
       );
 
-      if (propertyId != null) {
+      // A community-only result has no unit legs, so it must NOT overwrite the
+      // dashboard Community QA status (derived from FULL checks) — a units-free
+      // "pass" there would read as the whole listing being confirmed.
+      if (propertyId != null && !communityOnly) {
         await savePhotoCommunityCheckResult(propertyId, result);
       }
 
