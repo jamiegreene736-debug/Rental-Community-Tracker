@@ -2488,6 +2488,11 @@ async function fetchGuestyMfaCodeFromGmail(
       debug: pushLog, info: pushLog, warn: pushLog, error: pushLog,
     },
   });
+  // ImapFlow emits 'error' on an async socket drop; with no listener Node crashes
+  // the whole process. Route it into the push log instead of letting it throw.
+  client.on("error", (err: any) => {
+    pushLog({ msg: `IMAP client error: ${err?.message ?? err}` });
+  });
 
   try {
     try {
