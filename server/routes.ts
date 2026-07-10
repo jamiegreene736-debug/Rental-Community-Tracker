@@ -32917,6 +32917,7 @@ Return ONLY compact JSON with this exact shape:
       replacingExistingPhotos?: boolean;
       skipFirst?: number;
       rescrapeSourceUrl?: string;
+      findNewSource?: boolean;
     };
     const draftId = Number(body.draftId);
     const propertyId = Number(body.propertyId);
@@ -32945,6 +32946,7 @@ Return ONLY compact JSON with this exact shape:
       rescrapeSourceUrl: typeof body.rescrapeSourceUrl === "string" && /^https?:\/\//i.test(body.rescrapeSourceUrl)
         ? body.rescrapeSourceUrl.trim()
         : undefined,
+      findNewSource: body.findNewSource === true,
     });
     res.status(202).json({ job });
   });
@@ -39831,7 +39833,7 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar, nocache } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
@@ -39853,7 +39855,16 @@ Return ONLY compact JSON with this exact shape:
       // this — synchronous wizard callers omit it and stay sidecar-free so
       // the UI never hangs on a 90s sidecar. See SCRAPE_WITH_SIDECAR / LB #45.
       useSidecar?: boolean;
+      // OPERATOR-INITIATED calls (the preflight photo buttons) bypass the
+      // discovery cache READS (listingScrapeCache + discoverySerpCache) so a
+      // deliberate re-try always hits the live portals — an operator clicking
+      // "find new photos" must not be served a day-old cached gallery/SERP.
+      // Fresh results are still REMEMBERED (keep-better prevents downgrades),
+      // and the bulk-combo queue never sets this, so its 2026-07-09
+      // budget/keep-better protections are untouched.
+      nocache?: boolean;
     };
+    const bypassDiscoveryCaches = nocache === true;
     // Direct-url rescrape scrape options: sidecar ON only when the background
     // re-pull explicitly opts in, otherwise the long-standing no-sidecar path.
     const directScrapeOptions = useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR;
@@ -40087,7 +40098,7 @@ Return ONLY compact JSON with this exact shape:
       const fetchDiscoverySerp = async (
         q: string,
       ): Promise<Array<{ link?: string; title?: string; snippet?: string }> | null> => {
-        const cached = discoverySerpCache.get(q);
+        const cached = bypassDiscoveryCaches ? null : discoverySerpCache.get(q);
         if (cached) return cached;
         if (searchApiSerpStats.attempted >= maxSerpQueriesPerRequest) {
           searchApiSerpStats.capped += 1;
@@ -40495,7 +40506,7 @@ Return ONLY compact JSON with this exact shape:
           // module is what prevents that). A hit skips the datacenter scrape
           // entirely; a thin hit still flows into the sidecar rescue below
           // unless a rescue already ran for this listing within the thin TTL.
-          const cachedScrape = listingScrapeCache.get(clusterKey);
+          const cachedScrape = bypassDiscoveryCaches ? null : listingScrapeCache.get(clusterKey);
           let cachedSidecarTried = false;
           let sidecarRescueAttempted = false;
           let dual: { photos: ScrapedPhoto[]; sourceUrl: string; platform: "realtor" | "zillow" | "redfin" | "homes" | "other" };

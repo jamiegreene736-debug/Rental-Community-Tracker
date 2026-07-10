@@ -91,5 +91,48 @@ console.log("discovery-cache: search query cache");
   check("LRU cap evicts oldest", serp.get("b") === null && serp.get("a") !== null && serp.get("c") !== null);
 }
 
+// ── Source locks: operator nocache bypass + "Find new photos" wiring (2026-07-10) ──
+// The caches above are LOAD-BEARING for the bulk-combo queue (SearchAPI budget +
+// keep-better). Operator-initiated preflight buttons must BYPASS the cache READS
+// (a deliberate retry must hit live portals) while still remembering results.
+// These greps lock the wiring so a refactor can't silently re-cache the buttons
+// or re-enable the relaxed "any"-bedroom rung when replacing a real gallery.
+console.log("discovery-cache: nocache / find-new-source wiring (source locks)");
+{
+  const fs = await import("node:fs");
+  const routes = fs.readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  check("fetch-unit-photos accepts nocache",
+    /const bypassDiscoveryCaches = nocache === true;/.test(routes));
+  check("SERP cache read gated by nocache",
+    /bypassDiscoveryCaches \? null : discoverySerpCache\.get\(q\)/.test(routes));
+  check("scrape cache read gated by nocache",
+    /bypassDiscoveryCaches \? null : listingScrapeCache\.get\(clusterKey\)/.test(routes));
+  check("photo-fetch-jobs route forwards findNewSource",
+    /findNewSource: body\.findNewSource === true,/.test(routes));
+
+  const job = fs.readFileSync(new URL("../server/preflight-background-jobs.ts", import.meta.url), "utf8");
+  check("re-pull leg sends nocache", (job.match(/nocache: true,/g) ?? []).length >= 2);
+  check("find-new mode enables discovery despite existing photos",
+    /allowDiscoveryFallback = !replacingExistingPhotos \|\| findNewSource;/.test(job));
+  check("find-new mode drops the relaxed any-bedroom rung",
+    /\.filter\(\(a\) => !findNewSource \|\| a\.bedrooms !== "any"\)/.test(job));
+  check("find-new mode skips the saved-listing rescrape",
+    /const rescrapeSourceUrl = !findNewSource\s*&&/.test(job));
+  check("find-new failure keeps the existing gallery",
+    /Kept the existing gallery and source\./.test(job));
+  check("find-new rejects thin galleries BEFORE persist (persist replaces the folder first)",
+    /const minAcceptable = findNewSource \? MIN_INDEPENDENT_UNIT_PHOTOS : 1;/.test(job)
+    && /nextPhotos\.length >= minAcceptable && nextProof\.status !== "rejected"/.test(job));
+
+  const page = fs.readFileSync(new URL("../client/src/pages/builder-preflight.tsx", import.meta.url), "utf8");
+  check("preflight page has the Find new photos button",
+    /button-find-new-photos-/.test(page) && /Find new photos/.test(page));
+  check("button starts the job in findNewSource mode",
+    /handleScrapePhotosForUnit\(i === 0 \? 0 : 1, unit[^,]*, \{ findNewSource: true \}\)/.test(page));
+  check("find-new payload excludes the current source and skips rescrape",
+    /\(replacingExistingPhotos \|\| findNewSource\) && currentSourceUrl/.test(page)
+    && /!findNewSource && replacingExistingPhotos && currentSourceUrl/.test(page));
+}
+
 console.log(`\ndiscovery-cache: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
