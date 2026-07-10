@@ -120,12 +120,13 @@ function collectJsonLdAddresses(html: string): string[] {
 export function stripToText(html: string): string {
   return decodeEntities(
     html
-      // End tags matched with \s* so "</script >" / "</style\n>" are also removed
-      // (CodeQL js/bad-tag-filter). We are extracting text for a model prompt, not
+      // End tags matched with [^>]* so any junk before ">" is tolerated —
+      // "</script >", "</style\n>", "</script\t\n bar>" are all removed (CodeQL
+      // js/bad-tag-filter). We are extracting text for a model prompt, not
       // sanitizing for the DOM, but robust stripping keeps stray markup out.
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
-      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript\s*>/gi, " ")
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
+      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript[^>]*>/gi, " ")
       .replace(/<[^>]+>/g, " "),
   )
     .replace(/\s+/g, " ")

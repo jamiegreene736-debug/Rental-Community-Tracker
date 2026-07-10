@@ -59,6 +59,8 @@ const ampSig = extractSourcePageSignals('<title>A &amp;#39; B &amp; C</title>');
 check("&amp; is not double-unescaped", ampSig.title === "A &#39; B & C");
 const spacedScript = extractSourcePageSignals('<body>keep<script type="x">DROP</script >more</body>');
 check("strips script with spaced/attr end tag", !!spacedScript.snippet && !/DROP/.test(spacedScript.snippet) && /keep/.test(spacedScript.snippet) && /more/.test(spacedScript.snippet));
+const junkEndScript = extractSourcePageSignals('<body>keep<script>DROP</script\t\n bar>more</body>');
+check("strips script with junk end tag", !!junkEndScript.snippet && !/DROP/.test(junkEndScript.snippet) && /keep/.test(junkEndScript.snippet) && /more/.test(junkEndScript.snippet));
 
 console.log("source-page-community: prompt");
 const prompt = buildSourcePageCommunityPrompt("Kiahuna Plantation", "Unit A (2BR)", sig);
