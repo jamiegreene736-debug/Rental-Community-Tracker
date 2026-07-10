@@ -28,6 +28,15 @@
 // collectBuyInCoverageWarnings. When that signal is unavailable (email query
 // failed) the route sets hasInboundEmail=true so coverage degrades to the old
 // attachment-only rule instead of false-alarming on every attached unit.
+//
+// "Requirements unknown" rows (2026-07-10 change — operator): a committed
+// in-window reservation with ZERO resolved unit slots used to be silently
+// skipped. Zero slots means the listing is unmapped AND its bedroom count
+// could not be inferred (no bedrooms field, no "3BR" in the title), so the
+// system literally can't tell which units to buy — which makes it the WORST
+// covered booking, not a safe one. Those rows now surface in the same popup
+// as kind "unknown-requirements" with fix-the-listing guidance instead of
+// disappearing from the safety net.
 
 export const BUYIN_COVERAGE_WINDOW_DAYS = 15;
 
@@ -54,6 +63,8 @@ export type BuyInCoverageReservationLike = {
   integration?: any;
   source?: string | null;
   listing?: any;
+  listingId?: string | null;
+  operationsListingId?: string | null;
   operationsPropertyId?: number | null;
   operationsPropertyName?: string | null;
   slots?: BuyInCoverageSlot[] | null;
@@ -66,8 +77,18 @@ export type BuyInCoverageReservationLike = {
 export type BuyInMissingReason = "not-attached" | "no-email";
 export type BuyInMissingUnit = { unitId: string; unitLabel: string; reason: BuyInMissingReason };
 
+// "missing-units": the normal case — required units resolved, not all covered.
+// "unknown-requirements": ZERO unit slots could be resolved for the listing
+// (unmapped + bedroom count un-inferable), so coverage can't even be tracked;
+// the remedy is fixing the listing (set bedrooms / map it), not buying units.
+export type BuyInCoverageWarningKind = "missing-units" | "unknown-requirements";
+
 export type BuyInCoverageWarning = {
+  kind: BuyInCoverageWarningKind;
   reservationId: string;
+  // The Guesty listing id (or the synthetic manual:<id>) — lets the popup deep-
+  // link "fix the listing" for unknown-requirements rows.
+  listingId: string | null;
   confirmationCode: string | null;
   guestName: string | null;
   listingNickname: string | null;
@@ -196,16 +217,21 @@ export function collectBuyInCoverageWarnings(
     if (!reservation || typeof reservation !== "object") continue;
     if (reservationExcludedFromBuyInWarnings(reservation)) continue;
     const slots = Array.isArray(reservation.slots) ? reservation.slots : [];
-    // No configured unit slots → requirements unknown, nothing to warn about.
-    if (slots.length === 0) continue;
     if (!checkInWithinBuyInWarningWindow(reservation, nowMs, windowDays)) continue;
+    // Zero resolved unit slots = requirements UNKNOWN (unmapped listing whose
+    // bedroom count couldn't be inferred). Flag it — a booking the safety net
+    // can't even track is a fix-the-listing problem, not a safe skip.
+    const kind: BuyInCoverageWarningKind = slots.length === 0 ? "unknown-requirements" : "missing-units";
     const missing = missingBuyInUnits(reservation);
-    if (missing.length === 0) continue;
+    if (kind === "missing-units" && missing.length === 0) continue;
     const reservationId = String(reservation._id ?? reservation.id ?? "").trim();
     if (!reservationId || seen.has(reservationId)) continue;
     seen.add(reservationId);
+    const listingIdRaw = String(reservation.operationsListingId ?? reservation.listingId ?? "").trim();
     warnings.push({
+      kind,
       reservationId,
+      listingId: listingIdRaw || null,
       confirmationCode: reservation.confirmationCode ?? null,
       guestName: guestNameOf(reservation),
       listingNickname:
@@ -242,7 +268,9 @@ export function buyInCoverageWarningSignature(warnings: BuyInCoverageWarning[]):
   return warnings
     .map(
       (w) =>
-        `${w.reservationId}:${w.checkIn ?? ""}:${w.missingUnits
+        // Include the kind so a row flipping unknown-requirements ↔ missing-
+        // units (the listing got fixed / broke) re-raises a dismissed popup.
+        `${w.reservationId}:${w.kind}:${w.checkIn ?? ""}:${w.missingUnits
           // Include the reason so a unit going from not-attached → attached-but-
           // -no-email (or vice-versa) re-raises a dismissed popup — the facts changed.
           .map((u) => `${u.unitId}#${u.reason}`)

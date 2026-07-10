@@ -5617,7 +5617,7 @@ function AdminDashboard() {
               <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 <span className="font-medium">
-                  {buyInCoverageWarnings.length} booking{buyInCoverageWarnings.length === 1 ? " checks" : "s check"} in within {buyInCoverageData?.windowDays ?? 15} days with units NOT bought in
+                  {buyInCoverageWarnings.length} booking{buyInCoverageWarnings.length === 1 ? " checks" : "s check"} in within {buyInCoverageData?.windowDays ?? 15} days with units NOT bought in{buyInCoverageWarnings.some((w) => w.kind === "unknown-requirements") ? " (some listings need a bedroom count fixed)" : ""}
                 </span>
               </div>
               <Button
@@ -6800,7 +6800,8 @@ function AdminDashboard() {
               {buyInCoverageWarnings.length === 1 && buyInCoverageWarnings[0]?.missingUnits.length === 1 ? " has" : "s have"} not
               been bought in yet. A unit counts as bought in only once its alias inbox has received a booking
               email — attaching a unit is not enough. Book the missing units (or confirm the email arrived) on the
-              Bookings page. Cancelled bookings are excluded.
+              Bookings page. Rows marked "requirements unknown" have a listing with no bedroom count at all, so
+              coverage can&apos;t even be tracked — fix the listing first. Cancelled bookings are excluded.
             </DialogDescription>
           </DialogHeader>
           {buyInCoverageWarnings.length === 0 ? (
@@ -6828,10 +6829,14 @@ function AdminDashboard() {
                         className="block font-medium text-red-600 dark:text-red-400"
                         data-testid={`text-buyin-coverage-issue-${w.reservationId}`}
                       >
-                        ✕ {w.missingUnits.length} of {w.slotsTotal} unit{w.slotsTotal === 1 ? "" : "s"} NOT bought in
-                        {" "}({w.missingUnits
-                          .map((u) => `${u.unitLabel} — ${u.reason === "no-email" ? "attached, no booking email yet" : "not attached"}`)
-                          .join("; ")})
+                        {w.kind === "unknown-requirements"
+                          ? "⚠ Unit requirements UNKNOWN — the listing has no bedroom count, so the system can't tell which units to buy. Set the bedroom count on the Guesty listing (or map it to a property) to restore coverage."
+                          : <>
+                              ✕ {w.missingUnits.length} of {w.slotsTotal} unit{w.slotsTotal === 1 ? "" : "s"} NOT bought in
+                              {" "}({w.missingUnits
+                                .map((u) => `${u.unitLabel} — ${u.reason === "no-email" ? "attached, no booking email yet" : "not attached"}`)
+                                .join("; ")})
+                            </>}
                         {" "}·{" "}
                         {w.daysUntilCheckIn < 0
                           ? "guest is ALREADY checked in"
@@ -6846,14 +6851,25 @@ function AdminDashboard() {
                       ) : null}
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-1">
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => window.open("/bookings", "_blank")}
-                        data-testid={`button-find-units-${w.reservationId}`}
-                      >
-                        Find &amp; attach units
-                      </Button>
+                      {w.kind === "unknown-requirements" && w.listingId && !w.listingId.startsWith("manual:") ? (
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => window.open(`https://app.guesty.com/properties/${w.listingId}`, "_blank")}
+                          data-testid={`button-fix-listing-${w.reservationId}`}
+                        >
+                          Fix listing in Guesty
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => window.open("/bookings", "_blank")}
+                          data-testid={`button-find-units-${w.reservationId}`}
+                        >
+                          Find &amp; attach units
+                        </Button>
+                      )}
                       {!w.reservationId.startsWith("manual:") ? (
                         <Button
                           size="sm"
