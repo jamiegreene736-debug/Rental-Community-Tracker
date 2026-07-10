@@ -293,6 +293,14 @@ export async function syncGuestInboxForAlias(aliasEmail: string): Promise<{ impo
     auth: { user: imap.user, pass: imap.pass },
     logger: false,
   });
+  // ImapFlow is an EventEmitter: an async socket drop (e.g. "Connection not
+  // available" during compress/startSession) emits 'error', which with no
+  // listener CRASHES the whole process (Node's unhandled-'error' rule). The
+  // try/catch around connect() does NOT catch this async event. Attaching a
+  // listener makes it non-fatal — the awaited call still rejects and is handled.
+  client.on("error", (err: any) => {
+    console.warn("[guest-inbox] IMAP client error:", err?.message ?? err);
+  });
 
   let imported = 0;
   const since = new Date(Date.now() - 45 * 24 * 60 * 60_000);

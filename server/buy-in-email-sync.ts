@@ -204,6 +204,11 @@ export async function syncBuyInVendorEmailsForReservation(
     auth: { user: imap.user, pass: imap.pass },
     logger: false,
   });
+  // ImapFlow emits 'error' on an async socket drop; with no listener Node crashes
+  // the whole process (the try/catch around connect() does not catch the event).
+  client.on("error", (err: any) => {
+    console.warn("[buy-in-email] IMAP client error:", err?.message ?? err);
+  });
 
   let imported = 0;
   const since = new Date(Date.now() - 45 * 24 * 60 * 60_000);
