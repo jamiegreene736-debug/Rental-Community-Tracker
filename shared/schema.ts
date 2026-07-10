@@ -1082,6 +1082,13 @@ export const autoReplyLog = pgTable("auto_reply_log", {
   // the send pass only sends rows whose sendAfter <= now (and still uncontested).
   autoSent: boolean("auto_sent").notNull().default(false),
   sendAfter: timestamp("send_after"),
+  // Guest-question TIER (2026-07-10): 1 = super-basic property-fact question
+  // the AI answers automatically (Hawaii style, web-search grounded); 2 =
+  // everything else — never auto-sent, surfaced to the operator. Null on
+  // legacy rows written before tiering. tierReason is the operator-facing
+  // explanation (incl. tier-1→2 downgrades when the AI held its answer).
+  tier: integer("tier"),
+  tierReason: text("tier_reason"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

@@ -43,6 +43,31 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 (guest inbox: TIER-1 basics auto-answered by the AI + tier badges in the UI): Operator asked
+  for "basic tier 1 questions like Is there an ocean view" to be answered automatically (Hawaii lingo,
+  signed John Carpenter, "use claude AI search as much as possible") with the UI showing "AI responded —
+  tier 1" vs "tier 2 — no automatic response". SHIPPED (`claude/guest-inbox-tier1-auto-d60726`): a SCOPED
+  exception to the 2026-06-09 drafts-only default — pure `shared/guest-question-tier.ts` (81 tests)
+  classifies every incoming guest message; tier 1 = short question-shaped basic-property-fact ask
+  (curated topic list: ocean view, parking, pool, AC, wifi, laundry, kitchen, BBQ, lanai, beach distance,
+  check-in times, bedrooms/beds, TV, resort amenities, linens) with ZERO tier-2 signals (money/
+  availability/dates/policy/complaint/accessibility/urgency/service); everything else tier 2. Tier-1
+  candidates draft on `AUTO_REPLY_TIER1_MODEL` (default claude-sonnet-4-6) WITH the server-side
+  `web_search` tool (pause_turn-resumed, searches audited into toolsUsed) + a Hawaii-voice prompt block,
+  then queue through the EXISTING delivery-verified auto-send under `auto_send.tier1_enabled` (default
+  ON, new key so no rollout flag; master auto-send stays OFF and independent). LOAD-BEARING: the 3-layer
+  safety stack is UNCHANGED and every hold path (risk keyword, flag_for_human, output filter, error,
+  unmapped listing) DOWNGRADES the row to tier 2 + held — the tier-1 badge can never claim the AI
+  answered when it didn't. Tier persists on `auto_reply_log.tier/tier_reason` (schema +
+  schema-maintenance ALTER); UI = conversation-row chips + thread-header verdict in inbox.tsx fed by
+  cheap `GET /api/inbox/auto-reply/tiers` (agent-allowlisted; deliberately does NOT run
+  dismissHandledAutoReplyDrafts) + admin "Tier 1 auto-answer" switch
+  (`POST /api/inbox/auto-reply/tier1/toggle`; OFF reverts queued tier-1 rows to drafted). Verified:
+  guest-question-tier 81/0, full `npm test` exit 0, build clean, `npm run check` 338 = baseline (0 new,
+  stash-diffed), bundle-grep confirms chips + switch. Could NOT live-smoke the Guesty/Claude legs (no
+  creds) — post-deploy: message a mapped listing something like "does the condo have AC?"; within ~2 min
+  the row should show the emerald "Tier 1 · AI answered" chip and the guest gets the Aloha-style reply.
+  See AGENTS.md Load-Bearing #24 "TIER-1 EXCEPTION" + the 2026-07-10 Decision Log line.
 - 2026-07-10 (guest booking confirmations: representative-photos line + stay specifics + arrival-details
   watchdog + misroute resend + deeper Hawaii voice): Operator asked to research the automated day-of-booking
   messages (confirmation + two-units/representative expectations, Hawaii lingo) and implement all improvements.
