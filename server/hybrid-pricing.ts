@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS, haversineMiles } from "@shared/buy-in-market";
-import { getBuyInRate, getCommunityRegion, getSeasonForMonth, applyLodgingTaxGrossUp, LODGING_TAX_PCT } from "@shared/pricing-rates";
+import { getBuyInRate, getCommunityRegion, getSeasonForMonth } from "@shared/pricing-rates";
 import { confirmResearchCommunity, type CommunityConfirmation } from "@shared/static-rate-logic";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
 import { extractBedroomsFromListing } from "./community-research";
@@ -1376,20 +1376,13 @@ export async function refreshHybridPricingForTarget(args: {
       let basis = airbnb?.medianNightly ?? null;
       let logKind: "scan" | "static-fallback" = "scan";
       const scanNotes = [...(airbnb?.notes ?? [])];
-      // Gross the SearchAPI median up by the regional lodging tax so the stored
-      // buy-in equals the ACTUAL guest checkout total. Airbnb's
-      // extracted_total_price (the median's basis) already includes cleaning +
-      // service fees but NOT occupancy tax, which Airbnb adds at checkout — so
-      // without this the buy-in understates real cost. Applied ONLY to a real
-      // SearchAPI median (not the static thin-comp fallback, which is a separate
-      // rent-only backstop). Kill-switch: MARKET_RATE_LODGING_TAX_DISABLED=1.
-      if (basis != null && basis > 0 && process.env.MARKET_RATE_LODGING_TAX_DISABLED !== "1") {
-        const preTax = basis;
-        basis = applyLodgingTaxGrossUp(basis, args.community);
-        if (basis > preTax) {
-          scanNotes.push(`Grossed up $${preTax} → $${basis} for ${Number((LODGING_TAX_PCT[getCommunityRegion(args.community)] * 100).toFixed(1))}% ${getCommunityRegion(args.community)} lodging tax (all-in checkout total).`);
-        }
-      }
+      // The stored basis is the RAW SearchAPI median: Airbnb extracted_total_price
+      // ÷ nights = nightly rent + cleaning + service fees, occupancy tax NOT
+      // included. The 2026-07-01 regional lodging-tax gross-up (~18% HI /
+      // ~12.5% FL, the "add ~13% for taxes at checkout" uplift) was REMOVED on
+      // operator directive 2026-07-10 — do NOT re-add a tax layer here. The 20%
+      // MARKET_RATE_TARGET_MARGIN markup at push time is the only layer on top
+      // of the median. See the AGENTS.md 2026-07-10 Decision Log line.
       if (basis == null || basis <= 0) {
         basis = staticMarketRateBasis(window.yearMonth);
         logKind = "static-fallback";
@@ -1404,7 +1397,7 @@ export async function refreshHybridPricingForTarget(args: {
         );
       } else {
         scanNotes.push(
-          `Stored SearchAPI ${MARKET_PRICING_PERCENTILE}th percentile basis (median, grossed for lodging tax; no hybrid markup layers). Random ${stayNights}-night sample ${window.checkIn} to ${window.checkOut} in ${window.yearMonth}.`,
+          `Stored SearchAPI ${MARKET_PRICING_PERCENTILE}th percentile basis (raw median — no tax uplift, no hybrid markup layers). Random ${stayNights}-night sample ${window.checkIn} to ${window.checkOut} in ${window.yearMonth}.`,
         );
       }
 

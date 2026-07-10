@@ -155,22 +155,24 @@ export function getCommunityRegion(community: string): RegionType {
   return BUY_IN_RATES[community]?.region ?? "hawaii";
 }
 
-// Combined lodging/occupancy tax by region, used to gross a market-rate median
-// up to the ACTUAL guest checkout total. Airbnb's `extracted_total_price` (the
-// basis of the SearchAPI median) already includes cleaning + service fees but
-// NOT occupancy tax — Airbnb adds that at the final checkout step — so the
-// buy-in understates real cost without this. Hawaii TAT 10.25% + county TAT ~3%
+// Combined lodging/occupancy tax by region. Hawaii TAT 10.25% + county TAT ~3%
 // + GET ~4.7% ≈ ~18%; Florida state 6% + county tourist-development ≈ ~12.5%.
-// (shared/static-rate-logic.ts re-exports this so the dormant Claude all-in
-// engine and the live median engine share one tax table — keep it here.)
+// NOTE (2026-07-10): the LIVE market-rate engine (server/hybrid-pricing.ts) no
+// longer applies this — the operator asked for the tax uplift's removal, so
+// the stored basis is the raw SearchAPI Airbnb median again. This table is
+// kept ONLY for the dormant Claude static/all-in engine
+// (shared/static-rate-logic.ts re-exports it — keep it here).
 export const LODGING_TAX_PCT: Record<RegionType, number> = {
   hawaii: 0.18,
   florida: 0.125,
 };
 
-// Gross a nightly buy-in basis up by the community's regional lodging tax so it
-// equals the actual Airbnb checkout total (fees + taxes). Rounded. Env-tunable
-// off via MARKET_RATE_LODGING_TAX_DISABLED handled at the call site.
+// Gross a nightly buy-in basis up by the community's regional lodging tax.
+// UNUSED by the live market-rate update path since 2026-07-10 (the operator
+// asked for the checkout-tax uplift's removal — do NOT re-wire this into
+// hybrid-pricing.ts; tests/pipeline-logic.test.ts source-guards that). Retained
+// as a pure helper for the dormant static engine + tests. The old
+// MARKET_RATE_LODGING_TAX_DISABLED kill-switch env var is now a no-op.
 export function applyLodgingTaxGrossUp(basis: number, community: string): number {
   if (!Number.isFinite(basis) || basis <= 0) return basis;
   const region = getCommunityRegion(community);
