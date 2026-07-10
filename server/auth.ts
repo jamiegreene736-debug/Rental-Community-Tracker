@@ -244,6 +244,10 @@ function agentApiMethodAllowed(req: Request): boolean {
   if (method === "GET" && path.startsWith("/api/inbox/calls/")) return true;
   if (method === "POST" && /^\/api\/inbox\/calls\/(\d+|conversations\/[^/]+)\/acknowledge$/.test(path)) return true;
   if (method === "POST" && path === "/api/inbox/ai-draft") return true;
+  // Guest-question tier badges (read-only): the agent works the same inbox and
+  // needs to see which threads the AI auto-answered (tier 1) vs which need a
+  // human (tier 2). The tier-1 toggle + the full auto-reply log stay admin-only.
+  if (method === "GET" && path === "/api/inbox/auto-reply/tiers") return true;
 
   // Guest issues tracker — remote agents open issues, read them, and comment /
   // change status ("resolved" / "ongoing"). DELETE is deliberately NOT listed,

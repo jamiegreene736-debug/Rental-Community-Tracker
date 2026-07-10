@@ -49077,6 +49077,51 @@ CONSTRAINTS
     }
   });
 
+  // ── Guest-question TIERS (2026-07-10) ──
+  // Tier-1 auto-answer toggle (scoped: only tier-1 basics auto-send; the
+  // master auto-send toggle above stays independent and OFF by default).
+  app.post("/api/inbox/auto-reply/tier1/toggle", async (req, res) => {
+    try {
+      const { enabled } = req.body as { enabled?: boolean };
+      await setAutoSendConfig({ tier1Enabled: !!enabled });
+      res.json(getAutoReplyStatus());
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to toggle tier-1 auto-answer", message: err.message });
+    }
+  });
+
+  // Lightweight per-conversation tier map for the inbox badges: the LATEST
+  // auto-reply log per conversation, tier fields only. Deliberately does NOT
+  // run dismissHandledAutoReplyDrafts (that fetches Guesty posts per pending
+  // conversation) — this endpoint is polled by the conversation list and must
+  // stay a cheap single DB read. Fail-soft [] like /auto-reply/logs.
+  app.get("/api/inbox/auto-reply/tiers", async (_req, res) => {
+    try {
+      const logs = await storage.getAutoReplyLogs(200);
+      const latestByConversation = new Map<string, (typeof logs)[number]>();
+      for (const log of logs) {
+        const prev = latestByConversation.get(log.conversationId);
+        const logAt = log.createdAt instanceof Date ? log.createdAt.getTime() : new Date(log.createdAt as any).getTime();
+        const prevAt = prev ? (prev.createdAt instanceof Date ? prev.createdAt.getTime() : new Date(prev.createdAt as any).getTime()) : -1;
+        if (!prev || logAt > prevAt) latestByConversation.set(log.conversationId, log);
+      }
+      res.json(Array.from(latestByConversation.values()).map((log) => ({
+        conversationId: log.conversationId,
+        logId: log.id,
+        tier: log.tier ?? null,
+        tierReason: log.tierReason ?? null,
+        status: log.status,
+        replySent: log.replySent,
+        autoSent: log.autoSent,
+        createdAt: log.createdAt,
+      })));
+    } catch (err: any) {
+      const missingTable = /42P01|does not exist|relation .* does not exist|column .* does not exist/i.test(err.message || "");
+      console.error(`[auto-reply/tiers] ${missingTable ? "table/column missing — returning []" : err.message}`);
+      res.json([]);
+    }
+  });
+
   // ── Booking-confirmation auto-send ──
   // Status / toggle / manual-run endpoints. Mirrors the auto-reply
   // shape so the inbox UI can reuse the same patterns. The scheduler

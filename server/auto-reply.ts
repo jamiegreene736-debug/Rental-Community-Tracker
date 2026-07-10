@@ -7,6 +7,7 @@ import { guestyRequest } from "./guesty-sync";
 import { findGuestyConversationById, sendGuestyConversationMessage, deliveryOutcome } from "./guesty-ota-messaging";
 import { isBookingChannel, sanitizeForBookingChannel } from "@shared/receipt-message";
 import { isIncomingPost, isSystemPost, isHostPost, pickPostToReplyTo, postTimestampMs } from "@shared/guesty-post-classify";
+import { classifyGuestQuestionTier, type GuestQuestionTier } from "@shared/guest-question-tier";
 import { storage } from "./storage";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { occupancyForBedrooms } from "../shared/occupancy";
@@ -45,7 +46,16 @@ const SETTING_REVIEW_WINDOW = "auto_send.review_window_seconds";
 const SETTING_HOLD_RECOMMENDATIONS = "auto_send.hold_recommendations";
 const SETTING_FULLAUTO_ROLLOUT = "auto_send.full_auto_rollout_v1";
 const SETTING_DISABLE_ROLLOUT = "auto_send.disabled_rollout_v2";
+// TIER-1 auto-answer (2026-07-10, operator: basic questions like "is there an
+// ocean view" get answered automatically; tier 2 never does). A SCOPED
+// exception to the drafts-only default above: ONLY logs classified tier 1
+// (shared/guest-question-tier.ts) that survive the full 3-layer safety stack
+// may queue + auto-send. Default ON — a NEW settings key, so `null` (never
+// written) means enabled without a one-time rollout flag; an operator OFF
+// toggle persists "false" and sticks.
+const SETTING_TIER1_AUTO = "auto_send.tier1_enabled";
 let _autoSendEnabled = false;      // DRAFTS-ONLY: nothing auto-sends; every reply waits for the operator
+let _tier1AutoEnabled = true;      // EXCEPT tier-1 basics — see SETTING_TIER1_AUTO above
 let _reviewWindowSeconds = 90;
 let _holdRecommendations = false;  // moot while auto-send is off (only gates which clean drafts would queue)
 let _autoSendConfigLoaded = false;
@@ -60,6 +70,7 @@ export function getAutoReplyStatus() {
     lastRunAt: _lastRunAt,
     lastRunResult: _lastRunResult,
     autoSendEnabled: _autoSendEnabled,
+    tier1AutoEnabled: _tier1AutoEnabled,
     reviewWindowSeconds: _reviewWindowSeconds,
     holdRecommendations: _holdRecommendations,
     lastAutoSendAt: _lastAutoSendAt,
@@ -93,15 +104,17 @@ export async function loadAutoSendConfig(): Promise<void> {
       } catch (e) {
         console.warn(`[auto-reply] disable rollout: could not revert queued drafts: ${(e as Error).message}`);
       }
-      const [window, hold] = await Promise.all([
+      const [window, hold, tier1] = await Promise.all([
         storage.getSetting(SETTING_REVIEW_WINDOW),
         storage.getSetting(SETTING_HOLD_RECOMMENDATIONS),
+        storage.getSetting(SETTING_TIER1_AUTO),
       ]);
       if (window != null) {
         const n = Number(window);
         if (Number.isFinite(n) && n >= 0) _reviewWindowSeconds = Math.min(Math.round(n), 3600);
       }
       if (hold != null) _holdRecommendations = hold !== "false";
+      if (tier1 != null) _tier1AutoEnabled = tier1 !== "false";
       await storage.setSetting(SETTING_DISABLE_ROLLOUT, "1");
       // Also stamp the (now-superseded) enable-rollout flag so it can NEVER force
       // auto-send back ON — critical on a FRESH DB, where it would otherwise be
@@ -135,10 +148,11 @@ export async function loadAutoSendConfig(): Promise<void> {
       return;
     }
 
-    const [enabled, window, hold] = await Promise.all([
+    const [enabled, window, hold, tier1] = await Promise.all([
       storage.getSetting(SETTING_AUTOSEND_ENABLED),
       storage.getSetting(SETTING_REVIEW_WINDOW),
       storage.getSetting(SETTING_HOLD_RECOMMENDATIONS),
+      storage.getSetting(SETTING_TIER1_AUTO),
     ]);
     if (enabled != null) _autoSendEnabled = enabled === "true";
     if (window != null) {
@@ -146,8 +160,10 @@ export async function loadAutoSendConfig(): Promise<void> {
       if (Number.isFinite(n) && n >= 0) _reviewWindowSeconds = Math.min(Math.round(n), 3600);
     }
     if (hold != null) _holdRecommendations = hold !== "false";
+    // Default ON when the key has never been written — see SETTING_TIER1_AUTO.
+    if (tier1 != null) _tier1AutoEnabled = tier1 !== "false";
     _autoSendConfigLoaded = true;
-    console.log(`[auto-reply] auto-send config: enabled=${_autoSendEnabled} window=${_reviewWindowSeconds}s holdRecommendations=${_holdRecommendations}`);
+    console.log(`[auto-reply] auto-send config: enabled=${_autoSendEnabled} tier1=${_tier1AutoEnabled} window=${_reviewWindowSeconds}s holdRecommendations=${_holdRecommendations}`);
   } catch (err) {
     // Fail safe: if the settings table isn't ready yet, keep the in-memory
     // full-auto defaults (ON). A storage outage also stalls draft generation /
@@ -157,10 +173,27 @@ export async function loadAutoSendConfig(): Promise<void> {
 }
 
 export function getAutoSendConfig() {
-  return { autoSendEnabled: _autoSendEnabled, reviewWindowSeconds: _reviewWindowSeconds, holdRecommendations: _holdRecommendations };
+  return { autoSendEnabled: _autoSendEnabled, tier1AutoEnabled: _tier1AutoEnabled, reviewWindowSeconds: _reviewWindowSeconds, holdRecommendations: _holdRecommendations };
 }
 
-export async function setAutoSendConfig(cfg: { enabled?: boolean; reviewWindowSeconds?: number; holdRecommendations?: boolean }): Promise<void> {
+export async function setAutoSendConfig(cfg: { enabled?: boolean; tier1Enabled?: boolean; reviewWindowSeconds?: number; holdRecommendations?: boolean }): Promise<void> {
+  if (typeof cfg.tier1Enabled === "boolean") {
+    _tier1AutoEnabled = cfg.tier1Enabled;
+    await storage.setSetting(SETTING_TIER1_AUTO, cfg.tier1Enabled ? "true" : "false");
+    // Kill switch: turning tier-1 auto-answer OFF reverts still-queued TIER-1
+    // rows to the manual queue — but only when the master toggle isn't also
+    // authorizing them (master ON queues clean drafts regardless of tier).
+    if (!cfg.tier1Enabled && !_autoSendEnabled) {
+      try {
+        const queued = (await storage.getAutoReplyLogs(300)).filter((l) => l.status === "queued" && !l.replySent && l.tier === 1);
+        for (const l of queued) await storage.updateAutoReplyLog(l.id, { status: "drafted", sendAfter: null });
+        if (queued.length) console.log(`[auto-reply] tier-1 auto-answer disabled — reverted ${queued.length} queued tier-1 draft(s) to manual review`);
+      } catch (e) {
+        console.warn(`[auto-reply] failed to revert queued tier-1 drafts on disable: ${(e as Error).message}`);
+      }
+    }
+    console.log(`[auto-reply] tier-1 auto-answer ${cfg.tier1Enabled ? "ENABLED" : "DISABLED"}`);
+  }
   if (typeof cfg.enabled === "boolean") {
     _autoSendEnabled = cfg.enabled;
     await storage.setSetting(SETTING_AUTOSEND_ENABLED, cfg.enabled ? "true" : "false");
@@ -973,6 +1006,13 @@ async function draftReplyWithClaude(params: {
   channel?: string;
   isInitialContact?: boolean;
   forceDraftForReview?: boolean;
+  // TIER-1 mode (2026-07-10): the message classified as a super-basic
+  // property-fact question. Upgrades the draft call: web-search grounding
+  // (Anthropic server-side web_search tool so the model can verify community
+  // facts like "does this resort have ocean views"), a stronger default model,
+  // and the Hawaii-style voice block. The flag/safety semantics are UNCHANGED.
+  tier1Mode?: boolean;
+  tier1Topics?: string[];
 }): Promise<DraftResult> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) {
@@ -1008,6 +1048,19 @@ The guest raised an accessibility, ground-floor, stairs, mobility, or seniors co
 Do not skip this question. Do not roll it into a generic "let me know if you have questions" closer.`
     : "";
 
+  // TIER 1 BASIC QUESTION addendum — Hawaii-style auto-answer with web-search
+  // grounding. The classifier is a heuristic, so the FIRST instruction is an
+  // escape hatch back to flag_for_human; the model is the final gate.
+  const tier1Mandate = params.tier1Mode
+    ? `\n\nTIER 1 BASIC QUESTION — HAWAII-STYLE AUTO-ANSWER:
+Our classifier thinks this is a simple factual question about the property itself${params.tier1Topics?.length ? ` (${params.tier1Topics.join(", ")})` : ""}. If that is wrong in ANY way — the guest is also asking about money, availability, dates, booking changes, policy exceptions, services, or anything beyond simple property facts — call flag_for_human instead of answering.
+When it IS a simple factual question:
+- VERIFY THE FACT before answering. First read get_listing_details / get_local_property_facts. When they don't settle it (e.g. "is there an ocean view?"), use the web_search tool to research THIS exact resort/community (for example "<resort name> ocean view condos") and answer only what the listing data or credible results about THIS property/community confirm. If neither confirms it, call flag_for_human — never guess.
+- Search results are for PROPERTY/COMMUNITY facts only. Never quote prices, availability, hours, phone numbers, or another business's details from search.
+- VOICE: warm, local Hawaii style. If the fetched facts show the property is in Hawaii, open with "Aloha ${params.guestName?.split(/\s+/)[0] ?? "[first name]"}," and let one or two natural island touches through (mahalo, 'ohana, the lanai, the trade winds — only where accurate and never forced). For a mainland property keep the same warmth without the Hawaiian vocabulary.
+- Keep it to 2-4 sentences. Lead with the answer. The standard sign-off closes the message.`
+    : "";
+
   const styleGuidance = await getAutoReplyStyleGuidance();
   const userPrompt = `Guest name: ${params.guestName ?? "Guest"}
 Channel: ${params.channel ?? "unknown"}
@@ -1019,6 +1072,7 @@ Guest message:
 ${params.guestMessage}
 """
 ${accessibilityMandate}
+${tier1Mandate}
 ${styleGuidance}
 
 Use tools to gather any needed context, then reply. Return only the guest-facing reply text.
@@ -1029,7 +1083,19 @@ ${params.forceDraftForReview
   const messages: any[] = [{ role: "user", content: userPrompt }];
   const toolsUsed: { name: string; input: unknown }[] = [];
   let toolFlagReason: string | null = null;
-  const MAX_TURNS = 5;
+  // Tier-1 mode gets extra turns: server-side web_search rounds can pause the
+  // turn (`pause_turn`) and each resume consumes a loop iteration.
+  const MAX_TURNS = params.tier1Mode ? 8 : 5;
+  // Tier-1 answers AUTO-SEND with no human review, so they draft on the
+  // stronger model the repo already standardizes on for guest-facing accuracy
+  // (arrival extraction, source-page check) and gain Anthropic's server-side
+  // web_search tool for grounding. Everything else stays on Haiku.
+  const model = params.tier1Mode
+    ? (process.env.AUTO_REPLY_TIER1_MODEL || "claude-sonnet-4-6")
+    : "claude-haiku-4-5-20251001";
+  const tools = params.tier1Mode
+    ? [...TOOLS, { type: "web_search_20250305", name: "web_search", max_uses: Math.max(1, Number(process.env.AUTO_REPLY_TIER1_MAX_SEARCHES) || 4) }]
+    : TOOLS;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -1043,10 +1109,11 @@ ${params.forceDraftForReview
         // came back as `error` status — none ever auto-sent. Haiku
         // 4.5 handles the 3-tool flow (get_listing_details,
         // get_reservation, flag_for_human) inside the 5-turn cap.
-        model: "claude-haiku-4-5-20251001",
+        // (Tier-1 mode overrides the model + tools — see above.)
+        model,
         max_tokens: 1024,
         system: SYSTEM_PROMPT,
-        tools: TOOLS,
+        tools,
         messages,
       }),
     });
@@ -1062,6 +1129,23 @@ ${params.forceDraftForReview
 
     // Append assistant message
     messages.push({ role: "assistant", content });
+
+    // Audit trail: server-side web searches execute inside Anthropic's
+    // infrastructure (no runTool call), so capture them from the content
+    // blocks — the inbox toolsUsed JSON is how the operator sees that the
+    // tier-1 answer was actually web-search grounded.
+    for (const block of content) {
+      if (block?.type === "server_tool_use") {
+        toolsUsed.push({ name: block.name ?? "web_search", input: block.input });
+      }
+    }
+
+    // Server-side tool loop paused mid-turn (web_search hit its iteration
+    // cap). The assistant turn is already appended — re-request and the
+    // server resumes where it left off. No tool_results to send.
+    if (stopReason === "pause_turn") {
+      continue;
+    }
 
     if (stopReason === "tool_use") {
       const toolResults: any[] = [];
@@ -1093,7 +1177,12 @@ ${params.forceDraftForReview
           });
         }
       }
-      messages.push({ role: "user", content: toolResults });
+      // Guard: tier-1 turns can mix server_tool_use (already executed by
+      // Anthropic) with client tool_use blocks — an empty tool_result message
+      // is an API error, so only send one when a client tool actually ran.
+      if (toolResults.length > 0) {
+        messages.push({ role: "user", content: toolResults });
+      }
       continue;
     }
 
@@ -1203,6 +1292,17 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
         // Pre-filter: known risky keywords → highlighted draft path.
         const safety = classifyMessage(guestMessage);
 
+        // Guest-question TIER (2026-07-10 operator ask). Risky messages are
+        // tier 2 by definition; clean ones classify via the shared heuristic.
+        // Tier 1 is only a CANDIDATE — any downstream hold (model self-flag,
+        // output filter, draft error, unmapped listing) DOWNGRADES to tier 2
+        // so the inbox badge never claims the AI answered when it didn't.
+        const tierResult = classifyGuestQuestionTier(guestMessage);
+        let tier: GuestQuestionTier = safety.risky ? 2 : tierResult.tier;
+        let tierReason = safety.risky
+          ? `Risky topic (${safety.matched.slice(0, 3).join(", ")}) — held for you`
+          : tierResult.reason;
+
         let status: AutoReplyStatus;
         let replyDraft: string | null = null;
         let flagReason: string | null = null;
@@ -1237,15 +1337,25 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
             // a one-click reviewable draft in the inbox attention banner. A flag
             // still sets status "flagged" → held, never auto-sent (see below).
             forceDraftForReview: true,
+            tier1Mode: tier === 1,
+            tier1Topics: tierResult.topics,
           });
           replyDraft = result.draft;
           toolsUsedJson = JSON.stringify(result.toolsUsed);
 
           if (result.error) {
+            if (tier === 1) {
+              tier = 2;
+              tierReason = "Looked basic, but the AI hit an error — reply yourself";
+            }
             status = "error";
             errorMessage = result.error;
             errors++;
           } else if (result.flagReason) {
+            if (tier === 1) {
+              tier = 2;
+              tierReason = `The AI held it: ${result.flagReason}`;
+            }
             status = "flagged";
             flagReason = result.flagReason;
             flagged++;
@@ -1257,19 +1367,33 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
             // codes) and highlights those drafts for the approval queue.
             const outputSafety = classifyOutput(result.draft);
             if (outputSafety.risky) {
+              if (tier === 1) {
+                tier = 2;
+                tierReason = `The AI held it: ${outputSafety.reason}`;
+              }
               status = "flagged";
               flagReason = `Output filter: ${outputSafety.reason}`;
               flagged++;
               console.warn(`[auto-reply] output blocked for conversation ${conv._id}: ${outputSafety.reason}`);
             } else {
+              // A tier-1 auto-answer must be verifiable against a mapped
+              // listing — no listing, no auto-send, and the badge should say
+              // why rather than show a "held" tier 1.
+              if (tier === 1 && !listingId) {
+                tier = 2;
+                tierReason = "No Guesty listing mapped — the AI can't verify facts";
+              }
               // Clean draft. Auto-send (Part B): when the master toggle is ON,
               // QUEUE it with a review-window deadline instead of holding for
               // approval — UNLESS a hard exclusion applies. The send pass
               // (runAutoSendQueue) sends due queued rows that are still
-              // uncontested. When the toggle is OFF this is identical to before.
+              // uncontested. When the toggle is OFF this is identical to before
+              // — EXCEPT tier-1 basics (2026-07-10), which queue whenever the
+              // tier-1 auto-answer toggle is on.
               const isAreaAsk = looksLikeAreaQuestion(guestMessage);
+              const tierOneAutoSend = tier === 1 && _tier1AutoEnabled;
               const canAutoSend =
-                _autoSendEnabled &&
+                (_autoSendEnabled || tierOneAutoSend) &&
                 !!listingId &&                             // unmapped/blind → never auto-send
                 !(_holdRecommendations && isAreaAsk);      // training wheels: hold area answers
               if (canAutoSend) {
@@ -1282,6 +1406,10 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
               }
             }
           } else {
+            if (tier === 1) {
+              tier = 2;
+              tierReason = "Looked basic, but the AI produced no draft — reply yourself";
+            }
             status = "error";
             errorMessage = "No draft produced";
             errors++;
@@ -1305,6 +1433,8 @@ export async function runAutoReply(): Promise<NonNullable<typeof _lastRunResult>
           toolsUsed: toolsUsedJson,
           autoSent: false,
           sendAfter,
+          tier,
+          tierReason,
         };
         await storage.createAutoReplyLog(logEntry);
       } catch (err) {
@@ -1333,6 +1463,16 @@ export async function redoDraftedReply(logId: number): Promise<{ ok: boolean; er
   if (!log.guestMessage?.trim()) return { ok: false, error: "No guest message to draft from" };
   if (log.replySent) return { ok: false, error: "Reply already sent" };
 
+  // Re-classify the tier on redo so the badge stays honest (same downgrade
+  // rules as the scheduler path — a redo never auto-sends, so a clean tier-1
+  // redo lands "drafted" for the operator to send).
+  const inputSafety = classifyMessage(log.guestMessage);
+  const tierResult = classifyGuestQuestionTier(log.guestMessage);
+  let tier: GuestQuestionTier = inputSafety.risky ? 2 : tierResult.tier;
+  let tierReason = inputSafety.risky
+    ? `Risky topic (${inputSafety.matched.slice(0, 3).join(", ")}) — held for you`
+    : tierResult.reason;
+
   const result = await draftReplyWithClaude({
     guestMessage: log.guestMessage,
     guestName: log.guestName ?? undefined,
@@ -1340,9 +1480,10 @@ export async function redoDraftedReply(logId: number): Promise<{ ok: boolean; er
     reservationId: log.reservationId ?? undefined,
     channel: log.channel ?? undefined,
     forceDraftForReview: true,
+    tier1Mode: tier === 1,
+    tier1Topics: tierResult.topics,
   });
 
-  const inputSafety = classifyMessage(log.guestMessage);
   const outputSafety = result.draft ? classifyOutput(result.draft) : { risky: false, reason: null };
   let status: AutoReplyStatus = "drafted";
   let flagReason: string | null = null;
@@ -1351,18 +1492,22 @@ export async function redoDraftedReply(logId: number): Promise<{ ok: boolean; er
   if (result.error) {
     status = "error";
     errorMessage = result.error;
+    if (tier === 1) { tier = 2; tierReason = "Looked basic, but the AI hit an error — reply yourself"; }
   } else if (inputSafety.risky) {
     status = "flagged";
     flagReason = `Risky keywords: ${inputSafety.matched.join(", ")}`;
   } else if (result.flagReason) {
     status = "flagged";
     flagReason = result.flagReason;
+    if (tier === 1) { tier = 2; tierReason = `The AI held it: ${result.flagReason}`; }
   } else if (outputSafety.risky) {
     status = "flagged";
     flagReason = `Output filter: ${outputSafety.reason}`;
+    if (tier === 1) { tier = 2; tierReason = `The AI held it: ${outputSafety.reason}`; }
   } else if (!result.draft) {
     status = "error";
     errorMessage = "No draft produced";
+    if (tier === 1) { tier = 2; tierReason = "Looked basic, but the AI produced no draft — reply yourself"; }
   }
 
   await storage.updateAutoReplyLog(logId, {
@@ -1372,6 +1517,8 @@ export async function redoDraftedReply(logId: number): Promise<{ ok: boolean; er
     flagReason,
     errorMessage,
     toolsUsed: JSON.stringify(result.toolsUsed),
+    tier,
+    tierReason,
   });
 
   return { ok: status !== "error", error: errorMessage ?? undefined, status };
@@ -1489,7 +1636,9 @@ export async function dismissReply(logId: number): Promise<{ ok: boolean; error?
 // re-validating each immediately before send so the operator (or a guest's own
 // host reply) always wins. No-op when auto-send is OFF.
 export async function runAutoSendQueue(): Promise<{ due: number; sent: number; intercepted: number; skipped: number; errors: number; message: string }> {
-  if (!_autoSendEnabled) {
+  // Tier-1 basics auto-send even with the master toggle off (2026-07-10) —
+  // the pass runs when EITHER mode is on; per-row authorization below.
+  if (!_autoSendEnabled && !_tier1AutoEnabled) {
     _lastAutoSendResult = { due: 0, sent: 0, intercepted: 0, skipped: 0, errors: 0, message: "auto-send off" };
     return _lastAutoSendResult;
   }
@@ -1508,7 +1657,7 @@ export async function runAutoSendQueue(): Promise<{ due: number; sent: number; i
       byConversation.set(log.conversationId, list);
     }
     for (const [conversationId, logs] of Array.from(byConversation.entries())) {
-      if (!_autoSendEnabled) { skipped += logs.length; continue; } // kill switch mid-pass
+      if (!_autoSendEnabled && !_tier1AutoEnabled) { skipped += logs.length; continue; } // kill switch mid-pass
       let posts: GuestyPost[] = [];
       try { posts = await fetchConversationPosts(conversationId); } catch { posts = []; }
       for (const queuedLog of logs) {
@@ -1517,6 +1666,15 @@ export async function runAutoSendQueue(): Promise<{ due: number; sent: number; i
           // kill-switch may have already reverted it.
           const fresh = await storage.getAutoReplyLog(queuedLog.id);
           if (!fresh || fresh.replySent || fresh.status !== "queued") { intercepted++; continue; }
+          // Per-row authorization: with the master toggle OFF, only tier-1
+          // rows may send (the tier-1 toggle queued them). A row that lost
+          // its authorization mid-flight reverts to the manual queue.
+          const authorized = _autoSendEnabled || (_tier1AutoEnabled && fresh.tier === 1);
+          if (!authorized) {
+            await storage.updateAutoReplyLog(fresh.id, { status: "drafted", sendAfter: null });
+            skipped++;
+            continue;
+          }
           const draft = (fresh.replyDraft ?? "").trim();
           if (!draft) { await storage.updateAutoReplyLog(fresh.id, { status: "drafted", sendAfter: null }); skipped++; continue; }
           // A human already replied after the trigger → don't send.

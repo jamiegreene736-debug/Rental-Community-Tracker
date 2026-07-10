@@ -666,6 +666,14 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured guest_issues table");
 
+  // Guest-question tier columns (2026-07-10): auto_reply_log predates them
+  // (table itself comes from db:push), so ADD COLUMN IF NOT EXISTS on boot.
+  // tier 1 = super-basic property question the AI auto-answers; tier 2 =
+  // held for the operator. Null = legacy rows written before tiering.
+  await db.execute(sql`ALTER TABLE auto_reply_log ADD COLUMN IF NOT EXISTS tier integer`);
+  await db.execute(sql`ALTER TABLE auto_reply_log ADD COLUMN IF NOT EXISTS tier_reason text`);
+  console.log("[schema] ensured auto_reply_log tier columns");
+
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS guest_issue_comments (
       id serial PRIMARY KEY,
