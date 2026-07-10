@@ -1,3 +1,5 @@
+import { allKnownSampleLicenseValues, isSampleTaxLicenseCore } from "./license-samples";
+
 export type LicenseFieldKey =
   | "taxMapKey"
   | "tatLicense"
@@ -37,14 +39,13 @@ export function isPlaceholderLicenseValue(value: unknown): boolean {
   if (normalized.includes("license number")) return true;
   if (normalized.includes("account number")) return true;
   if (normalized.includes("county tdt account")) return true;
+  if (normalized.includes("county tdt acct")) return true;
 
   const digitsOnly = raw.replace(/\D/g, "");
   if (/9{4,}/.test(digitsOnly)) return true;
   if (/^(cnd|dwe)\s+(or|and)\s+(cnd|dwe)/.test(normalized)) return true;
 
   const knownSamples = new Set([
-    "420150080001",
-    "420090060001",
     "ta 023 450 1234 01",
     "ge 023 450 1234 01",
     "ta 025 430 9876 01",
@@ -56,6 +57,15 @@ export function isPlaceholderLicenseValue(value: unknown): boolean {
     "19 0096 or lbtr 999999",
   ]);
   if (knownSamples.has(normalized)) return true;
+  // Every value the sample generator can emit (any county branch) plus
+  // the retired/static placeholder families — shared/license-samples.ts
+  // is the single source of truth, so a generated sample can never be
+  // pushed to Guesty as a real license.
+  if (allKnownSampleLicenseValues().has(normalized)) return true;
+  // TA-/GE- values built from a documented filler core are samples
+  // regardless of the 2-digit location suffix (the static demo data
+  // varies the suffix per property while reusing the same core).
+  if (isSampleTaxLicenseCore(raw)) return true;
   // Obvious demo permit numbers (e.g. Makahuena portfolio placeholders).
   if (/^tvr 20\d{2} 999$/.test(normalized)) return true;
   return false;
@@ -166,7 +176,7 @@ export function resolveLicenseComplianceProfile(input: {
           required: false,
           requiredForOtas: ["Airbnb", "VRBO", "Booking.com"],
           sample: "TVR-2024-012 or TVNC-0342",
-          helpText: "County-specific permit when applicable.",
+          helpText: "County-specific permit when applicable — Kauai TVR-YYYY-NN/TVNC-####, Big Island STVR-19-####, Maui STKM/STWM/…YYYYNNNN, Oahu NUC/registration.",
         },
       ],
       sources: [

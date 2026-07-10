@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 (unit-builder Descriptions-tab licenses: sample↔detector single source of truth + real
+  county formats + Maui STRH registry pull): Operator asked to investigate the license section's
+  samples/online pulls and make samples as-real-as-possible / pull real licenses where a source
+  exists. SHIPPED (`claude/unit-builder-licenses-01ad99`): (1) LOAD-BEARING — `sampleLicensesForLocation`
+  MOVED to NEW `shared/license-samples.ts` (adapt-draft re-exports) and `isPlaceholderLicenseValue`
+  now enumerates EVERY generatable sample (probe matrix) + `LEGACY_SAMPLE_LICENSE_VALUES` (retired +
+  static unit-builder-data demo families) + `isSampleTaxLicenseCore` (TA-/GE- filler cores, any
+  suffix). The lists had drifted ~60 values, so push-compliance could push filler licenses (e.g.
+  "TA-026-780-7890-01") to live OTA listings as REAL — now impossible; when adding a sample branch,
+  add a probe location (test-locked). (2) Sample formats corrected to county reality: Big Island
+  STVR-19-3461 (county form numbers them "STVR - 19 - ___"), Maui ST<region>YYYYNNNN (STKM/STWM/
+  STRH fallback), Oahu NUC-89-0134 (NUCs are 1989-90 era; a "NUC-24-…" is impossible); Kauai
+  TVR/TVNC kept (registry-consistent). (3) `HAWAII_STR_PATTERN` widened to the real shapes
+  (STVR-19-####, ST<region>########, "TVNC #NNNN", NUC-##-####; longer alternatives first so
+  nothing truncates) + the Guesty-notes branch now reuses it instead of a drifted inline copy.
+  (4) NEW real pull: Maui County Approved STRH list (the Kauai-TVR-registry analog) —
+  parse/match/fetch in server/hawaii-compliance-lookup.ts, TMK-root-required matching, FAIL-OPEN
+  into the public search (most legal Maui STRs are permit-exempt condos; Molokai issues none).
+  Verified against the REAL county PDF: 154/154 permits parse; GIS 12-digit TMK → permit end-to-end.
+  DESCOPED: hitax.hawaii.gov GET/TAT search (hCaptcha-gated), Big Island/Honolulu registries (no
+  machine-readable list). Old pipeline-logic fixtures using sample-family values as "real"
+  repointed. Verified: license-compliance-samples 26/0 (new, in chain), full `npm test` exit 0,
+  build clean (UI strings bundle-grepped), `npm run check` 338 = baseline (0 new; the 4
+  hawaii-compliance-lookup TS18047s are pre-existing, A/B-verified). Could NOT live-smoke
+  SearchAPI/Guesty legs (no creds) — post-deploy: "Pull real STR permit" on a Kihei property with a
+  real TMK should return its STKM… permit from "County of Maui Approved STRH list".
+
 - 2026-07-10 (market-rate updates: REMOVED the lodging-tax checkout uplift — raw Airbnb median again):
   Operator: the queue + the manual market-rate button scan Airbnb via SearchAPI "and it will then add
   I think 13% more for taxes at check out — remove this 13% or that percentage uplift and update the

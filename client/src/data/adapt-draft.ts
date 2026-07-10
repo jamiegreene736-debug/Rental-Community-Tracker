@@ -20,249 +20,15 @@ import { registerDraftPropertyPricing, type PropertyPricing } from "@/data/prici
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import { resolveCanonicalCommunityPhotoFolder } from "@shared/community-photo-folders";
 
-// Sample license placeholders for promoted drafts. Active properties
-// in unit-builder-data have hand-curated values for the four
-// Compliance fields; the wizard doesn't collect them, so the builder's
-// Compliance & Registration card was rendering all four fields blank
-// for promoted drafts — operator complaint: "nothing inserted for
-// sample license data". Insert state-aware placeholders so the
-// operator sees the expected format and replaces with the real values
-// before pushing to Guesty.
-//
-// Hawaii uses TMK (parcel id) + GE (general excise tax) + TAT
-// (transient accom. tax) + STR (per-county permit).
-//
-// Florida re-uses the same four UI fields for the Florida vacation-
-// rental compliance stack (the field labels are state-aware in the
-// builder — see complianceLabels there):
-//   - field 1 (TMK slot)  → DBPR Vacation Rental License
-//   - field 2 (GE slot)   → Florida DOR Sales Tax Certificate
-//   - field 3 (TAT slot)  → County Tourist Development Tax account
-//   - field 4 (STR slot)  → Local Business Tax Receipt (LBTR)
-type LicenseSamples = {
-  taxMapKey: string;
-  getLicense: string;
-  tatLicense: string;
-  strPermit: string;
-};
-
-type LicenseSampleContext = {
-  address?: string;
-  propertyType?: string;
-};
-
-type HawaiiCounty = "kauai-vda" | "kauai-non-vda" | "big-island" | "maui" | "oahu" | "unknown";
-
-function locationHaystack(city: string, context?: LicenseSampleContext): string {
-  return `${city || ""} ${context?.address || ""}`.toLowerCase();
-}
-
-// Map a city → Hawaii county. Used to pick the right STR permit format
-// (each county has its own — Kauai uses TVR/TVNC, Big Island STVR,
-// Maui STRH, Oahu NUC). VDA = Visitor Destination Area, the Kauai
-// distinction between resort zones (TVR) and residential (TVNC).
-function hawaiiCountyFromCity(city: string, context?: LicenseSampleContext): HawaiiCounty {
-  const c = locationHaystack(city, context);
-  // Big Island (Hawaii County). Check before Oahu because Kailua-Kona
-  // contains "Kailua" but uses Hawaii County TMK/STVR formats.
-  if (/keauhou|kona|kailua-kona|hilo|waikoloa|mauna|volcano|pahoa|naalehu|big island|hawaii island/.test(c)) return "big-island";
-  // Oahu: Honolulu / Waikiki / Kailua / North Shore / Pearl City etc.
-  if (/honolulu|waikiki|\bkailua\b|kaneohe|aiea|pearl|wahiawa|haleiwa|kapolei|ewa|north shore/.test(c)) return "oahu";
-  // Maui County: Maui island + Lanai + Molokai
-  if (/maui|lahaina|kihei|wailea|kaanapali|kapalua|kahului|hana|paia|makawao|lanai|molokai/.test(c)) return "maui";
-  // Kauai VDA zones (resort areas)
-  if (/poipu|princeville|kapaa beachfront|hanalei|koloa/.test(c)) return "kauai-vda";
-  // Kauai non-VDA (residential)
-  if (/kekaha|waimea|lihue|kapaa|kalaheo|wailua/.test(c)) return "kauai-non-vda";
-  return "unknown";
-}
-
-// Fully-formed sample values that match the format real properties in
-// `unit-builder-data.ts` use (e.g. "TVR-2022-048", "GE-023-450-1234-01",
-// "420150080001"). The operator replaces these with the unit's actual
-// numbers before pushing to Guesty — the goal here is to show what the
-// expected shape is, not provide live license data. Format only:
-// every concrete digit string below is filler; nothing identifies a
-// real property or owner.
-// Hawaii GET/TAT share the same digit groups; only the TA- vs GE- prefix differs.
-// Shape matches Hawaii Tax Online: TA|GE-###-###-####-## (see unit-builder-data).
-function hawaiiTaxLicenseCore(city: string, county: HawaiiCounty, context?: LicenseSampleContext): string {
-  const c = locationHaystack(city, context);
-  switch (county) {
-    case "kauai-vda":
-      if (/princeville/.test(c)) return "026-780-7890-01";
-      if (/poipu|koloa/.test(c)) return "025-430-9876-01";
-      return "023-450-1234-09";
-    case "kauai-non-vda":
-      return "024-120-9012-01";
-    case "big-island":
-      return "018-920-3456-01";
-    case "maui":
-      return "022-560-7812-01";
-    case "oahu":
-      return "019-870-2345-01";
-    default:
-      return "023-450-1234-09";
-  }
-}
-
-function tatSampleHawaii(city: string, context?: LicenseSampleContext): string {
-  return `TA-${hawaiiTaxLicenseCore(city, hawaiiCountyFromCity(city, context), context)}`;
-}
-
-function getSampleHawaii(city: string, context?: LicenseSampleContext): string {
-  return `GE-${hawaiiTaxLicenseCore(city, hawaiiCountyFromCity(city, context), context)}`;
-}
-
-function strPermitSampleHawaii(city: string, context?: LicenseSampleContext): string {
-  const c = locationHaystack(city, context);
-  const county = hawaiiCountyFromCity(city, context);
-  switch (county) {
-    case "kauai-vda":
-      if (/princeville/.test(c)) return "TVR-2023-074";
-      return "TVR-2022-048";
-    case "kauai-non-vda":
-      if (/kekaha|waimea/.test(c)) return "TVNC-0218";
-      return "TVNC-0342";
-    case "big-island":
-      return "STVR-2019-003461";
-    case "maui":
-      return "STRH-20240042";
-    case "oahu":
-      return "NUC-24-001-0134";
-    default:
-      return "TVR-2022-048";
-  }
-}
-
-// Hawaii TMK serials are 12 digits (county-district-section-plat-parcel-cpr).
-// Keep filler digits in the per-county block of the actual TMK ranges —
-// 4xxx for Kauai, 3xxx for Big Island, 4xxx for Maui (different prefix
-// inside the range), 1xxx for Oahu — so the operator immediately sees
-// which county slot they're filling.
-function tmkSampleHawaii(city: string, context?: LicenseSampleContext): string {
-  switch (hawaiiCountyFromCity(city, context)) {
-    case "kauai-vda":
-    case "kauai-non-vda": return "420150080099";
-    case "big-island":    return "370110060099";
-    case "maui":          return "230080020099";
-    case "oahu":          return "190070030099";
-    default:              return "420150080099";
-  }
-}
-
-// Map a Florida city → county. Drives the Florida sample set, since
-// Tourist Development Tax and Local Business Tax Receipts are issued
-// per-county, and the sales-tax certificate's leading two digits encode
-// the county the business registered in (Osceola=49, Orange=48,
-// Polk=53). Davenport sits across the Polk/Osceola line — most resort
-// communities ("ChampionsGate", Reunion-area condos) bill from Osceola
-// addresses, so Davenport is grouped with Osceola here. Operators with
-// a Polk-side Davenport address should overwrite the BTR/TDT/sales-tax
-// samples with their actual numbers; the fields aren't used until the
-// operator pushes compliance to Guesty.
-type FloridaCounty = "osceola" | "orange" | "polk" | "lake" | "brevard" | "lee" | "unknown";
-
-function floridaCountyFromCity(city: string, context?: LicenseSampleContext): FloridaCounty {
-  const c = locationHaystack(city, context);
-  if (/(kissimmee|davenport|celebration|poinciana|st\.?\s*cloud|championsgate|reunion)/.test(c)) return "osceola";
-  if (/(orlando|windermere|lake\s+buena\s+vista|ocoee|apopka|winter\s+garden|dr\.?\s*phillips)/.test(c)) return "orange";
-  if (/(haines\s*city|lakeland|winter\s+haven|auburndale|bartow|lake\s+wales)/.test(c)) return "polk";
-  if (/(clermont|groveland|minneola|mascotte|mount\s+dora|tavares|leesburg)/.test(c)) return "lake";
-  if (/(melbourne|cocoa|titusville|palm\s+bay|merritt\s+island|cape\s+canaveral|viera|rockledge)/.test(c)) return "brevard";
-  if (/(fort\s+myers|fort\s+myers\s+beach|bonita\s+springs|bonita\s+national|cape\s+coral|sanibel|estero|lee\s+county|33931|33908|33913|33928|34135)/.test(c)) return "lee";
-  return "unknown";
-}
-
-function floridaDbprSample(context?: LicenseSampleContext): string {
-  return /condo|condominium|apartment|unit/i.test(context?.propertyType || "")
-    ? "CND7053894"
-    : "DWE7053894";
-}
-
-// Per-county Florida sample sets. The four FL fields are:
-//   - DBPR Vacation Rental License (DWE for dwellings, CND for
-//     condo-class units; 7-digit certificate)
-//   - DOR Sales & Use Tax Certificate (XX-XXXXXXXXXX-X; the leading
-//     two digits encode the county the business registered in)
-//   - Tourist Development Tax account (issued per-county by the local
-//     Tax Collector; numeric 7-digit account)
-//   - Local Business Tax Receipt (LBTR, issued by the same Tax
-//     Collector for STR-class businesses)
-//
-// Concrete digits are filler chosen to match each county's leading
-// sales-tax code, so the operator can see at a glance which county
-// slot they're in. Operators replace with their actual numbers
-// before pushing compliance to Guesty.
-type FloridaSamples = { taxMapKey: string; getLicense: string; tatLicense: string; strPermit: string };
-function floridaSamples(c: FloridaCounty, context?: LicenseSampleContext): FloridaSamples {
-  const dbprLicense = floridaDbprSample(context);
-  switch (c) {
-    case "osceola": return {
-      taxMapKey:  dbprLicense,
-      getLicense: "49-8013575941-1",
-      tatLicense: "Osceola County TDT Acct # 4502187",
-      strPermit:  "LBTR-548291",
-    };
-    case "orange": return {
-      taxMapKey:  dbprLicense.replace(/\d+$/, "6841273"),
-      getLicense: "48-8014729384-2",
-      tatLicense: "Orange County TDT Acct # 7218394",
-      strPermit:  "LBTR-739104",
-    };
-    case "polk": return {
-      taxMapKey:  dbprLicense.replace(/\d+$/, "5928374"),
-      getLicense: "53-8024918273-3",
-      tatLicense: "Polk County TDT Acct # 3612847",
-      strPermit:  "LBTR-462051",
-    };
-    case "lake": return {
-      taxMapKey:  dbprLicense.replace(/\d+$/, "4827193"),
-      getLicense: "35-8035102847-4",
-      tatLicense: "Lake County TDT Acct # 2841093",
-      strPermit:  "LBTR-318472",
-    };
-    case "brevard": return {
-      taxMapKey:  dbprLicense.replace(/\d+$/, "3719284"),
-      getLicense: "05-8046283715-5",
-      tatLicense: "Brevard County TDT Acct # 1928374",
-      strPermit:  "LBTR-294817",
-    };
-    case "lee": return {
-      taxMapKey:  dbprLicense.replace(/\d+$/, "4601287"),
-      getLicense: "36-8062451938-6",
-      tatLicense: "Lee County TDT Acct # 6184729",
-      strPermit:  "LBTR-190096",
-    };
-    default: return {
-      taxMapKey:  dbprLicense.replace(/\d+$/, "9999999"),
-      getLicense: "99-9999999999-9",
-      tatLicense: "FL County TDT Acct # 9999999",
-      strPermit:  "LBTR-999999",
-    };
-  }
-}
-
-export function sampleLicensesForLocation(city: string, state: string, context?: LicenseSampleContext): LicenseSamples {
-  const s = (state || "").toLowerCase();
-  if (s === "hawaii" || s === "hi") {
-    return {
-      taxMapKey:  tmkSampleHawaii(city, context),
-      getLicense: getSampleHawaii(city, context),
-      tatLicense: tatSampleHawaii(city, context),
-      strPermit:  strPermitSampleHawaii(city, context),
-    };
-  }
-  if (s === "florida" || s === "fl") {
-    return floridaSamples(floridaCountyFromCity(city, context), context);
-  }
-  return {
-    taxMapKey: "(no parcel/license id required for this state — verify with local jurisdiction)",
-    getLicense: "(no state sales tax cert required — verify with local jurisdiction)",
-    tatLicense: "(no occupancy tax registration required — verify with local jurisdiction)",
-    strPermit: "(verify local short-term rental permit requirements)",
-  };
-}
+// Sample license placeholders for promoted drafts live in
+// shared/license-samples.ts (moved 2026-07-10) so the placeholder
+// DETECTOR in shared/license-compliance.ts and the sample GENERATOR
+// share one source of truth. Re-exported here so existing client
+// imports (`@/data/adapt-draft`) keep working unchanged.
+import { sampleLicensesForLocation } from "@shared/license-samples";
+import { isPlaceholderLicenseValue } from "@shared/license-compliance";
+export { sampleLicensesForLocation };
+export type { LicenseSamples, LicenseSampleContext } from "@shared/license-samples";
 
 // True when the saved value looks like an older XXXX-style placeholder
 // or a "(sample — …)" / "(verify …)" annotated string from a previous
@@ -367,9 +133,13 @@ export function adaptDraftToPropertyUnitBuilder(
   const u2Br = resolveDraftUnitBedrooms(draft, "unit2");
   const blank = "";
   const licenseSamples = sampleLicensesForLocation(draft.city, draft.state);
+  // A value is "real" only when it's neither an old annotated
+  // placeholder NOR one of the enumerated generator/legacy samples —
+  // so a stale persisted sample (e.g. old-format "STRH-20240042")
+  // auto-upgrades to the current county-correct sample on adapt.
   const realDraftValue = (value: unknown): string | undefined => {
     const text = String(value ?? "").trim();
-    return text && !looksLikeSamplePlaceholder(text) ? text : undefined;
+    return text && !looksLikeSamplePlaceholder(text) && !isPlaceholderLicenseValue(text) ? text : undefined;
   };
   const savedTaxMapKey = realDraftValue((draft as any).taxMapKey) ?? realDraftValue((draft as any).dbprLicense);
   const savedTatLicense = realDraftValue((draft as any).tatLicense) ?? realDraftValue((draft as any).touristTaxAccount);

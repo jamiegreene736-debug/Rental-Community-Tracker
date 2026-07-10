@@ -68,9 +68,11 @@ export type PropertyUnitBuilder = {
   // Short-Term Rental Permit — format depends on county:
   //   Kauai County (VDA zones, e.g. Poipu, Princeville):  TVR-YYYY-##    e.g. TVR-2022-048
   //   Kauai County (non-VDA/residential, e.g. Kekaha, Kaha Lani, Lae Nani):  TVNC-####    e.g. TVNC-0342
-  //   Hawaii County (Big Island, e.g. Keauhou, Kona):  STVR-YYYY-######    e.g. STVR-2019-003461
-  //   Maui County:  STRH-########    e.g. STRH-20220042
-  //   Honolulu (Oahu):  NUC-##-###-####    e.g. NUC-22-001-0134
+  //   Hawaii County (Big Island, e.g. Keauhou, Kona):  STVR-19-####    e.g. STVR-19-3461 (the county's own
+  //     renewal form numbers certificates "STVR - 19 - ____"; NUC-19-#### for the NUC variant)
+  //   Maui County:  ST<region>YYYYNNNN from the county's Approved STRH list — STKM (Kihei-Makena),
+  //     STWM (West Maui), STHA (Hana), STPH (Paia-Haiku), STLA (Lanai), generic STRH  e.g. STKM20190012
+  //   Honolulu (Oahu):  NUC-##-####    e.g. NUC-89-0134 (NUCs date to the 1989-90 ordinance era)
   strPermit?: string;
   // Florida DBPR vacation rental license (Fort Myers Beach and other Florida units).
   dbprLicense?: string;
@@ -914,7 +916,7 @@ Important: This listing represents a managed estate property. Photos are represe
         taxMapKey: "370110060001",
     tatLicense: "TA-018-920-3456-01",
     getLicense: "GE-018-920-3456-01",
-    strPermit: "STVR-2019-003461",
+    strPermit: "STVR-19-3461",
     hasPhotos: true,
     communityPhotos: COMMUNITY_KEAUHOU,
     communityPhotoFolder: "community-keauhou-estates",
@@ -1302,7 +1304,7 @@ Important: This listing represents a managed estate property. Photos are represe
         taxMapKey: "370110070001",
     tatLicense: "TA-018-920-3456-02",
     getLicense: "GE-018-920-3456-02",
-    strPermit: "STVR-2019-003462",
+    strPermit: "STVR-19-3462",
     hasPhotos: true,
     communityPhotos: COMMUNITY_KEAUHOU,
     communityPhotoFolder: "community-keauhou-estates",

@@ -3,7 +3,7 @@ import { isPlaceholderLicenseValue, usableLicenseValue } from "../shared/license
 
 export type HawaiiComplianceLookupResult = {
   value: string;
-  confidence: "guesty-listing" | "property-record" | "paired-tax-license" | "public-listing" | "kauai-tvr-registry" | "unit-cpr" | "master-parcel";
+  confidence: "guesty-listing" | "property-record" | "paired-tax-license" | "public-listing" | "kauai-tvr-registry" | "maui-strh-registry" | "unit-cpr" | "master-parcel";
   note: string;
   searchedAddress?: string;
   geocodedAddress?: string;
@@ -240,6 +240,119 @@ export async function fetchKauaiTvrRecords(): Promise<KauaiTvrRecord[]> {
   return records;
 }
 
+// County of Maui "Approved Short-Term Rental Homes" list — the Maui
+// analog of the Kauai TVR registry above. The county publishes one PDF
+// with every approved STRH permit: permit number (ST<region>YYYYNNNN,
+// e.g. STKM20120001 for Kihei-Makena), 13-digit TMK (2-x-x-xxx-xxx-0000),
+// property name, street address, and town. Permit numbers here are the
+// exact strings the county requires in all STRH advertising.
+const MAUI_STRH_PDF_URL =
+  "https://www.mauicounty.gov/DocumentCenter/View/14762/Approved-Short-Term-Rental-Homes-List";
+
+export type MauiStrhRecord = {
+  permitNumber: string;
+  tmkKey: string;
+  name: string;
+  address: string;
+};
+
+// pdf-parse renders each row as one line shaped like
+//   "STKM20120001HALE ALANA2210170400000-4059 3 13378 KEHA DRIVE 5KKIHEI"
+// (permit + name + 13-digit TMK + per-row file number + rooms/dwellings
+// digits glued onto the street number + town glued onto the street).
+// Matching is TMK-first, so the address is kept as the raw tail — the
+// scorer's substring check tolerates the glued digit prefix/town suffix.
+export function parseMauiStrhPdfText(text: string): MauiStrhRecord[] {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const records: MauiStrhRecord[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const permitMatch = lines[i].match(/^(ST[A-Z]{2}\d{8})(.*)$/);
+    if (!permitMatch) continue;
+    let rest = permitMatch[2] ?? "";
+    // Wrap tolerance: a long property name can push the TMK 1-3 lines
+    // down (e.g. "DREAMS COME TRUE ON LANAI SHORT-TERM RENTAL" / "HOME" /
+    // "<TMK row>"). Join lookahead lines until the TMK appears, stopping
+    // at a new permit row or a row-number line; consume the joined lines
+    // only when the TMK was actually found.
+    if (!/2\d{12}/.test(rest)) {
+      let joined = rest;
+      let j = i + 1;
+      while (j < lines.length && j - i <= 3) {
+        const next = lines[j];
+        if (/^ST[A-Z]{2}\d{8}/.test(next) || /^\d{1,3}\.$/.test(next)) break;
+        joined = `${joined} ${next}`;
+        j += 1;
+        if (/2\d{12}/.test(joined)) break;
+      }
+      if (!/2\d{12}/.test(joined)) continue;
+      rest = joined;
+      i = j - 1;
+    }
+    // No leading \b — the TMK is glued to the property name in the
+    // pdf-parse rendering ("HALE ALANA2210170400000-…"); the (?!\d)
+    // tail plus the row's "-<file number>" separator anchor the match.
+    const tmkMatch = rest.match(/(2\d{12})(?!\d)/);
+    if (!tmkMatch) continue;
+    const tmkIndex = rest.indexOf(tmkMatch[1]);
+    records.push({
+      permitNumber: permitMatch[1],
+      tmkKey: tmkMatch[1],
+      name: rest.slice(0, tmkIndex).trim(),
+      address: rest.slice(tmkIndex + tmkMatch[1].length).trim(),
+    });
+  }
+  return records;
+}
+
+// Maui STRH permits are single-family parcels (the list's TMKs all end
+// in a 0000 CPR), so the 9-digit division+zone+section+plat+parcel root
+// identifies the property. The statewide GIS lookup returns 12-digit
+// TMKs whose first 9 digits are that same root.
+export function matchMauiStrhPermit(
+  records: MauiStrhRecord[],
+  taxMapKey: string,
+  address?: string | null,
+): { value: string; record: MauiStrhRecord; note: string } | null {
+  const digits = String(taxMapKey ?? "").replace(/\D/g, "");
+  const root = digits.length >= 9 && digits.startsWith("2") ? digits.slice(0, 9) : null;
+  const normalizedAddress = normalizeAddressText(address);
+  const streetLead = normalizedAddress.split(" ").slice(0, 3).join(" ");
+  const ranked = records
+    .map((record) => {
+      let score = 0;
+      if (root && record.tmkKey.slice(0, 9) === root) score += 120;
+      if (streetLead && normalizeAddressText(record.address).includes(streetLead)) score += 40;
+      return { record, score };
+    })
+    .filter(({ score }) => score >= 120)
+    .sort((a, b) => b.score - a.score);
+  const best = ranked[0]?.record;
+  if (!best) return null;
+  return {
+    value: best.permitNumber,
+    record: best,
+    note: `Matched Maui County Approved STRH list ${best.permitNumber} for TMK ${best.tmkKey} (${best.name || best.address || "approved rental home"}).`,
+  };
+}
+
+let mauiStrhCache: { loadedAt: number; records: MauiStrhRecord[] } | null = null;
+
+export async function fetchMauiStrhRecords(): Promise<MauiStrhRecord[]> {
+  const oneDay = 24 * 60 * 60 * 1000;
+  if (mauiStrhCache && Date.now() - mauiStrhCache.loadedAt < oneDay) {
+    return mauiStrhCache.records;
+  }
+  const resp = await fetch(MAUI_STRH_PDF_URL, {
+    headers: { "User-Agent": "NexStay/1.0" },
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!resp.ok) throw new Error(`Maui STRH registry download failed (${resp.status})`);
+  const parsed = await pdf(Buffer.from(await resp.arrayBuffer()));
+  const records = parseMauiStrhPdfText(parsed.text || "");
+  mauiStrhCache = { loadedAt: Date.now(), records };
+  return records;
+}
+
 // Shared ArcGIS geocode step used by both the Kauai parcel/CPR lookup and the
 // statewide (Big Island / Maui / Oahu) parcel lookup. Returns the best-scoring
 // point candidate; throws the same "No geocoded Hawaii address found" message
@@ -429,7 +542,16 @@ export async function lookupHawaiiStatewideTmkFromAddress(address: string): Prom
 
 const HAWAII_TAT_PATTERN = /\bTA-\d{3}-\d{3}-\d{4}-\d{2}\b/i;
 const HAWAII_GET_PATTERN = /\bGE-\d{3}-\d{3}-\d{4}-\d{2}\b/i;
-const HAWAII_STR_PATTERN = /\b(?:TVR-\d{4}-\d{2,4}|TVNC-\d{4}|STVR-\d{4}-\d{6}|STRH[-\s]?\d{8}|STPH[-\s]?\d{4,8}|NUC-\d{2}-\d{3}-\d{4})\b/i;
+// Per-county STR permit shapes, in the forms counties actually issue
+// (2026-07-10): Kauai TVR-YYYY-NN / TVNC-#### (registry also renders
+// "TVNC #1317"); Big Island STVR-19-#### and NUC-19-#### (the county's
+// renewal form numbers certificates "STVR - 19 - ____" — the legacy
+// STVR-YYYY-###### alternative stays for values we pushed historically);
+// Maui ST<region>YYYYNNNN from the Approved STRH list (STKM/STWM/STHA/
+// STWK/STMP/STPH/STLA + generic STRH); Oahu NUC-##-####. Longer
+// alternatives are listed before their shorter prefixes so the ordered
+// alternation never truncates a full permit (e.g. NUC-24-001-0134).
+const HAWAII_STR_PATTERN = /\b(?:TVR-\d{4}-\d{2,4}|TVNC[-\s#]{0,2}\d{3,4}|STVR-\d{4}-\d{6}|STVR[-\s]?\d{2}[-\s]?\d{3,6}|ST(?:HA|WK|KM|MP|PH|WM|LA|RH)[-\s]?\d{8}|STPH[-\s]?\d{4,8}|NUC-\d{2}-\d{3}-\d{4}|NUC[-\s]?\d{2}[-\s]?\d{3,4})\b/i;
 
 const classifyTopLevelLicense = (value: unknown): "tat" | "get" | "str" | null => {
   const raw = String(value ?? "").trim();
@@ -559,7 +681,7 @@ export function extractHawaiiComplianceFromGuestyListing(listing: Record<string,
   const strFromNotes = (() => {
     const labeled = notes.match(/Short-Term Rental Registration \/ Permit:\s*([^\n]+)/i);
     if (labeled) return usableLicenseValue(labeled[1]);
-    const permitMatch = notes.match(/\b(?:TVR-\d{4}-\d{2,4}|TVNC-\d{4}|STVR-\d{4}-\d{6}|STRH-\d{8}|NUC-\d{2}-\d{3}-\d{4})\b/i);
+    const permitMatch = notes.match(HAWAII_STR_PATTERN);
     return permitMatch ? usableLicenseValue(permitMatch[0]) : null;
   })();
 
@@ -779,6 +901,32 @@ export async function lookupHawaiiComplianceField(options: {
           source: "County of Kauai Planning TVR registry",
           sourceUrl: KAUAI_TVR_PDF_URL,
         };
+      }
+    } else if (/\b(maui|kihei|wailea|makena|lahaina|kaanapali|kapalua|napili|kahului|wailuku|hana|paia|haiku|makawao|pukalani|kula|lanai|molokai|kaunakakai)\b/i.test(searchedAddress)) {
+      // Maui County: match the county's published Approved STRH list by
+      // TMK root (+ address confirmation). Fail-open — a registry fetch
+      // problem falls through to the public-listing search below instead
+      // of failing the whole lookup (unlike Kauai, most legal Maui
+      // short-term rentals are permit-exempt apartment/hotel-district
+      // condos that will never appear on this list).
+      try {
+        const effectiveTmk = usableLicenseValue(taxMapKey)
+          || (await lookupHawaiiStatewideTmkFromAddress(searchedAddress)).taxMapKey;
+        const records = await fetchMauiStrhRecords();
+        const match = matchMauiStrhPermit(records, effectiveTmk, searchedAddress);
+        if (match) {
+          return {
+            value: match.value,
+            confidence: "maui-strh-registry",
+            note: match.note,
+            searchedAddress,
+            taxMapKey: effectiveTmk,
+            source: "County of Maui Approved STRH list",
+            sourceUrl: MAUI_STRH_PDF_URL,
+          };
+        }
+      } catch (e: any) {
+        console.warn(`[maui-strh-registry] lookup skipped: ${e?.message ?? e}`);
       }
     }
   }
