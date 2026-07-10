@@ -48,7 +48,7 @@ Before making any changes:
   I think 13% more for taxes at check out — remove this 13% or that percentage uplift and update the
   methodology." That uplift was the 2026-07-01 `applyLodgingTaxGrossUp` (HI 18% / FL 12.5% — the
   "~13%" memory) applied in `server/hybrid-pricing.ts` where the SearchAPI median became the stored
-  basis. REMOVED (`claude/remove-market-rate-tax-uplift-tt7z5s`, PR #TBD): the stored `monthlyRates`
+  basis. REMOVED (`claude/remove-market-rate-tax-uplift-tt7z5s`, PR #994): the stored `monthlyRates`
   basis is the RAW SearchAPI Airbnb median again (extracted_total_price ÷ nights = rent + cleaning +
   service fees, occupancy tax NOT added); year-2 extrapolation inherits the untaxed year-1 basis (tax
   was never re-applied there); the thin-comp static fallback was never taxed; the 20%
