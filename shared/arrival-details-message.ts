@@ -1,3 +1,33 @@
+// Does a host message body contain ACTUAL arrival details (as opposed to a
+// promise of them)? Used by the inbox guest-stay timeline's "14-day arrival
+// details" sent-detection AND the dashboard arrival-details coverage warning
+// (GET /api/dashboard/arrival-details-coverage), so the two surfaces can never
+// disagree.
+//
+// LOAD-BEARING — the old timeline regex (/arrival details|access code|check-in
+// date/i) false-positived on the AUTOMATED booking confirmation, whose
+// what-happens-next bullet PROMISES "your full arrival details ... door and
+// lockbox codes" ~14 days out. The step then read ✓ sent the moment the
+// confirmation posted, and a guest could reach arrival day with no codes while
+// the timeline looked done. So this matcher keys on the message's STRUCTURE,
+// not its vocabulary:
+//   - a line-anchored access credential label ("Access code: 1234",
+//     "Door code:", "Lockbox code:", "Gate code:", "Entry code:"), OR
+//   - the AD builder's per-unit block header ("Unit: Kiahuna 3BR",
+//     "Unit 2: ..."), which every builder-generated AD with >= 1 unit emits.
+// Prose mentions ("we'll send your door and lockbox codes") never match, and
+// the zero-unit "I am still confirming the final unit access details" variant
+// deliberately doesn't either — a promise is not a delivery. Address:/Wi-Fi:/
+// Parking: lines alone are NOT sufficient (they appear in casual host replies
+// answering one-off questions).
+const ARRIVAL_DETAILS_SIGNAL_RE = /^((access|door|lockbox|gate|entry) code|unit(?: \d+)?): /im;
+
+export function looksLikeArrivalDetailsMessage(body: string | null | undefined): boolean {
+  const text = String(body ?? "");
+  if (!text.trim()) return false;
+  return ARRIVAL_DETAILS_SIGNAL_RE.test(text);
+}
+
 export type ArrivalUnitDetail = {
   id?: number;
   unitLabel: string;

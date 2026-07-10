@@ -69,6 +69,87 @@ Before making any changes:
   hawaii-compliance-lookup TS18047s are pre-existing, A/B-verified). Could NOT live-smoke
   SearchAPI/Guesty legs (no creds) — post-deploy: "Pull real STR permit" on a Kihei property with a
   real TMK should return its STKM… permit from "County of Maui Approved STRH list".
+- 2026-07-10 (guest inbox: TIER-1 basics auto-answered by the AI + tier badges in the UI): Operator asked
+  for "basic tier 1 questions like Is there an ocean view" to be answered automatically (Hawaii lingo,
+  signed John Carpenter, "use claude AI search as much as possible") with the UI showing "AI responded —
+  tier 1" vs "tier 2 — no automatic response". SHIPPED (`claude/guest-inbox-tier1-auto-d60726`): a SCOPED
+  exception to the 2026-06-09 drafts-only default — pure `shared/guest-question-tier.ts` (81 tests)
+  classifies every incoming guest message; tier 1 = short question-shaped basic-property-fact ask
+  (curated topic list: ocean view, parking, pool, AC, wifi, laundry, kitchen, BBQ, lanai, beach distance,
+  check-in times, bedrooms/beds, TV, resort amenities, linens) with ZERO tier-2 signals (money/
+  availability/dates/policy/complaint/accessibility/urgency/service); everything else tier 2. Tier-1
+  candidates draft on `AUTO_REPLY_TIER1_MODEL` (default claude-sonnet-4-6) WITH the server-side
+  `web_search` tool (pause_turn-resumed, searches audited into toolsUsed) + a Hawaii-voice prompt block,
+  then queue through the EXISTING delivery-verified auto-send under `auto_send.tier1_enabled` (default
+  ON, new key so no rollout flag; master auto-send stays OFF and independent). LOAD-BEARING: the 3-layer
+  safety stack is UNCHANGED and every hold path (risk keyword, flag_for_human, output filter, error,
+  unmapped listing) DOWNGRADES the row to tier 2 + held — the tier-1 badge can never claim the AI
+  answered when it didn't. Tier persists on `auto_reply_log.tier/tier_reason` (schema +
+  schema-maintenance ALTER); UI = conversation-row chips + thread-header verdict in inbox.tsx fed by
+  cheap `GET /api/inbox/auto-reply/tiers` (agent-allowlisted; deliberately does NOT run
+  dismissHandledAutoReplyDrafts) + admin "Tier 1 auto-answer" switch
+  (`POST /api/inbox/auto-reply/tier1/toggle`; OFF reverts queued tier-1 rows to drafted). Verified:
+  guest-question-tier 81/0, full `npm test` exit 0, build clean, `npm run check` 338 = baseline (0 new,
+  stash-diffed), bundle-grep confirms chips + switch. Could NOT live-smoke the Guesty/Claude legs (no
+  creds) — post-deploy: message a mapped listing something like "does the condo have AC?"; within ~2 min
+  the row should show the emerald "Tier 1 · AI answered" chip and the guest gets the Aloha-style reply.
+  See AGENTS.md Load-Bearing #24 "TIER-1 EXCEPTION" + the 2026-07-10 Decision Log line.
+- 2026-07-10 (guest booking confirmations: representative-photos line + stay specifics + arrival-details
+  watchdog + misroute resend + deeper Hawaii voice): Operator asked to research the automated day-of-booking
+  messages (confirmation + two-units/representative expectations, Hawaii lingo) and implement all improvements.
+  KEY FINDINGS (don't re-chase): the automated confirmation ALREADY existed (server/booking-confirmations.ts,
+  5-min scheduler, PR #942) with the two-unit setup + Aloha voice; the gaps were (a) the "photos are
+  representative" disclosure was MANUAL-only, (b) nothing enforced the 14-day arrival-details promise, (c) the
+  inbox timeline's arrival-step regex false-marked itself sent off the confirmation's own promise text.
+  SHIPPED (`claude/guest-booking-confirmations-8cc471`): (1) representative line in BOTH message variants —
+  wording "assigned units will match" is LOAD-BEARING (auto-completes the timeline's manual unit-setup step);
+  (2) "Your stay at a glance" (dates/nights/confirmation code; the reservations poll now passes explicit
+  fields=) + scheduled-balance bullet via pure `scheduledBalanceDueFromReservation` (real Guesty schedule only:
+  shouldBePaidAt + isFullyPaid guard (Booking.com totalPaid:0 quirk) + deposit collected + next-row amount ≈
+  balance, else OMIT; wording must avoid "remaining balance" — invoice timeline regex); (3) NEW
+  GET /api/dashboard/arrival-details-coverage + amber home.tsx popup (pure shared/arrival-details-warning.ts;
+  manual rows excluded — no thread to verify; /posts fetched WITHOUT fields= per PR #917; 40-scan cap, 5-min
+  cache, localStorage nexstay_arrival_details_warning_dismissed); (4) ONE shared matcher
+  `looksLikeArrivalDetailsMessage` (line-anchored Access/Door/Lockbox/Gate/Entry code: or Unit N: labels;
+  promises + the zero-unit "still confirming" AD + casual Parking:/Wi-Fi: lines do NOT match) drives both the
+  timeline step and the coverage scan; (5) misroute visibility: GET /api/dashboard/booking-confirmation-issues
+  (red popup) + POST /api/inbox/booking-confirmations/resend — force-send mirrors receipts #51d (confirmed
+  "sent" row 409s; scheduler stays terminal on misroute/pending; storage.updateBookingConfirmation added);
+  (6) Hawaii voice: "E komo mai!" + island naming via `hawaiianIslandLabel(resolveIslandRegion(...))`
+  (shared/area-identity.ts — generic "Hawaii"/Florida regions render nothing), post-stay templates get
+  "Mahalo nui loa" + "A hui hou" (keep "appreciate a review" verbatim — timeline regex). ASCII-clean
+  everywhere (Booking.com). Verified: booking-confirmation-message 67/0 + arrival-details-warning 38/0 (new,
+  in the npm chain), full `npm test` exit 0, build clean (UI strings bundle-grepped), `npm run check` 338 =
+  baseline (0 new). Could NOT live-smoke Guesty sends (no creds) — post-deploy: next new booking gets the
+  enriched message; expect the amber arrivals popup on first dashboard load (any <14-day check-in without
+  arrival details on its thread raises it — that's the watchdog working, not a bug).
+- 2026-07-10 (amenity scan: surrounding-area "nearby" amenities via Claude web search + fully-automatic
+  save→push to Guesty): Operator (Amenities-tab screenshot): after the photo scan, auto-save against the
+  listing + auto-push to Guesty; and "see why it's not checking off things like shopping nearby — research
+  the surrounding area with Claude search." WHY nearby never checked (don't re-chase): the scan only ran
+  `AMENITY_VISION_TARGETS` — photos can't prove "Shopping Nearby", and those keys aren't in the baseline.
+  SHIPPED (`claude/amenities-scanning-guesty-sync-7cd6e8`): (1) NEW web-search leg — curated
+  `AMENITY_LOCATION_TARGETS` (shared/guesty-amenity-catalog.ts; 13 keys incl. SHOPPING/NEAR_RESTAURANTS/
+  GOLF/HIKING/NEAR_BEACH, hints carry distance thresholds, DISJOINT from vision targets) + pure
+  `buildAmenityLocationResearchPrompt` (same JSON contract → `parseAmenityDetectionJson` parses both legs)
+  + `server/amenity-location-research.ts` (`callClaudeWebSearchJson`, `AMENITY_LOCATION_MODEL` default
+  claude-sonnet-4-6, ≤6 searches/120s, kill `AMENITY_LOCATION_RESEARCH_DISABLED=1`; confirms an amenity
+  ONLY on a NAMED place within the threshold). Runs CONCURRENTLY with vision inside
+  `scanAmenitiesForProperty`; unions into the same ADD-ONLY merge; result gains a `location` section the
+  tab renders ("🌍 Area research…"). Fail-soft everywhere. (2) AUTOMATION GAP: scan already saved+pushed
+  when a listing was MAPPED; unmapped scans (fresh drafts — the screenshot) waited for a manual push
+  forever. NEW `autoPushSavedAmenitiesForProperty` (routes.ts) fires fire-and-forget wherever a
+  property↔listing mapping is born — builder create (`schedule-sync`), dashboard Connect-to-Guesty
+  (`/api/guesty-property-map`), Guesty import (both branches), `sync-now` — pushing the in-system saved
+  set add-only via the extracted `pushAmenityKeysToGuestyListing` union helper (2-min cooldown absorbs
+  the create flow's double-fire). LOAD-BEARING: the union with the listing's CURRENT Guesty amenities is
+  what keeps auto-pushes add-only over push-amenities' PUT-replace; manual "Save to system" deliberately
+  does NOT auto-push (the manual Push button stays the exact-replace path that can REMOVE). Bulk-combo
+  amenities step inherits both. Verified: amenity-scan-logic 62/0 (33 new incl. source guards on every
+  hook), full `npm test` exit 0, build clean (UI strings bundle-grepped), `npm run check` 338 = baseline
+  (0 new; git-stash A/B). Could NOT live-smoke web-search/Guesty (no creds) — post-deploy: Scan on the
+  Amenities tab → 🌍 line + nearby boxes check; publish a scanned draft → amenities land in Guesty
+  with no click. See the AGENTS.md 2026-07-10 Decision Log line.
 
 - 2026-07-10 (market-rate updates: REMOVED the lodging-tax checkout uplift — raw Airbnb median again):
   Operator: the queue + the manual market-rate button scan Airbnb via SearchAPI "and it will then add

@@ -39,13 +39,14 @@ import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { MessageTemplate } from "@shared/schema";
+import { autoReplyTierBadge, type AutoReplyTierBadge } from "@shared/guest-question-tier";
 import { GuestIssuesPanel, GuestIssuesTab } from "@/components/GuestIssuesPanel";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { AGENT_COMPOSE_SEED, AGENT_REPLY_SIGNOFF } from "@shared/agent-identity";
-import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
+import { buildArrivalDetailsGuestMessage, looksLikeArrivalDetailsMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { bodyWithoutAttachmentUrls, collectPostAttachments, type PostAttachment } from "@shared/guesty-post-attachments";
 import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
 import { guestPartyFromReservation, formatGuestParty } from "@shared/guest-party";
@@ -1482,14 +1483,22 @@ function buildPostStayBody(args: {
   isHawaii?: boolean;
 }): string {
   const isHawaii = args.isHawaii ?? true;
+  // Hawaii voice gets the deeper island touches here ("Mahalo nui loa",
+  // "A hui hou") — the farewell message is the natural home for them. Keep
+  // "appreciate a review" verbatim in both voices: the guest-stay timeline's
+  // post-stay sent-detection keys on it. ASCII only (Booking.com).
+  const bigThanks = isHawaii ? "Mahalo nui loa" : "Thank you so much";
+  const comeBack = isHawaii
+    ? `A hui hou - until we meet again! We would love to welcome you and your 'ohana back anytime.`
+    : `We would love to welcome you back anytime.`;
   return [
     guestGreeting(args.guestFirstName, isHawaii),
     ``,
-    `Thank you so much for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. It was a pleasure to host you, and I hope you had a wonderful trip.`,
+    `${bigThanks} for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. It was a pleasure to host you, and I hope you had a wonderful trip.`,
     ``,
     `If you have a moment, we would truly appreciate a review. It helps future guests feel confident booking and means the world to us.`,
     ``,
-    `We would love to welcome you back anytime.`,
+    comeBack,
     ``,
     ...guestSignoffLines(isHawaii),
   ].join("\n");
@@ -1501,7 +1510,9 @@ function buildPostStaySmsBody(args: {
   isHawaii?: boolean;
 }): string {
   const isHawaii = args.isHawaii ?? true;
-  return `${guestGreeting(args.guestFirstName, isHawaii)} thank you so much for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. If you have a moment, we would truly appreciate a review. We would love to host you again anytime. ${guestSmsSignoff(isHawaii)}`;
+  const smsThanks = isHawaii ? "mahalo nui loa" : "thank you so much";
+  const smsBack = isHawaii ? "A hui hou - we would love to host you again anytime." : "We would love to host you again anytime.";
+  return `${guestGreeting(args.guestFirstName, isHawaii)} ${smsThanks} for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. If you have a moment, we would truly appreciate a review. ${smsBack} ${guestSmsSignoff(isHawaii)}`;
 }
 
 function buildUnitSetupSmsBody(args: {
@@ -2997,6 +3008,70 @@ export default function InboxPage() {
     }
     return counts;
   }, [missedCalls]);
+
+  // ── Guest-question tiers (2026-07-10) ──
+  // Latest auto-reply log per conversation → "Tier 1 · AI answered" (green) /
+  // "Tier 2 · no auto-reply" (amber) badges on the list rows + thread header.
+  // The endpoint is a cheap single DB read (no Guesty calls), safe to poll.
+  const { data: tierRows } = useQuery<Array<{
+    conversationId: string;
+    logId: number;
+    tier: number | null;
+    tierReason: string | null;
+    status: string;
+    replySent: boolean;
+    autoSent: boolean;
+    createdAt: string;
+  }>>({
+    queryKey: ["/api/inbox/auto-reply/tiers"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/inbox/auto-reply/tiers");
+      if (!r.ok) throw new Error(`Tier map returned HTTP ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+  const tierBadgeByConversation = useMemo(() => {
+    const map: Record<string, AutoReplyTierBadge> = {};
+    for (const row of tierRows ?? []) {
+      const badge = autoReplyTierBadge(row);
+      if (badge) map[row.conversationId] = badge;
+    }
+    return map;
+  }, [tierRows]);
+
+  // Tier-1 auto-answer master switch (admin-only surface; the server default
+  // is ON). Reads the auto-reply engine status for the current value.
+  const { data: autoReplyEngineStatus } = useQuery<{ tier1AutoEnabled?: boolean }>({
+    queryKey: ["/api/inbox/auto-reply/status"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/inbox/auto-reply/status");
+      if (!r.ok) throw new Error(`Auto-reply status returned HTTP ${r.status}`);
+      return r.json();
+    },
+    enabled: isAdmin,
+    refetchInterval: 60_000,
+  });
+  const tier1ToggleMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const r = await apiRequest("POST", "/api/inbox/auto-reply/tier1/toggle", { enabled });
+      if (!r.ok) throw new Error(`Toggle returned HTTP ${r.status}`);
+      return r.json();
+    },
+    onSuccess: (data) => {
+      qc.setQueryData(["/api/inbox/auto-reply/status"], data);
+      toast({
+        title: data?.tier1AutoEnabled ? "Tier-1 auto-answer ON" : "Tier-1 auto-answer OFF",
+        description: data?.tier1AutoEnabled
+          ? "Basic tier-1 questions get an automatic AI reply."
+          : "Nothing auto-sends — every reply waits for you.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Couldn't update tier-1 auto-answer", description: err.message, variant: "destructive" });
+    },
+  });
 
   const markConversationReplied = (conversationId: string | null) => {
     if (!conversationId) return;
@@ -4749,7 +4824,26 @@ export default function InboxPage() {
               <div className="border rounded-lg bg-card max-h-[42vh] overflow-y-auto lg:max-h-none">
                 <div className="px-4 py-3 border-b flex items-center justify-between gap-2">
                   <span className="text-sm font-medium shrink-0">Conversations</span>
-                  {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />}
+                  <div className="flex items-center gap-2 min-w-0">
+                    {/* Tier-1 auto-answer switch (admin): ON = basic tier-1
+                        questions get the automatic Hawaii-style AI reply;
+                        tier 2 always waits for a human. */}
+                    {isAdmin && (
+                      <label
+                        className="flex items-center gap-1.5 text-[11px] text-muted-foreground select-none"
+                        title="Tier-1 auto-answer: super-basic property questions (ocean view, parking, wifi…) get an automatic AI reply in Hawaii style, signed John Carpenter. Tier-2 messages are never auto-answered."
+                      >
+                        <span className="whitespace-nowrap">Tier 1 auto-answer</span>
+                        <Switch
+                          checked={autoReplyEngineStatus?.tier1AutoEnabled !== false}
+                          disabled={tier1ToggleMutation.isPending}
+                          onCheckedChange={(checked) => tier1ToggleMutation.mutate(!!checked)}
+                          data-testid="switch-tier1-auto-answer"
+                        />
+                      </label>
+                    )}
+                    {convLoading && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />}
+                  </div>
                 </div>
                 <div className="px-3 py-2 border-b space-y-2">
                   {/* Free-text search — name / email / phone / listing /
@@ -4930,6 +5024,29 @@ export default function InboxPage() {
                                   : "CANCELLED"}
                               </span>
                             )}
+                            {/* Guest-question tier chip — "did the AI answer
+                                this automatically?" at a glance. tier2-handled
+                                is hidden here (noise once replied); the thread
+                                header still shows it. */}
+                            {(() => {
+                              const tierBadge = tierBadgeByConversation[c._id];
+                              if (!tierBadge || tierBadge.kind === "tier2-handled") return null;
+                              const chipClass =
+                                tierBadge.kind === "tier1-answered" ? "bg-emerald-100 text-emerald-800" :
+                                tierBadge.kind === "tier1-manual"   ? "bg-emerald-50 text-emerald-700" :
+                                tierBadge.kind === "tier1-sending"  ? "bg-sky-100 text-sky-800" :
+                                tierBadge.kind === "tier1-held"     ? "bg-slate-100 text-slate-600" :
+                                "bg-amber-100 text-amber-800";
+                              return (
+                                <span
+                                  className={`inline-block mt-1 ml-1 px-1.5 py-[1px] rounded text-[9px] font-medium ${chipClass}`}
+                                  title={tierBadge.title}
+                                  data-testid={`badge-tier-${c._id}`}
+                                >
+                                  {tierBadge.label}
+                                </span>
+                              );
+                            })()}
                           </div>
                         </div>
                         {c.isUnread && <div className="w-2 h-2 rounded-full bg-primary shrink-0 mt-1" />}
@@ -4986,6 +5103,35 @@ export default function InboxPage() {
                       <div className="min-w-0">
                         <p className="font-medium truncate">{selectedConv?.displayGuestName ?? "Guest"}</p>
                         <p className="text-xs text-muted-foreground truncate">{selectedConv?.displayListingName ?? "—"}</p>
+                        {/* Guest-question tier verdict for the latest message
+                            in this thread: Tier 1 = the AI answered (or is
+                            about to); Tier 2 = no automatic response, it's on
+                            the operator. Hover for the classifier's reason. */}
+                        {(() => {
+                          const tierBadge = selectedConvId ? tierBadgeByConversation[selectedConvId] : null;
+                          if (!tierBadge) return null;
+                          const chipClass =
+                            tierBadge.kind === "tier1-answered" ? "bg-emerald-100 text-emerald-800" :
+                            tierBadge.kind === "tier1-manual"   ? "bg-emerald-50 text-emerald-700" :
+                            tierBadge.kind === "tier1-sending"  ? "bg-sky-100 text-sky-800" :
+                            tierBadge.kind === "tier1-held"     ? "bg-slate-100 text-slate-600" :
+                            tierBadge.kind === "tier2-handled"  ? "bg-gray-100 text-gray-500" :
+                            "bg-amber-100 text-amber-800";
+                          return (
+                            <span
+                              className={`inline-block mt-1 px-1.5 py-[1px] rounded text-[10px] font-medium ${chipClass}`}
+                              title={tierBadge.title}
+                              data-testid={`badge-tier-thread-${selectedConvId}`}
+                            >
+                              {tierBadge.kind === "tier1-answered" ? "✓ Tier 1 — AI answered automatically"
+                                : tierBadge.kind === "tier1-sending" ? "Tier 1 — AI reply sending shortly"
+                                : tierBadge.kind === "tier1-manual" ? "Tier 1 — answered from the AI draft"
+                                : tierBadge.kind === "tier1-held" ? "Tier 1 — auto-answer off, reply yourself"
+                                : tierBadge.kind === "tier2-handled" ? "Tier 2 — handled (no auto-reply)"
+                                : "Tier 2 — no automatic AI response, needs you"}
+                            </span>
+                          );
+                        })()}
                       </div>
                       {(() => {
                         const res = (selectedConv as any)?.meta?.reservations?.[0];
@@ -6092,7 +6238,12 @@ export default function InboxPage() {
                                 title: "14-day arrival details",
                                 due: checkInDate ? addDays(checkInDate, -14) : null,
                                 dueLabel: "14 days before arrival",
-                                sent: wasSent(/arrival details|access code|check-in date/i),
+                                // NOT a vocabulary regex — the automated booking confirmation
+                                // PROMISES "your full arrival details ... door and lockbox codes"
+                                // and used to false-mark this step sent. The shared matcher keys
+                                // on actual detail lines (Access code: / Unit N:) instead; the
+                                // dashboard arrival-details coverage warning uses the same one.
+                                sent: outboundTemplateBodies.some((body: string) => looksLikeArrivalDetailsMessage(body)),
                                 detail: `${arrivalDetails?.units?.length ?? 0} attached unit${(arrivalDetails?.units?.length ?? 0) === 1 ? "" : "s"}`,
                                 testId: "button-draft-arrival-details",
                                 disabled: arrivalDetailsLoading,
