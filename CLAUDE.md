@@ -70,6 +70,34 @@ Before making any changes:
   the Pricing tab gains the same verdict. See AGENTS.md "Market-rate MATCH CONFIRMATION" + the
   2026-07-10 Decision Log line.
 
+- 2026-07-10 (preflight: the Photos-tab "🔎 Check photo community" FULL check + report, on the
+  Community Match card): Operator asked for the Photos-tab "check community photos" button ("checks
+  all photos for bedroom count, if the units match the community folder etc, it checks a lot") to be
+  placed, identically, in the preflight UI. KEY FINDING (don't re-chase): preflight's Community Match
+  card (#989) ALREADY ran the full engine — POST /api/builder/photo-community-check `{ propertyId }`
+  → server-built hydrated groups (`buildPhotoCommunityCheckRequestForProperty`: photo_labels
+  captions/categories, active swap folders, expectedListingBedrooms, per-unit `_source.json`
+  sourceUrl; drafts via negative id) → persisted result — the ONLY gap was the card's slim rendering
+  (no bedroom coverage / per-photo votes / junk / duplicates / photo counts). SHIPPED
+  (`claude/preflight-community-photos-check-2fxyao`): the Photos-tab report block (388 lines)
+  EXTRACTED VERBATIM into shared `client/src/components/photo-community-check-report.tsx`
+  (`PhotoCommunityCheckReport` + the result mirror types; inline styles — the one `glb-btn` class
+  dependency inlined so it renders identically off the builder stylesheet) and BOTH surfaces now
+  render that one component. LOAD-BEARING (AGENTS.md #45 new bullet): edit the report in the shared
+  component, never re-inline a copy on either surface — source-assertion-locked. Preflight card:
+  button renamed to the Photos-tab "🔎 Check photo community", result state switched to the full
+  type, "Mark as verified anyway" display state (reset per run; renders only for
+  unconfirmed/likely/warn — never a hard fail, same as the Photos tab), and the persisting run now
+  invalidates /api/builder/photo-community-status (parity with the Photos tab). The community-only
+  "Check photos are correct" card (#991) + its slim types are untouched. Verified:
+  photo-community-check 41/0 (11 new wiring assertions), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline (0 new; touched-file error counts identical pre/post via a
+  git-stash A/B). UI verified against the BUILT bundle (static SPA server on dist/public + Playwright
+  with mocked engine responses): pass state, mismatch/review state, and the mark-verified click all
+  render the full report on /builder/4/preflight. Could NOT live-smoke the Lens/vision legs (no keys
+  in session) — post-deploy: open any preflight page and click "🔎 Check photo community"; expect the
+  exact Photos-tab report (bedroom x/x + rooms, per-photo votes, source pages, dupes).
+
 - 2026-07-10 (preflight Community Photos: "Check photos are correct" YES/NO button + re-pull renamed):
   Operator asked for a button on the preflight Community Photos card that has Claude vision scan the
   CURRENT community-folder photos and answer plainly in the UI "yes, these are X community / no they're

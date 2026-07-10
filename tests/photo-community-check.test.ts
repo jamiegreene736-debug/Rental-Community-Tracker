@@ -189,5 +189,47 @@ check("re-pull button is renamed to 'Find new community photos'",
   preflightPageSource.includes("Find new community photos")
   && !preflightPageSource.includes("Re-pull community photos</>"));
 
+// ── Source assertions: the preflight FULL "Check photo community" report ─────
+// The Community Match card runs the Photos-tab full check ({ propertyId } only,
+// NEVER communityOnly) and both surfaces render the ONE shared report component
+// — if either re-inlines a copy, the reports drift and these lock it.
+
+console.log("\nphoto-community-check: shared full-report wiring assertions");
+
+const reportComponentSource = readFileSync(
+  "client/src/components/photo-community-check-report.tsx",
+  "utf8",
+);
+check("shared report renders the same-community roster headline",
+  reportComponentSource.includes("Same community?"));
+check("shared report renders the source-page check card",
+  reportComponentSource.includes("Source page check"));
+check("shared report renders bedroom photo coverage (the x/x bedrooms answer)",
+  reportComponentSource.includes("Bedroom photo coverage"));
+check("shared report renders the cross-folder duplicates card",
+  reportComponentSource.includes("Same photo found in more than one folder"));
+check("shared report keeps the manual-verify escape hatch",
+  reportComponentSource.includes("Mark as verified anyway"));
+
+const builderIndexSource = readFileSync(
+  "client/src/components/GuestyListingBuilder/index.tsx",
+  "utf8",
+);
+check("Photos tab renders the SHARED report component",
+  builderIndexSource.includes("<PhotoCommunityCheckReport")
+  && builderIndexSource.includes('from "@/components/photo-community-check-report"'));
+check("Photos tab carries no re-inlined report copy (edit the shared component instead)",
+  !builderIndexSource.includes("Bedroom photo coverage"));
+
+check("preflight Community Match button is the Photos-tab 'Check photo community'",
+  preflightPageSource.includes("Check photo community"));
+check("preflight Community Match posts the FULL check ({ propertyId } only, no communityOnly)",
+  preflightPageSource.includes("JSON.stringify({ propertyId: id })"));
+check("preflight renders the SHARED report component (bedroom coverage, votes, dupes)",
+  preflightPageSource.includes("<PhotoCommunityCheckReport")
+  && preflightPageSource.includes('from "@/components/photo-community-check-report"'));
+check("preflight carries no re-inlined report copy",
+  !preflightPageSource.includes("Bedroom photo coverage"));
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
