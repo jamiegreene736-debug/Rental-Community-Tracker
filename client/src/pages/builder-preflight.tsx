@@ -792,9 +792,16 @@ export default function BuilderPreflight() {
       });
     }
     if (job.status === "completed") {
-      void loadDraftPropertyByNegativeId(id).then((updated) => {
-        if (updated) setDraftProperty(updated);
-      });
+      if (id < 0) {
+        // Promoted draft: re-adapt the draft so unit.photos reflects the new gallery.
+        void loadDraftPropertyByNegativeId(id).then((updated) => {
+          if (updated) setDraftProperty(updated);
+        });
+      } else {
+        // Static property: re-trigger the override photo-count fetch (keyed on
+        // unitOverrides identity) so the "N on file" badge reflects the new gallery.
+        setUnitOverrides((prev) => ({ ...prev }));
+      }
       if (!restored) {
         const host = job.sourceUrl ? `From ${new URL(job.sourceUrl).hostname}. ` : "";
         const changeLine = typeof job.changeNote === "string" && job.changeNote ? `${job.changeNote}. ` : "";
@@ -1101,12 +1108,34 @@ export default function BuilderPreflight() {
     unit: { id: string; bedrooms: number; photos?: { url: string }[]; photoFolder?: string },
     opts?: { findNewSource?: boolean },
   ) => {
-    if (id >= 0 || !property) return; // promoted drafts only
+    if (!property) return;
     // "Find new photos": discovery for a DIFFERENT source listing — the current
     // source + sibling sources go into skipUrls and the saved-listing rescrape is
     // skipped, so the job can only land a gallery from a NEW listing page.
     const findNewSource = opts?.findNewSource === true;
-    const draftId = -id;
+    const isDraft = id < 0;
+    // STATIC builder property (positive id): the row's unit comes from
+    // effectiveUnits, so photoFolder is already the unit's ACTIVE folder (the
+    // replacement folder once the unit was swapped, else its own folder).
+    const activeFolder = unit.photoFolder;
+    if (!isDraft) {
+      if (!activeFolder) {
+        toast({ title: "No photo folder", description: "This unit has no photo folder configured, so there's nowhere to save photos.", variant: "destructive" });
+        return;
+      }
+      // Static "Re-pull all photos" IS the existing per-unit rescrape job (the
+      // same one the committed-replacements panel's "Rescrape photos" drives) —
+      // it resolves the folder's own saved source (_source.json / unit-swap
+      // row), replaces the folder, and leaves a sticky receipt + needs-URL
+      // prompt. Only "Find new photos" (discovery for a DIFFERENT source) and
+      // the empty-folder "Find Photos" go through the photo-fetch job below.
+      if (!findNewSource && photoCountForUnit(unit.id, unit.photos?.length ?? 0) > 0) {
+        void startRescrapeJob(activeFolder);
+        toast({ title: "Re-pull started", description: "Re-pulling this unit's saved listing — safe to leave this tab." });
+        return;
+      }
+    }
+    const draftId = isDraft ? -id : 0;
     const { street: parsedStreet, city, state } = parsePropertyAddress(property.address);
     const street = inferCommunityStreetAddress({
       communityName: property.complexName,
@@ -1126,7 +1155,12 @@ export default function BuilderPreflight() {
       }
     };
     try {
-      const replacingExistingPhotos = (unit.photos?.length ?? 0) > 0;
+      // Drafts keep the #990 computation (the draft adapter fills unit.photos
+      // from the folder); static rows count the ACTIVE folder (a swapped unit's
+      // original photos array would otherwise mask an empty replacement folder).
+      const replacingExistingPhotos = isDraft
+        ? (unit.photos?.length ?? 0) > 0
+        : photoCountForUnit(unit.id, unit.photos?.length ?? 0) > 0;
       const currentSourceUrl = await loadSourceUrl(unit.photoFolder);
       // skipUrls only governs the DISCOVERY fallback (when the unit's own
       // saved listing is dead/thin). Block sibling sources so discovery can't
@@ -1138,7 +1172,10 @@ export default function BuilderPreflight() {
         property.units
           .filter((u) => u.id !== unit.id)
           .filter((u) => !replacingExistingPhotos || photoCountForUnit(u.id, u.photos?.length ?? 0) > 0)
-          .map((u) => loadSourceUrl(u.photoFolder)),
+          // Static rows exclude the sibling's ACTIVE folder source (the
+          // replacement folder once swapped) — the original folder's
+          // _source.json is stale/absent there. Drafts keep #990's behavior.
+          .map((u) => loadSourceUrl(isDraft ? u.photoFolder : (unitOverrides[u.id]?.photoFolder ?? u.photoFolder))),
       )).filter((u): u is string => !!u);
       const skipUrls = Array.from(new Set([
         ...(skippedUrlsByUnit[unit.id] ?? []),
@@ -1165,6 +1202,9 @@ export default function BuilderPreflight() {
         // saved listing — discovery hunts a NEW source (current one excluded).
         rescrapeSourceUrl: !findNewSource && replacingExistingPhotos && currentSourceUrl ? currentSourceUrl : undefined,
         findNewSource,
+        // Static builder property: persist the discovered gallery into the
+        // unit's ACTIVE folder (server hands it to rescrape-unit-photos).
+        targetFolder: isDraft ? undefined : activeFolder,
       };
       photoFetchStartPayloadByUnit.current[unit.id] = startPayload;
       const resp = await apiRequest("POST", "/api/preflight/photo-fetch-jobs", startPayload);
@@ -1308,12 +1348,20 @@ export default function BuilderPreflight() {
 
   // Maps old unit ID → replacement unit data
   const [unitOverrides, setUnitOverrides] = useState<Record<string, UnitOverride>>({});
-  // Replacement photos live in a separate folder until commit; fetch counts
-  // so Photo Sources reflects the swapped unit, not the original scrape.
+  // Per-unit ACTIVE-folder photo counts. Replacement photos live in a separate
+  // folder until commit, so overridden units always count that folder; and
+  // STATIC builder properties count EVERY unit's folder on disk — their static
+  // `photos` arrays are mostly absent, so the folder listing is the only honest
+  // signal (a full gallery must never render as "Find Photos"). Drafts without
+  // an override keep reading the adapter-populated unit.photos.
   const [overridePhotoCounts, setOverridePhotoCounts] = useState<Record<string, number>>({});
   useEffect(() => {
-    const folders = Object.entries(unitOverrides)
-      .map(([unitId, o]) => [unitId, o.photoFolder] as const)
+    const folders = (property?.units ?? [])
+      .map((u) => {
+        const active = unitOverrides[u.id]?.photoFolder
+          ?? (id >= 0 ? ((u as any).photoFolder as string | undefined) : undefined);
+        return [u.id, active] as const;
+      })
       .filter((entry): entry is [string, string] => typeof entry[1] === "string" && !!entry[1]);
     if (!folders.length) {
       setOverridePhotoCounts({});
@@ -1343,7 +1391,10 @@ export default function BuilderPreflight() {
       if (!cancelled) setOverridePhotoCounts(counts);
     })();
     return () => { cancelled = true; };
-  }, [unitOverrides]);
+    // `property` identity is stable (static array element / draft state), so
+    // this fires on mount, on swap-load, and on the post-job identity bump.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unitOverrides, property, id]);
 
   const isCheckRunning = platformChecking;
   useEffect(() => {
@@ -1539,8 +1590,12 @@ export default function BuilderPreflight() {
     isCheckRunning ? effectiveUnits.filter((u) => !results[u.id]).map((u) => u.id) : [],
   );
 
+  // Overridden units and ALL static-property units read the fetched ACTIVE-folder
+  // count (static `photos` arrays are mostly absent, so `fallback` would wrongly
+  // say 0 for a full on-disk gallery); drafts without an override keep the
+  // adapter-populated fallback.
   const photoCountForUnit = (unitId: string, fallback: number) =>
-    unitOverrides[unitId]?.photoFolder
+    unitOverrides[unitId]?.photoFolder || id >= 0
       ? (overridePhotoCounts[unitId] ?? fallback)
       : fallback;
 
@@ -1841,7 +1896,7 @@ export default function BuilderPreflight() {
   const anyUnitNeedingPhotosFetching = unitsNeedingPhotos.some((u) => isPhotoFetchActive(u.id));
 
   const handleScrapePhotosForAllUnits = async () => {
-    if (id >= 0 || !property) return;
+    if (!property) return;
     const targets = property.units
       .map((unit, i) => ({ unit, unitIndex: (i === 0 ? 0 : 1) as 0 | 1 }))
       .filter(
@@ -2097,7 +2152,7 @@ export default function BuilderPreflight() {
           </Card>
         )}
 
-        {/* ── Photo Sources (promoted drafts only) ──
+        {/* ── Photo Sources (every preflight property — drafts AND static) ──
             The reverse-image-search half of the Platform Check needs
             photos to scan. When the wizard's Step 4 scrape didn't
             find a matching Zillow listing, the unit photo folders
@@ -2105,9 +2160,15 @@ export default function BuilderPreflight() {
             discovery that /api/replacement/find-unit uses for active
             properties — operator clicks one button per unit, no URL
             paste needed. "Try another" walks through subsequent
-            results so a bad first match isn't a dead end. */}
-        {isPromotedDraft && (
-          <Card className="p-6 mb-6">
+            results so a bad first match isn't a dead end.
+            Was promoted-drafts-only until 2026-07-10 (the operator asked
+            for "Find new photos" on static properties' preflight too):
+            static rows act on the unit's ACTIVE folder — "Re-pull all
+            photos" runs the existing per-unit rescrape job, "Find new
+            photos" / empty-folder "Find Photos" run the photo-fetch job,
+            which persists via rescrape-unit-photos (targetFolder). */}
+        {effectiveUnits.length > 0 && (
+          <Card className="p-6 mb-6" data-testid="card-photo-sources">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
               <h2 className="text-base font-semibold">Photo Sources</h2>
               {showFindAllPhotosButton && (
@@ -2172,8 +2233,8 @@ export default function BuilderPreflight() {
                   (or <strong>Find Photos</strong> per unit) and we&apos;ll search
                   Zillow for representative listings at{" "}
                   <strong>{property.complexName}</strong>, scrape their photos, and
-                  save them to the draft. Then click <strong>Run check</strong>{" "}
-                  on the Platform Check.
+                  save them to each unit&apos;s photo folder. Then click{" "}
+                  <strong>Run check</strong> on the Platform Check.
                 </p>
               );
             })()}
@@ -2188,6 +2249,11 @@ export default function BuilderPreflight() {
                 const unitFolder = (unit as any).photoFolder as string | undefined;
                 const unitSource = unitFolder ? unitSourceByFolder[unitFolder] : undefined;
                 const sourceRevealed = revealedSourceUnitIds.has(unit.id);
+                // Static "Re-pull all photos" runs as a per-folder RESCRAPE job
+                // (same job as the committed panel's "Rescrape photos" button),
+                // so this row's buttons must also reflect that job's activity.
+                const isRescrapingThisUnit = !!(unitFolder && rescrapeJobIdsByFolder[unitFolder]);
+                const unitBusy = isScrapingThisUnit || isRescrapingThisUnit;
                 return (
                   <div key={unit.id} className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-medium w-20 flex-shrink-0">
@@ -2204,7 +2270,7 @@ export default function BuilderPreflight() {
                     <Button
                       size="sm"
                       onClick={() => handleScrapePhotosForUnit(i === 0 ? 0 : 1, unit)}
-                      disabled={isScrapingThisUnit}
+                      disabled={unitBusy}
                       className="h-8 text-xs"
                       data-testid={`button-scrape-photos-${unit.id}`}
                     >
@@ -2212,6 +2278,11 @@ export default function BuilderPreflight() {
                         <>
                           <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                           Searching… {photoFetchElapsedSeconds}s
+                        </>
+                      ) : isRescrapingThisUnit ? (
+                        <>
+                          <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                          Re-pulling photos…
                         </>
                       ) : folderHasPhotos ? (
                         <><RefreshCw className="h-3 w-3 mr-1" /> Re-pull all photos</>
@@ -2224,7 +2295,7 @@ export default function BuilderPreflight() {
                         size="sm"
                         variant="outline"
                         onClick={() => handleScrapePhotosForUnit(i === 0 ? 0 : 1, unit as unknown as Parameters<typeof handleScrapePhotosForUnit>[1], { findNewSource: true })}
-                        disabled={isScrapingThisUnit}
+                        disabled={unitBusy}
                         className="h-8 text-xs flex-shrink-0"
                         data-testid={`button-find-new-photos-${unit.id}`}
                         title="Search live for a DIFFERENT listing of this unit size at this community (the current source is excluded, caches bypassed) and replace the gallery from that new source. Keeps the current gallery if nothing better is found."

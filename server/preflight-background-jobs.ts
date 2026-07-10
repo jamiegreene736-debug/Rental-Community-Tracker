@@ -513,6 +513,17 @@ export type StartPreflightPhotoFetchInput = {
    * existing gallery is kept.
    */
   findNewSource?: boolean;
+  /**
+   * STATIC builder property mode (draftId <= 0): the unit's ACTIVE photo folder
+   * (the replacement-p<prop>-u<unit> folder once the unit was swapped, else the
+   * unit's own folder) to persist the discovered gallery into. There is no draft
+   * row to persist through, so the job hands the discovered sourceUrl to
+   * POST /api/builder/rescrape-unit-photos — the same single-writer path the
+   * per-unit "Rescrape photos" button uses — which scrapes it, replaces the
+   * folder via downloadAndPrioritize, and re-stamps _source.json. Ignored when
+   * draftId > 0 (drafts keep the persist-photos path verbatim).
+   */
+  targetFolder?: string;
 };
 
 export function startPreflightPhotoFetchJob(input: StartPreflightPhotoFetchInput): PreflightPhotoFetchJob {
@@ -552,6 +563,11 @@ async function runPreflightPhotoFetchJob(
   const base = loopbackBaseUrl();
   const replacingExistingPhotos = input.replacingExistingPhotos === true;
   const findNewSource = input.findNewSource === true;
+  // STATIC builder property (no draft row): persist goes through
+  // rescrape-unit-photos into input.targetFolder, and discovery never accepts a
+  // thin gallery — static units are real listed properties, so a <MIN result
+  // must not replace (or seed) their active folder.
+  const staticFolderMode = !(input.draftId > 0);
   const rescrapeSourceUrl = !findNewSource
     && typeof input.rescrapeSourceUrl === "string" && /^https?:\/\//i.test(input.rescrapeSourceUrl)
     ? input.rescrapeSourceUrl.trim()
@@ -694,7 +710,7 @@ async function runPreflightPhotoFetchJob(
       // must be rejected HERE (falls through to the next attempt) or it would
       // clobber the existing gallery and then fail. Empty-unit discovery keeps
       // the old >0 acceptance (any photos beat none).
-      const minAcceptable = findNewSource ? MIN_INDEPENDENT_UNIT_PHOTOS : 1;
+      const minAcceptable = findNewSource || staticFolderMode ? MIN_INDEPENDENT_UNIT_PHOTOS : 1;
       if (nextPhotos.length >= minAcceptable && nextProof.status !== "rejected") {
         photos = nextPhotos;
         sourceUrl = nextSourceUrl;
@@ -728,6 +744,51 @@ async function runPreflightPhotoFetchJob(
         error: replaceOnlyFailure || lastNote || proofSummary || `Couldn't find another ${input.bedrooms}BR listing at ${input.communityName}`,
         proof: lastProof,
         diagnostic: lastDiagnostic,
+      });
+      return;
+    }
+
+    // STATIC builder property (no draft row): persist by handing the discovered
+    // source to the folder-level rescrape endpoint — the SAME single-writer path
+    // the per-unit "Rescrape photos" button drives — which scrapes it, replaces
+    // the unit's ACTIVE folder (downloadAndPrioritize: labels + category
+    // prioritization), and re-stamps _source.json so the next "Rescrape photos"
+    // re-pulls the NEW source. The draft proof ledger is draft-scoped and is
+    // deliberately skipped here — sibling same-source picks are already blocked
+    // by the skipUrls the client sends (each sibling's _source.json URL).
+    if (staticFolderMode) {
+      const targetFolder = typeof input.targetFolder === "string" ? input.targetFolder.trim() : "";
+      if (!targetFolder) {
+        throw new Error("No target photo folder for this unit — cannot save the discovered gallery.");
+      }
+      if (!sourceUrl) {
+        throw new Error("Discovery returned photos without a source listing URL — cannot save the gallery.");
+      }
+      touchPhotoJob(job, {
+        phase: "persisting",
+        message: "Replacing this unit's gallery from the new source",
+        progress: 86,
+      });
+      const persistData = await postJson(`${base}/api/builder/rescrape-unit-photos`, {
+        folder: targetFolder,
+        sourceUrl,
+      }, 300_000);
+      const savedStatic = Number(persistData?.savedCount ?? 0);
+      if (savedStatic < MIN_INDEPENDENT_UNIT_PHOTOS) {
+        throw new Error(`Only ${savedStatic} photo${savedStatic === 1 ? "" : "s"} saved after proof checks; at least ${MIN_INDEPENDENT_UNIT_PHOTOS} are required before replacing this unit's gallery.`);
+      }
+      touchPhotoJob(job, {
+        status: "completed",
+        phase: "completed",
+        message: `Saved ${savedStatic} photo${savedStatic === 1 ? "" : "s"} from the new source`,
+        progress: 100,
+        finishedAt: Date.now(),
+        savedCount: savedStatic,
+        changeNote: null,
+        sourceUrl: typeof persistData?.sourceUrl === "string" ? persistData.sourceUrl : sourceUrl,
+        proof: lastProof,
+        diagnostic: lastDiagnostic,
+        error: null,
       });
       return;
     }
