@@ -65,6 +65,13 @@ import {
   collectBuyInCoverageWarnings,
   BUYIN_COVERAGE_WINDOW_DAYS,
 } from "@shared/buyin-coverage-warning";
+import {
+  arrivalDetailsCandidates,
+  resolveArrivalDetailsWarning,
+  ARRIVAL_DETAILS_WINDOW_DAYS,
+  type ArrivalDetailsWarning,
+} from "@shared/arrival-details-warning";
+import { isHostPost, isSystemPost } from "@shared/guesty-post-classify";
 import { AGENT_REPLY_SIGNOFF_NAME } from "@shared/agent-identity";
 import path from "path";
 import fs from "fs";
@@ -154,7 +161,7 @@ import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeFo
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation, createReceiptPage } from "./guest-receipts";
 import { getGuestComplaintScannerStatus, setGuestComplaintScannerEnabled, runGuestComplaintScan } from "./guest-complaint-scanner";
 import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
-import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations } from "./booking-confirmations";
+import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations, resendBookingConfirmation } from "./booking-confirmations";
 import { runPropertyRevenueRefresh, getPropertyRevenueStatus } from "./property-revenue-scheduler";
 import { runMarketRateScan, getMarketRateScanStatus } from "./market-rate-scheduler";
 import { validateAndFixPhoto } from "./photo-validator";
@@ -8822,6 +8829,111 @@ export async function registerRoutes(
       res.json({ warnings, windowDays: BUYIN_COVERAGE_WINDOW_DAYS, checkedAt: new Date(nowMs).toISOString() });
     } catch (err: any) {
       res.status(500).json({ error: "Buy-in coverage check failed", message: err?.message ?? String(err) });
+    }
+  });
+
+  // ── Arrival-details coverage (dashboard warning) ──
+  // The automated booking confirmation PROMISES the guest "about 14 days
+  // before your check-in date, we'll send your full arrival details", but
+  // sending them is manual (Message AD dialog / inbox timeline draft). This
+  // surfaces every committed non-manual reservation checking in within 14 days
+  // whose Guesty thread has NO actual arrival-details message, judged by the
+  // SAME shared matcher the inbox timeline's sent-detection uses
+  // (looksLikeArrivalDetailsMessage) so the two surfaces can't disagree.
+  // Candidate selection is pure (shared/arrival-details-warning.ts); this
+  // route owns the loopback guesty-all fetch + one conversation-posts scan per
+  // candidate (host posts only — a guest quoting a code back must not count).
+  // That's up to ~ARRIVAL_COVERAGE_SCAN_CAP Guesty calls, so results are
+  // cached ~5 min per process; ?fresh=1 bypasses. Per-candidate scan failures
+  // degrade to scanUnavailable (listed, flagged "couldn't check") — an
+  // unreachable thread must never silently read as sent.
+  const ARRIVAL_COVERAGE_CACHE_MS = 5 * 60 * 1000;
+  const ARRIVAL_COVERAGE_SCAN_CAP = 40;
+  let arrivalCoverageCache: { at: number; payload: unknown } | null = null;
+  app.get("/api/dashboard/arrival-details-coverage", async (req, res) => {
+    try {
+      const nowMs = Date.now();
+      if (req.query.fresh !== "1" && arrivalCoverageCache && nowMs - arrivalCoverageCache.at < ARRIVAL_COVERAGE_CACHE_MS) {
+        return res.json(arrivalCoverageCache.payload);
+      }
+      const checkInTo = new Date(nowMs + (ARRIVAL_DETAILS_WINDOW_DAYS + 1) * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+      const port = process.env.PORT || "5000";
+      const url = `http://127.0.0.1:${port}/api/bookings/guesty-all?checkInTo=${checkInTo}`;
+      const resp = await fetch(url, { headers: loopbackRequestHeaders() });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        throw new Error(`guesty-all loopback ${resp.status}: ${body.slice(0, 200)}`);
+      }
+      const payload = (await resp.json()) as { reservations?: any[] };
+      const reservations: any[] = Array.isArray(payload?.reservations) ? payload.reservations : [];
+      const allCandidates = arrivalDetailsCandidates(reservations, nowMs);
+      const candidates = allCandidates.slice(0, ARRIVAL_COVERAGE_SCAN_CAP);
+      const warnings: ArrivalDetailsWarning[] = [];
+      for (const candidate of candidates) {
+        let hostBodies: string[] | null = null;
+        try {
+          const conv = await findGuestyConversationForReservation(candidate.reservationId, candidate.channel);
+          if (conv) {
+            // NOTE: no fields= on /posts — Guesty 400-rejects it there (see the
+            // apirequest-throws-on-non-2xx memory / PR #917).
+            const postsData = await guestyRequest(
+              "GET",
+              `/communication/conversations/${encodeURIComponent(conv.id)}/posts?limit=100`,
+            ) as any;
+            const nested = postsData?.data ?? postsData;
+            const posts: any[] = nested?.posts ?? postsData?.posts ?? nested?.results ?? [];
+            hostBodies = (Array.isArray(posts) ? posts : [])
+              .filter((p) => isHostPost(p) && !isSystemPost(p))
+              .map((p) => String(p?.body ?? p?.text ?? p?.message ?? ""));
+          }
+        } catch (scanErr: any) {
+          console.warn(
+            `[arrival-coverage] posts scan failed for reservation ${candidate.reservationId}: ${scanErr?.message ?? scanErr}`,
+          );
+          hostBodies = null;
+        }
+        const resolved = resolveArrivalDetailsWarning(candidate, hostBodies);
+        if (!resolved.adSent) warnings.push(resolved);
+      }
+      const out = {
+        warnings,
+        windowDays: ARRIVAL_DETAILS_WINDOW_DAYS,
+        scannedCandidates: candidates.length,
+        totalCandidates: allCandidates.length,
+        checkedAt: new Date(nowMs).toISOString(),
+      };
+      arrivalCoverageCache = { at: nowMs, payload: out };
+      res.json(out);
+    } catch (err: any) {
+      res.status(500).json({ error: "Arrival-details coverage check failed", message: err?.message ?? String(err) });
+    }
+  });
+
+  // ── Booking-confirmation delivery issues (dashboard alert) ──
+  // Recent MISROUTE rows from the booking_confirmations ledger — the
+  // confirmation was posted but filed off the guest's OTA channel, so the
+  // guest never saw it, and the scheduler NEVER retries one (AGENTS.md #51:
+  // a scheduler retry would re-post duplicates). Without this alert those
+  // guests silently never get greeted. "pending" (posted, delivery
+  // unconfirmed) rows are deliberately NOT flagged — the message reached the
+  // channel once and a resend risks a duplicate; that mirrors the refund
+  // receipts' unconfirmed rule. Fail-soft [] until the table exists.
+  app.get("/api/dashboard/booking-confirmation-issues", async (_req, res) => {
+    try {
+      const rows = await storage.getRecentBookingConfirmations(200);
+      const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+      const issues = rows.filter((r) => {
+        if (r.status !== "misroute") return false;
+        const at = r.sentAt instanceof Date ? r.sentAt.getTime() : new Date(r.sentAt as any).getTime();
+        return Number.isFinite(at) && at >= cutoff;
+      });
+      res.json({ issues, checkedAt: new Date().toISOString() });
+    } catch (err: any) {
+      const missingTable = /42P01|does not exist|relation .* does not exist/i.test(err?.message || "");
+      console.error(`[booking-confirmation-issues] ${missingTable ? "table missing — returning []" : err?.message}`);
+      res.json({ issues: [], checkedAt: new Date().toISOString() });
     }
   });
 
@@ -49113,6 +49225,28 @@ CONSTRAINTS
       const missingTable = /42P01|does not exist|relation .* does not exist/i.test(err.message || "");
       console.error(`[booking-confirmations/logs] ${missingTable ? "table missing — returning []" : err.message}`);
       res.json([]);
+    }
+  });
+
+  // Operator's MANUAL resend for a misrouted (or never-recorded) booking
+  // confirmation — the dashboard alert's "Resend" button. Mirrors the guest-
+  // receipts force-send rule (AGENTS.md #51d): only a confirmed "sent" ledger
+  // row blocks it (409); the SCHEDULER path stays terminal on misroute/pending.
+  // Refetches the reservation so the rebuilt body carries current facts, and
+  // updates the existing ledger row in place on success.
+  app.post("/api/inbox/booking-confirmations/resend", async (req, res) => {
+    const { reservationId } = req.body as { reservationId?: string };
+    if (!reservationId || typeof reservationId !== "string" || !reservationId.trim()) {
+      return res.status(400).json({ error: "reservationId (string) required" });
+    }
+    try {
+      const result = await resendBookingConfirmation(reservationId.trim());
+      if (result.outcome === "sent") return res.json({ ok: true, ...result });
+      if (result.outcome === "skipped") return res.status(409).json({ ok: false, ...result });
+      return res.status(502).json({ ok: false, ...result });
+    } catch (err: any) {
+      console.error(`[booking-confirmation] manual resend failed for ${reservationId}: ${err?.message ?? err}`);
+      res.status(500).json({ ok: false, error: "Resend failed", detail: err?.message ?? String(err) });
     }
   });
 

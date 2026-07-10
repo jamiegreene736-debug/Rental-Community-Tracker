@@ -45,7 +45,7 @@ import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { AGENT_COMPOSE_SEED, AGENT_REPLY_SIGNOFF } from "@shared/agent-identity";
-import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
+import { buildArrivalDetailsGuestMessage, looksLikeArrivalDetailsMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import { bodyWithoutAttachmentUrls, collectPostAttachments, type PostAttachment } from "@shared/guesty-post-attachments";
 import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
 import { guestPartyFromReservation, formatGuestParty } from "@shared/guest-party";
@@ -1482,14 +1482,22 @@ function buildPostStayBody(args: {
   isHawaii?: boolean;
 }): string {
   const isHawaii = args.isHawaii ?? true;
+  // Hawaii voice gets the deeper island touches here ("Mahalo nui loa",
+  // "A hui hou") — the farewell message is the natural home for them. Keep
+  // "appreciate a review" verbatim in both voices: the guest-stay timeline's
+  // post-stay sent-detection keys on it. ASCII only (Booking.com).
+  const bigThanks = isHawaii ? "Mahalo nui loa" : "Thank you so much";
+  const comeBack = isHawaii
+    ? `A hui hou - until we meet again! We would love to welcome you and your 'ohana back anytime.`
+    : `We would love to welcome you back anytime.`;
   return [
     guestGreeting(args.guestFirstName, isHawaii),
     ``,
-    `Thank you so much for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. It was a pleasure to host you, and I hope you had a wonderful trip.`,
+    `${bigThanks} for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. It was a pleasure to host you, and I hope you had a wonderful trip.`,
     ``,
     `If you have a moment, we would truly appreciate a review. It helps future guests feel confident booking and means the world to us.`,
     ``,
-    `We would love to welcome you back anytime.`,
+    comeBack,
     ``,
     ...guestSignoffLines(isHawaii),
   ].join("\n");
@@ -1501,7 +1509,9 @@ function buildPostStaySmsBody(args: {
   isHawaii?: boolean;
 }): string {
   const isHawaii = args.isHawaii ?? true;
-  return `${guestGreeting(args.guestFirstName, isHawaii)} thank you so much for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. If you have a moment, we would truly appreciate a review. We would love to host you again anytime. ${guestSmsSignoff(isHawaii)}`;
+  const smsThanks = isHawaii ? "mahalo nui loa" : "thank you so much";
+  const smsBack = isHawaii ? "A hui hou - we would love to host you again anytime." : "We would love to host you again anytime.";
+  return `${guestGreeting(args.guestFirstName, isHawaii)} ${smsThanks} for staying${args.propertyName ? ` at ${args.propertyName}` : ""}. If you have a moment, we would truly appreciate a review. ${smsBack} ${guestSmsSignoff(isHawaii)}`;
 }
 
 function buildUnitSetupSmsBody(args: {
@@ -6092,7 +6102,12 @@ export default function InboxPage() {
                                 title: "14-day arrival details",
                                 due: checkInDate ? addDays(checkInDate, -14) : null,
                                 dueLabel: "14 days before arrival",
-                                sent: wasSent(/arrival details|access code|check-in date/i),
+                                // NOT a vocabulary regex — the automated booking confirmation
+                                // PROMISES "your full arrival details ... door and lockbox codes"
+                                // and used to false-mark this step sent. The shared matcher keys
+                                // on actual detail lines (Access code: / Unit N:) instead; the
+                                // dashboard arrival-details coverage warning uses the same one.
+                                sent: outboundTemplateBodies.some((body: string) => looksLikeArrivalDetailsMessage(body)),
                                 detail: `${arrivalDetails?.units?.length ?? 0} attached unit${(arrivalDetails?.units?.length ?? 0) === 1 ? "" : "s"}`,
                                 testId: "button-draft-arrival-details",
                                 disabled: arrivalDetailsLoading,

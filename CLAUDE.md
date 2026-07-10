@@ -43,6 +43,36 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 (guest booking confirmations: representative-photos line + stay specifics + arrival-details
+  watchdog + misroute resend + deeper Hawaii voice): Operator asked to research the automated day-of-booking
+  messages (confirmation + two-units/representative expectations, Hawaii lingo) and implement all improvements.
+  KEY FINDINGS (don't re-chase): the automated confirmation ALREADY existed (server/booking-confirmations.ts,
+  5-min scheduler, PR #942) with the two-unit setup + Aloha voice; the gaps were (a) the "photos are
+  representative" disclosure was MANUAL-only, (b) nothing enforced the 14-day arrival-details promise, (c) the
+  inbox timeline's arrival-step regex false-marked itself sent off the confirmation's own promise text.
+  SHIPPED (`claude/guest-booking-confirmations-8cc471`): (1) representative line in BOTH message variants —
+  wording "assigned units will match" is LOAD-BEARING (auto-completes the timeline's manual unit-setup step);
+  (2) "Your stay at a glance" (dates/nights/confirmation code; the reservations poll now passes explicit
+  fields=) + scheduled-balance bullet via pure `scheduledBalanceDueFromReservation` (real Guesty schedule only:
+  shouldBePaidAt + isFullyPaid guard (Booking.com totalPaid:0 quirk) + deposit collected + next-row amount ≈
+  balance, else OMIT; wording must avoid "remaining balance" — invoice timeline regex); (3) NEW
+  GET /api/dashboard/arrival-details-coverage + amber home.tsx popup (pure shared/arrival-details-warning.ts;
+  manual rows excluded — no thread to verify; /posts fetched WITHOUT fields= per PR #917; 40-scan cap, 5-min
+  cache, localStorage nexstay_arrival_details_warning_dismissed); (4) ONE shared matcher
+  `looksLikeArrivalDetailsMessage` (line-anchored Access/Door/Lockbox/Gate/Entry code: or Unit N: labels;
+  promises + the zero-unit "still confirming" AD + casual Parking:/Wi-Fi: lines do NOT match) drives both the
+  timeline step and the coverage scan; (5) misroute visibility: GET /api/dashboard/booking-confirmation-issues
+  (red popup) + POST /api/inbox/booking-confirmations/resend — force-send mirrors receipts #51d (confirmed
+  "sent" row 409s; scheduler stays terminal on misroute/pending; storage.updateBookingConfirmation added);
+  (6) Hawaii voice: "E komo mai!" + island naming via `hawaiianIslandLabel(resolveIslandRegion(...))`
+  (shared/area-identity.ts — generic "Hawaii"/Florida regions render nothing), post-stay templates get
+  "Mahalo nui loa" + "A hui hou" (keep "appreciate a review" verbatim — timeline regex). ASCII-clean
+  everywhere (Booking.com). Verified: booking-confirmation-message 67/0 + arrival-details-warning 38/0 (new,
+  in the npm chain), full `npm test` exit 0, build clean (UI strings bundle-grepped), `npm run check` 338 =
+  baseline (0 new). Could NOT live-smoke Guesty sends (no creds) — post-deploy: next new booking gets the
+  enriched message; expect the amber arrivals popup on first dashboard load (any <14-day check-in without
+  arrival details on its thread raises it — that's the watchdog working, not a bug).
+
 - 2026-07-10 (market-rate updates: REMOVED the lodging-tax checkout uplift — raw Airbnb median again):
   Operator: the queue + the manual market-rate button scan Airbnb via SearchAPI "and it will then add
   I think 13% more for taxes at check out — remove this 13% or that percentage uplift and update the
