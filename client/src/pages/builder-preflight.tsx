@@ -22,7 +22,11 @@ import {
 import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "@/data/unit-builder-data";
 import { useAssistantContext } from "@/lib/assistant-context";
 import { loadDraftPropertyByNegativeId } from "@/data/adapt-draft";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import {
+  PhotoCommunityCheckReport,
+  type PhotoCommunityCheckResult,
+} from "@/components/photo-community-check-report";
 import { UnitReplacementFlow, type ReplacementUnitData } from "@/components/unit-replacement-flow";
 import { OperationFailureActions } from "@/components/OperationFailureActions";
 import { useToast } from "@/hooks/use-toast";
@@ -432,14 +436,17 @@ type PreflightRescrapeJob = {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-// ── Community Match check (photos + source pages vs the community folder) ──
-// Preflight surface for the builder Photos-tab "Check photo community" engine:
+// ── Photo community check (preflight surfaces of the Photos-tab engine) ──────
 // POST /api/builder/photo-community-check with { propertyId } alone makes the
 // SERVER rebuild the photo groups (published folders + captions + each unit
 // folder's _source.json source URL) via buildPhotoCommunityCheckRequestForProperty,
 // run Google Lens + Claude vision on the photos AND a Claude read of each unit's
-// source listing page, and persist the result. Types mirror only the fields this
-// card renders from PhotoCommunityCheckResult (server/photo-community-check.ts).
+// source listing page, and persist the result. The Community Match card runs that
+// FULL check and renders the shared <PhotoCommunityCheckReport> (the exact report
+// the Photos-tab "🔎 Check photo community" button shows — bedroom coverage,
+// per-photo votes, junk/duplicates, source pages). The slim types below mirror
+// only the fields the community-ONLY card ("Check photos are correct",
+// { communityOnly: true }) renders from PhotoCommunityCheckResult.
 type CommunityMatchSourcePage = {
   unitLabel: string;
   url: string;
@@ -522,15 +529,20 @@ export default function BuilderPreflight() {
 
   const { toast } = useToast();
 
-  // Community Match: one-click "are Unit A + Unit B in the same community as the
-  // community folder?" — photos AND source pages. See the type block above.
+  // Community Match: the Photos-tab "🔎 Check photo community" run from
+  // preflight — full engine (community folder + every unit + bedroom coverage +
+  // source pages), rendered with the SAME shared PhotoCommunityCheckReport the
+  // Photos tab uses. See the type-block comment above.
   const [communityMatchRunning, setCommunityMatchRunning] = useState(false);
-  const [communityMatchResult, setCommunityMatchResult] = useState<CommunityMatchResult | null>(null);
+  const [communityMatchResult, setCommunityMatchResult] = useState<PhotoCommunityCheckResult | null>(null);
   const [communityMatchError, setCommunityMatchError] = useState<string | null>(null);
+  // "Mark as verified anyway" display state inside the report (reset per run).
+  const [communityMatchManualVerified, setCommunityMatchManualVerified] = useState(false);
   const runCommunityMatchCheck = async () => {
     setCommunityMatchRunning(true);
     setCommunityMatchError(null);
     setCommunityMatchResult(null);
+    setCommunityMatchManualVerified(false);
     try {
       // Plain fetch (not apiRequest): the check runs Lens + batched vision and can
       // take minutes; we also want the JSON error body on a non-2xx.
@@ -540,7 +552,7 @@ export default function BuilderPreflight() {
         body: JSON.stringify({ propertyId: id }),
       });
       const data = (await resp.json().catch(() => null)) as
-        | CommunityMatchResult
+        | PhotoCommunityCheckResult
         | { error?: string }
         | null;
       if (!resp.ok || !data || !("verdict" in data)) {
@@ -548,6 +560,9 @@ export default function BuilderPreflight() {
         return;
       }
       setCommunityMatchResult(data);
+      // The full check persists its result server-side (dashboard Community QA),
+      // so refresh that query like the Photos-tab button does.
+      void queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
     } catch (e: any) {
       setCommunityMatchError(e?.message ?? String(e));
     } finally {
@@ -2386,161 +2401,63 @@ export default function BuilderPreflight() {
           </Card>
         )}
 
-        {/* ── Community Match — are Unit A + Unit B in the SAME community as the
-            community folder? Photos (Google Lens + Claude vision) AND each unit's
-            source listing page are Claude-checked. Same engine as the builder
-            Photos-tab "Check photo community" button, surfaced on preflight so
-            the operator can confirm before continuing to the builder. */}
+        {/* ── Community Match — the builder Photos-tab "🔎 Check photo community"
+            button, on preflight. FULL engine run (never communityOnly): community
+            folder identity (Google Lens + Claude vision), every unit vs the
+            community folder, bedroom photo coverage per unit, junk/mis-filed
+            flags, cross-folder duplicates, and each unit's source listing page —
+            rendered with the SAME shared PhotoCommunityCheckReport component the
+            Photos tab uses, so the two surfaces can never drift. */}
         <Card className="p-6 mb-6" data-testid="card-community-match">
           <div className="flex items-start justify-between gap-4 mb-1">
             <h2 className="text-base font-semibold">Community Match</h2>
             <Button
               id="btn-community-match-check"
-              aria-label="Confirm units are in the same community as the community folder"
+              aria-label="Check photo community — full photo check of the community folder and every unit"
               variant="outline"
               size="sm"
               onClick={runCommunityMatchCheck}
               disabled={communityMatchRunning}
               className="h-7 px-2 text-xs flex-shrink-0"
               data-testid="btn-preflight-community-match"
-              title="Claude-checks every unit's photos AND its source listing page against the community folder."
+              title="The Photos-tab full check: community folder + every unit's photos (Claude vision + Google Lens), bedroom photo coverage, junk/duplicate flags, and each unit's source listing page."
             >
               {communityMatchRunning ? (
-                <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Checking…</>
+                <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> 🔎 Checking photos…</>
               ) : (
-                <><Search className="h-3 w-3 mr-1" /> Confirm units match community</>
+                <>🔎 Check photo community</>
               )}
             </Button>
           </div>
           <p className="text-sm text-muted-foreground">
-            Confirms {property.units.length >= 2 ? "Unit A and Unit B are" : "each unit is"} in the
-            same community as the <strong>{property.complexName}</strong> community folder — unit
-            photos are checked with Claude vision against the community photos, and each unit's
-            source listing page is read to confirm it names this community.
+            The same full check as the builder Photos tab&apos;s{" "}
+            <strong>Check photo community</strong> button: confirms the community folder really
+            shows <strong>{property.complexName}</strong>, checks{" "}
+            {property.units.length >= 2 ? "Unit A and Unit B are" : "each unit is"} in the same
+            community as the community folder (Claude vision + Google Lens on every photo), counts
+            bedroom photo coverage against each unit&apos;s listed bedrooms, flags junk / mis-filed /
+            duplicate photos, and reads each unit&apos;s source listing page to confirm it names
+            this community.
           </p>
           {communityMatchRunning && (
             <p className="mt-2 text-xs text-cyan-700 dark:text-cyan-300">
-              Reverse-image search + Claude vision on the photos, then a Claude read of each unit's
-              source page — this can take a few minutes for large folders…
+              Analyzing the community folder (reverse-image search + Claude vision), then each
+              unit&apos;s match and bedroom coverage, then a Claude read of each unit&apos;s source
+              page — this can take several minutes for large folders…
             </p>
           )}
           {communityMatchError && (
             <p className="mt-2 text-sm text-red-600" data-testid="text-community-match-error">✗ {communityMatchError}</p>
           )}
-          {communityMatchResult && (() => {
-            const r = communityMatchResult;
-            const spByLabel = new Map((r.sourcePages ?? []).map((sp) => [sp.unitLabel, sp]));
-            const pill = (tone: "green" | "red" | "amber" | "slate", label: string) => {
-              const cls =
-                tone === "green"
-                  ? "bg-green-100 text-green-800 dark:bg-green-950/40 dark:text-green-300"
-                  : tone === "red"
-                    ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
-                    : tone === "amber"
-                      ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-                      : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
-              return (
-                <span className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap ${cls}`}>
-                  {label}
-                </span>
-              );
-            };
-            const sourcePill = (sp?: CommunityMatchSourcePage) =>
-              !sp
-                ? pill("slate", "Source page: no URL")
-                : sp.match === "yes"
-                  ? pill("green", "✓ Source page confirms")
-                  : sp.match === "no"
-                    ? pill("red", "✕ Source page differs")
-                    : pill("amber", sp.unreadable ? "Source page unreadable" : "Source page unclear");
-            const headline =
-              r.allSameCommunity === "yes" && r.verdict === "pass"
-                ? {
-                    cls: "border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300",
-                    Icon: CheckCircle2,
-                    text: `YES — all units match the ${r.expectedCommunity || property.complexName} community folder`,
-                  }
-                : r.verdict === "fail"
-                  ? {
-                      cls: "border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-200",
-                      Icon: XCircle,
-                      text: "NO — a community mismatch was found. Review the details below.",
-                    }
-                  : {
-                      cls: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200",
-                      Icon: AlertTriangle,
-                      text: "Review — the community match could not be fully confirmed.",
-                    };
-            return (
-              <div className="mt-3" data-testid="result-community-match">
-                <div className={`flex items-start gap-2 rounded-md border px-3 py-2 text-sm font-medium ${headline.cls}`}>
-                  <headline.Icon className="h-4 w-4 mt-0.5 shrink-0" />
-                  <span>{headline.text}</span>
-                </div>
-                <div className="mt-3 space-y-2">
-                  {r.community && (
-                    <div className="flex flex-wrap items-center gap-2 text-sm">
-                      <span className="font-medium">{r.community.label}</span>
-                      <span className="text-muted-foreground">identified as</span>
-                      <strong>{r.community.identifiedCommunity || "—"}</strong>
-                      <span className="ml-auto">
-                        {r.community.matchesExpected === "yes"
-                          ? pill("green", "✓ Matches expected community")
-                          : r.community.overallStatus === "mismatch"
-                            ? pill("red", "✕ Different place")
-                            : pill("amber", "Unconfirmed")}
-                      </span>
-                    </div>
-                  )}
-                  {r.units.map((u) => {
-                    const sp = spByLabel.get(u.label);
-                    return (
-                      <div key={u.label} className="flex flex-wrap items-center gap-2 border-t pt-2 text-sm">
-                        <span className="font-medium">{u.label}</span>
-                        <span className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
-                          {u.sameAsCommunity === "yes"
-                            ? pill("green", "✓ Photos match community")
-                            : pill("red", "✕ Photos differ")}
-                          {sourcePill(sp)}
-                          {sp?.url ? (
-                            <a
-                              href={sp.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-0.5 text-xs text-cyan-700 hover:underline dark:text-cyan-300"
-                            >
-                              source <ExternalLink className="h-3 w-3" />
-                            </a>
-                          ) : null}
-                        </span>
-                        {u.sameAsCommunity === "no" && (
-                          <div className="w-full text-xs text-red-700 dark:text-red-300">{u.reason}</div>
-                        )}
-                        {sp && sp.match !== "yes" && (
-                          <div className="w-full text-xs text-muted-foreground">
-                            {sp.reason}
-                            {sp.identifiedLocation ? ` · 📍 ${sp.identifiedLocation}` : ""}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                {r.concerns.length > 0 && (
-                  <ul
-                    className={`mt-3 list-disc pl-5 text-xs ${
-                      r.verdict === "fail" ? "text-red-700 dark:text-red-300" : "text-amber-700 dark:text-amber-300"
-                    }`}
-                  >
-                    {r.concerns.map((c, i) => (
-                      <li key={i}>{c}</li>
-                    ))}
-                  </ul>
-                )}
-                <p className="mt-2 text-xs text-muted-foreground">{r.summary}</p>
-              </div>
-            );
-          })()}
+          {communityMatchResult && (
+            <div data-testid="result-community-match">
+              <PhotoCommunityCheckReport
+                result={communityMatchResult}
+                manualVerified={communityMatchManualVerified}
+                onMarkVerified={() => setCommunityMatchManualVerified(true)}
+              />
+            </div>
+          )}
         </Card>
 
         {/* ── Platform Check ── */}
