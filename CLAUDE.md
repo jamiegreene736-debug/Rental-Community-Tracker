@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 (preflight: per-unit "Find new photos" / photo-source buttons now on STATIC properties —
+  Kaha Lani screenshot "why is find new unit photos not showing here?"): ROOT CAUSE: the per-unit
+  "Find new photos" button (#990) lives on the preflight Photo Sources card, which was gated
+  `isPromotedDraft` (and `handleScrapePhotosForUnit` hard-returned for `id >= 0`) — static builder
+  properties never rendered it; the gate existed because the photo-fetch job could only persist via
+  the draft-only /api/community/:draftId/persist-photos. SHIPPED
+  (`claude/preflight-community-photos-check-2fxyao`): Photo Sources renders on EVERY preflight page.
+  Static rows act on the unit's ACTIVE folder (replacement-p<prop>-u<unit> once swapped, else the
+  unit's own folder): "Re-pull all photos" DELEGATES to the existing per-folder rescrape job (same as
+  the committed panel's "Rescrape photos" — no new scrape path), "Find new photos" / empty-folder
+  "Find Photos" run the photo-fetch job with new `targetFolder` input, whose STATIC persist branch
+  hands the discovered sourceUrl to /api/builder/rescrape-unit-photos (single-writer folder path:
+  downloadAndPrioritize + _source.json restamp → the next "Rescrape photos" re-pulls the NEW source).
+  LOAD-BEARING GUARDS: (1) static discovery NEVER accepts a thin gallery — `minAcceptable =
+  MIN_INDEPENDENT_UNIT_PHOTOS` whenever `staticFolderMode` (no draft row), seeding or replacing;
+  (2) static rows count the ACTIVE folder ON DISK (`overridePhotoCounts` now covers every static
+  unit) because static `photos` arrays are mostly absent — the old fallback would render a full
+  gallery as "Find Photos" and empty-mode discovery could clobber it; (3) sibling skipUrls resolve
+  the sibling's ACTIVE folder source. Draft behavior byte-identical (#990 locks still pass).
+  Verified: discovery-cache 43/0 (11 new locks), full `npm test` exit 0, build clean, `npm run check`
+  338 = baseline (0 new; stash A/B'd per-file). UI verified on the BUILT bundle (mocked
+  /api/unit-swaps + job endpoints): swapped + un-swapped static pages both show
+  Re-pull/Find-new/View-source per unit; "Find new photos" POSTs targetFolder=<replacement folder>,
+  draftId 0, current+sibling sources excluded; completion receipt renders; "Re-pull" drives the
+  rescrape job with no sourceUrl override. Could NOT live-smoke discovery/scrape legs (no keys) —
+  post-deploy: open a static property's preflight and click "Find new photos" on a unit.
+
 - 2026-07-10 (unit-builder Descriptions-tab licenses: sample↔detector single source of truth + real
   county formats + Maui STRH registry pull): Operator asked to investigate the license section's
   samples/online pulls and make samples as-real-as-possible / pull real licenses where a source

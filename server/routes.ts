@@ -33140,6 +33140,7 @@ Return ONLY compact JSON with this exact shape:
       skipFirst?: number;
       rescrapeSourceUrl?: string;
       findNewSource?: boolean;
+      targetFolder?: string;
     };
     const draftId = Number(body.draftId);
     const propertyId = Number(body.propertyId);
@@ -33147,13 +33148,26 @@ Return ONLY compact JSON with this exact shape:
     const unitIndex = body.unitIndex === 1 ? 1 : 0;
     const bedrooms = Number(body.bedrooms);
     const communityName = typeof body.communityName === "string" ? body.communityName.trim() : "";
-    if (!Number.isFinite(draftId) || draftId <= 0) return res.status(400).json({ error: "draftId required" });
+    const targetFolder = typeof body.targetFolder === "string" ? body.targetFolder.trim() : "";
+    // Two modes: a promoted DRAFT (draftId > 0 — persists via the draft's
+    // persist-photos) or a STATIC builder property (positive propertyId +
+    // targetFolder — persists into the unit's ACTIVE folder via
+    // rescrape-unit-photos). See StartPreflightPhotoFetchInput.targetFolder.
+    const draftMode = Number.isFinite(draftId) && draftId > 0;
+    if (!draftMode) {
+      if (!Number.isFinite(propertyId) || propertyId <= 0) {
+        return res.status(400).json({ error: "draftId (draft) or propertyId + targetFolder (static property) required" });
+      }
+      if (!targetFolder || !/^[\w-]+$/.test(targetFolder)) {
+        return res.status(400).json({ error: "targetFolder required for a static property photo fetch" });
+      }
+    }
     if (!Number.isFinite(propertyId)) return res.status(400).json({ error: "propertyId required" });
     if (!unitId) return res.status(400).json({ error: "unitId required" });
     if (!Number.isFinite(bedrooms) || bedrooms <= 0) return res.status(400).json({ error: "bedrooms required" });
     if (!communityName) return res.status(400).json({ error: "communityName required" });
     const job = startPreflightPhotoFetchJob({
-      draftId,
+      draftId: draftMode ? draftId : 0,
       propertyId,
       unitId,
       unitIndex,
@@ -33169,6 +33183,7 @@ Return ONLY compact JSON with this exact shape:
         ? body.rescrapeSourceUrl.trim()
         : undefined,
       findNewSource: body.findNewSource === true,
+      targetFolder: targetFolder || undefined,
     });
     res.status(202).json({ job });
   });

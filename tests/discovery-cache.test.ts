@@ -120,8 +120,8 @@ console.log("discovery-cache: nocache / find-new-source wiring (source locks)");
     /const rescrapeSourceUrl = !findNewSource\s*&&/.test(job));
   check("find-new failure keeps the existing gallery",
     /Kept the existing gallery and source\./.test(job));
-  check("find-new rejects thin galleries BEFORE persist (persist replaces the folder first)",
-    /const minAcceptable = findNewSource \? MIN_INDEPENDENT_UNIT_PHOTOS : 1;/.test(job)
+  check("find-new + static modes reject thin galleries BEFORE persist (persist replaces the folder first)",
+    /const minAcceptable = findNewSource \|\| staticFolderMode \? MIN_INDEPENDENT_UNIT_PHOTOS : 1;/.test(job)
     && /nextPhotos\.length >= minAcceptable && nextProof\.status !== "rejected"/.test(job));
 
   const page = fs.readFileSync(new URL("../client/src/pages/builder-preflight.tsx", import.meta.url), "utf8");
@@ -132,6 +132,56 @@ console.log("discovery-cache: nocache / find-new-source wiring (source locks)");
   check("find-new payload excludes the current source and skips rescrape",
     /\(replacingExistingPhotos \|\| findNewSource\) && currentSourceUrl/.test(page)
     && /!findNewSource && replacingExistingPhotos && currentSourceUrl/.test(page));
+}
+
+// ── Source locks: STATIC builder properties get the same per-unit photo buttons
+// (2026-07-10 follow-up). The Photo Sources card — home of "Find new photos" —
+// was promoted-drafts-only, so a static property's preflight (e.g. Kaha Lani)
+// had NO per-unit photo buttons at all. Now: the card renders on every
+// preflight page; static rows act on the unit's ACTIVE folder (replacement
+// folder once swapped) — "Re-pull all photos" delegates to the existing
+// per-folder rescrape job, while "Find new photos" / empty-folder discovery
+// runs the photo-fetch job, which persists via rescrape-unit-photos
+// (targetFolder) since there is no draft row to persist through.
+console.log("discovery-cache: static-property Photo Sources wiring (source locks)");
+{
+  const fs = await import("node:fs");
+  const page = fs.readFileSync(new URL("../client/src/pages/builder-preflight.tsx", import.meta.url), "utf8");
+  check("Photo Sources card renders for static properties (not draft-gated)",
+    page.includes('data-testid="card-photo-sources"')
+    && !/\{isPromotedDraft &&\s*\(\s*<Card className="p-6 mb-6" data-testid="card-photo-sources">/.test(page));
+  check("handleScrapePhotosForUnit no longer bails on static ids",
+    !page.includes("if (id >= 0 || !property) return; // promoted drafts only")
+    && page.includes("const isDraft = id < 0;"));
+  check("static Re-pull delegates to the existing per-folder rescrape job",
+    page.includes("void startRescrapeJob(activeFolder);"));
+  check("static photo-fetch payload carries the unit's ACTIVE folder",
+    page.includes("targetFolder: isDraft ? undefined : activeFolder,"));
+  check("row buttons reflect a live rescrape job on the unit's folder",
+    /const isRescrapingThisUnit = !!\(unitFolder && rescrapeJobIdsByFolder\[unitFolder\]\);/.test(page)
+    && /const unitBusy = isScrapingThisUnit \|\| isRescrapingThisUnit;/.test(page));
+  check("static sibling exclusion resolves the sibling's ACTIVE folder",
+    page.includes("loadSourceUrl(isDraft ? u.photoFolder : (unitOverrides[u.id]?.photoFolder ?? u.photoFolder))"));
+  check("static rows count the ACTIVE folder on disk, never the (absent) static photos array",
+    /unitOverrides\[unitId\]\?\.photoFolder \|\| id >= 0/.test(page)
+    && /\?\? \(id >= 0 \? \(\(u as any\)\.photoFolder as string \| undefined\) : undefined\)/.test(page));
+
+  const job = fs.readFileSync(new URL("../server/preflight-background-jobs.ts", import.meta.url), "utf8");
+  check("photo-fetch input declares the static targetFolder",
+    /targetFolder\?: string;/.test(job));
+  check("static persist goes through rescrape-unit-photos (single-writer folder path)",
+    /const staticFolderMode = !\(input\.draftId > 0\);/.test(job)
+    && /if \(staticFolderMode\) \{/.test(job)
+    && job.includes('postJson(`${base}/api/builder/rescrape-unit-photos`'));
+  check("static persist enforces the MIN gallery floor",
+    /savedStatic < MIN_INDEPENDENT_UNIT_PHOTOS/.test(job));
+  check("draft persist path is untouched",
+    job.includes("/api/community/${input.draftId}/persist-photos"));
+
+  const routes = fs.readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  check("photo-fetch-jobs route accepts static mode (propertyId + targetFolder)",
+    routes.includes("targetFolder required for a static property photo fetch")
+    && routes.includes("targetFolder: targetFolder || undefined,"));
 }
 
 console.log(`\ndiscovery-cache: ${pass} passed, ${fail} failed`);
