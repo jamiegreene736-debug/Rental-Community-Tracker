@@ -29,7 +29,8 @@ import { sampleLicensesForLocation } from "@/data/adapt-draft";
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
-import { curatedResortSearchName, isCuratedBuyInMarket, resolveBuyInMarketFromText } from "@shared/buy-in-market";
+import { BUY_IN_MARKET_LOCATIONS, curatedResortSearchName, isCuratedBuyInMarket, resolveBuyInMarketFromText } from "@shared/buy-in-market";
+import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -4397,7 +4398,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const curatedByEvidence = perBedroom.some((b) => b.hasLive && b.radiusMiles != null);
     const curated = curatedByRegistry || curatedByEvidence;
     const curatedDerived = !curatedByRegistry && curatedByEvidence;
-    return { community, resort, realResort, curated, curatedDerived, units, distinctBedrooms, combo, composition, scalingNote, perBedroom, anyWidened };
+    // Evidence-level "right community + right bedroom count?" verdict — the
+    // SAME shared check the dashboard bulk-queue chip uses, computed here from
+    // the persisted per-month comp evidence (getLiveBuyIn monthlyRates). Green
+    // only when every scanned month was geo-boxed to this community AND >=95%
+    // of accepted comps independently parsed at the exact bedroom size.
+    // expectedBedrooms = the listing's TRUE unit sizes, so researching the
+    // wrong size for any unit is a hard red mismatch.
+    const match = computeMarketRateMatchConfirmation({
+      community: resolvedCommunity,
+      searchLabel: realResort || resort || null,
+      expectedCity: BUY_IN_MARKET_LOCATIONS[resolvedCommunity]?.city ?? null,
+      expectedState: BUY_IN_MARKET_LOCATIONS[resolvedCommunity]?.state ?? null,
+      curated: curatedByRegistry,
+      expectedBedrooms: distinctBedrooms,
+      rows: distinctBedrooms.map((br) => ({
+        bedrooms: br,
+        monthlyRates: getLiveBuyIn(propertyId, br)?.monthlyRates ?? null,
+      })),
+    });
+    return { community, resort, realResort, curated, curatedDerived, units, distinctBedrooms, combo, composition, scalingNote, perBedroom, anyWidened, match };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId, marketRatesVersion]);
 
@@ -6395,6 +6415,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             {researchProvenance && (
                               <div style={{ marginTop: 8, marginBottom: 4, padding: "8px 10px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, fontSize: 11, color: "#374151", display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
                                 <span style={{ fontWeight: 600, color: "#111827" }}>🔎 Research confirmation</span>
+                                {researchProvenance.match && (() => {
+                                  // Evidence verdict: right community + right bedroom count
+                                  // (green only past the 95% bar — see
+                                  // shared/market-rate-match-confirmation).
+                                  const m = researchProvenance.match;
+                                  const tone = m.level === "green"
+                                    ? { bg: "#dcfce7", fg: "#166534", icon: "✓" }
+                                    : m.level === "red"
+                                      ? { bg: "#fee2e2", fg: "#991b1b", icon: "✕" }
+                                      : { bg: "#fef3c7", fg: "#92400e", icon: "⚠" };
+                                  return (
+                                    <span
+                                      style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: tone.bg, color: tone.fg, borderRadius: 4, fontWeight: 600 }}
+                                      title={m.reasons.join("\n")}
+                                      data-testid="market-rate-match-verdict"
+                                    >
+                                      {tone.icon} {m.headline}
+                                    </span>
+                                  );
+                                })()}
                                 <span
                                   style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: researchProvenance.curated ? "#dbeafe" : "#fef3c7", color: researchProvenance.curated ? "#1e40af" : "#92400e", borderRadius: 4, fontWeight: 500 }}
                                   title={researchProvenance.curatedDerived
@@ -6425,6 +6465,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 )}
                                 <span style={{ flexBasis: "100%", height: 0 }} />
                                 <span style={{ color: "#6b7280" }}>{researchProvenance.scalingNote}</span>
+                                {researchProvenance.match && researchProvenance.match.reasons
+                                  .filter((r) => /^(Community:|Bedrooms:|MISMATCH|No live)/.test(r))
+                                  .map((reason, i) => (
+                                    <span key={i} style={{ flexBasis: "100%", color: reason.startsWith("MISMATCH") ? "#991b1b" : "#6b7280" }}>
+                                      {reason}
+                                    </span>
+                                  ))}
                                 {researchProvenance.perBedroom.some((b) => b.score != null) && (
                                   <>
                                     <span style={{ flexBasis: "100%", height: 0 }} />

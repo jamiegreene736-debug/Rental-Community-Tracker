@@ -271,6 +271,20 @@ type BulkPricingJob = {
         resortConfident?: boolean;
         bedroomSplitInferred?: boolean;
       } | null;
+      // Evidence-level "right community + right bedroom count" verdict computed
+      // server-side from the persisted comp evidence when the item's refresh
+      // lands (shared/market-rate-match-confirmation). Green only when the
+      // evidence clears the 95%+ bar.
+      matchConfirmation?: {
+        verdict?: "verified" | "review" | "mismatch";
+        level?: "green" | "yellow" | "red";
+        headline?: string;
+        reasons?: string[];
+        comps?: number;
+        bedroomVerifiedPct?: number | null;
+        communityVerdict?: string;
+        bedroomVerdict?: string;
+      } | null;
       acceptedCandidates?: number;
       rejectedCandidates?: number;
       blackoutCount?: number;
@@ -4920,6 +4934,10 @@ function AdminDashboard() {
                             const communityConfirmation = (item.progress?.pricingRecipe as any)?.communityConfirmation as
                               | { community: string; searchLabel: string; expectedCity?: string; expectedState?: string; nameMatch: boolean; locationMatch: boolean; curated: boolean; confirmed: boolean; detail: string }
                               | undefined;
+                            // Evidence verdict (lands when the item's refresh completes).
+                            // While it's present it subsumes the target-level
+                            // communityConfirmation chip — one verdict, not two.
+                            const matchConfirmation = item.progress?.matchConfirmation ?? null;
                             const perBedroomConfidence = Array.isArray(confidence?.perBedroom) ? confidence.perBedroom : [];
                             const anyWidened = confidence?.widened === true || perBedroomConfidence.some((b) => b.widened);
                             const blackoutCount = typeof item.progress?.blackoutCount === "number" ? item.progress.blackoutCount : 0;
@@ -4946,7 +4964,7 @@ function AdminDashboard() {
                                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                                       Attempt {item.attemptCount ?? 0} · heartbeat {formatBulkPricingTime(item.heartbeatAt)}
                                     </p>
-                                    {(pushChip || communityConfirmation || recipeResort || recipeScaling || confidenceScore != null || blackoutCount > 0 || resortUnconfident || bedroomSplitInferred) && (
+                                    {(pushChip || matchConfirmation || communityConfirmation || recipeResort || recipeScaling || confidenceScore != null || blackoutCount > 0 || resortUnconfident || bedroomSplitInferred) && (
                                       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
                                         {pushChip && (
                                           <span
@@ -4969,7 +4987,23 @@ function AdminDashboard() {
                                             </span>
                                           </span>
                                         )}
-                                        {communityConfirmation && (
+                                        {matchConfirmation && (
+                                          <span
+                                            className={`inline-flex max-w-full items-center gap-1 rounded border px-2 py-0.5 font-semibold ${
+                                              matchConfirmation.level === "green"
+                                                ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+                                                : matchConfirmation.level === "red"
+                                                  ? "border-red-300 bg-red-50 text-red-800"
+                                                  : "border-amber-300 bg-amber-50 text-amber-800"
+                                            }`}
+                                            title={(matchConfirmation.reasons ?? []).join("\n")}
+                                            data-testid={`bulk-pricing-match-${item.propertyId}`}
+                                          >
+                                            <span aria-hidden>{matchConfirmation.level === "green" ? "✓" : matchConfirmation.level === "red" ? "✕" : "⚠"}</span>
+                                            <span className="truncate">{matchConfirmation.headline ?? "Community/bedroom verification"}</span>
+                                          </span>
+                                        )}
+                                        {communityConfirmation && !matchConfirmation && (
                                           <span
                                             className={`inline-flex max-w-full items-center gap-1 rounded border px-2 py-0.5 font-medium ${communityConfirmation.confirmed ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-800"}`}
                                             title={`${communityConfirmation.detail} · researching: ${communityConfirmation.searchLabel}`}
@@ -4983,7 +5017,7 @@ function AdminDashboard() {
                                             </span>
                                           </span>
                                         )}
-                                        {resortUnconfident && !communityConfirmation && (
+                                        {resortUnconfident && !communityConfirmation && !matchConfirmation && (
                                           <span className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 font-medium text-amber-800" title="This draft's community could not be matched to a curated market, so the resort searched is a best-guess fallback. Verify the resort before trusting these rates.">
                                             ⚠ resort not confidently matched
                                           </span>

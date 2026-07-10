@@ -304,14 +304,24 @@ export type MonthlyMarketRate = {
   };
   // Per-month research confidence + evidence (subset). Surfaced by the Pricing
   // tab "Research confirmation" block: the resort actually searched (query), the
-  // geo radius / widened flag, and per-bedroom sample/confidence.
+  // geo radius / widened flag, and per-bedroom sample/confidence. The comp-level
+  // counters (accepted / exact-bedroom / community-matched / geo-verified) feed
+  // computeMarketRateMatchConfirmation (shared/market-rate-match-confirmation)
+  // — the "right community + right bedroom count" verdict — so do NOT strip
+  // them back out of the parse (2026-07-10).
   confidence?: {
     score?: number;
     level?: "green" | "yellow" | "red";
     sampleCount?: number;
+    acceptedCandidates?: number;
+    exactBedroomCandidates?: number;
+    unknownBedroomCandidates?: number;
+    communityMatchedCandidates?: number;
+    geoVerifiedCandidates?: number;
   };
   evidence?: {
     query?: string;
+    requestedBedrooms?: number;
     geoConstraint?: {
       kind?: "curated-bounds" | "center-radius" | "none";
       description?: string;
@@ -375,9 +385,15 @@ function parseMonthlyRates(input: unknown): Record<string, MonthlyMarketRate> {
           ? raw.confidence.level
           : undefined,
         sampleCount: typeof raw.confidence.sampleCount === "number" ? raw.confidence.sampleCount : undefined,
+        acceptedCandidates: typeof raw.confidence.acceptedCandidates === "number" ? raw.confidence.acceptedCandidates : undefined,
+        exactBedroomCandidates: typeof raw.confidence.exactBedroomCandidates === "number" ? raw.confidence.exactBedroomCandidates : undefined,
+        unknownBedroomCandidates: typeof raw.confidence.unknownBedroomCandidates === "number" ? raw.confidence.unknownBedroomCandidates : undefined,
+        communityMatchedCandidates: typeof raw.confidence.communityMatchedCandidates === "number" ? raw.confidence.communityMatchedCandidates : undefined,
+        geoVerifiedCandidates: typeof raw.confidence.geoVerifiedCandidates === "number" ? raw.confidence.geoVerifiedCandidates : undefined,
       } : undefined,
       evidence: raw.evidence && typeof raw.evidence === "object" ? {
         query: typeof raw.evidence.query === "string" ? raw.evidence.query : undefined,
+        requestedBedrooms: typeof raw.evidence.requestedBedrooms === "number" ? raw.evidence.requestedBedrooms : undefined,
         geoConstraint: raw.evidence.geoConstraint && typeof raw.evidence.geoConstraint === "object" ? {
           kind: raw.evidence.geoConstraint.kind,
           description: typeof raw.evidence.geoConstraint.description === "string" ? raw.evidence.geoConstraint.description : undefined,
