@@ -121,6 +121,10 @@ import {
   buyInCoverageWarningSignature,
   type BuyInCoverageWarning,
 } from "@shared/buyin-coverage-warning";
+import {
+  arrivalDetailsWarningSignature,
+  type ArrivalDetailsWarning,
+} from "@shared/arrival-details-warning";
 import { GuestyConnectDialog } from "@/components/GuestyConnectDialog";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import { usePortalSession } from "@/lib/auth";
@@ -373,6 +377,12 @@ const PAYMENT_FAILURE_WARNING_DISMISSED_KEY = "nexstay_payment_failure_warning_d
 // days): same dismissal pattern — signature persisted on dismiss, re-raised
 // when the facts change (new uncovered arrival, changed dates/missing units).
 const BUYIN_COVERAGE_WARNING_DISMISSED_KEY = "nexstay_buyin_coverage_warning_dismissed";
+// Arrival-details promise coverage (check-ins within 14 days whose Guesty
+// thread shows no actual arrival-details message) — same dismissal pattern.
+const ARRIVAL_DETAILS_WARNING_DISMISSED_KEY = "nexstay_arrival_details_warning_dismissed";
+// Misrouted booking confirmations (posted off the guest's channel — guest
+// never greeted; scheduler never retries, so the operator must resend).
+const CONFIRMATION_ISSUES_DISMISSED_KEY = "nexstay_booking_confirmation_issues_dismissed";
 
 type BulkAvailabilityQueueItemStatus = "pending" | "running" | "success" | "error" | "cancelled";
 type BulkAvailabilityProgress = {
@@ -1418,6 +1428,9 @@ function AdminDashboard() {
   const [addressAlertWarningOpen, setAddressAlertWarningOpen] = useState(false);
   const [paymentFailureWarningOpen, setPaymentFailureWarningOpen] = useState(false);
   const [buyInCoverageWarningOpen, setBuyInCoverageWarningOpen] = useState(false);
+  const [arrivalDetailsWarningOpen, setArrivalDetailsWarningOpen] = useState(false);
+  const [confirmationIssuesOpen, setConfirmationIssuesOpen] = useState(false);
+  const [confirmationResendPending, setConfirmationResendPending] = useState<Record<string, boolean>>({});
   const [photoReplaceRescans, setPhotoReplaceRescans] = useState<Record<string, {
     startedAt: number;
     propertyName: string;
@@ -2121,6 +2134,124 @@ function AdminDashboard() {
       // localStorage unavailable — dismissal just won't persist across reloads.
     }
     setBuyInCoverageWarningOpen(false);
+  };
+  // Arrival-details promise coverage: the automated booking confirmation tells
+  // every guest "arrival details ~14 days before check-in", but sending them is
+  // manual (Message AD) — this warns when a check-in inside the window has no
+  // actual arrival-details message on its Guesty thread (server-scanned with
+  // the same matcher the inbox timeline uses). Same popup + banner + dismissal
+  // pattern as the buy-in coverage warning above.
+  const { data: arrivalCoverageData } = useQuery<{
+    warnings: ArrivalDetailsWarning[];
+    windowDays: number;
+    checkedAt: string;
+  }>({
+    queryKey: ["/api/dashboard/arrival-details-coverage"],
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const arrivalDetailsWarnings = arrivalCoverageData?.warnings ?? [];
+  const arrivalDetailsSignature = useMemo(
+    () => arrivalDetailsWarningSignature(arrivalDetailsWarnings),
+    [arrivalDetailsWarnings],
+  );
+  useEffect(() => {
+    if (!arrivalDetailsSignature) return;
+    let dismissed = "";
+    try {
+      dismissed = window.localStorage.getItem(ARRIVAL_DETAILS_WARNING_DISMISSED_KEY) ?? "";
+    } catch {
+      // localStorage unavailable (private mode) — the popup just re-raises.
+    }
+    if (dismissed === arrivalDetailsSignature) return;
+    setArrivalDetailsWarningOpen(true);
+  }, [arrivalDetailsSignature]);
+  const closeArrivalDetailsWarning = () => {
+    try {
+      window.localStorage.setItem(ARRIVAL_DETAILS_WARNING_DISMISSED_KEY, arrivalDetailsSignature);
+    } catch {
+      // localStorage unavailable — dismissal just won't persist across reloads.
+    }
+    setArrivalDetailsWarningOpen(false);
+  };
+  // Misrouted booking confirmations — the automated greeting was posted but
+  // filed OFF the guest's OTA channel, and the scheduler never retries one
+  // (AGENTS.md #51), so without this alert the guest silently never gets
+  // greeted. Remediation is the per-row Resend button (manual force-send).
+  const { data: confirmationIssuesData } = useQuery<{
+    issues: Array<{
+      id: number;
+      reservationId: string;
+      guestName: string | null;
+      listingNickname: string | null;
+      channel: string | null;
+      status: string;
+      errorMessage: string | null;
+      sentAt: string;
+    }>;
+    checkedAt: string;
+  }>({
+    queryKey: ["/api/dashboard/booking-confirmation-issues"],
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const confirmationIssues = confirmationIssuesData?.issues ?? [];
+  const confirmationIssuesSignature = useMemo(
+    () =>
+      confirmationIssues
+        .map((i) => `${i.reservationId}:${i.status}:${i.sentAt}`)
+        .sort()
+        .join(";"),
+    [confirmationIssues],
+  );
+  useEffect(() => {
+    if (!confirmationIssuesSignature) return;
+    let dismissed = "";
+    try {
+      dismissed = window.localStorage.getItem(CONFIRMATION_ISSUES_DISMISSED_KEY) ?? "";
+    } catch {
+      // localStorage unavailable (private mode) — the popup just re-raises.
+    }
+    if (dismissed === confirmationIssuesSignature) return;
+    setConfirmationIssuesOpen(true);
+  }, [confirmationIssuesSignature]);
+  const closeConfirmationIssues = () => {
+    try {
+      window.localStorage.setItem(CONFIRMATION_ISSUES_DISMISSED_KEY, confirmationIssuesSignature);
+    } catch {
+      // localStorage unavailable — dismissal just won't persist across reloads.
+    }
+    setConfirmationIssuesOpen(false);
+  };
+  // Direct fetch (not apiRequest) so the 409/502 body's `detail` reaches the
+  // toast — apiRequest throws on non-2xx and drops the structured reason (see
+  // the apirequest-throws-on-non-2xx memory / PR #896).
+  const resendBookingConfirmationFor = async (reservationId: string) => {
+    setConfirmationResendPending((s) => ({ ...s, [reservationId]: true }));
+    try {
+      const res = await fetch("/api/inbox/booking-confirmations/resend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reservationId }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (res.ok && data?.ok) {
+        toast({ title: "Confirmation resent", description: data.detail || "Delivered to the guest's booking channel." });
+      } else {
+        toast({
+          title: "Resend failed",
+          description: data?.detail || data?.error || `HTTP ${res.status}`,
+          variant: "destructive",
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/booking-confirmation-issues"] });
+    } catch (err: any) {
+      toast({ title: "Resend failed", description: err?.message ?? "Network error", variant: "destructive" });
+    } finally {
+      setConfirmationResendPending((s) => ({ ...s, [reservationId]: false }));
+    }
   };
   // Card payments captured through Guesty settle into the bank ~5 business days
   // after capture, so each collected payment is projected forward to its
@@ -5500,6 +5631,44 @@ function AdminDashboard() {
               </Button>
             </div>
           )}
+          {arrivalDetailsWarnings.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-sm dark:border-amber-900 dark:bg-amber-950/30" data-testid="banner-arrival-details-coverage">
+              <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span className="font-medium">
+                  {arrivalDetailsWarnings.length} booking{arrivalDetailsWarnings.length === 1 ? " checks" : "s check"} in within {arrivalCoverageData?.windowDays ?? 14} days without arrival details sent
+                </span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setArrivalDetailsWarningOpen(true)}
+                data-testid="button-open-arrival-details-warning"
+              >
+                Review arrivals
+              </Button>
+            </div>
+          )}
+          {confirmationIssues.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-300 bg-red-50/70 px-3 py-2 text-sm dark:border-red-900 dark:bg-red-950/30" data-testid="banner-confirmation-issues">
+              <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span className="font-medium">
+                  {confirmationIssues.length} booking confirmation{confirmationIssues.length === 1 ? "" : "s"} did NOT reach the guest
+                </span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                onClick={() => setConfirmationIssuesOpen(true)}
+                data-testid="button-open-confirmation-issues"
+              >
+                Review &amp; resend
+              </Button>
+            </div>
+          )}
           {duplicatePhotoUnits.length > 0 && (
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-300 bg-red-50/70 px-3 py-2 text-sm dark:border-red-900 dark:bg-red-950/30" data-testid="banner-duplicate-photos">
               <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
@@ -6703,6 +6872,172 @@ function AdminDashboard() {
           )}
           <div className="flex justify-end">
             <Button type="button" variant="outline" size="sm" onClick={closeBuyInCoverageWarning} data-testid="button-dismiss-buyin-coverage-warning">
+              Dismiss
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Arrival-details coverage popup — auto-raised when a reservation checks
+          in within 14 days and its Guesty thread has NO actual arrival-details
+          message. The automated booking confirmation PROMISES those details
+          ~14 days out, so this is the watchdog behind that promise. Sending
+          stays manual by design (codes must be verified first) — the button
+          jumps to the Bookings page where the Message AD dialog lives. */}
+      <Dialog
+        open={arrivalDetailsWarningOpen}
+        onOpenChange={(open) => (open ? setArrivalDetailsWarningOpen(true) : closeArrivalDetailsWarning())}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="h-4 w-4" /> Arrival details not sent yet
+            </DialogTitle>
+            <DialogDescription>
+              These bookings check in within the next {arrivalCoverageData?.windowDays ?? 14} days and their
+              conversation shows no arrival-details message (door codes, unit assignments). The booking
+              confirmation promised details about 14 days before check-in — send them from the Bookings page
+              (Message AD). Manual bookings are not tracked here.
+            </DialogDescription>
+          </DialogHeader>
+          {arrivalDetailsWarnings.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Every booking checking in within the next {arrivalCoverageData?.windowDays ?? 14} days has arrival details on its thread.
+            </p>
+          ) : (
+            <div className="max-h-96 space-y-1.5 overflow-y-auto">
+              {arrivalDetailsWarnings.map((w) => (
+                <div
+                  key={w.reservationId}
+                  className="rounded border border-amber-200 bg-background p-2 dark:border-amber-900"
+                  data-testid={`row-arrival-details-${w.reservationId}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0 text-xs">
+                      <span className="font-medium">{w.guestName || "Guest"}</span>
+                      <span className="text-muted-foreground">
+                        {" "}· {w.listingNickname || "—"}
+                        {w.checkIn ? ` · ${formatShortDate(w.checkIn)}` : ""}
+                        {w.channel ? ` · ${w.channel}` : ""}
+                        {w.confirmationCode ? ` · ${w.confirmationCode}` : ""}
+                      </span>
+                      <span
+                        className="block font-medium text-amber-700 dark:text-amber-400"
+                        data-testid={`text-arrival-details-issue-${w.reservationId}`}
+                      >
+                        {w.scanUnavailable ? "? Could not check the thread — verify manually" : "✕ Arrival details NOT sent"}
+                        {" "}·{" "}
+                        {w.daysUntilCheckIn === 0
+                          ? "checks in TODAY"
+                          : `checks in in ${w.daysUntilCheckIn} day${w.daysUntilCheckIn === 1 ? "" : "s"}`}
+                      </span>
+                      {w.unitsRequired > 0 && w.unitsAttached < w.unitsRequired ? (
+                        <span className="block text-muted-foreground">
+                          {w.unitsAttached} of {w.unitsRequired} units attached — attach units first, then send details
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <Button
+                        size="sm"
+                        onClick={() => window.open("/bookings", "_blank")}
+                        data-testid={`button-send-arrival-details-${w.reservationId}`}
+                      >
+                        Send arrival details
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => window.open(`https://app.guesty.com/reservations/${w.reservationId}`, "_blank")}
+                        data-testid={`button-open-guesty-arrival-${w.reservationId}`}
+                      >
+                        Open in Guesty
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <Button type="button" variant="outline" size="sm" onClick={closeArrivalDetailsWarning} data-testid="button-dismiss-arrival-details-warning">
+              Dismiss
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Misrouted booking-confirmation popup — the automated day-of-booking
+          greeting was posted but filed OFF the guest's OTA channel (misroute),
+          and the scheduler never retries one (AGENTS.md #51). Per-row Resend
+          runs the manual force-send: rebuilds the message with current facts
+          and posts through the delivery-verified path; a row already confirmed
+          delivered is refused server-side (409) so it can't duplicate. */}
+      <Dialog
+        open={confirmationIssuesOpen}
+        onOpenChange={(open) => (open ? setConfirmationIssuesOpen(true) : closeConfirmationIssues())}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-700 dark:text-red-300">
+              <AlertTriangle className="h-4 w-4" /> Booking confirmations that did not reach the guest
+            </DialogTitle>
+            <DialogDescription>
+              These automated welcome messages were posted but landed off the guest's booking channel, so the
+              guest never saw them. Resend posts a fresh copy through the delivery-verified path.
+            </DialogDescription>
+          </DialogHeader>
+          {confirmationIssues.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No misrouted booking confirmations in the last 14 days.</p>
+          ) : (
+            <div className="max-h-96 space-y-1.5 overflow-y-auto">
+              {confirmationIssues.map((issue) => (
+                <div
+                  key={issue.reservationId}
+                  className="rounded border border-red-200 bg-background p-2 dark:border-red-900"
+                  data-testid={`row-confirmation-issue-${issue.reservationId}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0 text-xs">
+                      <span className="font-medium">{issue.guestName || "Guest"}</span>
+                      <span className="text-muted-foreground">
+                        {" "}· {issue.listingNickname || "—"}
+                        {issue.channel ? ` · ${issue.channel}` : ""}
+                        {issue.sentAt ? ` · ${formatShortDate(issue.sentAt.slice(0, 10))}` : ""}
+                      </span>
+                      <span className="block font-medium text-red-600 dark:text-red-400">
+                        ✕ Posted off the guest's channel — never delivered
+                      </span>
+                      {issue.errorMessage ? (
+                        <span className="block text-muted-foreground">{issue.errorMessage}</span>
+                      ) : null}
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        disabled={!!confirmationResendPending[issue.reservationId]}
+                        onClick={() => resendBookingConfirmationFor(issue.reservationId)}
+                        data-testid={`button-resend-confirmation-${issue.reservationId}`}
+                      >
+                        {confirmationResendPending[issue.reservationId] ? "Resending…" : "Resend to guest"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => window.open(`https://app.guesty.com/reservations/${issue.reservationId}`, "_blank")}
+                        data-testid={`button-open-guesty-confirmation-${issue.reservationId}`}
+                      >
+                        Open in Guesty
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <Button type="button" variant="outline" size="sm" onClick={closeConfirmationIssues} data-testid="button-dismiss-confirmation-issues">
               Dismiss
             </Button>
           </div>

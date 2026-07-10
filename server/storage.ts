@@ -309,6 +309,10 @@ export interface IStorage {
   createBookingConfirmation(b: InsertBookingConfirmation): Promise<BookingConfirmation>;
   getBookingConfirmationByReservationId(reservationId: string): Promise<BookingConfirmation | undefined>;
   getRecentBookingConfirmations(limit?: number): Promise<BookingConfirmation[]>;
+  updateBookingConfirmation(
+    id: number,
+    fields: Partial<Pick<BookingConfirmation, "conversationId" | "channel" | "messageBody" | "status" | "errorMessage" | "sentAt">>,
+  ): Promise<void>;
 
   // Guest-facing alternative/relocation pages (durable store + open tracking).
   saveBookingAlternativePage(row: {
@@ -1439,6 +1443,13 @@ export class DatabaseStorage implements IStorage {
 
   async getRecentBookingConfirmations(limit = 100): Promise<BookingConfirmation[]> {
     return db.select().from(bookingConfirmations).orderBy(desc(bookingConfirmations.sentAt)).limit(limit);
+  }
+
+  async updateBookingConfirmation(
+    id: number,
+    fields: Partial<Pick<BookingConfirmation, "conversationId" | "channel" | "messageBody" | "status" | "errorMessage" | "sentAt">>,
+  ): Promise<void> {
+    await db.update(bookingConfirmations).set(fields).where(eq(bookingConfirmations.id, id));
   }
 
   // ── Guest-facing alternative/relocation pages ──

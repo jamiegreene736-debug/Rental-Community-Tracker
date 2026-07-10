@@ -12,6 +12,24 @@
 // can't be determined — callers fall back to the town/state already in the
 // address, which is always safe.
 
+// The resolveIslandRegion values that are actual Hawaiian islands — the only
+// ones the booking-confirmation copy may drop into "welcome you to X here on
+// {island}". The generic "Hawaii" fallback and the Florida regions read wrong
+// in that sentence, so they map to null.
+const HAWAIIAN_ISLAND_REGIONS = new Set([
+  "Kauai",
+  "Oahu",
+  "Maui",
+  "Molokai",
+  "Lanai",
+  "the Big Island of Hawaii",
+]);
+
+/** The region iff it names a Hawaiian island ("Kauai", "the Big Island of Hawaii", ...); else null. */
+export function hawaiianIslandLabel(region: string | null | undefined): string | null {
+  return region && HAWAIIAN_ISLAND_REGIONS.has(region) ? region : null;
+}
+
 export function resolveIslandRegion(address: string | null | undefined): string | null {
   const a = String(address ?? "").toLowerCase();
   if (!a) return null;
