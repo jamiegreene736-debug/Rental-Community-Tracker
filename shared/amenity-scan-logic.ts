@@ -73,6 +73,58 @@ export function buildAmenityDetectionInstruction(
     .join("\n");
 }
 
+/**
+ * Build the WEB-SEARCH instruction for surrounding-area ("nearby") amenities.
+ * The photo scan can never prove "Shopping Nearby" — this prompt has Claude
+ * research the community's actual surroundings and confirm an amenity ONLY
+ * when it can cite a real named place within the target's distance hint. The
+ * response contract is IDENTICAL to the vision scan ({present:[{key,
+ * confidence, evidence}]}), so parseAmenityDetectionJson parses both legs.
+ */
+export function buildAmenityLocationResearchPrompt(
+  targets: AmenityVisionTarget[],
+  opts: {
+    communityName: string;
+    city?: string;
+    state?: string;
+    address?: string;
+    labelForKey?: (key: string) => string;
+  },
+): string {
+  const labelFor = opts.labelForKey ?? ((k: string) => k);
+  const lines = targets.map(
+    (t) => `- ${t.key} (${labelFor(t.key)}): ${t.hint}`,
+  );
+  const place = [opts.communityName, opts.city, opts.state].filter((s) => s && String(s).trim()).join(", ");
+  return [
+    "You research the SURROUNDING AREA of a vacation-rental community to determine which",
+    "location-based amenities genuinely apply to its listing.",
+    "",
+    `The community is: ${place}.`,
+    opts.address?.trim() ? `Street address: ${opts.address.trim()}.` : "",
+    "",
+    "Use web search to find what is actually near this specific community — beaches, shopping,",
+    "restaurants, golf courses, trails, and attractions — and how far away they are.",
+    "Rules:",
+    "  - Only include an amenity when you can cite a SPECIFIC named place (e.g. a named beach,",
+    "    shopping village, golf course, or trail) within the distance in its description. Do NOT guess.",
+    "  - The evidence string must name the place and its approximate distance",
+    '    (e.g. "Poipu Shopping Village ~0.5 mi from the resort").',
+    "  - Distances are from THIS community, not from the town in general.",
+    "  - If you cannot verify the community's location or find a qualifying place, omit that amenity.",
+    "  - Use ONLY keys from this list (exact spelling). Omit anything unverified — never pad the list.",
+    "",
+    "Amenities to research:",
+    ...lines,
+    "",
+    'Respond with ONLY minified JSON, no prose:',
+    '{"present":[{"key":"SHOPPING","confidence":"high","evidence":"Poipu Shopping Village ~0.5 mi away"}]}',
+    'confidence is one of "high" | "medium" | "low". Omit an amenity entirely rather than guessing at low confidence.',
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+}
+
 const CONF_ORDER: Record<AmenityConfidence, number> = { high: 3, medium: 2, low: 1 };
 
 function coerceConfidence(v: unknown): AmenityConfidence {

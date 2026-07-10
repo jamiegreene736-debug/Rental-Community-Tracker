@@ -368,3 +368,35 @@ export const AMENITY_VISION_TARGETS: AmenityVisionTarget[] = [
   { key: "BEACH_UMBRELLA", hint: "beach umbrellas provided" },
   { key: "BEACH_ESSENTIALS", hint: "beach gear provided (chairs, cooler, snorkel, boogie boards, sand toys)" },
 ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Location-research amenities (SURROUNDING-AREA, not photo-visible).
+//
+// "Shopping Nearby" / "Golf Nearby" / "Near Restaurants" can NEVER be proven by
+// a photo, so they are deliberately absent from AMENITY_VISION_TARGETS — which
+// is why the photo scan never checked them. This curated list is researched by
+// a separate Claude WEB-SEARCH leg (server/amenity-location-research.ts) that
+// looks up the community's actual surroundings and only confirms an amenity
+// when it can name a real place within the hint's distance. Same ADD-ONLY
+// posture as the vision scan. Keys are DISJOINT from AMENITY_VISION_TARGETS
+// (views/beachfront claims stay vision-proven; "nearby" claims are researched).
+// ─────────────────────────────────────────────────────────────────────────────
+export const AMENITY_LOCATION_TARGETS: AmenityVisionTarget[] = [
+  // Beach proximity (walking distance / access — not "on the sand", which is vision's BEACHFRONT)
+  { key: "NEAR_BEACH",       hint: "a public beach within comfortable walking distance (~1 mile / 15-minute walk)" },
+  { key: "BEACH_ACCESS",     hint: "the community/resort has direct beach access (path or entrance onto a beach)" },
+  // Shopping & dining
+  { key: "SHOPPING",         hint: "shops, a shopping village/center, or a supermarket within ~3 miles" },
+  { key: "NEAR_SHOPPING",    hint: "shopping within ~2 miles (walkable or a very short drive)" },
+  { key: "NEAR_RESTAURANTS", hint: "restaurants or cafes within ~2 miles" },
+  // Activities
+  { key: "GOLF",             hint: "a golf course within ~5 miles" },
+  { key: "NEAR_GOLF_COURSE", hint: "a golf course directly adjacent or within ~2 miles" },
+  { key: "HIKING",           hint: "hiking trails or a trailhead within ~10 miles" },
+  { key: "FISHING",          hint: "shore/pier fishing or fishing charters within ~5 miles" },
+  { key: "CYCLING",          hint: "a bike path, bike-friendly road network, or bike rentals nearby (~3 miles)" },
+  { key: "WATER_PARK",       hint: "a water park within ~15 miles" },
+  { key: "THEME_PARK",       hint: "a theme/amusement park within ~15 miles" },
+  // Community type
+  { key: "RESORT_ACCESS",    hint: "the property is part of a resort community whose shared amenities guests can use" },
+];
