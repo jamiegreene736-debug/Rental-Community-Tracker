@@ -1469,17 +1469,34 @@ assert.equal(PROPERTY_TARGET_MARGIN_OVERRIDES[-3], 0.20, "override map records t
 assert.ok(!(0 in PROPERTY_TARGET_MARGIN_OVERRIDES), "no accidental propertyId 0 override");
 console.log("  ✓ targetMarginForProperty overrides only allow-listed properties");
 
-// Lodging-tax gross-up: the SearchAPI median (fees included, tax not) is grossed
-// up to the actual guest checkout total by the regional occupancy tax.
+// Lodging-tax table/helper: retained ONLY for the dormant Claude static/all-in
+// engine (STATIC_RATE_ENGINE=1). The LIVE median engine stores the raw SearchAPI
+// median — the market-rate checkout-tax uplift was REMOVED on operator
+// directive 2026-07-10 (see the source guard below).
 assert.equal(LODGING_TAX_PCT.hawaii, 0.18, "Hawaii lodging tax ~18%");
 assert.equal(LODGING_TAX_PCT.florida, 0.125, "Florida lodging tax ~12.5%");
-assert.equal(applyLodgingTaxGrossUp(1000, "Poipu Kai"), 1180, "HI median grossed up ×1.18");
-assert.equal(applyLodgingTaxGrossUp(1000, "Windsor Hills"), 1125, "FL median grossed up ×1.125");
+assert.equal(applyLodgingTaxGrossUp(1000, "Poipu Kai"), 1180, "HI basis grossed up ×1.18");
+assert.equal(applyLodgingTaxGrossUp(1000, "Windsor Hills"), 1125, "FL basis grossed up ×1.125");
 assert.equal(applyLodgingTaxGrossUp(1000, "Totally Unknown Resort"), 1180, "unknown community defaults to Hawaii");
 assert.equal(applyLodgingTaxGrossUp(0, "Poipu Kai"), 0, "zero basis is left unchanged");
 // A real BUY_IN_RATES HI key (genuinely region-mapped, not the unknown default).
 assert.equal(applyLodgingTaxGrossUp(933, "Poipu Kai"), Math.round(933 * 1.18), "named HI community (Poipu Kai) grossed up ×1.18");
-console.log("  ✓ applyLodgingTaxGrossUp adds regional lodging tax to the buy-in basis");
+console.log("  ✓ applyLodgingTaxGrossUp stays a pure helper for the dormant static engine");
+
+// SOURCE GUARD (operator 2026-07-10): the live market-rate update path (dashboard
+// queue + Pricing-tab "Update Market Rates" button, both via hybrid-pricing)
+// must NOT gross the stored basis up for lodging/checkout tax. If either
+// assertion trips, someone re-wired the tax uplift into the median engine.
+const hybridPricingSource = readFileSync("server/hybrid-pricing.ts", "utf8");
+assert.ok(
+  !hybridPricingSource.includes("applyLodgingTaxGrossUp"),
+  "server/hybrid-pricing.ts must not apply the lodging-tax gross-up (removed 2026-07-10)",
+);
+assert.ok(
+  !hybridPricingSource.includes("MARKET_RATE_LODGING_TAX_DISABLED"),
+  "the MARKET_RATE_LODGING_TAX_DISABLED kill-switch went away with the gross-up call site",
+);
+console.log("  ✓ live median engine stores the raw SearchAPI median (no lodging-tax uplift)");
 
 // Pili Mai 5BR is priced as its actual 3BR + 2BR component buy-ins, not
 // as a single 5BR villa comp. The operator-verified September 8-15, 2026

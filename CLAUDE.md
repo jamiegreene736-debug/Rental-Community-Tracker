@@ -43,6 +43,26 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 (market-rate updates: REMOVED the lodging-tax checkout uplift — raw Airbnb median again):
+  Operator: the queue + the manual market-rate button scan Airbnb via SearchAPI "and it will then add
+  I think 13% more for taxes at check out — remove this 13% or that percentage uplift and update the
+  methodology." That uplift was the 2026-07-01 `applyLodgingTaxGrossUp` (HI 18% / FL 12.5% — the
+  "~13%" memory) applied in `server/hybrid-pricing.ts` where the SearchAPI median became the stored
+  basis. REMOVED (`claude/remove-market-rate-tax-uplift-tt7z5s`, PR #994): the stored `monthlyRates`
+  basis is the RAW SearchAPI Airbnb median again (extracted_total_price ÷ nights = rent + cleaning +
+  service fees, occupancy tax NOT added); year-2 extrapolation inherits the untaxed year-1 basis (tax
+  was never re-applied there); the thin-comp static fallback was never taxed; the 20%
+  `MARKET_RATE_TARGET_MARGIN` markup at push time is UNTOUCHED (operator asked only about the tax).
+  Scan-note methodology string now reads "raw median — no tax uplift"; client queue/Pricing-tab
+  labels never mentioned the tax (verified), so no UI copy change. `LODGING_TAX_PCT` +
+  `applyLodgingTaxGrossUp` STAY in shared/pricing-rates.ts SOLELY for the dormant Claude static/all-in
+  engine (`STATIC_RATE_ENGINE=1`); `MARKET_RATE_LODGING_TAX_DISABLED` is now a no-op. SOURCE-GUARDED
+  in tests/pipeline-logic.test.ts (hybrid-pricing must not reference the gross-up — re-wiring it
+  trips the suite). Net ≈ −15% on pushed HI rates (÷1.18) / ≈ −11% FL, effective on each property's
+  NEXT push — re-run the dashboard "Update market pricing" queue to apply everywhere. Verified: full
+  `npm test` exit 0, build clean, `npm run check` 338 = baseline (0 new). See the AGENTS.md
+  2026-07-10 Decision Log line (the 2026-07-01 all-in entry is marked SUPERSEDED, tax half only).
+
 - 2026-07-10 (market-rate queue + Pricing tab: 95%+ "right community & bedroom count" MATCH CONFIRMATION):
   Operator asked for UI on the Pricing tab and/or the dashboard market-rate queue that confirms with
   ~95%+ accuracy that the rates being researched are for the CORRECT community and bedroom count.
