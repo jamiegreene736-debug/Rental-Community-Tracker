@@ -1035,10 +1035,21 @@ type PhotoCommunityCheckResult = {
     }>;
   } | null;
   duplicates: CommunityCheckDuplicate[];
+  sourcePages?: CommunityCheckSourcePage[];
   model: string;
   photosChecked: number;
   elapsedMs: number;
   warning?: string;
+};
+type CommunityCheckSourcePage = {
+  unitLabel: string;
+  url: string;
+  match: "yes" | "no" | "uncertain";
+  identifiedCommunity?: string;
+  identifiedLocation?: string;
+  reason: string;
+  confidence?: number;
+  unreadable?: boolean;
 };
 
 export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, isSingleListing = false, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged }: Props) {
@@ -3411,6 +3422,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         filenames: string[];
         captions: Record<string, string>;
         expectedBedrooms?: number;
+        sourceUrl?: string;
       };
       const byFolder = new Map<string, ReqGroup>();
       let expectedCommunity = "";
@@ -3434,6 +3446,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         if (g.role !== "unit") continue;
         const m = g.label.match(/\((\d+)\s*BR\)/i);
         if (m) g.expectedBedrooms = Number(m[1]);
+        // Attach the folder's scraped source URL so the server also verifies the
+        // source listing page names the expected community (independent signal).
+        const src = sourceUrlsByFolder?.[g.folder];
+        if (src) g.sourceUrl = src;
       }
       const groups = Array.from(byFolder.values())
         .sort((a, b) => (a.role === b.role ? a.label.localeCompare(b.label) : a.role === "community" ? -1 : 1));
@@ -3466,7 +3482,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setCommunityCheckError(e?.message ?? String(e));
       setCommunityCheckPhase("error");
     }
-  }, [photos, propertyId, propertyData?.bedrooms, queryClient]);
+  }, [photos, propertyId, propertyData?.bedrooms, queryClient, sourceUrlsByFolder]);
 
   const communityPhotoVerdicts = useMemo(() => {
     const map: Record<string, { match: "yes" | "no" | "uncertain"; reason?: string; status?: CommunityCheckPhotoVerdict["status"] }> = {};
@@ -7819,11 +7835,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       : nothingToCompare
                                       ? { bg: "#f1f5f9", fg: "#475569", label: "ⓘ Only one photo set — attach units to compare" }
                                       : { bg: "#dcfce7", fg: "#15803d", label: "✓ YES — all the same community" };
+                                  // Source-page verdicts keyed by unit label — the second,
+                                  // independent signal (the listing's own source page names the
+                                  // community, not just its photos).
+                                  const sourceByLabel = new Map((r.sourcePages ?? []).map((sp) => [sp.unitLabel, sp]));
+                                  const sourceBadge = (sp?: CommunityCheckSourcePage) => {
+                                    if (!sp) return { bg: "#f1f5f9", fg: "#64748b", label: "—" };
+                                    if (sp.match === "yes") return { bg: "#dcfce7", fg: "#15803d", label: "✓ Confirms" };
+                                    if (sp.match === "no") return { bg: "#fee2e2", fg: "#b91c1c", label: "✕ Different" };
+                                    return { bg: "#fef9c3", fg: "#92400e", label: sp.unreadable ? "ⓘ Unreadable" : "ⓘ Unclear" };
+                                  };
                                   // Roster: community folder first, then each unit, each as
-                                  // "<label> is <identified community>" + a same/different badge.
-                                  const rosterRows: Array<{ label: string; identified: string; status?: "yes" | "no"; vsLabel: string }> = [];
+                                  // "<label> is <identified community>" + a Photos badge and a
+                                  // Source-page badge (units only) vs the community folder.
+                                  const rosterRows: Array<{ role: "community" | "unit"; label: string; identified: string; status?: "yes" | "no"; vsLabel: string; sourcePage?: CommunityCheckSourcePage }> = [];
                                   if (r.community) {
                                     rosterRows.push({
+                                      role: "community",
                                       label: r.community.label,
                                       identified: r.community.identifiedCommunity || r.community.communityFingerprint || "community folder",
                                       status: r.community.matchesExpected,
@@ -7832,12 +7860,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   }
                                   for (const u of r.units) {
                                     rosterRows.push({
+                                      role: "unit",
                                       label: u.label,
                                       identified: u.sameAsCommunity === "yes"
                                         ? (r.community?.identifiedCommunity || r.expectedCommunity || "same community")
                                         : (u.reason || "different community"),
                                       status: u.sameAsCommunity,
                                       vsLabel: r.community ? "vs community folder" : "vs other units",
+                                      sourcePage: sourceByLabel.get(u.label),
                                     });
                                   }
 
@@ -7855,16 +7885,34 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           Same community?
                                         </div>
                                         <span style={{ ...badge(sameStyle), fontSize: 13, padding: "3px 12px", borderRadius: 12 }}>{sameStyle.label}</span>
-                                        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
+                                        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 7 }}>
                                           {rosterRows.map((row, i) => {
                                             const t = yn(row.status);
+                                            const sp = row.sourcePage;
+                                            const sb = sourceBadge(sp);
                                             return (
-                                              <div key={i} style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 12, flexWrap: "wrap" }}>
+                                              <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, flexWrap: "wrap", borderTop: i > 0 ? "1px solid #f1f5f9" : undefined, paddingTop: i > 0 ? 7 : 0 }}>
                                                 <span style={{ fontWeight: 600, color: "#0f172a" }}>{row.label}</span>
                                                 <span style={{ color: "#64748b" }}>is</span>
                                                 <b style={{ color: "#0f172a" }}>{row.identified}</b>
-                                                <span style={{ ...badge(t), marginLeft: "auto" }}>{t.label}</span>
-                                                <span style={{ fontSize: 10, color: "#94a3b8" }}>{row.vsLabel}</span>
+                                                <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                                  {/* Photos signal (Lens + Claude vision) */}
+                                                  <span style={{ fontSize: 9.5, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.3 }}>Photos</span>
+                                                  <span style={{ ...badge(t) }}>{t.label}</span>
+                                                  {/* Source-page signal (units only) */}
+                                                  {row.role === "unit" && (
+                                                    <>
+                                                      <span style={{ fontSize: 9.5, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.3 }}>Source page</span>
+                                                      <span
+                                                        style={{ ...badge(sb) }}
+                                                        title={sp ? `${sp.identifiedCommunity || sp.identifiedLocation || "source page"} — ${sp.reason}` : "No source listing URL recorded for this unit."}
+                                                      >
+                                                        {sb.label}
+                                                      </span>
+                                                    </>
+                                                  )}
+                                                </div>
+                                                <span style={{ fontSize: 10, color: "#94a3b8", width: "100%", textAlign: "right" }}>{row.vsLabel}</span>
                                               </div>
                                             );
                                           })}
@@ -7873,6 +7921,48 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           <div style={{ fontSize: 10.5, color: "#94a3b8", marginTop: 7 }}>UI community: “{r.expectedCommunity}”</div>
                                         ) : null}
                                       </div>
+                                      )}
+
+                                      {/* ── Source-page check — verifies each unit's SOURCE
+                                          LISTING PAGE (Zillow/Redfin/VRBO/…) names the
+                                          expected community, independent of the photos. */}
+                                      {r.sourcePages && r.sourcePages.length > 0 && (
+                                        <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px", marginBottom: 8 }}>
+                                          <div style={{ fontSize: 10.5, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>
+                                            Source page check
+                                          </div>
+                                          <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8 }}>
+                                            Confirms the listing page each unit's photos were scraped from is in the expected community.
+                                          </div>
+                                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                            {r.sourcePages.map((sp, i) => {
+                                              const sb = sp.match === "yes"
+                                                ? { bg: "#dcfce7", fg: "#15803d", label: "✓ Confirms community" }
+                                                : sp.match === "no"
+                                                ? { bg: "#fee2e2", fg: "#b91c1c", label: "✕ Different community" }
+                                                : { bg: "#fef9c3", fg: "#92400e", label: sp.unreadable ? "ⓘ Page unreadable" : "ⓘ Unclear" };
+                                              let host = "";
+                                              try { host = new URL(sp.url).hostname.replace(/^www\./, ""); } catch { host = sp.url; }
+                                              return (
+                                                <div key={i} style={{ borderTop: i > 0 ? "1px solid #f1f5f9" : undefined, paddingTop: i > 0 ? 8 : 0 }}>
+                                                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                                    <span style={{ fontWeight: 600, fontSize: 12, color: "#0f172a" }}>{sp.unitLabel}</span>
+                                                    <span style={{ ...badge(sb), fontSize: 11, padding: "1px 8px" }}>{sb.label}</span>
+                                                    {sp.identifiedLocation ? (
+                                                      <span style={{ fontSize: 11, color: "#475569" }}>📍 {sp.identifiedLocation}</span>
+                                                    ) : null}
+                                                    {sp.url ? (
+                                                      <a href={sp.url} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: "#0e7490", marginLeft: "auto" }}>
+                                                        {host} ↗
+                                                      </a>
+                                                    ) : null}
+                                                  </div>
+                                                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 3 }}>{sp.reason}</div>
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        </div>
                                       )}
 
                                       {/* Bedroom photo coverage — the operator's x/x listing bedrooms question */}

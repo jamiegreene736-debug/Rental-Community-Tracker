@@ -45,6 +45,12 @@ import {
   type CommunityPhotoSample,
 } from "./community-photo-verify";
 import { getSearchApiKey } from "./searchapi";
+import { verifyUnitSourcePages } from "./source-page-community-check";
+import {
+  summarizeSourcePages,
+  sourcePageIsStrongContradiction,
+  type SourcePageVerdict,
+} from "../shared/source-page-community-logic";
 
 const MODEL = "claude-sonnet-4-6";
 
@@ -66,6 +72,9 @@ const ANTHROPIC_TIMEOUT_MS = 90_000;
 
 const IMAGE_EXT = /\.(?:jpe?g|png|webp|gif)$/i;
 
+/** Kill switch for the source-page verification leg (photo legs still run). */
+const SOURCE_PAGE_CHECK_DISABLED = process.env.SOURCE_PAGE_COMMUNITY_CHECK_DISABLED === "1";
+
 export type CheckGroupInput = {
   role: "community" | "unit";
   label: string;
@@ -81,6 +90,13 @@ export type CheckGroupInput = {
   /** Unit listing copy for bed-inventory parsing. */
   unitDescription?: string;
   expectedBedInventory?: string[];
+  /**
+   * The listing page this folder's photos were scraped from (Zillow / Redfin /
+   * VRBO / Airbnb / Guesty). When present on a unit group, the check also verifies
+   * the SOURCE PAGE names the expected community — an independent signal from the
+   * photo (Lens/vision) legs. Absent → source-page leg skipped for this unit.
+   */
+  sourceUrl?: string;
 };
 
 export type PhotoCommunityCheckRequest = {
@@ -165,6 +181,8 @@ export type PhotoCommunityCheckResult = {
   units: UnitGroupResult[];
   bedroomCoverage: ListingBedroomCoverage | null;
   duplicates: DuplicateFinding[];
+  /** Per-unit source-listing-page community verdicts (empty when no URLs given). */
+  sourcePages: SourcePageVerdict[];
   model: string;
   photosChecked: number;
   elapsedMs: number;
@@ -805,6 +823,7 @@ export async function runPhotoCommunityCheck(
       units: [],
       bedroomCoverage: null,
       duplicates,
+      sourcePages: [],
       model: "google_lens+claude",
       photosChecked: 0,
       elapsedMs: Date.now() - startedAt,
@@ -829,6 +848,7 @@ export async function runPhotoCommunityCheck(
       units: [],
       bedroomCoverage: null,
       duplicates,
+      sourcePages: [],
       model: "google_lens+claude",
       photosChecked,
       elapsedMs: Date.now() - startedAt,
@@ -849,6 +869,7 @@ export async function runPhotoCommunityCheck(
       units: [],
       bedroomCoverage: null,
       duplicates,
+      sourcePages: [],
       model: "google_lens+claude",
       photosChecked,
       elapsedMs: Date.now() - startedAt,
@@ -928,6 +949,24 @@ export async function runPhotoCommunityCheck(
     }
   }
 
+  // ── Source-page verification (independent of the Lens/vision photo legs) ──
+  // For each unit that carries a source listing URL, confirm the page itself
+  // names the expected community. Fail-soft: a blocked/JS-only/auth-gated page
+  // resolves to "uncertain" and never fails the check.
+  let sourcePages: SourcePageVerdict[] = [];
+  const sourceUnitInputs = unitInputs
+    .filter((g) => typeof g.sourceUrl === "string" && g.sourceUrl.trim().length > 0)
+    .map((g) => ({ label: g.label, sourceUrl: g.sourceUrl }));
+  if (sourceUnitInputs.length > 0 && apiKey && !SOURCE_PAGE_CHECK_DISABLED) {
+    try {
+      sourcePages = await verifyUnitSourcePages(sourceUnitInputs, expectedCommunity, apiKey);
+    } catch (e: any) {
+      warning = warning
+        ? `${warning}; source-page: ${e?.message ?? e}`
+        : `Source-page check failed: ${e?.message ?? e}`;
+    }
+  }
+
   // ── Verdict synthesis ─────────────────────────────────────────────────────
   const concerns: string[] = [];
   let hasFail = false;
@@ -979,6 +1018,15 @@ export async function runPhotoCommunityCheck(
     }
     if (!u.allSameUnit || u.outliers.length > 0) warn(`${u.label} has photo(s) that may not be the same unit.`);
     if (u.junk.length > 0) warn(`${u.label} has ${u.junk.length} junk/mis-filed photo(s).`);
+  }
+
+  for (const sp of sourcePages) {
+    if (sourcePageIsStrongContradiction(sp)) {
+      const where = sp.identifiedCommunity || sp.identifiedLocation || "a different place";
+      fail(`${sp.unitLabel}: source listing page is a DIFFERENT community (${where}) — ${sp.reason}`);
+    } else if (sp.match === "no") {
+      warn(`${sp.unitLabel}: source page may be a different community — ${sp.reason}`);
+    }
   }
 
   if (bedroomCoverage) {
@@ -1043,6 +1091,10 @@ export async function runPhotoCommunityCheck(
     verdict = "warn";
   }
 
+  const sourceRoll = summarizeSourcePages(sourcePages);
+  const sourceHeadline = sourceRoll.matched > 0
+    ? ` Source pages: ${sourceRoll.matched}/${sourcePages.length} confirm the community.`
+    : "";
   let summary: string;
   const bedroomHeadline = bedroomCoverage?.expectedListingBedrooms
     ? ` Bedroom photos: ${bedroomCoverage.bedroomsFoundCombined}/${bedroomCoverage.expectedListingBedrooms}.`
@@ -1051,8 +1103,8 @@ export async function runPhotoCommunityCheck(
     : "";
   if (verdict === "pass") {
     summary = units.length >= 2
-      ? `Confirmed: community folder and all ${units.length} units are the same community (${expectedCommunity || community?.identifiedCommunity || "verified"}).${bedroomHeadline}`
-      : `Confirmed: community folder and unit photos are the same community.${bedroomHeadline}`;
+      ? `Confirmed: community folder and all ${units.length} units are the same community (${expectedCommunity || community?.identifiedCommunity || "verified"}).${bedroomHeadline}${sourceHeadline}`
+      : `Confirmed: community folder and unit photos are the same community.${bedroomHeadline}${sourceHeadline}`;
   } else if (hasFail) {
     summary = bedroomCoverage?.matchesListing === "no"
       ? `Problem found — bedroom photo coverage is incomplete (${bedroomCoverage.bedroomsFoundCombined}/${bedroomCoverage.expectedListingBedrooms} listing bedrooms). Review details below.`
@@ -1079,6 +1131,7 @@ export async function runPhotoCommunityCheck(
     units,
     bedroomCoverage,
     duplicates,
+    sourcePages,
     model: "google_lens+claude",
     photosChecked,
     elapsedMs: Date.now() - startedAt,
