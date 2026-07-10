@@ -5952,7 +5952,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   {strLookupBusy ? "Pulling real STR permit..." : "Pull real STR permit from Guesty address"}
                                 </button>
                                 <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
-                                  Uses the connected Guesty listing when available, otherwise matches the Kauai County TVR registry by TMK.
+                                  Uses the connected Guesty listing when available, otherwise matches the Kauai TVR / Maui STRH county registries by TMK.
                                 </div>
                                 {renderComplianceLookupMeta(strLookupResult)}
                               </div>

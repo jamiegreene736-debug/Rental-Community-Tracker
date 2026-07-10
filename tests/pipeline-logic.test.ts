@@ -1933,40 +1933,44 @@ const tmkMatch = matchKauaiStrPermit(parsedTvr, "412006014000", "Waimea");
 assert.equal(tmkMatch?.value, "TVNC-1317");
 assert.ok(tmkMatchKeys("412006014000").includes("412006014"));
 
+// Fixture values are real-SHAPED (2026-07-10): the sample-family values
+// this suite previously used (TA-024-120-9012-01, TVR-2022-037,
+// 420140050001…) are now recognized placeholders and correctly null out
+// through usableLicenseValue — see tests/license-compliance-samples.test.ts.
 const extracted = extractHawaiiComplianceFromGuestyListing({
-  tags: ["TMK:420140050001", "TAT:TA-024-120-9012-01", "GET:GE-024-120-9012-01", "STR:TVR-2022-037"],
+  tags: ["TMK:428014033000", "TAT:TA-042-123-8571-01", "GET:GE-042-123-8571-01", "STR:TVR-2020-101"],
   licenseNumber: "SHOULD-NOT-WIN",
   taxId: "SHOULD-NOT-WIN",
   publicDescription: {
     notes: "=== Rental License Compliance ===\nShort-Term Rental Registration / Permit: NOTES-STR",
   },
 });
-assert.equal(extracted.tatLicense, "TA-024-120-9012-01");
-assert.equal(extracted.getLicense, "GE-024-120-9012-01");
-assert.equal(extracted.strPermit, "TVR-2022-037");
+assert.equal(extracted.tatLicense, "TA-042-123-8571-01");
+assert.equal(extracted.getLicense, "GE-042-123-8571-01");
+assert.equal(extracted.strPermit, "TVR-2020-101");
 
 const strOnLicenseNumber = extractHawaiiComplianceFromGuestyListing({
-  licenseNumber: "TVR-2022-037",
-  taxId: "GE-024-120-9012-01",
+  licenseNumber: "TVR-2020-101",
+  taxId: "GE-042-123-8571-01",
   tags: [],
 });
-assert.equal(strOnLicenseNumber.strPermit, "TVR-2022-037");
-assert.equal(strOnLicenseNumber.getLicense, "GE-024-120-9012-01");
+assert.equal(strOnLicenseNumber.strPermit, "TVR-2020-101");
+assert.equal(strOnLicenseNumber.getLicense, "GE-042-123-8571-01");
 assert.equal(strOnLicenseNumber.tatLicense, null);
 
 const fromHomeaway = extractHawaiiComplianceFromGuestyListing({
   tags: [],
   channels: {
     homeaway: {
-      licenseNumber: "TA-024-630-2345-01",
-      taxId: "GE-024-630-2345-01",
-      parcelNumber: "430150130001",
+      licenseNumber: "TA-063-217-4905-01",
+      taxId: "GE-063-217-4905-01",
+      parcelNumber: "435006012000",
     },
   },
 });
-assert.equal(fromHomeaway.tatLicense, "TA-024-630-2345-01");
-assert.equal(fromHomeaway.getLicense, "GE-024-630-2345-01");
-assert.equal(pairHawaiiTaxLicense("TA-024-120-9012-01", "getLicense"), "GE-024-120-9012-01");
+assert.equal(fromHomeaway.tatLicense, "TA-063-217-4905-01");
+assert.equal(fromHomeaway.getLicense, "GE-063-217-4905-01");
+assert.equal(pairHawaiiTaxLicense("TA-042-123-8571-01", "getLicense"), "GE-042-123-8571-01");
 
 const publicMauiValues = extractHawaiiComplianceFromPublicText(
   "Property Registration Number 2390010850095, TA-006-753-6384-01, GE-006-753-6384-01",
