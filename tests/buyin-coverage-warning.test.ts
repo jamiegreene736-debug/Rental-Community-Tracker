@@ -2,9 +2,12 @@
 // Operator rules (2026-07-04, window widened to 15 days on 2026-07-07): red-flag
 // any reservation checking in within the next 15 days whose required units have
 // NOT all been bought in; include stays already in-house; never warn on
-// cancelled bookings or reservations with no configured unit slots.
+// cancelled bookings.
 // 2026-07-09: "bought in" now REQUIRES email activity in the unit's alias inbox
 // (slot.buyIn.hasInboundEmail === true), not merely an attached buy-in row.
+// 2026-07-10: reservations with ZERO resolved unit slots (unmapped listing with
+// an un-inferable bedroom count) are no longer silently skipped — they flag as
+// kind "unknown-requirements" so the operator can fix the listing.
 import {
   buyInCoverageWarningSignature,
   buyInSlotAttached,
@@ -173,8 +176,36 @@ console.log("buyin-coverage-warning: collection rules");
     collectBuyInCoverageWarnings([reservation({ _id: "manual:5", status: "manual", integration: { platform: "Manual" } })], NOW).length === 1,
   );
   check(
-    "no configured slots → no warning (requirements unknown)",
-    collectBuyInCoverageWarnings([reservation({ slots: [] })], NOW).length === 0,
+    "normal missing-units warning carries kind missing-units",
+    warnings[0]?.kind === "missing-units",
+  );
+  // 2026-07-10: zero-slot rows FLAG as unknown-requirements instead of skipping.
+  const unknown = collectBuyInCoverageWarnings(
+    [reservation({ slots: [], operationsListingId: "guestylisting123" })],
+    NOW,
+  );
+  check("no configured slots → unknown-requirements warning", unknown.length === 1, unknown);
+  check("unknown-requirements warning carries the kind", unknown[0]?.kind === "unknown-requirements");
+  check("unknown-requirements warning has zero slots + no missing units", unknown[0]?.slotsTotal === 0 && unknown[0]?.missingUnits.length === 0);
+  check("unknown-requirements warning carries the listing id", unknown[0]?.listingId === "guestylisting123");
+  check(
+    "listingId falls back to reservation.listingId",
+    collectBuyInCoverageWarnings([reservation({ slots: [], listingId: "fallback9" })], NOW)[0]?.listingId === "fallback9",
+  );
+  check(
+    "cancelled zero-slot reservation still never warns",
+    collectBuyInCoverageWarnings([reservation({ slots: [], status: "canceled" })], NOW).length === 0,
+  );
+  check(
+    "zero-slot reservation outside the window does not warn",
+    collectBuyInCoverageWarnings([reservation({ slots: [], checkInDays: 30 })], NOW).length === 0,
+  );
+  check(
+    "zero-slot manual reservation flags too",
+    collectBuyInCoverageWarnings(
+      [reservation({ _id: "manual:9", status: "manual", slots: [], listingId: "manual:9" })],
+      NOW,
+    )[0]?.kind === "unknown-requirements",
   );
   check(
     "check-in beyond window → no warning",
@@ -240,6 +271,15 @@ console.log("buyin-coverage-warning: dismissal signature");
     "signature is order-independent",
     buyInCoverageWarningSignature(two) === buyInCoverageWarningSignature(twoReversed),
   );
+  // A row flipping unknown-requirements ↔ missing-units (listing fixed / broke)
+  // is a fact change that must re-raise a dismissed popup.
+  const unknownSig = buyInCoverageWarningSignature(
+    collectBuyInCoverageWarnings([reservation({ slots: [] })], NOW),
+  );
+  const knownSig = buyInCoverageWarningSignature(
+    collectBuyInCoverageWarnings([reservation()], NOW),
+  );
+  check("kind change (unknown → missing-units) changes the signature", unknownSig !== knownSig && unknownSig !== "");
 }
 
 console.log(`\nbuyin-coverage-warning tests: ${pass} passed, ${fail} failed`);
