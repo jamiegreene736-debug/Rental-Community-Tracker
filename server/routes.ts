@@ -38718,6 +38718,10 @@ Return ONLY compact JSON with this exact shape:
               units: check.units,
               bedroomCoverage: check.bedroomCoverage,
               bedroomCoverageReliable: allLabelsReady,
+              // Source-page community verdicts (a page positively naming a different
+              // community skips; unreadable/no-URL is fail-open). COMBO_SOURCE_PAGE_GATE=0
+              // disables the skip while the manual pricing-tab check still shows it.
+              sourcePages: process.env.COMBO_SOURCE_PAGE_GATE === "0" ? [] : check.sourcePages,
             };
             lastGateInput = gateInput;
             return evaluateComboPhotoCommunityGate(gateInput);

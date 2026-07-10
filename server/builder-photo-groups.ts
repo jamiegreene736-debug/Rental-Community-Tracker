@@ -86,6 +86,24 @@ function effectiveCaption(
   return (fromDb?.trim() || staticCaption?.trim() || captionFromFilename(filename));
 }
 
+/**
+ * Read the source listing URL a folder's photos were scraped from (stamped into
+ * `_source.json` by the last rescrape / Guesty import). Feeds the source-page
+ * community-verification leg. Fail-soft: returns undefined on any error.
+ */
+export async function readFolderSourceUrl(folder: string): Promise<string | undefined> {
+  const sourcePath = path.join(publicPhotoDir(folder), "_source.json");
+  try {
+    const doc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8")) as {
+      sourceListing?: { url?: string } | null;
+    };
+    const url = doc?.sourceListing?.url;
+    return typeof url === "string" && url.trim() ? url.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function listPublishedFilenames(folder: string): Promise<string[]> {
   const dir = publicPhotoDir(folder);
   let diskFiles: string[] = [];
@@ -134,6 +152,10 @@ async function buildGroupFromPublishedFolder(
     ? parseExpectedBedInventory(unitDescription)
     : undefined;
 
+  // Only unit groups drive the source-page leg (the community folder's source is
+  // the resort's own Guesty/master listing, not a per-unit for-sale page).
+  const sourceUrl = role === "unit" ? await readFolderSourceUrl(folder) : undefined;
+
   return {
     role,
     label,
@@ -147,6 +169,7 @@ async function buildGroupFromPublishedFolder(
     expectedBedrooms,
     unitDescription,
     expectedBedInventory: expectedBedInventory?.length ? expectedBedInventory : undefined,
+    sourceUrl,
   };
 }
 

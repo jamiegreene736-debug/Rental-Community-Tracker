@@ -26,6 +26,7 @@
 //     PUBLISH (fail-open), so an API outage can't silently skip an entire batch.
 
 import { isStrongContradiction } from "./photo-community-check-logic";
+import { sourcePageIsStrongContradiction, type SourcePageVerdict } from "./source-page-community-logic";
 
 /**
  * Warnings runPhotoCommunityCheck returns from an early-out when it could not
@@ -89,6 +90,14 @@ export type ComboPhotoGateInput = {
    * labels that had not been written when the gate ran.
    */
   bedroomCoverageReliable?: boolean;
+  /**
+   * Per-unit source-listing-page verdicts (server/source-page-community-check.ts).
+   * A page that POSITIVELY names a DIFFERENT community is a strong contradiction and
+   * skips; an unreadable / login-gated / no-URL page is fail-open (never skips). The
+   * caller may pass an empty array (or omit) to disable this leg — e.g. the
+   * COMBO_SOURCE_PAGE_GATE=0 kill switch.
+   */
+  sourcePages?: SourcePageVerdict[];
 };
 
 export type ComboPhotoGateDecision = {
@@ -176,6 +185,23 @@ function unitContradictionReasons(input: ComboPhotoGateInput): string[] {
 }
 
 /**
+ * (b2) Each unit's SOURCE LISTING PAGE names that community — only a STRONG
+ * contradiction (the page positively identifies a different community/city) skips.
+ * An unreadable / auth-gated / no-URL page yields no reason (fail-open).
+ */
+function sourcePageContradictionReasons(input: ComboPhotoGateInput): string[] {
+  const expected = expectedCommunityLabel(input);
+  const out: string[] = [];
+  for (const sp of input.sourcePages ?? []) {
+    if (sourcePageIsStrongContradiction(sp)) {
+      const where = sp.identifiedCommunity || sp.identifiedLocation || "a different community";
+      out.push(`${sp.unitLabel} source page is ${where}, not ${expected}`);
+    }
+  }
+  return out;
+}
+
+/**
  * (d) Units whose photos do NOT cover their bedroom count beyond the tolerance.
  * matchesListing "no" fires exactly when bedroomsFound < expectedBedrooms
  * (bed-TYPE inventory does not affect this). A unit is only surfaced here when it
@@ -216,6 +242,7 @@ export function evaluateComboPhotoCommunityGate(input: ComboPhotoGateInput): Com
   const community = communitySkipReason(input);
   if (community) reasons.push(community);
   reasons.push(...unitContradictionReasons(input));
+  reasons.push(...sourcePageContradictionReasons(input));
   for (const u of bedroomShortUnits(input)) {
     reasons.push(`${u.label} shows only ${u.bedroomsFound}/${u.expectedBedrooms} bedrooms in its photos`);
   }
@@ -265,8 +292,12 @@ export function planComboBedroomRetry(input: ComboPhotoGateInput): ComboBedroomR
   const shortUnits = bedroomShortUnits(input);
   if (shortUnits.length === 0) return { retryable: false, units: [] };
   // Retry ONLY when bedrooms are the sole problem — a wrong community folder /
-  // wrong-community unit is not fixed by swapping a for-sale candidate.
-  const bedroomOnly = !communitySkipReason(input) && unitContradictionReasons(input).length === 0;
+  // wrong-community unit / wrong-community source page is not fixed by swapping a
+  // for-sale candidate's bedroom photos.
+  const bedroomOnly =
+    !communitySkipReason(input) &&
+    unitContradictionReasons(input).length === 0 &&
+    sourcePageContradictionReasons(input).length === 0;
   const units: ComboBedroomRetryUnit[] = [];
   for (const u of shortUnits) {
     const slot = slotFromUnitLabel(u.label);

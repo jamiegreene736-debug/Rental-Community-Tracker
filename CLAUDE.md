@@ -43,6 +43,32 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 ("Check photo community" → also verify each unit's SOURCE PAGE, not just its photos):
+  Operator asked for a button (already exists: "🔎 Check photo community" on the Photos tab) that
+  confirms Unit A + Unit B are in the same community as the community folder by scanning their photos
+  AND their source listing page with Claude, with clear yes/yes UI, and automated in the add-combo
+  tool. SHIPPED (`claude/unit-community-verify-button-7945me`): the photo legs (Google Lens on the
+  community folder + Claude vision per unit) already existed; this adds an INDEPENDENT source-page leg.
+  (1) pure `shared/source-page-community-logic.ts` (39 tests: HTML → title/meta/OpenGraph/JSON-LD
+  address/snippet extraction, Claude prompt, verdict parse w/ self-contradiction downgrade, tolerant
+  name match, `sourcePageIsStrongContradiction`, roll-up). (2) `server/source-page-community-check.ts`
+  `verifyUnitSourcePages` — bounded fail-open page fetch + one Claude JSON call per unit's source URL
+  (`SOURCE_PAGE_COMMUNITY_MODEL`, default claude-sonnet-4-6); Guesty/auth-gated/JS-only/blocked pages →
+  "uncertain" (never a false "no"), never throws. Kill switch `SOURCE_PAGE_COMMUNITY_CHECK_DISABLED=1`.
+  (3) `runPhotoCommunityCheck` gains `sourceUrl?` per unit group + `sourcePages[]` on the result; a
+  POSITIVE different-community source page contributes a fail, else warn/info. (4) source URLs resolved
+  from each folder's `_source.json`: server `readFolderSourceUrl` in builder-photo-groups.ts (unit
+  groups only) + client passes `sourceUrlsByFolder`. (5) UI: each roster row now shows TWO badges —
+  Photos ✓ and Source page ✓ vs the community folder — plus a "Source page check" card (per-unit
+  verdict, 📍 location, source link). (6) combo gate: `ComboPhotoGateInput.sourcePages` +
+  `sourcePageContradictionReasons` skip leg (strong contradiction only; unreadable/no-URL fail-open;
+  also blocks the bedroom-retry); wired into `runBulkComboListingItem`, disable with
+  `COMBO_SOURCE_PAGE_GATE=0`. LOAD-BEARING: mirrors the 2026-06-26/07-08 posture — a source page only
+  SKIPS on a POSITIVE different-community finding, never on absence of proof, so a legit resort whose
+  page can't be read still publishes. Verified: source-page-community 39/0, full `npm test` exit 0,
+  build clean, `npm run check` 338 = baseline (0 new). Could NOT live-smoke the Claude/fetch legs (no
+  key) — post-deploy: click "Check photo community"; each unit shows a Photos + Source page badge.
+
 - 2026-07-09 (amenities tab: photo-driven amenity scan → auto-fill + Guesty sync + combo step): Operator
   asked for a button that scans the community folder + ALL units' photos, adds amenities to the amenities
   tab, syncs to Guesty if the listing exists (else save in-system), fills out ALL amenities where
