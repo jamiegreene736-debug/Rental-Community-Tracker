@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 (market-rate queue + Pricing tab: 95%+ "right community & bedroom count" MATCH CONFIRMATION):
+  Operator asked for UI on the Pricing tab and/or the dashboard market-rate queue that confirms with
+  ~95%+ accuracy that the rates being researched are for the CORRECT community and bedroom count.
+  KEY INSIGHT (don't re-chase): the live median engine already persists everything needed per scanned
+  month (`monthlyRates[ym].evidence`: exact query, `requestedBedrooms` pin, geo-box kind/radius/widened,
+  per-comp tallies incl. exact-bedroom-parsed + coordinate-verified-in-box; wrong-size / out-of-box
+  comps are REJECTED before pricing) — so this is a strict deterministic roll-up, no new scanning.
+  SHIPPED (`claude/pricing-market-rate-confirm-sfabjv`): pure `shared/market-rate-match-confirmation.ts`
+  (`computeMarketRateMatchConfirmation`, 14 scenario tests) renders ONE green/amber/red verdict chip on
+  BOTH surfaces — dashboard queue items (server-computed in `runBulkPricingItem` →
+  `progress.matchConfirmation` + terminal event metas + an `item-match-review` warn/error event) and
+  the Pricing-tab "Research confirmation" block (client-computed from the getLiveBuyIn cache via the
+  SAME function; `parseMonthlyRates` widened to keep the comp counters — test-locked, don't strip).
+  GREEN only past the 95% bar: all live months geo-boxed to the community (widened/unboxed → amber),
+  search label passes `confirmResearchCommunity` (wrong location → RED), every size query-pinned,
+  ≥95% of accepted comps independently parsed at the exact size (≥3 comps/size), zero wrong-size
+  accepted comps (→ RED), and researched sizes must cover the listing's TRUE unit sizes (miss → RED
+  "Wrong bedroom research"). Absence of evidence NEVER reads verified (static/extrapolated months are
+  reported, not counted). BONUS: the live engine's recipe now stamps `communityConfirmation` (the
+  static engine's guard) so the queue shows "✓ Community confirmed" from the FIRST tick; the evidence
+  verdict subsumes it at completion. Display-only — never blocks a push. Verified: new suite green,
+  full `npm test` exit 0, build clean (new UI strings bundle-grepped), `npm run check` 338 = baseline
+  (0 new). Could NOT live-run a queue (no SearchAPI/DB creds) — post-deploy: run "Update market
+  pricing"; each item shows the community chip while scanning + the verdict chip on completion, and
+  the Pricing tab gains the same verdict. See AGENTS.md "Market-rate MATCH CONFIRMATION" + the
+  2026-07-10 Decision Log line.
+
 - 2026-07-10 (preflight Community Photos: "Check photos are correct" YES/NO button + re-pull renamed):
   Operator asked for a button on the preflight Community Photos card that has Claude vision scan the
   CURRENT community-folder photos and answer plainly in the UI "yes, these are X community / no they're

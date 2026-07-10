@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { BUY_IN_MARKET_BOUNDS, BUY_IN_MARKET_LOCATIONS, BUY_IN_MARKETS, haversineMiles } from "@shared/buy-in-market";
 import { getBuyInRate, getCommunityRegion, getSeasonForMonth, applyLodgingTaxGrossUp, LODGING_TAX_PCT } from "@shared/pricing-rates";
+import { confirmResearchCommunity, type CommunityConfirmation } from "@shared/static-rate-logic";
 import { PROPERTY_UNIT_CONFIGS, type PropertyUnitConfig } from "@shared/property-units";
 import { extractBedroomsFromListing } from "./community-research";
 
@@ -186,6 +187,13 @@ export type MarketRatePricingRecipe = {
   // inferred from the combined total rather than explicit per-unit data.
   resortConfident?: boolean;
   bedroomSplitInferred?: boolean;
+  // Label-level "right community?" check for the LIVE engine (2026-07-10) —
+  // the same confirmResearchCommunity guard the static engine's chip uses: the
+  // search label must match the expected city/state (the load-bearing geo
+  // guard) plus a name-or-curated identity signal. Computed once per refresh
+  // in refreshHybridPricingForTarget and carried on every progress event, so
+  // the market-rate queue shows "✓ Community confirmed" from the first tick.
+  communityConfirmation?: CommunityConfirmation;
 };
 
 export type MarketRateCandidateEvidence = {
@@ -1163,6 +1171,11 @@ export async function refreshHybridPricingForTarget(args: {
   derivedGeo?: DerivedMarketGeo;
   resortConfident?: boolean;
   bedroomSplitInferred?: boolean;
+  // Expected location for the recipe's community-confirmation label check.
+  // Defaults to the curated market's registry location; the draft path passes
+  // the draft's own city/state so non-registry listings are checked too.
+  expectedCity?: string;
+  expectedState?: string;
   asOf?: Date;
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
   onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>;
@@ -1187,6 +1200,7 @@ export async function refreshHybridPricingForTarget(args: {
   const bedroomCounts = Array.from(new Set(args.bedroomCounts))
     .filter((bedrooms) => Number.isFinite(bedrooms) && bedrooms > 0)
     .sort((a, b) => a - b);
+  const marketLocation = BUY_IN_MARKET_LOCATIONS[args.community];
   const pricingRecipe: MarketRatePricingRecipe = {
     community: args.community,
     searchName,
@@ -1198,6 +1212,13 @@ export async function refreshHybridPricingForTarget(args: {
     querySet: searchQueries,
     resortConfident: args.resortConfident ?? true,
     bedroomSplitInferred: args.bedroomSplitInferred ?? false,
+    communityConfirmation: confirmResearchCommunity({
+      community: args.community,
+      searchLabel: searchName,
+      expectedCity: args.expectedCity ?? marketLocation?.city,
+      expectedState: args.expectedState ?? marketLocation?.state,
+      curated: !!BUY_IN_MARKETS[args.community],
+    }),
   };
 
   for (const bedrooms of bedroomCounts) {

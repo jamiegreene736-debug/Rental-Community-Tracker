@@ -208,6 +208,7 @@ import {
   searchLocationForBuyInMarket,
   textMatchesResortPhrase,
 } from "@shared/buy-in-market";
+import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 import { draftPhotoFolderRef, isScannableFolder, replacementPhotoFolderRef, verificationTokensForFolder } from "@shared/photo-folder-utils";
 import {
   isCompoundUnitClaim,
@@ -1200,6 +1201,10 @@ async function refreshHybridPricingForDraft(
   // search on its free-text name. This is what guarantees every listing (and every
   // future bulk-queue add, which loopback-refreshes through here) is curated.
   const derivedGeo = await resolveDraftDerivedGeo(draft, community);
+  // Expected location for the recipe's community-confirmation label check —
+  // the curated market's registry location when the draft resolved to one,
+  // else the draft's own city/state (mirrors resolveStaticPricingTarget).
+  const draftMarket = BUY_IN_MARKETS[community];
   return refreshHybridPricingForTarget({
     propertyId,
     propertyName: String(draft.name || draft.listingTitle || fallbackLabel || `Draft ${draftId}`),
@@ -1211,6 +1216,8 @@ async function refreshHybridPricingForDraft(
     resortConfident: derivedGeo ? true : resortConfident,
     derivedGeo: derivedGeo ?? undefined,
     bedroomSplitInferred,
+    expectedCity: draftMarket?.location?.city || String(draft?.city || "").trim() || undefined,
+    expectedState: draftMarket?.location?.state || String(draft?.state || "").trim() || undefined,
     triggerType: "Manual Update",
     notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly median bases (no hybrid markup layers).",
     onMonthScanned,
@@ -1601,6 +1608,24 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   const rateChanges = summarizePricingRateChanges(pricingResult.logs);
   const confidenceSummary = summarizeMarketRateProgressConfidence(pricingResult.rows);
   const pricingRecipe = (item.progress as any)?.pricingRecipe ?? null;
+  // Evidence-level "right community + right bedroom count?" verdict from the
+  // rows the refresh just persisted (2026-07-10 operator ask). Live SearchAPI
+  // engine only — the static engine has its own communityConfirmation and no
+  // per-month comp evidence to verify against. For configured properties the
+  // expected bedroom sizes come from the unit config (so a wrong-size research
+  // is a hard mismatch); drafts fall back to the researched set (their split
+  // risk is carried by bedroomSplitInferred instead).
+  const matchConfirmation = usingStaticEngine ? null : computeMarketRateMatchConfirmation({
+    community: String(pricingRecipe?.community ?? ""),
+    searchLabel: typeof pricingRecipe?.searchName === "string" ? pricingRecipe.searchName : null,
+    communityConfirmation: pricingRecipe?.communityConfirmation ?? null,
+    resortConfident: pricingRecipe?.resortConfident,
+    bedroomSplitInferred: pricingRecipe?.bedroomSplitInferred,
+    expectedBedrooms: item.propertyId > 0
+      ? PROPERTY_UNIT_CONFIGS[item.propertyId]?.units?.map((u) => u.bedrooms)
+      : (Array.isArray(pricingRecipe?.searchedBedrooms) ? pricingRecipe.searchedBedrooms : undefined),
+    rows: pricingResult.rows,
+  });
   const savedSourceLabel = usingStaticEngine
     ? "Claude static seasonal rates"
     : "SearchAPI Airbnb monthly pricing";
@@ -1611,14 +1636,22 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
     rows: pricingResult.rows.length,
     confidence: confidenceSummary,
     pricingRecipe,
+    matchConfirmation,
     rateChanges,
   };
   item.heartbeatAt = Date.now();
   await persistBulkPricingJob(job);
   await topQueueEvent("bulk-pricing", job.id, usingStaticEngine ? "item-research-completed" : "item-searchapi-completed", `${savedSourceLabel} completed for ${item.label}`, {
     itemKey: item.id,
-    meta: { propertyId: item.propertyId, rows: pricingResult.rows.length, confidence: confidenceSummary, pricingRecipe, blackoutCount: blackoutWindows.length },
+    meta: { propertyId: item.propertyId, rows: pricingResult.rows.length, confidence: confidenceSummary, pricingRecipe, matchConfirmation, blackoutCount: blackoutWindows.length },
   });
+  if (matchConfirmation && matchConfirmation.verdict !== "verified") {
+    await topQueueEvent("bulk-pricing", job.id, "item-match-review", `${item.label}: community/bedroom verification is ${matchConfirmation.verdict.toUpperCase()} — ${matchConfirmation.headline}`, {
+      itemKey: item.id,
+      level: matchConfirmation.verdict === "mismatch" ? "error" : "warn",
+      meta: { propertyId: item.propertyId, matchConfirmation },
+    });
+  }
   if (blackoutWindows.length > 0) {
     const months = Array.from(new Set(blackoutWindows.map((w) => w.yearMonth))).sort();
     const monthPreview = months.slice(0, 6).join(", ") + (months.length > 6 ? ` +${months.length - 6} more` : "");
@@ -1650,6 +1683,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       label: `Market rates saved; Guesty push failed and will be retried: ${reason}`,
       confidence: confidenceSummary,
       pricingRecipe,
+      matchConfirmation,
     };
     await topQueueEvent("bulk-pricing", job.id, "item-guesty-push-failed", `Guesty pricing push failed for ${item.label}: ${reason}`, {
       itemKey: item.id,
@@ -1685,6 +1719,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       guestyPush,
       confidence: confidenceSummary,
       pricingRecipe,
+      matchConfirmation,
       blackoutCount: blackoutWindows.length,
       blackoutClosed,
       rateChanges,
@@ -1702,6 +1737,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
       guestyPush,
       confidence: confidenceSummary,
       pricingRecipe,
+      matchConfirmation,
       blackoutCount: blackoutWindows.length,
       blackoutClosed,
       rateChanges,
