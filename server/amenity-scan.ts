@@ -30,6 +30,7 @@ import {
   mergeDetectedAmenities,
   type AmenityDetection,
 } from "@shared/amenity-scan-logic";
+import { researchLocationAmenitiesForProperty } from "./amenity-location-research";
 
 const MODEL = process.env.AMENITY_SCAN_MODEL || "claude-sonnet-4-6";
 const ANTHROPIC_TIMEOUT_MS = 90_000;
@@ -50,14 +51,21 @@ export type AmenityScanResult = {
   next: string[];
   /** Detected keys newly added on top of the base. */
   added: string[];
-  /** Every key the scan detected (incl. ones already selected). */
+  /** Every key the scan detected (photos + area research, incl. already-selected). */
   detected: string[];
-  /** Per-key vision detail (confidence + evidence) for UI/diagnostics. */
+  /** Per-key detail (confidence + evidence) for UI/diagnostics — both legs. */
   detail: AmenityDetection[];
   base: string[];
   filledFromBaseline: boolean;
   photosScanned: number;
   groupsScanned: number;
+  /** Surrounding-area (web search) leg — "Shopping Nearby" etc. */
+  location: {
+    researched: boolean;
+    detected: string[];
+    searchLabel?: string;
+    warning?: string;
+  };
   /** Non-fatal note (e.g. no key / no photos). */
   warning?: string;
 };
@@ -187,11 +195,33 @@ export async function scanAmenitiesForProperty(
   const baseline = opts.baseline ?? HAWAII_BASE_AMENITY_KEYS;
   const apiKey = opts.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY ?? "";
 
+  // Surrounding-area (web search) leg — runs CONCURRENTLY with the photo/vision
+  // leg. It detects the "nearby" amenities (shopping/golf/restaurants/beach)
+  // that photos can never prove. Fail-soft: it resolves to an empty result +
+  // warning on any failure, so it can never break the photo scan.
+  const locationPromise = researchLocationAmenitiesForProperty(propertyId, { anthropicApiKey: apiKey });
+
   const built = await buildPhotoCommunityCheckRequestForProperty(propertyId);
   const community = built?.request.expectedCommunity ?? "";
   const groups = built?.request.groups ?? [];
 
-  const finalize = (detected: string[], detail: AmenityDetection[], photosScanned: number, groupsScanned: number, warning?: string): AmenityScanResult => {
+  const finalize = async (
+    visionDetected: string[],
+    visionDetail: AmenityDetection[],
+    photosScanned: number,
+    groupsScanned: number,
+    warning?: string,
+  ): Promise<AmenityScanResult> => {
+    const location = await locationPromise;
+    // Union the two legs. Keys are disjoint by design (vision targets vs
+    // location targets), but dedupe defensively, higher confidence winning.
+    const confRank: Record<string, number> = { high: 3, medium: 2, low: 1 };
+    const detailByKey = new Map<string, AmenityDetection>();
+    for (const d of [...visionDetail, ...location.detail]) {
+      const prev = detailByKey.get(d.key);
+      if (!prev || confRank[d.confidence] > confRank[prev.confidence]) detailByKey.set(d.key, d);
+    }
+    const detected = Array.from(new Set([...visionDetected, ...location.detected]));
     const merged = mergeDetectedAmenities({
       current: opts.currentKeys ?? null,
       baseline,
@@ -205,11 +235,17 @@ export async function scanAmenitiesForProperty(
       next: merged.next,
       added: merged.added,
       detected: detected.filter((k) => AMENITY_CATALOG_KEYS.has(k)),
-      detail,
+      detail: Array.from(detailByKey.values()),
       base: merged.base,
       filledFromBaseline: merged.filledFromBaseline,
       photosScanned,
       groupsScanned,
+      location: {
+        researched: location.researched,
+        detected: location.detected,
+        searchLabel: location.searchLabel,
+        warning: location.warning,
+      },
       warning,
     };
   };

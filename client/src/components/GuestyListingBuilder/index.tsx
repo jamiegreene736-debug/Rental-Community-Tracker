@@ -1060,6 +1060,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     community: string;
     warning?: string;
     guesty?: { synced: boolean; listingId: string | null; saved?: number; error?: string };
+    location?: { researched: boolean; detected: string[]; searchLabel?: string; warning?: string };
   } | null>(null);
   const [amenitySaveState, setAmenitySaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   // Guesty's canonical amenity catalog: list of { name } strings (Guesty's supported amenities
@@ -3070,6 +3071,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         detail?: { key: string; confidence: string; evidence: string }[];
         photosScanned?: number; groupsScanned?: number; community?: string; warning?: string;
         guesty?: { synced: boolean; listingId: string | null; saved?: number; error?: string };
+        location?: { researched: boolean; detected: string[]; searchLabel?: string; warning?: string };
       };
       if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
       if (Array.isArray(data.next)) setPendingAmenities(new Set(data.next));
@@ -3082,15 +3084,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         community: data.community ?? "",
         warning: data.warning,
         guesty: data.guesty,
+        location: data.location,
       });
       setAmenityScanState("done");
       // Reflect that the selection now matches what was persisted in-system.
       if (amenityPushState !== "idle") setAmenityPushState("idle");
+      // The scan auto-synced to Guesty — surface that in the data-push log so
+      // the "Amenities · Never pushed" preview chip flips without a manual push.
+      if (data.guesty?.synced) {
+        recordDataPush("amenities", "success", `Auto-synced after photo scan (${data.guesty.saved ?? 0} confirmed by Guesty)`);
+      }
       const addedN = data.added?.length ?? 0;
+      const nearbyN = data.location?.researched ? data.location.detected.length : 0;
       toast({
         title: "Amenity scan complete",
         description: `${addedN} amenit${addedN === 1 ? "y" : "ies"} added from ${data.photosScanned ?? 0} photo${(data.photosScanned ?? 0) === 1 ? "" : "s"}`
-          + (data.guesty?.synced ? " · synced to Guesty" : data.guesty?.listingId ? " · Guesty sync failed" : " · saved in-system")
+          + (data.location?.researched ? ` · ${nearbyN} nearby from area research` : "")
+          + (data.guesty?.synced ? " · synced to Guesty" : data.guesty?.listingId ? " · Guesty sync failed" : " · saved in-system, auto-pushes when the listing is linked")
           + (data.warning ? ` · ${data.warning}` : ""),
         duration: 9000,
       });
@@ -3098,7 +3108,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setAmenityScanState("error");
       toast({ title: "Amenity scan failed", description: (e as Error).message, variant: "destructive" });
     }
-  }, [propertyId, selectedId, pendingAmenities, amenityScanState, amenityPushState, toast]);
+  }, [propertyId, selectedId, pendingAmenities, amenityScanState, amenityPushState, toast, recordDataPush]);
 
   // Persist the current amenity selection in-system (no Guesty push). Lets manual
   // checkbox edits survive a reload even before a listing exists in Guesty.
@@ -6093,8 +6103,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         <div style={{ flex: 1 }}>
                           <div style={{ fontWeight: 700, fontSize: 13, color: "#6d28d9" }}>🔎 Scan photos for amenities</div>
                           <div style={{ fontSize: 11, color: "#7c6ba8", marginTop: 2 }}>
-                            AI reads the community + unit photos and checks the amenities it can see, on top of the standard baseline.
-                            Add-only — it never unchecks anything.{selectedId ? " Syncs to Guesty after scanning." : " Saved in-system (no Guesty listing selected)."}
+                            AI reads the community + unit photos AND researches the surrounding area (shopping, restaurants, golf, beach)
+                            to check every amenity it can verify, on top of the standard baseline. Add-only — it never unchecks anything.
+                            {selectedId ? " Saves + syncs to Guesty automatically after scanning." : " Saves in-system automatically; pushes to Guesty the moment the listing is created or connected."}
                           </div>
                         </div>
                         <button
@@ -6116,7 +6127,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                       {amenityScanResult && (
                         <div style={{ marginBottom: 12, padding: "10px 12px", border: "1px solid #ddd6fe", borderRadius: 8, background: "#faf5ff", fontSize: 11 }}>
                           <div style={{ fontWeight: 700, color: "#6d28d9", marginBottom: 4 }}>
-                            Scan detected {amenityScanResult.detected.length} amenit{amenityScanResult.detected.length === 1 ? "y" : "ies"} across {amenityScanResult.photosScanned} photo{amenityScanResult.photosScanned === 1 ? "" : "s"} · added {amenityScanResult.added.length} new
+                            Scan detected {amenityScanResult.detected.length} amenit{amenityScanResult.detected.length === 1 ? "y" : "ies"} across {amenityScanResult.photosScanned} photo{amenityScanResult.photosScanned === 1 ? "" : "s"}{amenityScanResult.location?.researched ? " + area research" : ""} · added {amenityScanResult.added.length} new
                           </div>
                           {amenityScanResult.added.length > 0 && (
                             <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: amenityScanResult.warning || amenityScanResult.guesty ? 6 : 0 }}>
@@ -6130,17 +6141,28 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           )}
                           {amenityScanResult.added.length === 0 && (
                             <div style={{ color: "#7c6ba8", marginBottom: amenityScanResult.warning || amenityScanResult.guesty ? 6 : 0 }}>
-                              No new amenities to add — everything the photos show was already selected.
+                              No new amenities to add — everything the scan found was already selected.
                             </div>
                           )}
+                          {amenityScanResult.location?.researched && (
+                            <div style={{ color: "#0e7490", marginBottom: 4 }} data-testid="text-amenity-area-research">
+                              🌍 Area research{amenityScanResult.location.searchLabel ? ` (${amenityScanResult.location.searchLabel})` : ""}:{" "}
+                              {amenityScanResult.location.detected.length > 0
+                                ? `confirmed ${amenityScanResult.location.detected.map(k => GUESTY_AMENITY_CATALOG.find(e => e.key === k)?.label ?? k).join(", ")}`
+                                : "no additional nearby amenities could be verified"}
+                            </div>
+                          )}
+                          {amenityScanResult.location && !amenityScanResult.location.researched && amenityScanResult.location.warning && (
+                            <div style={{ color: "#b45309", marginBottom: 4 }}>🌍 {amenityScanResult.location.warning}</div>
+                          )}
                           {amenityScanResult.guesty?.synced && (
-                            <div style={{ color: "#15803d" }}>✓ Synced to Guesty ({amenityScanResult.guesty.saved ?? 0} confirmed).</div>
+                            <div style={{ color: "#15803d" }}>✓ Saved to system + synced to Guesty ({amenityScanResult.guesty.saved ?? 0} confirmed).</div>
                           )}
                           {amenityScanResult.guesty && !amenityScanResult.guesty.synced && amenityScanResult.guesty.listingId && (
                             <div style={{ color: "#b45309" }}>⚠ Saved in-system, but the Guesty sync failed{amenityScanResult.guesty.error ? `: ${amenityScanResult.guesty.error}` : ""}. Use "Push Amenities to Guesty".</div>
                           )}
                           {amenityScanResult.guesty && !amenityScanResult.guesty.listingId && (
-                            <div style={{ color: "#6b7280" }}>Saved in-system. Select a Guesty listing above, then push when the listing is live.</div>
+                            <div style={{ color: "#6b7280" }}>✓ Saved in-system — no Guesty listing linked yet. The amenities push to Guesty automatically as soon as the listing is created or connected.</div>
                           )}
                           {amenityScanResult.warning && (
                             <div style={{ color: "#b45309", marginTop: 4 }}>{amenityScanResult.warning}</div>

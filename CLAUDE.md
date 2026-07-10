@@ -43,6 +43,34 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 (amenity scan: surrounding-area "nearby" amenities via Claude web search + fully-automatic
+  save→push to Guesty): Operator (Amenities-tab screenshot): after the photo scan, auto-save against the
+  listing + auto-push to Guesty; and "see why it's not checking off things like shopping nearby — research
+  the surrounding area with Claude search." WHY nearby never checked (don't re-chase): the scan only ran
+  `AMENITY_VISION_TARGETS` — photos can't prove "Shopping Nearby", and those keys aren't in the baseline.
+  SHIPPED (`claude/amenities-scanning-guesty-sync-7cd6e8`): (1) NEW web-search leg — curated
+  `AMENITY_LOCATION_TARGETS` (shared/guesty-amenity-catalog.ts; 13 keys incl. SHOPPING/NEAR_RESTAURANTS/
+  GOLF/HIKING/NEAR_BEACH, hints carry distance thresholds, DISJOINT from vision targets) + pure
+  `buildAmenityLocationResearchPrompt` (same JSON contract → `parseAmenityDetectionJson` parses both legs)
+  + `server/amenity-location-research.ts` (`callClaudeWebSearchJson`, `AMENITY_LOCATION_MODEL` default
+  claude-sonnet-4-6, ≤6 searches/120s, kill `AMENITY_LOCATION_RESEARCH_DISABLED=1`; confirms an amenity
+  ONLY on a NAMED place within the threshold). Runs CONCURRENTLY with vision inside
+  `scanAmenitiesForProperty`; unions into the same ADD-ONLY merge; result gains a `location` section the
+  tab renders ("🌍 Area research…"). Fail-soft everywhere. (2) AUTOMATION GAP: scan already saved+pushed
+  when a listing was MAPPED; unmapped scans (fresh drafts — the screenshot) waited for a manual push
+  forever. NEW `autoPushSavedAmenitiesForProperty` (routes.ts) fires fire-and-forget wherever a
+  property↔listing mapping is born — builder create (`schedule-sync`), dashboard Connect-to-Guesty
+  (`/api/guesty-property-map`), Guesty import (both branches), `sync-now` — pushing the in-system saved
+  set add-only via the extracted `pushAmenityKeysToGuestyListing` union helper (2-min cooldown absorbs
+  the create flow's double-fire). LOAD-BEARING: the union with the listing's CURRENT Guesty amenities is
+  what keeps auto-pushes add-only over push-amenities' PUT-replace; manual "Save to system" deliberately
+  does NOT auto-push (the manual Push button stays the exact-replace path that can REMOVE). Bulk-combo
+  amenities step inherits both. Verified: amenity-scan-logic 62/0 (33 new incl. source guards on every
+  hook), full `npm test` exit 0, build clean (UI strings bundle-grepped), `npm run check` 338 = baseline
+  (0 new; git-stash A/B). Could NOT live-smoke web-search/Guesty (no creds) — post-deploy: Scan on the
+  Amenities tab → 🌍 line + nearby boxes check; publish a scanned draft → amenities land in Guesty
+  with no click. See the AGENTS.md 2026-07-10 Decision Log line.
+
 - 2026-07-10 (market-rate updates: REMOVED the lodging-tax checkout uplift — raw Airbnb median again):
   Operator: the queue + the manual market-rate button scan Airbnb via SearchAPI "and it will then add
   I think 13% more for taxes at check out — remove this 13% or that percentage uplift and update the
