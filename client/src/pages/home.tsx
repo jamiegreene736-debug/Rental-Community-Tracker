@@ -3631,7 +3631,7 @@ function AdminDashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen overflow-x-clip bg-background">
       <div className="max-w-[1400px] mx-auto px-3 py-4 sm:px-4 sm:py-6">
         <div className="mb-5 flex items-start justify-between gap-4 flex-wrap">
           <div>
@@ -4697,7 +4697,7 @@ function AdminDashboard() {
             <p className="text-sm text-muted-foreground" data-testid="text-showing-count" id="text-showing-count">
               Showing {filtered.length} of {dashboardRowCount} properties
             </p>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 size="sm"
