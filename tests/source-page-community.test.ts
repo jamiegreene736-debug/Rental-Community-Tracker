@@ -53,6 +53,13 @@ check("non-empty signals", !signalsAreEmpty(sig));
 check("empty html → empty signals", signalsAreEmpty(extractSourcePageSignals("<html></html>")));
 check("garbage input does not throw", (() => { extractSourcePageSignals(undefined as any); return true; })());
 
+// CodeQL regressions: &amp; decoded last (no double-unescape), and whitespace/attr
+// tolerant script stripping.
+const ampSig = extractSourcePageSignals('<title>A &amp;#39; B &amp; C</title>');
+check("&amp; is not double-unescaped", ampSig.title === "A &#39; B & C");
+const spacedScript = extractSourcePageSignals('<body>keep<script type="x">DROP</script >more</body>');
+check("strips script with spaced/attr end tag", !!spacedScript.snippet && !/DROP/.test(spacedScript.snippet) && /keep/.test(spacedScript.snippet) && /more/.test(spacedScript.snippet));
+
 console.log("source-page-community: prompt");
 const prompt = buildSourcePageCommunityPrompt("Kiahuna Plantation", "Unit A (2BR)", sig);
 check("prompt names expected community", prompt.includes("Kiahuna Plantation"));

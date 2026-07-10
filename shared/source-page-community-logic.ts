@@ -51,7 +51,6 @@ const HEADINGS_MAX = 8;
 
 function decodeEntities(s: string): string {
   return s
-    .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
@@ -65,7 +64,10 @@ function decodeEntities(s: string): string {
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => {
       const code = parseInt(h, 16);
       return Number.isFinite(code) && code > 0 && code < 0x10ffff ? String.fromCodePoint(code) : " ";
-    });
+    })
+    // Decode &amp; LAST so a replacement can never re-form another entity that a
+    // prior rule would then double-unescape (e.g. "&amp;#39;" must stay "&#39;").
+    .replace(/&amp;/g, "&");
 }
 
 function firstMeta(html: string, patterns: RegExp[]): string | undefined {
@@ -79,9 +81,14 @@ function firstMeta(html: string, patterns: RegExp[]): string | undefined {
   return undefined;
 }
 
+/** Escape every regex metacharacter (backslash first) so a name is a literal. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** name/property="X" content="Y" OR content="Y" ... name="X" (attribute order varies). */
 function metaContent(name: string): RegExp[] {
-  const n = name.replace(/[:]/g, "\\:");
+  const n = escapeRegExp(name);
   return [
     new RegExp(`<meta[^>]+(?:name|property)=["']${n}["'][^>]*\\scontent=["']([^"']*)["']`, "i"),
     new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]*(?:name|property)=["']${n}["']`, "i"),
@@ -113,9 +120,12 @@ function collectJsonLdAddresses(html: string): string[] {
 export function stripToText(html: string): string {
   return decodeEntities(
     html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      // End tags matched with \s* so "</script >" / "</style\n>" are also removed
+      // (CodeQL js/bad-tag-filter). We are extracting text for a model prompt, not
+      // sanitizing for the DOM, but robust stripping keeps stray markup out.
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
+      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript\s*>/gi, " ")
       .replace(/<[^>]+>/g, " "),
   )
     .replace(/\s+/g, " ")
