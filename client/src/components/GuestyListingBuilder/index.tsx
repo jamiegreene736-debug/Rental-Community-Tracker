@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { guestyService } from "@/services/guestyService";
 import type { GuestyPropertyData, GuestyChannelStatus, BuildStepEntry, GuestyListingSummary } from "@/services/guestyService";
 import { getPropertyPricing, getSeasonLabel, getSeasonBgClass, minProfitableRate, netPayoutAfterChannelFee, setLivePropertyMarketRates, getLiveBuyIn, getBuyInRate, cleanBaseRateFromBuyIn, CHANNEL_HOST_FEE, MIN_PROFIT_MARGIN, type ChannelKey, type LivePropertyMarketRateInput } from "@/data/pricing-data";
-import { GUESTY_AMENITY_CATALOG, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
+import { GUESTY_AMENITY_CATALOG, GUESTY_PUSH_NAME_ALIASES, GUESTY_UNSUPPORTED_AMENITY_KEYS, getGuestyAmenities, type AmenityEntry } from "@/data/guesty-amenities";
 import { buildListingRooms, parseSqft, syncSleepsInTitle, syncSleepsInDescription } from "@/data/guesty-listing-config";
 import {
   loadBeddingConfig as loadBuilderBeddingConfig,
@@ -1068,7 +1068,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     saved: number;
     missing: string[];
     rejected?: string[];
-    suggestions?: { name: string; suggestion: string | null; alternatives?: string[] }[];
+    suggestions?: { name: string; suggestion: string | null; alternatives?: string[]; unsupported?: boolean }[];
     guestyCatalogSize?: number;
   } | null>(null);
   const [showGuestyCatalog, setShowGuestyCatalog] = useState(false);
@@ -1119,8 +1119,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         for (const entry of GUESTY_AMENITY_CATALOG) {
           const byLabel = guestyByNorm.get(normalize(entry.label));
           const byKey   = guestyByNorm.get(normalize(entry.key));
+          // Shared alias table covers keys whose label/key never norm-match a
+          // Guesty name (WIFI → "Wireless Internet", GOLF → "Golf - Optional", …).
+          const aliasName = GUESTY_PUSH_NAME_ALIASES[entry.key];
+          const byAlias = aliasName ? guestyByNorm.get(normalize(aliasName)) : undefined;
           if (byLabel) map[entry.key] = byLabel;
           else if (byKey) map[entry.key] = byKey;
+          else if (byAlias) map[entry.key] = byAlias;
         }
         setKeyToGuestyId(map);
         console.log("[amenity-catalog] loaded", catalog.length, "Guesty amenities, mapped", Object.keys(map).length, "of", GUESTY_AMENITY_CATALOG.length);
@@ -3241,7 +3246,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       otherAmenities?: string[];
       missing?: string[];
       rejected?: string[];
-      suggestions?: { name: string; suggestion: string | null; alternatives?: string[] }[];
+      suggestions?: { name: string; suggestion: string | null; alternatives?: string[]; unsupported?: boolean }[];
       guestyCatalogSize?: number;
       error?: string;
     };
@@ -3264,10 +3269,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
     recordDataPush("amenities", "success", `${data.saved ?? 0}/${data.sent ?? amenityPayload.length} amenities confirmed`);
     if (showToast) {
+        // Split the unsaved names: curated known-unsupported keys are expected
+        // (Guesty simply has no such amenity — kept in-system), only the rest
+        // are genuinely unrecognized and worth investigating.
+        const unsupportedCount = (data.suggestions ?? []).filter(s => s.unsupported).length;
+        const unrecognizedCount = Math.max(0, (data.missing?.length ?? 0) - unsupportedCount);
+        const parts: string[] = [];
+        if (unrecognizedCount > 0) parts.push(`${unrecognizedCount} name${unrecognizedCount === 1 ? "" : "s"} Guesty didn't recognise — see the panel below.`);
+        if (unsupportedCount > 0) parts.push(`${unsupportedCount} have no Guesty equivalent — kept in-system only.`);
         toast({
           title: `Amenities pushed to Guesty`,
-          description: data.missing && data.missing.length > 0
-            ? `${data.saved}/${data.sent} saved. ${data.missing.length} names Guesty didn't recognise — check server logs.`
+          description: parts.length > 0
+            ? `${data.saved}/${data.sent} saved. ${parts.join(" ")}`
             : `${data.saved} amenities confirmed in Guesty's Popular Amenities panel.`,
           duration: 8000,
         });
@@ -6608,33 +6621,60 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         );
                       })()}
 
-                      {/* Verification result — rejected items with Guesty suggestions */}
-                      {amenityPushResult && (amenityPushResult.rejected?.length ?? 0) > 0 && (
-                        <div style={{ padding: "10px 12px", marginBottom: 12, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11 }}>
-                          <strong style={{ color: "#d97706" }}>
-                            ⚠ Guesty doesn't recognise {amenityPushResult.rejected!.length} profile amenit{amenityPushResult.rejected!.length === 1 ? "y" : "ies"}
-                          </strong>
-                          <div style={{ color: "#78350f", marginTop: 4, marginBottom: 6 }}>
-                            These names don't map to any of Guesty's {amenityPushResult.guestyCatalogSize ?? "?"} supported amenities. Guesty's closest match is shown — tell me which ones are right and I'll add aliases.
-                          </div>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            {(amenityPushResult.suggestions ?? []).map(({ name, suggestion, alternatives }) => (
-                              <div key={name} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11, flexWrap: "wrap" }}>
-                                <span style={{ padding: "2px 7px", borderRadius: 10, background: "#fef3c7", border: "1px solid #fde68a", color: "#92400e", minWidth: 160 }}>{name}</span>
-                                <span style={{ color: "#9ca3af" }}>→</span>
-                                <span style={{ color: suggestion ? "#065f46" : "#9ca3af", fontStyle: suggestion ? "normal" : "italic" }}>
-                                  {suggestion ? `Guesty: "${suggestion}"` : "no close match — Guesty may not support this"}
-                                </span>
-                                {alternatives && alternatives.length > 0 && (
-                                  <span style={{ color: "#6b7280", fontSize: 10 }}>
-                                    other matches: {alternatives.map(a => `"${a}"`).join(", ")}
-                                  </span>
-                                )}
+                      {/* Verification result — rejected items with Guesty suggestions.
+                          Known-unsupported keys (curated in the shared catalog) are
+                          expected — rendered calmly as "kept in-system only" — while
+                          genuinely-unrecognized names keep the amber warning. */}
+                      {amenityPushResult && (amenityPushResult.rejected?.length ?? 0) > 0 && (() => {
+                        const suggestions = amenityPushResult.suggestions ?? [];
+                        const unrecognized = suggestions.filter(s => !s.unsupported);
+                        const unsupported = suggestions.filter(s => s.unsupported);
+                        return (
+                        <div style={{ padding: "10px 12px", marginBottom: 12, background: unrecognized.length > 0 ? "#fffbeb" : "#f8fafc", border: `1px solid ${unrecognized.length > 0 ? "#fde68a" : "#e2e8f0"}`, borderRadius: 6, fontSize: 11 }}>
+                          {unrecognized.length > 0 && (
+                            <>
+                              <strong style={{ color: "#d97706" }}>
+                                ⚠ Guesty doesn't recognise {unrecognized.length} profile amenit{unrecognized.length === 1 ? "y" : "ies"}
+                              </strong>
+                              <div style={{ color: "#78350f", marginTop: 4, marginBottom: 6 }}>
+                                These names don't map to any of Guesty's {amenityPushResult.guestyCatalogSize ?? "?"} supported amenities. Guesty's closest match is shown — tell me which ones are right and I'll add aliases.
                               </div>
-                            ))}
-                          </div>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: unsupported.length > 0 ? 8 : 0 }}>
+                                {unrecognized.map(({ name, suggestion, alternatives }) => (
+                                  <div key={name} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11, flexWrap: "wrap" }}>
+                                    <span style={{ padding: "2px 7px", borderRadius: 10, background: "#fef3c7", border: "1px solid #fde68a", color: "#92400e", minWidth: 160 }}>{name}</span>
+                                    <span style={{ color: "#9ca3af" }}>→</span>
+                                    <span style={{ color: suggestion ? "#065f46" : "#9ca3af", fontStyle: suggestion ? "normal" : "italic" }}>
+                                      {suggestion ? `Guesty: "${suggestion}"` : "no close match — Guesty may not support this"}
+                                    </span>
+                                    {alternatives && alternatives.length > 0 && (
+                                      <span style={{ color: "#6b7280", fontSize: 10 }}>
+                                        other matches: {alternatives.map(a => `"${a}"`).join(", ")}
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          )}
+                          {unsupported.length > 0 && (
+                            <>
+                              <strong style={{ color: "#475569" }}>
+                                ℹ {unsupported.length} amenit{unsupported.length === 1 ? "y has" : "ies have"} no Guesty equivalent — kept in-system only
+                              </strong>
+                              <div style={{ color: "#64748b", marginTop: 4, marginBottom: 6 }}>
+                                Guesty's supported list simply doesn't include these. They stay saved in-system and on your profile; nothing to fix.
+                              </div>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                                {unsupported.map(({ name }) => (
+                                  <span key={name} style={{ fontSize: 11, padding: "2px 7px", borderRadius: 10, background: "#f1f5f9", border: "1px solid #e2e8f0", color: "#475569" }}>{name}</span>
+                                ))}
+                              </div>
+                            </>
+                          )}
                         </div>
-                      )}
+                        );
+                      })()}
                       {amenityPushResult && amenityPushResult.missing.length > 0 && (amenityPushResult.rejected?.length ?? 0) === 0 && (
                         <div style={{ padding: "8px 12px", marginBottom: 12, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11 }}>
                           <strong style={{ color: "#d97706" }}>⚠ Guesty didn't save {amenityPushResult.missing.length} amenit{amenityPushResult.missing.length === 1 ? "y" : "ies"}</strong>
