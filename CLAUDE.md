@@ -43,6 +43,21 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-11 (dashboard: sort by the "G" Listed-on-Guesty column): Operator asked to sort the
+  dashboard by the Guesty-connected column without disturbing listing data or column widths.
+  SHIPPED (`claude/dashboard-column-sorting-46df81`): `SortField` gained `"guestyListed"`; the
+  comparator groups Guesty-connected rows (green G-dots, `guestyConnected.has(id)`) first on asc,
+  unconnected first on desc — display-order only, ties keep stable order. LOAD-BEARING detail: the
+  `/api/guesty-property-map` query + `guestyConnected` memo MOVED above the `filtered` useMemo
+  (same react-query key = deduped, zero behavior change) because the sort comparator closes over
+  it — declared below, it TDZ-crashes; same pattern as propertyRevenueData/priceScanData. Header
+  keeps the exact `w-[20px]` (table-fixed reads widths off the header row) by stacking the "G"
+  label ABOVE the sort icon (flex-col ghost button, `button-sort-guesty-listed`). Verified: full
+  `npm test` exit 0, build clean (bundle-grepped), `npm run check` 338 = baseline (stash A/B —
+  identical home.tsx error set, line shifts only), UI on the BUILT bundle (static SPA server +
+  mocked endpoints, Playwright: asc/desc grouping, all 20 header widths byte-stable across sorts,
+  G column stays 20px, no rows dropped, re-sort after another column works).
+
 - 2026-07-11 (Photos tab "Make Cover Collage" → ONE-CLICK Claude-vision pick + server compose + Guesty
   push + in-system save): Operator: "change this so it uses claude vision and finds the two best photos
   and creates a collage and then pushes it to Guesty and saves it within the system … Research what best

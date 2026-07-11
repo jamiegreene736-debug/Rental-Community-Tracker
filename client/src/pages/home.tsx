@@ -774,7 +774,7 @@ const properties: Property[] = [
   },
 ];
 
-type SortField = "propertyId" | "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay" | "dateAdded" | "totalRevenue" | "lastPriceScan";
+type SortField = "propertyId" | "name" | "community" | "bedrooms" | "guests" | "lowPrice" | "highPrice" | "island" | "unitCount" | "baseRate" | "minimumStay" | "dateAdded" | "totalRevenue" | "lastPriceScan" | "guestyListed";
 
 // Per-property trailing-365-day revenue for the "Total Revenue" column.
 type PropertyRevenueEntry = { revenue: number; bookings: number; currency: string; windowDays: number; computedAt: string | null };
@@ -1740,6 +1740,17 @@ function AdminDashboard() {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
+  // Guesty listing mapping — drives BOTH the "G" connected-dot column and its
+  // sort. Declared HERE — before the `filtered` useMemo — so the sort
+  // comparator can close over `guestyConnected` without a TDZ error (the
+  // fetch is deduped by react-query key with any later use).
+  const { data: guestyMapData } = useQuery<GuestyPropertyMap[]>({
+    queryKey: ["/api/guesty-property-map"],
+  });
+  const guestyConnected = useMemo(() => {
+    if (!guestyMapData) return new Set<number>();
+    return new Set(guestyMapData.map((m) => m.propertyId));
+  }, [guestyMapData]);
   const baseRates = useMemo(() => {
     const map = new Map<number, number>();
     for (const p of allProperties) {
@@ -1837,6 +1848,14 @@ function AdminDashboard() {
         if (bT === null) return -1;
         return sortDir === "asc" ? aT - bT : bT - aT;
       }
+      if (sortField === "guestyListed") {
+        // Boolean "G" column: asc groups Guesty-connected rows (green dots)
+        // first, desc groups unconnected first. Ties keep their prior order
+        // (Array.prototype.sort is stable).
+        const aC = guestyConnected.has(a.id) ? 0 : 1;
+        const bC = guestyConnected.has(b.id) ? 0 : 1;
+        return sortDir === "asc" ? aC - bC : bC - aC;
+      }
       let aVal: string | number | null = a[sortField as keyof typeof a] as string | number | null;
       let bVal: string | number | null = b[sortField as keyof typeof b] as string | number | null;
       if (aVal === null) aVal = sortDir === "asc" ? Infinity : -Infinity;
@@ -1849,7 +1868,7 @@ function AdminDashboard() {
       return sortDir === "asc" ? numA - numB : numB - numA;
     });
     return result;
-  }, [allProperties, searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, baseRates, propertyRevenueData, priceScanData]);
+  }, [allProperties, searchTerm, communityFilter, islandFilter, multiUnitFilter, sortField, sortDir, baseRates, propertyRevenueData, priceScanData, guestyConnected]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -1916,14 +1935,6 @@ function AdminDashboard() {
   const { data: communityDraftsData } = useQuery<CommunityDraft[]>({
     queryKey: ["/api/community/drafts"],
   });
-
-  const { data: guestyMapData } = useQuery<GuestyPropertyMap[]>({
-    queryKey: ["/api/guesty-property-map"],
-  });
-  const guestyConnected = useMemo(() => {
-    if (!guestyMapData) return new Set<number>();
-    return new Set(guestyMapData.map((m) => m.propertyId));
-  }, [guestyMapData]);
 
   // Per-property channel status for the Channels column. Single server call
   // that batches all mapped listings into one Guesty read. Refetches every
@@ -5803,7 +5814,22 @@ function AdminDashboard() {
                 </TableHead>
                 <TableHead className="w-[78px] sticky left-0 bg-background z-10">Actions</TableHead>
                 <TableHead className="w-[26px] text-center px-0 text-muted-foreground">#</TableHead>
-                <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected">G</TableHead>
+                <TableHead className="w-[20px] text-center px-0" title="Guesty listing connected — click to sort (connected first)">
+                  {/* Stacked label-over-icon so the sort control fits the fixed
+                      20px column — table-fixed reads widths off this row, so
+                      widening this <th> would reflow every other column. */}
+                  <Button
+                    variant="ghost"
+                    className="h-auto min-h-0 min-w-0 max-w-full flex-col gap-0 px-0 py-0 text-[11px] font-medium leading-tight"
+                    onClick={() => handleSort("guestyListed")}
+                    data-testid="button-sort-guesty-listed"
+                    id="button-sort-guesty-listed"
+                    aria-label="Sort by Guesty connection"
+                  >
+                    G
+                    <SortIcon field="guestyListed" />
+                  </Button>
+                </TableHead>
                 <TableHead className="w-[80px] text-center px-0.5">
                   <Button
                     variant="ghost"
