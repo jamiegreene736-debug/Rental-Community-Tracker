@@ -24,8 +24,18 @@ import {
   type CommunityCheckPhotoVerdict,
   type PhotoCommunityCheckResult,
 } from "@/components/photo-community-check-report";
-import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
-import { sampleLicensesForLocation } from "@/data/adapt-draft";
+import {
+  getUnitBuilderByPropertyId,
+  LISTING_DISCLOSURE,
+  REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE,
+  SINGLE_LISTING_SAMPLE_DISCLOSURE,
+} from "@/data/unit-builder-data";
+import { sampleLicensesForLocation, loadDraftPropertyByNegativeId } from "@/data/adapt-draft";
+import {
+  composeSpaceFromUnitDescriptions,
+  composeSummaryWithDisclosures,
+  type PropertyDescriptionOverrideField,
+} from "@shared/description-copy";
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
@@ -195,6 +205,14 @@ type ConnState = "checking" | "connected" | "disconnected" | "rate-limited";
 type GuestyListing = GuestyListingSummary;
 type LogEntry = BuildStepEntry & { icon: string };
 type DataPushRow = "descriptions" | "bedding" | "amenities" | "photos" | "bookable" | "availability" | "pricing";
+
+// Descriptions-tab fields with an inline textarea editor. `title` keeps its
+// dedicated input; `notes` is compliance-owned (publicDescription.notes is
+// written by the compliance push) so it is deliberately NOT editable here.
+const EDITABLE_DESCRIPTION_FIELDS = ["summary", "space", "neighborhood", "transit", "access", "houseRules"] as const;
+type EditableDescriptionField = (typeof EDITABLE_DESCRIPTION_FIELDS)[number];
+// Top combo disclosure exactly as builder.tsx composes it for the summary.
+const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
 type DataPushStatus = "success" | "error";
 type DataPushLog = Partial<Record<DataPushRow, { pushedAt: string; status: DataPushStatus; message: string }>>;
 type DataPushTab = Exclude<DataPushRow, "bookable">;
@@ -1029,6 +1047,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [editableTitle, setEditableTitle] = useState("");
   const [descPushState, setDescPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
   const [descPushError, setDescPushError] = useState<string | null>(null);
+  // Descriptions-tab field edits (summary/space/neighborhood/transit/
+  // access/houseRules). Live edits merge into effectivePropertyData (so
+  // what you see is what pushes — same posture as editableTitle) and
+  // "Save edits" persists them to property_description_overrides. The
+  // persisted copy is the dirty-tracking baseline. `title` is persisted
+  // through the same store but keeps its dedicated editableTitle input.
+  const [descFieldEdits, setDescFieldEdits] = useState<Partial<Record<EditableDescriptionField, string>>>({});
+  const [persistedDescOverrides, setPersistedDescOverrides] = useState<Partial<Record<PropertyDescriptionOverrideField, string>>>({});
+  const [descSaveState, setDescSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [descRegenState, setDescRegenState] = useState<"idle" | "running" | "error">("idle");
+  const [descRegenError, setDescRegenError] = useState<string | null>(null);
   const [dataPushBusy, setDataPushBusy] = useState(false);
   const [dataPushLog, setDataPushLog] = useState<DataPushLog>({});
   // Async Guesty rate-push status for the unified "Push … & Pricing" button.
@@ -1250,6 +1279,42 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return () => { cancelled = true; };
   }, [propertyId]);
 
+  // Load persisted Descriptions-tab overrides (operator edits + saved
+  // Regenerate results). Hydrates the live edit state AND the persisted
+  // baseline; a saved title override wins over the generated title.
+  useEffect(() => {
+    setDescFieldEdits({});
+    setPersistedDescOverrides({});
+    setDescSaveState("idle");
+    setDescRegenState("idle");
+    setDescRegenError(null);
+    if (!propertyId) return;
+    let cancelled = false;
+    fetch(`/api/builder/descriptions/${propertyId}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.values) return;
+        const loadedEdits: Partial<Record<EditableDescriptionField, string>> = {};
+        const loadedPersisted: Partial<Record<PropertyDescriptionOverrideField, string>> = {};
+        for (const field of EDITABLE_DESCRIPTION_FIELDS) {
+          const text = String(data.values[field] ?? "").trim();
+          if (text) {
+            loadedEdits[field] = text;
+            loadedPersisted[field] = text;
+          }
+        }
+        const savedTitle = String(data.values.title ?? "").trim();
+        if (savedTitle) {
+          loadedPersisted.title = savedTitle;
+          setEditableTitle(savedTitle);
+        }
+        if (Object.keys(loadedEdits).length > 0) setDescFieldEdits(loadedEdits);
+        if (Object.keys(loadedPersisted).length > 0) setPersistedDescOverrides(loadedPersisted);
+      })
+      .catch(() => { /* non-fatal — tab renders the generated base copy */ });
+    return () => { cancelled = true; };
+  }, [propertyId]);
+
   const effectivePropertyData = useMemo(() => {
     if (!propertyData) return null;
     const withCompliance = { ...propertyData, ...complianceOverrides };
@@ -1260,7 +1325,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     // listing-level "... N guests" phrases are rewritten (bedroom counts/sqft
     // and per-unit "Sleeps N with <beds>" sentences are left alone).
     const sleeps = typeof propertyId === "number" ? headlineBeddingSleeps(propertyId, loadBuilderBeddingConfig(propertyId)) : 0;
-    const d = propertyData.descriptions;
+    // Operator field edits (live textarea state, hydrated from the
+    // persisted overrides) win over the generated/static base value.
+    // Empty edits fall back to the base — clearing a field reverts it.
+    const d = { ...propertyData.descriptions } as NonNullable<GuestyPropertyData["descriptions"]>;
+    for (const field of EDITABLE_DESCRIPTION_FIELDS) {
+      const edited = descFieldEdits[field];
+      if (edited !== undefined && edited.trim()) {
+        (d as Record<string, string | undefined>)[field] = edited;
+      }
+    }
     const fix = <T extends string | undefined>(s: T): T => (s ? (syncSleepsInDescription(s, sleeps) as T) : s);
     return {
       ...withCompliance,
@@ -1276,7 +1350,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         houseRules: fix(d.houseRules),
       },
     };
-  }, [propertyData, complianceOverrides, editableTitle, propertyId]);
+  }, [propertyData, complianceOverrides, editableTitle, propertyId, descFieldEdits]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -2928,6 +3002,175 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       recordDataPush("descriptions", "error", (e as Error).message);
     }
   }, [descPushState, pushDescriptionsToGuesty, recordDataPush]);
+
+  // The PATCH body that would persist the current edit state: an edited
+  // value that differs from the generated base saves as an override; an
+  // edit reverted to the base (or blanked) saves as null = clear. Fields
+  // never touched this session AND not already persisted are omitted.
+  const descOverridePatch = useMemo(() => {
+    const base = (propertyData?.descriptions ?? {}) as Record<string, string | undefined>;
+    const patch: Record<string, string | null> = {};
+    for (const field of EDITABLE_DESCRIPTION_FIELDS) {
+      const edited = descFieldEdits[field];
+      const persisted = persistedDescOverrides[field] ?? null;
+      if (edited === undefined) {
+        continue;
+      }
+      const trimmed = edited.trim();
+      const baseVal = String(base[field] ?? "").trim();
+      const next = trimmed && trimmed !== baseVal ? trimmed : null;
+      if (persisted !== next) patch[field] = next;
+    }
+    const baseTitle = String(base.title ?? "").trim();
+    const titleTrimmed = editableTitle.trim();
+    const titleNext = titleTrimmed && titleTrimmed !== baseTitle ? titleTrimmed : null;
+    if ((persistedDescOverrides.title ?? null) !== titleNext) patch.title = titleNext;
+    return patch;
+  }, [propertyData?.descriptions, descFieldEdits, persistedDescOverrides, editableTitle]);
+  const descEditsDirty = Object.keys(descOverridePatch).length > 0;
+
+  const applyPersistedDescValues = useCallback((values: Record<string, unknown> | undefined) => {
+    const next: Partial<Record<PropertyDescriptionOverrideField, string>> = {};
+    for (const field of [...EDITABLE_DESCRIPTION_FIELDS, "title"] as PropertyDescriptionOverrideField[]) {
+      const text = String(values?.[field] ?? "").trim();
+      if (text) next[field] = text;
+    }
+    setPersistedDescOverrides(next);
+  }, []);
+
+  const saveDescriptionEdits = useCallback(async () => {
+    if (!propertyId || descSaveState === "saving") return;
+    if (!descEditsDirty) {
+      setDescSaveState("saved");
+      return;
+    }
+    setDescSaveState("saving");
+    try {
+      const res = await fetch(`/api/builder/descriptions/${propertyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(descOverridePatch),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      applyPersistedDescValues(data?.values);
+      setDescSaveState("saved");
+      toast({ title: "Description edits saved", description: "Edits persist for this property and will be used by every Guesty push." });
+    } catch (e) {
+      setDescSaveState("error");
+      toast({ title: "Save failed", description: (e as Error).message, variant: "destructive" });
+    }
+  }, [propertyId, descSaveState, descEditsDirty, descOverridePatch, applyPersistedDescValues, toast]);
+
+  const resetDescriptionField = useCallback(async (field: EditableDescriptionField) => {
+    setDescFieldEdits((prev) => {
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+    if (!propertyId || !(field in persistedDescOverrides)) return;
+    try {
+      const res = await fetch(`/api/builder/descriptions/${propertyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: null }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok) applyPersistedDescValues(data?.values);
+    } catch { /* local reset already applied; persisted override clears on next save */ }
+  }, [propertyId, persistedDescOverrides, applyPersistedDescValues]);
+
+  // "Regenerate descriptions" — re-runs the SAME generator the wizard/bulk
+  // queue uses (/api/community/generate-listing), now grounded with each
+  // unit's real source-listing URL (from the photo folders' _source.json)
+  // and the property address. The result is applied to the editable fields
+  // AND persisted as overrides, so it survives reloads and is what pushes.
+  const regenerateDescriptions = useCallback(async () => {
+    if (!propertyId || descRegenState === "running") return;
+    setDescRegenState("running");
+    setDescRegenError(null);
+    try {
+      const prop = getUnitBuilderByPropertyId(propertyId)
+        ?? (propertyId < 0 ? await loadDraftPropertyByNegativeId(propertyId) : null);
+      if (!prop) throw new Error("Property facts not found for this id.");
+      const units = Array.isArray(prop.units) ? prop.units : [];
+      if (units.length === 0) throw new Error("No units configured for this property.");
+      const singleListing = units.length === 1;
+      // City/state from the property address ("…, City, ST ZIP").
+      const addrParts = String(prop.address ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+      const stateZip = (addrParts[addrParts.length - 1] ?? "").split(" ").filter(Boolean);
+      const state = stateZip[0] ?? "";
+      const city = addrParts.length >= 2
+        ? addrParts[addrParts.length - 2].replace(/^(bldg|unit|apt|#)\s*\d+/i, "").trim() || addrParts[addrParts.length - 2]
+        : "";
+      const sourceUrlFor = (folder: string | undefined) => (folder ? sourceUrlsByFolder?.[folder] ?? "" : "");
+      const res = await fetch("/api/community/generate-listing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          communityName: prop.complexName || prop.propertyName,
+          city,
+          state,
+          singleListing,
+          // Address goes on unit1 only: two identical addresses would make
+          // the endpoint geocode a walk between a point and itself instead
+          // of using the per-resort fallback minutes.
+          unit1: { bedrooms: units[0].bedrooms, url: sourceUrlFor(units[0].photoFolder), address: prop.address },
+          ...(singleListing ? {} : {
+            unit2: { bedrooms: units[1].bedrooms, url: sourceUrlFor(units[1].photoFolder) },
+          }),
+          suggestedRate: propertyData?.pricing?.basePrice ?? 0,
+        }),
+      });
+      const gen = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(gen?.error ?? `HTTP ${res.status}`);
+      // The endpoint fail-softs to scaffolding placeholder copy with a
+      // `warning` — never apply that (the push guard would reject it anyway).
+      if (gen?.warning) throw new Error(String(gen.warning));
+      const summaryBody = [gen?.summary, gen?.space]
+        .map((s) => String(s ?? "").trim())
+        .filter(Boolean)
+        .join("\n\n");
+      if (!summaryBody) throw new Error("Generator returned no description copy.");
+      const summary = composeSummaryWithDisclosures(summaryBody, {
+        top: singleListing ? "" : COMBO_TOP_DISCLOSURE,
+        bottom: singleListing ? SINGLE_LISTING_SAMPLE_DISCLOSURE : REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE,
+      });
+      const space = composeSpaceFromUnitDescriptions(
+        units.map((u, i) => ({
+          label: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
+          text: String((i === 0 ? gen?.unitA?.longDescription : gen?.unitB?.longDescription) ?? "").trim(),
+        })),
+        !singleListing ? String(gen?.walk?.description ?? "").trim() : "",
+      );
+      const nextEdits: Partial<Record<EditableDescriptionField, string>> = {};
+      if (summary) nextEdits.summary = summary;
+      if (space) nextEdits.space = space;
+      const neighborhood = String(gen?.neighborhood ?? "").trim();
+      if (neighborhood) nextEdits.neighborhood = neighborhood;
+      const transit = String(gen?.transit ?? "").trim();
+      if (transit) nextEdits.transit = transit;
+      setDescFieldEdits((prev) => ({ ...prev, ...nextEdits }));
+      // Persist immediately so the regenerated copy survives a reload.
+      const patchRes = await fetch(`/api/builder/descriptions/${propertyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(nextEdits),
+      });
+      const patchData = await patchRes.json().catch(() => null);
+      if (patchRes.ok) applyPersistedDescValues(patchData?.values);
+      setDescRegenState("idle");
+      setDescPushState("idle");
+      toast({
+        title: "Descriptions regenerated",
+        description: "Summary, Space, Neighborhood, and Getting Around were rewritten from the source listings and saved. Review, then push to Guesty.",
+      });
+    } catch (e) {
+      setDescRegenState("error");
+      setDescRegenError((e as Error).message);
+      toast({ title: "Regenerate failed", description: (e as Error).message, variant: "destructive" });
+    }
+  }, [propertyId, descRegenState, sourceUrlsByFolder, propertyData?.pricing?.basePrice, applyPersistedDescValues, toast]);
 
   const [syncingDetails, setSyncingDetails] = useState(false);
   const syncBeddingAndSqftToGuesty = useCallback(async (showToast = true) => {
@@ -5585,13 +5828,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         notes: "Other Notes",
                       };
                       const FIELD_ORDER = ["title", "summary", "space", "neighborhood", "transit", "access", "houseRules", "notes"];
+                      const editableSet = new Set<string>(EDITABLE_DESCRIPTION_FIELDS);
                       const orderedEntries = [
-                        ...FIELD_ORDER.filter(k => k in descriptions),
+                        ...FIELD_ORDER.filter(k => k in descriptions || editableSet.has(k)),
                         ...Object.keys(descriptions).filter(k => !FIELD_ORDER.includes(k)),
                       ];
                       return orderedEntries.map((key) => {
                         const val = (descriptions as Record<string, string | undefined>)[key];
-                        if (!val && key !== "title") return null;
+                        // Editable fields render even when empty so the operator
+                        // can fill them (e.g. Guest Access on a single listing).
+                        if (!val && key !== "title" && !editableSet.has(key)) return null;
                         if (key === "title") {
                           const len = editableTitle.length;
                           return (
@@ -5617,6 +5863,53 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             </div>
                           );
                         }
+                        if (editableSet.has(key)) {
+                          const field = key as EditableDescriptionField;
+                          const text = val ?? "";
+                          const edited = descFieldEdits[field] !== undefined || persistedDescOverrides[field] !== undefined;
+                          const len = text.length;
+                          const rows = Math.min(16, Math.max(3, text.split("\n").length + 1));
+                          return (
+                            <div key={key} className="glb-desc-block">
+                              <div className="glb-desc-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                                <span>
+                                  {FIELD_LABELS[key] ?? key.replace(/([A-Z])/g, " $1").trim()}
+                                  {edited && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 500, color: "#6366f1" }}>✎ edited</span>}
+                                </span>
+                                <span style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 400, fontSize: 10, color: key === "summary" && len > 4500 ? "#f59e0b" : "#6b7280" }}>
+                                  {len > 0 ? `${len.toLocaleString()} chars${key === "summary" && len > 4500 ? " ⚠ very long" : ""}` : "empty — type to add"}
+                                  {edited && (
+                                    <button
+                                      onClick={() => resetDescriptionField(field)}
+                                      data-testid={`btn-reset-desc-${key}`}
+                                      style={{ border: "none", background: "transparent", color: "#6b7280", cursor: "pointer", fontSize: 10, textDecoration: "underline", padding: 0 }}
+                                      title="Discard the edit and revert to the generated copy"
+                                    >
+                                      reset
+                                    </button>
+                                  )}
+                                </span>
+                              </div>
+                              <textarea
+                                value={text}
+                                onChange={(e) => {
+                                  const next = e.target.value;
+                                  setDescFieldEdits((prev) => ({ ...prev, [field]: next }));
+                                  setDescSaveState("idle");
+                                }}
+                                rows={rows}
+                                data-testid={`textarea-desc-${key}`}
+                                placeholder={`Write the ${String(FIELD_LABELS[key] ?? key).toLowerCase()} copy…`}
+                                style={{
+                                  width: "100%", padding: "8px 10px", fontSize: 13, lineHeight: 1.5,
+                                  border: `1px solid ${edited ? "#c7d2fe" : "#e5e7eb"}`,
+                                  borderRadius: 4, background: "transparent", color: "inherit",
+                                  outline: "none", resize: "vertical", fontFamily: "inherit",
+                                }}
+                              />
+                            </div>
+                          );
+                        }
                         return (
                           <div key={key} className="glb-desc-block">
                             <div className="glb-desc-label">{FIELD_LABELS[key] ?? key.replace(/([A-Z])/g, " $1").trim()}</div>
@@ -5630,6 +5923,39 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                     {descriptions && (
                       <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                          <button
+                            className="glb-btn"
+                            disabled={descRegenState === "running"}
+                            onClick={() => regenerateDescriptions()}
+                            data-testid="btn-regenerate-descriptions"
+                            title="Rewrite Summary, Space, Neighborhood, and Getting Around with AI, grounded in each unit's real source listing"
+                            style={{
+                              background: "#0891b2",
+                              color: "#fff",
+                              opacity: descRegenState === "running" ? 0.6 : 1,
+                            }}
+                          >
+                            {descRegenState === "running" ? "Regenerating…" : "↻ Regenerate descriptions"}
+                          </button>
+                          <button
+                            className="glb-btn"
+                            disabled={!descEditsDirty || descSaveState === "saving"}
+                            onClick={() => saveDescriptionEdits()}
+                            data-testid="btn-save-descriptions"
+                            title={descEditsDirty ? "Persist the edited fields for this property" : "No unsaved edits"}
+                            style={{
+                              background: descSaveState === "error" ? "#ef4444" : "#374151",
+                              color: "#fff",
+                              opacity: !descEditsDirty || descSaveState === "saving" ? 0.6 : 1,
+                            }}
+                          >
+                            {descSaveState === "saving" ? "Saving…" : descSaveState === "saved" && !descEditsDirty ? "✓ Saved" : "💾 Save edits"}
+                          </button>
+                          {descRegenState === "error" && descRegenError && (
+                            <span style={{ fontSize: 11, color: "#ef4444", maxWidth: 400, wordBreak: "break-word" }}>
+                              {descRegenError}
+                            </span>
+                          )}
                           <button
                             className="glb-btn"
                             disabled={!selectedId || descPushState === "pushing"}

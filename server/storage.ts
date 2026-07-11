@@ -44,9 +44,11 @@ import {
   type PricingUpdateLog, type InsertPricingUpdateLog,
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
   propertyComplianceOverrides,
+  propertyDescriptionOverrides,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, inArray, ne, sql } from "drizzle-orm";
+import { DESCRIPTION_OVERRIDE_FIELDS, type PropertyDescriptionOverrideField } from "@shared/description-copy";
 
 function listingUrlKey(url: string | null | undefined): string {
   if (!url) return "";
@@ -257,6 +259,12 @@ export interface IStorage {
       dbprLicense: string | null;
       touristTaxAccount: string | null;
     }>,
+  ): Promise<void>;
+
+  getPropertyDescriptionOverrides(propertyId: number): Promise<Partial<Record<PropertyDescriptionOverrideField, string | null>> | null>;
+  upsertPropertyDescriptionOverrides(
+    propertyId: number,
+    values: Partial<Record<PropertyDescriptionOverrideField, string | null>>,
   ): Promise<void>;
 
   getMessageTemplates(): Promise<MessageTemplate[]>;
@@ -1113,6 +1121,52 @@ export class DatabaseStorage implements IStorage {
           touristTaxAccount: merged.touristTaxAccount ?? null,
           updatedAt: new Date(),
         },
+      });
+  }
+
+  async getPropertyDescriptionOverrides(propertyId: number) {
+    const [row] = await db
+      .select()
+      .from(propertyDescriptionOverrides)
+      .where(eq(propertyDescriptionOverrides.propertyId, propertyId));
+    if (!row) return null;
+    const values: Partial<Record<PropertyDescriptionOverrideField, string | null>> = {};
+    for (const field of DESCRIPTION_OVERRIDE_FIELDS) {
+      values[field] = (row as Record<string, unknown>)[field] as string | null ?? null;
+    }
+    return values;
+  }
+
+  async upsertPropertyDescriptionOverrides(
+    propertyId: number,
+    values: Partial<Record<PropertyDescriptionOverrideField, string | null>>,
+  ): Promise<void> {
+    const patch: Partial<Record<PropertyDescriptionOverrideField, string | null>> = {};
+    for (const field of DESCRIPTION_OVERRIDE_FIELDS) {
+      const value = values[field];
+      if (value === undefined) continue;
+      patch[field] = value == null ? null : String(value).trim() || null;
+    }
+    if (Object.keys(patch).length === 0) return;
+
+    const existing = await this.getPropertyDescriptionOverrides(propertyId);
+    const merged = { ...(existing ?? {}), ...patch };
+    const columns = {
+      title: merged.title ?? null,
+      summary: merged.summary ?? null,
+      space: merged.space ?? null,
+      neighborhood: merged.neighborhood ?? null,
+      transit: merged.transit ?? null,
+      access: merged.access ?? null,
+      houseRules: merged.houseRules ?? null,
+      updatedAt: new Date(),
+    };
+    await db
+      .insert(propertyDescriptionOverrides)
+      .values({ propertyId, ...columns })
+      .onConflictDoUpdate({
+        target: propertyDescriptionOverrides.propertyId,
+        set: columns,
       });
   }
 

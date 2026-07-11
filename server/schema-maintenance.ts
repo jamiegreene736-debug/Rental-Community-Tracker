@@ -428,6 +428,23 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured property_compliance_overrides table");
 
+  // Operator-edited Descriptions-tab overrides. property_id is a positive
+  // core id OR a negative -draftId (see schema.ts).
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS property_description_overrides (
+      property_id integer PRIMARY KEY,
+      title text,
+      summary text,
+      space text,
+      neighborhood text,
+      transit text,
+      access text,
+      house_rules text,
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured property_description_overrides table");
+
   // In-system amenity selection per property (photo-scan / combo / manual).
   // property_id is a positive core id OR a negative -draftId (see schema.ts).
   await db.execute(sql`

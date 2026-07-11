@@ -19,6 +19,7 @@ import { registerDraftBeddingDefaults, type PropertyBeddingConfig } from "@/data
 import { registerDraftPropertyPricing, type PropertyPricing } from "@/data/pricing-data";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import { resolveCanonicalCommunityPhotoFolder } from "@shared/community-photo-folders";
+import { stripAreaSectionsFromDescription } from "@shared/description-copy";
 
 // Sample license placeholders for promoted drafts live in
 // shared/license-samples.ts (moved 2026-07-10) so the placeholder
@@ -114,7 +115,12 @@ function unitNumberFromAddress(address: string | null): string {
 }
 
 function descriptionForDraft(draft: CommunityDraft): string {
-  const text = draft.listingDescription ?? "";
+  // Drafts store the generator's FLAT description (summary + space +
+  // "THE NEIGHBORHOOD" + "GETTING AROUND" glued for the wizard's Step-5
+  // textarea). The builder pushes neighborhood/transit as their own
+  // Guesty fields, so strip those sections here — otherwise the summary
+  // duplicates them on every OTA with raw ALL-CAPS headers (2026-07-10).
+  const text = stripAreaSectionsFromDescription(draft.listingDescription ?? "");
   if ((draft as any).singleListing !== true) return text;
   return text
     .replace(/please note:\s*this listing combines two units within the same community\.[\s\S]*?(?:---\s*)?/i, "")

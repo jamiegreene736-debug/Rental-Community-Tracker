@@ -43,6 +43,43 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-10 (unit-builder Descriptions tab overhaul: dedupe + real facts + placeholder push guard +
+  editable fields + "Regenerate descriptions" button): Operator asked to evaluate how the Descriptions
+  tab builds copy, implement every improvement found, and add a regenerate button. SHIPPED
+  (`claude/unit-builder-descriptions-review-65390b`): (1) NEW shared/description-copy.ts —
+  `stripAreaSectionsFromDescription` removes the generator's "THE NEIGHBORHOOD"/"GETTING AROUND"
+  sections from the flat draft description at ALL THREE summary assemblers (adapt-draft
+  `descriptionForDraft`, builder.tsx `buildGuestySummary`, routes.ts `draftToGuestySummarySource`) —
+  those sections are pushed as their own publicDescription fields, so drafts were duplicating
+  neighborhood/transit on every OTA with raw ALL-CAPS headers mid-summary. (2) push guard (the
+  license-placeholder posture applied to descriptions): POST /api/builder/push-descriptions 422s when
+  any field contains generate-listing's fallback scaffolding ("Add specific nearby landmarks … before
+  publishing") via `findDescriptionPlaceholders`; the phrase list is DRIFT-LOCKED against routes.ts
+  `fallbackDraft` in tests/description-copy.test.ts — reword a fallback sentence there → update
+  `DESCRIPTION_PLACEHOLDER_PHRASES` in the same PR. (3) generator grounded in real facts: the
+  bulk-combo copy step now passes `item.unit1/2SourceUrl` + streetAddress (was `url: ""` — Claude
+  invented bathrooms/sqft/bedding), and both prompt variants accept per-unit source-listing detail
+  snippets + a prefer-provided-facts rule. (4) NEW `property_description_overrides` table (positive
+  core id OR negative -draftId, property_amenities convention; schema + schema-maintenance CREATE) +
+  GET/PATCH /api/builder/descriptions/:propertyId + the tab's fields are now TEXTAREAS
+  (summary/space/neighborhood/transit/access/houseRules) with ✎-edited chips, per-field reset,
+  summary char counter, and a "💾 Save edits" button; live edits merge into effectivePropertyData so
+  what you see IS what pushes (title pattern), and a PATCH null clears an override back to generated
+  copy. LOAD-BEARING: `notes` is deliberately NOT editable — publicDescription.notes is owned by the
+  compliance push (OTA-facing license block); an override would clobber it. Combos also gained a
+  default Guest Access blurb (separate keys per unit). (5) "↻ Regenerate descriptions" button
+  (Descriptions tab) re-runs /api/community/generate-listing with each unit's REAL source URL (from
+  sourceUrlsByFolder → _source.json) + the property address, recomposes summary (disclosures intact
+  via `composeSummaryWithDisclosures`) + space (unit long descriptions + walk line), applies to the
+  editable fields AND persists as overrides; a generator fallback (`warning` set) is REFUSED — never
+  applied (the push guard would reject it anyway). Verified: description-copy 30/0 (incl. source
+  locks on all wiring), full `npm test` exit 0, build clean (bundle-grepped), `npm run check` 338 =
+  baseline (stash A/B — identical error sets). UI verified on the BUILT bundle (static SPA server +
+  mocked GET overrides): 6 textareas render, saved override hydrates with ✎ chip + reset, Save
+  enables on edit. Could NOT live-smoke the Claude leg (no key) — post-deploy: open any builder
+  Descriptions tab, click "↻ Regenerate descriptions", expect rewritten copy grounded in the unit
+  source listings; then "Push Descriptions to Guesty".
+
 - 2026-07-10 (preflight: per-unit "Find new photos" / photo-source buttons now on STATIC properties —
   Kaha Lani screenshot "why is find new unit photos not showing here?"): ROOT CAUSE: the per-unit
   "Find new photos" button (#990) lives on the preflight Photo Sources card, which was gated
