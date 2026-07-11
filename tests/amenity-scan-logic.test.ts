@@ -375,6 +375,27 @@ const read = (p: string) => fs.readFileSync(p, "utf8"); // repo-root cwd (matche
     builderSrc.includes("GUESTY_PUSH_NAME_ALIASES[entry.key]"));
   check("client toast separates unsupported (kept in-system) from unrecognized",
     builderSrc.includes("no Guesty equivalent"));
+
+  // ── Other-bucket delivery (2026-07-11: "4 amenities not pushed") ───────────
+  // Guesty's docs put `otherAmenities` on the amenities GET/PUT RESPONSES only
+  // (never a documented input), so the push route ATTEMPTS the undocumented
+  // body field and treats a name as delivered ONLY when the read-back shows it.
+  check("push-amenities attempts the Other bucket on the PUT (amenities + otherAmenities)",
+    routesSrc.includes("otherAmenities: otherUnion"));
+  check("Other-bucket union preserves the property's CURRENT free-text entries (add-only)",
+    routesSrc.includes("[...otherToSend, ...currentOtherAmenities]"));
+  check("a 4xx on the undocumented field falls back to the documented { amenities } body — the conversations-'skip' failure class must never break the canonical push",
+    routesSrc.includes("e.status >= 400 && e.status < 500")
+    && routesSrc.includes('await guestyRequest("PUT", `/properties-api/amenities/${propertyId}`, { amenities: translated });'));
+  check("deliveredAsOther is read-back-proven, never assumed from the PUT",
+    routesSrc.includes('deliveredAsOther: otherDelivery === "attempted" && savedOtherLower.has('));
+  check("unmapped raw catalog keys prettify to their catalog LABEL for the Other bucket",
+    routesSrc.includes("? getAmenityLabel(catalogKey)"));
+  check("client renders the delivered bucket separately from kept-in-system",
+    builderSrc.includes("deliveredAsOther")
+    && builderSrc.includes('delivered to Guesty\'s "Other amenities"'));
+  check("client kept-in-system bucket excludes delivered names",
+    builderSrc.includes("s.unsupported && !s.deliveredAsOther"));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

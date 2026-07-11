@@ -43,6 +43,29 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-11 (Amenities push: "4 amenities not pushed to Guesty" — Other-bucket delivery + honest
+  per-name proof): Operator (Kamaole Beach Club toast "71/69 saved. 4 have no Guesty equivalent"):
+  diagnose + fix. DIAGNOSIS (don't re-chase): the 4 (Keyless Entry / Streaming Services / Near
+  Restaurants & Dining / Hiking Trails Nearby) are curated `GUESTY_UNSUPPORTED_AMENITY_KEYS` —
+  re-verified against BOTH the 187-name snapshot and Guesty's API docs: the supported catalog has no
+  truthful name for any of them, the documented amenities PUT body is `{ amenities }` ONLY
+  (`otherAmenities` is documented on RESPONSES only), no Open API endpoint writes the free-text Other
+  bucket, and Guesty's own help docs say to add unmapped amenities channel-side or in the description
+  (Other amenities are display-only, never channel-synced). SHIPPED
+  (`claude/amenity-guesty-equivalents-4missing`): push-amenities ATTEMPTS the undocumented
+  `otherAmenities` body field — union with the property's CURRENT Other entries (add-only, cap
+  50×120ch) — with a 4xx→retry-documented-body guard (the conversations-"skip" class can never break
+  the canonical push); delivery is proven PER-NAME via the existing read-back
+  (`suggestions[].deliveredAsOther`), never assumed from a 200. Raw catalog keys prettify to labels
+  ("NEAR_RESTAURANTS" → "Near Restaurants & Dining") before hitting Guesty/UI. UI: emerald
+  "✓ delivered to Guesty's Other amenities" bucket + kept-in-system copy now carries the
+  channel-side/description guidance; toast counts both. If Guesty ignores the field, behavior is
+  byte-equivalent to before and reported honestly. Locked: amenity-scan-logic 83/0 (7 new guards);
+  full `npm test` exit 0, build clean (bundle-grepped), `npm run check` 338 = baseline, three-bucket
+  UI verified on the BUILT bundle (Playwright + mocked push). Could NOT live-verify whether this
+  Guesty account persists the undocumented field (no creds) — post-deploy: re-push any listing's
+  amenities and read the toast/panel verdict.
+
 - 2026-07-11 (Photos tab "Make Cover Collage" → ONE-CLICK Claude-vision pick + server compose + Guesty
   push + in-system save): Operator: "change this so it uses claude vision and finds the two best photos
   and creates a collage and then pushes it to Guesty and saves it within the system … Research what best

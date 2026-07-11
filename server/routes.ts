@@ -23860,20 +23860,76 @@ Requirements:
         if (hit) {
           if (!dedupe.has(hit)) { dedupe.add(hit); translated.push(hit); }
         } else {
-          // Preserve a human-readable form for the "Other" bucket.
-          const pretty = a.replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
-          const key = pretty.toLowerCase();
+          // Preserve a human-readable form for the "Other" bucket. A raw
+          // catalog KEY (e.g. the client's manual push sends "NEAR_RESTAURANTS")
+          // prettifies to its catalog label ("Near Restaurants & Dining") —
+          // these strings reach Guesty's Other-amenities section and the UI.
+          const catalogKey = AMENITY_CATALOG_KEYS.has(a) ? a
+            : AMENITY_CATALOG_KEYS.has(a.toUpperCase().replace(/[^A-Z0-9]+/g, "_")) ? a.toUpperCase().replace(/[^A-Z0-9]+/g, "_")
+            : null;
+          const pretty = catalogKey
+            ? getAmenityLabel(catalogKey)
+            : a.replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
+          const key = norm(pretty);
           if (!otherDedupe.has(key)) { otherDedupe.add(key); otherToSend.push(pretty); }
         }
       }
       console.log(`[push-amenities] canonical=${translated.length} other=${otherToSend.length}`);
-      if (otherToSend.length) console.log(`[push-amenities] other (not sent, Guesty ignores):`, otherToSend.slice(0, 10));
+      if (otherToSend.length) console.log(`[push-amenities] other (attempting Other-bucket delivery):`, otherToSend.slice(0, 10));
 
-      // Only send canonical amenities. Guesty's PUT silently ignores otherAmenities
-      // so we stop wasting the slot — unmapped items are reported back to the UI.
-      await guestyRequest("PUT", `/properties-api/amenities/${propertyId}`, {
-        amenities: translated,
-      });
+      // Free-text delivery for names with no canonical equivalent (2026-07-11,
+      // "4 amenities not pushed" — Keyless Entry / Streaming Services / Near
+      // Restaurants & Dining / Hiking Trails Nearby). Guesty's docs put
+      // `otherAmenities` on the GET/PUT RESPONSES only ("all other amenities
+      // assigned to the property") — the documented PUT body is { amenities }
+      // alone, and NO Open API endpoint documents writing the Other bucket.
+      // We ATTEMPT the undocumented body field anyway because the read-back
+      // below proves per-name whether it stuck; the union with the property's
+      // CURRENT Other entries keeps this add-only (a Guesty-curated free-text
+      // amenity is never dropped by our replace).
+      let currentOtherAmenities: string[] = [];
+      try {
+        const cur = await guestyRequest("GET", `/properties-api/amenities/${propertyId}`) as any;
+        currentOtherAmenities = Array.isArray(cur?.otherAmenities)
+          ? cur.otherAmenities.filter((s: unknown): s is string => typeof s === "string" && s.length > 0)
+          : [];
+      } catch { /* best-effort — attempt with just this push's names */ }
+      const otherUnion: string[] = [];
+      {
+        const seenOther = new Set<string>();
+        for (const s of [...otherToSend, ...currentOtherAmenities]) {
+          const trimmed = s.slice(0, 120).trim();
+          const k = trimmed.toLowerCase();
+          if (!k || seenOther.has(k)) continue;
+          seenOther.add(k);
+          otherUnion.push(trimmed);
+          if (otherUnion.length >= 50) break;
+        }
+      }
+
+      let otherDelivery: "attempted" | "rejected" | "none" = "none";
+      try {
+        if (otherUnion.length > 0) {
+          otherDelivery = "attempted";
+          await guestyRequest("PUT", `/properties-api/amenities/${propertyId}`, {
+            amenities: translated,
+            otherAmenities: otherUnion,
+          });
+        } else {
+          await guestyRequest("PUT", `/properties-api/amenities/${propertyId}`, { amenities: translated });
+        }
+      } catch (e: any) {
+        // A strict validator rejecting the undocumented field must never break
+        // the canonical push (the 2026-07-09 conversations-"skip" failure
+        // class) — fall straight back to the documented body.
+        if (otherDelivery === "attempted" && typeof e?.status === "number" && e.status >= 400 && e.status < 500) {
+          console.warn(`[push-amenities] PUT with otherAmenities rejected (${e.status}: ${e?.message ?? ""}) — retrying with the documented body`);
+          otherDelivery = "rejected";
+          await guestyRequest("PUT", `/properties-api/amenities/${propertyId}`, { amenities: translated });
+        } else {
+          throw e;
+        }
+      }
 
       // GET-after-PUT — wait briefly for Guesty's async write to commit
       await new Promise(r => setTimeout(r, 2000));
@@ -23915,14 +23971,22 @@ Requirements:
       const unsupportedNorms = new Set(
         Array.from(GUESTY_UNSUPPORTED_AMENITY_KEYS).flatMap(k => [norm(k), norm(getAmenityLabel(k))]),
       );
+      // Per-name proof of the Other-bucket attempt: a name is DELIVERED only
+      // when the read-back shows it in otherAmenities — never assumed from a
+      // 200 on the PUT (the field is undocumented as an input).
+      const savedOtherLower = new Set(savedOther.map(s => s.toLowerCase().trim()));
       const suggestions = otherToSend.map(name => ({
         name,
         suggestion: suggestFor(name)[0] ?? null,
         alternatives: suggestFor(name).slice(1),
         unsupported: unsupportedNorms.has(norm(name)),
+        deliveredAsOther: otherDelivery === "attempted" && savedOtherLower.has(name.slice(0, 120).trim().toLowerCase()),
       }));
 
-      console.log(`[push-amenities] saved=${savedAmenities.length} missing=${missing.length} rejected=${otherToSend.length}`);
+      console.log(
+        `[push-amenities] saved=${savedAmenities.length} missing=${missing.length} rejected=${otherToSend.length} ` +
+        `otherDelivery=${otherDelivery} otherSaved=${suggestions.filter(s => s.deliveredAsOther).length}/${otherToSend.length}`,
+      );
       console.log(`[push-amenities] guesty returned sample:`, savedAmenities.slice(0, 10));
       if (missing.length) console.log(`[push-amenities] missing sample:`, missing.slice(0, 10));
       res.json({
@@ -23934,6 +23998,7 @@ Requirements:
         rejected: otherToSend,
         suggestions,
         missing,
+        otherDelivery,
         propertyId,
         guestyCatalogSize: canonicalNames.length,
       });
