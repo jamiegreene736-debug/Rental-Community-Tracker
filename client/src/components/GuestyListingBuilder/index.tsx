@@ -1998,6 +1998,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [communityCheckError, setCommunityCheckError] = useState<string | null>(null);
   const [communityCheckManualVerified, setCommunityCheckManualVerified] = useState(false);
 
+  // ── Photo duplicate scan ──────────────────────────────────────────────────
+  // Operator-clicked cleanup: finds redundant photos in each gallery folder
+  // (near-identical copies via perceptual hash + "same scene, different angle"
+  // groups via Claude vision) and PROPOSES extras to remove. Nothing is
+  // removed until the operator reviews the groups and confirms; removal is the
+  // existing `hidden` soft-delete (excluded from the tab + Guesty pushes,
+  // files stay on disk) so the Undo button can restore everything. The
+  // request-building callback lives after `photos` because it reads the array.
+  type DedupeGroupMemberView = { filename: string; caption: string | null; category: string | null; keep: boolean; humanTouched: boolean };
+  type DedupeGroupView = { id: string; folder: string; kind: "exact" | "near" | "same-scene"; reason: string; members: DedupeGroupMemberView[] };
+  type DedupeFolderView = { folder: string; label: string; totalVisible: number; scannedForVision: number; visionUsed: boolean; visionError: string | null; groups: DedupeGroupView[] };
+  type DedupeProposalView = { scanId: string; folders: DedupeFolderView[]; groupCount: number; removableCount: number; visionUsed: boolean; warnings: string[]; note?: string };
+  type DedupePhase = "idle" | "running" | "done" | "error";
+  const [dedupePhase, setDedupePhase] = useState<DedupePhase>("idle");
+  const [dedupeResult, setDedupeResult] = useState<DedupeProposalView | null>(null);
+  const [dedupeError, setDedupeError] = useState<string | null>(null);
+  // Keys "folder/filename" the operator has selected for removal.
+  const [dedupeSelected, setDedupeSelected] = useState<Set<string>>(new Set());
+  const [dedupeApplyPhase, setDedupeApplyPhase] = useState<"idle" | "applying" | "applied" | "undoing" | "error">("idle");
+  const [dedupeApplyError, setDedupeApplyError] = useState<string | null>(null);
+  // What the last apply actually hid — the Undo payload.
+  const [dedupeApplied, setDedupeApplied] = useState<Array<{ folder: string; filename: string }>>([]);
+
   // Persisted last-push summary (survives refresh)
   type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number };
   const [lastPushSummary, setLastPushSummary] = useState<PushSummary | null>(null);
@@ -3662,6 +3685,144 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setCommunityCheckPhase("error");
     }
   }, [photos, propertyId, propertyData?.bedrooms, queryClient, sourceUrlsByFolder]);
+
+  // Build the duplicate-scan request from the photos currently rendered in the
+  // tab — same client-driven pattern as runCommunityCheck, so it works for
+  // static props, drafts, and single listings without any unit-builder-data
+  // lookup. Sends each folder's VISIBLE files in gallery order.
+  const runDedupeScan = useCallback(async () => {
+    setDedupePhase("running");
+    setDedupeError(null);
+    setDedupeResult(null);
+    setDedupeSelected(new Set());
+    setDedupeApplyPhase("idle");
+    setDedupeApplyError(null);
+    setDedupeApplied([]);
+    try {
+      const parse = (url: string): { folder: string; filename: string } | null => {
+        try {
+          const p = url.startsWith("/") ? url : new URL(url, window.location.origin).pathname;
+          const m = p.match(/^\/photos\/([^/?#]+)\/([^/?#]+)$/);
+          return m ? { folder: m[1], filename: m[2] } : null;
+        } catch { return null; }
+      };
+      const byFolder = new Map<string, { folder: string; label: string; filenames: string[]; captions: Record<string, string> }>();
+      for (const p of photos) {
+        const parsed = parse(p.url);
+        if (!parsed) continue;
+        let g = byFolder.get(parsed.folder);
+        if (!g) {
+          g = { folder: parsed.folder, label: String(p.source ?? parsed.folder), filenames: [], captions: {} };
+          byFolder.set(parsed.folder, g);
+        }
+        if (!g.filenames.includes(parsed.filename)) g.filenames.push(parsed.filename);
+        if (p.caption) g.captions[parsed.filename] = p.caption;
+      }
+      const groups = Array.from(byFolder.values());
+      if (groups.length === 0) {
+        setDedupeError("No local photo folders found to scan.");
+        setDedupePhase("error");
+        return;
+      }
+      const resp = await fetch("/api/builder/photo-dedupe-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ groups }),
+      });
+      const data = await resp.json().catch(() => null) as (DedupeProposalView & { ok?: boolean; error?: string }) | null;
+      if (!resp.ok || !data) {
+        setDedupeError((data as any)?.error || `HTTP ${resp.status}`);
+        setDedupePhase("error");
+        return;
+      }
+      setDedupeResult(data);
+      // Pre-select the proposed extras (every non-keeper member).
+      const preselect = new Set<string>();
+      for (const f of data.folders ?? []) {
+        for (const g of f.groups ?? []) {
+          for (const m of g.members) {
+            if (!m.keep) preselect.add(`${f.folder}/${m.filename}`);
+          }
+        }
+      }
+      setDedupeSelected(preselect);
+      setDedupePhase("done");
+    } catch (e: any) {
+      setDedupeError(e?.message ?? String(e));
+      setDedupePhase("error");
+    }
+  }, [photos]);
+
+  const applyDedupeRemoval = useCallback(async () => {
+    if (!dedupeResult) return;
+    const remove = Array.from(dedupeSelected).map((key) => {
+      const slash = key.indexOf("/");
+      return { folder: key.slice(0, slash), filename: key.slice(slash + 1) };
+    });
+    if (remove.length === 0) return;
+    const confirmed = window.confirm(
+      `Remove ${remove.length} duplicate photo${remove.length === 1 ? "" : "s"} from the listing?\n\n` +
+      `They are hidden from the gallery and future Guesty pushes — files stay on disk, and you can Undo right after.`,
+    );
+    if (!confirmed) return;
+    setDedupeApplyPhase("applying");
+    setDedupeApplyError(null);
+    try {
+      const resp = await fetch("/api/builder/photo-dedupe-apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scanId: dedupeResult.scanId, remove }),
+      });
+      const data = await resp.json().catch(() => null) as { ok?: boolean; hidden?: Array<{ folder: string; filename: string }>; failures?: string[]; error?: string } | null;
+      if (!resp.ok || !data?.ok) {
+        setDedupeApplyError(
+          resp.status === 410
+            ? "The scan expired — run the duplicate scan again."
+            : (data?.error || (data?.failures?.length ? `Failed on: ${data.failures.join(", ")}` : `HTTP ${resp.status}`)),
+        );
+        setDedupeApplyPhase("error");
+        return;
+      }
+      setDedupeApplied(data.hidden ?? remove);
+      setDedupeApplyPhase("applied");
+      toast({ title: "Duplicates removed", description: `${(data.hidden ?? remove).length} photo(s) hidden from the listing. Use Undo to restore.` });
+      onPhotoOverridesChanged?.();
+    } catch (e: any) {
+      setDedupeApplyError(e?.message ?? String(e));
+      setDedupeApplyPhase("error");
+    }
+  }, [dedupeResult, dedupeSelected, onPhotoOverridesChanged, toast]);
+
+  const undoDedupeRemoval = useCallback(async () => {
+    if (dedupeApplied.length === 0) return;
+    setDedupeApplyPhase("undoing");
+    setDedupeApplyError(null);
+    try {
+      const resp = await fetch("/api/builder/photo-dedupe-restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: dedupeApplied }),
+      });
+      const data = await resp.json().catch(() => null) as { ok?: boolean; restored?: unknown[]; error?: string; failures?: string[] } | null;
+      if (!resp.ok || !data?.ok) {
+        // Keep the "applied" state (and its Undo button) on a failed undo so
+        // a transient error never strands hidden photos with no way back.
+        const msg = data?.error || (data?.failures?.length ? `Failed on: ${data.failures.join(", ")}` : `HTTP ${resp.status}`);
+        toast({ title: "Undo failed", description: msg, variant: "destructive" });
+        setDedupeApplyPhase("applied");
+        return;
+      }
+      toast({ title: "Removal undone", description: `${dedupeApplied.length} photo(s) restored to the listing.` });
+      setDedupeApplied([]);
+      setDedupeApplyPhase("idle");
+      setDedupePhase("idle");
+      setDedupeResult(null);
+      onPhotoOverridesChanged?.();
+    } catch (e: any) {
+      toast({ title: "Undo failed", description: e?.message ?? String(e), variant: "destructive" });
+      setDedupeApplyPhase("applied");
+    }
+  }, [dedupeApplied, onPhotoOverridesChanged, toast]);
 
   const communityPhotoVerdicts = useMemo(() => {
     const map: Record<string, { match: "yes" | "no" | "uncertain"; reason?: string; status?: CommunityCheckPhotoVerdict["status"] }> = {};
@@ -8089,6 +8250,168 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     manualVerified={communityCheckManualVerified}
                                     onMarkVerified={() => setCommunityCheckManualVerified(true)}
                                   />
+                                )}
+                              </div>
+
+                              {/* ── Duplicate photo scan ──────────────────────
+                                  Finds redundant photos (near-identical copies
+                                  + same scene from another angle) per gallery
+                                  folder and proposes extras to remove. Nothing
+                                  is removed until the operator confirms; the
+                                  removal is the `hidden` soft-delete, so Undo
+                                  restores everything. */}
+                              <div style={{ marginBottom: 10, padding: 10, background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                  <button
+                                    className="glb-btn"
+                                    onClick={runDedupeScan}
+                                    disabled={dedupePhase === "running" || dedupeApplyPhase === "applying"}
+                                    data-testid="btn-photo-dedupe-scan"
+                                    style={{ fontSize: 12, background: "#fefce8", color: "#854d0e", border: "1px solid #fde68a" }}
+                                  >
+                                    {dedupePhase === "running" ? "🧹 Scanning photos…" : "🧹 Scan photos & remove duplicates"}
+                                  </button>
+                                  <span style={{ fontSize: 11, color: "#64748b", flex: 1, minWidth: 220 }}>
+                                    Finds duplicated photos and repeat shots of the same area from a different angle. You review and confirm before anything is removed.
+                                  </span>
+                                </div>
+
+                                {dedupePhase === "running" && (
+                                  <div style={{ fontSize: 11, color: "#854d0e", marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+                                    <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#eab308", animation: "glb-blink 1s infinite" }} />
+                                    Comparing every photo in each gallery (perceptual hash + Claude vision same-scene pass) — usually under a minute…
+                                  </div>
+                                )}
+
+                                {dedupePhase === "error" && (
+                                  <div style={{ fontSize: 12, color: "#b91c1c", marginTop: 8 }}>✗ {dedupeError}</div>
+                                )}
+
+                                {dedupePhase === "done" && dedupeResult && dedupeResult.groupCount === 0 && (
+                                  <div style={{ fontSize: 12, color: "#166534", marginTop: 8 }}>
+                                    ✓ No duplicate or redundant photos found across {dedupeResult.folders.reduce((s, f) => s + f.totalVisible, 0)} photos.
+                                    {dedupeResult.note && <div style={{ color: "#92400e", marginTop: 4 }}>⚠ {dedupeResult.note}</div>}
+                                  </div>
+                                )}
+
+                                {dedupePhase === "done" && dedupeResult && dedupeResult.groupCount > 0 && dedupeApplyPhase !== "applied" && (
+                                  <div style={{ marginTop: 10 }}>
+                                    <div style={{ fontSize: 12, color: "#334155", marginBottom: 6 }}>
+                                      Found <b>{dedupeResult.groupCount}</b> group{dedupeResult.groupCount === 1 ? "" : "s"} of duplicate / overlapping photos.
+                                      {" "}Photos marked <span style={{ color: "#991b1b", fontWeight: 600 }}>remove</span> are pre-selected — the best shot of each group is kept. Nothing is removed until you confirm below.
+                                    </div>
+                                    {dedupeResult.note && (
+                                      <div style={{ fontSize: 11, color: "#92400e", marginBottom: 6 }}>⚠ {dedupeResult.note}</div>
+                                    )}
+                                    {dedupeResult.warnings.map((w, i) => (
+                                      <div key={i} style={{ fontSize: 11, color: "#92400e", marginBottom: 4 }}>⚠ {w}</div>
+                                    ))}
+                                    {dedupeResult.folders.filter((f) => f.groups.length > 0).map((f) => (
+                                      <div key={f.folder} style={{ marginBottom: 8 }}>
+                                        <div style={{ fontSize: 12, fontWeight: 600, color: "#0f172a", margin: "6px 0 4px" }}>
+                                          {f.label} <span style={{ color: "#94a3b8", fontWeight: 400 }}>· {f.groups.length} group{f.groups.length === 1 ? "" : "s"} · {f.totalVisible} photos</span>
+                                          {f.visionError && <span style={{ color: "#b45309", fontWeight: 400 }}> · AI pass unavailable — hash-only</span>}
+                                        </div>
+                                        {f.groups.map((g) => (
+                                          <div key={g.id} style={{ border: "1px solid #e2e8f0", background: "#fff", borderRadius: 6, padding: 8, marginBottom: 6 }}>
+                                            <div style={{ fontSize: 11, color: "#475569", marginBottom: 6 }}>
+                                              <span style={{
+                                                display: "inline-block", padding: "1px 6px", borderRadius: 999, marginRight: 6, fontWeight: 600,
+                                                background: g.kind === "same-scene" ? "#ede9fe" : "#fee2e2",
+                                                color: g.kind === "same-scene" ? "#5b21b6" : "#991b1b",
+                                              }}>
+                                                {g.kind === "exact" ? "near-identical" : g.kind === "near" ? "near-duplicate" : "same scene (AI)"}
+                                              </span>
+                                              {g.reason}
+                                            </div>
+                                            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                              {g.members.map((m) => {
+                                                const key = `${f.folder}/${m.filename}`;
+                                                const selected = dedupeSelected.has(key);
+                                                return (
+                                                  <label key={m.filename} style={{ width: 96, cursor: "pointer", display: "block" }} title={m.caption ?? m.filename}>
+                                                    <div style={{
+                                                      position: "relative", borderRadius: 6, overflow: "hidden",
+                                                      border: selected ? "2px solid #dc2626" : "2px solid #16a34a",
+                                                      opacity: selected ? 0.75 : 1,
+                                                    }}>
+                                                      <img src={`/photos/${f.folder}/${m.filename}`} alt={m.caption ?? m.filename}
+                                                        style={{ width: "100%", height: 64, objectFit: "cover", display: "block" }} loading="lazy" />
+                                                      <span style={{
+                                                        position: "absolute", top: 2, left: 2, fontSize: 9, fontWeight: 700, padding: "1px 4px", borderRadius: 4,
+                                                        background: selected ? "#dc2626" : "#16a34a", color: "#fff",
+                                                      }}>{selected ? "remove" : "keep"}</span>
+                                                      {m.humanTouched && (
+                                                        <span title="You edited this photo's caption/category" style={{ position: "absolute", top: 2, right: 2, fontSize: 10 }}>✎</span>
+                                                      )}
+                                                    </div>
+                                                    <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
+                                                      <input
+                                                        type="checkbox"
+                                                        checked={selected}
+                                                        onChange={() => {
+                                                          setDedupeSelected((prev) => {
+                                                            const next = new Set(prev);
+                                                            if (next.has(key)) next.delete(key);
+                                                            else {
+                                                              // Keep-one guard in the UI too: refuse to select the
+                                                              // last unselected member of this group (the server
+                                                              // enforces it again on apply).
+                                                              const unselected = g.members.filter((x) => !next.has(`${f.folder}/${x.filename}`));
+                                                              if (unselected.length <= 1) return prev;
+                                                              next.add(key);
+                                                            }
+                                                            return next;
+                                                          });
+                                                        }}
+                                                      />
+                                                      <span style={{ fontSize: 9, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                        {m.caption || m.filename}
+                                                      </span>
+                                                    </div>
+                                                  </label>
+                                                );
+                                              })}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ))}
+                                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+                                      <button
+                                        className="glb-btn"
+                                        onClick={applyDedupeRemoval}
+                                        disabled={dedupeSelected.size === 0 || dedupeApplyPhase === "applying"}
+                                        data-testid="btn-photo-dedupe-apply"
+                                        style={{ fontSize: 12, background: "#fee2e2", color: "#991b1b", border: "1px solid #fecaca" }}
+                                      >
+                                        {dedupeApplyPhase === "applying" ? "Removing…" : `Remove ${dedupeSelected.size} selected photo${dedupeSelected.size === 1 ? "" : "s"}`}
+                                      </button>
+                                      <span style={{ fontSize: 11, color: "#64748b" }}>
+                                        Removed photos are hidden from the listing (files kept on disk) — you can undo right after.
+                                      </span>
+                                    </div>
+                                    {dedupeApplyPhase === "error" && dedupeApplyError && (
+                                      <div style={{ fontSize: 12, color: "#b91c1c", marginTop: 6 }}>✗ {dedupeApplyError}</div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {dedupeApplyPhase === "applied" && (
+                                  <div style={{ marginTop: 8, fontSize: 12, color: "#166534", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                    ✓ Removed {dedupeApplied.length} duplicate photo{dedupeApplied.length === 1 ? "" : "s"} — hidden from the gallery and future pushes.
+                                    <button
+                                      className="glb-btn"
+                                      onClick={undoDedupeRemoval}
+                                      data-testid="btn-photo-dedupe-undo"
+                                      style={{ fontSize: 12, background: "#ecfdf5", color: "#065f46", border: "1px solid #a7f3d0" }}
+                                    >
+                                      ↺ Undo removal
+                                    </button>
+                                  </div>
+                                )}
+                                {dedupeApplyPhase === "undoing" && (
+                                  <div style={{ marginTop: 8, fontSize: 12, color: "#475569" }}>Restoring photos…</div>
                                 )}
                               </div>
 

@@ -1758,6 +1758,53 @@ established it so you can read the rationale in the commit message.
       (`agreementImageIdentityHolds`), locked by
       `tests/photo-hashing-identity.test.ts`.
 
+### Photos-tab duplicate scan (Load-Bearing, 2026-07-11)
+
+The "🧹 Scan photos & remove duplicates" button on the builder Photos tab
+(`runDedupeScan` in `GuestyListingBuilder/index.tsx` →
+`POST /api/builder/photo-dedupe-scan` → engine `server/photo-dedupe.ts`,
+decisions in pure `shared/photo-dedupe-logic.ts`, locked by
+`tests/photo-dedupe.test.ts`). Finds redundant photos WITHIN each gallery
+folder from two merged signals: dHash near-duplicate clustering
+(`NEAR_DUPLICATE_DISTANCE=10`, keyless/deterministic; env
+`PHOTO_DEDUPE_HASH_DISTANCE`) + one batched Claude Sonnet vision call per
+folder for "same scene, different angle" groups (downscaled images, cap
+`PHOTO_DEDUPE_VISION_CAP=60`, model `PHOTO_DEDUPE_MODEL`, kill
+`PHOTO_DEDUPE_VISION_DISABLED=1`, fail-soft to hash-only on any error).
+
+1. **The scan only PROPOSES; removal is a second, operator-confirmed call
+   validated against the SERVER-STORED proposal.** `photo-dedupe-apply`
+   re-runs `validateDedupeSelection` against the scan the server itself
+   stored (30-min TTL; expired → 410 → the client says "rescan"), so a
+   hand-crafted request can never remove a photo the scan didn't group,
+   never remove EVERY member of a group (keep-one guard, enforced in the
+   UI too), and never empty a folder. Do NOT make the scan auto-apply —
+   this deliberately does NOT re-introduce the auto photo-dropping that
+   old decision #4 removed (per-room caps); the operator reviews thumbnails
+   and confirms every removal.
+2. **Removal = the existing `photo_labels.hidden` soft-delete, NEVER file
+   deletion.** Hidden photos vanish from the tab, the counts, and Guesty
+   pushes, but the files stay on the volume — that's what makes the
+   "↺ Undo removal" button (`photo-dedupe-restore`) a true undo. Do NOT
+   "optimize" apply into `fs.unlink` (test-locked); disk files ARE the
+   undo store, and a later rescrape rebuilds folders anyway.
+3. **Vision grouping is conservative by construction.** Only
+   high-confidence vision groups are used (medium = discarded); a vision
+   edge is dropped when the two photos' effective categories differ or
+   their `bedroomClusterId`s differ (never fold two distinct bedrooms —
+   only an exact-hash duplicate may bridge categories, that's a mislabeled
+   copy); the prompt forbids grouping different rooms/amenities and says
+   "when unsure, DO NOT group". Grouping is WITHIN-FOLDER only —
+   cross-folder duplicates stay the photo-community-check's mixed-up-folder
+   signal, not a dedupe target.
+4. **Keeper pick is deterministic** (`pickKeeperIndex`): human-touched
+   (userLabel/userCategory) > manual sort_order > earlier gallery position
+   > larger file. A human-curated photo is never the default removal.
+5. **Client-driven groups, same as the community check** — the request is
+   built from the rendered `photos` array (visible files in gallery order),
+   so it works for static props, negative-id drafts, and single listings.
+   Don't refactor the endpoint to take just a propertyId.
+
 ### Availability & pricing
 
 10. **Auto-scan scheduler flips ON when the tab loads for any
@@ -4246,3 +4293,5 @@ Welcome. When in doubt, ask the human.
 2026-07-10 · Jamie asked to evaluate the unit-builder Descriptions tab and implement all improvements + a "Regenerate descriptions" button · ACCEPTED · Five-part ship on `claude/unit-builder-descriptions-review-65390b`: (1) NEW shared/description-copy.ts — `stripAreaSectionsFromDescription` removes the generator's "THE NEIGHBORHOOD"/"GETTING AROUND" headed sections from the flat draft description at every summary assembler (adapt-draft descriptionForDraft, builder.tsx buildGuestySummary, routes.ts draftToGuestySummarySource) because those sections are ALSO pushed as their own publicDescription fields — leaving them in the summary duplicated them on every OTA with raw ALL-CAPS headers mid-summary; when generate-listing's flat-description shape changes, keep this strip in sync (test-locked). (2) `findDescriptionPlaceholders` + a 422 guard on POST /api/builder/push-descriptions — the license-placeholder posture applied to descriptions: generate-listing's fallback scaffolding copy ("Add specific nearby landmarks … before publishing") can never be pushed live; the phrase list is drift-locked against routes.ts fallbackDraft in tests/description-copy.test.ts (reword a fallback sentence → update DESCRIPTION_PLACEHOLDER_PHRASES in the same PR). (3) generate-listing now gets REAL facts: the bulk-combo copy step passes item.unit1/2SourceUrl + streetAddress (was url:"" — Claude invented bathrooms/sqft/bedding), and the prompt carries optional per-unit source-listing detail snippets + a use-provided-facts-over-estimates rule. (4) NEW property_description_overrides table (positive core id OR negative -draftId, same convention as property_amenities) + GET/PATCH /api/builder/descriptions/:propertyId + editable textareas on the Descriptions tab (summary/space/neighborhood/transit/access/houseRules; live edits merge into effectivePropertyData so WYSIWYG = what pushes; null PATCH clears an override back to generated copy). LOAD-BEARING: `notes` is deliberately NOT editable/overridable — publicDescription.notes is owned by the compliance push (the OTA-facing license block) and an override would clobber it. (5) "↻ Regenerate descriptions" button re-runs /api/community/generate-listing grounded with each unit's real source URL (from sourceUrlsByFolder/_source.json), recomposes summary/space with the standard disclosures, applies to the editable fields, and persists as overrides; a generator fallback (`warning`) is REFUSED, never applied. Combos also gained a default Guest Access blurb (separate keys per unit).
 
 2026-07-11 · Jamie: "When photos are pushed to Guesty I think they're like upscaled. Is there anything we can do to improve this?" · ACCEPTED — the push pipeline WAS degrading photos, two ways · DIAGNOSIS: (a) with `upscale:true` (every automated push: guesty-photo-repush after unit swaps, bulk-combo publish) `POST /api/builder/push-photos` ran Real-ESRGAN 2x on EVERY photo regardless of size — a 4032px Zillow original was AI-upscaled to 8064px then immediately Lanczos-downscaled back to the 1920px spec by photo-validator (AI-smoothed look, zero resolution benefit, ~30s + a Replicate charge per photo); a fixed 2x was also too little for tiny photos (418px → 836px, then plain-stretched to 1920). (b) With `upscale:false` (the manual Photos-tab toggle default + the publish-all flow) the validator force-stretched every sub-1920 photo to exactly 1920 wide with NO sharpening (`needsSharpen` only fired on downscale) — the literal "looks upscaled" blur. FIX (`claude/guesty-photo-upscaling-x3jzqn`): NEW pure `shared/photo-upscale-plan.ts` — `esrganScaleForPhoto(w,h,target)` returns null (skip the AI) when the photo's LONG side (validator rotates portraits) already ≥ 1920, else the smallest scale 2–4 that clears 1920 (capped at 4), so the classical resize after ESRGAN only ever SHRINKS; wired into both push-photos and /api/builder/upscale-photo via a sharp metadata probe, and `upscaleWithReplicateKw` gained the scale param (makeover flow keeps legacy 2x). `isAlreadyPushCompliant` gives photo-validator a byte-passthrough fast path (upright landscape JPEG at exactly 1920 wide, ≤4MB → original bytes untouched — re-pushes of previously-normalized galleries no longer lose a JPEG generation every time), and the validator now sharpens Lanczos UPSCALES too (sigma 1.0/m1 0.4/m2 1.0, mirroring guest-photo-upscale.ts). Client: the Photos-tab toggle defaults ON (relabeled "AI-upscale small photos…") and the publish flow follows the toggle instead of hardcoding upscale off — safe now that only sub-spec photos reach Replicate. The 1920px/4MB/JPEG spec itself is UNCHANGED (Airbnb rejects >1920×1080 — do not raise it here). Locked by tests/photo-upscale-plan.test.ts (pure fns + source guards on the routes gating, the scale forwarding, the validator fast path/up-sharpen, and the client defaults).
+
+2026-07-11 · Jamie: "When I pull photos during pre-flight or when a unit is built there are usually a lot of duplicated photos or photos of the same area or the same tree but a different angle. Create a button within the photos tab that scans all photos and deletes extras — plan it out and build in safeguards." · SHIPPED (`claude/photo-dedup-scanner-wimfjv`) · New "🧹 Scan photos & remove duplicates" button on the builder Photos tab: per-folder dHash near-dup clustering (keyless) + a conservative Claude Sonnet same-scene vision pass propose duplicate GROUPS with the best shot pre-kept; the operator reviews thumbnails and confirms; apply is validated server-side against the stored scan (keep-one-per-group, never empty a folder) and removal is the existing `hidden` soft-delete (files never unlinked) so "↺ Undo removal" fully restores. Deliberately NOT auto-delete-on-scan (Load-Bearing #4 forbids automatic photo dropping — the operator-review step is the safeguard compromise). See Load-Bearing "Photos-tab duplicate scan".

@@ -306,6 +306,8 @@ import {
 } from "./seasonal-availability";
 import { runPhotoListingCheckForFolders, runAddressBackfill, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, communityOnlyCheckRequest, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
+import { scanForDuplicatePhotos, getStoredDedupeScan, type DedupeScanGroupInput } from "./photo-dedupe";
+import { validateDedupeSelection, type DedupeSelection } from "../shared/photo-dedupe-logic";
 import { scanAmenitiesForProperty } from "./amenity-scan";
 import { getAmenityLabel, AMENITY_CATALOG_KEYS, GUESTY_PUSH_NAME_ALIASES, GUESTY_UNSUPPORTED_AMENITY_KEYS } from "@shared/guesty-amenity-catalog";
 import { evaluateComboPhotoCommunityGate, planComboBedroomRetry, type ComboPhotoGateDecision, type ComboPhotoGateInput, type ComboBedroomRetryPlan } from "@shared/combo-photo-community-gate";
@@ -30334,6 +30336,126 @@ Return ONLY compact JSON with this exact shape:
     const job = await cancelBulkPhotoCommunityJob(String(req.params.jobId));
     if (!job) return res.status(404).json({ ok: false, error: "job not found" });
     return res.json({ ok: true, job: serializeBulkPhotoCommunityJob(job) });
+  });
+
+  // ── Photos-tab duplicate scan (two-phase: propose, then operator-confirmed
+  //    apply). See AGENTS.md "Photos-tab duplicate scan" for the safety model:
+  //    the scan only PROPOSES; apply is validated against the STORED proposal
+  //    (keep-one-per-group, never empty a folder) and removal is the
+  //    photo_labels.hidden soft-delete — files are NEVER unlinked, so the
+  //    restore endpoint can undo everything. Client-driven groups (the
+  //    rendered photos array) on purpose, same as photo-community-check, so
+  //    it works for static props, drafts, and single listings alike.
+  app.post("/api/builder/photo-dedupe-scan", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { groups?: unknown };
+      const rawGroups = Array.isArray(body.groups) ? body.groups : [];
+      const groups: DedupeScanGroupInput[] = [];
+      const fnameRe = /^[\w.-]+\.(jpe?g|png|webp)$/i;
+      for (const raw of rawGroups) {
+        const g = (raw ?? {}) as { folder?: unknown; label?: unknown; filenames?: unknown; captions?: unknown };
+        const folder = typeof g.folder === "string" ? g.folder.trim() : "";
+        if (!/^[\w-]+$/.test(folder)) continue;
+        const filenames = Array.isArray(g.filenames)
+          ? (g.filenames as unknown[]).map((f) => String(f)).filter((f) => fnameRe.test(f)).slice(0, 400)
+          : [];
+        const captions: Record<string, string> = {};
+        if (g.captions && typeof g.captions === "object") {
+          for (const [k, v] of Object.entries(g.captions as Record<string, unknown>)) {
+            if (fnameRe.test(k) && typeof v === "string") captions[k] = v.slice(0, 200);
+          }
+        }
+        groups.push({ folder, label: typeof g.label === "string" ? g.label.slice(0, 120) : folder, filenames, captions });
+      }
+      if (groups.length === 0) {
+        return res.status(400).json({ ok: false, error: "groups[] required (folder + filenames per gallery)" });
+      }
+      const proposal = await scanForDuplicatePhotos(groups.slice(0, 12));
+      return res.json({ ok: true, ...proposal });
+    } catch (err: any) {
+      console.error("[photo-dedupe-scan]", err?.message ?? err);
+      return res.status(500).json({ ok: false, error: err?.message ?? "photo dedupe scan failed" });
+    }
+  });
+
+  app.post("/api/builder/photo-dedupe-apply", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { scanId?: unknown; remove?: unknown };
+      const scanId = typeof body.scanId === "string" ? body.scanId : "";
+      const proposal = scanId ? getStoredDedupeScan(scanId) : null;
+      if (!proposal) {
+        // 410: the proposal expired (or a redeploy dropped it) — the client
+        // tells the operator to rescan rather than applying blind.
+        return res.status(410).json({ ok: false, error: "scan expired — run the duplicate scan again" });
+      }
+      const fnameRe = /^[\w.-]+\.(jpe?g|png|webp)$/i;
+      const remove: DedupeSelection[] = [];
+      for (const raw of Array.isArray(body.remove) ? body.remove : []) {
+        const s = (raw ?? {}) as { folder?: unknown; filename?: unknown };
+        const folder = typeof s.folder === "string" ? s.folder.trim() : "";
+        const filename = typeof s.filename === "string" ? s.filename.trim() : "";
+        if (!/^[\w-]+$/.test(folder) || !fnameRe.test(filename)) continue;
+        remove.push({ folder, filename });
+      }
+      const verdict = validateDedupeSelection(proposal, remove);
+      if (!verdict.ok) {
+        return res.status(422).json({ ok: false, error: verdict.errors.join("; "), errors: verdict.errors });
+      }
+      const hidden: DedupeSelection[] = [];
+      const failures: string[] = [];
+      for (const s of remove) {
+        try {
+          const row = await storage.updatePhotoLabelOverrides(s.folder, s.filename, { hidden: true });
+          if (row) hidden.push(s);
+          else failures.push(`${s.folder}/${s.filename}`);
+        } catch (e: any) {
+          failures.push(`${s.folder}/${s.filename}: ${e?.message ?? e}`);
+        }
+      }
+      return res.json({
+        ok: failures.length === 0,
+        hidden,
+        failures,
+        warnings: verdict.warnings,
+        remainingByFolder: verdict.remainingByFolder,
+      });
+    } catch (err: any) {
+      console.error("[photo-dedupe-apply]", err?.message ?? err);
+      return res.status(500).json({ ok: false, error: err?.message ?? "photo dedupe apply failed" });
+    }
+  });
+
+  // Undo for the dedupe apply — flips hidden back off for the given photos.
+  app.post("/api/builder/photo-dedupe-restore", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { items?: unknown };
+      const fnameRe = /^[\w.-]+\.(jpe?g|png|webp)$/i;
+      const items: DedupeSelection[] = [];
+      for (const raw of Array.isArray(body.items) ? body.items : []) {
+        const s = (raw ?? {}) as { folder?: unknown; filename?: unknown };
+        const folder = typeof s.folder === "string" ? s.folder.trim() : "";
+        const filename = typeof s.filename === "string" ? s.filename.trim() : "";
+        if (!/^[\w-]+$/.test(folder) || !fnameRe.test(filename)) continue;
+        items.push({ folder, filename });
+      }
+      if (items.length === 0) return res.status(400).json({ ok: false, error: "items[] required" });
+      if (items.length > 500) return res.status(400).json({ ok: false, error: "too many items" });
+      const restored: DedupeSelection[] = [];
+      const failures: string[] = [];
+      for (const s of items) {
+        try {
+          const row = await storage.updatePhotoLabelOverrides(s.folder, s.filename, { hidden: false });
+          if (row) restored.push(s);
+          else failures.push(`${s.folder}/${s.filename}`);
+        } catch (e: any) {
+          failures.push(`${s.folder}/${s.filename}: ${e?.message ?? e}`);
+        }
+      }
+      return res.json({ ok: failures.length === 0, restored, failures });
+    } catch (err: any) {
+      console.error("[photo-dedupe-restore]", err?.message ?? err);
+      return res.status(500).json({ ok: false, error: err?.message ?? "photo dedupe restore failed" });
+    }
   });
 
   app.post("/api/builder/normalize-photos", async (req, res) => {
