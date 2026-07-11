@@ -11,6 +11,7 @@
 // Returns the normalized buffer + a list of human-readable changes applied.
 
 import sharp from "sharp";
+import { isAlreadyPushCompliant } from "@shared/photo-upscale-plan";
 
 export const TARGET_WIDTH = 1920;
 export const TARGET_HEIGHT = 1080;
@@ -58,6 +59,31 @@ export async function validateAndFixPhoto(
     throw new Error("Unable to read image dimensions");
   }
 
+  // Fast path: an upright landscape JPEG already at exactly TARGET_WIDTH and
+  // under the size budget is returned byte-untouched. Decoding + re-encoding
+  // it anyway (the old behavior) cost a JPEG generation on every push — and
+  // re-pushes of previously-normalized galleries are the common case.
+  if (
+    inputMime === "image/jpeg" &&
+    isAlreadyPushCompliant(
+      { format: meta.format, width: originalWidth, height: originalHeight, orientation: meta.orientation, bytes: originalBytes },
+      TARGET_WIDTH,
+      MAX_FILE_BYTES,
+    )
+  ) {
+    return {
+      buffer: input,
+      mimeType: "image/jpeg",
+      changes: [],
+      originalWidth,
+      originalHeight,
+      finalWidth: originalWidth,
+      finalHeight: originalHeight,
+      originalBytes,
+      finalBytes: originalBytes,
+    };
+  }
+
   // If portrait, rotate 90° clockwise to make landscape.
   // (This is better than cropping — preserves the whole scene, just turned sideways.)
   if (originalHeight > originalWidth) {
@@ -98,9 +124,14 @@ export async function validateAndFixPhoto(
   //   - mozjpeg + trellis quantisation → better compression for same visual quality
   //   - chromaSubsampling "4:4:4" → no chroma downsampling, preserves sharp edges
   //     (trim details, text, dividers — important for a cover collage)
-  //   - mild post-resize sharpen → counteracts bicubic softening after downscale
+  //   - mild post-resize sharpen → counteracts interpolation softening in BOTH
+  //     directions: downscale (bicubic blur) AND upscale (Lanczos stretch —
+  //     without it, sub-1920 photos pushed with the AI upscaler off/unavailable
+  //     land on Guesty visibly soft; this was half of the 2026-07-11
+  //     "photos look upscaled" report, mirrors guest-photo-upscale.ts)
   //   - Lanczos3 is sharp's default kernel, already optimal
-  const needsSharpen = preResizeW > TARGET_WIDTH; // only sharpen when downscaling
+  const resizeDirection: "down" | "up" | "none" =
+    preResizeW > TARGET_WIDTH ? "down" : preResizeW < TARGET_WIDTH ? "up" : "none";
   const buildPipeline = (q: number, subsampling: "4:4:4" | "4:2:0") => {
     let p = sharp(afterRotateBuf).resize({
       width: TARGET_WIDTH,
@@ -108,7 +139,8 @@ export async function validateAndFixPhoto(
       withoutEnlargement: false,
       kernel: "lanczos3",
     });
-    if (needsSharpen) p = p.sharpen({ sigma: 0.6, m1: 0.3, m2: 0.8 });
+    if (resizeDirection === "down") p = p.sharpen({ sigma: 0.6, m1: 0.3, m2: 0.8 });
+    else if (resizeDirection === "up") p = p.sharpen({ sigma: 1.0, m1: 0.4, m2: 1.0 });
     return p.jpeg({
       quality: q,
       mozjpeg: true,

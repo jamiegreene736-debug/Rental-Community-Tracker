@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-11 (Guesty photo push: photos "look upscaled" — smart ESRGAN gating + validator sharpening):
+  Operator: "When photos are pushed to Guesty I think they're like upscaled. Is there anything we can
+  do to improve this?" TWO real degradations found in POST /api/builder/push-photos (don't re-chase):
+  (a) upscale:true (ALL automated pushes — guesty-photo-repush, bulk-combo publish) ran Real-ESRGAN 2x
+  on EVERY photo — big originals (4032px Zillow) were AI-upscaled to 8064px then immediately
+  Lanczos-downscaled back to the 1920px spec by photo-validator = AI-smoothed look, zero benefit,
+  ~30s + Replicate cost per photo; and 2x was too LITTLE for tiny photos (418px→836px, then
+  plain-stretched). (b) upscale:false (manual Photos-tab toggle default + publish-all flow) had the
+  validator stretch every sub-1920 photo to exactly 1920 with NO sharpening (needsSharpen only fired
+  on downscale) — the literal "looks upscaled" blur. SHIPPED (`claude/guesty-photo-upscaling-x3jzqn`):
+  NEW pure shared/photo-upscale-plan.ts — `esrganScaleForPhoto` skips the AI when the LONG side
+  (validator rotates portraits) is already >= 1920, else picks the smallest scale 2–4 that clears
+  1920 (so the classical resize after ESRGAN only ever SHRINKS = crisp); wired into push-photos +
+  /api/builder/upscale-photo via a sharp metadata probe; `upscaleWithReplicateKw` gained a scale
+  param (makeover flow keeps legacy 2x). photo-validator: `isAlreadyPushCompliant` byte-passthrough
+  fast path (upright landscape JPEG at exactly 1920 wide, <=4MB → original bytes untouched; re-pushes
+  no longer burn a JPEG generation) + Lanczos UPSCALES now get sharpened too (sigma 1.0/m1 0.4/m2 1.0,
+  mirrors guest-photo-upscale.ts). Client: Photos-tab toggle now defaults ON ("AI-upscale small
+  photos…") and the publish flow follows the toggle (was hardcoded false) — safe since only sub-spec
+  photos reach Replicate now. LOAD-BEARING: the 1920px/4MB/JPEG push spec is UNCHANGED (Airbnb rejects
+  >1920×1080 — don't raise it); gate on the LONG side, not width. Verified: photo-upscale-plan tests
+  (pure + source guards) green, full `npm test` exit 0, build clean (bundle-grepped both bundles),
+  `npm run check` 338 = baseline (0 new), validator smoked with real sharp-generated images
+  (passthrough byte-identical; 418px → 1920 sharpened; 4032px → 1920; portrait rotate; PNG converts).
+  Could NOT live-smoke the Replicate/Guesty legs (no keys) — post-deploy: re-push any gallery; expect
+  large photos to push in seconds (no ESRGAN wait) and small ones to land noticeably sharper.
+
 - 2026-07-10 (unit-builder Descriptions tab overhaul: dedupe + real facts + placeholder push guard +
   editable fields + "Regenerate descriptions" button): Operator asked to evaluate how the Descriptions
   tab builds copy, implement every improvement found, and add a regenerate button. SHIPPED
