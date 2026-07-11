@@ -296,6 +296,26 @@ export function resetBeddingConfig(propertyId: number): PropertyBeddingConfig {
   return buildDefaultBeddingConfig(propertyId);
 }
 
+// ── Space-text manual override ───────────────────────────────────────────────
+// When the operator hand-edits the Space textarea, the edited text is saved
+// here and auto-regeneration pauses until they explicitly regenerate. Without
+// this, any bedding tweak — or switching tabs, which unmounts the editor —
+// silently discarded manual edits.
+
+const spaceKey = (propertyId: number) => `nexstay_bedding_space_${propertyId}`;
+
+export function loadSpaceTextOverride(propertyId: number): string | null {
+  try { return localStorage.getItem(spaceKey(propertyId)); } catch { return null; }
+}
+
+export function saveSpaceTextOverride(propertyId: number, text: string): void {
+  try { localStorage.setItem(spaceKey(propertyId), text); } catch {}
+}
+
+export function clearSpaceTextOverride(propertyId: number): void {
+  try { localStorage.removeItem(spaceKey(propertyId)); } catch {}
+}
+
 // ── Adapters → Guesty ────────────────────────────────────────────────────────
 
 export function totalBedrooms(config: PropertyBeddingConfig): number {
@@ -421,17 +441,35 @@ export function describeUnitBedding(unit: UnitBeddingConfig): string {
 // tab to populate publicDescription.space in Guesty so bedroom names "stream
 // through" to the actual listing copy.
 
+// Prose-friendly bed nouns for guest-facing sentences. The UI labels
+// ("Twin / Single", "Sofa Bed") read wrong mid-sentence, and appending
+// "bed" after the label produced "a 2 Kings bed" / "a Sofa Bed bed".
+const BED_TYPE_PROSE: Record<GuestyBedType, string> = {
+  KING_BED:   "King bed",
+  QUEEN_BED:  "Queen bed",
+  DOUBLE_BED: "Double bed",
+  SINGLE_BED: "Twin bed",
+  SOFA_BED:   "sofa bed",
+  BUNK_BED:   "bunk bed",
+};
+
+function bedPhrase(bed: { type: GuestyBedType; quantity: number }): string {
+  const noun = BED_TYPE_PROSE[bed.type] ?? "bed";
+  return bed.quantity > 1 ? `${bed.quantity} ${noun}s` : `a ${noun}`;
+}
+
+function joinProse(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? "";
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+}
+
 function bedSentence(br: BedroomDetail): string {
-  const bedParts = br.beds.map(b => {
-    const qty = b.quantity > 1 ? `${b.quantity} ` : "";
-    const name = BED_TYPE_LABELS[b.type];
-    const plural = b.quantity > 1 ? (name.endsWith("s") ? "" : "s") : "";
-    return `${qty}${name}${plural}`;
-  }).join(" and ");
+  const bedParts = joinProse(br.beds.map(bedPhrase));
   const ensuiteParts = br.hasEnsuite && br.ensuiteFeatures.length > 0
     ? ` with a private ensuite featuring ${br.ensuiteFeatures.map(f => BATH_FEATURE_LABELS[f]).join(" and ").toLowerCase()}`
     : br.hasEnsuite ? " with private ensuite bathroom" : "";
-  return `The ${br.label} offers a ${bedParts} bed${ensuiteParts}.`;
+  return `The ${br.label} offers ${bedParts}${ensuiteParts}.`;
 }
 
 function bathSentence(baths: BathroomDetail[]): string {
@@ -457,10 +495,13 @@ export function buildSpaceDescription(config: PropertyBeddingConfig): string {
     const sleeps = unit.bedrooms.reduce((s, br) =>
       s + br.beds.reduce((bs, b) => bs + (BED_SLEEPS[b.type] ?? 2) * b.quantity, 0), 0)
       + (unit.livingRoom.hasSofaBed ? 2 * unit.livingRoom.count : 0);
-    const header = `Unit ${unit.unitLabel} (${brCount}BR/${bathCount}BA · Sleeps ${sleeps})`;
+    // ASCII only — this text is pushed to publicDescription.space and reaches
+    // Booking.com, which mangles non-ASCII characters.
+    const header = `Unit ${unit.unitLabel} (${brCount}BR/${bathCount}BA - Sleeps ${sleeps})`;
     const bedroomLines = unit.bedrooms.map(br => bedSentence(br)).join(" ");
+    // Never claim a size for the sofa bed — the config doesn't capture one.
     const sofaLine = unit.livingRoom.hasSofaBed
-      ? ` The living room has ${unit.livingRoom.count > 1 ? `${unit.livingRoom.count} sofa beds` : "a queen sofa bed"} for additional sleeping.`
+      ? ` The living room has ${unit.livingRoom.count > 1 ? `${unit.livingRoom.count} sofa beds` : "a sofa bed"} for additional sleeping.`
       : "";
     const bathLine = bathSentence(unit.bathrooms);
     return `${header}\n${bedroomLines}${sofaLine} ${bathLine}`.trim();
