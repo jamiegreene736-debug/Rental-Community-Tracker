@@ -1,5 +1,10 @@
 import { preflightPhotoDiscoveryAttempts } from "@shared/preflight-photo-discovery";
 import {
+  auditUnitIdsNeedingRetry,
+  mergeRetriedAuditUnitResult,
+  tallyPreflightAuditOutcome,
+} from "@shared/preflight-audit-outcome";
+import {
   decideReplacementContinuation,
   mergeReplacementUnits,
   REPLACEMENT_EXHAUSTIVE_OPTION_TARGET_DEFAULT,
@@ -1040,8 +1045,14 @@ async function runPreflightReplacementFindJob(
 
 // ── Full unit audit / platform check (server-side background job) ──────────────
 
-const AUDIT_PLATFORM_KEYS = ["airbnb", "vrbo", "booking"] as const;
 const AUDIT_PLATFORM_CHECK_TIMEOUT_MS = 120_000;
+// One automatic re-run of units whose platform lookups errored (transient
+// SearchAPI blips) before the receipt is computed — the operator should not be
+// the retry loop. Route-level per-query retries live in the platform-check
+// handler itself; this pass covers whole-call failures (loopback timeout, a
+// platform that exhausted its in-route attempts).
+const AUDIT_UNIT_RETRY_PASSES = 1;
+const AUDIT_UNIT_RETRY_DELAY_MS = 2_000;
 const AUDIT_DEEP_PHOTO_TIMEOUT_MS = 60_000;
 // Mirrors the client's old 90×6s (~9 min) deep-photo poll ceiling.
 const AUDIT_DEEP_PHOTO_POLL_TRIES = 90;
@@ -1154,71 +1165,85 @@ async function runPreflightAuditJob(job: PreflightAuditJob, input: StartPrefligh
       startedAt: job.startedAt ?? Date.now(),
     });
 
-    const outcome = { verified: 0, apiFailUnits: 0, platformErrors: 0, platformsChecked: 0 };
     const recordResult = (unitId: string, result: Record<string, unknown>) => {
+      const firstTime = !(unitId in job.results);
       job.results = { ...job.results, [unitId]: result };
-      job.completedCount = Math.min(total, job.completedCount + 1);
+      if (firstTime) job.completedCount = Math.min(total, job.completedCount + 1);
       // Text phase climbs to ~78%; the deep photo phase (if any) owns 78→98.
       const progress = total > 0 ? 8 + Math.round((job.completedCount / total) * 70) : 78;
       touchAuditJob(job, { progress });
     };
 
-    // Same parallelism as the old client Promise.all over units — the heavy
-    // work already lives in the platform-check handler; we just drive it.
+    // One unit's platform-check via loopback — the heavy work already lives in
+    // the platform-check handler; we just drive it. Any failure (non-ok, no
+    // unit in the payload, thrown fetch) becomes the all-platforms-error
+    // result the retry pass below picks up.
+    const checkUnitViaLoopback = async (unit: PreflightAuditUnitInput): Promise<Record<string, unknown>> => {
+      const params = new URLSearchParams({
+        name: input.name,
+        city: input.city,
+        units: JSON.stringify([
+          {
+            unitId: unit.unitId,
+            unitNumber: unit.unitNumber,
+            address: unit.address,
+            photoFolder: unit.photoFolder ?? "",
+            bedrooms: unit.bedrooms,
+          },
+        ]),
+        photoMode: input.fullPhotoAudit ? "full" : "sample",
+        singleListing: input.singleListing ? "1" : "0",
+      });
+      try {
+        const resp = await fetch(`${base}/api/preflight/platform-check?${params.toString()}`, {
+          headers: loopbackRequestHeaders(),
+          signal: AbortSignal.timeout(AUDIT_PLATFORM_CHECK_TIMEOUT_MS),
+        });
+        if (!resp.ok) return auditErrorUnitResult(unit);
+        const data = await resp.json().catch(() => ({}));
+        const unitResult = Array.isArray(data?.units) ? data.units[0] : undefined;
+        return unitResult && typeof unitResult === "object"
+          ? (unitResult as Record<string, unknown>)
+          : auditErrorUnitResult(unit);
+      } catch {
+        return auditErrorUnitResult(unit);
+      }
+    };
+
+    // Same parallelism as the old client Promise.all over units.
     await Promise.all(
       input.units.map(async (unit) => {
-        const params = new URLSearchParams({
-          name: input.name,
-          city: input.city,
-          units: JSON.stringify([
-            {
-              unitId: unit.unitId,
-              unitNumber: unit.unitNumber,
-              address: unit.address,
-              photoFolder: unit.photoFolder ?? "",
-              bedrooms: unit.bedrooms,
-            },
-          ]),
-          photoMode: input.fullPhotoAudit ? "full" : "sample",
-          singleListing: input.singleListing ? "1" : "0",
-        });
-        try {
-          const resp = await fetch(`${base}/api/preflight/platform-check?${params.toString()}`, {
-            headers: loopbackRequestHeaders(),
-            signal: AbortSignal.timeout(AUDIT_PLATFORM_CHECK_TIMEOUT_MS),
-          });
-          if (resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            const unitResult = Array.isArray(data?.units) ? data.units[0] : undefined;
-            if (unitResult) {
-              const statuses = AUDIT_PLATFORM_KEYS.map((k) => unitResult.platforms?.[k]?.status);
-              outcome.platformsChecked += statuses.length;
-              outcome.platformErrors += statuses.filter((s: unknown) => s === "error").length;
-              if (statuses.some((s: unknown) => s === "confirmed" || s === "photo-confirmed" || s === "not-listed")) {
-                outcome.verified += 1;
-              }
-              recordResult(unit.unitId, unitResult);
-            } else {
-              outcome.apiFailUnits += 1;
-              outcome.platformsChecked += 3;
-              outcome.platformErrors += 3;
-              recordResult(unit.unitId, auditErrorUnitResult(unit));
-            }
-          } else {
-            outcome.apiFailUnits += 1;
-            outcome.platformsChecked += 3;
-            outcome.platformErrors += 3;
-            recordResult(unit.unitId, auditErrorUnitResult(unit));
-          }
-        } catch {
-          outcome.apiFailUnits += 1;
-          outcome.platformsChecked += 3;
-          outcome.platformErrors += 3;
-          recordResult(unit.unitId, auditErrorUnitResult(unit));
-        }
+        recordResult(unit.unitId, await checkUnitViaLoopback(unit));
       }),
     );
 
+    // Automatic retry pass (2026-07-11): SearchAPI is non-deterministic and a
+    // transient blip used to surface as the red "N OTA lookups didn't respond
+    // (API error) — re-run to retry them" banner, making the OPERATOR the retry
+    // loop. Units that came back with any platform "error" get ONE more
+    // loopback call before the receipt is computed. The merge is additive-only
+    // (mergeRetriedAuditUnitResult): a retry can heal an "error" slot but never
+    // flips a decided confirmed/not-listed from the first pass.
+    for (let pass = 0; pass < AUDIT_UNIT_RETRY_PASSES; pass++) {
+      const retryIds = auditUnitIdsNeedingRetry(job.results);
+      if (retryIds.length === 0) break;
+      touchAuditJob(job, {
+        message: `Retrying ${retryIds.length} lookup${retryIds.length === 1 ? "" : "s"} that didn't respond…`,
+      });
+      await new Promise((rr) => setTimeout(rr, AUDIT_UNIT_RETRY_DELAY_MS));
+      await Promise.all(
+        retryIds.map(async (unitId) => {
+          const unit = input.units.find((u) => u.unitId === unitId);
+          if (!unit) return;
+          const retried = await checkUnitViaLoopback(unit);
+          recordResult(unitId, mergeRetriedAuditUnitResult(job.results[unitId], retried));
+        }),
+      );
+    }
+
+    // The receipt tallies FINAL (post-retry) results so the sticky banner
+    // reflects what the operator actually has, not the first pass's blips.
+    const outcome = tallyPreflightAuditOutcome(job.results);
     const receipt = buildAuditReceipt(input, outcome);
     touchAuditJob(job, { receipt, progress: total > 0 ? 78 : 90 });
 
