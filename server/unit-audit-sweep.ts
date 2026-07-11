@@ -33,16 +33,28 @@
 
 import fs from "fs";
 import path from "path";
-import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
+import {
+  getUnitBuilderByPropertyId,
+  LISTING_DISCLOSURE,
+  REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE,
+  SINGLE_LISTING_SAMPLE_DISCLOSURE,
+} from "../client/src/data/unit-builder-data";
 import { parseStreetCityState } from "@shared/address-listing-logic";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
-import { findDescriptionPlaceholders, AREA_SECTION_HEADERS, DESCRIPTION_OVERRIDE_FIELDS } from "@shared/description-copy";
+import {
+  findDescriptionPlaceholders,
+  AREA_SECTION_HEADERS,
+  DESCRIPTION_OVERRIDE_FIELDS,
+  composeSummaryWithDisclosures,
+  composeSpaceFromUnitDescriptions,
+} from "@shared/description-copy";
 import { isPlaceholderLicenseValue, usableLicenseValue } from "@shared/license-compliance";
 import { COVER_COLLAGE_SETTING_KEY, COVER_COLLAGE_DISK_FOLDER } from "@shared/cover-collage-logic";
 import { GUESTY_PUSH_NAME_ALIASES, GUESTY_UNSUPPORTED_AMENITY_KEYS, getAmenityLabel } from "@shared/guesty-amenity-catalog";
 import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 import { isCuratedBuyInMarket } from "@shared/buy-in-market";
 import {
+  dedupeAutoFixSelections,
   MAX_UNIT_AUDIT_RESUMES,
   UNIT_AUDIT_REPORTS_SETTING_KEY,
   UNIT_AUDIT_STAGE_IDS,
@@ -68,7 +80,7 @@ import {
   type UnitAuditStageResult,
   type UnitAuditStageVerdict,
 } from "@shared/unit-audit-sweep-logic";
-import { buildPhotoCommunityCheckRequestForProperty } from "./builder-photo-groups";
+import { buildPhotoCommunityCheckRequestForProperty, readFolderSourceUrl } from "./builder-photo-groups";
 import { scanForDuplicatePhotos, type DedupeScanGroupInput } from "./photo-dedupe";
 import type { PhotoCommunityCheckResult } from "./photo-community-check";
 import { loopbackRequestHeaders } from "./auth";
@@ -76,20 +88,29 @@ import { storage } from "./storage";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 
-// Per-stage ceilings. The two long legs (community check, OTA deep scan) are
-// bounded generously; everything else is reads + one Guesty GET.
+// Per-stage ceilings. The long legs: community check + OTA deep scan (Lens),
+// and — with auto-fix on — the description regenerate (one Claude call), the
+// amenity scan (vision + area research), the collage (vision + ESRGAN + ImgBB
+// + Guesty), and the pricing refresh (SearchAPI months × unit sizes, the same
+// work a bulk-queue item does). Verify-only paths return in seconds anyway.
 const STAGE_TIMEOUT_MS: Record<UnitAuditStageId, number> = {
   resolve: 60_000,
-  "photo-dedupe": 6 * 60_000,
+  "photo-dedupe": 12 * 60_000,
   "photo-community": 18 * 60_000,
   "ota-scan": 16 * 60_000,
-  descriptions: 60_000,
-  amenities: 90_000,
-  "cover-collage": 30_000,
+  descriptions: 6 * 60_000,
+  amenities: 8 * 60_000,
+  "cover-collage": 8 * 60_000,
   layout: 90_000,
-  pricing: 60_000,
+  pricing: 20 * 60_000,
   channels: 90_000,
 };
+
+// Global auto-fix kill (the per-engine kill switches — COVER_COLLAGE_VISION_
+// DISABLED, PHOTO_DEDUPE_VISION_DISABLED, etc. — still apply downstream).
+const autoFixGloballyDisabled = () =>
+  /^(1|true|yes|on)$/i.test(String(process.env.UNIT_AUDIT_AUTOFIX_DISABLED ?? "").trim());
+const autoFixEnabled = (record: UnitAuditJobRecord) => record.autoFix && !autoFixGloballyDisabled();
 
 // How fresh an existing photo_listing_checks row must be for the OTA stage to
 // reuse it instead of kicking a new deep scan (each deep scan is real Lens +
@@ -307,7 +328,7 @@ async function stageResolve(record: UnitAuditJobRecord): Promise<StageOutcome> {
   };
 }
 
-async function stagePhotoDedupe(target: UnitAuditTarget): Promise<StageOutcome> {
+async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
   if (target.groups.length === 0) {
     return { verdict: "error", detail: "No published photos found — nothing to scan for duplicates." };
   }
@@ -317,26 +338,91 @@ async function stagePhotoDedupe(target: UnitAuditTarget): Promise<StageOutcome> 
     filenames: g.filenames,
     captions: g.captions,
   }));
-  const proposal = await scanForDuplicatePhotos(groups);
-  const allGroups = proposal.folders.flatMap((f) => f.groups.map((grp) => ({ ...grp, folderLabel: f.label || f.folder })));
-  const exact = allGroups.filter((g) => g.kind === "exact" || g.kind === "near");
-  const sameScene = allGroups.filter((g) => g.kind === "same-scene");
-  const items: string[] = [];
-  for (const g of allGroups) {
-    const files = g.members.map((m: any) => m.filename).slice(0, 6).join(", ");
-    items.push(`${g.folderLabel}: ${g.kind} group of ${g.members.length} (${files}${g.members.length > 6 ? ", …" : ""})`);
-  }
+  const summarize = (proposal: Awaited<ReturnType<typeof scanForDuplicatePhotos>>) => {
+    const all = proposal.folders.flatMap((f) => f.groups.map((grp) => ({ ...grp, folderLabel: f.label || f.folder })));
+    return {
+      all,
+      hash: all.filter((g) => g.kind === "exact" || g.kind === "near"),
+      sameScene: all.filter((g) => g.kind === "same-scene"),
+      lines: all.map((g) => {
+        const files = g.members.map((m: any) => m.filename).slice(0, 6).join(", ");
+        return `${g.folderLabel}: ${g.kind} group of ${g.members.length} (${files}${g.members.length > 6 ? ", …" : ""})`;
+      }),
+    };
+  };
+
+  let proposal = await scanForDuplicatePhotos(groups);
+  let s = summarize(proposal);
+  const items: string[] = [...s.lines];
   if (proposal.note) items.push(proposal.note);
-  if (allGroups.length === 0) {
+  if (s.all.length === 0) {
     return {
       verdict: "pass",
       detail: `No duplicates found across ${target.groups.length} folder${target.groups.length === 1 ? "" : "s"}${proposal.visionUsed ? " (hash + AI same-scene scan)" : " (hash-only scan)"}.`,
       items: proposal.note ? [proposal.note] : undefined,
     };
   }
+
+  // AUTO-FIX: hide the hash-proven (exact/near) extras via the existing apply
+  // route — same keep-one-per-group + never-empty-folder validation as the
+  // Photos-tab confirm, and the same photo_labels.hidden soft-delete, so
+  // ↺ Undo on the Photos tab remains a true undo. AI same-scene groups are
+  // deliberately left for the operator (Load-Bearing #4; the hash classes are
+  // the operator-approved scoped exception).
+  let fixedNote = "";
+  if (autoFixEnabled(record) && s.hash.length > 0) {
+    const selection = dedupeAutoFixSelections(s.all.map((g) => ({ kind: g.kind, folder: g.folder, members: g.members })));
+    if (selection.remove.length > 0) {
+      touch(record, { message: `Hiding ${selection.remove.length} hash-proven duplicate photo${selection.remove.length === 1 ? "" : "s"} (soft-delete, undoable)…` });
+      const apply = await loopbackJson("POST", "/api/builder/photo-dedupe-apply", { scanId: proposal.scanId, remove: selection.remove }, 60_000)
+        .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+      if (apply.status >= 400) {
+        items.push(`Auto-fix could not apply (${String(apply.data?.error ?? `HTTP ${apply.status}`)}) — review on the Photos tab instead`);
+        return {
+          verdict: "attention",
+          detail: `${s.hash.length} hash duplicate group${s.hash.length === 1 ? "" : "s"} found but the auto-hide was refused — review with 🧹 Scan photos & remove duplicates.`,
+          items,
+        };
+      }
+      fixedNote = `${selection.remove.length} duplicate photo${selection.remove.length === 1 ? "" : "s"} hidden (soft-delete — ↺ Undo on the Photos tab)`;
+      items.push(`Auto-fixed: ${fixedNote}: ${selection.remove.map((r) => r.filename).slice(0, 8).join(", ")}${selection.remove.length > 8 ? ", …" : ""}`);
+      // Re-resolve the target so this re-verify AND every later stage (e.g.
+      // the collage candidate list) see the surviving photo set, not the
+      // just-hidden files.
+      const refreshedTarget = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
+      if (refreshedTarget) targets.set(record.jobId, refreshedTarget);
+      const refreshedGroups: DedupeScanGroupInput[] = (refreshedTarget ?? target).groups.map((g) => ({
+        folder: g.folder,
+        label: g.label,
+        filenames: g.filenames,
+        captions: g.captions,
+      }));
+      if (refreshedGroups.length > 0) {
+        proposal = await scanForDuplicatePhotos(refreshedGroups);
+        s = summarize(proposal);
+        if (s.hash.length > 0) {
+          items.push(`Re-verify: ${s.hash.length} hash group${s.hash.length === 1 ? "" : "s"} still present — review on the Photos tab`);
+        }
+      }
+    }
+  }
+
+  if (s.sameScene.length > 0 || s.hash.length > 0) {
+    const parts = [
+      s.hash.length > 0 ? `${s.hash.length} hash duplicate group${s.hash.length === 1 ? "" : "s"}` : null,
+      s.sameScene.length > 0 ? `${s.sameScene.length} same-scene (AI) group${s.sameScene.length === 1 ? "" : "s"} — needs your eyes` : null,
+    ].filter(Boolean).join(" + ");
+    return {
+      verdict: "attention",
+      detail: `${fixedNote ? `${fixedNote}; ` : ""}${parts} — review with 🧹 Scan photos & remove duplicates on the Photos tab.`,
+      items,
+    };
+  }
   return {
-    verdict: "attention",
-    detail: `${exact.length} exact/near duplicate group${exact.length === 1 ? "" : "s"} + ${sameScene.length} same-scene group${sameScene.length === 1 ? "" : "s"} (${proposal.removableCount} removable photo${proposal.removableCount === 1 ? "" : "s"}) — review with 🧹 Scan photos & remove duplicates on the Photos tab.`,
+    verdict: fixedNote ? "fixed" : "pass",
+    detail: fixedNote
+      ? `${fixedNote} — re-scan confirms no duplicates remain.`
+      : `No duplicates found across ${target.groups.length} folder${target.groups.length === 1 ? "" : "s"}.`,
     items,
   };
 }
@@ -455,91 +541,213 @@ async function stageOtaScan(target: UnitAuditTarget, record: UnitAuditJobRecord)
   return { verdict: "pass", detail: `No photos found on Airbnb / VRBO / Booking.com · address clean (${folders.length} unit folder${folders.length === 1 ? "" : "s"}, deep scan).`, items };
 }
 
-async function stageDescriptions(target: UnitAuditTarget): Promise<StageOutcome> {
+// Effective description fields = what a push would actually send: an
+// operator/regenerated OVERRIDE wins over the generated/static base per field
+// (the Descriptions-tab contract) — so an override that fixed a placeholder
+// must not keep flagging the stale base copy underneath it.
+async function effectiveDescriptionFields(target: UnitAuditTarget): Promise<{
+  overrides: Record<string, string>;
+  fields: Record<string, string>;
+}> {
   const overridesRow = await storage.getPropertyDescriptionOverrides(target.propertyId).catch(() => undefined);
   const overrides: Record<string, string> = {};
   for (const field of DESCRIPTION_OVERRIDE_FIELDS) {
     const v = String((overridesRow as any)?.[field] ?? "").trim();
     if (v) overrides[field] = v;
   }
-  const fields: Record<string, string | null | undefined> = { ...overrides };
-  let baseSummary = "";
+  const fields: Record<string, string> = { ...overrides };
   if (target.isDraft) {
-    const draft = await storage.getCommunityDraft(-target.propertyId).catch(() => undefined);
-    baseSummary = String((draft as any)?.description ?? "");
-    fields["draft description"] = baseSummary;
-    fields["Unit A description"] = String((draft as any)?.unit1Description ?? "");
-    if ((draft as any)?.singleListing !== true) fields["Unit B description"] = String((draft as any)?.unit2Description ?? "");
-    fields["listing title"] = String((draft as any)?.listingTitle ?? "");
+    const draft: any = await storage.getCommunityDraft(-target.propertyId).catch(() => undefined);
+    if (!fields.summary) fields.summary = String(draft?.description ?? "").trim();
+    if (!fields.space) {
+      fields.space = [String(draft?.unit1Description ?? ""), draft?.singleListing === true ? "" : String(draft?.unit2Description ?? "")]
+        .map((s) => s.trim()).filter(Boolean).join("\n\n");
+    }
+    if (!fields.title) fields.title = String(draft?.listingTitle ?? "").trim();
   } else {
     const builder = getUnitBuilderByPropertyId(target.propertyId);
-    baseSummary = String(builder?.combinedDescription ?? "");
-    fields["combined description"] = baseSummary;
-    builder?.units.forEach((u, i) => {
-      fields[`Unit ${String.fromCharCode(65 + i)} description`] = [u.shortDescription, u.longDescription].filter(Boolean).join(" ");
-    });
+    if (!fields.summary) fields.summary = String(builder?.combinedDescription ?? "").trim();
+    if (!fields.space) {
+      fields.space = (builder?.units ?? [])
+        .map((u) => [u.shortDescription, u.longDescription].filter(Boolean).join(" ").trim())
+        .filter(Boolean).join("\n\n");
+    }
+    if (!fields.neighborhood) fields.neighborhood = String(builder?.neighborhood ?? "").trim();
+    if (!fields.transit) fields.transit = String(builder?.transit ?? "").trim();
   }
+  return { overrides, fields };
+}
 
+function describeDescriptionProblems(fields: Record<string, string>): {
+  placeholderFields: string[];
+  embeddedHeaders: string[];
+  emptySummary: boolean;
+  items: string[];
+} {
   const items: string[] = [];
-  const placeholderHits = findDescriptionPlaceholders(fields);
-  for (const hit of placeholderHits) items.push(`${hit.field}: placeholder scaffolding ("${hit.phrase.slice(0, 60)}…")`);
-
-  const effectiveSummary = overrides.summary || baseSummary;
-  const embeddedHeaders = AREA_SECTION_HEADERS.filter((h) => effectiveSummary.toUpperCase().includes(h));
+  const hits = findDescriptionPlaceholders(fields);
+  for (const hit of hits) items.push(`${hit.field}: placeholder scaffolding ("${hit.phrase.slice(0, 60)}…")`);
+  const embeddedHeaders = AREA_SECTION_HEADERS.filter((h) => (fields.summary ?? "").toUpperCase().includes(h));
   if (embeddedHeaders.length > 0) {
-    items.push(`Summary embeds ${embeddedHeaders.join(" + ")} section${embeddedHeaders.length === 1 ? "" : "s"} — these push as their own OTA fields and would duplicate; use ↻ Regenerate descriptions`);
+    items.push(`Summary embeds ${embeddedHeaders.join(" + ")} section${embeddedHeaders.length === 1 ? "" : "s"} — these push as their own OTA fields and would duplicate`);
   }
-  if (!effectiveSummary.trim()) items.push("Summary/description is EMPTY");
+  const emptySummary = !(fields.summary ?? "").trim();
+  if (emptySummary) items.push("Summary/description is EMPTY");
+  return {
+    placeholderFields: Array.from(new Set(hits.map((h) => h.field))),
+    embeddedHeaders,
+    emptySummary,
+    items,
+  };
+}
+
+// AUTO-FIX: the server-side twin of the Descriptions tab's "↻ Regenerate
+// descriptions" — same generator endpoint grounded in each unit's REAL
+// source-listing URL (_source.json) + the property address, same disclosure
+// composition, persisted as overrides, then the regenerated fields (ONLY)
+// are pushed to Guesty. `notes` is never touched (compliance-owned) and a
+// generator fallback (`warning` set) is REFUSED — never applied.
+async function regenerateDescriptionsForTarget(target: UnitAuditTarget): Promise<{ ok: boolean; note: string; patch?: Record<string, string> }> {
+  type GenUnit = { bedrooms: number; folder: string | null };
+  let units: GenUnit[] = [];
+  let address = "";
+  if (target.isDraft) {
+    const draft: any = await storage.getCommunityDraft(-target.propertyId).catch(() => undefined);
+    if (!draft) return { ok: false, note: "Draft row not found for regenerate." };
+    units = [{ bedrooms: resolveDraftUnitBedrooms(draft, "unit1"), folder: draft.unit1PhotoFolder ?? null }];
+    if (draft.singleListing !== true) units.push({ bedrooms: resolveDraftUnitBedrooms(draft, "unit2"), folder: draft.unit2PhotoFolder ?? null });
+    address = [draft.streetAddress, draft.city, draft.state].filter(Boolean).join(", ");
+  } else {
+    const builder = getUnitBuilderByPropertyId(target.propertyId);
+    if (!builder) return { ok: false, note: "Builder property not found for regenerate." };
+    units = builder.units.map((u) => ({ bedrooms: u.bedrooms, folder: u.photoFolder ?? null }));
+    address = builder.address ?? "";
+  }
+  units = units.filter((u) => u.bedrooms > 0);
+  if (units.length === 0) return { ok: false, note: "No units with a bedroom count — cannot regenerate." };
+  const singleListing = units.length === 1;
+  const sourceUrls = await Promise.all(units.map((u) => (u.folder ? readFolderSourceUrl(u.folder) : Promise.resolve(undefined))));
+
+  const { status, data: gen } = await loopbackJson("POST", "/api/community/generate-listing", {
+    communityName: target.communityName,
+    city: target.city ?? "",
+    state: target.state ?? "",
+    singleListing,
+    unit1: { bedrooms: units[0].bedrooms, url: sourceUrls[0] ?? "", address },
+    ...(singleListing ? {} : { unit2: { bedrooms: units[1].bedrooms, url: sourceUrls[1] ?? "" } }),
+    suggestedRate: 0,
+  }, 4 * 60_000).catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+  if (status >= 400) return { ok: false, note: `Generator call failed: ${String((gen as any)?.error ?? `HTTP ${status}`)}` };
+  if ((gen as any)?.warning) return { ok: false, note: `Generator returned fallback copy — refused (never applied): ${String((gen as any).warning)}` };
+
+  const summaryBody = [gen?.summary, gen?.space].map((s: unknown) => String(s ?? "").trim()).filter(Boolean).join("\n\n");
+  if (!summaryBody) return { ok: false, note: "Generator returned no description copy." };
+  // Same composition as the builder's regenerate button (index.tsx): the
+  // combo top-disclosure is LISTING_DISCLOSURE without its trailing rule.
+  const comboTopDisclosure = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
+  const summary = composeSummaryWithDisclosures(summaryBody, {
+    top: singleListing ? "" : comboTopDisclosure,
+    bottom: singleListing ? SINGLE_LISTING_SAMPLE_DISCLOSURE : REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE,
+  });
+  const space = composeSpaceFromUnitDescriptions(
+    units.map((u, i) => ({
+      label: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
+      text: String((i === 0 ? (gen as any)?.unitA?.longDescription : (gen as any)?.unitB?.longDescription) ?? "").trim(),
+    })),
+    !singleListing ? String((gen as any)?.walk?.description ?? "").trim() : "",
+  );
+  const patch: Record<string, string> = {};
+  if (summary) patch.summary = summary;
+  if (space) patch.space = space;
+  const neighborhood = String((gen as any)?.neighborhood ?? "").trim();
+  if (neighborhood) patch.neighborhood = neighborhood;
+  const transit = String((gen as any)?.transit ?? "").trim();
+  if (transit) patch.transit = transit;
+  if (Object.keys(patch).length === 0) return { ok: false, note: "Generator produced no usable fields." };
+
+  await storage.upsertPropertyDescriptionOverrides(target.propertyId, patch);
+  let note = `Regenerated ${Object.keys(patch).join(", ")} from the real source listings and saved as overrides`;
+
+  if (target.guestyListingId) {
+    const push = await loopbackJson("POST", "/api/builder/push-descriptions", {
+      listingId: target.guestyListingId,
+      descriptions: patch,
+    }, 60_000).catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+    note += push.status < 400
+      ? "; pushed to Guesty (placeholder guard re-passed)"
+      : `; Guesty push failed (${String((push.data as any)?.error ?? `HTTP ${push.status}`)}) — push from the Descriptions tab`;
+  } else {
+    note += "; no Guesty listing yet — the copy pushes when one is connected";
+  }
+  return { ok: true, note, patch };
+}
+
+async function stageDescriptions(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
+  let { overrides, fields } = await effectiveDescriptionFields(target);
+  let problems = describeDescriptionProblems(fields);
+  const items: string[] = [...problems.items];
+
+  let fixedNote = "";
+  const needsFix = problems.placeholderFields.length > 0 || problems.embeddedHeaders.length > 0 || problems.emptySummary;
+  if (needsFix && autoFixEnabled(record)) {
+    touch(record, { message: "Regenerating descriptions from the real source listings (Claude)…" });
+    const fix = await regenerateDescriptionsForTarget(target);
+    items.push(fix.ok ? `Auto-fixed: ${fix.note}` : `Auto-fix failed: ${fix.note}`);
+    if (fix.ok) {
+      fixedNote = fix.note;
+      ({ overrides, fields } = await effectiveDescriptionFields(target));
+      problems = describeDescriptionProblems(fields);
+      if (problems.items.length > 0) items.push(...problems.items.map((l) => `Re-verify: ${l}`));
+    }
+  }
 
   const overrideNote = Object.keys(overrides).length > 0
-    ? `${Object.keys(overrides).length} operator-edited override${Object.keys(overrides).length === 1 ? "" : "s"} (✎) in effect`
-    : "no manual overrides — generated copy in effect";
+    ? `${Object.keys(overrides).length} override${Object.keys(overrides).length === 1 ? "" : "s"} (✎/regenerated) in effect`
+    : "no overrides — generated copy in effect";
 
-  if (placeholderHits.length > 0) {
+  if (problems.placeholderFields.length > 0) {
     return {
       verdict: "failed",
-      detail: `Placeholder scaffolding in ${new Set(placeholderHits.map((h) => h.field)).size} field(s) — the Guesty push guard would reject this; run ↻ Regenerate descriptions on the Descriptions tab.`,
+      detail: `Placeholder scaffolding in ${problems.placeholderFields.length} field(s) — the Guesty push guard would reject this; run ↻ Regenerate descriptions on the Descriptions tab.`,
       items,
     };
   }
-  if (embeddedHeaders.length > 0 || !effectiveSummary.trim()) {
+  if (problems.embeddedHeaders.length > 0 || problems.emptySummary) {
     return { verdict: "attention", detail: "Description copy needs cleanup — see the findings below.", items };
+  }
+  if (fixedNote) {
+    return { verdict: "fixed", detail: `${fixedNote} — re-verify clean.`, items };
   }
   return {
     verdict: "pass",
-    detail: `No placeholder copy · summary ${effectiveSummary.trim().length} chars · ${overrideNote}.`,
+    detail: `No placeholder copy · summary ${(fields.summary ?? "").trim().length} chars · ${overrideNote}.`,
     items: items.length > 0 ? items : undefined,
   };
 }
 
-async function stageAmenities(target: UnitAuditTarget): Promise<StageOutcome> {
+type AmenityVerify = {
+  row: Awaited<ReturnType<typeof storage.getPropertyAmenities>>;
+  keys: string[];
+  scannedNote: string;
+  /** null = Guesty not readable / not mapped; else keys absent from the listing. */
+  missing: string[] | null;
+  guestyCount: number | null;
+  guestyReadError: string | null;
+};
+
+async function verifyAmenities(target: UnitAuditTarget): Promise<AmenityVerify> {
   const row = await storage.getPropertyAmenities(target.propertyId).catch(() => undefined);
   const keys: string[] = Array.isArray(row?.amenityKeys) ? (row!.amenityKeys as string[]) : [];
-  if (!row || keys.length === 0) {
-    return {
-      verdict: "attention",
-      detail: "No amenity set saved in-system — run 🔎 Scan photos for amenities on the Amenities tab (fills the Hawaii baseline + AI-detected extras).",
-    };
-  }
-  const items: string[] = [];
-  const scannedNote = row.scannedAt
+  const scannedNote = row?.scannedAt
     ? `last scanned ${new Date(row.scannedAt as any).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`
-    : "saved manually (never AI-scanned)";
-  items.push(`${keys.length} amenities saved in-system (source: ${row.source ?? "unknown"}, ${scannedNote})`);
-  if (!row.scannedAt) items.push("Run the AI amenity scan to catch photo-visible + nearby-area amenities");
-
+    : row ? "saved manually (never AI-scanned)" : "never scanned";
   if (!target.guestyListingId) {
-    return {
-      verdict: row.scannedAt ? "pass" : "attention",
-      detail: `${keys.length} amenities saved in-system (${scannedNote}) — no Guesty listing yet, push happens automatically when one is connected.`,
-      items,
-    };
+    return { row, keys, scannedNote, missing: null, guestyCount: null, guestyReadError: null };
   }
   const { status, data } = await loopbackJson("GET", `/api/guesty-proxy/listings/${encodeURIComponent(target.guestyListingId)}?fields=${encodeURIComponent("amenities")}`, undefined, 30_000)
     .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
   if (status >= 400) {
-    items.push(`Could not read the Guesty listing's amenities (HTTP ${status})`);
-    return { verdict: "error", detail: "Amenities are saved in-system but the Guesty listing could not be read to confirm they were pushed.", items };
+    return { row, keys, scannedNote, missing: null, guestyCount: null, guestyReadError: String((data as any)?.error ?? `HTTP ${status}`) };
   }
   const guestyNames = new Set<string>((Array.isArray(data?.amenities) ? data.amenities : []).map((a: unknown) => String(a).trim().toLowerCase()));
   const missing = keys.filter((k) => {
@@ -547,29 +755,119 @@ async function stageAmenities(target: UnitAuditTarget): Promise<StageOutcome> {
     const pushName = (GUESTY_PUSH_NAME_ALIASES[k] ?? getAmenityLabel(k)).trim().toLowerCase();
     return !guestyNames.has(pushName);
   });
-  if (missing.length > 0) {
-    items.push(`Missing from the Guesty listing: ${missing.slice(0, 10).map((k) => getAmenityLabel(k)).join(", ")}${missing.length > 10 ? ` +${missing.length - 10} more` : ""}`);
+  return { row, keys, scannedNote, missing, guestyCount: guestyNames.size, guestyReadError: null };
+}
+
+async function stageAmenities(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
+  let v = await verifyAmenities(target);
+  const items: string[] = [];
+
+  // AUTO-FIX: the existing scan route does the whole remedy in one call —
+  // Claude-vision + area-research scan, ADD-ONLY merge over the saved set,
+  // persist, and (when mapped) the add-only union push to Guesty. Fire when
+  // there's no AI-scanned set yet or saved amenities are missing from Guesty.
+  let fixedNote = "";
+  const needsFix = !v.row || !v.row.scannedAt || (v.missing != null && v.missing.length > 0);
+  if (needsFix && autoFixEnabled(record)) {
+    touch(record, { message: "Scanning photos + area for amenities (Claude vision + web research), saving, and pushing add-only…" });
+    const scan = await loopbackJson("POST", "/api/builder/scan-amenities", { propertyId: target.propertyId }, STAGE_TIMEOUT_MS.amenities - 90_000)
+      .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+    if (scan.status >= 400) {
+      items.push(`Auto-fix failed: amenity scan did not run (${String((scan.data as any)?.error ?? `HTTP ${scan.status}`)})`);
+    } else {
+      const synced = (scan.data as any)?.guesty?.synced === true;
+      fixedNote = `AI amenity scan ran and saved${synced ? " + pushed add-only to Guesty" : target.guestyListingId ? " (Guesty push did not confirm — see Amenities tab)" : " (no Guesty listing yet — auto-push on connect)"}`;
+      items.push(`Auto-fixed: ${fixedNote}`);
+      v = await verifyAmenities(target);
+    }
+  }
+
+  if (!v.row || v.keys.length === 0) {
     return {
       verdict: "attention",
-      detail: `${missing.length} saved amenit${missing.length === 1 ? "y is" : "ies are"} not on the Guesty listing — push amenities from the Amenities tab (add-only).`,
+      detail: "No amenity set saved in-system — run 🔎 Scan photos for amenities on the Amenities tab (fills the Hawaii baseline + AI-detected extras).",
+      items: items.length > 0 ? items : undefined,
+    };
+  }
+  items.unshift(`${v.keys.length} amenities saved in-system (source: ${v.row.source ?? "unknown"}, ${v.scannedNote})`);
+
+  if (!target.guestyListingId) {
+    return {
+      verdict: fixedNote ? "fixed" : v.row.scannedAt ? "pass" : "attention",
+      detail: `${v.keys.length} amenities saved in-system (${v.scannedNote}) — no Guesty listing yet, push happens automatically when one is connected.`,
       items,
     };
   }
-  const unsupportedCount = keys.filter((k) => GUESTY_UNSUPPORTED_AMENITY_KEYS.has(k)).length;
+  if (v.guestyReadError) {
+    items.push(`Could not read the Guesty listing's amenities (${v.guestyReadError})`);
+    return { verdict: "error", detail: "Amenities are saved in-system but the Guesty listing could not be read to confirm they were pushed.", items };
+  }
+  if (v.missing && v.missing.length > 0) {
+    items.push(`Missing from the Guesty listing: ${v.missing.slice(0, 10).map((k) => getAmenityLabel(k)).join(", ")}${v.missing.length > 10 ? ` +${v.missing.length - 10} more` : ""}`);
+    return {
+      verdict: "attention",
+      detail: `${v.missing.length} saved amenit${v.missing.length === 1 ? "y is" : "ies are"} not on the Guesty listing${fixedNote ? " even after the scan+push" : ""} — push amenities from the Amenities tab (add-only).`,
+      items,
+    };
+  }
+  const unsupportedCount = v.keys.filter((k) => GUESTY_UNSUPPORTED_AMENITY_KEYS.has(k)).length;
+  const summary = `All ${v.keys.length - unsupportedCount} Guesty-supported amenities are on the listing (${v.guestyCount} total on Guesty)${unsupportedCount > 0 ? ` · ${unsupportedCount} with no Guesty equivalent (Other-bucket/description class)` : ""} · ${v.scannedNote}.`;
+  if (fixedNote) {
+    return { verdict: "fixed", detail: `${fixedNote} — re-verify: ${summary}`, items };
+  }
   return {
-    verdict: row.scannedAt ? "pass" : "attention",
-    detail: `All ${keys.length - unsupportedCount} Guesty-supported amenities are on the listing (${guestyNames.size} total on Guesty)${unsupportedCount > 0 ? ` · ${unsupportedCount} with no Guesty equivalent (Other-bucket/description class)` : ""} · ${scannedNote}.`,
+    verdict: v.row.scannedAt ? "pass" : "attention",
+    detail: summary,
     items,
   };
 }
 
-async function stageCoverCollage(target: UnitAuditTarget): Promise<StageOutcome> {
+async function readCoverCollageRecord(listingId: string): Promise<any> {
+  const raw = await storage.getSetting(COVER_COLLAGE_SETTING_KEY).catch(() => undefined);
+  try {
+    const map = raw ? (JSON.parse(raw) as Record<string, any>) : {};
+    return Object.prototype.hasOwnProperty.call(map, listingId) ? map[listingId] : null;
+  } catch {
+    return null;
+  }
+}
+
+async function stageCoverCollage(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
   if (!target.guestyListingId) {
     return { verdict: "skipped", detail: "No Guesty listing mapped — the cover collage is generated + pinned when a listing exists." };
   }
-  const raw = await storage.getSetting(COVER_COLLAGE_SETTING_KEY).catch(() => undefined);
-  let recordRow: any = null;
-  try { recordRow = raw ? (JSON.parse(raw) as Record<string, any>)[target.guestyListingId] ?? null : null; } catch { recordRow = null; }
+  let recordRow: any = await readCoverCollageRecord(target.guestyListingId);
+  let fixedNote = "";
+  if (!recordRow && autoFixEnabled(record)) {
+    // AUTO-FIX: the one-click AI collage — same endpoint the Photos-tab
+    // button drives, candidates built from the resolved PUBLISHED photos
+    // (hidden files never reach the pick; community-group labels keep the
+    // destination-left pairing heuristic honest). Vision fail-softs to the
+    // caption heuristic inside the endpoint; ImgBB + Guesty push included.
+    const candidates = target.groups.flatMap((g) =>
+      g.filenames.map((filename) => ({
+        url: `/photos/${g.folder}/${filename}`,
+        caption: g.captions[filename] ?? filename,
+        source: g.label,
+      })),
+    ).slice(0, 80); // endpoint caps vision at COVER_COLLAGE_VISION_CAP anyway
+    if (candidates.length < 2) {
+      return { verdict: "attention", detail: "No AI cover collage and fewer than 2 published photos to build one from." };
+    }
+    touch(record, { message: "Making the AI cover collage (Claude picks the pair, composes, pushes + pins on Guesty)…" });
+    const make = await loopbackJson("POST", "/api/builder/auto-cover-collage", {
+      listingId: target.guestyListingId,
+      photos: candidates,
+    }, STAGE_TIMEOUT_MS["cover-collage"] - 60_000).catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+    if (make.status >= 400) {
+      return {
+        verdict: "attention",
+        detail: `No AI cover collage, and the auto-make failed: ${String((make.data as any)?.error ?? `HTTP ${make.status}`)} — use 🖼 Make Cover Collage on the Photos tab.`,
+      };
+    }
+    recordRow = await readCoverCollageRecord(target.guestyListingId);
+    fixedNote = "AI cover collage generated, pushed to Guesty (pinned first), and saved in-system";
+  }
   if (!recordRow) {
     return {
       verdict: "attention",
@@ -586,8 +884,10 @@ async function stageCoverCollage(target: UnitAuditTarget): Promise<StageOutcome>
   const onDisk = await fs.promises.access(file).then(() => true).catch(() => false);
   if (!onDisk) items.push("Saved collage file is missing from the photos volume (record exists; Guesty copy unaffected)");
   return {
-    verdict: "pass",
-    detail: `AI cover collage on file and pushed to Guesty (pinned first)${recordRow.method === "vision" ? "" : " — heuristic pick, consider re-running for a Claude-vision pick"}.`,
+    verdict: fixedNote ? "fixed" : "pass",
+    detail: fixedNote
+      ? `${fixedNote} (${recordRow.method === "vision" ? "Claude-vision pick" : "heuristic pick"}).`
+      : `AI cover collage on file and pushed to Guesty (pinned first)${recordRow.method === "vision" ? "" : " — heuristic pick, consider re-running for a Claude-vision pick"}.`,
     items,
   };
 }
@@ -631,6 +931,14 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
       items.push(`Sleeps: Guesty shows ${gSleeps}, system max guests total is ${target.maxGuestsTotal}`);
     } else items.push(`Sleeps: ${gSleeps} ✓`);
   }
+  if (mismatch || soft) {
+    // DELIBERATELY no auto-push here: the canonical bedding push reads the
+    // operator's Bedding-tab configuration from browser localStorage
+    // (loadBuilderBeddingConfig), which this server-side sweep cannot see —
+    // pushing static defaults could clobber his curated bed arrangement.
+    // The remedy is one click on the builder's push button.
+    items.push("Fix: open the builder and push Bedding + sqft (the sweep never overwrites a layout — your Bedding-tab configuration lives in the browser)");
+  }
   if (mismatch) {
     return { verdict: "failed", detail: "Guesty bedroom count does not match the system unit config — guests are filtering on the wrong layout.", items };
   }
@@ -640,11 +948,19 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
   return { verdict: "pass", detail: "Guesty layout matches the system config (bedrooms/bathrooms/sleeps).", items };
 }
 
-async function stagePricing(target: UnitAuditTarget): Promise<StageOutcome> {
+type PricingVerify = {
+  verdict: UnitAuditStageVerdict;
+  items: string[];
+  /** A market-rate refresh+push would remedy the finding. */
+  needsRefresh: boolean;
+};
+
+async function verifyPricing(target: UnitAuditTarget): Promise<PricingVerify> {
   const schedule = await storage.getScannerSchedule(target.propertyId).catch(() => undefined);
   const rates = await storage.getPropertyMarketRates(target.propertyId).catch(() => []);
   const items: string[] = [];
   let verdict: UnitAuditStageVerdict = "pass";
+  let needsRefresh = false;
   const bump = (v: UnitAuditStageVerdict) => {
     const rank: Record<string, number> = { pass: 0, fixed: 0, skipped: 0, attention: 1, error: 2, failed: 3 };
     if (rank[v] > rank[verdict]) verdict = v;
@@ -655,9 +971,11 @@ async function stagePricing(target: UnitAuditTarget): Promise<StageOutcome> {
   const missingSizes = sizes.filter((s) => !rateSizes.has(s));
   if (rates.length === 0) {
     bump("attention");
+    needsRefresh = true;
     items.push("No market-rate pricing table — run Update market pricing (dashboard queue or the Pricing tab)");
   } else if (missingSizes.length > 0) {
     bump("attention");
+    needsRefresh = true;
     items.push(`No market-rate row for ${missingSizes.map((s) => `${s}BR`).join(", ")} — the push would miss those units`);
   } else if (sizes.length > 0) {
     items.push(`Market-rate rows cover the listing's unit sizes (${sizes.map((s) => `${s}BR`).join(" + ")})`);
@@ -667,17 +985,21 @@ async function stagePricing(target: UnitAuditTarget): Promise<StageOutcome> {
   const pushStatus = (schedule as any)?.lastGuestyRatePushStatus ?? null;
   if (!pushedAt) {
     bump("attention");
+    needsRefresh = true;
     items.push("Rates have never been pushed to Guesty for this property");
   } else {
     const days = Math.floor((Date.now() - pushedAt) / 86_400_000);
     if (pushStatus === "error") {
       bump("failed");
+      needsRefresh = true;
       items.push(`Last Guesty rate push FAILED ${days}d ago: ${(schedule as any)?.lastGuestyRatePushSummary ?? "see the Last Price Scan column"}`);
     } else if (pushStatus === "seed") {
       bump("attention");
+      needsRefresh = true;
       items.push(`Only a seeded backfill stamp exists (${days}d ago) — no real push yet`);
     } else if (days > PRICING_STALE_DAYS) {
       bump("attention");
+      needsRefresh = true;
       items.push(`Rates last pushed ${days} days ago — stale (weekly cadence); re-run Update market pricing`);
     } else {
       items.push(`Rates pushed to Guesty ${days === 0 ? "today" : `${days}d ago`} (status ${pushStatus ?? "ok"})`);
@@ -702,15 +1024,56 @@ async function stagePricing(target: UnitAuditTarget): Promise<StageOutcome> {
   if (confirmation) {
     if (confirmation.level === "green") items.push("Match confirmation GREEN — researched the right community + bedroom sizes (95%+ bar)");
     else if (confirmation.level === "yellow") { bump("attention"); items.push(`Match confirmation AMBER: ${confirmation.headline || "research evidence incomplete"}`); }
-    else { bump("attention"); items.push(`Match confirmation RED: ${confirmation.headline || "research may not match this community/bedrooms"} — re-run the market-rate scan`); }
+    else {
+      bump("attention");
+      // A RED confirmation means the stored research may not match this
+      // community/bedrooms — a fresh scan re-researches and re-stamps.
+      needsRefresh = true;
+      items.push(`Match confirmation RED: ${confirmation.headline || "research may not match this community/bedrooms"} — re-run the market-rate scan`);
+    }
   } else if (rates.length > 0) {
     items.push("No research evidence stored on the pricing rows (older scan) — re-running Update market pricing stamps it");
   }
+  return { verdict, items, needsRefresh };
+}
 
-  const detail = verdict === "pass"
-    ? `Pricing table fresh + pushed · ${items.find((i) => i.startsWith("Match confirmation")) ?? "rates verified"}`
-    : items.find((i) => /FAILED|never been pushed|stale|No market-rate|RED|AMBER|seeded/.test(i)) ?? "Pricing needs review.";
-  return { verdict, detail, items };
+async function stagePricing(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
+  let v = await verifyPricing(target);
+  const items = [...v.items];
+
+  // AUTO-FIX: the SAME per-property refresh+push path the "Update market
+  // pricing" queue and the weekly cron drive — SearchAPI Airbnb median scan
+  // per unit size, marked-up push to Guesty with read-back verification, and
+  // the Last Price Scan stamp. Fired only when the verify found a refreshable
+  // problem (never/stale/failed/seed/missing-size/RED confirmation) so a
+  // fresh table never burns SearchAPI budget. AUDIT_PRICING_REFRESH=0 kills.
+  let fixedNote = "";
+  if (v.needsRefresh && autoFixEnabled(record) && String(process.env.AUDIT_PRICING_REFRESH ?? "").trim() !== "0") {
+    touch(record, { message: "Refreshing market rates (SearchAPI Airbnb median) and pushing marked-up rates to Guesty — the long pricing leg…" });
+    const refreshPath = target.isDraft
+      ? `/api/community/${-target.propertyId}/refresh-pricing`
+      : `/api/property/${target.propertyId}/refresh-market-rates`;
+    const refresh = await loopbackJson("POST", refreshPath, {}, STAGE_TIMEOUT_MS.pricing - 2 * 60_000)
+      .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+    if (refresh.status >= 400) {
+      items.push(`Auto-fix failed: market-rate refresh did not run (${String((refresh.data as any)?.error ?? `HTTP ${refresh.status}`)})`);
+    } else if ((refresh.data as any)?.alreadyRunning) {
+      items.push("A market-rate refresh for this property is already running — re-run the audit after it lands");
+    } else {
+      fixedNote = "Market rates refreshed + pushed to Guesty";
+      items.push(`Auto-fixed: ${fixedNote}`);
+      v = await verifyPricing(target);
+      items.push(...v.items.map((l) => `Re-verify: ${l}`));
+    }
+  }
+
+  if (v.verdict === "pass" && fixedNote) {
+    return { verdict: "fixed", detail: `${fixedNote} — re-verify clean.`, items };
+  }
+  const detail = v.verdict === "pass"
+    ? `Pricing table fresh + pushed · ${v.items.find((i) => i.startsWith("Match confirmation")) ?? "rates verified"}`
+    : v.items.find((i) => /FAILED|never been pushed|stale|No market-rate|RED|AMBER|seeded/.test(i)) ?? "Pricing needs review.";
+  return { verdict: v.verdict, detail, items };
 }
 
 async function stageChannels(target: UnitAuditTarget): Promise<StageOutcome> {
@@ -791,14 +1154,14 @@ async function runStageForRecord(record: UnitAuditJobRecord, stageId: UnitAuditS
     if (stageId !== "resolve" && !target) throw new Error("internal: target not resolved");
     const work: Promise<StageOutcome> = stageId === "resolve"
       ? stageResolve(record)
-      : stageId === "photo-dedupe" ? stagePhotoDedupe(target!)
+      : stageId === "photo-dedupe" ? stagePhotoDedupe(target!, record)
       : stageId === "photo-community" ? stagePhotoCommunity(target!, record)
       : stageId === "ota-scan" ? stageOtaScan(target!, record)
-      : stageId === "descriptions" ? stageDescriptions(target!)
-      : stageId === "amenities" ? stageAmenities(target!)
-      : stageId === "cover-collage" ? stageCoverCollage(target!)
+      : stageId === "descriptions" ? stageDescriptions(target!, record)
+      : stageId === "amenities" ? stageAmenities(target!, record)
+      : stageId === "cover-collage" ? stageCoverCollage(target!, record)
       : stageId === "layout" ? stageLayout(target!)
-      : stageId === "pricing" ? stagePricing(target!)
+      : stageId === "pricing" ? stagePricing(target!, record)
       : stageChannels(target!);
     outcome = await withTimeout(work, STAGE_TIMEOUT_MS[stageId], UNIT_AUDIT_STAGE_LABELS[stageId]);
   } catch (e: any) {
@@ -865,7 +1228,7 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
 
 // ── Public API (routes) ──────────────────────────────────────────────────────
 
-export async function startUnitAuditSweep(input: { propertyId: number }): Promise<
+export async function startUnitAuditSweep(input: { propertyId: number; autoFix?: boolean }): Promise<
   { ok: true; job: UnitAuditJobRecord } | { ok: false; status: number; error: string }
 > {
   const propertyId = Number(input.propertyId);
@@ -901,6 +1264,7 @@ export async function startUnitAuditSweep(input: { propertyId: number }): Promis
     createdAt: Date.now(),
     updatedAt: Date.now(),
     resumeCount: 0,
+    autoFix: input.autoFix !== false,
   };
   jobs.set(record.jobId, record);
   await mutateStore((store) => { store[record.jobId] = { ...record }; });

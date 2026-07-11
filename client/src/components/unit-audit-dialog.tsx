@@ -109,6 +109,11 @@ export function UnitAuditDialog({ propertyId, propertyName, open, onOpenChange, 
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [jobId, setJobId] = useState<string | null>(null);
+  // Auto-fix (default ON — the operator-confirmed default): fixable stages
+  // repair + re-verify (hide hash-duplicate photos, regenerate + push
+  // descriptions, amenity scan + add-only push, make the cover collage,
+  // refresh + push stale pricing). Unchecked = verify-only.
+  const [autoFix, setAutoFix] = useState(true);
 
   // Re-attach to a live sweep the dashboard status already knows about
   // (started on another device / before a reload).
@@ -147,7 +152,7 @@ export function UnitAuditDialog({ propertyId, propertyName, open, onOpenChange, 
 
   const startMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/unit-audit", { propertyId });
+      const res = await apiRequest("POST", "/api/unit-audit", { propertyId, autoFix });
       return (await res.json()) as { ok: boolean; job: UnitAuditJobRecord };
     },
     onSuccess: (data) => {
@@ -241,10 +246,26 @@ export function UnitAuditDialog({ propertyId, propertyName, open, onOpenChange, 
         )}
 
         <div className="flex items-center justify-between gap-2 pt-1">
-          <span className="text-xs text-muted-foreground">
-            {jobActive ? "Runs server-side — safe to close this dialog or leave the page." : "Verify-only: the sweep changes nothing; every finding links to the tab that fixes it."}
-          </span>
-          <div className="flex gap-2">
+          {jobActive ? (
+            <span className="text-xs text-muted-foreground">
+              Runs server-side — safe to close this dialog or leave the page.
+              {job && !job.autoFix ? " (verify-only run)" : ""}
+            </span>
+          ) : (
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={autoFix}
+                onChange={(e) => setAutoFix(e.target.checked)}
+                data-testid="checkbox-unit-audit-autofix"
+              />
+              <span>
+                <span className="font-medium">Auto-fix issues</span> — hide duplicate photos, regenerate bad copy, scan + push
+                amenities, make the collage, refresh stale pricing (all re-verified; photo/unit replacement stays manual)
+              </span>
+            </label>
+          )}
+          <div className="flex shrink-0 gap-2">
             {jobActive ? (
               <Button variant="outline" size="sm" onClick={() => cancelMutation.mutate()} disabled={cancelMutation.isPending} data-testid="button-cancel-unit-audit">
                 Cancel sweep
