@@ -322,8 +322,12 @@ export const GUESTY_PUSH_NAME_ALIASES: Record<string, string> = {
 
 // Catalog keys with NO Guesty-supported equivalent (checked against the full
 // 187-name list — nothing close enough to claim truthfully). They stay
-// selectable and persist in-system, but a Guesty push cannot deliver them;
-// the UI reports them as "no Guesty equivalent" rather than an error.
+// selectable and persist in-system; a Guesty push cannot deliver them as
+// CANONICAL amenities. Since 2026-07-11 the push route additionally attempts
+// Guesty's free-text "Other amenities" bucket for them (undocumented as a PUT
+// input — the docs only list `otherAmenities` on responses — so delivery is
+// proven per-name via read-back, never assumed). Delivered names render as
+// "delivered to Other amenities"; the rest as "no Guesty equivalent".
 export const GUESTY_UNSUPPORTED_AMENITY_KEYS: Set<string> = new Set([
   "KEYPAD",               // no keyless-entry / smart-lock amenity in Guesty
   "SPICES",
