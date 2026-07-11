@@ -22214,7 +22214,10 @@ Requirements:
   // in app_settings and resume after restarts via the boot watchdog.
   app.post("/api/unit-audit", async (req, res) => {
     try {
-      const result = await startUnitAuditSweep({ propertyId: Number((req.body as any)?.propertyId) });
+      const result = await startUnitAuditSweep({
+        propertyId: Number((req.body as any)?.propertyId),
+        autoFix: (req.body as any)?.autoFix !== false,
+      });
       if (!result.ok) return res.status(result.status).json({ error: result.error });
       return res.json({ ok: true, job: result.job });
     } catch (e: any) {

@@ -113,6 +113,10 @@ export type UnitAuditJobRecord = {
   createdAt: number;
   updatedAt: number;
   resumeCount: number;
+  /** Auto-fix mode (PR 2): fixable stages repair + re-verify instead of only
+   * flagging. Defaults ON (the operator's confirmed default); the dialog
+   * checkbox and UNIT_AUDIT_AUTOFIX_DISABLED=1 turn it off. */
+  autoFix: boolean;
 };
 
 // Overall verdict for a finished sweep. `error` outranks `attention` because
@@ -186,6 +190,9 @@ export function parseUnitAuditStore(raw: string | null | undefined): Record<stri
         createdAt: typeof v.createdAt === "number" ? v.createdAt : 0,
         updatedAt: typeof v.updatedAt === "number" ? v.updatedAt : 0,
         resumeCount: typeof v.resumeCount === "number" ? v.resumeCount : 0,
+        // Records from before the auto-fix PR default ON (matches the new
+        // start default) — a resumed pre-upgrade sweep behaves like a fresh one.
+        autoFix: typeof v.autoFix === "boolean" ? v.autoFix : true,
       };
     }
     return out;
@@ -379,6 +386,42 @@ export function unitAuditBadge(
     return { kind: "failed", label: `✕ ${c.failed}`, title: `${c.failed} check${c.failed === 1 ? "" : "s"} failed (${when}) — click for the receipt` };
   }
   return { kind: "error", label: "? unverified", title: `Some checks could not be verified (${when}) — click for the receipt` };
+}
+
+// ── Auto-fix: duplicate-photo selection (PR 2) ───────────────────────────────
+// Which photos the sweep may hide WITHOUT operator review: only members of
+// HASH-proven groups ("exact" ≤5 dHash distance, "near" ≤10 — the same image
+// byte-identical or recompressed) that the dedupe engine pre-marked removable
+// (keep === false; the deterministic keeper pick stays). AI "same-scene"
+// groups are NEVER auto-applied — two angles of one room is a judgment call,
+// and Load-Bearing #4 forbids automatic photo dropping without review; the
+// hash classes are the scoped exception the operator approved in the audit
+// plan. Removal is the photo_labels.hidden soft-delete, so ↺ Undo stays real.
+export type DedupeAutoFixGroupInput = {
+  kind: "exact" | "near" | "same-scene";
+  folder: string;
+  members: Array<{ filename: string; keep: boolean }>;
+};
+
+export function dedupeAutoFixSelections(groups: DedupeAutoFixGroupInput[]): {
+  remove: Array<{ folder: string; filename: string }>;
+  hashGroupCount: number;
+  sameSceneCount: number;
+} {
+  const remove: Array<{ folder: string; filename: string }> = [];
+  let hashGroupCount = 0;
+  let sameSceneCount = 0;
+  for (const g of groups ?? []) {
+    if (g.kind === "same-scene") {
+      sameSceneCount += 1;
+      continue;
+    }
+    hashGroupCount += 1;
+    for (const m of g.members ?? []) {
+      if (!m.keep && m.filename) remove.push({ folder: g.folder, filename: m.filename });
+    }
+  }
+  return { remove, hashGroupCount, sameSceneCount };
 }
 
 // Queue summary (active first, then recent terminals) — mirrors the

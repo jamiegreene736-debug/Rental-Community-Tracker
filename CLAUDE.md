@@ -43,6 +43,24 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-11 (Unit Audit Sweep PR 2 of 3 — AUTO-FIX chaining): Operator: "Go on pr 2". SHIPPED
+  (`claude/unit-audit-sweep-tool-79apae`, follow-up to PR #1013): fixable stages repair through the
+  EXISTING engines then RE-VERIFY (`fixed` verdict only on a passing re-check): dedupe → validated
+  `/photo-dedupe-apply` hides HASH-proven extras only (same-scene = review-only, pure
+  `dedupeAutoFixSelections`; target re-resolved after a hide so collage candidates never reference
+  hidden files); descriptions → server-side twin of ↻ Regenerate (generate-listing w/ real source
+  URLs, disclosure composition, `warning` refused, overrides persisted, ONLY regenerated fields
+  pushed — `notes` compliance-owned; verify now reads EFFECTIVE fields, override wins);
+  amenities → `/scan-amenities` loopback (scan+save+ADD-ONLY push in one call); collage →
+  `/auto-cover-collage` with published-photo candidates; pricing → per-property refresh+push
+  (drafts via `/api/community/:id/refresh-pricing`), fired ONLY on never/stale/failed/seed/
+  missing-size/RED-confirmation, `AUDIT_PRICING_REFRESH=0` kills. LAYOUT stays flag-only ON PURPOSE
+  (bedding push reads Bedding-tab localStorage — invisible server-side; source-locked no
+  listingRooms/PUT). `record.autoFix` (dialog checkbox default ON; `UNIT_AUDIT_AUTOFIX_DISABLED=1`
+  global kill). Stage ceilings raised (descriptions 6m/amenities 8m/collage 8m/pricing 20m/dedupe
+  12m). Verified: unit-audit-sweep 67/0, full `npm test` exit 0, build clean, `npm run check` 338 =
+  baseline, dialog UI re-verified on the BUILT bundle. PR 3 (photo fix ladder + bulk queue) next.
+
 - 2026-07-11 (dashboard "Audit" column — Unit Audit Sweep, PR 1 of 3, VERIFY-ONLY): Operator asked for
   a one-click full-unit audit tool (AI descriptions, AI amenities, photos-match-community + enough
   bedroom photos else replace source/unit, AI collage, layout, pricing — per-stage UI progress +

@@ -7,6 +7,7 @@
 import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import {
+  dedupeAutoFixSelections,
   lookupUnitAuditRecord,
   MAX_UNIT_AUDIT_RESUMES,
   STUCK_UNIT_AUDIT_ERROR,
@@ -56,6 +57,7 @@ const record = (over: Partial<UnitAuditJobRecord> = {}): UnitAuditJobRecord => (
   createdAt: NOW - 60_000,
   updatedAt: NOW - 30_000,
   resumeCount: 0,
+  autoFix: true,
   ...over,
 });
 
@@ -117,6 +119,37 @@ check("store: cap keeps the newest records",
     }
     const parsed = parseUnitAuditStore(serializeUnitAuditStore(store, NOW));
     return Object.keys(parsed).length === UNIT_AUDIT_STORE_CAP && !!parsed.j0 && !parsed[`j${UNIT_AUDIT_STORE_CAP + 4}`];
+  })());
+
+check("store: autoFix round-trips; records from before the auto-fix PR default ON",
+  (() => {
+    const off = record({ jobId: "off", autoFix: false });
+    const parsed = parseUnitAuditStore(serializeUnitAuditStore({ off }, NOW));
+    const legacy = parseUnitAuditStore(JSON.stringify({ old: { ...record({ jobId: "old" }), autoFix: undefined } }));
+    return parsed.off?.autoFix === false && legacy.old?.autoFix === true;
+  })());
+
+// ── Auto-fix: duplicate-photo selection (PR 2) ──────────────────────────────
+check("dedupe auto-fix: hash groups' non-keepers only; same-scene NEVER auto-applied",
+  (() => {
+    const sel = dedupeAutoFixSelections([
+      { kind: "exact", folder: "f1", members: [{ filename: "a.jpg", keep: true }, { filename: "b.jpg", keep: false }] },
+      { kind: "near", folder: "f2", members: [{ filename: "c.jpg", keep: false }, { filename: "d.jpg", keep: true }] },
+      { kind: "same-scene", folder: "f1", members: [{ filename: "e.jpg", keep: true }, { filename: "f.jpg", keep: false }] },
+    ]);
+    return sel.remove.length === 2 &&
+      sel.remove.some((r) => r.folder === "f1" && r.filename === "b.jpg") &&
+      sel.remove.some((r) => r.folder === "f2" && r.filename === "c.jpg") &&
+      !sel.remove.some((r) => r.filename === "f.jpg") &&
+      sel.hashGroupCount === 2 && sel.sameSceneCount === 1;
+  })());
+
+check("dedupe auto-fix: keepers are never selected; empty input is a no-op",
+  (() => {
+    const sel = dedupeAutoFixSelections([
+      { kind: "exact", folder: "f", members: [{ filename: "keep.jpg", keep: true }] },
+    ]);
+    return sel.remove.length === 0 && dedupeAutoFixSelections([]).remove.length === 0;
   })());
 
 // ── Prototype-pollution guard (CodeQL, PR #1013) ─────────────────────────────
@@ -338,6 +371,36 @@ check("server: stage errors report verdict \"error\" — absence of evidence nev
 check("server: request-supplied jobId lookups go through lookupUnitAuditRecord (own properties only)",
   /return lookupUnitAuditRecord\(parseUnitAuditStore\(raw \?\? null\), jobId\);/.test(serverSrc));
 
+// ── Source guards: auto-fix wiring (PR 2) reuses the EXISTING fix engines ────
+check("fix: dedupe apply goes through the validated apply route (keep-one-per-group, never-empty-folder) with the shared hash-only selection",
+  serverSrc.includes("/api/builder/photo-dedupe-apply") && serverSrc.includes("dedupeAutoFixSelections"));
+
+check("fix: descriptions regenerate uses the SAME generator + disclosure composition as the builder button, persists overrides, refuses generator fallback",
+  serverSrc.includes("/api/community/generate-listing") &&
+  serverSrc.includes("composeSummaryWithDisclosures") &&
+  serverSrc.includes("composeSpaceFromUnitDescriptions") &&
+  serverSrc.includes("upsertPropertyDescriptionOverrides") &&
+  /warning.*refused|refused.*warning/i.test(serverSrc));
+
+check("fix: regenerated copy pushes ONLY the regenerated fields via push-descriptions (notes stays compliance-owned)",
+  serverSrc.includes("/api/builder/push-descriptions") && !/descriptions:\s*\{[^}]*notes/.test(serverSrc));
+
+check("fix: amenities fire the scan route (scan + save + ADD-ONLY Guesty union push in one call)",
+  serverSrc.includes("/api/builder/scan-amenities"));
+
+check("fix: cover collage drives the one-click AI endpoint with published-photo candidates",
+  serverSrc.includes("/api/builder/auto-cover-collage"));
+
+check("fix: pricing refresh drives the per-property refresh+push path (cores) / draft refresh-pricing, only when the verify found a refreshable problem",
+  serverSrc.includes("/refresh-market-rates") && serverSrc.includes("/refresh-pricing") && serverSrc.includes("needsRefresh"));
+
+check("fix: layout deliberately never pushes (Bedding-tab config lives in browser localStorage) — the sweep only GETs from Guesty",
+  !serverSrc.includes("listingRooms") && !/loopbackJson\("PUT"/.test(serverSrc) &&
+  /never overwrites a layout/.test(serverSrc));
+
+check("fix: global kill switch UNIT_AUDIT_AUTOFIX_DISABLED gates every fix path",
+  serverSrc.includes("UNIT_AUDIT_AUTOFIX_DISABLED") && /autoFixEnabled\(record\)/.test(serverSrc));
+
 // ── Source guards: wiring ────────────────────────────────────────────────────
 const routesSrc = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
 check("routes: POST /api/unit-audit + GET active/:jobId/cancel + dashboard status wired",
@@ -371,6 +434,11 @@ check("dialog: starts via POST /api/unit-audit and polls the job endpoint",
 
 check("dialog: renders every stage from the SHARED stage list (no drift)",
   dialogSrc.includes("UNIT_AUDIT_STAGE_IDS.map"));
+
+check("route + dialog: autoFix flows from the checkbox through POST /api/unit-audit",
+  routesSrc.includes("autoFix: (req.body as any)?.autoFix !== false") &&
+  dialogSrc.includes("checkbox-unit-audit-autofix") &&
+  dialogSrc.includes("{ propertyId, autoFix }"));
 
 const pkg = readFileSync(new URL("../package.json", import.meta.url), "utf8");
 check("npm test chain includes this suite",
