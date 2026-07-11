@@ -8309,6 +8309,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     result={communityCheckResult}
                                     manualVerified={communityCheckManualVerified}
                                     onMarkVerified={() => setCommunityCheckManualVerified(true)}
+                                    // Flagged-photo Remove/Undo inside the report hides a photo
+                                    // (photo_labels.hidden) — refresh the gallery the same way
+                                    // the dedupe apply/undo does.
+                                    onPhotoOverridesChanged={onPhotoOverridesChanged}
                                   />
                                 )}
                               </div>

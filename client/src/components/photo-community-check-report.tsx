@@ -12,6 +12,17 @@
 // re-inline a copy on either surface or the two reports will drift. Styling is
 // intentionally inline (no builder stylesheet dependency) so it renders
 // identically wherever it's mounted.
+//
+// Flagged-photo review (2026-07-11): every YELLOW (unconfirmed) / RED
+// (mismatch) per-photo vote, outlier/junk flag, and cross-folder duplicate
+// renders the ACTUAL photo (thumbnail + folder/filename + open-full-size) with
+// an inline "🗑 Remove photo" / "✓ Keep" decision. Remove is the EXISTING
+// photo_labels.hidden soft-delete (PUT /api/photo-labels/:folder/:filename
+// { hidden: true }) — files are NEVER unlinked, the photo just leaves the
+// gallery + future Guesty pushes, and "↺ Undo" flips it straight back. Removal
+// is ALWAYS operator-confirmed via window.confirm — the check itself never
+// auto-drops a photo (AGENTS.md Load-Bearing #4).
+import { useState } from "react";
 import type { CSSProperties } from "react";
 
 // Shape of POST /api/builder/photo-community-check's JSON response. Mirrors
@@ -115,15 +126,19 @@ export type PhotoCommunityCheckResult = {
 
 // `manualVerified` + `onMarkVerified` = the "Mark as verified anyway" control
 // (client-side display state only; each surface owns its own useState and
-// resets it when a new check starts).
+// resets it when a new check starts). `onPhotoOverridesChanged` fires after a
+// flagged photo is hidden/restored so the host surface can refresh its gallery
+// (the Photos tab passes its existing onPhotoOverridesChanged through).
 export function PhotoCommunityCheckReport({
   result,
   manualVerified,
   onMarkVerified,
+  onPhotoOverridesChanged,
 }: {
   result: PhotoCommunityCheckResult;
   manualVerified: boolean;
   onMarkVerified: () => void;
+  onPhotoOverridesChanged?: () => void;
 }) {
   const r = result;
   const communityStatus = r.community?.overallStatus;
@@ -143,12 +158,154 @@ export function PhotoCommunityCheckReport({
   const yn = (s?: "yes" | "no") =>
     s === "no" ? { bg: "#fee2e2", fg: "#b91c1c", label: "No" }
     : { bg: "#dcfce7", fg: "#15803d", label: "Yes" };
+  const photoStatusOf = (v: CommunityCheckPhotoVerdict) =>
+    v.status ?? (v.match === "no" ? "mismatch" : v.match === "uncertain" ? "unconfirmed" : "verified");
   const photoStatusBadge = (v: CommunityCheckPhotoVerdict) => {
-    const st = v.status ?? (v.match === "no" ? "mismatch" : v.match === "uncertain" ? "unconfirmed" : "verified");
+    const st = photoStatusOf(v);
     if (st === "mismatch") return { bg: "#fee2e2", fg: "#b91c1c", label: "Mismatch" };
     if (st === "unconfirmed") return { bg: "#fef9c3", fg: "#92400e", label: "Unconfirmed" };
     if (st === "likely") return { bg: "#ecfdf5", fg: "#047857", label: "Likely" };
     return { bg: "#dcfce7", fg: "#15803d", label: "Verified" };
+  };
+
+  // ── Flagged-photo review state ────────────────────────────────────────────
+  // Keyed "<folder>/<filename>" so the SAME photo appearing in more than one
+  // place (a red vote AND an outlier flag, or both sides of a duplicate pair)
+  // shows one consistent decision everywhere. Display-only local state except
+  // remove/undo, which PUT the existing photo_labels.hidden soft-delete.
+  type PhotoDecision = { state: "idle" | "removing" | "removed" | "restoring" | "kept"; error?: string };
+  const [photoDecisions, setPhotoDecisions] = useState<Record<string, PhotoDecision>>({});
+  const decisionKeyOf = (folder: string, filename: string) => `${folder}/${filename}`;
+  const setDecision = (key: string, d: PhotoDecision | null) =>
+    setPhotoDecisions((prev) => {
+      const next = { ...prev };
+      if (d) next[key] = d;
+      else delete next[key];
+      return next;
+    });
+  const setPhotoHidden = async (folder: string, filename: string, hidden: boolean) => {
+    const key = decisionKeyOf(folder, filename);
+    if (hidden) {
+      // Operator-confirmed, one photo at a time — the check NEVER auto-drops a
+      // photo (Load-Bearing #4); this dialog is the safeguard.
+      const confirmed = window.confirm(
+        `Remove "${filename}" from the listing?\n\n` +
+        `It is hidden from the gallery and future Guesty pushes — the file stays on disk, and you can Undo right after.`,
+      );
+      if (!confirmed) return;
+    }
+    setDecision(key, { state: hidden ? "removing" : "restoring" });
+    try {
+      const resp = await fetch(
+        `/api/photo-labels/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hidden }),
+        },
+      );
+      const data = (await resp.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!resp.ok || !data?.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      setDecision(key, hidden ? { state: "removed" } : null);
+      onPhotoOverridesChanged?.();
+    } catch (e: any) {
+      // Failed remove → back to undecided (error shown); failed undo → STAY
+      // "removed" so the Undo button survives (a transient error must never
+      // strand a hidden photo with no way back — same posture as dedupe undo).
+      const error = e?.message ?? String(e);
+      setDecision(key, hidden ? { state: "idle", error } : { state: "removed", error });
+    }
+  };
+  const miniBtn = (fg: string, border: string, bg: string): CSSProperties => ({
+    display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", borderRadius: 6,
+    fontSize: 10.5, fontWeight: 600, cursor: "pointer", background: bg, color: fg, border: `1px solid ${border}`,
+  });
+  // The card that answers "which photo is this flag about?": thumbnail
+  // (click = full size in a new tab), folder/filename, and the keep/remove
+  // decision. `tone` mirrors the flag severity (red mismatch / amber review).
+  const flaggedPhotoCard = (folder: string | undefined, filename: string | undefined, tone: "red" | "amber") => {
+    if (!folder || !filename) return null;
+    const key = decisionKeyOf(folder, filename);
+    const d = photoDecisions[key];
+    const src = `/photos/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}`;
+    const busy = d?.state === "removing" || d?.state === "restoring";
+    const removed = d?.state === "removed";
+    const border = removed ? "#94a3b8" : tone === "red" ? "#dc2626" : "#d97706";
+    return (
+      <div
+        data-testid={`flagged-photo-${folder}-${filename}`}
+        style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 4, marginBottom: 2, padding: 6, background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6, maxWidth: 470 }}
+      >
+        <a href={src} target="_blank" rel="noreferrer" title="Open full-size in a new tab" style={{ flexShrink: 0 }}>
+          <img
+            src={src}
+            alt={filename}
+            loading="lazy"
+            style={{ width: 96, height: 64, objectFit: "cover", display: "block", borderRadius: 4, border: `2px solid ${border}`, opacity: removed ? 0.45 : 1 }}
+          />
+        </a>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 10, color: "#475569", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${folder}/${filename}`}>
+            <code>{folder}/{filename}</code>
+            <a href={src} target="_blank" rel="noreferrer" style={{ marginLeft: 6, color: "#0e7490" }}>open ↗</a>
+          </div>
+          {d?.error ? (
+            <div style={{ fontSize: 10, color: "#b91c1c", marginTop: 2 }}>✗ {d.error}</div>
+          ) : null}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5, flexWrap: "wrap" }}>
+            {removed ? (
+              <>
+                <span style={{ fontSize: 10.5, fontWeight: 600, color: "#b91c1c" }}>Removed — hidden from the gallery + future pushes</span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void setPhotoHidden(folder, filename, false)}
+                  style={miniBtn("#0e7490", "#a5f3fc", "#ecfeff")}
+                  data-testid={`btn-flagged-photo-undo-${folder}-${filename}`}
+                >
+                  ↺ Undo
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void setPhotoHidden(folder, filename, true)}
+                  style={{ ...miniBtn("#b91c1c", "#fecaca", "#fef2f2"), opacity: busy ? 0.6 : 1 }}
+                  data-testid={`btn-flagged-photo-remove-${folder}-${filename}`}
+                >
+                  {d?.state === "removing" ? "Removing…" : d?.state === "restoring" ? "Restoring…" : "🗑 Remove photo"}
+                </button>
+                {d?.state === "kept" ? (
+                  <span style={{ fontSize: 10.5, fontWeight: 600, color: "#15803d" }}>✓ Keeping this photo</span>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setDecision(key, { state: "kept" })}
+                    style={miniBtn("#15803d", "#bbf7d0", "#f0fdf4")}
+                    data-testid={`btn-flagged-photo-keep-${folder}-${filename}`}
+                  >
+                    ✓ Keep
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+  // Resolve an outlier/junk flag id (e.g. "C6", "U1-3") back to its photo via
+  // the group's per-photo verdicts (which carry folder+filename). Synthetic
+  // ids like the dHash "pre-screen" outlier have no photo — no card renders.
+  const photoByIdFor = (g: { folder?: string; photoVerdicts?: CommunityCheckPhotoVerdict[] } | null | undefined) => {
+    const m = new Map<string, { folder?: string; filename?: string }>();
+    for (const v of g?.photoVerdicts ?? []) {
+      if (v.filename) m.set(v.id, { folder: v.folder ?? g?.folder, filename: v.filename });
+    }
+    return m;
   };
   const badge = (c: { bg: string; fg: string }): CSSProperties => ({
     display: "inline-block", fontSize: 10.5, fontWeight: 600, padding: "1px 7px",
@@ -157,14 +314,28 @@ export function PhotoCommunityCheckReport({
   const card: CSSProperties = { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 6, padding: "8px 10px", marginTop: 6 };
   const rowS: CSSProperties = { fontSize: 11.5, color: "#334155", marginTop: 2 };
   const muted: CSSProperties = { color: "#64748b" };
-  const flagList = (flags: CommunityCheckFlag[], heading: string, color: string) =>
+  // `resolvePhoto` maps a flag id back to its folder/filename (built from the
+  // group's per-photo verdicts) so each flagged line can show its photo.
+  const flagList = (
+    flags: CommunityCheckFlag[],
+    heading: string,
+    color: string,
+    tone: "red" | "amber",
+    resolvePhoto?: Map<string, { folder?: string; filename?: string }>,
+  ) =>
     flags.length > 0 ? (
       <div style={{ marginTop: 3 }}>
         <span style={{ fontSize: 11, fontWeight: 600, color }}>{heading}:</span>
         <ul style={{ margin: "2px 0 0 0", paddingLeft: 18, fontSize: 11, color: "#475569" }}>
-          {flags.map((f, i) => (
-            <li key={i}><code style={{ color: "#0e7490" }}>{f.id}</code>{f.caption ? ` "${f.caption}"` : ""} — {f.reason}</li>
-          ))}
+          {flags.map((f, i) => {
+            const photo = resolvePhoto?.get(f.id);
+            return (
+              <li key={i}>
+                <code style={{ color: "#0e7490" }}>{f.id}</code>{f.caption ? ` "${f.caption}"` : ""} — {f.reason}
+                {photo ? flaggedPhotoCard(photo.folder, photo.filename, tone) : null}
+              </li>
+            );
+          })}
         </ul>
       </div>
     ) : null;
@@ -175,6 +346,11 @@ export function PhotoCommunityCheckReport({
         <ul style={{ margin: "2px 0 0 0", paddingLeft: 18, fontSize: 11, color: "#475569" }}>
           {verdicts.map((v, i) => {
             const pb = photoStatusBadge(v);
+            const st = photoStatusOf(v);
+            // Yellow/red rows show the ACTUAL photo so the operator can decide
+            // keep vs remove without hunting through the gallery. Green rows
+            // stay compact.
+            const flagged = st === "mismatch" || st === "unconfirmed";
             return (
             <li key={i}>
               <code style={{ color: "#0e7490" }}>{v.id}</code>
@@ -183,6 +359,7 @@ export function PhotoCommunityCheckReport({
                 <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: 4 }}>({v.confidenceScore}%)</span>
               ) : null}
               {v.caption ? ` "${v.caption}"` : ""} — {v.reason}
+              {flagged ? flaggedPhotoCard(v.folder, v.filename, st === "mismatch" ? "red" : "amber") : null}
             </li>
           );})}
         </ul>
@@ -466,8 +643,8 @@ export function PhotoCommunityCheckReport({
             All community photos same place: <span style={badge(yn(r.community.allSameCommunity ? "yes" : "no"))}>{yn(r.community.allSameCommunity ? "yes" : "no").label}</span>
           </div>
           {photoVerdictList(r.community.photoVerdicts)}
-          {flagList(r.community.outliers, "Different-community photos", "#b45309")}
-          {flagList(r.community.junk, "Junk / mis-filed", "#b45309")}
+          {flagList(r.community.outliers, "Different-community photos", "#b45309", "red", photoByIdFor(r.community))}
+          {flagList(r.community.junk, "Junk / mis-filed", "#b45309", "amber", photoByIdFor(r.community))}
         </div>
       )}
 
@@ -490,8 +667,8 @@ export function PhotoCommunityCheckReport({
             {u.allSameUnit === false && (
               <div style={{ ...rowS, color: "#b45309" }}>⚠ Not all photos look like the same unit.</div>
             )}
-            {flagList(u.outliers, "Possible odd-one-out photos", "#b45309")}
-            {flagList(u.junk, "Junk / mis-filed", "#b45309")}
+            {flagList(u.outliers, "Possible odd-one-out photos", "#b45309", "red", photoByIdFor(u))}
+            {flagList(u.junk, "Junk / mis-filed", "#b45309", "amber", photoByIdFor(u))}
           </div>
         );
       })}
@@ -501,7 +678,15 @@ export function PhotoCommunityCheckReport({
           <div style={{ fontWeight: 600, fontSize: 11.5, color: "#92400e", marginBottom: 3 }}>⚠ Same photo found in more than one folder</div>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: "#92400e" }}>
             {crossDupes.map((d, i) => (
-              <li key={i}><code>{d.a.folder}/{d.a.filename}</code> ↔ <code>{d.b.folder}/{d.b.filename}</code></li>
+              <li key={i}>
+                <code>{d.a.folder}/{d.a.filename}</code> ↔ <code>{d.b.folder}/{d.b.filename}</code>
+                {/* Both copies, side by side, each removable — the operator
+                    decides which folder keeps the photo. */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {flaggedPhotoCard(d.a.folder, d.a.filename, "amber")}
+                  {flaggedPhotoCard(d.b.folder, d.b.filename, "amber")}
+                </div>
+              </li>
             ))}
           </ul>
         </div>

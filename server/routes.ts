@@ -166,7 +166,7 @@ import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar
 import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel, receiptNeedsAttention, refundSmsNeedsAttention } from "@shared/receipt-message";
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation, createReceiptPage } from "./guest-receipts";
 import { getGuestComplaintScannerStatus, setGuestComplaintScannerEnabled, runGuestComplaintScan } from "./guest-complaint-scanner";
-import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
+import { fetchSearchApiWithFallback, getSearchApiKey, isSearchApiQuotaError } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations, resendBookingConfirmation } from "./booking-confirmations";
 import { runPropertyRevenueRefresh, getPropertyRevenueStatus } from "./property-revenue-scheduler";
 import { runMarketRateScan, getMarketRateScanStatus } from "./market-rate-scheduler";
@@ -268,6 +268,10 @@ import {
   notListedVerdict,
   type PreflightPlatformKey,
 } from "@shared/preflight-platform-match";
+import {
+  preflightPlatformFailureVerdict,
+  type PreflightQueryRunSummary,
+} from "@shared/preflight-audit-outcome";
 import { discoverCommunityStreetAddress } from "./community-address-discovery";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize, relabelFolderPhotos } from "./photo-pipeline";
@@ -32750,6 +32754,11 @@ Return ONLY compact JSON with this exact shape:
     }
 
     const PREFLIGHT_PLATFORMS: PreflightPlatformKey[] = ["airbnb", "vrbo", "booking"];
+    // Attempts per query (transient SearchAPI blips get one more shot; quota
+    // failures never retry). Worst case per platform stays well inside the audit
+    // job's 120s per-unit loopback timeout: 2 queries × 2 attempts × 12s ≈ 50s.
+    const PREFLIGHT_QUERY_ATTEMPTS = 2;
+    const PREFLIGHT_QUERY_RETRY_DELAY_MS = 600;
 
     const checkPlatformStrict = async (
       platform: PreflightPlatformKey,
@@ -32772,33 +32781,66 @@ Return ONLY compact JSON with this exact shape:
       if (queries.length === 0) {
         return { status: "error", url: null, detection: "No address or community name to search" };
       }
-      try {
-        for (const q of queries) {
-          const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "8" });
-          const ctrl = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), 12_000);
-          const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, { signal: ctrl.signal })
-            .finally(() => clearTimeout(timer));
-          if (!resp.ok) continue;
-          const data = await resp.json() as any;
-          for (const r of (data.organic_results || []) as any[]) {
-            const verdict = evaluatePreflightSearchResult(
-              { title: r.title, snippet: r.snippet, link: r.link },
-              platform,
-              matchContext,
-            );
-            if (verdict) return verdict;
+      // Rev. 2026-07-11 — per-query retry + honest failure verdicts (see
+      // shared/preflight-audit-outcome.ts). The old shape had TWO failure bugs:
+      // one thrown 12s timeout aborted the REMAINING queries and errored the
+      // whole platform with no retry (the "1 OTA lookup didn't respond" banner),
+      // and all-queries-non-ok (SearchAPI 429/5xx) silently fell through to
+      // notListedVerdict() — a false decisive "Not listed" with zero evidence.
+      // Now each query gets PREFLIGHT_QUERY_ATTEMPTS isolated attempts (quota
+      // errors fail fast — retrying an exhausted quota just burns budget), and
+      // "not-listed" is only returned when EVERY query actually completed;
+      // anything less is an "error" verdict that the audit job's automatic
+      // retry pass (preflight-background-jobs.ts) re-runs before the receipt.
+      const summary: PreflightQueryRunSummary = {
+        totalQueries: queries.length,
+        succeededQueries: 0,
+        failedQueries: 0,
+        quotaHit: false,
+        timedOut: false,
+        lastHttpStatus: null,
+      };
+      for (const q of queries) {
+        if (summary.quotaHit) { summary.failedQueries += 1; continue; }
+        let organicResults: any[] | null = null;
+        for (let attempt = 0; attempt < PREFLIGHT_QUERY_ATTEMPTS && organicResults === null; attempt++) {
+          try {
+            const params = new URLSearchParams({ engine: "google", q, api_key: apiKey, num: "8" });
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 12_000);
+            const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, { signal: ctrl.signal })
+              .finally(() => clearTimeout(timer));
+            if (!resp.ok) {
+              summary.lastHttpStatus = resp.status;
+              const body = await resp.text().catch(() => "");
+              if (isSearchApiQuotaError(resp.status, `${resp.statusText} ${body}`)) {
+                summary.quotaHit = true;
+                break;
+              }
+            } else {
+              const data = await resp.json() as any;
+              organicResults = Array.isArray(data?.organic_results) ? data.organic_results : [];
+            }
+          } catch (err: any) {
+            if (err?.name === "AbortError" || err?.name === "TimeoutError") summary.timedOut = true;
           }
-          await new Promise((rr) => setTimeout(rr, 250));
+          if (organicResults === null && !summary.quotaHit && attempt + 1 < PREFLIGHT_QUERY_ATTEMPTS) {
+            await new Promise((rr) => setTimeout(rr, PREFLIGHT_QUERY_RETRY_DELAY_MS));
+          }
         }
-        return notListedVerdict();
-      } catch (err: any) {
-        return {
-          status: "error",
-          url: null,
-          detection: err?.name === "AbortError" ? "Search timed out" : "Could not verify",
-        };
+        if (organicResults === null) { summary.failedQueries += 1; continue; }
+        summary.succeededQueries += 1;
+        for (const r of organicResults) {
+          const verdict = evaluatePreflightSearchResult(
+            { title: r.title, snippet: r.snippet, link: r.link },
+            platform,
+            matchContext,
+          );
+          if (verdict) return verdict;
+        }
+        await new Promise((rr) => setTimeout(rr, 250));
       }
+      return preflightPlatformFailureVerdict(summary) ?? notListedVerdict();
     };
 
     try {
