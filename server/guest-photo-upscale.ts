@@ -26,6 +26,8 @@
 
 import type { Express, Request, Response } from "express";
 import crypto from "crypto";
+import net from "net";
+import dns from "dns/promises";
 import sharp from "sharp";
 import {
   GUEST_PHOTO_PROXY_PATH,
@@ -38,6 +40,117 @@ import {
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 12_000;
 const CACHE_MAX_ENTRIES = 80;
+const MAX_REDIRECTS = 3;
+const SOURCE_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+
+// ── SSRF hardening (2026-07-11) ─────────────────────────────────────────────
+// The string guard (isSafeGuestPhotoSourceUrl) rejects IP-literal / internal /
+// numeric-TLD hosts, but a PUBLIC DNS name can still resolve to an internal IP
+// (e.g. 169.254.169.254.nip.io), and a legitimately-signed URL could 302 to an
+// internal host. So before every fetch — and on every redirect hop — we (a)
+// re-run the string guard, and (b) resolve the host and reject any private /
+// reserved / link-local / loopback address. Redirects are followed manually
+// (redirect: "manual") so each hop is re-validated. Residual TOCTOU (a rebinding
+// DNS could return a public IP to lookup() and an internal IP to the socket) is
+// bounded by the HMAC-signature requirement — only URLs we embedded on a stored
+// guest page can reach this endpoint at all.
+
+function ipv4ToInt(ip: string): number | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return null;
+  const o = m.slice(1).map(Number);
+  if (o.some((n) => n > 255)) return null;
+  return ((o[0] << 24) >>> 0) + (o[1] << 16) + (o[2] << 8) + o[3];
+}
+
+function isDisallowedIpv4(ip: string): boolean {
+  const n = ipv4ToInt(ip);
+  if (n === null) return true; // unparseable → treat as unsafe
+  const inRange = (base: string, bits: number): boolean => {
+    const b = ipv4ToInt(base)!;
+    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+    return (n & mask) >>> 0 === (b & mask) >>> 0;
+  };
+  return (
+    inRange("0.0.0.0", 8) ||       // "this" network
+    inRange("10.0.0.0", 8) ||      // private
+    inRange("100.64.0.0", 10) ||   // CGNAT
+    inRange("127.0.0.0", 8) ||     // loopback
+    inRange("169.254.0.0", 16) ||  // link-local (cloud metadata)
+    inRange("172.16.0.0", 12) ||   // private
+    inRange("192.0.0.0", 24) ||    // IETF protocol assignments
+    inRange("192.0.2.0", 24) ||    // TEST-NET-1
+    inRange("192.88.99.0", 24) ||  // 6to4 relay anycast
+    inRange("192.168.0.0", 16) ||  // private
+    inRange("198.18.0.0", 15) ||   // benchmarking
+    inRange("198.51.100.0", 24) || // TEST-NET-2
+    inRange("203.0.113.0", 24) ||  // TEST-NET-3
+    inRange("224.0.0.0", 4) ||     // multicast
+    inRange("240.0.0.0", 4)        // reserved + broadcast
+  );
+}
+
+function isDisallowedIp(ip: string): boolean {
+  const fam = net.isIP(ip);
+  if (fam === 4) return isDisallowedIpv4(ip);
+  if (fam === 6) {
+    const lower = ip.toLowerCase();
+    if (lower === "::1" || lower === "::") return true; // loopback / unspecified
+    const mapped = /^(?:::ffff:|::)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(lower);
+    if (mapped) return isDisallowedIpv4(mapped[1]); // IPv4-mapped/compat
+    if (/^f[cd][0-9a-f]{2}:/.test(lower)) return true; // fc00::/7 unique-local
+    if (/^fe[89ab][0-9a-f]:/.test(lower)) return true; // fe80::/10 link-local
+    return false;
+  }
+  return true; // not a valid IP string → unsafe
+}
+
+async function assertPublicHost(hostname: string): Promise<void> {
+  if (net.isIP(hostname)) {
+    // The string guard rejects IP-literal hosts before we get here, but stay
+    // defensive in case this is ever called directly.
+    if (isDisallowedIp(hostname)) throw new Error(`blocked ip host ${hostname}`);
+    return;
+  }
+  const records = await dns.lookup(hostname, { all: true });
+  if (!records.length) throw new Error(`no DNS records for ${hostname}`);
+  for (const r of records) {
+    if (isDisallowedIp(r.address)) {
+      throw new Error(`host ${hostname} resolves to disallowed address ${r.address}`);
+    }
+  }
+}
+
+/** Fetch `startUrl`, following redirects manually and re-validating the string
+ * guard + resolved IP on every hop. Throws on an unsafe hop or too many. */
+async function ssrfSafeImageFetch(startUrl: string): Promise<globalThis.Response> {
+  let url = startUrl;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    if (!isSafeGuestPhotoSourceUrl(url)) throw new Error(`unsafe redirect target ${url}`);
+    await assertPublicHost(new URL(url).hostname);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    let response: globalThis.Response;
+    try {
+      response = await fetch(url, {
+        signal: controller.signal,
+        redirect: "manual",
+        headers: { "User-Agent": SOURCE_UA, Accept: "image/*,*/*;q=0.8" },
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) throw new Error(`redirect ${response.status} without location`);
+      url = new URL(location, url).toString(); // resolve relative redirects
+      continue;
+    }
+    return response;
+  }
+  throw new Error("too many redirects");
+}
 
 const signingKey = (): string =>
   process.env.GUEST_PHOTO_SIGN_KEY || process.env.ADMIN_SECRET || "nexstay-guest-photo-v1";
@@ -78,20 +191,9 @@ const cachePut = (key: string, value: CachedPhoto): void => {
 };
 
 async function fetchAndUpscale(src: string): Promise<CachedPhoto> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let response: globalThis.Response;
-  try {
-    response = await fetch(src, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-        Accept: "image/*,*/*;q=0.8",
-      },
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+  // SSRF-hardened fetch: validates the string guard + resolves the host to a
+  // public IP on every redirect hop before connecting (see ssrfSafeImageFetch).
+  const response = await ssrfSafeImageFetch(src);
   if (!response.ok) throw new Error(`source HTTP ${response.status}`);
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_SOURCE_BYTES) throw new Error("source too large");

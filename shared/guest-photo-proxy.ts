@@ -43,6 +43,15 @@ export function isSafeGuestPhotoSourceUrl(url: string | null | undefined): boole
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false; // IPv4 literal
   if (host.startsWith("[") || host.includes(":")) return false; // IPv6 literal
   if (/\.(?:local|internal|localdomain|home|lan|arpa)$/.test(host)) return false;
+  // The rightmost label (TLD) of a real domain is always alphabetic. Rejecting
+  // a non-alphabetic TLD kills every numeric IP-literal encoding that slips the
+  // dotted-quad regex above — decimal (http://2130706433/ has no dot so is
+  // already out), hex/octal dotted forms (http://0x7f.0.0.1/, http://0177.0.0.1/),
+  // and mixed forms — none of which have an alphabetic TLD. Server-side DNS
+  // resolution in guest-photo-upscale.ts is the authoritative backstop, but this
+  // keeps the shared pure guard from ever green-lighting an IP-shaped host.
+  const tld = host.slice(host.lastIndexOf(".") + 1);
+  if (!/[a-z]/.test(tld)) return false;
   return true;
 }
 

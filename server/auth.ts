@@ -448,6 +448,53 @@ export function loginPageHandler(req: Request, res: Response) {
   res.send(LOGIN_HTML("", nextPath));
 }
 
+// ── Login brute-force limiter (in-memory, per client IP) ────────────────────
+// 2026-07-11: POST /login had no throttling — the admin secret and agent
+// passwords were guessable at network speed. This caps FAILED attempts per
+// client IP within a rolling window; a successful login clears the bucket.
+// NOTE: the key uses X-Forwarded-For (Railway's edge sets it to the real
+// client) with a socket fallback — this is ONLY for rate-limit bucketing, NOT
+// an auth decision, so an attacker spoofing XFF merely reshuffles their own
+// bucket (the standard IP-limiter limitation) and gains no access. Auth itself
+// still relies on the cookie/secret and the un-spoofable socket loopback check.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 10;
+const loginFailures = new Map<string, number[]>();
+
+function loginClientKey(req: Request): string {
+  const xff = String(req.headers["x-forwarded-for"] ?? "").split(",")[0].trim();
+  return xff || req.socket?.remoteAddress || "unknown";
+}
+
+function recentLoginFailures(key: string, now: number): number[] {
+  const arr = (loginFailures.get(key) ?? []).filter((t) => now - t < LOGIN_WINDOW_MS);
+  if (arr.length) loginFailures.set(key, arr);
+  else loginFailures.delete(key);
+  return arr;
+}
+
+export function isLoginRateLimited(req: Request): boolean {
+  return recentLoginFailures(loginClientKey(req), Date.now()).length >= LOGIN_MAX_FAILURES;
+}
+
+function recordLoginFailure(req: Request): void {
+  const now = Date.now();
+  const key = loginClientKey(req);
+  const arr = recentLoginFailures(key, now);
+  arr.push(now);
+  loginFailures.set(key, arr);
+  if (loginFailures.size > 5000) {
+    // Bound memory: drop buckets whose newest failure has aged out.
+    loginFailures.forEach((v, k) => {
+      if (!v.some((t) => now - t < LOGIN_WINDOW_MS)) loginFailures.delete(k);
+    });
+  }
+}
+
+function clearLoginFailures(req: Request): void {
+  loginFailures.delete(loginClientKey(req));
+}
+
 export function loginPostHandler(req: Request, res: Response) {
   const secret = process.env.ADMIN_SECRET ?? "";
   if (!secret) {
@@ -461,13 +508,22 @@ export function loginPostHandler(req: Request, res: Response) {
   // /login?next=https://evil/ to hand off the freshly-issued cookie
   // to a phishing page. Relative paths only.
   const safeNext = nextRaw.startsWith("/") && !nextRaw.startsWith("//") ? nextRaw : "/";
+  if (isLoginRateLimited(req)) {
+    res.status(429);
+    res.set("Content-Type", "text/html; charset=utf-8");
+    res.set("Cache-Control", "no-store");
+    res.set("Retry-After", String(Math.ceil(LOGIN_WINDOW_MS / 1000)));
+    return res.send(LOGIN_HTML("Too many attempts. Please wait a few minutes and try again.", safeNext));
+  }
   const role = resolveLoginRole(username, password, secret);
   if (!role) {
+    recordLoginFailure(req);
     res.status(401);
     res.set("Content-Type", "text/html; charset=utf-8");
     res.set("Cache-Control", "no-store");
     return res.send(LOGIN_HTML("Incorrect username or password.", safeNext));
   }
+  clearLoginFailures(req);
   res.set("Set-Cookie", buildSetCookie(buildRoleCookieValue(secret, role), Math.floor(COOKIE_MAX_AGE_MS / 1000)));
   res.redirect(role === "agent" && safeNext !== "/inbox" ? "/" : safeNext);
 }
