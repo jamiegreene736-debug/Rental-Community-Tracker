@@ -63,6 +63,29 @@ Before making any changes:
   (static SPA server + mocked endpoints, Playwright: cards render for yellow/red only, Keep marks,
   Remove confirm → hidden:true, Undo → hidden:false, cancelled confirm → no PUT).
 
+- 2026-07-11 (preflight Full unit audit: "1 OTA lookup didn't respond (API error)" — auto-retry +
+  false-not-listed fix): Operator screenshot of the Platform Check card's red "some checks didn't
+  respond" banner; asked to investigate/improve/fix. TWO bugs in `checkPlatformStrict`
+  (GET /api/preflight/platform-check, routes.ts — don't re-chase): (1) ONE try/catch wrapped the whole
+  query loop, so a single thrown 12s SearchAPI timeout abandoned the platform's remaining queries and
+  errored the platform with zero retries — the banner told the OPERATOR to be the retry loop; (2) worse
+  + silent: non-ok responses (429 quota / 5xx) just `continue`d, so all-queries-failed fell through to
+  `notListedVerdict()` = a FALSE decisive "No matching listing found" with zero evidence (quota
+  exhaustion would green the audit — the false-Clear class #721 guards against). SHIPPED
+  (`claude/unit-audit-search-30645c`): route — per-query isolation + 2 bounded attempts (600ms backoff;
+  quota fails FAST via `isSearchApiQuotaError`), "not-listed" only when EVERY query completed, else an
+  "error" verdict with the real reason (quota / timed out / HTTP status / N-of-M partial) via pure
+  `preflightPlatformFailureVerdict`; audit job — ONE automatic retry pass over errored units before the
+  receipt (`AUDIT_UNIT_RETRY_PASSES=1`, 2s delay), merge is ADDITIVE-ONLY (`mergeRetriedAuditUnitResult`
+  heals "error" slots, never flips a decided confirmed/not-listed — SearchAPI is non-deterministic);
+  receipt tallies FINAL post-retry results (`tallyPreflightAuditOutcome`). Pure pieces in NEW
+  `shared/preflight-audit-outcome.ts`; locked by tests/preflight-audit-outcome.test.ts (24, in the npm
+  chain, incl. source guards on both wirings). Worst case stays inside the job's 120s per-unit loopback
+  timeout. Client untouched. Verified: new suite 24/0, full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline (stash A/B). Could NOT live-smoke SearchAPI (no key in session) —
+  post-deploy: re-run a Full unit audit; a transient blip should self-heal (brief "Retrying N lookups…"
+  message) instead of raising the red banner.
+
 - 2026-07-11 (Guesty photo push: photos "look upscaled" — smart ESRGAN gating + validator sharpening):
   Operator: "When photos are pushed to Guesty I think they're like upscaled. Is there anything we can
   do to improve this?" TWO real degradations found in POST /api/builder/push-photos (don't re-chase):
