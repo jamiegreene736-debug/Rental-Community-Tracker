@@ -12,6 +12,9 @@ import {
   loadBeddingConfig,
   saveBeddingConfig,
   resetBeddingConfig,
+  loadSpaceTextOverride,
+  saveSpaceTextOverride,
+  clearSpaceTextOverride,
   buildGuestyListingRooms,
   buildSpaceDescription,
   totalBedrooms,
@@ -77,21 +80,27 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
   const { toast } = useToast();
   const [config, setConfig] = useState<PropertyBeddingConfig>(() => loadBeddingConfig(propertyId));
   const [pushing, setPushing] = useState(false);
-  const [spaceText, setSpaceText] = useState(() => buildSpaceDescription(loadBeddingConfig(propertyId)));
+  // spaceDirty = the operator hand-edited the Space text; auto-regeneration is
+  // paused and the text persists across tab switches until "Regenerate".
+  const [spaceDirty, setSpaceDirty] = useState(() => loadSpaceTextOverride(propertyId) != null);
+  const [spaceText, setSpaceText] = useState(() =>
+    loadSpaceTextOverride(propertyId) ?? buildSpaceDescription(loadBeddingConfig(propertyId)));
   const [pushingSpace, setPushingSpace] = useState(false);
 
   // Reload when property changes
   useEffect(() => {
     const c = loadBeddingConfig(propertyId);
     setConfig(c);
-    setSpaceText(buildSpaceDescription(c));
+    const override = loadSpaceTextOverride(propertyId);
+    setSpaceDirty(override != null);
+    setSpaceText(override ?? buildSpaceDescription(c));
   }, [propertyId]);
 
-  // Auto-persist on change + refresh generated space text
+  // Auto-persist on change + refresh generated space text (unless hand-edited)
   useEffect(() => {
     saveBeddingConfig(config);
-    setSpaceText(buildSpaceDescription(config));
-  }, [config]);
+    if (!spaceDirty) setSpaceText(buildSpaceDescription(config));
+  }, [config, spaceDirty]);
 
   const totals = useMemo(() => ({
     bedrooms: totalBedrooms(config),
@@ -165,7 +174,23 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
 
   const handleReset = () => {
     if (!confirm("Reset bedding config for this property to defaults? Your edits will be lost.")) return;
-    setConfig(resetBeddingConfig(propertyId));
+    const c = resetBeddingConfig(propertyId);
+    clearSpaceTextOverride(propertyId);
+    setSpaceDirty(false);
+    setConfig(c);
+    setSpaceText(buildSpaceDescription(c));
+  };
+
+  const handleSpaceTextEdit = (text: string) => {
+    setSpaceText(text);
+    setSpaceDirty(true);
+    saveSpaceTextOverride(propertyId, text);
+  };
+
+  const handleRegenerateSpace = () => {
+    clearSpaceTextOverride(propertyId);
+    setSpaceDirty(false);
+    setSpaceText(buildSpaceDescription(config));
   };
 
   const handlePushSpace = useCallback(async () => {
@@ -458,23 +483,35 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
               Edit below, then push to update the Space field in Guesty so guests see the bedroom names you've set.
             </div>
           </div>
-          <button
-            onClick={handlePushSpace}
-            disabled={!guestyListingId || pushingSpace}
-            style={{
-              ...inputStyle, marginLeft: "auto", cursor: guestyListingId ? "pointer" : "not-allowed",
-              background: pushingSpace ? "#94a3b8" : "#4f46e5", color: "#fff",
-              borderColor: "transparent", fontWeight: 600, whiteSpace: "nowrap",
-            }}
-            data-testid="btn-push-space"
-            title={guestyListingId ? "Push this text to the Space field in Guesty" : "Select a Guesty listing first"}
-          >
-            {pushingSpace ? "Pushing…" : "↑ Push Space to Guesty"}
-          </button>
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            {spaceDirty && (
+              <button
+                onClick={handleRegenerateSpace}
+                style={{ ...inputStyle, cursor: "pointer", color: "#4f46e5", whiteSpace: "nowrap" }}
+                data-testid="btn-regenerate-space"
+                title="Discard your manual edits and rebuild this text from the bedding config above"
+              >
+                ↻ Regenerate from bedding
+              </button>
+            )}
+            <button
+              onClick={handlePushSpace}
+              disabled={!guestyListingId || pushingSpace}
+              style={{
+                ...inputStyle, cursor: guestyListingId ? "pointer" : "not-allowed",
+                background: pushingSpace ? "#94a3b8" : "#4f46e5", color: "#fff",
+                borderColor: "transparent", fontWeight: 600, whiteSpace: "nowrap",
+              }}
+              data-testid="btn-push-space"
+              title={guestyListingId ? "Push this text to the Space field in Guesty" : "Select a Guesty listing first"}
+            >
+              {pushingSpace ? "Pushing…" : "↑ Push Space to Guesty"}
+            </button>
+          </div>
         </div>
         <textarea
           value={spaceText}
-          onChange={e => setSpaceText(e.target.value)}
+          onChange={e => handleSpaceTextEdit(e.target.value)}
           rows={Math.min(20, spaceText.split("\n").length + 2)}
           style={{
             width: "100%", padding: "8px 10px", fontSize: 12,
@@ -486,7 +523,9 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
           placeholder="Space description will be generated from your bedding configuration..."
         />
         <div style={{ fontSize: 10, color: "#6366f1", marginTop: 4 }}>
-          Auto-regenerated from bedding config on each edit. You can freely edit this text before pushing.
+          {spaceDirty
+            ? "Manually edited — auto-regeneration is paused and your text is saved locally. Use ↻ Regenerate from bedding to rebuild it from the config above."
+            : "Auto-regenerates as you edit the bedding config above. Editing this text pauses auto-regeneration and keeps your version."}
         </div>
       </div>
 
