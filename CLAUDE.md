@@ -70,6 +70,38 @@ Before making any changes:
   Could NOT live-smoke the Replicate/Guesty legs (no keys) — post-deploy: re-push any gallery; expect
   large photos to push in seconds (no ESRGAN wait) and small ones to land noticeably sharper.
 
+- 2026-07-11 (Photos tab: "🧹 Scan photos & remove duplicates" — operator-confirmed dedupe with undo):
+  Operator: photo pulls leave "a lot of duplicated photos or photos of the same area or the same tree
+  but a different angle" — wanted a Photos-tab button that scans all photos and deletes extras, with
+  safeguards. SHIPPED (`claude/photo-dedup-scanner-wimfjv`): (1) pure `shared/photo-dedupe-logic.ts`
+  (49 tests, in the npm chain) — within-folder union-find clustering over TWO merged signals: dHash
+  pairs at `NEAR_DUPLICATE_DISTANCE=10` (keyless; ≤5 = "exact"; env `PHOTO_DEDUPE_HASH_DISTANCE`) +
+  high-confidence Claude-vision same-scene groups (medium-confidence DISCARDED; a vision edge is
+  dropped on category mismatch or differing `bedroomClusterId` — two distinct bedrooms can never
+  fold; only an exact-hash dupe bridges categories); deterministic keeper pick (human-touched >
+  manual sort_order > gallery position > file size); `validateDedupeSelection` = the apply-time
+  guard. (2) `server/photo-dedupe.ts` — reuses stored `photo_labels.perceptual_hash` (computes +
+  backfills missing), ONE downscaled-image Sonnet call per folder (`PHOTO_DEDUPE_MODEL`, cap
+  `PHOTO_DEDUPE_VISION_CAP=60`, kill `PHOTO_DEDUPE_VISION_DISABLED=1`), FAIL-SOFT to hash-only (no
+  key → scan still finds exact/near copies); proposals stored in-memory 30 min for apply validation.
+  (3) routes: POST /api/builder/photo-dedupe-scan (client-driven groups from the rendered photos
+  array — works for static/drafts/single listings, same posture as photo-community-check),
+  /photo-dedupe-apply (validates vs the STORED scan: keep-one-per-group, never empty a folder, 410
+  on expired scan → client says rescan), /photo-dedupe-restore (undo). LOAD-BEARING: removal is the
+  EXISTING `photo_labels.hidden` soft-delete — files are NEVER unlinked (test-locked), which is what
+  makes "↺ Undo removal" a true undo; and the scan NEVER auto-applies (Load-Bearing #4 forbids
+  automatic photo dropping — the thumbnail review + confirm step is the safeguard). UI: amber button
+  beside "🔎 Check photo community"; groups render thumbnails with green keep / red remove chips
+  (extras pre-checked), warnings when a folder would drop below 3 visible, confirm dialog, then a
+  green applied state with Undo. Verified: photo-dedupe 49/0, full `npm test` exit 0, build clean
+  (bundle-grepped), `npm run check` 338 = baseline (stash A/B; 10 new TS2802/TS7006 fixed via
+  Array.from), engine exercised against REAL files on disk (byte-dupe + recompressed near-dupe
+  grouped, distinct photo untouched, guards enforced), UI verified on the BUILT bundle (static SPA
+  server + mocked endpoints, Playwright: scan → groups → keep-one guard → confirm → applied → undo).
+  Could NOT live-smoke the vision leg (no ANTHROPIC key in session) — post-deploy: open any builder
+  Photos tab, click "🧹 Scan photos & remove duplicates"; expect same-scene groups (purple "same
+  scene (AI)" chips) alongside the hash-dupe groups.
+
 - 2026-07-10 (unit-builder Descriptions tab overhaul: dedupe + real facts + placeholder push guard +
   editable fields + "Regenerate descriptions" button): Operator asked to evaluate how the Descriptions
   tab builds copy, implement every improvement found, and add a regenerate button. SHIPPED
