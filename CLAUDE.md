@@ -43,6 +43,34 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-11 (dashboard "Audit" column — Unit Audit Sweep, PR 1 of 3, VERIFY-ONLY): Operator asked for
+  a one-click full-unit audit tool (AI descriptions, AI amenities, photos-match-community + enough
+  bedroom photos else replace source/unit, AI collage, layout, pricing — per-stage UI progress +
+  failures + a dashboard column; "every data aspect perfect"); plan confirmed, then "Please go".
+  SHIPPED (`claude/unit-audit-sweep-tool-79apae`): NEW `shared/unit-audit-sweep-logic.ts` (10-stage
+  vocabulary, job store `unit_audit_sweeps.v1` + per-property receipts `unit_audit_reports.v1`,
+  resume rules, verdict roll-up, `unitAuditBadge`) + `server/unit-audit-sweep.ts` (orchestrator
+  modeled on auto-replace-jobs: mutateStore promise-tail, boot watchdog `UNIT_AUDIT_RESUME_DISABLED`,
+  cancel, per-stage timeouts) + `/api/unit-audit*` routes + `GET /api/dashboard/unit-audit-status` +
+  home.tsx "Audit" column (after Comm QA; 21 columns now — empty-state colSpan bumped) +
+  `client/src/components/unit-audit-dialog.tsx` (live checklist / receipt, Run/Re-run/Cancel).
+  LOAD-BEARING (see AGENTS.md "Unit Audit Sweep"): (1) NOT the preflight "Full unit audit" (that's
+  the OTA platform check) — never alias; (2) every stage REUSES the existing engine (photo groups via
+  buildPhotoCommunityCheckRequestForProperty, dedupe scanForDuplicatePhotos, community check via
+  loopback POST photo-community-check {propertyId} so Comm QA stays in sync, OTA deep scan w/ 24h
+  fresh-row reuse `AUDIT_OTA_FRESH_HOURS`/`AUDIT_OTA_SCAN=0`, shared placeholder/license detectors,
+  computeMarketRateMatchConfirmation) — source-guarded; (3) stage verdict `error` ≠ pass ≠ failed —
+  an unverifiable check can never green the audit; (4) stage results append on COMPLETION only (the
+  resume seam). PR 2 = auto-fix chaining (dedupe apply, regenerate+push, amenity push, collage,
+  bedding push, pricing refresh); PR 3 = photo fix ladder (re-scrape → find-new → replace unit) +
+  bulk "Audit selected" queue. Verified: unit-audit-sweep 51/0 (npm chain), full `npm test` exit 0,
+  build clean, `npm run check` 338 = baseline (0 new), UI on the BUILT bundle (static SPA server +
+  Playwright, all /api/* mocked: pass/attention/running/never badges, receipt dialog w/ review chips
+  + expandable findings, Run POSTs propertyId → live checklist, running badge re-attaches). Could NOT
+  live-run a sweep (no DB/keys in session) — post-deploy: click any Audit badge → "Run audit sweep";
+  expect the 10-stage checklist to walk to a receipt in ~5-15 min (community + OTA legs are the long
+  stages) and the column badge to stamp the verdict.
+
 - 2026-07-11 (dashboard: sort by the "G" Listed-on-Guesty column): Operator asked to sort the
   dashboard by the Guesty-connected column without disturbing listing data or column widths.
   SHIPPED (`claude/dashboard-column-sorting-46df81`): `SortField` gained `"guestyListed"`; the
