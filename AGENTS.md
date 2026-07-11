@@ -1824,6 +1824,43 @@ folder for "same scene, different angle" groups (downscaled images, cap
    so it works for static props, negative-id drafts, and single listings.
    Don't refactor the endpoint to take just a propertyId.
 
+### AI cover collage (Load-Bearing, 2026-07-11)
+
+The Photos-tab "Make Cover Collage" button is ONE-CLICK AI: the client ships
+its VISIBLE photos to `POST /api/builder/auto-cover-collage`, Claude vision
+picks the pair (engine `server/cover-collage.ts`, pure decisions in
+`shared/cover-collage-logic.ts`, locked by `tests/cover-collage-logic.test.ts`),
+sharp composes the 1600×800 2-up, the collage is pushed to Guesty as the pinned
+cover, and a copy is saved in-system.
+
+1. **Vision is FAIL-SOFT.** No ANTHROPIC key, `COVER_COLLAGE_VISION_DISABLED=1`,
+   a vision error, or an unusable reply (out-of-range / same photo twice —
+   `parseCollageVisionPick` rejects) degrades to `heuristicCollagePick`, the
+   verbatim caption-scoring port of the old client picker. The button must
+   always produce a collage when >=2 local photos exist; the response `method`
+   field reports which path ran and the UI renders it honestly.
+2. **Both collage endpoints share ONE Guesty tail** —
+   `pushCoverCollageToGuesty` in routes.ts (ImgBB host → PUT pictures with the
+   collage first, previous "Cover Collage"-captioned picture dropped). Don't
+   re-inline a copy on either endpoint; the manual picker → client-canvas →
+   `/api/builder/upload-collage` flow stays byte-compatible ("pick manually"
+   in the banner).
+3. **In-system saves are best-effort and NEVER unwind a successful Guesty
+   push**: bytes at `client/public/photos/cover-collages/<listingId>.jpg`
+   (inside the photos root = on the Railway volume) + a record in
+   `app_settings` `cover_collages.v1` (picks/method/reasoning/URL, newest 200).
+   The `cover-collages` folder holds synthetic composites, not gallery photos —
+   folder sweeps that readdir the photos root must SKIP it (relabel-all-photos
+   already does, test-locked). Scanners/dedupe/community checks never see it
+   because they enumerate configured/client-driven folders only.
+4. **Candidates are client-driven VISIBLE photos** (PhotoCurator's
+   `selectableCollagePhotos` — hidden/soft-deleted photos never reach the
+   pick), same posture as the community/dedupe checks, so drafts and single
+   listings work. Don't refactor the endpoint to take just a propertyId.
+5. **Panel ESRGAN gate is SHORT-side** (`collageEsrganScale`): cover-cropping
+   into the 800px square scales by min(w,h), unlike the push spec's long-side
+   gate. Only genuinely sub-panel photos hit Replicate.
+
 ### Availability & pricing
 
 10. **Auto-scan scheduler flips ON when the tab loads for any
@@ -4318,3 +4355,4 @@ Welcome. When in doubt, ask the human.
 2026-07-11 · Jamie (preflight Platform Check screenshot, Kihei 2-unit: red "Full unit audit — some checks didn't respond · Checked 2 units, but 1 OTA lookup didn't respond (API error)"): "Investigate the full unit audit search and see where it can be improved and/or fix this error." · DIAGNOSED + shipped (`claude/unit-audit-search-30645c`) · TWO failure bugs in `checkPlatformStrict` (`GET /api/preflight/platform-check`, routes.ts): (1) the whole query loop sat in ONE try/catch, so a single thrown 12s SearchAPI timeout on ANY query abandoned the platform's REMAINING queries and errored the whole platform with zero retries — the exact "1 OTA lookup didn't respond" banner, with the OPERATOR as the retry loop ("Re-run to retry them"); (2) worse and silent: a non-ok SearchAPI response (429 quota / 5xx) just `continue`d, so when EVERY query failed that way the loop fell through to `notListedVerdict()` — a false decisive "No matching listing found" with ZERO evidence (the false-Clear direction #721's guards exist to prevent; quota exhaustion would have greened the whole audit). FIX, three layers: (a) route — per-query isolation + `PREFLIGHT_QUERY_ATTEMPTS`=2 bounded retry (600ms backoff; quota/rate-limit responses fail FAST via `isSearchApiQuotaError`, retrying an exhausted quota just burns budget), and "not-listed" is now only returned when EVERY query actually completed — anything less is an "error" verdict with a specific reason (quota / "Search timed out" / HTTP status / "N of M searches didn't respond"), decided by pure `preflightPlatformFailureVerdict`; (b) audit job (`runPreflightAuditJob`, preflight-background-jobs.ts) — ONE automatic retry pass (`AUDIT_UNIT_RETRY_PASSES`=1, 2s delay) re-runs units that came back with any platform "error" BEFORE the receipt is computed; the merge (`mergeRetriedAuditUnitResult`) is ADDITIVE-ONLY — a retry can heal an "error" slot but never flips a decided confirmed/not-listed from the first pass (SearchAPI is non-deterministic; re-running identical queries must not toggle a verdict); (c) the receipt now tallies FINAL post-retry results via pure `tallyPreflightAuditOutcome` (replaces the incremental first-pass tally; an all-platforms-errored unit counts as "couldn't be checked"). All pure pieces live in NEW `shared/preflight-audit-outcome.ts`; `tests/preflight-audit-outcome.test.ts` (24, in the npm chain) locks the verdict/merge/tally + source-guards the routes gating ("preflightPlatformFailureVerdict(summary) ?? notListedVerdict()", no bare `if (!resp.ok) continue;` inside the strict checker) and the job wiring. Worst-case route time stays inside the job's 120s per-unit loopback timeout (2 queries × 2 attempts × 12s ≈ 50s, platforms parallel). Client untouched — improved error detections and the healed receipts flow through the existing polling contract.
 
 2026-07-11 · Jamie (screenshot of a Kamaole Beach Club check report): "When a photo is flagged in either yellow and/or red please have in the UI in the photos tab like show me exactly which photo it is referring to so I can then decide like yes delete or no keep." · SHIPPED (`claude/photo-flag-indicators-6527b1`) · The shared `PhotoCommunityCheckReport` (both the Photos tab and preflight — Load-Bearing #45 shared-report rule, edited in the ONE component) now renders, under every yellow (unconfirmed) / red (mismatch) per-photo vote, every outlier/junk flag, and both sides of every cross-folder duplicate, a flagged-photo card: the actual thumbnail (local `/photos/<folder>/<filename>`; click = full size), the folder/filename, and inline "🗑 Remove photo" / "✓ Keep" buttons. Remove = the existing `photo_labels.hidden` soft-delete via `PUT /api/photo-labels/:folder/:filename` (insert-on-miss, files never unlinked) behind a `window.confirm`, with "↺ Undo" (a failed undo stays "removed" so the button survives). Green rows deliberately stay compact (no thumbnails). Flag ids (e.g. "C6") resolve to photos through the group's per-photo verdicts, which already carried folder+filename server-side — no engine change. Photos tab passes `onPhotoOverridesChanged` through so a removal refreshes the gallery. Verified: photo-community-check suite 50/0 (9 new assertions), full `npm test` exit 0, build clean (bundle-grepped), `npm run check` 338 = baseline, UI exercised on the BUILT bundle (static SPA server + mocked endpoints, Playwright: yellow/red cards render with correct thumbnails, green renders none, Keep marks, Remove confirms + PUTs hidden:true, Undo PUTs hidden:false, cancelled confirm PUTs nothing). See the new Load-Bearing #45 "Flagged-photo review" bullet.
+2026-07-11 · Jamie (Photos-tab screenshot): "For the create the collage button, please change this so it uses claude vision and finds the two best photos and creates a collage and then pushes it to Guesty and saves it within the system … Research what best photos are usually used for a vacation rental collage" · ACCEPTED · Researched VR cover CRO (Vrbo photo guidelines, host guides, eye-tracking left-bias studies): strongest pairing = destination shot (ocean/lanai/pool) LEFT + bright living space RIGHT; ban bathrooms/floor plans/dark/portrait/close-up/people. Shipped `POST /api/builder/auto-cover-collage`: client sends its VISIBLE photos (hidden never reach the pick) → ONE batched Claude vision call (`COVER_COLLAGE_MODEL` default claude-sonnet-4-6, cap `COVER_COLLAGE_VISION_CAP=60`, kill `COVER_COLLAGE_VISION_DISABLED=1`) picks the pair with a one-line reasoning → sharp composes the same 1600×800 2-up the manual canvas drew → shared `pushCoverCollageToGuesty` tail (extracted from upload-collage, no drift) pins it as the Guesty cover → saved in-system (photos-volume copy under cover-collages/ + `app_settings` cover_collages.v1 record), saves best-effort/reported, never unwinding the push. Vision FAIL-SOFT to the old caption heuristic (now in shared/cover-collage-logic.ts, self-pair guarded). Banner button is one-click AI; "pick manually" keeps the legacy picker→canvas flow. Panel ESRGAN gate is SHORT-side (square cover-crop math), so only sub-800px photos hit Replicate. See the "AI cover collage" Load-Bearing subsection.

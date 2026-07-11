@@ -172,6 +172,8 @@ import { runPropertyRevenueRefresh, getPropertyRevenueStatus } from "./property-
 import { runMarketRateScan, getMarketRateScanStatus } from "./market-rate-scheduler";
 import { validateAndFixPhoto, TARGET_WIDTH as PUSH_PHOTO_TARGET_WIDTH } from "./photo-validator";
 import { esrganScaleForPhoto } from "@shared/photo-upscale-plan";
+import { generateAutoCoverCollage, type AutoCoverCollageResult } from "./cover-collage";
+import { COVER_COLLAGE_DISK_FOLDER, COVER_COLLAGE_SETTING_KEY, type CollageCandidate } from "@shared/cover-collage-logic";
 import { resolveCuratedCommunityDescription } from "./community-descriptions";
 import { filterNonRentalUnitPhotos, UNIT_PHOTO_VISION_VERSION } from "./unit-photo-vision";
 import {
@@ -23142,35 +23144,37 @@ Requirements:
   //   (b) a fresh GET from Guesty — fallback for callers that don't
   //       track their last push (e.g. user returns to the tab later and
   //       regenerates the collage without re-pushing).
-  app.post("/api/builder/upload-collage", async (req, res) => {
+  // Shared tail for both collage endpoints: ImgBB-host the collage bytes,
+  // then PUT Guesty's pictures with the collage pinned first (any previous
+  // "Cover Collage" picture dropped so regeneration doesn't accumulate).
+  // Returns a discriminated result instead of throwing so both callers map
+  // failures to the exact HTTP statuses the manual endpoint always used.
+  async function pushCoverCollageToGuesty(
+    listingId: string,
+    rawBase64: string,
+    existingPhotos?: { original: string; caption: string }[],
+  ): Promise<
+    | { ok: true; collageUrl: string; totalPhotos: number }
+    | { ok: false; status: number; body: Record<string, unknown> }
+  > {
     const imgbbKey = process.env.IMGBB_API_KEY;
-    if (!imgbbKey) return res.status(500).json({ error: "IMGBB_API_KEY not configured" });
-
-    const { base64, listingId, existingPhotos } = req.body as {
-      base64: string;
-      listingId: string;
-      existingPhotos?: { original: string; caption: string }[];
-    };
-    if (!base64 || !listingId) return res.status(400).json({ error: "base64 and listingId required" });
-
-    // Strip data URL prefix if present
-    const raw = base64.replace(/^data:image\/[a-z]+;base64,/, "");
+    if (!imgbbKey) return { ok: false, status: 500, body: { error: "IMGBB_API_KEY not configured" } };
 
     // Upload to ImgBB
     let collageUrl: string;
     try {
       const form = new FormData();
-      form.append("image", raw);
+      form.append("image", rawBase64);
       const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, { method: "POST", body: form });
       if (!imgbbResp.ok) {
         const t = await imgbbResp.text();
-        return res.status(502).json({ error: "ImgBB upload failed", detail: t.slice(0, 200) });
+        return { ok: false, status: 502, body: { error: "ImgBB upload failed", detail: t.slice(0, 200) } };
       }
       const imgbbData = await imgbbResp.json() as any;
       collageUrl = imgbbData?.data?.url;
-      if (!collageUrl) return res.status(502).json({ error: "ImgBB returned no URL" });
+      if (!collageUrl) return { ok: false, status: 502, body: { error: "ImgBB returned no URL" } };
     } catch (e: any) {
-      return res.status(500).json({ error: "ImgBB error", message: e.message });
+      return { ok: false, status: 500, body: { error: "ImgBB error", message: e.message } };
     }
 
     try {
@@ -23197,10 +23201,143 @@ Requirements:
       const updated = [{ original: collageUrl, caption: "Cover Collage" }, ...withoutOldCollage];
       await guestyRequest("PUT", `/listings/${listingId}`, { pictures: updated });
 
-      res.json({ success: true, collageUrl, totalPhotos: updated.length });
+      return { ok: true, collageUrl, totalPhotos: updated.length };
     } catch (e: any) {
-      res.status(500).json({ error: "Guesty update failed", message: e.message });
+      return { ok: false, status: 500, body: { error: "Guesty update failed", message: e.message } };
     }
+  }
+
+  app.post("/api/builder/upload-collage", async (req, res) => {
+    const { base64, listingId, existingPhotos } = req.body as {
+      base64: string;
+      listingId: string;
+      existingPhotos?: { original: string; caption: string }[];
+    };
+    if (!base64 || !listingId) return res.status(400).json({ error: "base64 and listingId required" });
+
+    // Strip data URL prefix if present
+    const raw = base64.replace(/^data:image\/[a-z]+;base64,/, "");
+    const result = await pushCoverCollageToGuesty(listingId, raw, existingPhotos);
+    if (!result.ok) return res.status(result.status).json(result.body);
+    res.json({ success: true, collageUrl: result.collageUrl, totalPhotos: result.totalPhotos });
+  });
+
+  // ========== AI COVER COLLAGE ==========
+  // POST /api/builder/auto-cover-collage
+  // Accepts:
+  //   { listingId: string,
+  //     photos: { url; caption?; source? }[],   // the tab's VISIBLE gallery,
+  //                                             // client-driven like the
+  //                                             // community/dedupe checks
+  //     existingPhotos?: { original; caption }[] }  // race-free pictures list
+  //
+  // One click end-to-end: Claude vision picks the two best photos (LEFT =
+  // destination shot, RIGHT = living space — see the prompt in
+  // shared/cover-collage-logic.ts; caption-heuristic fallback when vision is
+  // unavailable), sharp composes the 1600×800 2-up, the collage is pushed to
+  // Guesty as the pinned cover, and a copy is SAVED IN-SYSTEM:
+  //   - bytes at client/public/photos/cover-collages/<listingId>.jpg (on the
+  //     Railway volume, served at /photos/cover-collages/<listingId>.jpg)
+  //   - a record in app_settings under cover_collages.v1 (picks + method +
+  //     reasoning + URL), newest 200 kept.
+  // Both saves are best-effort and reported honestly in the response —
+  // a failed save never unwinds a successful Guesty push.
+  app.post("/api/builder/auto-cover-collage", async (req, res) => {
+    const { listingId, photos, existingPhotos } = req.body as {
+      listingId: string;
+      photos: Array<{ url: string; caption?: string; source?: string }>;
+      existingPhotos?: { original: string; caption: string }[];
+    };
+    if (!listingId || typeof listingId !== "string") {
+      return res.status(400).json({ error: "listingId required" });
+    }
+    if (!Array.isArray(photos) || photos.length < 2) {
+      return res.status(400).json({ error: "photos array with at least 2 entries required" });
+    }
+    // Fail fast before burning a vision call — the push tail needs ImgBB.
+    if (!process.env.IMGBB_API_KEY) {
+      return res.status(500).json({ error: "IMGBB_API_KEY not configured" });
+    }
+
+    const candidates: CollageCandidate[] = photos
+      .filter((p) => p && typeof p.url === "string" && p.url)
+      .map((p) => ({
+        url: String(p.url),
+        caption: typeof p.caption === "string" ? p.caption : null,
+        source: typeof p.source === "string" ? p.source : null,
+      }));
+
+    let collage: AutoCoverCollageResult;
+    try {
+      collage = await generateAutoCoverCollage({
+        photos: candidates,
+        upscale: (buf, mimeType, scale) => upscaleWithReplicateKw(buf, mimeType, scale),
+      });
+    } catch (e: any) {
+      return res.status(422).json({ error: e?.message ?? "Could not build the collage" });
+    }
+
+    const pushed = await pushCoverCollageToGuesty(
+      listingId,
+      collage.buffer.toString("base64"),
+      existingPhotos,
+    );
+    if (!pushed.ok) return res.status(pushed.status).json(pushed.body);
+
+    // Save in-system (best-effort, reported): disk copy on the photos volume…
+    let savedPath: string | null = null;
+    try {
+      const dir = path.join(process.cwd(), "client/public/photos", COVER_COLLAGE_DISK_FOLDER);
+      await fs.promises.mkdir(dir, { recursive: true });
+      const file = `${listingId.replace(/[^a-zA-Z0-9_-]+/g, "-")}.jpg`;
+      await fs.promises.writeFile(path.join(dir, file), collage.buffer);
+      savedPath = `/photos/${COVER_COLLAGE_DISK_FOLDER}/${file}`;
+    } catch (e: any) {
+      console.warn(`[cover-collage] disk save failed (Guesty push already succeeded): ${e?.message ?? e}`);
+    }
+    // …and a durable record of what was picked and why.
+    let savedRecord = false;
+    try {
+      const raw = await storage.getSetting(COVER_COLLAGE_SETTING_KEY);
+      let map: Record<string, any> = {};
+      try { map = raw ? JSON.parse(raw) : {}; } catch { map = {}; }
+      map[listingId] = {
+        collageUrl: pushed.collageUrl,
+        localPath: savedPath,
+        left: collage.left,
+        right: collage.right,
+        method: collage.method,
+        reasoning: collage.reasoning,
+        model: collage.model,
+        createdAt: new Date().toISOString(),
+      };
+      const entries = Object.entries(map).sort((a, b) =>
+        String((b[1] as any)?.createdAt ?? "").localeCompare(String((a[1] as any)?.createdAt ?? "")),
+      );
+      await storage.setSetting(COVER_COLLAGE_SETTING_KEY, JSON.stringify(Object.fromEntries(entries.slice(0, 200))));
+      savedRecord = true;
+    } catch (e: any) {
+      console.warn(`[cover-collage] record save failed (Guesty push already succeeded): ${e?.message ?? e}`);
+    }
+
+    console.log(
+      `[cover-collage] ✓ ${listingId}: ${collage.method} pick ` +
+      `(left="${collage.left.caption ?? collage.left.url}", right="${collage.right.caption ?? collage.right.url}") ` +
+      `→ ${pushed.collageUrl}${savedPath ? ` · saved ${savedPath}` : ""}`,
+    );
+
+    res.json({
+      success: true,
+      collageUrl: pushed.collageUrl,
+      totalPhotos: pushed.totalPhotos,
+      picks: { left: collage.left, right: collage.right },
+      method: collage.method,
+      reasoning: collage.reasoning,
+      model: collage.model,
+      candidateCount: collage.candidateCount,
+      savedPath,
+      savedRecord,
+    });
   });
 
   // POST /api/builder/resolve-license-requirements — returns mapped jurisdiction
@@ -32193,7 +32330,9 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       const all = await fs.promises.readdir(photosRoot);
-      const folders = all.filter((f) => !onlyFolder || f === onlyFolder);
+      // cover-collages holds the saved AI cover composites (synthetic 2-up
+      // images, not gallery photos) — labeling them would pollute photo_labels.
+      const folders = all.filter((f) => f !== COVER_COLLAGE_DISK_FOLDER && (!onlyFolder || f === onlyFolder));
 
       // For skip-existing mode, build a set of (folder|filename) pairs
       // already labeled so we can drop them from the work queue.

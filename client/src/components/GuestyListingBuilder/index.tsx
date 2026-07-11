@@ -2131,12 +2131,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setUpscaleError(null);
   }, []);
 
-  // ── Cover collage: operator selects two photos → canvas → ImgBB → Guesty ──
-  type CollagePhase = "idle" | "upscaling" | "generating" | "uploading" | "done" | "error";
+  // ── Cover collage ──────────────────────────────────────────────────────
+  // Primary path (one click): Claude vision picks the two best photos server-
+  // side, composes + pushes + saves — POST /api/builder/auto-cover-collage
+  // ("picking" phase). Manual fallback ("pick manually" in the banner): the
+  // legacy two-photo picker → client canvas → upload-collage, unchanged.
+  type CollagePhase = "idle" | "picking" | "upscaling" | "generating" | "uploading" | "done" | "error";
   const [collagePhase, setCollagePhase] = useState<CollagePhase>("idle");
   const [collageError, setCollageError] = useState<string | null>(null);
   const [collagePreviewUrl, setCollagePreviewUrl] = useState<string | null>(null);
   const [collagePicks, setCollagePicks] = useState<{ community: string; patio: string } | null>(null);
+  // Provenance of the last AI run: how the pair was chosen (vision vs the
+  // caption heuristic the server degrades to) + the model's one-line why.
+  const [collageMeta, setCollageMeta] = useState<{ method: string; reasoning: string | null } | null>(null);
 
   // Community scene: resort amenities, grounds, aerial shots. These are
   // the "sell the destination" photos — ocean views, pool complexes,
@@ -2213,6 +2220,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setCollageError(null);
     setCollagePreviewUrl(null);
     setCollagePicks(null);
+    setCollageMeta(null);
 
     const picks = selection
       ? {
@@ -2317,6 +2325,58 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const result = await resp.json() as any;
       setGuestyPhotoCount(result.totalPhotos);
       if (result.collageUrl) setGuestyCoverCollageUrl(result.collageUrl);
+      setCollagePhase("done");
+    } catch (e: any) {
+      setCollageError(e.message); setCollagePhase("error");
+    }
+  }, [selectedId, lastPushedPictures]);
+
+  // One-click AI collage: ship the tab's VISIBLE photos to the server, which
+  // has Claude vision pick the pair (destination shot LEFT, living space
+  // RIGHT), composes the 2-up, pushes it to Guesty as the pinned cover, and
+  // saves a copy in-system. Candidates come from PhotoCurator so hidden
+  // (soft-deleted) photos never reach the pick.
+  const generateAutoCoverCollage = useCallback(async (
+    candidates: Array<{ url: string; caption?: string; source?: string }>,
+  ) => {
+    if (!selectedId) return;
+    setCollagePhase("picking");
+    setCollageError(null);
+    setCollagePreviewUrl(null);
+    setCollagePicks(null);
+    setCollageMeta(null);
+    try {
+      const resp = await fetch("/api/builder/auto-cover-collage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          listingId: selectedId,
+          photos: candidates,
+          // Race-free pictures list when we just pushed (same contract as the
+          // manual upload-collage call).
+          existingPhotos: lastPushedPictures.length > 0 ? lastPushedPictures : undefined,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({})) as any;
+        throw new Error(err.error || `Server error ${resp.status}`);
+      }
+      const result = await resp.json() as any;
+      const pickLabel = (p: any, fallback: string) =>
+        (typeof p?.caption === "string" && p.caption) || (typeof p?.url === "string" && p.url.split("/").pop()) || fallback;
+      setCollagePicks({
+        community: pickLabel(result.picks?.left, "photo 1"),
+        patio: pickLabel(result.picks?.right, "photo 2"),
+      });
+      setCollageMeta({
+        method: result.method === "vision" ? "vision" : "heuristic",
+        reasoning: typeof result.reasoning === "string" ? result.reasoning : null,
+      });
+      setGuestyPhotoCount(result.totalPhotos);
+      if (result.collageUrl) {
+        setGuestyCoverCollageUrl(result.collageUrl);
+        setCollagePreviewUrl(result.collageUrl);
+      }
       setCollagePhase("done");
     } catch (e: any) {
       setCollageError(e.message); setCollagePhase("error");
@@ -8520,10 +8580,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                         )}
 
                         {/* Curation grid — simple tiles in Zillow's order,
-                            with a cover-collage banner at the top that lets
-                            the operator choose two photos, stitches them into
-                            a single 2-up cover, and sets it as the Guesty
-                            listing cover. */}
+                            with a cover-collage banner at the top. One click
+                            has Claude vision pick the two best photos, stitch
+                            the 2-up cover, set it as the Guesty listing cover,
+                            and save it in-system; "pick manually" keeps the
+                            legacy two-photo picker → canvas flow. */}
                         <PhotoCurator
                           photos={photos}
                           sourceUrlsByFolder={sourceUrlsByFolder}
@@ -8535,6 +8596,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           coverCollageDisabledReason={!selectedId ? "Select a Guesty listing above to push the collage as cover." : null}
                           coverCollageCurrentUrl={guestyCoverCollageUrl}
                           onRequestCoverCollage={(selection) => { setCollagePhase("idle"); generateCoverCollage(photos, selection); }}
+                          onRequestAutoCoverCollage={(candidates) => { generateAutoCoverCollage(candidates); }}
                           coverCollageStatus={{
                             phase: collagePhase === "upscaling" ? "generating" : collagePhase,
                             error: collageError,
@@ -8542,6 +8604,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             picks: collagePicks
                               ? { community: collagePicks.community, patio: collagePicks.patio }
                               : null,
+                            method: collageMeta?.method ?? null,
+                            reasoning: collageMeta?.reasoning ?? null,
                           }}
                         />
 
