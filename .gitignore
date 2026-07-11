@@ -6,3 +6,10 @@ vite.config.ts.*
 *.tar.gz
 tests/*.debug.png
 test-artifacts/
+
+# Never commit real secrets. .env holds Railway/local API keys; only the
+# example templates are tracked.
+.env
+.env.*
+!.env.example
+!.env.remote-sidecar.example

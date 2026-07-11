@@ -160,7 +160,7 @@ import {
 import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts, setAutoSendConfig, runAutoSendQueue } from "./auto-reply";
-import { loopbackRequestHeaders, resolvePortalSession } from "./auth";
+import { loopbackRequestHeaders, resolvePortalSession, isLoopback } from "./auth";
 import { registerAssistantRoutes } from "./assistant/routes";
 import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar-automation";
 import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel, receiptNeedsAttention, refundSmsNeedsAttention } from "@shared/receipt-message";
@@ -9005,7 +9005,16 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/guesty-token", async (_req, res) => {
+  app.post("/api/guesty-token", async (req, res) => {
+    // 2026-07-11 security fix: this endpoint returns the raw Guesty bearer
+    // token (full PMS access — all reservations, guest PII, financials). It
+    // must NEVER be handed to a browser: any XSS in the SPA could exfiltrate
+    // it, and under a misconfigured (unset ADMIN_SECRET) gate it would be
+    // fully anonymous. The client uses /api/guesty-proxy/* instead and does
+    // NOT call this route. Restrict to in-process loopback self-calls only.
+    if (!isLoopback(req)) {
+      return res.status(403).json({ error: "Forbidden", message: "This endpoint is restricted to server-side use." });
+    }
     try {
       const token = await getGuestyToken();
       const status = await getGuestyTokenStatus();
@@ -27062,15 +27071,26 @@ Requirements:
   //      POST /login. They don't carry X-Admin-Secret. The legacy check
   //      401'd them too.
   //
-  // No-op now. The function name and call sites are kept as
-  // documentation — they signal "this endpoint requires admin auth"
-  // even though the actual enforcement is upstream. NOTE FOR CODEX:
-  // do NOT restore the old check unless the outer middleware is
-  // simultaneously narrowed to NOT whitelist the sidecar paths AND
-  // the worker is updated to send the header.
+  // 2026-07-11 security fix: the /api/admin/vrbo-sidecar/* and
+  // /api/admin/buyin-agent/* prefixes were REMOVED from the server/auth.ts
+  // public allowlist, so requireAuth now authenticates every request to these
+  // routes (workers via X-Admin-Secret, operators via the admin cookie,
+  // loopback self-calls, anonymous → 401) — the exact "narrow the middleware
+  // AND have the worker send the header" precondition the old note demanded,
+  // and the workers already send the header. checkAdminSecret is now a real
+  // defense-in-depth backstop: even if the allowlist regresses, a caller that
+  // is not an admin session / loopback / valid X-Admin-Secret is rejected here.
+  // Fail-open only when ADMIN_SECRET is unset (dev); production boot-asserts it
+  // is set (see server/index.ts).
   // ============================================================
-  function checkAdminSecret(_req: Request, _res: Response): boolean {
-    return true;
+  function checkAdminSecret(req: Request, res: Response): boolean {
+    const secret = process.env.ADMIN_SECRET ?? "";
+    if (!secret) return true; // dev / fail-open; prod refuses to boot without it
+    if (isLoopback(req)) return true; // in-process scheduler/self-calls
+    const session = res.locals.portalSession as { role?: string } | undefined;
+    if (session?.role === "admin") return true; // admin cookie or X-Admin-Secret (resolved by requireAuth)
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
   }
 
   app.post("/api/admin/vrbo-sidecar/visual-date-controls", async (req: Request, res: Response) => {

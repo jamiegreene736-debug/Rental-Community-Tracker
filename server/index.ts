@@ -24,6 +24,20 @@ import { requireAuth, loginPageHandler, loginPostHandler, logoutHandler } from "
 import { installSearchApiFetchFallback } from "./searchapi";
 
 installSearchApiFetchFallback();
+
+// 2026-07-11 security fix: fail CLOSED in production. server/auth.ts is a
+// documented no-op when ADMIN_SECRET is unset — convenient for local dev, but
+// in production that means the entire portal (Guesty token, guest PII, inbox
+// send, bookings, pricing) is anonymously reachable as admin. Refuse to boot
+// so a cleared/typo'd/missing env var can never silently open the gate.
+if (process.env.NODE_ENV === "production" && !(process.env.ADMIN_SECRET ?? "").trim()) {
+  console.error(
+    "[fatal] ADMIN_SECRET is not set in production — refusing to start with the auth gate disabled. " +
+      "Set ADMIN_SECRET in the environment (Railway variables) and redeploy.",
+  );
+  process.exit(1);
+}
+
 const app = express();
 const httpServer = createServer(app);
 
