@@ -88,11 +88,22 @@ export type PhotoCuratorProps = {
   coverCollageDisabledReason?: string | null;
   coverCollageCurrentUrl?: string | null;
   onRequestCoverCollage?: (selection: CoverCollageSelection) => void;
+  // One-click AI path: the parent POSTs the candidates to
+  // /api/builder/auto-cover-collage (Claude vision picks the pair, the server
+  // composes + pushes + saves). Candidates = this tab's VISIBLE photos in
+  // gallery order — hidden (soft-deleted) photos are excluded here, the same
+  // pool the manual picker offers. When absent the primary button falls back
+  // to opening the manual picker (legacy behavior).
+  onRequestAutoCoverCollage?: (candidates: PhotoIn[]) => void;
   coverCollageStatus?: {
-    phase: "idle" | "generating" | "uploading" | "done" | "error";
+    phase: "idle" | "picking" | "generating" | "uploading" | "done" | "error";
     error?: string | null;
     preview?: string | null;
     picks?: { community: string; patio: string } | null;
+    /** How the last pair was chosen: "vision" (Claude) or "heuristic"
+     * (caption-score fallback). Null for the manual flow. */
+    method?: string | null;
+    reasoning?: string | null;
   };
   /** Per photo verdict from Check photo community (`folder/filename` key). */
   communityPhotoVerdicts?: Record<string, CommunityPhotoVerdict>;
@@ -115,6 +126,7 @@ export default function PhotoCurator({
   coverCollageDisabledReason,
   coverCollageCurrentUrl,
   onRequestCoverCollage,
+  onRequestAutoCoverCollage,
   coverCollageStatus,
   communityPhotoVerdicts,
   onReorderSection,
@@ -531,19 +543,33 @@ export default function PhotoCurator({
       </div>
 
       {/* Cover collage banner — "sell the destination + sell the space"
-          pairing: best community shot (resort pool, beach, aerial) on the
-          left, best private patio/lanai on the right. Canvas + Guesty
-          upload happens in the parent; this surface just renders the
-          trigger + status. */}
+          pairing. Primary (one click): Claude vision picks the two best
+          photos server-side, composes the 2-up, pushes it to Guesty as the
+          cover, and saves it in-system. "pick manually" keeps the legacy
+          two-photo picker → parent canvas flow. This surface just renders
+          the trigger + status. */}
       {coverCollageEnabled && onRequestCoverCollage && (() => {
         const phase = coverCollageStatus?.phase ?? "idle";
-        const busy = phase === "generating" || phase === "uploading";
+        const busy = phase === "picking" || phase === "generating" || phase === "uploading";
         const gated = !!coverCollageDisabledReason;
         const disabled = busy || gated;
+        const aiEnabled = !!onRequestAutoCoverCollage;
         const buttonText =
           phase === "done" ? "↺ Make New Cover Collage" :
-          busy ? (phase === "uploading" ? "⏳ Uploading to Guesty…" : "⏳ Building collage…") :
+          busy ? (
+            phase === "picking" ? "⏳ Claude is picking the best two photos…" :
+            phase === "uploading" ? "⏳ Uploading to Guesty…" : "⏳ Building collage…"
+          ) :
           "🖼 Make Cover Collage";
+        const startAuto = () => {
+          onRequestAutoCoverCollage?.(
+            selectableCollagePhotos.map((p) => ({ url: p.url, caption: p.caption, source: p.source })),
+          );
+        };
+        const openManualPicker = () => {
+          setCollageSelection([]);
+          setCollagePickerOpen(true);
+        };
         return (
           <div style={{
             display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
@@ -551,10 +577,7 @@ export default function PhotoCurator({
             borderRadius: 6, marginBottom: 14, fontSize: 12,
           }}>
             <button
-              onClick={() => {
-                setCollageSelection([]);
-                setCollagePickerOpen(true);
-              }}
+              onClick={() => { aiEnabled ? startAuto() : openManualPicker(); }}
               disabled={disabled}
               title={gated ? coverCollageDisabledReason! : undefined}
               style={{
@@ -565,8 +588,22 @@ export default function PhotoCurator({
               }}
             >{buttonText}</button>
             <span style={{ color: "#075985" }}>
-              Choose the two photos to stitch into a 2-up cover and set as the Guesty cover photo.
+              {aiEnabled
+                ? "Claude vision picks the two best photos (view + living space), stitches the 2-up cover, sets it as the Guesty cover photo, and saves it in the system."
+                : "Choose the two photos to stitch into a 2-up cover and set as the Guesty cover photo."}
             </span>
+            {aiEnabled && (
+              <button
+                onClick={openManualPicker}
+                disabled={disabled}
+                style={{
+                  padding: "4px 8px", fontSize: 11, fontWeight: 500,
+                  background: "transparent", color: disabled ? "#93c5fd" : "#0369a1",
+                  border: "1px solid #bae6fd", borderRadius: 4,
+                  cursor: disabled ? "not-allowed" : "pointer",
+                }}
+              >pick manually</button>
+            )}
             {gated && (
               <span style={{
                 flexBasis: "100%", color: "#b45309",
@@ -575,10 +612,22 @@ export default function PhotoCurator({
             )}
             {coverCollageStatus?.picks && (
               <div style={{ flexBasis: "100%", fontSize: 11, color: "#0369a1" }}>
-                Selected: <em>{coverCollageStatus.picks.community}</em> &nbsp;+&nbsp; <em>{coverCollageStatus.picks.patio}</em>
+                {coverCollageStatus.method === "vision" ? "🤖 Claude picked: " :
+                 coverCollageStatus.method === "heuristic" ? "Caption-scored (vision unavailable): " :
+                 "Selected: "}
+                <em>{coverCollageStatus.picks.community}</em> &nbsp;+&nbsp; <em>{coverCollageStatus.picks.patio}</em>
+                {coverCollageStatus.reasoning && (
+                  <span style={{ color: "#0c4a6e" }}> — {coverCollageStatus.reasoning}</span>
+                )}
               </div>
             )}
-            {phase === "done" && <span style={{ color: "#16a34a", fontWeight: 600 }}>✓ Set as cover on Guesty</span>}
+            {phase === "done" && (
+              <span style={{ color: "#16a34a", fontWeight: 600 }}>
+                {/* The AI path (method set) also saved a copy in-system; the
+                    manual canvas path only sets the Guesty cover. */}
+                {coverCollageStatus?.method ? "✓ Set as cover on Guesty & saved in system" : "✓ Set as cover on Guesty"}
+              </span>
+            )}
             {phase === "error" && <span style={{ color: "#991b1b" }}>✗ {coverCollageStatus?.error}</span>}
             {coverCollageStatus?.preview && (
               <img

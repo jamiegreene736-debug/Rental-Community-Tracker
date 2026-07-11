@@ -1805,6 +1805,43 @@ folder for "same scene, different angle" groups (downscaled images, cap
    so it works for static props, negative-id drafts, and single listings.
    Don't refactor the endpoint to take just a propertyId.
 
+### AI cover collage (Load-Bearing, 2026-07-11)
+
+The Photos-tab "Make Cover Collage" button is ONE-CLICK AI: the client ships
+its VISIBLE photos to `POST /api/builder/auto-cover-collage`, Claude vision
+picks the pair (engine `server/cover-collage.ts`, pure decisions in
+`shared/cover-collage-logic.ts`, locked by `tests/cover-collage-logic.test.ts`),
+sharp composes the 1600×800 2-up, the collage is pushed to Guesty as the pinned
+cover, and a copy is saved in-system.
+
+1. **Vision is FAIL-SOFT.** No ANTHROPIC key, `COVER_COLLAGE_VISION_DISABLED=1`,
+   a vision error, or an unusable reply (out-of-range / same photo twice —
+   `parseCollageVisionPick` rejects) degrades to `heuristicCollagePick`, the
+   verbatim caption-scoring port of the old client picker. The button must
+   always produce a collage when >=2 local photos exist; the response `method`
+   field reports which path ran and the UI renders it honestly.
+2. **Both collage endpoints share ONE Guesty tail** —
+   `pushCoverCollageToGuesty` in routes.ts (ImgBB host → PUT pictures with the
+   collage first, previous "Cover Collage"-captioned picture dropped). Don't
+   re-inline a copy on either endpoint; the manual picker → client-canvas →
+   `/api/builder/upload-collage` flow stays byte-compatible ("pick manually"
+   in the banner).
+3. **In-system saves are best-effort and NEVER unwind a successful Guesty
+   push**: bytes at `client/public/photos/cover-collages/<listingId>.jpg`
+   (inside the photos root = on the Railway volume) + a record in
+   `app_settings` `cover_collages.v1` (picks/method/reasoning/URL, newest 200).
+   The `cover-collages` folder holds synthetic composites, not gallery photos —
+   folder sweeps that readdir the photos root must SKIP it (relabel-all-photos
+   already does, test-locked). Scanners/dedupe/community checks never see it
+   because they enumerate configured/client-driven folders only.
+4. **Candidates are client-driven VISIBLE photos** (PhotoCurator's
+   `selectableCollagePhotos` — hidden/soft-deleted photos never reach the
+   pick), same posture as the community/dedupe checks, so drafts and single
+   listings work. Don't refactor the endpoint to take just a propertyId.
+5. **Panel ESRGAN gate is SHORT-side** (`collageEsrganScale`): cover-cropping
+   into the 800px square scales by min(w,h), unlike the push spec's long-side
+   gate. Only genuinely sub-panel photos hit Replicate.
+
 ### Availability & pricing
 
 10. **Auto-scan scheduler flips ON when the tab loads for any
@@ -4295,3 +4332,4 @@ Welcome. When in doubt, ask the human.
 2026-07-11 · Jamie: "When photos are pushed to Guesty I think they're like upscaled. Is there anything we can do to improve this?" · ACCEPTED — the push pipeline WAS degrading photos, two ways · DIAGNOSIS: (a) with `upscale:true` (every automated push: guesty-photo-repush after unit swaps, bulk-combo publish) `POST /api/builder/push-photos` ran Real-ESRGAN 2x on EVERY photo regardless of size — a 4032px Zillow original was AI-upscaled to 8064px then immediately Lanczos-downscaled back to the 1920px spec by photo-validator (AI-smoothed look, zero resolution benefit, ~30s + a Replicate charge per photo); a fixed 2x was also too little for tiny photos (418px → 836px, then plain-stretched to 1920). (b) With `upscale:false` (the manual Photos-tab toggle default + the publish-all flow) the validator force-stretched every sub-1920 photo to exactly 1920 wide with NO sharpening (`needsSharpen` only fired on downscale) — the literal "looks upscaled" blur. FIX (`claude/guesty-photo-upscaling-x3jzqn`): NEW pure `shared/photo-upscale-plan.ts` — `esrganScaleForPhoto(w,h,target)` returns null (skip the AI) when the photo's LONG side (validator rotates portraits) already ≥ 1920, else the smallest scale 2–4 that clears 1920 (capped at 4), so the classical resize after ESRGAN only ever SHRINKS; wired into both push-photos and /api/builder/upscale-photo via a sharp metadata probe, and `upscaleWithReplicateKw` gained the scale param (makeover flow keeps legacy 2x). `isAlreadyPushCompliant` gives photo-validator a byte-passthrough fast path (upright landscape JPEG at exactly 1920 wide, ≤4MB → original bytes untouched — re-pushes of previously-normalized galleries no longer lose a JPEG generation every time), and the validator now sharpens Lanczos UPSCALES too (sigma 1.0/m1 0.4/m2 1.0, mirroring guest-photo-upscale.ts). Client: the Photos-tab toggle defaults ON (relabeled "AI-upscale small photos…") and the publish flow follows the toggle instead of hardcoding upscale off — safe now that only sub-spec photos reach Replicate. The 1920px/4MB/JPEG spec itself is UNCHANGED (Airbnb rejects >1920×1080 — do not raise it here). Locked by tests/photo-upscale-plan.test.ts (pure fns + source guards on the routes gating, the scale forwarding, the validator fast path/up-sharpen, and the client defaults).
 
 2026-07-11 · Jamie: "When I pull photos during pre-flight or when a unit is built there are usually a lot of duplicated photos or photos of the same area or the same tree but a different angle. Create a button within the photos tab that scans all photos and deletes extras — plan it out and build in safeguards." · SHIPPED (`claude/photo-dedup-scanner-wimfjv`) · New "🧹 Scan photos & remove duplicates" button on the builder Photos tab: per-folder dHash near-dup clustering (keyless) + a conservative Claude Sonnet same-scene vision pass propose duplicate GROUPS with the best shot pre-kept; the operator reviews thumbnails and confirms; apply is validated server-side against the stored scan (keep-one-per-group, never empty a folder) and removal is the existing `hidden` soft-delete (files never unlinked) so "↺ Undo removal" fully restores. Deliberately NOT auto-delete-on-scan (Load-Bearing #4 forbids automatic photo dropping — the operator-review step is the safeguard compromise). See Load-Bearing "Photos-tab duplicate scan".
+2026-07-11 · Jamie (Photos-tab screenshot): "For the create the collage button, please change this so it uses claude vision and finds the two best photos and creates a collage and then pushes it to Guesty and saves it within the system … Research what best photos are usually used for a vacation rental collage" · ACCEPTED · Researched VR cover CRO (Vrbo photo guidelines, host guides, eye-tracking left-bias studies): strongest pairing = destination shot (ocean/lanai/pool) LEFT + bright living space RIGHT; ban bathrooms/floor plans/dark/portrait/close-up/people. Shipped `POST /api/builder/auto-cover-collage`: client sends its VISIBLE photos (hidden never reach the pick) → ONE batched Claude vision call (`COVER_COLLAGE_MODEL` default claude-sonnet-4-6, cap `COVER_COLLAGE_VISION_CAP=60`, kill `COVER_COLLAGE_VISION_DISABLED=1`) picks the pair with a one-line reasoning → sharp composes the same 1600×800 2-up the manual canvas drew → shared `pushCoverCollageToGuesty` tail (extracted from upload-collage, no drift) pins it as the Guesty cover → saved in-system (photos-volume copy under cover-collages/ + `app_settings` cover_collages.v1 record), saves best-effort/reported, never unwinding the push. Vision FAIL-SOFT to the old caption heuristic (now in shared/cover-collage-logic.ts, self-pair guarded). Banner button is one-click AI; "pick manually" keeps the legacy picker→canvas flow. Panel ESRGAN gate is SHORT-side (square cover-crop math), so only sub-800px photos hit Replicate. See the "AI cover collage" Load-Bearing subsection.

@@ -43,6 +43,39 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-11 (Photos tab "Make Cover Collage" → ONE-CLICK Claude-vision pick + server compose + Guesty
+  push + in-system save): Operator: "change this so it uses claude vision and finds the two best photos
+  and creates a collage and then pushes it to Guesty and saves it within the system … Research what best
+  photos are usually used." RESEARCHED (Vrbo guidelines, host-CRO guides, eye-tracking left-bias): best
+  pair = destination shot (ocean/lanai/pool) LEFT + bright living space RIGHT; never bathrooms/floor
+  plans/dark/portrait/close-ups/people; both must survive a square crop. SHIPPED
+  (`claude/collage-vision-guesty-1b317f`): NEW pure `shared/cover-collage-logic.ts` (prompt with the
+  ranked pairings + hard rules, strict `parseCollageVisionPick` — out-of-range/self-pair → reject,
+  `heuristicCollagePick` = verbatim port of the old client caption scorer with a self-pair guard,
+  SHORT-side `collageEsrganScale` for the 800px square panels) + `server/cover-collage.ts` (ONE batched
+  downscaled-image vision call, `COVER_COLLAGE_MODEL` default claude-sonnet-4-6, cap
+  `COVER_COLLAGE_VISION_CAP=60`, kill `COVER_COLLAGE_VISION_DISABLED=1`, FAIL-SOFT to the heuristic;
+  sharp composes the same 1600×800 2-up the manual canvas drew) + `POST /api/builder/auto-cover-collage`
+  (routes.ts): client sends its VISIBLE photos (client-driven like the community/dedupe checks — hidden
+  photos never reach the pick), ESRGAN via the existing `upscaleWithReplicateKw` only for sub-panel
+  picks, then the ImgBB→Guesty-pin tail EXTRACTED from upload-collage into shared
+  `pushCoverCollageToGuesty` (manual flow byte-compatible), then SAVES IN-SYSTEM: bytes at
+  `client/public/photos/cover-collages/<listingId>.jpg` (photos volume) + `app_settings`
+  `cover_collages.v1` record (picks/method/reasoning/URL, newest 200) — saves best-effort/reported,
+  never unwind the push; relabel-all-photos SKIPS the cover-collages folder (test-locked). UI: banner
+  button is one-click AI ("⏳ Claude is picking…", "🤖 Claude picked: X + Y — reasoning", method chip
+  honest about heuristic fallback); "pick manually" keeps the legacy 2-photo picker→canvas flow.
+  Verified: cover-collage-logic tests green (in the npm chain), full `npm test` exit 0, build clean
+  (bundle-grepped both bundles), `npm run check` 338 = baseline (stash A/B — identical error sets),
+  engine exercised against REAL files on disk (1600×800 JPEG out, heuristic picks correct, ESRGAN hook
+  fired only for a 270px-short-side photo at 3x, external/missing candidates excluded, <2-photos 422
+  path), UI verified on the BUILT bundle (static SPA server + mocked endpoints, Playwright: one-click →
+  picking phase → picks/reasoning/saved copy → POST contract → manual picker still opens). Could NOT
+  live-smoke the vision/ImgBB/Guesty legs (no keys) — post-deploy: open any builder Photos tab with a
+  listing selected, click "🖼 Make Cover Collage"; expect the picked pair + reasoning within ~15s and
+  the collage first on the Guesty listing. See AGENTS.md "AI cover collage" + the 2026-07-11 Decision
+  Log line.
+
 - 2026-07-11 (Guesty photo push: photos "look upscaled" — smart ESRGAN gating + validator sharpening):
   Operator: "When photos are pushed to Guesty I think they're like upscaled. Is there anything we can
   do to improve this?" TWO real degradations found in POST /api/builder/push-photos (don't re-chase):
