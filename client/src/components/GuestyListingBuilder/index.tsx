@@ -1068,7 +1068,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     saved: number;
     missing: string[];
     rejected?: string[];
-    suggestions?: { name: string; suggestion: string | null; alternatives?: string[]; unsupported?: boolean }[];
+    suggestions?: { name: string; suggestion: string | null; alternatives?: string[]; unsupported?: boolean; deliveredAsOther?: boolean }[];
     guestyCatalogSize?: number;
   } | null>(null);
   const [showGuestyCatalog, setShowGuestyCatalog] = useState(false);
@@ -3332,7 +3332,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       otherAmenities?: string[];
       missing?: string[];
       rejected?: string[];
-      suggestions?: { name: string; suggestion: string | null; alternatives?: string[]; unsupported?: boolean }[];
+      suggestions?: { name: string; suggestion: string | null; alternatives?: string[]; unsupported?: boolean; deliveredAsOther?: boolean }[];
       guestyCatalogSize?: number;
       error?: string;
     };
@@ -3355,12 +3355,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
     recordDataPush("amenities", "success", `${data.saved ?? 0}/${data.sent ?? amenityPayload.length} amenities confirmed`);
     if (showToast) {
-        // Split the unsaved names: curated known-unsupported keys are expected
-        // (Guesty simply has no such amenity — kept in-system), only the rest
-        // are genuinely unrecognized and worth investigating.
-        const unsupportedCount = (data.suggestions ?? []).filter(s => s.unsupported).length;
+        // Split the non-canonical names: delivered to Guesty's free-text
+        // "Other amenities" (read-back-proven) → good news; curated
+        // known-unsupported that did NOT stick → expected, kept in-system;
+        // only the rest are genuinely unrecognized and worth investigating.
+        const deliveredCount = (data.suggestions ?? []).filter(s => s.deliveredAsOther).length;
+        const unsupportedCount = (data.suggestions ?? []).filter(s => s.unsupported && !s.deliveredAsOther).length;
         const unrecognizedCount = Math.max(0, (data.missing?.length ?? 0) - unsupportedCount);
         const parts: string[] = [];
+        if (deliveredCount > 0) parts.push(`${deliveredCount} delivered to Guesty's "Other amenities".`);
         if (unrecognizedCount > 0) parts.push(`${unrecognizedCount} name${unrecognizedCount === 1 ? "" : "s"} Guesty didn't recognise — see the panel below.`);
         if (unsupportedCount > 0) parts.push(`${unsupportedCount} have no Guesty equivalent — kept in-system only.`);
         toast({
@@ -6849,15 +6852,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                       })()}
 
                       {/* Verification result — rejected items with Guesty suggestions.
-                          Known-unsupported keys (curated in the shared catalog) are
-                          expected — rendered calmly as "kept in-system only" — while
-                          genuinely-unrecognized names keep the amber warning. */}
+                          Three buckets: names DELIVERED to Guesty's free-text "Other
+                          amenities" section (read-back-proven, emerald), curated
+                          known-unsupported names that did NOT stick (calm "kept
+                          in-system only"), and genuinely-unrecognized names (amber
+                          warning, unchanged). */}
                       {amenityPushResult && (amenityPushResult.rejected?.length ?? 0) > 0 && (() => {
                         const suggestions = amenityPushResult.suggestions ?? [];
-                        const unrecognized = suggestions.filter(s => !s.unsupported);
-                        const unsupported = suggestions.filter(s => s.unsupported);
+                        const delivered = suggestions.filter(s => s.deliveredAsOther);
+                        const unrecognized = suggestions.filter(s => !s.unsupported && !s.deliveredAsOther);
+                        const unsupported = suggestions.filter(s => s.unsupported && !s.deliveredAsOther);
                         return (
                         <div style={{ padding: "10px 12px", marginBottom: 12, background: unrecognized.length > 0 ? "#fffbeb" : "#f8fafc", border: `1px solid ${unrecognized.length > 0 ? "#fde68a" : "#e2e8f0"}`, borderRadius: 6, fontSize: 11 }}>
+                          {delivered.length > 0 && (
+                            <>
+                              <strong style={{ color: "#047857" }}>
+                                ✓ {delivered.length} amenit{delivered.length === 1 ? "y" : "ies"} delivered to Guesty's "Other amenities"
+                              </strong>
+                              <div style={{ color: "#065f46", marginTop: 4, marginBottom: 6 }}>
+                                Guesty has no matching amenity in its supported catalog, so these were written to the property's free-text Other section (verified on read-back). Guesty shows them on the property; OTA channels only sync catalog amenities — mention them in the description if a channel must display them.
+                              </div>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: (unrecognized.length > 0 || unsupported.length > 0) ? 8 : 0 }}>
+                                {delivered.map(({ name }) => (
+                                  <span key={name} style={{ fontSize: 11, padding: "2px 7px", borderRadius: 10, background: "#ecfdf5", border: "1px solid #a7f3d0", color: "#047857" }}>{name}</span>
+                                ))}
+                              </div>
+                            </>
+                          )}
                           {unrecognized.length > 0 && (
                             <>
                               <strong style={{ color: "#d97706" }}>
@@ -6890,7 +6911,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 ℹ {unsupported.length} amenit{unsupported.length === 1 ? "y has" : "ies have"} no Guesty equivalent — kept in-system only
                               </strong>
                               <div style={{ color: "#64748b", marginTop: 4, marginBottom: 6 }}>
-                                Guesty's supported list simply doesn't include these. They stay saved in-system and on your profile; nothing to fix.
+                                Guesty's supported catalog doesn't include these, and this Guesty account didn't accept them in the free-text Other section either (its API documents that field as read-only). They stay saved in-system and on your profile. To show them to guests, add them directly on the channel (e.g. Airbnb's amenity editor) or mention them in the description.
                               </div>
                               <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                                 {unsupported.map(({ name }) => (
