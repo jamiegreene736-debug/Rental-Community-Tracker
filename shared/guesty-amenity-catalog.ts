@@ -256,6 +256,88 @@ export function getAmenityLabel(key: string): string {
   return entry?.label || key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Guesty push-name aliases — SINGLE SOURCE OF TRUTH (2026-07-10).
+//
+// Guesty's /properties-api/amenities/supported list (187 fixed names) has no
+// entry whose normalized form matches these catalog keys/labels, so a plain
+// norm() lookup fails and the push rejects them ("Guesty didn't recognise N
+// amenities"). Every value below is the EXACT Guesty canonical display name,
+// verified against the live supported list on 2026-07-10 (see
+// tests/amenity-scan-logic.test.ts, which locks each value against a snapshot
+// of that list). Both the server push route (push-amenities aliasMap) and the
+// client key→Guesty-name mapper consume THIS table — never grow a private
+// alias list on either side again; the two had drifted (e.g. an alias keyed
+// COVERED_LANAI_PATIO while the catalog key is COVERED_PATIO), which is what
+// caused the 13-reject push on 2026-07-10.
+//
+// Mapping posture: an alias may GENERALIZE (LAP_POOL → "Swimming pool",
+// PICKLEBALL_COURT → "Tennis court") because the claim stays true; it must
+// never STRENGTHEN a claim (NEAR_GOLF_COURSE maps to "Golf - Optional", not
+// "Golf course front"). Keys with no true Guesty equivalent belong in
+// GUESTY_UNSUPPORTED_AMENITY_KEYS below instead.
+// ─────────────────────────────────────────────────────────────────────────────
+export const GUESTY_PUSH_NAME_ALIASES: Record<string, string> = {
+  // Essentials
+  WIFI: "Wireless Internet",
+  LUGGAGE_DROPOFF: "Luggage dropoff allowed",
+  DEDICATED_WORKSPACE: "Laptop friendly workspace", // raw-key pushes (scan auto-push) need this; the label already matches
+  // Kitchen
+  COOKING_BASICS: "Cookware",
+  // Bedrooms
+  BLACKOUT_SHADES: "Room-darkening shades",
+  // Bathroom
+  JETTED_TUB: "Bathtub",
+  // Pool & Water
+  POOL: "Outdoor pool",            // Hawaii default (operator-confirmed alias)
+  PRIVATE_HOT_TUB: "Hot tub",
+  LAP_POOL: "Swimming pool",
+  WADING_POOL: "Swimming pool",
+  // Outdoor
+  COVERED_PATIO: "Patio or balcony",
+  OUTDOOR_SEATING: "Outdoor seating (furniture)",
+  OUTDOOR_FURNITURE: "Outdoor seating (furniture)",
+  GARDEN: "Garden or backyard",
+  PICKLEBALL_COURT: "Tennis court", // vision hint covers "pickleball OR tennis court"
+  EXERCISE_EQUIPMENT: "Gym",
+  BICYCLE: "Bicycles available",
+  BEACH_UMBRELLA: "Beach essentials",
+  // Activities (nearby)
+  GOLF: "Golf - Optional",
+  NEAR_GOLF_COURSE: "Golf - Optional",
+  WATER_PARK: "Water Parks",        // Guesty's name is plural
+  THEME_PARK: "Theme Parks",        // Guesty's name is plural
+  NEAR_SHOPPING: "Shopping",
+  // Location & Views
+  NEAR_BEACH: "Beach",
+  BEACHFRONT: "Beach Front",
+  OCEAN_VIEW: "Sea view",
+  // Family
+  CHILDREN_WELCOME: "Family/kid friendly",
+  BOARD_GAMES_KIDS: "Children’s books and toys",
+  // Safety
+  SMOKE_ALARM: "Smoke detector",
+  CARBON_MONOXIDE_ALARM: "Carbon monoxide detector",
+};
+
+// Catalog keys with NO Guesty-supported equivalent (checked against the full
+// 187-name list — nothing close enough to claim truthfully). They stay
+// selectable and persist in-system, but a Guesty push cannot deliver them;
+// the UI reports them as "no Guesty equivalent" rather than an error.
+export const GUESTY_UNSUPPORTED_AMENITY_KEYS: Set<string> = new Set([
+  "KEYPAD",               // no keyless-entry / smart-lock amenity in Guesty
+  "SPICES",
+  "STREAMING_SERVICES",
+  "LOCK_ON_BEDROOM_DOOR",
+  "WALK_IN_SHOWER",       // Guesty only has accessibility shower variants
+  "BOAT",
+  "HIKING",
+  "POOL_VIEW",
+  "NEAR_RESTAURANTS",
+  "COVERED_PARKING",      // covered/carport ≠ "Garage"; don't overclaim
+  "SECURITY_CAMERA",
+]);
+
 /**
  * Returns a grouped view of the catalog for display in settings UIs.
  */
