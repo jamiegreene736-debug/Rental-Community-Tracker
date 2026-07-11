@@ -4036,6 +4036,55 @@ LOAD-BEARING:
   fails the swap — the builder's "Push Photos to Guesty" button remains the
   manual fallback. Drafts (negative propertyIds) are skipped by design.
 
+### Unit Audit Sweep — dashboard "Audit" column (Load-Bearing, 2026-07-11)
+
+One-click per-property audit orchestrator (`server/unit-audit-sweep.ts`,
+pure logic + stage vocabulary in `shared/unit-audit-sweep-logic.ts`, dialog
+in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
+
+1. **NAMING: this is NOT the preflight "Full unit audit".** That name is
+   taken by the builder pre-flight OTA platform check
+   (`shared/preflight-verdict.ts` / `PreflightAuditJob`). This tool is the
+   "Unit Audit Sweep" in code, endpoints (`/api/unit-audit*`), and UI copy —
+   don't alias them.
+2. **Every stage REUSES an existing engine — never re-implement a check.**
+   Photo groups come from `buildPhotoCommunityCheckRequestForProperty`
+   (active swap folders, drafts via `-draftId`); dedupe =
+   `scanForDuplicatePhotos`; community/bedrooms = loopback
+   `POST /api/builder/photo-community-check { propertyId }` (persists →
+   the Comm QA column stays in sync for free); OTA = loopback
+   `POST /api/photo-listing-check/run` + `photo_listing_checks` polling;
+   descriptions = the shared placeholder detector (push-guard parity);
+   pricing = stored `monthlyRates` evidence via
+   `computeMarketRateMatchConfirmation`. Source-guarded in
+   tests/unit-audit-sweep.test.ts — a re-implemented check drifts from the
+   button the operator would click to fix it.
+3. **Honesty rule: stage verdict `error` ≠ `pass` and ≠ `failed`.** `failed`
+   means the LISTING DATA is provably wrong; `error` means the CHECK could
+   not run (no key, timeout, quota). An errored check must never green the
+   audit (the false-Clear class the preflight audit fixed) — the roll-up
+   ranks failed > error > attention, and an all-skipped/empty report rolls
+   up as `error`, never `pass`.
+4. **Resume seam: stage results are appended ONLY on completion.** A resumed
+   job (boot watchdog, `unit_audit_sweeps.v1`, window 60min/cap 3) re-runs
+   exactly the stages missing from `record.stages`; `resolve` always re-runs
+   (its target is in-memory) but UPSERTS its row. Don't persist partial
+   stage results — that would double-count on resume.
+5. **The receipt (`unit_audit_reports.v1`, latest per property) is the
+   dashboard column's ONLY data source** — the badge derives via the shared
+   `unitAuditBadge` from the persisted verdict + stages, so the column
+   survives restarts and renders "—" (never green) when a property was
+   never audited.
+6. **Deep OTA scans are reused when fresh** (< `AUDIT_OTA_FRESH_HOURS`=24)
+   — each deep scan is real Lens/SERP spend and the weekly cron refreshes
+   rows anyway. `AUDIT_OTA_SCAN=0` skips kicking new scans entirely
+   (existing rows still report, missing rows report `error`).
+7. Verify-only by design in PR 1: the sweep CHANGES NOTHING. Auto-fix
+   chaining (dedupe apply, description regenerate, re-scrape → find-new →
+   replace-unit ladder, pricing refresh) is the planned follow-up; the
+   `fixed` verdict is already in the vocabulary so persisted reports stay
+   parseable when it lands.
+
 ## Conventions
 
 ### Branches
@@ -4357,3 +4406,4 @@ Welcome. When in doubt, ask the human.
 2026-07-11 · Jamie (screenshot of a Kamaole Beach Club check report): "When a photo is flagged in either yellow and/or red please have in the UI in the photos tab like show me exactly which photo it is referring to so I can then decide like yes delete or no keep." · SHIPPED (`claude/photo-flag-indicators-6527b1`) · The shared `PhotoCommunityCheckReport` (both the Photos tab and preflight — Load-Bearing #45 shared-report rule, edited in the ONE component) now renders, under every yellow (unconfirmed) / red (mismatch) per-photo vote, every outlier/junk flag, and both sides of every cross-folder duplicate, a flagged-photo card: the actual thumbnail (local `/photos/<folder>/<filename>`; click = full size), the folder/filename, and inline "🗑 Remove photo" / "✓ Keep" buttons. Remove = the existing `photo_labels.hidden` soft-delete via `PUT /api/photo-labels/:folder/:filename` (insert-on-miss, files never unlinked) behind a `window.confirm`, with "↺ Undo" (a failed undo stays "removed" so the button survives). Green rows deliberately stay compact (no thumbnails). Flag ids (e.g. "C6") resolve to photos through the group's per-photo verdicts, which already carried folder+filename server-side — no engine change. Photos tab passes `onPhotoOverridesChanged` through so a removal refreshes the gallery. Verified: photo-community-check suite 50/0 (9 new assertions), full `npm test` exit 0, build clean (bundle-grepped), `npm run check` 338 = baseline, UI exercised on the BUILT bundle (static SPA server + mocked endpoints, Playwright: yellow/red cards render with correct thumbnails, green renders none, Keep marks, Remove confirms + PUTs hidden:true, Undo PUTs hidden:false, cancelled confirm PUTs nothing). See the new Load-Bearing #45 "Flagged-photo review" bullet.
 2026-07-11 · Jamie (Photos-tab screenshot): "For the create the collage button, please change this so it uses claude vision and finds the two best photos and creates a collage and then pushes it to Guesty and saves it within the system … Research what best photos are usually used for a vacation rental collage" · ACCEPTED · Researched VR cover CRO (Vrbo photo guidelines, host guides, eye-tracking left-bias studies): strongest pairing = destination shot (ocean/lanai/pool) LEFT + bright living space RIGHT; ban bathrooms/floor plans/dark/portrait/close-up/people. Shipped `POST /api/builder/auto-cover-collage`: client sends its VISIBLE photos (hidden never reach the pick) → ONE batched Claude vision call (`COVER_COLLAGE_MODEL` default claude-sonnet-4-6, cap `COVER_COLLAGE_VISION_CAP=60`, kill `COVER_COLLAGE_VISION_DISABLED=1`) picks the pair with a one-line reasoning → sharp composes the same 1600×800 2-up the manual canvas drew → shared `pushCoverCollageToGuesty` tail (extracted from upload-collage, no drift) pins it as the Guesty cover → saved in-system (photos-volume copy under cover-collages/ + `app_settings` cover_collages.v1 record), saves best-effort/reported, never unwinding the push. Vision FAIL-SOFT to the old caption heuristic (now in shared/cover-collage-logic.ts, self-pair guarded). Banner button is one-click AI; "pick manually" keeps the legacy picker→canvas flow. Panel ESRGAN gate is SHORT-side (square cover-crop math), so only sub-800px photos hit Replicate. See the "AI cover collage" Load-Bearing subsection.
 2026-07-11 · Jamie (Amenities-tab screenshot, Kamaole Beach Club toast "71/69 saved. 4 have no Guesty equivalent — kept in-system only"): "There were 4 amenities not pushed to Guesty. Please diagnose and fix." · DIAGNOSED + shipped · The 4 (KEYPAD "Keyless Entry", STREAMING_SERVICES, NEAR_RESTAURANTS "Near Restaurants & Dining", HIKING "Hiking Trails Nearby") are in the curated `GUESTY_UNSUPPORTED_AMENITY_KEYS` (2026-07-10) — re-verified against the 187-name snapshot AND Guesty's API docs: the supported catalog has no truthful equivalent (no keyless/streaming/restaurants/hiking names; "Mountain Climbing" would overclaim), the documented PUT body for /properties-api/amenities is `{ amenities }` ONLY (`otherAmenities` appears solely on GET/PUT RESPONSES — a read surface), NO Open API endpoint documents writing the free-text Other bucket, and Guesty's help docs recommend channel-side entry or description text for unmapped amenities. FIX (best-effort delivery + honest proof): push-amenities now ATTEMPTS the undocumented `otherAmenities` body field — union of this push's unmapped names with the property's CURRENT Other entries (add-only; capped 50×120ch) — guarded so a strict validator can never break the canonical push (4xx on the attempt → immediate retry with the documented `{ amenities }` body; the 2026-07-09 conversations-"skip" failure class); delivery is proven PER-NAME by the existing GET-after-PUT read-back (`deliveredAsOther` — never assumed from a 200). Unmapped raw catalog KEYS now prettify to their catalog LABEL ("NEAR_RESTAURANTS" → "Near Restaurants & Dining") before reaching Guesty/UI. UI: three buckets — emerald "✓ delivered to Guesty's Other amenities (verified on read-back; not channel-synced)", calm "kept in-system only" (now with the channel-side/description guidance), amber unrecognized (unchanged); toast counts each. If Guesty ignores the undocumented field the behavior is byte-equivalent to before (read-back proves it, UI reports kept-in-system). Locked in tests/amenity-scan-logic.test.ts (7 new guards, 83/0). Verified: full npm test exit 0, build clean, `npm run check` 338 = baseline, three-bucket UI exercised on the BUILT bundle (Playwright + mocked push endpoint). Could NOT live-verify whether this Guesty account persists the undocumented field (no creds) — post-deploy: re-push Kamaole's amenities; the toast/panel now state definitively either "4 delivered to Guesty's Other amenities" or "kept in-system" with next-step guidance.
+2026-07-11 · Jamie: "I'm trying to plan out like a button or tool on the dashboard where I can select a unit and do like a full unit audit sweep … descriptions are Claude AI generated, amenities caught by AI, photos match the community, enough bedroom photos (else replace the photo source or the unit), AI collage, layout correct, pricing updated — show me progress per stage in the UI, confirm each stage complete or the failure, and a dashboard column indicator. I want every data aspect of the listing to be perfect." Plan confirmed, then "Please go." · ACCEPTED, PR 1 of 3 (verify-only) · Shipped the Unit Audit Sweep: `shared/unit-audit-sweep-logic.ts` (stage vocabulary, persisted job store `unit_audit_sweeps.v1` + receipts `unit_audit_reports.v1`, resume rules, verdict roll-up, dashboard badge — 51 tests) + `server/unit-audit-sweep.ts` (10-stage orchestrator over the EXISTING engines: resolve → photo-dedupe → photo-community (loopback, persists → Comm QA) → deep OTA scan (fresh-row reuse, 24h) → descriptions placeholder/area-header checks → amenities saved-vs-Guesty diff → cover-collage record → layout vs Guesty listing doc → pricing freshness + match confirmation → channels + sample-license detector; per-stage timeouts, cancel, boot-resume watchdog) + routes `/api/unit-audit*` + `GET /api/dashboard/unit-audit-status` + home.tsx "Audit" column (badge from shared `unitAuditBadge`; 20→21 columns, empty-state colSpan bumped) + `unit-audit-dialog.tsx` (live 10-stage checklist / persisted receipt with expandable findings + Run/Re-run/Cancel). LOAD-BEARING: distinct name from the preflight "Full unit audit"; stage `error` ≠ `pass` ≠ `failed` (an unverifiable check can never green the audit); stage results append on COMPLETION only (the resume seam); every stage reuses the existing engine (source-guarded). Auto-fix chaining (PR 2) and the photo fix ladder incl. unit replacement + bulk queue (PR 3) are next. Verified: unit-audit-sweep 51/0 (in the npm chain), full `npm test` exit 0, build clean, `npm run check` 338 = baseline (0 new), UI verified on the BUILT bundle (static SPA server + Playwright with all /api/* mocked: column badges for pass/attention/running/never, receipt dialog verdict banner + review chips + expandable details, Run POSTs propertyId + flips to the live checklist, running badge re-attaches).

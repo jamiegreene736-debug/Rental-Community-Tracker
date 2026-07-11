@@ -85,6 +85,8 @@ import { cn } from "@/lib/utils";
 import type { CommunityDraft, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import { photoCommunityStatusLabel, type PhotoCommunityRowStatus } from "@shared/photo-community-status-logic";
+import { unitAuditBadge } from "@shared/unit-audit-sweep-logic";
+import { UnitAuditDialog, type UnitAuditDashboardStatus } from "@/components/unit-audit-dialog";
 import {
   guestyPushStatusForItem,
   summarizeBulkPricingGuestyPush,
@@ -1740,6 +1742,15 @@ function AdminDashboard() {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
+  // Unit Audit Sweep — "Audit" column: last persisted receipt + any live sweep
+  // per property. Polls faster while a sweep runs so the badge's stage counter
+  // ticks; the dialog itself polls its own job every 3s.
+  const { data: unitAuditStatus } = useQuery<UnitAuditDashboardStatus>({
+    queryKey: ["/api/dashboard/unit-audit-status"],
+    refetchInterval: (query) => (Object.keys(query.state.data?.active ?? {}).length > 0 ? 5_000 : 60_000),
+    refetchOnWindowFocus: false,
+  });
+  const [unitAuditDialog, setUnitAuditDialog] = useState<{ propertyId: number; propertyName: string } | null>(null);
   // Guesty listing mapping — drives BOTH the "G" connected-dot column and its
   // sort. Declared HERE — before the `filtered` useMemo — so the sort
   // comparator can close over `guestyConnected` without a TDZ error (the
@@ -5868,6 +5879,9 @@ function AdminDashboard() {
                 <TableHead className="w-[104px] text-center px-1" title="Photo community QA: B = bedroom photo coverage, C = community folder matches resort, M = all folders same community">
                   Comm QA
                 </TableHead>
+                <TableHead className="w-[84px] text-center px-1" title="Unit Audit Sweep — one click verifies every data aspect of the listing (duplicate photos, community match + bedrooms, OTA reposts, descriptions, amenities, cover collage, layout, pricing, channels + licenses). Click the badge for the full per-stage receipt.">
+                  Audit
+                </TableHead>
                 <TableHead className="w-[190px] max-w-[190px] px-1">
                   <Button
                     variant="ghost"
@@ -6526,6 +6540,45 @@ function AdminDashboard() {
                       );
                     })()}
                   </TableCell>
+                  <TableCell className="text-center px-1 py-2">
+                    {(() => {
+                      // Unit Audit Sweep badge — derived by the SHARED
+                      // unitAuditBadge so the cell and the dialog can't drift.
+                      // Clicking always opens the dialog (receipt or live run;
+                      // never-audited opens with the "Run audit sweep" button).
+                      const auditReport = unitAuditStatus?.reports?.[String(property.id)] ?? null;
+                      const auditActive = unitAuditStatus?.active?.[String(property.id)] ?? null;
+                      const badge = unitAuditBadge(
+                        auditReport,
+                        auditActive ? { status: auditActive.status, currentStage: auditActive.currentStage } : null,
+                      );
+                      const tone = badge.kind === "pass"
+                        ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                        : badge.kind === "attention"
+                          ? "border-amber-300 bg-amber-50 text-amber-800"
+                          : badge.kind === "failed"
+                            ? "border-red-300 bg-red-50 text-red-700"
+                            : badge.kind === "running"
+                              ? "border-sky-300 bg-sky-50 text-sky-700"
+                              : badge.kind === "error"
+                                ? "border-slate-300 bg-slate-50 text-slate-600"
+                                : "border-transparent text-muted-foreground";
+                      return (
+                        <button
+                          type="button"
+                          className={`inline-flex max-w-full items-center gap-1 truncate rounded-full border px-2 py-0.5 text-[10px] font-semibold ${tone}`}
+                          title={badge.title}
+                          onClick={() => setUnitAuditDialog({ propertyId: property.id, propertyName: property.name })}
+                          data-testid={`button-unit-audit-${property.id}`}
+                        >
+                          {badge.kind === "running" && (
+                            <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border-[1.5px] border-sky-200 border-t-sky-600" aria-hidden="true" />
+                          )}
+                          <span className="truncate">{badge.label}</span>
+                        </button>
+                      );
+                    })()}
+                  </TableCell>
                   <TableCell className="max-w-[190px] px-1 py-2">
                     <div className="min-w-0">
                       <span className="font-medium text-sm leading-tight block truncate" data-testid={`text-name-${property.id}`} id={`text-name-${property.id}`} title={property.name}>
@@ -6687,7 +6740,7 @@ function AdminDashboard() {
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={20} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={21} className="text-center py-8 text-muted-foreground">
 
                     No properties match your filters
                   </TableCell>
@@ -7737,6 +7790,15 @@ function AdminDashboard() {
           })()}
         </DialogContent>
       </Dialog>
+      {unitAuditDialog && (
+        <UnitAuditDialog
+          propertyId={unitAuditDialog.propertyId}
+          propertyName={unitAuditDialog.propertyName}
+          open
+          onOpenChange={(o) => { if (!o) setUnitAuditDialog(null); }}
+          status={unitAuditStatus}
+        />
+      )}
     </div>
   );
 }

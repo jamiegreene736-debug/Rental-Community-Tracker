@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
 import { clearAutoReplaceQueue, listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
+import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, listUnitAuditJobs, startUnitAuditSweep } from "./unit-audit-sweep";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
@@ -22205,6 +22206,51 @@ Requirements:
       console.warn("[market-rate-scan] price-scans serve failed (table may not exist yet):", e?.message ?? e);
       res.json({});
     }
+  });
+
+  // ── Unit Audit Sweep (dashboard "Audit" column) ────────────────────────────
+  // Verify-only orchestrator over every existing check engine — see
+  // server/unit-audit-sweep.ts. One active sweep per property; records persist
+  // in app_settings and resume after restarts via the boot watchdog.
+  app.post("/api/unit-audit", async (req, res) => {
+    try {
+      const result = await startUnitAuditSweep({ propertyId: Number((req.body as any)?.propertyId) });
+      if (!result.ok) return res.status(result.status).json({ error: result.error });
+      return res.json({ ok: true, job: result.job });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? "Failed to start audit sweep" });
+    }
+  });
+
+  app.get("/api/unit-audit/active", async (_req, res) => {
+    try {
+      return res.json(await listUnitAuditJobs());
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? "Failed to list audit sweeps" });
+    }
+  });
+
+  // Dashboard column feed: last persisted receipt + live job per property.
+  app.get("/api/dashboard/unit-audit-status", async (_req, res) => {
+    try {
+      return res.json(await getUnitAuditDashboardStatus());
+    } catch (e: any) {
+      // Fail-soft — the column renders "—" until the store exists.
+      console.warn("[unit-audit] dashboard status serve failed:", e?.message ?? e);
+      return res.json({ reports: {}, active: {} });
+    }
+  });
+
+  app.get("/api/unit-audit/:jobId", async (req, res) => {
+    const job = await getUnitAuditJob(String(req.params.jobId));
+    if (!job) return res.status(404).json({ error: "Audit sweep not found" });
+    return res.json({ ok: true, job });
+  });
+
+  app.post("/api/unit-audit/:jobId/cancel", async (req, res) => {
+    const job = await cancelUnitAuditSweep(String(req.params.jobId));
+    if (!job) return res.status(404).json({ error: "Audit sweep not found" });
+    return res.json({ ok: true, job });
   });
 
   // Manual trigger for the weekly market-rate scan (refresh every configured
