@@ -231,5 +231,38 @@ check("preflight renders the SHARED report component (bedroom coverage, votes, d
 check("preflight carries no re-inlined report copy",
   !preflightPageSource.includes("Bedroom photo coverage"));
 
+// ── Source assertions: flagged-photo review (2026-07-11) ─────────────────────
+// Every YELLOW (unconfirmed) / RED (mismatch) per-photo vote, outlier/junk
+// flag, and cross-folder duplicate in the shared report shows the ACTUAL photo
+// (thumbnail + folder/filename) with an inline keep / remove decision, so the
+// operator can see exactly which photo a flag refers to. Removal is the
+// EXISTING photo_labels.hidden soft-delete and is ALWAYS operator-confirmed —
+// the check itself never auto-drops a photo (Load-Bearing #4).
+
+console.log("\nphoto-community-check: flagged-photo review assertions");
+
+check("shared report renders flagged-photo thumbnails from the local /photos/ path",
+  reportComponentSource.includes("flaggedPhotoCard")
+  && reportComponentSource.includes("/photos/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}"));
+check("thumbnails render ONLY for yellow/red rows (mismatch + unconfirmed), never green",
+  reportComponentSource.includes('st === "mismatch" || st === "unconfirmed"'));
+check("remove = the EXISTING photo_labels.hidden soft-delete via PUT /api/photo-labels",
+  reportComponentSource.includes("/api/photo-labels/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}")
+  && reportComponentSource.includes("JSON.stringify({ hidden })"));
+check("removal is operator-confirmed (window.confirm) — the check never auto-drops a photo",
+  reportComponentSource.includes("window.confirm"));
+check("a removed photo keeps an Undo (hidden flips back off)",
+  reportComponentSource.includes("↺ Undo")
+  && reportComponentSource.includes("setPhotoHidden(folder, filename, false)"));
+check("a failed undo STAYS removed so the Undo button survives",
+  reportComponentSource.includes('{ state: "removed", error }'));
+check("outlier/junk flag ids resolve to photos via the group's per-photo verdicts",
+  reportComponentSource.includes("photoByIdFor"));
+check("cross-folder duplicates render BOTH copies for a which-folder-keeps-it decision",
+  reportComponentSource.match(/flaggedPhotoCard\(d\.a\.folder, d\.a\.filename/) != null
+  && reportComponentSource.match(/flaggedPhotoCard\(d\.b\.folder, d\.b\.filename/) != null);
+check("Photos tab passes its gallery-refresh callback into the shared report",
+  builderIndexSource.includes("onPhotoOverridesChanged={onPhotoOverridesChanged}"));
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

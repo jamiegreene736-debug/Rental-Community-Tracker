@@ -43,6 +43,26 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-11 ("Check photo community" report: yellow/red flags now SHOW the photo + keep/remove):
+  Operator (screenshot of a check report): "When a photo is flagged in either yellow and/or red
+  please have in the UI in the photos tab like show me exactly which photo it is referring to so I
+  can then decide like yes delete or no keep." SHIPPED (`claude/photo-flag-indicators-6527b1`): the
+  SHARED `PhotoCommunityCheckReport` (photo-community-check-report.tsx — Load-Bearing #45: edit the
+  one component, both Photos tab + preflight render it) now renders a flagged-photo card under every
+  YELLOW (unconfirmed) / RED (mismatch) per-photo vote, every outlier/junk flag, and BOTH sides of
+  every cross-folder duplicate: the actual thumbnail (`/photos/<folder>/<filename>`, click = full
+  size), folder/filename, and inline "🗑 Remove photo" / "✓ Keep". Remove = the EXISTING
+  photo_labels.hidden soft-delete (PUT /api/photo-labels/:folder/:filename, insert-on-miss upsert,
+  files never unlinked) behind window.confirm, with ↺ Undo (failed undo STAYS removed so the button
+  survives). Green rows deliberately stay compact — don't add thumbnails to them. Flag ids resolve
+  via the group's photoVerdicts (folder+filename were already server-populated — no engine change);
+  the synthetic "pre-screen" outlier gets no card. Photos tab passes onPhotoOverridesChanged so a
+  removal refreshes the gallery; preflight passes none (no gallery; counts are on-disk). Verified:
+  photo-community-check 50/0 (9 new source guards), full `npm test` exit 0, build clean
+  (bundle-grepped), `npm run check` 338 = baseline (0 new), UI exercised on the BUILT bundle
+  (static SPA server + mocked endpoints, Playwright: cards render for yellow/red only, Keep marks,
+  Remove confirm → hidden:true, Undo → hidden:false, cancelled confirm → no PUT).
+
 - 2026-07-11 (Guesty photo push: photos "look upscaled" — smart ESRGAN gating + validator sharpening):
   Operator: "When photos are pushed to Guesty I think they're like upscaled. Is there anything we can
   do to improve this?" TWO real degradations found in POST /api/builder/push-photos (don't re-chase):

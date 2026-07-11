@@ -2522,6 +2522,10 @@ export default function BuilderPreflight() {
           )}
           {communityMatchResult && (
             <div data-testid="result-community-match">
+              {/* The report's flagged-photo Remove/Undo (photo_labels.hidden)
+                  works here too; no onPhotoOverridesChanged is passed because
+                  preflight renders no photo gallery and its photo counts are
+                  on-disk file counts (hidden photos stay on disk). */}
               <PhotoCommunityCheckReport
                 result={communityMatchResult}
                 manualVerified={communityMatchManualVerified}
