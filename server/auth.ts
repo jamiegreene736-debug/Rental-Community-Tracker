@@ -22,16 +22,24 @@
 //
 //   - /login + /logout — the auth flow itself; gating these would
 //     create a chicken-and-egg.
-//   - /api/admin/vrbo-sidecar/* — the local-Chrome sidecar
-//     (Decision Log 2026-04-29) polls these endpoints from the
-//     operator's Mac. Gating would break the find-buy-in flow's
-//     most-reliable Vrbo path. The sidecar already runs on the
-//     operator's own machine and the channel is implicitly trusted.
-//   - /api/admin/buyin-agent/* — the local "buy-in agent" runner
-//     (daemon/buyin-agent/runner.mjs, the cowork buy-in engine) polls
-//     these from the operator's Mac, exactly like the sidecar above and
-//     for the same reason. Same trust model: local machine, X-Admin-Secret
-//     on every request. See the cowork engine plan §2.
+//   NOTE (2026-07-11 security fix): /api/admin/vrbo-sidecar/* and
+//   /api/admin/buyin-agent/* are NO LONGER public. They were previously
+//   allowlisted here on the theory that the local-Chrome sidecar and the
+//   buy-in agent runner poll them from the operator's Mac over an
+//   "implicitly trusted" channel — but the routes are served on the same
+//   public Railway origin as everything else, so any anonymous internet
+//   caller could poll /next (steal/observe jobs), POST forged /result
+//   payloads (inject fake listings/prices/photos into buy-in decisions and
+//   guest pages), read /tools/job-context (reservation + financial PII),
+//   or drive the Anthropic-billed vision endpoints. The per-route
+//   checkAdminSecret() backstop was a no-op. Both worker transports ALREADY
+//   send X-Admin-Secret on every request (daemon/vrbo-sidecar/worker.mjs
+//   authHeaders(); daemon/buyin-agent/runner.mjs), so requireAuth now gates
+//   these paths uniformly: the workers pass via the header, an operator
+//   viewing them passes via the admin cookie, loopback self-calls pass, and
+//   anonymous callers get 401. OPERATOR ACTION: ADMIN_SECRET must be set
+//   identically on the web service, the Railway sidecar-worker service, and
+//   the local Mac LaunchAgents or the workers will 401.
 //   - /assets/* + /photos/* + /brand/* + favicon/touch icons +
 //     /manifest.json + /robots.txt — the page can't render the
 //     login form without its own JS/CSS/brand assets, and browsers
@@ -84,8 +92,6 @@ const PUBLIC_PATH_PREFIXES = [
   "/assets/",
   "/photos/",
   "/brand/",
-  "/api/admin/vrbo-sidecar/",
-  "/api/admin/buyin-agent/",
   "/api/quo/webhooks/",
   "/agreement/",
   "/alternatives/",
@@ -148,7 +154,7 @@ function parseCookies(header: string | undefined): Record<string, string> {
   return out;
 }
 
-function isLoopback(req: Request): boolean {
+export function isLoopback(req: Request): boolean {
   const sock = req.socket?.remoteAddress ?? "";
   return sock === "127.0.0.1" || sock === "::ffff:127.0.0.1" || sock === "::1";
 }
@@ -271,14 +277,57 @@ export function isAgentAllowedPath(req: Request): boolean {
 }
 
 // Agent-role logins (role "agent" → identical rights/views, gated by
-// isAgentAllowedPath). Both are operated by Christal: the shared `agent` login
-// and her personal `christalh` login. Passwords are compared in constant time.
-// To add another agent, add a { username, password } entry here — nothing else
-// changes, since permissions are role-based.
-const AGENT_LOGINS: ReadonlyArray<{ username: string; password: string }> = [
-  { username: "agent", password: "agent" },
-  { username: "christalh", password: "VacationRentalz@12" },
-];
+// isAgentAllowedPath). Passwords are compared in constant time.
+//
+// SECURITY (2026-07-11): these were previously hardcoded here in plaintext,
+// which is unsafe in a public repo — anyone reading this file could sign in
+// as an agent and reach the guest inbox + reservation PII. Credentials now
+// come ONLY from the AGENT_LOGINS env var; nothing is compiled in. Unset =>
+// agent sign-in is disabled entirely.
+//
+// Format (either works):
+//   1. JSON array:  AGENT_LOGINS='[{"username":"christalh","password":"…"}]'
+//   2. Pair list:   AGENT_LOGINS='christalh:…,agent:…'
+// Use the JSON form if a password contains a comma. Usernames are matched
+// case-insensitively; passwords are used verbatim (not trimmed).
+// OPERATOR ACTION: set AGENT_LOGINS in Railway with NEW passwords — the old
+// "agent"/"agent" and "christalh"/"VacationRentalz@12" values are burned
+// (they were committed to a public repo) and no longer work until reissued.
+function loadAgentLogins(): ReadonlyArray<{ username: string; password: string }> {
+  const raw = (process.env.AGENT_LOGINS ?? "").trim();
+  if (!raw) return [];
+  const out: Array<{ username: string; password: string }> = [];
+  // Preferred: JSON array of {username, password}.
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const e of parsed) {
+          const username = typeof e?.username === "string" ? e.username.trim().toLowerCase() : "";
+          const password = typeof e?.password === "string" ? e.password : "";
+          if (username && password) out.push({ username, password });
+        }
+        return out;
+      }
+    } catch {
+      // Malformed JSON — fall through to the pair-list parser so a stray
+      // bracket doesn't silently disable every agent login.
+    }
+  }
+  // Fallback: comma-separated "username:password" pairs (first colon splits).
+  for (const pair of raw.split(",")) {
+    const trimmed = pair.trim();
+    if (!trimmed) continue;
+    const idx = trimmed.indexOf(":");
+    if (idx <= 0) continue;
+    const username = trimmed.slice(0, idx).trim().toLowerCase();
+    const password = trimmed.slice(idx + 1);
+    if (username && password) out.push({ username, password });
+  }
+  return out;
+}
+
+const AGENT_LOGINS: ReadonlyArray<{ username: string; password: string }> = loadAgentLogins();
 
 export function resolveLoginRole(usernameRaw: string, password: string, adminSecret: string): PortalRole | null {
   const username = usernameRaw.trim().toLowerCase();

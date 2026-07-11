@@ -143,14 +143,18 @@ console.log("buyin-agent-queue suite");
   console.log("  ✓ unknown run ids resolve null / ok:false");
 }
 
-// ── auth allowlist: runner endpoints are public (like the sidecar) ───────────
+// ── auth: runner endpoints are admin-gated, NOT public and NOT agent-role ────
+// (2026-07-11 security fix) The buyin-agent runner authenticates as admin via
+// X-Admin-Secret, so requireAuth admits it without consulting isAgentAllowedPath.
+// These paths are no longer in the public allowlist, and an agent-role cookie
+// session must NOT be able to reach them.
 {
-  assert.equal(isAgentAllowedPath(reqOf("GET", "/api/admin/buyin-agent/next")), true);
-  assert.equal(isAgentAllowedPath(reqOf("POST", "/api/admin/buyin-agent/result")), true);
-  assert.equal(isAgentAllowedPath(reqOf("POST", "/api/admin/buyin-agent/heartbeat")), true);
+  assert.equal(isAgentAllowedPath(reqOf("GET", "/api/admin/buyin-agent/next")), false);
+  assert.equal(isAgentAllowedPath(reqOf("POST", "/api/admin/buyin-agent/result")), false);
+  assert.equal(isAgentAllowedPath(reqOf("POST", "/api/admin/buyin-agent/heartbeat")), false);
   // Sanity: a non-allowlisted admin route stays blocked.
   assert.equal(isAgentAllowedPath(reqOf("POST", "/api/pricing/bulk-refresh")), false);
-  console.log("  ✓ /api/admin/buyin-agent/* is allowlisted; other admin routes stay blocked");
+  console.log("  ✓ /api/admin/buyin-agent/* is admin-gated (not public, not agent-role)");
 }
 
 console.log("buyin-agent-queue suite passed");

@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import type { Request } from "express";
 
 process.env.DATABASE_URL ||= "postgres://test:test@localhost:5432/test";
+// Agent logins are now loaded from the AGENT_LOGINS env var (never hardcoded —
+// server/auth.ts is in a public repo). Set dummy test creds BEFORE importing
+// server/auth so loadAgentLogins() reads them at module-eval time. These are
+// throwaway values, NOT the real (now-rotated) agent passwords.
+process.env.AGENT_LOGINS = "testagent:test-pass-123,christaltest:Str0ng#Pass";
 
 const { isAgentAllowedPath, resolveLoginRole } = await import("../server/auth");
 
@@ -11,18 +16,21 @@ function req(method: string, path: string): Request {
 
 console.log("auth agent suite");
 
-assert.equal(resolveLoginRole("agent", "agent", "admin-secret"), "agent");
+assert.equal(resolveLoginRole("testagent", "test-pass-123", "admin-secret"), "agent");
 assert.equal(resolveLoginRole("", "admin-secret", "admin-secret"), "admin");
 assert.equal(resolveLoginRole("admin", "admin-secret", "admin-secret"), "admin");
-assert.equal(resolveLoginRole("agent", "admin-secret", "admin-secret"), null);
-console.log("  ✓ classifies admin and agent credentials");
+assert.equal(resolveLoginRole("testagent", "admin-secret", "admin-secret"), null);
+// A username not present in AGENT_LOGINS never resolves (old burned creds are gone).
+assert.equal(resolveLoginRole("agent", "agent", "admin-secret"), null);
+assert.equal(resolveLoginRole("christalh", "VacationRentalz@12", "admin-secret"), null);
+console.log("  ✓ classifies admin and env-configured agent credentials");
 
-// christalh is a second agent-role login (Christal) — identical rights to `agent`.
-assert.equal(resolveLoginRole("christalh", "VacationRentalz@12", "admin-secret"), "agent");
-assert.equal(resolveLoginRole("ChristalH", "VacationRentalz@12", "admin-secret"), "agent"); // username case-insensitive
-assert.equal(resolveLoginRole("christalh", "wrong", "admin-secret"), null);
-assert.equal(resolveLoginRole("christalh", "vacationrentalz@12", "admin-secret"), null); // password IS case-sensitive
-console.log("  ✓ christalh resolves to the agent role (identical permissions)");
+// A second agent-role login parsed from AGENT_LOGINS — identical rights.
+assert.equal(resolveLoginRole("christaltest", "Str0ng#Pass", "admin-secret"), "agent");
+assert.equal(resolveLoginRole("ChristalTest", "Str0ng#Pass", "admin-secret"), "agent"); // username case-insensitive
+assert.equal(resolveLoginRole("christaltest", "wrong", "admin-secret"), null);
+assert.equal(resolveLoginRole("christaltest", "str0ng#pass", "admin-secret"), null); // password IS case-sensitive
+console.log("  ✓ a second env agent login resolves to the agent role (identical permissions)");
 
 // Agent identity constants (login greeting + reply sign-off name + compose seed).
 const { AGENT_DISPLAY_NAME, AGENT_LOGIN_GREETING, AGENT_REPLY_SIGNOFF_NAME, AGENT_REPLY_SIGNOFF, AGENT_COMPOSE_SEED } =
