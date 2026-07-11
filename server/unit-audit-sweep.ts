@@ -51,6 +51,7 @@ import {
   failStuckUnitAuditRecords,
   findActiveUnitAuditJob,
   isUnitAuditStatusActive,
+  lookupUnitAuditRecord,
   nextUnitAuditStage,
   parseUnitAuditReports,
   parseUnitAuditStore,
@@ -911,7 +912,10 @@ export async function getUnitAuditJob(jobId: string): Promise<UnitAuditJobRecord
   const live = jobs.get(jobId);
   if (live) return live;
   const raw = await storage.getSetting(UNIT_AUDIT_STORE_SETTING_KEY).catch(() => undefined);
-  return parseUnitAuditStore(raw ?? null)[jobId] ?? null;
+  // Own-property lookup — jobId comes from the request path, and a crafted
+  // "__proto__" id against a plain object would hand back Object.prototype
+  // for the cancel path to mutate (CodeQL, PR #1013).
+  return lookupUnitAuditRecord(parseUnitAuditStore(raw ?? null), jobId);
 }
 
 export async function listUnitAuditJobs(): Promise<{ activeCount: number; jobs: UnitAuditJobRecord[] }> {
@@ -949,7 +953,8 @@ export async function getUnitAuditDashboardStatus(): Promise<{
 }> {
   const rawReports = await storage.getSetting(UNIT_AUDIT_REPORTS_SETTING_KEY).catch(() => undefined);
   const reports = parseUnitAuditReports(rawReports ?? null);
-  const out: Record<string, { verdict: UnitAuditReportRecord["verdict"]; finishedAt: string; headline: string; stages: UnitAuditStageResult[]; jobId: string }> = {};
+  // Null-prototype like the parsers — keys originate from persisted JSON.
+  const out: Record<string, { verdict: UnitAuditReportRecord["verdict"]; finishedAt: string; headline: string; stages: UnitAuditStageResult[]; jobId: string }> = Object.create(null);
   for (const [key, r] of Object.entries(reports)) {
     out[key] = { verdict: r.verdict, finishedAt: r.finishedAt, headline: unitAuditHeadline(r.stages), stages: r.stages, jobId: r.jobId };
   }

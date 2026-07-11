@@ -131,6 +131,18 @@ export type UnitAuditReportRecord = {
 const STATUSES: UnitAuditJobStatus[] = ["queued", "running", "completed", "failed", "cancelled"];
 const VERDICTS: UnitAuditStageVerdict[] = ["pass", "fixed", "attention", "failed", "error", "skipped"];
 
+// Prototype-pollution guard (CodeQL, PR #1013): store keys round-trip through
+// JSON and are looked up by request-supplied ids (GET /api/unit-audit/:jobId),
+// and reading `{}["__proto__"]` returns Object.prototype — so a crafted id
+// could hand callers the prototype object to mutate. Both parsers build
+// null-prototype maps AND drop these keys; use lookupUnitAuditRecord (own
+// properties only) instead of raw indexing when the key comes from a request.
+const UNSAFE_RECORD_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+export function lookupUnitAuditRecord<T>(store: Record<string, T>, key: string): T | null {
+  return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+}
+
 function sanitizeStages(raw: unknown): UnitAuditStageResult[] {
   if (!Array.isArray(raw)) return [];
   const out: UnitAuditStageResult[] = [];
@@ -156,9 +168,9 @@ export function parseUnitAuditStore(raw: string | null | undefined): Record<stri
   try {
     const parsed = raw ? JSON.parse(raw) : {};
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const out: Record<string, UnitAuditJobRecord> = {};
+    const out: Record<string, UnitAuditJobRecord> = Object.create(null);
     for (const [jobId, v] of Object.entries(parsed as Record<string, any>)) {
-      if (!jobId || !v || typeof v !== "object") continue;
+      if (!jobId || UNSAFE_RECORD_KEYS.has(jobId) || !v || typeof v !== "object") continue;
       if (!STATUSES.includes(v.status)) continue;
       const propertyId = Number(v.propertyId);
       if (!Number.isFinite(propertyId) || propertyId === 0) continue;
@@ -194,9 +206,9 @@ export function parseUnitAuditReports(raw: string | null | undefined): Record<st
   try {
     const parsed = raw ? JSON.parse(raw) : {};
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const out: Record<string, UnitAuditReportRecord> = {};
+    const out: Record<string, UnitAuditReportRecord> = Object.create(null);
     for (const [key, v] of Object.entries(parsed as Record<string, any>)) {
-      if (!v || typeof v !== "object") continue;
+      if (!key || UNSAFE_RECORD_KEYS.has(key) || !v || typeof v !== "object") continue;
       const propertyId = Number(v.propertyId);
       if (!Number.isFinite(propertyId) || propertyId === 0) continue;
       const verdict = (["pass", "attention", "failed", "error"] as const).includes(v.verdict) ? v.verdict : null;

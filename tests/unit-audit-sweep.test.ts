@@ -7,6 +7,7 @@
 import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import {
+  lookupUnitAuditRecord,
   MAX_UNIT_AUDIT_RESUMES,
   STUCK_UNIT_AUDIT_ERROR,
   UNIT_AUDIT_REPORTS_CAP,
@@ -116,6 +117,31 @@ check("store: cap keeps the newest records",
     }
     const parsed = parseUnitAuditStore(serializeUnitAuditStore(store, NOW));
     return Object.keys(parsed).length === UNIT_AUDIT_STORE_CAP && !!parsed.j0 && !parsed[`j${UNIT_AUDIT_STORE_CAP + 4}`];
+  })());
+
+// ── Prototype-pollution guard (CodeQL, PR #1013) ─────────────────────────────
+check("store: a crafted __proto__ key is dropped at parse and unreachable via lookup",
+  (() => {
+    const raw = JSON.stringify({ ["__proto__"]: record({ jobId: "__proto__" }), good: record({ jobId: "good" }) });
+    const store = parseUnitAuditStore(raw);
+    const probe: Record<string, unknown> = {};
+    return lookupUnitAuditRecord(store, "__proto__") === null &&
+      lookupUnitAuditRecord(store, "constructor") === null &&
+      lookupUnitAuditRecord(store, "good")?.jobId === "good" &&
+      (probe as any).status === undefined; // Object.prototype untouched
+  })());
+
+check("lookupUnitAuditRecord never returns inherited properties",
+  lookupUnitAuditRecord({} as Record<string, unknown>, "toString") === null);
+
+check("reports: __proto__/constructor keys are dropped at parse",
+  (() => {
+    const raw = JSON.stringify({
+      ["__proto__"]: { propertyId: 1, propertyName: "x", jobId: "j", finishedAt: "2026-01-01", verdict: "pass", stages: [] },
+      "7": { propertyId: 7, propertyName: "ok", jobId: "j2", finishedAt: "2026-01-01", verdict: "pass", stages: [] },
+    });
+    const reports = parseUnitAuditReports(raw);
+    return lookupUnitAuditRecord(reports, "__proto__") === null && !!reports["7"];
   })());
 
 // ── Reports store ────────────────────────────────────────────────────────────
@@ -308,6 +334,9 @@ check("server: channel stage reuses GET /api/dashboard/channel-status",
 
 check("server: stage errors report verdict \"error\" — absence of evidence never passes",
   /verdict: "error", detail: `Check could not run/.test(serverSrc));
+
+check("server: request-supplied jobId lookups go through lookupUnitAuditRecord (own properties only)",
+  /return lookupUnitAuditRecord\(parseUnitAuditStore\(raw \?\? null\), jobId\);/.test(serverSrc));
 
 // ── Source guards: wiring ────────────────────────────────────────────────────
 const routesSrc = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
