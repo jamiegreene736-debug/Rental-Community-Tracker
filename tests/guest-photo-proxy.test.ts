@@ -30,6 +30,11 @@ check("internal suffix rejected", isSafeGuestPhotoSourceUrl("https://postgres.ra
 check("relative URL rejected", isSafeGuestPhotoSourceUrl("/photos/ilikai/1.jpg") === false);
 check("non-http scheme rejected", isSafeGuestPhotoSourceUrl("file:///etc/passwd") === false);
 check("empty/null rejected", isSafeGuestPhotoSourceUrl("") === false && isSafeGuestPhotoSourceUrl(null) === false);
+// Numeric IP-literal encodings must not slip the dotted-quad regex (numeric TLD).
+check("hex dotted IP rejected", isSafeGuestPhotoSourceUrl("http://0x7f.0.0.1/a.jpg") === false);
+check("octal dotted IP rejected", isSafeGuestPhotoSourceUrl("http://0177.0.0.1/a.jpg") === false);
+check("decimal IP (no dot) rejected", isSafeGuestPhotoSourceUrl("http://2130706433/a.jpg") === false);
+check("DNS name with alphabetic TLD still allowed", isSafeGuestPhotoSourceUrl("https://cdn.example.io/a.jpg") === true);
 
 console.log("guest-photo-proxy: shouldProxyGuestPhoto");
 check("low-res PM site → proxy", shouldProxyGuestPhoto("https://www.waikikibeachrentals.com/rentals/463/Ilikai-1834-1.jpg") === true);
@@ -65,6 +70,10 @@ check("upscale: large sources pass through untouched (never re-encode good pixel
   upscaleSrc.includes("width >= GUEST_PHOTO_UPSCALE_MIN_SOURCE_WIDTH"));
 check("upscale: any failure 302s to the source (never a broken guest image)",
   upscaleSrc.includes("res.redirect(302, src)"));
+check("upscale: resolves + validates the host IP before fetching (SSRF)",
+  upscaleSrc.includes("assertPublicHost") && upscaleSrc.includes("isDisallowedIp"));
+check("upscale: follows redirects manually so each hop is re-validated",
+  upscaleSrc.includes('redirect: "manual"'));
 check("upscale: lanczos3 + sharpen at the target width",
   upscaleSrc.includes('kernel: "lanczos3"') && upscaleSrc.includes("sharpen("));
 

@@ -58,6 +58,24 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// 2026-07-11 security fix: baseline security response headers on every route.
+// Deliberately a small hand-rolled middleware rather than `helmet` — helmet's
+// default Content-Security-Policy would break the SPA (inline styles on the
+// login page + the built bundle) and its COEP/CORP defaults would block the
+// cross-origin CDN images the guest pages render, and pulling it in just to
+// disable those is more risk than value. These four headers are the useful,
+// non-breaking subset: block MIME sniffing, deny framing (clickjacking), trim
+// the Referer, and pin HTTPS in production.
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  if (process.env.NODE_ENV === "production") {
+    res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
+  }
+  next();
+});
+
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",

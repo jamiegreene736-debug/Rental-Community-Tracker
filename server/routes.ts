@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
-import { createHash, randomBytes } from "crypto";
+import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
 import { clearAutoReplaceQueue, listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
@@ -50414,6 +50414,21 @@ ${SOURCE_FACTS_RULE}
     }
   });
 
+  // 2026-07-11 security fix: constant-time secret comparison for the Quo/OpenPhone
+  // webhooks, and the shared secret is now read ONLY from a request header — the
+  // old `req.query.secret` fallback put the secret in the URL, where it leaks into
+  // edge/access logs and Referer headers. Configure the webhook to send the secret
+  // as the `x-quo-webhook-secret` (or `x-webhook-secret`) header.
+  function quoWebhookSecretMatches(supplied: unknown, secret: string): boolean {
+    const value = Array.isArray(supplied) ? supplied[0] : supplied;
+    if (typeof value !== "string" || value.length !== secret.length) return false;
+    try {
+      return timingSafeEqual(Buffer.from(value), Buffer.from(secret));
+    } catch {
+      return false;
+    }
+  }
+
   app.post("/api/quo/webhooks/messages", async (req, res) => {
     try {
       const secret = process.env.QUO_WEBHOOK_SECRET ?? "";
@@ -50421,11 +50436,8 @@ ${SOURCE_FACTS_RULE}
         return res.status(500).json({ error: "QUO_WEBHOOK_SECRET is required in production" });
       }
       if (secret) {
-        const supplied =
-          req.headers["x-quo-webhook-secret"] ??
-          req.headers["x-webhook-secret"] ??
-          req.query.secret;
-        if (supplied !== secret) {
+        const supplied = req.headers["x-quo-webhook-secret"] ?? req.headers["x-webhook-secret"];
+        if (!quoWebhookSecretMatches(supplied, secret)) {
           return res.status(401).json({ error: "Invalid webhook secret" });
         }
       }
@@ -50444,11 +50456,8 @@ ${SOURCE_FACTS_RULE}
         return res.status(500).json({ error: "QUO_WEBHOOK_SECRET is required in production" });
       }
       if (secret) {
-        const supplied =
-          req.headers["x-quo-webhook-secret"] ??
-          req.headers["x-webhook-secret"] ??
-          req.query.secret;
-        if (supplied !== secret) {
+        const supplied = req.headers["x-quo-webhook-secret"] ?? req.headers["x-webhook-secret"];
+        if (!quoWebhookSecretMatches(supplied, secret)) {
           return res.status(401).json({ error: "Invalid webhook secret" });
         }
       }
