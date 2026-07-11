@@ -21,6 +21,7 @@ import { usePhotoLabels } from "@/hooks/use-photo-labels";
 import { loadDraftFullDataByNegativeId } from "@/data/adapt-draft";
 import type { GuestyPropertyData } from "@/services/guestyService";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
+import { composeSummaryWithDisclosures, stripAreaSectionsFromDescription } from "@shared/description-copy";
 
 type BuilderUnitSwap = {
   oldUnitId: string;
@@ -32,7 +33,6 @@ type BuilderUnitSwap = {
   photoFolder?: string;
 };
 
-const SUMMARY_SEPARATOR = "\n\n---\n\n";
 const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
 function isComboUnitDisclosure(text: string): boolean {
   return /combines\s+two\s+units\s+within\s+the\s+same\s+community/i.test(text);
@@ -62,17 +62,15 @@ function stripDisclosureParagraphs(text: string): string {
 }
 
 function buildGuestySummary(property: PropertyUnitBuilder, units: PropertyUnitBuilder["units"]): string {
-  const body = stripDisclosureParagraphs(property.combinedDescription);
+  // stripAreaSectionsFromDescription: promoted drafts strip these in
+  // adapt-draft.ts already; this covers static/legacy combinedDescription
+  // strings that carry the generator's flat-section headers.
+  const body = stripDisclosureParagraphs(stripAreaSectionsFromDescription(property.combinedDescription));
   const isSingle = units.length === 1;
-  const bottomDisclosure = isSingle
-    ? SINGLE_LISTING_SAMPLE_DISCLOSURE
-    : REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE;
-
-  return [
-    !isSingle ? COMBO_TOP_DISCLOSURE : "",
-    body,
-    bottomDisclosure,
-  ].filter(Boolean).join(SUMMARY_SEPARATOR);
+  return composeSummaryWithDisclosures(body, {
+    top: isSingle ? "" : COMBO_TOP_DISCLOSURE,
+    bottom: isSingle ? SINGLE_LISTING_SAMPLE_DISCLOSURE : REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE,
+  });
 }
 
 // ─── Parse "City, ST ZIPCODE" from address string ─────────────────────────────
@@ -441,6 +439,15 @@ export default function Builder() {
         ].join(""),
         neighborhood: property.neighborhood,
         transit: property.transit,
+        // Guest Access is a prominent OTA section that was never populated.
+        // Combos get a generic-but-true default (the two-key detail
+        // previously lived only in House Rules); single listings stay
+        // empty until the operator writes one (editable on the
+        // Descriptions tab, persisted as a description override).
+        access:
+          units.length >= 2
+            ? "Guests have exclusive access to both units for the entire stay. Separate access details (keys or door codes) for each unit are provided before check-in."
+            : "",
         houseRules:
           units.length === 1
             ? "No smoking. No parties or events. Must be 25+ years old to book. Quiet hours 10pm–8am."

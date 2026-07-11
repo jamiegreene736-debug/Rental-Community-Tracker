@@ -1036,6 +1036,23 @@ export const builderBookingRules = pgTable("builder_booking_rules", {
 export type BuilderBookingRules = typeof builderBookingRules.$inferSelect;
 export type InsertBuilderBookingRules = typeof builderBookingRules.$inferInsert;
 
+/** Operator-edited Descriptions-tab field overrides. property_id is a
+ * positive core id OR a negative -draftId (same convention as
+ * property_amenities). A null column = no override → the builder's
+ * generated/static base value renders and pushes. `notes` is deliberately
+ * absent — publicDescription.notes is owned by the compliance push. */
+export const propertyDescriptionOverrides = pgTable("property_description_overrides", {
+  propertyId: integer("property_id").primaryKey(),
+  title: text("title"),
+  summary: text("summary"),
+  space: text("space"),
+  neighborhood: text("neighborhood"),
+  transit: text("transit"),
+  access: text("access"),
+  houseRules: text("house_rules"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 /** Builder-pulled compliance values for hardcoded (positive) propertyIds. */
 export const propertyComplianceOverrides = pgTable("property_compliance_overrides", {
   propertyId: integer("property_id").primaryKey(),

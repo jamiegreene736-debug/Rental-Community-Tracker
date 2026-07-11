@@ -30,6 +30,12 @@ import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-or
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { occupancyForBedrooms } from "@shared/occupancy";
 import {
+  DESCRIPTION_OVERRIDE_FIELDS,
+  findDescriptionPlaceholders,
+  stripAreaSectionsFromDescription,
+  type PropertyDescriptionOverrideField,
+} from "@shared/description-copy";
+import {
   validateGuestIssueTitle,
   normalizeGuestIssueSeverity,
   normalizeGuestIssueStatus,
@@ -560,12 +566,17 @@ function buildGuestySummaryWithAssignmentNote(property: GuestySummarySource): st
 function draftToGuestySummarySource(draft: Record<string, unknown>): { title: string; property: GuestySummarySource } {
   const singleListing = draft.singleListing === true;
   const unitCount = singleListing ? 1 : 2;
-  const description = String(
+  // Strip the generator's "THE NEIGHBORHOOD" / "GETTING AROUND" sections —
+  // they're pushed as their own publicDescription fields, so leaving them
+  // in the summary duplicates them on the OTA (2026-07-10). The legacy
+  // fallback join deliberately excludes neighborhood/transit for the
+  // same reason.
+  const description = stripAreaSectionsFromDescription(String(
     draft.listingDescription
       ?? draft.description
-      ?? [draft.summary, draft.space, draft.neighborhood, draft.transit].filter(Boolean).join("\n\n")
+      ?? [draft.summary, draft.space].filter(Boolean).join("\n\n")
       ?? "",
-  ).trim();
+  ).trim());
   const title = String(draft.bookingTitle ?? draft.listingTitle ?? draft.name ?? `Draft ${draft.id ?? ""}`).trim();
   return {
     title,
@@ -7783,6 +7794,60 @@ export async function registerRoutes(
       await storage.upsertPropertyComplianceOverrides(propertyId, patch);
       const row = await storage.getPropertyComplianceOverrides(propertyId);
       return res.json({ values: readStoredComplianceValues(row) });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // GET /api/builder/descriptions/:propertyId — persisted Descriptions-tab
+  // field overrides (operator edits + Regenerate results). property_id is a
+  // positive core id OR a negative -draftId; null/absent field = no
+  // override, the builder renders its generated/static base value.
+  app.get("/api/builder/descriptions/:propertyId", async (req, res) => {
+    const propertyId = Number(req.params.propertyId);
+    if (!Number.isInteger(propertyId) || propertyId === 0) {
+      return res.status(400).json({ error: "Invalid propertyId" });
+    }
+    try {
+      const row = await storage.getPropertyDescriptionOverrides(propertyId);
+      const values: Record<string, string> = {};
+      for (const [key, value] of Object.entries(row ?? {})) {
+        const text = String(value ?? "").trim();
+        if (text) values[key] = text;
+      }
+      return res.json({ values });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // PATCH /api/builder/descriptions/:propertyId — save edited fields.
+  // A null (or empty-string) value CLEARS that field's override so the
+  // generated base value takes over again.
+  app.patch("/api/builder/descriptions/:propertyId", async (req, res) => {
+    const propertyId = Number(req.params.propertyId);
+    if (!Number.isInteger(propertyId) || propertyId === 0) {
+      return res.status(400).json({ error: "Invalid propertyId" });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const patch: Partial<Record<PropertyDescriptionOverrideField, string | null>> = {};
+    for (const field of DESCRIPTION_OVERRIDE_FIELDS) {
+      if (!(field in body)) continue;
+      const value = body[field];
+      patch[field] = value == null ? null : String(value);
+    }
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: "No description fields to save" });
+    }
+    try {
+      await storage.upsertPropertyDescriptionOverrides(propertyId, patch);
+      const row = await storage.getPropertyDescriptionOverrides(propertyId);
+      const values: Record<string, string> = {};
+      for (const [key, value] of Object.entries(row ?? {})) {
+        const text = String(value ?? "").trim();
+        if (text) values[key] = text;
+      }
+      return res.json({ values });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || String(err) });
     }
@@ -23879,6 +23944,21 @@ Requirements:
     if (!listingId) return res.status(400).json({ error: "listingId is required" });
     if (!descriptions) return res.status(400).json({ error: "descriptions is required" });
 
+    // Placeholder guard (2026-07-10, same posture as push-compliance's
+    // isPlaceholderLicenseValue): generate-listing's no-key / error
+    // fallback copy contains literal operator instructions ("Add specific
+    // nearby landmarks … before publishing"). Refuse to publish them —
+    // the operator edits the field (Descriptions tab) or regenerates.
+    const placeholderHits = findDescriptionPlaceholders(descriptions as Record<string, string | undefined>);
+    if (placeholderHits.length > 0) {
+      const fields = Array.from(new Set(placeholderHits.map((h) => h.field))).join(", ");
+      return res.status(422).json({
+        success: false,
+        error: `Description contains placeholder scaffolding copy in: ${fields}. This is unfinished AI-fallback text ("${placeholderHits[0].phrase}…") — edit the field or use Regenerate descriptions before pushing.`,
+        placeholders: placeholderHits,
+      });
+    }
+
     const payload: Record<string, unknown> = {};
     if (descriptions.title) payload.title = descriptions.title;
 
@@ -38651,12 +38731,17 @@ Return ONLY compact JSON with this exact shape:
     }
 
     if (job.cancelRequested) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
+    // Pass the ACTUAL source listing URLs (stamped by the photo step) so the
+    // generator can ground bathrooms/sqft/bedding in the real listing instead
+    // of estimating from bedroom count alone (2026-07-10). The community
+    // street address anchors the location context the same way the wizard's
+    // per-unit addresses do.
     const generated = await runBulkComboListingStep(job, item, "copy", "Generating listing draft", () => fetchComboPhotoJson(`${comboPhotoBaseUrl()}/api/community/generate-listing`, {
       communityName: community.name,
       city: community.city,
       state: community.state,
-      unit1: { bedrooms: effUnit1Beds, url: "", address: undefined },
-      unit2: { bedrooms: effUnit2Beds, url: "", address: undefined },
+      unit1: { bedrooms: effUnit1Beds, url: item.unit1SourceUrl ?? item.unit1Url ?? "", address: item.streetAddress || undefined },
+      unit2: { bedrooms: effUnit2Beds, url: item.unit2SourceUrl ?? item.unit2Url ?? "", address: item.streetAddress || undefined },
       suggestedRate: pairing.estimatedSellRate,
     }, { abortKey, timeoutMs: 120_000 }));
 
@@ -49021,12 +49106,25 @@ Return ONLY compact JSON with this exact shape:
     // text rather than two parallel routes — output JSON shape is
     // identical (just `unitB` is null for singles), so the wizard
     // and downstream save flow can use a single client call.
+    // Scraped source-listing text (when the caller has it) grounds the
+    // per-unit facts — bathrooms / sqft / bedding come from the real
+    // listing instead of a bedroom-count guess (2026-07-10). Collapsed
+    // + capped so a full Zillow page dump can't blow up the prompt.
+    const sourceFactSnippet = (text?: string): string => {
+      const t = String(text ?? "").replace(/\s+/g, " ").trim();
+      return t ? t.slice(0, 700) : "";
+    };
+    const unit1Facts = sourceFactSnippet(unit1.description);
+    const unit2Facts = singleListing ? "" : sourceFactSnippet(unit2?.description);
+    const SOURCE_FACTS_RULE = "- When source listing details are provided in CONTEXT, use their concrete facts (bathrooms, square footage, bedding) instead of estimating; only estimate what the details do not cover, and never contradict them.";
+
     const prompt = singleListing
       ? `Generate a structured vacation rental listing draft for a STANDALONE single-unit listing at ${communityName} in ${city}, ${state}.
 
 CONTEXT
 - Single unit: ${unit1.bedrooms}-bedroom ${unit1.address ? `at ${unit1.address}` : `at ${communityName}`}${unit1.url ? ` (source: ${unit1.url})` : ""}
 - This is ONE standalone condo or townhouse — NOT a combination of two units.
+${unit1Facts ? `- Source listing details: ${unit1Facts}` : ""}
 ${resortFeeNote ? `- Resort fee note to include exactly once in summary or space: ${resortFeeNote}` : ""}
 
 OUTPUT — return ONLY valid JSON with this exact shape:
@@ -49056,6 +49154,7 @@ CONSTRAINTS
 - Use commas and hyphens (-) only. NO em dashes (—) in either title.
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about.
+${SOURCE_FACTS_RULE}
 - Single-unit framing — NEVER mention "two units" or "combined" or "individually owned".
 - Do not include representative-accommodation or unit-assignment disclosure language. The builder appends that at the bottom.
 - If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
@@ -49064,10 +49163,12 @@ CONSTRAINTS
       : `Generate a structured vacation rental listing draft for a bundled multi-unit listing at ${communityName} in ${city}, ${state}.
 
 CONTEXT
-- Unit A: ${unit1.bedrooms}-bedroom unit at ${communityName}${unit1.url ? ` (source: ${unit1.url})` : ""}
-- Unit B: ${unit2!.bedrooms}-bedroom unit at ${communityName}${unit2!.url ? ` (source: ${unit2!.url})` : ""}
+- Unit A: ${unit1.bedrooms}-bedroom unit at ${communityName}${unit1.address ? ` (${unit1.address})` : ""}${unit1.url ? ` (source: ${unit1.url})` : ""}
+- Unit B: ${unit2!.bedrooms}-bedroom unit at ${communityName}${unit2!.address ? ` (${unit2!.address})` : ""}${unit2!.url ? ` (source: ${unit2!.url})` : ""}
 - Combined total: ${combinedBedrooms} bedrooms across two separate units
 - Walking distance between units: ${walk.description} (${walk.minutes}-minute walk, source: ${walk.source})
+${unit1Facts ? `- Unit A source listing details: ${unit1Facts}` : ""}
+${unit2Facts ? `- Unit B source listing details: ${unit2Facts}` : ""}
 ${resortFeeNote ? `- Resort fee note to include exactly once in summary or space: ${resortFeeNote}` : ""}
 
 OUTPUT — return ONLY valid JSON with this exact shape:
@@ -49106,6 +49207,7 @@ CONSTRAINTS
 - Use commas and hyphens (-) only. NO em dashes (—) in either title.
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about. Describe in terms of what a typical condo at this kind of resort offers.
+${SOURCE_FACTS_RULE}
 - summary and space must NOT contain combo disclosure or representative-photo disclosure; the builder places those separately.
 - If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
 - Plain text only inside the strings. No Markdown. No bullet markers. No headers.
