@@ -1880,7 +1880,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [pushResults, setPushResults] = useState<{ localPath: string; success: boolean; error?: string }[]>([]);
   const [savingToGuesty, setSavingToGuesty] = useState(false);
   const [checkpointCount, setCheckpointCount] = useState(0);
-  const [doUpscale, setDoUpscale] = useState(false);
+  // Default ON: the server now AI-upscales ONLY photos below the 1920px push
+  // spec (already-large photos skip Real-ESRGAN entirely), so the toggle no
+  // longer costs ~30s on every photo — just the small ones that need it.
+  const [doUpscale, setDoUpscale] = useState(true);
   const pushAbortRef = useRef<AbortController | null>(null);
 
   // ── Normalize existing Guesty photos (rotate/resize/compress in-place) ──
@@ -3477,7 +3480,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
 
     try {
-      const photoPush = await upscaleAndUpload(effectivePropertyData?.photos ?? [], false);
+      // Follows the Photos-tab upscale toggle (default ON) — the server only
+      // sends sub-1920px photos to the AI upscaler, so this no longer adds
+      // ~30s to every photo of a publish.
+      const photoPush = await upscaleAndUpload(effectivePropertyData?.photos ?? [], doUpscale);
       if (photoPush.error || photoPush.successCount <= 0) {
         throw new Error(photoPush.error ?? "No photos were saved to Guesty.");
       }
@@ -7962,8 +7968,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     data-testid="toggle-upscale"
                                     style={{ width: 14, height: 14, cursor: "pointer" }}
                                   />
-                                  Upscale 2× before pushing
-                                  <span style={{ color: "#9ca3af" }}>(slower — ~30s/photo)</span>
+                                  AI-upscale small photos before pushing
+                                  <span style={{ color: "#9ca3af" }}>(only photos under 1920px — ~30s each; larger photos push as-is)</span>
                                 </label>
 
                                 {!selectedId && (
@@ -8160,7 +8166,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   : checkpointCount > 0
                                   ? `✓ ${checkpointCount * 5} photos already saved to Guesty — uploading remainder…`
                                   : doUpscale
-                                  ? "Upscaling + hosting for Guesty — ~30s per photo. Progress saved to Guesty every 5 photos."
+                                  ? "Hosting for Guesty (AI-upscaling photos under 1920px, ~30s each). Progress saved to Guesty every 5 photos."
                                   : "Hosting for Guesty — a few seconds per photo. Progress saved to Guesty every 5 photos."}
                               </div>
                               {/* Live per-photo results */}

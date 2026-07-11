@@ -170,7 +170,8 @@ import { fetchSearchApiWithFallback, getSearchApiKey } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations, resendBookingConfirmation } from "./booking-confirmations";
 import { runPropertyRevenueRefresh, getPropertyRevenueStatus } from "./property-revenue-scheduler";
 import { runMarketRateScan, getMarketRateScanStatus } from "./market-rate-scheduler";
-import { validateAndFixPhoto } from "./photo-validator";
+import { validateAndFixPhoto, TARGET_WIDTH as PUSH_PHOTO_TARGET_WIDTH } from "./photo-validator";
+import { esrganScaleForPhoto } from "@shared/photo-upscale-plan";
 import { resolveCuratedCommunityDescription } from "./community-descriptions";
 import { filterNonRentalUnitPhotos, UNIT_PHOTO_VISION_VERSION } from "./unit-photo-vision";
 import {
@@ -5675,7 +5676,10 @@ async function generateWithReplicateKw(prompt: string): Promise<Buffer | null> {
   }
 }
 
-async function upscaleWithReplicateKw(imageBuffer: Buffer, mimeType: string): Promise<Buffer | null> {
+// scale: Real-ESRGAN output factor. Push callers compute it per photo via
+// esrganScaleForPhoto (only sub-spec photos reach here, with the smallest
+// scale that clears TARGET_WIDTH); the makeover flow keeps the legacy 2x.
+async function upscaleWithReplicateKw(imageBuffer: Buffer, mimeType: string, scale: number = 2): Promise<Buffer | null> {
   const key = process.env.REPLICATE_API_KEY;
   if (!key) return null;
   try {
@@ -5684,7 +5688,7 @@ async function upscaleWithReplicateKw(imageBuffer: Buffer, mimeType: string): Pr
     const createResp = await replicatePostWithRetry(
       "https://api.replicate.com/v1/models/nightmareai/real-esrgan/predictions",
       key,
-      { input: { image: dataUri, scale: 2, face_enhance: false } },
+      { input: { image: dataUri, scale, face_enhance: false } },
       "upscale"
     );
     if (!createResp.ok) {
@@ -23061,18 +23065,29 @@ Requirements:
     const ext = path.extname(safePath).toLowerCase();
     const mimeType = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
 
-    // Upscale with Real-ESRGAN if key available
+    // Upscale with Real-ESRGAN if key available — only when the photo is
+    // genuinely below the 1920px push spec (same gating as push-photos; an
+    // already-large photo passes through untouched).
     let finalBuffer = rawData;
     let wasUpscaled = false;
     if (replicateKey) {
-      console.log(`[builder-upscale] Upscaling ${safePath}...`);
-      const upscaled = await upscaleWithReplicateKw(rawData, mimeType);
-      if (upscaled) {
-        finalBuffer = upscaled;
-        wasUpscaled = true;
-        console.log(`[builder-upscale] ✓ ${safePath} upscaled (${rawData.length} → ${upscaled.length} bytes)`);
+      let esrganScale: number | null = null;
+      try {
+        const dims = await sharp(rawData, { failOn: "none" }).metadata();
+        esrganScale = esrganScaleForPhoto(dims.width, dims.height, PUSH_PHOTO_TARGET_WIDTH);
+      } catch { /* unreadable dimensions — skip the AI step */ }
+      if (esrganScale != null) {
+        console.log(`[builder-upscale] Upscaling ${safePath} (${esrganScale}x)...`);
+        const upscaled = await upscaleWithReplicateKw(rawData, mimeType, esrganScale);
+        if (upscaled) {
+          finalBuffer = upscaled;
+          wasUpscaled = true;
+          console.log(`[builder-upscale] ✓ ${safePath} upscaled (${rawData.length} → ${upscaled.length} bytes)`);
+        } else {
+          console.warn(`[builder-upscale] Upscale failed for ${safePath}, using original`);
+        }
       } else {
-        console.warn(`[builder-upscale] Upscale failed for ${safePath}, using original`);
+        console.log(`[builder-upscale] ${safePath} already at/above push spec — skipping AI upscale`);
       }
     }
 
@@ -24239,19 +24254,35 @@ Requirements:
       const ext = path.extname(safePath).toLowerCase();
       const mimeType = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
 
-      // Optionally upscale with Replicate (skipped if upscale=false or no key)
+      // Optionally AI-upscale with Replicate (skipped if upscale=false or no
+      // key) — but ONLY photos genuinely below the 1920px push spec, at the
+      // smallest ESRGAN scale that clears it. Photos already >= spec skip the
+      // AI entirely: Real-ESRGAN on a 4032px original that the validator then
+      // downscales back to 1920 buys nothing except an AI-smoothed look, ~30s
+      // and a Replicate charge per photo (the 2026-07-11 "photos look
+      // upscaled" report). esrganScaleForPhoto gates on the LONG side because
+      // the validator rotates portraits to landscape before resizing.
       let finalBuffer = rawData;
       let finalMime = mimeType;
       let wasUpscaled = false;
       if (upscale && replicateKey) {
+        let esrganScale: number | null = null;
         try {
-          const upscaled = await upscaleWithReplicateKw(rawData, mimeType);
-          if (upscaled) {
-            finalBuffer = upscaled;
-            wasUpscaled = true;
-          }
+          const dims = await sharp(rawData, { failOn: "none" }).metadata();
+          esrganScale = esrganScaleForPhoto(dims.width, dims.height, PUSH_PHOTO_TARGET_WIDTH);
         } catch {
-          // upscale failure is non-fatal — push original
+          // unreadable dimensions — skip the AI step; validation below surfaces the real error
+        }
+        if (esrganScale != null) {
+          try {
+            const upscaled = await upscaleWithReplicateKw(rawData, mimeType, esrganScale);
+            if (upscaled) {
+              finalBuffer = upscaled;
+              wasUpscaled = true;
+            }
+          } catch {
+            // upscale failure is non-fatal — push original
+          }
         }
       }
 
