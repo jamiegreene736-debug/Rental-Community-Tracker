@@ -300,7 +300,7 @@ import {
 import { runPhotoListingCheckForFolders, runAddressBackfill, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, communityOnlyCheckRequest, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
 import { scanAmenitiesForProperty } from "./amenity-scan";
-import { getAmenityLabel, AMENITY_CATALOG_KEYS } from "@shared/guesty-amenity-catalog";
+import { getAmenityLabel, AMENITY_CATALOG_KEYS, GUESTY_PUSH_NAME_ALIASES, GUESTY_UNSUPPORTED_AMENITY_KEYS } from "@shared/guesty-amenity-catalog";
 import { evaluateComboPhotoCommunityGate, planComboBedroomRetry, type ComboPhotoGateDecision, type ComboPhotoGateInput, type ComboBedroomRetryPlan } from "@shared/combo-photo-community-gate";
 import { evaluateComboOtaScanGate, type ComboOtaScanGateDecision } from "@shared/combo-ota-scan-gate";
 import {
@@ -23558,6 +23558,12 @@ Requirements:
       // Explicit aliases: our label/key → normalized Guesty name. Added for cases
       // where Guesty's wording diverges from ours. Values must pre-normalize cleanly
       // to a key present in byNorm.
+      // NOTE: the AUTHORITATIVE alias table is GUESTY_PUSH_NAME_ALIASES in
+      // shared/guesty-amenity-catalog.ts (merged below — it covers every catalog
+      // key that can't norm-match directly, keyed by the catalog KEY with the
+      // label form added automatically). The legacy pairs here are kept only for
+      // retired key/label spellings no longer in the catalog (e.g.
+      // COVERED_LANAI_PATIO); add NEW aliases to the shared table, not here.
       const aliasPairs: [string, string][] = [
         // Confirmed from user feedback (round 1)
         ["COVERED_LANAI_PATIO", "patio or balcony"],
@@ -23597,6 +23603,12 @@ Requirements:
         ["LONG_TERM_STAYS_ALLOWED", "long term stays allowed"],
       ];
       const aliasMap = new Map(aliasPairs.map(([k, v]) => [norm(k), v]));
+      // Merge the shared authoritative table: catalog key AND its label both
+      // resolve to the Guesty canonical name (normalized for the byNorm lookup).
+      for (const [key, canonical] of Object.entries(GUESTY_PUSH_NAME_ALIASES)) {
+        aliasMap.set(norm(key), norm(canonical));
+        aliasMap.set(norm(getAmenityLabel(key)), norm(canonical));
+      }
 
       const resolveCanonical = (input: string): string | null => {
         const n = norm(input);
@@ -23665,7 +23677,18 @@ Requirements:
         ranked.sort((a, b) => b.score - a.score || a.len - b.len);
         return ranked.slice(0, 3).map(r => r.name);
       };
-      const suggestions = otherToSend.map(name => ({ name, suggestion: suggestFor(name)[0] ?? null, alternatives: suggestFor(name).slice(1) }));
+      // Rejected names that are KNOWN to have no Guesty equivalent (curated in
+      // the shared catalog) are expected, not an error — flag them so the UI can
+      // say "kept in-system only" instead of an alarming warning.
+      const unsupportedNorms = new Set(
+        Array.from(GUESTY_UNSUPPORTED_AMENITY_KEYS).flatMap(k => [norm(k), norm(getAmenityLabel(k))]),
+      );
+      const suggestions = otherToSend.map(name => ({
+        name,
+        suggestion: suggestFor(name)[0] ?? null,
+        alternatives: suggestFor(name).slice(1),
+        unsupported: unsupportedNorms.has(norm(name)),
+      }));
 
       console.log(`[push-amenities] saved=${savedAmenities.length} missing=${missing.length} rejected=${otherToSend.length}`);
       console.log(`[push-amenities] guesty returned sample:`, savedAmenities.slice(0, 10));

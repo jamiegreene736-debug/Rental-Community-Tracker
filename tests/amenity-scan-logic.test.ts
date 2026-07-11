@@ -12,6 +12,8 @@ import {
   AMENITY_LOCATION_TARGETS,
   AMENITY_CATALOG_KEYS,
   GUESTY_AMENITY_CATALOG,
+  GUESTY_PUSH_NAME_ALIASES,
+  GUESTY_UNSUPPORTED_AMENITY_KEYS,
   HAWAII_BASE_AMENITY_KEYS,
   getAmenityLabel,
 } from "../shared/guesty-amenity-catalog";
@@ -251,6 +253,128 @@ const read = (p: string) => fs.readFileSync(p, "utf8"); // repo-root cwd (matche
     /keys\.length === 0\) return;/.test(routesSrc));
   check("auto-push cooldown absorbs the create flow's double-fire",
     routesSrc.includes("AMENITY_AUTO_PUSH_COOLDOWN_MS"));
+}
+
+// ── Guesty push-name aliases (2026-07-10 "Guesty didn't recognise 13 amenities") ──
+// Snapshot of Guesty's /properties-api/amenities/supported list (187 names),
+// pulled live on 2026-07-10. If Guesty ever renames one of these, the alias
+// checks below catch the drift at test time instead of at push time.
+{
+  const GUESTY_SUPPORTED_SNAPSHOT: string[] = [
+  "Accessible-height bed", "Accessible-height toilet", "Disabled parking spot", "Grab-rails for shower and toilet",
+  "Grab-rails in toilet", "Path to entrance lit at night", "Roll-in shower with shower bench or chair", "Shower bench",
+  "Shower chair", "Single level home", "Step-free access", "Tub with shower bench",
+  "Wheelchair accessible", "Wide clearance to bed", "Wide clearance to shower and toilet", "Wide doorway",
+  "Wide hallway clearance", "Body soap", "Cleaning products", "Conditioner",
+  "Hot water", "Shampoo", "Shower gel", "Towels provided",
+  "Clothing storage", "Coin Laundry", "Dryer in common space", "Mosquito net",
+  "Washer in common space", "Dvd player", "Foosball table", "Game room",
+  "Piano", "Ping pong table", "Pool table", "Sound system",
+  "Baby bath", "Baby monitor", "Babysitter recommendations", "Bathtub",
+  "Board games", "Changing table", "Children’s books and toys", "Children’s dinnerware",
+  "Crib", "Family/kid friendly", "Fireplace guards", "Game console",
+  "High chair", "Outlet covers", "Pack ’n Play/travel crib", "Room-darkening shades",
+  "Stair gates", "Table corner guards", "Window guards", "Portable fans",
+  "Carbon monoxide detector", "Emergency exit", "Fire extinguisher", "First aid kit",
+  "Smoke detector", "Baking sheet", "Barbeque utensils", "Blender",
+  "Breakfast", "Coffee", "Coffee maker", "Cookware",
+  "Dining table", "Dishes and silverware", "Dishwasher", "Freezer",
+  "Ice maker", "Kettle", "Microwave", "Mini fridge",
+  "Oven", "Refrigerator", "Rice maker", "Stove",
+  "Toaster", "Trash compactor", "Wine glasses", "Beach",
+  "Beach Front", "Beach View", "Beach access", "City View",
+  "Desert View", "Downtown", "Garden View", "Golf course front",
+  "Golf view", "Gulf front", "Lake", "Lake Front",
+  "Lake access", "Laundromat nearby", "Mountain", "Mountain view",
+  "Near Ocean", "Ocean Front", "Resort", "Resort access",
+  "Rural", "Sea view", "Ski In", "Ski In/Ski Out",
+  "Ski Out", "Town", "Village", "Water View",
+  "Waterfront", "Cleaning Disinfection", "Cleaning before checkout", "Desk",
+  "Enhanced cleaning practices", "High touch surfaces disinfected", "Laptop friendly workspace", "Long term stays allowed",
+  "Luggage dropoff allowed", "Casinos", "Cycling", "Fishing",
+  "Golf - Optional", "Horseback Riding", "Mountain Climbing", "Museums",
+  "Rock Climbing", "Shopping", "Theme Parks", "Water Parks",
+  "Water Sports", "Zoo", "BBQ grill", "Beach essentials",
+  "Bicycles available", "Bikes", "Boat slip", "Doorman",
+  "Fire Pit", "Garden or backyard", "Hammock", "Kayak",
+  "Outdoor kitchen", "Outdoor seating (furniture)", "River", "Tennis court",
+  "Free parking on premises", "Free parking on street", "Garage", "Paid parking",
+  "Paid parking off premises", "Communal pool", "Indoor pool", "Outdoor pool",
+  "Private pool", "Rooftop pool", "Swimming pool", "Air conditioning",
+  "Bed linens", "Cable TV", "Dryer", "Elevator",
+  "Essentials", "Hair dryer", "Hangers", "Heating",
+  "Indoor fireplace", "Internet", "Iron", "Kitchen",
+  "Patio or balcony", "TV", "Washer", "Wireless Internet",
+  "Ceiling fan", "EV charger", "Extra pillows and blankets", "Pocket Wifi",
+  "Private entrance", "Safe", "Stereo system", "Gym",
+  "Hot tub", "Sauna", "Spa",
+  ];
+  const norm = (s: string) =>
+    s.toLowerCase().replace(/[_\-/&]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+  const byNorm = new Map(GUESTY_SUPPORTED_SNAPSHOT.map((n) => [norm(n), n]));
+
+  check("snapshot holds Guesty's full 187-name catalog", GUESTY_SUPPORTED_SNAPSHOT.length === 187);
+  check("every alias key is a valid catalog key",
+    Object.keys(GUESTY_PUSH_NAME_ALIASES).every((k) => VALID.has(k)));
+  check("every alias value is an exact Guesty canonical name (norm-resolves against the snapshot)",
+    Object.values(GUESTY_PUSH_NAME_ALIASES).every((v) => byNorm.has(norm(v))));
+  check("every unsupported key is a valid catalog key",
+    [...GUESTY_UNSUPPORTED_AMENITY_KEYS].every((k) => VALID.has(k)));
+  check("no key is both aliased and marked unsupported",
+    [...GUESTY_UNSUPPORTED_AMENITY_KEYS].every((k) => !(k in GUESTY_PUSH_NAME_ALIASES)));
+  check("unsupported keys genuinely have no direct Guesty match (else promote to an alias)",
+    [...GUESTY_UNSUPPORTED_AMENITY_KEYS].every(
+      (k) => !byNorm.has(norm(k)) && !byNorm.has(norm(getAmenityLabel(k)))));
+
+  // THE invariant behind the 2026-07-10 fix: EVERY catalog key must reach a
+  // Guesty canonical name through norm(label) / norm(key) / the alias table —
+  // or be explicitly curated as unsupported. A new catalog entry that does
+  // neither would silently reject at push time; this catches it in CI.
+  const resolvable = (key: string) => {
+    const label = getAmenityLabel(key);
+    if (byNorm.has(norm(label)) || byNorm.has(norm(key))) return true;
+    const alias = GUESTY_PUSH_NAME_ALIASES[key];
+    return alias != null && byNorm.has(norm(alias));
+  };
+  const unexplained = GUESTY_AMENITY_CATALOG
+    .map((e) => e.key)
+    .filter((k) => !resolvable(k) && !GUESTY_UNSUPPORTED_AMENITY_KEYS.has(k));
+  check(`every catalog key maps to Guesty or is curated unsupported (unexplained: ${unexplained.join(",") || "none"})`,
+    unexplained.length === 0);
+
+  // The 13 keys Guesty rejected on the Koa Lagoon push (operator screenshot,
+  // 2026-07-10) must now each either resolve via the alias table or be
+  // explicitly curated unsupported.
+  const koaLagoonRejects = [
+    "WIFI", "KEYPAD", "COOKING_BASICS", "STREAMING_SERVICES", "WALK_IN_SHOWER",
+    "COVERED_PATIO", "OUTDOOR_SEATING", "GARDEN", "POOL_VIEW", "GOLF",
+    "NEAR_GOLF_COURSE", "NEAR_RESTAURANTS", "HIKING",
+  ];
+  check("each 2026-07-10 rejected key is now aliased or curated unsupported",
+    koaLagoonRejects.every((k) => resolvable(k) || GUESTY_UNSUPPORTED_AMENITY_KEYS.has(k)));
+  check("the previously-rejected mappable keys now resolve (WIFI/COOKING_BASICS/COVERED_PATIO/GOLF...)",
+    ["WIFI", "COOKING_BASICS", "COVERED_PATIO", "OUTDOOR_SEATING", "GARDEN", "GOLF", "NEAR_GOLF_COURSE"]
+      .every((k) => resolvable(k)));
+
+  // Aliases must never strengthen a claim: NEAR_GOLF_COURSE stays "Golf - Optional",
+  // never the frontage claim "Golf course front".
+  check("NEAR_GOLF_COURSE does not overclaim golf frontage",
+    GUESTY_PUSH_NAME_ALIASES["NEAR_GOLF_COURSE"] === "Golf - Optional");
+
+  // SOURCE GUARDS — both consumers must read the SHARED table (the 2026-07-10
+  // bug was exactly a private alias list drifting from the catalog keys).
+  const routesSrc = read("server/routes.ts");
+  check("push-amenities route merges the shared alias table (key + label forms)",
+    routesSrc.includes("Object.entries(GUESTY_PUSH_NAME_ALIASES)")
+    && routesSrc.includes("aliasMap.set(norm(getAmenityLabel(key)), norm(canonical))"));
+  check("push-amenities flags known-unsupported rejects for the UI",
+    routesSrc.includes("GUESTY_UNSUPPORTED_AMENITY_KEYS")
+    && routesSrc.includes("unsupported: unsupportedNorms.has(norm(name))"));
+  const builderSrc = read("client/src/components/GuestyListingBuilder/index.tsx");
+  check("client key->Guesty-name mapper consults the shared alias table",
+    builderSrc.includes("GUESTY_PUSH_NAME_ALIASES[entry.key]"));
+  check("client toast separates unsupported (kept in-system) from unrecognized",
+    builderSrc.includes("no Guesty equivalent"));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
