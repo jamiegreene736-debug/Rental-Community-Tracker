@@ -561,6 +561,213 @@ export function replaceRungOnCooldown(
   return nowMs - lastSwapAtMs < cooldownDays * 24 * 60 * 60 * 1000;
 }
 
+// ── Self-verifying audit: double/triple-check rails (2026-07-12) ─────────────
+// Operator directive off a live receipt ("2 need your attention, 1 could not
+// be verified — … fix the review so that no human intervention is needed …
+// double or triple check system"): review/unverified outcomes must re-check
+// themselves before a human ever sees them. Pure decisions live here; the
+// orchestration (server/unit-audit-sweep.ts) wires four rails:
+//   A. unverified-stage RETRY passes — stages that ended `error` (or
+//      attention/failed from a TRANSIENT auto-fix failure) re-run up to
+//      AUDIT_STAGE_RETRY_PASSES times before the receipt is written.
+//   B. community CONSENSUS passes — a warn-class check with ZERO positive
+//      contradictions re-runs; confirmations merge across passes; only
+//      all-passes-zero-contradiction may consensus-pass (a "no" anywhere is
+//      never upgraded — Load-Bearing #16's mismatch-always-wins).
+//   C. same-scene STABILITY double-check — a vision dedupe group only acts
+//      (or flags review) when a second independent scan reproduces it.
+//   D. OTA inconclusive re-kick — fresh-but-inconclusive scan rows re-scan
+//      (shared photoListingScanWasInconclusive) instead of erroring untried.
+
+export const UNIT_AUDIT_STAGE_RETRY_PASSES_DEFAULT = 2;
+
+// Which attention/failed rows may re-run in the retry pass: ONLY transient
+// auto-fix failure signatures (a fix engine call that errored mid-sweep, or a
+// refresh that was already running when the sweep tried to fire it).
+// Judgment-call rows — layout mismatches, sample licenses, cooldown/budget
+// blocks, replace-permission — must NOT re-run: they are deliberate
+// human-decision rails. Patterns are drift-locked against the orchestrator's
+// emitted strings by a source-guard test.
+export const RETRYABLE_ATTENTION_PATTERNS: RegExp[] = [
+  /^auto-fix failed:/i,
+  /^auto-fix could not apply/i,
+  /already running/i,
+];
+
+export function unitAuditRetryStageIds(stages: UnitAuditStageResult[]): UnitAuditStageId[] {
+  const retry = new Set<UnitAuditStageId>();
+  for (const s of stages) {
+    // A resolve failure is job-fatal (the run loop rethrows it) — never
+    // retried here.
+    if (s.stage === "resolve") continue;
+    if (s.verdict === "error") {
+      retry.add(s.stage);
+      continue;
+    }
+    if (
+      (s.verdict === "attention" || s.verdict === "failed") &&
+      (s.items ?? []).some((line) => RETRYABLE_ATTENTION_PATTERNS.some((re) => re.test(line)))
+    ) {
+      retry.add(s.stage);
+    }
+  }
+  return UNIT_AUDIT_STAGE_IDS.filter((id) => retry.has(id));
+}
+
+// ── Rail B: community-check consensus (pure decisions) ───────────────────────
+
+export const COMMUNITY_CONSENSUS_PASSES_DEFAULT = 3;
+
+export type CommunityConsensusVote = {
+  id?: string;
+  folder?: string;
+  filename?: string;
+  match: "yes" | "no" | "uncertain";
+};
+
+/** Structural view of the server's PhotoCommunityCheckResult — only the
+ * fields the consensus rules read, so this stays browser-safe + testable. */
+export type CommunityConsensusPass = {
+  verdict: "pass" | "warn" | "fail";
+  community?: {
+    matchesExpected: "yes" | "no";
+    photoVerdicts?: CommunityConsensusVote[];
+    junk?: Array<{ id: string }>;
+  } | null;
+  units?: Array<{
+    label: string;
+    sameAsCommunity: "yes" | "no";
+    photoVerdicts?: CommunityConsensusVote[];
+    junk?: Array<{ id: string }>;
+  }>;
+  bedroomCoverage?: { units?: Array<{ label?: string; matchesListing?: string }> } | null;
+  duplicates?: Array<unknown>;
+  /** Per-unit source-page verdicts — the field is `match` ("yes"|"no"|"uncertain"). */
+  sourcePages?: Array<{ match?: string }>;
+};
+
+// True when a non-pass check found NOTHING positively wrong and NOTHING the
+// fix ladder can act on — i.e. the ONLY problem is that some photos/units
+// could not be independently CONFIRMED online. That is the one state the
+// consensus rail may act on: re-running gathers more evidence, and only
+// zero-contradiction runs may consensus-pass. Any "no" anywhere (photo vote,
+// unit verdict, community identity, source page), any bedroom shortfall, junk
+// flag, or duplicate finding disqualifies — those are either real problems or
+// have a concrete remedy elsewhere in the sweep. Do NOT widen this to let
+// consensus mask contradictions (Load-Bearing #16's posture).
+export function communityCheckUncertaintyOnly(pass: CommunityConsensusPass): boolean {
+  if (pass.verdict === "fail") return false;
+  const c = pass.community;
+  if (c) {
+    if (c.matchesExpected === "no") return false;
+    if ((c.junk ?? []).length > 0) return false;
+    if ((c.photoVerdicts ?? []).some((v) => v.match === "no")) return false;
+  }
+  for (const u of pass.units ?? []) {
+    if (u.sameAsCommunity === "no") return false;
+    if ((u.junk ?? []).length > 0) return false;
+    if ((u.photoVerdicts ?? []).some((v) => v.match === "no")) return false;
+  }
+  for (const b of pass.bedroomCoverage?.units ?? []) {
+    if (b.matchesListing === "no") return false;
+  }
+  if ((pass.duplicates ?? []).length > 0) return false;
+  if ((pass.sourcePages ?? []).some((sp) => sp?.match === "no")) return false;
+  return true;
+}
+
+function consensusVoteKey(groupLabel: string, v: CommunityConsensusVote): string {
+  return v.folder && v.filename ? `${v.folder}/${v.filename}` : `${groupLabel}#${v.id ?? "?"}`;
+}
+
+// Union-merge confirmations across independent check passes: Lens/vision are
+// non-deterministic, so a photo unconfirmed in pass 1 but confirmed in pass 2
+// counts as confirmed. Contradiction detection does NOT depend on the keying
+// (any pass with a positive finding trips it wholesale).
+export function mergeCommunityConsensusPasses(passes: CommunityConsensusPass[]): {
+  contradiction: boolean;
+  /** Photo keys confirmed ("yes") in at least one pass. */
+  confirmedKeys: Set<string>;
+  /** Final-pass uncertain votes no pass ever confirmed (receipt detail). */
+  residualUnconfirmed: string[];
+  /** Every uncertain vote in the FINAL pass was confirmed by some pass. */
+  allResolvedByUnion: boolean;
+} {
+  const contradiction = passes.some((p) => !communityCheckUncertaintyOnly(p));
+  const confirmedKeys = new Set<string>();
+  const confirmedUnits = new Set<string>();
+  for (const p of passes) {
+    for (const v of p.community?.photoVerdicts ?? []) {
+      if (v.match === "yes") confirmedKeys.add(consensusVoteKey("community", v));
+    }
+    for (const u of p.units ?? []) {
+      if (u.sameAsCommunity === "yes") confirmedUnits.add(u.label);
+      for (const v of u.photoVerdicts ?? []) {
+        if (v.match === "yes") confirmedKeys.add(consensusVoteKey(u.label, v));
+      }
+    }
+  }
+  const last = passes[passes.length - 1];
+  const residualUnconfirmed: string[] = [];
+  let allResolvedByUnion = passes.length > 0;
+  if (last) {
+    const consider = (label: string, votes: CommunityConsensusVote[] | undefined) => {
+      for (const v of votes ?? []) {
+        if (v.match !== "uncertain") continue;
+        const key = consensusVoteKey(label, v);
+        if (!confirmedKeys.has(key)) {
+          residualUnconfirmed.push(key);
+          allResolvedByUnion = false;
+        }
+      }
+    };
+    consider("community", last.community?.photoVerdicts);
+    for (const u of last.units ?? []) {
+      consider(u.label, u.photoVerdicts);
+      if (u.sameAsCommunity !== "yes" && !confirmedUnits.has(u.label)) {
+        residualUnconfirmed.push(`${u.label} (unit)`);
+        allResolvedByUnion = false;
+      }
+    }
+  } else {
+    allResolvedByUnion = false;
+  }
+  return { contradiction, confirmedKeys, residualUnconfirmed, allResolvedByUnion };
+}
+
+// ── Rail C: same-scene stability double-check (pure decision) ────────────────
+
+export const SAME_SCENE_STABILITY_MIN_OVERLAP = 2;
+
+export type SameSceneGroupLike = {
+  folder: string;
+  members: Array<{ filename: string; keep: boolean }>;
+};
+
+// A vision "same-scene" grouping only counts — for auto-apply OR for flagging
+// review — when a SECOND independent scan reproduces it: two groups agree when
+// they live in the same folder and share >= minOverlap member filenames.
+// Vision grouping is non-deterministic (the live receipt's "3 groups still
+// present" after an apply were NEW pairings, not survivors), so a group only
+// one scan proposes is AI noise: left visible, never a review item. Hash
+// groups (exact/near dHash) are deterministic and never need this.
+export function confirmSameSceneGroups<T extends SameSceneGroupLike>(
+  first: T[],
+  second: SameSceneGroupLike[],
+  minOverlap = SAME_SCENE_STABILITY_MIN_OVERLAP,
+): { confirmed: T[]; noise: T[] } {
+  const confirmed: T[] = [];
+  const noise: T[] = [];
+  for (const g of first) {
+    const names = new Set(g.members.map((m) => m.filename));
+    const reproduced = second.some(
+      (h) => h.folder === g.folder && h.members.filter((m) => names.has(m.filename)).length >= minOverlap,
+    );
+    (reproduced ? confirmed : noise).push(g);
+  }
+  return { confirmed, noise };
+}
+
 // Queue summary (active first, then recent terminals) — mirrors the
 // auto-replace queue chip semantics.
 export const UNIT_AUDIT_SURFACE_TERMINAL_MS = 2 * 60 * 60 * 1000;

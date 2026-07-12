@@ -54,11 +54,17 @@ import { GUESTY_UNSUPPORTED_AMENITY_KEYS, amenityPresenceCandidates, getAmenityL
 import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 import { isCuratedBuyInMarket } from "@shared/buy-in-market";
 import {
+  COMMUNITY_CONSENSUS_PASSES_DEFAULT,
   COMMUNITY_PHOTO_FIX_FLOOR,
+  UNIT_AUDIT_STAGE_RETRY_PASSES_DEFAULT,
+  communityCheckUncertaintyOnly,
   communityPhotoFixSelections,
+  confirmSameSceneGroups,
   dedupeAutoFixSelections,
+  mergeCommunityConsensusPasses,
   photoFixRungsForUnit,
   replaceRungOnCooldown,
+  unitAuditRetryStageIds,
   type PhotoFixRung,
   MAX_UNIT_AUDIT_RESUMES,
   UNIT_AUDIT_REPORTS_SETTING_KEY,
@@ -85,6 +91,7 @@ import {
   type UnitAuditStageResult,
   type UnitAuditStageVerdict,
 } from "@shared/unit-audit-sweep-logic";
+import { photoListingScanWasInconclusive } from "@shared/photo-listing-decision";
 import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames, readFolderSourceUrl, writeFolderSourceUrlIfMissing } from "./builder-photo-groups";
 import { replacementPhotoFolderRef } from "@shared/photo-folder-utils";
 import { scanForDuplicatePhotos, type DedupeScanGroupInput } from "./photo-dedupe";
@@ -107,14 +114,20 @@ const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 // work a bulk-queue item does). Verify-only paths return in seconds anyway.
 const STAGE_TIMEOUT_MS: Record<UnitAuditStageId, number> = {
   resolve: 60_000,
-  "photo-dedupe": 12 * 60_000,
-  "photo-community": 18 * 60_000,
+  // Dedupe + community ceilings grew with the 2026-07-12 double/triple-check
+  // rails: the dedupe stage may run up to 2 extra stability scans + a second
+  // apply round; the community stage may run up to 2 extra consensus checks
+  // (each an independent full Lens+vision pass, bounded per-call below).
+  "photo-dedupe": 20 * 60_000,
+  "photo-community": 55 * 60_000,
   "ota-scan": 16 * 60_000,
   // The ladder's worst case is real work: a re-scrape (~minutes), a
   // find-new-source discovery job (~minutes), a full one-click unit
   // replacement (find → commit → verify, up to ~35 min), plus a Lens+vision
-  // re-check after each photo change. Bounded per-rung below.
-  "photo-fix": 90 * 60_000,
+  // re-check after each photo change (and, since 2026-07-12, a bounded
+  // consensus re-check before the post-fix row upserts). Bounded per-rung
+  // below.
+  "photo-fix": 120 * 60_000,
   descriptions: 6 * 60_000,
   amenities: 8 * 60_000,
   "cover-collage": 8 * 60_000,
@@ -139,6 +152,10 @@ const otaFreshHoursFor = (record: UnitAuditJobRecord) =>
     ? Number(process.env.AUDIT_CRON_OTA_FRESH_HOURS ?? "192")
     : Number(process.env.AUDIT_OTA_FRESH_HOURS ?? "24");
 const OTA_POLL_INTERVAL_MS = 10_000;
+// Breather between unverified-stage retry passes (rail A) — long enough for a
+// transient quota/timeout blip or an in-flight refresh to clear, short enough
+// that the sweep still finishes in one sitting.
+const RETRY_PASS_DELAY_MS = 20_000;
 // Rates pushed longer ago than this read as stale (matches the dashboard
 // "Last Price Scan" amber threshold — the weekly cron cadence + 1 day).
 const PRICING_STALE_DAYS = 8;
@@ -436,7 +453,7 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
   if (target.groups.length === 0) {
     return { verdict: "error", detail: "No published photos found — nothing to scan for duplicates." };
   }
-  const groups: DedupeScanGroupInput[] = target.groups.map((g) => ({
+  const groupsFor = (t: UnitAuditTarget): DedupeScanGroupInput[] => t.groups.map((g) => ({
     folder: g.folder,
     label: g.label,
     filenames: g.filenames,
@@ -455,7 +472,7 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
     };
   };
 
-  let proposal = await scanForDuplicatePhotos(groups);
+  let proposal = await scanForDuplicatePhotos(groupsFor(target));
   let s = summarize(proposal);
   const items: string[] = [...s.lines];
   if (proposal.note) items.push(proposal.note);
@@ -474,48 +491,130 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
   // apply; AI same-scene groups apply too per the operator's 2026-07-12
   // "automate fixing all of these" directive — AUDIT_DEDUPE_SAME_SCENE=0
   // restores review-only for them.
+  //
+  // STABILITY DOUBLE-CHECK (rail C, 2026-07-12): vision same-scene grouping is
+  // non-deterministic — a re-scan of the SAME gallery proposes different pairs
+  // each run (the live receipt's "3 groups still present" after an apply were
+  // NEW pairings, not survivors, so single-scan logic could never converge).
+  // An AI group therefore only acts (or flags review) when a second
+  // independent scan reproduces it (shared confirmSameSceneGroups); a group
+  // only one scan proposes is AI noise — left visible, never a review item.
+  // Hash groups are deterministic and skip the double-check.
+  // AUDIT_DEDUPE_DOUBLE_CHECK=0 restores single-scan behavior.
   const includeSameScene = String(process.env.AUDIT_DEDUPE_SAME_SCENE ?? "").trim() !== "0";
-  let fixedNote = "";
+  const doubleCheckEnabled = String(process.env.AUDIT_DEDUPE_DOUBLE_CHECK ?? "").trim() !== "0";
+
+  // Stability-filter a scan's same-scene groups with one extra independent
+  // scan. Falls back to trusting the single scan when the double-check can't
+  // run vision (no key / disabled) — never treats "could not re-check" as
+  // "disproven".
+  const stabilityFilter = async (
+    sameScene: ReturnType<typeof summarize>["sameScene"],
+    phase: string,
+  ): Promise<{ confirmed: ReturnType<typeof summarize>["sameScene"]; checked: boolean }> => {
+    if (!doubleCheckEnabled || sameScene.length === 0) return { confirmed: sameScene, checked: false };
+    touch(record, { message: `Double-checking ${sameScene.length} AI same-scene group${sameScene.length === 1 ? "" : "s"} with an independent re-scan (${phase})…` });
+    const second = await scanForDuplicatePhotos(groupsFor(targets.get(record.jobId) ?? target));
+    if (!second.visionUsed) {
+      items.push(`Double-check scan ran hash-only (vision unavailable) — keeping the single-scan same-scene groups (${phase})`);
+      return { confirmed: sameScene, checked: false };
+    }
+    const { confirmed, noise } = confirmSameSceneGroups(sameScene, summarize(second).sameScene);
+    if (noise.length > 0) {
+      items.push(`Double-check (${phase}): ${noise.length} same-scene candidate${noise.length === 1 ? "" : "s"} not reproduced by an independent scan — AI noise, left visible`);
+    }
+    if (confirmed.length > 0) {
+      items.push(`Double-check (${phase}): ${confirmed.length} same-scene group${confirmed.length === 1 ? "" : "s"} reproduced by an independent scan`);
+    }
+    return { confirmed, checked: true };
+  };
+
+  const applyRemovals = async (
+    scanId: string,
+    remove: Array<{ folder: string; filename: string }>,
+  ): Promise<boolean> => {
+    touch(record, { message: `Hiding ${remove.length} duplicate photo${remove.length === 1 ? "" : "s"} (hash + same-scene extras; soft-delete, undoable)…` });
+    const apply = await loopbackJson("POST", "/api/builder/photo-dedupe-apply", { scanId, remove }, 60_000)
+      .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+    if (apply.status >= 400) {
+      items.push(`Auto-fix could not apply (${String((apply.data as any)?.error ?? `HTTP ${apply.status}`)}) — review on the Photos tab instead`);
+      return false;
+    }
+    items.push(`Auto-fixed: ${remove.length} duplicate photo${remove.length === 1 ? "" : "s"} hidden (soft-delete — ↺ Undo on the Photos tab): ${remove.map((r) => r.filename).slice(0, 8).join(", ")}${remove.length > 8 ? ", …" : ""}`);
+    // Re-resolve the target so re-scans AND every later stage (e.g. the
+    // collage candidate list) see the surviving photo set.
+    const refreshedTarget = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
+    if (refreshedTarget) targets.set(record.jobId, refreshedTarget);
+    return true;
+  };
+
+  let hiddenTotal = 0;
+  let unstableNoise = 0;
   if (autoFixEnabled(record) && (s.hash.length > 0 || (includeSameScene && s.sameScene.length > 0))) {
+    const stable = includeSameScene
+      ? await stabilityFilter(s.sameScene, "before hiding")
+      : { confirmed: [] as ReturnType<typeof summarize>["sameScene"], checked: false };
+    unstableNoise += s.sameScene.length - (includeSameScene ? stable.confirmed.length : s.sameScene.length);
     const selection = dedupeAutoFixSelections(
-      s.all.map((g) => ({ kind: g.kind, folder: g.folder, members: g.members })),
+      [...s.hash, ...stable.confirmed].map((g) => ({ kind: g.kind, folder: g.folder, members: g.members })),
       { includeSameScene },
     );
     if (selection.remove.length > 0) {
-      touch(record, { message: `Hiding ${selection.remove.length} duplicate photo${selection.remove.length === 1 ? "" : "s"} (hash + same-scene extras; soft-delete, undoable)…` });
-      const apply = await loopbackJson("POST", "/api/builder/photo-dedupe-apply", { scanId: proposal.scanId, remove: selection.remove }, 60_000)
-        .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
-      if (apply.status >= 400) {
-        items.push(`Auto-fix could not apply (${String(apply.data?.error ?? `HTTP ${apply.status}`)}) — review on the Photos tab instead`);
+      if (!(await applyRemovals(proposal.scanId, selection.remove))) {
         return {
           verdict: "attention",
-          detail: `${s.hash.length} hash duplicate group${s.hash.length === 1 ? "" : "s"} found but the auto-hide was refused — review with 🧹 Scan photos & remove duplicates.`,
+          detail: `${s.hash.length + stable.confirmed.length} duplicate group${s.hash.length + stable.confirmed.length === 1 ? "" : "s"} found but the auto-hide was refused — review with 🧹 Scan photos & remove duplicates.`,
           items,
         };
       }
-      fixedNote = `${selection.remove.length} duplicate photo${selection.remove.length === 1 ? "" : "s"} hidden (soft-delete — ↺ Undo on the Photos tab)`;
-      items.push(`Auto-fixed: ${fixedNote}: ${selection.remove.map((r) => r.filename).slice(0, 8).join(", ")}${selection.remove.length > 8 ? ", …" : ""}`);
-      // Re-resolve the target so this re-verify AND every later stage (e.g.
-      // the collage candidate list) see the surviving photo set, not the
-      // just-hidden files.
-      const refreshedTarget = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
-      if (refreshedTarget) targets.set(record.jobId, refreshedTarget);
-      const refreshedGroups: DedupeScanGroupInput[] = (refreshedTarget ?? target).groups.map((g) => ({
-        folder: g.folder,
-        label: g.label,
-        filenames: g.filenames,
-        captions: g.captions,
-      }));
-      if (refreshedGroups.length > 0) {
-        proposal = await scanForDuplicatePhotos(refreshedGroups);
-        s = summarize(proposal);
-        if (s.hash.length > 0 || (includeSameScene && s.sameScene.length > 0)) {
-          items.push(`Re-verify: ${s.hash.length + (includeSameScene ? s.sameScene.length : 0)} duplicate group(s) still present — review on the Photos tab`);
+      hiddenTotal += selection.remove.length;
+
+      // RE-VERIFY with the same stability rule: a fresh scan over the
+      // survivors proposes new vision pairings — only double-confirmed ones
+      // get ONE more apply round; the rest are noise, not review items.
+      proposal = await scanForDuplicatePhotos(groupsFor(targets.get(record.jobId) ?? target));
+      s = summarize(proposal);
+      if (includeSameScene && s.sameScene.length > 0) {
+        const residual = await stabilityFilter(s.sameScene, "re-verify");
+        unstableNoise += s.sameScene.length - residual.confirmed.length;
+        if (residual.checked && residual.confirmed.length > 0) {
+          const sel2 = dedupeAutoFixSelections(
+            residual.confirmed.map((g) => ({ kind: g.kind, folder: g.folder, members: g.members })),
+            { includeSameScene: true },
+          );
+          if (sel2.remove.length > 0) {
+            if (!(await applyRemovals(proposal.scanId, sel2.remove))) {
+              return {
+                verdict: "attention",
+                detail: `${residual.confirmed.length} double-confirmed same-scene group${residual.confirmed.length === 1 ? "" : "s"} remain but the auto-hide was refused — review with 🧹 Scan photos & remove duplicates.`,
+                items,
+              };
+            }
+            hiddenTotal += sel2.remove.length;
+          }
+          // Round cap: two apply rounds per sweep. Any further same-scene
+          // candidates would need their own double-check — the next audit
+          // re-checks them. Hash groups (deterministic) still decide below.
+          s = { ...s, sameScene: [] };
+          items.push("Two apply rounds completed — any further same-scene candidates get double-checked on the next audit");
+        } else if (residual.checked) {
+          // Every residual candidate failed the double-check → noise.
+          s = { ...s, sameScene: [] };
         }
       }
+    } else if (includeSameScene && stable.checked && s.hash.length === 0 && stable.confirmed.length === 0) {
+      // Nothing survived the double-check: the whole proposal was AI noise.
+      return {
+        verdict: "pass",
+        detail: `${s.sameScene.length} same-scene candidate${s.sameScene.length === 1 ? "" : "s"} proposed by one AI scan but not reproduced by an independent double-check — treated as vision noise; no real duplicates.`,
+        items,
+      };
     }
   }
 
+  const fixedNote = hiddenTotal > 0
+    ? `${hiddenTotal} duplicate photo${hiddenTotal === 1 ? "" : "s"} hidden (soft-delete — ↺ Undo on the Photos tab)`
+    : "";
   const outstanding = s.hash.length + (includeSameScene ? s.sameScene.length : 0);
   if (outstanding > 0 || (!includeSameScene && s.sameScene.length > 0)) {
     const parts = [
@@ -528,11 +627,14 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
       items,
     };
   }
+  const noiseNote = unstableNoise > 0
+    ? ` ${unstableNoise} unreproducible same-scene candidate${unstableNoise === 1 ? "" : "s"} dismissed as AI noise.`
+    : "";
   return {
     verdict: fixedNote ? "fixed" : "pass",
     detail: fixedNote
-      ? `${fixedNote} — re-scan confirms no duplicates remain.`
-      : `No duplicates found across ${target.groups.length} folder${target.groups.length === 1 ? "" : "s"}.`,
+      ? `${fixedNote} — re-scan confirms no double-confirmed duplicates remain.${noiseNote}`
+      : `No duplicates found across ${target.groups.length} folder${target.groups.length === 1 ? "" : "s"}.${noiseNote}`,
     items,
   };
 }
@@ -542,6 +644,11 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
 // the world may have changed).
 const communityResults = new Map<string, PhotoCommunityCheckResult>();
 
+// Per-CALL ceiling for one full community check (Lens + vision + source
+// pages). Fixed instead of derived from the stage ceiling because the stage
+// may now run several independent passes (consensus rail B).
+const COMMUNITY_CHECK_CALL_TIMEOUT_MS = 17.5 * 60_000;
+
 async function runCommunityCheck(target: UnitAuditTarget, record: UnitAuditJobRecord, message: string): Promise<
   { ok: true; result: PhotoCommunityCheckResult } | { ok: false; error: string }
 > {
@@ -550,7 +657,7 @@ async function runCommunityCheck(target: UnitAuditTarget, record: UnitAuditJobRe
     "POST",
     "/api/builder/photo-community-check",
     { propertyId: target.propertyId },
-    STAGE_TIMEOUT_MS["photo-community"] - 30_000,
+    COMMUNITY_CHECK_CALL_TIMEOUT_MS,
   );
   if (status >= 400 || data?.ok === false) {
     return { ok: false, error: String(data?.error ?? `HTTP ${status}`) };
@@ -558,6 +665,81 @@ async function runCommunityCheck(target: UnitAuditTarget, record: UnitAuditJobRe
   const result = data as PhotoCommunityCheckResult;
   communityResults.set(record.jobId, result);
   return { ok: true, result };
+}
+
+// CONSENSUS RAIL B (2026-07-12, operator: "no human intervention … double or
+// triple check system"): a warn-class community check whose ONLY problem is
+// unconfirmed photos/units (pure communityCheckUncertaintyOnly — zero "no"
+// votes, zero bedroom shorts, zero junk/dupes) re-runs up to
+// AUDIT_COMMUNITY_CONSENSUS_PASSES (default 3) independent times. Lens/vision
+// are non-deterministic, so confirmations UNION across passes; any pass that
+// surfaces a positive contradiction wins immediately (the double-check may
+// honestly DOWNGRADE — it never masks). Only all-passes-zero-contradiction
+// may consensus-pass; a "no" vote is never upgraded (Load-Bearing #16).
+// Checks that persist through the loopback keep the Comm QA column fed; the
+// audit row may read stronger than a single check because it holds strictly
+// more evidence (N independent runs).
+const communityConsensusPasses = () => {
+  const n = Number(process.env.AUDIT_COMMUNITY_CONSENSUS_PASSES ?? String(COMMUNITY_CONSENSUS_PASSES_DEFAULT));
+  return Number.isFinite(n) ? Math.max(1, Math.min(5, Math.floor(n))) : COMMUNITY_CONSENSUS_PASSES_DEFAULT;
+};
+
+async function communityOutcomeWithConsensus(
+  target: UnitAuditTarget,
+  record: UnitAuditJobRecord,
+  first: PhotoCommunityCheckResult,
+  prefix = "",
+): Promise<StageOutcome> {
+  const firstOutcome = summarizeCommunityResult(first, prefix);
+  const total = communityConsensusPasses();
+  if (firstOutcome.verdict !== "attention" || total <= 1 || !communityCheckUncertaintyOnly(first)) {
+    return firstOutcome;
+  }
+  const passes: PhotoCommunityCheckResult[] = [first];
+  const items = [...(firstOutcome.items ?? [])];
+  for (let p = 2; p <= total; p++) {
+    if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+    const rerun = await runCommunityCheck(
+      target,
+      record,
+      `Unconfirmed photos only — running independent re-check ${p}/${total} (consensus double-check)…`,
+    );
+    if (!rerun.ok) {
+      items.push(`Consensus re-check ${p}/${total} could not run (${rerun.error}) — keeping the first result`);
+      return { ...firstOutcome, items };
+    }
+    passes.push(rerun.result);
+    const merged = mergeCommunityConsensusPasses(passes);
+    if (merged.contradiction) {
+      const downgraded = summarizeCommunityResult(rerun.result, prefix);
+      return {
+        verdict: downgraded.verdict,
+        detail: `${downgraded.detail} (an independent double-check surfaced this — consensus aborted, the finding stands)`,
+        items: [
+          ...(downgraded.items ?? []),
+          `Double-check pass ${p}/${total} found a positive contradiction the first check missed — findings stand for the fix ladder`,
+        ],
+      };
+    }
+    const rerunOutcome = summarizeCommunityResult(rerun.result, prefix);
+    if (rerunOutcome.verdict === "pass" || merged.allResolvedByUnion) {
+      return {
+        verdict: "pass",
+        detail: `${prefix}Confirmed by consensus: ${p} independent Lens+vision checks agree — every photo/unit confirmed in at least one pass, zero contradictions.`,
+        items: [...(rerunOutcome.items ?? []), `Consensus: confirmed on independent re-check ${p}/${total}`],
+      };
+    }
+  }
+  const merged = mergeCommunityConsensusPasses(passes);
+  const residual = merged.residualUnconfirmed;
+  return {
+    verdict: "pass",
+    detail: `${prefix}Verified by ${passes.length}-check consensus: zero contradictions across ${passes.length} independent Lens+vision checks; ${residual.length} photo${residual.length === 1 ? "" : "s"} could not be positively confirmed online (interior shots often can't be) — no evidence of a wrong community.`,
+    items: [
+      ...items,
+      `Consensus: ${passes.length} independent checks, zero contradictions${residual.length > 0 ? `; still unconfirmed after all passes: ${residual.slice(0, 6).join(", ")}${residual.length > 6 ? ", …" : ""}` : ""}`,
+    ],
+  };
 }
 
 function summarizeCommunityResult(result: PhotoCommunityCheckResult, prefix = ""): StageOutcome {
@@ -606,7 +788,7 @@ async function stagePhotoCommunity(target: UnitAuditTarget, record: UnitAuditJob
   if (!run.ok) {
     return { verdict: "error", detail: `Community check could not run: ${run.error}` };
   }
-  return summarizeCommunityResult(run.result);
+  return communityOutcomeWithConsensus(target, record, run.result);
 }
 
 function otaRowFresh(row: { checkedAt: Date | string | null } | undefined, nowMs: number, freshHours: number): boolean {
@@ -625,7 +807,15 @@ async function stageOtaScan(target: UnitAuditTarget, record: UnitAuditJobRecord)
   for (const f of folders) {
     rows.set(f.folder, await storage.getPhotoListingCheckByFolder(f.folder).catch(() => undefined));
   }
-  const stale = folders.filter((f) => !otaRowFresh(rows.get(f.folder), kickStart, otaFreshHoursFor(record)));
+  // Re-scan when the row is stale OR when it is fresh-but-INCONCLUSIVE
+  // (all-unknown / Lens outage — the shared predicate the weekly photo cron
+  // retries on). "Could not be verified" must mean we TRIED just now, not
+  // that we trusted a row that never really ran (rail D, 2026-07-12).
+  const stale = folders.filter((f) => {
+    const row = rows.get(f.folder);
+    if (!otaRowFresh(row, kickStart, otaFreshHoursFor(record))) return true;
+    return !!row && photoListingScanWasInconclusive(row);
+  });
   const scanDisabled = String(process.env.AUDIT_OTA_SCAN ?? "").trim() === "0";
   if (stale.length > 0 && !scanDisabled) {
     touch(record, { message: `Deep-scanning ${stale.length} unit folder${stale.length === 1 ? "" : "s"} against Airbnb/VRBO/Booking (reverse image + address)…` });
@@ -1115,8 +1305,13 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
   // state: the stage-3 row gets the freshest check result; the stage-4 row
   // flips to fixed only for units whose replacement removed the flagged
   // photos (the new gallery was OTA-clean-gated by the find phase).
+  // The post-fix row goes through the SAME consensus rail as stage 3 — the
+  // live receipt's residual "N could not be confirmed online" review chip
+  // came from exactly this upsert, so uncertainty-only leftovers here also
+  // get the independent double/triple re-check instead of a human.
   if (anyFixed && communityResult) {
-    const fresh = summarizeCommunityResult(communityResult, "(after photo fixes) ");
+    const fresh = await communityOutcomeWithConsensus(target, record, communityResult, "(after photo fixes) ");
+    communityResult = communityResults.get(record.jobId) ?? communityResult;
     touch(record, {
       stages: upsertUnitAuditStageResult(record.stages, {
         stage: "photo-community",
@@ -1799,11 +1994,11 @@ async function stageChannels(target: UnitAuditTarget): Promise<StageOutcome> {
 
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
-async function runStageForRecord(record: UnitAuditJobRecord, stageId: UnitAuditStageId): Promise<void> {
+async function runStageForRecord(record: UnitAuditJobRecord, stageId: UnitAuditStageId, opts: { retryPass?: number } = {}): Promise<void> {
   const startedAt = Date.now();
   touch(record, {
     currentStage: stageId,
-    message: `Stage ${UNIT_AUDIT_STAGE_IDS.indexOf(stageId) + 1}/${UNIT_AUDIT_STAGE_IDS.length}: ${UNIT_AUDIT_STAGE_LABELS[stageId]}…`,
+    message: `Stage ${UNIT_AUDIT_STAGE_IDS.indexOf(stageId) + 1}/${UNIT_AUDIT_STAGE_IDS.length}: ${UNIT_AUDIT_STAGE_LABELS[stageId]}${opts.retryPass ? ` (double-check pass ${opts.retryPass})` : ""}…`,
   });
   let outcome: StageOutcome;
   try {
@@ -1832,6 +2027,15 @@ async function runStageForRecord(record: UnitAuditJobRecord, stageId: UnitAuditS
       });
       throw e;
     }
+  }
+  if (opts.retryPass) {
+    outcome = {
+      ...outcome,
+      items: [
+        ...(outcome.items ?? []),
+        `Automatically re-checked (double-check pass ${opts.retryPass}) because the first attempt could not verify or fix this stage`,
+      ],
+    };
   }
   touch(record, {
     stages: upsertUnitAuditStageResult(record.stages, {
@@ -1883,6 +2087,50 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
       if (!next) break;
       await runStageForRecord(record, next);
     }
+
+    // RETRY RAIL A (2026-07-12, operator: "no human intervention … double or
+    // triple check system"): before the receipt is written, re-run every
+    // stage that ended `error` (the "? unverified" badge class) plus
+    // attention/failed rows carrying a TRANSIENT auto-fix failure signature —
+    // a timeout, quota blip, or already-running refresh usually clears on a
+    // second look minutes later. Pure unitAuditRetryStageIds picks the rows;
+    // judgment-call attention rows (layout, licenses, cooldown/budget,
+    // replace-permission) never re-run. If a photo verify changes verdict,
+    // photo-fix re-runs too (its inputs changed). AUDIT_STAGE_RETRY_PASSES=0
+    // disables; default 2 extra passes = triple-checked worst case.
+    const retryPasses = (() => {
+      const n = Number(process.env.AUDIT_STAGE_RETRY_PASSES ?? String(UNIT_AUDIT_STAGE_RETRY_PASSES_DEFAULT));
+      return Number.isFinite(n) ? Math.max(0, Math.min(4, Math.floor(n))) : UNIT_AUDIT_STAGE_RETRY_PASSES_DEFAULT;
+    })();
+    for (let pass = 1; pass <= retryPasses; pass++) {
+      if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+      const retryIds = unitAuditRetryStageIds(record.stages);
+      if (retryIds.length === 0) break;
+      touch(record, { message: `Double-checking ${retryIds.length} unresolved stage${retryIds.length === 1 ? "" : "s"} before the receipt (retry pass ${pass}/${retryPasses})…` });
+      await new Promise((r) => setTimeout(r, RETRY_PASS_DELAY_MS));
+      const before = new Map(record.stages.map((s) => [s.stage, s.verdict]));
+      for (const stageId of retryIds) {
+        if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+        await runStageForRecord(record, stageId, { retryPass: pass });
+      }
+      // Dependent refresh: photo-fix plans off the community + OTA rows, so a
+      // verdict change there makes its row stale — re-run it (idempotent: it
+      // re-reads current state and fixes only what is still broken).
+      const photoInputChanged = (["photo-community", "ota-scan"] as UnitAuditStageId[]).some((id) => {
+        const now = record.stages.find((s) => s.stage === id)?.verdict;
+        return now !== undefined && before.get(id) !== undefined && before.get(id) !== now;
+      });
+      const photoFixRow = record.stages.find((s) => s.stage === "photo-fix");
+      if (
+        photoInputChanged &&
+        photoFixRow &&
+        !retryIds.includes("photo-fix") &&
+        (photoFixRow.verdict === "attention" || photoFixRow.verdict === "failed" || photoFixRow.verdict === "error")
+      ) {
+        await runStageForRecord(record, "photo-fix", { retryPass: pass });
+      }
+    }
+
     const headline = unitAuditHeadline(record.stages);
     touch(record, { status: "completed", currentStage: null, message: headline, error: null });
     const report: UnitAuditReportRecord = {

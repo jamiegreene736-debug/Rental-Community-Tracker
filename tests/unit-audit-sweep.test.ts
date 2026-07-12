@@ -7,11 +7,20 @@
 import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import {
+  COMMUNITY_CONSENSUS_PASSES_DEFAULT,
+  RETRYABLE_ATTENTION_PATTERNS,
+  SAME_SCENE_STABILITY_MIN_OVERLAP,
+  UNIT_AUDIT_STAGE_RETRY_PASSES_DEFAULT,
+  communityCheckUncertaintyOnly,
   communityPhotoFixSelections,
+  confirmSameSceneGroups,
   dedupeAutoFixSelections,
+  mergeCommunityConsensusPasses,
   replaceRungOnCooldown,
   lookupUnitAuditRecord,
   photoFixRungsForUnit,
+  unitAuditRetryStageIds,
+  type CommunityConsensusPass,
   MAX_UNIT_AUDIT_RESUMES,
   STUCK_UNIT_AUDIT_ERROR,
   UNIT_AUDIT_REPORTS_CAP,
@@ -694,6 +703,192 @@ check("route: POST /api/unit-audit/bulk wired to startUnitAuditSweepBulk",
 
 check("home.tsx: 'Audit selected' bulk button posts the checked property ids",
   homeSrc.includes("button-bulk-unit-audit") && homeSrc.includes("/api/unit-audit/bulk"));
+
+// ── Self-verifying audit rails (2026-07-12): pure decisions ──────────────────
+// Operator: "fix the review so that no human intervention is needed …
+// double or triple check system".
+
+// Rail A: which stages re-run before the receipt.
+check("rail A: error stages re-run (returned in stage order), resolve never does",
+  (() => {
+    const ids = unitAuditRetryStageIds([
+      stage("resolve", "error"),
+      stage("channels", "error"),
+      stage("layout", "error"),
+      stage("photo-dedupe", "pass"),
+    ]);
+    return ids.length === 2 && ids[0] === "layout" && ids[1] === "channels";
+  })());
+
+check("rail A: attention row with a transient auto-fix failure item re-runs",
+  unitAuditRetryStageIds([
+    { stage: "amenities", verdict: "attention", detail: "x", items: ["Auto-fix failed: amenity scan did not run (HTTP 502)"] },
+  ]).join(",") === "amenities");
+
+check("rail A: failed row with a transient auto-fix failure item re-runs (pricing push blip)",
+  unitAuditRetryStageIds([
+    { stage: "pricing", verdict: "failed", detail: "x", items: ["Auto-fix failed: market-rate refresh did not run (HTTP 599)"] },
+  ]).join(",") === "pricing");
+
+check("rail A: 'already running' refresh re-runs; judgment-call attention rows never do",
+  unitAuditRetryStageIds([
+    { stage: "pricing", verdict: "attention", detail: "x", items: ["A market-rate refresh for this property is already running — re-run the audit after it lands"] },
+    { stage: "layout", verdict: "attention", detail: "x", items: ["Bathrooms: Guesty shows 2, system says 3"] },
+    { stage: "channels", verdict: "attention", detail: "x", items: ["TAT license is a SAMPLE/placeholder value (TA-026-780-7890-01)"] },
+    { stage: "photo-fix", verdict: "attention", detail: "x", items: ["Unit A (3BR): replacement skipped — anti-churn cooldown"] },
+  ]).join(",") === "pricing");
+
+check("rail A: dedupe 'Auto-fix could not apply' re-runs",
+  unitAuditRetryStageIds([
+    { stage: "photo-dedupe", verdict: "attention", detail: "x", items: ["Auto-fix could not apply (HTTP 410) — review on the Photos tab instead"] },
+  ]).join(",") === "photo-dedupe");
+
+check("rail A: pass/fixed/skipped rows never re-run",
+  unitAuditRetryStageIds([
+    stage("photo-dedupe", "fixed"), stage("photo-community", "pass"), stage("photo-fix", "skipped"),
+  ]).length === 0);
+
+check("rail A: default is 2 extra passes (triple-checked worst case)",
+  UNIT_AUDIT_STAGE_RETRY_PASSES_DEFAULT === 2 && RETRYABLE_ATTENTION_PATTERNS.length >= 3);
+
+// Rail A drift-lock: the retry patterns must match the strings the
+// orchestrator actually emits (reword one → update the other in the same PR).
+check("rail A drift-lock: the orchestrator emits the exact transient-failure strings the patterns match",
+  serverSrc.includes("Auto-fix failed:") &&
+  serverSrc.includes("Auto-fix could not apply") &&
+  serverSrc.includes("already running") &&
+  RETRYABLE_ATTENTION_PATTERNS.some((re) => re.test("Auto-fix failed: amenity scan did not run (HTTP 502)")) &&
+  RETRYABLE_ATTENTION_PATTERNS.some((re) => re.test("Auto-fix could not apply (HTTP 410) — review on the Photos tab instead")) &&
+  RETRYABLE_ATTENTION_PATTERNS.some((re) => re.test("A market-rate refresh for this property is already running — re-run the audit after it lands")));
+
+// Rail C: same-scene stability double-check.
+const ssGroup = (folder: string, files: string[]) => ({
+  kind: "same-scene" as const,
+  folder,
+  members: files.map((filename, i) => ({ filename, keep: i === 0 })),
+});
+
+check("rail C: a same-scene group reproduced by a second scan (≥2 shared members) is confirmed",
+  (() => {
+    const { confirmed, noise } = confirmSameSceneGroups(
+      [ssGroup("f", ["a.jpg", "b.jpg"])],
+      [ssGroup("f", ["a.jpg", "b.jpg", "c.jpg"])],
+    );
+    return confirmed.length === 1 && noise.length === 0;
+  })());
+
+check("rail C: a one-scan-only group is noise (second scan paired differently)",
+  (() => {
+    const { confirmed, noise } = confirmSameSceneGroups(
+      [ssGroup("f", ["a.jpg", "b.jpg"])],
+      [ssGroup("f", ["a.jpg", "c.jpg"])],
+    );
+    return confirmed.length === 0 && noise.length === 1;
+  })());
+
+check("rail C: folder must match — the same filenames in another folder don't confirm",
+  confirmSameSceneGroups([ssGroup("f1", ["a.jpg", "b.jpg"])], [ssGroup("f2", ["a.jpg", "b.jpg"])]).confirmed.length === 0);
+
+check("rail C: empty second scan → everything is noise",
+  confirmSameSceneGroups([ssGroup("f", ["a.jpg", "b.jpg"])], []).noise.length === 1);
+
+check("rail C: agreement bar is 2 shared members (a single shared photo is not agreement)",
+  SAME_SCENE_STABILITY_MIN_OVERLAP === 2);
+
+// Rail B: community consensus gate + cross-pass merge.
+const consensusPass = (over: Partial<CommunityConsensusPass> = {}): CommunityConsensusPass => ({
+  verdict: "warn",
+  community: {
+    matchesExpected: "yes",
+    photoVerdicts: [
+      { id: "c1", folder: "comm", filename: "p1.jpg", match: "yes" },
+      { id: "c2", folder: "comm", filename: "p2.jpg", match: "uncertain" },
+    ],
+    junk: [],
+  },
+  units: [{ label: "Unit A (3BR)", sameAsCommunity: "yes", photoVerdicts: [], junk: [] }],
+  bedroomCoverage: { units: [{ label: "Unit A (3BR)", matchesListing: "yes" }] },
+  duplicates: [],
+  sourcePages: [],
+  ...over,
+});
+
+check("rail B gate: warn with only uncertain votes = uncertainty-only (consensus may act)",
+  communityCheckUncertaintyOnly(consensusPass()));
+check("rail B gate: a RED photo vote disqualifies (mismatch always wins)",
+  !communityCheckUncertaintyOnly(consensusPass({ community: { matchesExpected: "yes", photoVerdicts: [{ id: "c1", folder: "comm", filename: "p1.jpg", match: "no" }], junk: [] } })));
+check("rail B gate: community identity 'no' disqualifies",
+  !communityCheckUncertaintyOnly(consensusPass({ community: { matchesExpected: "no", photoVerdicts: [], junk: [] } })));
+check("rail B gate: a unit 'no' disqualifies (the fix ladder owns it)",
+  !communityCheckUncertaintyOnly(consensusPass({ units: [{ label: "Unit A (3BR)", sameAsCommunity: "no" }] })));
+check("rail B gate: a bedroom shortfall disqualifies (the fix ladder owns it)",
+  !communityCheckUncertaintyOnly(consensusPass({ bedroomCoverage: { units: [{ label: "Unit A (3BR)", matchesListing: "no" }] } })));
+check("rail B gate: junk flags disqualify (the community ladder owns them)",
+  !communityCheckUncertaintyOnly(consensusPass({ community: { matchesExpected: "yes", photoVerdicts: [], junk: [{ id: "c9" }] } })));
+check("rail B gate: cross-folder duplicates disqualify",
+  !communityCheckUncertaintyOnly(consensusPass({ duplicates: [{}] })));
+check("rail B gate: a source-page 'no' disqualifies",
+  !communityCheckUncertaintyOnly(consensusPass({ sourcePages: [{ match: "no" }] })));
+check("rail B gate: verdict fail disqualifies",
+  !communityCheckUncertaintyOnly(consensusPass({ verdict: "fail" })));
+check("rail B: default is 3 total passes (the operator's 'double or triple check')",
+  COMMUNITY_CONSENSUS_PASSES_DEFAULT === 3);
+
+check("rail B merge: uncertain-in-pass-1 + confirmed-in-pass-2 resolves by union",
+  (() => {
+    const p2 = consensusPass({
+      community: {
+        matchesExpected: "yes",
+        photoVerdicts: [
+          { id: "c1", folder: "comm", filename: "p1.jpg", match: "uncertain" },
+          { id: "c2", folder: "comm", filename: "p2.jpg", match: "yes" },
+        ],
+        junk: [],
+      },
+    });
+    const merged = mergeCommunityConsensusPasses([consensusPass(), p2]);
+    return !merged.contradiction && merged.allResolvedByUnion && merged.residualUnconfirmed.length === 0;
+  })());
+
+check("rail B merge: a never-confirmed photo stays residual (named in the receipt)",
+  (() => {
+    const merged = mergeCommunityConsensusPasses([consensusPass(), consensusPass()]);
+    return !merged.contradiction && !merged.allResolvedByUnion &&
+      merged.residualUnconfirmed.length === 1 && merged.residualUnconfirmed[0] === "comm/p2.jpg";
+  })());
+
+check("rail B merge: a contradiction in ANY pass trips the merge",
+  mergeCommunityConsensusPasses([
+    consensusPass(),
+    consensusPass({ community: { matchesExpected: "yes", photoVerdicts: [{ id: "c1", folder: "comm", filename: "p1.jpg", match: "no" }], junk: [] } }),
+  ]).contradiction);
+
+// ── Source guards: the rails are wired in the orchestrator ───────────────────
+check("rail A wired: retry loop uses the pure stage picker + env knob, before the receipt",
+  serverSrc.includes("unitAuditRetryStageIds") &&
+  serverSrc.includes("AUDIT_STAGE_RETRY_PASSES") &&
+  serverSrc.indexOf("unitAuditRetryStageIds(record.stages)") < serverSrc.indexOf("rollUpUnitAuditVerdict(record.stages)"));
+
+check("rail A wired: a photo-verify verdict change re-runs photo-fix (its inputs changed)",
+  /photoInputChanged/.test(serverSrc) && /runStageForRecord\(record, "photo-fix", \{ retryPass: pass \}\)/.test(serverSrc));
+
+check("rail B wired: consensus helper gates on the pure uncertainty-only predicate + env knob",
+  serverSrc.includes("communityOutcomeWithConsensus") &&
+  serverSrc.includes("communityCheckUncertaintyOnly") &&
+  serverSrc.includes("AUDIT_COMMUNITY_CONSENSUS_PASSES") &&
+  serverSrc.includes("mergeCommunityConsensusPasses"));
+
+check("rail B wired at BOTH seams: stage 3 AND the post-photo-fix row upsert",
+  /return communityOutcomeWithConsensus\(target, record, run\.result\);/.test(serverSrc) &&
+  /communityOutcomeWithConsensus\(target, record, communityResult, "\(after photo fixes\) "\)/.test(serverSrc));
+
+check("rail C wired: same-scene groups act only when a second independent scan reproduces them",
+  serverSrc.includes("confirmSameSceneGroups") &&
+  serverSrc.includes("AUDIT_DEDUPE_DOUBLE_CHECK") &&
+  /visionUsed/.test(serverSrc));
+
+check("rail D wired: fresh-but-inconclusive OTA rows re-scan via the shared cron predicate",
+  serverSrc.includes("photoListingScanWasInconclusive"));
 
 const pkg = readFileSync(new URL("../package.json", import.meta.url), "utf8");
 check("npm test chain includes this suite",
