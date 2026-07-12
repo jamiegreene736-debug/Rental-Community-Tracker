@@ -68,7 +68,16 @@ Before making any changes:
   strings bundle-grepped), `npm run check` 338 = baseline (stash A/B identical). Could NOT live-run
   a sweep (no DB/keys) — post-deploy: re-run an audit on a property with a ⚠ "needs your eyes"
   photo receipt; expect "AI judgment:" decision lines in the receipt and the row to converge
-  without a click.
+  without a click. FOLLOW-UP (same day, second PR — operator: "make sure the photos were deleting
+  are genuine like duplicates or similar content"): REMOVAL VERIFICATION (#20 rule f) — nothing
+  hides on one opinion. Cross-dupe hides need a fresh on-disk dHash re-proof
+  (`verifyDupePairOnDisk`, ≤ NEAR_DUPLICATE_DISTANCE; stored distances never trusted — the Ilikai
+  phantom-pair class; disagreement vetoes the hide, keep-both persisted); junk/uncertain hides need
+  an adversarial second vision review (refute-framed, default keep) — refuted removals become
+  definitive keeps, an unavailable second review WITHHOLDS all removals (unresolved attention,
+  rail-A retryable "AI judgment could not run the second removal review…"). Kill
+  `AUDIT_JUDGMENT_DOUBLE_CHECK=0` (hash proof always on). Behaviorally proven on real bytes
+  (recompressed copy distance 0 → allowed; distinct scene 25 → vetoed). photo-judgment now 65/0.
 
 - 2026-07-12 (Pricing tab "Update Market Rates Now" froze at 79% with "No heartbeat for 93s … scan
   loop may be wedged" — Kaha Lani screenshot; diagnosed LIVE from the bulk-refresh job state + queue

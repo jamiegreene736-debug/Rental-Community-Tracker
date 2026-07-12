@@ -95,18 +95,24 @@ import {
   type UnitAuditStageVerdict,
 } from "@shared/unit-audit-sweep-logic";
 import {
+  PHOTO_JUDGMENT_DUPE_HASH_MAX_DISTANCE,
   collectPhotoJudgmentCandidates,
   filterAdjudicatedCandidates,
   photoJudgmentActionPlan,
+  verifiedDupeHideDistance,
+  type PhotoJudgmentCandidate,
   type PhotoJudgmentDecision,
 } from "@shared/photo-judgment-adjudication";
 import {
   coveredJudgmentKeysForFolders,
   judgmentFingerprintsForFolders,
   loadPhotoJudgmentDecisions,
+  photoJudgmentDoubleCheckEnabled,
   photoJudgmentEnabled,
   recordPhotoJudgmentDecisions,
   runPhotoJudgmentVision,
+  runRemovalRefuteVision,
+  verifyDupePairOnDisk,
 } from "./photo-judgment";
 import { photoListingScanWasInconclusive } from "@shared/photo-listing-decision";
 import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames, readFolderSourceUrl, writeFolderSourceUrlIfMissing } from "./builder-photo-groups";
@@ -1161,10 +1167,81 @@ async function runAiFinalSayAdjudication(
   for (const g of target.groups) visibleCounts[g.folder] = g.filenames.length;
   const plan = photoJudgmentActionPlan(vision.judged, vision.verdicts, visibleCounts, { floor: COMMUNITY_PHOTO_FIX_FLOOR });
 
+  // ── REMOVAL VERIFICATION (2026-07-12 operator follow-up: "make sure the
+  // photos we're deleting are genuine like duplicates or similar content").
+  // Nothing hides on a single opinion: cross-dupe hides need a fresh dHash
+  // re-proof from the bytes ON DISK (the stored distance fabricated phantom
+  // pairs in the Ilikai stale-hash incident); junk/uncertain hides need an
+  // independent adversarial second review (default keep). Unprovable
+  // removals are WITHHELD — kept visible, reported, retryable.
+  const confirmedHides: typeof plan.hide = [];
+  const extraKeeps: typeof plan.keep = [];
+  let withheld = 0;
+
+  const dupeSideIndex = new Map<string, PhotoJudgmentCandidate>();
+  for (const c of vision.judged) {
+    if (c.kind !== "cross-dupe" || !c.pairFolder || !c.pairFilename) continue;
+    dupeSideIndex.set(`${c.folder}/${c.filename}`, c);
+    dupeSideIndex.set(`${c.pairFolder}/${c.pairFilename}`, c);
+  }
+  const refuteQueue: typeof plan.hide = [];
+  for (const h of plan.hide) {
+    if (h.kind !== "cross-dupe") { refuteQueue.push(h); continue; }
+    const cand = dupeSideIndex.get(`${h.folder}/${h.filename}`);
+    const pair = cand
+      ? (cand.folder === h.folder && cand.filename === h.filename
+        ? { folder: cand.pairFolder!, filename: cand.pairFilename! }
+        : { folder: cand.folder, filename: cand.filename })
+      : null;
+    const distance = pair ? await verifyDupePairOnDisk({ folder: h.folder, filename: h.filename }, pair) : null;
+    if (verifiedDupeHideDistance(distance)) {
+      confirmedHides.push({ ...h, reason: `hash-verified duplicate (fresh on-disk distance ${distance}) — ${h.reason}` });
+    } else if (distance == null) {
+      withheld += 1;
+      items.push(`AI judgment: ${h.folder}/${h.filename} removal WITHHELD — could not re-verify the duplicate from the files on disk`);
+    } else {
+      extraKeeps.push({
+        folder: h.folder, filename: h.filename, kind: h.kind, action: "keep",
+        reason: `hash re-verification refuted the duplicate (fresh distance ${distance} > ${PHOTO_JUDGMENT_DUPE_HASH_MAX_DISTANCE}) — not the same content, both copies kept`,
+      });
+      items.push(`AI judgment: kept ${h.folder}/${h.filename} — fresh dHash refuted the duplicate finding (distance ${distance}); both copies stay`);
+    }
+  }
+
+  if (refuteQueue.length > 0) {
+    if (!photoJudgmentDoubleCheckEnabled()) {
+      confirmedHides.push(...refuteQueue);
+      items.push(`AI judgment: second removal review disabled (AUDIT_JUDGMENT_DOUBLE_CHECK=0) — ${refuteQueue.length} removal(s) acting on the first review only`);
+    } else {
+      touch(record, { message: `Independent second review of ${refuteQueue.length} removal decision${refuteQueue.length === 1 ? "" : "s"} (adversarial re-check before anything hides)…` });
+      const refute = await runRemovalRefuteVision(
+        target.communityName,
+        refuteQueue.map((h) => ({ folder: h.folder, filename: h.filename, kind: h.kind, reason: h.reason })),
+      );
+      if (!refute.ok) {
+        withheld += refuteQueue.length;
+        items.push(`AI judgment could not run the second removal review (${refute.error}) — ${refuteQueue.length} removal(s) withheld this pass`);
+      } else {
+        refute.verdicts.forEach((v, i) => {
+          const h = refuteQueue[i];
+          if (v.verdict === "remove") {
+            confirmedHides.push({ ...h, reason: `double-confirmed by an independent second review — ${h.reason}` });
+          } else {
+            extraKeeps.push({
+              folder: h.folder, filename: h.filename, kind: h.kind, action: "keep",
+              reason: `removal refuted by the independent second review (${v.reason}) — kept`,
+            });
+            items.push(`AI judgment: kept ${h.folder}/${h.filename} — the second review refuted the removal (${v.reason})`);
+          }
+        });
+      }
+    }
+  }
+
   let hidden = 0;
   const hiddenActions: typeof plan.hide = [];
   let putFailed = 0;
-  for (const h of plan.hide) {
+  for (const h of confirmedHides) {
     if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
     const put = await loopbackJson("PUT", `/api/photo-labels/${encodeURIComponent(h.folder)}/${encodeURIComponent(h.filename)}`, { hidden: true }, 30_000)
       .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
@@ -1177,6 +1254,7 @@ async function runAiFinalSayAdjudication(
       items.push(`AI judgment: could NOT hide ${h.folder}/${h.filename} (${String((put.data as any)?.error ?? `HTTP ${put.status}`)})`);
     }
   }
+  const allKeeps = [...plan.keep, ...extraKeeps];
   for (const k of plan.keep) items.push(`AI judgment: kept ${k.folder}/${k.filename} — ${k.reason}`);
   for (const f of plan.floorBlocked) items.push(`AI judgment: ${f.folder}/${f.filename} ${f.reason}`);
   if (plan.lowConfidenceKept > 0) {
@@ -1185,11 +1263,12 @@ async function runAiFinalSayAdjudication(
 
   // Persist definitive decisions fingerprint-scoped to the POST-hide photo
   // set (a keep stamped against the pre-hide set would lapse immediately).
-  // floorBlocked is deliberately NOT persisted — those stay unresolved.
+  // floorBlocked and WITHHELD removals are deliberately NOT persisted —
+  // those stay unresolved.
   const postFingerprints = hidden > 0 ? await judgmentFingerprintsForFolders(folders) : fingerprints;
   const nowIso = new Date().toISOString();
   const rows: PhotoJudgmentDecision[] = [];
-  for (const a of plan.keep) {
+  for (const a of allKeeps) {
     const fp = postFingerprints[a.folder];
     if (fp) rows.push({ folder: a.folder, filename: a.filename, kind: a.kind, decision: "keep", reason: a.reason, decidedAt: nowIso, fingerprint: fp });
   }
@@ -1199,7 +1278,7 @@ async function runAiFinalSayAdjudication(
   }
   if (rows.length > 0) await recordPhotoJudgmentDecisions(rows);
 
-  return { touched: true, failed: false, hidden, unresolved: plan.floorBlocked.length + putFailed };
+  return { touched: true, failed: false, hidden, unresolved: plan.floorBlocked.length + putFailed + withheld };
 }
 
 async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
@@ -1591,7 +1670,7 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
   if (judgment.unresolved > 0) {
     return {
       verdict: "attention",
-      detail: `Claude's final say decided ${judgment.unresolved} photo(s) should be removed but they were kept visible (folder floor or a failed hide) — add replacement photos (Find new photos) or remove them on the Photos tab.`,
+      detail: `Claude's final say decided ${judgment.unresolved} photo(s) should be removed but they were kept visible (folder floor, a failed hide, or a removal the verification pass could not prove) — add replacement photos (Find new photos) or remove them on the Photos tab.`,
       items,
     };
   }

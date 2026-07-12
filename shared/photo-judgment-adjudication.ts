@@ -32,6 +32,7 @@
 //     positive contradiction in ANY pass still wins.
 
 import { photoFolderFingerprint } from "./photo-folder-verification";
+import { NEAR_DUPLICATE_DISTANCE } from "./photo-dedupe-logic";
 
 export const PHOTO_JUDGMENT_DECISIONS_SETTING_KEY = "photo_judgment_decisions.v1";
 /** Newest decisions kept on write; stale folders age out instead of growing forever. */
@@ -62,6 +63,8 @@ export type PhotoJudgmentCandidate = {
   pairFilename?: string;
   /** cross-dupe only: the other side's group heading. */
   pairGroupLabel?: string;
+  /** cross-dupe only: the check engine's dHash distance for the pair. */
+  pairDistance?: number;
 };
 
 export type PhotoJudgmentDecisionValue = "keep" | "remove" | "keep-a" | "keep-b" | "keep-both";
@@ -126,6 +129,7 @@ export type JudgmentCheckResultLike = {
     scope: string;
     a: { folder: string; filename: string };
     b: { folder: string; filename: string };
+    distance?: number;
   }>;
 };
 
@@ -178,6 +182,7 @@ export function collectPhotoJudgmentCandidates(
       pairFolder: d.b.folder,
       pairFilename: d.b.filename,
       pairGroupLabel: headingByFolder.get(d.b.folder) ?? d.b.folder,
+      pairDistance: Number.isFinite(d.distance as number) ? (d.distance as number) : undefined,
     });
   }
 
@@ -419,6 +424,77 @@ export function photoJudgmentActionPlan(
     hide.push({ folder: h.folder, filename: h.filename, kind: h.kind, action: "hide", reason: h.reason });
   }
   return { hide, keep, floorBlocked, lowConfidenceKept };
+}
+
+// ── Removal verification (2026-07-12 operator follow-up: "make sure the
+// photos we're deleting are genuine like duplicates or similar content") ─────
+// NO AI-judgment hide happens on a single opinion:
+//   • cross-dupe hides need DETERMINISTIC proof — a fresh dHash distance
+//     recomputed from the two files' bytes ON DISK at hide time, ≤ the
+//     dedupe engine's near-duplicate threshold. The check result's stored
+//     distance is not trusted (the Ilikai stale-hash incident fabricated 13
+//     phantom duplicate pairs); a recompute that disagrees VETOES the hide
+//     and keeps both sides.
+//   • junk / doesn't-belong hides need a SECOND independent vision review
+//     framed adversarially ("try to REFUTE this removal; default keep") —
+//     only removals the refuter confirms proceed; a refuted removal becomes
+//     a definitive keep. If the second review can't run, removals are
+//     WITHHELD (never act on one opinion), and the stage stays retryable.
+
+/** Max fresh-recompute dHash distance for a hide to count as a genuine duplicate. */
+export const PHOTO_JUDGMENT_DUPE_HASH_MAX_DISTANCE = NEAR_DUPLICATE_DISTANCE;
+
+/** True when a freshly recomputed pair distance proves a genuine duplicate. */
+export function verifiedDupeHideDistance(distance: number | null | undefined): boolean {
+  return typeof distance === "number" && Number.isFinite(distance) && distance >= 0 &&
+    distance <= PHOTO_JUDGMENT_DUPE_HASH_MAX_DISTANCE;
+}
+
+export function buildRemovalRefutePrompt(input: {
+  expectedCommunity: string;
+  items: Array<{ folder: string; filename: string; kind: PhotoJudgmentKind; reason: string }>;
+}): string {
+  const lines: string[] = [];
+  lines.push(
+    `You are an independent SECOND reviewer for a vacation-rental photo audit of "${input.expectedCommunity}".`,
+    `A first review decided each photo below should be REMOVED from the listing gallery, for the stated reason.`,
+    `Your job is to try to REFUTE each removal. Removing a genuine photo hurts the listing, so when in ANY doubt answer "keep".`,
+    `Answer "remove" ONLY if you independently agree the photo is junk/mis-filed or does not belong to this property.`,
+    ``,
+    `Photos slated for removal:`,
+  );
+  input.items.forEach((it, i) => {
+    lines.push(`${i + 1}. [${it.kind}] ${it.folder}/${it.filename} — first review's reason: ${it.reason}`);
+  });
+  lines.push(
+    ``,
+    `Reply with ONLY this JSON (one entry per photo, verdict "remove" or "keep"):`,
+    `{"reviews":[{"index":1,"verdict":"keep","reason":"short"}]}`,
+  );
+  return lines.join("\n");
+}
+
+export type RemovalRefuteVerdict = { index: number; verdict: "remove" | "keep"; reason: string };
+
+/**
+ * Strict parse of the refute pass: every slated removal must be reviewed
+ * exactly once with a remove/keep verdict. Malformed → null, and the caller
+ * WITHHOLDS the removals (an unusable second opinion never acts).
+ */
+export function parseRemovalRefuteVerdicts(raw: unknown, count: number): RemovalRefuteVerdict[] | null {
+  const rows = (raw as any)?.reviews;
+  if (!Array.isArray(rows)) return null;
+  const byIndex = new Map<number, RemovalRefuteVerdict>();
+  for (const r of rows) {
+    const index = Number(r?.index);
+    if (!Number.isInteger(index) || index < 1 || index > count) return null;
+    if (byIndex.has(index)) return null;
+    const verdict = String(r?.verdict ?? "").trim().toLowerCase();
+    if (verdict !== "remove" && verdict !== "keep") return null;
+    byIndex.set(index, { index, verdict, reason: String(r?.reason ?? "").trim() || "no reason given" });
+  }
+  if (byIndex.size !== count) return null;
+  return Array.from({ length: count }, (_, i) => byIndex.get(i + 1)!);
 }
 
 // ── Decision store (parse / serialize / update) ──────────────────────────────
