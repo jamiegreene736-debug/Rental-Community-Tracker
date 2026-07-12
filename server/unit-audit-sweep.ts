@@ -50,10 +50,12 @@ import {
 } from "@shared/description-copy";
 import { isPlaceholderLicenseValue, usableLicenseValue } from "@shared/license-compliance";
 import { COVER_COLLAGE_SETTING_KEY, COVER_COLLAGE_DISK_FOLDER } from "@shared/cover-collage-logic";
-import { GUESTY_PUSH_NAME_ALIASES, GUESTY_UNSUPPORTED_AMENITY_KEYS, getAmenityLabel } from "@shared/guesty-amenity-catalog";
+import { GUESTY_UNSUPPORTED_AMENITY_KEYS, amenityPresenceCandidates, getAmenityLabel, normalizeGuestyAmenityName } from "@shared/guesty-amenity-catalog";
 import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 import { isCuratedBuyInMarket } from "@shared/buy-in-market";
 import {
+  COMMUNITY_PHOTO_FIX_FLOOR,
+  communityPhotoFixSelections,
   dedupeAutoFixSelections,
   photoFixRungsForUnit,
   type PhotoFixRung,
@@ -86,6 +88,7 @@ import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames, rea
 import { scanForDuplicatePhotos, type DedupeScanGroupInput } from "./photo-dedupe";
 import type { PhotoCommunityCheckResult } from "./photo-community-check";
 import { getPreflightPhotoFetchJob, startPreflightPhotoFetchJob } from "./preflight-background-jobs";
+import { getCommunityPhotoRepullJob, startCommunityPhotoRepullJob } from "./community-photo-repull";
 import { listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import { isAutoReplacePhaseActive, draftUnitIdForSlot } from "@shared/auto-replace-job-logic";
 import { loopbackRequestHeaders } from "./auth";
@@ -189,7 +192,7 @@ async function withTimeout<T>(work: Promise<T>, ms: number, label: string): Prom
   }
 }
 
-async function loopbackJson(method: "GET" | "POST", pathName: string, body: unknown, timeoutMs: number): Promise<{ status: number; data: any }> {
+async function loopbackJson(method: "GET" | "POST" | "PUT", pathName: string, body: unknown, timeoutMs: number): Promise<{ status: number; data: any }> {
   const resp = await fetch(`${loopbackBaseUrl()}${pathName}`, {
     method,
     headers: { "Content-Type": "application/json", ...loopbackRequestHeaders() },
@@ -396,17 +399,22 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
     };
   }
 
-  // AUTO-FIX: hide the hash-proven (exact/near) extras via the existing apply
-  // route — same keep-one-per-group + never-empty-folder validation as the
-  // Photos-tab confirm, and the same photo_labels.hidden soft-delete, so
-  // ↺ Undo on the Photos tab remains a true undo. AI same-scene groups are
-  // deliberately left for the operator (Load-Bearing #4; the hash classes are
-  // the operator-approved scoped exception).
+  // AUTO-FIX: hide the removable extras via the existing apply route — same
+  // keep-one-per-group + never-empty-folder validation as the Photos-tab
+  // confirm, and the same photo_labels.hidden soft-delete, so ↺ Undo on the
+  // Photos tab remains a true undo. Hash-proven (exact/near) groups always
+  // apply; AI same-scene groups apply too per the operator's 2026-07-12
+  // "automate fixing all of these" directive — AUDIT_DEDUPE_SAME_SCENE=0
+  // restores review-only for them.
+  const includeSameScene = String(process.env.AUDIT_DEDUPE_SAME_SCENE ?? "").trim() !== "0";
   let fixedNote = "";
-  if (autoFixEnabled(record) && s.hash.length > 0) {
-    const selection = dedupeAutoFixSelections(s.all.map((g) => ({ kind: g.kind, folder: g.folder, members: g.members })));
+  if (autoFixEnabled(record) && (s.hash.length > 0 || (includeSameScene && s.sameScene.length > 0))) {
+    const selection = dedupeAutoFixSelections(
+      s.all.map((g) => ({ kind: g.kind, folder: g.folder, members: g.members })),
+      { includeSameScene },
+    );
     if (selection.remove.length > 0) {
-      touch(record, { message: `Hiding ${selection.remove.length} hash-proven duplicate photo${selection.remove.length === 1 ? "" : "s"} (soft-delete, undoable)…` });
+      touch(record, { message: `Hiding ${selection.remove.length} duplicate photo${selection.remove.length === 1 ? "" : "s"} (hash + same-scene extras; soft-delete, undoable)…` });
       const apply = await loopbackJson("POST", "/api/builder/photo-dedupe-apply", { scanId: proposal.scanId, remove: selection.remove }, 60_000)
         .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
       if (apply.status >= 400) {
@@ -433,17 +441,18 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
       if (refreshedGroups.length > 0) {
         proposal = await scanForDuplicatePhotos(refreshedGroups);
         s = summarize(proposal);
-        if (s.hash.length > 0) {
-          items.push(`Re-verify: ${s.hash.length} hash group${s.hash.length === 1 ? "" : "s"} still present — review on the Photos tab`);
+        if (s.hash.length > 0 || (includeSameScene && s.sameScene.length > 0)) {
+          items.push(`Re-verify: ${s.hash.length + (includeSameScene ? s.sameScene.length : 0)} duplicate group(s) still present — review on the Photos tab`);
         }
       }
     }
   }
 
-  if (s.sameScene.length > 0 || s.hash.length > 0) {
+  const outstanding = s.hash.length + (includeSameScene ? s.sameScene.length : 0);
+  if (outstanding > 0 || (!includeSameScene && s.sameScene.length > 0)) {
     const parts = [
       s.hash.length > 0 ? `${s.hash.length} hash duplicate group${s.hash.length === 1 ? "" : "s"}` : null,
-      s.sameScene.length > 0 ? `${s.sameScene.length} same-scene (AI) group${s.sameScene.length === 1 ? "" : "s"} — needs your eyes` : null,
+      s.sameScene.length > 0 ? `${s.sameScene.length} same-scene (AI) group${s.sameScene.length === 1 ? "" : "s"}${includeSameScene ? "" : " — needs your eyes (AUDIT_DEDUPE_SAME_SCENE=0)"}` : null,
     ].filter(Boolean).join(" + ");
     return {
       verdict: "attention",
@@ -619,6 +628,7 @@ async function stageOtaScan(target: UnitAuditTarget, record: UnitAuditJobRecord)
 const PHOTO_FIX_RESCRAPE_TIMEOUT_MS = 6 * 60_000;
 const PHOTO_FIX_FIND_NEW_CEILING_MS = 15 * 60_000;
 const PHOTO_FIX_REPLACE_CEILING_MS = 40 * 60_000;
+const PHOTO_FIX_REPULL_CEILING_MS = 20 * 60_000;
 const PHOTO_FIX_LABEL_WAIT_MS = 240_000;
 
 // Local twin of routes' waitForFolderPhotoLabels (not exported there): the
@@ -741,6 +751,96 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     const rerun = await runCommunityCheck(target, record, "Re-deriving the community/bedroom findings after a restart…");
     if (rerun.ok) communityResult = rerun.result;
   }
+
+  const items: string[] = [];
+  let anyFixed = false;
+  let anyStillFailing = false;
+  let anyNeedsReplacePermission = false;
+
+  // ── Community-folder ladder (2026-07-12, from the live Coconut Plantation
+  // receipt): hide positively-flagged community photos (RED votes, junk,
+  // community-side cross-folder dupes — the flagged-photo Remove button's
+  // soft-delete, floor-guarded) → re-check; if the folder STILL reads as the
+  // wrong place, run the existing "Find new community photos" repull job
+  // (research + re-scrape + vision/Lens verify with mismatch deletion) →
+  // re-check again.
+  let communityFolderStillBad = false;
+  const communityGroupOf = (t: UnitAuditTarget) => t.groups.find((g) => g.role === "community");
+  if (communityResult?.community) {
+    const cg = communityGroupOf(target);
+    const c = communityResult.community;
+    const selections = cg ? communityPhotoFixSelections({
+      communityFolder: cg.folder,
+      photoVerdicts: (c.photoVerdicts ?? []).map((v) => ({ id: v.id, folder: v.folder, filename: v.filename, match: v.match })),
+      junk: (c.junk ?? []).map((j: any) => ({ id: j.id, reason: j.reason })),
+      duplicates: (communityResult.duplicates ?? []),
+      visibleCount: cg.filenames.length,
+    }) : null;
+    for (const line of selections?.reviewOnly ?? []) items.push(`Review: ${line}`);
+
+    if (selections && selections.hide.length > 0) {
+      touch(record, { message: `Hiding ${selections.hide.length} flagged community photo${selections.hide.length === 1 ? "" : "s"} (soft-delete, undoable)…` });
+      let hidden = 0;
+      for (const h of selections.hide) {
+        if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+        const put = await loopbackJson("PUT", `/api/photo-labels/${encodeURIComponent(h.folder)}/${encodeURIComponent(h.filename)}`, { hidden: true }, 30_000)
+          .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+        if (put.status < 400) { hidden += 1; items.push(`Community folder: hid ${h.filename} — ${h.reason}`); }
+        else items.push(`Community folder: could NOT hide ${h.filename} (${String((put.data as any)?.error ?? `HTTP ${put.status}`)})`);
+      }
+      if (selections.skippedForFloor > 0) {
+        items.push(`Community folder: ${selections.skippedForFloor} more flagged photo(s) left visible to keep at least ${COMMUNITY_PHOTO_FIX_FLOOR} photos — the repull below (or Find new community photos) replaces them`);
+      }
+      if (hidden > 0) {
+        anyFixed = true;
+        const refreshed = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
+        if (refreshed) { targets.set(record.jobId, refreshed); target = refreshed; }
+        const recheck = await runCommunityCheck(target, record, "Re-checking the community folder after hiding flagged photos…");
+        if (recheck.ok) communityResult = recheck.result;
+      }
+    }
+
+    // Identity still wrong (or the floor kept flagged photos visible) →
+    // repull the whole community folder through the existing background job.
+    const stillBad = communityResult?.community?.matchesExpected === "no" || (selections?.skippedForFloor ?? 0) > 0;
+    if (stillBad && cg) {
+      touch(record, { message: "Community folder still reads wrong — running Find new community photos (research + re-scrape + verify)…" });
+      const repull = startCommunityPhotoRepullJob({
+        communityName: target.communityName,
+        communityFolder: communityGroupOf(target)?.folder ?? cg.folder,
+        city: target.city,
+        state: target.state,
+      });
+      const deadline = Date.now() + PHOTO_FIX_REPULL_CEILING_MS;
+      for (;;) {
+        if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+        const j = getCommunityPhotoRepullJob(repull.id);
+        if (!j) { items.push("Community repull job vanished"); break; }
+        if (j.status === "completed") {
+          items.push(`Community repull: ${j.savedCount ?? 0} photos saved, ${j.removedCount ?? 0} mismatches removed${j.verifiedCount != null ? `, ${j.verifiedCount} verified` : ""}`);
+          anyFixed = true;
+          const refreshed = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
+          if (refreshed) { targets.set(record.jobId, refreshed); target = refreshed; }
+          const recheck = await runCommunityCheck(target, record, "Re-checking the community folder after the repull…");
+          if (recheck.ok) communityResult = recheck.result;
+          break;
+        }
+        if (j.status === "failed" || j.status === "cancelled") {
+          items.push(`Community repull ${j.status}: ${j.message || "no reason given"}`);
+          break;
+        }
+        if (Date.now() > deadline) { items.push("Community repull did not finish in time — it keeps running; re-run the audit later"); break; }
+        touch(record, { message: `Community repull ${j.phase}: ${j.message || "working…"}` });
+        await new Promise((r) => setTimeout(r, 10_000));
+      }
+    }
+    communityFolderStillBad = communityResult?.community?.matchesExpected === "no" ||
+      (communityResult?.community?.photoVerdicts ?? []).some((v) => v.match === "no");
+    if (communityFolderStillBad) {
+      items.push("Community folder still not confirmed after the cleanup ladder — review the report (yellow/uncertain votes may just need your eyes)");
+    }
+  }
+
   const problems = communityResult ? communityProblemsByUnit(communityResult) : new Map<string, { bedroomShort: boolean; communityMismatch: boolean }>();
 
   const otaFoundByLabel = new Set<string>();
@@ -768,15 +868,23 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     ].filter((s): s is string => !!s);
     plans.push({ ref, folder: group.folder, rungs, why });
   }
-  if (plans.length === 0) {
+  if (plans.length === 0 && !anyFixed && !communityFolderStillBad) {
+    // HONESTY (2026-07-12): "nothing to fix" must not render under a failed
+    // photo stage — when the earlier rows flagged problems this ladder has no
+    // remedy for (yellow/uncertain votes, review-only groups), say that.
+    const otaRowNow = record.stages.find((s) => s.stage === "ota-scan");
+    const photoRowsBad = [communityRow, otaRowNow].some((r) => r && (r.verdict === "failed" || r.verdict === "attention" || r.verdict === "error"));
+    if (photoRowsBad) {
+      return {
+        verdict: "attention",
+        detail: "The earlier photo stages flagged findings this ladder has no automatic remedy for (unconfirmed/yellow votes or unverifiable checks need your eyes) — open the reports above.",
+        items: items.length > 0 ? items : undefined,
+      };
+    }
     return { verdict: "skipped", detail: "Photos verified clean in the earlier stages — nothing to fix." };
   }
 
   const replaceAllowed = record.allowReplace && String(process.env.AUDIT_REPLACE_DISABLED ?? "").trim() !== "1";
-  const items: string[] = [];
-  let anyFixed = false;
-  let anyStillFailing = false;
-  let anyNeedsReplacePermission = false;
 
   for (const plan of plans) {
     items.push(`${plan.ref.label}: ${plan.why.join("; ")} → ladder: ${plan.rungs.join(" → ")}`);
@@ -861,10 +969,13 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     }
   }
 
-  if (anyStillFailing) {
+  const communityIdentityStillWrong = communityResult?.community?.matchesExpected === "no";
+  if (anyStillFailing || communityIdentityStillWrong) {
     return {
       verdict: "failed",
-      detail: "The fix ladder ran but at least one unit still fails — see the rung-by-rung log below; the dashboard Replace photos flow is the manual fallback.",
+      detail: communityIdentityStillWrong && !anyStillFailing
+        ? "The community folder still reads as the wrong place after the cleanup + repull ladder — see the log below; Find new community photos (preflight) is the manual fallback."
+        : "The fix ladder ran but at least one unit still fails — see the rung-by-rung log below; the dashboard Replace photos flow is the manual fallback.",
       items,
     };
   }
@@ -875,9 +986,16 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
       items,
     };
   }
+  if (communityFolderStillBad) {
+    return {
+      verdict: "attention",
+      detail: "Fixes applied, but some community photos still carry mismatch votes after the ladder — they may be shared-resort look-alikes; review the report.",
+      items,
+    };
+  }
   return {
     verdict: "fixed",
-    detail: `Photo problems fixed and re-verified for ${plans.length} unit${plans.length === 1 ? "" : "s"} — rung-by-rung log below.`,
+    detail: `Photo problems fixed and re-verified${plans.length > 0 ? ` for ${plans.length} unit${plans.length === 1 ? "" : "s"}` : " (community folder cleanup)"} — log below.`,
     items,
   };
 }
@@ -1085,18 +1203,27 @@ async function verifyAmenities(target: UnitAuditTarget): Promise<AmenityVerify> 
   if (!target.guestyListingId) {
     return { row, keys, scannedNote, missing: null, guestyCount: null, guestyReadError: null };
   }
-  const { status, data } = await loopbackJson("GET", `/api/guesty-proxy/listings/${encodeURIComponent(target.guestyListingId)}?fields=${encodeURIComponent("amenities")}`, undefined, 30_000)
+  // SAME read-back the add-only push uses ({amenities, otherAmenities} via
+  // /properties-api/amenities/:propertyId) and the SAME normalizer the push
+  // route resolves names with — the push maps "BBQ / Grill" → canonical
+  // "BBQ grill", "Ocean View" → "Sea view", etc., so a plain label comparison
+  // against the stored names falsely read 27 pushed amenities as missing
+  // (the 2026-07-12 Coconut Plantation receipt).
+  const { status, data } = await loopbackJson("GET", `/api/builder/guesty-amenities?listingId=${encodeURIComponent(target.guestyListingId)}`, undefined, 30_000)
     .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
   if (status >= 400) {
     return { row, keys, scannedNote, missing: null, guestyCount: null, guestyReadError: String((data as any)?.error ?? `HTTP ${status}`) };
   }
-  const guestyNames = new Set<string>((Array.isArray(data?.amenities) ? data.amenities : []).map((a: unknown) => String(a).trim().toLowerCase()));
+  const storedNames = [
+    ...(Array.isArray((data as any)?.amenities) ? (data as any).amenities : []),
+    ...(Array.isArray((data as any)?.otherAmenities) ? (data as any).otherAmenities : []),
+  ].filter((s: unknown): s is string => typeof s === "string" && s.length > 0);
+  const present = new Set(storedNames.map((n) => normalizeGuestyAmenityName(n)));
   const missing = keys.filter((k) => {
-    if (GUESTY_UNSUPPORTED_AMENITY_KEYS.has(k)) return false; // no truthful Guesty equivalent (delivered via Other)
-    const pushName = (GUESTY_PUSH_NAME_ALIASES[k] ?? getAmenityLabel(k)).trim().toLowerCase();
-    return !guestyNames.has(pushName);
+    if (GUESTY_UNSUPPORTED_AMENITY_KEYS.has(k)) return false; // no truthful Guesty equivalent (Other-bucket/description class)
+    return !amenityPresenceCandidates(k).some((candidate) => present.has(candidate));
   });
-  return { row, keys, scannedNote, missing, guestyCount: guestyNames.size, guestyReadError: null };
+  return { row, keys, scannedNote, missing, guestyCount: storedNames.length, guestyReadError: null };
 }
 
 async function stageAmenities(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {

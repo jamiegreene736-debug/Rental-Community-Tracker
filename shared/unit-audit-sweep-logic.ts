@@ -396,40 +396,123 @@ export function unitAuditBadge(
   return { kind: "error", label: "? unverified", title: `Some checks could not be verified (${when}) — click for the receipt` };
 }
 
-// ── Auto-fix: duplicate-photo selection (PR 2) ───────────────────────────────
-// Which photos the sweep may hide WITHOUT operator review: only members of
-// HASH-proven groups ("exact" ≤5 dHash distance, "near" ≤10 — the same image
-// byte-identical or recompressed) that the dedupe engine pre-marked removable
-// (keep === false; the deterministic keeper pick stays). AI "same-scene"
-// groups are NEVER auto-applied — two angles of one room is a judgment call,
-// and Load-Bearing #4 forbids automatic photo dropping without review; the
-// hash classes are the scoped exception the operator approved in the audit
-// plan. Removal is the photo_labels.hidden soft-delete, so ↺ Undo stays real.
+// ── Auto-fix: duplicate-photo selection (PR 2, widened 2026-07-12) ───────────
+// Which photos the sweep may hide WITHOUT operator review: members the dedupe
+// engine pre-marked removable (keep === false; the deterministic keeper pick
+// — human-touched > manual sort > gallery position > file size — stays).
+//   • HASH-proven groups ("exact" ≤5 dHash / "near" ≤10 — the same image,
+//     byte-identical or recompressed): always included.
+//   • AI "same-scene" groups (HIGH-confidence vision only; medium was already
+//     discarded by the engine): included when `includeSameScene` — the
+//     operator's 2026-07-12 directive ("automate fixing all of these issues",
+//     from a live receipt showing 5 same-scene review groups) overrides the
+//     earlier review-only stance FOR THE AUDIT SWEEP; the Photos-tab manual
+//     scan keeps its review flow. Removal stays the photo_labels.hidden
+//     soft-delete behind the validated apply route (keep-one-per-group,
+//     never-empty-folder), so ↺ Undo stays real and the receipt lists every
+//     hidden file. AUDIT_DEDUPE_SAME_SCENE=0 restores review-only.
 export type DedupeAutoFixGroupInput = {
   kind: "exact" | "near" | "same-scene";
   folder: string;
   members: Array<{ filename: string; keep: boolean }>;
 };
 
-export function dedupeAutoFixSelections(groups: DedupeAutoFixGroupInput[]): {
+export function dedupeAutoFixSelections(
+  groups: DedupeAutoFixGroupInput[],
+  opts: { includeSameScene?: boolean } = {},
+): {
   remove: Array<{ folder: string; filename: string }>;
   hashGroupCount: number;
   sameSceneCount: number;
+  sameSceneIncluded: boolean;
 } {
+  const includeSameScene = opts.includeSameScene === true;
   const remove: Array<{ folder: string; filename: string }> = [];
   let hashGroupCount = 0;
   let sameSceneCount = 0;
   for (const g of groups ?? []) {
     if (g.kind === "same-scene") {
       sameSceneCount += 1;
-      continue;
+      if (!includeSameScene) continue;
+    } else {
+      hashGroupCount += 1;
     }
-    hashGroupCount += 1;
     for (const m of g.members ?? []) {
       if (!m.keep && m.filename) remove.push({ folder: g.folder, filename: m.filename });
     }
   }
-  return { remove, hashGroupCount, sameSceneCount };
+  return { remove, hashGroupCount, sameSceneCount, sameSceneIncluded: includeSameScene };
+}
+
+// ── Auto-fix: community-folder photo cleanup (2026-07-12) ────────────────────
+// The community check can FAIL on the community folder itself (per-photo RED
+// mismatch votes, junk flags, cross-folder duplicates) — the live Coconut
+// Plantation receipt. The remedy the operator performs by hand is the flagged-
+// photo "Remove" button (photo_labels.hidden soft-delete); this selects the
+// same removals automatically:
+//   • per-photo RED votes (match === "no") — positively identified as a
+//     different place. Yellow "uncertain" votes are NEVER auto-hidden.
+//   • junk flags (floorplan/map/logo/screenshot) — resolved to files through
+//     the group's photoVerdicts, same as the report UI.
+//   • cross-folder duplicates where one side is the community folder — the
+//     COMMUNITY copy hides (the photo survives in the unit folder, so zero
+//     content is lost). Unit↔unit pairs stay review-only (which unit owns the
+//     photo is a judgment call).
+// A visible-count floor keeps the folder from being gutted; when the floor
+// truncates, no-loss removals (cross-dupes) rank first, then junk, then RED
+// votes.
+export const COMMUNITY_PHOTO_FIX_FLOOR = 3;
+
+export function communityPhotoFixSelections(input: {
+  communityFolder: string;
+  photoVerdicts: Array<{ id: string; folder?: string; filename?: string; match: "yes" | "no" | "uncertain" }>;
+  junk: Array<{ id: string; reason?: string }>;
+  duplicates: Array<{ scope: string; a: { folder: string; filename: string }; b: { folder: string; filename: string } }>;
+  visibleCount: number;
+  floor?: number;
+}): {
+  hide: Array<{ folder: string; filename: string; reason: string }>;
+  skippedForFloor: number;
+  reviewOnly: string[];
+} {
+  const floor = input.floor ?? COMMUNITY_PHOTO_FIX_FLOOR;
+  const byId = new Map(input.photoVerdicts.filter((v) => v.folder && v.filename).map((v) => [v.id, v]));
+  const seen = new Set<string>();
+  const candidates: Array<{ folder: string; filename: string; reason: string; rank: number }> = [];
+  const add = (folder: string | undefined, filename: string | undefined, reason: string, rank: number) => {
+    if (!folder || !filename || folder !== input.communityFolder) return;
+    const k = `${folder}/${filename}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    candidates.push({ folder, filename, reason, rank });
+  };
+  const reviewOnly: string[] = [];
+
+  for (const d of input.duplicates ?? []) {
+    if (d.scope !== "cross-folder") continue;
+    const aIsCommunity = d.a.folder === input.communityFolder;
+    const bIsCommunity = d.b.folder === input.communityFolder;
+    if (aIsCommunity !== bIsCommunity) {
+      const communitySide = aIsCommunity ? d.a : d.b;
+      const otherSide = aIsCommunity ? d.b : d.a;
+      add(communitySide.folder, communitySide.filename, `duplicate of ${otherSide.folder}/${otherSide.filename} — unit copy kept`, 0);
+    } else if (!aIsCommunity && !bIsCommunity) {
+      reviewOnly.push(`${d.a.folder}/${d.a.filename} duplicates ${d.b.folder}/${d.b.filename} — two unit folders share a photo; pick the owner on the Photos tab`);
+    }
+  }
+  for (const j of input.junk ?? []) {
+    const v = byId.get(j.id);
+    add(v?.folder, v?.filename, `junk: ${j.reason ?? "flagged"}`, 1);
+  }
+  for (const v of input.photoVerdicts ?? []) {
+    if (v.match !== "no") continue;
+    add(v.folder, v.filename, "flagged as a different place (red vote)", 2);
+  }
+
+  candidates.sort((a, b) => a.rank - b.rank);
+  const maxHide = Math.max(0, input.visibleCount - floor);
+  const hide = candidates.slice(0, maxHide).map(({ folder, filename, reason }) => ({ folder, filename, reason }));
+  return { hide, skippedForFloor: candidates.length - hide.length, reviewOnly };
 }
 
 // ── Photo fix ladder (PR 3): which rungs apply to a failing unit ─────────────

@@ -256,6 +256,35 @@ export function getAmenityLabel(key: string): string {
   return entry?.label || key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/**
+ * The push route's amenity-name normalizer (push-amenities `norm()` in
+ * routes.ts — keep byte-identical; a source-guard test locks the two against
+ * drift). Comparing our keys/labels/aliases against a Guesty listing's stored
+ * amenity names is ONLY valid through this normalizer: the push resolves
+ * "BBQ / Grill" → canonical "BBQ grill", "Ocean View" → "Sea view", etc., so
+ * a plain lowercase comparison reads dozens of successfully-pushed amenities
+ * as "missing" (the 2026-07-12 audit-sweep false-"27 missing" incident).
+ */
+export function normalizeGuestyAmenityName(s: string): string {
+  return s.toLowerCase().replace(/[_\-/&]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Every normalized form under which amenity `key` can appear on a Guesty
+ * listing after our push: the authoritative alias target (the exact canonical
+ * display name), the label, and the raw key (both norm-match directly when no
+ * alias is needed). An amenity is PRESENT when any candidate equals a
+ * normalized stored name (amenities + otherAmenities).
+ */
+export function amenityPresenceCandidates(key: string): string[] {
+  const alias = GUESTY_PUSH_NAME_ALIASES[key];
+  return Array.from(new Set(
+    [alias, getAmenityLabel(key), key]
+      .filter((s): s is string => !!s)
+      .map(normalizeGuestyAmenityName),
+  ));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Guesty push-name aliases — SINGLE SOURCE OF TRUTH (2026-07-10).
 //
