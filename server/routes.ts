@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
 import { clearAutoReplaceQueue, listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
-import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, listUnitAuditJobs, startUnitAuditSweep } from "./unit-audit-sweep";
+import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, listUnitAuditJobs, startUnitAuditSweep, startUnitAuditSweepBulk } from "./unit-audit-sweep";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
@@ -22217,11 +22217,30 @@ Requirements:
       const result = await startUnitAuditSweep({
         propertyId: Number((req.body as any)?.propertyId),
         autoFix: (req.body as any)?.autoFix !== false,
+        allowReplace: (req.body as any)?.allowReplace !== false,
       });
       if (!result.ok) return res.status(result.status).json({ error: result.error });
       return res.json({ ok: true, job: result.job });
     } catch (e: any) {
       return res.status(500).json({ error: e?.message ?? "Failed to start audit sweep" });
+    }
+  });
+
+  // Bulk "Audit selected" — one sweep per property, queued through the global
+  // concurrency slot (default one at a time; UNIT_AUDIT_CONCURRENCY raises).
+  app.post("/api/unit-audit/bulk", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { propertyIds?: unknown; autoFix?: unknown; allowReplace?: unknown };
+      const propertyIds = Array.isArray(body.propertyIds) ? body.propertyIds.map((n) => Number(n)) : [];
+      if (propertyIds.length === 0) return res.status(400).json({ error: "propertyIds[] required" });
+      const result = await startUnitAuditSweepBulk({
+        propertyIds,
+        autoFix: body.autoFix !== false,
+        allowReplace: body.allowReplace !== false,
+      });
+      return res.json({ ok: true, ...result });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? "Failed to start bulk audit sweeps" });
     }
   });
 
