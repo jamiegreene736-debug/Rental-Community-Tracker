@@ -50,6 +50,7 @@ const rec = (over: Partial<AutoReplaceJobRecord>): AutoReplaceJobRecord => ({
   updatedAt: NOW - 60_000,
   resumeCount: 0,
   findRestarts: 0,
+  requireBedroomPhotoCoverage: false,
   ...over,
 });
 
@@ -191,10 +192,10 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
   const { readFileSync } = await import("node:fs");
   const orch = readFileSync(new URL("../server/auto-replace-jobs.ts", import.meta.url), "utf8");
   check("commit loop burns a 502 photo-hydration failure and tries the next option",
-    /status === 502 && \/photo\/i\.test/.test(orch));
+    /status === 502 && \(data\?\.coverageShort === true \|\| \/photo\/i\.test/.test(orch));
   const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
   check("POST /api/unit-swaps hydrates with the sidecar scrape tier (bot-walled galleries recover)",
-    /hydrateUnitSwapPhotoFolder\(parsed\.data, \{ useSidecar: true, fallbackPhotoUrls \}\)/.test(routes));
+    /hydrateUnitSwapPhotoFolder\(parsed\.data, \{ useSidecar: true, fallbackPhotoUrls, requireBedroomPhotoCoverage \}\)/.test(routes));
   // 2026-07-06: the commit re-scrape can fail while ALL scrape tiers are
   // degraded (Apify 403 + ScrapingBee quota + 0-photo sidecar run) even
   // though the FIND phase scraped the gallery minutes earlier — the found
@@ -202,6 +203,53 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
   // between find and commit.
   check("hydration falls back to the find phase's photo URLs when the re-scrape is empty",
     routes.includes("fallbackPhotoUrls") && /falling back to \$\{urls\.length\} find-phase photo URLs/.test(routes));
+
+  // ── 2026-07-12 Ilikai receipt (draft -7, job uas_mrh8wbqk_ls005u) ──────────
+  // (a) STALE-LABEL LEAK: re-hydrating a REUSED replacement folder deleted
+  // only the STAGING folder's photo_labels rows — the target's rows from the
+  // PREVIOUS gallery survived the file rm+rename, filename-collided with the
+  // fresh photo_NN.jpg set, and queueMissingPhotoLabels saw nothing missing.
+  // Every caption/hash consumer (bedroom coverage → "0/2", dedupe → 13
+  // phantom cross-folder pairs, collage captions) then read June's labels on
+  // July's photos. Hydration must RE-KEY the pipeline's staging rows into
+  // place, replacing the destination's rows wholesale.
+  check("hydration re-keys the staging label rows onto the final folder (stale rows purged)",
+    /movePhotoLabelsToFolder\(stagingFolder, folder\)/.test(routes));
+  const storageSrc = readFileSync(new URL("../server/storage.ts", import.meta.url), "utf8");
+  check("movePhotoLabelsToFolder deletes the destination's rows before re-keying (filename collisions)",
+    /async movePhotoLabelsToFolder\(fromFolder: string, toFolder: string\)/.test(storageSrc) &&
+    /delete\(photoLabels\)\.where\(eq\(photoLabels\.folder, toFolder\)\)/.test(storageSrc));
+  // (b) BEDROOM-COVERAGE GATE: the audit ladder replaced Unit B with a
+  // gallery that itself photographed 1 of 2 bedrooms — the re-check could
+  // never pass and the swap was burned for nothing. A bedroom-shortfall
+  // replacement aborts at STAGING when the pipeline's folded bedroom count
+  // is short (only when the pipeline actually labeled — a labeler outage
+  // must not burn every candidate on a false 0), the route surfaces
+  // coverageShort on the 502, and the orchestrator burns the candidate.
+  check("hydration aborts a coverage-short gallery at staging (before the destructive rm+rename)",
+    /opts\.requireBedroomPhotoCoverage === true/.test(routes) &&
+    /result\.labeled > 0/.test(routes) &&
+    /result\.bedroomCount < coverageExpected/.test(routes) &&
+    routes.includes("coverageShort: true"));
+  check("orchestrator threads requireBedroomPhotoCoverage from the record into the commit body",
+    /requireBedroomPhotoCoverage: record\.requireBedroomPhotoCoverage === true/.test(orch));
+  check("orchestrator counts coverage burns separately for the all-burned failure message",
+    orch.includes("burnedCoverage") && /photographed fewer bedrooms/.test(orch));
+}
+
+// requireBedroomPhotoCoverage survives the persisted store round-trip (a
+// deploy mid-commit must not resume WITHOUT the gate and commit a short
+// gallery the pre-deploy attempt would have refused).
+{
+  const round = parseAutoReplaceStore(serializeAutoReplaceStore(
+    { j: rec({ jobId: "j", requireBedroomPhotoCoverage: true }) }, NOW));
+  check("requireBedroomPhotoCoverage round-trips through the persisted store",
+    round.j.requireBedroomPhotoCoverage === true);
+  const legacy = parseAutoReplaceStore(JSON.stringify({
+    old: { phase: "finding", propertyId: 23, unitId: "u", createdAt: 1, updatedAt: 2 },
+  }));
+  check("legacy records without the field parse to coverage-gate OFF",
+    legacy.old.requireBedroomPhotoCoverage === false);
 }
 
 // ── draft (negative-id) unit identity ─────────────────────────────────────────

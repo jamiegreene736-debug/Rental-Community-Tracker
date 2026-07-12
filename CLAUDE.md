@@ -43,6 +43,36 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (Ilikai audit "2 failed" receipt — photo-fix ladder walked ALL THREE rungs on Unit B and
+  still ended "bedroom photos 0/2"; diagnosed from Railway logs + prod DB, job uas_mrh8wbqk_ls005u):
+  THREE stacked causes (don't re-chase). (1) STALE-LABEL LEAK (the headline bug): the replace rung's
+  hydration (`hydrateUnitSwapPhotoFolder`) runs the photo pipeline in a STAGING folder and deleted only
+  the STAGING label rows after the rm+rename — a REUSED replacement folder (2nd swap of the same unit,
+  exactly what the automated ladder produces) kept its PREVIOUS gallery's photo_labels rows
+  (`replacement-pdraft-7-udraft7-unit-b` still carried 25 rows generated 2026-06-01), photo_NN.jpg
+  filenames collided, queueMissingPhotoLabels saw nothing missing, and the final re-check read June
+  captions/hashes on the July APT 510 photos → "0/2 bedrooms" (vision rejected the stale-caption
+  candidates) + 13 phantom cross-folder duplicate pairs. FIX: `storage.movePhotoLabelsToFolder`
+  (purge destination rows, single-UPDATE re-key of staging rows so label/hash/bedroom-cluster move
+  together) wired into hydration. (2) The replace rung committed APT 510 whose gallery photographs
+  only 1 of 2 bedrooms — the pipeline KNEW ("kept 20/20 (1 bedrooms)") but committed anyway, so even
+  with honest labels the re-check could never pass. FIX: bedroom-coverage COMMIT GATE — the audit
+  ladder sets `requireBedroomPhotoCoverage` on bedroom-shortfall plans (carried on the persisted
+  AutoReplaceJobRecord → POST /api/unit-swaps body); hydration aborts at STAGING (nothing destructive)
+  with `coverageShort:true` on the 502 and the orchestrator burns the candidate like a 409 and tries
+  the next option (all-burned message counts coverage burns). Enforced only when the pipeline actually
+  labeled (`result.labeled > 0`); OTA-found/manual replacements deliberately ungated. (3) The rescrape
+  rung REPLACED Unit B's healthy 19-photo folder with a 1-photo scrape (sold/stripped source gallery)
+  before trying the next rung. FIX: rescrape FLOOR GUARD — the route 409s (`keptExisting:true`) when
+  the fresh scrape is below MIN_INDEPENDENT_UNIT_PHOTOS and below the current folder count (community
+  folders exempt). ALSO true (not a bug): find-new picked APT 1109 whose 14-photo Zillow gallery has
+  ZERO bedroom photos — the fetch job has no coverage gate (known limit; the gated replace rung is the
+  backstop). See AGENTS.md Unit Audit Sweep #19. Verified: auto-replace-job 65/0 + unit-audit-sweep
+  160/0, full `npm test` exit 0, build clean (strings bundle-grepped), `npm run check` 338 = baseline.
+  Post-deploy: re-run the Ilikai audit MANUALLY (unit B was swapped today → cron replaces sit on the
+  28-day cooldown; manual sweeps are exempt) — expect the ladder to converge on a 2/2 gallery or
+  honestly report that no Ilikai 2BR listing photographs both bedrooms.
+
 - 2026-07-12 (audit sweep SELF-VERIFIES — "no human intervention … double or triple check system"):
   Operator (receipt screenshot: "2 need your attention, 1 could not be verified" + "? unverified"
   Audit badge) asked for review/unverified outcomes to fix themselves via multi-check consensus,

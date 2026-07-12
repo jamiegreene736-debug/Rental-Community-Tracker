@@ -306,12 +306,14 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
       // unit's gallery was gone, but the failure blamed a duplicate).
       let burnedInUse = 0;
       let burnedPhotos = 0;
+      let burnedCoverage = 0;
       for (;;) {
         const candidate = pickCommitCandidate(units as Array<{ url?: unknown }>, record.attemptedUrls);
         if (!candidate) {
           const reasons = [
             burnedInUse > 0 ? `${burnedInUse} already used by another listing` : null,
             burnedPhotos > 0 ? `${burnedPhotos} had a gallery that could not be scraped (bot-walled or photos taken down)` : null,
+            burnedCoverage > 0 ? `${burnedCoverage} photographed fewer bedrooms than the unit claims (the audit needs every bedroom in the gallery)` : null,
           ].filter(Boolean).join("; ");
           touch(record, {
             phase: "failed",
@@ -347,6 +349,10 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           photoUrls: Array.isArray(c.photos)
             ? (c.photos as Array<{ url?: unknown }>).map((p) => String(p?.url ?? "")).filter((u) => /^https?:\/\//i.test(u))
             : [],
+          // Bedroom-shortfall replacements (audit ladder): the route aborts
+          // the commit at staging when the new gallery photographs fewer
+          // bedrooms than the unit claims — burned below as coverageShort.
+          requireBedroomPhotoCoverage: record.requireBedroomPhotoCoverage === true,
         }, 300_000); // hydration may use the bounded 90s sidecar scrape tier
         if (status === 409) {
           burnedInUse += 1;
@@ -354,15 +360,19 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           continue;
         }
         // 502 from this route = photo hydration failed for THIS candidate
-        // (bot-walled gallery / photos taken down since the find phase) — a
-        // candidate-level problem, not a job-level one. Burn the URL and try
-        // the next option (the Pili Mai 9K case: option 1's Redfin gallery
-        // came back empty while option 2 scraped fine).
-        if (status === 502 && /photo/i.test(String(data?.error ?? ""))) {
-          burnedPhotos += 1;
+        // (bot-walled gallery / photos taken down since the find phase / the
+        // bedroom-coverage gate rejected the gallery) — a candidate-level
+        // problem, not a job-level one. Burn the URL and try the next option
+        // (the Pili Mai 9K case: option 1's Redfin gallery came back empty
+        // while option 2 scraped fine).
+        if (status === 502 && (data?.coverageShort === true || /photo/i.test(String(data?.error ?? "")))) {
+          if (data?.coverageShort === true) burnedCoverage += 1;
+          else burnedPhotos += 1;
           touch(record, {
             attemptedUrls: [...record.attemptedUrls, url],
-            message: "Candidate's photos could not be scraped — trying the next option…",
+            message: data?.coverageShort === true
+              ? "Candidate's gallery photographs too few bedrooms — trying the next option…"
+              : "Candidate's photos could not be scraped — trying the next option…",
           });
           continue;
         }
@@ -483,6 +493,10 @@ export async function startAutoReplaceJob(input: {
   propertyId: number;
   unitId: string;
   unitLabel?: string;
+  // Audit-ladder bedroom-shortfall replacements: require the NEW gallery to
+  // photograph every claimed bedroom (commit aborts at staging + burns the
+  // candidate otherwise). See AutoReplaceJobRecord.requireBedroomPhotoCoverage.
+  requireBedroomPhotoCoverage?: boolean;
 }): Promise<{ ok: true; job: AutoReplaceJobRecord } | { ok: false; status: number; error: string }> {
   const propertyId = Number(input.propertyId);
   const unitId = String(input.unitId ?? "");
@@ -527,6 +541,7 @@ export async function startAutoReplaceJob(input: {
     updatedAt: Date.now(),
     resumeCount: 0,
     findRestarts: 0,
+    requireBedroomPhotoCoverage: input.requireBedroomPhotoCoverage === true,
   };
   jobs.set(record.jobId, record);
   await mutateStore((store) => { store[record.jobId] = { ...record }; });
