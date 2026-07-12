@@ -43,6 +43,37 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (builder tabs: "last pushed to Guesty" time + WHAT-was-pushed summary under every tab,
+  retroactive 48h): Operator (Amenities-tab screenshot) asked for each tab (Descriptions/Bedding/
+  Amenities/Pricing/Photos/Availability) to show the last Guesty push time + a summary ("81 amenities
+  pushed, 45 photos pushed"), retroactive for the past 48 hours, then merge. KEY FINDING (don't
+  re-chase): the tab dot+timestamp ALREADY existed but was 100% per-browser localStorage
+  (`nexstay_data_push_*`, `recordDataPush` in GuestyListingBuilder/index.tsx) — no summary, no
+  cross-device durability; only pricing (scanner_schedule.lastGuestyRatePush*) and availability
+  (builder_booking_rules.lastPushed*) had durable server stamps. SHIPPED
+  (`claude/guesty-sync-history-display-5151a2`): durable per-tab ledger in app_settings
+  `guesty_push_history.v1` keyed by GUESTY LISTING id (pure `shared/guesty-push-history.ts` —
+  parse/serialize + 200-listing cap, record/backfill semantics, test-locked summary builders, proxy
+  write classifier; store `server/guesty-push-history.ts`, promise-tail + fail-soft, fire-and-forget
+  `recordGuestyPush` so the ledger can never break a push). Server-stamped at every seam:
+  push-descriptions (field count), push-amenities (sent/confirmed — auto-push loopbacks inherit),
+  push-photos (NDJSON done, verified count), push-seasonal-rates (inside `recordGuestyRatePush`,
+  BEFORE the propertyId guard), booking-rules push (= Availability tab), and bedding + bookable at
+  the GUESTY PROXY via `classifyGuestyProxyListingWrite` (bedding = the only flow PUTting
+  `listingRooms` to /listings/:id; bookable = `{isListed}` PUTs). GET
+  /api/builder/guesty-push-history overlays the two pre-existing durable stamps when newer
+  (scanner "seed" rows EXCLUDED — placeholders, not pushes). UI: tab strip + the push chips render
+  the MERGE (server ledger ∪ localStorage, newest wins via `newestGuestyPushEntry`) — "Pushed
+  <time>" / red "Push failed <time>" + truncated summary line under each tab label; OTA Visibility
+  deliberately has none (it never pushes). RETROACTIVE 48h: the client one-shot uploads in-window
+  localStorage entries via POST …/backfill — validated server-side (48h window, no future stamps,
+  NEVER clobbers same-or-newer entries; trust boundary, don't widen). Verified: guesty-push-history
+  69/0 (npm chain; source guards on all six seams), full `npm test` exit 0, build clean (strings
+  bundle-grepped BOTH bundles), `npm run check` 338 = baseline (stash A/B identical per-file), tab
+  rendering + merge + backfill POST exercised on the BUILT bundle (static SPA server + Playwright,
+  mocked /api). See AGENTS.md "Builder per-tab Guesty push history" + the 2026-07-12 Decision Log
+  line.
+
 - 2026-07-12 (audit sweep SELF-VERIFIES — "no human intervention … double or triple check system"):
   Operator (receipt screenshot: "2 need your attention, 1 could not be verified" + "? unverified"
   Audit badge) asked for review/unverified outcomes to fix themselves via multi-check consensus,
