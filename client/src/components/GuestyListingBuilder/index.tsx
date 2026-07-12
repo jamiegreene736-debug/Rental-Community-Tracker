@@ -39,6 +39,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
+import { guestyPushBackfillCandidates, newestGuestyPushEntry, type GuestyPushListingHistory } from "@shared/guesty-push-history";
 import { BUY_IN_MARKET_LOCATIONS, curatedResortSearchName, isCuratedBuyInMarket, resolveBuyInMarketFromText } from "@shared/buy-in-market";
 import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 
@@ -1060,6 +1061,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [descRegenError, setDescRegenError] = useState<string | null>(null);
   const [dataPushBusy, setDataPushBusy] = useState(false);
   const [dataPushLog, setDataPushLog] = useState<DataPushLog>({});
+  // Server-side per-tab push ledger (guesty_push_history.v1) — durable and
+  // cross-device, unlike dataPushLog's localStorage. Merged for display via
+  // mergedPushLog (newest entry wins).
+  const [serverPushHistory, setServerPushHistory] = useState<GuestyPushListingHistory>({});
+  const pushHistoryBackfilledRef = useRef<Set<string>>(new Set());
   // Async Guesty rate-push status for the unified "Push … & Pricing" button.
   const [pricingPushStatus, setPricingPushStatus] = useState<PricingPushStatus | null>(null);
   const [amenityPushState, setAmenityPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
@@ -1401,6 +1407,68 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       return next;
     });
   }, [selectedId, propertyId]);
+
+  // Load the durable server-side push ledger for the selected listing, then
+  // ONE-SHOT retroactive backfill: local push records from the past 48h that
+  // the server doesn't have yet (pre-ledger pushes) get uploaded so every
+  // device sees them. Fail-soft — the ledger is display-only.
+  useEffect(() => {
+    if (!selectedId) {
+      setServerPushHistory({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const params = new URLSearchParams({ listingId: selectedId });
+        if (typeof propertyId === "number") params.set("propertyId", String(propertyId));
+        const res = await fetch(`/api/builder/guesty-push-history?${params.toString()}`);
+        if (!res.ok) return;
+        const data = await res.json() as { tabs?: GuestyPushListingHistory };
+        const tabs = data?.tabs ?? {};
+        if (cancelled) return;
+        setServerPushHistory(tabs);
+        const backfillKey = dataPushStorageKey(selectedId, propertyId);
+        if (pushHistoryBackfilledRef.current.has(backfillKey)) return;
+        pushHistoryBackfilledRef.current.add(backfillKey);
+        let local: DataPushLog = {};
+        try {
+          local = JSON.parse(localStorage.getItem(backfillKey) ?? "{}") as DataPushLog;
+        } catch {
+          local = {};
+        }
+        const candidates = guestyPushBackfillCandidates(local, tabs, new Date().toISOString());
+        if (Object.keys(candidates).length === 0) return;
+        await fetch("/api/builder/guesty-push-history/backfill", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ listingId: selectedId, entries: candidates }),
+        });
+      } catch {
+        // Advisory display — never block the builder on ledger reads.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedId, propertyId]);
+
+  // What the tab strip + push chips display: per row, the NEWEST of the
+  // durable server ledger entry and this browser's localStorage record (a
+  // push that just finished writes localStorage instantly; other devices'
+  // pushes arrive via the server ledger).
+  const mergedPushLog = useMemo<DataPushLog>(() => {
+    const rows: DataPushRow[] = ["descriptions", "bedding", "amenities", "photos", "bookable", "availability", "pricing"];
+    const merged: DataPushLog = {};
+    for (const row of rows) {
+      const local = dataPushLog[row];
+      const server = serverPushHistory[row];
+      const winner = newestGuestyPushEntry(
+        server ?? null,
+        local ? { pushedAt: local.pushedAt, status: local.status, summary: local.message } : null,
+      );
+      if (winner) merged[row] = { pushedAt: winner.pushedAt, status: winner.status, message: winner.summary };
+    }
+    return merged;
+  }, [dataPushLog, serverPushHistory]);
 
   const complianceProfile = useMemo(() => {
     return resolveLicenseComplianceProfile({
@@ -5867,7 +5935,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   ["bookable", "Bookable"] as const,
                   ["pricing", "Pricing"] as const,
                 ]).map(([key, label]) => {
-                  const entry = dataPushLog[key];
+                  // Same merged (server ledger ∪ localStorage) view as the tab strip.
+                  const entry = mergedPushLog[key];
                   return (
                     <div
                       key={key}
@@ -5985,7 +6054,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               <div className="glb-tabs">
                 {(["descriptions", "bedding", "amenities", "pricing", "photos", "availability", "otaVisibility"] as const).map((t) => {
                   const pushTab: DataPushTab | null = t === "otaVisibility" ? null : t;
-                  const entry = pushTab ? dataPushLog[pushTab] : undefined;
+                  // Merged view: durable server ledger ∪ this browser's log — newest wins.
+                  const entry = pushTab ? mergedPushLog[pushTab] : undefined;
                   const pushedTime = formatDataPushTabTime(entry?.pushedAt);
                   const photosCount = photos.length + (guestyCoverCollageUrl ? 1 : 0);
                   const label = t === "otaVisibility"
@@ -5996,36 +6066,23 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   const statusTitle = !pushTab
                     ? label
                     : entry
-                      ? `${label} ${entry.status === "success" ? "pushed" : "failed"} ${pushedTime || formatDataPushTime(entry.pushedAt)}${entry.message ? `: ${entry.message}` : ""}`
-                      : `${label} has not been pushed from this browser session`;
+                      ? `${label} ${entry.status === "success" ? "pushed to Guesty" : "push failed"} ${pushedTime || formatDataPushTime(entry.pushedAt)}${entry.message ? `: ${entry.message}` : ""}`
+                      : `${label} has no recorded Guesty push yet`;
                   return (
                     <button key={t} className={`glb-tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)} data-testid={`tab-${t}`} title={statusTitle}>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                        {label}
-                        {selectedId && t === "photos" && (
-                          guestyPhotoCountLoading
-                            ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#d1d5db", display: "inline-block" }} title="Checking Guesty…" />
-                            : guestyPhotoCount === null
-                            ? null
-                            : guestyPhotoCount > 0
-                            ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#16a34a", display: "inline-block" }} title={`${guestyPhotoCount} photos in Guesty`} />
-                            : <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#dc2626", display: "inline-block" }} title="No photos in Guesty yet" />
-                        )}
-                        {pushTab && (
-                          <span
-                            aria-label={entry ? `${label} ${entry.status} ${pushedTime}` : `${label} not pushed`}
-                            title={statusTitle}
-                            style={{
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: 3,
-                              fontSize: 10,
-                              lineHeight: 1,
-                              color: entry?.status === "success" ? "#166534" : entry?.status === "error" ? "#991b1b" : "#9ca3af",
-                              textTransform: "none",
-                              letterSpacing: 0,
-                            }}
-                          >
+                      <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                          {label}
+                          {selectedId && t === "photos" && (
+                            guestyPhotoCountLoading
+                              ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#d1d5db", display: "inline-block" }} title="Checking Guesty…" />
+                              : guestyPhotoCount === null
+                              ? null
+                              : guestyPhotoCount > 0
+                              ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#16a34a", display: "inline-block" }} title={`${guestyPhotoCount} photos in Guesty`} />
+                              : <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#dc2626", display: "inline-block" }} title="No photos in Guesty yet" />
+                          )}
+                          {pushTab && (
                             <span
                               aria-hidden="true"
                               style={{
@@ -6036,7 +6093,42 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 display: "inline-block",
                               }}
                             />
-                            {pushedTime && <span>{pushedTime}</span>}
+                          )}
+                        </span>
+                        {pushTab && entry && (
+                          <span
+                            data-testid={`tab-push-info-${t}`}
+                            aria-label={`${label} ${entry.status === "success" ? "pushed" : "push failed"} ${pushedTime}${entry.message ? ` — ${entry.message}` : ""}`}
+                            title={statusTitle}
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              alignItems: "flex-start",
+                              gap: 1,
+                              fontSize: 10,
+                              lineHeight: 1.25,
+                              textTransform: "none",
+                              letterSpacing: 0,
+                              textAlign: "left",
+                              fontWeight: 400,
+                            }}
+                          >
+                            <span style={{ color: entry.status === "success" ? "#166534" : "#991b1b" }}>
+                              {entry.status === "success" ? "Pushed" : "Push failed"} {pushedTime}
+                            </span>
+                            {entry.message && (
+                              <span
+                                style={{
+                                  color: entry.status === "success" ? "#6b7280" : "#b91c1c",
+                                  maxWidth: 170,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {entry.message}
+                              </span>
+                            )}
                           </span>
                         )}
                       </span>
