@@ -22,18 +22,23 @@ import { storage } from "./storage";
 import {
   PHOTO_JUDGMENT_DECISIONS_SETTING_KEY,
   buildPhotoJudgmentPrompt,
+  buildRemovalRefutePrompt,
   coveredJudgmentKeys,
   parsePhotoJudgmentDecisions,
   parsePhotoJudgmentVerdicts,
+  parseRemovalRefuteVerdicts,
   serializePhotoJudgmentDecisions,
   photoJudgmentKey,
   type PhotoJudgmentCandidate,
   type PhotoJudgmentDecision,
+  type PhotoJudgmentKind,
   type PhotoJudgmentVerdict,
+  type RemovalRefuteVerdict,
 } from "../shared/photo-judgment-adjudication";
 import { photoFolderFingerprint } from "../shared/photo-folder-verification";
 import type { CommunityConsensusCoverage } from "../shared/unit-audit-sweep-logic";
 import { listPublishedFilenames } from "./builder-photo-groups";
+import { computeDhash, hammingDistance } from "./photo-hashing";
 
 const MODEL = process.env.AUDIT_JUDGMENT_MODEL || "claude-sonnet-4-6";
 const ANTHROPIC_TIMEOUT_MS = 150_000;
@@ -142,6 +147,86 @@ async function readPhoto(folder: string, filename: string): Promise<Buffer | nul
     return await fs.promises.readFile(path.join(publicPhotoDir(folder), path.basename(filename)));
   } catch {
     return null;
+  }
+}
+
+/** Kill switch for the removal double-check ONLY (hash proof is always on). */
+export function photoJudgmentDoubleCheckEnabled(): boolean {
+  return String(process.env.AUDIT_JUDGMENT_DOUBLE_CHECK ?? "").trim() !== "0";
+}
+
+/**
+ * DETERMINISTIC duplicate proof at hide time: recompute both sides' dHash
+ * from the bytes ON DISK and return the hamming distance — never trust the
+ * check result's stored distance (the Ilikai stale-hash incident fabricated
+ * phantom duplicate pairs from June rows). Returns null when either file
+ * can't be read/hashed — the caller treats null as UNPROVEN and never hides.
+ */
+export async function verifyDupePairOnDisk(
+  a: { folder: string; filename: string },
+  b: { folder: string; filename: string },
+): Promise<number | null> {
+  try {
+    const [bufA, bufB] = await Promise.all([readPhoto(a.folder, a.filename), readPhoto(b.folder, b.filename)]);
+    if (!bufA || !bufB) return null;
+    const [hashA, hashB] = await Promise.all([computeDhash(bufA), computeDhash(bufB)]);
+    return hammingDistance(hashA, hashB);
+  } catch {
+    return null;
+  }
+}
+
+export type RemovalRefuteOutcome =
+  | { ok: true; verdicts: RemovalRefuteVerdict[] }
+  | { ok: false; error: string };
+
+/**
+ * The adversarial SECOND opinion over photos slated for removal — a fresh
+ * vision call framed to REFUTE each removal (default keep). Only removals it
+ * confirms may act; ok:false means the caller WITHHOLDS every removal.
+ */
+export async function runRemovalRefuteVision(
+  expectedCommunity: string,
+  items: Array<{ folder: string; filename: string; kind: PhotoJudgmentKind; reason: string }>,
+): Promise<RemovalRefuteOutcome> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { ok: false, error: "no ANTHROPIC_API_KEY" };
+  try {
+    const content: any[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const buf = await readPhoto(items[i].folder, items[i].filename);
+      if (!buf) return { ok: false, error: `photo ${items[i].folder}/${items[i].filename} unreadable for the second review` };
+      content.push({ type: "text", text: `--- photo ${i + 1} (${items[i].folder}/${items[i].filename}) ---` });
+      const enc = await downscaleForVision(buf);
+      content.push({ type: "image", source: { type: "base64", media_type: enc.mime, data: enc.data } });
+    }
+    content.push({ type: "text", text: buildRemovalRefutePrompt({ expectedCommunity, items }) });
+
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 2000,
+        messages: [{ role: "user", content }],
+      }),
+      signal: AbortSignal.timeout(ANTHROPIC_TIMEOUT_MS),
+    });
+    const data = (await resp.json().catch(() => null)) as any;
+    if (!resp.ok) return { ok: false, error: String(data?.error?.message ?? `HTTP ${resp.status}`) };
+    const text: string = data?.content?.[0]?.text ?? "";
+    const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) return { ok: false, error: "second-review response was not JSON" };
+    const verdicts = parseRemovalRefuteVerdicts(JSON.parse(match[0]), items.length);
+    if (!verdicts) return { ok: false, error: "second-review response failed strict validation" };
+    return { ok: true, verdicts };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
   }
 }
 

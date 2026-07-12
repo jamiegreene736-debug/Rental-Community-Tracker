@@ -11,10 +11,12 @@ import { readFileSync } from "node:fs";
 import {
   PHOTO_JUDGMENT_DECISIONS_CAP,
   PHOTO_JUDGMENT_DECISIONS_SETTING_KEY,
+  PHOTO_JUDGMENT_DUPE_HASH_MAX_DISTANCE,
   PHOTO_JUDGMENT_MAX_DUPE_PAIRS,
   PHOTO_JUDGMENT_MAX_ITEMS_DEFAULT,
   PHOTO_JUDGMENT_MIN_REMOVE_CONFIDENCE,
   buildPhotoJudgmentPrompt,
+  buildRemovalRefutePrompt,
   collectPhotoJudgmentCandidates,
   coveredJudgmentKeys,
   dupePairKey,
@@ -22,12 +24,15 @@ import {
   fingerprintFolders,
   parsePhotoJudgmentDecisions,
   parsePhotoJudgmentVerdicts,
+  parseRemovalRefuteVerdicts,
   photoJudgmentActionPlan,
   photoJudgmentKey,
   serializePhotoJudgmentDecisions,
+  verifiedDupeHideDistance,
   type PhotoJudgmentCandidate,
   type PhotoJudgmentDecision,
 } from "../shared/photo-judgment-adjudication";
+import { NEAR_DUPLICATE_DISTANCE } from "../shared/photo-dedupe-logic";
 import { photoFolderFingerprint } from "../shared/photo-folder-verification";
 import {
   RETRYABLE_ATTENTION_PATTERNS,
@@ -324,6 +329,46 @@ const consensusPass = (over: Partial<CommunityConsensusPass> = {}): CommunityCon
 check("a failed AI judgment run is a retryable attention signature (rail A)",
   RETRYABLE_ATTENTION_PATTERNS.some((re) => re.test("AI judgment could not run (HTTP 529) — the flagged findings stay for review")));
 
+// ── Removal verification (deletions must be proven) ─────────────────────────
+console.log("removal verification");
+
+check("cross-dupe candidates carry the engine's pair distance",
+  collectPhotoJudgmentCandidates({
+    units: [{ label: "Unit A (3BR)", folder: "unit-a", photoVerdicts: [], junk: [] }],
+    duplicates: [{ scope: "cross-folder", a: { folder: "unit-a", filename: "l.jpg" }, b: { folder: "unit-b", filename: "p.jpg" }, distance: 4 }],
+  }, {})[0].pairDistance === 4);
+check("dupe hide proof threshold matches the dedupe engine's near-duplicate bar",
+  PHOTO_JUDGMENT_DUPE_HASH_MAX_DISTANCE === NEAR_DUPLICATE_DISTANCE);
+check("verifiedDupeHideDistance: fresh distance at/below the bar proves; above/null/NaN never does",
+  verifiedDupeHideDistance(0) && verifiedDupeHideDistance(NEAR_DUPLICATE_DISTANCE) &&
+  !verifiedDupeHideDistance(NEAR_DUPLICATE_DISTANCE + 1) &&
+  !verifiedDupeHideDistance(null) && !verifiedDupeHideDistance(undefined) && !verifiedDupeHideDistance(NaN));
+
+const refuteItems = [
+  { folder: "unit-a", filename: "floorplan.jpg", kind: "junk" as const, reason: "floor plan" },
+  { folder: "comm", filename: "pool.jpg", kind: "uncertain-vote" as const, reason: "wrong place" },
+];
+const refutePrompt = buildRemovalRefutePrompt({ expectedCommunity: "Poipu Kai", items: refuteItems });
+check("refute prompt is adversarial with a keep default",
+  /REFUTE each removal/.test(refutePrompt) && /when in ANY doubt answer "keep"/.test(refutePrompt));
+check("refute parse accepts a complete answer",
+  parseRemovalRefuteVerdicts({ reviews: [
+    { index: 1, verdict: "remove", reason: "agree — floor plan" },
+    { index: 2, verdict: "keep", reason: "plausible lanai view" },
+  ] }, 2)?.length === 2);
+check("refute parse rejects missing/invalid/duplicate reviews wholesale",
+  parseRemovalRefuteVerdicts({ reviews: [{ index: 1, verdict: "remove", reason: "r" }] }, 2) === null &&
+  parseRemovalRefuteVerdicts({ reviews: [
+    { index: 1, verdict: "unsure", reason: "r" },
+    { index: 2, verdict: "keep", reason: "r" },
+  ] }, 2) === null &&
+  parseRemovalRefuteVerdicts({ reviews: [
+    { index: 1, verdict: "remove", reason: "r" },
+    { index: 1, verdict: "keep", reason: "r" },
+  ] }, 2) === null);
+check("a withheld second review emits the retryable signature (rail A re-runs it)",
+  RETRYABLE_ATTENTION_PATTERNS.some((re) => re.test("AI judgment could not run the second removal review (HTTP 529) — 2 removal(s) withheld this pass")));
+
 // ── Source guards (wiring) ───────────────────────────────────────────────────
 console.log("source guards");
 
@@ -345,7 +390,7 @@ check("consensus seams load coverage from the decision store",
   /communityCheckUncertaintyOnly\(first, coverage\)/.test(sweepSrc) &&
   /mergeCommunityConsensusPasses\(passes, coverage\)/.test(sweepSrc));
 check("floorBlocked decisions are never persisted as keeps",
-  /floorBlocked is deliberately NOT persisted/.test(sweepSrc));
+  /floorBlocked and WITHHELD removals are deliberately NOT persisted/.test(sweepSrc));
 check("keep-only resolution still routes the row through the consensus rail (no verdict shortcut)",
   /\(after AI judgment\) /.test(sweepSrc));
 check("the vision call refuses malformed answers instead of acting",
@@ -354,6 +399,17 @@ check("fingerprints come from listPublishedFilenames (pin-store parity)",
   serverSrc.includes("listPublishedFilenames") && serverSrc.includes("photoFolderFingerprint"));
 check("red 'no' votes are structurally excluded from candidates",
   /match !== "uncertain"/.test(sharedSrc) && !/match === "no"[\s\S]{0,80}push\(/.test(sharedSrc));
+check("dupe hides are hash re-proven from disk BEFORE the PUT loop",
+  /verifyDupePairOnDisk[\s\S]{0,4000}for \(const h of confirmedHides\)/.test(sweepSrc) &&
+  serverSrc.includes("computeDhash") && serverSrc.includes("hammingDistance"));
+check("junk/uncertain hides go through the adversarial second review before acting",
+  /runRemovalRefuteVision[\s\S]{0,5000}for \(const h of confirmedHides\)/.test(sweepSrc) &&
+  sweepSrc.includes("photoJudgmentDoubleCheckEnabled") &&
+  /AUDIT_JUDGMENT_DOUBLE_CHECK[\s\S]{0,80}!== "0"/.test(serverSrc));
+check("a hash-refuted duplicate keeps BOTH sides instead of hiding",
+  /hash re-verification refuted the duplicate/.test(sweepSrc));
+check("withheld removals count as unresolved (attention), never as silent keeps",
+  /plan\.floorBlocked\.length \+ putFailed \+ withheld/.test(sweepSrc));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
