@@ -235,6 +235,15 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     /requireBedroomPhotoCoverage: record\.requireBedroomPhotoCoverage === true/.test(orch));
   check("orchestrator counts coverage burns separately for the all-burned failure message",
     orch.includes("burnedCoverage") && /photographed fewer bedrooms/.test(orch));
+  // Live Ilikai re-run (2026-07-12, uas_mrhwgeqz_2j7hi8): the first-hit find
+  // returned a pool of ONE, the coverage gate burned it, and the job failed
+  // with nothing left to try. A coverage-exhausted commit pass re-enters the
+  // find phase (same bounded findRestarts budget as the deploy-burst path)
+  // with every burned URL excluded so the fresh search can't refind them.
+  check("coverage-exhausted commit re-enters the find with burned URLs excluded (bounded restarts)",
+    /burnedCoverage > 0 && record\.findRestarts < MAX_AUTO_REPLACE_FIND_RESTARTS/.test(orch) &&
+    orch.includes("continue findCommit") &&
+    /assembleFindPayload\(record\.propertyId, record\.unitId, record\.attemptedUrls\)/.test(orch));
 }
 
 // requireBedroomPhotoCoverage survives the persisted store round-trip (a

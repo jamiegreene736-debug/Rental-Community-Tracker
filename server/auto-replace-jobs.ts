@@ -156,7 +156,7 @@ async function resolveAutoReplaceTarget(propertyId: number, unitId: string): Pro
 // parsed display address + inferred community street + existing swaps' source
 // URLs as skipUrls. First-hit mode (no collectAllOptions) — the auto flow
 // commits the first viable unit, so exhaustive pool-draining is wasted time.
-async function assembleFindPayload(propertyId: number, unitId: string): Promise<Record<string, unknown> | null> {
+async function assembleFindPayload(propertyId: number, unitId: string, extraSkipUrls: string[] = []): Promise<Record<string, unknown> | null> {
   const target = await resolveAutoReplaceTarget(propertyId, unitId);
   if (!target) return null;
   const streetAddress = inferCommunityStreetAddress({
@@ -166,9 +166,13 @@ async function assembleFindPayload(propertyId: number, unitId: string): Promise<
     addressHint: target.street || target.address,
   }) || target.street;
   const swaps = latestUnitSwapsByUnit(await storage.getUnitSwaps(propertyId).catch(() => []));
-  const skipUrls = Array.from(new Set(
-    Array.from(swaps.values()).map((s: any) => String(s?.newSourceUrl ?? "")).filter(Boolean),
-  ));
+  const skipUrls = Array.from(new Set([
+    ...Array.from(swaps.values()).map((s: any) => String(s?.newSourceUrl ?? "")).filter(Boolean),
+    // Commit-burned URLs (409 in-use / bot-walled gallery / coverage-short) —
+    // a coverage-exhaustion RESTART must not re-find the gallery it just
+    // refused to commit.
+    ...extraSkipUrls.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)),
+  ]));
   return {
     communityFolder: target.communityFolder,
     communityName: target.communityName,
@@ -224,6 +228,13 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
       return;
     }
 
+    // Phases 1+2 run inside a bounded outer loop: a commit pass that burns
+    // EVERY found option on bedroom-photo coverage re-enters the find phase
+    // with the burned URLs excluded (first-hit finds can return a pool of
+    // ONE — the live Ilikai re-run burned its single candidate and had
+    // nothing left to try). Bounded by the same MAX_AUTO_REPLACE_FIND_RESTARTS
+    // budget the deploy-burst restarts use.
+    findCommit: for (;;) {
     // Phase 1 — finding. Restart-tolerant: a find job that vanished or died
     // unresumably (killed by a deploy burst — the 2026-07-05 Pili Mai
     // incident) gets a bounded number of FRESH searches instead of the old
@@ -237,7 +248,7 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
       let restartSignals = 0;
       for (;;) {
         if (!record.findJobId) {
-          const payload = await assembleFindPayload(record.propertyId, record.unitId);
+          const payload = await assembleFindPayload(record.propertyId, record.unitId, record.attemptedUrls);
           if (!payload) {
             touch(record, { phase: "failed", error: "Could not resolve this property/unit for a replacement search." });
             return;
@@ -310,6 +321,21 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
       for (;;) {
         const candidate = pickCommitCandidate(units as Array<{ url?: unknown }>, record.attemptedUrls);
         if (!candidate) {
+          // Coverage burns exhausted the pool — widen it instead of failing:
+          // re-enter the find phase with every burned URL excluded, on the
+          // same bounded restart budget the deploy-burst path uses. Only for
+          // coverage burns: an all-409/bot-wall exhaustion means the pool
+          // itself is bad and a fresh first-hit search would refind it.
+          if (burnedCoverage > 0 && record.findRestarts < MAX_AUTO_REPLACE_FIND_RESTARTS) {
+            console.warn(`[auto-replace] ${record.jobId}: all ${burnedCoverage + burnedInUse + burnedPhotos} option(s) burned (${burnedCoverage} on bedroom coverage) — searching for more candidates (restart ${record.findRestarts + 1}/${MAX_AUTO_REPLACE_FIND_RESTARTS})`);
+            touch(record, {
+              phase: "finding",
+              findJobId: null,
+              findRestarts: record.findRestarts + 1,
+              message: "Every found gallery photographed too few bedrooms — searching for more candidates (burned galleries excluded)…",
+            });
+            continue findCommit;
+          }
           const reasons = [
             burnedInUse > 0 ? `${burnedInUse} already used by another listing` : null,
             burnedPhotos > 0 ? `${burnedPhotos} had a gallery that could not be scraped (bot-walled or photos taken down)` : null,
@@ -409,6 +435,8 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
       // Phase 3 — verifying (shared with the resumed-mid-verifying path).
       await runAutoReplaceVerifyPhase(record, committed);
     }
+    break;
+    } // findCommit
   } catch (e: any) {
     touch(record, { phase: "failed", error: e?.message ?? "Auto replace failed" });
   } finally {

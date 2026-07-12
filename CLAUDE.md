@@ -69,9 +69,17 @@ Before making any changes:
   ZERO bedroom photos — the fetch job has no coverage gate (known limit; the gated replace rung is the
   backstop). See AGENTS.md Unit Audit Sweep #19. Verified: auto-replace-job 65/0 + unit-audit-sweep
   160/0, full `npm test` exit 0, build clean (strings bundle-grepped), `npm run check` 338 = baseline.
-  Post-deploy: re-run the Ilikai audit MANUALLY (unit B was swapped today → cron replaces sit on the
-  28-day cooldown; manual sweeps are exempt) — expect the ladder to converge on a 2/2 gallery or
-  honestly report that no Ilikai 2BR listing photographs both bedrooms.
+  Post-deploy LIVE RE-RUN (job uas_mrhwgeqz_2j7hi8, manual — cron replaces sit on the 28-day cooldown
+  for unit B; manual sweeps are exempt): all three rails held — the rescrape relabeled the replacement
+  folder honestly (stale June rows gone), the phantom cross-folder dupes vanished, pricing auto-fixed,
+  and the coverage gate REFUSED the one candidate the first-hit find surfaced ("Every found option
+  failed at commit (1 photographed fewer bedrooms…)"). That exposed the last convergence gap: first-hit
+  finds can return a pool of ONE. FOLLOW-UP (same day, second PR): a commit pass that exhausts its pool
+  with ≥1 coverage burn re-enters the find phase (`continue findCommit`) on the SAME bounded
+  findRestarts budget (2) the deploy-burst restarts use, with record.attemptedUrls added to the fresh
+  search's skipUrls (assembleFindPayload extraSkipUrls param) so it can't refind the burned galleries;
+  all-409/bot-wall exhaustion deliberately does NOT restart (a fresh first-hit search would refind the
+  same pool). auto-replace-job 66/0.
 - 2026-07-12 (builder tabs: "last pushed to Guesty" time + WHAT-was-pushed summary under every tab,
   retroactive 48h): Operator (Amenities-tab screenshot) asked for each tab (Descriptions/Bedding/
   Amenities/Pricing/Photos/Availability) to show the last Guesty push time + a summary ("81 amenities
