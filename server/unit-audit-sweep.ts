@@ -1716,6 +1716,22 @@ async function stagePricing(target: UnitAuditTarget, record: UnitAuditJobRecord)
       items.push(`Auto-fix failed: market-rate refresh did not run (${String((refresh.data as any)?.error ?? `HTTP ${refresh.status}`)})`);
     } else if ((refresh.data as any)?.alreadyRunning) {
       items.push("A market-rate refresh for this property is already running — re-run the audit after it lands");
+    } else if ((refresh.data as any)?.guestyPush?.skipped) {
+      // HONESTY (2026-07-12 "Last Price Scan didn't update" incident): the
+      // scan saved a fresh pricing table, but NOTHING reached Guesty — the
+      // refresh routes soft-skip the push (no mapped listing, no priced
+      // months, plan gaps), and markScannerGuestyRatePush only stamps real
+      // pushes, so the Last Price Scan column will not move. Say exactly
+      // that instead of claiming "refreshed + pushed".
+      const reason = String((refresh.data as any).guestyPush.reason ?? "no mapped Guesty listing / no priced months");
+      items.push(`Auto-fix PARTIAL: market rates rescanned + saved, but the Guesty push was SKIPPED — ${reason}`);
+      const re = await verifyPricing(target);
+      items.push(...re.items.map((l) => `Re-verify: ${l}`));
+      return {
+        verdict: re.verdict === "pass" ? "attention" : re.verdict,
+        detail: `Rates rescanned, but the Guesty push was skipped: ${reason} — the Last Price Scan column stamps real pushes only.`,
+        items,
+      };
     } else {
       fixedNote = "Market rates refreshed + pushed to Guesty";
       items.push(`Auto-fixed: ${fixedNote}`);

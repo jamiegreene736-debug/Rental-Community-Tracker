@@ -43,6 +43,25 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 ("Last Price Scan column didn't update" after the Coconut Plantation audit — diagnosed +
+  fixed): TWO stacked causes (don't re-chase). (1) CLIENT (the operator's symptom): the dashboard's
+  data-column queries (`/api/dashboard/price-scans`, Comm QA status, photo-listing-check, drafts) use
+  staleTime + refetchOnWindowFocus:false and were NEVER invalidated when an audit sweep finished — the
+  pricing leg's `markScannerGuestyRatePush` stamp landed in the DB but an open dashboard sat frozen on
+  its page-load snapshot until a full reload. FIX: home.tsx watches the unit-audit ACTIVE set
+  (`prevActiveAuditIdsRef`) and invalidates those queries whenever any sweep leaves it (covers
+  badge-watched, bulk, and cron sweeps), and the unit-audit dialog's terminal effect invalidates them
+  too. (2) SERVER honesty: `stagePricing` claimed "Market rates refreshed + pushed to Guesty" on ANY
+  2xx refresh without reading `guestyPush` — the refresh routes soft-skip the push (unmapped listing,
+  no priced months, plan gaps via `isGuestyPushSoftFailure`) and skipped pushes never stamp the
+  column. FIX: a skipped push now reports "Auto-fix PARTIAL … Guesty push was SKIPPED — <reason>" and
+  caps the stage verdict at attention. Verified: unit-audit-sweep 116/0, full `npm test` exit 0, build
+  clean (both fixes bundle-grepped), check 338 = baseline. NOTE: the id chain for drafts was verified
+  correct end-to-end (draft rows use `-draft.id`; the stamp inserts-on-miss with negative ids; the
+  price-scans endpoint serves every scanner_schedule row) — a fresh (<8d) last push also legitimately
+  skips the refresh by design (no SearchAPI double-spend), in which case the column keeps its recent
+  date and the receipt says "Rates pushed to Guesty Nd ago".
+
 - 2026-07-12 (photo-listing cron: found→fix latency + outage retry + review tier + operator SMS):
   Operator asked to investigate the weekly photo-scan cron (photos found on Airbnb/VRBO/Booking →
   red flag → replace/swap) and implement all 4 improvements found, then merge. SHIPPED
