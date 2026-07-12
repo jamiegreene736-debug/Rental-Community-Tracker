@@ -62,6 +62,7 @@ const record = (over: Partial<UnitAuditJobRecord> = {}): UnitAuditJobRecord => (
   resumeCount: 0,
   autoFix: true,
   allowReplace: true,
+  source: "manual",
   ...over,
 });
 
@@ -141,6 +142,14 @@ check("store: allowReplace round-trips; legacy records default ON",
     const parsed = parseUnitAuditStore(serializeUnitAuditStore({ off2: off }, NOW));
     const legacy = parseUnitAuditStore(JSON.stringify({ old: { ...record({ jobId: "old" }), allowReplace: undefined } }));
     return parsed.off2?.allowReplace === false && legacy.old?.allowReplace === true;
+  })());
+
+check("store: source round-trips ('cron' kept; junk/legacy defaults to 'manual')",
+  (() => {
+    const cron = record({ jobId: "cr", source: "cron" });
+    const parsed = parseUnitAuditStore(serializeUnitAuditStore({ cr: cron }, NOW));
+    const junk = parseUnitAuditStore(JSON.stringify({ j: { ...record({ jobId: "j" }), source: "weird" } }));
+    return parsed.cr?.source === "cron" && junk.j?.source === "manual";
   })());
 
 // ── Photo fix ladder rungs (PR 3) ────────────────────────────────────────────
@@ -572,6 +581,29 @@ check("dedupe stage: same-scene auto-apply is env-gated (AUDIT_DEDUPE_SAME_SCENE
 check("photo-fix honesty: 'nothing to fix' can never render under a failed photo stage",
   serverSrc.includes("no automatic remedy") && /photoRowsBad/.test(serverSrc));
 
+// ── Source guards: weekly auto-audit scheduler (2026-07-12) ──────────────────
+const schedulerSrc = readFileSync(new URL("../server/unit-audit-scheduler.ts", import.meta.url), "utf8");
+check("scheduler: last-run persisted in app_settings, stamped at START, first boot anchored (never fires at deploy)",
+  schedulerSrc.includes("unit_audit_auto.last_run_at") &&
+  /setSetting\(UNIT_AUDIT_AUTO_LAST_RUN_KEY, new Date\(\)\.toISOString\(\)\)/.test(schedulerSrc) &&
+  /first boot/.test(schedulerSrc));
+
+check("scheduler: targets = all builder properties + Guesty-MAPPED drafts only",
+  schedulerSrc.includes("getAllUnitBuilders()") && schedulerSrc.includes("getGuestyPropertyMap") &&
+  /n < 0/.test(schedulerSrc));
+
+check("scheduler: cron sweeps run auto-fix ON, replacement OFF unless UNIT_AUDIT_CRON_REPLACE=1, source 'cron'",
+  schedulerSrc.includes("autoFix: true") &&
+  schedulerSrc.includes("UNIT_AUDIT_CRON_REPLACE") &&
+  schedulerSrc.includes('source: "cron"'));
+
+check("scheduler: kill switch UNIT_AUDIT_AUTO_DISABLED",
+  schedulerSrc.includes("UNIT_AUDIT_AUTO_DISABLED"));
+
+check("cron sweeps reuse the weekly photo-cron's OTA rows (wider fresh window by source)",
+  serverSrc.includes("AUDIT_CRON_OTA_FRESH_HOURS") && /source === "cron"/.test(serverSrc));
+
+
 // ── Source guards: wiring ────────────────────────────────────────────────────
 const routesSrc = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
 check("routes: POST /api/unit-audit + GET active/:jobId/cancel + dashboard status wired",
@@ -587,6 +619,13 @@ check("routes: /api/unit-audit/active registered BEFORE /api/unit-audit/:jobId (
 const indexSrc = readFileSync(new URL("../server/index.ts", import.meta.url), "utf8");
 check("index.ts: resume watchdog registered on boot",
   indexSrc.includes("startUnitAuditResumeWatchdog()"));
+
+check("index.ts: weekly auto-audit scheduler registered on boot",
+  indexSrc.includes("startUnitAuditAutoScheduler()"));
+
+check("routes: admin cron trigger + status wired",
+  routesSrc.includes('app.post("/api/admin/run-unit-audit-cron"') &&
+  routesSrc.includes('app.get("/api/admin/unit-audit-cron-status"'));
 
 const homeSrc = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
 check("home.tsx: Audit column header + shared badge + per-row dialog trigger",

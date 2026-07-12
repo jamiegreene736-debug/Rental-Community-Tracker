@@ -43,6 +43,20 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (WEEKLY AUTO-AUDIT cron — "auto correct itself so Comm QA turns green"): Operator asked
+  how the Comm QA column can self-correct to green. The fix side existed (sweep re-checks persist
+  through the Comm QA engine); the gap was nobody clicking. SHIPPED
+  (`claude/unit-audit-sweep-tool-79apae`): `server/unit-audit-scheduler.ts` (market-rate-scheduler
+  clone) — every builder property + Guesty-MAPPED draft gets a full auto-fix sweep weekly via the
+  bulk one-at-a-time queue; columns converge to green on their own; genuinely-unfixable judgment
+  calls (yellow votes) surface as ⚠ with reasons. Deploy-safe: `unit_audit_auto.last_run_at` in
+  app_settings, stamped at START, first-boot anchor → first run ~6d after deploy, never at boot.
+  CRON posture (load-bearing): `record.source="cron"` → OTA stage reuses the weekly photo-cron's
+  rows (`AUDIT_CRON_OTA_FRESH_HOURS`=192, prevents weekly double Lens spend) and unit replacement
+  stays OFF unless `UNIT_AUDIT_CRON_REPLACE=1`. Kill `UNIT_AUDIT_AUTO_DISABLED=1`; manual trigger
+  `POST /api/admin/run-unit-audit-cron`. Verified: unit-audit-sweep 105/0, full `npm test` exit 0,
+  build clean, check 338 = baseline.
+
 - 2026-07-12 (Unit Audit Sweep — first LIVE receipt fixes; Coconut Plantation screenshot): Operator
   ran a real sweep and asked to automate fixing everything it flagged. FOUR fixes shipped
   (`claude/unit-audit-sweep-tool-79apae`; don't re-chase): (1) "27 saved amenities not on the Guesty
