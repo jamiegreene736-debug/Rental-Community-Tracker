@@ -736,6 +736,30 @@ check("route: POST /api/unit-audit/bulk wired to startUnitAuditSweepBulk",
 check("home.tsx: 'Audit selected' bulk button posts the checked property ids",
   homeSrc.includes("button-bulk-unit-audit") && homeSrc.includes("/api/unit-audit/bulk"));
 
+// ── Last Price Scan column actually updates after a sweep (2026-07-12
+// Coconut Plantation incident) ────────────────────────────────────────────────
+// Two halves: (a) the pricing stage must not claim "refreshed + pushed" when
+// the refresh soft-skipped the Guesty push (markScannerGuestyRatePush stamps
+// real pushes only, so the column stays frozen — say so); (b) the dashboard
+// must refetch its data-column queries when a sweep finishes — they use
+// staleTime + no focus refetch, so without invalidation the DB stamp lands
+// but the open dashboard never shows it until a full reload.
+{
+  const sweepSrcLocal = readFileSync(new URL("../server/unit-audit-sweep.ts", import.meta.url), "utf8");
+  check("pricing stage reports a SKIPPED Guesty push honestly (no false 'pushed' claim)",
+    sweepSrcLocal.includes("guestyPush?.skipped")
+    && sweepSrcLocal.includes("the Guesty push was SKIPPED"));
+  check("a skipped push can never report better than attention",
+    sweepSrcLocal.includes('re.verdict === "pass" ? "attention" : re.verdict'));
+  check("home.tsx refreshes the data columns when a sweep leaves the active set",
+    homeSrc.includes("prevActiveAuditIdsRef")
+    && homeSrc.includes('invalidateQueries({ queryKey: ["/api/dashboard/price-scans"] })'));
+  check("dialog terminal effect refreshes Last Price Scan + Photos + drafts too",
+    dialogSrc.includes('queryKey: ["/api/dashboard/price-scans"]')
+    && dialogSrc.includes('queryKey: ["/api/photo-listing-check"]')
+    && dialogSrc.includes('queryKey: ["/api/community/drafts"]'));
+}
+
 const pkg = readFileSync(new URL("../package.json", import.meta.url), "utf8");
 check("npm test chain includes this suite",
   pkg.includes("tests/unit-audit-sweep.test.ts"));
