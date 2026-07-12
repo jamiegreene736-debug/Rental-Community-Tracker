@@ -557,6 +557,18 @@ check("ladder: find-new rung drives the preflight photo-fetch job with findNewSo
 check("ladder: replace rung drives the one-click auto-replace orchestrator (find→commit→verify, OTA-clean-gated find)",
   serverSrc.includes("startAutoReplaceJob") && serverSrc.includes("listAutoReplaceJobs"));
 
+// 2026-07-12 Ilikai receipt (uas_mrh8wbqk_ls005u): the replace rung committed
+// a gallery that itself photographed 1 of 2 bedrooms, so the re-check failed
+// again and the swap was burned for nothing. A bedroom-shortfall plan must
+// require the NEW gallery to photograph every claimed bedroom (the commit
+// aborts at staging; the orchestrator burns the candidate and tries the next
+// option). OTA-found-only plans deliberately do NOT gate — getting off
+// compromised photos beats gallery coverage.
+check("ladder: bedroom-shortfall replacements require bedroom-photo coverage on the new gallery",
+  /requireBedroomPhotoCoverage: plan\.bedroomShort/.test(serverSrc) &&
+  /requireBedroomPhotoCoverage: opts\.requireBedroomPhotoCoverage === true/.test(serverSrc));
+
+
 check("ladder: replacement requires record.allowReplace and honors AUDIT_REPLACE_DISABLED",
   serverSrc.includes("record.allowReplace") && serverSrc.includes("AUDIT_REPLACE_DISABLED"));
 
@@ -702,6 +714,15 @@ check("routes: POST /api/unit-audit + GET active/:jobId/cancel + dashboard statu
 
 check("routes: /api/unit-audit/active registered BEFORE /api/unit-audit/:jobId (else :jobId swallows it)",
   routesSrc.indexOf('app.get("/api/unit-audit/active"') < routesSrc.indexOf('app.get("/api/unit-audit/:jobId"'));
+
+// 2026-07-12 Ilikai receipt: the ladder's rescrape rung replaced Unit B's
+// 19-photo folder with a single og:image from a stripped/delisted source
+// gallery. The rescrape route must keep the existing gallery when the fresh
+// scrape can't even clear the unit photo floor (community folders exempt —
+// their curation path caps/floors separately).
+check("routes: rescrape-unit-photos floor-guards against downgrading a healthy gallery",
+  /scraped\.length < MIN_INDEPENDENT_UNIT_PHOTOS && !folder\.startsWith\("community-"\)/.test(routesSrc) &&
+  routesSrc.includes("keptExisting: true"));
 
 const indexSrc = readFileSync(new URL("../server/index.ts", import.meta.url), "utf8");
 check("index.ts: resume watchdog registered on boot",

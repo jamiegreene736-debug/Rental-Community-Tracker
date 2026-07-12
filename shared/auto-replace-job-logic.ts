@@ -74,6 +74,12 @@ export type AutoReplaceJobRecord = {
   // by MAX_AUTO_REPLACE_FIND_RESTARTS; separate from resumeCount, which
   // counts orchestrator re-attaches).
   findRestarts: number;
+  // Audit-ladder bedroom-shortfall replacements: the NEW gallery must
+  // photograph every claimed bedroom or the commit aborts at staging and the
+  // candidate is burned (a short gallery would fail the audit's re-check
+  // again — the 2026-07-12 Ilikai receipt). OTA-found/manual replacements
+  // leave it off: getting off compromised photos beats gallery coverage.
+  requireBedroomPhotoCoverage: boolean;
 };
 
 export function isAutoReplacePhaseActive(phase: AutoReplacePhase): boolean {
@@ -130,6 +136,7 @@ export function parseAutoReplaceStore(raw: string | null | undefined): Record<st
         updatedAt: typeof v.updatedAt === "number" ? v.updatedAt : 0,
         resumeCount: typeof v.resumeCount === "number" ? v.resumeCount : 0,
         findRestarts: typeof v.findRestarts === "number" ? v.findRestarts : 0,
+        requireBedroomPhotoCoverage: v.requireBedroomPhotoCoverage === true,
       };
     }
     return out;

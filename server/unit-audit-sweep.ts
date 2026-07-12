@@ -1000,6 +1000,7 @@ async function runPhotoFixRung(
   ref: UnitAuditUnitRef,
   folder: string,
   record: UnitAuditJobRecord,
+  opts: { requireBedroomPhotoCoverage?: boolean } = {},
 ): Promise<{ ok: boolean; note: string }> {
   if (rung === "rescrape") {
     touch(record, { message: `${ref.label}: re-scraping the current photo source…` });
@@ -1054,7 +1055,12 @@ async function runPhotoFixRung(
   // OTA-clean, community-matched candidates, which is what makes the result
   // trustworthy for the OTA-found case.
   touch(record, { message: `${ref.label}: replacing the unit (find → commit → verify — the long rung)…` });
-  const started = await startAutoReplaceJob({ propertyId: target.propertyId, unitId: ref.unitId, unitLabel: ref.label });
+  const started = await startAutoReplaceJob({
+    propertyId: target.propertyId,
+    unitId: ref.unitId,
+    unitLabel: ref.label,
+    requireBedroomPhotoCoverage: opts.requireBedroomPhotoCoverage === true,
+  });
   if (!started.ok) return { ok: false, note: `unit replacement did not start (${started.error})` };
   const replaceJobId = started.job.jobId;
   const deadline = Date.now() + PHOTO_FIX_REPLACE_CEILING_MS;
@@ -1224,7 +1230,7 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     if (found) otaFoundByLabel.add(g.label);
   }
 
-  type UnitPlan = { ref: UnitAuditUnitRef; folder: string; rungs: PhotoFixRung[]; why: string[] };
+  type UnitPlan = { ref: UnitAuditUnitRef; folder: string; rungs: PhotoFixRung[]; why: string[]; bedroomShort: boolean };
   const plans: UnitPlan[] = [];
   for (const ref of target.unitRefs) {
     const group = unitGroups(target).find((g) => g.label === ref.label);
@@ -1238,7 +1244,7 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
       p.communityMismatch ? "photos not confirmed in the community" : null,
       p.bedroomShort ? "not enough bedroom photos" : null,
     ].filter((s): s is string => !!s);
-    plans.push({ ref, folder: group.folder, rungs, why });
+    plans.push({ ref, folder: group.folder, rungs, why, bedroomShort: p.bedroomShort });
   }
   if (plans.length === 0 && !anyFixed && !communityFolderStillBad) {
     // HONESTY (2026-07-12): "nothing to fix" must not render under a failed
@@ -1301,7 +1307,13 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
           break;
         }
       }
-      const rungResult = await runPhotoFixRung(rung, target, plan.ref, plan.folder, record);
+      const rungResult = await runPhotoFixRung(rung, target, plan.ref, plan.folder, record, {
+        // A bedroom-shortfall replacement must not commit a gallery that is
+        // itself short (Ilikai receipt: APT 510 photographed 1 of 2 bedrooms
+        // and the ladder ended "still short") — the commit aborts at staging
+        // and the orchestrator tries the next candidate instead.
+        requireBedroomPhotoCoverage: plan.bedroomShort,
+      });
       items.push(`${plan.ref.label}: ${rung} — ${rungResult.ok ? rungResult.note : `✕ ${rungResult.note}`}`);
       if (!rungResult.ok) continue;
       // A committed swap means downstream stages must re-ground content in

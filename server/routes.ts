@@ -32082,6 +32082,25 @@ Return ONLY compact JSON with this exact shape:
       if (!scraped.length) {
         return res.status(502).json({ error: "Scraper returned zero photos. The page may have bot-detection or changed layout." });
       }
+      // FLOOR GUARD (2026-07-12 Ilikai receipt): a sold/stripped source
+      // gallery can come back as a single og:image — and this route REPLACES
+      // the folder, so a healthy 19-photo unit gallery was destroyed by a
+      // 1-photo re-scrape (the audit ladder's rescrape rung, before it even
+      // tried the next rung). If the fresh scrape can't clear the unit photo
+      // floor AND the folder currently holds more than the scrape returned,
+      // keep the existing gallery and say why. Community folders are exempt
+      // (their curation path caps/floors separately).
+      if (scraped.length < MIN_INDEPENDENT_UNIT_PHOTOS && !folder.startsWith("community-")) {
+        const currentFiles = await listPhotoFiles(folderPath).catch(() => [] as string[]);
+        if (currentFiles.length > scraped.length) {
+          return res.status(409).json({
+            error: `Fresh scrape of the source returned only ${scraped.length} photo${scraped.length === 1 ? "" : "s"} (gallery likely stripped or delisted) — keeping the existing ${currentFiles.length}-photo gallery instead of downgrading it.`,
+            keptExisting: true,
+            scrapedCount: scraped.length,
+            currentCount: currentFiles.length,
+          });
+        }
+      }
 
       // Cap how many we ultimately keep. The pipeline downloads ALL scraped
       // photos first, labels them, then keeps the top N by category priority
@@ -36667,8 +36686,8 @@ Return ONLY compact JSON with this exact shape:
       newBedrooms?: number | null;
       newSourceUrl: string;
     },
-    opts: { useSidecar?: boolean; fallbackPhotoUrls?: string[] } = {},
-  ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string; bedrooms?: number | null; bathrooms?: number | null; bedroomsFound?: number; coverage?: { bedroomsExpected: number | null; bedroomsFound: number; bedroomsShortfall: number; bathroomsExpected: number | null; bathroomsFound: number; bathroomsShortfall: number } }> => {
+    opts: { useSidecar?: boolean; fallbackPhotoUrls?: string[]; requireBedroomPhotoCoverage?: boolean } = {},
+  ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string; coverageShort?: boolean; bedrooms?: number | null; bathrooms?: number | null; bedroomsFound?: number; coverage?: { bedroomsExpected: number | null; bedroomsFound: number; bedroomsShortfall: number; bathroomsExpected: number | null; bathroomsFound: number; bathroomsShortfall: number } }> => {
     const url = swap.newSourceUrl;
     const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
     if (!/^https?:\/\//i.test(url)) return { ok: false, folder, savedCount: 0, error: "Replacement source URL is invalid" };
@@ -36744,6 +36763,34 @@ Return ONLY compact JSON with this exact shape:
           error: `Replacement photo pipeline kept only ${result.kept} photo${result.kept === 1 ? "" : "s"}; at least ${MIN_INDEPENDENT_UNIT_PHOTOS} independent photos are required.`,
         };
       }
+      // BEDROOM-COVERAGE GATE (2026-07-12, audit photo-fix ladder): when this
+      // swap exists to FIX a bedroom-photo shortfall, committing a gallery
+      // that itself photographs fewer unique bedrooms than the unit claims
+      // just burns the swap — the audit's re-check fails again (Ilikai
+      // receipt: APT 510 kept 20 photos but photographed 1 of 2 bedrooms and
+      // the ladder ended "still short"). Abort while everything is still in
+      // STAGING (nothing destructive happened) so the caller can burn this
+      // candidate and try the next option. Enforced only when the pipeline
+      // actually labeled photos — a labeler outage reads bedroomCount 0 and
+      // must not burn every candidate on a false zero.
+      const coverageExpected = result.coverage?.bedroomsExpected ?? null;
+      if (
+        opts.requireBedroomPhotoCoverage === true
+        && result.labeled > 0
+        && coverageExpected != null && coverageExpected > 0
+        && result.bedroomCount < coverageExpected
+      ) {
+        await cleanupStaging();
+        return {
+          ok: false,
+          folder,
+          savedCount: result.kept,
+          coverageShort: true,
+          bedroomsFound: result.bedroomCount,
+          coverage: result.coverage,
+          error: `Replacement gallery photographs only ${result.bedroomCount} of ${coverageExpected} bedrooms — this unit is being replaced to fix a bedroom-photo shortfall, so committing a short gallery would fail the audit again.`,
+        };
+      }
       const persistedProof = buildUnitPhotoResolverProof({
         photos: result.keptSourceUrls.map((photoUrl) => ({ url: photoUrl })),
         sourceUrl: url,
@@ -36785,7 +36832,18 @@ Return ONLY compact JSON with this exact shape:
       await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
       await fs.promises.rm(folderPath, { recursive: true, force: true });
       await fs.promises.rename(stagingPath, folderPath);
-      await storage.deletePhotoLabelsByFolder(stagingFolder).catch(() => {});
+      // The pipeline labeled/hashed/bedroom-clustered the NEW photos under the
+      // STAGING folder name, and the destination may still hold rows from a
+      // PREVIOUS replacement gallery whose photo_NN.jpg names collide with the
+      // fresh set. Left in place, queueMissingPhotoLabels sees nothing missing
+      // and every caption/hash consumer (bedroom coverage, dedupe, collage,
+      // Guesty captions) reads the OLD gallery's data for the NEW photos —
+      // the 2026-07-12 Ilikai receipt read "0/2 bedrooms" + 13 phantom
+      // cross-folder dupes off June labels after a July re-swap. Re-key the
+      // staging rows into place, replacing the destination's rows wholesale.
+      await storage.movePhotoLabelsToFolder(stagingFolder, folder).catch((error) => {
+        console.warn(`[unit-swap rescrape] ${folder}: label move failed ${error?.message ?? error}`);
+      });
       await queueMissingPhotoLabels(folder, "unit-swap").catch((error) => {
         console.warn(`[unit-swap rescrape] ${folder}: label queue failed ${error?.message ?? error}`);
       });
@@ -36925,10 +36983,19 @@ Return ONLY compact JSON with this exact shape:
     // fallback when the commit-time re-scrape comes up empty (all scrape
     // tiers can degrade at once; the find already proved the gallery).
     // Stripped before schema parse like the legacy photoFolder field.
-    const { photoFolder: _legacyPhotoFolder, photoUrls: rawPhotoUrls, ...swapBody } = req.body as any;
+    const {
+      photoFolder: _legacyPhotoFolder,
+      photoUrls: rawPhotoUrls,
+      requireBedroomPhotoCoverage: rawRequireCoverage,
+      ...swapBody
+    } = req.body as any;
     const fallbackPhotoUrls = Array.isArray(rawPhotoUrls)
       ? rawPhotoUrls.filter((u: unknown): u is string => typeof u === "string" && /^https?:\/\//i.test(u)).slice(0, 120)
       : [];
+    // Audit-ladder bedroom-shortfall replacements only: the new gallery must
+    // photograph every claimed bedroom or the commit aborts at staging (the
+    // orchestrator burns the candidate and tries the next option).
+    const requireBedroomPhotoCoverage = rawRequireCoverage === true;
     const parsed = insertUnitSwapSchema.safeParse(swapBody);
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid unit swap data", details: parsed.error.flatten() });
@@ -36971,11 +37038,15 @@ Return ONLY compact JSON with this exact shape:
     // The bounded 90s residential-IP sidecar tier (fires only when the
     // datacenter scrape comes up short) recovers exactly this; the
     // manual-URL swap route above has run with it since it shipped.
-    const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data, { useSidecar: true, fallbackPhotoUrls });
+    const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data, { useSidecar: true, fallbackPhotoUrls, requireBedroomPhotoCoverage });
     if (!hydrated.ok) {
       return res.status(502).json({
         error: `Replacement unit found, but its photos could not be saved: ${hydrated.error ?? "unknown error"}. Choose a different replacement so the builder does not reuse duplicate photos.`,
         photoFolder: hydrated.folder,
+        // Distinguishes "gallery photographs too few bedrooms" from a
+        // bot-walled/empty gallery so the orchestrator's burn accounting
+        // (and its all-burned failure message) stays honest.
+        coverageShort: hydrated.coverageShort === true ? true : undefined,
       });
     }
     const swap = await storage.createUnitSwap(parsed.data);

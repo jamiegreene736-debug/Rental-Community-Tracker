@@ -2119,6 +2119,22 @@ export class DatabaseStorage implements IStorage {
     return result.length;
   }
 
+  // Re-keys every label row from one folder to another, replacing the
+  // destination's rows wholesale (single UPDATE so label/category/hash/
+  // bedroom-cluster columns all move together). Used when a staged photo
+  // pipeline run is renamed into its final folder: the pipeline wrote the
+  // NEW photos' rows under the staging name, and the destination may still
+  // carry rows for a PREVIOUS gallery whose photo_NN.jpg filenames collide
+  // with the fresh set.
+  async movePhotoLabelsToFolder(fromFolder: string, toFolder: string): Promise<number> {
+    await db.delete(photoLabels).where(eq(photoLabels.folder, toFolder));
+    const rows = await db.update(photoLabels)
+      .set({ folder: toFolder })
+      .where(eq(photoLabels.folder, fromFolder))
+      .returning();
+    return rows.length;
+  }
+
   // Delete the label for a single file (used when a photo is curated away so the
   // DB doesn't keep an orphan label pointing at a now-deleted image).
   async deletePhotoLabel(folder: string, filename: string): Promise<number> {
