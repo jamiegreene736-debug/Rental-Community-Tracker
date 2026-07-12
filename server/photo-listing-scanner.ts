@@ -62,7 +62,8 @@ import {
   listingHaystackIncompatibleWithCommunity,
 } from "@shared/preflight-platform-match";
 import { communityAddressRuleForName } from "@shared/community-addresses";
-import { decidePlatformStatus } from "@shared/photo-listing-decision";
+import { INCONCLUSIVE_SCAN_NOTE, decidePlatformStatus } from "@shared/photo-listing-decision";
+import { reactToPhotoListingDetections, type PhotoListingDetection } from "./photo-found-reactions";
 import {
   ADDRESS_PLATFORMS,
   buildAddressQuery,
@@ -223,6 +224,20 @@ const PHOTO_LISTING_SCAN_INTERVAL_DAYS = (() => {
   return Math.min(366, Math.floor(n));
 })();
 export const PHOTO_LISTING_SCAN_MAX_AGE_MS = PHOTO_LISTING_SCAN_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+
+// Short retry window for INCONCLUSIVE rows (2026-07-12): a scan that never really ran — SearchAPI/
+// Lens outage, quota blip — used to wait the full weekly cadence before the scheduler touched the
+// folder again, leaving it blind (grey, or silently riding a preserved stale verdict) for 7 days
+// after one bad provider day. Such rows now re-scan after ~24h. Costs nothing when the provider is
+// healthy (healthy rows never match photoListingScanWasInconclusive); during a multi-day outage each
+// affected folder retries once a day. Set PHOTO_LISTING_INCONCLUSIVE_RETRY_HOURS=0 to disable.
+const PHOTO_LISTING_INCONCLUSIVE_RETRY_MS = (() => {
+  const raw = String(process.env.PHOTO_LISTING_INCONCLUSIVE_RETRY_HOURS ?? "").trim();
+  if (!raw) return 24 * 60 * 60 * 1000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0; // 0/invalid → legacy single-cadence behavior
+  return Math.floor(n * 60 * 60 * 1000);
+})();
 const LENS_TIMEOUT_MS = 45_000;
 const VERIFY_TIMEOUT_MS = 20_000;
 // Address-leg deep-fetch (recall booster): read the FULL page text of a
@@ -266,7 +281,12 @@ const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 const STANDALONE_DRAFT_NO_UNIT_TOKEN = "__standalone_draft_no_unit_token__";
 
 export type PlatformStatus = "clean" | "found" | "unknown";
-export type Match = { photoUrl: string; listingUrl: string; title: string; source: string };
+// `verified` marks a hit that passed the FULL cross-validation (community-compatible AND the unit
+// number in the listing's page text). Persisted in the match JSON so the dashboard can render the
+// display-only amber REVIEW tier for sub-threshold rows (1 verified photo < MIN_MATCHES) — see
+// subThresholdVerifiedMatches in shared/photo-listing-decision.ts. Old rows without the flag
+// simply never show the review badge (fail toward the pre-2026-07-12 behavior).
+export type Match = { photoUrl: string; listingUrl: string; title: string; source: string; verified?: boolean };
 // `matchType`/`evidence` are OPTIONAL and additive: legacy rows (and every
 // snippet-path match) omit them, so stored JSON and existing readers are
 // unaffected. Only the deep-fetch recall pass stamps them ("page-text").
@@ -856,10 +876,13 @@ async function verifyUrlMentionsUnit(url: string, unitHint: string): Promise<boo
 // (problem resolved — no need to raise a new flag). Alerts are one-
 // row-per-transition so operators can walk the history of events
 // instead of just seeing the current state.
+// Returns the platforms whose PHOTO verdict flipped non-found → found on this scan (the same
+// transitions that write photo_listing_alerts rows) so the scheduler can react to NEW detections
+// without re-deriving the flip logic.
 async function alertOnStateWorsen(
   prior: { airbnbStatus: PlatformStatus; vrboStatus: PlatformStatus; bookingStatus: PlatformStatus } | null,
   next: ScanResult,
-): Promise<void> {
+): Promise<Array<"airbnb" | "vrbo" | "booking">> {
   const platforms: Array<{
     key: "airbnb" | "vrbo" | "booking";
     prior: PlatformStatus;
@@ -870,9 +893,11 @@ async function alertOnStateWorsen(
     { key: "vrbo",    prior: prior?.vrboStatus    ?? "unknown", newStatus: next.vrboStatus,    matches: next.vrboMatches },
     { key: "booking", prior: prior?.bookingStatus ?? "unknown", newStatus: next.bookingStatus, matches: next.bookingMatches },
   ];
+  const flipped: Array<"airbnb" | "vrbo" | "booking"> = [];
   for (const p of platforms) {
     if (p.newStatus !== "found") continue;
     if (p.prior === "found") continue; // already alerted last run
+    flipped.push(p.key);
     try {
       await storage.createPhotoListingAlert({
         photoFolder: next.folder,
@@ -888,11 +913,16 @@ async function alertOnStateWorsen(
       console.error(`[photo-listing-scanner] failed to record alert for ${next.folder}/${p.key}: ${e?.message}`);
     }
   }
+  return flipped;
 }
 
 export async function runPhotoListingCheckForFolder(
   folder: string,
-  opts: { maxPhotos?: number } = {},
+  // onNewDetection fires AFTER persist when this scan flipped a platform to "found" (photo leg — the
+  // same transitions that write alert rows) or surfaced a NEW address-on-OTA hit. Only the weekly
+  // scheduler passes it (unattended context: react + notify); on-demand deep checks and the
+  // audit sweep's verify rescans deliberately don't — the operator/sweep is already acting there.
+  opts: { maxPhotos?: number; onNewDetection?: (d: PhotoListingDetection) => Promise<void> | void } = {},
 ): Promise<ScanResult> {
   // How many DISTINCT interior photos to reverse-image (1 Lens call each). Background scheduler uses
   // the cheap default (3); the on-demand preflight deep check passes a large number so it scans the
@@ -1159,7 +1189,7 @@ export async function runPhotoListingCheckForFolder(
         }
         if (communityOk && !siblingLookalike && imageIdentityOk) strongHits.push({ photoUrl, listingUrl: link, title, source });
         const ok = await verify(link, title, source);
-        if (ok) verifiedHits.push({ photoUrl, listingUrl: link, title, source });
+        if (ok) verifiedHits.push({ photoUrl, listingUrl: link, title, source, verified: true });
       }
       if (verifiedHits.length > 0) {
         tally[hostKey].photoHitCount += 1;
@@ -1246,7 +1276,31 @@ export async function runPhotoListingCheckForFolder(
   // non-unknown statuses regardless of whether the underlying error string happened to match
   // isProviderUnavailableError (a 401/403/5xx can carry "SearchAPI" without the matched substrings).
   await persist(result, priorRow, { inconclusive: !anyLensSucceeded });
-  await alertOnStateWorsen(prior, result);
+  const photoFoundFlips = await alertOnStateWorsen(prior, result);
+  if (opts.onNewDetection) {
+    // Address flips computed AFTER persist so outage-preserved statuses can't fabricate a
+    // transition (persist restores prior "found" on inconclusive scans → no flip).
+    const addressFoundFlips = HOST_KEYS.filter((key) => {
+      const nextStatus = key === "airbnb" ? result.airbnbAddressStatus : key === "vrbo" ? result.vrboAddressStatus : result.bookingAddressStatus;
+      if (nextStatus !== "found") return false;
+      const priorStatus = priorRow
+        ? ((priorRow as any)[`${key}AddressStatus`] as string | null | undefined) ?? "unknown"
+        : "unknown";
+      return priorStatus !== "found";
+    });
+    if (photoFoundFlips.length > 0 || addressFoundFlips.length > 0) {
+      try {
+        await opts.onNewDetection({
+          folder,
+          photoFoundFlips,
+          addressFoundFlips,
+          matchCount: result.airbnbMatches.length + result.vrboMatches.length + result.bookingMatches.length,
+        });
+      } catch (e: any) {
+        console.error(`[photo-listing-scanner] onNewDetection failed for ${folder}: ${e?.message ?? e}`);
+      }
+    }
+  }
   return result;
 }
 
@@ -1293,7 +1347,10 @@ async function persist(
     if (restoredAddress && r.addressMatches.length === 0) {
       r.addressMatches = parseStoredAddressMatches((prior as any).addressMatches);
     }
-    r.errorMessage = `${r.errorMessage} (kept previous status because the provider failure was inconclusive)`;
+    // The note text is the shared INCONCLUSIVE_SCAN_NOTE constant — the scheduler's short-window
+    // retry (getStalePhotoListingFolders) keys off it, so an inlined reworded copy would silently
+    // break the 24h outage retry.
+    r.errorMessage = `${r.errorMessage} (${INCONCLUSIVE_SCAN_NOTE})`;
   }
 
   return storage.upsertPhotoListingCheck({
@@ -1568,7 +1625,7 @@ export async function getPhotoCheckBudget(): Promise<{ used: number; cap: number
 
 export async function runPhotoListingCheckForFolders(
   folders: string[],
-  opts: { pauseMs?: number; maxPhotos?: number; budgetCap?: number } = {},
+  opts: { pauseMs?: number; maxPhotos?: number; budgetCap?: number; onNewDetection?: (d: PhotoListingDetection) => Promise<void> | void } = {},
 ): Promise<ScanResult[]> {
   const pause = opts.pauseMs ?? 1500;
   const results: ScanResult[] = [];
@@ -1584,7 +1641,7 @@ export async function runPhotoListingCheckForFolders(
       }
     }
     try {
-      const r = await runPhotoListingCheckForFolder(f, { maxPhotos: opts.maxPhotos });
+      const r = await runPhotoListingCheckForFolder(f, { maxPhotos: opts.maxPhotos, onNewDetection: opts.onNewDetection });
       results.push(r);
       console.error(
         `[photo-listing-scanner] ${f}: airbnb=${r.airbnbStatus}, vrbo=${r.vrboStatus}, booking=${r.bookingStatus} (${r.photosChecked} photos, ${r.lensCalls} lens calls)`,
@@ -1617,13 +1674,22 @@ export function startPhotoListingScheduler(maxAgeMs = PHOTO_LISTING_SCAN_MAX_AGE
   const tick = async () => {
     try {
       const known = await listScanableFolders();
-      const stale = await storage.getStalePhotoListingFolders(maxAgeMs, known);
+      // Inconclusive/outage rows retry on the short window instead of waiting out the weekly
+      // cadence — one bad SearchAPI day must not blind a folder for 7 days.
+      const stale = await storage.getStalePhotoListingFolders(maxAgeMs, known, PHOTO_LISTING_INCONCLUSIVE_RETRY_MS);
       if (stale.length === 0) {
         console.error(`[photo-listing-scanner] tick: ${known.length} folders, all fresh`);
         return;
       }
       console.error(`[photo-listing-scanner] tick: ${stale.length}/${known.length} folders stale — scanning (deep, maxPhotos=${PHOTO_LISTING_SCAN_MAX_PHOTOS})`);
-      await runPhotoListingCheckForFolders(stale, { maxPhotos: PHOTO_LISTING_SCAN_MAX_PHOTOS });
+      // The scheduler is the UNATTENDED path, so it reacts to NEW detections: a platform flipping
+      // to "found" queues the auto-fix audit sweep (cron rails: cooldown/budget/proven-shortfall)
+      // and texts the operator; a new address-on-OTA hit texts the takedown heads-up. On-demand
+      // scans deliberately don't react — the operator (or the audit sweep itself) is already there.
+      await runPhotoListingCheckForFolders(stale, {
+        maxPhotos: PHOTO_LISTING_SCAN_MAX_PHOTOS,
+        onNewDetection: reactToPhotoListingDetections,
+      });
     } catch (e: any) {
       console.error(`[photo-listing-scanner] scheduler crashed: ${e?.message}`);
     }

@@ -49,6 +49,7 @@ import {
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, inArray, ne, sql } from "drizzle-orm";
 import { DESCRIPTION_OVERRIDE_FIELDS, type PropertyDescriptionOverrideField } from "@shared/description-copy";
+import { photoListingScanWasInconclusive } from "@shared/photo-listing-decision";
 
 function listingUrlKey(url: string | null | undefined): string {
   if (!url) return "";
@@ -2492,7 +2493,7 @@ export class DatabaseStorage implements IStorage {
     return row;
   }
 
-  async getStalePhotoListingFolders(olderThanMs: number, knownFolders: string[]): Promise<string[]> {
+  async getStalePhotoListingFolders(olderThanMs: number, knownFolders: string[], inconclusiveRetryMs?: number): Promise<string[]> {
     // Returns a list of folders that EITHER have no row yet OR were
     // last checked more than `olderThanMs` ago. Caller supplies the
     // `knownFolders` list (derived from unit-builder) so the scheduler
@@ -2500,6 +2501,16 @@ export class DatabaseStorage implements IStorage {
     if (knownFolders.length === 0) return [];
     const rows = await db.select().from(photoListingChecks);
     const cutoff = new Date(Date.now() - olderThanMs);
+    // Inconclusive rows (provider outage — no usable photo verdict, or prior
+    // statuses only preserved because the scan failed) retry on a much shorter
+    // window: waiting the full weekly cadence would leave a folder blind for
+    // 7 days after one bad SearchAPI day. 0/undefined keeps the legacy
+    // single-cadence behavior.
+    const retryMs = Number(inconclusiveRetryMs);
+    const inconclusiveCutoff =
+      Number.isFinite(retryMs) && retryMs > 0 && retryMs < olderThanMs
+        ? new Date(Date.now() - retryMs)
+        : null;
     const fresh = new Set(
       rows
         .filter((r) => {
@@ -2512,6 +2523,13 @@ export class DatabaseStorage implements IStorage {
           // problem, not a healthy fresh scan. Do not let it pin the
           // dashboard at grey A?/V?/B? for a full day.
           if (allUnknown && r.photosChecked === 0) return false;
+          if (
+            inconclusiveCutoff &&
+            r.checkedAt <= inconclusiveCutoff &&
+            photoListingScanWasInconclusive(r)
+          ) {
+            return false; // outage row past the retry window — re-scan it
+          }
           return true;
         })
         .map((r) => r.photoFolder),
