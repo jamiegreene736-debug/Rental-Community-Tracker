@@ -4409,7 +4409,15 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    (`result.labeled > 0`) — a labeler outage must not burn every
    candidate on a false zero. OTA-found-only and manual replacements
    deliberately do NOT gate: getting off compromised photos beats
-   gallery coverage.
+   gallery coverage. CONVERGENCE (proven on the live re-run
+   uas_mrhwgeqz_2j7hi8 — first-hit find returned a pool of ONE, the
+   gate burned it, nothing left): a commit pass that exhausts its pool
+   with ≥1 coverage burn re-enters the find phase (`continue
+   findCommit`) on the SAME bounded `findRestarts` budget the
+   deploy-burst restarts use, with `record.attemptedUrls` added to the
+   fresh search's skipUrls so it can't refind the burned galleries.
+   All-409/bot-wall exhaustion deliberately does NOT restart (a fresh
+   first-hit search would refind the same pool).
    (c) RESCRAPE FLOOR GUARD — `POST /api/builder/rescrape-unit-photos`
    REPLACES the folder, and a sold/stripped source gallery can scrape to
    a single og:image (the Ilikai rescrape rung destroyed a healthy
