@@ -264,5 +264,181 @@ check("cross-folder duplicates render BOTH copies for a which-folder-keeps-it de
 check("Photos tab passes its gallery-refresh callback into the shared report",
   builderIndexSource.includes("onPhotoOverridesChanged={onPhotoOverridesChanged}"));
 
+// ── Provenance (chain-of-custody) upgrade (2026-07-12) ───────────────────────
+// "Can't confirm photos" (uncertain votes / too few decisive votes) is upgraded
+// ONLY when the gallery's origin is independently verified: operator pin >
+// source-page "yes" > committed swap. A positive "no" vote always wins — the
+// upgrade clears uncertainty, never masks a mismatch.
+
+console.log("\nphoto-community-check: provenance upgrade");
+
+{
+  const { unitProvenanceFor, canUpgradeWithProvenance } = await import("../shared/photo-community-check-logic");
+
+  check("no provenance signals → null (nothing upgrades by default)",
+    unitProvenanceFor({}, undefined) === null && unitProvenanceFor(null, "uncertain") === null);
+  check("operator pin outranks everything and carries the date",
+    unitProvenanceFor({ operatorVerified: true, operatorVerifiedAt: "2026-07-12T01:02:03Z", swapVerified: true }, "yes")?.kind === "operator"
+    && (unitProvenanceFor({ operatorVerified: true, operatorVerifiedAt: "2026-07-12T01:02:03Z" }, undefined)?.detail ?? "").includes("2026-07-12"));
+  check("source page 'yes' is provenance on its own",
+    unitProvenanceFor({}, "yes")?.kind === "source-page");
+  check("committed swap is provenance when the source page doesn't contradict",
+    unitProvenanceFor({ swapVerified: true }, undefined)?.kind === "swap"
+    && unitProvenanceFor({ swapVerified: true }, "uncertain")?.kind === "swap");
+  check("source page 'no' VETOES swap provenance (machine vs machine)",
+    unitProvenanceFor({ swapVerified: true }, "no") === null);
+  check("source page 'no' does NOT veto the operator pin (explicit human confirmation)",
+    unitProvenanceFor({ operatorVerified: true }, "no")?.kind === "operator");
+
+  const operator = { kind: "operator" as const, detail: "op" };
+  const machine = { kind: "source-page" as const, detail: "sp" };
+  const yes = { match: "yes" as const };
+  const no = { match: "no" as const };
+  const unc = { match: "uncertain" as const };
+  check("a single 'no' vote blocks EVERY provenance kind (mismatch always wins)",
+    !canUpgradeWithProvenance([yes, yes, no, unc], operator)
+    && !canUpgradeWithProvenance([yes, yes, no, unc], machine));
+  check("zero votes block every provenance kind (nothing was judged)",
+    !canUpgradeWithProvenance([], operator) && !canUpgradeWithProvenance([], machine));
+  check("operator pin upgrades even all-uncertain votes",
+    canUpgradeWithProvenance([unc, unc, unc], operator));
+  check("machine provenance needs at least one corroborating 'yes' vote",
+    !canUpgradeWithProvenance([unc, unc, unc], machine)
+    && canUpgradeWithProvenance([yes, unc, unc], machine));
+}
+
+{
+  const {
+    photoFolderFingerprint,
+    parsePhotoFolderVerifications,
+    serializePhotoFolderVerifications,
+    PHOTO_FOLDER_VERIFICATIONS_CAP,
+  } = await import("../shared/photo-folder-verification");
+
+  const fp = photoFolderFingerprint(["b.jpg", "a.jpg", "c.jpg"]);
+  check("fingerprint is order-insensitive and duplicate-insensitive",
+    fp === photoFolderFingerprint(["c.jpg", "a.jpg", "b.jpg", "a.jpg"]));
+  check("fingerprint changes when any photo is added/removed/renamed",
+    fp !== photoFolderFingerprint(["a.jpg", "b.jpg"])
+    && fp !== photoFolderFingerprint(["a.jpg", "b.jpg", "c.jpg", "d.jpg"])
+    && fp !== photoFolderFingerprint(["a.jpg", "b.jpg", "x.jpg"]));
+  check("fingerprint carries the photo count (collision would also need same count)",
+    fp.startsWith("v1:3:"));
+
+  const roundTrip = parsePhotoFolderVerifications(serializePhotoFolderVerifications({
+    "unit-721": { folder: "unit-721", fingerprint: fp, verifiedAt: "2026-07-12T00:00:00Z" },
+  } as any));
+  check("pin store round-trips",
+    roundTrip["unit-721"]?.fingerprint === fp && roundTrip["unit-721"]?.verifiedAt === "2026-07-12T00:00:00Z");
+  const polluted = parsePhotoFolderVerifications(JSON.stringify({
+    "__proto__": { fingerprint: "x", verifiedAt: "2026-01-01" },
+    "constructor": { fingerprint: "x", verifiedAt: "2026-01-01" },
+    ok: { fingerprint: "f", verifiedAt: "2026-01-01" },
+  }));
+  check("pin store drops prototype-pollution keys and returns a null-prototype map",
+    Object.keys(polluted).length === 1 && polluted["ok"]?.fingerprint === "f"
+    && Object.getPrototypeOf(polluted) === null);
+  check("pin store parse fails soft on junk",
+    Object.keys(parsePhotoFolderVerifications("not json")).length === 0
+    && Object.keys(parsePhotoFolderVerifications(null)).length === 0);
+  const big: Record<string, any> = {};
+  for (let i = 0; i < PHOTO_FOLDER_VERIFICATIONS_CAP + 20; i++) {
+    big[`f${i}`] = { folder: `f${i}`, fingerprint: "fp", verifiedAt: `2026-01-01T00:00:${String(i % 60).padStart(2, "0")}Z` };
+  }
+  check("pin store caps at the newest N on write",
+    Object.keys(JSON.parse(serializePhotoFolderVerifications(big))).length === PHOTO_FOLDER_VERIFICATIONS_CAP);
+}
+
+// _source.json backfill never clobbers (behavioral, real temp folder on disk).
+{
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { writeFolderSourceUrlIfMissing, readFolderSourceUrl } = await import("../server/photo-folder-source");
+  const folder = "test-source-backfill-tmp";
+  const dir = path.resolve(process.cwd(), "client/public/photos", folder);
+  fs.rmSync(dir, { recursive: true, force: true });
+  try {
+    check("backfill refuses a folder that doesn't exist on disk",
+      !(await writeFolderSourceUrlIfMissing(folder, "https://example.com/listing")));
+    fs.mkdirSync(dir, { recursive: true });
+    check("backfill rejects non-http candidates",
+      !(await writeFolderSourceUrlIfMissing(folder, "javascript:alert(1)"))
+      && !(await writeFolderSourceUrlIfMissing(folder, "")));
+    check("backfill writes when no _source.json exists",
+      (await writeFolderSourceUrlIfMissing(folder, "https://example.com/listing")) === true
+      && (await readFolderSourceUrl(folder)) === "https://example.com/listing");
+    check("backfill NEVER clobbers an existing url",
+      !(await writeFolderSourceUrlIfMissing(folder, "https://evil.example.com/other"))
+      && (await readFolderSourceUrl(folder)) === "https://example.com/listing");
+    fs.writeFileSync(path.join(dir, "_source.json"), JSON.stringify({ sourceListing: { title: "kept" }, extra: 1 }));
+    check("backfill merges into an existing url-less _source.json (other fields kept)",
+      (await writeFolderSourceUrlIfMissing(folder, "https://example.com/2")) === true
+      && (() => {
+        const doc = JSON.parse(fs.readFileSync(path.join(dir, "_source.json"), "utf8"));
+        return doc.sourceListing.url === "https://example.com/2" && doc.sourceListing.title === "kept" && doc.extra === 1;
+      })());
+    fs.writeFileSync(path.join(dir, "_source.json"), "{ not valid json");
+    check("backfill leaves an unparseable _source.json untouched",
+      !(await writeFolderSourceUrlIfMissing(folder, "https://example.com/3"))
+      && fs.readFileSync(path.join(dir, "_source.json"), "utf8") === "{ not valid json");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Source guards: the wiring that makes provenance real end-to-end.
+{
+  const engineSource = readFileSync("server/photo-community-check.ts", "utf8");
+  check("engine runs the provenance upgrade pass gated by canUpgradeWithProvenance",
+    engineSource.includes("canUpgradeWithProvenance(u.photoVerdicts, provenance)")
+    && engineSource.includes("unitProvenanceFor(input, sp?.match)"));
+  check("engine upgrade pass runs AFTER source pages and BEFORE verdict synthesis",
+    engineSource.indexOf("Provenance upgrade (chain of custody)") > engineSource.indexOf("verifyUnitSourcePages(sourceUnitInputs")
+    && engineSource.indexOf("Provenance upgrade (chain of custody)") < engineSource.indexOf("── Verdict synthesis ──"));
+  check("provenance substitutes for the interior-sample-size warn",
+    engineSource.includes("u.interiorPhotosChecked < UNIT_INTERIOR_MIN && !u.provenanceVerified"));
+
+  const routesSource = readFileSync("server/routes.ts", "utf8");
+  check("route STRIPS client-sent provenance fields (a browser can never assert custody)",
+    routesSource.includes("({ swapVerified, operatorVerified, operatorVerifiedAt, ...rest }) => rest"));
+  check("route enriches groups with server-derived provenance before the engine",
+    routesSource.includes("await enrichCheckGroupsWithProvenance(request.groups)"));
+  check("pin endpoint exists and validates the folder name",
+    routesSource.includes('app.post("/api/builder/photo-folder-verification"')
+    && routesSource.includes("setPhotoFolderVerification(folder, verified)"));
+
+  const bulkSource = readFileSync("server/photo-community-bulk.ts", "utf8");
+  check("bulk Comm-QA job applies the same enrichment (bulk must not read stricter than manual)",
+    bulkSource.includes("enrichCheckGroupsWithProvenance(built.request.groups)"));
+
+  const pinServerSource = readFileSync("server/photo-folder-verification.ts", "utf8");
+  check("swap provenance requires a COMMITTED unit_swaps row for the replacement folder",
+    pinServerSource.includes("replacementPhotoFolderRef(g.folder)")
+    && pinServerSource.includes("latestUnitSwapsByUnit"));
+  check("operator pin applies ONLY while the published-set fingerprint still matches",
+    pinServerSource.includes("photoFolderFingerprint(filenames) === pin.fingerprint"));
+  check("pin endpoint fingerprints the CURRENT published set at save time",
+    pinServerSource.includes("listPublishedFilenames(folder)"));
+
+  const sweepSource = readFileSync("server/unit-audit-sweep.ts", "utf8");
+  check("sweep resolve stage backfills _source.json provenance",
+    sweepSource.includes("backfillUnitSourceProvenance(target)"));
+  check("sweep backfill: replacement folders take the committed swap's newSourceUrl",
+    sweepSource.includes("newSourceUrl"));
+  check("sweep backfill: draft source hints never apply to a swapped (replacement) folder",
+    sweepSource.indexOf("replacementPhotoFolderRef(g.folder)") >= 0
+    && /\}\s*else if \(target\.isDraft\)/.test(sweepSource));
+
+  check("shared report renders the provenance chip",
+    reportComponentSource.includes("Verified by provenance")
+    && reportComponentSource.includes("provenanceReason"));
+  check("shared report offers the operator pin only where it can help (never over a mismatch)",
+    reportComponentSource.includes("button-pin-folder-verified-")
+    && reportComponentSource.includes('hasMismatch || (u.sameAsCommunity !== "no" && !hasUncertain)'));
+  check("pin button is operator-confirmed and POSTs the verification endpoint",
+    reportComponentSource.includes("/api/builder/photo-folder-verification")
+    && reportComponentSource.includes("Mark every photo currently in"));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

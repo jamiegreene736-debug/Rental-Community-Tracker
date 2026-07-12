@@ -22,11 +22,13 @@ import path from "path";
 import { computeDhash, hammingDistance, DUPLICATE_DISTANCE } from "./photo-hashing";
 import {
   UNIT_INTERIOR_MIN,
+  canUpgradeWithProvenance,
   communityNamesMatch,
   computeUnitVerdict,
   filterUnitOutliers,
   isInteriorPhoto,
   pickInteriorPhotos,
+  unitProvenanceFor,
 } from "../shared/photo-community-check-logic";
 import {
   type ListingBedroomCoverage,
@@ -97,6 +99,21 @@ export type CheckGroupInput = {
    * photo (Lens/vision) legs. Absent → source-page leg skipped for this unit.
    */
   sourceUrl?: string;
+  /**
+   * PROVENANCE (chain of custody) — stamped by SERVER-side enrichment only
+   * (enrichCheckGroupsWithProvenance; the route strips these off client-sent
+   * groups so a browser can never assert them):
+   *  - swapVerified: this folder's photos came from a COMMITTED unit
+   *    replacement (unit_swaps row exists for the folder's unit) — the find
+   *    flow community-gates candidates before they can be committed.
+   *  - operatorVerified(+At): the operator pinned this folder's CURRENT
+   *    published photo set as verified and the pin's fingerprint still matches
+   *    (shared/photo-folder-verification.ts).
+   * Provenance upgrades UNCERTAIN votes only — a positive "no" always wins.
+   */
+  swapVerified?: boolean;
+  operatorVerified?: boolean;
+  operatorVerifiedAt?: string;
 };
 
 export type PhotoCommunityCheckRequest = {
@@ -166,6 +183,9 @@ export type UnitGroupResult = {
   outliers: FlaggedPhoto[];
   junk: FlaggedPhoto[];
   confidence: number;
+  /** True when provenance verified this unit (see provenanceReason for why). */
+  provenanceVerified?: boolean;
+  provenanceReason?: string;
 };
 
 export type DuplicateFinding = {
@@ -975,6 +995,39 @@ export async function runPhotoCommunityCheck(
     }
   }
 
+  // ── Provenance upgrade (chain of custody) ─────────────────────────────────
+  // A unit whose photos can't all be confirmed ONLINE (Lens finds nothing for
+  // an interior shot, a vision batch failed → uncertain votes, or too few
+  // decisive votes for computeUnitVerdict's minimum) is NOT necessarily wrong.
+  // When the gallery's ORIGIN is verified — the source page names the expected
+  // community, the photos came from a committed community-gated swap, or the
+  // operator pinned this exact photo set — upgrade the uncertain votes and the
+  // unit verdict. canUpgradeWithProvenance blocks the upgrade whenever ANY
+  // photo voted "no": provenance clears uncertainty, never masks a mismatch.
+  for (const u of units) {
+    const input = unitInputs.find((g) => g.label === u.label);
+    const sp = sourcePages.find((s) => s.unitLabel === u.label);
+    const provenance = unitProvenanceFor(input, sp?.match);
+    if (!provenance) continue;
+    if (!canUpgradeWithProvenance(u.photoVerdicts, provenance)) continue;
+    let upgraded = 0;
+    for (const p of u.photoVerdicts) {
+      if (p.match !== "uncertain") continue;
+      p.match = "yes";
+      p.reason = `Verified by provenance — ${provenance.detail}.`;
+      upgraded++;
+    }
+    const verdictFlipped = u.sameAsCommunity !== "yes";
+    u.provenanceVerified = true;
+    u.provenanceReason = provenance.detail;
+    if (!verdictFlipped && upgraded === 0) continue; // already green — provenance is display-only
+    u.sameAsCommunity = "yes";
+    u.confidence = Math.max(u.confidence, 0.85);
+    u.reason = upgraded > 0
+      ? `Same community — ${provenance.detail}; ${upgraded} photo vote${upgraded === 1 ? "" : "s"} upgraded from uncertain.`
+      : `Same community — ${provenance.detail}.`;
+  }
+
   // ── Verdict synthesis ─────────────────────────────────────────────────────
   const concerns: string[] = [];
   let hasFail = false;
@@ -1021,7 +1074,9 @@ export async function runPhotoCommunityCheck(
     if (u.sameAsCommunity === "no") {
       fail(`${u.label}: NOT the same community — ${u.reason}`);
     }
-    if (u.interiorPhotosChecked < UNIT_INTERIOR_MIN) {
+    if (u.interiorPhotosChecked < UNIT_INTERIOR_MIN && !u.provenanceVerified) {
+      // Provenance substitutes for sample size: the gallery's origin is
+      // verified, so a small interior sample is not a review-worthy gap.
       warn(`${u.label}: only ${u.interiorPhotosChecked} interior-classified photos in sample (target ${UNIT_INTERIOR_MIN}+).`);
     }
     if (!u.allSameUnit || u.outliers.length > 0) warn(`${u.label} has photo(s) that may not be the same unit.`);

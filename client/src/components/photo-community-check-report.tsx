@@ -62,6 +62,9 @@ export type CommunityCheckGroup = {
   overallStatus?: "verified" | "likely" | "unconfirmed" | "mismatch";
   recommendation?: string;
   confidenceScore?: number;
+  /** Unit verdict upgraded by provenance (source page / committed swap / operator pin). */
+  provenanceVerified?: boolean;
+  provenanceReason?: string;
 };
 export type CommunityCheckDuplicate = {
   scope: "cross-folder" | "within-folder";
@@ -220,6 +223,38 @@ export function PhotoCommunityCheckReport({
     display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", borderRadius: 6,
     fontSize: 10.5, fontWeight: 600, cursor: "pointer", background: bg, color: fg, border: `1px solid ${border}`,
   });
+
+  // ── Operator-verified folder pin ──────────────────────────────────────────
+  // "I looked at these photos, they ARE this community." POSTs the folder to
+  // /api/builder/photo-folder-verification; the server fingerprints the
+  // CURRENT published photo set, so any later photo change silently un-applies
+  // the pin. It takes effect on the NEXT check run (the engine upgrades
+  // uncertain votes only — a real mismatch always wins), which is why the
+  // saved state tells the operator to re-run.
+  type PinState = { state: "saving" | "saved" | "error"; error?: string };
+  const [folderPins, setFolderPins] = useState<Record<string, PinState>>({});
+  const pinFolderVerified = async (folder: string) => {
+    const confirmed = window.confirm(
+      `Mark every photo currently in "${folder}" as verified for this community?\n\n` +
+      `The photo check will treat this exact photo set's unconfirmed photos as verified. ` +
+      `Adding, removing, or replacing any photo automatically un-applies it. ` +
+      `Photos the check positively flags as a MISMATCH are never blessed by this.`,
+    );
+    if (!confirmed) return;
+    setFolderPins((prev) => ({ ...prev, [folder]: { state: "saving" } }));
+    try {
+      const resp = await fetch("/api/builder/photo-folder-verification", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder, verified: true }),
+      });
+      const data = (await resp.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!resp.ok || !data?.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      setFolderPins((prev) => ({ ...prev, [folder]: { state: "saved" } }));
+    } catch (e: any) {
+      setFolderPins((prev) => ({ ...prev, [folder]: { state: "error", error: e?.message ?? String(e) } }));
+    }
+  };
   // The card that answers "which photo is this flag about?": thumbnail
   // (click = full size in a new tab), folder/filename, and the keep/remove
   // decision. `tone` mirrors the flag severity (red mismatch / amber review).
@@ -663,6 +698,54 @@ export function PhotoCommunityCheckReport({
               Same community as community folder: <span style={badge(t)}>{t.label}</span>
               {u.reason ? <span style={muted}> — {u.reason}</span> : null}
             </div>
+            {u.provenanceVerified && (
+              <div style={rowS}>
+                <span
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "1px 8px", borderRadius: 999, fontSize: 10.5, fontWeight: 600, background: "#ecfdf5", color: "#047857", border: "1px solid #bbf7d0" }}
+                  data-testid={`chip-provenance-verified-${u.folder}`}
+                >
+                  ✓ Verified by provenance
+                </span>
+                {u.provenanceReason ? <span style={muted}> {u.provenanceReason}</span> : null}
+              </div>
+            )}
+            {(() => {
+              // Operator pin offer: only where it would actually help — the
+              // unit is not already provenance-verified AND either its verdict
+              // is "no" or some photos could not be confirmed (uncertain).
+              // Hidden when any photo POSITIVELY mismatches ("no" vote): the
+              // engine refuses to upgrade those, so the pin would mislead.
+              if (!u.folder || u.provenanceVerified) return null;
+              const votes = u.photoVerdicts ?? [];
+              const hasUncertain = votes.some((v) => v.match === "uncertain");
+              const hasMismatch = votes.some((v) => v.match === "no");
+              if (hasMismatch || (u.sameAsCommunity !== "no" && !hasUncertain)) return null;
+              const pin = folderPins[u.folder];
+              if (pin?.state === "saved") {
+                return (
+                  <div style={{ ...rowS, color: "#047857" }}>
+                    ✓ Operator verification saved — re-run the check (or the next audit sweep) to apply it.
+                  </div>
+                );
+              }
+              return (
+                <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    disabled={pin?.state === "saving"}
+                    onClick={() => void pinFolderVerified(u.folder)}
+                    style={miniBtn("#047857", "#bbf7d0", "#ecfdf5")}
+                    data-testid={`button-pin-folder-verified-${u.folder}`}
+                  >
+                    {pin?.state === "saving" ? "Saving…" : "✓ These photos are correct — mark verified"}
+                  </button>
+                  <span style={{ fontSize: 10, color: "#64748b" }}>
+                    Pins the current photo set as operator-verified; auto-expires if any photo changes.
+                  </span>
+                  {pin?.state === "error" ? <span style={{ fontSize: 10, color: "#b91c1c" }}>{pin.error}</span> : null}
+                </div>
+              );
+            })()}
             {photoVerdictList(u.photoVerdicts)}
             {u.allSameUnit === false && (
               <div style={{ ...rowS, color: "#b45309" }}>⚠ Not all photos look like the same unit.</div>
