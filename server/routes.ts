@@ -44,6 +44,7 @@ import {
   summarizeAmenitiesPush,
   summarizeBeddingPush,
   summarizeBookingRulesPush,
+  summarizeCoverCollagePush,
   summarizeDescriptionsPush,
   summarizePhotosPush,
   summarizePricingPush,
@@ -23272,14 +23273,37 @@ Requirements:
   // "Cover Collage" picture dropped so regeneration doesn't accumulate).
   // Returns a discriminated result instead of throwing so both callers map
   // failures to the exact HTTP statuses the manual endpoint always used.
+  type CoverCollagePushResult =
+    | { ok: true; collageUrl: string; totalPhotos: number }
+    | { ok: false; status: number; body: Record<string, unknown> };
+
   async function pushCoverCollageToGuesty(
     listingId: string,
     rawBase64: string,
     existingPhotos?: { original: string; caption: string }[],
-  ): Promise<
-    | { ok: true; collageUrl: string; totalPhotos: number }
-    | { ok: false; status: number; body: Record<string, unknown> }
-  > {
+  ): Promise<CoverCollagePushResult> {
+    const result = await pushCoverCollageToGuestyUnrecorded(listingId, rawBase64, existingPhotos);
+    // Per-tab push ledger: the collage push rewrites the listing's pictures[]
+    // (collage pinned first), so it IS a Photos-tab Guesty push. Recording at
+    // this single chokepoint covers BOTH callers — the manual upload-collage
+    // route and auto-cover-collage (which the audit sweep's collage auto-fix
+    // drives) — the same way the other push seams record. Fail-soft.
+    recordGuestyPush(
+      listingId,
+      "photos",
+      result.ok ? "success" : "error",
+      result.ok
+        ? summarizeCoverCollagePush(result.totalPhotos)
+        : `Cover collage push failed: ${String(result.body?.error ?? `HTTP ${result.status}`)}`,
+    );
+    return result;
+  }
+
+  async function pushCoverCollageToGuestyUnrecorded(
+    listingId: string,
+    rawBase64: string,
+    existingPhotos?: { original: string; caption: string }[],
+  ): Promise<CoverCollagePushResult> {
     const imgbbKey = process.env.IMGBB_API_KEY;
     if (!imgbbKey) return { ok: false, status: 500, body: { error: "IMGBB_API_KEY not configured" } };
 

@@ -243,6 +243,13 @@ export function summarizePricingPush(days: number, verifiedDays: number): string
   return verifiedDays >= days ? base : `${base} (${verifiedDays} verified)`;
 }
 
+// The cover collage PUTs the listing's whole pictures[] (collage pinned
+// first), so it is a real Photos-tab push — both the manual "Make Cover
+// Collage" button and the audit sweep's collage auto-fix land here.
+export function summarizeCoverCollagePush(totalPhotos: number): string {
+  return `Cover collage pushed (${totalPhotos} photo${totalPhotos === 1 ? "" : "s"} on the listing)`;
+}
+
 export function summarizeBeddingPush(input: {
   bedrooms?: number;
   bathrooms?: number;
