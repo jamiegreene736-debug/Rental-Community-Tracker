@@ -55,6 +55,8 @@ import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-co
 import { isCuratedBuyInMarket } from "@shared/buy-in-market";
 import {
   dedupeAutoFixSelections,
+  photoFixRungsForUnit,
+  type PhotoFixRung,
   MAX_UNIT_AUDIT_RESUMES,
   UNIT_AUDIT_REPORTS_SETTING_KEY,
   UNIT_AUDIT_STAGE_IDS,
@@ -80,9 +82,12 @@ import {
   type UnitAuditStageResult,
   type UnitAuditStageVerdict,
 } from "@shared/unit-audit-sweep-logic";
-import { buildPhotoCommunityCheckRequestForProperty, readFolderSourceUrl } from "./builder-photo-groups";
+import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames, readFolderSourceUrl } from "./builder-photo-groups";
 import { scanForDuplicatePhotos, type DedupeScanGroupInput } from "./photo-dedupe";
 import type { PhotoCommunityCheckResult } from "./photo-community-check";
+import { getPreflightPhotoFetchJob, startPreflightPhotoFetchJob } from "./preflight-background-jobs";
+import { listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
+import { isAutoReplacePhaseActive, draftUnitIdForSlot } from "@shared/auto-replace-job-logic";
 import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
 
@@ -98,6 +103,11 @@ const STAGE_TIMEOUT_MS: Record<UnitAuditStageId, number> = {
   "photo-dedupe": 12 * 60_000,
   "photo-community": 18 * 60_000,
   "ota-scan": 16 * 60_000,
+  // The ladder's worst case is real work: a re-scrape (~minutes), a
+  // find-new-source discovery job (~minutes), a full one-click unit
+  // replacement (find → commit → verify, up to ~35 min), plus a Lens+vision
+  // re-check after each photo change. Bounded per-rung below.
+  "photo-fix": 90 * 60_000,
   descriptions: 6 * 60_000,
   amenities: 8 * 60_000,
   "cover-collage": 8 * 60_000,
@@ -201,15 +211,25 @@ type AuditPhotoGroup = {
   expectedBedrooms?: number;
 };
 
+type UnitAuditUnitRef = {
+  /** Matches the photo-group label format exactly: `Unit A (3BR)`. */
+  label: string;
+  unitId: string;
+  unitIndex: 0 | 1;
+  bedrooms: number;
+};
+
 type UnitAuditTarget = {
   propertyId: number;
   isDraft: boolean;
   propertyName: string;
   communityName: string;
+  streetAddress?: string;
   city?: string;
   state?: string;
   guestyListingId: string | null;
   groups: AuditPhotoGroup[];
+  unitRefs: UnitAuditUnitRef[];
   expectedListingBedrooms: number | null;
   unitBedroomSizes: number[];
   bathroomsTotal: number | null;
@@ -246,10 +266,17 @@ async function resolveUnitAuditTarget(propertyId: number): Promise<UnitAuditTarg
       isDraft: false,
       propertyName: builder.propertyName || builder.complexName,
       communityName: builder.complexName,
+      streetAddress: parsed.street || undefined,
       city: parsed.city || undefined,
       state: parsed.state || undefined,
       guestyListingId: mapRow?.guestyListingId ?? null,
       groups,
+      unitRefs: builder.units.map((u, i) => ({
+        label: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
+        unitId: u.id,
+        unitIndex: (i === 1 ? 1 : 0) as 0 | 1,
+        bedrooms: u.bedrooms,
+      })),
       expectedListingBedrooms: built?.request.expectedListingBedrooms ?? (builder.units.reduce((s, u) => s + (u.bedrooms ?? 0), 0) || null),
       unitBedroomSizes: Array.from(new Set(builder.units.map((u) => u.bedrooms).filter((n) => n > 0))),
       bathroomsTotal: bathrooms.length === builder.units.length ? bathrooms.reduce((s, n) => s + n, 0) : null,
@@ -270,15 +297,21 @@ async function resolveUnitAuditTarget(propertyId: number): Promise<UnitAuditTarg
   const u2 = isSingle ? 0 : resolveDraftUnitBedrooms(draft as any, "unit2");
   const bathroomsParts = [parseBathrooms((draft as any).unit1Bathrooms), isSingle ? null : parseBathrooms((draft as any).unit2Bathrooms)];
   const bathroomsKnown = isSingle ? bathroomsParts[0] != null : bathroomsParts.every((n) => n != null);
+  const draftUnitRefs: UnitAuditUnitRef[] = [
+    { label: `Unit A (${u1}BR)`, unitId: draftUnitIdForSlot(-propertyId, "a"), unitIndex: 0 as const, bedrooms: u1 },
+    ...(isSingle ? [] : [{ label: `Unit B (${u2}BR)`, unitId: draftUnitIdForSlot(-propertyId, "b"), unitIndex: 1 as const, bedrooms: u2 }]),
+  ].filter((r) => r.bedrooms > 0);
   return {
     propertyId,
     isDraft: true,
     propertyName: (draft as any).listingTitle || draft.name,
     communityName: draft.name,
+    streetAddress: (draft as any).streetAddress || undefined,
     city: (draft as any).city || undefined,
     state: (draft as any).state || undefined,
     guestyListingId: mapRow?.guestyListingId ?? null,
     groups,
+    unitRefs: draftUnitRefs,
     expectedListingBedrooms: built?.request.expectedListingBedrooms ?? ((u1 + u2) || null),
     unitBedroomSizes: Array.from(new Set([u1, u2].filter((n) => n > 0))),
     bathroomsTotal: bathroomsKnown ? bathroomsParts.reduce((s: number, n) => s + (n ?? 0), 0) : null,
@@ -427,11 +460,15 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
   };
 }
 
-async function stagePhotoCommunity(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
-  if (unitGroups(target).length === 0 && !target.groups.some((g) => g.role === "community")) {
-    return { verdict: "error", detail: "No published photos — the community/bedroom check cannot run." };
-  }
-  touch(record, { message: "Running the full photo community check (Google Lens + Claude vision — this is the long stage)…" });
+// Structured stage data for the photo-fix ladder — in-memory only (a resume
+// mid-ladder re-runs the community check to re-derive it, which is honest:
+// the world may have changed).
+const communityResults = new Map<string, PhotoCommunityCheckResult>();
+
+async function runCommunityCheck(target: UnitAuditTarget, record: UnitAuditJobRecord, message: string): Promise<
+  { ok: true; result: PhotoCommunityCheckResult } | { ok: false; error: string }
+> {
+  touch(record, { message });
   const { status, data } = await loopbackJson(
     "POST",
     "/api/builder/photo-community-check",
@@ -439,9 +476,14 @@ async function stagePhotoCommunity(target: UnitAuditTarget, record: UnitAuditJob
     STAGE_TIMEOUT_MS["photo-community"] - 30_000,
   );
   if (status >= 400 || data?.ok === false) {
-    return { verdict: "error", detail: `Community check could not run: ${String(data?.error ?? `HTTP ${status}`)}` };
+    return { ok: false, error: String(data?.error ?? `HTTP ${status}`) };
   }
   const result = data as PhotoCommunityCheckResult;
+  communityResults.set(record.jobId, result);
+  return { ok: true, result };
+}
+
+function summarizeCommunityResult(result: PhotoCommunityCheckResult, prefix = ""): StageOutcome {
   const items: string[] = [];
   if (result.community) {
     items.push(`Community folder: identified as "${result.community.identifiedCommunity || "unknown"}" — ${result.community.matchesExpected === "yes" ? "matches" : "does NOT match"} ${result.expectedCommunity}`);
@@ -458,9 +500,36 @@ async function stagePhotoCommunity(target: UnitAuditTarget, record: UnitAuditJob
     result.verdict === "pass" ? "pass" : result.verdict === "fail" ? "failed" : "attention";
   return {
     verdict,
-    detail: result.summary || `Community check verdict: ${result.verdict}`,
+    detail: `${prefix}${result.summary || `Community check verdict: ${result.verdict}`}`,
     items,
   };
+}
+
+// Per-unit problems the photo-fix ladder can act on.
+function communityProblemsByUnit(result: PhotoCommunityCheckResult): Map<string, { bedroomShort: boolean; communityMismatch: boolean }> {
+  const out = new Map<string, { bedroomShort: boolean; communityMismatch: boolean }>();
+  const ensure = (label: string) => {
+    if (!out.has(label)) out.set(label, { bedroomShort: false, communityMismatch: false });
+    return out.get(label)!;
+  };
+  for (const u of result.bedroomCoverage?.units ?? []) {
+    if (u.matchesListing === "no") ensure(u.label).bedroomShort = true;
+  }
+  for (const u of result.units ?? []) {
+    if (u.sameAsCommunity === "no") ensure(u.label).communityMismatch = true;
+  }
+  return out;
+}
+
+async function stagePhotoCommunity(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
+  if (unitGroups(target).length === 0 && !target.groups.some((g) => g.role === "community")) {
+    return { verdict: "error", detail: "No published photos — the community/bedroom check cannot run." };
+  }
+  const run = await runCommunityCheck(target, record, "Running the full photo community check (Google Lens + Claude vision — this is the long stage)…");
+  if (!run.ok) {
+    return { verdict: "error", detail: `Community check could not run: ${run.error}` };
+  }
+  return summarizeCommunityResult(run.result);
 }
 
 function otaRowFresh(row: { checkedAt: Date | string | null } | undefined, nowMs: number): boolean {
@@ -539,6 +608,278 @@ async function stageOtaScan(target: UnitAuditTarget, record: UnitAuditJobRecord)
     return { verdict: "error", detail: `${unverified} unit folder${unverified === 1 ? "" : "s"} could not be fully verified against the OTAs.`, items };
   }
   return { verdict: "pass", detail: `No photos found on Airbnb / VRBO / Booking.com · address clean (${folders.length} unit folder${folders.length === 1 ? "" : "s"}, deep scan).`, items };
+}
+
+// ── Stage: photo fixes — the bounded fix ladder (PR 3) ───────────────────────
+// re-scrape source → find a new source listing → replace the unit, re-checking
+// after each photo change. Max ONE unit replacement per unit per sweep; the
+// replace rung requires record.allowReplace and AUDIT_REPLACE_DISABLED unset.
+// AUDIT_PHOTO_FIX=0 skips the whole stage.
+
+const PHOTO_FIX_RESCRAPE_TIMEOUT_MS = 6 * 60_000;
+const PHOTO_FIX_FIND_NEW_CEILING_MS = 15 * 60_000;
+const PHOTO_FIX_REPLACE_CEILING_MS = 40 * 60_000;
+const PHOTO_FIX_LABEL_WAIT_MS = 240_000;
+
+// Local twin of routes' waitForFolderPhotoLabels (not exported there): the
+// bedroom engine selects candidates BY caption/category, so checking before
+// the async auto-labeler finishes false-fails 0/N (the 2026-07-07 combo-gate
+// root cause). Poll until every published file has a label row, bounded.
+async function waitForFolderLabels(folder: string, timeoutMs = PHOTO_FIX_LABEL_WAIT_MS): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const files = await listPublishedFilenames(folder);
+      if (files.length === 0) return true;
+      const labeled = new Set((await storage.getPhotoLabelsByFolder(folder)).map((l) => l.filename));
+      if (files.every((f) => labeled.has(f))) return true;
+    } catch {
+      // transient — keep polling
+    }
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 5_000));
+  }
+}
+
+async function runPhotoFixRung(
+  rung: PhotoFixRung,
+  target: UnitAuditTarget,
+  ref: UnitAuditUnitRef,
+  folder: string,
+  record: UnitAuditJobRecord,
+): Promise<{ ok: boolean; note: string }> {
+  if (rung === "rescrape") {
+    touch(record, { message: `${ref.label}: re-scraping the current photo source…` });
+    const r = await loopbackJson("POST", "/api/builder/rescrape-unit-photos", { folder }, PHOTO_FIX_RESCRAPE_TIMEOUT_MS)
+      .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+    if (r.status >= 400) {
+      return { ok: false, note: `re-scrape ${(r.data as any)?.needsUrl ? "has no source URL on file" : `failed (${String((r.data as any)?.error ?? `HTTP ${r.status}`)})`}` };
+    }
+    return { ok: true, note: "re-scraped the current source" };
+  }
+
+  if (rung === "find-new") {
+    // Exclude every unit folder's CURRENT source so discovery can't re-find
+    // the same listing (or steal the sibling's).
+    const skipUrls = (await Promise.all(unitGroups(target).map((g) => readFolderSourceUrl(g.folder))))
+      .filter((u): u is string => !!u);
+    touch(record, { message: `${ref.label}: searching for a new photo source listing…` });
+    const job = startPreflightPhotoFetchJob({
+      draftId: target.isDraft ? -target.propertyId : 0,
+      propertyId: target.propertyId,
+      unitId: ref.unitId,
+      unitIndex: ref.unitIndex,
+      bedrooms: ref.bedrooms,
+      communityName: target.communityName,
+      streetAddress: target.streetAddress,
+      city: target.city,
+      state: target.state,
+      skipUrls,
+      replacingExistingPhotos: true,
+      findNewSource: true,
+      targetFolder: target.isDraft ? undefined : folder,
+    });
+    const deadline = Date.now() + PHOTO_FIX_FIND_NEW_CEILING_MS;
+    for (;;) {
+      if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+      const j = getPreflightPhotoFetchJob(job.id);
+      if (!j) return { ok: false, note: "find-new-source job vanished" };
+      if (j.status === "completed") {
+        return { ok: true, note: `found a new source${j.savedCount != null ? ` (${j.savedCount} photos saved)` : ""}${j.sourceUrl ? ` — ${j.sourceUrl}` : ""}` };
+      }
+      if (j.status === "failed" || j.status === "cancelled") {
+        return { ok: false, note: `find-new-source ${j.status}: ${j.error ?? j.message ?? "no reason given"}` };
+      }
+      if (Date.now() > deadline) return { ok: false, note: "find-new-source did not finish in time" };
+      touch(record, { message: `${ref.label}: ${j.message || "searching for a new photo source…"}` });
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
+  }
+
+  // rung === "replace" — the one-click auto-replace orchestrator (find →
+  // commit → verify + Guesty photo push). Its find phase only accepts
+  // OTA-clean, community-matched candidates, which is what makes the result
+  // trustworthy for the OTA-found case.
+  touch(record, { message: `${ref.label}: replacing the unit (find → commit → verify — the long rung)…` });
+  const started = await startAutoReplaceJob({ propertyId: target.propertyId, unitId: ref.unitId, unitLabel: ref.label });
+  if (!started.ok) return { ok: false, note: `unit replacement did not start (${started.error})` };
+  const replaceJobId = started.job.jobId;
+  const deadline = Date.now() + PHOTO_FIX_REPLACE_CEILING_MS;
+  for (;;) {
+    if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+    const jobs2 = await listAutoReplaceJobs();
+    const j = jobs2.jobs.find((x) => x.jobId === replaceJobId);
+    if (!j) return { ok: false, note: "replacement job record vanished" };
+    if (!isAutoReplacePhaseActive(j.phase)) {
+      if (j.phase === "completed") {
+        return { ok: true, note: `unit replaced — ${j.newUnitLabel ?? "new unit"}${j.newAddress ? ` (${j.newAddress})` : ""}` };
+      }
+      return { ok: false, note: `unit replacement failed: ${j.error ?? j.message ?? "no reason given"}` };
+    }
+    if (Date.now() > deadline) {
+      return { ok: false, note: "unit replacement did not finish inside the audit window — it keeps running; check the dashboard replace queue" };
+    }
+    touch(record, { message: `${ref.label}: replacement ${j.phase} — ${j.message ?? "working…"}` });
+    await new Promise((r) => setTimeout(r, 15_000));
+  }
+}
+
+async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
+  if (String(process.env.AUDIT_PHOTO_FIX ?? "").trim() === "0") {
+    return { verdict: "skipped", detail: "Photo fix ladder disabled via AUDIT_PHOTO_FIX=0." };
+  }
+  if (!autoFixEnabled(record)) {
+    return { verdict: "skipped", detail: "Verify-only run — the photo fix ladder (re-scrape → new source → replace unit) only runs with auto-fix on." };
+  }
+
+  // What needs fixing? Community/bedroom problems from the stage-3 result
+  // (re-derived by a fresh check if this job resumed mid-ladder), OTA-found
+  // photos from the persisted photo_listing_checks rows (cheap read).
+  const communityRow = record.stages.find((s) => s.stage === "photo-community");
+  let communityResult = communityResults.get(record.jobId) ?? null;
+  if (!communityResult && (communityRow?.verdict === "failed" || communityRow?.verdict === "attention")) {
+    const rerun = await runCommunityCheck(target, record, "Re-deriving the community/bedroom findings after a restart…");
+    if (rerun.ok) communityResult = rerun.result;
+  }
+  const problems = communityResult ? communityProblemsByUnit(communityResult) : new Map<string, { bedroomShort: boolean; communityMismatch: boolean }>();
+
+  const otaFoundByLabel = new Set<string>();
+  for (const g of unitGroups(target)) {
+    const row = await storage.getPhotoListingCheckByFolder(g.folder).catch(() => undefined);
+    if (!row) continue;
+    const found = [row.airbnbStatus, row.vrboStatus, row.bookingStatus,
+      row.airbnbAddressStatus, row.vrboAddressStatus, row.bookingAddressStatus].some((s: any) => s === "found");
+    if (found) otaFoundByLabel.add(g.label);
+  }
+
+  type UnitPlan = { ref: UnitAuditUnitRef; folder: string; rungs: PhotoFixRung[]; why: string[] };
+  const plans: UnitPlan[] = [];
+  for (const ref of target.unitRefs) {
+    const group = unitGroups(target).find((g) => g.label === ref.label);
+    if (!group) continue;
+    const p = problems.get(ref.label) ?? { bedroomShort: false, communityMismatch: false };
+    const otaFound = otaFoundByLabel.has(ref.label);
+    const rungs = photoFixRungsForUnit({ bedroomShort: p.bedroomShort, communityMismatch: p.communityMismatch, otaFound });
+    if (rungs.length === 0) continue;
+    const why = [
+      otaFound ? "photos/address found on another OTA listing" : null,
+      p.communityMismatch ? "photos not confirmed in the community" : null,
+      p.bedroomShort ? "not enough bedroom photos" : null,
+    ].filter((s): s is string => !!s);
+    plans.push({ ref, folder: group.folder, rungs, why });
+  }
+  if (plans.length === 0) {
+    return { verdict: "skipped", detail: "Photos verified clean in the earlier stages — nothing to fix." };
+  }
+
+  const replaceAllowed = record.allowReplace && String(process.env.AUDIT_REPLACE_DISABLED ?? "").trim() !== "1";
+  const items: string[] = [];
+  let anyFixed = false;
+  let anyStillFailing = false;
+  let anyNeedsReplacePermission = false;
+
+  for (const plan of plans) {
+    items.push(`${plan.ref.label}: ${plan.why.join("; ")} → ladder: ${plan.rungs.join(" → ")}`);
+    let healed = false;
+    let blockedOnPermission = false;
+    for (const rung of plan.rungs) {
+      if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+      if (rung === "replace" && !replaceAllowed) {
+        blockedOnPermission = true;
+        items.push(`${plan.ref.label}: replacement rung skipped (${record.allowReplace ? "AUDIT_REPLACE_DISABLED=1" : "unit replacement unchecked for this run"}) — use Replace photos on the dashboard popup`);
+        break;
+      }
+      const rungResult = await runPhotoFixRung(rung, target, plan.ref, plan.folder, record);
+      items.push(`${plan.ref.label}: ${rung} — ${rungResult.ok ? rungResult.note : `✕ ${rungResult.note}`}`);
+      if (!rungResult.ok) continue;
+
+      // Photos changed: re-resolve the target (active folders may have moved),
+      // wait for the auto-labeler, then re-check. Later stages read the
+      // refreshed target from the map.
+      const refreshed = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
+      if (refreshed) {
+        targets.set(record.jobId, refreshed);
+        target = refreshed;
+      }
+      const newFolder = unitGroups(target).find((g) => g.label === plan.ref.label)?.folder ?? plan.folder;
+      plan.folder = newFolder;
+      touch(record, { message: `${plan.ref.label}: waiting for the photo auto-labeler on ${newFolder}…` });
+      const labelsReady = await waitForFolderLabels(newFolder);
+      if (!labelsReady) items.push(`${plan.ref.label}: photo labels were still generating after 4 min — the re-check may under-count bedrooms; re-run the audit if it reads short`);
+      const recheck = await runCommunityCheck(target, record, `${plan.ref.label}: re-checking community + bedroom coverage after the ${rung}…`);
+      if (!recheck.ok) {
+        items.push(`${plan.ref.label}: re-check could not run (${recheck.error})`);
+        continue;
+      }
+      communityResult = recheck.result;
+      const after = communityProblemsByUnit(recheck.result).get(plan.ref.label);
+      const stillOta = rung === "replace" ? false : otaFoundByLabel.has(plan.ref.label);
+      if (!after?.bedroomShort && !after?.communityMismatch && !stillOta) {
+        healed = true;
+        anyFixed = true;
+        if (rung === "replace") {
+          // The flagged photos are gone with the old unit; the replace flow's
+          // find phase only accepts OTA-clean candidates and it already
+          // kicked a fresh deep rescan of the new folder.
+          otaFoundByLabel.delete(plan.ref.label);
+        }
+        items.push(`${plan.ref.label}: ✓ re-verified clean after the ${rung}`);
+        break;
+      }
+      items.push(`${plan.ref.label}: still ${[after?.bedroomShort ? "short on bedroom photos" : null, after?.communityMismatch ? "unconfirmed community" : null, stillOta ? "OTA-flagged" : null].filter(Boolean).join(" + ")} — trying the next rung`);
+    }
+    if (!healed) {
+      if (blockedOnPermission) anyNeedsReplacePermission = true;
+      else anyStillFailing = true;
+    }
+  }
+
+  // Refresh the earlier photo rows so the roll-up reflects the POST-fix
+  // state: the stage-3 row gets the freshest check result; the stage-4 row
+  // flips to fixed only for units whose replacement removed the flagged
+  // photos (the new gallery was OTA-clean-gated by the find phase).
+  if (anyFixed && communityResult) {
+    const fresh = summarizeCommunityResult(communityResult, "(after photo fixes) ");
+    touch(record, {
+      stages: upsertUnitAuditStageResult(record.stages, {
+        stage: "photo-community",
+        verdict: fresh.verdict,
+        detail: fresh.detail,
+        items: fresh.items,
+      }),
+    });
+    const otaRow = record.stages.find((s) => s.stage === "ota-scan");
+    if (otaRow && otaRow.verdict === "failed" && otaFoundByLabel.size === 0) {
+      touch(record, {
+        stages: upsertUnitAuditStageResult(record.stages, {
+          stage: "ota-scan",
+          verdict: "fixed",
+          detail: "Flagged unit(s) replaced — the found photos are no longer used; the replace flow verified the new gallery OTA-clean and kicked a fresh deep rescan (dashboard Photos column).",
+          items: otaRow.items,
+        }),
+      });
+    }
+  }
+
+  if (anyStillFailing) {
+    return {
+      verdict: "failed",
+      detail: "The fix ladder ran but at least one unit still fails — see the rung-by-rung log below; the dashboard Replace photos flow is the manual fallback.",
+      items,
+    };
+  }
+  if (anyNeedsReplacePermission) {
+    return {
+      verdict: "attention",
+      detail: "Fixing these photos needs a unit replacement, which this run wasn't allowed to do — re-run with \"Allow unit replacement\" checked or use Replace photos on the dashboard popup.",
+      items,
+    };
+  }
+  return {
+    verdict: "fixed",
+    detail: `Photo problems fixed and re-verified for ${plans.length} unit${plans.length === 1 ? "" : "s"} — rung-by-rung log below.`,
+    items,
+  };
 }
 
 // Effective description fields = what a push would actually send: an
@@ -1157,6 +1498,7 @@ async function runStageForRecord(record: UnitAuditJobRecord, stageId: UnitAuditS
       : stageId === "photo-dedupe" ? stagePhotoDedupe(target!, record)
       : stageId === "photo-community" ? stagePhotoCommunity(target!, record)
       : stageId === "ota-scan" ? stageOtaScan(target!, record)
+      : stageId === "photo-fix" ? stagePhotoFix(target!, record)
       : stageId === "descriptions" ? stageDescriptions(target!, record)
       : stageId === "amenities" ? stageAmenities(target!, record)
       : stageId === "cover-collage" ? stageCoverCollage(target!, record)
@@ -1186,10 +1528,33 @@ async function runStageForRecord(record: UnitAuditJobRecord, stageId: UnitAuditS
   });
 }
 
+// Global concurrency gate (bulk "Audit selected", PR 3): each sweep is heavy
+// on shared budgets (Lens, SearchAPI, vision), so queued sweeps run one at a
+// time by default (UNIT_AUDIT_CONCURRENCY raises it). Waiting records stay
+// status "queued" with a heartbeat touch so the resume window never lapses
+// while they wait in line.
+let runningSweeps = 0;
+async function acquireSweepSlot(record: UnitAuditJobRecord): Promise<void> {
+  const max = Math.max(1, Number(process.env.UNIT_AUDIT_CONCURRENCY ?? "1") || 1);
+  let waitNoted = false;
+  while (runningSweeps >= max) {
+    if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+    if (!waitNoted || Date.now() - record.updatedAt > 60_000) {
+      waitNoted = true;
+      touch(record, { message: "Queued — waiting for the running audit sweep to finish…" });
+    }
+    await new Promise((r) => setTimeout(r, 5_000));
+  }
+  runningSweeps += 1;
+}
+
 async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
   if (activeJobIds.has(record.jobId)) return;
   activeJobIds.add(record.jobId);
+  let holdsSlot = false;
   try {
+    await acquireSweepSlot(record);
+    holdsSlot = true;
     touch(record, { status: "running" });
     // Resume seam: `resolve` always re-runs (its target is in-memory only) but
     // overwrites its own stage row; every already-completed stage is skipped.
@@ -1220,15 +1585,17 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
       touch(record, { status: "failed", currentStage: null, error: e?.message ?? "Audit sweep failed" });
     }
   } finally {
+    if (holdsSlot) runningSweeps -= 1;
     activeJobIds.delete(record.jobId);
     cancelRequested.delete(record.jobId);
     targets.delete(record.jobId);
+    communityResults.delete(record.jobId);
   }
 }
 
 // ── Public API (routes) ──────────────────────────────────────────────────────
 
-export async function startUnitAuditSweep(input: { propertyId: number; autoFix?: boolean }): Promise<
+export async function startUnitAuditSweep(input: { propertyId: number; autoFix?: boolean; allowReplace?: boolean }): Promise<
   { ok: true; job: UnitAuditJobRecord } | { ok: false; status: number; error: string }
 > {
   const propertyId = Number(input.propertyId);
@@ -1265,11 +1632,31 @@ export async function startUnitAuditSweep(input: { propertyId: number; autoFix?:
     updatedAt: Date.now(),
     resumeCount: 0,
     autoFix: input.autoFix !== false,
+    allowReplace: input.allowReplace !== false,
   };
   jobs.set(record.jobId, record);
   await mutateStore((store) => { store[record.jobId] = { ...record }; });
   void runUnitAuditJob(record);
   return { ok: true, job: record };
+}
+
+// Bulk "Audit selected" (dashboard checkboxes): one sweep per property,
+// deduped by the per-property active guard, funneled through the global
+// concurrency slot so they run in sequence.
+export async function startUnitAuditSweepBulk(input: {
+  propertyIds: number[];
+  autoFix?: boolean;
+  allowReplace?: boolean;
+}): Promise<{ started: UnitAuditJobRecord[]; skipped: Array<{ propertyId: number; error: string }> }> {
+  const ids = Array.from(new Set((input.propertyIds ?? []).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n !== 0))).slice(0, 40);
+  const started: UnitAuditJobRecord[] = [];
+  const skipped: Array<{ propertyId: number; error: string }> = [];
+  for (const propertyId of ids) {
+    const result = await startUnitAuditSweep({ propertyId, autoFix: input.autoFix, allowReplace: input.allowReplace });
+    if (result.ok) started.push(result.job);
+    else skipped.push({ propertyId, error: result.error });
+  }
+  return { started, skipped };
 }
 
 export async function getUnitAuditJob(jobId: string): Promise<UnitAuditJobRecord | null> {

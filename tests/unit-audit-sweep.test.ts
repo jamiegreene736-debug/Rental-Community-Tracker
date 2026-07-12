@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import {
   dedupeAutoFixSelections,
   lookupUnitAuditRecord,
+  photoFixRungsForUnit,
   MAX_UNIT_AUDIT_RESUMES,
   STUCK_UNIT_AUDIT_ERROR,
   UNIT_AUDIT_REPORTS_CAP,
@@ -58,6 +59,7 @@ const record = (over: Partial<UnitAuditJobRecord> = {}): UnitAuditJobRecord => (
   updatedAt: NOW - 30_000,
   resumeCount: 0,
   autoFix: true,
+  allowReplace: true,
   ...over,
 });
 
@@ -68,13 +70,15 @@ const stage = (
 ): UnitAuditStageResult => ({ stage: stageId, verdict, detail });
 
 // ── Stage vocabulary ─────────────────────────────────────────────────────────
-check("10 stages in the documented order (resolve first, channels last)",
-  UNIT_AUDIT_STAGE_IDS.length === 10 &&
+check("11 stages in the documented order (photo-fix right after the photo verifies, channels last)",
+  UNIT_AUDIT_STAGE_IDS.length === 11 &&
   UNIT_AUDIT_STAGE_IDS[0] === "resolve" &&
   UNIT_AUDIT_STAGE_IDS[1] === "photo-dedupe" &&
   UNIT_AUDIT_STAGE_IDS[2] === "photo-community" &&
   UNIT_AUDIT_STAGE_IDS[3] === "ota-scan" &&
-  UNIT_AUDIT_STAGE_IDS[9] === "channels");
+  UNIT_AUDIT_STAGE_IDS[4] === "photo-fix" &&
+  UNIT_AUDIT_STAGE_IDS[5] === "descriptions" &&
+  UNIT_AUDIT_STAGE_IDS[10] === "channels");
 
 check("every stage has an operator-facing label",
   UNIT_AUDIT_STAGE_IDS.every((id) => (UNIT_AUDIT_STAGE_LABELS[id] ?? "").length > 2));
@@ -128,6 +132,28 @@ check("store: autoFix round-trips; records from before the auto-fix PR default O
     const legacy = parseUnitAuditStore(JSON.stringify({ old: { ...record({ jobId: "old" }), autoFix: undefined } }));
     return parsed.off?.autoFix === false && legacy.old?.autoFix === true;
   })());
+
+check("store: allowReplace round-trips; legacy records default ON",
+  (() => {
+    const off = record({ jobId: "off2", allowReplace: false });
+    const parsed = parseUnitAuditStore(serializeUnitAuditStore({ off2: off }, NOW));
+    const legacy = parseUnitAuditStore(JSON.stringify({ old: { ...record({ jobId: "old" }), allowReplace: undefined } }));
+    return parsed.off2?.allowReplace === false && legacy.old?.allowReplace === true;
+  })());
+
+// ── Photo fix ladder rungs (PR 3) ────────────────────────────────────────────
+check("ladder: bedroom shortfall walks re-scrape → find-new → replace",
+  photoFixRungsForUnit({ bedroomShort: true }).join(",") === "rescrape,find-new,replace");
+
+check("ladder: community mismatch skips the pointless re-scrape (same gallery, same community)",
+  photoFixRungsForUnit({ communityMismatch: true }).join(",") === "find-new,replace");
+
+check("ladder: OTA-found photos go straight to unit replacement (any photo of that unit is compromised)",
+  photoFixRungsForUnit({ otaFound: true }).join(",") === "replace" &&
+  photoFixRungsForUnit({ otaFound: true, bedroomShort: true, communityMismatch: true }).join(",") === "replace");
+
+check("ladder: no problems → no rungs",
+  photoFixRungsForUnit({}).length === 0);
 
 // ── Auto-fix: duplicate-photo selection (PR 2) ──────────────────────────────
 check("dedupe auto-fix: hash groups' non-keepers only; same-scene NEVER auto-applied",
@@ -290,7 +316,7 @@ check("badge: live sweep wins over any report and shows stage progress",
       { verdict: "pass", finishedAt: "2026-07-10T00:00:00Z", stages: [] },
       { status: "running", currentStage: "ota-scan" },
     );
-    return b.kind === "running" && b.label === "4/10" && /OTA duplicate scan/.test(b.title);
+    return b.kind === "running" && b.label === "4/11" && /OTA duplicate scan/.test(b.title);
   })());
 
 check("badge: queued live sweep (no stage yet) still reads running",
@@ -401,6 +427,37 @@ check("fix: layout deliberately never pushes (Bedding-tab config lives in browse
 check("fix: global kill switch UNIT_AUDIT_AUTOFIX_DISABLED gates every fix path",
   serverSrc.includes("UNIT_AUDIT_AUTOFIX_DISABLED") && /autoFixEnabled\(record\)/.test(serverSrc));
 
+// ── Source guards: photo fix ladder (PR 3) reuses the EXISTING repair jobs ───
+check("ladder: rungs come from the shared photoFixRungsForUnit (no inline re-derivation)",
+  serverSrc.includes("photoFixRungsForUnit"));
+
+check("ladder: re-scrape rung drives the single-writer rescrape route",
+  serverSrc.includes("/api/builder/rescrape-unit-photos"));
+
+check("ladder: find-new rung drives the preflight photo-fetch job with findNewSource + targetFolder + sibling skipUrls",
+  serverSrc.includes("startPreflightPhotoFetchJob") &&
+  serverSrc.includes("findNewSource: true") &&
+  /skipUrls/.test(serverSrc));
+
+check("ladder: replace rung drives the one-click auto-replace orchestrator (find→commit→verify, OTA-clean-gated find)",
+  serverSrc.includes("startAutoReplaceJob") && serverSrc.includes("listAutoReplaceJobs"));
+
+check("ladder: replacement requires record.allowReplace and honors AUDIT_REPLACE_DISABLED",
+  serverSrc.includes("record.allowReplace") && serverSrc.includes("AUDIT_REPLACE_DISABLED"));
+
+check("ladder: waits for the photo auto-labeler before re-checking (the 0/N false-fail class)",
+  serverSrc.includes("waitForFolderLabels") && serverSrc.includes("getPhotoLabelsByFolder"));
+
+check("ladder: a successful fix upserts the photo-community row so the roll-up reflects the POST-fix state",
+  serverSrc.includes("(after photo fixes)"));
+
+check("ladder: AUDIT_PHOTO_FIX=0 skips the stage",
+  serverSrc.includes("AUDIT_PHOTO_FIX"));
+
+check("bulk: startUnitAuditSweepBulk dedupes ids and funnels through the global concurrency slot",
+  serverSrc.includes("startUnitAuditSweepBulk") && serverSrc.includes("acquireSweepSlot") &&
+  serverSrc.includes("UNIT_AUDIT_CONCURRENCY"));
+
 // ── Source guards: wiring ────────────────────────────────────────────────────
 const routesSrc = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
 check("routes: POST /api/unit-audit + GET active/:jobId/cancel + dashboard status wired",
@@ -435,10 +492,18 @@ check("dialog: starts via POST /api/unit-audit and polls the job endpoint",
 check("dialog: renders every stage from the SHARED stage list (no drift)",
   dialogSrc.includes("UNIT_AUDIT_STAGE_IDS.map"));
 
-check("route + dialog: autoFix flows from the checkbox through POST /api/unit-audit",
+check("route + dialog: autoFix + allowReplace flow from the checkboxes through POST /api/unit-audit",
   routesSrc.includes("autoFix: (req.body as any)?.autoFix !== false") &&
+  routesSrc.includes("allowReplace: (req.body as any)?.allowReplace !== false") &&
   dialogSrc.includes("checkbox-unit-audit-autofix") &&
-  dialogSrc.includes("{ propertyId, autoFix }"));
+  dialogSrc.includes("checkbox-unit-audit-allow-replace") &&
+  dialogSrc.includes("allowReplace: autoFix && allowReplace"));
+
+check("route: POST /api/unit-audit/bulk wired to startUnitAuditSweepBulk",
+  routesSrc.includes('app.post("/api/unit-audit/bulk"') && routesSrc.includes("startUnitAuditSweepBulk({"));
+
+check("home.tsx: 'Audit selected' bulk button posts the checked property ids",
+  homeSrc.includes("button-bulk-unit-audit") && homeSrc.includes("/api/unit-audit/bulk"));
 
 const pkg = readFileSync(new URL("../package.json", import.meta.url), "utf8");
 check("npm test chain includes this suite",

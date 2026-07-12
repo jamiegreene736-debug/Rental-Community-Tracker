@@ -43,6 +43,24 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (Unit Audit Sweep PR 3 of 3 — PHOTO FIX LADDER + bulk queue; plan complete): Operator:
+  "Please go and then when finished with this task in full merge pr with main". SHIPPED
+  (`claude/unit-audit-sweep-tool-79apae`): NEW stage `photo-fix` (11 stages; after the photo
+  verifies) — bounded ladder per failing unit from pure `photoFixRungsForUnit`: bedroom shortfall →
+  re-scrape (`/rescrape-unit-photos`) → find-new-source (preflight photo-fetch job, findNewSource +
+  targetFolder cores / draftMode drafts + sibling skipUrls) → replace unit (one-click auto-replace,
+  polled, 40m ceiling); community mismatch skips re-scrape; OTA-found → replace ONLY (the replace
+  find phase is OTA-clean-gated — justifies flipping the ota-scan row to `fixed` w/o a second deep
+  scan). After each photo change: target re-resolved, auto-labeler awaited (waitForFolderLabels
+  local twin — the 0/N class), community re-check; success UPSERTS the photo-community row
+  ("(after photo fixes)") so the roll-up is post-fix honest. Replace gated `record.allowReplace`
+  (dialog sub-checkbox default ON) + `AUDIT_REPLACE_DISABLED`; `AUDIT_PHOTO_FIX=0` skips. BULK:
+  "🔍 Audit selected" header button → `POST /api/unit-audit/bulk` (dedupe, cap 40) → global
+  one-at-a-time slot (`UNIT_AUDIT_CONCURRENCY`, queued heartbeat keeps resume window alive).
+  Verified: unit-audit-sweep 83/0, full `npm test` exit 0 (city-vrbo-expansion smoke is
+  timing-flaky under parallel CPU load only — 8/8 isolated), build clean, check 338 = baseline,
+  UI on BUILT bundle. The 3-PR Unit Audit Sweep plan is COMPLETE.
+
 - 2026-07-11 (Unit Audit Sweep PR 2 of 3 — AUTO-FIX chaining): Operator: "Go on pr 2". SHIPPED
   (`claude/unit-audit-sweep-tool-79apae`, follow-up to PR #1013): fixable stages repair through the
   EXISTING engines then RE-VERIFY (`fixed` verdict only on a passing re-check): dedupe → validated

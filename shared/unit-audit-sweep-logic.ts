@@ -39,6 +39,7 @@ export const UNIT_AUDIT_STAGE_IDS = [
   "photo-dedupe",
   "photo-community",
   "ota-scan",
+  "photo-fix",
   "descriptions",
   "amenities",
   "cover-collage",
@@ -54,6 +55,7 @@ export const UNIT_AUDIT_STAGE_LABELS: Record<UnitAuditStageId, string> = {
   "photo-dedupe": "Duplicate photos",
   "photo-community": "Community match & bedrooms",
   "ota-scan": "OTA duplicate scan",
+  "photo-fix": "Photo fixes",
   descriptions: "Descriptions",
   amenities: "Amenities",
   "cover-collage": "Cover collage",
@@ -117,6 +119,11 @@ export type UnitAuditJobRecord = {
    * flagging. Defaults ON (the operator's confirmed default); the dialog
    * checkbox and UNIT_AUDIT_AUTOFIX_DISABLED=1 turn it off. */
   autoFix: boolean;
+  /** Photo fix ladder's last rung (PR 3): allow the bounded one-click unit
+   * replacement when re-scrape / find-new-source can't fix the photos.
+   * Default ON per the confirmed plan (max 1 replacement per unit per
+   * sweep); requires autoFix; AUDIT_REPLACE_DISABLED=1 is the global kill. */
+  allowReplace: boolean;
 };
 
 // Overall verdict for a finished sweep. `error` outranks `attention` because
@@ -193,6 +200,7 @@ export function parseUnitAuditStore(raw: string | null | undefined): Record<stri
         // Records from before the auto-fix PR default ON (matches the new
         // start default) — a resumed pre-upgrade sweep behaves like a fresh one.
         autoFix: typeof v.autoFix === "boolean" ? v.autoFix : true,
+        allowReplace: typeof v.allowReplace === "boolean" ? v.allowReplace : true,
       };
     }
     return out;
@@ -422,6 +430,32 @@ export function dedupeAutoFixSelections(groups: DedupeAutoFixGroupInput[]): {
     }
   }
   return { remove, hashGroupCount, sameSceneCount };
+}
+
+// ── Photo fix ladder (PR 3): which rungs apply to a failing unit ─────────────
+// The operator's ask, bounded: "replace the photo scraping source or replace
+// the unit until we can find a unit with enough bedroom photos."
+//   bedroom shortfall   → re-scrape the CURRENT source (galleries grow /
+//                         partial pulls heal) → find a NEW source listing →
+//                         replace the unit.
+//   community mismatch  → the source itself is suspect: re-scraping the same
+//                         gallery can't change what community it shows, so
+//                         skip straight to find-new-source → replace.
+//   photos found on OTA → ANY photo of that unit is compromised (the unit is
+//                         listed), so only a unit replacement helps — and the
+//                         replace flow's find phase only accepts OTA-clean
+//                         candidates, which is what makes its result safe.
+export type PhotoFixRung = "rescrape" | "find-new" | "replace";
+
+export function photoFixRungsForUnit(problem: {
+  bedroomShort?: boolean;
+  communityMismatch?: boolean;
+  otaFound?: boolean;
+}): PhotoFixRung[] {
+  if (problem.otaFound) return ["replace"];
+  if (problem.communityMismatch) return ["find-new", "replace"];
+  if (problem.bedroomShort) return ["rescrape", "find-new", "replace"];
+  return [];
 }
 
 // Queue summary (active first, then recent terminals) — mirrors the

@@ -114,6 +114,10 @@ export function UnitAuditDialog({ propertyId, propertyName, open, onOpenChange, 
   // descriptions, amenity scan + add-only push, make the cover collage,
   // refresh + push stale pricing). Unchecked = verify-only.
   const [autoFix, setAutoFix] = useState(true);
+  // Photo fix ladder's last rung (default ON per the confirmed plan): allow
+  // the bounded one-click unit replacement when re-scrape/find-new-source
+  // can't fix the photos (max 1 replacement per unit per sweep).
+  const [allowReplace, setAllowReplace] = useState(true);
 
   // Re-attach to a live sweep the dashboard status already knows about
   // (started on another device / before a reload).
@@ -152,7 +156,7 @@ export function UnitAuditDialog({ propertyId, propertyName, open, onOpenChange, 
 
   const startMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/unit-audit", { propertyId, autoFix });
+      const res = await apiRequest("POST", "/api/unit-audit", { propertyId, autoFix, allowReplace: autoFix && allowReplace });
       return (await res.json()) as { ok: boolean; job: UnitAuditJobRecord };
     },
     onSuccess: (data) => {
@@ -252,18 +256,34 @@ export function UnitAuditDialog({ propertyId, propertyName, open, onOpenChange, 
               {job && !job.autoFix ? " (verify-only run)" : ""}
             </span>
           ) : (
-            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={autoFix}
-                onChange={(e) => setAutoFix(e.target.checked)}
-                data-testid="checkbox-unit-audit-autofix"
-              />
-              <span>
-                <span className="font-medium">Auto-fix issues</span> — hide duplicate photos, regenerate bad copy, scan + push
-                amenities, make the collage, refresh stale pricing (all re-verified; photo/unit replacement stays manual)
-              </span>
-            </label>
+            <div className="flex flex-col gap-1">
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={autoFix}
+                  onChange={(e) => setAutoFix(e.target.checked)}
+                  data-testid="checkbox-unit-audit-autofix"
+                />
+                <span>
+                  <span className="font-medium">Auto-fix issues</span> — hide duplicate photos, fix photos (re-scrape → new
+                  source), regenerate bad copy, scan + push amenities, make the collage, refresh stale pricing (all re-verified)
+                </span>
+              </label>
+              {autoFix && (
+                <label className="flex cursor-pointer items-center gap-1.5 pl-5 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={allowReplace}
+                    onChange={(e) => setAllowReplace(e.target.checked)}
+                    data-testid="checkbox-unit-audit-allow-replace"
+                  />
+                  <span>
+                    <span className="font-medium">Allow unit replacement</span> when photos can't be fixed any other way
+                    (finds a clean same-community unit; max 1 per unit per sweep)
+                  </span>
+                </label>
+              )}
+            </div>
           )}
           <div className="flex shrink-0 gap-2">
             {jobActive ? (

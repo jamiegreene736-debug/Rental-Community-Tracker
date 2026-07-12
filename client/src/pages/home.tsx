@@ -1751,6 +1751,30 @@ function AdminDashboard() {
     refetchOnWindowFocus: false,
   });
   const [unitAuditDialog, setUnitAuditDialog] = useState<{ propertyId: number; propertyName: string } | null>(null);
+  // Bulk "Audit selected" — one sweep per checked row, queued server-side one
+  // at a time (each sweep is heavy on Lens/SearchAPI/vision budgets). The
+  // Audit column badges show queued/running/receipt state per row.
+  const [bulkAuditStarting, setBulkAuditStarting] = useState(false);
+  const startBulkUnitAudit = async (propertyIds: number[]) => {
+    if (propertyIds.length === 0 || bulkAuditStarting) return;
+    setBulkAuditStarting(true);
+    try {
+      const res = await apiRequest("POST", "/api/unit-audit/bulk", { propertyIds });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      const started = Array.isArray(data?.started) ? data.started.length : 0;
+      const skipped = Array.isArray(data?.skipped) ? data.skipped.length : 0;
+      toast({
+        title: `Audit sweeps queued for ${started} propert${started === 1 ? "y" : "ies"}`,
+        description: `They run one at a time server-side — watch the Audit column badges.${skipped > 0 ? ` ${skipped} could not start.` : ""}`,
+      });
+      void queryClient.invalidateQueries({ queryKey: ["/api/dashboard/unit-audit-status"] });
+    } catch (e: any) {
+      toast({ title: "Audit sweeps failed to start", description: e?.message ?? String(e), variant: "destructive" });
+    } finally {
+      setBulkAuditStarting(false);
+    }
+  };
   // Guesty listing mapping — drives BOTH the "G" connected-dot column and its
   // sort. Declared HERE — before the `filtered` useMemo — so the sort
   // comparator can close over `guestyConnected` without a TDZ error (the
@@ -4865,6 +4889,23 @@ function AdminDashboard() {
               Showing {filtered.length} of {dashboardRowCount} properties
             </p>
             <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 gap-1.5"
+                disabled={selectedBulkPricingCount === 0 || bulkAuditStarting}
+                onClick={() => void startBulkUnitAudit(selectedBulkPricingProperties.map((p) => p.id))}
+                data-testid="button-bulk-unit-audit"
+                title={selectedBulkPricingCount === 0 ? "Select properties with the checkboxes first" : "Run a full audit sweep on each selected property (queued one at a time; auto-fix + bounded unit replacement on)"}
+              >
+                🔍 Audit selected
+                {selectedBulkPricingCount > 0 && (
+                  <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-[10px]">
+                    {selectedBulkPricingCount}
+                  </Badge>
+                )}
+              </Button>
               <Button
                 type="button"
                 size="sm"
