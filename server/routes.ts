@@ -38,6 +38,20 @@ import {
   type PropertyDescriptionOverrideField,
 } from "@shared/description-copy";
 import {
+  GUESTY_PUSH_RETROACTIVE_HOURS,
+  classifyGuestyProxyListingWrite,
+  newestGuestyPushEntry,
+  summarizeAmenitiesPush,
+  summarizeBeddingPush,
+  summarizeBookingRulesPush,
+  summarizeDescriptionsPush,
+  summarizePhotosPush,
+  summarizePricingPush,
+  type GuestyPushEntry,
+  type GuestyPushListingHistory,
+} from "@shared/guesty-push-history";
+import { backfillGuestyPushHistory, getGuestyPushHistory, recordGuestyPush } from "./guesty-push-history";
+import {
   validateGuestIssueTitle,
   normalizeGuestIssueSeverity,
   normalizeGuestIssueStatus,
@@ -9152,6 +9166,30 @@ export async function registerRoutes(
 
     try {
       const guestyRes = await fetch(url, fetchOptions);
+
+      // Per-tab push ledger: bedding + bookable pushes reach Guesty through
+      // this generic proxy (PUT /listings/:id with listingRooms / isListed) —
+      // this is the ONLY server seam that sees them. Display-only, fail-soft.
+      const ledgerWrite = classifyGuestyProxyListingWrite(req.method, guestyPath, req.body);
+      if (ledgerWrite) {
+        if (ledgerWrite.tab === "bedding") {
+          recordGuestyPush(
+            ledgerWrite.listingId,
+            "bedding",
+            guestyRes.ok ? "success" : "error",
+            guestyRes.ok ? summarizeBeddingPush(ledgerWrite) : `Bedding push failed (HTTP ${guestyRes.status})`,
+          );
+        } else {
+          recordGuestyPush(
+            ledgerWrite.listingId,
+            "bookable",
+            guestyRes.ok ? "success" : "error",
+            guestyRes.ok
+              ? (ledgerWrite.listed ? "Listing set live (bookable) on Guesty" : "Listing unlisted on Guesty")
+              : `Channel listing update failed (HTTP ${guestyRes.status})`,
+          );
+        }
+      }
 
       if (guestyRes.status === 204) {
         return res.status(204).send();
@@ -24074,6 +24112,7 @@ Requirements:
       );
       console.log(`[push-amenities] guesty returned sample:`, savedAmenities.slice(0, 10));
       if (missing.length) console.log(`[push-amenities] missing sample:`, missing.slice(0, 10));
+      recordGuestyPush(listingId, "amenities", "success", summarizeAmenitiesPush(translated.length, savedAmenities.length));
       res.json({
         success: true,
         sent: translated.length,
@@ -24089,6 +24128,7 @@ Requirements:
       });
     } catch (err: any) {
       console.error(`[push-amenities] error:`, err.message);
+      recordGuestyPush(listingId, "amenities", "error", `Amenities push failed: ${err.message}`);
       res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -24308,6 +24348,12 @@ Requirements:
 
       const summaryWasSaved = !!(savedDesc?.summary && savedDesc.summary.length > 10);
 
+      recordGuestyPush(
+        listingId,
+        "descriptions",
+        "success",
+        summarizeDescriptionsPush(Object.keys(publicDescriptions).length + (payload.title ? 1 : 0)),
+      );
       return res.json({
         success: true,
         verified: summaryWasSaved,
@@ -24317,6 +24363,7 @@ Requirements:
       });
     } catch (err: any) {
       console.error(`[push-descriptions] error:`, err.message);
+      recordGuestyPush(listingId, "descriptions", "error", `Descriptions push failed: ${err.message}`);
       return res.status(500).json({ success: false, error: err.message, sent: payload });
     }
   });
@@ -24698,6 +24745,7 @@ Requirements:
         console.log(`[push-photos] ✓ Guesty PUT — ${successCount} photos saved to listing ${guestyListingId}${pinnedCollage ? " (cover collage pinned first)" : ""}`);
       } catch (e: any) {
         console.error(`[push-photos] ✗ Guesty PUT failed: ${e.message}`);
+        recordGuestyPush(guestyListingId, "photos", "error", `Photo push failed: ${e.message}`);
         emit({ type: "done", successCount: 0, upscaledCount, total: photos.length, trimmed: trimmedCount, maxPhotos: MAX_GUESTY_PHOTOS, guestyError: e.message });
         res.end();
         return;
@@ -24751,6 +24799,12 @@ Requirements:
 
     const verifiedCount = Math.max(0, verifiedTotal - pinnedCount);
     const shortfall = collected.length - verifiedCount;
+    recordGuestyPush(
+      guestyListingId,
+      "photos",
+      successCount > 0 ? "success" : "error",
+      successCount > 0 ? summarizePhotosPush(successCount, verifiedCount) : "No photos pushed to Guesty",
+    );
     emit({
       type: "done",
       successCount,
@@ -24764,6 +24818,71 @@ Requirements:
     });
     console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, verified ${verifiedCount} on Guesty${shortfall > 0 ? ` (shortfall ${shortfall} — Guesty silently dropped them)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
     res.end();
+  });
+
+  // ── Guesty push history — per-tab "last pushed" ledger ─────────────────────
+  // GET: the durable per-listing ledger (guesty_push_history.v1), with the two
+  // PRE-EXISTING durable stamps overlaid when newer so pushes that predate the
+  // ledger still show:
+  //   • pricing  → scanner_schedule.lastGuestyRatePush* ("seed" rows excluded —
+  //     those are retroactive placeholders, never a real push),
+  //   • availability → builder_booking_rules.lastPushed*.
+  // POST /backfill: accepts THIS BROWSER's localStorage push log for the
+  // retroactive window (GUESTY_PUSH_RETROACTIVE_HOURS = 48h) so recent pushes
+  // recorded before the ledger existed become durable/cross-device. Entries
+  // are validated and NEVER clobber a same-or-newer server entry.
+  app.get("/api/builder/guesty-push-history", async (req: Request, res: Response) => {
+    const listingId = String((req.query as Record<string, unknown>).listingId ?? "").trim();
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    const propertyIdRaw = Number((req.query as Record<string, unknown>).propertyId);
+    const historyPropertyId = Number.isFinite(propertyIdRaw) && propertyIdRaw !== 0 ? propertyIdRaw : null;
+    try {
+      const tabs: GuestyPushListingHistory = { ...(await getGuestyPushHistory(listingId)) };
+      if (historyPropertyId != null) {
+        try {
+          const sched = await storage.getScannerSchedule(historyPropertyId);
+          if (sched?.lastGuestyRatePushAt && sched.lastGuestyRatePushStatus !== "seed") {
+            const overlay: GuestyPushEntry = {
+              pushedAt: new Date(sched.lastGuestyRatePushAt).toISOString(),
+              status: sched.lastGuestyRatePushStatus === "ok" ? "success" : "error",
+              summary: (sched.lastGuestyRatePushSummary ?? "").trim() || "Rates pushed to Guesty",
+            };
+            tabs.pricing = newestGuestyPushEntry(tabs.pricing ?? null, overlay) ?? overlay;
+          }
+        } catch {
+          // overlay is best-effort — the ledger alone is still correct
+        }
+        try {
+          const rules = await storage.getBuilderBookingRules(historyPropertyId, listingId);
+          if (rules?.lastPushedAt) {
+            const overlay: GuestyPushEntry = {
+              pushedAt: new Date(rules.lastPushedAt).toISOString(),
+              status: rules.lastPushStatus === "ok" ? "success" : "error",
+              summary: (rules.lastPushSummary ?? "").trim() || summarizeBookingRulesPush(rules.minNights, rules.maxNights),
+            };
+            tabs.availability = newestGuestyPushEntry(tabs.availability ?? null, overlay) ?? overlay;
+          }
+        } catch {
+          // overlay is best-effort
+        }
+      }
+      return res.json({ listingId, tabs, retroactiveHours: GUESTY_PUSH_RETROACTIVE_HOURS });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message ?? String(err) });
+    }
+  });
+
+  app.post("/api/builder/guesty-push-history/backfill", async (req: Request, res: Response) => {
+    const { listingId, entries } = (req.body ?? {}) as { listingId?: string; entries?: unknown };
+    if (!listingId || typeof listingId !== "string" || !listingId.trim()) {
+      return res.status(400).json({ error: "listingId required" });
+    }
+    try {
+      const result = await backfillGuestyPushHistory(listingId.trim(), entries);
+      return res.json({ ok: true, ...result });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message ?? String(err) });
+    }
   });
 
   async function findOtaVisibilityWindow(listingId: string): Promise<{ checkIn: string; checkOut: string; nights: number }> {
@@ -25348,6 +25467,16 @@ Requirements:
       lastPushSummary: summary,
     });
 
+    // Per-tab push ledger: booking rules ARE the Availability tab's push.
+    recordGuestyPush(
+      listingId,
+      "availability",
+      mismatches.length === 0 ? "success" : "error",
+      mismatches.length === 0
+        ? summarizeBookingRulesPush(rules.minNights, rules.maxNights)
+        : `Booking rules push mismatch: ${mismatches.join(", ")}`,
+    );
+
     return { row, readback, availabilityReadback, mismatches, summary };
   };
 
@@ -25635,7 +25764,10 @@ Requirements:
     if (current) ranges.push(current);
 
     const schedulePropertyId = Number.isFinite(Number(propertyId)) ? Number(propertyId) : null;
-    const recordGuestyRatePush = async (status: "ok" | "error", summary: string) => {
+    const recordGuestyRatePush = async (status: "ok" | "error", summary: string, tabSummary?: string) => {
+      // Per-tab push ledger — keyed by listing, so it records even when the
+      // caller didn't send a propertyId (the scanner ledger below needs one).
+      recordGuestyPush(listingId, "pricing", status === "ok" ? "success" : "error", tabSummary ?? summary);
       if (!schedulePropertyId) return;
       try {
         await storage.markScannerGuestyRatePush(schedulePropertyId, status, summary.slice(0, 240), pushedTargetMargin);
@@ -25678,7 +25810,7 @@ Requirements:
 
     if (failedRanges.length > 0) {
       const summary = `Pushed ${pushedRanges}/${ranges.length} ranges; first failed range ${failedRanges[0].range.startDate}..${failedRanges[0].range.endDate}: ${failedRanges[0].error}`;
-      await recordGuestyRatePush("error", summary);
+      await recordGuestyRatePush("error", summary, `Rate push failed — ${pushedRanges}/${ranges.length} ranges pushed`);
       return res.json({
         lastGuestyRatePushAt: schedulePropertyId ? new Date().toISOString() : undefined,
         lastGuestyRatePushStatus: "error",
@@ -25742,7 +25874,7 @@ Requirements:
       const summary = success
         ? `Pushed ${days.length} calendar days in ${pushedRanges}/${ranges.length} ranges; verified ${matched}/${days.length} days.${failedRangeSummary}`
         : `Attempted ${days.length} calendar days; pushed ${pushedRanges}/${ranges.length} ranges; verified ${matched}/${days.length} days.${failedRangeSummary}`;
-      await recordGuestyRatePush(success ? "ok" : "error", summary);
+      await recordGuestyRatePush(success ? "ok" : "error", summary, summarizePricingPush(days.length, matched));
       return res.json({
         lastGuestyRatePushAt: schedulePropertyId ? new Date().toISOString() : undefined,
         lastGuestyRatePushStatus: success ? "ok" : "error",
@@ -25768,7 +25900,13 @@ Requirements:
       const summary = rateLimitedVerify
         ? `Pushed ${pushedRanges}/${ranges.length} ranges; Guesty read-back deferred because Guesty rate limited verification.`
         : `Pushed ${pushedRanges}/${ranges.length} ranges; Guesty read-back verification failed: ${err.message}`;
-      await recordGuestyRatePush(success ? "ok" : "error", summary);
+      await recordGuestyRatePush(
+        success ? "ok" : "error",
+        summary,
+        success
+          ? `${days.length} days of rates pushed (verification deferred)`
+          : `Rate push incomplete — ${pushedRanges}/${ranges.length} ranges pushed`,
+      );
       return res.json({
         lastGuestyRatePushAt: schedulePropertyId ? new Date().toISOString() : undefined,
         lastGuestyRatePushStatus: success ? "ok" : "error",
