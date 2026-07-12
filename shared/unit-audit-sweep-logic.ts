@@ -124,6 +124,10 @@ export type UnitAuditJobRecord = {
    * Default ON per the confirmed plan (max 1 replacement per unit per
    * sweep); requires autoFix; AUDIT_REPLACE_DISABLED=1 is the global kill. */
   allowReplace: boolean;
+  /** Who started the sweep. "cron" = the weekly auto-audit scheduler — those
+   * runs reuse the weekly photo-cron's OTA rows (wider fresh window) instead
+   * of re-spending Lens budget, and default the replacement rung OFF. */
+  source: "manual" | "cron";
 };
 
 // Overall verdict for a finished sweep. `error` outranks `attention` because
@@ -201,6 +205,7 @@ export function parseUnitAuditStore(raw: string | null | undefined): Record<stri
         // start default) — a resumed pre-upgrade sweep behaves like a fresh one.
         autoFix: typeof v.autoFix === "boolean" ? v.autoFix : true,
         allowReplace: typeof v.allowReplace === "boolean" ? v.allowReplace : true,
+        source: v.source === "cron" ? "cron" : "manual",
       };
     }
     return out;

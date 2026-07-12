@@ -4,6 +4,7 @@ import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
 import { clearAutoReplaceQueue, listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, listUnitAuditJobs, startUnitAuditSweep, startUnitAuditSweepBulk } from "./unit-audit-sweep";
+import { getUnitAuditCronStatus, runUnitAuditCronSweep } from "./unit-audit-scheduler";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
@@ -22273,6 +22274,21 @@ Requirements:
     const job = await cancelUnitAuditSweep(String(req.params.jobId));
     if (!job) return res.status(404).json({ error: "Audit sweep not found" });
     return res.json({ ok: true, job });
+  });
+
+  // Manual trigger + status for the weekly auto-audit cron (admin/smoke —
+  // loopback bypasses auth like the other /api/admin routes).
+  app.post("/api/admin/run-unit-audit-cron", async (_req, res) => {
+    try {
+      const result = await runUnitAuditCronSweep("manual trigger");
+      return res.json({ ok: true, ...result });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message ?? "Auto-audit run failed" });
+    }
+  });
+
+  app.get("/api/admin/unit-audit-cron-status", (_req, res) => {
+    return res.json(getUnitAuditCronStatus());
   });
 
   // Manual trigger for the weekly market-rate scan (refresh every configured

@@ -127,8 +127,13 @@ const autoFixEnabled = (record: UnitAuditJobRecord) => record.autoFix && !autoFi
 
 // How fresh an existing photo_listing_checks row must be for the OTA stage to
 // reuse it instead of kicking a new deep scan (each deep scan is real Lens +
-// SERP spend; the weekly cron refreshes rows anyway).
-const OTA_FRESH_HOURS = Number(process.env.AUDIT_OTA_FRESH_HOURS ?? "24");
+// SERP spend). Manual sweeps demand a fresh look (24h); CRON sweeps reuse the
+// weekly photo-cron's rows (8 days) — without the wider window every weekly
+// auto-audit would double-spend the deep scan the photo cron just ran.
+const otaFreshHoursFor = (record: UnitAuditJobRecord) =>
+  record.source === "cron"
+    ? Number(process.env.AUDIT_CRON_OTA_FRESH_HOURS ?? "192")
+    : Number(process.env.AUDIT_OTA_FRESH_HOURS ?? "24");
 const OTA_POLL_INTERVAL_MS = 10_000;
 // Rates pushed longer ago than this read as stale (matches the dashboard
 // "Last Price Scan" amber threshold — the weekly cron cadence + 1 day).
@@ -541,10 +546,10 @@ async function stagePhotoCommunity(target: UnitAuditTarget, record: UnitAuditJob
   return summarizeCommunityResult(run.result);
 }
 
-function otaRowFresh(row: { checkedAt: Date | string | null } | undefined, nowMs: number): boolean {
+function otaRowFresh(row: { checkedAt: Date | string | null } | undefined, nowMs: number, freshHours: number): boolean {
   if (!row?.checkedAt) return false;
   const t = new Date(row.checkedAt as any).getTime();
-  return Number.isFinite(t) && nowMs - t <= OTA_FRESH_HOURS * 3600_000;
+  return Number.isFinite(t) && nowMs - t <= freshHours * 3600_000;
 }
 
 async function stageOtaScan(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
@@ -557,7 +562,7 @@ async function stageOtaScan(target: UnitAuditTarget, record: UnitAuditJobRecord)
   for (const f of folders) {
     rows.set(f.folder, await storage.getPhotoListingCheckByFolder(f.folder).catch(() => undefined));
   }
-  const stale = folders.filter((f) => !otaRowFresh(rows.get(f.folder), kickStart));
+  const stale = folders.filter((f) => !otaRowFresh(rows.get(f.folder), kickStart, otaFreshHoursFor(record)));
   const scanDisabled = String(process.env.AUDIT_OTA_SCAN ?? "").trim() === "0";
   if (stale.length > 0 && !scanDisabled) {
     touch(record, { message: `Deep-scanning ${stale.length} unit folder${stale.length === 1 ? "" : "s"} against Airbnb/VRBO/Booking (reverse image + address)…` });
@@ -1722,7 +1727,7 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
 
 // ── Public API (routes) ──────────────────────────────────────────────────────
 
-export async function startUnitAuditSweep(input: { propertyId: number; autoFix?: boolean; allowReplace?: boolean }): Promise<
+export async function startUnitAuditSweep(input: { propertyId: number; autoFix?: boolean; allowReplace?: boolean; source?: "manual" | "cron" }): Promise<
   { ok: true; job: UnitAuditJobRecord } | { ok: false; status: number; error: string }
 > {
   const propertyId = Number(input.propertyId);
@@ -1760,6 +1765,7 @@ export async function startUnitAuditSweep(input: { propertyId: number; autoFix?:
     resumeCount: 0,
     autoFix: input.autoFix !== false,
     allowReplace: input.allowReplace !== false,
+    source: input.source === "cron" ? "cron" : "manual",
   };
   jobs.set(record.jobId, record);
   await mutateStore((store) => { store[record.jobId] = { ...record }; });
@@ -1774,12 +1780,13 @@ export async function startUnitAuditSweepBulk(input: {
   propertyIds: number[];
   autoFix?: boolean;
   allowReplace?: boolean;
+  source?: "manual" | "cron";
 }): Promise<{ started: UnitAuditJobRecord[]; skipped: Array<{ propertyId: number; error: string }> }> {
   const ids = Array.from(new Set((input.propertyIds ?? []).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n !== 0))).slice(0, 40);
   const started: UnitAuditJobRecord[] = [];
   const skipped: Array<{ propertyId: number; error: string }> = [];
   for (const propertyId of ids) {
-    const result = await startUnitAuditSweep({ propertyId, autoFix: input.autoFix, allowReplace: input.allowReplace });
+    const result = await startUnitAuditSweep({ propertyId, autoFix: input.autoFix, allowReplace: input.allowReplace, source: input.source });
     if (result.ok) started.push(result.job);
     else skipped.push({ propertyId, error: result.error });
   }

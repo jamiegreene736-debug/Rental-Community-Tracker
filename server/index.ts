@@ -10,6 +10,7 @@ import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startReplacementFindResumeWatchdog } from "./preflight-background-jobs";
 import { startAutoReplaceResumeWatchdog } from "./auto-replace-jobs";
 import { startUnitAuditResumeWatchdog } from "./unit-audit-sweep";
+import { startUnitAuditAutoScheduler } from "./unit-audit-scheduler";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { startGuestReceiptScheduler } from "./guest-receipts";
 import { startGuestComplaintScanner } from "./guest-complaint-scanner";
@@ -209,6 +210,11 @@ app.get("/api/auth/session", (_req, res) => {
       // Unit Audit Sweep (dashboard "Audit" column) — resume orphaned sweeps
       // after a restart. Gate: UNIT_AUDIT_RESUME_DISABLED=1.
       startUnitAuditResumeWatchdog();
+      // Weekly auto-audit: every mapped property gets a full sweep with
+      // auto-fix ON so the Audit/Comm QA columns keep themselves green.
+      // Gate: UNIT_AUDIT_AUTO_DISABLED=1; replacement rung needs
+      // UNIT_AUDIT_CRON_REPLACE=1.
+      startUnitAuditAutoScheduler();
       await cleanupStaleRuns();
       startWeeklyScheduler();
       startAutoApproveScheduler();
