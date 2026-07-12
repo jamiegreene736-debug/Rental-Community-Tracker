@@ -314,6 +314,7 @@ import {
 } from "./seasonal-availability";
 import { runPhotoListingCheckForFolders, runAddressBackfill, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, communityOnlyCheckRequest, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
+import { enrichCheckGroupsWithProvenance, setPhotoFolderVerification } from "./photo-folder-verification";
 import { scanForDuplicatePhotos, getStoredDedupeScan, type DedupeScanGroupInput } from "./photo-dedupe";
 import { validateDedupeSelection, type DedupeSelection } from "../shared/photo-dedupe-logic";
 import { scanAmenitiesForProperty } from "./amenity-scan";
@@ -30539,7 +30540,13 @@ Return ONLY compact JSON with this exact shape:
         request = {
           expectedCommunity: body.expectedCommunity,
           expectedListingBedrooms: body.expectedListingBedrooms,
-          groups: body.groups,
+          // Provenance fields (swapVerified/operatorVerified) are SERVER-derived
+          // facts — strip anything a browser sent so a buggy/forged payload can
+          // never assert its own chain of custody; enrichment below re-stamps
+          // them from unit_swaps + the folder pin store.
+          groups: body.groups.map(
+            ({ swapVerified, operatorVerified, operatorVerifiedAt, ...rest }) => rest,
+          ),
         };
       } else {
         const built = propertyId != null ? await buildPhotoCommunityCheckRequestForProperty(propertyId) : null;
@@ -30559,6 +30566,14 @@ Return ONLY compact JSON with this exact shape:
         }
       }
 
+      // PROVENANCE enrichment (server-side only): fills each unit group's
+      // sourceUrl from _source.json when the caller didn't send one,
+      // swapVerified from committed unit_swaps for replacement-* folders, and
+      // operatorVerified from the fingerprint-scoped folder pin store. Runs on
+      // BOTH client-driven and server-built groups so every caller (Photos
+      // tab, preflight, unit-audit sweep loopback) gets the same upgrade.
+      await enrichCheckGroupsWithProvenance(request.groups).catch(() => undefined);
+
       const result = await runPhotoCommunityCheck(
         request,
         process.env.ANTHROPIC_API_KEY ?? "",
@@ -30576,6 +30591,33 @@ Return ONLY compact JSON with this exact shape:
     } catch (err: any) {
       console.error("[photo-community-check]", err?.message ?? err);
       return res.status(500).json({ ok: false, error: err?.message ?? "photo community check failed" });
+    }
+  });
+
+  // Operator-verified photo-folder pin — "I looked at these photos, they ARE
+  // this community." Persisted in app_settings `photo_folder_verifications.v1`
+  // and scoped to the CURRENT published photo set via fingerprint; any photo
+  // add/hide/replace silently un-applies it (never deleted — restoring the set
+  // restores the pin). The photo-community check treats an active pin as
+  // provenance that upgrades UNCERTAIN votes only; a positive mismatch always
+  // wins. Body: { folder, verified?: boolean } (verified=false clears the pin).
+  app.post("/api/builder/photo-folder-verification", async (req, res) => {
+    try {
+      const folder = String((req.body as any)?.folder ?? "").trim();
+      const verified = (req.body as any)?.verified !== false;
+      if (!folder || !/^[a-zA-Z0-9_-]+$/.test(folder)) {
+        return res.status(400).json({ ok: false, error: "folder required (letters, digits, - and _ only)" });
+      }
+      const row = await setPhotoFolderVerification(folder, verified);
+      return res.json({
+        ok: true,
+        folder,
+        verified: !!row,
+        fingerprint: row?.fingerprint ?? null,
+        verifiedAt: row?.verifiedAt ?? null,
+      });
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: err?.message ?? "failed to save folder verification" });
     }
   });
 

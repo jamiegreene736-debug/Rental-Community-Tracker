@@ -85,7 +85,8 @@ import {
   type UnitAuditStageResult,
   type UnitAuditStageVerdict,
 } from "@shared/unit-audit-sweep-logic";
-import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames, readFolderSourceUrl } from "./builder-photo-groups";
+import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames, readFolderSourceUrl, writeFolderSourceUrlIfMissing } from "./builder-photo-groups";
+import { replacementPhotoFolderRef } from "@shared/photo-folder-utils";
 import { scanForDuplicatePhotos, type DedupeScanGroupInput } from "./photo-dedupe";
 import type { PhotoCommunityCheckResult } from "./photo-community-check";
 import { getPreflightPhotoFetchJob, startPreflightPhotoFetchJob } from "./preflight-background-jobs";
@@ -246,6 +247,12 @@ type UnitAuditTarget = {
   bathroomsTotal: number | null;
   maxGuestsTotal: number | null;
   licenses: Record<string, string | undefined> | null;
+  /**
+   * Draft-only: the saved unit1/unit2 source URLs, indexed by unitIndex. Feeds
+   * the _source.json provenance backfill for a draft unit folder whose scrape
+   * predates the source stamp (core builder units rely on swap history).
+   */
+  unitSourceUrlHints?: Array<string | undefined>;
 };
 
 function parseBathrooms(value: unknown): number | null {
@@ -331,6 +338,10 @@ async function resolveUnitAuditTarget(propertyId: number): Promise<UnitAuditTarg
     // draft row — the channels stage reports that honestly instead of
     // pretending to have checked them.
     licenses: null,
+    unitSourceUrlHints: [
+      String((draft as any).unit1SourceUrl ?? "").trim() || undefined,
+      String((draft as any).unit2SourceUrl ?? "").trim() || undefined,
+    ],
   };
 }
 
@@ -343,6 +354,54 @@ type StageOutcome = { verdict: UnitAuditStageVerdict; detail: string; items?: st
 
 function unitGroups(target: UnitAuditTarget): AuditPhotoGroup[] {
   return target.groups.filter((g) => g.role === "unit");
+}
+
+// PROVENANCE BACKFILL (lever 2 of the "can't confirm photos" fix): a unit
+// folder with photos but no _source.json url can't run the source-page
+// community leg, so uncertain Lens/vision votes have nothing to upgrade them.
+// Recover the URL from records we already trust — the COMMITTED unit-swap row
+// for a replacement-* folder (its photos came from newSourceUrl by
+// construction), or the draft's saved unit source URL for the draft's own unit
+// folder. Never guesses, never clobbers (writeFolderSourceUrlIfMissing).
+async function backfillUnitSourceProvenance(target: UnitAuditTarget): Promise<string[]> {
+  const notes: string[] = [];
+  const units = unitGroups(target);
+  if (units.length === 0) return notes;
+  let swapsByUnit: Map<string, { oldUnitId: string; newSourceUrl?: string | null }> | null = null;
+  for (const g of units) {
+    try {
+      if (await readFolderSourceUrl(g.folder)) continue;
+      let candidate: string | undefined;
+      let from = "";
+      const repRef = replacementPhotoFolderRef(g.folder);
+      if (repRef) {
+        if (!swapsByUnit) {
+          swapsByUnit = latestUnitSwapsByUnit(await storage.getUnitSwaps(target.propertyId).catch(() => []));
+        }
+        const url = String(swapsByUnit.get(repRef.oldUnitId)?.newSourceUrl ?? "").trim();
+        if (/^https?:\/\//i.test(url)) {
+          candidate = url;
+          from = "the committed unit-replacement record";
+        }
+      } else if (target.isDraft) {
+        // Only the draft's OWN unit folder may take the draft hint — a swapped
+        // folder's photos did not come from the original unit's source URL.
+        const ref = target.unitRefs.find((r) => r.label === g.label);
+        const hint = ref ? String(target.unitSourceUrlHints?.[ref.unitIndex] ?? "").trim() : "";
+        if (/^https?:\/\//i.test(hint)) {
+          candidate = hint;
+          from = "the draft's saved unit source URL";
+        }
+      }
+      if (!candidate) continue;
+      if (await writeFolderSourceUrlIfMissing(g.folder, candidate)) {
+        notes.push(`${g.label}: backfilled the photo-source URL from ${from} — the source-page community leg can now verify this unit.`);
+      }
+    } catch {
+      // Fail-soft per folder — backfill is an upgrade, never a blocker.
+    }
+  }
+  return notes;
 }
 
 async function stageResolve(record: UnitAuditJobRecord): Promise<StageOutcome> {
@@ -362,6 +421,7 @@ async function stageResolve(record: UnitAuditJobRecord): Promise<StageOutcome> {
   for (const g of unitGroups(target)) {
     items.push(`${g.label} — folder ${g.folder}, ${g.filenames.length} photos`);
   }
+  items.push(...(await backfillUnitSourceProvenance(target)));
   if (unitGroups(target).length === 0) {
     return { verdict: "attention", detail: "Resolved, but no unit photo folders have published photos — the photo stages cannot verify anything.", items };
   }

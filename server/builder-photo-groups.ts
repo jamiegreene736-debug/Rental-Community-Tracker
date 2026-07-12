@@ -2,7 +2,6 @@
 // published (non-hidden) files from disk, DB labels with static fallbacks.
 
 import fs from "fs";
-import path from "path";
 import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "../client/src/data/unit-builder-data";
 import { resolveActiveUnitPhotoFolders } from "../shared/unit-swap-photos";
 import { resolveCanonicalCommunityPhotoFolder } from "../shared/community-photo-folders";
@@ -14,10 +13,11 @@ import type { CommunityDraft } from "../shared/schema";
 
 const IMAGE_EXT = /\.(?:jpe?g|png|webp|gif)$/i;
 
-export function publicPhotoDir(folder: string): string {
-  const safe = folder.replace(/[^a-zA-Z0-9_-]+/g, "-");
-  return path.resolve(process.cwd(), "client/public/photos", safe);
-}
+// fs-only source-provenance helpers live in ./photo-folder-source (no storage
+// import there, so tests can exercise them without a DATABASE_URL); re-exported
+// here because this module is where every existing importer looks for them.
+export { publicPhotoDir, readFolderSourceUrl, writeFolderSourceUrlIfMissing } from "./photo-folder-source";
+import { publicPhotoDir, readFolderSourceUrl } from "./photo-folder-source";
 
 export function captionFromFilename(filename: string): string {
   const stem = filename.replace(/\.[^.]+$/, "").replace(/^\d+[-_]/, "");
@@ -84,24 +84,6 @@ function effectiveCaption(
 ): string {
   const fromDb = labelRow?.userLabel ?? labelRow?.label;
   return (fromDb?.trim() || staticCaption?.trim() || captionFromFilename(filename));
-}
-
-/**
- * Read the source listing URL a folder's photos were scraped from (stamped into
- * `_source.json` by the last rescrape / Guesty import). Feeds the source-page
- * community-verification leg. Fail-soft: returns undefined on any error.
- */
-export async function readFolderSourceUrl(folder: string): Promise<string | undefined> {
-  const sourcePath = path.join(publicPhotoDir(folder), "_source.json");
-  try {
-    const doc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8")) as {
-      sourceListing?: { url?: string } | null;
-    };
-    const url = doc?.sourceListing?.url;
-    return typeof url === "string" && url.trim() ? url.trim() : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 export async function listPublishedFilenames(folder: string): Promise<string[]> {
