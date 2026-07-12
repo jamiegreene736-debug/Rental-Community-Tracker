@@ -4285,6 +4285,60 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    the honesty rule (#3) is unchanged. Source-guarded in
    tests/unit-audit-sweep.test.ts.
 
+18. **Self-verifying audit — double/triple-check rails (2026-07-12).**
+   Operator directive off a live receipt ("2 need your attention, 1 could
+   not be verified"): review/unverified outcomes re-check themselves before
+   a human ever sees them. Four bounded rails (pure decisions in
+   shared/unit-audit-sweep-logic.ts, orchestration in
+   server/unit-audit-sweep.ts, all source-guarded):
+   (A) RETRY passes — after the stage loop and BEFORE the receipt, stages
+   that ended `error` (the "? unverified" badge class) plus
+   attention/failed rows carrying a TRANSIENT auto-fix failure signature
+   (`RETRYABLE_ATTENTION_PATTERNS`: "Auto-fix failed:", "Auto-fix could
+   not apply", "already running" — drift-locked to the emitted strings)
+   re-run up to `AUDIT_STAGE_RETRY_PASSES` (default 2) times via pure
+   `unitAuditRetryStageIds`. Judgment-call attention rows (layout,
+   licenses, cooldown/budget, replace-permission) deliberately NEVER
+   re-run — they are human-decision rails. A photo-community/ota-scan
+   verdict change re-runs photo-fix (its inputs changed).
+   (B) Community CONSENSUS passes — a warn-class check whose ONLY problem
+   is unconfirmed photos/units (pure `communityCheckUncertaintyOnly`:
+   zero "no" votes anywhere, zero bedroom shorts, zero junk/dupes/
+   source-page-"no") re-runs up to `AUDIT_COMMUNITY_CONSENSUS_PASSES`
+   (default 3 total) independent full checks; confirmations UNION across
+   passes (`mergeCommunityConsensusPasses` — Lens/vision are
+   non-deterministic, so uncertain-in-pass-1 + confirmed-in-pass-2 =
+   confirmed); any pass that surfaces a positive contradiction WINS
+   immediately (the double-check may honestly DOWNGRADE, never mask);
+   all-passes-zero-contradiction ⇒ consensus pass with the residual
+   unconfirmed photos named. Wired at BOTH seams — stage 3 and the
+   post-photo-fix row upsert (the live receipt's residual chip came from
+   the latter). A "no" is never upgraded (#16's mismatch-always-wins).
+   The persisted Comm QA row may read warn while the audit reads pass —
+   the audit holds strictly more evidence (N independent runs); that
+   divergence is intentional, don't "sync" it by faking a persisted pass.
+   (C) Same-scene STABILITY double-check — vision same-scene dedupe
+   grouping is non-deterministic (the live receipt's "3 groups still
+   present" after an apply were NEW pairings, not survivors — single-scan
+   logic can never converge). An AI group only ACTS or FLAGS review when
+   a second independent scan reproduces it (pure `confirmSameSceneGroups`:
+   same folder + ≥2 shared members); one-scan-only groups are AI noise —
+   left visible, never a review item. Post-apply residuals get the same
+   double-check and at most ONE more apply round; only deterministic hash
+   evidence can leave the stage at attention. Falls back to single-scan
+   behavior when the double-check can't run vision ("could not re-check"
+   ≠ "disproven"). `AUDIT_DEDUPE_DOUBLE_CHECK=0` restores single-scan.
+   (D) OTA inconclusive re-kick — a fresh-but-INCONCLUSIVE
+   photo_listing_checks row (shared `photoListingScanWasInconclusive`,
+   the weekly photo-cron's predicate) re-scans instead of erroring
+   without trying: "could not be verified" must mean we TRIED just now.
+   Stage ceilings grew with the rails (photo-dedupe 20m, photo-community
+   55m, photo-fix 120m; per-check call ceiling
+   `COMMUNITY_CHECK_CALL_TIMEOUT_MS` 17.5m) — don't shrink them below
+   passes × per-call. COMPOSES with #17: the verify-read retry heals one
+   READ inside a stage; rail A re-runs the whole STAGE when it still ends
+   `error`.
+
 ## Conventions
 
 ### Branches
@@ -4395,6 +4449,7 @@ Examples:
 2026-07-10 · Jamie: "On the photos tab in the unit builder is a button called check community photos… it checks a lot [bedroom count, units match the community folder]. I want this exact same button/function but now placed in the UI of the pre flight check." · SHIPPED (`claude/preflight-community-photos-check-2fxyao`) · KEY FINDING: the preflight Community Match card (#989) ALREADY ran the FULL engine (POST { propertyId } → server-built photo_labels-hydrated groups, persisted result) — the only gap was its slim rendering (no bedroom coverage, per-photo votes, junk/duplicates, photo counts). The Photos-tab report renderer was EXTRACTED VERBATIM into shared `client/src/components/photo-community-check-report.tsx` and BOTH surfaces now render that one component, so preflight shows the exact Photos-tab output and the two can never drift (source-assertion-locked); the card's button is renamed to the Photos-tab "🔎 Check photo community" and the persisting run now invalidates photo-community-status like the Photos tab. The community-only "Check photos are correct" card (#991) is untouched. See Load-Bearing #45 (shared-report bullet).
 2026-07-10 · Jamie: "basic tier 1 questions like Is there an ocean view … answered automatically by the AI … in Hawaii lingo and signed by John Carpenter … use claude AI search as much as possible; the UI must show 'AI responded — tier 1' and vice versa 'tier 2 — no automatic response'." · SHIPPED (`claude/guest-inbox-tier1-auto-d60726`) · A SCOPED exception to the 2026-06-09 drafts-only default (which stays the rule for everything else): new pure `shared/guest-question-tier.ts` classifies every incoming guest message — tier 1 = short, question-shaped, matching a curated basic-property-fact topic list (ocean view, parking, pool, AC, wifi, laundry, kitchen, BBQ, lanai, beach distance, check-in times, bedrooms/beds, TV, resort amenities, linens) with ZERO tier-2 signals (money/availability/dates/policy/complaint/accessibility/urgency/service-request); everything else = tier 2. Tier-1 candidates draft on `AUTO_REPLY_TIER1_MODEL` (default claude-sonnet-4-6) with Anthropic's server-side `web_search` tool for fact grounding (pause_turn-resumed; searches audited into toolsUsed) + a Hawaii-voice prompt block (Aloha opener, island touches only when the fetched facts say the property is in Hawaii; the John Carpenter sign-off was already enforced by ensureSignoff), then QUEUE through the EXISTING delivery-verified auto-send under new `auto_send.tier1_enabled` (default ON — new settings key, so no rollout flag; per-row re-check in runAutoSendQueue; master auto-send stays OFF and independent). The FULL 3-layer safety stack is UNCHANGED and any hold (RISK_KEYWORDS, model flag_for_human, output filter, draft error, unmapped listing) DOWNGRADES the row to tier 2 + held — the tier-1 badge can never cover an unverified send. Tier persists on `auto_reply_log.tier/tier_reason` (schema + ALTER-on-boot) and renders in the inbox: conversation-row chips + a thread-header verdict ("✓ Tier 1 — AI answered automatically" emerald / "Tier 2 — no automatic AI response, needs you" amber) fed by cheap `GET /api/inbox/auto-reply/tiers` (agent-readable) + an admin "Tier 1 auto-answer" switch (`POST /api/inbox/auto-reply/tier1/toggle`). Verified: tests/guest-question-tier.test.ts 81/0 (in the npm chain), full `npm test` exit 0, build clean, `npm run check` 338 = baseline (0 new, stash-diffed), bundle-grep confirms chips + switch. Could NOT live-smoke the Guesty/Claude legs (no creds) — post-deploy: a "does the condo have AC?"-style message should auto-answer within ~2 min and its row show the emerald tier-1 chip. See the TIER-1 EXCEPTION note under Load-Bearing #24.
 2026-07-10 · Jamie (screenshot of a static property's preflight — Kaha Lani, both units swapped): "Usually now in the preflight check I have a button that will say find new unit photos and then it will like look for a new source to scrape photos from for that unit. Please investigate and fix why this is not showing here and fix it so that it does show here for this unit and others." · DIAGNOSED + SHIPPED (`claude/preflight-community-photos-check-2fxyao`) · ROOT CAUSE: the per-unit "Find new photos" button (#990) lives on the Photo Sources card, which was gated `isPromotedDraft` AND `handleScrapePhotosForUnit` hard-returned for positive ids — a STATIC builder property's preflight never rendered it. The gate was real: the photo-fetch job persisted ONLY via the draft-only `/api/community/:draftId/persist-photos`. FIX: the card now renders on EVERY preflight page; static rows act on the unit's ACTIVE folder (unitOverrides→replacement folder once swapped, else its own folder) — "Re-pull all photos" delegates to the EXISTING per-folder rescrape job (the committed panel's "Rescrape photos"), while "Find new photos" / empty-folder discovery runs the photo-fetch job with a new `targetFolder` input, persisting via `/api/builder/rescrape-unit-photos` (the single-writer folder path: downloadAndPrioritize + _source.json restamp — so the NEXT "Rescrape photos" re-pulls the NEW source). Guards: static discovery NEVER accepts a thin gallery (minAcceptable = MIN_INDEPENDENT_UNIT_PHOTOS in static mode, replacing or seeding); static rows count the ACTIVE folder on disk (static `photos` arrays are mostly absent — the old fallback would render a full gallery as "Find Photos" and let empty-mode discovery clobber it); sibling exclusion resolves the sibling's ACTIVE folder source. Drafts keep the #990 paths byte-identical. Locked by tests/discovery-cache.test.ts (43/0).
+2026-07-12 · Jamie (screenshot of an audit receipt showing "? unverified" + 2 review chips): "How can we fix the review so that no human intervention is needed and everything just fixes itself after like a double or triple check system sort of thing?" · SHIPPED (`claude/audit-auto-verify-f935a5`) · Four bounded self-verification rails in the Unit Audit Sweep (Load-Bearing #18 under "Unit Audit Sweep"): (A) `error` stages + transient auto-fix failures automatically re-run up to AUDIT_STAGE_RETRY_PASSES (2) times before the receipt — the "? unverified" badge now only survives a genuine triple-failure; (B) a warn-class community check with ZERO positive contradictions re-runs up to AUDIT_COMMUNITY_CONSENSUS_PASSES (3) independent times, confirmations union across passes, and all-passes-clean consensus-passes ("N could not be confirmed online" stops flagging review when 3 independent Lens+vision checks found nothing wrong) — a contradiction surfaced by ANY pass wins immediately, so the double-check can downgrade but never mask; (C) vision same-scene dedupe groups only act/flag when a SECOND independent scan reproduces them (the "still present" groups were new AI pairings each scan, not survivors — they are noise, not review items); (D) fresh-but-inconclusive OTA scan rows re-scan via the photo-cron's shared predicate instead of erroring untried. Judgment-call attention rows (layout, licenses, cooldown/budget, replace-permission) deliberately stay human. Verified: unit-audit-sweep 144/0, full `npm test` exit 0, build clean, `npm run check` 338 = baseline.
 ```
 
 (Populate on first dispute.)

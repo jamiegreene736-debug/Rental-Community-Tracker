@@ -43,6 +43,41 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (audit sweep SELF-VERIFIES — "no human intervention … double or triple check system"):
+  Operator (receipt screenshot: "2 need your attention, 1 could not be verified" + "? unverified"
+  Audit badge) asked for review/unverified outcomes to fix themselves via multi-check consensus,
+  then merge. SHIPPED (`claude/audit-auto-verify-f935a5`; AGENTS.md Unit Audit Sweep #18 — don't
+  re-chase): FOUR bounded rails in server/unit-audit-sweep.ts, pure decisions in
+  shared/unit-audit-sweep-logic.ts. (A) RETRY — after the stage loop, BEFORE the receipt, `error`
+  stages + attention/failed rows with a TRANSIENT auto-fix failure signature (pure
+  `unitAuditRetryStageIds` + `RETRYABLE_ATTENTION_PATTERNS`, drift-locked) re-run up to
+  `AUDIT_STAGE_RETRY_PASSES` (2) times; a photo-community/ota verdict change re-runs photo-fix;
+  judgment-call rows (layout, licenses, cooldown/budget, replace-permission) NEVER re-run. The
+  "? unverified" badge now means "failed 3 independent attempts", not "failed once". (B) COMMUNITY
+  CONSENSUS — a warn-class check whose ONLY problem is unconfirmed photos/units (pure
+  `communityCheckUncertaintyOnly`: zero "no" votes/shorts/junk/dupes/source-page-"no") re-runs up
+  to `AUDIT_COMMUNITY_CONSENSUS_PASSES` (3 total) independent full checks; confirmations UNION
+  across passes (`mergeCommunityConsensusPasses`); ANY pass surfacing a contradiction wins
+  immediately (double-check may DOWNGRADE, never mask — a "no" is never upgraded, LB #16);
+  all-clean ⇒ consensus pass naming the residual unconfirmed photos. Wired at BOTH seams (stage 3
+  + the photo-fix "(after photo fixes)" upsert — the screenshot's exact chip). Comm QA may read ⚠
+  while Audit reads ✓ — intentional (the audit holds N runs of evidence); don't fake-persist a
+  pass. (C) DEDUPE STABILITY — same-scene (AI) groups only act/flag when a SECOND independent scan
+  reproduces them (pure `confirmSameSceneGroups`, same folder + ≥2 shared members); the receipt's
+  "3 groups still present" were NEW vision pairings each scan (noise), not survivors — now
+  dismissed as AI noise, never review; post-apply residuals get one double-checked extra apply
+  round; only hash evidence can leave attention; vision-unavailable falls back to single-scan
+  (`AUDIT_DEDUPE_DOUBLE_CHECK=0` restores old flow). (D) OTA INCONCLUSIVE RE-KICK — fresh-but-
+  inconclusive photo_listing_checks rows (shared `photoListingScanWasInconclusive`) re-scan
+  instead of erroring untried. Ceilings: photo-dedupe 20m / photo-community 55m / photo-fix 120m;
+  per-check call 17.5m (`COMMUNITY_CHECK_CALL_TIMEOUT_MS`). Verified: unit-audit-sweep 158/0
+  post-merge (32 new incl. drift-locks + both-seams guard), full `npm test` exit 0, build clean
+  (env knobs + strings bundle-grepped), `npm run check` 338 = baseline. Could NOT live-run a sweep
+  (no DB/keys) — post-deploy: re-run the audit on the screenshot property; expect the dedupe +
+  community rows to resolve themselves and "? unverified" only after a genuine 3× failure.
+  COMPOSES with the same-day #1022 verify-read Guesty-429 retries (below): #1022 retries ONE
+  read within a stage; rail A re-runs the whole STAGE when it still ends error.
+
 - 2026-07-12 (audit receipt "Amenities unverified — aborted due to timeout" — verify-read RETRY over
   Guesty 429 pauses): Operator screenshot (Coconut Plantation receipt, stage 7 "Could not read the
   Guesty listing's amenities (The operation was aborted due to timeout)"); asked to investigate via
