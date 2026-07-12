@@ -43,6 +43,24 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (audit receipt "Amenities unverified — aborted due to timeout" — verify-read RETRY over
+  Guesty 429 pauses): Operator screenshot (Coconut Plantation receipt, stage 7 "Could not read the
+  Guesty listing's amenities (The operation was aborted due to timeout)"); asked to investigate via
+  Railway logs, fix, merge. DIAGNOSIS (don't re-chase): NOT a push failure — the sweep hit a live
+  Guesty 429 mid-run (02:37:58Z, deployment 4ccfc1ed, mid deploy-burst); ALL Guesty calls serialize
+  through guesty-sync.ts's global gate (500ms gaps + up-to-120s pause after any 429), the
+  guesty-amenities route makes TWO serialized Guesty calls, and verifyAmenities had ONE 30s attempt —
+  it aborted while the queue drained (the layout stage read the SAME listing fine seconds later).
+  SHIPPED (`claude/unit-audit-amenities-fix-205063`): `loopbackVerifyRead` in unit-audit-sweep.ts —
+  bounded retries + growing backoff (10s/20s) for the three verify-side Guesty reads (amenities 3×45s,
+  layout + channels 2×45s), pure classification `unitAuditVerifyReadRetryable` (429/5xx/599 retry,
+  other 4xx fail fast; GETs only) in shared/unit-audit-sweep-logic.ts; stage ceilings rebalanced
+  (amenities 8→13m — scan timeout now explicitly subtracts BOTH verify calls' worst case, scan budget
+  390s→420s no regression; layout/channels 90s→3m); exhausted retries still report `error` with the
+  attempt count (honesty rule intact — see AGENTS.md Unit Audit Sweep #17). Verified: unit-audit-sweep
+  122/0 (10 new), full `npm test` exit 0, build clean (strings bundle-grepped), `npm run check` 338 =
+  baseline. The flagged receipt heals on the property's next sweep (re-run Audit or the weekly cron).
+
 - 2026-07-12 (photo-listing cron: found→fix latency + outage retry + review tier + operator SMS):
   Operator asked to investigate the weekly photo-scan cron (photos found on Airbnb/VRBO/Booking →
   red flag → replace/swap) and implement all 4 improvements found, then merge. SHIPPED

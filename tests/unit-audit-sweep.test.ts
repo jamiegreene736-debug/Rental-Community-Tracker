@@ -34,6 +34,8 @@ import {
   summarizeUnitAuditQueue,
   unitAuditBadge,
   unitAuditHeadline,
+  unitAuditVerifyReadBackoffMs,
+  unitAuditVerifyReadRetryable,
   upsertUnitAuditStageResult,
   type UnitAuditJobRecord,
   type UnitAuditStageResult,
@@ -568,6 +570,45 @@ check("amenity verify: reads {amenities, otherAmenities} via the SAME endpoint t
   serverSrc.includes("otherAmenities") &&
   serverSrc.includes("amenityPresenceCandidates") &&
   serverSrc.includes("normalizeGuestyAmenityName"));
+
+// ── Verify-read retry over Guesty rate-limit pauses (2026-07-12) ─────────────
+// The live Coconut Plantation receipt: the amenities read-back aborted at its
+// single 30s attempt while the global Guesty request gate sat in a 429 pause,
+// and the stage reported "could not be verified" for a push that had landed.
+check("verify-read retry: success statuses never retry",
+  !unitAuditVerifyReadRetryable(200) && !unitAuditVerifyReadRetryable(204) && !unitAuditVerifyReadRetryable(304));
+
+check("verify-read retry: transient classes retry (429 route rate-limit, 5xx incl. Guesty-429-as-500, 599 client abort)",
+  unitAuditVerifyReadRetryable(429) && unitAuditVerifyReadRetryable(500) &&
+  unitAuditVerifyReadRetryable(502) && unitAuditVerifyReadRetryable(599));
+
+check("verify-read retry: non-retryable 4xx (bad listing id / validation) fail fast",
+  !unitAuditVerifyReadRetryable(400) && !unitAuditVerifyReadRetryable(404) && !unitAuditVerifyReadRetryable(422));
+
+check("verify-read backoff: grows 10s/20s so attempt 2 clears Guesty's default 15s pause",
+  unitAuditVerifyReadBackoffMs(1) === 10_000 && unitAuditVerifyReadBackoffMs(2) === 20_000 &&
+  unitAuditVerifyReadBackoffMs(0) === 10_000);
+
+check("amenity verify: read-back goes through the retrying loopbackVerifyRead (never a bare single attempt)",
+  /loopbackVerifyRead\(\s*`\/api\/builder\/guesty-amenities\?listingId=/.test(serverSrc) &&
+  !/loopbackJson\("GET", `\/api\/builder\/guesty-amenities/.test(serverSrc));
+
+check("layout verify: listing read goes through the retrying loopbackVerifyRead",
+  /loopbackVerifyRead\(\s*`\/api\/guesty-proxy\/listings\//.test(serverSrc) &&
+  !/loopbackJson\("GET", `\/api\/guesty-proxy\/listings\//.test(serverSrc));
+
+check("channels verify: channel-status read goes through the retrying loopbackVerifyRead",
+  /loopbackVerifyRead\(\s*\n?\s*"\/api\/dashboard\/channel-status"/.test(serverSrc) &&
+  !/loopbackJson\("GET", "\/api\/dashboard\/channel-status"/.test(serverSrc));
+
+check("verify-read retry: classification + backoff come from the shared pure functions",
+  serverSrc.includes("unitAuditVerifyReadRetryable") && serverSrc.includes("unitAuditVerifyReadBackoffMs"));
+
+check("amenities stage ceiling accounting: the scan timeout subtracts BOTH verify calls' worst case",
+  serverSrc.includes("2 * AMENITY_VERIFY_WORST_MS"));
+
+check("verify-read failure receipts carry the attempt count (honest 'could not verify', never silent)",
+  /after \$\{attemptsUsed\} read attempt/.test(serverSrc));
 
 check("amenity normalizer drift-lock: routes' inline norm() and the shared normalizer are byte-identical",
   (() => {
