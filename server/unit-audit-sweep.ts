@@ -91,8 +91,23 @@ import {
   type UnitAuditReportRecord,
   type UnitAuditStageId,
   type UnitAuditStageResult,
+  type CommunityConsensusCoverage,
   type UnitAuditStageVerdict,
 } from "@shared/unit-audit-sweep-logic";
+import {
+  collectPhotoJudgmentCandidates,
+  filterAdjudicatedCandidates,
+  photoJudgmentActionPlan,
+  type PhotoJudgmentDecision,
+} from "@shared/photo-judgment-adjudication";
+import {
+  coveredJudgmentKeysForFolders,
+  judgmentFingerprintsForFolders,
+  loadPhotoJudgmentDecisions,
+  photoJudgmentEnabled,
+  recordPhotoJudgmentDecisions,
+  runPhotoJudgmentVision,
+} from "./photo-judgment";
 import { photoListingScanWasInconclusive } from "@shared/photo-listing-decision";
 import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames, readFolderSourceUrl, writeFolderSourceUrlIfMissing } from "./builder-photo-groups";
 import { replacementPhotoFolderRef } from "@shared/photo-folder-utils";
@@ -740,11 +755,22 @@ async function communityOutcomeWithConsensus(
 ): Promise<StageOutcome> {
   const firstOutcome = summarizeCommunityResult(first, prefix);
   const total = communityConsensusPasses();
-  if (firstOutcome.verdict !== "attention" || total <= 1 || !communityCheckUncertaintyOnly(first)) {
+  // AI FINAL-SAY coverage (2026-07-12): junk flags / cross-dupe pairs Claude
+  // already adjudicated KEEP (fingerprint-valid) stop blocking the consensus
+  // gate — the independent re-checks below still own the final greening, and
+  // a positive contradiction in any pass still wins. "no" votes / bedroom
+  // shorts / source-page contradictions are never coverable.
+  const coverage: CommunityConsensusCoverage | undefined =
+    await coveredJudgmentKeysForFolders(target.groups.map((g) => g.folder)).catch(() => undefined);
+  if (firstOutcome.verdict !== "attention" || total <= 1 || !communityCheckUncertaintyOnly(first, coverage)) {
     return firstOutcome;
   }
   const passes: PhotoCommunityCheckResult[] = [first];
   const items = [...(firstOutcome.items ?? [])];
+  if (coverage && !communityCheckUncertaintyOnly(first)) {
+    const covered = (coverage.coveredPhotoKeys?.size ?? 0) + (coverage.coveredDupeSides?.size ?? 0);
+    items.push(`AI judgment: ${covered} previously adjudicated finding(s) treated as resolved (Claude's keep decisions, fingerprint-scoped)`);
+  }
   for (let p = 2; p <= total; p++) {
     if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
     const rerun = await runCommunityCheck(
@@ -757,7 +783,7 @@ async function communityOutcomeWithConsensus(
       return { ...firstOutcome, items };
     }
     passes.push(rerun.result);
-    const merged = mergeCommunityConsensusPasses(passes);
+    const merged = mergeCommunityConsensusPasses(passes, coverage);
     if (merged.contradiction) {
       const downgraded = summarizeCommunityResult(rerun.result, prefix);
       return {
@@ -778,7 +804,7 @@ async function communityOutcomeWithConsensus(
       };
     }
   }
-  const merged = mergeCommunityConsensusPasses(passes);
+  const merged = mergeCommunityConsensusPasses(passes, coverage);
   const residual = merged.residualUnconfirmed;
   return {
     verdict: "pass",
@@ -1083,6 +1109,99 @@ async function runPhotoFixRung(
   }
 }
 
+// ── AI FINAL SAY (2026-07-12 operator directive: "I don't want to make
+// judgment calls. I'll leave that to Claude AI to determine.") ───────────────
+// The residual review-class findings — junk flags, unit↔unit duplicate
+// ownership, still-unconfirmed photos — get ONE forced-choice Claude vision
+// call (keep or remove; "uncertain" refused at parse). Removals are the same
+// photo_labels.hidden soft-delete the report's Remove button performs
+// (floor-guarded, ↺ undoable); every decision lands in the receipt; KEEPs
+// persist fingerprint-scoped (photo_judgment_decisions.v1 — the operator-pin
+// posture) so the next sweep doesn't re-ask and the consensus rail treats
+// them as covered. Red "no" votes are NEVER adjudicated (Load-Bearing #16 —
+// they belong to the fix ladder), and a failed/malformed vision answer keeps
+// the pre-existing "needs your eyes" behavior (honesty rule #3).
+type AiJudgmentSummary = { touched: boolean; failed: boolean; hidden: number; unresolved: number };
+
+async function runAiFinalSayAdjudication(
+  target: UnitAuditTarget,
+  record: UnitAuditJobRecord,
+  result: PhotoCommunityCheckResult,
+  items: string[],
+): Promise<AiJudgmentSummary> {
+  const none: AiJudgmentSummary = { touched: false, failed: false, hidden: 0, unresolved: 0 };
+  if (!photoJudgmentEnabled()) return none;
+  const communityFolder = target.groups.find((g) => g.role === "community")?.folder;
+  const currentFolders = new Set(target.groups.map((g) => g.folder));
+  const candidates = collectPhotoJudgmentCandidates(result, { communityFolder })
+    .filter((c) => currentFolders.has(c.folder) && (!c.pairFolder || currentFolders.has(c.pairFolder)));
+  if (candidates.length === 0) return none;
+
+  const folders = Array.from(new Set(candidates.flatMap((c) => [c.folder, ...(c.pairFolder ? [c.pairFolder] : [])])));
+  const fingerprints = await judgmentFingerprintsForFolders(folders);
+  const decisions = await loadPhotoJudgmentDecisions();
+  const { pending, priorKeeps } = filterAdjudicatedCandidates(candidates, decisions, fingerprints);
+  if (priorKeeps.length > 0) {
+    items.push(`AI judgment: ${priorKeeps.length} finding(s) already adjudicated keep by Claude on a prior sweep (photo set unchanged) — not re-asked`);
+  }
+  if (pending.length === 0) return { touched: true, failed: false, hidden: 0, unresolved: 0 };
+
+  touch(record, { message: `Claude is making the final call on ${pending.length} flagged photo${pending.length === 1 ? "" : "s"} (junk / duplicate ownership / unconfirmed)…` });
+  const vision = await runPhotoJudgmentVision(target.communityName, pending);
+  if (!vision.ok) {
+    items.push(`AI judgment could not run (${vision.error}) — the flagged findings stay for review`);
+    return { touched: true, failed: true, hidden: 0, unresolved: pending.length };
+  }
+  if (vision.judged.length < pending.length) {
+    items.push(`AI judgment: ${pending.length - vision.judged.length} flagged photo(s) no longer on disk — stale findings skipped`);
+  }
+  if (vision.judged.length === 0) return { touched: true, failed: false, hidden: 0, unresolved: 0 };
+
+  const visibleCounts: Record<string, number> = {};
+  for (const g of target.groups) visibleCounts[g.folder] = g.filenames.length;
+  const plan = photoJudgmentActionPlan(vision.judged, vision.verdicts, visibleCounts, { floor: COMMUNITY_PHOTO_FIX_FLOOR });
+
+  let hidden = 0;
+  const hiddenActions: typeof plan.hide = [];
+  let putFailed = 0;
+  for (const h of plan.hide) {
+    if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+    const put = await loopbackJson("PUT", `/api/photo-labels/${encodeURIComponent(h.folder)}/${encodeURIComponent(h.filename)}`, { hidden: true }, 30_000)
+      .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+    if (put.status < 400) {
+      hidden += 1;
+      hiddenActions.push(h);
+      items.push(`AI judgment: hid ${h.folder}/${h.filename} (soft-delete — ↺ Undo on the Photos tab) — ${h.reason}`);
+    } else {
+      putFailed += 1;
+      items.push(`AI judgment: could NOT hide ${h.folder}/${h.filename} (${String((put.data as any)?.error ?? `HTTP ${put.status}`)})`);
+    }
+  }
+  for (const k of plan.keep) items.push(`AI judgment: kept ${k.folder}/${k.filename} — ${k.reason}`);
+  for (const f of plan.floorBlocked) items.push(`AI judgment: ${f.folder}/${f.filename} ${f.reason}`);
+  if (plan.lowConfidenceKept > 0) {
+    items.push(`AI judgment: ${plan.lowConfidenceKept} low-confidence removal call(s) conservatively resolved as keep`);
+  }
+
+  // Persist definitive decisions fingerprint-scoped to the POST-hide photo
+  // set (a keep stamped against the pre-hide set would lapse immediately).
+  // floorBlocked is deliberately NOT persisted — those stay unresolved.
+  const postFingerprints = hidden > 0 ? await judgmentFingerprintsForFolders(folders) : fingerprints;
+  const nowIso = new Date().toISOString();
+  const rows: PhotoJudgmentDecision[] = [];
+  for (const a of plan.keep) {
+    const fp = postFingerprints[a.folder];
+    if (fp) rows.push({ folder: a.folder, filename: a.filename, kind: a.kind, decision: "keep", reason: a.reason, decidedAt: nowIso, fingerprint: fp });
+  }
+  for (const a of hiddenActions) {
+    const fp = postFingerprints[a.folder];
+    if (fp) rows.push({ folder: a.folder, filename: a.filename, kind: a.kind, decision: "remove", reason: a.reason, decidedAt: nowIso, fingerprint: fp });
+  }
+  if (rows.length > 0) await recordPhotoJudgmentDecisions(rows);
+
+  return { touched: true, failed: false, hidden, unresolved: plan.floorBlocked.length + putFailed };
+}
+
 async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
   if (String(process.env.AUDIT_PHOTO_FIX ?? "").trim() === "0") {
     return { verdict: "skipped", detail: "Photo fix ladder disabled via AUDIT_PHOTO_FIX=0." };
@@ -1190,6 +1309,22 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     }
   }
 
+  // AI FINAL SAY: hand the residual judgment calls to Claude BEFORE the unit
+  // ladder, so junk/dupe/uncertain cleanup lands in the same result the
+  // ladder plans from (a hide that drops bedroom coverage gets fixed by the
+  // ladder in this same sweep, not next week's).
+  let judgment: AiJudgmentSummary = { touched: false, failed: false, hidden: 0, unresolved: 0 };
+  if (communityResult && (communityRow?.verdict === "failed" || communityRow?.verdict === "attention")) {
+    judgment = await runAiFinalSayAdjudication(target, record, communityResult, items);
+    if (judgment.hidden > 0) {
+      anyFixed = true;
+      const refreshed = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
+      if (refreshed) { targets.set(record.jobId, refreshed); target = refreshed; }
+      const recheck = await runCommunityCheck(target, record, "Re-checking photos after Claude's final-say cleanup…");
+      if (recheck.ok) communityResult = recheck.result;
+    }
+  }
+
   const problems = communityResult ? communityProblemsByUnit(communityResult) : new Map<string, { bedroomShort: boolean; communityMismatch: boolean }>();
 
   // PROVE a bedroom shortfall before the ladder may act on it (2026-07-12,
@@ -1247,6 +1382,33 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     plans.push({ ref, folder: group.folder, rungs, why, bedroomShort: p.bedroomShort });
   }
   if (plans.length === 0 && !anyFixed && !communityFolderStillBad) {
+    // AI FINAL SAY settled every residual judgment call with keeps only
+    // (hides would have set anyFixed): refresh the photo-community row
+    // through the coverage-aware consensus rail so the receipt converges
+    // without the operator — the rail may still honestly DOWNGRADE.
+    if (judgment.touched && !judgment.failed && judgment.unresolved === 0 && communityResult) {
+      const fresh = await communityOutcomeWithConsensus(target, record, communityResult, "(after AI judgment) ");
+      touch(record, {
+        stages: upsertUnitAuditStageResult(record.stages, {
+          stage: "photo-community",
+          verdict: fresh.verdict,
+          detail: fresh.detail,
+          items: fresh.items,
+        }),
+      });
+      if (fresh.verdict === "pass") {
+        return {
+          verdict: "pass",
+          detail: "No mechanical fixes needed — Claude adjudicated the residual judgment calls (decisions in the log below); nothing left for review.",
+          items,
+        };
+      }
+      return {
+        verdict: "attention",
+        detail: "Claude adjudicated the residual judgment calls, but the follow-up consensus re-check still isn't clean — see the refreshed photo rows above.",
+        items,
+      };
+    }
     // HONESTY (2026-07-12): "nothing to fix" must not render under a failed
     // photo stage — when the earlier rows flagged problems this ladder has no
     // remedy for (yellow/uncertain votes, review-only groups), say that.
@@ -1426,9 +1588,16 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
       items,
     };
   }
+  if (judgment.unresolved > 0) {
+    return {
+      verdict: "attention",
+      detail: `Claude's final say decided ${judgment.unresolved} photo(s) should be removed but they were kept visible (folder floor or a failed hide) — add replacement photos (Find new photos) or remove them on the Photos tab.`,
+      items,
+    };
+  }
   return {
     verdict: "fixed",
-    detail: `Photo problems fixed and re-verified${plans.length > 0 ? ` for ${plans.length} unit${plans.length === 1 ? "" : "s"}` : " (community folder cleanup)"} — log below.`,
+    detail: `Photo problems fixed and re-verified${plans.length > 0 ? ` for ${plans.length} unit${plans.length === 1 ? "" : "s"}` : judgment.hidden > 0 ? " (AI judgment cleanup)" : " (community folder cleanup)"} — log below.`,
     items,
   };
 }

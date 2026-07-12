@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (audit sweep AI FINAL SAY — "I don't want to make judgment calls. I'll leave that to
+  Claude AI to determine."): Operator directive after asking whether a dashboard unit audit tidies
+  both units' photos. SHIPPED (`claude/unit-audit-dashboard-photos-d5ysy2`; AGENTS.md Unit Audit
+  Sweep #20 — don't re-chase): the residual review-class photo findings (junk flags, unit↔unit
+  cross-dupe OWNERSHIP, still-unconfirmed yellow votes — the "needs your eyes" class) now get ONE
+  forced-choice Claude vision call inside photo-fix (`runAiFinalSayAdjudication`, runs BEFORE the
+  unit ladder so hides feed the same ladder planning; pure logic
+  shared/photo-judgment-adjudication.ts, vision + store server/photo-judgment.ts). Rules: red "no"
+  votes NEVER adjudicated (structurally excluded — #16's mismatch-always-wins); strict parse rejects
+  "uncertain"/missing/dupe indexes wholesale (malformed answer = old behavior, never acts); removals
+  = existing photo_labels.hidden soft-delete (↺ Undo real), low-confidence (<0.6) downgrades to
+  keep, one dupe side max, COMMUNITY_PHOTO_FIX_FLOOR(3) with floor-blocked removals staying
+  UNRESOLVED attention (never persisted as keeps); decisions persist FINGERPRINT-SCOPED in
+  `photo_judgment_decisions.v1` (pin-store parity via listPublishedFilenames) so keeps aren't
+  re-asked while the photo set is unchanged; KEEPs green THROUGH the consensus rail (KIND-STRICT
+  coverage on communityCheckUncertaintyOnly/mergeCommunityConsensusPasses at BOTH seams — junk keeps
+  cover junk, keep-both covers dupes, uncertain keeps cover nothing) so rail B's independent
+  re-checks still own the final verdict and can honestly DOWNGRADE. "AI judgment could not run" is a
+  RETRYABLE_ATTENTION_PATTERNS signature (rail A re-runs bounded). Layout/licenses/cron-budget
+  judgment rails deliberately stay human. Kill `AUDIT_AI_JUDGMENT=0`; model `AUDIT_JUDGMENT_MODEL`
+  (default claude-sonnet-4-6). Verified: photo-judgment 54/0 (new, npm chain), unit-audit-sweep
+  160/0 + photo-community-check 89/0 untouched, full `npm test` exit 0, build clean (knobs +
+  strings bundle-grepped), `npm run check` 338 = baseline (stash A/B identical). Could NOT live-run
+  a sweep (no DB/keys) — post-deploy: re-run an audit on a property with a ⚠ "needs your eyes"
+  photo receipt; expect "AI judgment:" decision lines in the receipt and the row to converge
+  without a click.
+
 - 2026-07-12 (Pricing tab "Update Market Rates Now" froze at 79% with "No heartbeat for 93s … scan
   loop may be wedged" — Kaha Lani screenshot; diagnosed LIVE from the bulk-refresh job state + queue
   events + Railway deploy list): NOT SearchAPI, NOT a wedge — a DEPLOY RACE (don't re-chase). PR

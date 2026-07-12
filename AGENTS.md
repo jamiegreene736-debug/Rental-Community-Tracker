@@ -4438,6 +4438,58 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    reports the rung failed and moves on. Community folders are exempt
    (their curation path caps/floors separately).
 
+20. **AI FINAL SAY — residual photo judgment calls go to Claude, not the
+   operator (2026-07-12 operator directive: "I don't want to make judgment
+   calls. I'll leave that to Claude AI to determine.").** The review-class
+   findings that used to end "needs your eyes" — junk flags (no auto
+   remedy in unit folders), unit↔unit cross-folder duplicate OWNERSHIP
+   (#12 deliberately left it manual), and still-unconfirmed yellow votes —
+   now get ONE forced-choice Claude vision call inside the photo-fix stage
+   (pure logic `shared/photo-judgment-adjudication.ts`; vision call +
+   decision store `server/photo-judgment.ts`; rail
+   `runAiFinalSayAdjudication` in server/unit-audit-sweep.ts, runs BEFORE
+   the unit ladder so its hides feed the same ladder planning). Rules that
+   must not drift:
+   (a) Red "no" votes are NEVER adjudicated — a positive mismatch is
+   decided evidence with a concrete remedy (the ladder / community
+   cleanup); letting a second vision look overturn one would be upgrading
+   a "no" (#16's mismatch-always-wins). Structurally excluded at candidate
+   collection, test-locked.
+   (b) The prompt forces keep/remove (dupes: keep-a/keep-b/keep-both) and
+   the STRICT parse rejects "uncertain", missing items, duplicate or
+   out-of-range indexes wholesale — a malformed answer keeps the old
+   "needs your eyes" behavior, never acts (honesty rule #3). A failed
+   vision run emits "AI judgment could not run …", which is a
+   RETRYABLE_ATTENTION_PATTERNS signature so rail A re-runs the stage
+   bounded.
+   (c) Removals are the EXISTING photo_labels.hidden soft-delete PUT
+   (files never unlinked, ↺ Undo real), guarded: low-confidence removals
+   (< PHOTO_JUDGMENT_MIN_REMOVE_CONFIDENCE 0.6) downgrade to keep, a dupe
+   pair hides at most ONE side, and the COMMUNITY_PHOTO_FIX_FLOOR (3)
+   caps per-folder hides with no-loss dupe hides ranked first. Floor-
+   blocked removals stay UNRESOLVED (attention) and are never persisted
+   as keeps — that would green the audit over a photo Claude decided
+   should go.
+   (d) Decisions persist FINGERPRINT-SCOPED (`photo_judgment_decisions.v1`,
+   photoFolderFingerprint over listPublishedFilenames — byte-parity with
+   the operator pin's scoping) so a keep silently un-applies on any photo
+   change; only KEEPs short-circuit re-asking (a visible photo with a
+   stored REMOVE means the operator un-hid it — an override, so re-ask).
+   (e) KEEPs green the audit THROUGH the consensus rail, never around it:
+   `communityCheckUncertaintyOnly`/`mergeCommunityConsensusPasses` accept
+   a KIND-STRICT coverage (junk keeps cover junk; keep-both pairs cover
+   dupes; uncertain-vote keeps cover nothing — uncertainty never blocked
+   the rail anyway), so rail B still runs its independent re-checks and a
+   positive contradiction in ANY pass still wins/downgrades. Both seams
+   (stage 3 + the post-fix upsert) load coverage from the store.
+   Kill `AUDIT_AI_JUDGMENT=0` (restores "needs your eyes"); model
+   `AUDIT_JUDGMENT_MODEL` (default claude-sonnet-4-6). Non-photo judgment
+   rails are deliberately UNTOUCHED: layout stays flag-only (#9 —
+   bedding truth lives in browser localStorage), licenses stay human
+   (compliance values must never be AI-guessed onto live OTA listings),
+   and cron cooldown/budget blocks keep their SMS-alert escalation (#15).
+   Locked by tests/photo-judgment.test.ts (54, in the npm chain).
+
 ## Conventions
 
 ### Branches
@@ -4774,3 +4826,4 @@ Welcome. When in doubt, ask the human.
 2026-07-12 · Jamie (Amenities-tab screenshot): "underneath each tab like amenities, pricing, etc put in there the last time that tab was pushed to Guesty. Put a summary of what was pushed like for example: 81 amenities pushed, 45 photos pushed, etc. Make this retroactive for the past 48 hours and then implement the changes. Then merge PR with main." · ACCEPTED, merge authorized · The existing tab dot+timestamp was localStorage-only (per-browser, no summary, lost cross-device). Shipped a durable per-tab push ledger: app_settings `guesty_push_history.v1` keyed by Guesty listing id (pure `shared/guesty-push-history.ts` + `server/guesty-push-history.ts` promise-tail store), server-stamped at every push seam (push-descriptions / push-amenities / push-photos NDJSON done / push-seasonal-rates wrapper / booking-rules push; bedding + bookable classified at the Guesty proxy via the `listingRooms`/`isListed` body signatures). GET /api/builder/guesty-push-history overlays scanner_schedule.lastGuestyRatePush* (excluding "seed") + builder_booking_rules.lastPushed* when newer; the tab strip + push chips render the MERGE of server ledger ∪ localStorage (newest wins) with "Pushed <time>" / red "Push failed <time>" + the summary line underneath. RETROACTIVE 48h: the client one-shot uploads its in-window localStorage entries via POST …/backfill (validated, never clobbers same-or-newer server entries); pricing/availability retroactivity comes free from the durable overlays. See the "Builder per-tab Guesty push history" Load-Bearing subsection. Verified: guesty-push-history 69/0 (in the npm chain, incl. source guards on all six seams + the seed exclusion), full npm test exit 0, build clean (strings bundle-grepped in BOTH bundles), `npm run check` 338 = baseline (stash A/B — identical per-file error sets), tab strip + merge + backfill POST exercised on the BUILT bundle (static SPA server + Playwright, mocked /api).
 2026-07-12 · Jamie (screenshot of the Ilikai audit receipt — "2 failed — 5 passed, 4 auto-fixed"; Unit B walked rescrape → find-new → replace and still ended "bedroom photos 0/2"): "Please see what we can do to fix the audit sweep for this unit so everything is fixed automatically? Please check the railway logs and confirm what needs to be done." · DIAGNOSED from Railway logs + prod DB + shipped · THREE stacked causes on draft -7 / job uas_mrh8wbqk_ls005u (don't re-chase): (1) the rescrape rung REPLACED Unit B's healthy 19-photo folder with a single og:image (sold/stripped source gallery — "scrapedCount":1) and made the unit worse; (2) find-new picked APT 1109 whose 14-photo gallery has ZERO bedroom photos (labels prove it — living/lanai/kitchen/bath/lobby only), so the re-check correctly stayed 0/2; (3) the replace rung committed APT 510 whose gallery photographs 1 of 2 bedrooms (the pipeline KNEW: "kept 20/20 (1 bedrooms)") AND the re-check read June 1 labels on the July photos — hydrateUnitSwapPhotoFolder deleted only the STAGING folder's label rows, the REUSED replacement folder's previous rows survived the file rm+rename, photo_NN.jpg names collided, queueMissingPhotoLabels saw nothing missing, and the final check counted 0/2 + 13 phantom cross-folder dupes off stale captions/hashes. SHIPPED (Load-Bearing "Unit Audit Sweep" #19): (a) storage.movePhotoLabelsToFolder re-keys the pipeline's staging labels onto the final folder, purging the destination's stale rows; (b) bedroom-coverage COMMIT GATE — bedroom-shortfall replacements (audit ladder only) abort at staging with coverageShort:true when the new gallery photographs fewer bedrooms than the unit claims; the orchestrator burns the candidate like a 409 and tries the next option (only enforced when the pipeline actually labeled); (c) rescrape FLOOR GUARD — the route 409s (keptExisting) instead of replacing a healthy unit gallery with a sub-floor scrape. Verified: auto-replace-job 65/0 + unit-audit-sweep 160/0 (new source guards + store round-trip), full npm test exit 0, build clean (all new strings bundle-grepped), npm run check 338 = baseline (stash A/B identical error sets). Post-deploy: re-ran the Ilikai audit manually (cron replaces are on the 28-day cooldown for this unit — manual sweeps are exempt) to confirm the ladder converges or honestly reports that no Ilikai 2BR gallery photographs both bedrooms.
 2026-07-12 · Jamie: "Make sure that when the audit sweep is done that it updates the pricing column and that all the tabs within the unit builder get updated with time stamp confirmations etc for when everything in that tab was pushed to Guesty. Then merge PR." · VERIFIED + one gap closed, merge authorized · Audit of every sweep→Guesty push seam confirmed the wiring already shipped: pricing column = server stamp (`markScannerGuestyRatePush` inside the push-seasonal-rates `recordGuestyRatePush` wrapper, which the sweep's refresh loopback drives) + client invalidation of `/api/dashboard/price-scans` on any sweep leaving the active set AND on the dialog's terminal effect (#1021); per-tab timestamps = the #1024 ledger, which sweep pushes already hit because every auto-fix funnels through a recording seam (descriptions → push-descriptions loopback; amenities → scan-amenities → pushAmenityKeysToGuestyListing → push-amenities loopback; pricing → push-seasonal-rates loopback; replaced-unit photos → repushGuestyPhotosForProperty → push-photos loopback). ONE seam was missing: `pushCoverCollageToGuesty` PUTs the listing's whole pictures[] (collage pinned first) but never recorded, so a collage push — the manual "Make Cover Collage" button AND the sweep's collage auto-fix — left the Photos tab timestamp stale. Fixed with a recording wrapper at that single chokepoint (`pushCoverCollageToGuestyUnrecorded` holds the ImgBB+PUT body; both routes call the recording `pushCoverCollageToGuesty`), summary `summarizeCoverCollagePush` ("Cover collage pushed (N photos on the listing)"), error entries carry the failure reason. Verified: guesty-push-history 72/0 (2 summary locks + a wrapper source guard), cover-collage-logic green (its `await pushCoverCollageToGuesty(` drift-lock intact), full npm test exit 0, build clean (summary string bundle-grepped), `npm run check` 338 = baseline.
+2026-07-12 · Jamie (after asking whether a dashboard unit audit tidies both units' photos): "I want a situation where I don't want to make judgment calls. I'll leave that to Claude AI to determine." · ACCEPTED — new AI FINAL SAY rail (Load-Bearing "Unit Audit Sweep" #20) · The sweep's remaining photo judgment calls (junk flags, unit↔unit duplicate ownership, residual unconfirmed votes — the "needs your eyes" class) now get a forced-choice Claude vision decision inside photo-fix: decisive removals hide via the existing photo_labels soft-delete (floor-guarded, low-confidence removals downgrade to keep, one dupe side max), every decision lands in the receipt, KEEPs persist fingerprint-scoped in `photo_judgment_decisions.v1` so nothing is re-asked while the photo set is unchanged, and kept junk/dupes feed the consensus rail as KIND-STRICT coverage so rail B's independent re-checks still own the final greening (a "no" is still never upgraded; red votes are structurally excluded from adjudication). This is a sweep-only exception in the same spirit as the same-scene auto-apply (#8); the Photos-tab manual flows are untouched, and layout/licenses/cron-budget rails deliberately stay human. Kill `AUDIT_AI_JUDGMENT=0`. Verified: photo-judgment 54/0 (new, in the npm chain), unit-audit-sweep 160/0 + photo-community-check 89/0 untouched, full npm test exit 0, build clean (env knobs + strings bundle-grepped), `npm run check` 338 = baseline (stash A/B — identical error sets).

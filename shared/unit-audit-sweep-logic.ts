@@ -592,6 +592,10 @@ export const RETRYABLE_ATTENTION_PATTERNS: RegExp[] = [
   /^auto-fix failed:/i,
   /^auto-fix could not apply/i,
   /already running/i,
+  // The AI final-say vision call is transient-failure-shaped (timeout/quota/
+  // malformed answer) — a stage it left at attention re-runs bounded, same as
+  // any other errored fix engine. Drift-locked to the emitted string.
+  /^ai judgment could not run/i,
 ];
 
 export function unitAuditRetryStageIds(stages: UnitAuditStageResult[]): UnitAuditStageId[] {
@@ -641,9 +645,29 @@ export type CommunityConsensusPass = {
     junk?: Array<{ id: string }>;
   }>;
   bedroomCoverage?: { units?: Array<{ label?: string; matchesListing?: string }> } | null;
-  duplicates?: Array<unknown>;
+  duplicates?: Array<{
+    scope?: string;
+    a?: { folder?: string; filename?: string };
+    b?: { folder?: string; filename?: string };
+  } | null | undefined>;
   /** Per-unit source-page verdicts — the field is `match` ("yes"|"no"|"uncertain"). */
   sourcePages?: Array<{ match?: string }>;
+};
+
+/**
+ * AI-adjudicated coverage (2026-07-12 operator directive: judgment calls go to
+ * Claude, not the operator). Junk flags and cross-folder dupe pairs that
+ * Claude explicitly adjudicated KEEP (fingerprint-scoped — see
+ * shared/photo-judgment-adjudication.ts) stop blocking the consensus rail, so
+ * rail B's independent re-checks can finish the greening. Coverage NEVER
+ * extends to "no" votes, bedroom shortfalls, or source-page contradictions —
+ * those stay disqualifying no matter what (Load-Bearing #16's posture).
+ */
+export type CommunityConsensusCoverage = {
+  /** `${folder}/${filename}` keys whose junk finding Claude adjudicated keep. */
+  coveredPhotoKeys?: Set<string>;
+  /** `${folder}/${filename}` sides of cross-folder dupe pairs adjudicated keep-both. */
+  coveredDupeSides?: Set<string>;
 };
 
 // True when a non-pass check found NOTHING positively wrong and NOTHING the
@@ -655,23 +679,52 @@ export type CommunityConsensusPass = {
 // flag, or duplicate finding disqualifies — those are either real problems or
 // have a concrete remedy elsewhere in the sweep. Do NOT widen this to let
 // consensus mask contradictions (Load-Bearing #16's posture).
-export function communityCheckUncertaintyOnly(pass: CommunityConsensusPass): boolean {
+export function communityCheckUncertaintyOnly(
+  pass: CommunityConsensusPass,
+  coverage?: CommunityConsensusCoverage,
+): boolean {
   if (pass.verdict === "fail") return false;
+  const coveredPhotos = coverage?.coveredPhotoKeys;
+  const coveredDupeSides = coverage?.coveredDupeSides;
+  // A junk flag only stops blocking when it resolves to a folder/filename that
+  // Claude adjudicated KEEP; an unresolvable junk id can never be covered.
+  const junkBlocks = (g: { photoVerdicts?: CommunityConsensusVote[]; junk?: Array<{ id: string }> }): boolean => {
+    const junk = g.junk ?? [];
+    if (junk.length === 0) return false;
+    if (!coveredPhotos || coveredPhotos.size === 0) return true;
+    const byId = new Map((g.photoVerdicts ?? []).filter((v) => v.folder && v.filename).map((v) => [v.id, v]));
+    return junk.some((j) => {
+      const v = j.id != null ? byId.get(j.id) : undefined;
+      return !(v?.folder && v.filename && coveredPhotos.has(`${v.folder}/${v.filename}`));
+    });
+  };
   const c = pass.community;
   if (c) {
     if (c.matchesExpected === "no") return false;
-    if ((c.junk ?? []).length > 0) return false;
+    if (junkBlocks(c)) return false;
     if ((c.photoVerdicts ?? []).some((v) => v.match === "no")) return false;
   }
   for (const u of pass.units ?? []) {
     if (u.sameAsCommunity === "no") return false;
-    if ((u.junk ?? []).length > 0) return false;
+    if (junkBlocks(u)) return false;
     if ((u.photoVerdicts ?? []).some((v) => v.match === "no")) return false;
   }
   for (const b of pass.bedroomCoverage?.units ?? []) {
     if (b.matchesListing === "no") return false;
   }
-  if ((pass.duplicates ?? []).length > 0) return false;
+  for (const d of pass.duplicates ?? []) {
+    if (!d) continue;
+    // A cross-folder pair Claude adjudicated keep-both (BOTH sides covered)
+    // stops blocking; anything else — within-folder, unresolvable shape, an
+    // uncovered pair — blocks exactly as before.
+    const aKey = d.a?.folder && d.a?.filename ? `${d.a.folder}/${d.a.filename}` : null;
+    const bKey = d.b?.folder && d.b?.filename ? `${d.b.folder}/${d.b.filename}` : null;
+    const covered =
+      d.scope === "cross-folder" &&
+      !!aKey && !!bKey &&
+      !!coveredDupeSides && coveredDupeSides.has(aKey) && coveredDupeSides.has(bKey);
+    if (!covered) return false;
+  }
   if ((pass.sourcePages ?? []).some((sp) => sp?.match === "no")) return false;
   return true;
 }
@@ -684,7 +737,10 @@ function consensusVoteKey(groupLabel: string, v: CommunityConsensusVote): string
 // non-deterministic, so a photo unconfirmed in pass 1 but confirmed in pass 2
 // counts as confirmed. Contradiction detection does NOT depend on the keying
 // (any pass with a positive finding trips it wholesale).
-export function mergeCommunityConsensusPasses(passes: CommunityConsensusPass[]): {
+export function mergeCommunityConsensusPasses(
+  passes: CommunityConsensusPass[],
+  coverage?: CommunityConsensusCoverage,
+): {
   contradiction: boolean;
   /** Photo keys confirmed ("yes") in at least one pass. */
   confirmedKeys: Set<string>;
@@ -693,7 +749,7 @@ export function mergeCommunityConsensusPasses(passes: CommunityConsensusPass[]):
   /** Every uncertain vote in the FINAL pass was confirmed by some pass. */
   allResolvedByUnion: boolean;
 } {
-  const contradiction = passes.some((p) => !communityCheckUncertaintyOnly(p));
+  const contradiction = passes.some((p) => !communityCheckUncertaintyOnly(p, coverage));
   const confirmedKeys = new Set<string>();
   const confirmedUnits = new Set<string>();
   for (const p of passes) {
