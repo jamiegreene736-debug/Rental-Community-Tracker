@@ -298,7 +298,7 @@ import {
   runRealtyApiPhotoDiscoveryLeg,
 } from "./realtyapi-discovery";
 import { countAirbnbCandidates, computeSetsFromCounts, verdictFor, type CandidateListing, type CountByBedrooms } from "./availability-search";
-import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type DerivedMarketGeo, type HybridBlackoutWindow, type HybridMonthBlackoutEvent, type HybridMonthScannedEvent, type HybridTriggerType } from "./hybrid-pricing";
+import { refreshHybridPricingForProperty, refreshHybridPricingForTarget, runHybridPricingForAllProperties, type DerivedMarketGeo, type HybridBlackoutWindow, type HybridMonthBlackoutEvent, type HybridMonthScannedEvent, type HybridMonthScanningEvent, type HybridTriggerType } from "./hybrid-pricing";
 import { generateStaticRatesForTarget, applyStaticRateOverride, type StaticProgressEvent } from "./static-rate-engine";
 import {
   DEFAULT_CRITICAL_SCARCITY_MARKUP,
@@ -706,6 +706,7 @@ type BulkPricingJob = {
 const BULK_PRICING_JOB_TTL_MS = 6 * 60 * 60 * 1000;
 const BULK_PRICING_ITEM_MAX_ATTEMPTS = 2;
 const BULK_PRICING_RETRY_BACKOFF_MS = 30_000;
+const BULK_PRICING_ITEM_HEARTBEAT_MS = 15_000;
 const bulkPricingJobs = new Map<string, BulkPricingJob>();
 const activeBulkPricingJobIds = new Set<string>();
 const BULK_PRICING_WORKER_ID = `${process.pid}-${randomBytes(4).toString("hex")}`;
@@ -1221,6 +1222,7 @@ async function refreshHybridPricingForDraft(
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>,
   shouldCancel?: () => boolean | Promise<boolean>,
   onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>,
+  onMonthScanning?: (event: HybridMonthScanningEvent) => void | Promise<void>,
 ): Promise<{ propertyId: number; rows: any[]; logs: any[]; blackouts: HybridBlackoutWindow[] }> {
   const draftId = Math.abs(propertyId);
   let draft = await storage.getCommunityDraft(draftId);
@@ -1265,6 +1267,7 @@ async function refreshHybridPricingForDraft(
     expectedState: draftMarket?.location?.state || String(draft?.state || "").trim() || undefined,
     triggerType: "Manual Update",
     notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly median bases (no hybrid markup layers).",
+    onMonthScanning,
     onMonthScanned,
     onMonthBlackout,
     shouldCancel,
@@ -1373,6 +1376,7 @@ async function refreshMarketRatesForProperty(
   propertyId: number,
   label: string,
   hooks?: {
+    onMonthScanning?: (event: HybridMonthScanningEvent) => void | Promise<void>;
     onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
     onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>;
     shouldCancel?: () => boolean | Promise<boolean>;
@@ -1394,11 +1398,12 @@ async function refreshMarketRatesForProperty(
     return { ...result, blackouts: [] as HybridBlackoutWindow[] };
   }
   return propertyId < 0
-    ? refreshHybridPricingForDraft(propertyId, label, hooks?.onMonthScanned, hooks?.shouldCancel, hooks?.onMonthBlackout)
+    ? refreshHybridPricingForDraft(propertyId, label, hooks?.onMonthScanned, hooks?.shouldCancel, hooks?.onMonthBlackout, hooks?.onMonthScanning)
     : refreshHybridPricingForProperty({
       propertyId,
       triggerType: hooks?.triggerType ?? "Manual Update",
       notes: "Bulk market pricing refresh from SearchAPI Airbnb monthly median bases (no hybrid markup layers).",
+      onMonthScanning: hooks?.onMonthScanning,
       onMonthScanned: hooks?.onMonthScanned,
       onMonthBlackout: hooks?.onMonthBlackout,
       shouldCancel: hooks?.shouldCancel,
@@ -1538,7 +1543,50 @@ function summarizePricingRateChanges(logs: Array<{ bedrooms?: number | null; old
   return Array.from(byBR.values()).sort((a, b) => a.bedrooms - b.bedrooms);
 }
 
+// Wall-clock heartbeat for the RUNNING bulk-pricing item (2026-07-12 Kaha Lani
+// deploy-race incident). item.heartbeatAt was previously stamped ONLY on
+// progress events (a month finishing, a phase boundary), so any long silent
+// stretch — a widened thin-market month chaining many SearchAPI requests, or a
+// minutes-long Guesty push — froze the heartbeat, tripped the Pricing tab's
+// "no heartbeat (expected every 15s)" warning on a HEALTHY scan, and (worse)
+// let the job's 10-minute lease expire mid-run so the resume watchdog could
+// start a duplicate runner. This ticker makes the heartbeat mean what the UI
+// copy says — "the worker process is alive" — and renews the lease while the
+// item genuinely runs. Writes are deliberately narrow (one item row + the job
+// lease row) so a 40-item mass update doesn't rewrite every row each tick, and
+// the lease renewal is CONDITIONAL on still owning the lock so a stale runner
+// in a draining deploy container can never steal the lease back from a
+// watchdog-resumed successor.
+async function heartbeatBulkPricingItemRow(job: BulkPricingJob, item: BulkPricingItem): Promise<void> {
+  if (!activeBulkPricingJobIds.has(job.id)) return;
+  const now = new Date();
+  const [owned] = await db
+    .update(bulkPricingRefreshJobRows)
+    .set({ lockedBy: BULK_PRICING_WORKER_ID, lockExpiresAt: bulkPricingLockExpiry(), updatedAt: now })
+    .where(and(eq(bulkPricingRefreshJobRows.id, job.id), eq(bulkPricingRefreshJobRows.lockedBy, BULK_PRICING_WORKER_ID)))
+    .returning({ id: bulkPricingRefreshJobRows.id });
+  if (!owned) return;
+  item.heartbeatAt = now.getTime();
+  await db
+    .update(bulkPricingRefreshJobItemRows)
+    .set({ heartbeatAt: now, updatedAt: now })
+    .where(and(eq(bulkPricingRefreshJobItemRows.jobId, job.id), eq(bulkPricingRefreshJobItemRows.itemKey, item.id)));
+  bulkPricingJobs.set(job.id, job);
+}
+
 async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): Promise<void> {
+  const heartbeatTimer = setInterval(() => {
+    void heartbeatBulkPricingItemRow(job, item).catch(() => {});
+  }, BULK_PRICING_ITEM_HEARTBEAT_MS);
+  heartbeatTimer.unref?.();
+  try {
+    await runBulkPricingItemAttempt(job, item);
+  } finally {
+    clearInterval(heartbeatTimer);
+  }
+}
+
+async function runBulkPricingItemAttempt(job: BulkPricingJob, item: BulkPricingItem): Promise<void> {
   item.status = "running";
   item.startedAt = item.startedAt ?? Date.now();
   item.finishedAt = null;
@@ -1592,6 +1640,24 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   // Live running count of blacked-out windows, surfaced to the queue UI.
   let blackoutMonthsCount = 0;
 
+  // Progress stamp BEFORE a month's live SearchAPI requests start. Without it
+  // the label froze on the PREVIOUS bedroom size's "24/24" line while the next
+  // size scanned — the exact display that read as "done but wedged" in the
+  // 2026-07-12 Kaha Lani incident.
+  const onMonthScanning = async (event: HybridMonthScanningEvent) => {
+    item.progress = {
+      ...(item.progress ?? {}),
+      phase: "searchapi-airbnb",
+      percent: Math.min(79, Math.round(10 + (70 * event.monthOffset) / event.horizonMonths)),
+      label: `SearchAPI Airbnb ${event.bedrooms}BR: scanning ${event.yearMonth} (${event.monthOffset + 1}/${event.horizonMonths})…`,
+      currentMonth: event.yearMonth,
+      bedrooms: event.bedrooms,
+      horizonMonths: event.horizonMonths,
+    };
+    item.heartbeatAt = Date.now();
+    await persistBulkPricingJob(job);
+  };
+
   const onMonthScanned = async (event: HybridMonthScannedEvent) => {
     if (await shouldCancel()) throw Object.assign(new Error("Cancelled by operator"), { cancelled: true });
     const confidenceLabel = event.confidence ? `; confidence ${event.confidence.score}% ${event.confidence.level}` : "";
@@ -1644,6 +1710,7 @@ async function runBulkPricingItem(job: BulkPricingJob, item: BulkPricingItem): P
   };
 
   const pricingResult = await refreshMarketRatesForProperty(item.propertyId, item.label, {
+    onMonthScanning,
     onMonthScanned,
     onMonthBlackout,
     shouldCancel,

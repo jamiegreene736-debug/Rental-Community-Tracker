@@ -7441,7 +7441,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   </div>
                                   {isStale && (
                                     <div style={{ marginTop: 4, padding: "4px 6px", border: "1px solid #fca5a5", background: "#ffffff", borderRadius: 3, fontSize: 10, color: "#7f1d1d" }}>
-                                      No heartbeat for {ageSinceTickSec}s (expected every 15s). Scan loop may be wedged. You can cancel and retry when the server is stable.
+                                      No heartbeat for {ageSinceTickSec}s (expected every 15s). The server-side scan was likely interrupted by a deploy or restart — the queue watchdog auto-resumes it within ~12 minutes, so you can leave this open and it will pick back up. Cancel only if you want to stop the update.
                                     </div>
                                   )}
                                   {/* Per-window / per-channel warnings (CAPTCHA, bot wall, rate-limit, etc.). Yellow-amber banner so it stands apart from both the blue progress and the red staleness state. */}

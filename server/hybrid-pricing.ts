@@ -24,6 +24,22 @@ export type HybridMonthScannedEvent = {
   pricingRecipe?: MarketRatePricingRecipe;
 };
 
+// Emitted BEFORE a month's live SearchAPI scan starts (2026-07-12 Kaha Lani
+// incident): onMonthScanned only fires on COMPLETION, so during a slow month —
+// or the first month of the NEXT bedroom size — the progress display froze on
+// the previous size's "24/24" label and read as "done but stuck". Callers use
+// this to show "3BR: scanning 2026-07 (1/24)…" while the requests run.
+// Extrapolated year-2 months complete instantly and deliberately don't emit it.
+export type HybridMonthScanningEvent = {
+  propertyId: number;
+  bedrooms: number;
+  monthOffset: number;
+  horizonMonths: number;
+  yearMonth: string;
+  checkIn: string;
+  checkOut: string;
+};
+
 // Emitted when a single month's exact-bedroom scan can't find a confident
 // comp basis (red confidence or no usable samples). Instead of aborting the
 // whole property (the pre-2026-06-15 behavior), the scan records a blackout
@@ -750,6 +766,56 @@ function cityAnchorQueriesForMarket(community: string): string[] {
   return Array.from(new Set(anchors.map((q) => q.trim()).filter(Boolean)));
 }
 
+// Bounded SearchAPI request rail (2026-07-12 Kaha Lani deploy-race incident).
+// The raw fetch had NO timeout, so a hung/throttled SearchAPI request could
+// stall a month for undici's default ~5-minute header timeout with zero
+// progress events — long enough for the bulk-queue lease to expire and the
+// operator UI to declare the scan wedged. Every pricing request now carries an
+// AbortSignal timeout, and a TRANSIENT failure (timeout, network error, 5xx)
+// gets ONE cheap in-place retry before the error propagates — an item-level
+// retry restarts the whole property from month 1 and re-spends every SearchAPI
+// request already made, so retrying the single request first is strictly
+// cheaper. HTTP 4xx (including 429 — the global searchapi.ts fetch wrapper
+// already rotates keys on quota responses) fails fast with the real status.
+const SEARCHAPI_PRICING_FETCH_RETRIES = 1;
+function searchApiPricingTimeoutMs(): number {
+  const raw = Number.parseInt(process.env.MARKET_RATE_SEARCHAPI_TIMEOUT_MS ?? "", 10);
+  if (Number.isFinite(raw) && raw >= 5_000) return raw;
+  return 75_000;
+}
+export function isTransientSearchApiPricingFailure(args: { status?: number; error?: unknown }): boolean {
+  if (typeof args.status === "number") return args.status >= 500;
+  const err = args.error as any;
+  if (/AbortError|TimeoutError/i.test(String(err?.name ?? ""))) return true;
+  const message = String(err?.message ?? err ?? "");
+  return /timed? ?out|network|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket|aborted/i.test(message);
+}
+export async function fetchSearchApiPricingResponse(url: string): Promise<Response> {
+  const timeoutMs = searchApiPricingTimeoutMs();
+  let lastFailure = "";
+  for (let attempt = 0; attempt <= SEARCHAPI_PRICING_FETCH_RETRIES; attempt += 1) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      if (response.ok || !isTransientSearchApiPricingFailure({ status: response.status }) || attempt === SEARCHAPI_PRICING_FETCH_RETRIES) {
+        return response;
+      }
+      await response.body?.cancel().catch(() => {});
+      lastFailure = `HTTP ${response.status}`;
+    } catch (e: any) {
+      if (!isTransientSearchApiPricingFailure({ error: e })) throw e;
+      if (attempt === SEARCHAPI_PRICING_FETCH_RETRIES) {
+        throw new Error(
+          `SearchAPI Airbnb request failed after ${attempt + 1} attempt(s) (${Math.round(timeoutMs / 1000)}s timeout each): ${e?.message ?? String(e)}`,
+        );
+      }
+      lastFailure = e?.message ?? String(e);
+    }
+    console.warn(`[hybrid-pricing] transient SearchAPI failure (${lastFailure}); retrying request (attempt ${attempt + 2}/${SEARCHAPI_PRICING_FETCH_RETRIES + 1})`);
+    await sleep(2_500);
+  }
+  throw new Error(`SearchAPI Airbnb request failed: ${lastFailure}`);
+}
+
 async function fetchAirbnbMedianNightlyForQuery(args: {
   community: string;
   bedrooms: number;
@@ -781,7 +847,7 @@ async function fetchAirbnbMedianNightlyForQuery(args: {
     api_key: args.apiKey,
   };
   Object.assign(params, geoConstraint.params);
-  const response = await fetch(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
+  const response = await fetchSearchApiPricingResponse(`https://www.searchapi.io/api/v1/search?${new URLSearchParams(params).toString()}`);
   if (!response.ok) throw new Error(`SearchAPI Airbnb HTTP ${response.status}`);
   const data = await response.json() as any;
   const evidence: MarketRateEvidence = {
@@ -1177,6 +1243,7 @@ export async function refreshHybridPricingForTarget(args: {
   expectedCity?: string;
   expectedState?: string;
   asOf?: Date;
+  onMonthScanning?: (event: HybridMonthScanningEvent) => void | Promise<void>;
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
   onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>;
   shouldCancel?: () => boolean | Promise<boolean>;
@@ -1357,6 +1424,15 @@ export async function refreshHybridPricingForTarget(args: {
         continue;
       }
 
+      await args.onMonthScanning?.({
+        propertyId: args.propertyId,
+        bedrooms,
+        monthOffset,
+        horizonMonths,
+        yearMonth: window.yearMonth,
+        checkIn: window.checkIn,
+        checkOut: window.checkOut,
+      });
       const airbnb = await fetchAirbnbMedianNightly({
         community: args.community,
         bedrooms,
@@ -1530,6 +1606,7 @@ export async function refreshHybridPricingForProperty(args: {
   triggerType: HybridTriggerType;
   notes?: string;
   asOf?: Date;
+  onMonthScanning?: (event: HybridMonthScanningEvent) => void | Promise<void>;
   onMonthScanned?: (event: HybridMonthScannedEvent) => void | Promise<void>;
   onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>;
   shouldCancel?: () => boolean | Promise<boolean>;
@@ -1545,6 +1622,7 @@ export async function refreshHybridPricingForProperty(args: {
     triggerType: args.triggerType,
     notes: args.notes,
     asOf: args.asOf,
+    onMonthScanning: args.onMonthScanning,
     onMonthScanned: args.onMonthScanned,
     onMonthBlackout: args.onMonthBlackout,
     shouldCancel: args.shouldCancel,

@@ -43,6 +43,26 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (Pricing tab "Update Market Rates Now" froze at 79% with "No heartbeat for 93s … scan
+  loop may be wedged" — Kaha Lani screenshot; diagnosed LIVE from the bulk-refresh job state + queue
+  events + Railway deploy list): NOT SearchAPI, NOT a wedge — a DEPLOY RACE (don't re-chase). PR
+  #1025's deployment was created 22s before the click; when it went live, Railway killed the draining
+  container mid-3BR-leg. The bulk-pricing item's heartbeatAt was stamped ONLY on month-completion
+  events (the Pricing tab button queues a 1-item BULK job and maps item.heartbeatAt → the UI
+  heartbeat), so it froze on the 2BR leg's last month; the job's 10-min lease expired and the resume
+  watchdog restarted the item (attempt 2), which completed + pushed 720 days to Guesty at 14:51:48Z —
+  the operator's update DID land ~14 min after the click. SHIPPED
+  (`claude/market-rates-update-bug-a2ab1c`): (1) wall-clock 15s item heartbeat ticker
+  (`heartbeatBulkPricingItemRow` — one item row + job-lease renewal CONDITIONAL on lockedBy=our
+  worker id; a silent >10-min month can no longer lease-expire a live run into a duplicate runner);
+  (2) `onMonthScanning` event BEFORE each live month's SearchAPI requests so the label reads "3BR:
+  scanning 2026-07 (1/24)…" instead of freezing on the previous size's 24/24; (3) hybrid-pricing's
+  SearchAPI fetch now has AbortSignal.timeout (`MARKET_RATE_SEARCHAPI_TIMEOUT_MS`, default 75s) + one
+  in-place retry on transient timeout/network/5xx (4xx incl. 429 fail fast — key rotation owns
+  quota); (4) the stale-heartbeat banner now says the watchdog auto-resumes within ~12 min instead of
+  inviting a cancel. Verified: hybrid-pricing suite green (incl. behavioral local-HTTP 503-retry +
+  404-fail-fast), full `npm test` exit 0, build clean (labels bundle-grepped both bundles),
+  `npm run check` 338 = baseline. See the AGENTS.md 2026-07-12 Decision Log line.
 - 2026-07-12 (Ilikai audit "2 failed" receipt — photo-fix ladder walked ALL THREE rungs on Unit B and
   still ended "bedroom photos 0/2"; diagnosed from Railway logs + prod DB, job uas_mrh8wbqk_ls005u):
   THREE stacked causes (don't re-chase). (1) STALE-LABEL LEAK (the headline bug): the replace rung's

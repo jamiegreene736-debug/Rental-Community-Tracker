@@ -8,6 +8,8 @@ import {
   hybridPricingWindowForMonth,
   hybridPricingWindowForSeason,
   isSearchApiAirbnbNoResultsError,
+  isTransientSearchApiPricingFailure,
+  fetchSearchApiPricingResponse,
   AIRBNB_MARKET_RATE_SEARCH_MONTHS,
   YEAR_TWO_MARKET_RATE_GROWTH,
 } from "../server/hybrid-pricing";
@@ -809,6 +811,117 @@ for (const [key, market] of Object.entries(BUY_IN_MARKETS)) {
     /,\s*[A-Z]{2}$/,
     `market "${key}" curated Airbnb query "${airbnbQuery}" must end in a 2-letter state code`,
   );
+}
+
+// ── 2026-07-12 Kaha Lani deploy-race incident: bounded SearchAPI requests +
+// wall-clock bulk-item heartbeat + scanning-month progress ───────────────────
+
+// Pure classifier: transient failures (timeout / network / 5xx) retry in place;
+// definitive HTTP statuses (4xx incl. 429 — key rotation owns quota) fail fast.
+assert.equal(isTransientSearchApiPricingFailure({ status: 500 }), true);
+assert.equal(isTransientSearchApiPricingFailure({ status: 502 }), true);
+assert.equal(isTransientSearchApiPricingFailure({ status: 503 }), true);
+assert.equal(isTransientSearchApiPricingFailure({ status: 429 }), false);
+assert.equal(isTransientSearchApiPricingFailure({ status: 404 }), false);
+assert.equal(isTransientSearchApiPricingFailure({ status: 422 }), false);
+assert.equal(isTransientSearchApiPricingFailure({ error: Object.assign(new Error("This operation was aborted"), { name: "AbortError" }) }), true);
+assert.equal(isTransientSearchApiPricingFailure({ error: Object.assign(new Error("The operation timed out"), { name: "TimeoutError" }) }), true);
+assert.equal(isTransientSearchApiPricingFailure({ error: new Error("fetch failed") }), true);
+assert.equal(isTransientSearchApiPricingFailure({ error: new Error("read ECONNRESET") }), true);
+assert.equal(isTransientSearchApiPricingFailure({ error: new Error("SearchAPI Airbnb: Invalid API key") }), false);
+
+// SOURCE GUARDS: the pricing SearchAPI request must stay on the bounded rail —
+// a raw un-timed fetch is what let a hung request stall a month for undici's
+// ~5-minute default with zero heartbeat.
+assert.ok(
+  hybridPricingSource.includes("const response = await fetchSearchApiPricingResponse("),
+  "fetchAirbnbMedianNightlyForQuery must request through fetchSearchApiPricingResponse (timeout + bounded transient retry)",
+);
+assert.ok(
+  !/await fetch\(`https:\/\/www\.searchapi\.io/.test(hybridPricingSource),
+  "hybrid-pricing must not fetch searchapi.io directly without the bounded rail",
+);
+assert.ok(
+  hybridPricingSource.includes("AbortSignal.timeout("),
+  "the pricing SearchAPI request must carry an AbortSignal timeout",
+);
+
+// SOURCE GUARD: the scanning-month progress event fires BEFORE the live
+// SearchAPI call, so the label can't freeze on the previous bedroom size's
+// "24/24" line while the next size scans.
+const scanningIdx = hybridPricingSource.indexOf("await args.onMonthScanning?.(");
+const medianCallIdx = hybridPricingSource.indexOf("const airbnb = await fetchAirbnbMedianNightly({");
+assert.ok(scanningIdx > 0, "refreshHybridPricingForTarget must emit onMonthScanning");
+assert.ok(medianCallIdx > 0, "expected the live month scan call site");
+assert.ok(scanningIdx < medianCallIdx, "onMonthScanning must fire before the month's SearchAPI requests start");
+
+// SOURCE GUARDS: the bulk-queue item heartbeat is a WALL-CLOCK ticker (the UI
+// promises one every 15s), it stops in finally, and its lease renewal is
+// conditional on still owning the lock so a stale deploy-container runner can
+// never steal the lease back from a watchdog-resumed successor.
+const runItemIdx = routesSource.indexOf("async function runBulkPricingItem(");
+const runItemWrapper = routesSource.slice(runItemIdx, routesSource.indexOf("async function runBulkPricingItemAttempt("));
+assert.ok(runItemIdx > 0, "runBulkPricingItem must exist");
+assert.ok(runItemWrapper.includes("setInterval") && runItemWrapper.includes("BULK_PRICING_ITEM_HEARTBEAT_MS"), "runBulkPricingItem must start the wall-clock item heartbeat ticker");
+assert.ok(runItemWrapper.includes("finally") && runItemWrapper.includes("clearInterval(heartbeatTimer)"), "the item heartbeat ticker must be cleared in finally");
+const heartbeatRowIdx = routesSource.indexOf("async function heartbeatBulkPricingItemRow(");
+const heartbeatRowSource = routesSource.slice(heartbeatRowIdx, runItemIdx);
+assert.ok(heartbeatRowIdx > 0, "heartbeatBulkPricingItemRow must exist");
+assert.ok(
+  heartbeatRowSource.includes("eq(bulkPricingRefreshJobRows.lockedBy, BULK_PRICING_WORKER_ID)"),
+  "the ticker's lease renewal must be conditional on still owning the lock",
+);
+assert.ok(
+  routesSource.includes("onMonthScanning,\n    onMonthScanned,\n    onMonthBlackout,\n    shouldCancel,\n    triggerType: \"Manual Update\",")
+    || /refreshMarketRatesForProperty\(item\.propertyId, item\.label, \{\s*onMonthScanning,/.test(routesSource),
+  "runBulkPricingItemAttempt must wire onMonthScanning into refreshMarketRatesForProperty",
+);
+
+// SOURCE GUARD: the Pricing tab's stale-heartbeat banner must tell the operator
+// the queue watchdog auto-resumes an interrupted scan (2026-07-12: the old
+// "may be wedged — cancel and retry" copy invited cancelling a scan the
+// watchdog was about to resume).
+const builderSource = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
+assert.ok(
+  builderSource.includes("the queue watchdog auto-resumes it"),
+  "the stale-heartbeat banner must mention the auto-resume watchdog",
+);
+assert.ok(
+  !builderSource.includes("Scan loop may be wedged"),
+  "the old wedged-guessing copy must not come back",
+);
+
+// BEHAVIORAL: the bounded rail retries a transient 5xx once (recovering without
+// burning a whole-item restart) and fails FAST on a definitive 4xx (no retry).
+{
+  const { createServer } = await import("node:http");
+  let hits503 = 0;
+  let hits404 = 0;
+  const server = createServer((req, res) => {
+    if (req.url?.startsWith("/flaky")) {
+      hits503 += 1;
+      if (hits503 === 1) {
+        res.writeHead(503).end("upstream hiccup");
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" }).end("{\"ok\":true}");
+      return;
+    }
+    hits404 += 1;
+    res.writeHead(404).end("nope");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const recovered = await fetchSearchApiPricingResponse(`http://127.0.0.1:${port}/flaky`);
+    assert.equal(recovered.status, 200, "a transient 503 should be retried in place and recover");
+    assert.equal(hits503, 2, "the 503 should be retried exactly once");
+    const definitive = await fetchSearchApiPricingResponse(`http://127.0.0.1:${port}/missing`);
+    assert.equal(definitive.status, 404, "a definitive 4xx must be returned as-is");
+    assert.equal(hits404, 1, "a definitive 4xx must not be retried");
+  } finally {
+    server.close();
+  }
 }
 
 console.log("hybrid pricing suite passed");
