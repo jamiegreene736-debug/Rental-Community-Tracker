@@ -43,6 +43,19 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (cron UNIT REPLACEMENT ON — "1 bedroom photo on a 3BR = swap it, 100% automated"): Operator
+  directive; supersedes the same-day cron replacement-OFF default. Weekly auto-audit sweeps now run
+  the FULL photo ladder including unit replacement (`UNIT_AUDIT_CRON_REPLACE=0` restores flag-only),
+  made safe by three rails (AGENTS.md Unit Audit Sweep #15; don't remove): (a) PROVEN shortfall —
+  `folderLabelsComplete` + wait + community re-check BEFORE the ladder acts, so the async-labeler
+  0/N race (the 2026-07-07 class) can never trigger a swap; (b) 28-day anti-churn cooldown per unit
+  (`AUDIT_REPLACE_COOLDOWN_DAYS`, `replaceRungOnCooldown` over unit_swaps; manual sweeps exempt);
+  (c) per-run budget `UNIT_AUDIT_CRON_REPLACE_CAP`=3 reset by the scheduler each run. Cooldown/
+  budget blocks = attention, never fail. POST-SWAP: descriptions regenerate from the NEW unit's
+  source + collage re-composes within the same sweep (`replacedThisSweep` in-memory hint). Verified:
+  unit-audit-sweep 112/0, full `npm test` exit 0, build clean, check 338 = baseline.
+
+
 - 2026-07-12 (WEEKLY AUTO-AUDIT cron — "auto correct itself so Comm QA turns green"): Operator asked
   how the Comm QA column can self-correct to green. The fix side existed (sweep re-checks persist
   through the Comm QA engine); the gap was nobody clicking. SHIPPED

@@ -22,16 +22,20 @@
 //  • source:"cron" → the OTA stage reuses the weekly photo-cron's deep-scan
 //    rows (AUDIT_CRON_OTA_FRESH_HOURS, default 192h) instead of re-spending
 //    the same Lens budget the photo cron just spent.
-//  • UNIT REPLACEMENT stays OFF unless UNIT_AUDIT_CRON_REPLACE=1 — an
-//    unattended job silently swapping a unit's photos is a bigger call than
-//    hiding a duplicate; the receipt tells the operator exactly which unit
-//    needs the (one-click) replacement instead.
+//  • UNIT REPLACEMENT is ON by default (operator directive 2026-07-12 — a
+//    3BR showing one bedroom photo must be swapped without a click;
+//    UNIT_AUDIT_CRON_REPLACE=0 restores flag-only), made safe by three
+//    rails in the sweep: a bedroom shortfall must be PROVEN with photo
+//    labels complete (a labeling race can never trigger a swap), a 28-day
+//    anti-churn cooldown per unit (AUDIT_REPLACE_COOLDOWN_DAYS), and a
+//    per-run replacement budget (UNIT_AUDIT_CRON_REPLACE_CAP=3, reset
+//    each run) so a systemic false signal can't burn SearchAPI overnight.
 // Kill switch: UNIT_AUDIT_AUTO_DISABLED=1.
 
 import { storage } from "./storage";
 import { getAllUnitBuilders } from "../client/src/data/unit-builder-data";
 import { DAY_MS, WEEK_MS, nextRunDelayMs } from "./market-rate-scan-logic";
-import { startUnitAuditSweepBulk } from "./unit-audit-sweep";
+import { resetCronReplaceBudget, startUnitAuditSweepBulk } from "./unit-audit-sweep";
 
 export const UNIT_AUDIT_AUTO_LAST_RUN_KEY = "unit_audit_auto.last_run_at";
 
@@ -62,11 +66,17 @@ export async function runUnitAuditCronSweep(reason: string): Promise<{ started: 
     // the whole sweep on the next boot.
     await storage.setSetting(UNIT_AUDIT_AUTO_LAST_RUN_KEY, new Date().toISOString());
     const targets = await unitAuditCronTargets();
-    console.log(`[unit-audit-auto] ${reason}: starting weekly audit sweeps for ${targets.length} properties (queued one at a time)`);
+    // Replacement is ON by default for cron runs (operator directive
+    // 2026-07-12: a 3BR with one bedroom photo "100% needs to be automated");
+    // UNIT_AUDIT_CRON_REPLACE=0 restores flag-only. The unattended rails —
+    // labels-proven shortfall, the 28-day anti-churn cooldown, and the
+    // per-run budget reset below — are what make the default safe.
+    const budget = resetCronReplaceBudget();
+    console.log(`[unit-audit-auto] ${reason}: starting weekly audit sweeps for ${targets.length} properties (queued one at a time; replacement budget ${budget})`);
     const result = await startUnitAuditSweepBulk({
       propertyIds: targets,
       autoFix: true,
-      allowReplace: /^(1|true|yes|on)$/i.test(String(process.env.UNIT_AUDIT_CRON_REPLACE ?? "").trim()),
+      allowReplace: String(process.env.UNIT_AUDIT_CRON_REPLACE ?? "").trim() !== "0",
       source: "cron",
     });
     _lastRunSummary = { startedAt: new Date().toISOString(), started: result.started.length, skipped: result.skipped.length };
