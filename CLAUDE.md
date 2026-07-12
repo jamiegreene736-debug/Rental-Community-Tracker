@@ -46,7 +46,7 @@ Before making any changes:
 - 2026-07-12 (audit sweep SELF-VERIFIES — "no human intervention … double or triple check system"):
   Operator (receipt screenshot: "2 need your attention, 1 could not be verified" + "? unverified"
   Audit badge) asked for review/unverified outcomes to fix themselves via multi-check consensus,
-  then merge. SHIPPED (`claude/audit-auto-verify-f935a5`; AGENTS.md Unit Audit Sweep #17 — don't
+  then merge. SHIPPED (`claude/audit-auto-verify-f935a5`; AGENTS.md Unit Audit Sweep #18 — don't
   re-chase): FOUR bounded rails in server/unit-audit-sweep.ts, pure decisions in
   shared/unit-audit-sweep-logic.ts. (A) RETRY — after the stage loop, BEFORE the receipt, `error`
   stages + attention/failed rows with a TRANSIENT auto-fix failure signature (pure
@@ -70,11 +70,50 @@ Before making any changes:
   (`AUDIT_DEDUPE_DOUBLE_CHECK=0` restores old flow). (D) OTA INCONCLUSIVE RE-KICK — fresh-but-
   inconclusive photo_listing_checks rows (shared `photoListingScanWasInconclusive`) re-scan
   instead of erroring untried. Ceilings: photo-dedupe 20m / photo-community 55m / photo-fix 120m;
-  per-check call 17.5m (`COMMUNITY_CHECK_CALL_TIMEOUT_MS`). Verified: unit-audit-sweep 144/0
-  (32 new incl. drift-locks + both-seams guard), full `npm test` exit 0, build clean (env knobs +
-  strings bundle-grepped), `npm run check` 338 = baseline. Could NOT live-run a sweep (no DB/keys)
-  — post-deploy: re-run the audit on the screenshot property; expect the dedupe + community rows
-  to resolve themselves and the badge to leave "? unverified" unless a check genuinely failed 3×.
+  per-check call 17.5m (`COMMUNITY_CHECK_CALL_TIMEOUT_MS`). Verified: unit-audit-sweep 158/0
+  post-merge (32 new incl. drift-locks + both-seams guard), full `npm test` exit 0, build clean
+  (env knobs + strings bundle-grepped), `npm run check` 338 = baseline. Could NOT live-run a sweep
+  (no DB/keys) — post-deploy: re-run the audit on the screenshot property; expect the dedupe +
+  community rows to resolve themselves and "? unverified" only after a genuine 3× failure.
+  COMPOSES with the same-day #1022 verify-read Guesty-429 retries (below): #1022 retries ONE
+  read within a stage; rail A re-runs the whole STAGE when it still ends error.
+
+- 2026-07-12 (audit receipt "Amenities unverified — aborted due to timeout" — verify-read RETRY over
+  Guesty 429 pauses): Operator screenshot (Coconut Plantation receipt, stage 7 "Could not read the
+  Guesty listing's amenities (The operation was aborted due to timeout)"); asked to investigate via
+  Railway logs, fix, merge. DIAGNOSIS (don't re-chase): NOT a push failure — the sweep hit a live
+  Guesty 429 mid-run (02:37:58Z, deployment 4ccfc1ed, mid deploy-burst); ALL Guesty calls serialize
+  through guesty-sync.ts's global gate (500ms gaps + up-to-120s pause after any 429), the
+  guesty-amenities route makes TWO serialized Guesty calls, and verifyAmenities had ONE 30s attempt —
+  it aborted while the queue drained (the layout stage read the SAME listing fine seconds later).
+  SHIPPED (`claude/unit-audit-amenities-fix-205063`): `loopbackVerifyRead` in unit-audit-sweep.ts —
+  bounded retries + growing backoff (10s/20s) for the three verify-side Guesty reads (amenities 3×45s,
+  layout + channels 2×45s), pure classification `unitAuditVerifyReadRetryable` (429/5xx/599 retry,
+  other 4xx fail fast; GETs only) in shared/unit-audit-sweep-logic.ts; stage ceilings rebalanced
+  (amenities 8→13m — scan timeout now explicitly subtracts BOTH verify calls' worst case, scan budget
+  390s→420s no regression; layout/channels 90s→3m); exhausted retries still report `error` with the
+  attempt count (honesty rule intact — see AGENTS.md Unit Audit Sweep #17). Verified: unit-audit-sweep
+  122/0 (10 new), full `npm test` exit 0, build clean (strings bundle-grepped), `npm run check` 338 =
+  baseline. The flagged receipt heals on the property's next sweep (re-run Audit or the weekly cron).
+
+- 2026-07-12 ("Last Price Scan column didn't update" after the Coconut Plantation audit — diagnosed +
+  fixed): TWO stacked causes (don't re-chase). (1) CLIENT (the operator's symptom): the dashboard's
+  data-column queries (`/api/dashboard/price-scans`, Comm QA status, photo-listing-check, drafts) use
+  staleTime + refetchOnWindowFocus:false and were NEVER invalidated when an audit sweep finished — the
+  pricing leg's `markScannerGuestyRatePush` stamp landed in the DB but an open dashboard sat frozen on
+  its page-load snapshot until a full reload. FIX: home.tsx watches the unit-audit ACTIVE set
+  (`prevActiveAuditIdsRef`) and invalidates those queries whenever any sweep leaves it (covers
+  badge-watched, bulk, and cron sweeps), and the unit-audit dialog's terminal effect invalidates them
+  too. (2) SERVER honesty: `stagePricing` claimed "Market rates refreshed + pushed to Guesty" on ANY
+  2xx refresh without reading `guestyPush` — the refresh routes soft-skip the push (unmapped listing,
+  no priced months, plan gaps via `isGuestyPushSoftFailure`) and skipped pushes never stamp the
+  column. FIX: a skipped push now reports "Auto-fix PARTIAL … Guesty push was SKIPPED — <reason>" and
+  caps the stage verdict at attention. Verified: unit-audit-sweep 116/0, full `npm test` exit 0, build
+  clean (both fixes bundle-grepped), check 338 = baseline. NOTE: the id chain for drafts was verified
+  correct end-to-end (draft rows use `-draft.id`; the stamp inserts-on-miss with negative ids; the
+  price-scans endpoint serves every scanner_schedule row) — a fresh (<8d) last push also legitimately
+  skips the refresh by design (no SearchAPI double-spend), in which case the column keeps its recent
+  date and the receipt says "Rates pushed to Guesty Nd ago".
 
 - 2026-07-12 (photo-listing cron: found→fix latency + outage retry + review tier + operator SMS):
   Operator asked to investigate the weekly photo-scan cron (photos found on Airbnb/VRBO/Booking →

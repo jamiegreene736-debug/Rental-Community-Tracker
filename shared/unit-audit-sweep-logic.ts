@@ -768,6 +768,32 @@ export function confirmSameSceneGroups<T extends SameSceneGroupLike>(
   return { confirmed, noise };
 }
 
+// ── Verify-read retry over the Guesty rate-limit gate (2026-07-12) ──────────
+// Verify-side Guesty reads (the amenities read-back, the layout listing read,
+// the channel-status roll-up) funnel through the server's global Guesty
+// request gate, which serializes EVERY Guesty call (500ms min gap) and pauses
+// the whole queue for up to 120s when Guesty 429s (Retry-After). A single
+// short-timeout attempt can straddle that pause and abort while the queue
+// drains — the live Coconut Plantation receipt reported amenities "could not
+// be verified" for a push that had landed fine (the layout stage's read of
+// the SAME listing succeeded seconds later once the queue drained). These
+// reads are idempotent GETs, so the sweep retries a bounded number of times
+// before declaring the stage unverifiable.
+export function unitAuditVerifyReadRetryable(status: number): boolean {
+  if (status < 400) return false; // success — nothing to retry
+  if (status === 429) return true; // rate-limited at the route
+  // Route 5xx (a Guesty 429/5xx surfaces as the route's 500) and the 599
+  // client-abort sentinel are the transient classes. Other 4xx (bad listing
+  // id, validation) won't heal on retry.
+  return status >= 500;
+}
+
+// 10s, 20s, 30s … — attempt 2 lands after Guesty's default 15s rate-limit
+// pause; the caller caps total attempts so the stage ceiling always holds.
+export function unitAuditVerifyReadBackoffMs(failedAttempts: number): number {
+  return Math.max(1, failedAttempts) * 10_000;
+}
+
 // Queue summary (active first, then recent terminals) — mirrors the
 // auto-replace queue chip semantics.
 export const UNIT_AUDIT_SURFACE_TERMINAL_MS = 2 * 60 * 60 * 1000;

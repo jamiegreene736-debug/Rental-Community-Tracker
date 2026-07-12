@@ -84,6 +84,8 @@ import {
   shouldResumeUnitAuditJob,
   summarizeUnitAuditQueue,
   unitAuditHeadline,
+  unitAuditVerifyReadBackoffMs,
+  unitAuditVerifyReadRetryable,
   upsertUnitAuditStageResult,
   type UnitAuditJobRecord,
   type UnitAuditReportRecord,
@@ -129,11 +131,17 @@ const STAGE_TIMEOUT_MS: Record<UnitAuditStageId, number> = {
   // below.
   "photo-fix": 120 * 60_000,
   descriptions: 6 * 60_000,
-  amenities: 8 * 60_000,
+  // Amenities: the scan (vision + area research + push) keeps its ~7-min
+  // budget; the extra headroom covers the verify read's bounded retries over
+  // Guesty rate-limit pauses (see loopbackVerifyRead — the accounting is
+  // explicit at the scan call).
+  amenities: 13 * 60_000,
   "cover-collage": 8 * 60_000,
-  layout: 90_000,
+  // Layout/channels are single Guesty-backed reads — the 3-min ceilings fit
+  // 2 retry attempts over a rate-limit pause.
+  layout: 3 * 60_000,
   pricing: 20 * 60_000,
-  channels: 90_000,
+  channels: 3 * 60_000,
 };
 
 // Global auto-fix kill (the per-engine kill switches — COVER_COLLAGE_VISION_
@@ -228,6 +236,46 @@ async function loopbackJson(method: "GET" | "POST" | "PUT", pathName: string, bo
   const data = await resp.json().catch(() => ({}));
   return { status: resp.status, data };
 }
+
+// Retrying wrapper for VERIFY-side Guesty reads (idempotent GETs only). Every
+// Guesty call funnels through the global request gate in guesty-sync.ts —
+// serialized with a 500ms min gap and PAUSED for up to 120s after any 429
+// (Retry-After) — so a single short-timeout attempt can straddle a rate-limit
+// pause and abort while the queue drains. That produced the live 2026-07-12
+// Coconut Plantation receipt: amenities "could not be verified (The operation
+// was aborted due to timeout)" while the layout stage's read of the SAME
+// listing succeeded seconds later. Retry classification + backoff are pure
+// (unitAuditVerifyReadRetryable / unitAuditVerifyReadBackoffMs); callers size
+// attempts × timeout to fit their stage ceiling.
+async function loopbackVerifyRead(
+  pathName: string,
+  opts: { attempts: number; timeoutMs: number; label: string },
+): Promise<{ status: number; data: any; attemptsUsed: number }> {
+  let last: { status: number; data: any } = { status: 599, data: { error: "not attempted" } };
+  let attemptsUsed = 0;
+  for (let attempt = 1; attempt <= Math.max(1, opts.attempts); attempt++) {
+    if (attempt > 1) {
+      const backoffMs = unitAuditVerifyReadBackoffMs(attempt - 1);
+      console.log(`[unit-audit] ${opts.label}: read attempt ${attempt - 1} failed (${String((last.data as any)?.error ?? `HTTP ${last.status}`)}) — retrying in ${Math.round(backoffMs / 1000)}s (Guesty rate-limit pauses can stall reads)`);
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+    attemptsUsed = attempt;
+    last = await loopbackJson("GET", pathName, undefined, opts.timeoutMs)
+      .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+    if (!unitAuditVerifyReadRetryable(last.status)) break; // success, or a 4xx that won't heal
+  }
+  return { ...last, attemptsUsed };
+}
+
+// Verify-read budgets. Amenities worst case per verify call:
+// attempts × timeout + backoffs (10s + 20s) = 165s; verifyAmenities runs at
+// most twice per stage (before + after the auto-fix scan), and the scan's own
+// timeout below subtracts both so the stage ceiling always holds.
+const AMENITY_VERIFY_READ_ATTEMPTS = 3;
+const AMENITY_VERIFY_READ_TIMEOUT_MS = 45_000;
+const AMENITY_VERIFY_WORST_MS =
+  AMENITY_VERIFY_READ_ATTEMPTS * AMENITY_VERIFY_READ_TIMEOUT_MS +
+  unitAuditVerifyReadBackoffMs(1) + unitAuditVerifyReadBackoffMs(2);
 
 // ── Target resolution ────────────────────────────────────────────────────────
 
@@ -1586,11 +1634,20 @@ async function verifyAmenities(target: UnitAuditTarget): Promise<AmenityVerify> 
   // route resolves names with — the push maps "BBQ / Grill" → canonical
   // "BBQ grill", "Ocean View" → "Sea view", etc., so a plain label comparison
   // against the stored names falsely read 27 pushed amenities as missing
-  // (the 2026-07-12 Coconut Plantation receipt).
-  const { status, data } = await loopbackJson("GET", `/api/builder/guesty-amenities?listingId=${encodeURIComponent(target.guestyListingId)}`, undefined, 30_000)
-    .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+  // (the 2026-07-12 Coconut Plantation receipt). Read with bounded retries:
+  // the route makes TWO serialized Guesty calls behind the global rate-limit
+  // gate, so a single short attempt falsely reported "could not be verified"
+  // during a 429 pause (the same day's follow-up receipt).
+  const { status, data, attemptsUsed } = await loopbackVerifyRead(
+    `/api/builder/guesty-amenities?listingId=${encodeURIComponent(target.guestyListingId)}`,
+    { attempts: AMENITY_VERIFY_READ_ATTEMPTS, timeoutMs: AMENITY_VERIFY_READ_TIMEOUT_MS, label: "amenities verify" },
+  );
   if (status >= 400) {
-    return { row, keys, scannedNote, missing: null, guestyCount: null, guestyReadError: String((data as any)?.error ?? `HTTP ${status}`) };
+    const reason = String((data as any)?.error ?? `HTTP ${status}`);
+    return {
+      row, keys, scannedNote, missing: null, guestyCount: null,
+      guestyReadError: `${reason} — after ${attemptsUsed} read attempt${attemptsUsed === 1 ? "" : "s"}; Guesty rate limiting can stall reads, re-run the audit to verify`,
+    };
   }
   const storedNames = [
     ...(Array.isArray((data as any)?.amenities) ? (data as any).amenities : []),
@@ -1616,7 +1673,10 @@ async function stageAmenities(target: UnitAuditTarget, record: UnitAuditJobRecor
   const needsFix = !v.row || !v.row.scannedAt || (v.missing != null && v.missing.length > 0);
   if (needsFix && autoFixEnabled(record)) {
     touch(record, { message: "Scanning photos + area for amenities (Claude vision + web research), saving, and pushing add-only…" });
-    const scan = await loopbackJson("POST", "/api/builder/scan-amenities", { propertyId: target.propertyId }, STAGE_TIMEOUT_MS.amenities - 90_000)
+    // Ceiling accounting: two verify calls (worst case each AMENITY_VERIFY_
+    // WORST_MS) + this scan + a 30s cushion must fit STAGE_TIMEOUT_MS.amenities.
+    const scanTimeoutMs = STAGE_TIMEOUT_MS.amenities - 2 * AMENITY_VERIFY_WORST_MS - 30_000;
+    const scan = await loopbackJson("POST", "/api/builder/scan-amenities", { propertyId: target.propertyId }, scanTimeoutMs)
       .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
     if (scan.status >= 400) {
       items.push(`Auto-fix failed: amenity scan did not run (${String((scan.data as any)?.error ?? `HTTP ${scan.status}`)})`);
@@ -1749,10 +1809,12 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
     return { verdict: "skipped", detail: "No Guesty listing mapped — nothing to compare the bedding/layout against." };
   }
   const fields = "bedrooms bathrooms accommodates beds title";
-  const { status, data } = await loopbackJson("GET", `/api/guesty-proxy/listings/${encodeURIComponent(target.guestyListingId)}?fields=${encodeURIComponent(fields)}`, undefined, 30_000)
-    .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+  const { status, data, attemptsUsed } = await loopbackVerifyRead(
+    `/api/guesty-proxy/listings/${encodeURIComponent(target.guestyListingId)}?fields=${encodeURIComponent(fields)}`,
+    { attempts: 2, timeoutMs: 45_000, label: "layout verify" },
+  );
   if (status >= 400) {
-    return { verdict: "error", detail: `Could not read the Guesty listing to verify the layout (HTTP ${status}).` };
+    return { verdict: "error", detail: `Could not read the Guesty listing to verify the layout (${String((data as any)?.error ?? `HTTP ${status}`)} — after ${attemptsUsed} read attempt${attemptsUsed === 1 ? "" : "s"}).` };
   }
   const items: string[] = [];
   let mismatch = false;
@@ -1911,6 +1973,22 @@ async function stagePricing(target: UnitAuditTarget, record: UnitAuditJobRecord)
       items.push(`Auto-fix failed: market-rate refresh did not run (${String((refresh.data as any)?.error ?? `HTTP ${refresh.status}`)})`);
     } else if ((refresh.data as any)?.alreadyRunning) {
       items.push("A market-rate refresh for this property is already running — re-run the audit after it lands");
+    } else if ((refresh.data as any)?.guestyPush?.skipped) {
+      // HONESTY (2026-07-12 "Last Price Scan didn't update" incident): the
+      // scan saved a fresh pricing table, but NOTHING reached Guesty — the
+      // refresh routes soft-skip the push (no mapped listing, no priced
+      // months, plan gaps), and markScannerGuestyRatePush only stamps real
+      // pushes, so the Last Price Scan column will not move. Say exactly
+      // that instead of claiming "refreshed + pushed".
+      const reason = String((refresh.data as any).guestyPush.reason ?? "no mapped Guesty listing / no priced months");
+      items.push(`Auto-fix PARTIAL: market rates rescanned + saved, but the Guesty push was SKIPPED — ${reason}`);
+      const re = await verifyPricing(target);
+      items.push(...re.items.map((l) => `Re-verify: ${l}`));
+      return {
+        verdict: re.verdict === "pass" ? "attention" : re.verdict,
+        detail: `Rates rescanned, but the Guesty push was skipped: ${reason} — the Last Price Scan column stamps real pushes only.`,
+        items,
+      };
     } else {
       fixedNote = "Market rates refreshed + pushed to Guesty";
       items.push(`Auto-fixed: ${fixedNote}`);
@@ -1939,11 +2017,13 @@ async function stageChannels(target: UnitAuditTarget): Promise<StageOutcome> {
   if (!target.guestyListingId) {
     items.push("No Guesty listing mapped — channel status not applicable");
   } else {
-    const { status, data } = await loopbackJson("GET", "/api/dashboard/channel-status", undefined, 45_000)
-      .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
+    const { status, data, attemptsUsed } = await loopbackVerifyRead(
+      "/api/dashboard/channel-status",
+      { attempts: 2, timeoutMs: 45_000, label: "channels verify" },
+    );
     if (status >= 400) {
       bump("error");
-      items.push(`Channel status could not be read (HTTP ${status})`);
+      items.push(`Channel status could not be read (${String((data as any)?.error ?? `HTTP ${status}`)} — after ${attemptsUsed} read attempt${attemptsUsed === 1 ? "" : "s"})`);
     } else {
       const ch = (data as any)?.[String(target.propertyId)] ?? (data as any)?.[target.propertyId];
       if (!ch) {

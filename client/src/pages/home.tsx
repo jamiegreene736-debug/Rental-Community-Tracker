@@ -1751,6 +1751,26 @@ function AdminDashboard() {
     refetchInterval: (query) => (Object.keys(query.state.data?.active ?? {}).length > 0 ? 5_000 : 60_000),
     refetchOnWindowFocus: false,
   });
+  // When a sweep FINISHES (a property leaves the active set), refresh the data
+  // columns its auto-fix legs write to. Without this, the dashboard's column
+  // queries (staleTime + no focus refetch) sit frozen on their page-load
+  // snapshot, so an audit that refreshed + pushed rates updated the DB but the
+  // "Last Price Scan" cell never moved until a full reload (2026-07-12
+  // Coconut Plantation incident). Watching the active SET (not the dialog)
+  // also covers bulk "Audit selected" and the weekly cron sweeps, which the
+  // operator follows from the column badges with no dialog open.
+  const prevActiveAuditIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const current = new Set(Object.keys(unitAuditStatus?.active ?? {}));
+    const previous = prevActiveAuditIdsRef.current;
+    prevActiveAuditIdsRef.current = current;
+    const anyFinished = Array.from(previous).some((id) => !current.has(id));
+    if (!anyFinished) return;
+    void queryClient.invalidateQueries({ queryKey: ["/api/dashboard/price-scans"] });
+    void queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
+    void queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
+    void queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+  }, [unitAuditStatus?.active]);
   const [unitAuditDialog, setUnitAuditDialog] = useState<{ propertyId: number; propertyName: string } | null>(null);
   // Bulk "Audit selected" — one sweep per checked row, queued server-side one
   // at a time (each sweep is heavy on Lens/SearchAPI/vision budgets). The

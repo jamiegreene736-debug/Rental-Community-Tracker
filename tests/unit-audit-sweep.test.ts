@@ -43,6 +43,8 @@ import {
   summarizeUnitAuditQueue,
   unitAuditBadge,
   unitAuditHeadline,
+  unitAuditVerifyReadBackoffMs,
+  unitAuditVerifyReadRetryable,
   upsertUnitAuditStageResult,
   type UnitAuditJobRecord,
   type UnitAuditStageResult,
@@ -578,6 +580,45 @@ check("amenity verify: reads {amenities, otherAmenities} via the SAME endpoint t
   serverSrc.includes("amenityPresenceCandidates") &&
   serverSrc.includes("normalizeGuestyAmenityName"));
 
+// ── Verify-read retry over Guesty rate-limit pauses (2026-07-12) ─────────────
+// The live Coconut Plantation receipt: the amenities read-back aborted at its
+// single 30s attempt while the global Guesty request gate sat in a 429 pause,
+// and the stage reported "could not be verified" for a push that had landed.
+check("verify-read retry: success statuses never retry",
+  !unitAuditVerifyReadRetryable(200) && !unitAuditVerifyReadRetryable(204) && !unitAuditVerifyReadRetryable(304));
+
+check("verify-read retry: transient classes retry (429 route rate-limit, 5xx incl. Guesty-429-as-500, 599 client abort)",
+  unitAuditVerifyReadRetryable(429) && unitAuditVerifyReadRetryable(500) &&
+  unitAuditVerifyReadRetryable(502) && unitAuditVerifyReadRetryable(599));
+
+check("verify-read retry: non-retryable 4xx (bad listing id / validation) fail fast",
+  !unitAuditVerifyReadRetryable(400) && !unitAuditVerifyReadRetryable(404) && !unitAuditVerifyReadRetryable(422));
+
+check("verify-read backoff: grows 10s/20s so attempt 2 clears Guesty's default 15s pause",
+  unitAuditVerifyReadBackoffMs(1) === 10_000 && unitAuditVerifyReadBackoffMs(2) === 20_000 &&
+  unitAuditVerifyReadBackoffMs(0) === 10_000);
+
+check("amenity verify: read-back goes through the retrying loopbackVerifyRead (never a bare single attempt)",
+  /loopbackVerifyRead\(\s*`\/api\/builder\/guesty-amenities\?listingId=/.test(serverSrc) &&
+  !/loopbackJson\("GET", `\/api\/builder\/guesty-amenities/.test(serverSrc));
+
+check("layout verify: listing read goes through the retrying loopbackVerifyRead",
+  /loopbackVerifyRead\(\s*`\/api\/guesty-proxy\/listings\//.test(serverSrc) &&
+  !/loopbackJson\("GET", `\/api\/guesty-proxy\/listings\//.test(serverSrc));
+
+check("channels verify: channel-status read goes through the retrying loopbackVerifyRead",
+  /loopbackVerifyRead\(\s*\n?\s*"\/api\/dashboard\/channel-status"/.test(serverSrc) &&
+  !/loopbackJson\("GET", "\/api\/dashboard\/channel-status"/.test(serverSrc));
+
+check("verify-read retry: classification + backoff come from the shared pure functions",
+  serverSrc.includes("unitAuditVerifyReadRetryable") && serverSrc.includes("unitAuditVerifyReadBackoffMs"));
+
+check("amenities stage ceiling accounting: the scan timeout subtracts BOTH verify calls' worst case",
+  serverSrc.includes("2 * AMENITY_VERIFY_WORST_MS"));
+
+check("verify-read failure receipts carry the attempt count (honest 'could not verify', never silent)",
+  /after \$\{attemptsUsed\} read attempt/.test(serverSrc));
+
 check("amenity normalizer drift-lock: routes' inline norm() and the shared normalizer are byte-identical",
   (() => {
     const impl = 's.toLowerCase().replace(/[_\\-/&]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\\s+/g, " ").trim()';
@@ -889,6 +930,30 @@ check("rail C wired: same-scene groups act only when a second independent scan r
 
 check("rail D wired: fresh-but-inconclusive OTA rows re-scan via the shared cron predicate",
   serverSrc.includes("photoListingScanWasInconclusive"));
+
+// ── Last Price Scan column actually updates after a sweep (2026-07-12
+// Coconut Plantation incident) ────────────────────────────────────────────────
+// Two halves: (a) the pricing stage must not claim "refreshed + pushed" when
+// the refresh soft-skipped the Guesty push (markScannerGuestyRatePush stamps
+// real pushes only, so the column stays frozen — say so); (b) the dashboard
+// must refetch its data-column queries when a sweep finishes — they use
+// staleTime + no focus refetch, so without invalidation the DB stamp lands
+// but the open dashboard never shows it until a full reload.
+{
+  const sweepSrcLocal = readFileSync(new URL("../server/unit-audit-sweep.ts", import.meta.url), "utf8");
+  check("pricing stage reports a SKIPPED Guesty push honestly (no false 'pushed' claim)",
+    sweepSrcLocal.includes("guestyPush?.skipped")
+    && sweepSrcLocal.includes("the Guesty push was SKIPPED"));
+  check("a skipped push can never report better than attention",
+    sweepSrcLocal.includes('re.verdict === "pass" ? "attention" : re.verdict'));
+  check("home.tsx refreshes the data columns when a sweep leaves the active set",
+    homeSrc.includes("prevActiveAuditIdsRef")
+    && homeSrc.includes('invalidateQueries({ queryKey: ["/api/dashboard/price-scans"] })'));
+  check("dialog terminal effect refreshes Last Price Scan + Photos + drafts too",
+    dialogSrc.includes('queryKey: ["/api/dashboard/price-scans"]')
+    && dialogSrc.includes('queryKey: ["/api/photo-listing-check"]')
+    && dialogSrc.includes('queryKey: ["/api/community/drafts"]'));
+}
 
 const pkg = readFileSync(new URL("../package.json", import.meta.url), "utf8");
 check("npm test chain includes this suite",
