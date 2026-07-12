@@ -15,6 +15,7 @@ import {
 import { buildPhotoCommunityCheckRequestForProperty } from "./builder-photo-groups";
 import { storage } from "./storage";
 import { runPhotoCommunityCheck, type PhotoCommunityCheckResult } from "./photo-community-check";
+import { enrichCheckGroupsWithProvenance } from "./photo-folder-verification";
 
 const STATUS_SETTING_KEY = "photo_community_check.status_by_property";
 const JOB_SETTING_KEY = "photo_community_check.active_job";
@@ -304,6 +305,9 @@ async function runBulkPhotoCommunityJob(job: BulkPhotoCommunityJob, apiKey: stri
         });
         continue;
       }
+      // Same server-side provenance stamps the single-check route applies —
+      // without this a bulk re-check would read stricter than a manual one.
+      await enrichCheckGroupsWithProvenance(built.request.groups).catch(() => undefined);
       const result = await runPropertyPhotoCommunityCheck(built.request, apiKey);
       const row = derivePhotoCommunityRowStatus(item.propertyId, result, new Date().toISOString());
       statusByProperty.set(item.propertyId, row);

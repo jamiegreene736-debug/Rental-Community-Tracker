@@ -103,6 +103,77 @@ export function computeUnitVerdict(
   };
 }
 
+// ── Provenance (chain-of-custody) upgrade ───────────────────────────────────
+// "Can't confirm photos" (uncertain votes / too few decisive votes) usually
+// means Lens/vision could not find the photos online or a vision batch failed —
+// NOT that anything is wrong with the listing. When the gallery's ORIGIN is
+// independently verified, those uncertain votes can honestly be upgraded:
+//   operator    — the operator pinned this exact published photo set as
+//                 verified (photo_folder_verifications.v1, fingerprint-scoped).
+//   source-page — the unit's source listing page names the expected community
+//                 (the independent source-page leg returned match "yes").
+//   swap        — the photos came from a COMMITTED unit replacement; the find
+//                 flow community-gates candidates before they can be committed.
+// A positive "no" vote ALWAYS wins (canUpgradeWithProvenance) — provenance can
+// clear uncertainty, never mask a real contradiction.
+
+export type UnitProvenance = {
+  kind: "operator" | "source-page" | "swap";
+  detail: string;
+};
+
+export function unitProvenanceFor(
+  input:
+    | { swapVerified?: boolean; operatorVerified?: boolean; operatorVerifiedAt?: string }
+    | null
+    | undefined,
+  sourcePageMatch?: "yes" | "no" | "uncertain",
+): UnitProvenance | null {
+  if (input?.operatorVerified) {
+    const when = String(input.operatorVerifiedAt ?? "").slice(0, 10);
+    return {
+      kind: "operator",
+      detail: `the operator verified this exact photo set${when ? ` on ${when}` : ""}`,
+    };
+  }
+  if (sourcePageMatch === "yes") {
+    return {
+      kind: "source-page",
+      detail: "the unit's source listing page independently names the expected community",
+    };
+  }
+  // A source page that POSITIVELY names a different community ("no") vetoes the
+  // other machine signal: a committed swap must not upgrade a unit whose own
+  // source page contradicts the community. (The operator pin above still wins —
+  // it is an explicit human confirmation of the exact photo set.)
+  if (input?.swapVerified && sourcePageMatch !== "no") {
+    return {
+      kind: "swap",
+      detail: "the photos came from a committed unit replacement (community-gated when found)",
+    };
+  }
+  return null;
+}
+
+/**
+ * Whether provenance may upgrade this unit. Rules (in order):
+ *  - zero votes → never (nothing was actually judged);
+ *  - ANY "no" vote → never (a positive contradiction always wins — provenance
+ *    must not mask a real mismatch);
+ *  - operator pin → yes (explicit human confirmation of the exact photo set);
+ *  - machine provenance (source page / swap) → only with at least one
+ *    corroborating "yes" vision vote.
+ */
+export function canUpgradeWithProvenance(
+  photoVerdicts: Array<{ match: "yes" | "no" | "uncertain" }>,
+  provenance: UnitProvenance,
+): boolean {
+  if (!Array.isArray(photoVerdicts) || photoVerdicts.length === 0) return false;
+  if (photoVerdicts.some((p) => p.match === "no")) return false;
+  if (provenance.kind === "operator") return true;
+  return photoVerdicts.some((p) => p.match === "yes");
+}
+
 export type FlaggedPhoto = { id: string; caption?: string; reason: string };
 
 export function computeCommunityCohesion(

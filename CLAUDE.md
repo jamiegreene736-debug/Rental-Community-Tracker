@@ -43,6 +43,30 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 ("can't confirm photos" → PROVENANCE upgrade, 3 levers): Operator: "Is there anyway to
+  improve the can't confirm photos issue?" → "Yes build all three and then merge PR with main."
+  SHIPPED (`claude/unit-audit-sweep-tool-79apae`; see AGENTS.md Load-Bearing "Unit Audit Sweep" #16 —
+  don't re-chase): (1) the photo-community check now upgrades UNCERTAIN votes + a too-few-decisive
+  unit verdict when the gallery's ORIGIN is verified — operator pin > source-page match "yes" >
+  committed unit-swap (pure `unitProvenanceFor`/`canUpgradeWithProvenance` in
+  shared/photo-community-check-logic.ts; a positive "no" vote blocks EVERY kind, machine kinds need
+  ≥1 corroborating "yes" vote, source-page "no" vetoes swap provenance); provenance fields are
+  SERVER-stamped only (the route strips client-sent `swapVerified`/`operatorVerified`, then
+  `enrichCheckGroupsWithProvenance` in server/photo-folder-verification.ts re-derives them from
+  committed unit_swaps + the pin store; the bulk Comm-QA job enriches identically); the
+  interior-sample-size warn is skipped for provenance-verified units. (2) the sweep's resolve stage
+  BACKFILLS missing `_source.json` URLs (replacement-* folder → committed swap newSourceUrl; draft's
+  own unit folder → draft unit1/2SourceUrl) via never-clobber `writeFolderSourceUrlIfMissing`
+  (server/photo-folder-source.ts, storage-free so tests need no DATABASE_URL) so the source-page leg
+  can run for older scrapes. (3) operator PIN: "✓ These photos are correct — mark verified" button in
+  the SHARED photo-community-check-report component (unconfirmed units only, NEVER over a positive
+  mismatch) → POST /api/builder/photo-folder-verification → app_settings
+  `photo_folder_verifications.v1`, fingerprint-scoped (photoFolderFingerprint over the published
+  filename set — any photo add/hide/replace silently un-applies; the pin takes effect on the NEXT
+  check run). Verified: photo-community-check 89/0 (33 new incl. behavioral never-clobber tests on
+  real temp folders), full `npm test` exit 0, build clean, check 338 = baseline, chip + pin flow
+  smoked on the BUILT bundle (Playwright, preflight surface).
+
 - 2026-07-12 (cron UNIT REPLACEMENT ON — "1 bedroom photo on a 3BR = swap it, 100% automated"): Operator
   directive; supersedes the same-day cron replacement-OFF default. Weekly auto-audit sweeps now run
   the FULL photo ladder including unit replacement (`UNIT_AUDIT_CRON_REPLACE=0` restores flag-only),
