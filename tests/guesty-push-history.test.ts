@@ -21,6 +21,7 @@ import {
   summarizeAmenitiesPush,
   summarizeBeddingPush,
   summarizeBookingRulesPush,
+  summarizeCoverCollagePush,
   summarizeDescriptionsPush,
   summarizePhotosPush,
   summarizePricingPush,
@@ -146,6 +147,8 @@ check("bedding rooms-only fallback", summarizeBeddingPush({ rooms: 3 }) === "Bed
 check("bedding empty fallback", summarizeBeddingPush({}) === "Bedding configuration pushed");
 check("booking rules with min", summarizeBookingRulesPush(5, 365) === "Booking rules pushed (min 5 nights)");
 check("booking rules without min", summarizeBookingRulesPush(null) === "Booking rules pushed");
+check("cover collage plural", summarizeCoverCollagePush(46) === "Cover collage pushed (46 photos on the listing)");
+check("cover collage singular", summarizeCoverCollagePush(1) === "Cover collage pushed (1 photo on the listing)");
 
 console.log("guesty-push-history: proxy write classifier");
 {
@@ -179,6 +182,16 @@ check("routes: push-amenities records to the ledger", routes.includes(`recordGue
 check("routes: push-photos records to the ledger", routesFlat.includes(`recordGuestyPush( guestyListingId, "photos",`));
 check("routes: pricing wrapper records to the ledger", routes.includes(`recordGuestyPush(listingId, "pricing", status === "ok" ? "success" : "error", tabSummary ?? summary)`));
 check("routes: booking rules record as availability", routesFlat.includes(`recordGuestyPush( listingId, "availability",`));
+// The collage rewrites the listing's pictures[] — a real Photos-tab push.
+// Recording lives in the pushCoverCollageToGuesty wrapper so BOTH callers
+// (manual upload-collage + auto-cover-collage, which the audit sweep's
+// collage auto-fix drives) stamp the ledger.
+check(
+  "routes: cover-collage push records to the ledger (both callers via the wrapper)",
+  routesFlat.includes(`summarizeCoverCollagePush(result.totalPhotos)`) &&
+  routesFlat.includes(`recordGuestyPush( listingId, "photos", result.ok ? "success" : "error"`) &&
+  routesFlat.includes("await pushCoverCollageToGuestyUnrecorded(listingId, rawBase64, existingPhotos)"),
+);
 check("routes: proxy classifies bedding/bookable writes", routes.includes("classifyGuestyProxyListingWrite(req.method, guestyPath, req.body)"));
 check("routes: GET history endpoint exists", routes.includes(`app.get("/api/builder/guesty-push-history"`));
 check("routes: backfill endpoint exists", routes.includes(`app.post("/api/builder/guesty-push-history/backfill"`));
