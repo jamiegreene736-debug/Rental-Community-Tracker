@@ -43,6 +43,22 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (Unit Audit Sweep — first LIVE receipt fixes; Coconut Plantation screenshot): Operator
+  ran a real sweep and asked to automate fixing everything it flagged. FOUR fixes shipped
+  (`claude/unit-audit-sweep-tool-79apae`; don't re-chase): (1) "27 saved amenities not on the Guesty
+  listing even after scan+push" was a VERIFY-side false alarm — the push resolves names via norm() +
+  Guesty's canonical list + aliases ("Ocean View"→"Sea view") while the verify compared plain labels
+  and never read otherAmenities; verify now uses the same guesty-amenities read-back + shared
+  `normalizeGuestyAmenityName`/`amenityPresenceCandidates` (drift-locked to routes' norm()). (2) NEW
+  community-folder ladder in photo-fix (the stage previously only fixed UNIT problems and said
+  "nothing to fix" under a community-folder FAIL): auto-hide RED-vote/junk/community-side-cross-dupe
+  photos (soft-delete PUT, floor 3, no-loss first, yellow votes NEVER touched) → still wrong →
+  escalate to the existing community-photo-repull job → re-check + row upsert. (3) same-scene dedupe
+  groups now AUTO-APPLY inside the sweep per operator directive (sweep-only exception to the
+  review-only stance; `AUDIT_DEDUPE_SAME_SCENE=0` restores; Photos-tab manual flow unchanged).
+  (4) photo-fix honesty: "nothing to fix" can't render under a failed photo stage. Verified:
+  unit-audit-sweep 97/0, full `npm test` exit 0, build clean, check 338 = baseline.
+
 - 2026-07-12 (Unit Audit Sweep PR 3 of 3 — PHOTO FIX LADDER + bulk queue; plan complete): Operator:
   "Please go and then when finished with this task in full merge pr with main". SHIPPED
   (`claude/unit-audit-sweep-tool-79apae`): NEW stage `photo-fix` (11 stages; after the photo

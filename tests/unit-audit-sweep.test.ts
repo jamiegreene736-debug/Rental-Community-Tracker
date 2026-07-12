@@ -7,6 +7,7 @@
 import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import {
+  communityPhotoFixSelections,
   dedupeAutoFixSelections,
   lookupUnitAuditRecord,
   photoFixRungsForUnit,
@@ -36,6 +37,7 @@ import {
   type UnitAuditJobRecord,
   type UnitAuditStageResult,
 } from "../shared/unit-audit-sweep-logic";
+import { amenityPresenceCandidates, normalizeGuestyAmenityName } from "../shared/guesty-amenity-catalog";
 
 let passed = 0;
 let failed = 0;
@@ -155,19 +157,30 @@ check("ladder: OTA-found photos go straight to unit replacement (any photo of th
 check("ladder: no problems → no rungs",
   photoFixRungsForUnit({}).length === 0);
 
-// ── Auto-fix: duplicate-photo selection (PR 2) ──────────────────────────────
-check("dedupe auto-fix: hash groups' non-keepers only; same-scene NEVER auto-applied",
+// ── Auto-fix: duplicate-photo selection (PR 2; same-scene opt-in 2026-07-12) ─
+const DEDUPE_GROUPS = [
+  { kind: "exact" as const, folder: "f1", members: [{ filename: "a.jpg", keep: true }, { filename: "b.jpg", keep: false }] },
+  { kind: "near" as const, folder: "f2", members: [{ filename: "c.jpg", keep: false }, { filename: "d.jpg", keep: true }] },
+  { kind: "same-scene" as const, folder: "f1", members: [{ filename: "e.jpg", keep: true }, { filename: "f.jpg", keep: false }] },
+];
+
+check("dedupe auto-fix default: hash groups' non-keepers only (same-scene excluded)",
   (() => {
-    const sel = dedupeAutoFixSelections([
-      { kind: "exact", folder: "f1", members: [{ filename: "a.jpg", keep: true }, { filename: "b.jpg", keep: false }] },
-      { kind: "near", folder: "f2", members: [{ filename: "c.jpg", keep: false }, { filename: "d.jpg", keep: true }] },
-      { kind: "same-scene", folder: "f1", members: [{ filename: "e.jpg", keep: true }, { filename: "f.jpg", keep: false }] },
-    ]);
+    const sel = dedupeAutoFixSelections(DEDUPE_GROUPS);
     return sel.remove.length === 2 &&
       sel.remove.some((r) => r.folder === "f1" && r.filename === "b.jpg") &&
       sel.remove.some((r) => r.folder === "f2" && r.filename === "c.jpg") &&
       !sel.remove.some((r) => r.filename === "f.jpg") &&
-      sel.hashGroupCount === 2 && sel.sameSceneCount === 1;
+      sel.hashGroupCount === 2 && sel.sameSceneCount === 1 && sel.sameSceneIncluded === false;
+  })());
+
+check("dedupe auto-fix with includeSameScene: same-scene non-keepers included, keepers still safe (operator's 2026-07-12 directive)",
+  (() => {
+    const sel = dedupeAutoFixSelections(DEDUPE_GROUPS, { includeSameScene: true });
+    return sel.remove.length === 3 &&
+      sel.remove.some((r) => r.filename === "f.jpg") &&
+      !sel.remove.some((r) => r.filename === "e.jpg") &&
+      sel.sameSceneIncluded === true;
   })());
 
 check("dedupe auto-fix: keepers are never selected; empty input is a no-op",
@@ -176,6 +189,80 @@ check("dedupe auto-fix: keepers are never selected; empty input is a no-op",
       { kind: "exact", folder: "f", members: [{ filename: "keep.jpg", keep: true }] },
     ]);
     return sel.remove.length === 0 && dedupeAutoFixSelections([]).remove.length === 0;
+  })());
+
+// ── Auto-fix: community-folder photo cleanup (2026-07-12) ────────────────────
+const COMM = "community-coconut";
+const communityFixInput = (over: Record<string, unknown> = {}) => ({
+  communityFolder: COMM,
+  photoVerdicts: [
+    { id: "C1", folder: COMM, filename: "red.jpg", match: "no" as const },
+    { id: "C2", folder: COMM, filename: "yellow.jpg", match: "uncertain" as const },
+    { id: "C3", folder: COMM, filename: "junky.jpg", match: "yes" as const },
+    { id: "C4", folder: COMM, filename: "dupe.jpg", match: "yes" as const },
+  ],
+  junk: [{ id: "C3", reason: "floor plan" }],
+  duplicates: [
+    { scope: "cross-folder", a: { folder: COMM, filename: "dupe.jpg" }, b: { folder: "unit-a", filename: "dupe.jpg" } },
+    { scope: "cross-folder", a: { folder: "unit-a", filename: "shared.jpg" }, b: { folder: "unit-b", filename: "shared.jpg" } },
+  ],
+  visibleCount: 10,
+  ...over,
+});
+
+check("community fix: hides RED votes + junk (via verdict id) + community-side cross-dupes; yellow NEVER hidden",
+  (() => {
+    const sel = communityPhotoFixSelections(communityFixInput());
+    const files = sel.hide.map((h) => h.filename);
+    return files.includes("red.jpg") && files.includes("junky.jpg") && files.includes("dupe.jpg") &&
+      !files.includes("yellow.jpg") && sel.hide.every((h) => h.folder === COMM);
+  })());
+
+check("community fix: unit↔unit cross-dupes are review-only (never auto-picked)",
+  (() => {
+    const sel = communityPhotoFixSelections(communityFixInput());
+    return sel.reviewOnly.length === 1 && /shared\.jpg/.test(sel.reviewOnly[0]) &&
+      !sel.hide.some((h) => h.filename === "shared.jpg");
+  })());
+
+check("community fix: floor caps the hide list — no-loss cross-dupes rank first, then junk, then red votes",
+  (() => {
+    const sel = communityPhotoFixSelections(communityFixInput({ visibleCount: 4 }));
+    // 4 visible − floor 3 = 1 hide allowed; the cross-dupe (zero content loss) wins.
+    return sel.hide.length === 1 && sel.hide[0].filename === "dupe.jpg" && sel.skippedForFloor === 2;
+  })());
+
+check("community fix: never hides photos from other folders and dedupes repeats",
+  (() => {
+    const sel = communityPhotoFixSelections(communityFixInput({
+      photoVerdicts: [
+        { id: "U1", folder: "unit-a", filename: "u.jpg", match: "no" as const },
+        { id: "C1", folder: COMM, filename: "red.jpg", match: "no" as const },
+      ],
+      junk: [{ id: "C1", reason: "also junk" }],
+      duplicates: [],
+    }));
+    return sel.hide.length === 1 && sel.hide[0].filename === "red.jpg";
+  })());
+
+// ── Amenity presence: push-parity normalization (2026-07-12) ─────────────────
+check("normalizeGuestyAmenityName matches the push route's norm() semantics",
+  normalizeGuestyAmenityName("BBQ / Grill") === "bbq grill" &&
+  normalizeGuestyAmenityName("Outdoor seating (furniture)") === "outdoor seating furniture" &&
+  normalizeGuestyAmenityName("AIR_CONDITIONING") === "air conditioning");
+
+check("amenityPresenceCandidates: alias target + label + key, all normalized (OCEAN_VIEW finds Guesty's 'Sea view')",
+  (() => {
+    const c = amenityPresenceCandidates("OCEAN_VIEW");
+    return c.includes("sea view") && c.includes("ocean view");
+  })());
+
+check("amenityPresenceCandidates: a pushed listing name matches through the candidates (the false-'27 missing' class)",
+  (() => {
+    const stored = ["Sea view", "BBQ grill", "Wireless Internet"].map(normalizeGuestyAmenityName);
+    const present = new Set(stored);
+    return ["OCEAN_VIEW", "BBQ_GRILL", "WIFI"].every((k) =>
+      amenityPresenceCandidates(k).some((cand) => present.has(cand)));
   })());
 
 // ── Prototype-pollution guard (CodeQL, PR #1013) ─────────────────────────────
@@ -420,8 +507,8 @@ check("fix: cover collage drives the one-click AI endpoint with published-photo 
 check("fix: pricing refresh drives the per-property refresh+push path (cores) / draft refresh-pricing, only when the verify found a refreshable problem",
   serverSrc.includes("/refresh-market-rates") && serverSrc.includes("/refresh-pricing") && serverSrc.includes("needsRefresh"));
 
-check("fix: layout deliberately never pushes (Bedding-tab config lives in browser localStorage) — the sweep only GETs from Guesty",
-  !serverSrc.includes("listingRooms") && !/loopbackJson\("PUT"/.test(serverSrc) &&
+check("fix: layout deliberately never pushes (Bedding-tab config lives in browser localStorage) — the sweep never PUTs to Guesty",
+  !serverSrc.includes("listingRooms") && !/"PUT", `\/api\/guesty/.test(serverSrc) &&
   /never overwrites a layout/.test(serverSrc));
 
 check("fix: global kill switch UNIT_AUDIT_AUTOFIX_DISABLED gates every fix path",
@@ -457,6 +544,33 @@ check("ladder: AUDIT_PHOTO_FIX=0 skips the stage",
 check("bulk: startUnitAuditSweepBulk dedupes ids and funnels through the global concurrency slot",
   serverSrc.includes("startUnitAuditSweepBulk") && serverSrc.includes("acquireSweepSlot") &&
   serverSrc.includes("UNIT_AUDIT_CONCURRENCY"));
+
+// ── Source guards: 2026-07-12 receipt fixes ──────────────────────────────────
+check("amenity verify: reads {amenities, otherAmenities} via the SAME endpoint the push union uses + push-parity candidates",
+  serverSrc.includes("/api/builder/guesty-amenities?listingId=") &&
+  serverSrc.includes("otherAmenities") &&
+  serverSrc.includes("amenityPresenceCandidates") &&
+  serverSrc.includes("normalizeGuestyAmenityName"));
+
+check("amenity normalizer drift-lock: routes' inline norm() and the shared normalizer are byte-identical",
+  (() => {
+    const impl = 's.toLowerCase().replace(/[_\\-/&]+/g, " ").replace(/[^a-z0-9 ]/g, "").replace(/\\s+/g, " ").trim()';
+    const routesSrcLocal = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+    const catalogSrc = readFileSync(new URL("../shared/guesty-amenity-catalog.ts", import.meta.url), "utf8");
+    return routesSrcLocal.includes(impl) && catalogSrc.includes(impl);
+  })());
+
+check("community ladder: flagged photos hidden via the photo-labels soft-delete PUT (insert-on-miss, undoable)",
+  serverSrc.includes("communityPhotoFixSelections") && serverSrc.includes("/api/photo-labels/"));
+
+check("community ladder: still-wrong folder escalates to the existing Find-new-community-photos repull job",
+  serverSrc.includes("startCommunityPhotoRepullJob") && serverSrc.includes("getCommunityPhotoRepullJob"));
+
+check("dedupe stage: same-scene auto-apply is env-gated (AUDIT_DEDUPE_SAME_SCENE=0 restores review-only)",
+  serverSrc.includes("AUDIT_DEDUPE_SAME_SCENE") && serverSrc.includes("includeSameScene"));
+
+check("photo-fix honesty: 'nothing to fix' can never render under a failed photo stage",
+  serverSrc.includes("no automatic remedy") && /photoRowsBad/.test(serverSrc));
 
 // ── Source guards: wiring ────────────────────────────────────────────────────
 const routesSrc = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
