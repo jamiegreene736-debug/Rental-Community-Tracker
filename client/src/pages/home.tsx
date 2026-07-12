@@ -72,6 +72,7 @@ import {
 import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { occupancyForBedrooms } from "@/data/bedding-config";
 import { isScannableFolder, replacementPhotoFolderRef } from "@shared/photo-folder-utils";
+import { subThresholdVerifiedMatches } from "@shared/photo-listing-decision";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
 import { UnitReplacementFlow, findLiveReplacementJobRef, type ReplacementUnitData } from "@/components/unit-replacement-flow";
@@ -2505,14 +2506,19 @@ function AdminDashboard() {
   // any one folder is what Jamie cares about; UNKNOWN is inconclusive,
   // not match evidence.
   type PhotoStatus = "clean" | "found" | "unknown";
+  // `verified` marks a match that passed the scanner's FULL cross-validation (community +
+  // unit-number-in-page-text). One verified match on a "clean" platform renders the display-only
+  // amber REVIEW badge (subThresholdVerifiedMatches) — below the 2-photo red threshold, so it never
+  // raises the red duplicate-photos popup and never feeds the auto-replace machinery.
+  type PhotoMatchRow = { photoUrl: string; listingUrl: string; title: string; source: string; verified?: boolean };
   type PhotoCheckRow = {
     folder: string;
     airbnbStatus: PhotoStatus;
     vrboStatus: PhotoStatus;
     bookingStatus: PhotoStatus;
-    airbnbMatches: Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
-    vrboMatches:   Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
-    bookingMatches:Array<{ photoUrl: string; listingUrl: string; title: string; source: string }>;
+    airbnbMatches: PhotoMatchRow[];
+    vrboMatches:   PhotoMatchRow[];
+    bookingMatches: PhotoMatchRow[];
     airbnbAddressStatus?: PhotoStatus;
     vrboAddressStatus?: PhotoStatus;
     bookingAddressStatus?: PhotoStatus;
@@ -2655,6 +2661,15 @@ function AdminDashboard() {
       vrbo: PhotoMatchedUnit[];
       booking: PhotoMatchedUnit[];
     };
+    // REVIEW tier (display-only): verified sub-threshold matches — a platform that stayed "clean"
+    // (below the 2-photo red bar) but has >=1 FULLY-VERIFIED match. Renders an amber "!" badge;
+    // deliberately excluded from duplicateUnits so it never raises the red popup or any auto-fix.
+    reviewCounts: { airbnb: number; vrbo: number; booking: number };
+    reviewUnits: {
+      airbnb: PhotoMatchedUnit[];
+      vrbo: PhotoMatchedUnit[];
+      booking: PhotoMatchedUnit[];
+    };
     // Address-on-OTA leg: worst per-platform status + total address matches.
     addr: { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus };
     addressMatchCount: number;
@@ -2753,6 +2768,8 @@ function AdminDashboard() {
         lastCheckedAt: null,
         matchCounts: { airbnb: 0, vrbo: 0, booking: 0 },
         matchedUnits: { airbnb: [], vrbo: [], booking: [] },
+        reviewCounts: { airbnb: 0, vrbo: 0, booking: 0 },
+        reviewUnits: { airbnb: [], vrbo: [], booking: [] },
         addr: { airbnb: null, vrbo: null, booking: null },
         addressMatchCount: 0,
         duplicateUnits: [],
@@ -2775,6 +2792,22 @@ function AdminDashboard() {
             existing.matches += matches;
           } else {
             agg.matchedUnits[platform].push({ ...owner, folder, matches });
+          }
+        }
+      };
+      const addReviewUnits = (platform: PhotoPlatform, folder: string, matches: number) => {
+        if (matches <= 0) return;
+        agg.reviewCounts[platform] += matches;
+        const owners = Array.from(folderOwners.get(folder)?.values() ?? []);
+        const affected = owners.length > 0
+          ? owners
+          : [{ label: "Unit folder", detailLabel: folder }];
+        for (const owner of affected) {
+          const existing = agg.reviewUnits[platform].find((unit) => unit.label === owner.label);
+          if (existing) {
+            existing.matches += matches;
+          } else {
+            agg.reviewUnits[platform].push({ ...owner, folder, matches });
           }
         }
       };
@@ -2808,6 +2841,10 @@ function AdminDashboard() {
         addMatchedUnits("airbnb", f, row.airbnbMatches?.length ?? 0);
         addMatchedUnits("vrbo", f, row.vrboMatches?.length ?? 0);
         addMatchedUnits("booking", f, row.bookingMatches?.length ?? 0);
+        // Review tier: verified matches on a NOT-found platform (one photo short of the red bar).
+        addReviewUnits("airbnb", f, subThresholdVerifiedMatches(row.airbnbStatus, row.airbnbMatches));
+        addReviewUnits("vrbo", f, subThresholdVerifiedMatches(row.vrboStatus, row.vrboMatches));
+        addReviewUnits("booking", f, subThresholdVerifiedMatches(row.bookingStatus, row.bookingMatches));
         const foundPlatforms: DuplicatePhotoPlatform[] = [];
         if (row.airbnbStatus === "found") foundPlatforms.push("airbnb");
         if (row.vrboStatus === "found") foundPlatforms.push("vrbo");
@@ -6297,10 +6334,10 @@ function AdminDashboard() {
                         if (labels.length <= 1) return labels[0] ?? "unit folder";
                         return `${labels.slice(0, -1).join(", ")} + ${labels[labels.length - 1]}`;
                       };
-                      const items: Array<{ letter: string; name: string; status: PhotoAggStatus; matches: number; units: PhotoMatchedUnit[] }> = [
-                        { letter: "A", name: "Airbnb",       status: agg?.airbnb  ?? null, matches: agg?.matchCounts.airbnb  ?? 0, units: agg?.matchedUnits.airbnb ?? [] },
-                        { letter: "V", name: "VRBO",         status: agg?.vrbo    ?? null, matches: agg?.matchCounts.vrbo    ?? 0, units: agg?.matchedUnits.vrbo ?? [] },
-                        { letter: "B", name: "Booking.com",  status: agg?.booking ?? null, matches: agg?.matchCounts.booking ?? 0, units: agg?.matchedUnits.booking ?? [] },
+                      const items: Array<{ letter: string; name: string; status: PhotoAggStatus; matches: number; units: PhotoMatchedUnit[]; review: number; reviewUnits: PhotoMatchedUnit[] }> = [
+                        { letter: "A", name: "Airbnb",       status: agg?.airbnb  ?? null, matches: agg?.matchCounts.airbnb  ?? 0, units: agg?.matchedUnits.airbnb ?? [], review: agg?.reviewCounts.airbnb ?? 0, reviewUnits: agg?.reviewUnits.airbnb ?? [] },
+                        { letter: "V", name: "VRBO",         status: agg?.vrbo    ?? null, matches: agg?.matchCounts.vrbo    ?? 0, units: agg?.matchedUnits.vrbo ?? [], review: agg?.reviewCounts.vrbo ?? 0, reviewUnits: agg?.reviewUnits.vrbo ?? [] },
+                        { letter: "B", name: "Booking.com",  status: agg?.booking ?? null, matches: agg?.matchCounts.booking ?? 0, units: agg?.matchedUnits.booking ?? [], review: agg?.reviewCounts.booking ?? 0, reviewUnits: agg?.reviewUnits.booking ?? [] },
                       ];
                       const matchedSummary = items
                         .filter((it) => it.status === "found")
@@ -6321,13 +6358,18 @@ function AdminDashboard() {
                         <div className="flex flex-col items-center gap-0.5" data-testid={`photo-match-${property.id}`}>
                           <div className="flex gap-1 justify-center items-center">
                             {items.map((it) => {
-                              const tone = toneOf(it.status);
+                              // REVIEW tier: below the 2-photo red bar but with >=1 fully-verified
+                              // match — amber "!" so a single-photo repost isn't invisible. Display
+                              // only: red (found) still wins, and review never raises the popup.
+                              const isReview = it.status !== "found" && it.review > 0;
+                              const tone = it.status === "found" ? "bad" : isReview ? "warn" : toneOf(it.status);
                               const p = PAL[tone];
                               const affected = it.status === "found" ? `; change photos for ${unitList(it.units, "detailLabel")}` : "";
                               const tip =
                                 noFolders ? `${it.name}: no scannable units — backfill real unit numbers in unit-builder-data to enable scanning` :
-                                it.status === "clean" ? `${it.name}: no matches (last checked ${stamp})` :
                                 it.status === "found" ? `${it.name}: ${it.matches} match${it.matches === 1 ? "" : "es"} found${affected} (last checked ${stamp})` :
+                                isReview ? `${it.name}: ${it.review} photo${it.review === 1 ? "" : "s"} verified on a listing (${unitList(it.reviewUnits, "detailLabel")}) — below the 2-photo red threshold; review manually (last checked ${stamp})` :
+                                it.status === "clean" ? `${it.name}: no matches (last checked ${stamp})` :
                                 it.status === "unknown" ? `${it.name}: inconclusive, not a match (${stamp})${errorPreview ? ` — ${errorPreview}` : ""}` :
                                 `${it.name}: not checked yet`;
                               return (

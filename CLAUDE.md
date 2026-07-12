@@ -43,6 +43,31 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-12 (photo-listing cron: found→fix latency + outage retry + review tier + operator SMS):
+  Operator asked to investigate the weekly photo-scan cron (photos found on Airbnb/VRBO/Booking →
+  red flag → replace/swap) and implement all 4 improvements found, then merge. SHIPPED
+  (`claude/listings-photo-detection-778279`): (1) FOUND-FLIP REACTION — the weekly scheduler now
+  passes `onNewDetection` and a non-found→found flip immediately queues a Unit Audit Sweep for the
+  owning property (`server/photo-found-reactions.ts`; source:"cron" so ALL replacement rails apply —
+  proven shortfall, 28-day cooldown, SHARED weekly budget never reset reactively — and the fresh OTA
+  row is reused, no double Lens). Flips only + scheduler-path only (on-demand checks and the sweep's
+  own rescans never react — recursion guard); drafts must be Guesty-mapped; dedupe = startUnitAuditSweep
+  returning the active job. Kill `PHOTO_FOUND_AUTO_AUDIT_DISABLED=1`. (2) INCONCLUSIVE rows (all-unknown,
+  "Lens unavailable", or outage-preserved statuses) re-scan after `PHOTO_LISTING_INCONCLUSIVE_RETRY_HOURS`
+  (24; 0 disables) instead of waiting the 7-day cadence — pure `photoListingScanWasInconclusive`;
+  persist()'s preservation note is now the shared `INCONCLUSIVE_SCAN_NOTE` constant (drift-locked,
+  don't inline-reword it). (3) REVIEW tier — verified hits carry `verified:true` in the match JSON;
+  a "clean" platform with ≥1 verified match renders an amber "A!/V!/B!" badge (pure
+  `subThresholdVerifiedMatches`) so a single-photo repost isn't invisible; DISPLAY-ONLY — never raises
+  the red popup, never feeds auto-replace. (4) OPERATOR SMS ALERTS (`server/operator-alerts.ts`,
+  sendQuoSms conversationId:null, fail-soft, app_settings dedup `operator_alerts.recent.v1`, ~1 text
+  per condition per week) for photo-found flips (+queued-sweep outcome), address-found flips (takedown),
+  and cron replace cooldown/budget blocks — DORMANT until the operator sets `OPERATOR_ALERT_PHONE` on
+  Railway. Verified: photo-listing-decision 29/0 (9 source guards), full `npm test` exit 0, build clean
+  (env/strings bundle-grepped in BOTH bundles), `npm run check` 338 = baseline (stash A/B identical
+  error sets). Could NOT live-smoke Lens/SMS (no keys) — post-deploy: set OPERATOR_ALERT_PHONE to get
+  texts; flip-reaction + 24h retry are automatic on the next scheduler tick.
+
 - 2026-07-12 (cron UNIT REPLACEMENT ON — "1 bedroom photo on a 3BR = swap it, 100% automated"): Operator
   directive; supersedes the same-day cron replacement-OFF default. Weekly auto-audit sweeps now run
   the FULL photo ladder including unit replacement (`UNIT_AUDIT_CRON_REPLACE=0` restores flag-only),

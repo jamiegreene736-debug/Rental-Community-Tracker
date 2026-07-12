@@ -94,6 +94,7 @@ import { listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import { isAutoReplacePhaseActive, draftUnitIdForSlot } from "@shared/auto-replace-job-logic";
 import { latestUnitSwapsByUnit } from "@shared/unit-swap-photos";
 import { loopbackRequestHeaders } from "./auth";
+import { sendOperatorAlert } from "./operator-alerts";
 import { storage } from "./storage";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
@@ -982,12 +983,23 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
           anyOnCooldown = true;
           blockedSoft = true;
           items.push(`${plan.ref.label}: replacement skipped — this unit was already swapped within the last ${cooldownDays} days and is still short (anti-churn cooldown); this community may have no better unit — run a manual sweep to force another swap`);
+          // Cooldown/budget blocks are exactly the cases the automation deliberately leaves to a
+          // human, and the cron runs unattended — text the operator (fail-soft, dedup keeps this
+          // to one message per unit per weekly cycle).
+          void sendOperatorAlert({
+            dedupKey: `replace-blocked-cooldown:${target.propertyId}:${plan.ref.unitId}`,
+            body: `Weekly audit: ${record.propertyName} — ${plan.ref.label} still needs a unit replacement but was swapped within the last ${cooldownDays} days (anti-churn cooldown). This community may have no better unit; run a manual audit sweep to force another swap.`,
+          });
           break;
         }
         if (!consumeCronReplaceBudget()) {
           anyBudgetSpent = true;
           blockedSoft = true;
           items.push(`${plan.ref.label}: replacement skipped — this weekly run's replacement budget (UNIT_AUDIT_CRON_REPLACE_CAP) is spent; next week's run or a manual sweep picks it up`);
+          void sendOperatorAlert({
+            dedupKey: `replace-blocked-budget:${target.propertyId}:${plan.ref.unitId}`,
+            body: `Weekly audit: ${record.propertyName} — ${plan.ref.label} needs a unit replacement but this week's replacement budget is spent. Next week's run picks it up, or run a manual audit sweep now.`,
+          });
           break;
         }
       }
