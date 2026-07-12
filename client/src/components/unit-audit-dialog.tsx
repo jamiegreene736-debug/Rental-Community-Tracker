@@ -137,13 +137,20 @@ export function UnitAuditDialog({ propertyId, propertyName, open, onOpenChange, 
   const job = jobId ? jobData?.job ?? null : null;
   const jobActive = !!job && isUnitAuditStatusActive(job.status);
 
-  // When a watched sweep lands, refresh the column badge + Comm QA (the
-  // community stage persists a fresh full check).
+  // When a watched sweep lands, refresh every dashboard column its stages can
+  // write to: the Audit badge, Comm QA (the community stage persists a fresh
+  // full check), Last Price Scan (the pricing leg refreshes + pushes rates —
+  // 2026-07-12 Coconut Plantation incident: the DB stamp landed but the
+  // column's cached query never refetched), Photos (photo-fix kicks OTA
+  // rescans), and drafts (pricing updates estimatedLow/HighRate).
   const jobStatus = job?.status;
   useEffect(() => {
     if (!jobStatus || isUnitAuditStatusActive(jobStatus)) return;
     void queryClient.invalidateQueries({ queryKey: ["/api/dashboard/unit-audit-status"] });
     void queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
+    void queryClient.invalidateQueries({ queryKey: ["/api/dashboard/price-scans"] });
+    void queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
+    void queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
   }, [jobStatus, queryClient]);
 
   const report = status?.reports?.[String(propertyId)] ?? null;
