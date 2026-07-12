@@ -58,6 +58,7 @@ import {
   communityPhotoFixSelections,
   dedupeAutoFixSelections,
   photoFixRungsForUnit,
+  replaceRungOnCooldown,
   type PhotoFixRung,
   MAX_UNIT_AUDIT_RESUMES,
   UNIT_AUDIT_REPORTS_SETTING_KEY,
@@ -91,6 +92,7 @@ import { getPreflightPhotoFetchJob, startPreflightPhotoFetchJob } from "./prefli
 import { getCommunityPhotoRepullJob, startCommunityPhotoRepullJob } from "./community-photo-repull";
 import { listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import { isAutoReplacePhaseActive, draftUnitIdForSlot } from "@shared/auto-replace-job-logic";
+import { latestUnitSwapsByUnit } from "@shared/unit-swap-photos";
 import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
 
@@ -640,21 +642,58 @@ const PHOTO_FIX_LABEL_WAIT_MS = 240_000;
 // bedroom engine selects candidates BY caption/category, so checking before
 // the async auto-labeler finishes false-fails 0/N (the 2026-07-07 combo-gate
 // root cause). Poll until every published file has a label row, bounded.
+async function folderLabelsComplete(folder: string): Promise<boolean> {
+  try {
+    const files = await listPublishedFilenames(folder);
+    if (files.length === 0) return true;
+    const labeled = new Set((await storage.getPhotoLabelsByFolder(folder)).map((l) => l.filename));
+    return files.every((f) => labeled.has(f));
+  } catch {
+    return false; // transient — treat as incomplete so callers wait/retry
+  }
+}
+
 async function waitForFolderLabels(folder: string, timeoutMs = PHOTO_FIX_LABEL_WAIT_MS): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    try {
-      const files = await listPublishedFilenames(folder);
-      if (files.length === 0) return true;
-      const labeled = new Set((await storage.getPhotoLabelsByFolder(folder)).map((l) => l.filename));
-      if (files.every((f) => labeled.has(f))) return true;
-    } catch {
-      // transient — keep polling
-    }
+    if (await folderLabelsComplete(folder)) return true;
     if (Date.now() > deadline) return false;
     await new Promise((r) => setTimeout(r, 5_000));
   }
 }
+
+// Unattended-replacement rails (2026-07-12, operator: a 3BR with one bedroom
+// photo "100% needs to be automated"):
+//  • cooldown — a unit whose photos already came from a swap inside the
+//    window is never cron-swapped again (anti-churn in communities with no
+//    better unit). Manual sweeps are exempt — an operator click is explicit.
+//  • budget — each weekly cron run may commit at most N replacements (each
+//    is a full SearchAPI find sweep); the scheduler resets it per run.
+async function lastSwapAtForUnit(propertyId: number, unitId: string): Promise<number | null> {
+  const swaps = await storage.getUnitSwaps(propertyId).catch(() => []);
+  const latest = latestUnitSwapsByUnit(swaps as Array<{ oldUnitId: string }>);
+  const s: any = latest.get(unitId);
+  const t = s?.createdAt ? new Date(s.createdAt).getTime() : NaN;
+  return Number.isFinite(t) ? t : null;
+}
+
+const cronReplaceCap = () => Math.max(0, Number(process.env.UNIT_AUDIT_CRON_REPLACE_CAP ?? "3") || 3);
+let cronReplaceBudgetRemaining = cronReplaceCap();
+export function resetCronReplaceBudget(): number {
+  cronReplaceBudgetRemaining = cronReplaceCap();
+  return cronReplaceBudgetRemaining;
+}
+function consumeCronReplaceBudget(): boolean {
+  if (cronReplaceBudgetRemaining <= 0) return false;
+  cronReplaceBudgetRemaining -= 1;
+  return true;
+}
+
+// Units replaced earlier in the CURRENT sweep — downstream stages regenerate
+// copy/collage from the NEW unit's facts instead of trusting stale content.
+// In-memory on purpose (a resume mid-sweep loses the hint; the next weekly
+// run heals any staleness).
+const replacedThisSweep = new Set<string>();
 
 async function runPhotoFixRung(
   rung: PhotoFixRung,
@@ -848,6 +887,35 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
 
   const problems = communityResult ? communityProblemsByUnit(communityResult) : new Map<string, { bedroomShort: boolean; communityMismatch: boolean }>();
 
+  // PROVE a bedroom shortfall before the ladder may act on it (2026-07-12,
+  // unattended-replacement rail #1): the bedroom engine reads photo LABELS,
+  // written asynchronously after any photo change — a labeling race reading
+  // "1/3 bedrooms" must never trigger a swap. If any short unit's folder has
+  // unlabeled files, wait for the auto-labeler and re-verify; only a
+  // labels-complete shortfall survives into the plans below.
+  const shortLabels = Array.from(problems.entries()).filter(([, p]) => p.bedroomShort).map(([label]) => label);
+  if (shortLabels.length > 0) {
+    let raced = false;
+    for (const label of shortLabels) {
+      const folder = unitGroups(target).find((g) => g.label === label)?.folder;
+      if (!folder) continue;
+      if (!(await folderLabelsComplete(folder))) {
+        raced = true;
+        touch(record, { message: `${label}: photo labels still generating — waiting before trusting the bedroom count…` });
+        await waitForFolderLabels(folder);
+      }
+    }
+    if (raced) {
+      const recheck = await runCommunityCheck(target, record, "Re-verifying bedroom coverage with labels complete (a labeling race must never trigger a swap)…");
+      if (recheck.ok) {
+        communityResult = recheck.result;
+        problems.clear();
+        for (const [k, v] of Array.from(communityProblemsByUnit(recheck.result).entries())) problems.set(k, v);
+        items.push("Bedroom shortfall re-verified with photo labels complete before any fix ran");
+      }
+    }
+  }
+
   const otaFoundByLabel = new Set<string>();
   for (const g of unitGroups(target)) {
     const row = await storage.getPhotoListingCheckByFolder(g.folder).catch(() => undefined);
@@ -891,10 +959,13 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
 
   const replaceAllowed = record.allowReplace && String(process.env.AUDIT_REPLACE_DISABLED ?? "").trim() !== "1";
 
+  let anyOnCooldown = false;
+  let anyBudgetSpent = false;
   for (const plan of plans) {
     items.push(`${plan.ref.label}: ${plan.why.join("; ")} → ladder: ${plan.rungs.join(" → ")}`);
     let healed = false;
     let blockedOnPermission = false;
+    let blockedSoft = false;
     for (const rung of plan.rungs) {
       if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
       if (rung === "replace" && !replaceAllowed) {
@@ -902,9 +973,30 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
         items.push(`${plan.ref.label}: replacement rung skipped (${record.allowReplace ? "AUDIT_REPLACE_DISABLED=1" : "unit replacement unchecked for this run"}) — use Replace photos on the dashboard popup`);
         break;
       }
+      // Unattended (cron) replacements only: anti-churn cooldown + per-run
+      // budget. Manual sweeps skip both — an operator click is explicit.
+      if (rung === "replace" && record.source === "cron") {
+        const cooldownDays = Math.max(0, Number(process.env.AUDIT_REPLACE_COOLDOWN_DAYS ?? "28") || 0);
+        const lastSwapAt = await lastSwapAtForUnit(target.propertyId, plan.ref.unitId);
+        if (replaceRungOnCooldown(lastSwapAt, Date.now(), cooldownDays)) {
+          anyOnCooldown = true;
+          blockedSoft = true;
+          items.push(`${plan.ref.label}: replacement skipped — this unit was already swapped within the last ${cooldownDays} days and is still short (anti-churn cooldown); this community may have no better unit — run a manual sweep to force another swap`);
+          break;
+        }
+        if (!consumeCronReplaceBudget()) {
+          anyBudgetSpent = true;
+          blockedSoft = true;
+          items.push(`${plan.ref.label}: replacement skipped — this weekly run's replacement budget (UNIT_AUDIT_CRON_REPLACE_CAP) is spent; next week's run or a manual sweep picks it up`);
+          break;
+        }
+      }
       const rungResult = await runPhotoFixRung(rung, target, plan.ref, plan.folder, record);
       items.push(`${plan.ref.label}: ${rung} — ${rungResult.ok ? rungResult.note : `✕ ${rungResult.note}`}`);
       if (!rungResult.ok) continue;
+      // A committed swap means downstream stages must re-ground content in
+      // the NEW unit (descriptions regenerate, collage re-composes).
+      if (rung === "replace") replacedThisSweep.add(record.jobId);
 
       // Photos changed: re-resolve the target (active folders may have moved),
       // wait for the auto-labeler, then re-check. Later stages read the
@@ -943,7 +1035,7 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     }
     if (!healed) {
       if (blockedOnPermission) anyNeedsReplacePermission = true;
-      else anyStillFailing = true;
+      else if (!blockedSoft) anyStillFailing = true;
     }
   }
 
@@ -988,6 +1080,15 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     return {
       verdict: "attention",
       detail: "Fixing these photos needs a unit replacement, which this run wasn't allowed to do — re-run with \"Allow unit replacement\" checked or use Replace photos on the dashboard popup.",
+      items,
+    };
+  }
+  if (anyOnCooldown || anyBudgetSpent) {
+    return {
+      verdict: "attention",
+      detail: anyOnCooldown
+        ? "A unit still needs replacing but was already swapped recently (anti-churn cooldown) — this community may have no better unit; a manual sweep forces another attempt."
+        : "A unit still needs replacing but this weekly run's replacement budget is spent — next week's run (or a manual sweep) picks it up.",
       items,
     };
   }
@@ -1152,8 +1253,13 @@ async function stageDescriptions(target: UnitAuditTarget, record: UnitAuditJobRe
   const items: string[] = [...problems.items];
 
   let fixedNote = "";
-  const needsFix = problems.placeholderFields.length > 0 || problems.embeddedHeaders.length > 0 || problems.emptySummary;
+  // A unit replaced earlier in THIS sweep means the copy describes the OLD
+  // unit — regenerate from the NEW unit's source listing even if the old
+  // copy was otherwise clean (post-swap follow-through, 2026-07-12).
+  const forcedBySwap = replacedThisSweep.has(record.jobId);
+  const needsFix = problems.placeholderFields.length > 0 || problems.embeddedHeaders.length > 0 || problems.emptySummary || forcedBySwap;
   if (needsFix && autoFixEnabled(record)) {
+    if (forcedBySwap) items.push("Regenerating because a unit was replaced earlier in this sweep — grounding the copy in the NEW unit's source listing");
     touch(record, { message: "Regenerating descriptions from the real source listings (Claude)…" });
     const fix = await regenerateDescriptionsForTarget(target);
     items.push(fix.ok ? `Auto-fixed: ${fix.note}` : `Auto-fix failed: ${fix.note}`);
@@ -1311,7 +1417,11 @@ async function stageCoverCollage(target: UnitAuditTarget, record: UnitAuditJobRe
   }
   let recordRow: any = await readCoverCollageRecord(target.guestyListingId);
   let fixedNote = "";
-  if (!recordRow && autoFixEnabled(record)) {
+  // A unit replaced earlier in THIS sweep may be featured on the existing
+  // collage — re-compose from the surviving photo set (post-swap
+  // follow-through, 2026-07-12).
+  const collageStaleFromSwap = !!recordRow && replacedThisSweep.has(record.jobId);
+  if ((!recordRow || collageStaleFromSwap) && autoFixEnabled(record)) {
     // AUTO-FIX: the one-click AI collage — same endpoint the Photos-tab
     // button drives, candidates built from the resolved PUBLISHED photos
     // (hidden files never reach the pick; community-group labels keep the
@@ -1339,7 +1449,9 @@ async function stageCoverCollage(target: UnitAuditTarget, record: UnitAuditJobRe
       };
     }
     recordRow = await readCoverCollageRecord(target.guestyListingId);
-    fixedNote = "AI cover collage generated, pushed to Guesty (pinned first), and saved in-system";
+    fixedNote = collageStaleFromSwap
+      ? "AI cover collage re-composed after this sweep's unit replacement, pushed to Guesty (pinned first)"
+      : "AI cover collage generated, pushed to Guesty (pinned first), and saved in-system";
   }
   if (!recordRow) {
     return {
@@ -1722,6 +1834,7 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
     cancelRequested.delete(record.jobId);
     targets.delete(record.jobId);
     communityResults.delete(record.jobId);
+    replacedThisSweep.delete(record.jobId);
   }
 }
 

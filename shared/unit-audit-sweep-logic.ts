@@ -546,6 +546,21 @@ export function photoFixRungsForUnit(problem: {
   return [];
 }
 
+// ── Cron replacement anti-churn cooldown (2026-07-12) ────────────────────────
+// An UNATTENDED weekly swap must not ping-pong a unit in a community where no
+// candidate can ever satisfy bedroom coverage: if the unit's photos already
+// came from a swap within the cooldown and coverage is STILL short, the cron
+// flags instead of swapping again. Manual sweeps are exempt — an operator
+// click is an explicit ask.
+export function replaceRungOnCooldown(
+  lastSwapAtMs: number | null,
+  nowMs: number,
+  cooldownDays: number,
+): boolean {
+  if (lastSwapAtMs == null || !Number.isFinite(lastSwapAtMs) || cooldownDays <= 0) return false;
+  return nowMs - lastSwapAtMs < cooldownDays * 24 * 60 * 60 * 1000;
+}
+
 // Queue summary (active first, then recent terminals) — mirrors the
 // auto-replace queue chip semantics.
 export const UNIT_AUDIT_SURFACE_TERMINAL_MS = 2 * 60 * 60 * 1000;

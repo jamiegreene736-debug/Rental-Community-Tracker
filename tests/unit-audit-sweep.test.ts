@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import {
   communityPhotoFixSelections,
   dedupeAutoFixSelections,
+  replaceRungOnCooldown,
   lookupUnitAuditRecord,
   photoFixRungsForUnit,
   MAX_UNIT_AUDIT_RESUMES,
@@ -165,6 +166,13 @@ check("ladder: OTA-found photos go straight to unit replacement (any photo of th
 
 check("ladder: no problems → no rungs",
   photoFixRungsForUnit({}).length === 0);
+
+// ── Cron replacement rails (2026-07-12) ──────────────────────────────────────
+check("cooldown: a swap inside the window blocks another cron swap; outside/never/0-days does not",
+  replaceRungOnCooldown(NOW - 5 * 86_400_000, NOW, 28) === true &&
+  replaceRungOnCooldown(NOW - 40 * 86_400_000, NOW, 28) === false &&
+  replaceRungOnCooldown(null, NOW, 28) === false &&
+  replaceRungOnCooldown(NOW - 5 * 86_400_000, NOW, 0) === false);
 
 // ── Auto-fix: duplicate-photo selection (PR 2; same-scene opt-in 2026-07-12) ─
 const DEDUPE_GROUPS = [
@@ -581,6 +589,32 @@ check("dedupe stage: same-scene auto-apply is env-gated (AUDIT_DEDUPE_SAME_SCENE
 check("photo-fix honesty: 'nothing to fix' can never render under a failed photo stage",
   serverSrc.includes("no automatic remedy") && /photoRowsBad/.test(serverSrc));
 
+// ── Source guards: unattended-replacement rails (2026-07-12) ─────────────────
+check("rail 1: a bedroom shortfall must be PROVEN with photo labels complete before the ladder acts",
+  serverSrc.includes("folderLabelsComplete") &&
+  /labeling race/.test(serverSrc) &&
+  serverSrc.includes("Re-verifying bedroom coverage with labels complete"));
+
+check("rail 2: cron swaps honor the anti-churn cooldown via the unit's swap history (manual sweeps exempt)",
+  serverSrc.includes("AUDIT_REPLACE_COOLDOWN_DAYS") &&
+  serverSrc.includes("lastSwapAtForUnit") &&
+  serverSrc.includes("latestUnitSwapsByUnit") &&
+  /rung === "replace" && record\.source === "cron"/.test(serverSrc));
+
+check("rail 3: cron swaps draw from a per-run budget the scheduler resets",
+  serverSrc.includes("UNIT_AUDIT_CRON_REPLACE_CAP") &&
+  serverSrc.includes("consumeCronReplaceBudget") &&
+  serverSrc.includes("export function resetCronReplaceBudget"));
+
+check("rails: cooldown/budget blocks report attention, never a hard fail",
+  serverSrc.includes("anyOnCooldown") && serverSrc.includes("anyBudgetSpent") &&
+  /blockedSoft/.test(serverSrc));
+
+check("post-swap follow-through: descriptions regenerate + collage re-composes after a replacement this sweep",
+  serverSrc.includes("replacedThisSweep") &&
+  serverSrc.includes("forcedBySwap") &&
+  serverSrc.includes("collageStaleFromSwap"));
+
 // ── Source guards: weekly auto-audit scheduler (2026-07-12) ──────────────────
 const schedulerSrc = readFileSync(new URL("../server/unit-audit-scheduler.ts", import.meta.url), "utf8");
 check("scheduler: last-run persisted in app_settings, stamped at START, first boot anchored (never fires at deploy)",
@@ -592,10 +626,13 @@ check("scheduler: targets = all builder properties + Guesty-MAPPED drafts only",
   schedulerSrc.includes("getAllUnitBuilders()") && schedulerSrc.includes("getGuestyPropertyMap") &&
   /n < 0/.test(schedulerSrc));
 
-check("scheduler: cron sweeps run auto-fix ON, replacement OFF unless UNIT_AUDIT_CRON_REPLACE=1, source 'cron'",
+check("scheduler: cron sweeps run auto-fix ON, replacement ON by default (UNIT_AUDIT_CRON_REPLACE=0 restores flag-only), source 'cron'",
   schedulerSrc.includes("autoFix: true") &&
-  schedulerSrc.includes("UNIT_AUDIT_CRON_REPLACE") &&
+  /UNIT_AUDIT_CRON_REPLACE \?\? ""\)\.trim\(\) !== "0"/.test(schedulerSrc) &&
   schedulerSrc.includes('source: "cron"'));
+
+check("scheduler: per-run replacement budget reset at the start of every cron sweep",
+  schedulerSrc.includes("resetCronReplaceBudget()"));
 
 check("scheduler: kill switch UNIT_AUDIT_AUTO_DISABLED",
   schedulerSrc.includes("UNIT_AUDIT_AUTO_DISABLED"));
