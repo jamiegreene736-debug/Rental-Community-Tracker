@@ -43,6 +43,24 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-13 (Auto Cowork — prompts auto-open in Claude Desktop): Operator: "At the moment I generate
+  prompts for cowork. How can we automate the input of those prompts into cowork? I have Claude
+  desktop… in the UI change the button to like auto CoWork." SHIPPED (`claude/auto-cowork-launch`):
+  all five bookings-page Cowork prompt buttons now fire `claude://cowork/new?q=<prompt>` after
+  copying to the clipboard — Claude Desktop opens a NEW Cowork task with the composer PRE-FILLED,
+  NOT submitted (pressing send in Claude Desktop = the approval; the checkout prompt's "sending is
+  the approval" semantics are preserved). CONTRACT verified against the app's own URL handler
+  (1.20186.1) + live-fired on the operator's Mac: only /new and /shared-artifact are recognized
+  cowork paths; q is SILENTLY TRUNCATED at 14336 chars (16KiB−2KiB) — the find prompt is already
+  ~13.9k, so pure `shared/cowork-launch.ts` REFUSES to embed over-cap prompts (bare
+  claude://cowork/new + a paste-from-clipboard toast; NEVER truncate — the money guards/DONE-signal
+  live at the prompt END). Desktop-only (`shouldAutoLaunchCowork`); phones keep copy-only. Labels:
+  "Auto Cowork" (find), "Auto checkout (books on VRBO)"; verify/guest-happy/find-on-VRBO keep their
+  labels but auto-launch. A length canary test trips if the real find prompt outgrows the cap.
+  Browsers show a one-time "Open Claude?" confirm per site. Verified: cowork-launch 30/0 (npm
+  chain), full `npm test` exit 0, build clean (labels bundle-grepped), `npm run check` 338 =
+  baseline. See the AGENTS.md 2026-07-13 Decision Log line.
+
 - 2026-07-12 (audit sweep AI FINAL SAY — "I don't want to make judgment calls. I'll leave that to
   Claude AI to determine."): Operator directive after asking whether a dashboard unit audit tidies
   both units' photos. SHIPPED (`claude/unit-audit-dashboard-photos-d5ysy2`; AGENTS.md Unit Audit

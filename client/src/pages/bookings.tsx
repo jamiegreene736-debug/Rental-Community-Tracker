@@ -57,6 +57,7 @@ import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
 import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt } from "@shared/cowork-buyin-prompt";
+import { buildCoworkDeepLink, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
 
 // Is this attached buy-in already on the VRBO channel? Drives the
 // "Find on VRBO" re-channel button + slot badges (operator prefers to book
@@ -2332,11 +2333,47 @@ function BuyInEscalationStages({
   );
 }
 
-// "Create prompt for Cowork" — generates a copy-to-clipboard prompt for an agent
-// (Cowork) to search the open web (Google, PM sites, Airbnb/VRBO/Booking) for the
-// two cheapest buy-in units for this reservation and attach them via the manual-
-// attach API. Same-community first, then a city-wide fallback, and NEVER beyond
-// city-wide (operator's spec). The prompt itself is built by the shared, tested
+// Auto Cowork launcher shared by EVERY Cowork prompt button below. It ALWAYS
+// copies the prompt to the clipboard first (the paste fallback + the phone
+// path), then — on a desktop, where Claude Desktop lives — fires the
+// claude://cowork/new deep link so a new Cowork task opens with the prompt
+// already typed into the composer. buildCoworkDeepLink() (shared, tested)
+// refuses to embed an over-cap prompt because Claude Desktop silently
+// truncates ?q= at 14,336 chars and the prompts' money guards live at the
+// END — in that case Cowork opens empty and the toast says to paste.
+// The deep link only PRE-FILLS; nothing runs until the operator presses send
+// in Claude Desktop, so the checkout prompt's "sending is the approval"
+// semantics are preserved.
+async function launchCoworkPrompt(prompt: string): Promise<CoworkLaunchResult> {
+  let copied = false;
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      copied = true;
+    } catch {
+      copied = false;
+    }
+  }
+  if (!shouldAutoLaunchCowork(navigator.userAgent)) {
+    return { copied, launched: false, promptIncluded: false };
+  }
+  const link = buildCoworkDeepLink(prompt);
+  try {
+    // A custom-scheme assignment hands off to the OS (Safari/Chrome show an
+    // "Open Claude?" confirm) and does NOT navigate the SPA away.
+    window.location.href = link.url;
+    return { copied, launched: true, promptIncluded: link.promptIncluded };
+  } catch {
+    return { copied, launched: false, promptIncluded: false };
+  }
+}
+
+// "Auto Cowork" (find prompt) — generates the buy-in search prompt and hands it
+// straight to Cowork (deep link + clipboard) for an agent to search the open web
+// (Google, PM sites, Airbnb/VRBO/Booking) for the two cheapest buy-in units for
+// this reservation and attach them via the manual-attach API. Same-community
+// first, then a city-wide fallback, and NEVER beyond city-wide (operator's
+// spec). The prompt itself is built by the shared, tested
 // buildCoworkBuyInPrompt() so the search/attach contract stays in one place.
 function CoworkBuyInPromptButton({
   reservation,
@@ -2398,6 +2435,10 @@ function CoworkBuyInPromptButton({
       toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
     }
   };
+  const launch = async () => {
+    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The buy-in search prompt");
+    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
+  };
   return (
     <>
       <Button
@@ -2408,24 +2449,25 @@ function CoworkBuyInPromptButton({
         onClick={(e) => {
           e.stopPropagation();
           setOpen(true);
-          void copy();
+          void launch();
         }}
         data-testid={`button-cowork-prompt-${reservation._id}`}
-        title="Generate a prompt for Cowork to web-search + manually attach the cheapest buy-in units (search only — booking has its own separate prompt)"
+        title="Opens a new Cowork task in Claude Desktop pre-filled with the buy-in search prompt — web-search + manually attach the cheapest buy-in units (search only — booking has its own separate button)"
       >
         <Sparkles className="mr-1 h-3.5 w-3.5" />
-        Create prompt for Cowork
+        Auto Cowork
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Cowork buy-in prompt</DialogTitle>
+            <DialogTitle>Auto Cowork — buy-in search prompt</DialogTitle>
             <DialogDescription>
-              Copied to your clipboard. Paste this into Cowork — it searches Google, PM company sites,
-              Airbnb, VRBO and Booking.com for the cheapest units (same community first, then a
-              city-wide fallback, never beyond the city) and attaches them with the manual-attach
-              method, then stops. Review the attached picks, then use the separate &quot;Checkout
-              prompt&quot; button to book them on VRBO.
+              On your Mac this just opened a new Cowork task in Claude Desktop with the prompt below
+              pre-filled — press send there to run it (it&apos;s also on your clipboard if you&apos;d
+              rather paste). It searches Google, PM company sites, Airbnb, VRBO and Booking.com for
+              the cheapest units (same community first, then a city-wide fallback, never beyond the
+              city) and attaches them with the manual-attach method, then stops. Review the attached
+              picks, then use the separate &quot;Auto checkout&quot; button to book them on VRBO.
             </DialogDescription>
           </DialogHeader>
           <textarea
@@ -2489,6 +2531,10 @@ function CoworkCheckoutPromptButton({
       toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
     }
   };
+  const launch = async () => {
+    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The checkout prompt");
+    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
+  };
   return (
     <>
       <Button
@@ -2499,21 +2545,22 @@ function CoworkCheckoutPromptButton({
         onClick={(e) => {
           e.stopPropagation();
           setOpen(true);
-          void copy();
+          void launch();
         }}
         data-testid={`button-cowork-checkout-prompt-${reservation._id}`}
-        title="Generate a prompt for Cowork to BOOK the attached unit(s) on VRBO — damage waiver only, guest name + alias email, your standing card. Run it only after you've reviewed the attached picks; pasting it is the approval."
+        title="Opens a new Cowork task pre-filled with the prompt that BOOKS the attached unit(s) on VRBO — damage waiver only, guest name + alias email, your standing card. Nothing runs until you press send in Claude Desktop; sending it is the approval."
       >
         <ShoppingCart className="mr-1 h-3.5 w-3.5" />
-        Checkout prompt (books on VRBO)
+        Auto checkout (books on VRBO)
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Cowork checkout prompt — books the attached units</DialogTitle>
+            <DialogTitle>Auto checkout — books the attached units</DialogTitle>
             <DialogDescription>
-              Copied to your clipboard. This prompt BOOKS — pasting it into Cowork is your approval,
-              there is no further checkpoint. It checks each attached unit out on vrbo.com with the
+              On your Mac this just opened a new Cowork task with the prompt pre-filled (it&apos;s
+              also on your clipboard). This prompt BOOKS — nothing runs until you press send in
+              Claude Desktop, and sending it is your approval; there is no further checkpoint. It checks each attached unit out on vrbo.com with the
               damage waiver only (all insurance and add-ons declined), the guest&apos;s name on every
               name field, the auto-minted guest alias email, and your standing card read from the
               local file on your Mac (~/Documents/vrbo-booking-card.txt — keep it up to date; card
@@ -2579,6 +2626,10 @@ function CoworkCommunityVerifyButton({
       toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
     }
   };
+  const launch = async () => {
+    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The verify-community prompt");
+    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
+  };
   return (
     <>
       <Button
@@ -2589,7 +2640,7 @@ function CoworkCommunityVerifyButton({
         onClick={(e) => {
           e.stopPropagation();
           setOpen(true);
-          void copy();
+          void launch();
         }}
         data-testid={`button-cowork-verify-community-${reservation._id}`}
         title="Generate a Cowork prompt that verifies the attached unit(s) are in the buy-in community — same building/complex — and records each confirmed street address on the buy-in"
@@ -2602,7 +2653,8 @@ function CoworkCommunityVerifyButton({
           <DialogHeader>
             <DialogTitle>Cowork verify-community prompt</DialogTitle>
             <DialogDescription>
-              Copied to your clipboard. Paste this into Cowork — it opens each attached unit&apos;s
+              On your Mac this just opened a new Cowork task with the prompt pre-filled — press send
+              there to run it (it&apos;s also on your clipboard). It opens each attached unit&apos;s
               listing, pins down the exact building/complex and street address, and reports whether
               the units are in the SAME BUILDING, the same complex, or different communities (with
               real walking distance). It also saves each confirmed address onto the buy-in so the
@@ -2669,6 +2721,10 @@ function CoworkGuestHappyButton({
       toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
     }
   };
+  const launch = async () => {
+    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The guest-happiness prompt");
+    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
+  };
   return (
     <>
       <Button
@@ -2679,7 +2735,7 @@ function CoworkGuestHappyButton({
         onClick={(e) => {
           e.stopPropagation();
           setOpen(true);
-          void copy();
+          void launch();
         }}
         data-testid={`button-cowork-guest-happy-${reservation._id}`}
         title="Generate a Cowork prompt that judges the attached unit(s) through the guest's eyes — community, size, bedding layout, and photo quality vs the listing they booked — and records the verdict + feedback"
@@ -2692,7 +2748,8 @@ function CoworkGuestHappyButton({
           <DialogHeader>
             <DialogTitle>Cowork guest-happiness prompt</DialogTitle>
             <DialogDescription>
-              Copied to your clipboard. Paste this into Cowork — it studies the ORIGINAL listing the
+              On your Mac this just opened a new Cowork task with the prompt pre-filled — press send
+              there to run it (it&apos;s also on your clipboard). It studies the ORIGINAL listing the
               guest booked (photos, bedding layout, community), studies each attached unit the same
               way, and answers dimension by dimension: same community? same size? same bedding
               layout (1 King, 1 Queen…)? similar photo quality? It records the verdict + a written
@@ -2759,6 +2816,10 @@ function CoworkFindOnVrboButton({
       toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
     }
   };
+  const launch = async () => {
+    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The find-on-VRBO prompt");
+    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
+  };
   return (
     <>
       <Button
@@ -2769,7 +2830,7 @@ function CoworkFindOnVrboButton({
         onClick={(e) => {
           e.stopPropagation();
           setOpen(true);
-          void copy();
+          void launch();
         }}
         data-testid={`button-cowork-find-on-vrbo-${reservation._id}`}
         title="Generate a Cowork prompt that hunts for the attached non-VRBO unit(s) on vrbo.com — same physical unit only — and re-points the buy-in at the VRBO listing, or records that it's genuinely not on VRBO"
@@ -2782,7 +2843,8 @@ function CoworkFindOnVrboButton({
           <DialogHeader>
             <DialogTitle>Cowork find-on-VRBO prompt</DialogTitle>
             <DialogDescription>
-              Copied to your clipboard. Paste this into Cowork — for each attached unit that lives on
+              On your Mac this just opened a new Cowork task with the prompt pre-filled — press send
+              there to run it (it&apos;s also on your clipboard). For each attached unit that lives on
               a direct booking site or Booking.com, it pins down the exact physical unit and hunts
               for that same unit&apos;s own listing on vrbo.com (verified by unit number, address, and
               photos — a similar unit doesn&apos;t count). If found, it re-points the buy-in at the
