@@ -43,6 +43,22 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-13 (BULK buy-ins route through Cowork): Operator (after the Auto Cowork buttons shipped):
+  "I want you to change this so that it routes through cowork." SHIPPED
+  (`claude/bulk-cowork-route`): "Auto Cowork bulk (N)" is now the PRIMARY bulk button on the
+  bookings page — `buildCoworkBulkBuyInPrompt` builds ONE batch task (each reservation's brief =
+  the EXACT single find prompt via an internal `bulkBrief` opt; bot-wall protocol hoisted once,
+  tidy-up + done chime fire ONCE after the last brief; 1-element batch === single prompt
+  byte-identical, test-locked) and launches it through the existing launchCoworkPrompt (multi-
+  reservation batches exceed the 14,336 deep-link cap → clipboard handoff, paste once + send).
+  LOAD-BEARING SEMANTICS: the Cowork route fills OPEN slots only and NEVER detaches; the server
+  engine stays as the outline "Run bulk buy-ins (server)" fallback (detach+refill re-search, and
+  the only route from a phone); both disabled while a server queue runs (no concurrent attach
+  races). Cap `COWORK_BULK_FIND_MAX`=8/batch, client slices + toast says re-run for the rest.
+  Per-reservation inputs mirror the single button exactly (empty slots, remaining net revenue).
+  Verified: cowork-buyin-prompt 235/0 (26 new), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline. See the AGENTS.md 2026-07-13 Decision Log (second entry).
+
 - 2026-07-13 (Auto Cowork — prompts auto-open in Claude Desktop): Operator: "At the moment I generate
   prompts for cowork. How can we automate the input of those prompts into cowork? I have Claude
   desktop… in the UI change the button to like auto CoWork." SHIPPED (`claude/auto-cowork-launch`):
