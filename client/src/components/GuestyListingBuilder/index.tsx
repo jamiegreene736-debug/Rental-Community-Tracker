@@ -39,11 +39,13 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
-import { guestyPushBackfillCandidates, newestGuestyPushEntry, type GuestyPushListingHistory } from "@shared/guesty-push-history";
+import { guestyPushBackfillCandidates, newestGuestyPushEntry, parsePhotosPushSummary, type GuestyPushListingHistory } from "@shared/guesty-push-history";
 import {
   PUSH_RECONCILE_DEADLINE_MS,
   PUSH_RECONCILE_POLL_MS,
   freshPushOutcome,
+  photoPushReconcileDeadlineMs,
+  photoPushStreamLostMessage,
   pushEntryTimeMs,
   pushReconcileTimeoutMessage,
   type PushLedgerEntryLike,
@@ -51,6 +53,24 @@ import {
 import { BUY_IN_MARKET_LOCATIONS, curatedResortSearchName, isCuratedBuyInMarket, resolveBuyInMarketFromText } from "@shared/buy-in-market";
 import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 import { builderTabFromSearch, type BuilderTabKey } from "@shared/builder-deep-link";
+
+// Reads the durable server push ledger's PHOTOS entry for a listing.
+// Fail-soft (null) — the ledger is the reconcile signal for a photo push
+// whose NDJSON stream got cut (Railway's edge hard-caps every response at
+// 15 minutes, and a big AI-upscale push legitimately runs longer), never a
+// blocker. Module-level (no hooks) so upscaleAndUpload can use it without
+// dependency-ordering games.
+async function readPhotosPushLedgerEntry(listingId: string): Promise<PushLedgerEntryLike> {
+  try {
+    const params = new URLSearchParams({ listingId });
+    const res = await fetch(`/api/builder/guesty-push-history?${params.toString()}`);
+    if (!res.ok) return null;
+    const data = await res.json() as { tabs?: { photos?: PushLedgerEntryLike } };
+    return data?.tabs?.photos ?? null;
+  } catch {
+    return null;
+  }
+}
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -1974,6 +1994,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [pushResults, setPushResults] = useState<{ localPath: string; success: boolean; error?: string }[]>([]);
   const [savingToGuesty, setSavingToGuesty] = useState(false);
   const [checkpointCount, setCheckpointCount] = useState(0);
+  // Stream-loss reconcile state (2026-07-14): Railway's edge cuts every
+  // response at exactly 15 minutes, so a long AI-upscale push loses its NDJSON
+  // stream mid-run while the SERVER keeps pushing to completion. While the
+  // client waits on the push ledger to confirm the real outcome it shows
+  // pushReconcileNote; a ledger-confirmed finish renders reconciledPushSummary
+  // in the done state (the per-photo event list is incomplete by definition —
+  // the tail events died with the stream — so the ledger summary is the
+  // honest aggregate).
+  const [pushReconcileNote, setPushReconcileNote] = useState<string | null>(null);
+  const [reconciledPushSummary, setReconciledPushSummary] = useState<string | null>(null);
   // Default ON: the server now AI-upscales ONLY photos below the 1920px push
   // spec (already-large photos skip Real-ESRGAN entirely), so the toggle no
   // longer costs ~30s on every photo — just the small ones that need it.
@@ -2223,6 +2253,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setUpscaleTotal(0);
     setPushResults([]);
     setUpscaleError(null);
+    setPushReconcileNote(null);
+    setReconciledPushSummary(null);
   }, []);
 
   // ── Cover collage ──────────────────────────────────────────────────────
@@ -2538,6 +2570,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setPushResults([]);
     setSavingToGuesty(false);
     setCheckpointCount(0);
+    setPushReconcileNote(null);
+    setReconciledPushSummary(null);
     // Reset the known-pushed-pictures list at the start of each push so
     // a follow-up cover-collage operation only sees URLs from THIS run.
     setLastPushedPictures([]);
@@ -2558,10 +2592,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const controller = new AbortController();
     pushAbortRef.current = controller;
     let finalResult: PhotoPushResult | null = null;
+    // Stream progress high-water marks — they size the reconcile deadline
+    // (each not-yet-seen photo can honestly cost ~60s server-side) and keep
+    // the reconciled localStorage summary roughly honest about upscales.
+    let lastSeenIndex = 0;
+    let upscaledSoFar = 0;
+    // Snapshot the photos ledger BEFORE pushing (the descriptions-push
+    // reconcile trick, 2026-07-14): only an entry with a server timestamp
+    // strictly newer than this baseline counts as THIS push's outcome —
+    // server-time vs server-time, so client clock skew can never matter.
+    const baselineMs = pushEntryTimeMs(await readPhotosPushLedgerEntry(selectedId));
 
     try {
-      // Streaming NDJSON: server sends one JSON line per photo as it completes.
-      // This keeps the HTTP connection alive indefinitely — no timeout possible.
+      // Streaming NDJSON: the server sends one JSON line per photo as it
+      // completes. NOTE (2026-07-14): streaming does NOT make the connection
+      // immortal — Railway's edge hard-cuts every response at exactly 15
+      // minutes of total duration even while lines are actively arriving, and
+      // a big AI-upscale push legitimately runs longer than that. A cut
+      // stream falls through to the push-ledger reconcile below instead of
+      // reporting a false failure while the server finishes the push.
       const resp = await fetch("/api/builder/push-photos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2570,10 +2619,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       });
 
       if (!resp.ok) {
+        // DEFINITIVE error — the server responded with a status + (usually) a
+        // JSON error body, so it already rejected the push. Fail fast; the
+        // ledger reconcile below is only for INDEFINITE stream loss.
         const err = await resp.json().catch(() => ({})) as any;
         const message = err.error || `Server error ${resp.status}`;
         setUpscaleError(message);
         setUpscalePhase("error");
+        pushAbortRef.current = null;
         return { successCount: 0, total: photos.length, shortfall: photos.length, error: message };
       }
 
@@ -2616,7 +2669,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
             if (event.type === "photo") {
               setUpscaleCurrent(event.index ?? 0);
-              if (event.wasUpscaled) setUpscaledCount(c => c + 1);
+              if (typeof event.index === "number" && event.index > lastSeenIndex) lastSeenIndex = event.index;
+              if (event.wasUpscaled) { upscaledSoFar++; setUpscaledCount(c => c + 1); }
               setPushResults(prev => [...prev, {
                 localPath: event.localPath || "",
                 success: event.success ?? false,
@@ -2707,16 +2761,81 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } catch (err: any) {
       if (err?.name === "AbortError") {
         // User cancelled — state is already reset by cancelPush()
+        pushAbortRef.current = null;
         return { successCount: 0, total: photos.length, shortfall: photos.length, error: "Photo push cancelled." };
       }
-      const message = err?.message || "Network error — could not reach server";
-      setUpscaleError(message);
-      setUpscalePhase("error");
-      return { successCount: 0, total: photos.length, shortfall: photos.length, error: message };
+      // A fetch/read error mid-stream is INDEFINITE: the common cause is the
+      // hosting edge cutting the response at its 15-minute cap while the
+      // SERVER keeps pushing to completion (observed live 2026-07-14 — a
+      // 51-photo upscale push finished + verified on Guesty a minute after
+      // the browser reported "network error"). Fall through to the ledger
+      // reconcile below instead of failing a push that's about to succeed.
+    }
+
+    if (finalResult) {
+      pushAbortRef.current = null;
+      return finalResult;
+    }
+
+    // ── Stream lost before the "done" event — reconcile from the push ledger ──
+    // The server stamps guesty_push_history.v1 (photos tab) at the end of
+    // every push, success AND failure, so a fresh ledger entry is the
+    // authoritative outcome even though the HTTP response died. Deadline
+    // scales with how many photos the server still had in flight.
+    setSavingToGuesty(false);
+    setPushReconcileNote(photoPushStreamLostMessage(lastSeenIndex, photos.length));
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const reconcileDeadline = Date.now() + photoPushReconcileDeadlineMs(Math.max(0, photos.length - lastSeenIndex));
+    try {
+      for (;;) {
+        if (controller.signal.aborted) {
+          // User hit Cancel while we were waiting on the ledger — cancelPush()
+          // already reset the UI state.
+          return { successCount: 0, total: photos.length, shortfall: photos.length, error: "Photo push cancelled." };
+        }
+        const outcome = freshPushOutcome(baselineMs, await readPhotosPushLedgerEntry(selectedId));
+        if (outcome) {
+          if (outcome.status === "error") {
+            const message = outcome.summary || "The photo push failed on the server — see the tab's push history.";
+            setUpscaleError(message);
+            setUpscalePhase("error");
+            return { successCount: 0, total: photos.length, shortfall: photos.length, error: message };
+          }
+          // Ledger-confirmed success. The per-photo events after the cut died
+          // with the stream, so read the aggregate counts back out of the
+          // ledger summary (parsePhotosPushSummary is the test-locked inverse
+          // of the server's summarizePhotosPush).
+          const counts = parsePhotosPushSummary(outcome.summary);
+          const successCount = counts ? counts.verified : Math.max(lastSeenIndex, 1);
+          const shortfall = counts ? Math.max(0, counts.pushed - counts.verified) : 0;
+          setReconciledPushSummary(outcome.summary || `${successCount} photos pushed`);
+          setUpscalePhase("done");
+          savePushSummary({
+            listingId: selectedId,
+            timestamp: Date.now(),
+            successCount,
+            total: photos.length,
+            upscaledCount: upscaledSoFar,
+            failed: Math.max(0, photos.length - successCount),
+          });
+          // Guesty processes uploaded photos asynchronously — poll the live
+          // count the same way the normal done path does.
+          setTimeout(() => refreshGuestyPhotoCount(), 3000);
+          setTimeout(() => refreshGuestyPhotoCount(), 8000);
+          return { successCount, total: photos.length, shortfall };
+        }
+        if (Date.now() >= reconcileDeadline) {
+          const message = pushReconcileTimeoutMessage("photos");
+          setUpscaleError(message);
+          setUpscalePhase("error");
+          return { successCount: 0, total: photos.length, shortfall: photos.length, error: message };
+        }
+        await sleep(PUSH_RECONCILE_POLL_MS);
+      }
     } finally {
+      setPushReconcileNote(null);
       pushAbortRef.current = null;
     }
-    return finalResult ?? { successCount: 0, total: photos.length, shortfall: photos.length, error: "Photo push finished without a server completion event." };
   }, [selectedId, refreshGuestyPhotoCount, savePushSummary, toast]);
 
   // ── Check connection + load listings ──────────────────────────────────────
@@ -8769,6 +8888,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               )}
 
                               {upscalePhase === "done" && (() => {
+                                // A reconciled push lost its per-photo event tail with the
+                                // stream, so pushResults undercounts — the ledger summary
+                                // is the honest aggregate for that case.
+                                if (reconciledPushSummary) {
+                                  return (
+                                    <div style={{ display: "flex", alignItems: "center", gap: 10 }} data-testid="photo-push-reconciled-done">
+                                      <span style={{ fontSize: 13, color: "#16a34a" }}>
+                                        ✓ {reconciledPushSummary} — confirmed from the push ledger after the connection dropped mid-push
+                                      </span>
+                                      <button onClick={cancelPush} style={{ fontSize: 11, color: "#6b7280", background: "none", border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>
+                                        Reset
+                                      </button>
+                                    </div>
+                                  );
+                                }
                                 const failed = pushResults.filter(r => !r.success);
                                 const succeeded = pushResults.filter(r => r.success);
                                 return (
@@ -8829,6 +8963,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   ? "Hosting for Guesty (AI-upscaling photos under 1920px, ~30s each). Progress saved to Guesty every 5 photos."
                                   : "Hosting for Guesty — a few seconds per photo. Progress saved to Guesty every 5 photos."}
                               </div>
+                              {/* Stream-loss reconcile: the edge cut the response
+                                  (15-min cap) but the SERVER is still pushing —
+                                  we're watching the push ledger for the result. */}
+                              {pushReconcileNote && (
+                                <div style={{ marginTop: 6, padding: "6px 10px", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 12, color: "#92400e" }} data-testid="photo-push-reconcile-note">
+                                  ⏳ {pushReconcileNote}
+                                </div>
+                              )}
                               {/* Live per-photo results */}
                               {pushResults.length > 0 && (
                                 <div style={{ marginTop: 8, maxHeight: 120, overflowY: "auto", fontSize: 11, display: "flex", flexDirection: "column", gap: 2 }}>
