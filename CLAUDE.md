@@ -82,6 +82,58 @@ Before making any changes:
   "🔎 Scan photos for bedding"; expect the proposal in ~30-60s; re-run a dashboard audit and the Bedding &
   layout row now carries "Bedding photo check:" lines.
 
+- 2026-07-14 (dashboard "Update market pricing" → Last Price Scan column + Pricing tab timestamps):
+  Operator: "make sure that it updates and time stamps the last price scan column and also in the
+  pricing tab." SERVER SIDE WAS ALREADY CORRECT (don't re-chase): every bulk-queue item that pushes
+  goes `runBulkPricingItem` → `pushBulkGuestyPricingAfterRefresh` → loopback POST
+  /api/builder/push-seasonal-rates → `recordGuestyRatePush` stamps BOTH `scanner_schedule.
+  lastGuestyRatePush*` (the column, ok AND error) and the per-tab ledger `recordGuestyPush(listingId,
+  "pricing", …)` (the tab chip). The gaps were CLIENT refresh (the #1021 incident class, bulk-queue
+  edition), SHIPPED (`claude/market-pricing-timestamps-fb9fc8`): (1) home.tsx bulk poll —
+  `bulkPricingCompletedCountRef` invalidates `/api/dashboard/price-scans` whenever the job's
+  completed count rises MID-RUN (rows tick as items land) and again at terminal; (2) builder —
+  the Pricing-tab job watcher's completed/failed branches now call `refreshScannerSchedule()`
+  (the "Last Guesty rate push" line — previously stale even after the tab's OWN button ran) +
+  the extracted `reloadServerPushHistory()` (tab chip; supersede-guarded via
+  `pushHistoryLoadTokenRef`, backfill one-shot semantics unchanged), and a 30s-throttled
+  focus/visibilitychange listener re-reads both so a builder left open in another browser tab
+  reflects dashboard-queue/cron/sweep pushes without a remount. TDZ trap: `refreshScannerSchedule`
+  is declared BELOW the watcher effect — closure-called, deliberately NOT in that dep array.
+  Verified: bulk-pricing-push 35/0 (6 new source guards), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline (stash A/B identical per-file error sets).
+
+- 2026-07-13 (Cowork browser rule — REAL Chrome only, cookies stop repeat bot walls): Operator:
+  "ensure that Cowork always uses like Chrome or another browser that has cookies cached so that
+  VRBO and/or Zillow and others will stop the bot question after I resolve it." SHIPPED
+  (`claude/cowork-chrome-browser-rule`): new `CHROME_BROWSER_RULE` composed INTO
+  `BOT_WALL_PROTOCOL` — every Cowork prompt (all five + the bulk batch's hoisted copy) now
+  mandates browsing ONLY in the operator's real Google Chrome via the Chrome tools (persistent
+  profile = solved bot-check clearances survive), never the isolated built-in browser pane
+  (cookie-less → re-raises solved challenges every run); no incognito, never clear cookies; if
+  the Chrome tools aren't connected → loud ALERT + WAIT, never a silent cookie-less fallback.
+  SIZE IS LOAD-BEARING: the rule is deliberately terse — the find prompt sits ~140 chars under
+  the 14,336 deep-link cap (the cowork-launch canary tripped TWICE during drafting; a wordier
+  rule silently demotes the single Auto Cowork button to paste). Long-named properties may still
+  exceed the cap → graceful clipboard handoff, never truncation. Verified: cowork-buyin-prompt
+  262/0 (27 new), cowork-launch 30/0 (canary at 14,199), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline. See the AGENTS.md 2026-07-13 Decision Log (third entry).
+
+- 2026-07-13 (BULK buy-ins route through Cowork): Operator (after the Auto Cowork buttons shipped):
+  "I want you to change this so that it routes through cowork." SHIPPED
+  (`claude/bulk-cowork-route`): "Auto Cowork bulk (N)" is now the PRIMARY bulk button on the
+  bookings page — `buildCoworkBulkBuyInPrompt` builds ONE batch task (each reservation's brief =
+  the EXACT single find prompt via an internal `bulkBrief` opt; bot-wall protocol hoisted once,
+  tidy-up + done chime fire ONCE after the last brief; 1-element batch === single prompt
+  byte-identical, test-locked) and launches it through the existing launchCoworkPrompt (multi-
+  reservation batches exceed the 14,336 deep-link cap → clipboard handoff, paste once + send).
+  LOAD-BEARING SEMANTICS: the Cowork route fills OPEN slots only and NEVER detaches; the server
+  engine stays as the outline "Run bulk buy-ins (server)" fallback (detach+refill re-search, and
+  the only route from a phone); both disabled while a server queue runs (no concurrent attach
+  races). Cap `COWORK_BULK_FIND_MAX`=8/batch, client slices + toast says re-run for the rest.
+  Per-reservation inputs mirror the single button exactly (empty slots, remaining net revenue).
+  Verified: cowork-buyin-prompt 235/0 (26 new), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline. See the AGENTS.md 2026-07-13 Decision Log (second entry).
+
 - 2026-07-13 (Auto Cowork — prompts auto-open in Claude Desktop): Operator: "At the moment I generate
   prompts for cowork. How can we automate the input of those prompts into cowork? I have Claude
   desktop… in the UI change the button to like auto CoWork." SHIPPED (`claude/auto-cowork-launch`):

@@ -4,11 +4,13 @@
 // the manual-attach API (create buy-in + attach-buy-in) per unit slot.
 import {
   buildCoworkBuyInPrompt,
+  buildCoworkBulkBuyInPrompt,
   buildCoworkCheckoutPrompt,
   buildCoworkCommunityVerifyPrompt,
   buildCoworkGuestHappyPrompt,
   buildCoworkVrboLookupPrompt,
   resolveCoworkSearchTargets,
+  COWORK_BULK_FIND_MAX,
   DEFAULT_CARD_FILE_HINT,
   type CoworkBuyInPromptInput,
   type CoworkCheckoutPromptInput,
@@ -819,6 +821,153 @@ check(
   "guest-happy: feedback example covers the negative bedding case",
   /bedding is off \(2 Twins where they booked a King\)/.test(guestHappy),
 );
+
+// ── Browser rule (operator 2026-07-13): REAL Chrome only, cookies persist ────
+// Bot walls stop recurring only when solved challenges land in the operator's
+// persistent Chrome profile — the isolated built-in browser pane is
+// cookie-less and re-raises them every run. The rule rides inside
+// BOT_WALL_PROTOCOL so every prompt inherits it. SIZE NOTE: the rule is
+// deliberately terse — the find prompt sits ~140 chars under the 14,336
+// deep-link cap (canary in cowork-launch.test.ts); a wordier rule demotes
+// the single Auto Cowork button from pre-fill to paste.
+for (const [label, p] of [
+  ["find", prompt],
+  ["checkout", checkout],
+  ["verify", verify],
+  ["guest-happy", guestHappy],
+  ["vrbo-lookup", vrboLookup],
+] as const) {
+  check(
+    `${label} prompt: browser rule — real Chrome only, never the built-in pane`,
+    p.includes("## Browser rule — my REAL Chrome only") && /never the\s+built-in browser pane/.test(p),
+  );
+  check(
+    `${label} prompt: browser rule explains the cookie/clearance why`,
+    /cookie-less, so solved VRBO\/Zillow bot checks\s+come back/.test(p) && /my Chrome keeps the clearances/.test(p),
+  );
+  check(
+    `${label} prompt: no incognito / never clear cookies`,
+    /No incognito; never clear\s+cookies/.test(p),
+  );
+  check(
+    `${label} prompt: missing Chrome tools → alert + wait, never a silent fallback`,
+    /Chrome tools missing\? ALERT me \(protocol below\) and WAIT — no\s+fallback/.test(p),
+  );
+  check(
+    `${label} prompt: browser rule sits ABOVE the bot-check protocol`,
+    p.indexOf("## Browser rule") > -1 && p.indexOf("## Browser rule") < p.indexOf("## Bot-check protocol"),
+  );
+}
+
+// ── buildCoworkBulkBuyInPrompt: the bulk route through Cowork ────────────────
+// (operator spec 2026-07-13: "run bulk buy in queue … change this so that it
+// routes through cowork"). ONE batch task works N reservations one at a time;
+// each brief is the EXACT single prompt with the bot-wall protocol hoisted
+// once and the closing (tidy-up + done signal) fired once after the last brief.
+console.log("cowork-buyin-prompt: bulk batch builder");
+
+const bulkResB: CoworkBuyInPromptInput = {
+  reservationId: "res-B-777",
+  guestName: "Bulk Guest B",
+  propertyId: 12,
+  propertyName: "Kiahuna Plantation - 2BR Condo",
+  community: "Kiahuna Plantation",
+  checkIn: "2026-09-01",
+  checkOut: "2026-09-08",
+  units: [{ unitId: "kia-2br", unitLabel: "Unit 2BR", bedrooms: 2 }],
+  netRevenue: 3000,
+  baseUrl: "https://app.example.com",
+};
+
+check("bulk: empty input → empty string", buildCoworkBulkBuyInPrompt([]) === "");
+check(
+  "bulk: ONE reservation → byte-identical to the single Auto Cowork prompt (load-bearing equivalence)",
+  buildCoworkBulkBuyInPrompt([baseInput]) === buildCoworkBuyInPrompt(baseInput),
+);
+check(
+  "bulk: default single prompt keeps its own protocol + closing (bulkBrief opt-in only)",
+  buildCoworkBuyInPrompt(baseInput).includes("## Bot-check protocol")
+    && buildCoworkBuyInPrompt(baseInput).includes("TIDY UP THE BROWSER")
+    && buildCoworkBuyInPrompt(baseInput).includes("## Done signal"),
+);
+
+const bulk = buildCoworkBulkBuyInPrompt([baseInput, bulkResB]);
+const bulkCount = (re: RegExp) => (bulk.match(re) ?? []).length;
+check("bulk: batch title counts the reservations", bulk.includes("# Task: Bulk buy-in search — 2 reservations, one at a time"));
+check(
+  "bulk: delimited brief headers carry guest @ property (dates)",
+  bulk.includes("RESERVATION 1 of 2 — Jane Traveler @ Poipu Kai 6BR Combo (2026-07-20 → 2026-07-27)")
+    && bulk.includes("RESERVATION 2 of 2 — Bulk Guest B @ Kiahuna Plantation - 2BR Condo (2026-09-01 → 2026-09-08)"),
+);
+check("bulk: brief order preserved", bulk.indexOf("RESERVATION 1 of 2") < bulk.indexOf("RESERVATION 2 of 2"));
+check("bulk: bot-check protocol hoisted EXACTLY once (batch level)", bulkCount(/## Bot-check protocol/g) === 1);
+check("bulk: browser rule hoisted EXACTLY once, above the first brief", bulkCount(/## Browser rule/g) === 1 && bulk.indexOf("## Browser rule") < bulk.indexOf("RESERVATION 1 of 2"));
+check("bulk: protocol hoisted ABOVE the first brief", bulk.indexOf("## Bot-check protocol") < bulk.indexOf("RESERVATION 1 of 2"));
+check("bulk: each brief points at the batch-level protocol", bulkCount(/batch-level protocol at the TOP of this task/g) === 2);
+check("bulk: the per-brief pointer names the REAL-Chrome rule too", bulkCount(/browse in my REAL Chrome only/g) === 2);
+check(
+  "bulk: done signal EXACTLY once, after the last brief",
+  bulkCount(/## Done signal/g) === 1 && bulk.indexOf("## Done signal") > bulk.indexOf("RESERVATION 2 of 2"),
+);
+check("bulk: browser tidy-up EXACTLY once", bulkCount(/TIDY UP THE BROWSER/g) === 1);
+check("bulk: every brief still ends at ATTACH (never books)", bulkCount(/This task ends at ATTACH/g) === 2);
+check(
+  "bulk: each reservation keeps its OWN attach endpoint",
+  bulk.includes("/api/bookings/abc123/attach-buy-in") && bulk.includes("/api/bookings/res-B-777/attach-buy-in"),
+);
+check("bulk: one-at-a-time sequencing rule", /Work them STRICTLY one at a/.test(bulk));
+check("bulk: failure isolation — one stuck reservation never sinks the batch", /FAILURE ISOLATION/.test(bulk) && /never sink the batch/.test(bulk));
+check("bulk: cross-reservation contamination forbidden", /NEVER carry a unit, price, or URL from one/.test(bulk));
+{
+  const brief1 = bulk.slice(bulk.indexOf("RESERVATION 1 of 2"), bulk.indexOf("RESERVATION 2 of 2"));
+  const brief2 = bulk.slice(bulk.indexOf("RESERVATION 2 of 2"), bulk.indexOf("AFTER THE LAST RESERVATION"));
+  check(
+    "bulk: profit guard scoped PER BRIEF (off for guard-less A, on for B with its own budget)",
+    !brief1.includes("## Profit guard") && brief2.includes("## Profit guard") && brief2.includes("$3000.00"),
+  );
+}
+check(
+  "bulk: consolidated final report + once-only closing section",
+  bulk.includes("AFTER THE LAST RESERVATION — final report, tidy up, done signal") && bulk.includes("ONE consolidated report"),
+);
+check("bulk: done-signal success example counts the whole batch", bulk.includes("all 2 reservations have their buy-in units attached"));
+check("bulk: batch cap constant is 8", COWORK_BULK_FIND_MAX === 8);
+
+// Source assertions: the bookings page actually routes the bulk process
+// through Cowork with the open-slots-only + remaining-budget semantics
+// (grep, not import — bookings.tsx drags in the whole client bundle).
+{
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const bookingsSrc = fs.readFileSync(path.join(here, "../client/src/pages/bookings.tsx"), "utf8");
+  check(
+    "bookings: Auto Cowork bulk button exists and builds the batch via the shared builder",
+    bookingsSrc.includes('data-testid="button-run-bulk-cowork"') && bookingsSrc.includes("buildCoworkBulkBuyInPrompt(inputs)"),
+  );
+  check(
+    "bookings: the batch launches through the shared Cowork launcher",
+    /const result = await launchCoworkPrompt\(prompt\)/.test(bookingsSrc),
+  );
+  check(
+    "bookings: Cowork bulk fills OPEN slots only (never detaches)",
+    bookingsSrc.includes("selectedBulkEligibleReservations.filter((r) => r.slots.some((slot) => !slot.buyIn))")
+      && bookingsSrc.includes("reservation.slots.filter((slot) => !slot.buyIn)"),
+  );
+  check(
+    "bookings: batch sliced to COWORK_BULK_FIND_MAX with an operator note for the overflow",
+    bookingsSrc.includes("withOpenSlots.slice(0, COWORK_BULK_FIND_MAX)") && bookingsSrc.includes("run Auto Cowork bulk again for the remaining"),
+  );
+  check(
+    "bookings: remaining-budget rule mirrored from the single button (net revenue minus attached costs, twice: single + bulk)",
+    (bookingsSrc.match(/getNetRevenue\(reservation\)\s*-\s*reservation\.slots\.reduce/g) ?? []).length === 2,
+  );
+  check(
+    "bookings: server engine still available as the fallback (relabeled, same handler)",
+    bookingsSrc.includes("Run bulk buy-ins (server)") && bookingsSrc.includes("onClick={startBulkBuyInQueue}"),
+  );
+}
 
 console.log(`\ncowork-buyin-prompt: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

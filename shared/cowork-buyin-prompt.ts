@@ -95,7 +95,33 @@ placeholder text. ONE burst only, never loop these. The bot-check alarm
 "task over".`;
 }
 
-const BOT_WALL_PROTOCOL = `## Bot-check protocol (VRBO especially — NEVER skip a site over this)
+// Browser rule (operator spec 2026-07-13: "ensure that Cowork always uses
+// like Chrome or another browser that has cookies cached so that VRBO and/or
+// Zillow and others will stop the bot question after I resolve it"). Cowork
+// has TWO browsers: the operator's REAL Chrome (via the Claude-in-Chrome /
+// Chrome control tools — persistent profile, cookies, past bot-check
+// clearances) and an isolated built-in browser pane (fresh cookie-less
+// profile → VRBO/Zillow re-raise solved challenges every run). The rule
+// mandates the real Chrome and forbids a silent fallback. Composed INTO
+// BOT_WALL_PROTOCOL below so every prompt that embeds the protocol — all
+// five single prompts AND the bulk batch's hoisted copy — inherits it with
+// the same embed-once semantics.
+// SIZE IS LOAD-BEARING: this rule rides inside EVERY prompt (via
+// BOT_WALL_PROTOCOL), and the 2-slot FIND prompt sits ~470 chars under the
+// 14,336-char claude:// deep-link cap — a wordier rule pushes it over and
+// silently demotes the single Auto Cowork button from pre-fill to
+// paste-from-clipboard. The canary in tests/cowork-launch.test.ts trips if
+// this outgrows the headroom; keep edits terse.
+const CHROME_BROWSER_RULE = `## Browser rule — my REAL Chrome only
+Browse ONLY in my real Google Chrome via the Chrome tools — never the
+built-in browser pane: it is cookie-less, so solved VRBO/Zillow bot checks
+come back; my Chrome keeps the clearances. No incognito; never clear
+cookies. Chrome tools missing? ALERT me (protocol below) and WAIT — no
+fallback.`;
+
+const BOT_WALL_PROTOCOL = `${CHROME_BROWSER_RULE}
+
+## Bot-check protocol (VRBO especially — NEVER skip a site over this)
 If any site — especially VRBO — shows a bot check (slider puzzle, CAPTCHA,
 "verify you are human") or a sign-in wall you can't get past:
 
@@ -275,7 +301,20 @@ export function resolveCoworkSearchTargets(community: string): {
   };
 }
 
-export function buildCoworkBuyInPrompt(input: CoworkBuyInPromptInput): string {
+export interface CoworkBuyInPromptOpts {
+  /**
+   * INTERNAL — set only by buildCoworkBulkBuyInPrompt when embedding this
+   * prompt as one brief of a multi-reservation batch. Swaps the full
+   * BOT_WALL_PROTOCOL for a pointer to the batch-level copy (hoisted once at
+   * the top of the bulk task) and drops the per-brief closing (browser
+   * tidy-up + done signal), which the bulk frame emits ONCE after the last
+   * reservation. Default (absent/false) output is BYTE-IDENTICAL to the
+   * historical single-reservation prompt — test-locked.
+   */
+  bulkBrief?: boolean;
+}
+
+export function buildCoworkBuyInPrompt(input: CoworkBuyInPromptInput, opts?: CoworkBuyInPromptOpts): string {
   const nights = nightsBetween(input.checkIn, input.checkOut);
   const { resortSearchName, city, state, cityWideSearch } = resolveCoworkSearchTargets(input.community);
   const base = (input.baseUrl ?? "").replace(/\/+$/, "");
@@ -387,6 +426,29 @@ Projected loss = (combined all-in cost) − ${netRevenueLabel}.
     ? ` Also report the PROFIT MATH for the ${n === 1 ? "pick" : "set"} you attached: combined all-in cost vs the net revenue (${netRevenueLabel}) = projected profit or loss, and which branch applied — (a) same-community ${n === 1 ? "pick" : "set"} within the $${maxLoss} loss cap, (b) rolled back to a city-wide ${n === 1 ? "unit" : "same-complex pair"} to escape a same-community loss, or (c) attached at a loss because no option within the $${maxLoss} cap existed anywhere in the city (flag this loudly).`
     : "";
 
+  // Bulk-brief mode: the bot-wall protocol is hoisted ONCE to the top of the
+  // batch task, and the closing (tidy-up + done signal) fires ONCE after the
+  // last reservation — see buildCoworkBulkBuyInPrompt. Both substitutions are
+  // byte-identical no-ops in the default single-prompt path.
+  const botWallSection = opts?.bulkBrief
+    ? "(Browser rule + bot-check protocol: the batch-level protocol at the TOP of this task applies here in full — browse in my REAL Chrome only, alert loudly, wait for me, never skip a site over a bot wall.)"
+    : BOT_WALL_PROTOCOL;
+  const closingSections = opts?.bulkBrief
+    ? ""
+    : `
+
+Finally, TIDY UP THE BROWSER: close every Chrome tab you opened during this
+task (search results, listings, PM sites — all of them). Leave any tabs that
+were already open before you started untouched. Your report has everything I
+need, so nothing needs to stay open.
+
+${doneSignalSection(
+      n === 1 ? "the buy-in unit is attached" : "both buy-in units are attached",
+      profitGuardOn
+        ? "a slot you could not fill, a price-sanity gap, or a set you had to attach at a loss over the cap"
+        : "a slot you could not fill, or a price-sanity gap to review",
+    )}`;
+
   return `# Task: Find ${countWord} buy-in ${unitWord} for a reservation and attach ${themOrIt}
 
 You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
@@ -488,7 +550,7 @@ exact ADDRESS (to prove the location), the TOTAL price for the exact
 ${input.checkIn} → ${input.checkOut} stay (all-in: nightly × nights + cleaning/fees),
 and the BOOKING MODE (instant book vs request-only — see the booking-mode rule above).
 
-${BOT_WALL_PROTOCOL}
+${botWallSection}
 
 ## Attach using the manual-attach method
 For EACH unit slot, replicate the manual-attach flow (the "Manually add buy-in"
@@ -538,18 +600,91 @@ plus the combined cost, and any slot you could not fill.${reportProfitTail}
 
 This task ends at ATTACH. Do **NOT** book, open a checkout page, or enter any
 payment details — I review the attached picks first, and booking runs from a
-separate checkout prompt I'll start myself.
+separate checkout prompt I'll start myself.${closingSections}`;
+}
 
-Finally, TIDY UP THE BROWSER: close every Chrome tab you opened during this
-task (search results, listings, PM sites — all of them). Leave any tabs that
-were already open before you started untouched. Your report has everything I
-need, so nothing needs to stay open.
+/**
+ * Upper bound on reservations per bulk Cowork find task. One Cowork session
+ * works the briefs strictly one at a time and each find+attach is a
+ * substantial web-research job — past this the session gets unwieldy and a
+ * mid-batch failure wastes more work. The client slices to this cap and tells
+ * the operator to run the remainder as a second batch.
+ */
+export const COWORK_BULK_FIND_MAX = 8;
+
+/**
+ * The BULK route through Cowork: ONE task that works N reservations' buy-in
+ * searches strictly one at a time. Each reservation's brief is the EXACT
+ * single-reservation prompt (same rules, profit guard, attach calls — the
+ * contract 209 tests lock) with two bulk-frame substitutions: the bot-wall
+ * protocol is hoisted once to the top, and the browser tidy-up + done signal
+ * fire ONCE after the last reservation instead of per brief.
+ *
+ * - 0 reservations → "" (callers guard; nothing sensible to build).
+ * - 1 reservation → byte-identical to buildCoworkBuyInPrompt(inputs[0]) —
+ *   LOAD-BEARING equivalence (test-locked): a single-item "bulk" run must
+ *   behave exactly like the per-reservation Auto Cowork button.
+ */
+export function buildCoworkBulkBuyInPrompt(reservations: CoworkBuyInPromptInput[]): string {
+  if (reservations.length === 0) return "";
+  if (reservations.length === 1) return buildCoworkBuyInPrompt(reservations[0]);
+  const n = reservations.length;
+  const divider = "=".repeat(70);
+  const briefs = reservations
+    .map((input, i) => {
+      const guest = input.guestName?.trim() || "(unknown guest)";
+      return `${divider}
+RESERVATION ${i + 1} of ${n} — ${guest} @ ${input.propertyName} (${input.checkIn} → ${input.checkOut})
+${divider}
+
+${buildCoworkBuyInPrompt(input, { bulkBrief: true })}`;
+    })
+    .join("\n\n");
+
+  return `# Task: Bulk buy-in search — ${n} reservations, one at a time
+
+You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
+Below are ${n} SELF-CONTAINED reservation briefs. Work them STRICTLY one at a
+time, in the order listed — finish reservation 1's search + attach (or record
+exactly why it could not be filled) before opening a single tab for
+reservation 2.
+
+Batch rules (these sit ABOVE every brief):
+- Each brief is complete on its own: its resort anchor, qualification rules,
+  profit guard, and attach API calls (with its own reservation ID) apply ONLY
+  to that reservation. NEVER carry a unit, price, or URL from one
+  reservation's research into another reservation's attach calls.
+- FAILURE ISOLATION: if a reservation cannot be completed (no qualifying
+  units, a page you cannot get past even after the bot-check protocol, an API
+  error) — record exactly what happened for the final report and MOVE ON to
+  the next reservation. One stuck reservation must never sink the batch.
+- Do NOT book anything for ANY reservation. Every brief ends at ATTACH.
+- Each brief's report is collected into ONE consolidated final report at the
+  end; the browser tidy-up and the done signal happen ONCE, after the LAST
+  reservation (never between briefs).
+
+${BOT_WALL_PROTOCOL}
+
+${briefs}
+
+${divider}
+AFTER THE LAST RESERVATION — final report, tidy up, done signal
+${divider}
+
+Deliver ONE consolidated report with a section per reservation, in order:
+what you attached (listing URL, bedrooms, unit type, address + how you
+confirmed the location, total price, resort vs city-wide, booking mode + the
+instant-book backup wherever a pick was request-only, and the profit math
+wherever that brief's profit guard was on), any slot you could not fill and
+why, and any reservation you had to skip entirely.
+
+Then TIDY UP THE BROWSER: close every Chrome tab you opened during this task
+(search results, listings, PM sites — all of them, across ALL reservations).
+Leave tabs that were already open before you started untouched.
 
 ${doneSignalSection(
-    n === 1 ? "the buy-in unit is attached" : "both buy-in units are attached",
-    profitGuardOn
-      ? "a slot you could not fill, a price-sanity gap, or a set you had to attach at a loss over the cap"
-      : "a slot you could not fill, or a price-sanity gap to review",
+    `all ${n} reservations have their buy-in units attached`,
+    "a reservation you could not fill, a loss over the cap, or an attach that needs review",
   )}`;
 }
 
