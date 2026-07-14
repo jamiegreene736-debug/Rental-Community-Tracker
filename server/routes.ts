@@ -24611,9 +24611,15 @@ Requirements:
   });
 
   // POST /api/builder/push-photos
-  // Streams NDJSON events as each photo completes so the connection never times out.
+  // Streams NDJSON events as each photo completes to keep progress flowing.
   // Each line: { type:"photo", index, total, localPath, success, url?, wasUpscaled?, error? }
   // Final line: { type:"done", successCount, upscaledCount, total }
+  // NOTE (2026-07-14): streaming does NOT make the connection immortal —
+  // Railway's edge hard-cuts every response at 15 minutes of total duration
+  // even mid-stream, and a big AI-upscale push legitimately runs longer. The
+  // route keeps working after the cut (checkpoint PUTs every 5 photos + the
+  // final PUT/verify), and the recordGuestyPush ledger stamp at the end is the
+  // client's reconcile signal (shared/push-reconcile.ts) — don't remove it.
   app.post("/api/builder/push-photos", async (req, res) => {
     const imgbbKey = process.env.IMGBB_API_KEY;
     const replicateKey = process.env.REPLICATE_API_KEY;
@@ -24664,7 +24670,8 @@ Requirements:
     const trimmedCount = rawPhotos.length - photos.length;
 
     // Stream NDJSON — one JSON line per photo + a final summary line.
-    // This keeps the HTTP connection alive for as long as needed (no timeout).
+    // (Keeps intermediaries from idle-timing-out the response; the edge's
+    // 15-minute TOTAL-duration cap still applies — see the route note above.)
     res.setHeader("Content-Type", "application/x-ndjson");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering if present

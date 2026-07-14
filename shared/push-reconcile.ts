@@ -71,3 +71,44 @@ export function pushReconcileTimeoutMessage(tabLabel: string): string {
     `It may still complete in the background — check this tab's "Pushed" stamp in a minute before retrying.`
   );
 }
+
+// ── Photos push: reconcile after a mid-stream connection cut ────────────────
+// (2026-07-14 second incident, same class as the descriptions one above.)
+// THE INCIDENT: a 51-photo manual push with AI upscale ran ~16 minutes
+// server-side (every photo was sub-1920px, so each cost a ~30s Real-ESRGAN
+// call before ImgBB + the Guesty PUTs). Railway's edge hard-cuts EVERY
+// response at exactly 900,000 ms (15 minutes) of total duration — even while
+// NDJSON progress lines are actively streaming — so the browser lost the
+// stream at ~45/51, showed "✗ failed", and the server then finished, verified
+// 51/51 on Guesty, and ledger-stamped SUCCESS a minute later. The old NDJSON
+// comment ("no timeout possible") was simply wrong at the edge layer.
+//
+// The client reconciles a lost stream against the photos ledger entry, with a
+// deadline scaled to how many photos the server still had left when the
+// stream died: each remaining photo can honestly cost up to ~ESRGAN 30-40s +
+// validation + ImgBB retries (~60s worst case), plus a base allowance for the
+// final PUT + the 3-attempt verify ladder. Floor = the descriptions deadline
+// (never LESS patient than the simple case); cap keeps a wedged server from
+// pinning the UI for an hour.
+export const PHOTO_PUSH_RECONCILE_BASE_MS = 2 * 60_000;
+export const PHOTO_PUSH_RECONCILE_PER_PHOTO_MS = 60_000;
+export const PHOTO_PUSH_RECONCILE_MAX_MS = 45 * 60_000;
+
+export function photoPushReconcileDeadlineMs(remainingPhotos: number): number {
+  const remaining = Number.isFinite(remainingPhotos)
+    ? Math.max(0, Math.ceil(remainingPhotos))
+    : 0;
+  const scaled = PHOTO_PUSH_RECONCILE_BASE_MS + remaining * PHOTO_PUSH_RECONCILE_PER_PHOTO_MS;
+  return Math.min(PHOTO_PUSH_RECONCILE_MAX_MS, Math.max(PUSH_RECONCILE_DEADLINE_MS, scaled));
+}
+
+// Shown in the push progress UI while the ledger poll runs. Honest about what
+// happened (the connection dropped, not the push) and what the client is
+// doing about it.
+export function photoPushStreamLostMessage(seen: number, total: number): string {
+  const progress = total > 0 ? ` after ${Math.min(seen, total)} of ${total} photos` : "";
+  return (
+    `The connection to the server dropped${progress} (long pushes exceed the hosting edge's 15-minute ` +
+    `response limit). The server is still pushing in the background — watching the push ledger for the result…`
+  );
+}

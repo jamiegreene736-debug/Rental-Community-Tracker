@@ -43,6 +43,29 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-14 (Photos push "not pushing them all through and then fails" — push actually SUCCEEDED
+  in ~16 min; Railway edge cuts EVERY response at exactly 15 minutes): Operator's manual "Push
+  Photos to Guesty" (51 photos, draft 46) showed progress stall + failure. NOT a push failure
+  (don't re-chase): the HTTP edge log shows `POST /api/builder/push-photos` cut at totalDuration
+  900000ms EXACTLY — Railway's edge hard-caps total response duration at 15 min even while NDJSON
+  lines are actively streaming (the route's old "no timeout possible" comment was wrong). All 51
+  photos were sub-1920px → 51 ESRGAN calls ≈ 16 min; the server finished AFTER the cut, verified
+  52/52 (incl. pinned collage), ledger-stamped "51 photos pushed · success" at 22:52:49Z. SHIPPED
+  (`claude/guesty-photo-push-issue-0cf983`): #1039's ledger reconcile extended to photos —
+  `upscaleAndUpload` snapshots the photos ledger before the POST; a stream that dies before the
+  "done" event polls the ledger (5s) with a deadline that SCALES with the photos still in flight
+  (`photoPushReconcileDeadlineMs`: 2 min + 60s/remaining photo, floor 6 min, cap 45 min); counts
+  read back via `parsePhotosPushSummary` (test-locked inverse of summarizePhotosPush). Definitive
+  !resp.ok still fails fast; user Cancel never reconciles. Amber "server is still pushing —
+  watching the push ledger" note while reconciling; done state renders the ledger summary. Server
+  route untouched (checkpoint PUTs every 5 photos already made it cut-safe); its recordGuestyPush
+  photos stamp is now drift-locked — it IS the reconcile signal. Verified: push-reconcile 52/0,
+  full `npm test` exit 0, build clean (strings bundle-grepped), `npm run check` 338 = baseline
+  (stash A/B identical per-file sets), both scenarios proven on the BUILT bundle (Playwright +
+  mocked /api: cut stream + fresh ledger → reconcile note → "✓ … confirmed from the push ledger",
+  one POST; definitive 400 → "✗" in 88ms, zero ledger polls). The operator's original 51-photo
+  push DID land — no re-push needed.
+
 - 2026-07-14 (Descriptions tab "stuck saying pushing" — push actually SUCCEEDED in 111s; client
   reconcile fix): Operator's manual "Push Descriptions to Guesty" (draft -86, Kamaole Beach Club,
   listing 6a515b04…) sat on "Pushing…" forever. NOT a push failure (don't re-chase): Railway logs

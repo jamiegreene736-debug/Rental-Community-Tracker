@@ -238,6 +238,25 @@ export function summarizePhotosPush(pushed: number, verified: number): string {
   return verified >= pushed ? base : `${base} (${verified} verified on Guesty)`;
 }
 
+// Inverse of summarizePhotosPush. The Photos-tab stream-loss reconcile
+// (shared/push-reconcile.ts) resolves a cut NDJSON push from the ledger and
+// needs the counts back out of the summary text to report honestly. Keep in
+// lockstep with the builder above — the round-trip is test-locked. Returns
+// null for any non-photos-summary string (a null just means "no counts";
+// callers must not treat it as failure).
+export function parsePhotosPushSummary(
+  summary: string | null | undefined,
+): { pushed: number; verified: number } | null {
+  const m = /^(\d+) photos? pushed(?: \((\d+) verified on Guesty\))?$/.exec(
+    String(summary ?? "").trim(),
+  );
+  if (!m) return null;
+  const pushed = Number(m[1]);
+  const verified = m[2] != null ? Number(m[2]) : pushed;
+  if (!Number.isFinite(pushed) || !Number.isFinite(verified)) return null;
+  return { pushed, verified };
+}
+
 export function summarizePricingPush(days: number, verifiedDays: number): string {
   const base = `${days} day${days === 1 ? "" : "s"} of rates pushed`;
   return verifiedDays >= days ? base : `${base} (${verifiedDays} verified)`;
