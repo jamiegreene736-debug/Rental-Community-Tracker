@@ -699,7 +699,11 @@ async function nearFullscreenWindowBounds(targetPage = page) {
 
 function playVrboChallengeAlertSound(label = "vrbo", id = "") {
   if (process.env.SIDECAR_VRBO_ALERT_SOUND === "0") return;
-  if (!/^vrbo/i.test(String(label || ""))) return;
+  // The listing-gallery bot-wall assist (Zillow/Redfin/Homes via
+  // listing_gallery_scrape / zillow_photo_scrape) surfaces the same yellow
+  // manual-solve window and needs the audible alert too — the operator is
+  // usually away from the sidecar display when a wall pops mid find-replacement.
+  if (!/^(?:vrbo|listing_gallery_scrape|zillow_photo_scrape)/i.test(String(label || ""))) return;
   const now = Date.now();
   const minGapMs = Math.max(1_000, Number(process.env.SIDECAR_VRBO_ALERT_SOUND_MIN_GAP_MS ?? 10_000) || 10_000);
   if (now - lastVrboChallengeAlertAt < minGapMs) return;
@@ -8336,6 +8340,113 @@ async function processVrboPhotoScrape(id, params) {
   await postResult(id, { photos, bedText, sleeps, lat: geo.lat, lng: geo.lng, complexName: geo.complexName, streetAddress: geo.streetAddress });
 }
 
+// ─────────── Listing-portal bot-wall manual resolve (yellow window) ───────────
+// Zillow (PerimeterX "Press & Hold"), Realtor (Imperva "Pardon Our
+// Interruption"), Redfin/Homes (Cloudflare interstitials) can bot-wall even the
+// residential-IP sidecar. Before this assist the gallery scrape just harvested
+// the wall page (~0 photos) and moved straight on — the operator watched the
+// check appear and vanish before it could be solved (2026-07-14
+// find-replacement report). Now the wall is detected up front, the Chrome
+// window is surfaced with the yellow "RESOLVE THE BOT DETECTION" banner +
+// alert sound (same machinery as the VRBO CAPTCHA handoff), and the op WAITS
+// for the operator to solve before scraping. A solved anti-bot cookie also
+// un-walls subsequent scrapes in this Chrome profile.
+// Kill: SIDECAR_GALLERY_BOTWALL_ASSIST=0. Wait ceiling:
+// SIDECAR_GALLERY_BOTWALL_WAIT_MS (default 4 min). The heartbeat STAGE sent
+// while waiting is CONTRACT-LOCKED with the server's manual-solve wallet pause
+// (MANUAL_SOLVE_STAGE_RE in server/vrbo-sidecar-queue.ts awaitOpResult): the
+// server freezes its wallet clock while this stage is fresh so it can't cancel
+// the op — a wallet-expiry cancel tears down the Chrome page mid-solve, which
+// is the exact reported incident. Renaming one side breaks the other;
+// tests/sidecar-botwall-assist.test.ts drift-locks the pair.
+const GALLERY_BOTWALL_STAGE = "listing gallery waiting for manual bot-wall solve";
+const LISTING_BOT_WALL_TITLE_RE =
+  /access (?:to this page )?has been denied|access denied|pardon our interruption|just a moment|attention required|human verification|are you a (?:human|robot)|robot check|security check|captcha/i;
+const LISTING_BOT_WALL_BODY_RE =
+  /press\s*&\s*hold|press\s+and\s+hold|pardon our interruption|px-captcha|perimeterx|(?:confirm|verify)(?: that)? you(?:'?re| are)(?: a)? human|not a robot|are you a robot|human verification|unusual traffic|checking your browser|enable javascript and cookies to continue|datadome|hcaptcha|recaptcha/i;
+
+function detectListingBotWall(state) {
+  if (!state) return null;
+  const title = String(state.title ?? "").replace(/\s+/g, " ").trim();
+  const body = String(state.bodyExcerpt ?? "").replace(/\s+/g, " ").trim();
+  const html = String(state.bodyHtmlSnippet ?? "");
+  // Bot walls are TINY documents; a real listing page carries thousands of
+  // chars of body text (captureVrboChallengeState caps bodyExcerpt at 3000, so
+  // real pages sit at the cap). The size guard keeps a listing whose
+  // description happens to say "captcha"/"robot" from false-tripping the wait.
+  const compact = body.length < 2600;
+  if (LISTING_BOT_WALL_TITLE_RE.test(title) && (compact || LISTING_BOT_WALL_BODY_RE.test(body))) {
+    return `title "${title.slice(0, 80)}"`;
+  }
+  if (compact && LISTING_BOT_WALL_BODY_RE.test(body)) {
+    const m = body.match(LISTING_BOT_WALL_BODY_RE);
+    return `body "${(m?.[0] ?? "").slice(0, 60)}"`;
+  }
+  if (compact && /id=["']px-captcha["']|perimeterx|geo\.captcha-delivery\.com/i.test(html)) {
+    return "challenge markup";
+  }
+  return null;
+}
+
+// Reuses the VRBO challenge highlight (yellow top banner + yellow border) but
+// re-labels the banner for the listing-portal context — the operator's ask was
+// literally a yellow window saying "resolve the bot detection".
+async function setListingBotWallBanner(targetPage, label, id) {
+  await setVrboChallengeHighlight(targetPage, true, label, id).catch(() => {});
+  await targetPage
+    .evaluate(() => {
+      const b = document.getElementById("rct-vrbo-challenge-alert-banner");
+      if (b) b.textContent = "🤖 RESOLVE THE BOT DETECTION — complete the check below so the photo scrape can continue";
+    })
+    .catch(() => {});
+}
+
+async function resolveListingBotWallManually(id, label, targetUrl) {
+  if (process.env.SIDECAR_GALLERY_BOTWALL_ASSIST === "0") return { cleared: false, waited: false };
+  let state = await captureVrboChallengeState(page);
+  let wallReason = detectListingBotWall(state);
+  if (!wallReason) return { cleared: true, waited: false };
+  if (usingHeadlessRuntime()) {
+    log(`${label} ${id}: bot detection on ${hostFromUrl(state?.url || targetUrl)} (${wallReason}) but the runtime is headless — no window to surface; harvesting as-is`);
+    return { cleared: false, waited: false };
+  }
+  const timeoutMs = Math.max(30_000, Number(process.env.SIDECAR_GALLERY_BOTWALL_WAIT_MS ?? 4 * 60_000) || 4 * 60_000);
+  const timeoutAt = Date.now() + timeoutMs;
+  log(`${label} ${id}: bot detection on ${hostFromUrl(state?.url || targetUrl)} (${wallReason}); surfacing the yellow window for a manual solve (up to ${Math.round(timeoutMs / 1000)}s)`);
+  await normalizePageDisplay(page).catch(() => {});
+  await surfaceVrboChallengeWindow(page, label, id).catch(() => {});
+  await setListingBotWallBanner(page, label, id);
+  await postScreenSnapshot({ id, opType: label }, page, GALLERY_BOTWALL_STAGE, { captcha: true, force: true });
+  try {
+    while (Date.now() < timeoutAt) {
+      throwIfRequestCancelled(id);
+      // Heartbeat with the contract-locked stage so the server-side wallet
+      // pauses instead of cancelling the op (which would close this page
+      // mid-solve). force=true so every tick re-stamps stageUpdatedAt — the
+      // server's pause is freshness-gated.
+      await sendHeartbeat(GALLERY_BOTWALL_STAGE, true, id).catch((e) => {
+        if (e instanceof SidecarCancelledError) throw e;
+      });
+      await boundedPageDelay(page, 2_500);
+      state = await captureVrboChallengeState(page);
+      wallReason = state ? detectListingBotWall(state) : wallReason;
+      if (state && !wallReason) {
+        log(`${label} ${id}: bot detection cleared by the operator; continuing the scrape`);
+        await postScreenSnapshot({ id, opType: label }, page, "listing bot detection solved", { force: true });
+        return { cleared: true, waited: true };
+      }
+      // A challenge reload can wipe the injected banner — re-assert it.
+      await setListingBotWallBanner(page, label, id);
+    }
+    log(`${label} ${id}: bot detection NOT resolved within ${Math.round(timeoutMs / 1000)}s; harvesting whatever rendered`);
+    await postScreenSnapshot({ id, opType: label }, page, "listing bot detection unresolved (timed out)", { captcha: true, force: true });
+    return { cleared: false, waited: true };
+  } finally {
+    await setVrboChallengeHighlight(page, false, label, id).catch(() => {});
+    await setCaptchaWindowVisibility(page, false, label, id).catch(() => {});
+  }
+}
+
 // ──────────── Generic real-estate listing gallery scrape ─────────────
 // Host-agnostic photo + facts scrape (Redfin / Homes.com / Zillow) via the
 // operator's home-IP Chrome. The residential IP bypasses the datacenter
@@ -8351,6 +8462,18 @@ async function processListingGalleryScrape(id, params) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS });
   await page.waitForTimeout(PAGE_SETTLE_MS);
   await dismissObstructions(page, "listing_gallery_scrape");
+
+  // Bot-wall assist (see resolveListingBotWallManually above): surface the
+  // yellow RESOLVE-THE-BOT-DETECTION window and wait for the operator instead
+  // of silently harvesting the wall page (~0 photos) and moving on. After a
+  // solve, re-navigate so the listing renders with the fresh anti-bot cookie
+  // before the harvest below.
+  const wallAssist = await resolveListingBotWallManually(id, "listing_gallery_scrape", url);
+  if (wallAssist.waited && wallAssist.cleared) {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS }).catch(() => {});
+    await page.waitForTimeout(PAGE_SETTLE_MS);
+    await dismissObstructions(page, "listing_gallery_scrape");
+  }
 
   // Best-effort: open the full photo gallery so lazy-loaded images render.
   // Generic across portals; when no matching control exists we just harvest

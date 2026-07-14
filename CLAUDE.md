@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-14 (find-replacement Zillow bot check "closed the page before I could resolve it" → YELLOW
+  resolve-it window + server wallet pause): Operator saw a Zillow bot detection during a
+  replacement-unit search vanish before he could solve it. TWO stacked causes (don't re-chase):
+  (1) the sidecar's `processListingGalleryScrape` (backs `listing_gallery_scrape` AND
+  `zillow_photo_scrape`) had zero bot-wall handling — it harvested the wall page (~0 photos) and
+  moved on; (2) `awaitOpResult`'s 90s gallery wallet CANCELS the op on expiry and the worker's
+  heartbeat-cancel tears down the Chrome page mid-solve. SHIPPED
+  (`claude/zillow-bot-detection-prompt-60a46a`): worker `detectListingBotWall` (PerimeterX
+  "Press & Hold" / Imperva / Cloudflare; compact-body <2600ch guard against false positives on real
+  listings) + `resolveListingBotWallManually` — surfaces the Chrome window via the existing VRBO
+  challenge machinery, yellow banner re-labeled "🤖 RESOLVE THE BOT DETECTION — complete the check
+  below so the photo scrape can continue", alert sound (label gate widened), polls ~2.5s until
+  cleared (then re-navigates with the fresh anti-bot cookie) or `SIDECAR_GALLERY_BOTWALL_WAIT_MS`
+  (4 min) expires; window always restored; kill `SIDECAR_GALLERY_BOTWALL_ASSIST=0`. Server:
+  awaitOpResult pauses the wallet while the op's FRESH (≤45s) heartbeat stage matches
+  `MANUAL_SOLVE_STAGE_RE` (also covers the VRBO manual-CAPTCHA stage), ceiling
+  `SIDECAR_MANUAL_SOLVE_HOLD_MS` (6 min). CONTRACT: worker stage string ↔ server regex drift-locked
+  in tests/sidecar-botwall-assist.test.ts. LIVE daemon (~/.vrbo-sidecar-daemon/worker.mjs, AHEAD of
+  main) got the same delta surgically (backup worker.mjs.bak-botwall-*) + launchctl kickstart —
+  never wholesale-cp the repo copy over it. Outer step budgets (rescue 110s) deliberately untouched:
+  a slow solve still lands in the keep-better/sidecar result caches and the solved cookie un-walls
+  the session. Verified: sidecar-botwall-assist suite green, full `npm test` exit 0, build clean
+  (wallet-pause bundle-grepped), `npm run check` 338 = baseline (stash A/B identical per-file sets),
+  daemon restarted clean on the new worker. Post-deploy: next Zillow bot wall during a
+  find/replace run should pop the yellow near-fullscreen Chrome window + Submarine chime and the
+  scrape continues after the press-and-hold is solved.
+
 - 2026-07-14 (dashboard "Update market pricing" → Last Price Scan column + Pricing tab timestamps):
   Operator: "make sure that it updates and time stamps the last price scan column and also in the
   pricing tab." SERVER SIDE WAS ALREADY CORRECT (don't re-chase): every bulk-queue item that pushes
