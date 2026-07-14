@@ -56,7 +56,7 @@ import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared
 import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt } from "@shared/cowork-buyin-prompt";
+import { buildCoworkBuyInPrompt, buildCoworkBulkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, type CoworkBuyInPromptInput } from "@shared/cowork-buyin-prompt";
 import { buildCoworkDeepLink, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
 
 // Is this attached buy-in already on the VRBO channel? Drives the
@@ -7862,6 +7862,12 @@ export default function Bookings() {
   const rawReservationsRef = useRef<GuestyReservation[]>([]);
 
   const [bulkSelectedReservations, setBulkSelectedReservations] = useState<Record<string, boolean>>({});
+  // The Cowork route for the bulk process: one Claude Desktop Cowork task works
+  // the selected bookings' OPEN slots one reservation at a time. The dialog
+  // shows the batch prompt (and "Copy again") after launch.
+  const [bulkCoworkOpen, setBulkCoworkOpen] = useState(false);
+  const [bulkCoworkPrompt, setBulkCoworkPrompt] = useState("");
+  const [bulkCoworkNote, setBulkCoworkNote] = useState("");
   const [bulkBuyInQueueOpen, setBulkBuyInQueueOpen] = useState(false);
   const [bulkBuyInQueueItems, setBulkBuyInQueueItems] = useState<BulkBuyInQueueItem[]>([]);
   const [bulkBuyInQueueRunning, setBulkBuyInQueueRunning] = useState(false);
@@ -9491,6 +9497,98 @@ export default function Bookings() {
       return !!meta?.propertyId && reservation.slotsTotal > 0 && reservation.slots.length > 0;
     })
   ), [bulkSelectedReservations, reservations, reservationPropertyMeta]);
+  // What the COWORK bulk route runs: the selected reservations that still have
+  // at least one OPEN slot. The find prompt ends at ATTACH and never detaches,
+  // so fully-attached bookings are skipped here (detach a unit first, or use
+  // the server queue, to re-search one of those).
+  const selectedBulkCoworkReservations = useMemo(
+    () => selectedBulkEligibleReservations.filter((r) => r.slots.some((slot) => !slot.buyIn)),
+    [selectedBulkEligibleReservations],
+  );
+  // Route the bulk buy-in process through Cowork (operator spec 2026-07-13):
+  // build ONE batch prompt — each selected reservation's brief is the exact
+  // single-button find prompt — copy it, and deep-link a new Cowork task
+  // (launchCoworkPrompt handles the over-cap clipboard handoff; a multi-
+  // reservation batch always exceeds the 14,336-char deep-link cap, so the
+  // operator pastes once and sends). Inputs mirror CoworkBuyInPromptButton
+  // exactly: EMPTY slots only, remaining net revenue (full minus attached
+  // slot costs) so the per-brief profit guard sees the budget that's left.
+  const startBulkCoworkFind = async () => {
+    const selected = selectedBulkEligibleReservations;
+    const withOpenSlots = selectedBulkCoworkReservations;
+    if (withOpenSlots.length === 0) {
+      toast({
+        title: "No open buy-in slots in the selection",
+        description:
+          "The Cowork route fills OPEN slots only — it never detaches. Detach a unit first (or use the server queue) to re-search an already-filled booking.",
+      });
+      return;
+    }
+    const capped = withOpenSlots.slice(0, COWORK_BULK_FIND_MAX);
+    const toDateOnly = (s?: string) => (!s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10));
+    const inputs: CoworkBuyInPromptInput[] = [];
+    for (const reservation of capped) {
+      const meta = reservationPropertyMeta.get(reservation._id);
+      if (!meta?.propertyId) continue;
+      const ci = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
+      const co = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ci) || !/^\d{4}-\d{2}-\d{2}$/.test(co)) continue;
+      const emptySlots = reservation.slots.filter((slot) => !slot.buyIn);
+      if (emptySlots.length === 0) continue;
+      inputs.push({
+        reservationId: reservation._id,
+        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? null,
+        propertyId: meta.propertyId,
+        propertyName: meta.propertyName,
+        community:
+          PROPERTY_UNIT_CONFIGS[meta.propertyId]?.community
+          ?? reservation.slots.find((slot) => slot.community)?.community
+          ?? "",
+        checkIn: ci,
+        checkOut: co,
+        units: emptySlots.map((slot) => ({ unitId: slot.unitId, unitLabel: slot.unitLabel, bedrooms: slot.bedrooms })),
+        party: guestPartyFromReservation(reservation),
+        // Same remaining-budget rule as the single Auto Cowork button: the
+        // batch fills only EMPTY slots, so the guard budget is what's left
+        // after the already-attached siblings.
+        netRevenue:
+          getNetRevenue(reservation)
+          - reservation.slots.reduce((sum, slot) => sum + parseFloat(String(slot.buyIn?.costPaid ?? 0)), 0),
+        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
+      });
+    }
+    if (inputs.length === 0) {
+      toast({
+        title: "Could not prepare the Cowork batch",
+        description: "None of the selected bookings had usable dates + open slots.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const prompt = buildCoworkBulkBuyInPrompt(inputs);
+    const notes: string[] = [];
+    const skippedAttached = selected.length - withOpenSlots.length;
+    if (skippedAttached > 0) {
+      notes.push(`${skippedAttached} fully-attached booking${skippedAttached === 1 ? " was" : "s were"} skipped (Cowork fills open slots only).`);
+    }
+    const overflow = withOpenSlots.length - capped.length;
+    if (overflow > 0) {
+      notes.push(`Batch capped at ${COWORK_BULK_FIND_MAX} — run Auto Cowork bulk again for the remaining ${overflow}.`);
+    }
+    setBulkCoworkPrompt(prompt);
+    setBulkCoworkNote(notes.join(" "));
+    setBulkCoworkOpen(true);
+    const result = await launchCoworkPrompt(prompt);
+    const t = coworkLaunchToastCopy(
+      result,
+      inputs.length === 1 ? "The buy-in search prompt" : `The ${inputs.length}-reservation buy-in batch prompt`,
+    );
+    toast({
+      title: t.title,
+      description: [t.description, ...notes].join(" "),
+      variant: t.destructive ? "destructive" : undefined,
+    });
+  };
   const setBulkQueueItem = (reservationId: string, patch: Partial<BulkBuyInQueueItem>) => {
     setBulkBuyInQueueItems((prev) => prev.map((item) => (
       item.reservationId === reservationId ? { ...item, ...patch } : item
@@ -10438,19 +10536,40 @@ export default function Bookings() {
                   >
                     Clear
                   </Button>
+                  {/* The bulk process routes through Cowork (operator spec
+                      2026-07-13): ONE Claude Desktop task works the selected
+                      bookings' open slots one reservation at a time. The
+                      server engine stays available below as the fallback —
+                      it's the only route from a phone, and the only one that
+                      detaches + re-searches fully-attached bookings. Both are
+                      disabled while a server queue runs so the two engines
+                      never attach to the same slots concurrently. */}
                   <Button
                     type="button"
                     size="sm"
+                    onClick={startBulkCoworkFind}
+                    disabled={bulkBuyInQueueRunning || selectedBulkCoworkReservations.length === 0}
+                    data-testid="button-run-bulk-cowork"
+                    title="Route the bulk buy-in process through Cowork: one Claude Desktop task searches the web and attaches the cheapest qualifying units to the selected bookings' OPEN slots, one reservation at a time. Never books, never detaches."
+                  >
+                    <Sparkles className="h-3.5 w-3.5 mr-1.5" />
+                    Auto Cowork bulk ({selectedBulkCoworkReservations.length})
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
                     onClick={startBulkBuyInQueue}
                     disabled={bulkBuyInQueueRunning || selectedBulkEligibleReservations.length === 0}
                     data-testid="button-run-bulk-buy-ins"
+                    title="The server-side engine (SearchAPI + sidecar): detaches the selected bookings' units and re-searches every slot from scratch. Use for re-searching fully-attached bookings, or when you're away from your Mac."
                   >
                     {bulkBuyInQueueRunning ? (
                       <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
                     ) : (
                       <Zap className="h-3.5 w-3.5 mr-1.5" />
                     )}
-                    Run bulk buy-ins ({selectedBulkEligibleReservations.length})
+                    Run bulk buy-ins (server) ({selectedBulkEligibleReservations.length})
                   </Button>
                   {bulkBuyInQueueItems.length > 0 && (
                     <Button
@@ -12686,6 +12805,48 @@ export default function Bookings() {
         )}
       </div>
 
+      <Dialog open={bulkCoworkOpen} onOpenChange={setBulkCoworkOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Auto Cowork — bulk buy-in batch</DialogTitle>
+            <DialogDescription>
+              On your Mac this just opened a new Cowork task in Claude Desktop — press send there to
+              run it. If the composer is empty (multi-reservation batches are too long to pre-fill
+              via the link), paste first: the whole batch prompt is on your clipboard. Cowork works
+              the reservations ONE AT A TIME — same search rules and attach method as the
+              per-booking Auto Cowork button — and chimes once when the whole batch is done. It
+              never books anything and never touches slots that already have buy-ins. Don&apos;t run
+              the server bulk queue on these same bookings while Cowork is working them.
+              {bulkCoworkNote ? ` ${bulkCoworkNote}` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            readOnly
+            value={bulkCoworkPrompt}
+            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
+            data-testid="textarea-bulk-cowork-prompt"
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <DialogFooter>
+            <Button
+              type="button"
+              size="sm"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard?.writeText(bulkCoworkPrompt);
+                  toast({ title: "Batch prompt copied", description: "Paste it into the Cowork composer and press send." });
+                } catch {
+                  toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
+                }
+              }}
+              data-testid="button-bulk-cowork-copy"
+            >
+              <Copy className="mr-1 h-3.5 w-3.5" />
+              Copy again
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={bulkBuyInQueueOpen} onOpenChange={setBulkBuyInQueueOpen}>
         <DialogContent className="max-w-6xl">
           <DialogHeader>
