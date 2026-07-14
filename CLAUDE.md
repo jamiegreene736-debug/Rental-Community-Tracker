@@ -63,6 +63,22 @@ Before making any changes:
   Verified: bulk-pricing-push 35/0 (6 new source guards), full `npm test` exit 0, build clean,
   `npm run check` 338 = baseline (stash A/B identical per-file error sets).
 
+- 2026-07-13 (Cowork browser rule — REAL Chrome only, cookies stop repeat bot walls): Operator:
+  "ensure that Cowork always uses like Chrome or another browser that has cookies cached so that
+  VRBO and/or Zillow and others will stop the bot question after I resolve it." SHIPPED
+  (`claude/cowork-chrome-browser-rule`): new `CHROME_BROWSER_RULE` composed INTO
+  `BOT_WALL_PROTOCOL` — every Cowork prompt (all five + the bulk batch's hoisted copy) now
+  mandates browsing ONLY in the operator's real Google Chrome via the Chrome tools (persistent
+  profile = solved bot-check clearances survive), never the isolated built-in browser pane
+  (cookie-less → re-raises solved challenges every run); no incognito, never clear cookies; if
+  the Chrome tools aren't connected → loud ALERT + WAIT, never a silent cookie-less fallback.
+  SIZE IS LOAD-BEARING: the rule is deliberately terse — the find prompt sits ~140 chars under
+  the 14,336 deep-link cap (the cowork-launch canary tripped TWICE during drafting; a wordier
+  rule silently demotes the single Auto Cowork button to paste). Long-named properties may still
+  exceed the cap → graceful clipboard handoff, never truncation. Verified: cowork-buyin-prompt
+  262/0 (27 new), cowork-launch 30/0 (canary at 14,199), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline. See the AGENTS.md 2026-07-13 Decision Log (third entry).
+
 - 2026-07-13 (BULK buy-ins route through Cowork): Operator (after the Auto Cowork buttons shipped):
   "I want you to change this so that it routes through cowork." SHIPPED
   (`claude/bulk-cowork-route`): "Auto Cowork bulk (N)" is now the PRIMARY bulk button on the
