@@ -8,12 +8,18 @@
 // reconcile loop can't be silently unwired.
 import { readFileSync } from "node:fs";
 import {
+  PHOTO_PUSH_RECONCILE_BASE_MS,
+  PHOTO_PUSH_RECONCILE_MAX_MS,
+  PHOTO_PUSH_RECONCILE_PER_PHOTO_MS,
   PUSH_RECONCILE_DEADLINE_MS,
   PUSH_RECONCILE_POLL_MS,
   freshPushOutcome,
+  photoPushReconcileDeadlineMs,
+  photoPushStreamLostMessage,
   pushEntryTimeMs,
   pushReconcileTimeoutMessage,
 } from "../shared/push-reconcile";
+import { parsePhotosPushSummary, summarizePhotosPush } from "../shared/guesty-push-history";
 
 let pass = 0;
 let fail = 0;
@@ -85,6 +91,63 @@ check(
   pushReconcileTimeoutMessage("descriptions").includes("may still complete"),
 );
 
+// ── Photos push: stream-loss reconcile (2026-07-14 second incident) ────────
+// A 51-photo AI-upscale push ran ~16 min server-side; Railway's edge cut the
+// NDJSON response at exactly 15:00, the UI reported failure, and the server
+// then finished + verified 51/51 + ledger-stamped success. These lock the
+// deadline math and the summary round-trip the client reconcile depends on.
+console.log("push-reconcile: photoPushReconcileDeadlineMs");
+check(
+  "0 remaining photos → floor = the descriptions deadline (never LESS patient)",
+  photoPushReconcileDeadlineMs(0) === PUSH_RECONCILE_DEADLINE_MS,
+);
+check(
+  "6 remaining (the live incident's tail) → base + 6/photo = 8 min",
+  photoPushReconcileDeadlineMs(6) === PHOTO_PUSH_RECONCILE_BASE_MS + 6 * PHOTO_PUSH_RECONCILE_PER_PHOTO_MS,
+);
+check(
+  "100 remaining → capped so a wedged server can't pin the UI for hours",
+  photoPushReconcileDeadlineMs(100) === PHOTO_PUSH_RECONCILE_MAX_MS,
+);
+check("negative input clamps to the floor", photoPushReconcileDeadlineMs(-5) === PUSH_RECONCILE_DEADLINE_MS);
+check("NaN input clamps to the floor", photoPushReconcileDeadlineMs(Number.NaN) === PUSH_RECONCILE_DEADLINE_MS);
+check(
+  "cap covers a full 100-photo push at the worst honest per-photo cost is >= 30 min",
+  PHOTO_PUSH_RECONCILE_MAX_MS >= 30 * 60_000,
+);
+check(
+  "stream-lost copy says the SERVER is still pushing (never implies failure)",
+  photoPushStreamLostMessage(45, 51).includes("still pushing") &&
+    photoPushStreamLostMessage(45, 51).includes("45 of 51"),
+);
+check(
+  "stream-lost copy omits progress when total is unknown",
+  !photoPushStreamLostMessage(0, 0).includes(" of "),
+);
+
+console.log("push-reconcile: parsePhotosPushSummary round-trips summarizePhotosPush");
+// The reconcile reads counts back out of the ledger summary — the parser must
+// stay the exact inverse of the server's builder (same shared module).
+check("all verified: '51 photos pushed'", (() => {
+  const p = parsePhotosPushSummary(summarizePhotosPush(51, 51));
+  return p?.pushed === 51 && p.verified === 51;
+})());
+check("singular: '1 photo pushed'", (() => {
+  const p = parsePhotosPushSummary(summarizePhotosPush(1, 1));
+  return p?.pushed === 1 && p.verified === 1;
+})());
+check("shortfall: '51 photos pushed (49 verified on Guesty)'", (() => {
+  const p = parsePhotosPushSummary(summarizePhotosPush(51, 49));
+  return p?.pushed === 51 && p.verified === 49;
+})());
+check("over-verified collapses to pushed (builder emits the bare form)", (() => {
+  const p = parsePhotosPushSummary(summarizePhotosPush(10, 12));
+  return p?.pushed === 10 && p.verified === 10;
+})());
+check("cover-collage summary is NOT a photos-push count", parsePhotosPushSummary("Cover collage pushed (12 photos on the listing)") === null);
+check("error summary never parses", parsePhotosPushSummary("No photos pushed to Guesty") === null);
+check("null/empty never parse", parsePhotosPushSummary(null) === null && parsePhotosPushSummary("") === null);
+
 // ── Source guards: the client wiring must stay reconciled ──────────────────
 // The stuck-"Pushing…" class returns the moment someone "simplifies" the push
 // back to a bare fetch+await, so lock the load-bearing pieces to the source.
@@ -117,6 +180,64 @@ check(
 check(
   "AbortSignal.timeout is feature-detected (older Safari)",
   builderSrc.includes(`typeof AbortSignal.timeout === "function"`),
+);
+
+// ── Source guards: PHOTOS stream-loss reconcile wiring ─────────────────────
+// The false-"✗ failed" class returns the moment someone treats the NDJSON
+// stream as immortal again ("no timeout possible" — it isn't; the edge cuts
+// at 15 min) or unwires the ledger fallback.
+console.log("push-reconcile: photos client wiring source guards");
+check(
+  "photo push reads the ledger's PHOTOS tab entry",
+  builderSrc.includes("tabs?: { photos?: PushLedgerEntryLike }"),
+);
+check(
+  "photo push captures a ledger baseline BEFORE the POST",
+  /const baselineMs = pushEntryTimeMs\(await readPhotosPushLedgerEntry\(selectedId\)\)/.test(builderSrc),
+);
+check(
+  "a lost stream resolves from the ledger via freshPushOutcome",
+  /freshPushOutcome\(baselineMs, await readPhotosPushLedgerEntry\(selectedId\)\)/.test(builderSrc),
+);
+check(
+  "reconcile deadline scales with the photos the server still had in flight",
+  /photoPushReconcileDeadlineMs\(Math\.max\(0, photos\.length - lastSeenIndex\)\)/.test(builderSrc),
+);
+check(
+  "user cancel (AbortError) returns cancelled and never enters the reconcile",
+  /AbortError[\s\S]{0,200}Photo push cancelled\./.test(builderSrc),
+);
+check(
+  "the reconcile loop itself observes a mid-poll cancel",
+  builderSrc.includes("if (controller.signal.aborted) {"),
+);
+check(
+  "a definitive !resp.ok error still fails fast (no reconcile)",
+  /if \(!resp\.ok\) \{[\s\S]{0,700}return \{ successCount: 0, total: photos\.length/.test(builderSrc),
+);
+check(
+  "ledger counts come from the test-locked summary parser",
+  builderSrc.includes("parsePhotosPushSummary(outcome.summary)"),
+);
+check(
+  "reconcile note renders while the ledger poll runs",
+  builderSrc.includes("photo-push-reconcile-note"),
+);
+check(
+  "reconciled done state renders the ledger summary (per-photo tail is gone)",
+  builderSrc.includes("photo-push-reconciled-done"),
+);
+
+// The server side of the contract: push-photos MUST ledger-stamp its outcome
+// at the end (that stamp IS the reconcile signal) — success and failure both.
+const routesSrc = readFileSync("server/routes.ts", "utf8");
+check(
+  "push-photos route stamps the photos ledger on completion",
+  /recordGuestyPush\(\s*guestyListingId,\s*"photos",\s*successCount > 0 \? "success" : "error"/.test(routesSrc),
+);
+check(
+  "push-photos route stamps the photos ledger on a failed final PUT too",
+  routesSrc.includes(`recordGuestyPush(guestyListingId, "photos", "error", \`Photo push failed: \${e.message}\`)`),
 );
 
 console.log(`\npush-reconcile: ${pass} passed, ${fail} failed`);
