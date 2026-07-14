@@ -130,6 +130,17 @@ app.use((req, res, next) => {
 app.get("/login", loginPageHandler);
 app.post("/login", loginPostHandler);
 app.post("/logout", logoutHandler);
+// Railway deploy healthcheck (railway.json healthcheckPath). With a healthcheck
+// configured, Railway keeps the OLD container serving until this returns 200 on
+// the NEW one — which is what stops every deploy from blackholing the portal
+// with "connection refused" 502s for the 1-3 min boot window (photos-volume
+// seed + db:push + ensureRuntimeSchema all run before listen()). A 200 here
+// genuinely means "ready": this route can only answer once httpServer.listen()
+// has run, which is after schema sync and route registration. Deliberately NO
+// DB probe — a transient Postgres blip must not make Railway fail a healthy
+// deploy. Registered before requireAuth (and whitelisted in server/auth.ts)
+// because Railway's prober carries no auth cookie/secret.
+app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));
 app.use(requireAuth);
 app.get("/api/auth/session", (_req, res) => {
   const session = res.locals.portalSession ?? { role: "admin", username: "admin" };

@@ -43,6 +43,30 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-14 ("Remove 6 selected photos" → HTTP 502 — DEPLOY BLACKHOLE class, fixed at the source with
+  a Railway healthcheck): Operator's photo-dedupe apply click (Menehune Shores Unit B) 502'd. NOT a
+  dedupe bug (don't re-chase): the edge log shows `connection refused` ×3 in 2ms — the POST never
+  reached the app and nothing was hidden; EVERY endpoint 502'd for the same ~15s+ window because
+  deployment 01116238 (the PR #1040 merge, created 66s before the click) flipped traffic to a container
+  that spends ~1-3 min before `listen()` (photos seed + db:push + ensureRuntimeSchema). Railway had NO
+  healthcheck, so EVERY deploy has been blackholing the portal like this (the #1025 deploy-race class).
+  SHIPPED (`claude/photo-removal-502-error-8f1f2e`): railway.json `healthcheckPath /healthz` +
+  `healthcheckTimeout 600` — Railway now keeps the OLD container serving until the new one answers 200
+  (zero-downtime deploys); `/healthz` registered in server/index.ts BEFORE requireAuth + whitelisted in
+  auth.ts PUBLIC_PATH_EXACT (static {ok:true}, no DB probe — a Postgres blip must not fail a healthy
+  deploy); and daemon/vrbo-sidecar/supervisor.mjs got a Railway-env-gated /healthz listener because
+  rct-sidecar-worker-lxkl auto-deploys from the SAME railway.json (never binds a port on the Mac
+  daemon). Client belt-and-braces: NEW pure `shared/transient-fetch.ts` (`fetchWithTransientRetry`,
+  3 attempts, 2s/4s backoff, 502/503/504 + network-drop only — 500/410/422 return immediately) wraps
+  the IDEMPOTENT dedupe apply/restore fetches; exhausted retries render honest copy ("Nothing was
+  removed … run the scan again"), and a post-swap retry gets the designed 410 rescan message (in-memory
+  scan store). NEVER wrap non-idempotent pushes with it — those reconcile via the push ledger
+  (shared/push-reconcile.ts). See AGENTS.md "Deploy healthcheck — zero-downtime deploys" + the
+  2026-07-14 Decision Log line. Verified: deploy-healthcheck 21/0 (npm chain), full `npm test` exit 0,
+  build clean (healthz + copy bundle-grepped), `npm run check` 338 = baseline; live /healthz 200 +
+  green deploys on BOTH services confirmed post-merge. The operator's 6 selected photos were NOT
+  removed — re-run "🧹 Scan photos & remove duplicates" and apply again.
+
 - 2026-07-14 (Descriptions tab "stuck saying pushing" — push actually SUCCEEDED in 111s; client
   reconcile fix): Operator's manual "Push Descriptions to Guesty" (draft -86, Kamaole Beach Club,
   listing 6a515b04…) sat on "Pushing…" forever. NOT a push failure (don't re-chase): Railway logs
