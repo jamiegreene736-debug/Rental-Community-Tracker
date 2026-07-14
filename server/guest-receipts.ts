@@ -31,6 +31,8 @@ import {
   buildRefundReceiptBody,
   buildRefundReceiptSmsBody,
   receiptDedupKey,
+  receiptPollWindowFilters,
+  reservationStatusBlocksPaymentReceipt,
   sameTransactionMoment,
   RECEIPT_SENDER_NAME,
   RECEIPT_BRAND_NAME,
@@ -306,24 +308,50 @@ export async function runGuestReceipts(): Promise<NonNullable<typeof _lastRunRes
     // money object -> lastUpdatedAt), so a refund on a months-old booking is
     // still seen. Pick the first sort the account accepts, then page until a
     // full page is entirely older than the window.
+    //
+    // LOAD-BEARING `filters=` (2026-07-14, Thien Tran incident): the BARE list
+    // (no filters param) gets Guesty's hidden DEFAULT filter — only committed
+    // UPCOMING stays come back, so a refund issued after checkout or after a
+    // cancellation was invisible to this poll and no receipt/ledger row/alert
+    // ever existed. An explicit window filter (receiptPollWindowFilters)
+    // disables the default filter AND narrows the result to just the
+    // recently-updated rows. If Guesty ever rejects the filter shape, the
+    // second pass falls back to the legacy bare list so this poll is never
+    // WORSE than the old behavior — but it logs loudly, because the fallback
+    // has the past-stay/canceled blind spot.
     const reservations: any[] = [];
     const sortCandidates = ["-lastUpdatedAt", "-updatedAt", "-createdAt"];
     let usedSort = "";
-    for (const sort of sortCandidates) {
-      try {
-        const data = await guestyRequest("GET", `/reservations?limit=${PAGE_LIMIT}&skip=0&sort=${sort}&fields=${fields}`);
-        reservations.push(...unwrapReservations(data));
-        usedSort = sort;
+    let usedFilterQuery = "";
+    for (const withWindowFilter of [true, false]) {
+      for (const sort of sortCandidates) {
+        const filterQuery = withWindowFilter
+          ? `&filters=${encodeURIComponent(receiptPollWindowFilters(sort, new Date(cutoff).toISOString()))}`
+          : "";
+        try {
+          const data = await guestyRequest("GET", `/reservations?limit=${PAGE_LIMIT}&skip=0&sort=${sort}&fields=${fields}${filterQuery}`);
+          reservations.push(...unwrapReservations(data));
+          usedSort = sort;
+          usedFilterQuery = filterQuery;
+          break;
+        } catch {
+          // try the next sort field / the unfiltered fallback pass
+        }
+      }
+      if (usedSort) {
+        if (!withWindowFilter) {
+          console.warn(
+            "[guest-receipts] Guesty rejected the window-filtered reservation poll — fell back to the bare list, which hides past-checkout/canceled reservations (their refunds will NOT be receipted until the filter works again)",
+          );
+        }
         break;
-      } catch {
-        // try the next sort field
       }
     }
     if (!usedSort) throw new Error("Guesty rejected every reservation list sort");
 
     if (reservations.length === PAGE_LIMIT) {
       for (let page = 1; page < MAX_PAGES; page++) {
-        const data = await guestyRequest("GET", `/reservations?limit=${PAGE_LIMIT}&skip=${page * PAGE_LIMIT}&sort=${usedSort}&fields=${fields}`);
+        const data = await guestyRequest("GET", `/reservations?limit=${PAGE_LIMIT}&skip=${page * PAGE_LIMIT}&sort=${usedSort}&fields=${fields}${usedFilterQuery}`);
         const pageRows = unwrapReservations(data);
         if (pageRows.length === 0) break;
         reservations.push(...pageRows);
@@ -339,8 +367,16 @@ export async function runGuestReceipts(): Promise<NonNullable<typeof _lastRunRes
       processed++;
       const reservationId = String(reservation?._id ?? reservation?.id ?? "");
       if (!reservationId) { skipped++; continue; }
-      for (const txn of collectedPaymentsForReceipts(reservation)) {
-        if (inWindow(txn)) pending.push({ kind: "payment", txn, reservation });
+      // The filtered poll now sees canceled/inquiry/expired rows the bare list
+      // used to hide. A PAYMENT receipt on those reads wrong ("a payment was
+      // processed" on a canceled booking), so payments are status-gated.
+      // REFUNDS are NOT gated — refund-after-cancellation is the most common
+      // refund and must always message the guest.
+      const paymentsBlocked = reservationStatusBlocksPaymentReceipt(reservation?.status);
+      if (!paymentsBlocked) {
+        for (const txn of collectedPaymentsForReceipts(reservation)) {
+          if (inWindow(txn)) pending.push({ kind: "payment", txn, reservation });
+        }
       }
       for (const txn of realRefundsForReceipts(reservation)) {
         if (inWindow(txn)) pending.push({ kind: "refund", txn, reservation });
