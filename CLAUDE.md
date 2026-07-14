@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-14 (Descriptions tab "stuck saying pushing" — push actually SUCCEEDED in 111s; client
+  reconcile fix): Operator's manual "Push Descriptions to Guesty" (draft -86, Kamaole Beach Club,
+  listing 6a515b04…) sat on "Pushing…" forever. NOT a push failure (don't re-chase): Railway logs
+  show `POST /api/builder/push-descriptions 200 in 111283ms` — a Guesty 429 at 22:05:05Z held the
+  guesty-sync global gate (retry-after pause, 120s cap) so the PUT waited ~2 min, then completed,
+  verified, and ledger-stamped "7 description fields pushed · success" at 22:07:08Z; the browser
+  silently lost the long-lived response and the bare `await fetch` was the client's only completion
+  signal. SHIPPED (`claude/unit-builder-push-stuck-24748c`): NEW pure `shared/push-reconcile.ts` —
+  the push snapshots the durable push ledger's descriptions entry BEFORE the POST (baseline), then
+  races the POST against a 5s ledger poll (6-min deadline); a ledger entry with a server timestamp
+  strictly newer than the baseline resolves the push either way (server-time vs server-time, clock
+  skew can't matter). DEFINITIVE errors (parsed JSON error body, e.g. the 422 placeholder guard)
+  still fail FAST; only indefinite failures (network kill / edge 502 HTML / still pending) fall to
+  ledger polling. AbortSignal.timeout feature-detected (older Safari); "can take 1–2 minutes" hint
+  renders while pushing. Server route deliberately untouched — the 111s was Guesty's rate limit
+  working as documented. Verified: push-reconcile 25/0 (incl. source guards so the loop can't be
+  simplified back to a bare fetch), full `npm test` exit 0, build clean (hint bundle-grepped),
+  `npm run check` 338 = baseline, both scenarios proven on the BUILT bundle (Playwright + mocked
+  /api: hung POST + fresh ledger → "✓ Pushed", one POST fired; 422 → "✗ Failed" in 81ms). The
+  operator's original push DID land — no re-push needed for Kamaole.
+
 - 2026-07-14 (Thien Tran $4,043 refund — NO receipt message ever sent; diagnosed LIVE + fixed):
   Operator refunded Thien Tran ~$4,043 (reservation 6a3e88479cbfa900134c015c, refunded 12:28Z) and no
   message went out. NOT an extraction bug (don't re-chase): `realRefundsForReceipts` handles the nested

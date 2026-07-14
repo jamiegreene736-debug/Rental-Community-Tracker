@@ -40,6 +40,14 @@ import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
 import { guestyPushBackfillCandidates, newestGuestyPushEntry, type GuestyPushListingHistory } from "@shared/guesty-push-history";
+import {
+  PUSH_RECONCILE_DEADLINE_MS,
+  PUSH_RECONCILE_POLL_MS,
+  freshPushOutcome,
+  pushEntryTimeMs,
+  pushReconcileTimeoutMessage,
+  type PushLedgerEntryLike,
+} from "@shared/push-reconcile";
 import { BUY_IN_MARKET_LOCATIONS, curatedResortSearchName, isCuratedBuyInMarket, resolveBuyInMarketFromText } from "@shared/buy-in-market";
 import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 import { builderTabFromSearch, type BuilderTabKey } from "@shared/builder-deep-link";
@@ -3137,6 +3145,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     onUpdateComplete?.({ listingId: result.listingId });
   }, [effectivePropertyData, selectedId, building, onUpdateComplete]);
 
+  // Reads the durable server push ledger's descriptions entry for the
+  // selected listing. Fail-soft (null) — the ledger is a reconcile signal,
+  // never a blocker.
+  const readDescriptionsLedgerEntry = useCallback(async (): Promise<PushLedgerEntryLike> => {
+    if (!selectedId) return null;
+    try {
+      const params = new URLSearchParams({ listingId: selectedId });
+      const res = await fetch(`/api/builder/guesty-push-history?${params.toString()}`);
+      if (!res.ok) return null;
+      const data = await res.json() as { tabs?: { descriptions?: PushLedgerEntryLike } };
+      return data?.tabs?.descriptions ?? null;
+    } catch {
+      return null;
+    }
+  }, [selectedId]);
+
   const pushDescriptionsToGuesty = useCallback(async (showToast = true) => {
     if (!effectivePropertyData?.descriptions || !selectedId) {
       throw new Error("Select a Guesty listing and make sure descriptions are available.");
@@ -3152,22 +3176,99 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       ...effectivePropertyData.descriptions,
       title: syncSleepsInTitle(effectivePropertyData.descriptions.title ?? "", sleeps),
     };
-    const res = await fetch("/api/builder/push-descriptions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ listingId: selectedId, descriptions }),
-    });
-    const data = await res.json() as { success: boolean; error?: string; returnedDescriptions?: Record<string, string> | null };
-    if (!res.ok || !data.success) {
-      throw new Error(data.error ?? `HTTP ${res.status}`);
+
+    // 2026-07-14 stuck-"Pushing…" fix: a Guesty 429 pause can hold this
+    // request for minutes, and the browser can silently lose the long-lived
+    // response even when the server-side push SUCCEEDS (it did — the ledger
+    // recorded it while the button sat on "Pushing…" forever). So the POST
+    // response is no longer the only completion signal: snapshot the server
+    // push ledger BEFORE pushing, then race the POST against a slow ledger
+    // poll — a fresh ledger entry (server timestamp newer than the baseline)
+    // resolves the push even if the response never arrives.
+    const baselineMs = pushEntryTimeMs(await readDescriptionsLedgerEntry());
+
+    type PushResponse = { success: boolean; error?: string; returnedDescriptions?: Record<string, string> | null };
+    let fetchError: Error | null = null;
+    // A DEFINITIVE error means the server responded with a parsed JSON error
+    // body — it already finished processing, so fail fast (the 422
+    // placeholder guard must surface immediately, not after the reconcile
+    // deadline). An INDEFINITE error (network kill / abort / edge 502 with an
+    // unparseable body) means the server may still be mid-push — keep polling
+    // the ledger until the deadline instead of failing a push that's about to
+    // succeed.
+    let fetchErrorDefinitive = false;
+    let fetchResult: PushResponse | null = null;
+    let fetchSettled = false;
+    const fetchPromise = (async (): Promise<void> => {
+      let res: Response;
+      try {
+        res = await fetch("/api/builder/push-descriptions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ listingId: selectedId, descriptions }),
+          // Feature-detected: older Safari lacks AbortSignal.timeout, and a
+          // sync throw here would skip the push entirely.
+          signal: typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+            ? AbortSignal.timeout(PUSH_RECONCILE_DEADLINE_MS)
+            : undefined,
+        });
+      } catch (e) {
+        fetchError = e instanceof Error ? e : new Error(String(e));
+        fetchSettled = true;
+        return;
+      }
+      try {
+        const data = await res.json() as PushResponse;
+        if (!res.ok || !data.success) {
+          fetchError = new Error(data.error ?? `HTTP ${res.status}`);
+          fetchErrorDefinitive = true;
+        } else {
+          fetchResult = data;
+        }
+      } catch {
+        // Got a response but the body wasn't the route's JSON (edge 502 HTML,
+        // connection cut mid-body) — ambiguous, let the ledger decide.
+        fetchError = new Error(`The push response could not be read (HTTP ${res.status}).`);
+      } finally {
+        fetchSettled = true;
+      }
+    })();
+
+    const deadline = Date.now() + PUSH_RECONCILE_DEADLINE_MS;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let data: PushResponse | null = null;
+    for (;;) {
+      // Once the fetch has settled a bare race would resolve instantly every
+      // iteration (settled promises win races) — skip straight to the ledger
+      // poll and pace with a plain sleep at the bottom instead.
+      if (!fetchSettled) await Promise.race([fetchPromise, sleep(PUSH_RECONCILE_POLL_MS)]);
+      if (fetchResult) { data = fetchResult; break; }
+      if (fetchSettled && fetchError && fetchErrorDefinitive) throw fetchError;
+      // Fetch died mid-flight OR is still pending — either way the ledger is
+      // the authority on whether the push actually landed server-side.
+      const outcome = freshPushOutcome(baselineMs, await readDescriptionsLedgerEntry());
+      if (outcome) {
+        if (outcome.status === "error") {
+          throw new Error(outcome.summary || "The push failed on the server — see the tab's push history.");
+        }
+        data = { success: true };
+        break;
+      }
+      if (Date.now() >= deadline) {
+        // keep polling the ledger until the deadline, then report honestly —
+        // the server may still complete after this.
+        throw fetchError ?? new Error(pushReconcileTimeoutMessage("descriptions"));
+      }
+      if (fetchSettled) await sleep(PUSH_RECONCILE_POLL_MS);
     }
+
     setDescPushState("success");
     recordDataPush("descriptions", "success", "Descriptions updated");
     if (showToast) {
         toast({ title: "Descriptions pushed to Guesty", description: "Summary, Space, Neighborhood, and other description fields updated." });
     }
     return data;
-  }, [effectivePropertyData, selectedId, recordDataPush, toast, propertyId]);
+  }, [effectivePropertyData, selectedId, recordDataPush, toast, propertyId, readDescriptionsLedgerEntry]);
 
   const pushDescriptions = useCallback(async () => {
     if (descPushState === "pushing") return;
@@ -6360,6 +6461,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           </button>
                           {!selectedId && (
                             <span style={{ fontSize: 11, color: "var(--muted)" }}>Select or build a listing first</span>
+                          )}
+                          {descPushState === "pushing" && (
+                            <span style={{ fontSize: 11, color: "var(--muted)", maxWidth: 400 }}>
+                              Guesty rate limits can make this take 1–2 minutes — the button will confirm either way, even if the connection drops.
+                            </span>
                           )}
                           {descPushState === "error" && descPushError && (
                             <span style={{ fontSize: 11, color: "#ef4444", maxWidth: 400, wordBreak: "break-word" }}>
