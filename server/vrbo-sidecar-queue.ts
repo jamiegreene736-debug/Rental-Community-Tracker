@@ -3456,6 +3456,26 @@ export async function fetchVrboPaymentScheduleViaSidecar(opts: {
   };
 }
 
+// Manual-solve wallet pause (2026-07-14): while a sidecar op's heartbeat stage
+// reports that the OPERATOR is solving a bot check / CAPTCHA in the surfaced
+// (yellow) Chrome window, the wallet clock must not cancel the op — a
+// wallet-expiry cancel tears down the Chrome page mid-solve (the exact
+// "Zillow bot check closed before I could resolve it" incident; gallery-scrape
+// wallets default to 90s while a human solve takes minutes). The stage strings
+// are CONTRACT-LOCKED with the daemon worker (GALLERY_BOTWALL_STAGE in
+// daemon/vrbo-sidecar/worker.mjs + the long-standing "VRBO waiting for manual
+// CAPTCHA solve"); tests/sidecar-botwall-assist.test.ts drift-locks the pair.
+// The pause is freshness-gated (the stage must have been re-stamped within the
+// last 45s — the worker's wait loop heartbeats every ~2.5s) so a wedged/dead
+// worker can NOT pin a wallet open, and ceiling-bounded
+// (SIDECAR_MANUAL_SOLVE_HOLD_MS, default 6 min; 0 disables the pause).
+const MANUAL_SOLVE_STAGE_RE = /waiting for manual\b.{0,40}\b(?:captcha|bot|verification|challenge)/i;
+const MANUAL_SOLVE_STAGE_FRESH_MS = 45_000;
+function manualSolveHoldCeilingMs(): number {
+  const raw = Number(process.env.SIDECAR_MANUAL_SOLVE_HOLD_MS ?? 6 * 60_000);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 6 * 60_000;
+}
+
 // Shared enqueue + poll loop. Each `searchXViaSidecar` is a thin
 // op-typed wrapper around this.
 async function awaitOpResult(opts: {
@@ -3529,6 +3549,7 @@ async function awaitOpResult(opts: {
   }
   const { id, deduped } = enqueueOp(opts.enqueueArgs);
   let activeStartedAt: number | null = null;
+  let manualHoldStartedAt: number | null = null;
   let aborted = false;
   const cancelIfOwned = (reason: string) => {
     // A deduped waiter is sharing an already-running browser job with
@@ -3607,6 +3628,24 @@ async function awaitOpResult(opts: {
       if (r.status === "in_progress") {
         if (activeStartedAt === null) {
           activeStartedAt = deduped ? now : (r.claimedAt ?? now);
+        }
+        // Manual-solve wallet pause — see MANUAL_SOLVE_STAGE_RE above. While the
+        // worker's fresh heartbeat stage says the operator is solving a bot
+        // check/CAPTCHA in the surfaced yellow window, freeze the wallet clock
+        // so this loop can't cancel the op (and close the page) mid-solve.
+        const holdCeilingMs = manualSolveHoldCeilingMs();
+        const stageFresh =
+          typeof r.stageUpdatedAt === "number" && now - r.stageUpdatedAt <= MANUAL_SOLVE_STAGE_FRESH_MS;
+        if (holdCeilingMs > 0 && stageFresh && typeof r.stage === "string" && MANUAL_SOLVE_STAGE_RE.test(r.stage)) {
+          if (manualHoldStartedAt === null) {
+            manualHoldStartedAt = now;
+            console.log(`[sidecar] wallet paused for ${opts.enqueueArgs.opType} ${id}: ${r.stage}`);
+          }
+          if (now - manualHoldStartedAt < holdCeilingMs) {
+            activeStartedAt = now; // freeze the wallet while the operator solves
+          }
+        } else if (manualHoldStartedAt !== null) {
+          manualHoldStartedAt = null;
         }
       } else if (activeStartedAt !== null) {
         // Reclaimed jobs return to pending; extend the wallet for the next claim.

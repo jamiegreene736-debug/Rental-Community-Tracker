@@ -64,6 +64,72 @@ Before making any changes:
   exit 0, build clean, `npm run check` 338 = baseline, fixed poll live-simulated read-only against prod
   (both missed refunds detected; sent payments dedup-skip).
 
+- 2026-07-14 (find-replacement Zillow bot check "closed the page before I could resolve it" → YELLOW
+  resolve-it window + server wallet pause): Operator saw a Zillow bot detection during a
+  replacement-unit search vanish before he could solve it. TWO stacked causes (don't re-chase):
+  (1) the sidecar's `processListingGalleryScrape` (backs `listing_gallery_scrape` AND
+  `zillow_photo_scrape`) had zero bot-wall handling — it harvested the wall page (~0 photos) and
+  moved on; (2) `awaitOpResult`'s 90s gallery wallet CANCELS the op on expiry and the worker's
+  heartbeat-cancel tears down the Chrome page mid-solve. SHIPPED
+  (`claude/zillow-bot-detection-prompt-60a46a`): worker `detectListingBotWall` (PerimeterX
+  "Press & Hold" / Imperva / Cloudflare; compact-body <2600ch guard against false positives on real
+  listings) + `resolveListingBotWallManually` — surfaces the Chrome window via the existing VRBO
+  challenge machinery, yellow banner re-labeled "🤖 RESOLVE THE BOT DETECTION — complete the check
+  below so the photo scrape can continue", alert sound (label gate widened), polls ~2.5s until
+  cleared (then re-navigates with the fresh anti-bot cookie) or `SIDECAR_GALLERY_BOTWALL_WAIT_MS`
+  (4 min) expires; window always restored; kill `SIDECAR_GALLERY_BOTWALL_ASSIST=0`. Server:
+  awaitOpResult pauses the wallet while the op's FRESH (≤45s) heartbeat stage matches
+  `MANUAL_SOLVE_STAGE_RE` (also covers the VRBO manual-CAPTCHA stage), ceiling
+  `SIDECAR_MANUAL_SOLVE_HOLD_MS` (6 min). CONTRACT: worker stage string ↔ server regex drift-locked
+  in tests/sidecar-botwall-assist.test.ts. LIVE daemon (~/.vrbo-sidecar-daemon/worker.mjs, AHEAD of
+  main) got the same delta surgically (backup worker.mjs.bak-botwall-*) + launchctl kickstart —
+  never wholesale-cp the repo copy over it. Outer step budgets (rescue 110s) deliberately untouched:
+  a slow solve still lands in the keep-better/sidecar result caches and the solved cookie un-walls
+  the session. Verified: sidecar-botwall-assist suite green, full `npm test` exit 0, build clean
+  (wallet-pause bundle-grepped), `npm run check` 338 = baseline (stash A/B identical per-file sets),
+  daemon restarted clean on the new worker. Post-deploy: next Zillow bot wall during a
+  find/replace run should pop the yellow near-fullscreen Chrome window + Submarine chime and the
+  scrape continues after the press-and-hold is solved.
+
+- 2026-07-14 (Bedding tab: "Scan photos for bedding" — Claude vision proposal + unit-audit layout leg +
+  rates-column lock): Operator asked how the Bedding tab is built (answer: static defaults + regex-parsed
+  AI-ESTIMATED text, NO photo evidence; en-suite = master-by-convention; bath features = heuristic
+  defaults) then: "Yes, please build this out and then merge PR. Also, include this in the unit audit…
+  Finally… ensure that it updates the rates update column on the dashboard too." SHIPPED
+  (`claude/bedding-tab-creation-523a10`): NEW pure `shared/bedding-photo-scan.ts` (prompt / STRICT parse —
+  out-of-range or double-claimed photo indexes and unrecognizable beds DROP, quantities clamp, <0.6
+  confidence never applies / compares; caption fallback; `mergeBeddingScanIntoUnit`;
+  `compareDetectedBeddingToGuestyRooms`; `bedding_photo_scans.v1` store shapes) + engine
+  `server/bedding-photo-scan.ts` (ONE batched 640px-downscaled vision call per unit over the unit's
+  Bedrooms/Bathrooms-category photos, `BEDDING_SCAN_MODEL` default claude-sonnet-4-6, captions
+  deliberately NOT sent — stale-label class; fingerprint-scoped persistence, pin-store parity) + routes
+  POST/GET `/api/builder/bedding-photo-scan`. Detects per DISTINCT photographed bedroom: bed type +
+  quantity, en-suite ONLY on visible attached-bathroom evidence, and bath fixtures (walk-in / combo /
+  soaking / jetted / rain / double-vanity / half). HONESTY: unphotographed bedrooms (3 of the operator's
+  31 listings) are counted + reported "no bedroom photo — unverifiable", NEVER guessed/padded; the merge
+  leaves those slots untouched. PROPOSAL-ONLY: the tab's violet "🔎 Scan photos for bedding" renders a
+  panel; Apply is an explicit per-unit click (biggest bed → Master; en-suite evidence sets+unions, never
+  unsets; bathroom features replace matched slots only; bedroom/bathroom COUNTS never change) — the
+  operator's localStorage config stays the ONLY push source (AGENTS.md Unit Audit Sweep #9 intact).
+  AUDIT: stageLayout calls `beddingPhotoCheckForAudit` (kill `AUDIT_BEDDING_PHOTO_CHECK=0`) — reuses a
+  fingerprint-fresh stored scan (one vision spend serves tab + audit), compares TYPE PRESENCE ONLY vs the
+  pushed Guesty bed layout (quantities never; Guesty-only types flagged only when ALL claimed bedrooms
+  photographed; sofa beds excluded), findings flag-only attention; the Guesty rooms read lives in the
+  ENGINE module because unit-audit-sweep.ts is source-locked against the rooms field name; layout ceiling
+  3m→8m; a scan that can't run caps layout at attention (never a silent pass). Vision kill
+  `BEDDING_SCAN_VISION_DISABLED=1` → caption-derived fallback (flagged in receipt + panel). RATES COLUMN
+  ask: VERIFIED already wired end-to-end since 2026-07-12 (stagePricing → refresh routes (drafts stamp
+  under -id) → pushBulkGuestyPricingAfterRefresh → markScannerGuestyRatePush → /api/dashboard/price-scans;
+  invalidation on BOTH seams — home.tsx active-set watcher + dialog terminal effect) — now DRIFT-LOCKED by
+  4 source guards in the new suite; no code gap existed. Verified: bedding-photo-scan 65/0 (npm chain),
+  unit-audit-sweep 160/0 untouched, full `npm test` REAL exit 0, build clean (UI strings + env knobs
+  bundle-grepped BOTH bundles), `npm run check` 338 = baseline, UI proven on the BUILT bundle (static SPA
+  server + Playwright, mocked /api: hydrate → stale chip → scan POST → apply rewrites bedroom 2
+  Queen→2×Twin, unphotographed bedroom 3 untouched, zero-detection unit's Apply disabled — 15/0). Could
+  NOT live-run the vision leg (no ANTHROPIC key in session) — post-deploy: open any builder Bedding tab →
+  "🔎 Scan photos for bedding"; expect the proposal in ~30-60s; re-run a dashboard audit and the Bedding &
+  layout row now carries "Bedding photo check:" lines.
+
 - 2026-07-14 (dashboard "Update market pricing" → Last Price Scan column + Pricing tab timestamps):
   Operator: "make sure that it updates and time stamps the last price scan column and also in the
   pricing tab." SERVER SIDE WAS ALREADY CORRECT (don't re-chase): every bulk-queue item that pushes

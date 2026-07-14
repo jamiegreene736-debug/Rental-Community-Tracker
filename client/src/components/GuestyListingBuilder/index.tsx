@@ -42,6 +42,7 @@ import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
 import { guestyPushBackfillCandidates, newestGuestyPushEntry, type GuestyPushListingHistory } from "@shared/guesty-push-history";
 import { BUY_IN_MARKET_LOCATIONS, curatedResortSearchName, isCuratedBuyInMarket, resolveBuyInMarketFromText } from "@shared/buy-in-market";
 import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
+import { builderTabFromSearch, type BuilderTabKey } from "@shared/builder-deep-link";
 
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
@@ -1039,7 +1040,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // side this hits Guesty's Distribution page and clicks the publish-
   // like button scoped to the channel's row — see AGENTS.md #29.
   const [publishStateByListingChannel, setPublishStateByListingChannel] = useState<Record<string, "idle" | "busy">>({});
-  const [activeTab, setActiveTab] = useState<"photos" | "amenities" | "descriptions" | "pricing" | "availability" | "bedding" | "otaVisibility">("descriptions");
+  // Initial tab honors a ?tab= deep link (e.g. the guest inbox's Listing
+  // panel "Photos"/"Descriptions" buttons open /builder/<id>/step-1?tab=photos
+  // in a new browser tab). One-shot read at mount; invalid/missing values
+  // keep the "descriptions" default. Type + parse live in
+  // shared/builder-deep-link.ts (drift-locked against the tab strip below).
+  const [activeTab, setActiveTab] = useState<BuilderTabKey>(
+    () => builderTabFromSearch(typeof window !== "undefined" ? window.location.search : null) ?? "descriptions",
+  );
   const [building, setBuilding] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState(0);
