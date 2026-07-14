@@ -2559,6 +2559,51 @@ margin on the SELL side (pricing) and the SOURCING side (the gate). PRs #663
     at build time — the volume mount shadows anything at the
     destination path, so the seed must live elsewhere in the image.
 
+### Deploy healthcheck — zero-downtime deploys (Load-Bearing, 2026-07-14)
+
+`railway.json` sets `healthcheckPath: "/healthz"` (+ `healthcheckTimeout: 600`).
+Before this, EVERY deploy blackholed the portal: Railway flipped traffic to the
+new container as soon as it started, but the app doesn't bind its port until
+after the photos-volume seed + boot `db:push` + `ensureRuntimeSchema()` (~1-3
+min), so the edge returned "connection refused" 502s for every request in that
+window — the 2026-07-14 incident where the operator's "Remove 6 selected
+photos" click 502'd 66s after a merge created a deploy. With the healthcheck,
+Railway keeps the OLD container serving until the NEW one answers 200.
+
+Load-bearing details (drift-locked in `tests/deploy-healthcheck.test.ts`):
+
+- **`/healthz` must stay reachable without credentials.** It's registered in
+  `server/index.ts` BEFORE `app.use(requireAuth)` (like `/login`) AND
+  whitelisted in `server/auth.ts` `PUBLIC_PATH_EXACT` — Railway's prober
+  carries no cookie/`X-Admin-Secret`. Removing either makes every deploy fail
+  its healthcheck and never go live (the old deploy keeps serving — an outage
+  of NEW code, not of the portal). It returns a static `{ok:true}` and exposes
+  nothing; deliberately NO DB probe, so a transient Postgres blip can't make
+  Railway kill a healthy deploy.
+- **A 200 genuinely means ready**: the route can only answer once
+  `httpServer.listen()` runs, which is after schema sync and route
+  registration.
+- **The sidecar-worker service shares this railway.json.**
+  `rct-sidecar-worker-lxkl` auto-deploys from `main` with the same root
+  Dockerfile + config, and its main process is
+  `daemon/vrbo-sidecar/supervisor.mjs` — which now runs a tiny `/healthz`
+  HTTP listener, gated to Railway env (`RAILWAY_ENVIRONMENT` /
+  `RAILWAY_PRIVATE_DOMAIN`; it must NEVER bind a port on the operator's Mac,
+  where the launchd daemon runs). Removing that listener kills every future
+  sidecar-worker deploy the same way. (`rct-sidecar-worker` and `rct-chrome`
+  are image-based/RAILPACK services that don't read this railway.json.)
+- **Overlap trade-off (accepted)**: during the new container's boot the old
+  one keeps serving, so two processes briefly coexist. Schedulers start
+  15-90s AFTER `listen()` (by which point the old container is gone) and the
+  double-run-sensitive paths are already idempotent (receipt/confirmation
+  dedup ledgers, bulk-pricing lease claims, watchdog freshness windows), so
+  no scheduler changes were needed.
+- Client-side complement: `shared/transient-fetch.ts`
+  (`fetchWithTransientRetry`) gives the idempotent photo-dedupe apply/restore
+  calls a bounded 502/503/504 + network-error retry. ONLY wrap
+  reads/idempotent writes with it — non-idempotent pushes reconcile via the
+  push ledger instead (`shared/push-reconcile.ts`).
+
 18. **Cover collage banner renders whenever `photos.length >= 2`, not
     only when a Guesty listing is selected.** Earlier gate was
     `!!selectedId && photos.length >= 2`, which hid the feature
@@ -4929,3 +4974,5 @@ Welcome. When in doubt, ask the human.
 2026-07-14 · Jamie: "I'm trying to manually push the descriptions within the unit builder and it's just stuck saying pushing. Please check the logs and see what's going wrong. Then fix the issues and merge PR" · DIAGNOSED live + fixed (`claude/unit-builder-push-stuck-24748c`) · THE PUSH NEVER FAILED: Railway deploy logs show `POST /api/builder/push-descriptions 200 in 111283ms` at 22:07:08Z — a Guesty 429 ("Too many requests", logged 22:05:05Z) held guesty-sync's global request gate (retry-after pause capped 120s) so the route's PUT sat ~2 min in the queue, then completed, verified (`verified:true`, all 7 fields on the listing), and ledger-stamped "7 description fields pushed · success". The BROWSER silently lost the long-lived response, so the button sat on "Pushing…" forever — the client's bare `await fetch(...)` was the ONLY completion signal. FIX (client-side reconcile, pure logic in NEW `shared/push-reconcile.ts`): the Descriptions push snapshots the durable push ledger's descriptions entry BEFORE the POST (baseline), then races the POST against a slow ledger poll (`PUSH_RECONCILE_POLL_MS` 5s, deadline `PUSH_RECONCILE_DEADLINE_MS` 6 min) — a ledger entry with a SERVER timestamp strictly newer than the baseline resolves the push (success or error) even when the response never arrives; server-time-vs-server-time so client clock skew can never mis-read. Error taxonomy is load-bearing: a DEFINITIVE error (HTTP response with parsed JSON error body — e.g. the 422 placeholder guard) still fails FAST; only INDEFINITE failures (network kill / abort / edge 502 with unparseable body / still-pending) fall to ledger polling, because the server may still be mid-push. AbortSignal.timeout is feature-detected (older Safari). UI gains a "Guesty rate limits can make this take 1–2 minutes" hint while pushing. Server route untouched (the 111s was Guesty's rate limit, not a defect — the gate pause is the documented 429 posture). Verified: push-reconcile 25/0 (pure cases + source guards locking the baseline/poll/fast-fail wiring so the loop can't be "simplified" back to a bare fetch), full npm test exit 0, build clean (hint copy bundle-grepped), `npm run check` 338 = baseline, and BOTH behaviors proven on the BUILT bundle (static SPA server + Playwright, mocked /api: hung POST + fresh ledger entry → "✓ Pushed" with exactly one POST fired; definitive 422 → "✗ Failed" in 81ms with the server's reason rendered).
 
 2026-07-14 · Jamie: "I'm trying to do a manual push of photos to Guesty but it's not pushing them all through and then fails. Please then merge PR." · DIAGNOSED live + fixed (`claude/guesty-photo-push-issue-0cf983`) · THE PUSH NEVER FAILED — the descriptions stuck-"Pushing…" class (see the entry above), photos edition, with a new twist: Railway's edge hard-cuts EVERY response at exactly 900,000 ms (15 minutes) of TOTAL duration even while NDJSON progress lines are actively streaming (HTTP edge log: `POST /api/builder/push-photos` httpStatus 200, totalDuration 900000, txBytes 28167 — the stream died mid-run), so the route's "streams NDJSON so the connection never times out" premise was false at the edge layer. The operator's 51-photo push had every photo sub-1920px → 51 Real-ESRGAN calls (~20-30s each) → ~16 min wall time; the browser lost the stream at ~45/51 and reported failure while the SERVER kept going, finished all 51, passed the verify ladder (52/52 with the pinned collage), and ledger-stamped "51 photos pushed · success" at 22:52:49Z. FIX (client-side reconcile; NO server behavior change — checkpoint PUTs every 5 photos already made the server side deploy/cut-safe): `upscaleAndUpload` snapshots the photos ledger entry BEFORE the POST, and a stream that dies before the "done" event (read error OR clean end without the final line) falls into a ledger poll — `freshPushOutcome` (server-time strictly newer than baseline) resolves success/error; deadline `photoPushReconcileDeadlineMs(remaining)` scales with the photos the server still had in flight (base 2 min + 60s/photo, floor = the 6-min descriptions deadline, cap 45 min) since a 100-photo upscale push can honestly run ~30+ min past the cut. Counts come back out of the ledger summary via `parsePhotosPushSummary` (shared/guesty-push-history.ts, test-locked inverse of summarizePhotosPush) because the per-photo event tail died with the stream. Error taxonomy preserved: definitive !resp.ok JSON errors fail FAST (no reconcile); user Cancel (AbortError) never reconciles and a mid-poll cancel exits the loop. UI: amber "server is still pushing — watching the push ledger" note while reconciling; the done state renders the ledger summary flagged "confirmed from the push ledger". The route's recordGuestyPush photos stamp is now drift-locked (success AND failed-PUT paths) — it IS the reconcile signal. Verified: push-reconcile 52/0 (deadline math, parser round-trip, wiring source guards), full npm test exit 0, build clean (both new UI strings bundle-grepped), `npm run check` 338 = baseline (stash A/B identical per-file error sets), and BOTH behaviors proven on the BUILT bundle (static SPA server + Playwright, mocked /api: NDJSON stream cut without "done" + fresh ledger entry → reconcile note → "✓ 20 photos pushed (19 verified on Guesty) — confirmed from the push ledger", exactly one POST fired; definitive 400 → error rendered in 88ms, zero ledger polls). The operator's original 51-photo push DID land — no re-push needed.
+
+2026-07-14 · Jamie (screenshot: builder Photos tab, Menehune Shores Unit B): "I tried to click remove 6 selected photos and it gave me an http 502 error. Please diagnose and fix." · DIAGNOSED from Railway edge logs + fixed (`claude/photo-removal-502-error-8f1f2e`) · NOT a dedupe bug: the edge log for `POST /api/builder/photo-dedupe-apply` at 23:15:19Z shows `connection refused` ×3 with 2ms total — the request NEVER reached the app (nothing was hidden), and EVERY endpoint 502'd identically for the same window (44 requests). ROOT CAUSE: deployment 01116238 (the PR #1040 merge) was created at 23:14:13Z; Railway had NO healthcheck configured, so it flipped traffic to the new container at process start while the app spends ~1-3 min before `listen()` (photos-volume seed + boot db:push + ensureRuntimeSchema) — every deploy has been silently blackholing the portal this way (the #1025 "deploy race" incident class, now fixed at the SOURCE instead of per-feature). FIX: railway.json `healthcheckPath /healthz` + `healthcheckTimeout 600` (old container keeps serving until the new one answers), `/healthz` in server/index.ts before requireAuth + PUBLIC_PATH_EXACT (documented exception: static ok-only probe, no DB, no data exposure), and a matching listener in daemon/vrbo-sidecar/supervisor.mjs because rct-sidecar-worker-lxkl builds from the SAME railway.json (Railway-env-gated — never binds on the Mac daemon). Belt-and-braces: NEW pure `shared/transient-fetch.ts` — the idempotent dedupe apply/restore fetches retry bounded (3 attempts, 2s/4s) on 502/503/504/network-drop, with honest error copy ("Nothing was removed … run the scan again") when exhausted; after a real container swap the retry lands on the new process's empty in-memory scan store and gets the designed 410 rescan message, never a blind apply. See Load-Bearing "Deploy healthcheck — zero-downtime deploys". Verified: deploy-healthcheck 21/0 (npm chain), full `npm test` exit 0, build clean (healthz + error copy bundle-grepped), `npm run check` 338 = baseline; post-merge deploy smoke planned: `/healthz` 200 on the live domain + both services' deploys green + a mid-deploy request no longer 502s.

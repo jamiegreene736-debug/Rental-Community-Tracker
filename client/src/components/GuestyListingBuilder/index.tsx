@@ -39,6 +39,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
+import { fetchWithTransientRetry, isTransientHttpStatus } from "@shared/transient-fetch";
 import { guestyPushBackfillCandidates, newestGuestyPushEntry, parsePhotosPushSummary, type GuestyPushListingHistory } from "@shared/guesty-push-history";
 import {
   PUSH_RECONCILE_DEADLINE_MS,
@@ -4137,17 +4138,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setDedupeApplyPhase("applying");
     setDedupeApplyError(null);
     try {
-      const resp = await fetch("/api/builder/photo-dedupe-apply", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scanId: dedupeResult.scanId, remove }),
-      });
+      // Retried on transient edge failures (Railway 502/503/504 during a
+      // deploy swap — the 2026-07-14 "Remove 6 selected photos → HTTP 502"
+      // incident — or a dropped connection). Safe to repeat: the apply is a
+      // soft-delete flip validated server-side against the stored scan, and
+      // after a real container swap it lands as the designed 410 "rescan".
+      const resp = await fetchWithTransientRetry(() =>
+        fetch("/api/builder/photo-dedupe-apply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scanId: dedupeResult.scanId, remove }),
+        }),
+      );
       const data = await resp.json().catch(() => null) as { ok?: boolean; hidden?: Array<{ folder: string; filename: string }>; failures?: string[]; error?: string } | null;
       if (!resp.ok || !data?.ok) {
         setDedupeApplyError(
           resp.status === 410
             ? "The scan expired — run the duplicate scan again."
-            : (data?.error || (data?.failures?.length ? `Failed on: ${data.failures.join(", ")}` : `HTTP ${resp.status}`)),
+            : isTransientHttpStatus(resp.status)
+              ? `The server was briefly unreachable (HTTP ${resp.status} — usually a deploy restarting it). Nothing was removed; wait ~1 minute and run the scan again.`
+              : (data?.error || (data?.failures?.length ? `Failed on: ${data.failures.join(", ")}` : `HTTP ${resp.status}`)),
         );
         setDedupeApplyPhase("error");
         return;
@@ -4167,11 +4177,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setDedupeApplyPhase("undoing");
     setDedupeApplyError(null);
     try {
-      const resp = await fetch("/api/builder/photo-dedupe-restore", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: dedupeApplied }),
-      });
+      // Same transient-edge retry as the apply: restore is the idempotent
+      // hidden:false flip, and a 502 mid-undo would otherwise strand hidden
+      // photos behind a scary toast until the operator re-clicked.
+      const resp = await fetchWithTransientRetry(() =>
+        fetch("/api/builder/photo-dedupe-restore", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: dedupeApplied }),
+        }),
+      );
       const data = await resp.json().catch(() => null) as { ok?: boolean; restored?: unknown[]; error?: string; failures?: string[] } | null;
       if (!resp.ok || !data?.ok) {
         // Keep the "applied" state (and its Undo button) on a failed undo so

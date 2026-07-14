@@ -110,6 +110,12 @@ const PUBLIC_PATH_EXACT = new Set<string>([
   // open proxy: requests need an HMAC `sig` minted at page render, and the
   // handler re-rejects IP-literal/internal hosts. See server/guest-photo-upscale.ts.
   "/guest-photo",
+  // NOTE FOR CODEX: /healthz is the Railway deploy healthcheck target
+  // (railway.json healthcheckPath). It returns a static {ok:true} and exposes
+  // nothing. Railway's prober has no cookie/X-Admin-Secret, so removing this
+  // entry (or the matching early route in server/index.ts) makes every deploy
+  // fail its healthcheck and never go live. See AGENTS.md "Deploy healthcheck".
+  "/healthz",
   "/favicon.ico",
   "/favicon.png",
   "/favicon-16x16.png",

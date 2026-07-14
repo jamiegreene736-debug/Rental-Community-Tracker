@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -109,6 +110,34 @@ async function stopAll(signal) {
 
 process.on("SIGINT", () => void stopAll("SIGINT"));
 process.on("SIGTERM", () => void stopAll("SIGTERM"));
+
+// ── Railway deploy healthcheck listener ─────────────────────────────────────
+// railway.json sets healthcheckPath "/healthz" for EVERY service that builds
+// from the repo's root Dockerfile — the web portal AND the remote
+// sidecar-worker service (RAILWAY_SERVICE_ROLE=sidecar-worker), whose main
+// process is this supervisor. Railway only flips traffic to (and only then
+// removes the old container of) a deployment once /healthz returns 200, which
+// is what gives the WEB service zero-downtime deploys. This tiny listener
+// exists so sidecar-worker deploys can pass the same shared check; without it
+// every sidecar deploy would sit at "healthcheck failing" and never go live.
+// Gated to Railway (never binds on the operator's Mac, where the launchd
+// daemon must not open ports): only when Railway injects its env. PORT falls
+// back to 8080 in case Railway probes without injecting PORT.
+const onRailway = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PRIVATE_DOMAIN || process.env.RAILWAY_SERVICE_ID);
+if (onRailway) {
+  const healthPort = Number(process.env.PORT) || 8080;
+  const healthServer = http.createServer((req, res) => {
+    if ((req.url || "").split("?")[0] === "/healthz") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, role: "sidecar-supervisor", workers: children.size }));
+    } else {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
+    }
+  });
+  healthServer.on("error", (e) => log(`healthcheck listener error: ${e?.message ?? e}`));
+  healthServer.listen(healthPort, "0.0.0.0", () => log(`healthcheck listener on :${healthPort} (/healthz)`));
+}
 
 log(`starting local worker pool max=${maxWorkers}`);
 for (let slot = 1; slot <= maxWorkers; slot++) startWorker(slot);
