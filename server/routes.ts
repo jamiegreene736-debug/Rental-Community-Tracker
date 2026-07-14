@@ -333,6 +333,7 @@ import { enrichCheckGroupsWithProvenance, setPhotoFolderVerification } from "./p
 import { scanForDuplicatePhotos, getStoredDedupeScan, type DedupeScanGroupInput } from "./photo-dedupe";
 import { validateDedupeSelection, type DedupeSelection } from "../shared/photo-dedupe-logic";
 import { scanAmenitiesForProperty } from "./amenity-scan";
+import { scanBeddingPhotosForProperty, loadStoredBeddingScan } from "./bedding-photo-scan";
 import { getAmenityLabel, AMENITY_CATALOG_KEYS, GUESTY_PUSH_NAME_ALIASES, GUESTY_UNSUPPORTED_AMENITY_KEYS } from "@shared/guesty-amenity-catalog";
 import { evaluateComboPhotoCommunityGate, planComboBedroomRetry, type ComboPhotoGateDecision, type ComboPhotoGateInput, type ComboBedroomRetryPlan } from "@shared/combo-photo-community-gate";
 import { evaluateComboOtaScanGate, type ComboOtaScanGateDecision } from "@shared/combo-ota-scan-gate";
@@ -24357,6 +24358,44 @@ Requirements:
     } catch (err: any) {
       console.error("[scan-amenities]", err?.message ?? err);
       return res.status(500).json({ ok: false, error: err?.message ?? "amenity scan failed" });
+    }
+  });
+
+  // POST /api/builder/bedding-photo-scan — the Bedding tab's "Scan photos for
+  // bedding" button AND the unit-audit layout stage's evidence source. Runs
+  // ONE batched Claude vision call per unit over the unit's Bedrooms/Bathrooms
+  // photos and returns detected bed types, en-suite evidence, and bathroom
+  // fixtures. NEVER writes the bedding config or pushes to Guesty — the result
+  // is a PROPOSAL the operator applies in the Bedding tab (their localStorage
+  // config stays the single push source; Load-Bearing: the layout stage never
+  // auto-pushes). Persists to app_settings `bedding_photo_scans.v1` so the tab
+  // can hydrate a scan an audit already paid for.
+  app.post("/api/builder/bedding-photo-scan", async (req: Request, res: Response) => {
+    const propertyId = Number((req.body ?? {}).propertyId);
+    if (!Number.isFinite(propertyId) || propertyId === 0) {
+      return res.status(400).json({ ok: false, error: "propertyId required" });
+    }
+    try {
+      const record = await scanBeddingPhotosForProperty(propertyId);
+      return res.json({ ok: true, record, fresh: true });
+    } catch (err: any) {
+      console.error("[bedding-photo-scan]", err?.message ?? err);
+      return res.status(500).json({ ok: false, error: err?.message ?? "bedding photo scan failed" });
+    }
+  });
+
+  // GET /api/builder/bedding-photo-scan/:propertyId — last stored scan +
+  // whether it still matches the current published photo set (fingerprint).
+  app.get("/api/builder/bedding-photo-scan/:propertyId", async (req: Request, res: Response) => {
+    const propertyId = Number(req.params.propertyId);
+    if (!Number.isFinite(propertyId) || propertyId === 0) {
+      return res.status(400).json({ ok: false, error: "propertyId required" });
+    }
+    try {
+      const { record, fresh } = await loadStoredBeddingScan(propertyId);
+      return res.json({ ok: true, record, fresh });
+    } catch (err: any) {
+      return res.json({ ok: true, record: null, fresh: false, warning: String(err?.message ?? err) });
     }
   });
 

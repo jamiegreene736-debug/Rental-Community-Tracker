@@ -4510,6 +4510,54 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    and cron cooldown/budget blocks keep their SMS-alert escalation (#15).
    Locked by tests/photo-judgment.test.ts (65, in the npm chain).
 
+21. **Bedding PHOTO scan (2026-07-14) — photo-proven bedding, shared between
+   the Bedding tab and the layout stage.** The Bedding tab's config comes
+   from static defaults + regex-parsed AI-ESTIMATED text (draft-bedding.ts)
+   — no photo evidence — so `shared/bedding-photo-scan.ts` (pure prompt/
+   strict-parse/merge/compare/store) + `server/bedding-photo-scan.ts`
+   (ONE batched downscaled-image vision call per unit,
+   `BEDDING_SCAN_MODEL` default claude-sonnet-4-6) detect bed types per
+   DISTINCT photographed bedroom, en-suite evidence, and bathroom fixtures
+   (walk-in shower / shower-tub combo / soaking- or jetted-tub / rain
+   shower / double vanity / half bath). Rules that must not drift:
+   (a) HONESTY — unphotographed bedrooms are counted and reported
+   ("N claimed bedrooms have no bedroom photo — unverifiable"), never
+   guessed or padded; the prompt forbids padding to the claimed count and
+   the strict parse drops entries with out-of-range/duplicate photo
+   indexes or unrecognizable beds. Detections under
+   `BEDDING_SCAN_MIN_CONFIDENCE` (0.6) render but never apply/compare.
+   (b) PROPOSAL-ONLY — nothing auto-applies. The tab's "🔎 Scan photos
+   for bedding" button renders a panel; the operator clicks Apply per
+   unit (`mergeBeddingScanIntoUnit`: biggest bed → Master slot, en-suite
+   evidence SETS + unions but never unsets, bathroom features replace
+   only matched slots, bedroom/bathroom COUNTS never change) and then
+   pushes via the existing Push Bedding button. The operator's
+   localStorage config remains the ONLY push source (#9 intact).
+   (c) The AUDIT reuses the same engine: stageLayout calls
+   `beddingPhotoCheckForAudit` (kill `AUDIT_BEDDING_PHOTO_CHECK=0`),
+   which reuses a fingerprint-fresh stored scan
+   (`bedding_photo_scans.v1`, photoFolderFingerprint over
+   listPublishedFilenames — one vision spend serves both surfaces) and
+   compares TYPE PRESENCE ONLY vs the Guesty listing's pushed bed layout
+   (quantities never compared — a second twin can be out of frame;
+   Guesty-only types are flagged ONLY when every claimed bedroom is
+   photographed; sofa beds excluded). Findings are flag-only attention
+   (never `failed`), and the Guesty rooms read lives in the ENGINE module
+   because the sweep source-lock forbids the rooms field name in
+   unit-audit-sweep.ts (the GET-only complement of #9). A scan that
+   cannot run caps layout at attention — never a silent pass. Layout
+   stage ceiling is 8m for the vision calls (#17's "layout 3m" superseded
+   for layout only; channels stays 3m). Vision kill
+   `BEDDING_SCAN_VISION_DISABLED=1` → caption-derived fallback
+   (method:"captions", flagged in the receipt — captions are themselves
+   vision-authored labels, weaker but not blind). Locked by
+   tests/bedding-photo-scan.test.ts (65, in the npm chain), which ALSO
+   source-guards the audit-pricing → `markScannerGuestyRatePush` →
+   `/api/dashboard/price-scans` → dashboard-invalidation chain (the
+   2026-07-14 operator ask that the audit's rate pushes move the Last
+   Price Scan column — verified already wired since 2026-07-12, now
+   drift-locked).
+
 ## Conventions
 
 ### Branches
@@ -4849,3 +4897,4 @@ Welcome. When in doubt, ask the human.
 2026-07-12 · Jamie (after asking whether a dashboard unit audit tidies both units' photos): "I want a situation where I don't want to make judgment calls. I'll leave that to Claude AI to determine." · ACCEPTED — new AI FINAL SAY rail (Load-Bearing "Unit Audit Sweep" #20) · The sweep's remaining photo judgment calls (junk flags, unit↔unit duplicate ownership, residual unconfirmed votes — the "needs your eyes" class) now get a forced-choice Claude vision decision inside photo-fix: decisive removals hide via the existing photo_labels soft-delete (floor-guarded, low-confidence removals downgrade to keep, one dupe side max), every decision lands in the receipt, KEEPs persist fingerprint-scoped in `photo_judgment_decisions.v1` so nothing is re-asked while the photo set is unchanged, and kept junk/dupes feed the consensus rail as KIND-STRICT coverage so rail B's independent re-checks still own the final greening (a "no" is still never upgraded; red votes are structurally excluded from adjudication). This is a sweep-only exception in the same spirit as the same-scene auto-apply (#8); the Photos-tab manual flows are untouched, and layout/licenses/cron-budget rails deliberately stay human. Kill `AUDIT_AI_JUDGMENT=0`. Verified: photo-judgment 54/0 (new, in the npm chain), unit-audit-sweep 160/0 + photo-community-check 89/0 untouched, full npm test exit 0, build clean (env knobs + strings bundle-grepped), `npm run check` 338 = baseline (stash A/B — identical error sets).
 2026-07-12 · Jamie: "Did you merge with the main PR? Also, if anyway to improve this to make sure the photos were deleting are genuine like duplicates or similar content then please implant." · ACCEPTED — REMOVAL VERIFICATION added to the AI final-say rail (Load-Bearing "Unit Audit Sweep" #20 rule f; second PR on the same directive) · No AI-judgment hide acts on a single opinion anymore. Cross-dupe hides now require a DETERMINISTIC re-proof: fresh dHash from both files' bytes on disk at hide time, distance ≤ NEAR_DUPLICATE_DISTANCE — the stored check distance is never trusted (the Ilikai stale-hash class fabricated phantom pairs); a disagreeing recompute vetoes the hide and keeps both copies (persisted keep-both). Junk/doesn't-belong hides now require an independent adversarial second vision review ("try to REFUTE each removal; any doubt = keep") — only refuter-confirmed removals hide, refuted removals become definitive keeps, and an unavailable/malformed second review WITHHOLDS every removal (unresolved attention, rail-A-retryable signature). `AUDIT_JUDGMENT_DOUBLE_CHECK=0` restores single-review removals; the hash proof is always on. Behaviorally proven on real image bytes (recompressed copy → distance 0, hide allowed; distinct scene → distance 25, hide vetoed). Verified: photo-judgment 65/0 (11 new), unit-audit-sweep 160/0 + photo-dedupe 49/0 untouched, full npm test exit 0 (city-vrbo-expansion smoke 8/8 isolated — known parallel-load flake), build clean (verification strings bundle-grepped), `npm run check` 338 = baseline (0 in touched files).
 2026-07-13 · Jamie: "At the moment I generate prompts for cowork. How can we automate the input of those prompts into cowork? I have Claude desktop. … Then in the UI change the button to like auto CoWork or something like that." · ACCEPTED — Auto Cowork deep-link launch · Claude Desktop registers the claude:// scheme and its URL handler accepts `claude://cowork/new?q=<url-encoded prompt>` — it opens a NEW Cowork task with the composer PRE-FILLED and does NOT auto-submit (verified two ways: reading the handler in app 1.20186.1's bundle, AND live-firing links on the operator's Mac — a 16.4KB URL was accepted with no handler warnings and no session was created until send). The operator's send press inside Claude Desktop stays the human approval — load-bearing for the checkout prompt, where sending IS the approval. LOAD-BEARING CAP: the handler silently truncates q at 16*1024−2*1024 = 14336 chars (String.slice), and the 2-slot find prompt already runs ~13.9k — a truncated prompt would drop the money guards / BOT_WALL_PROTOCOL / DONE-signal that live at the END of every Cowork prompt. So `shared/cowork-launch.ts` buildCoworkDeepLink() NEVER embeds an over-cap prompt: it returns the bare claude://cowork/new URL and the toast tells the operator to paste from the clipboard — which every button still populates FIRST (the paste fallback + the phone path). Desktop-only gate `shouldAutoLaunchCowork` (iPhone/iPad/Android keep the old copy-only flow; unknown schemes raise a modal error there). All FIVE bookings-page Cowork buttons launch through ONE client helper (`launchCoworkPrompt` in bookings.tsx — source-guarded); "Create prompt for Cowork" → "Auto Cowork", "Checkout prompt (books on VRBO)" → "Auto checkout (books on VRBO)"; verify-community / guest-happy / find-on-VRBO keep their labels but auto-launch too. A length CANARY test on a representative find prompt trips the suite if prompt growth ever crosses the cap. Degrades safely: if a future Claude Desktop drops the route, the link no-ops app-side and behavior is exactly the old clipboard flow — nothing server-side depends on it. Verified: cowork-launch 30/0 (in the npm chain), cowork-buyin-prompt 209/0 untouched, full npm test exit 0, build clean (labels bundle-grepped), npm run check 338 = baseline.
+2026-07-14 · Jamie (after asking how the Bedding tab is built and whether Claude vision detects bedrooms/en-suites/tub-vs-shower): "Yes, please build this out and then merge PR. Also, include this in the unit audit when I run it on the dashboard. Finally, when the unit audit is run and it pushes the market rate updates to Guesty, ensure that it updates the rates update column on the dashboard too." · ACCEPTED — Bedding PHOTO scan (Load-Bearing "Unit Audit Sweep" #21) · The Bedding tab's config was estimates all the way down (static defaults + regex-parsed AI-estimated text; en-suite = master-by-convention; bath features = heuristic defaults) while the photo pipeline already vision-captioned every photo — the two halves were never connected. NEW `shared/bedding-photo-scan.ts` + `server/bedding-photo-scan.ts` + `POST/GET /api/builder/bedding-photo-scan`: one batched Claude vision call per unit over the unit's Bedrooms/Bathrooms photos proposes bed types per DISTINCT photographed bedroom, en-suite evidence (only when a photo shows the attached bathroom), and bath fixtures (walk-in / combo / soaking / jetted / rain / double-vanity / half). HONESTY: unphotographed bedrooms (the operator counts 3 of 31 listings with incomplete bedroom photos) are reported as unverifiable and left untouched — never guessed. PROPOSAL-ONLY: the tab renders the scan and the operator clicks Apply per unit, then pushes with the existing button — localStorage config stays the only push source (#9 intact). AUDIT: stageLayout runs the same engine (fingerprint-fresh stored scans reused — one vision spend serves both surfaces), comparing TYPE presence only vs the pushed Guesty bed layout; findings are flag-only attention; the Guesty rooms read lives in the engine module so the sweep's no-rooms-string source lock holds; layout ceiling 3m→8m. Kills: AUDIT_BEDDING_PHOTO_CHECK=0 (audit leg), BEDDING_SCAN_VISION_DISABLED=1 (vision → caption fallback). The rates-column ask was VERIFIED already wired (2026-07-12 ship: markScannerGuestyRatePush stamp for properties AND drafts + both client invalidation seams) and is now drift-locked by 4 source guards in the new suite. Verified: bedding-photo-scan 65/0 (npm chain), unit-audit-sweep 160/0 untouched, full npm test exit 0, build clean, npm run check 338 = baseline.

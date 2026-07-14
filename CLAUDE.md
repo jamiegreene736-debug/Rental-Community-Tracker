@@ -43,6 +43,45 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-14 (Bedding tab: "Scan photos for bedding" — Claude vision proposal + unit-audit layout leg +
+  rates-column lock): Operator asked how the Bedding tab is built (answer: static defaults + regex-parsed
+  AI-ESTIMATED text, NO photo evidence; en-suite = master-by-convention; bath features = heuristic
+  defaults) then: "Yes, please build this out and then merge PR. Also, include this in the unit audit…
+  Finally… ensure that it updates the rates update column on the dashboard too." SHIPPED
+  (`claude/bedding-tab-creation-523a10`): NEW pure `shared/bedding-photo-scan.ts` (prompt / STRICT parse —
+  out-of-range or double-claimed photo indexes and unrecognizable beds DROP, quantities clamp, <0.6
+  confidence never applies / compares; caption fallback; `mergeBeddingScanIntoUnit`;
+  `compareDetectedBeddingToGuestyRooms`; `bedding_photo_scans.v1` store shapes) + engine
+  `server/bedding-photo-scan.ts` (ONE batched 640px-downscaled vision call per unit over the unit's
+  Bedrooms/Bathrooms-category photos, `BEDDING_SCAN_MODEL` default claude-sonnet-4-6, captions
+  deliberately NOT sent — stale-label class; fingerprint-scoped persistence, pin-store parity) + routes
+  POST/GET `/api/builder/bedding-photo-scan`. Detects per DISTINCT photographed bedroom: bed type +
+  quantity, en-suite ONLY on visible attached-bathroom evidence, and bath fixtures (walk-in / combo /
+  soaking / jetted / rain / double-vanity / half). HONESTY: unphotographed bedrooms (3 of the operator's
+  31 listings) are counted + reported "no bedroom photo — unverifiable", NEVER guessed/padded; the merge
+  leaves those slots untouched. PROPOSAL-ONLY: the tab's violet "🔎 Scan photos for bedding" renders a
+  panel; Apply is an explicit per-unit click (biggest bed → Master; en-suite evidence sets+unions, never
+  unsets; bathroom features replace matched slots only; bedroom/bathroom COUNTS never change) — the
+  operator's localStorage config stays the ONLY push source (AGENTS.md Unit Audit Sweep #9 intact).
+  AUDIT: stageLayout calls `beddingPhotoCheckForAudit` (kill `AUDIT_BEDDING_PHOTO_CHECK=0`) — reuses a
+  fingerprint-fresh stored scan (one vision spend serves tab + audit), compares TYPE PRESENCE ONLY vs the
+  pushed Guesty bed layout (quantities never; Guesty-only types flagged only when ALL claimed bedrooms
+  photographed; sofa beds excluded), findings flag-only attention; the Guesty rooms read lives in the
+  ENGINE module because unit-audit-sweep.ts is source-locked against the rooms field name; layout ceiling
+  3m→8m; a scan that can't run caps layout at attention (never a silent pass). Vision kill
+  `BEDDING_SCAN_VISION_DISABLED=1` → caption-derived fallback (flagged in receipt + panel). RATES COLUMN
+  ask: VERIFIED already wired end-to-end since 2026-07-12 (stagePricing → refresh routes (drafts stamp
+  under -id) → pushBulkGuestyPricingAfterRefresh → markScannerGuestyRatePush → /api/dashboard/price-scans;
+  invalidation on BOTH seams — home.tsx active-set watcher + dialog terminal effect) — now DRIFT-LOCKED by
+  4 source guards in the new suite; no code gap existed. Verified: bedding-photo-scan 65/0 (npm chain),
+  unit-audit-sweep 160/0 untouched, full `npm test` REAL exit 0, build clean (UI strings + env knobs
+  bundle-grepped BOTH bundles), `npm run check` 338 = baseline, UI proven on the BUILT bundle (static SPA
+  server + Playwright, mocked /api: hydrate → stale chip → scan POST → apply rewrites bedroom 2
+  Queen→2×Twin, unphotographed bedroom 3 untouched, zero-detection unit's Apply disabled — 15/0). Could
+  NOT live-run the vision leg (no ANTHROPIC key in session) — post-deploy: open any builder Bedding tab →
+  "🔎 Scan photos for bedding"; expect the proposal in ~30-60s; re-run a dashboard audit and the Bedding &
+  layout row now carries "Bedding photo check:" lines.
+
 - 2026-07-13 (Auto Cowork — prompts auto-open in Claude Desktop): Operator: "At the moment I generate
   prompts for cowork. How can we automate the input of those prompts into cowork? I have Claude
   desktop… in the UI change the button to like auto CoWork." SHIPPED (`claude/auto-cowork-launch`):
