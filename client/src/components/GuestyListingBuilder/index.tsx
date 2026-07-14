@@ -1411,45 +1411,55 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // Load the durable server-side push ledger for the selected listing, then
   // ONE-SHOT retroactive backfill: local push records from the past 48h that
   // the server doesn't have yet (pre-ledger pushes) get uploaded so every
-  // device sees them. Fail-soft — the ledger is display-only.
-  useEffect(() => {
+  // device sees them. Fail-soft — the ledger is display-only. Extracted to a
+  // callback so the Pricing-tab job watcher + the focus-refresh effect can
+  // re-read it after a push lands (the mount fetch alone left the tab chips
+  // stale when a dashboard market-pricing queue pushed while this builder
+  // sat open). The load token supersedes stale in-flight responses when the
+  // operator switches listings mid-fetch (the old effect's `cancelled` flag).
+  const pushHistoryLoadTokenRef = useRef(0);
+  const reloadServerPushHistory = useCallback(async () => {
     if (!selectedId) {
+      // Bump the token too, so an in-flight response for the previously
+      // selected listing can't land after this reset.
+      pushHistoryLoadTokenRef.current++;
       setServerPushHistory({});
       return;
     }
-    let cancelled = false;
-    (async () => {
+    const token = ++pushHistoryLoadTokenRef.current;
+    try {
+      const params = new URLSearchParams({ listingId: selectedId });
+      if (typeof propertyId === "number") params.set("propertyId", String(propertyId));
+      const res = await fetch(`/api/builder/guesty-push-history?${params.toString()}`);
+      if (!res.ok) return;
+      const data = await res.json() as { tabs?: GuestyPushListingHistory };
+      const tabs = data?.tabs ?? {};
+      if (token !== pushHistoryLoadTokenRef.current) return;
+      setServerPushHistory(tabs);
+      const backfillKey = dataPushStorageKey(selectedId, propertyId);
+      if (pushHistoryBackfilledRef.current.has(backfillKey)) return;
+      pushHistoryBackfilledRef.current.add(backfillKey);
+      let local: DataPushLog = {};
       try {
-        const params = new URLSearchParams({ listingId: selectedId });
-        if (typeof propertyId === "number") params.set("propertyId", String(propertyId));
-        const res = await fetch(`/api/builder/guesty-push-history?${params.toString()}`);
-        if (!res.ok) return;
-        const data = await res.json() as { tabs?: GuestyPushListingHistory };
-        const tabs = data?.tabs ?? {};
-        if (cancelled) return;
-        setServerPushHistory(tabs);
-        const backfillKey = dataPushStorageKey(selectedId, propertyId);
-        if (pushHistoryBackfilledRef.current.has(backfillKey)) return;
-        pushHistoryBackfilledRef.current.add(backfillKey);
-        let local: DataPushLog = {};
-        try {
-          local = JSON.parse(localStorage.getItem(backfillKey) ?? "{}") as DataPushLog;
-        } catch {
-          local = {};
-        }
-        const candidates = guestyPushBackfillCandidates(local, tabs, new Date().toISOString());
-        if (Object.keys(candidates).length === 0) return;
-        await fetch("/api/builder/guesty-push-history/backfill", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ listingId: selectedId, entries: candidates }),
-        });
+        local = JSON.parse(localStorage.getItem(backfillKey) ?? "{}") as DataPushLog;
       } catch {
-        // Advisory display — never block the builder on ledger reads.
+        local = {};
       }
-    })();
-    return () => { cancelled = true; };
+      const candidates = guestyPushBackfillCandidates(local, tabs, new Date().toISOString());
+      if (Object.keys(candidates).length === 0) return;
+      await fetch("/api/builder/guesty-push-history/backfill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listingId: selectedId, entries: candidates }),
+      });
+    } catch {
+      // Advisory display — never block the builder on ledger reads.
+    }
   }, [selectedId, propertyId]);
+
+  useEffect(() => {
+    void reloadServerPushHistory();
+  }, [reloadServerPushHistory]);
 
   // What the tab strip + push chips display: per row, the NEWEST of the
   // durable server ledger entry and this browser's localStorage record (a
@@ -4804,9 +4814,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         recordDataPush("pricing", "success", label);
         void reloadMarketRates();
         void reloadPricingLogs();
+        // The push stamped scanner_schedule + the per-tab ledger server-side;
+        // re-read both so the "Last Guesty rate push" line and the tab chip
+        // reflect this run without a remount. refreshScannerSchedule is
+        // declared later in the file — called via closure at poll time and
+        // deliberately NOT in the dep array (a dep reference would TDZ-crash
+        // at render; its identity only varies with propertyId, already a dep).
+        void refreshScannerSchedule();
+        void reloadServerPushHistory();
         stopped = true;
       } else if (isFailed || isCancelled) {
         recordDataPush("pricing", "error", item?.error || label);
+        // Failed pushes stamp an "error" status — surface it the same way.
+        void refreshScannerSchedule();
+        void reloadServerPushHistory();
         stopped = true;
       }
     };
@@ -4816,7 +4837,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [pricingPushStatus?.jobId, pricingPushStatus?.status, pricingPushStatus?.startedAt, propertyId, recordDataPush, reloadMarketRates, reloadPricingLogs]);
+  }, [pricingPushStatus?.jobId, pricingPushStatus?.status, pricingPushStatus?.startedAt, propertyId, recordDataPush, reloadMarketRates, reloadPricingLogs, reloadServerPushHistory]);
 
   // Aggregate monthly rates across all units for the 24-month seasonal table
   // Target markup margin (slider in the Guesty rate-push card, persisted to the
@@ -5045,6 +5066,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   useEffect(() => {
     void refreshScannerSchedule();
   }, [refreshScannerSchedule]);
+
+  // A dashboard "Update market pricing" queue, the weekly cron, or an audit
+  // sweep can push rates while this builder sits open in another browser tab.
+  // The scanner stamp + per-tab push ledger are plain mount fetches (no
+  // react-query cache), so without this the Pricing tab's "Last Guesty rate
+  // push" line and the tab chips stayed stale until a remount. Re-read both
+  // when the window regains focus/visibility, throttled to one refresh per
+  // 30s (both endpoints are cheap single-row/app_settings reads).
+  const pushStampsRefreshedAtRef = useRef(0);
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "hidden") return;
+      const now = Date.now();
+      if (now - pushStampsRefreshedAtRef.current < 30_000) return;
+      pushStampsRefreshedAtRef.current = now;
+      void refreshScannerSchedule();
+      void reloadServerPushHistory();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [refreshScannerSchedule, reloadServerPushHistory]);
 
   useEffect(() => {
     if (!propertyId) return;

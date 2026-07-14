@@ -43,6 +43,26 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-14 (dashboard "Update market pricing" → Last Price Scan column + Pricing tab timestamps):
+  Operator: "make sure that it updates and time stamps the last price scan column and also in the
+  pricing tab." SERVER SIDE WAS ALREADY CORRECT (don't re-chase): every bulk-queue item that pushes
+  goes `runBulkPricingItem` → `pushBulkGuestyPricingAfterRefresh` → loopback POST
+  /api/builder/push-seasonal-rates → `recordGuestyRatePush` stamps BOTH `scanner_schedule.
+  lastGuestyRatePush*` (the column, ok AND error) and the per-tab ledger `recordGuestyPush(listingId,
+  "pricing", …)` (the tab chip). The gaps were CLIENT refresh (the #1021 incident class, bulk-queue
+  edition), SHIPPED (`claude/market-pricing-timestamps-fb9fc8`): (1) home.tsx bulk poll —
+  `bulkPricingCompletedCountRef` invalidates `/api/dashboard/price-scans` whenever the job's
+  completed count rises MID-RUN (rows tick as items land) and again at terminal; (2) builder —
+  the Pricing-tab job watcher's completed/failed branches now call `refreshScannerSchedule()`
+  (the "Last Guesty rate push" line — previously stale even after the tab's OWN button ran) +
+  the extracted `reloadServerPushHistory()` (tab chip; supersede-guarded via
+  `pushHistoryLoadTokenRef`, backfill one-shot semantics unchanged), and a 30s-throttled
+  focus/visibilitychange listener re-reads both so a builder left open in another browser tab
+  reflects dashboard-queue/cron/sweep pushes without a remount. TDZ trap: `refreshScannerSchedule`
+  is declared BELOW the watcher effect — closure-called, deliberately NOT in that dep array.
+  Verified: bulk-pricing-push 35/0 (6 new source guards), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline (stash A/B identical per-file error sets).
+
 - 2026-07-13 (BULK buy-ins route through Cowork): Operator (after the Auto Cowork buttons shipped):
   "I want you to change this so that it routes through cowork." SHIPPED
   (`claude/bulk-cowork-route`): "Auto Cowork bulk (N)" is now the PRIMARY bulk button on the
