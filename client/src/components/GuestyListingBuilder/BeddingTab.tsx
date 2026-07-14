@@ -23,6 +23,14 @@ import {
   describeUnitBedding,
 } from "@/data/bedding-config";
 import type { GuestyBedType } from "@/data/guesty-listing-config";
+import {
+  BEDDING_SCAN_MIN_CONFIDENCE,
+  BEDDING_SCAN_FEATURE_LABELS,
+  describeDetectedBeds,
+  mergeBeddingScanIntoUnit,
+  type BeddingPhotoScanRecord,
+  type BeddingScanUnit,
+} from "@shared/bedding-photo-scan";
 
 const BED_TYPES: GuestyBedType[] = ["KING_BED", "QUEEN_BED", "DOUBLE_BED", "SINGLE_BED", "SOFA_BED", "BUNK_BED"];
 const BATH_FEATURES: BathFeature[] = ["walk-in-shower", "shower-tub-combo", "soaking-tub", "jetted-tub", "rain-shower", "double-vanity"];
@@ -86,6 +94,15 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
   const [spaceText, setSpaceText] = useState(() =>
     loadSpaceTextOverride(propertyId) ?? buildSpaceDescription(loadBeddingConfig(propertyId)));
   const [pushingSpace, setPushingSpace] = useState(false);
+  // Bedding PHOTO scan — Claude vision proposal over the unit's actual photos.
+  // NOTHING auto-applies: the operator reviews the panel and clicks Apply per
+  // unit (their manual edits keep winning — apply just writes the config state,
+  // which persists through the normal localStorage save).
+  const [beddingScan, setBeddingScan] = useState<BeddingPhotoScanRecord | null>(null);
+  const [beddingScanFresh, setBeddingScanFresh] = useState(false);
+  const [beddingScanning, setBeddingScanning] = useState(false);
+  const [beddingScanError, setBeddingScanError] = useState<string | null>(null);
+  const [beddingScanApplied, setBeddingScanApplied] = useState<Record<string, string>>({});
 
   // Reload when property changes
   useEffect(() => {
@@ -94,6 +111,25 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
     const override = loadSpaceTextOverride(propertyId);
     setSpaceDirty(override != null);
     setSpaceText(override ?? buildSpaceDescription(c));
+  }, [propertyId]);
+
+  // Hydrate the last stored photo scan (an audit sweep may have already paid
+  // for one — the store is shared with the unit-audit layout stage).
+  useEffect(() => {
+    let cancelled = false;
+    setBeddingScan(null);
+    setBeddingScanFresh(false);
+    setBeddingScanError(null);
+    setBeddingScanApplied({});
+    fetch(`/api/builder/bedding-photo-scan/${propertyId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.record) return;
+        setBeddingScan(data.record as BeddingPhotoScanRecord);
+        setBeddingScanFresh(data.fresh === true);
+      })
+      .catch(() => { /* proposal panel just stays hidden */ });
+    return () => { cancelled = true; };
   }, [propertyId]);
 
   // Auto-persist on change + refresh generated space text (unless hand-edited)
@@ -172,6 +208,53 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
     }
   }, [guestyListingId, pushing, totals, config, onGuestyPushRecorded, toast]);
 
+  // ── Bedding photo scan ────────────────────────────────────────────────────
+  const handleBeddingScan = useCallback(async () => {
+    if (beddingScanning) return;
+    setBeddingScanning(true);
+    setBeddingScanError(null);
+    try {
+      const r = await fetch("/api/builder/bedding-photo-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ propertyId }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data?.record) throw new Error(data?.error ?? `HTTP ${r.status}`);
+      setBeddingScan(data.record as BeddingPhotoScanRecord);
+      setBeddingScanFresh(true);
+      setBeddingScanApplied({});
+      toast({
+        title: "Bedding photo scan complete",
+        description: data.record.method === "vision"
+          ? "Claude looked at the unit photos — review the proposal below, then Apply."
+          : "Vision was unavailable — the proposal is derived from existing photo labels.",
+      });
+    } catch (e) {
+      setBeddingScanError((e as Error).message);
+      toast({ title: "Bedding photo scan failed", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBeddingScanning(false);
+    }
+  }, [beddingScanning, propertyId, toast]);
+
+  const handleApplyBeddingScan = useCallback((scanUnit: BeddingScanUnit, unitIndex: number) => {
+    const target = config.units[unitIndex];
+    if (!target) return;
+    const result = mergeBeddingScanIntoUnit(target, scanUnit);
+    if (!result.changed) {
+      toast({ title: "Nothing to apply", description: "No detection cleared the confidence floor for this unit." });
+      return;
+    }
+    updateUnit(target.unitId, () => result.unit as UnitBeddingConfig);
+    setBeddingScanApplied((prev) => ({ ...prev, [target.unitId]: result.applied.join(" · ") }));
+    toast({
+      title: `Applied photo-detected bedding to Unit ${target.unitLabel}`,
+      description: [...result.applied, ...result.notes].join(" · ").slice(0, 300)
+        + " — review below, then Push Bedding to Guesty.",
+    });
+  }, [config.units, toast, updateUnit]);
+
   const handleReset = () => {
     if (!confirm("Reset bedding config for this property to defaults? Your edits will be lost.")) return;
     const c = resetBeddingConfig(propertyId);
@@ -233,6 +316,19 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
         </div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <button
+            onClick={handleBeddingScan}
+            disabled={beddingScanning}
+            style={{
+              ...inputStyle, cursor: beddingScanning ? "wait" : "pointer",
+              background: beddingScanning ? "#c4b5fd" : "#7c3aed", color: "#fff",
+              borderColor: "transparent", fontWeight: 600,
+            }}
+            data-testid="btn-bedding-scan"
+            title="Claude vision reads the unit photos and proposes bed types, en-suite evidence, and bathroom fixtures — nothing is applied until you click Apply"
+          >
+            {beddingScanning ? "⏳ Claude is reading the photos…" : "🔎 Scan photos for bedding"}
+          </button>
+          <button
             onClick={handleReset}
             style={{ ...inputStyle, cursor: "pointer", color: "#6b7280" }}
             data-testid="btn-reset-bedding"
@@ -254,6 +350,109 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
           </button>
         </div>
       </div>
+
+      {/* Bedding photo-scan proposal — photo-proven bedding, explicit Apply */}
+      {beddingScanError && (
+        <div style={{ ...cellStyle, background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", fontSize: 13 }}>
+          Bedding photo scan failed: {beddingScanError}
+        </div>
+      )}
+      {beddingScan && beddingScan.units.length > 0 && (
+        <div style={{ ...cellStyle, background: "#f5f3ff", border: "1px solid #ddd6fe" }} data-testid="bedding-scan-panel">
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#5b21b6" }}>
+              {beddingScan.method === "vision" ? "🤖 Claude read the unit photos" : "🏷 Proposal from existing photo labels (vision unavailable)"}
+            </div>
+            <div style={{ fontSize: 11, color: "#7c6f9f" }}>
+              scanned {new Date(beddingScan.scannedAt).toLocaleString()}
+            </div>
+            {!beddingScanFresh && (
+              <span style={{ fontSize: 11, background: "#fef3c7", border: "1px solid #fcd34d", color: "#92400e", borderRadius: 999, padding: "2px 8px" }}>
+                photos changed since this scan — re-scan for current evidence
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>
+            Only what the photos prove: confident detections fill the matching unit below when you click Apply;
+            bedrooms with no photo evidence are flagged and left exactly as configured. Your edits always win —
+            nothing applies automatically, and you can hand-edit after applying.
+          </div>
+          {beddingScan.units.map((su, i) => {
+            const cfgUnit = config.units[i];
+            const confidentBedrooms = su.bedrooms.filter((b) => b.confidence >= BEDDING_SCAN_MIN_CONFIDENCE);
+            const lowBedrooms = su.bedrooms.length - confidentBedrooms.length;
+            const confidentBaths = su.bathrooms.filter((b) => b.confidence >= BEDDING_SCAN_MIN_CONFIDENCE);
+            const appliedNote = cfgUnit ? beddingScanApplied[cfgUnit.unitId] : undefined;
+            return (
+              <div key={`${su.folder}-${i}`} style={{ background: "#fff", border: "1px solid #e9e5f8", borderRadius: 6, padding: 10, marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{su.label}</div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", fontFamily: "monospace" }}>{su.folder}</div>
+                  {su.photosScanned > 0 && (
+                    <div style={{ fontSize: 11, color: "#6b7280" }}>{su.photosScanned} photos read</div>
+                  )}
+                  {cfgUnit && (
+                    <button
+                      onClick={() => handleApplyBeddingScan(su, i)}
+                      disabled={confidentBedrooms.length === 0 && confidentBaths.length === 0}
+                      style={{
+                        ...inputStyle, marginLeft: "auto", cursor: confidentBedrooms.length || confidentBaths.length ? "pointer" : "not-allowed",
+                        background: confidentBedrooms.length || confidentBaths.length ? "#059669" : "#e5e7eb",
+                        color: confidentBedrooms.length || confidentBaths.length ? "#fff" : "#9ca3af",
+                        borderColor: "transparent", fontWeight: 600, fontSize: 12,
+                      }}
+                      data-testid={`btn-bedding-apply-${cfgUnit.unitId}`}
+                    >
+                      ✓ Apply to Unit {cfgUnit.unitLabel}
+                    </button>
+                  )}
+                </div>
+                {appliedNote && (
+                  <div style={{ fontSize: 12, color: "#047857", background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 6, padding: "4px 8px", marginBottom: 6 }}>
+                    ✓ Applied: {appliedNote} — review + Push Bedding to Guesty.
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
+                  {confidentBedrooms.map((b, bi) => (
+                    <span key={bi} style={{ fontSize: 12, background: "#eef2ff", border: "1px solid #c7d2fe", color: "#3730a3", borderRadius: 999, padding: "3px 10px" }}>
+                      🛏 {describeDetectedBeds(b.beds)}
+                      {b.ensuiteFeatures.length > 0 && ` · en-suite (${b.ensuiteFeatures.map((f) => BEDDING_SCAN_FEATURE_LABELS[f]).join(", ")})`}
+                      {` · ${Math.round(b.confidence * 100)}%`}
+                    </span>
+                  ))}
+                  {confidentBaths.map((b, bi) => (
+                    <span key={`bath-${bi}`} style={{ fontSize: 12, background: "#ecfeff", border: "1px solid #a5f3fc", color: "#155e75", borderRadius: 999, padding: "3px 10px" }}>
+                      🛁 {b.isHalf ? "Half bath" : b.features.map((f) => BEDDING_SCAN_FEATURE_LABELS[f]).join(", ")}
+                      {` · ${Math.round(b.confidence * 100)}%`}
+                    </span>
+                  ))}
+                  {confidentBedrooms.length === 0 && confidentBaths.length === 0 && (
+                    <span style={{ fontSize: 12, color: "#6b7280", fontStyle: "italic" }}>
+                      No bed or bathroom could be confidently identified in this unit's photos.
+                    </span>
+                  )}
+                </div>
+                {(su.unphotographedBedrooms > 0 || lowBedrooms > 0 || su.warning) && (
+                  <div style={{ fontSize: 11, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, padding: "4px 8px" }}>
+                    {su.unphotographedBedrooms > 0 && (
+                      <div>⚠ {su.unphotographedBedrooms} of {su.expectedBedrooms} claimed bedroom{su.expectedBedrooms === 1 ? "" : "s"} ha{su.unphotographedBedrooms === 1 ? "s" : "ve"} no bedroom photo — those slots stay as configured (verify manually or find better photos).</div>
+                    )}
+                    {lowBedrooms > 0 && (
+                      <div>⚠ {lowBedrooms} detection{lowBedrooms === 1 ? "" : "s"} below the {Math.round(BEDDING_SCAN_MIN_CONFIDENCE * 100)}% confidence floor — not applied.</div>
+                    )}
+                    {su.warning && <div>⚠ {su.warning}</div>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {beddingScan.units.length !== config.units.length && (
+            <div style={{ fontSize: 11, color: "#92400e" }}>
+              ⚠ The scan found {beddingScan.units.length} photographed unit{beddingScan.units.length === 1 ? "" : "s"} but this property has {config.units.length} configured — Apply matches by position, so double-check unit order.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Per-unit cards */}
       {config.units.length === 0 && (
