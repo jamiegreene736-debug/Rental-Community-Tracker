@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
   guestyPushStatusForItem,
   summarizeBulkPricingGuestyPush,
@@ -128,6 +129,47 @@ console.log("bulk-pricing-push: summarizeBulkPricingGuestyPush");
   const summary = summarizeBulkPricingGuestyPush([pushedItem(1), item({ propertyId: 2, status: "cancelled" })]);
   check("cancelled item blocks allPushed", summary.allPushed === false);
   check("cancelled is not an attention item (operator chose to stop)", summary.attention.length === 0, summary.attention);
+}
+
+// ── Source guards: push timestamps must reach the UI (2026-07-14) ──────────
+// The server stamps land at push time (push-seasonal-rates → recordGuestyPush
+// for the Pricing tab ledger + markScannerGuestyRatePush for the dashboard
+// column), but the displays only move if the client re-reads them. Lock the
+// wiring so a refactor can't silently re-freeze the "Last Price Scan" column
+// (the 2026-07-12 audit-sweep incident class, bulk-queue edition) or the
+// Pricing tab's timestamps.
+console.log("bulk-pricing-push: source guards — push-timestamp refresh wiring");
+{
+  const homeSrc = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
+  check(
+    "home.tsx: bulk pricing poll tracks per-job completed counts",
+    homeSrc.includes("bulkPricingCompletedCountRef"),
+  );
+  check(
+    "home.tsx: an item completing OR the job ending refreshes the Last Price Scan column",
+    /itemJustCompleted \|\| jobTerminal[\s\S]{0,200}invalidateQueries\(\{ queryKey: \["\/api\/dashboard\/price-scans"\] \}\)/.test(homeSrc),
+  );
+  const builderSrc = readFileSync(
+    new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url),
+    "utf8",
+  );
+  check(
+    "builder: pricing job completion re-reads the scanner stamp + push ledger",
+    /recordDataPush\("pricing", "success", label\);[\s\S]{0,700}refreshScannerSchedule\(\);[\s\S]{0,100}reloadServerPushHistory\(\);/.test(builderSrc),
+  );
+  check(
+    "builder: pricing job failure re-reads them too (error stamps must surface)",
+    /recordDataPush\("pricing", "error", item\?\.error \|\| label\);[\s\S]{0,300}refreshScannerSchedule\(\);[\s\S]{0,100}reloadServerPushHistory\(\);/.test(builderSrc),
+  );
+  check(
+    "builder: focus/visibility refresh keeps an open builder in sync with dashboard-queue pushes",
+    builderSrc.includes('document.addEventListener("visibilitychange", refresh)')
+      && /const refresh = \(\) => \{[\s\S]{0,500}refreshScannerSchedule\(\);[\s\S]{0,100}reloadServerPushHistory\(\);/.test(builderSrc),
+  );
+  check(
+    "builder: push-history loads are supersede-guarded (stale listing responses dropped)",
+    builderSrc.includes("pushHistoryLoadTokenRef"),
+  );
 }
 
 console.log(`\nbulk-pricing-push tests: ${pass} passed, ${fail} failed`);

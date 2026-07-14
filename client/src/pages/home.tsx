@@ -3411,6 +3411,10 @@ function AdminDashboard() {
     });
   }, [allProperties]);
 
+  // Last observed completed-count per bulk pricing job, so the poll can tell
+  // "an item just finished" (→ its Guesty push stamp is in the DB, refresh the
+  // Last Price Scan column) apart from an ordinary tick.
+  const bulkPricingCompletedCountRef = useRef<{ jobId: string; completed: number } | null>(null);
   useEffect(() => {
     if (!bulkPricingJob?.id || bulkPricingTerminal) return;
     let cancelled = false;
@@ -3422,7 +3426,22 @@ function AdminDashboard() {
         if (!cancelled) {
           setBulkPricingJob(data.job);
           setBulkPricingEvents(Array.isArray(data.events) ? data.events : []);
-          if (["completed", "failed", "cancelled"].includes(data.job?.status)) {
+          // Each finished item has ALREADY stamped scanner_schedule via the
+          // push-seasonal-rates seam, but the "Last Price Scan" column query
+          // (staleTime + no focus refetch) sits frozen on its page-load
+          // snapshot unless someone invalidates it — the same class as the
+          // 2026-07-12 audit-sweep incident, on the bulk-queue path. Refresh
+          // it as items land (a long queue ticks row by row) and again at
+          // terminal (covers cancel/fail after partial completions).
+          const completedCount = typeof data.job?.completed === "number" ? data.job.completed : 0;
+          const prevCompleted = bulkPricingCompletedCountRef.current;
+          bulkPricingCompletedCountRef.current = { jobId: String(data.job?.id ?? ""), completed: completedCount };
+          const itemJustCompleted = prevCompleted?.jobId === String(data.job?.id ?? "") && completedCount > prevCompleted.completed;
+          const jobTerminal = ["completed", "failed", "cancelled"].includes(data.job?.status);
+          if (itemJustCompleted || jobTerminal) {
+            queryClient.invalidateQueries({ queryKey: ["/api/dashboard/price-scans"] });
+          }
+          if (jobTerminal) {
             queryClient.invalidateQueries({ queryKey: ["/api/property/market-rates"] });
             queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
           }
