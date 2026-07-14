@@ -33,7 +33,7 @@ import {
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, X, ShieldAlert, MessageCircle, DollarSign,
   FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
-  Search, Loader2, ExternalLink, Copy, Link2, MailOpen, Reply,
+  Search, Loader2, ExternalLink, Copy, Link2, MailOpen, Reply, Image,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -50,6 +50,7 @@ import { buildArrivalDetailsGuestMessage, looksLikeArrivalDetailsMessage, type A
 import { bodyWithoutAttachmentUrls, collectPostAttachments, type PostAttachment } from "@shared/guesty-post-attachments";
 import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
 import { guestPartyFromReservation, formatGuestParty } from "@shared/guest-party";
+import { builderTabLinkForGuestyListing } from "@shared/builder-deep-link";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import { usePortalSession } from "@/lib/auth";
 import { useAssistantContext } from "@/lib/assistant-context";
@@ -4398,6 +4399,18 @@ export default function InboxPage() {
     }
   };
 
+  // ── Guesty listing → property mapping ──
+  // Drives the Listing panel's "Photos" / "Descriptions" deep links into the
+  // unit builder (new browser tab, so the conversation stays open while the
+  // operator references pool photos / listing copy). Same queryKey as the
+  // dashboard's copy → deduped by react-query. Builder routes are
+  // admin-gated (AgentRouteGate), hence enabled: isAdmin.
+  const { data: guestyPropertyMapRows } = useQuery<Array<{ propertyId: number; guestyListingId: string }>>({
+    queryKey: ["/api/guesty-property-map"],
+    enabled: isAdmin,
+    staleTime: 5 * 60_000,
+  });
+
   // ── Reservations ──
   const { data: pendingData, isLoading: pendingLoading } = useQuery<any>({
     queryKey: ["/api/guesty-proxy/reservations/pending"],
@@ -5819,6 +5832,51 @@ export default function InboxPage() {
                             )}
                           </div>
                         </div>
+                        {/* Deep links into the unit builder for THIS listing so
+                            guest questions ("is there a pool?", "which view?")
+                            can be answered from the actual photos + listing
+                            copy. New browser tab keeps the conversation open.
+                            Rendered only when the listing maps to a property
+                            (guesty_property_map) and only for the admin —
+                            builder routes are agent-gated (AgentRouteGate). */}
+                        {isAdmin && (() => {
+                          const inboxListingId = (listing as any)?._id ?? (selectedConv as any)?.listingId ?? null;
+                          const photosHref = builderTabLinkForGuestyListing(inboxListingId, guestyPropertyMapRows, "photos");
+                          const descriptionsHref = builderTabLinkForGuestyListing(inboxListingId, guestyPropertyMapRows, "descriptions");
+                          if (!photosHref && !descriptionsHref) return null;
+                          return (
+                            <div className="mt-1.5 flex flex-wrap gap-1.5">
+                              {photosHref && (
+                                <Button asChild size="sm" variant="outline" className="h-6 px-2 text-[11px]" data-testid="button-inbox-listing-photos">
+                                  <a
+                                    href={photosHref}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Open this listing's photos in the builder (new tab) — pool, views, interiors"
+                                  >
+                                    <Image className="h-3 w-3 mr-1" />
+                                    Photos
+                                    <ExternalLink className="h-2.5 w-2.5 ml-1 opacity-60" />
+                                  </a>
+                                </Button>
+                              )}
+                              {descriptionsHref && (
+                                <Button asChild size="sm" variant="outline" className="h-6 px-2 text-[11px]" data-testid="button-inbox-listing-descriptions">
+                                  <a
+                                    href={descriptionsHref}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Open this listing's descriptions in the builder (new tab) — amenity details like the pool"
+                                  >
+                                    <FileText className="h-3 w-3 mr-1" />
+                                    Descriptions
+                                    <ExternalLink className="h-2.5 w-2.5 ml-1 opacity-60" />
+                                  </a>
+                                </Button>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {/* Dates */}
