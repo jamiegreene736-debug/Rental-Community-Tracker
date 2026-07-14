@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-14 (Thien Tran $4,043 refund — NO receipt message ever sent; diagnosed LIVE + fixed):
+  Operator refunded Thien Tran ~$4,043 (reservation 6a3e88479cbfa900134c015c, refunded 12:28Z) and no
+  message went out. NOT an extraction bug (don't re-chase): `realRefundsForReceipts` handles the nested
+  `money.payments[].refunds[]` shape fine — verified against the live reservation. ROOT CAUSE: Guesty's
+  BARE `/reservations` list (no `filters=` param) applies a HIDDEN default filter — only `confirmed`
+  rows with a FUTURE check-in return (live-probed 47 of 145), so the guest-receipts scheduler's poll
+  never saw reservations whose stay had ended (Thien checked out 7/12, refunded 7/14) or been canceled
+  (bergomi valeria $3,858 refund the same day — a SECOND missed refund found during diagnosis). No
+  ledger row was ever written, so even the refund-attention alert couldn't fire. Every prior refund
+  receipt worked only because those stays were still upcoming. SHIPPED
+  (`claude/refund-message-delivery-97273b`): the poll sends an explicit
+  `filters=[{lastUpdatedAt $gte cutoff}]` (`receiptPollWindowFilters` in shared/receipt-message.ts) —
+  ANY explicit filter disables Guesty's default list filter; tiny result set; nested refunds intact;
+  pagination carries it; Guesty-rejects-filter → legacy bare-list fallback (never worse) + loud warn.
+  Payments (never refunds) now status-gated via `reservationStatusBlocksPaymentReceipt` since
+  canceled/inquiry rows flow through the poll. See AGENTS.md receipts Load-Bearing #11 + the 2026-07-14
+  Decision Log line. Thien's receipt retroactively force-sent via the manual endpoint; bergomi's
+  auto-sent on the first post-deploy tick (48h window). Verified: receipt-message 81/0, full `npm test`
+  exit 0, build clean, `npm run check` 338 = baseline, fixed poll live-simulated read-only against prod
+  (both missed refunds detected; sent payments dedup-skip).
+
 - 2026-07-14 (find-replacement Zillow bot check "closed the page before I could resolve it" → YELLOW
   resolve-it window + server wallet pause): Operator saw a Zillow bot detection during a
   replacement-unit search vanish before he could solve it. TWO stacked causes (don't re-chase):

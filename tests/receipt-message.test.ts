@@ -5,6 +5,8 @@ import {
   refundSmsNeedsAttention,
   sanitizeForBookingChannel,
   receiptDedupKey,
+  receiptPollWindowFilters,
+  reservationStatusBlocksPaymentReceipt,
   sameTransactionMoment,
   receiptNeedsAttention,
   RECEIPT_STALE_MS,
@@ -242,6 +244,65 @@ console.log("receipt-message: manual-resend source guards");
   check(
     "home.tsx: resend mutation treats 422 as a result, not a transport error",
     mutationBlock.includes("r.status !== 422"),
+  );
+}
+
+// ── Poll window filter + payment status gate (Thien Tran incident, 2026-07-14) ──
+// Guesty's BARE /reservations list applies a hidden default filter (upcoming
+// committed stays only), which hid post-checkout / post-cancellation refunds
+// from the scheduler entirely — no receipt, no ledger row, no dashboard alert.
+// The poll must pass an EXPLICIT window filter (any explicit filters= disables
+// the default filter), and payments — but never refunds — are status-gated now
+// that canceled/inquiry rows flow through the poll.
+console.log("receipt-message: receiptPollWindowFilters");
+{
+  const iso = "2026-07-12T12:00:00.000Z";
+  const parsed = JSON.parse(receiptPollWindowFilters("-lastUpdatedAt", iso));
+  check(
+    "poll filter: lastUpdatedAt >= cutoff",
+    Array.isArray(parsed) && parsed.length === 1 && parsed[0].field === "lastUpdatedAt" && parsed[0].operator === "$gte" && parsed[0].value === iso,
+    parsed,
+  );
+  check("poll filter: field mirrors the fallback sort", JSON.parse(receiptPollWindowFilters("-createdAt", iso))[0].field === "createdAt");
+  check("poll filter: blank sort defaults to lastUpdatedAt", JSON.parse(receiptPollWindowFilters("", iso))[0].field === "lastUpdatedAt");
+}
+
+console.log("receipt-message: reservationStatusBlocksPaymentReceipt");
+{
+  check("payment gate: canceled blocks", reservationStatusBlocksPaymentReceipt("canceled"));
+  check("payment gate: cancelled (double-l) blocks", reservationStatusBlocksPaymentReceipt("cancelled"));
+  check("payment gate: inquiry blocks", reservationStatusBlocksPaymentReceipt("inquiry"));
+  check("payment gate: expired/declined/closed/draft block",
+    ["expired", "declined", "closed", "draft"].every(reservationStatusBlocksPaymentReceipt));
+  check("payment gate: confirmed does NOT block", !reservationStatusBlocksPaymentReceipt("confirmed"));
+  check("payment gate: unknown/absent status fails OPEN", !reservationStatusBlocksPaymentReceipt(null) && !reservationStatusBlocksPaymentReceipt(""));
+}
+
+console.log("receipt-message: scheduler poll source guards");
+{
+  const { readFileSync } = await import("node:fs");
+  const receiptsSource = readFileSync("server/guest-receipts.ts", "utf8");
+  check(
+    "guest-receipts: poll sends the explicit window filter (bare list hides past/canceled stays)",
+    /filters=\$\{encodeURIComponent\(receiptPollWindowFilters\(/.test(receiptsSource),
+  );
+  check(
+    "guest-receipts: pagination carries the same filter",
+    /skip=\$\{page \* PAGE_LIMIT\}&sort=\$\{usedSort\}&fields=\$\{fields\}\$\{usedFilterQuery\}/.test(receiptsSource),
+  );
+  check(
+    "guest-receipts: bare-list fallback preserved (never worse than legacy) + logs loudly",
+    /for \(const withWindowFilter of \[true, false\]\)/.test(receiptsSource) &&
+      /fell back to the bare list/.test(receiptsSource),
+  );
+  check(
+    "guest-receipts: PAYMENT receipts status-gated now that canceled rows are visible",
+    /paymentsBlocked = reservationStatusBlocksPaymentReceipt\(reservation\?\.status\)/.test(receiptsSource) &&
+      /if \(!paymentsBlocked\) \{\s*\n\s*for \(const txn of collectedPaymentsForReceipts\(reservation\)\)/.test(receiptsSource),
+  );
+  check(
+    "guest-receipts: REFUND receipts are NEVER status-gated",
+    /for \(const txn of realRefundsForReceipts\(reservation\)\) \{\s*\n\s*if \(inWindow\(txn\)\) pending\.push\(\{ kind: "refund"/.test(receiptsSource),
   );
 }
 

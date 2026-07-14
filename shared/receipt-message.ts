@@ -258,6 +258,42 @@ export function sameTransactionMoment(aIso?: string | null, bIso?: string | null
   return Number.isFinite(ta) && Number.isFinite(tb) && ta === tb;
 }
 
+// ── Scheduler reservation-poll window filter ───────────────────────────────
+// Guesty's BARE `/reservations` list (no `filters=` param at all) applies a
+// HIDDEN default filter: only committed, still-upcoming stays come back
+// (live-probed 2026-07-14: 47 rows, every one `confirmed` with a FUTURE
+// check-in; past-checkout, in-house-checkout, canceled and inquiry rows were
+// all silently absent regardless of `sort=`). That blinded the receipt
+// scheduler to exactly the reservations most refunds land on: a refund issued
+// AFTER checkout (post-stay adjustment — the Thien Tran $4,043 incident) or
+// after a CANCELLATION never appeared in the poll, so no receipt, no ledger
+// row, and no dashboard attention alert ever existed.
+//
+// Passing ANY explicit `filters=` disables the default filter. This builds the
+// one the poll wants: `<sortField> >= cutoff` — a payment/refund bumps
+// `lastUpdatedAt`, so the window filter returns exactly the recently-touched
+// reservations (a handful of rows), INCLUDING past/canceled/inquiry ones, with
+// the nested `money.payments[].refunds[]` records intact (live-verified).
+// The field mirrors the sort key so a fallback sort stays self-consistent.
+export function receiptPollWindowFilters(sort: string, cutoffIso: string): string {
+  const field = String(sort ?? "").replace(/^-/, "").trim() || "lastUpdatedAt";
+  return JSON.stringify([{ field, operator: "$gte", value: cutoffIso }]);
+}
+
+// Should a reservation's status block an auto PAYMENT receipt? Mirror of
+// routes.ts isCommittedGuestyReservation's status exclusions (same regex as
+// shared/payment-failure-warning.ts / buyin-coverage-warning.ts). Needed
+// because the explicitly-filtered poll above now SEES canceled/inquiry/expired
+// rows the bare list used to hide — a "payment processed" receipt on a
+// canceled booking would read wrong (the refund is the receipt that matters
+// there). REFUNDS are deliberately NEVER status-gated: a refund after a
+// cancellation is the most common refund of all and must always message the
+// guest. Unknown/absent status does not block (fail open, matching the old
+// behavior for bare rows).
+export function reservationStatusBlocksPaymentReceipt(status: unknown): boolean {
+  return /(cancel|declin|inquir|request|expired|closed|draft)/.test(String(status ?? "").toLowerCase());
+}
+
 // How long a retryable receipt row (`error`/`pending`) may sit before it counts
 // as "stuck" and surfaces to the operator. Several 5-minute scheduler ticks.
 export const RECEIPT_STALE_MS = 30 * 60 * 1000;
