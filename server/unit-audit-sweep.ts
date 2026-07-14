@@ -118,6 +118,7 @@ import { photoListingScanWasInconclusive } from "@shared/photo-listing-decision"
 import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames, readFolderSourceUrl, writeFolderSourceUrlIfMissing } from "./builder-photo-groups";
 import { replacementPhotoFolderRef } from "@shared/photo-folder-utils";
 import { scanForDuplicatePhotos, type DedupeScanGroupInput } from "./photo-dedupe";
+import { beddingPhotoCheckForAudit } from "./bedding-photo-scan";
 import type { PhotoCommunityCheckResult } from "./photo-community-check";
 import { getPreflightPhotoFetchJob, startPreflightPhotoFetchJob } from "./preflight-background-jobs";
 import { getCommunityPhotoRepullJob, startCommunityPhotoRepullJob } from "./community-photo-repull";
@@ -158,9 +159,11 @@ const STAGE_TIMEOUT_MS: Record<UnitAuditStageId, number> = {
   // explicit at the scan call).
   amenities: 13 * 60_000,
   "cover-collage": 8 * 60_000,
-  // Layout/channels are single Guesty-backed reads — the 3-min ceilings fit
-  // 2 retry attempts over a rate-limit pause.
-  layout: 3 * 60_000,
+  // Layout: the Guesty-backed read (2 retry attempts over a rate-limit pause)
+  // PLUS the bedding photo check — one batched vision call per unit (~2 min
+  // worst case each for a 2-unit property) when no fingerprint-fresh stored
+  // scan exists. Channels stays a single read.
+  layout: 8 * 60_000,
   pricing: 20 * 60_000,
   channels: 3 * 60_000,
 };
@@ -2105,6 +2108,38 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
       items.push(`Sleeps: Guesty shows ${gSleeps}, system max guests total is ${target.maxGuestsTotal}`);
     } else items.push(`Sleeps: ${gSleeps} ✓`);
   }
+
+  // BEDDING PHOTO CHECK (2026-07-14 operator ask): compare what the unit's
+  // photos actually show — bed types per distinct photographed bedroom — to
+  // the bed layout pushed to Guesty. Runs through the SAME engine as the
+  // Bedding tab's "Scan photos for bedding" button (a fingerprint-fresh
+  // stored scan is reused, so a tab scan and an audit share one vision spend).
+  // The Guesty rooms read lives in server/bedding-photo-scan.ts — this module
+  // stays push-free per the layout stage's source lock. Findings are
+  // flag-only, like every layout finding: the remedy is the Bedding tab
+  // (Scan photos for bedding → Apply → Push). Unphotographed bedrooms are
+  // reported as unverifiable, never guessed. Kill: AUDIT_BEDDING_PHOTO_CHECK=0.
+  let beddingMismatch = false;
+  let beddingClean = false;
+  if (String(process.env.AUDIT_BEDDING_PHOTO_CHECK ?? "").trim() !== "0") {
+    try {
+      const bedding = await beddingPhotoCheckForAudit(target.propertyId, target.guestyListingId);
+      items.push(...bedding.items);
+      if (bedding.mismatch) {
+        beddingMismatch = true;
+        soft = true;
+      } else if (!bedding.unverified && bedding.method === "vision") {
+        beddingClean = true;
+      }
+    } catch (e: any) {
+      // The CHECK could not run (Guesty read / scan failure) — an attention
+      // note, never a silent pass (honesty rule) and never a hard fail (the
+      // count comparison above already verified what it could).
+      soft = true;
+      items.push(`Bedding photo check could not run (${String(e?.message ?? e).slice(0, 160)}) — re-run the audit to retry`);
+    }
+  }
+
   if (mismatch || soft) {
     // DELIBERATELY no auto-push here: the canonical bedding push reads the
     // operator's Bedding-tab configuration from browser localStorage
@@ -2117,9 +2152,21 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
     return { verdict: "failed", detail: "Guesty bedroom count does not match the system unit config — guests are filtering on the wrong layout.", items };
   }
   if (soft) {
-    return { verdict: "attention", detail: "Layout numbers partially disagree with Guesty — review the Bedding tab.", items };
+    return {
+      verdict: "attention",
+      detail: beddingMismatch
+        ? "The unit photos disagree with the pushed Guesty bed layout — open the Bedding tab, run Scan photos for bedding, Apply, and push."
+        : "Layout numbers partially disagree with Guesty — review the Bedding tab.",
+      items,
+    };
   }
-  return { verdict: "pass", detail: "Guesty layout matches the system config (bedrooms/bathrooms/sleeps).", items };
+  return {
+    verdict: "pass",
+    detail: beddingClean
+      ? "Guesty layout matches the system config (bedrooms/bathrooms/sleeps) and the photographed beds match the pushed bed layout."
+      : "Guesty layout matches the system config (bedrooms/bathrooms/sleeps).",
+    items,
+  };
 }
 
 type PricingVerify = {

@@ -95,7 +95,33 @@ placeholder text. ONE burst only, never loop these. The bot-check alarm
 "task over".`;
 }
 
-const BOT_WALL_PROTOCOL = `## Bot-check protocol (VRBO especially — NEVER skip a site over this)
+// Browser rule (operator spec 2026-07-13: "ensure that Cowork always uses
+// like Chrome or another browser that has cookies cached so that VRBO and/or
+// Zillow and others will stop the bot question after I resolve it"). Cowork
+// has TWO browsers: the operator's REAL Chrome (via the Claude-in-Chrome /
+// Chrome control tools — persistent profile, cookies, past bot-check
+// clearances) and an isolated built-in browser pane (fresh cookie-less
+// profile → VRBO/Zillow re-raise solved challenges every run). The rule
+// mandates the real Chrome and forbids a silent fallback. Composed INTO
+// BOT_WALL_PROTOCOL below so every prompt that embeds the protocol — all
+// five single prompts AND the bulk batch's hoisted copy — inherits it with
+// the same embed-once semantics.
+// SIZE IS LOAD-BEARING: this rule rides inside EVERY prompt (via
+// BOT_WALL_PROTOCOL), and the 2-slot FIND prompt sits ~470 chars under the
+// 14,336-char claude:// deep-link cap — a wordier rule pushes it over and
+// silently demotes the single Auto Cowork button from pre-fill to
+// paste-from-clipboard. The canary in tests/cowork-launch.test.ts trips if
+// this outgrows the headroom; keep edits terse.
+const CHROME_BROWSER_RULE = `## Browser rule — my REAL Chrome only
+Browse ONLY in my real Google Chrome via the Chrome tools — never the
+built-in browser pane: it is cookie-less, so solved VRBO/Zillow bot checks
+come back; my Chrome keeps the clearances. No incognito; never clear
+cookies. Chrome tools missing? ALERT me (protocol below) and WAIT — no
+fallback.`;
+
+const BOT_WALL_PROTOCOL = `${CHROME_BROWSER_RULE}
+
+## Bot-check protocol (VRBO especially — NEVER skip a site over this)
 If any site — especially VRBO — shows a bot check (slider puzzle, CAPTCHA,
 "verify you are human") or a sign-in wall you can't get past:
 
@@ -405,7 +431,7 @@ Projected loss = (combined all-in cost) − ${netRevenueLabel}.
   // last reservation — see buildCoworkBulkBuyInPrompt. Both substitutions are
   // byte-identical no-ops in the default single-prompt path.
   const botWallSection = opts?.bulkBrief
-    ? "(Bot-check protocol: the batch-level protocol at the TOP of this task applies here in full — alert loudly, wait for me, never skip a site over a bot wall.)"
+    ? "(Browser rule + bot-check protocol: the batch-level protocol at the TOP of this task applies here in full — browse in my REAL Chrome only, alert loudly, wait for me, never skip a site over a bot wall.)"
     : BOT_WALL_PROTOCOL;
   const closingSections = opts?.bulkBrief
     ? ""

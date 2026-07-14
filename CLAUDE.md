@@ -70,6 +70,45 @@ Before making any changes:
   find/replace run should pop the yellow near-fullscreen Chrome window + Submarine chime and the
   scrape continues after the press-and-hold is solved.
 
+- 2026-07-14 (Bedding tab: "Scan photos for bedding" — Claude vision proposal + unit-audit layout leg +
+  rates-column lock): Operator asked how the Bedding tab is built (answer: static defaults + regex-parsed
+  AI-ESTIMATED text, NO photo evidence; en-suite = master-by-convention; bath features = heuristic
+  defaults) then: "Yes, please build this out and then merge PR. Also, include this in the unit audit…
+  Finally… ensure that it updates the rates update column on the dashboard too." SHIPPED
+  (`claude/bedding-tab-creation-523a10`): NEW pure `shared/bedding-photo-scan.ts` (prompt / STRICT parse —
+  out-of-range or double-claimed photo indexes and unrecognizable beds DROP, quantities clamp, <0.6
+  confidence never applies / compares; caption fallback; `mergeBeddingScanIntoUnit`;
+  `compareDetectedBeddingToGuestyRooms`; `bedding_photo_scans.v1` store shapes) + engine
+  `server/bedding-photo-scan.ts` (ONE batched 640px-downscaled vision call per unit over the unit's
+  Bedrooms/Bathrooms-category photos, `BEDDING_SCAN_MODEL` default claude-sonnet-4-6, captions
+  deliberately NOT sent — stale-label class; fingerprint-scoped persistence, pin-store parity) + routes
+  POST/GET `/api/builder/bedding-photo-scan`. Detects per DISTINCT photographed bedroom: bed type +
+  quantity, en-suite ONLY on visible attached-bathroom evidence, and bath fixtures (walk-in / combo /
+  soaking / jetted / rain / double-vanity / half). HONESTY: unphotographed bedrooms (3 of the operator's
+  31 listings) are counted + reported "no bedroom photo — unverifiable", NEVER guessed/padded; the merge
+  leaves those slots untouched. PROPOSAL-ONLY: the tab's violet "🔎 Scan photos for bedding" renders a
+  panel; Apply is an explicit per-unit click (biggest bed → Master; en-suite evidence sets+unions, never
+  unsets; bathroom features replace matched slots only; bedroom/bathroom COUNTS never change) — the
+  operator's localStorage config stays the ONLY push source (AGENTS.md Unit Audit Sweep #9 intact).
+  AUDIT: stageLayout calls `beddingPhotoCheckForAudit` (kill `AUDIT_BEDDING_PHOTO_CHECK=0`) — reuses a
+  fingerprint-fresh stored scan (one vision spend serves tab + audit), compares TYPE PRESENCE ONLY vs the
+  pushed Guesty bed layout (quantities never; Guesty-only types flagged only when ALL claimed bedrooms
+  photographed; sofa beds excluded), findings flag-only attention; the Guesty rooms read lives in the
+  ENGINE module because unit-audit-sweep.ts is source-locked against the rooms field name; layout ceiling
+  3m→8m; a scan that can't run caps layout at attention (never a silent pass). Vision kill
+  `BEDDING_SCAN_VISION_DISABLED=1` → caption-derived fallback (flagged in receipt + panel). RATES COLUMN
+  ask: VERIFIED already wired end-to-end since 2026-07-12 (stagePricing → refresh routes (drafts stamp
+  under -id) → pushBulkGuestyPricingAfterRefresh → markScannerGuestyRatePush → /api/dashboard/price-scans;
+  invalidation on BOTH seams — home.tsx active-set watcher + dialog terminal effect) — now DRIFT-LOCKED by
+  4 source guards in the new suite; no code gap existed. Verified: bedding-photo-scan 65/0 (npm chain),
+  unit-audit-sweep 160/0 untouched, full `npm test` REAL exit 0, build clean (UI strings + env knobs
+  bundle-grepped BOTH bundles), `npm run check` 338 = baseline, UI proven on the BUILT bundle (static SPA
+  server + Playwright, mocked /api: hydrate → stale chip → scan POST → apply rewrites bedroom 2
+  Queen→2×Twin, unphotographed bedroom 3 untouched, zero-detection unit's Apply disabled — 15/0). Could
+  NOT live-run the vision leg (no ANTHROPIC key in session) — post-deploy: open any builder Bedding tab →
+  "🔎 Scan photos for bedding"; expect the proposal in ~30-60s; re-run a dashboard audit and the Bedding &
+  layout row now carries "Bedding photo check:" lines.
+
 - 2026-07-14 (dashboard "Update market pricing" → Last Price Scan column + Pricing tab timestamps):
   Operator: "make sure that it updates and time stamps the last price scan column and also in the
   pricing tab." SERVER SIDE WAS ALREADY CORRECT (don't re-chase): every bulk-queue item that pushes
@@ -89,6 +128,22 @@ Before making any changes:
   is declared BELOW the watcher effect — closure-called, deliberately NOT in that dep array.
   Verified: bulk-pricing-push 35/0 (6 new source guards), full `npm test` exit 0, build clean,
   `npm run check` 338 = baseline (stash A/B identical per-file error sets).
+
+- 2026-07-13 (Cowork browser rule — REAL Chrome only, cookies stop repeat bot walls): Operator:
+  "ensure that Cowork always uses like Chrome or another browser that has cookies cached so that
+  VRBO and/or Zillow and others will stop the bot question after I resolve it." SHIPPED
+  (`claude/cowork-chrome-browser-rule`): new `CHROME_BROWSER_RULE` composed INTO
+  `BOT_WALL_PROTOCOL` — every Cowork prompt (all five + the bulk batch's hoisted copy) now
+  mandates browsing ONLY in the operator's real Google Chrome via the Chrome tools (persistent
+  profile = solved bot-check clearances survive), never the isolated built-in browser pane
+  (cookie-less → re-raises solved challenges every run); no incognito, never clear cookies; if
+  the Chrome tools aren't connected → loud ALERT + WAIT, never a silent cookie-less fallback.
+  SIZE IS LOAD-BEARING: the rule is deliberately terse — the find prompt sits ~140 chars under
+  the 14,336 deep-link cap (the cowork-launch canary tripped TWICE during drafting; a wordier
+  rule silently demotes the single Auto Cowork button to paste). Long-named properties may still
+  exceed the cap → graceful clipboard handoff, never truncation. Verified: cowork-buyin-prompt
+  262/0 (27 new), cowork-launch 30/0 (canary at 14,199), full `npm test` exit 0, build clean,
+  `npm run check` 338 = baseline. See the AGENTS.md 2026-07-13 Decision Log (third entry).
 
 - 2026-07-13 (BULK buy-ins route through Cowork): Operator (after the Auto Cowork buttons shipped):
   "I want you to change this so that it routes through cowork." SHIPPED

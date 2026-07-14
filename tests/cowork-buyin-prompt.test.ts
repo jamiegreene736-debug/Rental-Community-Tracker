@@ -822,6 +822,43 @@ check(
   /bedding is off \(2 Twins where they booked a King\)/.test(guestHappy),
 );
 
+// ── Browser rule (operator 2026-07-13): REAL Chrome only, cookies persist ────
+// Bot walls stop recurring only when solved challenges land in the operator's
+// persistent Chrome profile — the isolated built-in browser pane is
+// cookie-less and re-raises them every run. The rule rides inside
+// BOT_WALL_PROTOCOL so every prompt inherits it. SIZE NOTE: the rule is
+// deliberately terse — the find prompt sits ~140 chars under the 14,336
+// deep-link cap (canary in cowork-launch.test.ts); a wordier rule demotes
+// the single Auto Cowork button from pre-fill to paste.
+for (const [label, p] of [
+  ["find", prompt],
+  ["checkout", checkout],
+  ["verify", verify],
+  ["guest-happy", guestHappy],
+  ["vrbo-lookup", vrboLookup],
+] as const) {
+  check(
+    `${label} prompt: browser rule — real Chrome only, never the built-in pane`,
+    p.includes("## Browser rule — my REAL Chrome only") && /never the\s+built-in browser pane/.test(p),
+  );
+  check(
+    `${label} prompt: browser rule explains the cookie/clearance why`,
+    /cookie-less, so solved VRBO\/Zillow bot checks\s+come back/.test(p) && /my Chrome keeps the clearances/.test(p),
+  );
+  check(
+    `${label} prompt: no incognito / never clear cookies`,
+    /No incognito; never clear\s+cookies/.test(p),
+  );
+  check(
+    `${label} prompt: missing Chrome tools → alert + wait, never a silent fallback`,
+    /Chrome tools missing\? ALERT me \(protocol below\) and WAIT — no\s+fallback/.test(p),
+  );
+  check(
+    `${label} prompt: browser rule sits ABOVE the bot-check protocol`,
+    p.indexOf("## Browser rule") > -1 && p.indexOf("## Browser rule") < p.indexOf("## Bot-check protocol"),
+  );
+}
+
 // ── buildCoworkBulkBuyInPrompt: the bulk route through Cowork ────────────────
 // (operator spec 2026-07-13: "run bulk buy in queue … change this so that it
 // routes through cowork"). ONE batch task works N reservations one at a time;
@@ -864,8 +901,10 @@ check(
 );
 check("bulk: brief order preserved", bulk.indexOf("RESERVATION 1 of 2") < bulk.indexOf("RESERVATION 2 of 2"));
 check("bulk: bot-check protocol hoisted EXACTLY once (batch level)", bulkCount(/## Bot-check protocol/g) === 1);
+check("bulk: browser rule hoisted EXACTLY once, above the first brief", bulkCount(/## Browser rule/g) === 1 && bulk.indexOf("## Browser rule") < bulk.indexOf("RESERVATION 1 of 2"));
 check("bulk: protocol hoisted ABOVE the first brief", bulk.indexOf("## Bot-check protocol") < bulk.indexOf("RESERVATION 1 of 2"));
 check("bulk: each brief points at the batch-level protocol", bulkCount(/batch-level protocol at the TOP of this task/g) === 2);
+check("bulk: the per-brief pointer names the REAL-Chrome rule too", bulkCount(/browse in my REAL Chrome only/g) === 2);
 check(
   "bulk: done signal EXACTLY once, after the last brief",
   bulkCount(/## Done signal/g) === 1 && bulk.indexOf("## Done signal") > bulk.indexOf("RESERVATION 2 of 2"),
