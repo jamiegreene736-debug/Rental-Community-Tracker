@@ -184,7 +184,18 @@ const entry = (over: Partial<LicenseProvenanceEntry> = {}): LicenseProvenanceEnt
   check("server-side pull persist only stamps attributed fields", routes.includes("if (attribution) stamps[field as LicenseProvenanceField] = { ...attribution, value };"));
   check("bulk resolve attributes only lookup-filled fields", routes.includes("if (!resolvedTaxMapKeyValue && publicLookup.taxMapKey) lookupAttributions.taxMapKey = hawaiiAttribution;"));
 
+  // Guesty rate-limit patience (2026-07-15, same day): the compliance
+  // listing read queues behind guesty-sync's global gate (up-to-120s pause
+  // after a 429), so it must wait out a full pause on its ONE queued
+  // request, and a Guesty read failure must FALL THROUGH to the
+  // registry/public legs instead of aborting the lookup.
+  check("compliance Guesty read uses the patient window", routes.includes("COMPLIANCE_GUESTY_PATIENT_TIMEOUT_MS = 150_000") && routes.includes("COMPLIANCE_GUESTY_PATIENT_TIMEOUT_MS,\n    );"));
+  const hawaiiLookup = readFileSync(new URL("../server/hawaii-compliance-lookup.ts", import.meta.url), "utf8");
+  check("Guesty read failure falls through to registry/public sources", hawaiiLookup.includes("guestyFetchError = e?.message ?? String(e);") && hawaiiLookup.includes("falling through to registry/public sources"));
+  check("no-value error stays honest about the skipped Guesty source", hawaiiLookup.includes("The Guesty listing itself could not be read:"));
+
   const builder = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
+  check("client pull wait widened past the old 28s", builder.includes("COMPLIANCE_FETCH_TIMEOUT_MS = 45_000"));
   check("client pull requests ask the server to persist", (builder.match(/params\.set\("persist", "1"\)/g) ?? []).length >= 2 && builder.includes("persist: true,"));
   check("client skips its own PATCH when the server persisted", (builder.match(/if \(data\.persisted\) \{/g) ?? []).length >= 3);
   check("returning to the tab re-reads compliance values + provenance", builder.includes("reloadComplianceValues") && builder.includes('document.addEventListener("visibilitychange", maybeReload)'));

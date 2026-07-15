@@ -1838,7 +1838,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return /\b(hawaii|hi)\b/i.test(`${stateField} ${fullField}`);
   }, [effectivePropertyData?.address]);
 
-  const COMPLIANCE_FETCH_TIMEOUT_MS = 28_000;
+  // How long a pull button waits in-tab before falling back to the
+  // "keeps running on the server" toast. The server waits out Guesty's
+  // rate-limit queue for up to 150s and persists the result either way;
+  // 45s just widens the window where the operator sees the value land
+  // directly instead of on the next tab-focus re-read.
+  const COMPLIANCE_FETCH_TIMEOUT_MS = 45_000;
   const complianceListingName = useMemo(() => (
     effectivePropertyData?.title
     || effectivePropertyData?.nickname

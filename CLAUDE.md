@@ -43,6 +43,22 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-15 (TAT pull "Guesty listing compliance fetch timed out after 20s" — rate-limit patience +
+  fail-open): NOT a lookup defect (don't re-chase): live logs show a Guesty 429 at 4:36:00 PM put
+  guesty-sync's global gate into its retry-after pause (≤120s); the TAT pull at 4:36:54 queued behind
+  it and its single 20s race expired → 504. Same class as the 2026-07-12 amenities verify-read.
+  SHIPPED (`claude/tat-lookup-guesty-timeout`): (1) `fetchGuestyListingForCompliance` waits
+  `COMPLIANCE_GUESTY_PATIENT_TIMEOUT_MS` (150s = full pause + drain) on its ONE queued request —
+  deliberately NEVER re-issued on timeout (the request is still queued; re-issuing adds gate
+  pressure); (2) `lookupHawaiiComplianceField` Guesty leg is now FAIL-OPEN — a thrown Guesty read no
+  longer kills the lookup, it falls through to the county-registry/public-listing legs and the final
+  no-value error appends the Guesty failure honestly; (3) client pull wait 28s→45s (beyond that the
+  server-persist + "keeps running on the server" toast + focus re-read own the outcome). Verified:
+  license-provenance 72/0, full npm test REAL exit 0 (note: `npm test | tail; echo EXIT:$?` reports
+  tail's status — use PIPESTATUS or redirect to a file; city-vrbo-expansion.smoke stays timing-flaky
+  under load, 8/0 isolated), build clean, check 338 = baseline; post-deploy: re-run the
+  operator's exact failing TAT pull live (listing 6a515b04…) — never the bare 20s timeout again.
+
 - 2026-07-15 (license pulls: "I don't see a time stamp" + "leave the tab and it still needs to work" —
   SERVER-persisted pulls): BOTH symptoms were one root cause (don't re-chase): live probe showed the
   #1043 deploy healthy (bundle strings present, compliance GET returns provenance) but `provenance: {}`

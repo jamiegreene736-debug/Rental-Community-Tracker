@@ -7789,15 +7789,25 @@ export async function registerRoutes(
   });
 
   const COMPLIANCE_GUESTY_TIMEOUT_MS = 20_000;
-  const withComplianceLookupTimeout = async <T>(promise: Promise<T>, label: string): Promise<T> => {
+  // Every Guesty call queues behind guesty-sync's GLOBAL gate (500ms request
+  // gaps + an up-to-120s pause after any 429 — the documented rate-limit
+  // posture), so a 20s window dies whenever the gate is paused. Live incident
+  // 2026-07-15: auto-reply hit a 429 at :00, the operator's TAT pull at :54
+  // queued behind the pause and 504'd at exactly 20s. The compliance listing
+  // read therefore waits out a FULL pause + drain on its ONE queued request —
+  // never re-issue the request on timeout, that only adds queue pressure.
+  // Server-side pull persist means a slow success still lands after the
+  // browser gives up.
+  const COMPLIANCE_GUESTY_PATIENT_TIMEOUT_MS = 150_000;
+  const withComplianceLookupTimeout = async <T>(promise: Promise<T>, label: string, timeoutMs: number = COMPLIANCE_GUESTY_TIMEOUT_MS): Promise<T> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         promise,
         new Promise<T>((_, reject) => {
           timer = setTimeout(
-            () => reject(new Error(`${label} timed out after ${COMPLIANCE_GUESTY_TIMEOUT_MS / 1000}s`)),
-            COMPLIANCE_GUESTY_TIMEOUT_MS,
+            () => reject(new Error(`${label} timed out after ${timeoutMs / 1000}s`)),
+            timeoutMs,
           );
         }),
       ]);
@@ -7811,6 +7821,7 @@ export async function registerRoutes(
     return await withComplianceLookupTimeout(
       guestyRequest("GET", `/listings/${listingId}`) as Promise<Record<string, unknown>>,
       "Guesty listing compliance fetch",
+      COMPLIANCE_GUESTY_PATIENT_TIMEOUT_MS,
     );
   };
 
