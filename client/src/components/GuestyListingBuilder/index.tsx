@@ -16,7 +16,6 @@ import {
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
 import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
-import StaticRatePlanPanel from "./StaticRatePlanPanel";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import {
@@ -7756,11 +7755,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 )}
                               </div>
                             )}
-                            {/* Claude static-rate plan: editable/lockable seasonal
-                                anchors researched via web search. Dormant by default
-                                (the live SearchAPI Airbnb median scan is the rate
-                                source); shown when STATIC_RATE_ENGINE=1. */}
-                            <StaticRatePlanPanel propertyId={propertyId} version={marketRatesVersion} />
                             {/* Live buy-in summary. One badge per bedroom-count
                                 showing the persisted Airbnb SearchAPI layered
                                 basis for the market-rate tool. */}
