@@ -43,6 +43,28 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-15 (licenses section: "last time the license was created/pulled" line): Operator asked to
+  plan + implement UI in the Descriptions-tab licenses section showing when each license number was
+  created/pulled from the internet, then merge. SHIPPED (`claude/license-timestamp-ui-1d49f3`): NEW
+  pure `shared/license-provenance.ts` — per-field entries {savedAt, method online-pull|manual|sample,
+  value snapshot, source?, sourceUrl?} in app_settings `license_provenance.v1` keyed by builder
+  propertyId (positive core id OR negative -draftId; 300-property LRU cap) + fail-soft promise-tail
+  store `server/license-provenance.ts`. The compliance PATCH takes an optional per-field `provenance`
+  attribution (validated; savedAt SERVER-stamped), both compliance routes return `provenance`, and
+  `persistComplianceValues` now ALWAYS PATCHes /api/builder/compliance/:propertyId (draft branch =
+  same six community_drafts columns) — ONE stamping seam. Attribution per write path: single-field
+  pulls → online-pull with the lookup's real source/sourceUrl; the bulk resolve stamps ONLY fields it
+  actually CHANGED (it echoes client-sent values — never re-label a manual value as pulled); samples →
+  sample; blur → manual. LOAD-BEARING (test-locked): stamps render ONLY when the value snapshot
+  matches the current value (unstamped paths read "🕐 Last pull not recorded"); a manual no-op blur
+  never clobbers a pull stamp; a re-pull of the SAME value re-stamps (fresh verification). UI: line
+  under all four summary boxes + every requirement card — green "🌐 Pulled online 2h ago · <source
+  link>" / muted "✎ Entered manually 3d ago" / amber "⚠ Sample generated …"; >30d shows the absolute
+  date; tooltip = exact local datetime. Verified: license-provenance 58/0 (npm chain), full `npm
+  test` exit 0, build clean (strings bundle-grepped), `npm run check` 338 = baseline (stash A/B), UI
+  proven on the BUILT bundle (static SPA server + Playwright, mocked /api: all three tones +
+  not-recorded render, blur PATCH carries manual attribution, line flips to "just now" — 8/0).
+
 - 2026-07-14 ("Remove 6 selected photos" → HTTP 502 — DEPLOY BLACKHOLE class, fixed at the source with
   a Railway healthcheck): Operator's photo-dedupe apply click (Menehune Shores Unit B) 502'd. NOT a
   dedupe bug (don't re-chase): the edge log shows `connection refused` ×3 in 2ms — the POST never

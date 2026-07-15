@@ -38,6 +38,14 @@ import {
 } from "@shared/description-copy";
 import { useToast } from "@/hooks/use-toast";
 import { isFloridaLicenseJurisdiction, isPlaceholderLicenseValue, resolveLicenseComplianceProfile, type LicenseFieldKey, type LicenseRequirement } from "@shared/license-compliance";
+import {
+  describeLicenseProvenance,
+  formatLicenseProvenanceAge,
+  licenseProvenanceMatchesValue,
+  type LicensePropertyProvenance,
+  type LicenseProvenanceClientPatch,
+  type LicenseProvenanceField,
+} from "@shared/license-provenance";
 import { normalizePhotoVerdictKey } from "@shared/photo-verdict-keys";
 import { fetchWithTransientRetry, isTransientHttpStatus } from "@shared/transient-fetch";
 import { guestyPushBackfillCandidates, newestGuestyPushEntry, parsePhotosPushSummary, type GuestyPushListingHistory } from "@shared/guesty-push-history";
@@ -1030,6 +1038,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // listings mid-request.
   const [complianceStateByListing, setComplianceStateByListing] = useState<Record<string, "idle" | "busy">>({});
   const [complianceOverrides, setComplianceOverrides] = useState<Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>>({});
+  // Per-field "when was this license created/pulled" stamps from the durable
+  // server ledger (license_provenance.v1). Display-only; hydrated with the
+  // compliance values and refreshed from every save response.
+  const [complianceProvenance, setComplianceProvenance] = useState<LicensePropertyProvenance>({});
   const [licenseLookupBusy, setLicenseLookupBusy] = useState(false);
   const [tmkLookupBusy, setTmkLookupBusy] = useState(false);
   const [tmkLookupResult, setTmkLookupResult] = useState<TmkLookupResult | null>(null);
@@ -1299,6 +1311,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
 
   useEffect(() => {
     setComplianceOverrides({});
+    setComplianceProvenance({});
     setTmkLookupResult(null);
     setGetLookupResult(null);
     setTatLookupResult(null);
@@ -1322,6 +1335,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           }
         }
         if (Object.keys(loaded).length > 0) setComplianceOverrides(loaded);
+        if (data.provenance && typeof data.provenance === "object") {
+          setComplianceProvenance(data.provenance as LicensePropertyProvenance);
+        }
       })
       .catch(() => { /* non-fatal — builder still works from static property data */ });
     return () => { cancelled = true; };
@@ -1553,20 +1569,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     };
   }, [complianceProfile.jurisdiction, complianceValueFor]);
 
+  // Which provenance field each summary column reads — mirrors the value
+  // mapping in complianceSummaryValues above.
+  const complianceSummaryFields = useMemo<Record<"title1" | "title2" | "title3" | "title4", LicenseProvenanceField>>(() => {
+    const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
+    return {
+      title1: isFloridaProfile ? "dbprLicense" : "taxMapKey",
+      title2: "getLicense",
+      title3: isFloridaProfile ? "touristTaxAccount" : "tatLicense",
+      title4: "strPermit",
+    };
+  }, [complianceProfile.jurisdiction]);
+
+  // Saves compliance values AND attributes each save for the "last pulled"
+  // provenance line. Both signs go through /api/builder/compliance/:propertyId
+  // (its draft branch writes the same six community_drafts columns the old
+  // /api/community/:id PATCH did) so the server has ONE stamping seam.
   const persistComplianceValues = useCallback(async (
     values: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>,
+    provenance?: LicenseProvenanceClientPatch,
   ) => {
     if (!propertyId) return;
-    const payload: Record<string, string> = {};
+    const payload: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(values)) {
       const text = String(value ?? "").trim();
       if (text) payload[key] = text;
     }
     if (Object.keys(payload).length === 0) return;
-    const url = propertyId < 0
-      ? `/api/community/${Math.abs(propertyId)}`
-      : `/api/builder/compliance/${propertyId}`;
-    const resp = await fetch(url, {
+    if (provenance && Object.keys(provenance).length > 0) payload.provenance = provenance;
+    const resp = await fetch(`/api/builder/compliance/${propertyId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1574,6 +1605,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!resp.ok) {
       const error = await resp.json().catch(() => ({}));
       throw new Error(error?.error || error?.message || `Save failed (${resp.status})`);
+    }
+    const data = await resp.json().catch(() => null);
+    if (data?.provenance && typeof data.provenance === "object") {
+      setComplianceProvenance(data.provenance as LicensePropertyProvenance);
     }
     if (propertyId < 0) {
       await queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
@@ -1605,7 +1640,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!sample) return;
     setComplianceOverrides((prev) => ({ ...prev, [req.key]: sample }));
     try {
-      await persistComplianceValues({ [req.key]: sample } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>);
+      await persistComplianceValues(
+        { [req.key]: sample } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>,
+        { [req.key]: { method: "sample" } } as LicenseProvenanceClientPatch,
+      );
       toast({
         title: `Sample ${req.shortLabel} applied`,
         description: "County/state-shaped placeholder — replace with the real license before publishing, or pull the real value from Guesty/public records above.",
@@ -1628,6 +1666,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setLicenseLookupBusy(true);
     try {
       const isFloridaProfile = isFloridaLicenseJurisdiction(complianceProfile.jurisdiction);
+      const sentValues: Record<string, string> = {
+        taxMapKey: String(effectivePropertyData.taxMapKey ?? "").trim(),
+        tatLicense: String(effectivePropertyData.tatLicense ?? "").trim(),
+        getLicense: String(effectivePropertyData.getLicense ?? "").trim(),
+        strPermit: String(effectivePropertyData.strPermit ?? "").trim(),
+        dbprLicense: String(effectivePropertyData.dbprLicense || (isFloridaProfile ? effectivePropertyData.taxMapKey : "") || "").trim(),
+        touristTaxAccount: String(effectivePropertyData.touristTaxAccount || (isFloridaProfile ? effectivePropertyData.tatLicense : "") || "").trim(),
+      };
       const r = await fetch("/api/builder/resolve-license-requirements", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1655,7 +1701,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         ...(data.values?.dbprLicense ? { dbprLicense: data.values.dbprLicense } : {}),
         ...(data.values?.touristTaxAccount ? { touristTaxAccount: data.values.touristTaxAccount } : {}),
       }));
-      await persistComplianceValues(data.values ?? {});
+      // Attribute ONLY fields the lookup actually changed: the endpoint
+      // echoes the values we sent for already-set fields, and re-labeling a
+      // manually entered license as "pulled online" would be a lie.
+      const bulkProvenance: LicenseProvenanceClientPatch = {};
+      for (const field of Object.keys(sentValues) as LicenseProvenanceField[]) {
+        const returned = String(data.values?.[field] ?? "").trim();
+        if (returned && returned !== sentValues[field]) {
+          bulkProvenance[field] = {
+            method: "online-pull",
+            source: "Public license records lookup",
+            ...(data.lookup?.sourceUrl ? { sourceUrl: String(data.lookup.sourceUrl) } : {}),
+          };
+        }
+      }
+      await persistComplianceValues(data.values ?? {}, bulkProvenance);
       const missingRequired = (data.profile?.requirements ?? [])
         .filter((req: any) => req.required && isPlaceholderLicenseValue(data.values?.[req.key]))
         .map((req: any) => req.shortLabel || req.label);
@@ -1755,7 +1815,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || data?.message || "TMK lookup failed");
       setComplianceOverrides((prev) => ({ ...prev, taxMapKey: data.taxMapKey }));
-      void persistComplianceValues({ taxMapKey: data.taxMapKey }).catch((err) => {
+      void persistComplianceValues({ taxMapKey: data.taxMapKey }, {
+        taxMapKey: {
+          method: "online-pull",
+          ...(data.source ? { source: String(data.source) } : {}),
+          ...(data.sourceUrl ? { sourceUrl: String(data.sourceUrl) } : {}),
+        },
+      }).catch((err) => {
         toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
       });
       setTmkLookupResult(data as TmkLookupResult);
@@ -1824,7 +1890,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         && !isPlaceholderLicenseValue(previous)
         && previous.replace(/\W/g, "").toLowerCase() === value.replace(/\W/g, "").toLowerCase();
       setComplianceOverrides((prev) => ({ ...prev, [options.field]: value }));
-      void persistComplianceValues({ [options.field]: value }).catch((err) => {
+      void persistComplianceValues({ [options.field]: value }, {
+        [options.field]: {
+          method: "online-pull",
+          ...(data.source ? { source: String(data.source) } : {}),
+          ...(data.sourceUrl ? { sourceUrl: String(data.sourceUrl) } : {}),
+        },
+      } as LicenseProvenanceClientPatch).catch((err) => {
         toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
       });
       options.setResult(data as ComplianceLookupResult);
@@ -1895,6 +1967,51 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         )}
         <br />
         {result.note}
+      </div>
+    );
+  };
+
+  // "Last created/pulled" line for a license value. Renders only when the
+  // field HAS a value; the stamp itself renders only when its value snapshot
+  // matches the current value (a value written by a path that didn't stamp —
+  // e.g. combo-draft creation — honestly reads "not recorded" instead of
+  // wearing another value's timestamp). Tooltip carries the exact local
+  // datetime; the source label links to the registry page when we have it.
+  const renderLicenseProvenance = (field: LicenseProvenanceField, currentValue: string | null | undefined, variant: "summary" | "card") => {
+    const value = String(currentValue ?? "").trim();
+    if (!value) return null;
+    const entry = complianceProvenance[field];
+    if (!entry || !licenseProvenanceMatchesValue(entry, value)) {
+      return (
+        <div
+          style={{ fontSize: 10, color: "var(--muted-foreground)", marginTop: 4, lineHeight: 1.4 }}
+          data-testid={`license-provenance-${variant}-${field}`}
+        >
+          🕐 Last pull not recorded
+        </div>
+      );
+    }
+    const desc = describeLicenseProvenance(entry);
+    const color = desc.tone === "pulled" ? "#047857" : desc.tone === "sample" ? "#b45309" : "var(--muted-foreground)";
+    return (
+      <div
+        style={{ fontSize: 10, color, marginTop: 4, lineHeight: 1.4 }}
+        title={`${desc.label} ${new Date(entry.savedAt).toLocaleString()}${entry.source ? ` · ${entry.source}` : ""}`}
+        data-testid={`license-provenance-${variant}-${field}`}
+      >
+        {desc.icon} {desc.label} {formatLicenseProvenanceAge(entry.savedAt, new Date().toISOString())}
+        {entry.source && (
+          <>
+            {" · "}
+            {entry.sourceUrl ? (
+              <a href={entry.sourceUrl} target="_blank" rel="noreferrer" style={{ color: "inherit", textDecoration: "underline" }}>
+                {entry.source}
+              </a>
+            ) : (
+              entry.source
+            )}
+          </>
+        )}
       </div>
     );
   };
@@ -6749,6 +6866,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {renderLicenseProvenance(complianceSummaryFields.title1, complianceSummaryValues.title1, "summary")}
                             {isHawaiiCompliance && (
                               <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
                                 <button
@@ -6827,6 +6945,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {renderLicenseProvenance(complianceSummaryFields.title2, complianceSummaryValues.title2, "summary")}
                             {isHawaiiCompliance && (
                               <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
                                 <button
@@ -6870,6 +6989,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {renderLicenseProvenance(complianceSummaryFields.title3, complianceSummaryValues.title3, "summary")}
                             {isHawaiiCompliance && (
                               <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
                                 <button
@@ -6913,6 +7033,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 >📋</button>
                               )}
                             </div>
+                            {renderLicenseProvenance(complianceSummaryFields.title4, complianceSummaryValues.title4, "summary")}
                             {isHawaiiCompliance && (
                               <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
                                 <button
@@ -6969,6 +7090,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       >📋</button>
                                     )}
                                   </div>
+                                  {renderLicenseProvenance(req.key as LicenseProvenanceField, value, "card")}
                                   {isPlaceholder && (
                                     <div style={{ fontSize: 10, color: "#b45309", marginTop: 5, lineHeight: 1.35 }}>
                                       Sample value only. Enter the real {req.shortLabel}, generate a sample placeholder below{canPublicPull ? `, or pull it from the public ${req.key === "dbprLicense" ? "Florida DBPR records" : req.key === "taxMapKey" ? "county GIS" : "Fort Myers STR portal"}` : ""} before pushing compliance.
@@ -6981,7 +7103,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       setComplianceOverrides((prev) => ({ ...prev, [req.key]: next }));
                                     }}
                                     onBlur={(event) => {
-                                      persistComplianceValues({ [req.key]: event.target.value } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>)
+                                      // Attributed "manual" — the server's no-op guard keeps an
+                                      // existing pull stamp when the blur didn't change the value.
+                                      persistComplianceValues(
+                                        { [req.key]: event.target.value } as Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">>,
+                                        { [req.key]: { method: "manual" } } as LicenseProvenanceClientPatch,
+                                      )
                                         .catch((err) => toast({ title: "License save failed", description: err.message, variant: "destructive" }));
                                     }}
                                     placeholder={req.sample}

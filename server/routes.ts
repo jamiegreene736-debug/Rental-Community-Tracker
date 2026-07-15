@@ -52,6 +52,8 @@ import {
   type GuestyPushListingHistory,
 } from "@shared/guesty-push-history";
 import { backfillGuestyPushHistory, getGuestyPushHistory, recordGuestyPush } from "./guesty-push-history";
+import { getLicenseProvenance, recordLicenseProvenance } from "./license-provenance";
+import { sanitizeLicenseProvenanceClientPatch, type LicenseProvenanceField, type LicenseProvenanceMethod } from "@shared/license-provenance";
 import {
   validateGuestIssueTitle,
   normalizeGuestIssueSeverity,
@@ -7864,34 +7866,51 @@ export async function registerRoutes(
       if (propertyId < 0) {
         const draft = await storage.getCommunityDraft(Math.abs(propertyId));
         if (!draft) return res.status(404).json({ error: "Draft not found" });
-        return res.json({ values: readStoredComplianceValues(draft) });
+        return res.json({ values: readStoredComplianceValues(draft), provenance: await getLicenseProvenance(propertyId) });
       }
       const row = await storage.getPropertyComplianceOverrides(propertyId);
-      return res.json({ values: readStoredComplianceValues(row) });
+      return res.json({ values: readStoredComplianceValues(row), provenance: await getLicenseProvenance(propertyId) });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });
 
-  // PATCH /api/builder/compliance/:propertyId — save pulled/edited compliance values.
+  // PATCH /api/builder/compliance/:propertyId — save pulled/edited compliance
+  // values. The optional body `provenance` map attributes each saved field
+  // (online-pull / manual / sample + source) for the licenses-section "last
+  // pulled" line; savedAt is stamped server-side and a field saved WITHOUT an
+  // attribution defaults to "manual" (the honest floor for stale bundles).
   app.patch("/api/builder/compliance/:propertyId", async (req, res) => {
     const propertyId = Number(req.params.propertyId);
     if (!Number.isInteger(propertyId) || propertyId === 0) {
       return res.status(400).json({ error: "Invalid propertyId" });
     }
-    const patch = sanitizeCompliancePayload((req.body ?? {}) as Record<string, unknown>);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const patch = sanitizeCompliancePayload(body);
     if (Object.keys(patch).length === 0) {
       return res.status(400).json({ error: "No compliance values to save" });
     }
+    const stampProvenance = () => {
+      const clientProvenance = sanitizeLicenseProvenanceClientPatch(body.provenance);
+      const patches: Partial<Record<LicenseProvenanceField, { method: LicenseProvenanceMethod; source?: string; sourceUrl?: string; value: string }>> = {};
+      for (const [field, value] of Object.entries(patch)) {
+        if (!value) continue; // cleared values keep no stamp (render gate hides the old one)
+        const attribution = clientProvenance[field as LicenseProvenanceField] ?? { method: "manual" as const };
+        patches[field as LicenseProvenanceField] = { ...attribution, value };
+      }
+      if (Object.keys(patches).length > 0) void recordLicenseProvenance(propertyId, patches);
+    };
     try {
       if (propertyId < 0) {
         const draft = await storage.updateCommunityDraft(Math.abs(propertyId), patch as any);
         if (!draft) return res.status(404).json({ error: "Draft not found" });
-        return res.json({ values: readStoredComplianceValues(draft) });
+        stampProvenance();
+        return res.json({ values: readStoredComplianceValues(draft), provenance: await getLicenseProvenance(propertyId) });
       }
       await storage.upsertPropertyComplianceOverrides(propertyId, patch);
+      stampProvenance();
       const row = await storage.getPropertyComplianceOverrides(propertyId);
-      return res.json({ values: readStoredComplianceValues(row) });
+      return res.json({ values: readStoredComplianceValues(row), provenance: await getLicenseProvenance(propertyId) });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || String(err) });
     }
