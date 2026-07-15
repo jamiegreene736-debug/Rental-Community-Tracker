@@ -253,5 +253,40 @@ check("apply asks for operator confirmation first",
 check("apply refreshes the photo-label state (hidden photos disappear from the tab)",
   builderIndexSource.includes("photo-dedupe-apply") && builderIndexSource.includes("onPhotoOverridesChanged?.();"));
 
+console.log("photo-dedupe: Guesty propagation locks (2026-07-15 — a dedupe removal must reach Guesty)");
+
+// The hide is a local soft-delete; what deletes the photo from the LIVE
+// Guesty listing is the background gallery re-push (full pictures[] PUT).
+// These locks keep that seam wired end-to-end.
+check("apply/restore share the dedupeGuestySync helper (definition + 2 call sites)",
+  routesSource.split("dedupeGuestySync(").length - 1 >= 2 && routesSource.includes("const dedupeGuestySync = async"));
+check("the sync drives the existing gallery re-push, FIRE-AND-FORGET (response must not block minutes)",
+  routesSource.includes("void repushGuestyPhotosForProperty(propertyId, { reason })"));
+check("the sync requires a mapped Guesty listing and reports honestly when there is none",
+  routesSource.includes("getGuestyListingId(propertyId)") && routesSource.includes(`{ started: false, reason: "no-guesty-mapping" }`));
+check("no propertyId → no push (the opt-in gate)",
+  routesSource.includes(`{ started: false, reason: "no-property" }`));
+
+// The unit-audit sweep's loopback apply must stay propertyId-FREE: a
+// mid-sweep gallery push would race the sweep's own photo stages
+// (community ladder / replace / collage). If the sweep should ever sync,
+// that is a separate deliberate decision — not an accidental body change.
+const sweepSource = readFileSync("server/unit-audit-sweep.ts", "utf8");
+check("sweep loopback apply body stays { scanId, remove } — no propertyId, no mid-sweep push",
+  sweepSource.includes(`"/api/builder/photo-dedupe-apply", { scanId, remove }`));
+
+// The whole propagation depends on the repush assembly dropping hidden
+// photos — if this filter goes, the re-push would re-publish the dupes.
+const repushSharedSource = readFileSync("shared/guesty-photo-repush.ts", "utf8");
+check("repush gallery assembly drops hidden photos",
+  repushSharedSource.includes(".filter((filename) => !labelByFile.get(filename)?.hidden)"));
+
+check("client sends propertyId on BOTH apply and restore (opts in to the Guesty sync)",
+  builderIndexSource.split(`...(typeof propertyId === "number" ? { propertyId } : {})`).length - 1 >= 2);
+check("applied panel renders the honest Guesty-sync verdict",
+  builderIndexSource.includes(`data-testid="dedupe-guesty-sync-note"`)
+  && builderIndexSource.includes("Removing them from Guesty too")
+  && builderIndexSource.includes(`use "Push Photos to Guesty" to remove them from the live listing`));
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0);
