@@ -30985,9 +30985,34 @@ Return ONLY compact JSON with this exact shape:
     }
   });
 
+  // Optional propertyId on the dedupe apply/restore bodies: when present and
+  // the property maps to a Guesty listing, the route fires the existing
+  // gallery re-push (repushGuestyPhotosForProperty) so the hide/restore
+  // propagates to Guesty — the push's full pictures[] PUT is what deletes a
+  // hidden photo from the live listing (2026-07-15 operator report: dedupe
+  // removals never reached Guesty). Fire-and-forget: the push runs minutes
+  // and stamps the push ledger; the response only reports that it STARTED.
+  // The unit-audit sweep's loopback apply deliberately sends NO propertyId —
+  // a mid-sweep gallery push would race the sweep's own photo stages.
+  const dedupeGuestySync = async (
+    rawPropertyId: unknown,
+    changedCount: number,
+    reason: string,
+  ): Promise<{ started: boolean; reason?: string }> => {
+    const propertyId = Number(rawPropertyId);
+    if (!Number.isInteger(propertyId) || propertyId === 0) return { started: false, reason: "no-property" };
+    if (changedCount === 0) return { started: false, reason: "nothing-changed" };
+    const guestyListingId = await storage.getGuestyListingId(propertyId).catch(() => undefined);
+    if (!guestyListingId) return { started: false, reason: "no-guesty-mapping" };
+    void repushGuestyPhotosForProperty(propertyId, { reason }).catch((e: any) =>
+      console.warn(`[photo-dedupe] guesty re-push failed to start for property ${propertyId}: ${e?.message ?? e}`),
+    );
+    return { started: true };
+  };
+
   app.post("/api/builder/photo-dedupe-apply", async (req, res) => {
     try {
-      const body = (req.body ?? {}) as { scanId?: unknown; remove?: unknown };
+      const body = (req.body ?? {}) as { scanId?: unknown; remove?: unknown; propertyId?: unknown };
       const scanId = typeof body.scanId === "string" ? body.scanId : "";
       const proposal = scanId ? getStoredDedupeScan(scanId) : null;
       if (!proposal) {
@@ -31019,12 +31044,18 @@ Return ONLY compact JSON with this exact shape:
           failures.push(`${s.folder}/${s.filename}: ${e?.message ?? e}`);
         }
       }
+      const guestySync = await dedupeGuestySync(
+        body.propertyId,
+        hidden.length,
+        "photo dedupe apply — remove hidden duplicates from the Guesty gallery",
+      );
       return res.json({
         ok: failures.length === 0,
         hidden,
         failures,
         warnings: verdict.warnings,
         remainingByFolder: verdict.remainingByFolder,
+        guestySync,
       });
     } catch (err: any) {
       console.error("[photo-dedupe-apply]", err?.message ?? err);
@@ -31035,7 +31066,7 @@ Return ONLY compact JSON with this exact shape:
   // Undo for the dedupe apply — flips hidden back off for the given photos.
   app.post("/api/builder/photo-dedupe-restore", async (req, res) => {
     try {
-      const body = (req.body ?? {}) as { items?: unknown };
+      const body = (req.body ?? {}) as { items?: unknown; propertyId?: unknown };
       const fnameRe = /^[\w.-]+\.(jpe?g|png|webp)$/i;
       const items: DedupeSelection[] = [];
       for (const raw of Array.isArray(body.items) ? body.items : []) {
@@ -31058,7 +31089,12 @@ Return ONLY compact JSON with this exact shape:
           failures.push(`${s.folder}/${s.filename}: ${e?.message ?? e}`);
         }
       }
-      return res.json({ ok: failures.length === 0, restored, failures });
+      const guestySync = await dedupeGuestySync(
+        body.propertyId,
+        restored.length,
+        "photo dedupe undo — restore photos on the Guesty gallery",
+      );
+      return res.json({ ok: failures.length === 0, restored, failures, guestySync });
     } catch (err: any) {
       console.error("[photo-dedupe-restore]", err?.message ?? err);
       return res.status(500).json({ ok: false, error: err?.message ?? "photo dedupe restore failed" });
