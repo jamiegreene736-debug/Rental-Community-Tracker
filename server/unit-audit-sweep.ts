@@ -123,6 +123,7 @@ import type { PhotoCommunityCheckResult } from "./photo-community-check";
 import { getPreflightPhotoFetchJob, startPreflightPhotoFetchJob } from "./preflight-background-jobs";
 import { getCommunityPhotoRepullJob, startCommunityPhotoRepullJob } from "./community-photo-repull";
 import { listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
+import { repushGuestyPhotosForProperty } from "./guesty-photo-repush";
 import { isAutoReplacePhaseActive, draftUnitIdForSlot } from "@shared/auto-replace-job-logic";
 import { latestUnitSwapsByUnit } from "@shared/unit-swap-photos";
 import { loopbackRequestHeaders } from "./auth";
@@ -613,6 +614,9 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
       return false;
     }
     items.push(`Auto-fixed: ${remove.length} duplicate photo${remove.length === 1 ? "" : "s"} hidden (soft-delete — ↺ Undo on the Photos tab): ${remove.map((r) => r.filename).slice(0, 8).join(", ")}${remove.length > 8 ? ", …" : ""}`);
+    // Feed the end-of-sweep Guesty gallery sync (startSweepDedupeGuestySync):
+    // the hide alone never reaches the live listing.
+    dedupeHiddenThisSweep.set(record.jobId, (dedupeHiddenThisSweep.get(record.jobId) ?? 0) + remove.length);
     // Re-resolve the target so re-scans AND every later stage (e.g. the
     // collage candidate list) see the surviving photo set.
     const refreshedTarget = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
@@ -1028,6 +1032,17 @@ function consumeCronReplaceBudget(): boolean {
 // In-memory on purpose (a resume mid-sweep loses the hint; the next weekly
 // run heals any staleness).
 const replacedThisSweep = new Set<string>();
+
+// Duplicate photos hidden by THIS sweep's dedupe auto-fix (jobId → count).
+// The hide is a local photo_labels.hidden soft-delete — invisible to the
+// mapped Guesty listing until its pictures[] is re-PUT (PR #1042 gave the
+// Photos tab's manual apply that push). The sweep's loopback apply
+// deliberately stays propertyId-free — a minutes-long gallery push
+// MID-sweep would race the later photo stages (replace rung, collage) —
+// so hides are tracked here and ONE re-push fires at sweep END instead
+// (startSweepDedupeGuestySync). In-memory like replacedThisSweep: a resume
+// mid-sweep loses the hint, and the gallery heals on any later push.
+const dedupeHiddenThisSweep = new Map<string, number>();
 
 async function runPhotoFixRung(
   rung: PhotoFixRung,
@@ -2455,6 +2470,61 @@ async function acquireSweepSlot(record: UnitAuditJobRecord): Promise<void> {
   runningSweeps += 1;
 }
 
+// END-OF-SWEEP Guesty sync for dedupe hides (2026-07-15, the sweep edition of
+// PR #1042): if this sweep's dedupe stage hid ≥1 duplicate, fire ONE
+// full-gallery re-push so the hides reach the live Guesty listing — AFTER
+// every photo stage AND the retry rails, so a minutes-long push can never
+// race the replace rung or the collage pin. FIRE-AND-FORGET like the
+// unit-swaps hook (per-property serialized inside guesty-photo-repush; the
+// photos push ledger — the Photos tab "Pushed" chip — is the confirmation
+// surface). Skipped when the replace rung committed a swap this sweep: the
+// swap's own awaited re-push assembles the CURRENT gallery and the assembly
+// drops hidden rows, so the dedupe hides already rode along — a second push
+// would be pure duplicate Guesty load. RATE-LIMIT POSTURE: a push fires only
+// when a hide actually landed THIS sweep, so the weekly cron is
+// self-quenching — once the dupes are hidden, later sweeps find nothing new
+// and fire nothing; sweeps run one-at-a-time (UNIT_AUDIT_CONCURRENCY) so
+// pushes space out, and every Guesty call serializes through guesty-sync's
+// global gate. Kill switch: AUDIT_DEDUPE_GUESTY_PUSH=0.
+// Returns the honest receipt line for the photo-dedupe row (or null when
+// there is nothing to say). At-most-once per job: the map entry is consumed.
+function startSweepDedupeGuestySync(record: UnitAuditJobRecord): string | null {
+  const hidden = dedupeHiddenThisSweep.get(record.jobId) ?? 0;
+  if (hidden <= 0) return null;
+  dedupeHiddenThisSweep.delete(record.jobId);
+  const plural = hidden === 1 ? "" : "s";
+  if (String(process.env.AUDIT_DEDUPE_GUESTY_PUSH ?? "").trim() === "0") {
+    return `${hidden} hidden duplicate${plural} NOT removed from Guesty (AUDIT_DEDUPE_GUESTY_PUSH=0) — use "Push Photos to Guesty" on the Photos tab`;
+  }
+  if (replacedThisSweep.has(record.jobId)) {
+    return `${hidden} hidden duplicate${plural} already removed from Guesty by the unit replacement's gallery re-push — no extra push fired`;
+  }
+  const target = targets.get(record.jobId);
+  if (!target?.guestyListingId) {
+    return `${hidden} hidden duplicate${plural} — property is not connected to Guesty, nothing to sync`;
+  }
+  void repushGuestyPhotosForProperty(record.propertyId, {
+    reason: `unit-audit sweep — remove ${hidden} dedupe-hidden photo${plural} from the Guesty gallery`,
+  }).then((r) => {
+    if (!r.ok) console.warn(`[unit-audit] ${record.propertyName}: dedupe Guesty re-push did not complete — ${r.error ?? r.skipped ?? "unknown"}`);
+  }).catch((e: any) => {
+    console.warn(`[unit-audit] ${record.propertyName}: dedupe Guesty re-push failed to start — ${e?.message ?? e}`);
+  });
+  return `Guesty gallery re-push started in the background to remove the ${hidden} hidden duplicate${plural} from the live listing — the Photos tab push ledger ("Pushed …") confirms completion`;
+}
+
+// Append the sync verdict to the photo-dedupe receipt row so the operator
+// can see from the receipt alone whether Guesty was updated.
+function noteSweepDedupeGuestySync(record: UnitAuditJobRecord): void {
+  const note = startSweepDedupeGuestySync(record);
+  if (!note) return;
+  const row = record.stages.find((s) => s.stage === "photo-dedupe");
+  if (!row) return;
+  touch(record, {
+    stages: upsertUnitAuditStageResult(record.stages, { ...row, items: [...(row.items ?? []), note] }),
+  });
+}
+
 async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
   if (activeJobIds.has(record.jobId)) return;
   activeJobIds.add(record.jobId);
@@ -2518,6 +2588,13 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
       }
     }
 
+    // Every photo stage + the retry rails are done — safe point for the ONE
+    // background Guesty gallery re-push that propagates this sweep's dedupe
+    // hides to the live listing (no-op when nothing was hidden / a swap
+    // already pushed). Must run BEFORE the receipt so the photo-dedupe row
+    // carries the sync verdict.
+    noteSweepDedupeGuestySync(record);
+
     const headline = unitAuditHeadline(record.stages);
     touch(record, { status: "completed", currentStage: null, message: headline, error: null });
     const report: UnitAuditReportRecord = {
@@ -2531,8 +2608,14 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
     await mutateReports((reports) => { reports[String(record.propertyId)] = report; });
   } catch (e: any) {
     if (String(e?.message) === "cancelled") {
+      // Operator cancel = stop doing things; already-applied hides stay
+      // local-only (the next completed sweep or any photo push heals Guesty).
       touch(record, { status: "cancelled", currentStage: null, message: "Audit sweep cancelled.", error: null });
     } else {
+      // The hides a FAILED sweep applied are just as durable as a completed
+      // sweep's — still sync them so the live listing doesn't keep serving
+      // duplicates because a LATER stage (descriptions/pricing/…) errored.
+      noteSweepDedupeGuestySync(record);
       touch(record, { status: "failed", currentStage: null, error: e?.message ?? "Audit sweep failed" });
     }
   } finally {
@@ -2542,6 +2625,7 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
     targets.delete(record.jobId);
     communityResults.delete(record.jobId);
     replacedThisSweep.delete(record.jobId);
+    dedupeHiddenThisSweep.delete(record.jobId);
   }
 }
 
