@@ -174,7 +174,21 @@ const entry = (over: Partial<LicenseProvenanceEntry> = {}): LicenseProvenanceEnt
   check("server store uses the promise-tail pattern", serverStore.includes("storeTail = storeTail.then") && serverStore.includes("license_provenance.v1"));
   check("server stamps savedAt with server time", serverStore.includes("savedAt: nowIso"));
 
+  // Server-side pull persistence (2026-07-15): the pull must complete +
+  // stamp even when the operator leaves the tab mid-lookup — the client
+  // fetch dies with the tab, so the LOOKUP ROUTE owns the save.
+  check("single-field lookups persist server-side on persist=1", routes.includes('String(req.query.persist ?? "") === "1"') && routes.includes("persistPulledComplianceValues(req.query.propertyId, { [field]: result.value }"));
+  check("tmk lookup persists server-side on persist=1", routes.includes("persistPulledComplianceValues(req.query.propertyId, { taxMapKey: String(payload.taxMapKey) }"));
+  check("bulk resolve persists server-side on persist", routes.includes('body.persist === true || body.persist === 1 || body.persist === "1"') && routes.includes("persistPulledComplianceValues(body.propertyId, {"));
+  check("server-side pull persist refuses placeholders", routes.includes("if (!text || isPlaceholderLicenseValue(text)) continue;"));
+  check("server-side pull persist only stamps attributed fields", routes.includes("if (attribution) stamps[field as LicenseProvenanceField] = { ...attribution, value };"));
+  check("bulk resolve attributes only lookup-filled fields", routes.includes("if (!resolvedTaxMapKeyValue && publicLookup.taxMapKey) lookupAttributions.taxMapKey = hawaiiAttribution;"));
+
   const builder = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
+  check("client pull requests ask the server to persist", (builder.match(/params\.set\("persist", "1"\)/g) ?? []).length >= 2 && builder.includes("persist: true,"));
+  check("client skips its own PATCH when the server persisted", (builder.match(/if \(data\.persisted\) \{/g) ?? []).length >= 3);
+  check("returning to the tab re-reads compliance values + provenance", builder.includes("reloadComplianceValues") && builder.includes('document.addEventListener("visibilitychange", maybeReload)'));
+  check("focus refresh merges (never clobbers unsaved edits)", builder.includes("setComplianceOverrides((prev) => ({ ...prev, ...loaded }))"));
   check("builder renders the provenance line on summary boxes", (builder.match(/renderLicenseProvenance\(complianceSummaryFields\.title\d, complianceSummaryValues\.title\d, "summary"\)/g) ?? []).length === 4);
   check("builder renders the provenance line on requirement cards", builder.includes('renderLicenseProvenance(req.key as LicenseProvenanceField, value, "card")'));
   check("unrecorded values read honestly", builder.includes("Last pull not recorded"));

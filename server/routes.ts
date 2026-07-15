@@ -7670,6 +7670,52 @@ export async function registerRoutes(
     };
   };
 
+  // Server-side persist for license PULLS (2026-07-15). The pull buttons
+  // used to rely on the CLIENT persisting the looked-up value afterwards —
+  // leaving the tab mid-pull aborted the fetch and threw the result away
+  // (no saved value, no provenance stamp). With ?persist=1 + propertyId the
+  // lookup route itself saves the value and stamps provenance, and node
+  // keeps running the handler after a browser disconnect, so a pull started
+  // right before walking away still lands. Returns the fresh provenance map
+  // (null = nothing persisted; the caller reports persisted:false and the
+  // client falls back to its own PATCH).
+  const persistPulledComplianceValues = async (
+    propertyIdRaw: unknown,
+    patch: Partial<Record<LicenseProvenanceField, string | null | undefined>>,
+    attributions: Partial<Record<LicenseProvenanceField, { method: LicenseProvenanceMethod; source?: string; sourceUrl?: string }>>,
+  ) => {
+    const propertyId = Number(propertyIdRaw);
+    if (!Number.isInteger(propertyId) || propertyId === 0) return null;
+    const values: Partial<Record<LicenseProvenanceField, string>> = {};
+    for (const [field, raw] of Object.entries(patch)) {
+      const text = String(raw ?? "").trim();
+      // A server-side pull must never persist a sample/placeholder as real.
+      if (!text || isPlaceholderLicenseValue(text)) continue;
+      values[field as LicenseProvenanceField] = text;
+    }
+    if (Object.keys(values).length === 0) return null;
+    try {
+      if (propertyId < 0) {
+        const draft = await storage.updateCommunityDraft(Math.abs(propertyId), values as any);
+        if (!draft) return null;
+      } else {
+        await storage.upsertPropertyComplianceOverrides(propertyId, values);
+      }
+      const stamps: Partial<Record<LicenseProvenanceField, { method: LicenseProvenanceMethod; source?: string; sourceUrl?: string; value: string }>> = {};
+      for (const [field, value] of Object.entries(values)) {
+        const attribution = attributions[field as LicenseProvenanceField];
+        // Only explicitly attributed fields get a stamp — persisted echoes of
+        // unchanged values must never overwrite their existing history.
+        if (attribution) stamps[field as LicenseProvenanceField] = { ...attribution, value };
+      }
+      if (Object.keys(stamps).length > 0) await recordLicenseProvenance(propertyId, stamps);
+      return await getLicenseProvenance(propertyId);
+    } catch (err: any) {
+      console.warn(`[license-pull-persist] failed for property ${propertyId}: ${err?.message ?? err}`);
+      return null;
+    }
+  };
+
   // GET /api/builder/tmk-lookup
   //
   // Pulls a real Hawaii Tax Map Key from official public data instead
@@ -7688,21 +7734,37 @@ export async function registerRoutes(
       return res.status(400).json({ error: "Only Hawaii TMK lookup is currently supported" });
     }
 
+    // With persist=1, the looked-up TMK is saved + provenance-stamped
+    // server-side so a pull survives the operator leaving the tab.
+    const respondWithTmk = async (payload: Record<string, unknown>) => {
+      let provenance = null;
+      if (String(req.query.persist ?? "") === "1" && payload.taxMapKey) {
+        provenance = await persistPulledComplianceValues(req.query.propertyId, { taxMapKey: String(payload.taxMapKey) }, {
+          taxMapKey: {
+            method: "online-pull",
+            source: typeof payload.source === "string" ? payload.source : undefined,
+            sourceUrl: typeof payload.sourceUrl === "string" ? payload.sourceUrl : undefined,
+          },
+        });
+      }
+      return res.json({ ...payload, persisted: provenance != null, ...(provenance ? { provenance } : {}) });
+    };
+
     try {
       if (/\b(kauai|koloa|poipu|princeville|kapaa|lihue|wailua|hanalei|waimea|kekaha)\b/i.test(address)) {
-        return res.json(await lookupKauaiTmkFromAddress(address));
+        return await respondWithTmk(await lookupKauaiTmkFromAddress(address) as unknown as Record<string, unknown>);
       }
       // Big Island / Maui / Oahu / Molokai / Lanai: the State of Hawaii statewide
       // GIS parcel layer is the authoritative TMK source. Try it first; only fall
       // back to public OTA snippet scraping if GIS can't resolve the address.
       try {
-        return res.json(await lookupHawaiiStatewideTmkFromAddress(address));
+        return await respondWithTmk(await lookupHawaiiStatewideTmkFromAddress(address) as unknown as Record<string, unknown>);
       } catch (gisErr: any) {
         const gisMessage = gisErr?.message || String(gisErr);
         console.warn("[tmk-lookup] statewide GIS miss, trying public search:", gisMessage);
         const publicValues = await lookupHawaiiPublicListingLicenses({ address, listingName });
         if (publicValues?.taxMapKey) {
-          return res.json({
+          return await respondWithTmk({
             taxMapKey: publicValues.taxMapKey,
             confidence: "public-listing",
             note: publicValues.note,
@@ -7796,6 +7858,14 @@ export async function registerRoutes(
           propertyValues,
           fetchGuestyListing: fetchGuestyListingForCompliance,
         });
+        // persist=1 → save + provenance-stamp server-side so the pull
+        // survives the operator leaving the tab mid-lookup.
+        let provenance = null;
+        if (String(req.query.persist ?? "") === "1") {
+          provenance = await persistPulledComplianceValues(req.query.propertyId, { [field]: result.value }, {
+            [field]: { method: "online-pull" as const, source: result.source ?? undefined, sourceUrl: result.sourceUrl ?? undefined },
+          });
+        }
         res.json({
           [field]: result.value,
           value: result.value,
@@ -7806,6 +7876,8 @@ export async function registerRoutes(
           taxMapKey: result.taxMapKey,
           source: result.source,
           sourceUrl: result.sourceUrl,
+          persisted: provenance != null,
+          ...(provenance ? { provenance } : {}),
         });
       } catch (err: any) {
         const message = err?.message || String(err);
@@ -23590,6 +23662,8 @@ Requirements:
       strPermit?: string;
       dbprLicense?: string;
       touristTaxAccount?: string;
+      propertyId?: number | string;
+      persist?: boolean | number | string;
     };
     const profile = resolveLicenseComplianceProfile({
       city: body.city,
@@ -23612,9 +23686,17 @@ Requirements:
     let lookupSource: string | null = null;
     const lookupNotes: string[] = [];
     let lookupCandidates: Array<DeckardLicenseNode | DbprLicenseRecord> = [];
+    // Fields the LOOKUP actually filled (vs echoes of client-sent values) —
+    // only these get an online-pull provenance stamp on the persist path.
+    const lookupAttributions: Partial<Record<LicenseProvenanceField, { method: LicenseProvenanceMethod; source?: string; sourceUrl?: string }>> = {};
     if (profile.jurisdiction === "hawaii" && body.address) {
       const publicLookup = await lookupHawaiiPublicListingLicenses({ address: body.address, listingName: body.listingName });
       if (publicLookup) {
+        const hawaiiAttribution = { method: "online-pull" as const, source: publicLookup.source, sourceUrl: publicLookup.sourceUrl || undefined };
+        if (!resolvedTaxMapKeyValue && publicLookup.taxMapKey) lookupAttributions.taxMapKey = hawaiiAttribution;
+        if (!resolvedTatLicenseValue && publicLookup.tatLicense) lookupAttributions.tatLicense = hawaiiAttribution;
+        if (!resolvedGetLicenseValue && publicLookup.getLicense) lookupAttributions.getLicense = hawaiiAttribution;
+        if (!resolvedStrPermitValue && publicLookup.strPermit) lookupAttributions.strPermit = hawaiiAttribution;
         resolvedTaxMapKeyValue = resolvedTaxMapKeyValue || publicLookup.taxMapKey;
         resolvedTatLicenseValue = resolvedTatLicenseValue || publicLookup.tatLicense;
         resolvedGetLicenseValue = resolvedGetLicenseValue || publicLookup.getLicense;
@@ -23626,6 +23708,7 @@ Requirements:
     if (!resolvedStrPermitValue && profile.jurisdiction === "fort_myers_beach_fl" && body.address) {
       const strLookup = await lookupFortMyersBeachStrLicense(body.address);
       if (strLookup) {
+        if (strLookup.value) lookupAttributions.strPermit = { method: "online-pull", source: "Fort Myers Beach STR portal", sourceUrl: strLookup.sourceUrl || undefined };
         resolvedStrPermitValue = strLookup.value;
         lookupNotes.push(strLookup.note);
         lookupSource = strLookup.sourceUrl;
@@ -23635,6 +23718,7 @@ Requirements:
     if (!resolvedDbprLicenseValue && isFloridaProfile && body.address) {
       const dbprLookup = await lookupFloridaDbprLicense(body.address, body.listingName);
       if (dbprLookup) {
+        if (dbprLookup.value) lookupAttributions.dbprLicense = { method: "online-pull", source: dbprLookup.source, sourceUrl: dbprLookup.sourceUrl || undefined };
         resolvedDbprLicenseValue = dbprLookup.value;
         lookupNotes.push(dbprLookup.note);
         lookupSource = lookupSource || dbprLookup.sourceUrl;
@@ -23642,6 +23726,21 @@ Requirements:
       }
     }
     lookupNote = lookupNotes.join(" ");
+    // persist=true → save the resolved values + stamp the lookup-filled
+    // fields server-side, so the bulk pull survives the operator leaving
+    // the tab mid-lookup (echoed client values persist WITHOUT a stamp —
+    // their existing history must not be rewritten as an online pull).
+    let persistedProvenance = null;
+    if (body.persist === true || body.persist === 1 || body.persist === "1") {
+      persistedProvenance = await persistPulledComplianceValues(body.propertyId, {
+        taxMapKey: resolvedTaxMapKeyValue,
+        tatLicense: resolvedTatLicenseValue,
+        getLicense: resolvedGetLicenseValue,
+        strPermit: resolvedStrPermitValue,
+        dbprLicense: resolvedDbprLicenseValue,
+        touristTaxAccount: touristTaxAccountValue,
+      }, lookupAttributions);
+    }
     return res.json({
       ok: true,
       profile,
@@ -23658,6 +23757,8 @@ Requirements:
         sourceUrl: lookupSource,
         candidates: lookupCandidates,
       },
+      persisted: persistedProvenance != null,
+      ...(persistedProvenance ? { provenance: persistedProvenance } : {}),
     });
   });
 
