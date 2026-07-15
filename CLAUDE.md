@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-15 (license pulls: "I don't see a time stamp" + "leave the tab and it still needs to work" —
+  SERVER-persisted pulls): BOTH symptoms were one root cause (don't re-chase): live probe showed the
+  #1043 deploy healthy (bundle strings present, compliance GET returns provenance) but `provenance: {}`
+  — no stamp had ever been written because the pull→persist→stamp chain was CLIENT-driven; leaving the
+  tab aborts the fetch, the lookup result is discarded, nothing saves. SHIPPED
+  (`claude/license-pull-server-persist`): `persistPulledComplianceValues` (routes.ts) wired into ALL
+  THREE pull routes behind `?persist=1` + propertyId (single-field GET/TAT/STR, TMK via respondWithTmk
+  over all three success shapes, bulk resolve via body.persist stamping ONLY lookup-filled fields via
+  `lookupAttributions`) — node keeps running a handler after browser disconnect, so the pull completes,
+  saves, and stamps server-side. Placeholder-guarded (a pull can never persist a sample as real);
+  unattributed echoes persist without stamps (history never rewritten). Client: pull paths send
+  persist=1 and SKIP their own PATCH when `persisted:true` (mirror returned provenance; drafts query
+  still invalidated); compliance hydration extracted to `reloadComplianceValues` (token-superseded,
+  MERGES into overrides — a focus refresh can't clobber unsaved edits) + a 30s-throttled
+  focus/visibilitychange listener re-reads it, so returning to the tab shows what landed while away
+  without a remount; timeout toasts say the pull keeps running server-side. Verified:
+  license-provenance 68/0, full `npm test` exit 0, build clean, `npm run check` 338 = baseline (stash
+  A/B), new flows proven on the BUILT bundle (Playwright + mocked /api: persist=1+propertyId on the
+  request, zero client PATCH when server persisted, focus re-read renders the while-away value+stamp —
+  6/0). If the operator still sees NO provenance lines at all: stale Safari SPA bundle — hard refresh.
+
 - 2026-07-15 (licenses section: "last time the license was created/pulled" line): Operator asked to
   plan + implement UI in the Descriptions-tab licenses section showing when each license number was
   created/pulled from the internet, then merge. SHIPPED (`claude/license-timestamp-ui-1d49f3`): NEW

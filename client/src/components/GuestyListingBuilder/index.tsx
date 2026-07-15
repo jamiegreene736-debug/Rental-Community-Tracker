@@ -1309,6 +1309,42 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return () => { cancelled = true; };
   }, [propertyId, selectedId]);
 
+  // Compliance values + provenance loader. Extracted from the mount effect
+  // so a focus/visibilitychange listener can RE-read it — a license pull now
+  // completes + persists server-side even when the operator leaves the tab
+  // mid-lookup, and this re-read is what shows the landed value/stamp when
+  // they come back (a plain tab switch doesn't remount the component). The
+  // load token supersedes stale in-flight responses when the operator
+  // switches properties mid-fetch; loaded values MERGE into the overrides so
+  // a just-typed unsaved edit is never clobbered by a focus refresh.
+  const complianceLoadTokenRef = useRef(0);
+  const reloadComplianceValues = useCallback(async () => {
+    if (!propertyId) {
+      complianceLoadTokenRef.current++;
+      return;
+    }
+    const token = ++complianceLoadTokenRef.current;
+    try {
+      const r = await fetch(`/api/builder/compliance/${propertyId}`, { cache: "no-store" });
+      if (!r.ok) return;
+      const data = await r.json();
+      if (token !== complianceLoadTokenRef.current || !data?.values) return;
+      const loaded: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">> = {};
+      for (const [key, value] of Object.entries(data.values)) {
+        const text = String(value ?? "").trim();
+        if (text) {
+          loaded[key as keyof typeof loaded] = text;
+        }
+      }
+      if (Object.keys(loaded).length > 0) setComplianceOverrides((prev) => ({ ...prev, ...loaded }));
+      if (data.provenance && typeof data.provenance === "object") {
+        setComplianceProvenance(data.provenance as LicensePropertyProvenance);
+      }
+    } catch {
+      // non-fatal — builder still works from static property data
+    }
+  }, [propertyId]);
+
   useEffect(() => {
     setComplianceOverrides({});
     setComplianceProvenance({});
@@ -1322,26 +1358,28 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setTmkLookupBusy(false);
     setLicenseLookupBusy(false);
     if (!propertyId) return;
-    let cancelled = false;
-    fetch(`/api/builder/compliance/${propertyId}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled || !data?.values) return;
-        const loaded: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">> = {};
-        for (const [key, value] of Object.entries(data.values)) {
-          const text = String(value ?? "").trim();
-          if (text) {
-            loaded[key as keyof typeof loaded] = text;
-          }
-        }
-        if (Object.keys(loaded).length > 0) setComplianceOverrides(loaded);
-        if (data.provenance && typeof data.provenance === "object") {
-          setComplianceProvenance(data.provenance as LicensePropertyProvenance);
-        }
-      })
-      .catch(() => { /* non-fatal — builder still works from static property data */ });
-    return () => { cancelled = true; };
-  }, [propertyId]);
+    void reloadComplianceValues();
+  }, [propertyId, reloadComplianceValues]);
+
+  // Returning to the tab re-reads compliance values + provenance (30s
+  // throttle) so a pull that landed server-side while the operator was away
+  // shows up without a remount or manual reload.
+  const complianceReloadThrottleRef = useRef(0);
+  useEffect(() => {
+    const maybeReload = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - complianceReloadThrottleRef.current < 30_000) return;
+      complianceReloadThrottleRef.current = now;
+      void reloadComplianceValues();
+    };
+    window.addEventListener("focus", maybeReload);
+    document.addEventListener("visibilitychange", maybeReload);
+    return () => {
+      window.removeEventListener("focus", maybeReload);
+      document.removeEventListener("visibilitychange", maybeReload);
+    };
+  }, [reloadComplianceValues]);
 
   // Load persisted Descriptions-tab overrides (operator edits + saved
   // Regenerate results). Hydrates the live edit state AND the persisted
@@ -1688,6 +1726,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           strPermit: effectivePropertyData.strPermit,
           dbprLicense: effectivePropertyData.dbprLicense || (isFloridaProfile ? effectivePropertyData.taxMapKey : undefined),
           touristTaxAccount: effectivePropertyData.touristTaxAccount || (isFloridaProfile ? effectivePropertyData.tatLicense : undefined),
+          // persist → the SERVER saves + stamps the lookup results, so the
+          // bulk pull completes even if this tab closes mid-lookup.
+          propertyId,
+          persist: true,
         }),
       });
       const data = await r.json();
@@ -1701,21 +1743,32 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         ...(data.values?.dbprLicense ? { dbprLicense: data.values.dbprLicense } : {}),
         ...(data.values?.touristTaxAccount ? { touristTaxAccount: data.values.touristTaxAccount } : {}),
       }));
-      // Attribute ONLY fields the lookup actually changed: the endpoint
-      // echoes the values we sent for already-set fields, and re-labeling a
-      // manually entered license as "pulled online" would be a lie.
-      const bulkProvenance: LicenseProvenanceClientPatch = {};
-      for (const field of Object.keys(sentValues) as LicenseProvenanceField[]) {
-        const returned = String(data.values?.[field] ?? "").trim();
-        if (returned && returned !== sentValues[field]) {
-          bulkProvenance[field] = {
-            method: "online-pull",
-            source: "Public license records lookup",
-            ...(data.lookup?.sourceUrl ? { sourceUrl: String(data.lookup.sourceUrl) } : {}),
-          };
+      if (data.persisted) {
+        // Server already saved + stamped — just mirror its provenance.
+        if (data.provenance && typeof data.provenance === "object") {
+          setComplianceProvenance(data.provenance as LicensePropertyProvenance);
         }
+        if (propertyId && propertyId < 0) {
+          void queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+        }
+      } else {
+        // Fallback for a server that didn't persist (no propertyId).
+        // Attribute ONLY fields the lookup actually changed: the endpoint
+        // echoes the values we sent for already-set fields, and re-labeling a
+        // manually entered license as "pulled online" would be a lie.
+        const bulkProvenance: LicenseProvenanceClientPatch = {};
+        for (const field of Object.keys(sentValues) as LicenseProvenanceField[]) {
+          const returned = String(data.values?.[field] ?? "").trim();
+          if (returned && returned !== sentValues[field]) {
+            bulkProvenance[field] = {
+              method: "online-pull",
+              source: "Public license records lookup",
+              ...(data.lookup?.sourceUrl ? { sourceUrl: String(data.lookup.sourceUrl) } : {}),
+            };
+          }
+        }
+        await persistComplianceValues(data.values ?? {}, bulkProvenance);
       }
-      await persistComplianceValues(data.values ?? {}, bulkProvenance);
       const missingRequired = (data.profile?.requirements ?? [])
         .filter((req: any) => req.required && isPlaceholderLicenseValue(data.values?.[req.key]))
         .map((req: any) => req.shortLabel || req.label);
@@ -1730,7 +1783,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } finally {
       setLicenseLookupBusy(false);
     }
-  }, [effectivePropertyData, complianceProfile.jurisdiction, persistComplianceValues, toast]);
+  }, [effectivePropertyData, complianceProfile.jurisdiction, persistComplianceValues, propertyId, queryClient, toast]);
 
   // Compliance card labels swap by state. The four data fields
   // (taxMapKey / getLicense / tatLicense / strPermit) are reused
@@ -1809,21 +1862,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         address: fullAddress,
       });
       if (complianceListingName) params.set("listingName", complianceListingName);
+      // persist=1 → the SERVER saves + stamps the pulled value, so the pull
+      // completes even if this tab is closed/backgrounded mid-lookup.
+      if (propertyId) params.set("propertyId", String(propertyId));
+      params.set("persist", "1");
       const resp = await fetch(`/api/builder/tmk-lookup?${params.toString()}`, {
         signal: AbortSignal.timeout(COMPLIANCE_FETCH_TIMEOUT_MS),
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || data?.message || "TMK lookup failed");
       setComplianceOverrides((prev) => ({ ...prev, taxMapKey: data.taxMapKey }));
-      void persistComplianceValues({ taxMapKey: data.taxMapKey }, {
-        taxMapKey: {
-          method: "online-pull",
-          ...(data.source ? { source: String(data.source) } : {}),
-          ...(data.sourceUrl ? { sourceUrl: String(data.sourceUrl) } : {}),
-        },
-      }).catch((err) => {
-        toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
-      });
+      if (data.persisted) {
+        // Server already saved + stamped — just mirror its provenance.
+        if (data.provenance && typeof data.provenance === "object") {
+          setComplianceProvenance(data.provenance as LicensePropertyProvenance);
+        }
+        if (propertyId && propertyId < 0) {
+          void queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+        }
+      } else {
+        void persistComplianceValues({ taxMapKey: data.taxMapKey }, {
+          taxMapKey: {
+            method: "online-pull",
+            ...(data.source ? { source: String(data.source) } : {}),
+            ...(data.sourceUrl ? { sourceUrl: String(data.sourceUrl) } : {}),
+          },
+        }).catch((err) => {
+          toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
+        });
+      }
       setTmkLookupResult(data as TmkLookupResult);
       toast({
         title: data.confidence === "public-listing"
@@ -1836,14 +1903,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       toast({
         title: "TMK lookup failed",
         description: timedOut
-          ? "Hawaii TMK lookup timed out. Try again in a moment."
+          ? "Hawaii TMK lookup timed out — the lookup keeps running on the server and saves automatically if it succeeds. Check back in a minute."
           : err?.message || String(err),
         variant: "destructive",
       });
     } finally {
       setTmkLookupBusy(false);
     }
-  }, [complianceListingName, effectivePropertyData?.address, persistComplianceValues, toast]);
+  }, [complianceListingName, effectivePropertyData?.address, persistComplianceValues, propertyId, queryClient, toast]);
 
   const pullHawaiiComplianceField = useCallback(async (options: {
     field: "getLicense" | "tatLicense" | "strPermit";
@@ -1873,6 +1940,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       if (selectedId) params.set("listingId", selectedId);
       if (propertyId) params.set("propertyId", String(propertyId));
       if (effectivePropertyData.taxMapKey) params.set("taxMapKey", effectivePropertyData.taxMapKey);
+      // persist=1 → the SERVER saves + stamps the pulled value, so the pull
+      // completes even if this tab is closed/backgrounded mid-lookup.
+      params.set("persist", "1");
       const resp = await fetch(`${options.endpoint}?${params.toString()}`, {
         signal: AbortSignal.timeout(COMPLIANCE_FETCH_TIMEOUT_MS),
       });
@@ -1890,15 +1960,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         && !isPlaceholderLicenseValue(previous)
         && previous.replace(/\W/g, "").toLowerCase() === value.replace(/\W/g, "").toLowerCase();
       setComplianceOverrides((prev) => ({ ...prev, [options.field]: value }));
-      void persistComplianceValues({ [options.field]: value }, {
-        [options.field]: {
-          method: "online-pull",
-          ...(data.source ? { source: String(data.source) } : {}),
-          ...(data.sourceUrl ? { sourceUrl: String(data.sourceUrl) } : {}),
-        },
-      } as LicenseProvenanceClientPatch).catch((err) => {
-        toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
-      });
+      if (data.persisted) {
+        // Server already saved + stamped — just mirror its provenance.
+        if (data.provenance && typeof data.provenance === "object") {
+          setComplianceProvenance(data.provenance as LicensePropertyProvenance);
+        }
+        if (propertyId && propertyId < 0) {
+          void queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+        }
+      } else {
+        void persistComplianceValues({ [options.field]: value }, {
+          [options.field]: {
+            method: "online-pull",
+            ...(data.source ? { source: String(data.source) } : {}),
+            ...(data.sourceUrl ? { sourceUrl: String(data.sourceUrl) } : {}),
+          },
+        } as LicenseProvenanceClientPatch).catch((err) => {
+          toast({ title: "License save failed", description: err?.message || String(err), variant: "destructive" });
+        });
+      }
       options.setResult(data as ComplianceLookupResult);
       if (unchanged) {
         toast({
@@ -1913,14 +1993,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       toast({
         title: `${options.label} lookup failed`,
         description: timedOut
-          ? `${options.label} lookup timed out (Guesty or county registry may be slow). Try again in a moment.`
+          ? `${options.label} lookup timed out (Guesty or county registry may be slow) — it keeps running on the server and saves automatically if it succeeds. Check back in a minute.`
           : err?.message || String(err),
         variant: "destructive",
       });
     } finally {
       options.setBusy(false);
     }
-  }, [complianceListingName, complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistComplianceValues, propertyId, selectedId, toast]);
+  }, [complianceListingName, complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistComplianceValues, propertyId, queryClient, selectedId, toast]);
 
   const pullRealGetLicense = useCallback(async () => {
     await pullHawaiiComplianceField({
