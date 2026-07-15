@@ -867,22 +867,34 @@ export async function lookupHawaiiComplianceField(options: {
   const searchedAddress = address.trim();
   const label = fieldLabel(field);
 
+  // FAIL-OPEN on the Guesty read (2026-07-15): all Guesty calls queue behind
+  // guesty-sync's global rate-limit gate, so this fetch can time out while a
+  // 429 pause drains. That must not abort the whole lookup — the county
+  // registry + public-listing legs below can still find the value. The
+  // failure is remembered so a no-value outcome stays honest about the
+  // skipped source.
+  let guestyFetchError: string | null = null;
   if (listingId && fetchGuestyListing) {
-    const listing = await fetchGuestyListing(listingId);
-    const extracted = extractHawaiiComplianceFromGuestyListing(listing);
-    const guestyValue = resolveTaxField(field, extracted);
-    if (guestyValue) {
-      const paired = !usableLicenseValue(extracted[field]);
-      return {
-        value: guestyValue,
-        confidence: paired ? "paired-tax-license" : "guesty-listing",
-        note: paired
-          ? `Derived the ${label} license from the paired ${field === "getLicense" ? "TAT" : "GET"} value already stored on the connected Guesty listing.`
-          : `Pulled the real ${label} value already stored on the connected Guesty listing.`,
-        searchedAddress,
-        source: "Guesty listing compliance fields",
-        sourceUrl: `https://app.guesty.com/properties/${listingId}/owners-and-license`,
-      };
+    try {
+      const listing = await fetchGuestyListing(listingId);
+      const extracted = extractHawaiiComplianceFromGuestyListing(listing);
+      const guestyValue = resolveTaxField(field, extracted);
+      if (guestyValue) {
+        const paired = !usableLicenseValue(extracted[field]);
+        return {
+          value: guestyValue,
+          confidence: paired ? "paired-tax-license" : "guesty-listing",
+          note: paired
+            ? `Derived the ${label} license from the paired ${field === "getLicense" ? "TAT" : "GET"} value already stored on the connected Guesty listing.`
+            : `Pulled the real ${label} value already stored on the connected Guesty listing.`,
+          searchedAddress,
+          source: "Guesty listing compliance fields",
+          sourceUrl: `https://app.guesty.com/properties/${listingId}/owners-and-license`,
+        };
+      }
+    } catch (e: any) {
+      guestyFetchError = e?.message ?? String(e);
+      console.warn(`[hawaii-compliance] Guesty listing read failed for ${listingId} (${guestyFetchError}) — falling through to registry/public sources`);
     }
   }
 
@@ -947,7 +959,7 @@ export async function lookupHawaiiComplianceField(options: {
 
   throw new Error(
     listingId
-      ? `No real ${label} license was found on the connected Guesty listing. Push compliance to Guesty after you have the official Hawaii ${label} license, or paste it manually.`
+      ? `No real ${label} license was found on the connected Guesty listing. Push compliance to Guesty after you have the official Hawaii ${label} license, or paste it manually.${guestyFetchError ? ` (The Guesty listing itself could not be read: ${guestyFetchError} — Guesty may be rate-limited; try again in a couple of minutes.)` : ""}`
       : `Select a connected Guesty listing to pull the real ${label} license from Guesty compliance fields, or paste it manually.`,
   );
 }
