@@ -2262,6 +2262,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [dedupeApplyError, setDedupeApplyError] = useState<string | null>(null);
   // What the last apply actually hid — the Undo payload.
   const [dedupeApplied, setDedupeApplied] = useState<Array<{ folder: string; filename: string }>>([]);
+  // Did the server start the background Guesty gallery re-push for the last
+  // apply (propagates the removal to the live listing)? null until an apply.
+  const [dedupeGuestySync, setDedupeGuestySync] = useState<{ started: boolean; reason?: string } | null>(null);
 
   // Persisted last-push summary (survives refresh)
   type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number };
@@ -4185,6 +4188,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setDedupeApplyPhase("idle");
     setDedupeApplyError(null);
     setDedupeApplied([]);
+    setDedupeGuestySync(null);
     try {
       const parse = (url: string): { folder: string; filename: string } | null => {
         try {
@@ -4249,25 +4253,32 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (remove.length === 0) return;
     const confirmed = window.confirm(
       `Remove ${remove.length} duplicate photo${remove.length === 1 ? "" : "s"} from the listing?\n\n` +
-      `They are hidden from the gallery and future Guesty pushes — files stay on disk, and you can Undo right after.`,
+      `They are hidden from the gallery and future pushes, and removed from the connected Guesty listing (its gallery re-pushes without them in the background). Files stay on disk — you can Undo right after.`,
     );
     if (!confirmed) return;
     setDedupeApplyPhase("applying");
     setDedupeApplyError(null);
+    setDedupeGuestySync(null);
     try {
       // Retried on transient edge failures (Railway 502/503/504 during a
       // deploy swap — the 2026-07-14 "Remove 6 selected photos → HTTP 502"
       // incident — or a dropped connection). Safe to repeat: the apply is a
       // soft-delete flip validated server-side against the stored scan, and
       // after a real container swap it lands as the designed 410 "rescan".
+      // propertyId opts in to the server-side Guesty gallery re-push, which
+      // is what actually deletes the hidden photos from the live listing.
       const resp = await fetchWithTransientRetry(() =>
         fetch("/api/builder/photo-dedupe-apply", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ scanId: dedupeResult.scanId, remove }),
+          body: JSON.stringify({
+            scanId: dedupeResult.scanId,
+            remove,
+            ...(typeof propertyId === "number" ? { propertyId } : {}),
+          }),
         }),
       );
-      const data = await resp.json().catch(() => null) as { ok?: boolean; hidden?: Array<{ folder: string; filename: string }>; failures?: string[]; error?: string } | null;
+      const data = await resp.json().catch(() => null) as { ok?: boolean; hidden?: Array<{ folder: string; filename: string }>; failures?: string[]; error?: string; guestySync?: { started: boolean; reason?: string } } | null;
       if (!resp.ok || !data?.ok) {
         setDedupeApplyError(
           resp.status === 410
@@ -4280,14 +4291,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         return;
       }
       setDedupeApplied(data.hidden ?? remove);
+      setDedupeGuestySync(data.guestySync ?? null);
       setDedupeApplyPhase("applied");
-      toast({ title: "Duplicates removed", description: `${(data.hidden ?? remove).length} photo(s) hidden from the listing. Use Undo to restore.` });
+      toast({
+        title: "Duplicates removed",
+        description: data.guestySync?.started
+          ? `${(data.hidden ?? remove).length} photo(s) hidden — Guesty is being updated in the background (a few minutes). Use Undo to restore.`
+          : `${(data.hidden ?? remove).length} photo(s) hidden from the listing. Use Undo to restore.`,
+      });
       onPhotoOverridesChanged?.();
     } catch (e: any) {
       setDedupeApplyError(e?.message ?? String(e));
       setDedupeApplyPhase("error");
     }
-  }, [dedupeResult, dedupeSelected, onPhotoOverridesChanged, toast]);
+  }, [dedupeResult, dedupeSelected, onPhotoOverridesChanged, propertyId, toast]);
 
   const undoDedupeRemoval = useCallback(async () => {
     if (dedupeApplied.length === 0) return;
@@ -4297,14 +4314,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       // Same transient-edge retry as the apply: restore is the idempotent
       // hidden:false flip, and a 502 mid-undo would otherwise strand hidden
       // photos behind a scary toast until the operator re-clicked.
+      // propertyId re-pushes the restored gallery to Guesty (the apply's
+      // background push may already have removed the photos there).
       const resp = await fetchWithTransientRetry(() =>
         fetch("/api/builder/photo-dedupe-restore", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: dedupeApplied }),
+          body: JSON.stringify({
+            items: dedupeApplied,
+            ...(typeof propertyId === "number" ? { propertyId } : {}),
+          }),
         }),
       );
-      const data = await resp.json().catch(() => null) as { ok?: boolean; restored?: unknown[]; error?: string; failures?: string[] } | null;
+      const data = await resp.json().catch(() => null) as { ok?: boolean; restored?: unknown[]; error?: string; failures?: string[]; guestySync?: { started: boolean; reason?: string } } | null;
       if (!resp.ok || !data?.ok) {
         // Keep the "applied" state (and its Undo button) on a failed undo so
         // a transient error never strands hidden photos with no way back.
@@ -4313,8 +4335,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         setDedupeApplyPhase("applied");
         return;
       }
-      toast({ title: "Removal undone", description: `${dedupeApplied.length} photo(s) restored to the listing.` });
+      toast({
+        title: "Removal undone",
+        description: data.guestySync?.started
+          ? `${dedupeApplied.length} photo(s) restored — Guesty is being updated in the background (a few minutes).`
+          : `${dedupeApplied.length} photo(s) restored to the listing.`,
+      });
       setDedupeApplied([]);
+      setDedupeGuestySync(null);
       setDedupeApplyPhase("idle");
       setDedupePhase("idle");
       setDedupeResult(null);
@@ -4323,7 +4351,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       toast({ title: "Undo failed", description: e?.message ?? String(e), variant: "destructive" });
       setDedupeApplyPhase("applied");
     }
-  }, [dedupeApplied, onPhotoOverridesChanged, toast]);
+  }, [dedupeApplied, onPhotoOverridesChanged, propertyId, toast]);
 
   const communityPhotoVerdicts = useMemo(() => {
     const map: Record<string, { match: "yes" | "no" | "uncertain"; reason?: string; status?: CommunityCheckPhotoVerdict["status"] }> = {};
@@ -8986,7 +9014,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                         {dedupeApplyPhase === "applying" ? "Removing…" : `Remove ${dedupeSelected.size} selected photo${dedupeSelected.size === 1 ? "" : "s"}`}
                                       </button>
                                       <span style={{ fontSize: 11, color: "#64748b" }}>
-                                        Removed photos are hidden from the listing (files kept on disk) — you can undo right after.
+                                        Removed photos are hidden here and removed from Guesty (files kept on disk) — you can undo right after.
                                       </span>
                                     </div>
                                     {dedupeApplyPhase === "error" && dedupeApplyError && (
@@ -8996,16 +9024,35 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 )}
 
                                 {dedupeApplyPhase === "applied" && (
-                                  <div style={{ marginTop: 8, fontSize: 12, color: "#166534", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                                    ✓ Removed {dedupeApplied.length} duplicate photo{dedupeApplied.length === 1 ? "" : "s"} — hidden from the gallery and future pushes.
-                                    <button
-                                      className="glb-btn"
-                                      onClick={undoDedupeRemoval}
-                                      data-testid="btn-photo-dedupe-undo"
-                                      style={{ fontSize: 12, background: "#ecfdf5", color: "#065f46", border: "1px solid #a7f3d0" }}
-                                    >
-                                      ↺ Undo removal
-                                    </button>
+                                  <div style={{ marginTop: 8 }}>
+                                    <div style={{ fontSize: 12, color: "#166534", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                      ✓ Removed {dedupeApplied.length} duplicate photo{dedupeApplied.length === 1 ? "" : "s"} — hidden from the gallery and future pushes.
+                                      <button
+                                        className="glb-btn"
+                                        onClick={undoDedupeRemoval}
+                                        data-testid="btn-photo-dedupe-undo"
+                                        style={{ fontSize: 12, background: "#ecfdf5", color: "#065f46", border: "1px solid #a7f3d0" }}
+                                      >
+                                        ↺ Undo removal
+                                      </button>
+                                    </div>
+                                    {/* Guesty propagation verdict — honest about whether the
+                                        background gallery re-push actually started. */}
+                                    {dedupeGuestySync?.started && (
+                                      <div style={{ fontSize: 11, color: "#0e7490", marginTop: 4 }} data-testid="dedupe-guesty-sync-note">
+                                        ⏳ Removing them from Guesty too — the gallery is re-pushing in the background (a few minutes). The Photos tab's "Pushed" chip updates when it lands.
+                                      </div>
+                                    )}
+                                    {dedupeGuestySync && !dedupeGuestySync.started && dedupeGuestySync.reason === "no-guesty-mapping" && (
+                                      <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }} data-testid="dedupe-guesty-sync-note">
+                                        This property isn't connected to a Guesty listing, so there's nothing to remove on Guesty.
+                                      </div>
+                                    )}
+                                    {dedupeGuestySync && !dedupeGuestySync.started && dedupeGuestySync.reason !== "no-guesty-mapping" && (
+                                      <div style={{ fontSize: 11, color: "#b45309", marginTop: 4 }} data-testid="dedupe-guesty-sync-note">
+                                        ⚠ Guesty was NOT updated automatically — use "Push Photos to Guesty" to remove them from the live listing.
+                                      </div>
+                                    )}
                                   </div>
                                 )}
                                 {dedupeApplyPhase === "undoing" && (
