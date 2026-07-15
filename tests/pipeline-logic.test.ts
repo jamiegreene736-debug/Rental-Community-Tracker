@@ -5,7 +5,7 @@
 // Run: npx tsx tests/pipeline-logic.test.ts
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   auditTopMarketSevenEightFromCuratedSeeds,
   filterTopScanComboCandidates,
@@ -1497,6 +1497,26 @@ assert.ok(
   "the MARKET_RATE_LODGING_TAX_DISABLED kill-switch went away with the gross-up call site",
 );
 console.log("  ✓ live median engine stores the raw SearchAPI median (no lodging-tax uplift)");
+
+// SOURCE GUARD (operator 2026-07-15): "Update Market Rates Now" must use the
+// SearchAPI Airbnb median engine. The Claude static-rate engine stays dormant
+// and OPT-IN only (STATIC_RATE_ENGINE=1), and the Pricing tab no longer renders
+// the static-rate plan panel (it advertised the dormant engine and confused the
+// operator about which engine the button runs).
+assert.ok(
+  routesSource.includes('process.env.STATIC_RATE_ENGINE === "1"'),
+  "staticRateEngineEnabled must be opt-in — default OFF routes the market-rate update to the SearchAPI Airbnb median engine",
+);
+const builderIndexSource = readFileSync("client/src/components/GuestyListingBuilder/index.tsx", "utf8");
+assert.ok(
+  !builderIndexSource.includes("StaticRatePlanPanel"),
+  "the Pricing tab must not import/render the static-rate plan panel (removed 2026-07-15)",
+);
+assert.ok(
+  !existsSync("client/src/components/GuestyListingBuilder/StaticRatePlanPanel.tsx"),
+  "StaticRatePlanPanel.tsx was deleted 2026-07-15 — the dormant static engine is server-side only",
+);
+console.log("  ✓ Pricing tab is SearchAPI-Airbnb-median only (static-rate panel removed, engine opt-in)");
 
 // Pili Mai 5BR is priced as its actual 3BR + 2BR component buy-ins, not
 // as a single 5BR villa comp. The operator-verified September 8-15, 2026
