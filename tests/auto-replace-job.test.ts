@@ -200,9 +200,31 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
   // degraded (Apify 403 + ScrapingBee quota + 0-photo sidecar run) even
   // though the FIND phase scraped the gallery minutes earlier — the found
   // unit's photo URLs pass through so a proven gallery can never be lost
-  // between find and commit.
-  check("hydration falls back to the find phase's photo URLs when the re-scrape is empty",
-    routes.includes("fallbackPhotoUrls") && /falling back to \$\{urls\.length\} find-phase photo URLs/.test(routes));
+  // between find and commit. 2026-07-15 (Poipu Kapili unit-B): the fallback
+  // also fires on a THIN scrape (a sold-stripped/bot-walled page returns
+  // exactly 1 og:image, which used to bypass the empty-only fallback and
+  // then die at the MIN floor) — find-phase URLs are UNIONED behind the
+  // fresh scrape.
+  check("hydration falls back to the find phase's photo URLs when the re-scrape is empty OR thin",
+    routes.includes("fallbackPhotoUrls")
+    && /scraped\.length < MIN_INDEPENDENT_UNIT_PHOTOS\s*\n?\s*&& Array\.isArray\(opts\.fallbackPhotoUrls\)/.test(routes)
+    && /adding \$\{extras\.length\} find-phase photo URLs/.test(routes));
+  // 2026-07-15 (the reason the Poipu Kapili unit-B auto-replacement burned
+  // BOTH candidates): find-unit's foundUnits carried ONLY the Google SERP
+  // thumbnail (a base64 data: URI) as `photos`, so the orchestrator's
+  // https-only photoUrls filter always produced an EMPTY fallback — the
+  // 2026-07-06 pass-through never actually had the gallery on this path.
+  // The found unit must now carry the FULL proven scraped gallery as
+  // photoUrls, and both commit callers must prefer it.
+  check("find-unit found units carry the full scraped gallery as photoUrls (not just the SERP thumbnail)",
+    /photoUrls: scrapedPhotoUrls\s*\n?\s*\.filter\(\(u\) => \/\^https\?:\\\/\\\/\/i\.test\(String\(u \?\? ""\)\)\)/.test(routes));
+  check("orchestrator commit body prefers the unit's photoUrls gallery over the display thumbnail",
+    /Array\.isArray\(c\.photoUrls\) && c\.photoUrls\.length > 0/.test(orch));
+  {
+    const flowSrc = readFileSync(new URL("../client/src/components/unit-replacement-flow.tsx", import.meta.url), "utf8");
+    check("manual Replace-photos flow sends the full photoUrls gallery when present",
+      /photoUrls: \(result\.photoUrls\?\.length/.test(flowSrc));
+  }
 
   // ── 2026-07-12 Ilikai receipt (draft -7, job uas_mrh8wbqk_ls005u) ──────────
   // (a) STALE-LABEL LEAK: re-hydrating a REUSED replacement folder deleted

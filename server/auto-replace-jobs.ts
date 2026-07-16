@@ -372,9 +372,16 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           // The find phase's scraped gallery — hydration's fallback when the
           // commit-time re-scrape hits a bot-wall/quota outage (all scrape
           // tiers can degrade at once; the find already proved this gallery).
-          photoUrls: Array.isArray(c.photos)
-            ? (c.photos as Array<{ url?: unknown }>).map((p) => String(p?.url ?? "")).filter((u) => /^https?:\/\//i.test(u))
-            : [],
+          // Prefer the unit's photoUrls field (the FULL proven gallery,
+          // 2026-07-15); c.photos is only the SERP display thumbnail — often
+          // a base64 data: URI that the https filter drops, which left this
+          // fallback permanently EMPTY on the find-unit path (the Poipu
+          // Kapili unit-B burn class).
+          photoUrls: Array.isArray(c.photoUrls) && c.photoUrls.length > 0
+            ? (c.photoUrls as unknown[]).map((u) => String(u ?? "")).filter((u) => /^https?:\/\//i.test(u)).slice(0, 120)
+            : Array.isArray(c.photos)
+              ? (c.photos as Array<{ url?: unknown }>).map((p) => String(p?.url ?? "")).filter((u) => /^https?:\/\//i.test(u))
+              : [],
           // Bedroom-shortfall replacements (audit ladder): the route aborts
           // the commit at staging when the new gallery photographs fewer
           // bedrooms than the unit claims — burned below as coverageShort.
