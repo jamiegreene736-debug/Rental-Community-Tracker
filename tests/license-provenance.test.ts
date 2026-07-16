@@ -209,6 +209,22 @@ const entry = (over: Partial<LicenseProvenanceEntry> = {}): LicenseProvenanceEnt
   check("bulk resolve only stamps fields it changed", builder.includes("returned && returned !== sentValues[field]"));
   check("compliance persist goes through the single stamping seam", builder.includes("`/api/builder/compliance/${propertyId}`") && !builder.includes("`/api/community/${Math.abs(propertyId)}`"));
   check("stamps hydrate with the compliance GET", builder.includes("setComplianceProvenance(data.provenance as LicensePropertyProvenance)"));
+
+  // Post-timeout pull watcher (2026-07-15 second live incident): the
+  // operator's GET pull queued behind a Guesty rate-limit pause, the
+  // in-tab 45s wait expired, and the value landed server-side at +126s —
+  // but the only re-read was the focus listener, so sitting ON the tab
+  // showed literally nothing ("nothing happened, no error"). After a
+  // timeout the page must WATCH the compliance endpoint and surface the
+  // landing (or the honest failure) without any tab switch.
+  check("in-tab timeout starts the server-pull watcher (both pull paths)", (builder.match(/void watchForServerPullLanding\(/g) ?? []).length >= 2);
+  check("watcher detects landing by the stamp CHANGING (server-time vs server-time, skew-proof)", builder.includes("stamp.savedAt !== baselineSavedAt"));
+  check("watcher baseline comes from the field's current server stamp", builder.includes("complianceProvenance[options.field]?.savedAt ?? null") && builder.includes("complianceProvenance.taxMapKey?.savedAt ?? null"));
+  check("reload returns the payload so the watcher needs no second fetch", builder.includes("return { values: data.values as Record<string, unknown>, provenance };"));
+  check("watching disables the pull button (a re-issued request only adds gate pressure)", (builder.match(/disabled=\{\w+LookupBusy \|\| !!pullWatchFields\.\w+ \|\| !effectivePropertyData\.address\}/g) ?? []).length === 4);
+  check("watching renders a visible inline hint under all four buttons", (builder.match(/\{renderPullWatchHint\("(taxMapKey|getLicense|tatLicense|strPermit)"\)\}/g) ?? []).length === 4 && builder.includes("Still pulling on the server"));
+  check("property switch cancels live watches", builder.includes("pullWatchActiveRef.current = {};"));
+  check("watcher gives an honest failure verdict when nothing lands", builder.includes("pull did not save"));
 }
 
 console.log(`license-provenance: ${pass} passed, ${fail} failed`);

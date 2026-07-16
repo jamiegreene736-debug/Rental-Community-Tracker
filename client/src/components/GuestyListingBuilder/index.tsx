@@ -1317,17 +1317,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // switches properties mid-fetch; loaded values MERGE into the overrides so
   // a just-typed unsaved edit is never clobbered by a focus refresh.
   const complianceLoadTokenRef = useRef(0);
-  const reloadComplianceValues = useCallback(async () => {
+  // Returns the fetched payload (or null) so the post-timeout pull watcher
+  // can inspect the fresh provenance stamps without a second fetch.
+  const reloadComplianceValues = useCallback(async (): Promise<{ values: Record<string, unknown>; provenance: LicensePropertyProvenance } | null> => {
     if (!propertyId) {
       complianceLoadTokenRef.current++;
-      return;
+      return null;
     }
     const token = ++complianceLoadTokenRef.current;
     try {
       const r = await fetch(`/api/builder/compliance/${propertyId}`, { cache: "no-store" });
-      if (!r.ok) return;
+      if (!r.ok) return null;
       const data = await r.json();
-      if (token !== complianceLoadTokenRef.current || !data?.values) return;
+      if (token !== complianceLoadTokenRef.current || !data?.values) return null;
       const loaded: Partial<Pick<GuestyPropertyData, "taxMapKey" | "tatLicense" | "getLicense" | "strPermit" | "dbprLicense" | "touristTaxAccount">> = {};
       for (const [key, value] of Object.entries(data.values)) {
         const text = String(value ?? "").trim();
@@ -1336,12 +1338,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         }
       }
       if (Object.keys(loaded).length > 0) setComplianceOverrides((prev) => ({ ...prev, ...loaded }));
+      const provenance: LicensePropertyProvenance = data.provenance && typeof data.provenance === "object"
+        ? (data.provenance as LicensePropertyProvenance)
+        : {};
       if (data.provenance && typeof data.provenance === "object") {
         setComplianceProvenance(data.provenance as LicensePropertyProvenance);
       }
+      return { values: data.values as Record<string, unknown>, provenance };
     } catch {
       // non-fatal — builder still works from static property data
     }
+    return null;
   }, [propertyId]);
 
   useEffect(() => {
@@ -1356,6 +1363,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setStrLookupBusy(false);
     setTmkLookupBusy(false);
     setLicenseLookupBusy(false);
+    // Switching properties abandons any post-timeout pull watches — their
+    // token check sees the cleared map and stops polling/toasting.
+    pullWatchActiveRef.current = {};
+    setPullWatchFields({});
     if (!propertyId) return;
     void reloadComplianceValues();
   }, [propertyId, reloadComplianceValues]);
@@ -1843,6 +1854,67 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // 45s just widens the window where the operator sees the value land
   // directly instead of on the next tab-focus re-read.
   const COMPLIANCE_FETCH_TIMEOUT_MS = 45_000;
+
+  // Post-timeout pull watcher (2026-07-15 live incident): the operator's GET
+  // pull queued behind a Guesty rate-limit pause, the in-tab 45s wait
+  // expired, and the value landed SERVER-side at +126s — but the only
+  // re-read was the focus/visibilitychange listener, so an operator sitting
+  // ON the tab watching the button saw literally nothing. After a timeout,
+  // poll the compliance endpoint until the field's provenance stamp changes
+  // (server-time vs server-time — clock skew can't matter) or ~3 minutes
+  // pass, then report the landing (or the honest failure) with a toast.
+  // Token map is per-field so concurrent watches on different fields
+  // coexist; a property switch clears the map and every watch stops.
+  const pullWatchSeqRef = useRef(0);
+  const pullWatchActiveRef = useRef<Partial<Record<LicenseProvenanceField, number>>>({});
+  const [pullWatchFields, setPullWatchFields] = useState<Partial<Record<LicenseProvenanceField, boolean>>>({});
+  const watchForServerPullLanding = useCallback(async (
+    field: LicenseProvenanceField,
+    label: string,
+    baselineSavedAt: string | null,
+  ) => {
+    const token = ++pullWatchSeqRef.current;
+    pullWatchActiveRef.current[field] = token;
+    setPullWatchFields((prev) => ({ ...prev, [field]: true }));
+    const alive = () => pullWatchActiveRef.current[field] === token;
+    try {
+      // First check at 5s, then every 15s. 5 + 11×15 = 170s of watching on
+      // top of the 45s already waited — comfortably past the server's 150s
+      // patient Guesty window + registry/public legs.
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 5_000 : 15_000));
+        if (!alive()) return;
+        const data = await reloadComplianceValues();
+        if (!alive()) return;
+        const stamp = data?.provenance?.[field];
+        if (stamp?.savedAt && stamp.savedAt !== baselineSavedAt) {
+          // Any stamp change ends the watch; the success toast is reserved
+          // for the pull actually landing (a manual save mid-watch means
+          // the operator moved on — stop silently).
+          if (stamp.method === "online-pull") {
+            toast({
+              title: `${label} pulled`,
+              description: `The server-side lookup finished and saved${stamp.source ? ` · ${stamp.source}` : ""}.`,
+            });
+          }
+          return;
+        }
+      }
+      if (alive()) {
+        toast({
+          title: `${label} pull did not save`,
+          description: `The server-side ${label} lookup still hasn't saved a value after ~3 minutes — it most likely found nothing. Try the pull again, or enter the official value manually.`,
+          variant: "destructive",
+        });
+      }
+    } finally {
+      if (alive()) {
+        delete pullWatchActiveRef.current[field];
+        setPullWatchFields((prev) => ({ ...prev, [field]: false }));
+      }
+    }
+  }, [reloadComplianceValues, toast]);
+
   const complianceListingName = useMemo(() => (
     effectivePropertyData?.title
     || effectivePropertyData?.nickname
@@ -1861,6 +1933,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
     setTmkLookupBusy(true);
     setTmkLookupResult(null);
+    // Server-time baseline for the post-timeout watcher — a landed pull is
+    // detected by the stamp CHANGING, never by comparing client clocks.
+    const baselineSavedAt = complianceProvenance.taxMapKey?.savedAt ?? null;
     try {
       const params = new URLSearchParams({
         address: fullAddress,
@@ -1904,17 +1979,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       });
     } catch (err: any) {
       const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+      if (timedOut && propertyId) {
+        // The lookup keeps running + persists server-side — watch for the
+        // landing so the operator sees the value WITHOUT leaving the tab.
+        void watchForServerPullLanding("taxMapKey", "TMK", baselineSavedAt);
+      }
       toast({
-        title: "TMK lookup failed",
+        title: timedOut ? "TMK lookup is taking longer than usual" : "TMK lookup failed",
         description: timedOut
-          ? "Hawaii TMK lookup timed out — the lookup keeps running on the server and saves automatically if it succeeds. Check back in a minute."
+          ? "The lookup keeps running on the server — this page is now watching for the result and will fill the field in automatically when it lands (usually within 1–2 minutes)."
           : err?.message || String(err),
-        variant: "destructive",
+        ...(timedOut ? {} : { variant: "destructive" as const }),
       });
     } finally {
       setTmkLookupBusy(false);
     }
-  }, [complianceListingName, effectivePropertyData?.address, persistComplianceValues, propertyId, queryClient, toast]);
+  }, [complianceListingName, complianceProvenance.taxMapKey?.savedAt, effectivePropertyData?.address, persistComplianceValues, propertyId, queryClient, toast, watchForServerPullLanding]);
 
   const pullHawaiiComplianceField = useCallback(async (options: {
     field: "getLicense" | "tatLicense" | "strPermit";
@@ -1938,6 +2018,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
     options.setBusy(true);
     options.setResult(null);
+    // Server-time baseline for the post-timeout watcher — a landed pull is
+    // detected by the stamp CHANGING, never by comparing client clocks.
+    const baselineSavedAt = complianceProvenance[options.field]?.savedAt ?? null;
     try {
       const params = new URLSearchParams({ address: fullAddress });
       if (complianceListingName) params.set("listingName", complianceListingName);
@@ -1994,17 +2077,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       }
     } catch (err: any) {
       const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+      if (timedOut && propertyId) {
+        // The lookup keeps running + persists server-side — watch for the
+        // landing so the operator sees the value WITHOUT leaving the tab.
+        // Live incident 2026-07-15: a GET pull queued behind a Guesty
+        // rate-limit pause landed at +126s while the operator sat on the
+        // tab seeing nothing.
+        void watchForServerPullLanding(options.field, options.label, baselineSavedAt);
+      }
       toast({
-        title: `${options.label} lookup failed`,
+        title: timedOut ? `${options.label} lookup is taking longer than usual` : `${options.label} lookup failed`,
         description: timedOut
-          ? `${options.label} lookup timed out (Guesty or county registry may be slow) — it keeps running on the server and saves automatically if it succeeds. Check back in a minute.`
+          ? `Guesty or the county registry is slow (usually a rate-limit pause). The lookup keeps running on the server — this page is now watching for the result and will fill the field in automatically when it lands (usually within 1–2 minutes).`
           : err?.message || String(err),
-        variant: "destructive",
+        ...(timedOut ? {} : { variant: "destructive" as const }),
       });
     } finally {
       options.setBusy(false);
     }
-  }, [complianceListingName, complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistComplianceValues, propertyId, queryClient, selectedId, toast]);
+  }, [complianceListingName, complianceProvenance, complianceValueFor, effectivePropertyData?.address, effectivePropertyData?.taxMapKey, persistComplianceValues, propertyId, queryClient, selectedId, toast, watchForServerPullLanding]);
 
   const pullRealGetLicense = useCallback(async () => {
     await pullHawaiiComplianceField({
@@ -2035,6 +2126,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setResult: setStrLookupResult,
     });
   }, [pullHawaiiComplianceField]);
+
+  // Amber "still pulling" strip under a pull button while the post-timeout
+  // watcher is polling — the visible signal that the click is still working.
+  const renderPullWatchHint = (field: LicenseProvenanceField) => {
+    if (!pullWatchFields[field]) return null;
+    return (
+      <div style={{ fontSize: 10.5, color: "#b45309", lineHeight: 1.35, fontWeight: 600 }} data-testid={`pull-watch-hint-${field}`}>
+        ⏳ Still pulling on the server — this field updates automatically when the lookup finishes.
+      </div>
+    );
+  };
 
   const renderComplianceLookupMeta = (result: ComplianceLookupResult | null) => {
     if (!result) return null;
@@ -6956,7 +7058,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <button
                                   type="button"
                                   onClick={pullRealTaxMapKey}
-                                  disabled={tmkLookupBusy || !effectivePropertyData.address}
+                                  disabled={tmkLookupBusy || !!pullWatchFields.taxMapKey || !effectivePropertyData.address}
                                   style={{
                                     width: "100%",
                                     fontSize: 11,
@@ -6964,14 +7066,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     padding: "6px 8px",
                                     borderRadius: 5,
                                     border: "1px solid var(--border)",
-                                    background: tmkLookupBusy ? "var(--muted)" : "#fff",
+                                    background: tmkLookupBusy || pullWatchFields.taxMapKey ? "var(--muted)" : "#fff",
                                     color: "var(--text)",
-                                    cursor: tmkLookupBusy ? "wait" : "pointer",
+                                    cursor: tmkLookupBusy || pullWatchFields.taxMapKey ? "wait" : "pointer",
                                   }}
                                   data-testid="button-pull-real-tmk"
                                 >
-                                  {tmkLookupBusy ? "Pulling Guesty-address TMK..." : "Pull real TMK from Guesty address"}
+                                  {tmkLookupBusy ? "Pulling Guesty-address TMK..." : pullWatchFields.taxMapKey ? "Still pulling on the server..." : "Pull real TMK from Guesty address"}
                                 </button>
+                                {renderPullWatchHint("taxMapKey")}
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -7035,7 +7138,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <button
                                   type="button"
                                   onClick={pullRealGetLicense}
-                                  disabled={getLookupBusy || !effectivePropertyData.address}
+                                  disabled={getLookupBusy || !!pullWatchFields.getLicense || !effectivePropertyData.address}
                                   style={{
                                     width: "100%",
                                     fontSize: 11,
@@ -7043,14 +7146,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     padding: "6px 8px",
                                     borderRadius: 5,
                                     border: "1px solid var(--border)",
-                                    background: getLookupBusy ? "var(--muted)" : "#fff",
+                                    background: getLookupBusy || pullWatchFields.getLicense ? "var(--muted)" : "#fff",
                                     color: "var(--text)",
-                                    cursor: getLookupBusy ? "wait" : "pointer",
+                                    cursor: getLookupBusy || pullWatchFields.getLicense ? "wait" : "pointer",
                                   }}
                                   data-testid="button-pull-real-get"
                                 >
-                                  {getLookupBusy ? "Pulling real GET..." : "Pull real GET license"}
+                                  {getLookupBusy ? "Pulling real GET..." : pullWatchFields.getLicense ? "Still pulling on the server..." : "Pull real GET license"}
                                 </button>
+                                {renderPullWatchHint("getLicense")}
                                 <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
                                   Pulls from the connected Guesty listing compliance fields only (not static sample data).
                                 </div>
@@ -7079,7 +7183,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <button
                                   type="button"
                                   onClick={pullRealTatLicense}
-                                  disabled={tatLookupBusy || !effectivePropertyData.address}
+                                  disabled={tatLookupBusy || !!pullWatchFields.tatLicense || !effectivePropertyData.address}
                                   style={{
                                     width: "100%",
                                     fontSize: 11,
@@ -7087,14 +7191,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     padding: "6px 8px",
                                     borderRadius: 5,
                                     border: "1px solid var(--border)",
-                                    background: tatLookupBusy ? "var(--muted)" : "#fff",
+                                    background: tatLookupBusy || pullWatchFields.tatLicense ? "var(--muted)" : "#fff",
                                     color: "var(--text)",
-                                    cursor: tatLookupBusy ? "wait" : "pointer",
+                                    cursor: tatLookupBusy || pullWatchFields.tatLicense ? "wait" : "pointer",
                                   }}
                                   data-testid="button-pull-real-tat"
                                 >
-                                  {tatLookupBusy ? "Pulling real TAT..." : "Pull real TAT license"}
+                                  {tatLookupBusy ? "Pulling real TAT..." : pullWatchFields.tatLicense ? "Still pulling on the server..." : "Pull real TAT license"}
                                 </button>
+                                {renderPullWatchHint("tatLicense")}
                                 <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
                                   Pulls from the connected Guesty listing compliance fields only (not static sample data).
                                 </div>
@@ -7123,7 +7228,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <button
                                   type="button"
                                   onClick={pullRealStrPermit}
-                                  disabled={strLookupBusy || !effectivePropertyData.address}
+                                  disabled={strLookupBusy || !!pullWatchFields.strPermit || !effectivePropertyData.address}
                                   style={{
                                     width: "100%",
                                     fontSize: 11,
@@ -7131,14 +7236,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                     padding: "6px 8px",
                                     borderRadius: 5,
                                     border: "1px solid var(--border)",
-                                    background: strLookupBusy ? "var(--muted)" : "#fff",
+                                    background: strLookupBusy || pullWatchFields.strPermit ? "var(--muted)" : "#fff",
                                     color: "var(--text)",
-                                    cursor: strLookupBusy ? "wait" : "pointer",
+                                    cursor: strLookupBusy || pullWatchFields.strPermit ? "wait" : "pointer",
                                   }}
                                   data-testid="button-pull-real-str"
                                 >
-                                  {strLookupBusy ? "Pulling real STR permit..." : "Pull real STR permit from Guesty address"}
+                                  {strLookupBusy ? "Pulling real STR permit..." : pullWatchFields.strPermit ? "Still pulling on the server..." : "Pull real STR permit from Guesty address"}
                                 </button>
+                                {renderPullWatchHint("strPermit")}
                                 <div style={{ fontSize: 10.5, color: "var(--muted-foreground)", lineHeight: 1.35 }}>
                                   Uses the connected Guesty listing when available, otherwise matches the Kauai TVR / Maui STRH county registries by TMK.
                                 </div>
