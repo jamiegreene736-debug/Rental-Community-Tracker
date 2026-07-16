@@ -257,6 +257,11 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     /requireBedroomPhotoCoverage: record\.requireBedroomPhotoCoverage === true/.test(orch));
   check("orchestrator counts coverage burns separately for the all-burned failure message",
     orch.includes("burnedCoverage") && /photographed fewer bedrooms/.test(orch));
+  // 2026-07-15: a resolver-proof "bedroom-mismatch:N-vs-M" 502 is a coverage
+  // reject, not a scrape failure — it must land in the burnedCoverage bucket
+  // so the all-burned receipt doesn't send the operator chasing bot-walls.
+  check("orchestrator classifies resolver-proof bedroom-mismatch rejects as coverage burns",
+    /\/bedroom-mismatch\/i\.test/.test(orch) && /coverageReject/.test(orch));
   // Live Ilikai re-run (2026-07-12, uas_mrhwgeqz_2j7hi8): the first-hit find
   // returned a pool of ONE, the coverage gate burned it, and the job failed
   // with nothing left to try. A coverage-exhausted commit pass re-enters the
