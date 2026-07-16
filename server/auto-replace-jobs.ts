@@ -399,11 +399,18 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
         // (the Pili Mai 9K case: option 1's Redfin gallery came back empty
         // while option 2 scraped fine).
         if (status === 502 && (data?.coverageShort === true || /photo/i.test(String(data?.error ?? "")))) {
-          if (data?.coverageShort === true) burnedCoverage += 1;
+          // A resolver-proof "bedroom-mismatch:N-vs-M" reject is a COVERAGE
+          // problem (the gallery photographs fewer bedrooms than the unit
+          // needs), not a scrape failure — bucketing it as "could not be
+          // scraped" sent the 2026-07-15 Poipu Kapili diagnosis chasing
+          // bot-walls when the pipeline had the photos all along.
+          const coverageReject = data?.coverageShort === true
+            || /bedroom-mismatch/i.test(String(data?.error ?? ""));
+          if (coverageReject) burnedCoverage += 1;
           else burnedPhotos += 1;
           touch(record, {
             attemptedUrls: [...record.attemptedUrls, url],
-            message: data?.coverageShort === true
+            message: coverageReject
               ? "Candidate's gallery photographs too few bedrooms — trying the next option…"
               : "Candidate's photos could not be scraped — trying the next option…",
           });
