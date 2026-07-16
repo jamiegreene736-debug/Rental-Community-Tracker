@@ -36757,6 +36757,16 @@ Return ONLY compact JSON with this exact shape:
             bedrooms: actualBedrooms ?? requiredBedroomCount ?? null,
             source: sourceLabel(source),
             photos,
+            // The FULL scraped gallery this pass just proved (photo floor +
+            // interior probe ran on these exact URLs). `photos` above is only
+            // the Google SERP thumbnail — often a base64 data: URI — so
+            // without this field the commit's hydration fallback
+            // (POST /api/unit-swaps photoUrls) has NOTHING when the
+            // commit-time re-scrape bot-walls, and the candidate burns as
+            // "gallery could not be scraped" (the Poipu Kapili unit-B class).
+            photoUrls: scrapedPhotoUrls
+              .filter((u) => /^https?:\/\//i.test(String(u ?? "")))
+              .slice(0, 120),
             photoCount,
             sampledCategories,
             platformCheck,
@@ -37019,12 +37029,27 @@ Return ONLY compact JSON with this exact shape:
       // listing PAGE is bot-walled), fall back to them instead of failing the
       // whole replacement. Fresh-scrape-first is kept: a live scrape reflects
       // gallery changes since the find.
-      if (!scraped.length && Array.isArray(opts.fallbackPhotoUrls) && opts.fallbackPhotoUrls.length > 0) {
-        const urls = opts.fallbackPhotoUrls
-          .filter((u): u is string => typeof u === "string" && /^https?:\/\//i.test(u));
-        if (urls.length > 0) {
-          console.warn(`[unit-swap rescrape] ${folder}: re-scrape returned 0 photos for ${url} — falling back to ${urls.length} find-phase photo URLs`);
-          scraped = urls.map((photoUrl) => ({ url: photoUrl, title: "", source: "", sourceLink: url }));
+      // Fires on a THIN scrape, not only an empty one: a bot-walled or
+      // sold-stripped page often returns exactly 1 og:image, which used to
+      // bypass this fallback and then die at the MIN_INDEPENDENT_UNIT_PHOTOS
+      // floor below. The fresh scrape still leads (it reflects gallery
+      // changes since the find); find-phase URLs are UNIONED in behind it.
+      if (
+        scraped.length < MIN_INDEPENDENT_UNIT_PHOTOS
+        && Array.isArray(opts.fallbackPhotoUrls) && opts.fallbackPhotoUrls.length > 0
+      ) {
+        const seenKeys = new Set(scraped.map((p) => p.url.replace(/[?#].*$/, "")));
+        const extras = opts.fallbackPhotoUrls
+          .filter((u): u is string => typeof u === "string" && /^https?:\/\//i.test(u))
+          .filter((u) => {
+            const key = u.replace(/[?#].*$/, "");
+            if (seenKeys.has(key)) return false;
+            seenKeys.add(key);
+            return true;
+          });
+        if (extras.length > 0) {
+          console.warn(`[unit-swap rescrape] ${folder}: re-scrape returned ${scraped.length} photos for ${url} — adding ${extras.length} find-phase photo URLs`);
+          scraped = [...scraped, ...extras.map((photoUrl) => ({ url: photoUrl, title: "", source: "", sourceLink: url }))];
         }
       }
       if (!scraped.length) {

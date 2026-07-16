@@ -190,6 +190,11 @@ export type ReplacementUnitData = {
   bedrooms: number | null;
   source: string;
   photos: { url: string; label: string }[];
+  // FULL find-phase scraped gallery (https URLs) — `photos` above is often
+  // just the SERP thumbnail (can be a base64 data: URI). This is what the
+  // unit-swap commit sends as the hydration fallback so a bot-walled
+  // commit-time re-scrape can't lose a find-proven gallery.
+  photoUrls?: string[];
   photoFolder?: string;
   // Count of full-size photos the Apify scraper found on the source
   // listing. Server only returns candidates with >= 12 photos, but we
@@ -567,8 +572,13 @@ export function UnitReplacementFlow({
         newSourceUrl: result.url,
         thumbnailUrl: result.photos[0]?.url || null,
         // Find-phase gallery URLs — the server's hydration fallback when the
-        // commit-time re-scrape hits a bot-wall/quota outage.
-        photoUrls: result.photos.map((p) => p.url).filter(Boolean),
+        // commit-time re-scrape hits a bot-wall/quota outage. Prefer the full
+        // proven gallery (photoUrls); result.photos is only the display
+        // thumbnail, often a base64 data: URI the server filter drops.
+        photoUrls: (result.photoUrls?.length
+          ? result.photoUrls
+          : result.photos.map((p) => p.url)
+        ).filter(Boolean),
       });
       if (!resp.ok) {
         const err = await resp.json();
