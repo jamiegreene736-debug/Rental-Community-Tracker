@@ -15,6 +15,8 @@
 // find-job→next-step decision, commit-candidate picking, and the queue-chip
 // summary. Storage/loopback I/O lives in server/auto-replace-jobs.ts.
 
+import { parseAutoReplaceOrigin, type AutoReplaceOrigin } from "./auto-fix-activity";
+
 export const AUTO_REPLACE_STORE_SETTING_KEY = "auto_replace_jobs.v1";
 export const AUTO_REPLACE_STORE_CAP = 12;
 // Unit ids are internal slugs (normally under 40 chars). Bound the persisted
@@ -77,6 +79,9 @@ export const AUTO_REPLACE_ACTIVE_PHASES: AutoReplacePhase[] = ["queued", "findin
 
 export type AutoReplaceJobRecord = {
   jobId: string;
+  // The initiating context is retained while retry events are separately
+  // labeled as automatic. Older persisted records safely parse as unknown.
+  origin: AutoReplaceOrigin;
   phase: AutoReplacePhase;
   propertyId: number;
   unitId: string;
@@ -157,6 +162,7 @@ export function parseAutoReplaceStore(raw: string | null | undefined): Record<st
       if (!Number.isFinite(propertyId) || !unitId) continue;
       out[jobId] = {
         jobId,
+        origin: parseAutoReplaceOrigin(v.origin),
         phase: v.phase,
         propertyId,
         unitId,

@@ -30,6 +30,18 @@ import {
 import { resolveCanonicalCommunityPhotoFolder } from "@shared/community-photo-folders";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import {
+  AUTO_FIX_ACTIVITY_JOB_TYPE,
+  autoFixActivityEventKey,
+  normalizeAutoFixActivityLimit,
+  parseAutoFixActivityRows,
+  parseAutoReplaceOrigin,
+  sanitizeAutoFixActivityText,
+  type AutoFixActivityEvent,
+  type AutoFixActivityStatus,
+  type AutoFixActivityWrite,
+  type AutoReplaceOrigin,
+} from "@shared/auto-fix-activity";
+import {
   AUTO_REPLACE_STORE_SETTING_KEY,
   AUTO_REPLACE_RUNNER_LEASE_MS,
   AUTO_REPLACE_UNIT_ID_MAX_LENGTH,
@@ -88,9 +100,14 @@ class AutoReplaceRunnerLeaseLostError extends Error {
 const jobs = new Map<string, AutoReplaceJobRecord>();
 const activeJobIds = new Set<string>();
 
+type AutoReplaceStoreMutation = (
+  store: Record<string, AutoReplaceJobRecord>,
+  nowMs: number,
+) => AutoFixActivityWrite[] | void;
+
 let storeTail: Promise<void> = Promise.resolve();
 async function mutateStoreTransaction(
-  mutate: (store: Record<string, AutoReplaceJobRecord>, nowMs: number) => void,
+  mutate: AutoReplaceStoreMutation,
 ): Promise<void> {
   const client = await dbPool.connect();
   try {
@@ -107,11 +124,61 @@ async function mutateStoreTransaction(
     );
     const now = Date.now();
     const store = parseAutoReplaceStore(locked.rows[0]?.value ?? null);
-    mutate(store, now);
+    const activity = mutate(store, now) ?? [];
     await client.query(
       `UPDATE app_settings SET "value" = $2, "updated_at" = NOW() WHERE "key" = $1`,
       [AUTO_REPLACE_STORE_SETTING_KEY, serializeAutoReplaceStore(store, now)],
     );
+    // Keep semantic activity events in the SAME transaction as the job-state
+    // transition. A savepoint makes observability fail-open: a logging defect
+    // must never block the photo repair itself, while a healthy write commits
+    // atomically with the transition it describes.
+    if (activity.length > 0) {
+      await client.query("SAVEPOINT auto_fix_activity_write");
+      try {
+        for (const event of activity) {
+          const level = event.status === "failed"
+            ? "error"
+            : event.status === "skipped" || event.status === "retry-scheduled"
+              ? "warn"
+              : "info";
+          await client.query(
+            `INSERT INTO queue_job_events
+              (job_type, job_id, item_key, phase, level, message, meta, created_at)
+             SELECT $1, $2, $3, $4, $5, $6, $7::jsonb, $8
+             WHERE NOT EXISTS (
+               SELECT 1 FROM queue_job_events
+               WHERE job_type = $1 AND job_id = $2 AND meta->>'eventKey' = $9
+             )`,
+            [
+              AUTO_FIX_ACTIVITY_JOB_TYPE,
+              event.jobId,
+              `${event.propertyId}:${event.unitId}`,
+              event.status,
+              level,
+              sanitizeAutoFixActivityText(event.message),
+              JSON.stringify({
+                eventKey: event.eventKey,
+                propertyId: event.propertyId,
+                propertyName: sanitizeAutoFixActivityText(event.propertyName),
+                unitId: sanitizeAutoFixActivityText(event.unitId),
+                unitLabel: sanitizeAutoFixActivityText(event.unitLabel),
+                origin: event.origin,
+                attemptNumber: event.attemptNumber,
+                scheduledFor: event.scheduledFor,
+              }),
+              new Date(event.occurredAt),
+              event.eventKey,
+            ],
+          );
+        }
+        await client.query("RELEASE SAVEPOINT auto_fix_activity_write");
+      } catch (error: any) {
+        await client.query("ROLLBACK TO SAVEPOINT auto_fix_activity_write");
+        await client.query("RELEASE SAVEPOINT auto_fix_activity_write");
+        console.warn(`[auto-replace] activity write failed: ${error?.message ?? error}`);
+      }
+    }
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -122,7 +189,7 @@ async function mutateStoreTransaction(
 }
 
 function enqueueStoreMutation(
-  mutate: (store: Record<string, AutoReplaceJobRecord>, nowMs: number) => void,
+  mutate: AutoReplaceStoreMutation,
   strict: boolean,
 ): Promise<void> {
   const attempt = storeTail.then(() => mutateStoreTransaction(mutate));
@@ -132,11 +199,11 @@ function enqueueStoreMutation(
   return strict ? attempt : attempt.catch(() => undefined);
 }
 
-function mutateStore(mutate: (store: Record<string, AutoReplaceJobRecord>, nowMs: number) => void): Promise<void> {
+function mutateStore(mutate: AutoReplaceStoreMutation): Promise<void> {
   return enqueueStoreMutation(mutate, false);
 }
 
-function mutateStoreStrict(mutate: (store: Record<string, AutoReplaceJobRecord>, nowMs: number) => void): Promise<void> {
+function mutateStoreStrict(mutate: AutoReplaceStoreMutation): Promise<void> {
   return enqueueStoreMutation(mutate, true);
 }
 
@@ -168,6 +235,35 @@ function autoReplaceTargetLockKey(propertyId: number, unitId: string): number {
     hash = Math.imul(hash ^ value.charCodeAt(i), 0x01000193);
   }
   return hash | 0;
+}
+
+function autoFixActivity(
+  record: AutoReplaceJobRecord,
+  status: AutoFixActivityStatus,
+  message: string,
+  opts: {
+    attemptNumber?: number;
+    occurredAt?: number;
+    scheduledFor?: number | null;
+    origin?: AutoReplaceOrigin;
+  } = {},
+): AutoFixActivityWrite {
+  const attemptNumber = Math.max(0, Math.floor(opts.attemptNumber ?? record.autoRetryCount));
+  const occurredAt = opts.occurredAt ?? Date.now();
+  return {
+    eventKey: autoFixActivityEventKey(record.jobId, status, attemptNumber),
+    jobId: record.jobId,
+    propertyId: record.propertyId,
+    propertyName: record.propertyName,
+    unitId: record.unitId,
+    unitLabel: record.unitLabel,
+    origin: opts.origin ?? (attemptNumber > 0 ? "automatic-retry" : record.origin),
+    status,
+    attemptNumber,
+    occurredAt,
+    scheduledFor: opts.scheduledFor ? new Date(opts.scheduledFor).toISOString() : null,
+    message: sanitizeAutoFixActivityText(message),
+  };
 }
 
 async function acquireAutoReplaceTargetLock(record: Pick<AutoReplaceJobRecord, "propertyId" | "unitId">): Promise<AutoReplaceTargetLock | null> {
@@ -231,14 +327,24 @@ async function claimAutoReplaceRunner(record: AutoReplaceJobRecord, resuming: bo
       && (current.runnerLeaseUntil ?? 0) > now) return;
     if (resuming && !shouldResumeAutoReplaceJob(current, now)) return;
 
-    claimed = {
+    const next: AutoReplaceJobRecord = {
       ...current,
       resumeCount: current.resumeCount + (resuming ? 1 : 0),
       runnerId: AUTO_REPLACE_RUNNER_ID,
       runnerLeaseUntil: now + AUTO_REPLACE_RUNNER_LEASE_MS,
       updatedAt: now,
     };
-    store[current.jobId] = claimed;
+    claimed = next;
+    store[current.jobId] = next;
+    const retryAttempt = next.autoRetryCount > 0;
+    return [autoFixActivity(
+      next,
+      retryAttempt ? "retry-started" : "started",
+      retryAttempt
+        ? `Automatic retry ${next.autoRetryCount}/${MAX_AUTO_REPLACE_RETRIES} started after the runner lease was acquired.`
+        : "Photo replacement started after the runner lease was acquired.",
+      { occurredAt: now },
+    )];
   });
   if (!claimed) return false;
   Object.assign(record, claimed);
@@ -399,6 +505,7 @@ async function finishAutoReplaceFailure(
   opts: { retryablePreCommit?: boolean } = {},
 ): Promise<void> {
   const previous = { ...record, attemptedUrls: [...record.attemptedUrls] };
+  const failedAttempt = record.autoRetryCount;
   const expectedRunnerId = record.runnerId === AUTO_REPLACE_RUNNER_ID
     ? AUTO_REPLACE_RUNNER_ID
     : undefined;
@@ -410,7 +517,19 @@ async function finishAutoReplaceFailure(
       );
       Object.assign(record, retry);
       try {
-        await persistAutoReplaceRecord(record, { strict: true, expectedRunnerId });
+        await persistAutoReplaceRecord(record, {
+          strict: true,
+          expectedRunnerId,
+          activity: [
+            autoFixActivity(record, "failed", error, { attemptNumber: failedAttempt }),
+            autoFixActivity(
+              record,
+              "retry-scheduled",
+              String(retry.message ?? `Automatic retry ${record.autoRetryCount} scheduled.`),
+              { scheduledFor: record.nextRetryAt },
+            ),
+          ],
+        });
       } catch (persistError) {
         Object.assign(record, previous);
         throw persistError;
@@ -430,7 +549,11 @@ async function finishAutoReplaceFailure(
     updatedAt: Date.now(),
   });
   try {
-    await persistAutoReplaceRecord(record, { strict: true, expectedRunnerId });
+    await persistAutoReplaceRecord(record, {
+      strict: true,
+      expectedRunnerId,
+      activity: [autoFixActivity(record, "failed", error, { attemptNumber: failedAttempt })],
+    });
   } catch (persistError) {
     Object.assign(record, previous);
     throw persistError;
@@ -943,7 +1066,11 @@ async function runAutoReplaceVerifyPhase(
     updatedAt: Date.now(),
   });
   try {
-    await persistAutoReplaceRecord(record, { strict: true, expectedRunnerId });
+    await persistAutoReplaceRecord(record, {
+      strict: true,
+      expectedRunnerId,
+      activity: [autoFixActivity(record, "succeeded", record.message ?? "Photo replacement completed.")],
+    });
   } catch (error) {
     Object.assign(record, previous);
     throw error;
@@ -954,6 +1081,7 @@ export async function startAutoReplaceJob(input: {
   propertyId: number;
   unitId: string;
   unitLabel?: string;
+  origin?: AutoReplaceOrigin;
   // Audit-ladder bedroom-shortfall replacements: require the NEW gallery to
   // photograph every claimed bedroom (commit aborts at staging + burns the
   // candidate otherwise). See AutoReplaceJobRecord.requireBedroomPhotoCoverage.
@@ -961,6 +1089,7 @@ export async function startAutoReplaceJob(input: {
 }): Promise<{ ok: true; job: AutoReplaceJobRecord } | { ok: false; status: number; error: string }> {
   const propertyId = Number(input.propertyId);
   const unitId = String(input.unitId ?? "");
+  const origin = parseAutoReplaceOrigin(input.origin);
   if (unitId.length > AUTO_REPLACE_UNIT_ID_MAX_LENGTH) {
     return { ok: false, status: 400, error: "Invalid unit id" };
   }
@@ -1043,6 +1172,7 @@ export async function startAutoReplaceJob(input: {
       : "";
     const record: AutoReplaceJobRecord = {
       jobId: `arj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      origin,
       phase: "queued",
       propertyId,
       unitId,
@@ -1088,6 +1218,28 @@ export async function listAutoReplaceJobs(): Promise<{ activeCount: number; jobs
   return summarizeAutoReplaceQueue(store, Date.now());
 }
 
+export async function listAutoFixActivity(
+  requestedLimit: unknown,
+): Promise<{ events: AutoFixActivityEvent[] }> {
+  const limit = normalizeAutoFixActivityLimit(requestedLimit);
+  const result = await dbPool.query<{
+    id: number;
+    jobId: string;
+    phase: string;
+    message: string;
+    meta: unknown;
+    createdAt: Date;
+  }>(
+    `SELECT id, job_id AS "jobId", phase, message, meta, created_at AS "createdAt"
+     FROM queue_job_events
+     WHERE job_type = $1
+     ORDER BY created_at DESC, id DESC
+     LIMIT $2`,
+    [AUTO_FIX_ACTIVITY_JOB_TYPE, limit],
+  );
+  return { events: parseAutoFixActivityRows(result.rows, limit) };
+}
+
 // Operator "Clear queue": drop finished (and unresumably-stuck) records from
 // memory AND the persisted store so the dashboard banner disappears. Jobs this
 // process is actively running keep their records (clearableAutoReplaceJobIds
@@ -1107,7 +1259,11 @@ export async function clearAutoReplaceQueue(): Promise<{ removed: number; active
 
 async function persistAutoReplaceRecord(
   record: AutoReplaceJobRecord,
-  opts: { strict?: boolean; expectedRunnerId?: string } = {},
+  opts: {
+    strict?: boolean;
+    expectedRunnerId?: string;
+    activity?: AutoFixActivityWrite[];
+  } = {},
 ): Promise<void> {
   const snapshot = { ...record, attemptedUrls: [...record.attemptedUrls] };
   if (opts.strict) {
@@ -1116,6 +1272,7 @@ async function persistAutoReplaceRecord(
       if (opts.expectedRunnerId && store[record.jobId]?.runnerId !== opts.expectedRunnerId) return;
       store[record.jobId] = snapshot;
       accepted = true;
+      return opts.activity;
     });
     if (!accepted) throw new AutoReplaceRunnerLeaseLostError(record.jobId);
     jobs.set(record.jobId, record);
@@ -1125,6 +1282,7 @@ async function persistAutoReplaceRecord(
   await mutateStore((store) => {
     if (opts.expectedRunnerId && store[record.jobId]?.runnerId !== opts.expectedRunnerId) return;
     store[record.jobId] = snapshot;
+    return opts.activity;
   });
 }
 
@@ -1150,6 +1308,7 @@ async function scheduleLegacyAutoReplaceRetry(record: AutoReplaceJobRecord, nowM
     if (!context?.photoFolder || context.unitSwapSnapshot !== "none"
       || !(await folderStillHasPhotoFinding(context.photoFolder))) return false;
     const previous = { ...record };
+    record.origin = "legacy-recovery";
     record.retryPhotoFolder = context.photoFolder;
     record.retryUnitSwapSnapshot = context.unitSwapSnapshot;
     const retry = planAutoReplaceRetry(record, String(record.error ?? "Auto replace failed"), nowMs);
@@ -1167,6 +1326,12 @@ async function scheduleLegacyAutoReplaceRetry(record: AutoReplaceJobRecord, nowM
           || live.updatedAt !== previous.updatedAt) return;
         store[record.jobId] = snapshot;
         promoted = true;
+        return [autoFixActivity(
+          record,
+          "retry-scheduled",
+          String(record.message ?? "A legacy failed replacement was scheduled for automatic recovery."),
+          { occurredAt: nowMs, scheduledFor: record.nextRetryAt, origin: "legacy-recovery" },
+        )];
       });
     } catch (error) {
       Object.assign(record, previous);
@@ -1244,7 +1409,14 @@ async function activateDueAutoReplaceRetry(record: AutoReplaceJobRecord): Promis
         updatedAt: Date.now(),
       });
       try {
-        await persistAutoReplaceRecord(record, { strict: true });
+        await persistAutoReplaceRecord(record, {
+          strict: true,
+          activity: [autoFixActivity(
+            record,
+            "skipped",
+            `Automatic retry stopped because ${reason}.`,
+          )],
+        });
       } catch (error) {
         Object.assign(record, previous);
         throw error;
