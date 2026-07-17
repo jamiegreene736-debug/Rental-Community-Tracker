@@ -85,6 +85,16 @@ import { selectInboxAlternativePage, summarizeAlternativePagePayload } from "@sh
 import { proxiedGuestPhotoUrl, registerGuestPhotoRoute } from "./guest-photo-upscale";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import {
+  MAX_FULL_GALLERY_OPTIONS,
+  buildEquivalentPortalQueries,
+  canonicalListingUrlKey,
+  detectRealEstateListingPortal,
+  extractListingUnitIdentity,
+  groupListingUrlsByIdentity,
+  listingIdentityClusterKey,
+  selectBestPhotoGalleryOption,
+} from "@shared/real-estate-listing-discovery";
+import {
   collectReservationPaymentIssues,
   PAYMENT_WARNING_WINDOW_DAYS,
   PAYMENT_WARNING_WINDOW_MS,
@@ -4890,13 +4900,16 @@ function listingScrapePlatform(url: string): "realtor" | "zillow" | "redfin" | "
 
 // Per-listing scrape cache + per-query SERP cache for the fetch-unit-photos
 // discovery loop (2026-07-09, see server/discovery-cache.ts for the live root
-// cause). Keyed by listingClusterKey. KEEP-BETTER is load-bearing: a bot-walled
+// cause). Keyed by stable physical-unit identity; each entry also records the
+// portal mirrors already tried so newly discovered mirrors are scraped once.
+// KEEP-BETTER is load-bearing: a bot-walled
 // re-scrape (0-1 photos) must never evict a full gallery already won — on the
 // 2026-07-08 sweep the same Redfin unit scraped 25 photos once, then 0 forever
 // after, and the combo failed even though the gallery had been in hand.
 const listingScrapeCache = createKeepBetterScrapeCache<{
   dual: { photos: ScrapedPhoto[]; sourceUrl: string; platform: "realtor" | "zillow" | "redfin" | "homes" | "other" };
   facts: ListingFacts;
+  mirrorKeys: string[];
 }>({ minFullPhotos: MIN_INDEPENDENT_UNIT_PHOTOS });
 const discoverySerpCache = createSearchQueryCache<Array<{ link?: string; title?: string; snippet?: string }>>();
 
@@ -5011,17 +5024,6 @@ async function scrapeListingPhotosDualSource(
 
   const fallbackUrl = parallelTargets[0] ?? unique[0];
   return { photos: [], sourceUrl: fallbackUrl, platform: listingScrapePlatform(fallbackUrl) };
-}
-
-function listingClusterKey(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
-    const path = parsed.pathname.replace(/\/+$/, "").toLowerCase();
-    return `${host}${path}`;
-  } catch {
-    return url.trim().toLowerCase().replace(/[?#].*$/, "").replace(/\/+$/, "");
-  }
 }
 
 function extractGenericRealEstateGalleryFromHtml(html: string): { urls: string[]; facts: ListingFacts } {
@@ -34782,14 +34784,15 @@ Return ONLY compact JSON with this exact shape:
   });
 
   // ========== FIND REPLACEMENT LISTING ==========
-  // Searches for a different MLS unit at the same community and returns its photos.
+  // Compatibility endpoint for older clients. The canonical replacement finder
+  // owns discovery, portal clustering, OTA checks, photo proof, and budgets; keep
+  // this route as a response-shape adapter so no replacement path can drift back
+  // to a smaller Zillow/Homes-only pool.
   app.post("/api/photos/find-replacement", async (req, res) => {
-    const searchApiKey = process.env.SEARCHAPI_API_KEY;
-    if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
-
-    const { communityFolder, currentZillowUrl } = req.body as {
+    const { communityFolder, currentZillowUrl, requiredBedrooms } = req.body as {
       communityFolder: string;
       currentZillowUrl?: string;
+      requiredBedrooms?: number;
     };
 
     const safeFolder = (communityFolder || "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -34798,57 +34801,55 @@ Return ONLY compact JSON with this exact shape:
       return res.status(400).json({ error: "Unknown community folder" });
     }
 
-    const knownPrimary = COMMUNITY_SOURCE_URLS[communityName]?.primary || currentZillowUrl || null;
-
-    // Search for Zillow listings at this community using SearchAPI Google search
-    let candidateUrls: string[] = [];
-    for (const siteQuery of [`site:zillow.com "${communityName}"`, `site:homes.com "${communityName}"`]) {
-      try {
-        const searchResp = await fetch(
-          `https://www.searchapi.io/api/v1/search?engine=google&q=${encodeURIComponent(siteQuery)}&num=8&api_key=${searchApiKey}`,
-        );
-        if (!searchResp.ok) continue;
-        const searchData = await searchResp.json() as any;
-        const urls: string[] = (searchData.organic_results || [])
-          .map((r: any) => r.link as string)
-          .filter((u: string) => (u.includes("zillow.com/homedetails") || u.includes("homes.com/property")) && u !== knownPrimary);
-        candidateUrls = [...candidateUrls, ...urls];
-        if (candidateUrls.length >= 5) break;
-      } catch {}
-    }
-
-    candidateUrls = [...new Set(candidateUrls)].slice(0, 5);
-
-    // Try to scrape photos from each candidate (up to 3 attempts)
-    let attempts = 0;
-    for (const url of candidateUrls) {
-      if (attempts >= 3) break;
-      attempts++;
-      console.log(`[find-replacement] Trying: ${url}`);
-      try {
-        const photos = await scrapeListingPhotos(url, undefined, undefined, SCRAPE_WITHOUT_SIDECAR);
-        if (photos.length >= 3) {
-          // Extract unit identifier from URL path
-          const unitMatch = url.match(/apt-([a-z0-9]+)/i)
-            || url.match(/unit-([a-z0-9]+)/i)
-            || url.match(/-([a-z0-9]+)[-/]?.*zpid/i);
-          const unitLabel = unitMatch ? `Unit #${unitMatch[1].toUpperCase()}` : "a different unit";
-          return res.json({
-            photos: photos.map(p => ({ url: p.url, label: p.title || "Photo" })),
-            source: `${communityName} — ${unitLabel}`,
-            communityName,
-            sourceUrl: url,
-          });
-        }
-      } catch (err: any) {
-        console.warn(`[find-replacement] Failed for ${url}:`, err.message);
+    const skipUrls = Array.from(new Set([
+      COMMUNITY_SOURCE_URLS[communityName]?.primary,
+      currentZillowUrl,
+    ].filter((value): value is string => !!value)));
+    try {
+      const finderResponse = await fetch(`${bulkPricingBaseUrl()}/api/replacement/find-unit`, {
+        method: "POST",
+        headers: loopbackRequestHeaders(),
+        body: JSON.stringify({
+          communityFolder: safeFolder,
+          skipUrls,
+          ...(Number.isFinite(Number(requiredBedrooms)) && Number(requiredBedrooms) > 0
+            ? { requiredBedrooms: Math.round(Number(requiredBedrooms)) }
+            : {}),
+        }),
+        // The canonical finder has a 260s normal-search budget. Leave enough
+        // adapter headroom for it to return a valid final candidate.
+        signal: AbortSignal.timeout(280_000),
+      });
+      const finderBody = await finderResponse.json() as any;
+      const unit = finderBody?.unit;
+      if (finderResponse.ok && unit?.url) {
+        const fullGallery = Array.isArray(unit.photoUrls)
+          ? unit.photoUrls
+          : Array.isArray(unit.photos)
+            ? unit.photos.map((photo: any) => photo?.url)
+            : [];
+        const photos = fullGallery
+          .filter((photoUrl: unknown): photoUrl is string => typeof photoUrl === "string" && /^https?:\/\//i.test(photoUrl))
+          .map((photoUrl: string) => ({ url: photoUrl, label: "Photo" }));
+        return res.json({
+          photos,
+          source: `${communityName} — ${unit.unitLabel || "a different unit"}`,
+          communityName,
+          sourceUrl: unit.url,
+        });
       }
+      return res.json({
+        photos: [],
+        error: finderBody?.error || "Could not find a replacement unit automatically — please select photos manually.",
+        ...(finderBody?.diagnostic ? { diagnostic: finderBody.diagnostic } : {}),
+      });
+    } catch (err: any) {
+      console.warn("[find-replacement] Canonical replacement finder failed:", err?.message ?? err);
+      return res.status(502).json({
+        photos: [],
+        error: "The replacement search could not be completed. Please retry.",
+      });
     }
-
-    return res.json({
-      photos: [],
-      error: "Could not find a replacement unit automatically — please select photos manually.",
-    });
   });
 
   // ============================================================
@@ -35482,12 +35483,8 @@ Return ONLY compact JSON with this exact shape:
     // be a per-listing detail page, not a search-results or category
     // page (those have no unit-level info to extract).
     const detectSource = (url: string): CandidateSource | null => {
-      if (/zillow\.com\/homedetails\//i.test(url)) return "zillow";
-      if (/realtor\.com\/realestateandhomes-detail\//i.test(url)) return "realtor";
-      if (/redfin\.com\/.+\/home\/\d+/i.test(url)) return "redfin";
-      if (/homes\.com\/property\//i.test(url)) return "homes";
-      // PR #338: VRBO explicitly excluded — see header comment.
-      return null;
+      // VRBO and the other OTAs are deliberately not discovery sources.
+      return detectRealEstateListingPortal(url);
     };
 
     const extractUnitNumberFromText = (text: string): string => {
@@ -36418,25 +36415,26 @@ Return ONLY compact JSON with this exact shape:
     // different units. When no unit token is parseable (a distinct-street-number resort
     // unit, one address == one unit) it falls back to street-root-only, preserving prior
     // behavior there. The same url always yields the same key, so build and lookup agree.
-    const listingClusterKeyFor = (url: string, contextText = ""): string => {
-      const root = streetRootFromListingAddress(
+    const listingIdentityFor = (url: string, contextText = "") => ({
+      url,
+      streetRoot: streetRootFromListingAddress(
         parseListingAddressFromUrl(url) ?? parseListingAddressFromText(contextText),
-      );
-      if (!root) return `__url:${url}`;
-      const rawUnit = extractUnitNumber(url, detectSource(url) ?? "zillow", contextText)
-        || extractUnitNumberFromText(contextText);
-      const unit = normalizeUnitClaim(String(rawUnit || "")).replace(/^0+(?=\d)/, "");
-      return unit ? `${root}#${unit}` : root;
-    };
+      ),
+      unitClaim: extractListingUnitIdentity(
+        parseListingAddressFromUrl(url),
+        url,
+        contextText,
+      ) || extractUnitNumber(url, detectSource(url) ?? "zillow", contextText)
+        || extractUnitNumberFromText(contextText),
+      allowRootOnly: true,
+    });
+    const listingClusterKeyFor = (url: string, contextText = ""): string =>
+      listingIdentityClusterKey(listingIdentityFor(url, contextText));
 
-    const listingUrlsByCluster = new Map<string, string[]>();
-    for (const candidate of candidates) {
-      const clusterKey = listingClusterKeyFor(candidate.sourceUrl, candidate.contextText);
-      const bucket = listingUrlsByCluster.get(clusterKey) ?? [];
-      const key = unitSwapListingKey(candidate.sourceUrl);
-      if (key && !bucket.some((u) => unitSwapListingKey(u) === key)) bucket.push(candidate.sourceUrl);
-      listingUrlsByCluster.set(clusterKey, bucket);
-    }
+    const listingUrlsByCluster = groupListingUrlsByIdentity(
+      candidates,
+      (candidate) => listingIdentityFor(candidate.sourceUrl, candidate.contextText),
+    );
 
     // PR #329 / #338: sort candidates by source priority before
     // processing. Realtor first (for-sale → low VRBO overlap),
@@ -36662,13 +36660,11 @@ Return ONLY compact JSON with this exact shape:
     ): Promise<{ sourceUrl: string; source: CandidateSource; address: string; unitNumber: string; photos: string[]; facts: ListingFacts } | null> => {
       const unit = candidate.unitNumber || extractUnitNumberFromText(candidate.address);
       if (!unit) return null;
-      const queryParts = [
-        candidate.address ? `"${candidate.address}" Zillow` : "",
-        candidate.address ? `site:zillow.com "${candidate.address}"` : "",
-        unit ? `site:zillow.com "${communityAddress}" "${unit}"` : "",
-        unit ? `site:redfin.com "${communityAddress}" "${unit}"` : "",
-        unit ? `site:homes.com "${communityAddress}" "${unit}"` : "",
-      ].filter(Boolean);
+      const queryParts = buildEquivalentPortalQueries({
+        address: candidate.address,
+        communityAddress,
+        unit,
+      });
       const seen = new Set<string>([unitSwapListingKey(candidate.sourceUrl)].filter(Boolean));
       for (const q of queryParts) {
         const hits = await runSearch(q);
@@ -36676,7 +36672,7 @@ Return ONLY compact JSON with this exact shape:
         for (const hit of hits) {
           const link = String(hit?.link || "");
           const source = detectSource(link);
-          if (!source || source === "realtor") continue;
+          if (!source) continue;
           const lower = unitSwapListingKey(link);
           if (!lower || seen.has(lower) || skipUrlSet.has(lower)) continue;
           seen.add(lower);
@@ -36693,7 +36689,11 @@ Return ONLY compact JSON with this exact shape:
           }
           const facts: ListingFacts = {};
           const clusterKey = listingClusterKeyFor(link, `${hit?.title || ""} ${hit?.snippet || ""}`);
-          const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [link];
+          const knownClusterUrls = listingUrlsByCluster.get(clusterKey) ?? [];
+          const clusterUrls = Array.from(new Map(
+            [...knownClusterUrls, link].map((clusterUrl) => [canonicalListingUrlKey(clusterUrl), clusterUrl]),
+          ).values());
+          listingUrlsByCluster.set(clusterKey, clusterUrls);
           const dual = await withStepTimeout(
             scrapeListingPhotosDualSource(clusterUrls.length > 0 ? clusterUrls : [link], facts, SCRAPE_WITHOUT_SIDECAR),
             PHOTO_SCRAPE_TIMEOUT_MS,
@@ -42048,16 +42048,7 @@ Return ONLY compact JSON with this exact shape:
       // Stacked discovery (parallel): Apify native Zillow/Realtor search,
       // SearchAPI Zillow site: queries, RealtyAPI community Realtor harvest,
       // plus supplemental Realtor/Redfin/Homes.
-      const listingKey = (raw: string): string => {
-        try {
-          const u = new URL(raw);
-          const host = u.hostname.replace(/^www\./i, "").toLowerCase();
-          const pathOnly = u.pathname.replace(/\/+$/, "").toLowerCase();
-          return `${host}${pathOnly}`;
-        } catch {
-          return raw.trim().toLowerCase().replace(/[?#].*$/, "").replace(/\/+$/, "");
-        }
-      };
+      const listingKey = canonicalListingUrlKey;
       const skipSet = new Set((skipUrls ?? []).map((u) => listingKey(u)));
       const candidateLimit = Number.isFinite(Number(maxCandidates)) && Number(maxCandidates) > 0
         ? Math.max(1, Math.min(50, Math.floor(Number(maxCandidates))))
@@ -42099,7 +42090,25 @@ Return ONLY compact JSON with this exact shape:
       const requestedStateAbbr = String(state ?? "").trim().toLowerCase().match(/^(hi|hawaii)$/) ? "hi" : null;
       const urlStatePattern = /(?:^|[-_/])([A-Z]{2})(?:[-_/]|$)/i;
       type DiscoverySource = "zillow" | "realtor" | "redfin" | "homes";
-      type DiscoveryCandidate = { url: string; source: DiscoverySource; score: number; reasons: string[] };
+      type DiscoveryCandidate = {
+        url: string;
+        source: DiscoverySource;
+        score: number;
+        reasons: string[];
+        contextText: string;
+      };
+      const listingIdentityForCandidate = (candidate: Pick<DiscoveryCandidate, "url" | "contextText">) => {
+        let decodedUrl = candidate.url;
+        try { decodedUrl = decodeURIComponent(candidate.url); } catch { /* keep raw on malformed escapes */ }
+        const address = parseListingAddressFromUrl(candidate.url)
+          ?? parseListingAddressFromText(candidate.contextText);
+        return {
+          url: candidate.url,
+          streetRoot: streetRootFromListingAddress(address),
+          unitClaim: extractListingUnitIdentity(address, decodedUrl, candidate.contextText)
+            ?? extractAddressUnitToken(address),
+        };
+      };
       const candidateUrls: DiscoveryCandidate[] = [];
       const seen = new Set<string>();
       const harvestRootCounts = new Map<string, number>();
@@ -42161,7 +42170,12 @@ Return ONLY compact JSON with this exact shape:
           if (!root || !allowedRoots.has(root)) return false;
         }
         seen.add(key);
-        candidateUrls.push({ url: link, source, ...scoreCandidate(link, source, title, snippet) });
+        candidateUrls.push({
+          url: link,
+          source,
+          contextText: `${title} ${snippet}`.trim(),
+          ...scoreCandidate(link, source, title, snippet),
+        });
         rememberRoot(link, title, snippet);
         return true;
       };
@@ -42265,14 +42279,12 @@ Return ONLY compact JSON with this exact shape:
       // candidates count toward the target, so cheap off-street noise can't
       // starve the queries that find the real building.
       const discoveryCandidateTarget = candidateLimit ? candidateLimit * 3 : 30;
-      const usefulCandidateCount = () => {
-        if (!(isBoundedDiscovery && suppliedStreetRoot)) return candidateUrls.length;
-        let n = 0;
-        for (const c of candidateUrls) {
-          if (listingStreetRoot(c.url) === suppliedStreetRoot) n += 1;
-        }
-        return n;
-      };
+      const usefulCandidateCount = () => new Set(
+        candidateUrls
+          .filter((candidate) => !(isBoundedDiscovery && suppliedStreetRoot)
+            || listingIdentityForCandidate(candidate).streetRoot === suppliedStreetRoot)
+          .map((candidate) => listingIdentityClusterKey(listingIdentityForCandidate(candidate))),
+      ).size;
       const enoughDiscoveryCandidates = () => usefulCandidateCount() >= discoveryCandidateTarget;
       const DISCOVERY_SERP_BATCH = 4;
       const runDiscoveryQueries = async (queries: string[], pattern: RegExp, source: DiscoverySource) => {
@@ -42495,8 +42507,8 @@ Return ONLY compact JSON with this exact shape:
 
       const canonicalStreetRoot = suppliedStreetRoot;
       candidateUrls.sort((a, b) => {
-        const aOnStreet = canonicalStreetRoot && listingStreetRoot(a.url) === canonicalStreetRoot ? 0 : 1;
-        const bOnStreet = canonicalStreetRoot && listingStreetRoot(b.url) === canonicalStreetRoot ? 0 : 1;
+        const aOnStreet = canonicalStreetRoot && listingIdentityForCandidate(a).streetRoot === canonicalStreetRoot ? 0 : 1;
+        const bOnStreet = canonicalStreetRoot && listingIdentityForCandidate(b).streetRoot === canonicalStreetRoot ? 0 : 1;
         if (aOnStreet !== bOnStreet) return aOnStreet - bOnStreet;
         return b.score - a.score;
       });
@@ -42508,8 +42520,8 @@ Return ONLY compact JSON with this exact shape:
         );
         orderedCandidates = scrapeable;
         if (canonicalStreetRoot) {
-          const onStreet = orderedCandidates.filter((c) => listingStreetRoot(c.url) === canonicalStreetRoot);
-          const offStreet = orderedCandidates.filter((c) => listingStreetRoot(c.url) !== canonicalStreetRoot);
+          const onStreet = orderedCandidates.filter((c) => listingIdentityForCandidate(c).streetRoot === canonicalStreetRoot);
+          const offStreet = orderedCandidates.filter((c) => listingIdentityForCandidate(c).streetRoot !== canonicalStreetRoot);
           if (onStreet.length > 0) orderedCandidates = [...onStreet, ...offStreet];
         }
       }
@@ -42517,23 +42529,51 @@ Return ONLY compact JSON with this exact shape:
       if (knownPhotoSourceUrl && !skipSet.has(listingKey(knownPhotoSourceUrl))) {
         const knownKey = listingKey(knownPhotoSourceUrl);
         orderedCandidates = [
-          { url: knownPhotoSourceUrl, source: "zillow" as DiscoverySource, score: 100, reasons: ["configured-source", "source:zillow"] },
+          {
+            url: knownPhotoSourceUrl,
+            source: "zillow" as DiscoverySource,
+            score: 100,
+            reasons: ["configured-source", "source:zillow"],
+            contextText: "",
+          },
           ...orderedCandidates.filter((candidate) => listingKey(candidate.url) !== knownKey),
         ];
       }
+      const skippedUnitClusters = new Set(
+        (skipUrls ?? [])
+          .map((skippedUrl) => listingIdentityClusterKey(listingIdentityForCandidate({ url: skippedUrl, contextText: "" })))
+          // A root-only skip is ambiguous in a single-address tower. Keep the
+          // existing exact-URL skip in that case instead of hiding neighbors.
+          .filter((key) => key.includes("#")),
+      );
+      orderedCandidates = orderedCandidates.filter((candidate) =>
+        !skippedUnitClusters.has(listingIdentityClusterKey(listingIdentityForCandidate(candidate))),
+      );
+      const listingUrlsByCluster = groupListingUrlsByIdentity(
+        orderedCandidates,
+        listingIdentityForCandidate,
+      );
+      const seenOrderedClusters = new Set<string>();
+      const orderedClusterCandidates = orderedCandidates.filter((candidate) => {
+        const clusterKey = listingIdentityClusterKey(listingIdentityForCandidate(candidate));
+        if (seenOrderedClusters.has(clusterKey)) return false;
+        seenOrderedClusters.add(clusterKey);
+        return true;
+      });
       const candidateDiagnostics = (candidates: DiscoveryCandidate[]) =>
         candidates.slice(0, 25).map((candidate) => ({
           url: candidate.url,
           source: candidate.source,
           score: candidate.score,
           reasons: candidate.reasons,
-          streetRoot: listingStreetRoot(candidate.url),
+          streetRoot: listingIdentityForCandidate(candidate).streetRoot,
+          clusterKey: listingIdentityClusterKey(listingIdentityForCandidate(candidate)),
         }));
 
       const offset = Math.max(0, Math.min(10, Number(skipFirst ?? 0) || 0));
       const candidatesToTry = candidateLimit
-        ? orderedCandidates.slice(offset, offset + candidateLimit)
-        : orderedCandidates.slice(offset);
+        ? orderedClusterCandidates.slice(offset, offset + candidateLimit)
+        : orderedClusterCandidates.slice(offset);
       if (isBoundedDiscovery) {
         const bySource = Object.fromEntries(
           (["zillow", "realtor", "redfin", "homes"] as const).map((s) => [
@@ -42544,7 +42584,8 @@ Return ONLY compact JSON with this exact shape:
         console.log(
           `[fetch-unit-photos] bounded try pool community="${communityName ?? ""}" ` +
           `total=${candidateUrls.length} scrapeable=${orderedCandidates.length} ` +
-          `trying=${candidatesToTry.length} bySource=${JSON.stringify(bySource)} ` +
+          `clusters=${orderedClusterCandidates.length} trying=${candidatesToTry.length} ` +
+          `bySource=${JSON.stringify(bySource)} ` +
           `canonicalStreet=${canonicalStreetRoot ?? "none"}`,
         );
       }
@@ -42552,7 +42593,7 @@ Return ONLY compact JSON with this exact shape:
       const configuredPhotoSourceUrl = COMMUNITY_SOURCE_URLS[communityName]?.primary;
       const configuredPhotoSourceKey = configuredPhotoSourceUrl ? listingKey(configuredPhotoSourceUrl) : null;
       let bestRepresentativeFallback: {
-        candidate: DiscoveryCandidate;
+        candidate: { url: string; source: DiscoverySource };
         photos: ScrapedPhoto[];
         facts: ListingFacts;
         scrapedBedrooms: number;
@@ -42570,6 +42611,19 @@ Return ONLY compact JSON with this exact shape:
         platform: string;
         clusterUrls: string[];
       } | null = null;
+      let fullGalleryOptions: Array<{
+        photos: Array<{ url: string; label: string }>;
+        sourceUrl: string;
+        sourceLabel: DiscoverySource;
+        facts: ListingFacts;
+        platform: string;
+        clusterUrls: string[];
+        exactStreetMatch: boolean;
+        bedroomEvidence: number;
+        photoCount: number;
+        discoveryScore: number;
+        discoveryIndex: number;
+      }> = [];
       const triedListingClusters = new Set<string>();
       const considerRepresentativeFallback = (
         candidate: { url: string; source: DiscoverySource },
@@ -42591,7 +42645,8 @@ Return ONLY compact JSON with this exact shape:
         }
         bestRepresentativeFallback = { candidate, photos, facts: { ...facts }, scrapedBedrooms };
       };
-      for (const candidate of candidatesToTry) {
+      for (let candidateIndex = 0; candidateIndex < candidatesToTry.length; candidateIndex += 1) {
+        const candidate = candidatesToTry[candidateIndex];
         if (discoveryWallBudgetMs !== null && discoveryElapsedMs() >= discoveryWallBudgetMs) {
           console.warn(
             `[fetch-unit-photos] bounded discovery budget hit before ${candidate.url}: ` +
@@ -42599,7 +42654,7 @@ Return ONLY compact JSON with this exact shape:
           );
           break;
         }
-        const candidateStreetRoot = listingStreetRoot(candidate.url);
+        const candidateStreetRoot = listingIdentityForCandidate(candidate).streetRoot;
         const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
         if (isBoundedDiscovery && canonicalStreetRoot && candidateStreetRoot !== canonicalStreetRoot && !isConfiguredPhotoSource) {
           console.warn(
@@ -42608,14 +42663,15 @@ Return ONLY compact JSON with this exact shape:
           );
           continue;
         }
-        const clusterKey = listingClusterKey(candidate.url);
+        const clusterKey = listingIdentityClusterKey(listingIdentityForCandidate(candidate));
         if (triedListingClusters.has(clusterKey)) continue;
         triedListingClusters.add(clusterKey);
-        const clusterUrls = [candidate.url];
+        const clusterUrls = listingUrlsByCluster.get(clusterKey) ?? [candidate.url];
+        const clusterMirrorKeys = Array.from(new Set(clusterUrls.map(canonicalListingUrlKey)));
         for (const clusterUrl of clusterUrls) {
           if (!triedCandidateUrls.includes(clusterUrl)) triedCandidateUrls.push(clusterUrl);
         }
-        const facts: ListingFacts = {};
+        let facts: ListingFacts = {};
         try {
           const remainingBudgetMs = discoveryWallBudgetMs === null
             ? null
@@ -42633,19 +42689,40 @@ Return ONLY compact JSON with this exact shape:
           // entirely; a thin hit still flows into the sidecar rescue below
           // unless a rescue already ran for this listing within the thin TTL.
           const cachedScrape = bypassDiscoveryCaches ? null : listingScrapeCache.get(clusterKey);
+          const cachedMirrorKeys = new Set(cachedScrape?.result.mirrorKeys ?? []);
+          const newlyDiscoveredMirrorUrls = cachedScrape
+            ? clusterUrls.filter((clusterUrl) => !cachedMirrorKeys.has(canonicalListingUrlKey(clusterUrl)))
+            : clusterUrls;
           let cachedSidecarTried = false;
           let sidecarRescueAttempted = false;
           let dual: { photos: ScrapedPhoto[]; sourceUrl: string; platform: "realtor" | "zillow" | "redfin" | "homes" | "other" };
-          if (cachedScrape) {
+          if (cachedScrape && newlyDiscoveredMirrorUrls.length === 0) {
             cachedSidecarTried = cachedScrape.sidecarTried;
-            mergeListingFactsInto(facts, cachedScrape.result.facts);
+            facts = { ...cachedScrape.result.facts };
             dual = cachedScrape.result.dual;
             console.log(
               `[fetch-unit-photos] scrape cache hit for ${candidate.url} ` +
               `(${dual.photos.length} photos, age ${Math.round((Date.now() - cachedScrape.at) / 1000)}s)`,
             );
           } else {
-            dual = await scrapeListingPhotosDualSource(clusterUrls, facts, scrapeOpts);
+            const freshFacts: ListingFacts = {};
+            const freshDual = await scrapeListingPhotosDualSource(
+              newlyDiscoveredMirrorUrls.length > 0 ? newlyDiscoveredMirrorUrls : clusterUrls,
+              freshFacts,
+              scrapeOpts,
+            );
+            cachedSidecarTried = cachedScrape?.sidecarTried ?? false;
+            if (cachedScrape && cachedScrape.result.dual.photos.length >= freshDual.photos.length) {
+              dual = cachedScrape.result.dual;
+              facts = { ...cachedScrape.result.facts };
+              console.log(
+                `[fetch-unit-photos] kept cached ${dual.photos.length}-photo winner after trying ` +
+                `${newlyDiscoveredMirrorUrls.length} new portal mirror(s) for ${candidate.url}`,
+              );
+            } else {
+              dual = freshDual;
+              facts = freshFacts;
+            }
           }
           // Bounded sidecar rescue (see the constants above): a thin scrape on a
           // bedroom-compatible candidate gets ONE residential-IP retry while
@@ -42663,7 +42740,7 @@ Return ONLY compact JSON with this exact shape:
           if (
             isBoundedDiscovery &&
             !cachedSidecarTried &&
-            /redfin\.com|homes\.com|zillow\.com/i.test(candidate.url) &&
+            clusterUrls.some((clusterUrl) => /redfin\.com|homes\.com|zillow\.com/i.test(clusterUrl)) &&
             dual.photos.length < MIN_INDEPENDENT_UNIT_PHOTOS &&
             sidecarPhotoRescuesUsed < maxSidecarPhotoRescues
           ) {
@@ -42683,7 +42760,8 @@ Return ONLY compact JSON with this exact shape:
                     `[fetch-unit-photos] sidecar photo rescue ${sidecarPhotoRescuesUsed}/${maxSidecarPhotoRescues} ` +
                     `for ${candidate.url} (${dual.photos.length} photos < ${MIN_INDEPENDENT_UNIT_PHOTOS}, wallet=${walletMs}ms)`,
                   );
-                  const rescued = await scrapeListingPhotosDualSource(clusterUrls, facts, {
+                  const rescuedFacts: ListingFacts = { ...facts };
+                  const rescued = await scrapeListingPhotosDualSource(clusterUrls, rescuedFacts, {
                     detailTimeoutMs: Math.min(28_000, remainingMs ?? 28_000),
                     scrapingBeeTimeoutMs: Math.min(18_000, remainingMs ?? 18_000),
                     sidecarWalletMs: walletMs,
@@ -42694,6 +42772,7 @@ Return ONLY compact JSON with this exact shape:
                       `for ${rescued.sourceUrl || candidate.url}`,
                     );
                     dual = rescued;
+                    facts = rescuedFacts;
                   }
                 }
               } catch (e: any) {
@@ -42703,7 +42782,14 @@ Return ONLY compact JSON with this exact shape:
           }
           listingScrapeCache.remember(
             clusterKey,
-            { dual, facts: { ...facts } },
+            {
+              dual,
+              facts: { ...facts },
+              mirrorKeys: Array.from(new Set([
+                ...(cachedScrape?.result.mirrorKeys ?? []),
+                ...clusterMirrorKeys,
+              ])),
+            },
             dual.photos.length,
             { sidecarTried: cachedSidecarTried || sidecarRescueAttempted },
           );
@@ -42749,39 +42835,68 @@ Return ONLY compact JSON with this exact shape:
             );
             continue;
           }
+          fullGalleryOptions.push({
+            photos: responsePhotos,
+            sourceUrl,
+            sourceLabel,
+            facts: { ...facts },
+            platform: dual.platform,
+            clusterUrls: [...clusterUrls],
+            exactStreetMatch: !!canonicalStreetRoot && candidateStreetRoot === canonicalStreetRoot,
+            bedroomEvidence: requestedBedrooms || minimumBedrooms
+              ? facts.bedrooms != null
+                ? 2
+                : candidate.reasons.includes("bedroom-evidence")
+                  ? 1
+                  : 0
+              : 0,
+            photoCount: responsePhotos.length,
+            discoveryScore: candidate.score,
+            discoveryIndex: candidateIndex,
+          });
           console.log(
-            `[fetch-unit-photos] success community="${communityName ?? ""}" ` +
-            `source=${sourceLabel} photos=${photos.length} url=${sourceUrl} ` +
-            `clusterUrls=${clusterUrls.length} elapsedMs=${Date.now() - startedAt}`,
+            `[fetch-unit-photos] viable gallery ${fullGalleryOptions.length}/${MAX_FULL_GALLERY_OPTIONS} ` +
+            `community="${communityName ?? ""}" source=${sourceLabel} photos=${photos.length} ` +
+            `url=${sourceUrl} clusterUrls=${clusterUrls.length} elapsedMs=${Date.now() - startedAt}`,
           );
-          const resolverProof = buildUnitPhotoResolverProof({
-            photos: responsePhotos,
-            sourceUrl,
-            foundVia: "search",
-            requestedBedrooms,
-            minimumBedrooms,
-            facts,
-            relaxedSearch: relaxedBedroomDiscovery,
-          });
-          res.json({
-            photos: responsePhotos,
-            sourceUrl,
-            foundVia: "search",
-            facts,
-            resolverProof,
-            diagnostic: {
-              code: resolverProof.status === "accepted" ? "unit-photo-proof-accepted" : "unit-photo-proof-review",
-              triedCandidateUrls,
-              resolverProof,
-              dualSourceCluster: clusterUrls,
-              winningPlatform: dual.platform,
-              candidateScores: candidateDiagnostics(candidatesToTry),
-            },
-          });
-          return;
+          if (fullGalleryOptions.length >= MAX_FULL_GALLERY_OPTIONS) break;
         } catch (e: any) {
           console.warn(`[fetch-unit-photos] cluster scrape failed (${clusterUrls.join(" | ")}): ${e.message}`);
         }
+      }
+
+      const selectedGallery = selectBestPhotoGalleryOption(fullGalleryOptions);
+      if (selectedGallery) {
+        console.log(
+          `[fetch-unit-photos] selected best of ${fullGalleryOptions.length} viable galleries ` +
+          `community="${communityName ?? ""}" source=${selectedGallery.sourceLabel} ` +
+          `photos=${selectedGallery.photoCount} url=${selectedGallery.sourceUrl}`,
+        );
+        const resolverProof = buildUnitPhotoResolverProof({
+          photos: selectedGallery.photos,
+          sourceUrl: selectedGallery.sourceUrl,
+          foundVia: "search",
+          requestedBedrooms,
+          minimumBedrooms,
+          facts: selectedGallery.facts,
+          relaxedSearch: relaxedBedroomDiscovery,
+        });
+        return res.json({
+          photos: selectedGallery.photos,
+          sourceUrl: selectedGallery.sourceUrl,
+          foundVia: "search",
+          facts: selectedGallery.facts,
+          resolverProof,
+          diagnostic: {
+            code: resolverProof.status === "accepted" ? "unit-photo-proof-accepted" : "unit-photo-proof-review",
+            triedCandidateUrls,
+            resolverProof,
+            dualSourceCluster: selectedGallery.clusterUrls,
+            winningPlatform: selectedGallery.platform,
+            viableGalleryCount: fullGalleryOptions.length,
+            candidateScores: candidateDiagnostics(candidatesToTry),
+          },
+        });
       }
 
       // The whole pool was scanned without a >= MIN gallery, but a BEDROOM-MATCHED
@@ -42828,7 +42943,7 @@ Return ONLY compact JSON with this exact shape:
       }
 
       const representativeFallback = bestRepresentativeFallback as {
-        candidate: DiscoveryCandidate;
+        candidate: { url: string; source: DiscoverySource };
         photos: ScrapedPhoto[];
         facts: ListingFacts;
         scrapedBedrooms: number;
@@ -42975,7 +43090,11 @@ Return ONLY compact JSON with this exact shape:
           diagnostic: {
             code: "no-unit-photo-source",
             triedCandidateUrls,
-            uncheckedCandidateUrls: candidatesToTry.slice(triedCandidateUrls.length).map((candidate) => candidate.url),
+            uncheckedCandidateUrls: candidatesToTry
+              .filter((candidate) => !triedListingClusters.has(
+                listingIdentityClusterKey(listingIdentityForCandidate(candidate)),
+              ))
+              .map((candidate) => candidate.url),
             resolverProof,
             candidateScores: candidateDiagnostics(candidatesToTry),
             selfFix: resolverProof.selfFix,
@@ -44475,25 +44594,25 @@ Return ONLY compact JSON with this exact shape:
     // NOT the local addressFromSlug/addressFromSearchText/streetRootFromAddress aliases
     // (declared ~50 lines below) — those would put this in their temporal dead zone, the
     // pre-existing bug (TS2448) that left this whole cluster build throwing at runtime.
-    const listingClusterKeyFor = (url: string, contextText = ""): string => {
-      const root = streetRootFromListingAddress(
-        parseListingAddressFromUrl(url) ?? parseListingAddressFromText(contextText),
-      );
-      if (!root) return `__url:${url}`;
+    const listingIdentityFor = (url: string, contextText = "") => {
       let decodedUrl = url;
       try { decodedUrl = decodeURIComponent(url); } catch { /* keep raw on malformed escapes */ }
-      const rawUnit = extractUnitTokenFromText(`${contextText} ${decodedUrl}`);
-      const unit = normalizeUnitClaim(String(rawUnit || "")).replace(/^0+(?=\d)/, "");
-      return unit ? `${root}#${unit}` : root;
+      return {
+        url,
+        streetRoot: streetRootFromListingAddress(
+          parseListingAddressFromUrl(url) ?? parseListingAddressFromText(contextText),
+        ),
+        unitClaim: extractListingUnitIdentity(parseListingAddressFromUrl(url), decodedUrl, contextText)
+          ?? extractUnitTokenFromText(`${contextText} ${decodedUrl}`),
+        allowRootOnly: true,
+      };
     };
-    const listingUrlsByCluster = new Map<string, string[]>();
-    for (const candidateUrl of candidateUrls) {
+    const listingClusterKeyFor = (url: string, contextText = ""): string =>
+      listingIdentityClusterKey(listingIdentityFor(url, contextText));
+    const listingUrlsByCluster = groupListingUrlsByIdentity(candidateUrls, (candidateUrl) => {
       const meta = candidateMeta.get(candidateUrl.toLowerCase());
-      const clusterKey = listingClusterKeyFor(candidateUrl, `${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
-      const bucket = listingUrlsByCluster.get(clusterKey) ?? [];
-      if (!bucket.includes(candidateUrl)) bucket.push(candidateUrl);
-      listingUrlsByCluster.set(clusterKey, bucket);
-    }
+      return listingIdentityFor(candidateUrl, `${meta?.title ?? ""} ${meta?.snippet ?? ""}`);
+    });
     // CODEX NOTE (2026-05-05, codex/single-listing-photo-gate):
     // A candidate must have photos and those photos must pass Lens
     // against Airbnb / VRBO / Booking before we accept it. Address
