@@ -107,6 +107,10 @@ console.log("discovery-cache: nocache / find-new-source wiring (source locks)");
     /bypassDiscoveryCaches \? null : discoverySerpCache\.get\(q\)/.test(routes));
   check("scrape cache read gated by nocache",
     /bypassDiscoveryCaches \? null : listingScrapeCache\.get\(clusterKey\)/.test(routes));
+  check("new cluster mirrors are tried without discarding the stable cached winner",
+    /const newlyDiscoveredMirrorUrls = cachedScrape/.test(routes)
+      && /cachedScrape\.result\.dual\.photos\.length >= freshDual\.photos\.length/.test(routes)
+      && /mirrorKeys: Array\.from\(new Set\(/.test(routes));
   check("photo-fetch-jobs route forwards findNewSource",
     /findNewSource: body\.findNewSource === true,/.test(routes));
 

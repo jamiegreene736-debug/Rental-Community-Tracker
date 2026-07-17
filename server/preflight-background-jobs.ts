@@ -686,7 +686,9 @@ async function runPreflightPhotoFetchJob(
         // Operator-initiated: bypass the discovery cache reads (SERP + scrape) so a
         // deliberate retry hits the live portals instead of a day-old cached result.
         nocache: true,
-      }, 120_000);
+      // fetch-unit-photos may inspect three viable cross-portal galleries
+      // within its 175s bounded budget before choosing the best one.
+      }, 190_000);
       lastNote = typeof fetchData?.note === "string" ? fetchData.note : undefined;
       const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
       const nextSourceUrl: string | null = fetchData?.sourceUrl ?? null;

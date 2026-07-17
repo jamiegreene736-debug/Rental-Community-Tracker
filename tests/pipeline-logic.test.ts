@@ -309,7 +309,7 @@ assert.match(
 // find-unit rescue cap (2026-07-06).
 assert.match(
   routesSource,
-  /isBoundedDiscovery &&\s*\n\s*!cachedSidecarTried &&\s*\n\s*\/redfin\\\.com\|homes\\\.com\|zillow\\\.com\/i\.test\(candidate\.url\) &&\s*\n\s*dual\.photos\.length < MIN_INDEPENDENT_UNIT_PHOTOS &&\s*\n\s*sidecarPhotoRescuesUsed < maxSidecarPhotoRescues/,
+  /isBoundedDiscovery &&\s*\n\s*!cachedSidecarTried &&\s*\n\s*clusterUrls\.some\(\(clusterUrl\) => \/redfin\\\.com\|homes\\\.com\|zillow\\\.com\/i\.test\(clusterUrl\)\) &&\s*\n\s*dual\.photos\.length < MIN_INDEPENDENT_UNIT_PHOTOS &&\s*\n\s*sidecarPhotoRescuesUsed < maxSidecarPhotoRescues/,
   "bounded unit photo discovery must run a bounded, host-gated sidecar rescue when the datacenter tiers scrape thin",
 );
 assert.match(
@@ -345,8 +345,13 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /listingScrapeCache\.remember\(\s*clusterKey,\s*\{ dual, facts: \{ \.\.\.facts \} \},\s*dual\.photos\.length,\s*\{ sidecarTried: cachedSidecarTried \|\| sidecarRescueAttempted \}/,
-  "the discovery loop must remember every scrape (incl. rescue outcome) so later passes never re-scrape or re-rescue the same listing",
+  /const newlyDiscoveredMirrorUrls = cachedScrape[\s\S]{0,500}cachedMirrorKeys\.has\(canonicalListingUrlKey\(clusterUrl\)\)/,
+  "a cached physical-unit winner must still scrape newly discovered portal mirrors once",
+);
+assert.match(
+  routesSource,
+  /listingScrapeCache\.remember\(\s*clusterKey,[\s\S]{0,500}mirrorKeys: Array\.from\(new Set\(\[[\s\S]{0,300}cachedScrape\?\.result\.mirrorKeys[\s\S]{0,200}clusterMirrorKeys/,
+  "the discovery loop must keep one stable physical-unit cache entry and remember every portal mirror already tried",
 );
 assert.match(
   routesSource,
@@ -408,10 +413,11 @@ assert.match(
   /if \(enoughDiscoveryCandidates\(\)\) \{[\s\S]{0,400}skipping \$\{unique\.length - i\} remaining \$\{source\} queries/,
   "discovery SERP queries must early-stop once enough candidates are pooled",
 );
-assert.match(
-  routesSource,
-  /if \(!\(isBoundedDiscovery && suppliedStreetRoot\)\) return candidateUrls\.length;/,
-  "the early-stop target must count only on-street candidates in bounded street-gated mode",
+assert.ok(
+  routesSource.includes("const usefulCandidateCount = () => new Set(")
+    && routesSource.includes("listingIdentityForCandidate(candidate).streetRoot === suppliedStreetRoot")
+    && routesSource.includes("listingIdentityClusterKey(listingIdentityForCandidate(candidate))"),
+  "the early-stop target must count distinct on-street unit clusters in bounded street-gated mode",
 );
 assert.match(
   routesSource,
@@ -707,11 +713,23 @@ assert.match(
   /withDraftPhotoProofLock/,
   "parallel preflight unit photo jobs must serialize proof reservation so Unit A and Unit B cannot save the same gallery",
 );
-assert.match(
-  routesSource,
-  /const clusterUrls = \[candidate\.url\]/,
-  "bounded unit photo discovery must scrape one listing URL at a time instead of merging every unit at the same street address",
-);
+{
+  const fetchUnitStart = routesSource.indexOf('app.post("/api/community/fetch-unit-photos"');
+  const fetchUnitEnd = routesSource.indexOf('app.post("/api/community/generate-listing"', fetchUnitStart);
+  const fetchUnitSource = routesSource.slice(fetchUnitStart, fetchUnitEnd);
+  assert.ok(
+    fetchUnitSource.includes("groupListingUrlsByIdentity")
+      && fetchUnitSource.includes("listingIdentityClusterKey")
+      && fetchUnitSource.includes("listingUrlsByCluster.get(clusterKey) ?? [candidate.url]")
+      && !fetchUnitSource.includes("const clusterUrls = [candidate.url]"),
+    "Add Combo must group same-unit portal mirrors with the shared unit-aware cluster helper",
+  );
+  assert.ok(
+    fetchUnitSource.includes("MAX_FULL_GALLERY_OPTIONS")
+      && fetchUnitSource.includes("selectBestPhotoGalleryOption(fullGalleryOptions)"),
+    "Add Combo must inspect a bounded set of viable galleries and select the best instead of returning the first adequate result",
+  );
+}
 assert.match(
   routesSource,
   /rescrape-unit-photos[\s\S]*unitGalleryMaxKeep\(scraped\.length\)/,
@@ -2722,9 +2740,9 @@ assert.match(
 // units into one cluster and the dual-source scrape stamps one unit's bedroom count +
 // photos onto its neighbors (real 3BRs wrongly rejected as the cluster's 1BR).
 assert.ok(
-  routeSource.includes("const listingClusterKeyFor = (url: string, contextText = \"\"): string =>")
-    && /listingClusterKeyFor[\s\S]*?\$\{root\}#\$\{unit\}/.test(routeSource),
-  "replacement find-unit must cluster portals by unit identity (street root + unit number), not a bare street root",
+  routeSource.includes("listingIdentityClusterKey(listingIdentityFor(url, contextText))")
+    && routeSource.includes("const listingUrlsByCluster = groupListingUrlsByIdentity("),
+  "replacement find-unit must use the shared street-root + unit identity cluster helper",
 );
 assert.ok(
   !/const clusterKey = streetRootFromListingAddress\(/.test(routeSource)
@@ -2744,13 +2762,14 @@ assert.ok(
   assert.ok(fcuStart >= 0 && fcuEnd > fcuStart, "find-clean-unit route must be locatable for source-lock");
   const fcuSource = routeSource.slice(fcuStart, fcuEnd);
   assert.ok(
-    fcuSource.includes("const listingClusterKeyFor = (url: string, contextText = \"\"): string =>")
-      && /listingClusterKeyFor[\s\S]*?\$\{root\}#\$\{unit\}/.test(fcuSource),
-    "find-clean-unit must cluster portals by unit identity (street root + unit token), not a bare street root",
+    fcuSource.includes("listingIdentityClusterKey(listingIdentityFor(url, contextText))")
+      && fcuSource.includes("groupListingUrlsByIdentity(candidateUrls"),
+    "find-clean-unit must use the shared street-root + unit identity cluster helper",
   );
   assert.ok(
     !/streetRootFromAddress\(addressGuess\)\s*\?\?\s*`__url:/.test(fcuSource)
-      && (fcuSource.match(/const clusterKey = listingClusterKeyFor\(/g) || []).length >= 2,
+      && fcuSource.includes("groupListingUrlsByIdentity(candidateUrls")
+      && fcuSource.includes("const clusterKey = listingClusterKeyFor("),
     "find-clean-unit cluster build + lookup must both use the unit-aware listingClusterKeyFor helper",
   );
 }
@@ -3065,9 +3084,36 @@ assert.ok(
   routeSource.includes("scrapeListingPhotosDualSource(clusterUrls, candidateFacts, SCRAPE_WITHOUT_SIDECAR)"),
   "replacement find-unit must not open local Chrome during photo scrape",
 );
+{
+  const legacyStart = routeSource.indexOf('app.post("/api/photos/find-replacement"');
+  const legacyEnd = routeSource.indexOf("// ============================================================\n  // Fetch Zillow listing photos", legacyStart);
+  const legacySource = routeSource.slice(legacyStart, legacyEnd);
+  assert.ok(
+    legacySource.includes('/api/replacement/find-unit')
+      && !legacySource.includes("site:zillow.com")
+      && !legacySource.includes("scrapeListingPhotos(url"),
+    "the legacy replacement endpoint must delegate to the canonical four-portal finder instead of maintaining a divergent source pool",
+  );
+}
 assert.ok(
   routeSource.includes("if (scrapedPhotoUrls.length < MIN_PHOTOS) {"),
-  "replacement find-unit must try equivalent Zillow sources when the primary scrape is photo-sparse",
+  "replacement find-unit must try equivalent portal sources when the primary scrape is photo-sparse",
+);
+{
+  const equivalentStart = routeSource.indexOf("const findEquivalentPhotoSource = async");
+  const equivalentEnd = routeSource.indexOf("// PR #322", equivalentStart);
+  const equivalentSource = routeSource.slice(equivalentStart, equivalentEnd);
+  assert.ok(
+    equivalentSource.includes("buildEquivalentPortalQueries({")
+      && equivalentSource.includes("[...knownClusterUrls, link]")
+      && !equivalentSource.includes('source === "realtor"'),
+    "replacement equivalent lookup must use the shared four-portal query builder and admit Realtor results",
+  );
+}
+assert.ok(
+  routeSource.includes("signal: AbortSignal.timeout(280_000)")
+    && preflightJobsSource.includes("}, 190_000);"),
+  "shared replacement callers must leave enough time for the canonical finder and the bounded three-gallery Add Combo scan",
 );
 assert.ok(
   routeSource.includes("cdn-redfin"),

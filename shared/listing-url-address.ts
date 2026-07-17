@@ -41,5 +41,8 @@ export function parseListingAddressFromUrl(url: string): string | null {
     return clean(`${street}${unit}`);
   }
 
+  const homesMatch = url.match(/homes\.com\/property\/([^/?#]+)(?:\/|$)/i);
+  if (homesMatch) return clean(homesMatch[1]);
+
   return null;
 }
