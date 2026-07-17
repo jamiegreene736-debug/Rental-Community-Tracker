@@ -29,6 +29,7 @@ import {
 } from "../shared/bedroom-same-room-logic";
 import { groupSameBedroomsViaVision, type SameRoomRep } from "./bedroom-same-room-vision";
 import { computeDhash } from "./photo-hashing";
+import { photoFolderDiskName } from "./photo-folder-source";
 import type { CheckGroupInput } from "./photo-community-check";
 
 const BEDROOM_FOLDER_CAP = 150;
@@ -55,7 +56,7 @@ type BedroomVisionClassification = {
 };
 
 function publicPhotoDir(folder: string): string {
-  const safe = folder.replace(/[^a-zA-Z0-9_-]+/g, "-");
+  const safe = photoFolderDiskName(folder);
   return path.resolve(process.cwd(), "client/public/photos", safe);
 }
 

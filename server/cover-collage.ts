@@ -140,6 +140,7 @@ async function callCollageVision(
 async function visionPick(
   apiKey: string,
   candidates: ResolvedCandidate[],
+  requirePatioProof = false,
 ): Promise<CollagePickIndices> {
   const sample = evenSampleIndices(candidates.length, VISION_PHOTO_CAP);
   const sampled = sample.map((i) => candidates[i]);
@@ -151,6 +152,27 @@ async function visionPick(
   const raw = await callCollageVision(apiKey, photos);
   const pick = parseCollageVisionPick(raw, sampled.length);
   if (!pick) throw new Error("vision reply was not a usable pick");
+  const sampledCommunity = sampled.map((candidate, index) => ({ candidate, index }))
+    .filter(({ candidate }) => (candidate.source ?? "").toLowerCase().startsWith("community"));
+  const sampledUnits = sampled.map((candidate, index) => ({ candidate, index }))
+    .filter(({ candidate }) => !(candidate.source ?? "").toLowerCase().startsWith("community"));
+  if (requirePatioProof && sampledCommunity.length === 0) {
+    throw new Error("vision pick has no published community-photo pool for the left panel");
+  }
+  if (requirePatioProof && sampledUnits.length === 0) {
+    throw new Error("vision pick has no published unit-photo pool for the right patio panel");
+  }
+  if (sampledCommunity.length > 0 && !sampledCommunity.some(({ index }) => index === pick.leftIndex)) {
+    throw new Error("vision pick did not place a community photo on the left");
+  }
+  if (sampledUnits.length > 0 && !sampledUnits.some(({ index }) => index === pick.rightIndex)) {
+    throw new Error("vision pick did not place a unit patio photo on the right");
+  }
+  if (requirePatioProof && !new Set([
+    "patio", "lanai", "balcony", "deck", "porch", "outdoor-transition",
+  ]).has(pick.rightScene ?? "")) {
+    throw new Error("vision pick did not prove the right panel is a patio, lanai, balcony, deck, porch, or outdoor-transition space");
+  }
   return {
     leftIndex: sample[pick.leftIndex],
     rightIndex: sample[pick.rightIndex],
@@ -191,6 +213,9 @@ async function preparePanel(
 
 export async function generateAutoCoverCollage(opts: {
   photos: CollageCandidate[];
+  /** Dashboard full-audit rail: Claude must make the pick. Manual callers
+   * omit this and retain the existing fail-soft caption heuristic. */
+  requireVision?: boolean;
   /** Real-ESRGAN hook (routes.ts passes upscaleWithReplicateKw). Absent/null
    * result → classical resize only. */
   upscale?: (buf: Buffer, mimeType: string, scale: number) => Promise<Buffer | null>;
@@ -205,18 +230,29 @@ export async function generateAutoCoverCollage(opts: {
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   const visionEnabled = !!apiKey && process.env.COVER_COLLAGE_VISION_DISABLED !== "1";
+  if (opts.requireVision && !visionEnabled) {
+    throw new Error(
+      !apiKey
+        ? "Claude cover selection requires ANTHROPIC_API_KEY"
+        : "Claude cover selection is disabled by COVER_COLLAGE_VISION_DISABLED",
+    );
+  }
 
   let pick: CollagePickIndices | null = null;
   let method: "vision" | "heuristic" = "heuristic";
   if (visionEnabled) {
     try {
-      pick = await visionPick(apiKey!, candidates);
+      pick = await visionPick(apiKey!, candidates, opts.requireVision === true);
       method = "vision";
     } catch (e: any) {
+      if (opts.requireVision) {
+        throw new Error(`Claude could not select the cover collage: ${e?.message ?? e}`);
+      }
       console.warn(`[cover-collage] vision pick failed (falling back to caption heuristic): ${e?.message ?? e}`);
     }
   }
   if (!pick) {
+    if (opts.requireVision) throw new Error("Claude did not return a usable cover-collage pair");
     pick = heuristicCollagePick(candidates);
     method = "heuristic";
   }

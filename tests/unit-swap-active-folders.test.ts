@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import {
+  collectUnitSwapSkipUrls,
   latestUnitSwapsByUnit,
   replacementPhotoFolderForUnit,
   resolveActiveUnitPhotoFolders,
@@ -25,6 +26,26 @@ console.log("unit-swap-active-folders: active photo-folder resolution");
 }
 check("swap rows without oldUnitId are ignored",
   latestUnitSwapsByUnit([{ oldUnitId: "" }, { oldUnitId: "u-a" }]).size === 1);
+
+// Replacement searches exclude every historical source, not only the newest
+// row per unit, plus every candidate burned during the current retry loop.
+{
+  const skipUrls = collectUnitSwapSkipUrls([
+    { newSourceUrl: "https://www.zillow.com/homedetails/older-source/123_zpid/?utm_source=first" },
+    { newSourceUrl: "https://zillow.com/homedetails/current-source/456_zpid/" },
+    { newSourceUrl: "https://zillow.com/homedetails/older-source/123_zpid/#photos" },
+    { newSourceUrl: "data:text/plain,not-a-listing" },
+  ], [
+    "https://www.redfin.com/HI/Koloa/rejected-candidate/home/789?source=search",
+    "https://redfin.com/HI/Koloa/rejected-candidate/home/789#photos",
+    null,
+  ]);
+  check("all historical and rejected listing sources are excluded without query/hash duplicates",
+    skipUrls.length === 3
+    && skipUrls.some((url) => url.includes("older-source"))
+    && skipUrls.some((url) => url.includes("current-source"))
+    && skipUrls.some((url) => url.includes("rejected-candidate")));
+}
 
 // resolveActiveUnitPhotoFolders
 const units = [

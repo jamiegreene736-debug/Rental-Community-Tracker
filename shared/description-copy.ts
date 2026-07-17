@@ -94,6 +94,37 @@ export const DESCRIPTION_OVERRIDE_FIELDS = [
 ] as const;
 export type PropertyDescriptionOverrideField = (typeof DESCRIPTION_OVERRIDE_FIELDS)[number];
 
+export type DescriptionReadbackMismatch = {
+  field: string;
+  sent: string;
+  saved: string;
+};
+
+/**
+ * Guesty may normalize line endings and surrounding whitespace while storing
+ * public-description fields. Those representation-only changes are accepted;
+ * every character inside the trimmed value must still round-trip exactly.
+ */
+export function normalizeDescriptionReadback(value: unknown): string {
+  return String(value ?? "").replace(/\r\n?/g, "\n").trim();
+}
+
+/** Compare only fields included in the write payload. */
+export function findDescriptionReadbackMismatches(
+  sent: Record<string, unknown>,
+  saved: Record<string, unknown>,
+): DescriptionReadbackMismatch[] {
+  const mismatches: DescriptionReadbackMismatch[] = [];
+  for (const [field, value] of Object.entries(sent)) {
+    const normalizedSent = normalizeDescriptionReadback(value);
+    const normalizedSaved = normalizeDescriptionReadback(saved[field]);
+    if (normalizedSent !== normalizedSaved) {
+      mismatches.push({ field, sent: normalizedSent, saved: normalizedSaved });
+    }
+  }
+  return mismatches;
+}
+
 /** Paragraph separator used between disclosure blocks and the summary
  * body — mirrored by the client builder and the server reflow route. */
 export const SUMMARY_DISCLOSURE_SEPARATOR = "\n\n---\n\n";

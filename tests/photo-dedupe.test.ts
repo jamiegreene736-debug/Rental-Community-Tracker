@@ -2,6 +2,7 @@ import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import {
   buildDedupeVisionInstruction,
+  buildCompleteVisionBatchPlan,
   buildDuplicateGroupsForFolder,
   clusterHashPairs,
   dedupeEdgeAllowed,
@@ -41,6 +42,27 @@ check("clusterHashPairs default threshold stays below the 25-36 look-alike band"
   NEAR_DUPLICATE_DISTANCE <= 16);
 
 console.log("photo-dedupe: vision parse");
+
+const oneBatch = buildCompleteVisionBatchPlan(60, 60, 12);
+check("complete vision plan uses one call when the folder fits the cap",
+  oneBatch.complete && oneBatch.batches.length === 1 && oneBatch.batches[0].length === 60);
+
+const pairCover = buildCompleteVisionBatchPlan(61, 60, 12);
+const allPairsCovered = (() => {
+  if (!pairCover.complete) return false;
+  for (let a = 0; a < 61; a++) {
+    for (let b = a + 1; b < 61; b++) {
+      if (!pairCover.batches.some((batch) => batch.includes(a) && batch.includes(b))) return false;
+    }
+  }
+  return true;
+})();
+check("complete vision plan pair-covers every photo above the one-call cap",
+  pairCover.batches.length === 3 && allPairsCovered && pairCover.batches.every((batch) => batch.length <= 60));
+
+const overBudget = buildCompleteVisionBatchPlan(181, 60, 12);
+check("complete vision plan fails explicitly when exhaustive coverage exceeds its budget",
+  !overBudget.complete && overBudget.batches.length === 0 && /require 21 exhaustive Claude batches/.test(overBudget.error || ""));
 
 const idMap = new Map<string, number>([["p1", 0], ["p2", 1], ["p3", 2]]);
 const parsedGroups = parseDedupeVisionGroups({
@@ -162,8 +184,11 @@ const folderResult: DedupeFolderResult = {
   folder: "f",
   label: "Unit A (2BR)",
   totalVisible: 10,
+  visionEligible: 10,
   scannedForVision: 10,
+  visionBatchCount: 1,
   visionUsed: true,
+  visionComplete: true,
   visionError: null,
   groups: [
     {
@@ -272,31 +297,41 @@ check("no propertyId → no push (the opt-in gate)",
 // (community ladder / replace / collage). The sweep DOES sync its dedupe
 // hides to Guesty (decided 2026-07-15) — but at its OWN seam: one
 // fire-and-forget re-push at sweep END, after every photo stage and the
-// retry rails (startSweepDedupeGuestySync), never via the mid-sweep body.
+// retry rails, never via the mid-sweep body. Standard audits may start that
+// final push in the background; strict bulk audits await and verify it.
 const sweepSource = readFileSync("server/unit-audit-sweep.ts", "utf8");
 check("sweep loopback apply body stays { scanId, remove } — no propertyId, no mid-sweep push",
   sweepSource.includes(`"/api/builder/photo-dedupe-apply", { scanId, remove }`));
 
 // The sweep's end-of-sweep sync seam (2026-07-15):
-check("sweep tracks its dedupe hides per job for the end-of-sweep sync",
-  sweepSource.includes("const dedupeHiddenThisSweep = new Map<string, number>()")
-  && sweepSource.includes("dedupeHiddenThisSweep.set(record.jobId, (dedupeHiddenThisSweep.get(record.jobId) ?? 0) + remove.length)"));
-check("sweep fires ONE gallery re-push at sweep END, fire-and-forget (never blocks the receipt)",
-  sweepSource.includes("void repushGuestyPhotosForProperty(record.propertyId"));
+check("sweep durably tracks local gallery changes + dedupe hides for the end-of-sweep sync",
+  sweepSource.includes("pendingGuestyGallerySync: true")
+  && sweepSource.includes("pendingDedupeHiddenCount: record.pendingDedupeHiddenCount + remove.length")
+  && !sweepSource.includes("dedupeHiddenThisSweep"));
+check("sweep fires ONE gallery re-push at sweep END; strict audits await it while standard audits stay fire-and-forget",
+  sweepSource.includes("const pushPromise = repushGuestyPhotosForProperty(record.propertyId")
+  && sweepSource.includes("if (!record.fullAutomation)")
+  && sweepSource.includes("void pushPromise.then(")
+  && sweepSource.includes("const result = await pushPromise"));
 check("the end-of-sweep push runs AFTER the retry rails, before the receipt (completed path)",
   /unitAuditRetryStageIds[\s\S]*noteSweepDedupeGuestySync\(record\);[\s\S]*const headline = unitAuditHeadline/.test(sweepSource));
 check("a FAILED sweep still syncs its durable hides; a CANCELLED sweep does not",
   /noteSweepDedupeGuestySync\(record\);\s*\n\s*touch\(record, \{ status: "failed"/.test(sweepSource)
   && !/noteSweepDedupeGuestySync\(record\);\s*\n\s*touch\(record, \{ status: "cancelled"/.test(sweepSource));
-check("a replace-rung swap this sweep makes the dedupe push redundant — skipped, not doubled",
-  sweepSource.includes("replacedThisSweep.has(record.jobId)")
-  && sweepSource.includes("already removed from Guesty by the unit replacement's gallery re-push"));
+check("a replace-rung resets pre-swap hides, while newer post-swap hides still reach the final push",
+  sweepSource.includes("if (rungResult.ok) await clearGuestyGallerySyncPending(record)")
+  && sweepSource.indexOf("if (rungResult.ok) await clearGuestyGallerySyncPending(record)")
+    < sweepSource.indexOf("const dedupe = await stagePhotoDedupe(target, record)")
+  && sweepSource.includes("pendingDedupeHiddenCount: record.pendingDedupeHiddenCount + remove.length")
+  && !sweepSource.includes("already removed from Guesty by the unit replacement's gallery re-push"));
 check("sweep dedupe push has a kill switch (AUDIT_DEDUPE_GUESTY_PUSH=0) with honest receipt copy",
   sweepSource.includes(`process.env.AUDIT_DEDUPE_GUESTY_PUSH`)
-  && sweepSource.includes("NOT removed from Guesty (AUDIT_DEDUPE_GUESTY_PUSH=0)"));
-check("the sync verdict lands on the photo-dedupe receipt row (at-most-once — the map entry is consumed)",
+  && sweepSource.includes("NOT synchronized to Guesty (AUDIT_DEDUPE_GUESTY_PUSH=0)"));
+check("the sync verdict lands on the photo-dedupe receipt row and clears the durable handoff only after success",
   sweepSource.includes(`record.stages.find((s) => s.stage === "photo-dedupe")`)
-  && sweepSource.includes("dedupeHiddenThisSweep.delete(record.jobId);"));
+  && sweepSource.includes("if (result.ok && !result.skipped && exactGalleryVerified)")
+  && sweepSource.includes("await clearGuestyGallerySyncPending(record, {")
+  && sweepSource.includes("finalGuestyGalleryVerified: true"));
 
 // The whole propagation depends on the repush assembly dropping hidden
 // photos — if this filter goes, the re-push would re-publish the dupes.

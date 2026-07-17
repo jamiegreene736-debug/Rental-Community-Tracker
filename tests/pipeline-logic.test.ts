@@ -1456,6 +1456,7 @@ console.log("\npricing tables suite");
 
 import { getBuyInRate, suggestPricingArea, BUY_IN_RATES, setLivePropertyMarketRates, targetMarginForProperty, MARKET_RATE_TARGET_MARGIN, PROPERTY_TARGET_MARGIN_OVERRIDES, LODGING_TAX_PCT, applyLodgingTaxGrossUp } from "../shared/pricing-rates";
 import { buyInMarketKeyForScoutCommunity, resolveBuyInMarket, searchLocationForBuyInMarket, textMatchesResortPhrase } from "../shared/buy-in-market";
+import { buildPricingAuditReceipt } from "../server/pricing-audit-receipt";
 
 // Global market-rate markup is 20% (operator 2026-07-01, was 15%). The
 // per-property override chokepoint still returns the global for anyone not
@@ -1506,6 +1507,64 @@ console.log("  ✓ live median engine stores the raw SearchAPI median (no lodgin
 assert.ok(
   routesSource.includes('process.env.STATIC_RATE_ENGINE === "1"'),
   "staticRateEngineEnabled must be opt-in — default OFF routes the market-rate update to the SearchAPI Airbnb median engine",
+);
+assert.ok(
+  routesSource.includes("if (staticRateEngineEnabled() && hooks?.forceSearchApi !== true)") &&
+  routesSource.includes("forceSearchApi?: boolean"),
+  "strict callers can bypass STATIC_RATE_ENGINE and force the live SearchAPI pricing path",
+);
+
+const pricingReceipt = buildPricingAuditReceipt({
+  propertyId: 23,
+  runId: "pricing-test",
+  completedAt: "2026-07-17T12:00:00.000Z",
+  rows: [{
+    bedrooms: 2,
+    monthlyRates: {
+      "2026-08": {
+        medianNightly: 410,
+        channelCount: 1,
+        sampleCount: 8,
+        evidence: { searchedAt: "2026-07-17T11:00:00.000Z" },
+        hybrid: { notes: ["Stored SearchAPI median from live Airbnb comps."] },
+      },
+      "2026-09": {
+        medianNightly: 390,
+        channelCount: 0,
+        sampleCount: 0,
+        hybrid: { notes: ["No usable exact-2BR SearchAPI comps; priced from static seasonal buy-in $390."] },
+      },
+      "2027-08": {
+        medianNightly: 422,
+        channelCount: 0,
+        sampleCount: 0,
+        hybrid: { notes: ["Year-2 extrapolation: 2026-08 SearchAPI basis + 3%."] },
+      },
+    },
+  }],
+});
+assert.equal(pricingReceipt.engine, "searchapi-airbnb");
+assert.equal(pricingReceipt.searchAttemptMonths, 2, "live and thin first-year SearchAPI attempts are both receipted");
+assert.equal(pricingReceipt.liveCompMonths, 1);
+assert.equal(pricingReceipt.staticFallbackMonths, 1);
+assert.equal(pricingReceipt.extrapolatedMonths, 1);
+assert.match(pricingReceipt.rowFingerprint, /^sha256:[0-9a-f]{64}$/);
+assert.throws(
+  () => buildPricingAuditReceipt({ propertyId: 23, runId: "none", rows: [{ bedrooms: 2, monthlyRates: {} }] }),
+  /no durable SearchAPI monthly research evidence/,
+  "a successful HTTP shell without monthly SearchAPI evidence cannot satisfy strict audit provenance",
+);
+console.log("  ✓ strict pricing receipt proves this invocation's SearchAPI attempts and saved monthly mix");
+assert.ok(
+  routesSource.includes("forceSearchApi,") &&
+  routesSource.includes("refreshHybridPricingForDraft(") &&
+  routesSource.includes("refreshHybridPricingForProperty({"),
+  "the pricing-tab wrapper forwards forceSearchApi and the bypass falls through to the hybrid SearchAPI engines",
+);
+assert.equal(
+  routesSource.split("(req.body as any)?.forceSearchApi === true").length - 1,
+  2,
+  "both draft and configured-property refresh routes forward the audit's forceSearchApi request",
 );
 const builderIndexSource = readFileSync("client/src/components/GuestyListingBuilder/index.tsx", "utf8");
 assert.ok(

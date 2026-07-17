@@ -12,10 +12,9 @@
 //     `BEDDING_SCAN_VISION_DISABLED=1` → caption-derived fallback);
 //   • the fingerprint-scoped scan store in app_settings
 //     (`bedding_photo_scans.v1`, promise-tail + fail-soft);
-//   • the AUDIT comparison vs the Guesty listing's pushed bed layout. It lives
-//     HERE because server/unit-audit-sweep.ts is source-locked to never
-//     contain the string "listingRooms" (the layout stage must never push a
-//     bed layout) — this module only ever GETs.
+//   • the audit comparison plus the strict Dashboard-audit application. Raw
+//     Guesty room reads/writes live HERE so server/unit-audit-sweep.ts only
+//     orchestrates a narrow helper and never edits room payloads itself.
 //
 // Captions are deliberately NOT sent to the vision call: photo_labels captions
 // can go stale (the Ilikai stale-label incident) and the whole point of this
@@ -25,10 +24,15 @@
 
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { storage } from "./storage";
 import { guestyRequest } from "./guesty-sync";
-import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames } from "./builder-photo-groups";
+import {
+  buildPhotoCommunityCheckRequestForProperty,
+  configuredPhotoFolderStatusesForProperty,
+  listPublishedFilenames,
+} from "./builder-photo-groups";
 import type { CheckGroupInput } from "./photo-community-check";
 import { photoFolderFingerprint } from "../shared/photo-folder-verification";
 import {
@@ -37,11 +41,15 @@ import {
   buildBeddingVisionPrompt,
   captionFallbackBedding,
   compareDetectedBeddingToGuestyRooms,
+  isBeddingScanAutoApplyEligible,
+  isStrictClaudeBeddingScan,
+  mergeBeddingScanIntoGuestyRooms,
   parseBeddingScanStore,
   parseBeddingVisionJson,
   parseGuestyListingRoomsForScan,
   serializeBeddingScanStore,
   summarizeDetectedBedding,
+  type BeddingAuditApplication,
   type BeddingPhotoScanRecord,
   type BeddingScanUnit,
   type CaptionFallbackFile,
@@ -59,6 +67,7 @@ const MAX_IMAGE_BYTES = 12 * 1024 * 1024; // pre-downscale read guard
 const BEDROOM_CAP = Number(process.env.BEDDING_SCAN_BEDROOM_CAP || 16);
 const BATHROOM_CAP = Number(process.env.BEDDING_SCAN_BATHROOM_CAP || 10);
 const UNCATEGORIZED_CAP = Number(process.env.BEDDING_SCAN_FALLBACK_CAP || 20);
+const STRICT_BEDDING_PHOTO_LIMIT = 100;
 
 export function beddingVisionEnabled(): boolean {
   return String(process.env.BEDDING_SCAN_VISION_DISABLED ?? "").trim() !== "1";
@@ -77,7 +86,7 @@ export async function loadBeddingScanStore(): Promise<Record<string, BeddingPhot
   }
 }
 
-function persistBeddingScan(record: BeddingPhotoScanRecord): Promise<boolean> {
+function persistBeddingScan(record: BeddingPhotoScanRecord, strict = false): Promise<boolean> {
   const write = storeTail.then(async () => {
     try {
       const raw = await storage.getSetting(BEDDING_PHOTO_SCANS_SETTING_KEY);
@@ -87,13 +96,15 @@ function persistBeddingScan(record: BeddingPhotoScanRecord): Promise<boolean> {
       return true;
     } catch (err: any) {
       // Fail-soft: an unpersisted scan just re-runs next time — the store is a
-      // spend-saver for audits. The explicit tab route opts into required
-      // persistence so it can never claim a timestamp was saved when it wasn't.
+      // spend-saver for audits. Explicit tab scans and Dashboard application
+      // receipts opt into required persistence so they cannot claim a saved
+      // timestamp/result when the write failed.
       console.warn(`[bedding-scan] could not persist property ${record.propertyId}: ${err?.message ?? err}`);
+      if (strict) throw err;
       return false;
     }
   });
-  storeTail = write.then(() => undefined);
+  storeTail = write.then(() => undefined, () => undefined);
   return write;
 }
 
@@ -150,8 +161,12 @@ async function loadScanPhoto(folder: string, filename: string): Promise<ScanPhot
  * then Bathrooms, then — only when the folder has no bed/bath labels at all —
  * an uncategorized slice so a freshly-scraped folder isn't invisible.
  */
-export function selectScanFilenames(group: CheckGroupInput): string[] {
+export function selectScanFilenames(
+  group: CheckGroupInput,
+  opts: { exhaustive?: boolean } = {},
+): string[] {
   const files = (group.filenames ?? []).map((f) => path.basename(String(f))).filter((f) => IMAGE_EXT.test(f));
+  if (opts.exhaustive) return Array.from(new Set(files));
   const categories = group.categories ?? {};
   const bedroom = files.filter((f) => categories[f] === "Bedrooms").slice(0, Math.max(1, BEDROOM_CAP));
   const bathroom = files.filter((f) => categories[f] === "Bathrooms").slice(0, Math.max(1, BATHROOM_CAP));
@@ -203,6 +218,8 @@ export type ScanBeddingOptions = {
   anthropicApiKey?: string;
   /** Explicit tab clicks require the scan/timestamp to be durably saved. */
   requirePersistence?: boolean;
+  /** Strict Dashboard audit: every published unit photo must reach Claude. */
+  exhaustiveVision?: boolean;
 };
 
 /**
@@ -220,11 +237,29 @@ export async function scanBeddingPhotosForProperty(
 
   const built = await buildPhotoCommunityCheckRequestForProperty(propertyId);
   const unitGroups = (built?.request.groups ?? []).filter((g) => g.role === "unit");
+  if (opts.exhaustiveVision) {
+    const configured = await configuredPhotoFolderStatusesForProperty(propertyId);
+    if (!configured) {
+      throw new Error(`Strict bedding scan could not resolve property ${propertyId}`);
+    }
+    const configuredUnits = configured.filter((group) => group.role === "unit");
+    const missingOrEmpty = configuredUnits.filter((group) => !group.folder || group.publishedCount === 0);
+    const scannedUnitIds = new Set(unitGroups.map((group) => group.unitId).filter(Boolean));
+    const omitted = configuredUnits.filter((group) =>
+      group.publishedCount > 0 && (!group.unitId || !scannedUnitIds.has(group.unitId)));
+    if (configuredUnits.length === 0 || missingOrEmpty.length > 0 || omitted.length > 0) {
+      const failures = [...missingOrEmpty, ...omitted].map((group) =>
+        `${group.label} (${group.folder ? `folder ${group.folder} has ${group.publishedCount} published photos` : "no folder configured"})`);
+      throw new Error(
+        configuredUnits.length === 0
+          ? "Strict bedding scan found no configured unit photo folders"
+          : `Strict bedding scan requires every configured unit folder to contain published photos: ${failures.join("; ")}`,
+      );
+    }
+  }
 
   const units: BeddingScanUnit[] = [];
   const fingerprints: Record<string, string> = {};
-  let anyVision = false;
-
   for (const group of unitGroups) {
     try {
       fingerprints[group.folder] = photoFolderFingerprint(await listPublishedFilenames(group.folder));
@@ -247,20 +282,20 @@ export async function scanBeddingPhotosForProperty(
       bedrooms: BeddingScanUnit["bedrooms"],
       bathrooms: BeddingScanUnit["bathrooms"],
       photosScanned: number,
-      evidenceMethod?: BeddingScanUnit["evidenceMethod"],
+      method: "vision" | "captions",
       warning?: string,
     ) => {
-      // Audit coverage deliberately remains inclusive at the 60% floor. The
-      // stricter >60% rule belongs only to the explicit tab auto-apply seam.
       const confident = bedrooms.filter((b) =>
-        b.confidence >= BEDDING_SCAN_MIN_CONFIDENCE).length;
+        isBeddingScanAutoApplyEligible(b.confidence)).length;
       units.push({
         ...base,
-        evidenceMethod,
+        evidenceMethod: method,
         bedrooms,
         bathrooms,
         photosScanned,
         unphotographedBedrooms: expectedBedrooms != null ? Math.max(0, expectedBedrooms - confident) : 0,
+        method,
+        model: method === "vision" ? MODEL : null,
         warning,
       });
     };
@@ -271,14 +306,24 @@ export async function scanBeddingPhotosForProperty(
       continue;
     }
 
-    const filenames = selectScanFilenames(group);
+    const filenames = selectScanFilenames(group, { exhaustive: opts.exhaustiveVision === true });
+    if (opts.exhaustiveVision && filenames.length > STRICT_BEDDING_PHOTO_LIMIT) {
+      throw new Error(
+        `${group.label} has ${filenames.length} published photos; strict bedding vision supports at most ${STRICT_BEDDING_PHOTO_LIMIT} per unit`,
+      );
+    }
     const photos: ScanPhoto[] = [];
     for (const filename of filenames) {
       const p = await loadScanPhoto(group.folder, filename);
       if (p) photos.push(p);
     }
+    if (opts.exhaustiveVision && photos.length !== filenames.length) {
+      throw new Error(
+        `${group.label} strict bedding scan could read only ${photos.length}/${filenames.length} published photos`,
+      );
+    }
     if (photos.length === 0) {
-      finalizeUnit([], [], 0, undefined, "No readable photos on disk for this unit yet.");
+      finalizeUnit([], [], 0, "captions", "No readable photos on disk for this unit yet.");
       continue;
     }
 
@@ -291,7 +336,6 @@ export async function scanBeddingPhotosForProperty(
       const raw = await callBeddingVision(apiKey, prompt, photos);
       const parsed = parseBeddingVisionJson(raw, photos.length);
       if (!parsed) throw new Error("vision answer did not match the required shape");
-      anyVision = true;
       const bedrooms = parsed.bedrooms.map((b) => ({
         beds: b.beds,
         ensuiteFeatures: b.ensuiteFeatures,
@@ -314,11 +358,12 @@ export async function scanBeddingPhotosForProperty(
     }
   }
 
+  const allVision = units.length > 0 && units.every((unit) => unit.method === "vision" && !unit.warning);
   const record: BeddingPhotoScanRecord = {
     propertyId,
     scannedAt: new Date().toISOString(),
-    method: anyVision ? "vision" : "captions",
-    model: anyVision ? MODEL : null,
+    method: allVision ? "vision" : "captions",
+    model: allVision ? MODEL : null,
     units,
     fingerprints,
   };
@@ -330,6 +375,137 @@ export async function scanBeddingPhotosForProperty(
 }
 
 // ── Audit hook ───────────────────────────────────────────────────────────────
+
+export type ApplyBeddingPhotoScanForAuditOptions = {
+  guestyListingId?: string | null;
+  /** Normally a fingerprint-fresh all-Claude scan is reused to control spend. */
+  forceFresh?: boolean;
+  anthropicApiKey?: string;
+};
+
+export type BeddingAuditApplyResult = {
+  record: BeddingPhotoScanRecord;
+  reusedStoredScan: boolean;
+  changed: boolean;
+  guestyStatus: BeddingAuditApplication["guesty"]["status"];
+  items: string[];
+};
+
+/**
+ * Strict automation boundary for Dashboard → Audit selected.
+ *
+ * Unlike the manual Bedding-tab scan, this refuses every caption fallback and
+ * mixed-provenance result. It applies only >60%-confidence photographed
+ * bedrooms into existing Guesty room slots, never changes counts/common rooms,
+ * and always persists a durable local receipt (including bathroom evidence)
+ * whether or not a Guesty listing exists.
+ */
+export async function applyBeddingPhotoScanForAudit(
+  propertyId: number,
+  opts: ApplyBeddingPhotoScanForAuditOptions = {},
+): Promise<BeddingAuditApplyResult> {
+  const stored = opts.forceFresh ? { record: null, fresh: false } : await loadStoredBeddingScan(propertyId);
+  const reusedStoredScan = !!stored.record && stored.fresh && isStrictClaudeBeddingScan(stored.record);
+  const scanned = reusedStoredScan
+    ? stored.record!
+    : await scanBeddingPhotosForProperty(propertyId, {
+        anthropicApiKey: opts.anthropicApiKey,
+        exhaustiveVision: true,
+      });
+
+  if (!isStrictClaudeBeddingScan(scanned)) {
+    const fallbackUnits = scanned.units.filter((unit) => unit.method !== "vision" || !!unit.warning).length;
+    throw new Error(
+      `Bedding audit requires Claude vision for every photographed unit; ${fallbackUnits || "all"} unit(s) used fallback or had unreadable photos`,
+    );
+  }
+
+  const listingId = String(opts.guestyListingId ?? "").trim() || null;
+  let guestyStatus: BeddingAuditApplication["guesty"]["status"] = listingId ? "unchanged" : "not-requested";
+  let guestyError: string | undefined;
+  let changedRooms = 0;
+  const items: string[] = [];
+
+  if (listingId) {
+    try {
+      const listing = await guestyRequest(
+        "GET",
+        `/listings/${encodeURIComponent(listingId)}?fields=${encodeURIComponent("listingRooms bedrooms")}`,
+      ) as Record<string, unknown> | null;
+      const merged = mergeBeddingScanIntoGuestyRooms((listing as any)?.listingRooms, scanned.units);
+      changedRooms = merged.changedRooms;
+      items.push(...merged.applied, ...merged.notes);
+      if (merged.blocked) {
+        guestyStatus = "blocked";
+        guestyError = merged.notes[0]?.slice(0, 500) || "Guesty room slots could not be mapped safely to scan units";
+      } else if (merged.changed) {
+        await guestyRequest("PUT", `/listings/${encodeURIComponent(listingId)}`, { listingRooms: merged.rooms });
+        guestyStatus = "pushed";
+      } else {
+        guestyStatus = "unchanged";
+      }
+    } catch (error: any) {
+      guestyStatus = "failed";
+      guestyError = String(error?.message ?? error).slice(0, 500);
+      items.push(`Guesty bedding push failed: ${guestyError}`);
+    }
+  } else {
+    items.push("No Guesty listing: Claude bedding and bathroom evidence saved locally");
+  }
+
+  const confidentBedrooms = scanned.units.reduce(
+    (total, unit) => total + unit.bedrooms.filter((bedroom) =>
+      isBeddingScanAutoApplyEligible(bedroom.confidence)).length,
+    0,
+  );
+  const confidentBathrooms = scanned.units.reduce(
+    (total, unit) => total + unit.bathrooms.filter((bathroom) =>
+      isBeddingScanAutoApplyEligible(bathroom.confidence)).length,
+    0,
+  );
+  const belowThresholdDetections = scanned.units.reduce(
+    (total, unit) => total
+      + unit.bedrooms.filter((bedroom) => !isBeddingScanAutoApplyEligible(bedroom.confidence)).length
+      + unit.bathrooms.filter((bathroom) => !isBeddingScanAutoApplyEligible(bathroom.confidence)).length,
+    0,
+  );
+  const appliedAt = new Date().toISOString();
+  const auditApplication: BeddingAuditApplication = {
+    id: randomUUID(),
+    appliedAt,
+    scanScannedAt: scanned.scannedAt,
+    method: "vision",
+    minConfidence: BEDDING_SCAN_MIN_CONFIDENCE,
+    localSaved: true,
+    confidentBedrooms,
+    confidentBathrooms,
+    belowThresholdDetections,
+    guesty: {
+      listingId,
+      status: guestyStatus,
+      changedRooms,
+      ...(guestyError ? { error: guestyError } : {}),
+    },
+  };
+  const record: BeddingPhotoScanRecord = { ...scanned, auditApplication };
+  // Unlike scan caching, an audit must not claim success unless this receipt
+  // is durable. The strict store write propagates a DB/settings failure.
+  await persistBeddingScan(record, true);
+
+  if (confidentBedrooms === 0) items.push("Claude found no bedroom evidence above the 60% confidence floor");
+  if (confidentBathrooms === 0) items.push("Claude found no bathroom evidence above the 60% confidence floor");
+  items.push(
+    `Saved ${confidentBedrooms} confident bedroom and ${confidentBathrooms} confident bathroom detection(s); ${belowThresholdDetections} below-threshold detection(s) ignored`,
+  );
+
+  return {
+    record,
+    reusedStoredScan,
+    changed: guestyStatus === "pushed" || confidentBedrooms > 0 || confidentBathrooms > 0,
+    guestyStatus,
+    items,
+  };
+}
 
 export type BeddingAuditCheckResult = {
   /** Receipt lines for the layout stage's items list. */

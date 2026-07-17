@@ -6,7 +6,9 @@ import {
   DESCRIPTION_PLACEHOLDER_PHRASES,
   composeSpaceFromUnitDescriptions,
   composeSummaryWithDisclosures,
+  findDescriptionReadbackMismatches,
   findDescriptionPlaceholders,
+  normalizeDescriptionReadback,
   stripAreaSectionsFromDescription,
 } from "../shared/description-copy";
 
@@ -83,6 +85,22 @@ check("empty/null fields are ignored",
 check("matching is case-insensitive",
   findDescriptionPlaceholders({ space: FALLBACK_SPACE_COMBO.toUpperCase() }).length > 0);
 
+// ── exact normalized Guesty read-back ───────────────────────────────────────
+check("read-back normalization accepts only line-ending and edge-whitespace changes",
+  normalizeDescriptionReadback("  First\r\nSecond \r") === "First\nSecond");
+check("read-back verifier checks every submitted field, including title", (() => {
+  const mismatches = findDescriptionReadbackMismatches(
+    { title: "Exact title", summary: "Line one\r\nLine two", access: "Private home" },
+    { title: "Different title", summary: " Line one\nLine two ", access: "Private home" },
+  );
+  return mismatches.length === 1 && mismatches[0].field === "title";
+})());
+check("read-back verifier catches an omitted non-summary field",
+  findDescriptionReadbackMismatches(
+    { title: "Title", summary: "Summary", houseRules: "Care for the home." },
+    { title: "Title", summary: "Summary" },
+  ).some((mismatch) => mismatch.field === "houseRules"));
+
 // ── source lock: routes.ts fallback copy stays covered by the phrase list ────
 {
   const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
@@ -96,6 +114,23 @@ check("matching is case-insensitive",
     stillPresent.length >= 5);
   check("push-descriptions endpoint runs the placeholder guard",
     /push-descriptions[\s\S]{0,2500}findDescriptionPlaceholders/.test(routes));
+  check("push-descriptions verifies exact normalized read-back and fails mismatches",
+    /push-descriptions[\s\S]{0,5000}findDescriptionReadbackMismatches[\s\S]{0,800}recordGuestyPush\(listingId, "descriptions", "error"[\s\S]{0,300}res\.status\(502\)/.test(routes)
+    && !/const summaryWasSaved/.test(routes));
+  check("Claude output asks for all seven operator-editable fields in both prompt variants",
+    (routes.match(/\"access\": \"1 short paragraph/g) ?? []).length === 2
+    && (routes.match(/\"houseRules\": \"1 short paragraph/g) ?? []).length === 2);
+  check("Claude access/rules prompt forbids unsourced operational specifics",
+    routes.includes("never invent access codes")
+    && routes.includes("parking details")
+    && routes.includes("quiet hours")
+    && routes.includes("check-in or check-out times")
+    && routes.includes("pet rules")
+    && routes.includes("smoking rules")
+    && routes.includes("fee specifics"));
+  check("generate-listing returns access and houseRules for Claude and fallback output",
+    /const access = singleListing[\s\S]{0,1200}access,[\s\S]{0,100}houseRules,/.test(routes)
+    && /access: parsedAccess,[\s\S]{0,100}houseRules: parsedHouseRules/.test(routes));
   check("bulk-combo copy step passes the real unit source URLs",
     /generate-listing[\s\S]{0,600}unit1:\s*\{\s*bedrooms:\s*effUnit1Beds,\s*url:\s*item\.unit1SourceUrl/.test(routes));
   check("draftToGuestySummarySource strips area sections",
@@ -114,6 +149,8 @@ check("matching is case-insensitive",
     builderIndex.includes("/api/builder/descriptions/") && builderIndex.includes("btn-save-descriptions"));
   check("regenerate never applies fallback scaffolding (warning → error)",
     /gen\?\.warning[\s\S]{0,120}throw new Error/.test(builderIndex));
+  check("manual regenerate applies Claude access and houseRules",
+    /gen\?\.access[\s\S]{0,160}gen\?\.houseRules[\s\S]{0,200}!access \|\| !houseRules[\s\S]{0,200}nextEdits\.access[\s\S]{0,100}nextEdits\.houseRules/.test(builderIndex));
 }
 
 // ── composeSummaryWithDisclosures ────────────────────────────────────────────

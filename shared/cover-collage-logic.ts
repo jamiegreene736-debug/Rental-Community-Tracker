@@ -27,6 +27,8 @@ export type CollagePickIndices = {
   leftIndex: number;
   rightIndex: number;
   reasoning: string | null;
+  /** Claude's visual classification of the right panel. */
+  rightScene?: "patio" | "lanai" | "balcony" | "deck" | "porch" | "outdoor-transition" | "interior" | "other";
 };
 
 /** Collage geometry — mirrors the client canvas the manual flow draws
@@ -129,11 +131,11 @@ export function heuristicCollagePick(candidates: CollageCandidate[]): CollagePic
 // ── Vision prompt + parser ───────────────────────────────────────────────────
 
 /**
- * Instruction appended after the numbered candidate images. The pairing rules
- * distill vacation-rental cover research (Vrbo photo guidelines, host-CRO
- * guides, eye-tracking left-bias studies): the strongest destination shot goes
- * LEFT, the space-proof interior RIGHT, and the classic cover mistakes
- * (bathrooms, floor plans, dark/portrait/close-up shots, people) are banned.
+ * Instruction appended after the numbered candidate images. This deliberately
+ * mirrors Load-Bearing #8 and the deterministic fallback: community hero LEFT,
+ * unit patio/lanai RIGHT. The `section` marker attached to each image is the
+ * source of truth for community-vs-unit ownership; Claude judges photo quality
+ * and whether the unit image is genuinely an outdoor transition space.
  */
 export function buildCollageVisionPrompt(photoCount: number): string {
   return [
@@ -141,25 +143,26 @@ export function buildCollageVisionPrompt(photoCount: number): string {
     "",
     "Pick the TWO best photos for the listing's cover collage — a side-by-side 2-up hero image shown as the FIRST photo on Airbnb/VRBO/Booking.com. Guests decide from thumbnails, so this pair drives clicks.",
     "",
-    "LEFT panel — the scroll-stopper that sells the destination: an ocean or beach view (ideally from the lanai/balcony), the pool or resort grounds, or a dramatic waterfront exterior.",
-    "RIGHT panel — proof of the space: a bright, inviting living area (best of all one framing the water through windows or lanai doors), or the strongest interior.",
+    'LEFT panel — choose the strongest image whose marker says section: "Community…": resort pool, beach/ocean, grounds, or community exterior. This must be a COMMUNITY image when one is available.',
+    'RIGHT panel — choose the strongest PATIO/LANAI/BALCONY/DECK/PORCH image from a NON-community unit section. Prefer an ocean/view-facing outdoor transition space. This must be a UNIT image when one is available.',
     "",
     "Preferred pairings, most desirable first:",
-    "1. Ocean/beach view (from the lanai if one exists) + bright living room",
-    "2. Ocean view + pool or resort grounds",
-    "3. Pool or beachfront grounds + living room",
-    "4. Living room with the ocean visible through doors + primary bedroom",
-    "5. Building/resort exterior with palms + living room",
+    "1. Community pool or beachfront grounds + ocean-view unit lanai",
+    "2. Community ocean/beach view + bright unit patio or balcony",
+    "3. Community exterior/grounds + the unit's best deck or porch",
+    "4. If no true unit patio exists, use the strongest non-community unit outdoor-transition image; do not substitute an ordinary interior while a patio/lanai candidate exists.",
     "",
     "Hard rules:",
     "- Both picks must be landscape-oriented, bright daylight, level horizon, and decluttered.",
     "- The two picks must show DIFFERENT subjects — never two angles of the same room or view.",
+    "- Honor the section markers: do not put a unit photo on the community side or a community photo on the unit-patio side when both source groups are available.",
     "- Prefer a pair with matching color temperature and brightness so the collage reads as one image.",
     "- Each panel is center-cropped to a SQUARE, so the subject must survive a square crop.",
     "- NEVER pick: bathrooms, floor plans, maps, close-up/detail shots, dark or blurry or heavily filtered photos, photos with people or pets, screenshots, or watermarked images.",
     "",
     'Respond with ONLY this JSON (no prose, no markdown fences):',
-    '{"left": <photo number>, "right": <photo number>, "reasoning": "<one short sentence on why this pair>"}',
+    'Classify the chosen right image as exactly one of: "patio", "lanai", "balcony", "deck", "porch", "outdoor-transition", "interior", or "other".',
+    '{"left": <photo number>, "right": <photo number>, "rightScene": "<classification>", "reasoning": "<one short sentence on why this pair>"}',
   ].join("\n");
 }
 
@@ -180,7 +183,16 @@ export function parseCollageVisionPick(raw: unknown, photoCount: number): Collag
   const reasoning = typeof obj.reasoning === "string" && obj.reasoning.trim()
     ? obj.reasoning.trim().slice(0, 500)
     : null;
-  return { leftIndex: left - 1, rightIndex: right - 1, reasoning };
+  const rightScene = typeof obj.rightScene === "string"
+    && ["patio", "lanai", "balcony", "deck", "porch", "outdoor-transition", "interior", "other"].includes(obj.rightScene)
+    ? obj.rightScene as CollagePickIndices["rightScene"]
+    : undefined;
+  return {
+    leftIndex: left - 1,
+    rightIndex: right - 1,
+    reasoning,
+    ...(rightScene ? { rightScene } : {}),
+  };
 }
 
 /**

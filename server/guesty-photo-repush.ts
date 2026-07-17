@@ -78,6 +78,8 @@ export type GuestyPhotoRepushResult = {
   photoCount?: number;
   successCount?: number;
   verifiedCount?: number;
+  collagePinned?: boolean;
+  strictGalleryVerified?: boolean;
   error?: string;
 };
 
@@ -170,7 +172,12 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
   return { photos, guestyListingId, propertyName };
 }
 
-async function runRepush(propertyId: number, reason: string, waitForLabelsFolder?: string): Promise<GuestyPhotoRepushResult> {
+async function runRepush(
+  propertyId: number,
+  reason: string,
+  waitForLabelsFolder?: string,
+  requiredCoverCollageUrl?: string,
+): Promise<GuestyPhotoRepushResult> {
   const base: GuestyPhotoRepushResult = { ok: false, propertyId };
   let assembled: Awaited<ReturnType<typeof assemblePushPhotosForProperty>>;
   try {
@@ -192,7 +199,12 @@ async function runRepush(propertyId: number, reason: string, waitForLabelsFolder
     const resp = await fetch(`${loopbackBaseUrl()}/api/builder/push-photos`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...loopbackRequestHeaders() },
-      body: JSON.stringify({ guestyListingId, photos, upscale: true }),
+      body: JSON.stringify({
+        guestyListingId,
+        photos,
+        upscale: true,
+        ...(requiredCoverCollageUrl ? { requiredCoverCollageUrl } : {}),
+      }),
       signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
     });
     if (!resp.ok || !resp.body) {
@@ -201,6 +213,9 @@ async function runRepush(propertyId: number, reason: string, waitForLabelsFolder
     // Drain the NDJSON stream; the final {type:"done"} line carries the counts.
     let successCount = 0;
     let verifiedCount = 0;
+    let expectedPushCount = 0;
+    let collagePinned = false;
+    let strictGalleryVerified = false;
     let sawDone = false;
     const reader = (resp.body as any).getReader();
     const decoder = new TextDecoder();
@@ -219,12 +234,34 @@ async function runRepush(propertyId: number, reason: string, waitForLabelsFolder
             sawDone = true;
             successCount = Number(ev.successCount ?? 0);
             verifiedCount = Number(ev.verifiedCount ?? 0);
+            expectedPushCount = Number(ev.total ?? 0);
+            collagePinned = ev.collagePinned === true;
+            strictGalleryVerified = ev.strictGalleryVerified === true;
           }
         } catch { /* malformed line — ignore */ }
       }
     }
-    const ok = sawDone && successCount > 0;
-    console.log(`[guesty-photo-repush] ${propertyName}: ${ok ? "✓" : "✗"} ${successCount}/${photos.length} pushed, ${verifiedCount} verified on Guesty`);
+    // A non-zero partial upload is not a completed gallery replacement. The
+    // push route reports both the post-cap target (`total`) and the Guesty
+    // read-back (`verifiedCount`); require every attempted photo to be hosted,
+    // PUT, and observed on Guesty before strict audit callers see `ok:true`.
+    const ok = sawDone
+      && expectedPushCount > 0
+      && successCount === expectedPushCount
+      && verifiedCount >= successCount
+      && (!requiredCoverCollageUrl || (collagePinned && strictGalleryVerified));
+    console.log(`[guesty-photo-repush] ${propertyName}: ${ok ? "✓" : "✗"} ${successCount}/${expectedPushCount || photos.length} pushed, ${verifiedCount} verified on Guesty`);
+    const incompleteError = !sawDone
+      ? "push stream ended without a done event"
+      : expectedPushCount <= 0
+        ? "push stream reported no target photos"
+        : successCount !== expectedPushCount
+          ? `only ${successCount}/${expectedPushCount} photos were pushed`
+          : verifiedCount < successCount
+            ? `only ${verifiedCount}/${successCount} pushed photos were verified on Guesty`
+            : requiredCoverCollageUrl && (!collagePinned || !strictGalleryVerified)
+              ? "the exact audit-generated Cover Collage and ordered gallery were not verified on Guesty"
+              : null;
     return {
       ...base,
       ok,
@@ -233,7 +270,9 @@ async function runRepush(propertyId: number, reason: string, waitForLabelsFolder
       photoCount: photos.length,
       successCount,
       verifiedCount,
-      ...(ok ? {} : { error: sawDone ? "Guesty saved 0 photos" : "push stream ended without a done event" }),
+      collagePinned,
+      strictGalleryVerified,
+      ...(ok ? {} : { error: incompleteError ?? "Guesty gallery push was incomplete" }),
     };
   } catch (e: any) {
     const msg = e?.name === "TimeoutError" ? `push timed out after ${Math.round(PUSH_TIMEOUT_MS / 60000)} min` : (e?.message ?? String(e));
@@ -256,13 +295,16 @@ export function repushGuestyPhotosForProperty(
      * for its Claude photo labels so captions/ordering match a manual push.
      */
     waitForLabelsFolder?: string;
+    /** Full-audit identity boundary: require this exact generated collage URL
+     * first in the exact ordered Guesty readback before reporting ok. */
+    requiredCoverCollageUrl?: string;
   } = {},
 ): Promise<GuestyPhotoRepushResult> {
   const reason = opts.reason ?? "manual";
   const tail = pushTails.get(propertyId) ?? Promise.resolve();
   const run = tail
     .catch(() => undefined)
-    .then(() => runRepush(propertyId, reason, opts.waitForLabelsFolder));
+    .then(() => runRepush(propertyId, reason, opts.waitForLabelsFolder, opts.requiredCoverCollageUrl));
   pushTails.set(propertyId, run);
   void run.finally(() => {
     if (pushTails.get(propertyId) === run) pushTails.delete(propertyId);

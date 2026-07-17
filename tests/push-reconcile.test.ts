@@ -233,7 +233,7 @@ check(
 const routesSrc = readFileSync("server/routes.ts", "utf8");
 check(
   "push-photos route stamps the photos ledger on completion",
-  /recordGuestyPush\(\s*guestyListingId,\s*"photos",\s*successCount > 0 \? "success" : "error"/.test(routesSrc),
+  /recordGuestyPush\(\s*guestyListingId,\s*"photos",\s*successCount > 0 && !strictGalleryError \? "success" : "error"/.test(routesSrc),
 );
 check(
   "push-photos route stamps the photos ledger on a failed final PUT too",

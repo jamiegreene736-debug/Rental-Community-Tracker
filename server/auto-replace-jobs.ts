@@ -22,6 +22,7 @@ import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
 import { parseStreetCityState } from "@shared/address-listing-logic";
 import {
+  collectUnitSwapSkipUrls,
   latestUnitSwapsByUnit,
   replacementPhotoFolderForUnit,
   resolveActiveUnitPhotoFolders,
@@ -42,12 +43,14 @@ import {
   type AutoReplaceOrigin,
 } from "@shared/auto-fix-activity";
 import {
+  AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS,
   AUTO_REPLACE_STORE_SETTING_KEY,
   AUTO_REPLACE_RUNNER_LEASE_MS,
   AUTO_REPLACE_UNIT_ID_MAX_LENGTH,
   MAX_AUTO_REPLACE_FIND_RESTARTS,
   MAX_AUTO_REPLACE_RETRIES,
   STUCK_AUTO_REPLACE_ERROR,
+  autoReplaceCommunityRetryBackoffMs,
   clearableAutoReplaceJobIds,
   parseDraftUnitId,
   failStuckAutoReplaceRecords,
@@ -56,6 +59,7 @@ import {
   isAutoReplaceRetryDue,
   isLegacyAutoReplaceFailureRetryable,
   newestAutoReplaceJobsByTarget,
+  isStagedCommunityAuditInconclusive,
   nextStepFromFindJob,
   parseAutoReplaceStore,
   photoListingHasPersistentPhotoFinding,
@@ -65,6 +69,7 @@ import {
   shouldResumeAutoReplaceJob,
   summarizeAutoReplaceQueue,
   type AutoReplaceJobRecord,
+  type AutoReplaceGuestyPhotoPushOutcome,
   type AutoReplacePhase,
 } from "@shared/auto-replace-job-logic";
 import {
@@ -310,7 +315,14 @@ function touch(record: AutoReplaceJobRecord, patch: Partial<AutoReplaceJobRecord
   void mutateStore((store) => {
     const current = store[record.jobId];
     if (snapshot.runnerId && current?.runnerId !== snapshot.runnerId) return;
-    store[record.jobId] = snapshot;
+    // Safety gates are monotonic. A strict dashboard audit may durably upgrade
+    // a queued/finding job owned by another Railway instance; a later
+    // fail-soft progress write from that runner must not downgrade the gate.
+    store[record.jobId] = {
+      ...snapshot,
+      requireBedroomPhotoCoverage: snapshot.requireBedroomPhotoCoverage || current?.requireBedroomPhotoCoverage === true,
+      requireFullCommunityAudit: snapshot.requireFullCommunityAudit || current?.requireFullCommunityAudit === true,
+    };
   });
 }
 
@@ -357,6 +369,8 @@ async function renewAutoReplaceRunnerLease(
 ): Promise<"owned" | "lost" | "unavailable"> {
   let owned = false;
   let leaseUntil = 0;
+  let requireBedroomPhotoCoverage = record.requireBedroomPhotoCoverage;
+  let requireFullCommunityAudit = record.requireFullCommunityAudit;
   try {
     await mutateStoreStrict((store, now) => {
       const current = store[record.jobId];
@@ -367,6 +381,10 @@ async function renewAutoReplaceRunnerLease(
       leaseUntil = now + AUTO_REPLACE_RUNNER_LEASE_MS;
       current.runnerLeaseUntil = leaseUntil;
       current.updatedAt = now;
+      requireBedroomPhotoCoverage ||= current.requireBedroomPhotoCoverage;
+      requireFullCommunityAudit ||= current.requireFullCommunityAudit;
+      current.requireBedroomPhotoCoverage = requireBedroomPhotoCoverage;
+      current.requireFullCommunityAudit = requireFullCommunityAudit;
       store[record.jobId] = current;
       owned = true;
     });
@@ -376,6 +394,8 @@ async function renewAutoReplaceRunnerLease(
   if (!owned) return "lost";
   record.runnerLeaseUntil = leaseUntil;
   record.updatedAt = Date.now();
+  record.requireBedroomPhotoCoverage = requireBedroomPhotoCoverage;
+  record.requireFullCommunityAudit = requireFullCommunityAudit;
   jobs.set(record.jobId, record);
   return "owned";
 }
@@ -561,8 +581,8 @@ async function finishAutoReplaceFailure(
 }
 
 // The same find payload the manual dialog assembles (builder-preflight parity):
-// parsed display address + inferred community street + existing swaps' source
-// URLs as skipUrls. First-hit mode (no collectAllOptions) — the auto flow
+// parsed display address + inferred community street + ALL historical swaps'
+// source URLs plus this job's rejected URLs as skipUrls. First-hit mode (no collectAllOptions) — the auto flow
 // commits the first viable unit, so exhaustive pool-draining is wasted time.
 async function assembleFindPayload(propertyId: number, unitId: string, extraSkipUrls: string[] = []): Promise<Record<string, unknown> | null> {
   const target = await resolveAutoReplaceTarget(propertyId, unitId);
@@ -573,14 +593,12 @@ async function assembleFindPayload(propertyId: number, unitId: string, extraSkip
     state: target.state,
     addressHint: target.street || target.address,
   }) || target.street;
-  const swaps = latestUnitSwapsByUnit(await storage.getUnitSwaps(propertyId).catch(() => []));
-  const skipUrls = Array.from(new Set([
-    ...Array.from(swaps.values()).map((s: any) => String(s?.newSourceUrl ?? "")).filter(Boolean),
-    // Commit-burned URLs (409 in-use / bot-walled gallery / coverage-short) —
-    // a coverage-exhaustion RESTART must not re-find the gallery it just
-    // refused to commit.
-    ...extraSkipUrls.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)),
-  ]));
+  const swaps = await storage.getUnitSwaps(propertyId).catch(() => []);
+  // Do not collapse to latestUnitSwapsByUnit here. Old sources and candidates
+  // rejected by this job are intentionally durable exclusions: a later find
+  // restart must never cycle back to a gallery the audit already replaced or
+  // refused to commit.
+  const skipUrls = collectUnitSwapSkipUrls(swaps, extraSkipUrls);
   return {
     communityFolder: target.communityFolder,
     communityName: target.communityName,
@@ -790,21 +808,23 @@ async function runAutoReplaceJob(
       let burnedInUse = 0;
       let burnedPhotos = 0;
       let burnedCoverage = 0;
+      let burnedCommunity = 0;
       for (;;) {
         const candidate = pickCommitCandidate(units as Array<{ url?: unknown }>, record.attemptedUrls);
         if (!candidate) {
-          // Coverage burns exhausted the pool — widen it instead of failing:
+          // A positive coverage/community rejection exhausted the pool —
+          // widen it instead of failing:
           // re-enter the find phase with every burned URL excluded, on the
-          // same bounded restart budget the deploy-burst path uses. Only for
-          // coverage burns: an all-409/bot-wall exhaustion means the pool
-          // itself is bad and a fresh first-hit search would refind it.
-          if (burnedCoverage > 0 && record.findRestarts < MAX_AUTO_REPLACE_FIND_RESTARTS) {
-            console.warn(`[auto-replace] ${record.jobId}: all ${burnedCoverage + burnedInUse + burnedPhotos} option(s) burned (${burnedCoverage} on bedroom coverage) — searching for more candidates (restart ${record.findRestarts + 1}/${MAX_AUTO_REPLACE_FIND_RESTARTS})`);
+          // same bounded restart budget the deploy-burst path uses. An
+          // all-409/bot-wall exhaustion still fails: a fresh first-hit search
+          // would simply refind the same unusable pool.
+          if ((burnedCoverage > 0 || burnedCommunity > 0) && record.findRestarts < MAX_AUTO_REPLACE_FIND_RESTARTS) {
+            console.warn(`[auto-replace] ${record.jobId}: all ${burnedCoverage + burnedCommunity + burnedInUse + burnedPhotos} option(s) burned (${burnedCoverage} bedroom coverage, ${burnedCommunity} community mismatch) — searching for more candidates (restart ${record.findRestarts + 1}/${MAX_AUTO_REPLACE_FIND_RESTARTS})`);
             touch(record, {
               phase: "finding",
               findJobId: null,
               findRestarts: record.findRestarts + 1,
-              message: "Every found gallery photographed too few bedrooms — searching for more candidates (burned galleries excluded)…",
+              message: "Every found gallery failed bedroom/community verification — searching for more candidates (burned galleries excluded)…",
             });
             continue findCommit;
           }
@@ -812,6 +832,7 @@ async function runAutoReplaceJob(
             burnedInUse > 0 ? `${burnedInUse} already used by another listing` : null,
             burnedPhotos > 0 ? `${burnedPhotos} had a gallery that could not be scraped (bot-walled or photos taken down)` : null,
             burnedCoverage > 0 ? `${burnedCoverage} photographed fewer bedrooms than the unit claims (the audit needs every bedroom in the gallery)` : null,
+            burnedCommunity > 0 ? `${burnedCommunity} positively mismatched the property's community` : null,
           ].filter(Boolean).join("; ");
           await finishAutoReplaceFailure(
             record,
@@ -845,7 +866,10 @@ async function runAutoReplaceJob(
           );
           return;
         }
-        const { status, data } = await postLoopback("/api/unit-swaps", {
+        let commitResponse: { status: number; data: any } | null = null;
+        for (let attempt = 1; attempt <= AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS; attempt++) {
+          if (!(await confirmRunnerLease())) return;
+          commitResponse = await postLoopback("/api/unit-swaps", {
           // The route's fire-and-forget Guesty push is skipped here — this
           // orchestrator runs its OWN awaited push below so the dashboard
           // queue shows push progress and the completed message reports the
@@ -882,8 +906,25 @@ async function runAutoReplaceJob(
           // the commit at staging when the new gallery photographs fewer
           // bedrooms than the unit claims — burned below as coverageShort.
           requireBedroomPhotoCoverage: record.requireBedroomPhotoCoverage === true,
-        }, 300_000); // hydration may use the bounded 90s sidecar scrape tier
-        if (leaseLost) return;
+          // Strict dashboard-audit replacements never overwrite the active
+          // folder until the disposable staging gallery passes the same full
+          // photo-community engine used by pre-flight. Standalone/manual
+          // auto-replace keeps its historical contract (flag defaults off).
+          requireFullCommunityAudit: record.requireFullCommunityAudit === true,
+          }, 900_000); // hydration + bounded sidecar + up to two full staged community audits
+          if (leaseLost) return;
+          if (!isStagedCommunityAuditInconclusive(commitResponse.status, commitResponse.data)) break;
+          if (attempt >= AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS) break;
+          const delayMs = autoReplaceCommunityRetryBackoffMs(attempt);
+          touch(record, {
+            message: `Candidate's staged community audit was inconclusive — keeping the current unit and retrying the same candidate (${attempt + 1}/${AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS}) in ${Math.round(delayMs / 1000)}s…`,
+          });
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+        const { status, data } = commitResponse!;
+        // A generation-precondition failure is authoritative and must be
+        // handled before the generic 409 candidate-burn path. The user's newer
+        // manual/automatic choice always wins.
         if (status === 409 && data?.targetChanged === true) {
           await finishAutoReplaceFailure(
             record,
@@ -895,6 +936,30 @@ async function runAutoReplaceJob(
           burnedInUse += 1;
           touch(record, { attemptedUrls: [...record.attemptedUrls, url], message: "Candidate already in use — trying the next option…" });
           continue;
+        }
+        // A positive staged contradiction is candidate-specific and safe to
+        // burn. The route distinguishes it from infrastructure uncertainty,
+        // which is never burned and falls through to the explicit job failure
+        // below so the current unit remains untouched.
+        if (status === 422 && data?.candidateRejected === true) {
+          const coverageReject = data?.candidateRejection === "bedroom-coverage";
+          if (coverageReject) burnedCoverage += 1;
+          else burnedCommunity += 1;
+          touch(record, {
+            attemptedUrls: [...record.attemptedUrls, url],
+            message: coverageReject
+              ? "Candidate's staged gallery failed bedroom coverage — trying the next option…"
+              : "Candidate's staged gallery is not in this community — trying the next option…",
+          });
+          continue;
+        }
+        if (isStagedCommunityAuditInconclusive(status, data)) {
+          await finishAutoReplaceFailure(
+            record,
+            `The same replacement candidate's community audit remained inconclusive after ${AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS} attempts. The current unit was kept and the candidate was not burned; re-run the audit when Claude/Lens evidence is available.`,
+            { retryablePreCommit: true },
+          );
+          return;
         }
         // 502 from this route = photo hydration failed for THIS candidate
         // (bot-walled gallery / photos taken down since the find phase / the
@@ -1035,6 +1100,7 @@ async function runAutoReplaceVerifyPhase(
     message: "Swap committed — pushing the new photos to Guesty (replaces the old unit's photos on the listing)…",
   });
   let guestyPushNote = "";
+  let guestyPhotoPush: AutoReplaceGuestyPhotoPushOutcome;
   try {
     const push = await repushGuestyPhotosForProperty(record.propertyId, {
       reason: `auto-replace ${record.jobId} (${record.unitLabel})`,
@@ -1042,15 +1108,65 @@ async function runAutoReplaceVerifyPhase(
     });
     if (push.ok && !push.skipped) {
       guestyPushNote = ` ${push.successCount ?? 0} photos re-pushed to Guesty (old photos replaced).`;
+      guestyPhotoPush = {
+        status: "synced",
+        guestyListingId: push.guestyListingId ?? null,
+        photoCount: push.photoCount ?? null,
+        successCount: push.successCount ?? null,
+        verifiedCount: push.verifiedCount ?? null,
+        skipped: null,
+        error: null,
+        completedAt: Date.now(),
+      };
     } else if (push.skipped === "no-guesty-mapping") {
       guestyPushNote = " No Guesty listing is mapped to this property, so there were no old photos to replace on Guesty.";
+      guestyPhotoPush = {
+        status: "not-mapped",
+        guestyListingId: null,
+        photoCount: push.photoCount ?? null,
+        successCount: push.successCount ?? null,
+        verifiedCount: push.verifiedCount ?? null,
+        skipped: push.skipped,
+        error: push.error ?? null,
+        completedAt: Date.now(),
+      };
     } else if (push.skipped) {
       guestyPushNote = ` ⚠ Guesty photo push skipped (${push.skipped}).`;
+      guestyPhotoPush = {
+        status: "skipped",
+        guestyListingId: push.guestyListingId ?? null,
+        photoCount: push.photoCount ?? null,
+        successCount: push.successCount ?? null,
+        verifiedCount: push.verifiedCount ?? null,
+        skipped: push.skipped,
+        error: push.error ?? null,
+        completedAt: Date.now(),
+      };
     } else {
       guestyPushNote = ` ⚠ Guesty photo push failed (${push.error ?? "unknown error"}) — open the builder's Photos tab and use "Push Photos to Guesty".`;
+      guestyPhotoPush = {
+        status: "failed",
+        guestyListingId: push.guestyListingId ?? null,
+        photoCount: push.photoCount ?? null,
+        successCount: push.successCount ?? null,
+        verifiedCount: push.verifiedCount ?? null,
+        skipped: null,
+        error: push.error ?? "unknown error",
+        completedAt: Date.now(),
+      };
     }
   } catch (e: any) {
     guestyPushNote = ` ⚠ Guesty photo push failed (${e?.message ?? e}) — open the builder's Photos tab and use "Push Photos to Guesty".`;
+    guestyPhotoPush = {
+      status: "failed",
+      guestyListingId: null,
+      photoCount: null,
+      successCount: null,
+      verifiedCount: null,
+      skipped: null,
+      error: String(e?.message ?? e),
+      completedAt: Date.now(),
+    };
   }
 
   const expectedRunnerId = record.runnerId === AUTO_REPLACE_RUNNER_ID
@@ -1059,6 +1175,7 @@ async function runAutoReplaceVerifyPhase(
   const previous = { ...record, attemptedUrls: [...record.attemptedUrls] };
   Object.assign(record, {
     phase: "completed",
+    guestyPhotoPush,
     message: `${record.unitLabel} now uses ${committed.newUnitLabel || record.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.${rescanKickNote}${guestyPushNote}`,
     error: null,
     runnerId: null,
@@ -1077,6 +1194,68 @@ async function runAutoReplaceVerifyPhase(
   }
 }
 
+type AutoReplaceGateRequest = {
+  requireBedroomPhotoCoverage?: boolean;
+  requireFullCommunityAudit?: boolean;
+};
+
+function autoReplaceJobSatisfiesRequestedGates(
+  record: AutoReplaceJobRecord,
+  requested: AutoReplaceGateRequest,
+): boolean {
+  return (requested.requireBedroomPhotoCoverage !== true || record.requireBedroomPhotoCoverage)
+    && (requested.requireFullCommunityAudit !== true || record.requireFullCommunityAudit);
+}
+
+async function reuseOrUpgradeAutoReplaceJob(
+  propertyId: number,
+  unitId: string,
+  requested: AutoReplaceGateRequest,
+): Promise<
+  | { kind: "none" }
+  | { kind: "reuse"; job: AutoReplaceJobRecord }
+  | { kind: "blocked"; phase: AutoReplacePhase }
+> {
+  type ReuseOutcome =
+    | { kind: "none" }
+    | { kind: "reuse"; job: AutoReplaceJobRecord }
+    | { kind: "blocked"; phase: AutoReplacePhase };
+  const result: { outcome: ReuseOutcome } = { outcome: { kind: "none" } };
+
+  await mutateStoreStrict((store, now) => {
+    const authoritative = newestAutoReplaceJobsByTarget(Object.values(store))
+      .find((candidate) => candidate.propertyId === propertyId && candidate.unitId === unitId);
+    if (!authoritative || !isAutoReplacePhaseActive(authoritative.phase)) return;
+
+    if (autoReplaceJobSatisfiesRequestedGates(authoritative, requested)) {
+      result.outcome = { kind: "reuse", job: { ...authoritative, attemptedUrls: [...authoritative.attemptedUrls] } };
+      return;
+    }
+
+    // Before the commit boundary, gates can be strengthened monotonically.
+    // Once commit has started, adopting a non-strict run as a strict audit
+    // would fabricate proof that its staged gallery passed checks it skipped.
+    if (authoritative.phase !== "queued" && authoritative.phase !== "finding") {
+      result.outcome = { kind: "blocked", phase: authoritative.phase };
+      return;
+    }
+
+    const upgraded: AutoReplaceJobRecord = {
+      ...authoritative,
+      requireBedroomPhotoCoverage: authoritative.requireBedroomPhotoCoverage
+        || requested.requireBedroomPhotoCoverage === true,
+      requireFullCommunityAudit: authoritative.requireFullCommunityAudit
+        || requested.requireFullCommunityAudit === true,
+      updatedAt: now,
+    };
+    store[upgraded.jobId] = upgraded;
+    result.outcome = { kind: "reuse", job: { ...upgraded, attemptedUrls: [...upgraded.attemptedUrls] } };
+  });
+
+  if (result.outcome.kind === "reuse") jobs.set(result.outcome.job.jobId, result.outcome.job);
+  return result.outcome;
+}
+
 export async function startAutoReplaceJob(input: {
   propertyId: number;
   unitId: string;
@@ -1086,6 +1265,9 @@ export async function startAutoReplaceJob(input: {
   // photograph every claimed bedroom (commit aborts at staging + burns the
   // candidate otherwise). See AutoReplaceJobRecord.requireBedroomPhotoCoverage.
   requireBedroomPhotoCoverage?: boolean;
+  /** Full dashboard audit only: verify the staged candidate with the complete
+   * community engine before committing. Standalone/manual callers omit it. */
+  requireFullCommunityAudit?: boolean;
 }): Promise<{ ok: true; job: AutoReplaceJobRecord } | { ok: false; status: number; error: string }> {
   const propertyId = Number(input.propertyId);
   const unitId = String(input.unitId ?? "");
@@ -1110,7 +1292,7 @@ export async function startAutoReplaceJob(input: {
     }
   }
   const persistedActive = findActiveAutoReplaceJob(combinedStore, propertyId, unitId);
-  if (persistedActive) {
+  if (persistedActive && autoReplaceJobSatisfiesRequestedGates(persistedActive, input)) {
     if (!jobs.has(persistedActive.jobId)) jobs.set(persistedActive.jobId, persistedActive);
     // A cross-instance double-tap only returns the shared receipt. The runner
     // lease/watchdog owns execution; an API request must never duplicate it.
@@ -1129,7 +1311,16 @@ export async function startAutoReplaceJob(input: {
     // create a second job merely because its first write is still in flight.
     const latestRaw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY).catch(() => undefined);
     const latestActive = findActiveAutoReplaceJob(parseAutoReplaceStore(latestRaw ?? null), propertyId, unitId);
-    if (latestActive) return { ok: true, job: latestActive };
+    if (latestActive && autoReplaceJobSatisfiesRequestedGates(latestActive, input)) {
+      return { ok: true, job: latestActive };
+    }
+    if (latestActive) {
+      return {
+        ok: false,
+        status: 409,
+        error: `A replacement job is already ${latestActive.phase} without the requested strict checks. Retry once its queue transition finishes.`,
+      };
+    }
     return { ok: false, status: 409, error: "A replacement job for this unit is already starting — please wait a moment." };
   }
 
@@ -1142,10 +1333,27 @@ export async function startAutoReplaceJob(input: {
     } catch {
       return { ok: false, status: 503, error: "Could not verify the replacement queue safely — please retry." };
     }
-    const lockedActive = findActiveAutoReplaceJob(parseAutoReplaceStore(lockedRaw ?? null), propertyId, unitId);
+    const lockedStore = parseAutoReplaceStore(lockedRaw ?? null);
+    const lockedActive = findActiveAutoReplaceJob(lockedStore, propertyId, unitId);
     if (lockedActive) {
-      jobs.set(lockedActive.jobId, lockedActive);
-      return { ok: true, job: lockedActive };
+      let reuse:
+        | { kind: "none" }
+        | { kind: "reuse"; job: AutoReplaceJobRecord }
+        | { kind: "blocked"; phase: AutoReplacePhase };
+      try {
+        reuse = await reuseOrUpgradeAutoReplaceJob(propertyId, unitId, input);
+      } catch {
+        return { ok: false, status: 503, error: "Could not persist the stricter replacement checks safely — please retry." };
+      }
+      if (reuse.kind === "reuse") return { ok: true, job: reuse.job };
+      if (reuse.kind === "blocked") {
+        return {
+          ok: false,
+          status: 409,
+          error: `A replacement job is already ${reuse.phase} without the requested strict checks. It cannot be adopted as a strict audit after the commit boundary.`,
+        };
+      }
+      return { ok: false, status: 409, error: "The replacement job changed while strict checks were being applied — please retry." };
     }
 
     let targetContext: AutoReplaceTargetContext | null;
@@ -1183,6 +1391,7 @@ export async function startAutoReplaceJob(input: {
       newUnitLabel: null,
       newAddress: null,
       replacementFolder: null,
+      guestyPhotoPush: null,
       message: "Queued",
       error: null,
       createdAt: Date.now(),
@@ -1190,6 +1399,7 @@ export async function startAutoReplaceJob(input: {
       resumeCount: 0,
       findRestarts: 0,
       requireBedroomPhotoCoverage: input.requireBedroomPhotoCoverage === true,
+      requireFullCommunityAudit: input.requireFullCommunityAudit === true,
       retryPhotoFolder,
       retryUnitSwapSnapshot: targetContext.unitSwapSnapshot,
       runnerId: null,

@@ -1842,14 +1842,18 @@ function AdminDashboard() {
     if (propertyIds.length === 0 || bulkAuditStarting) return;
     setBulkAuditStarting(true);
     try {
-      const res = await apiRequest("POST", "/api/unit-audit/bulk", { propertyIds });
+      const res = await apiRequest("POST", "/api/unit-audit/bulk", {
+        propertyIds,
+        fullAutomation: true,
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
       const started = Array.isArray(data?.started) ? data.started.length : 0;
       const skipped = Array.isArray(data?.skipped) ? data.skipped.length : 0;
+      const firstSkipped = skipped > 0 ? String(data.skipped[0]?.error ?? "").trim() : "";
       toast({
         title: `Audit sweeps queued for ${started} propert${started === 1 ? "y" : "ies"}`,
-        description: `They run one at a time server-side — watch the Audit column badges.${skipped > 0 ? ` ${skipped} could not start.` : ""}`,
+        description: `They run one at a time server-side — watch the Audit column badges.${skipped > 0 ? ` ${skipped} could not start.${firstSkipped ? ` ${firstSkipped}` : ""}` : ""}`,
       });
       void queryClient.invalidateQueries({ queryKey: ["/api/dashboard/unit-audit-status"] });
     } catch (e: any) {

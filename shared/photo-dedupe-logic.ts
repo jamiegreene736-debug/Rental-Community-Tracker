@@ -89,6 +89,63 @@ export type VisionDupeGroup = {
   confidence: "high" | "medium";
 };
 
+export type CompleteVisionBatchPlan = {
+  /** Index sets for Claude calls. Every pair co-occurs in at least one set. */
+  batches: number[][];
+  complete: boolean;
+  error: string | null;
+};
+
+/**
+ * Build a bounded set of Claude calls that compares every photo pair.
+ *
+ * A plain sequence of disjoint batches is not complete: photo 10 could be an
+ * alternate angle of photo 70 and the model would never see them together.
+ * Splitting into half-cap chunks and pairing every two chunks guarantees that
+ * every pair co-occurs in at least one call, including pairs within a chunk.
+ * If that guarantee would exceed the configured call budget, callers get an
+ * explicit incomplete plan and must not claim the gallery is clean.
+ */
+export function buildCompleteVisionBatchPlan(
+  photoCount: number,
+  photoCap: number,
+  maxBatches: number,
+): CompleteVisionBatchPlan {
+  const count = Number.isFinite(photoCount) ? Math.max(0, Math.floor(photoCount)) : 0;
+  const cap = Math.floor(photoCap);
+  const budget = Number.isFinite(maxBatches) ? Math.max(0, Math.floor(maxBatches)) : 0;
+  if (count < 2) return { batches: [], complete: true, error: null };
+  if (!Number.isFinite(cap) || cap < 2) {
+    return { batches: [], complete: false, error: `vision photo cap ${String(photoCap)} is below 2` };
+  }
+  if (count <= cap) {
+    if (budget < 1) return { batches: [], complete: false, error: "vision batch budget is 0" };
+    return { batches: [Array.from({ length: count }, (_, i) => i)], complete: true, error: null };
+  }
+
+  const chunkSize = Math.floor(cap / 2);
+  const chunks: number[][] = [];
+  for (let start = 0; start < count; start += chunkSize) {
+    chunks.push(Array.from({ length: Math.min(chunkSize, count - start) }, (_, i) => start + i));
+  }
+  const needed = (chunks.length * (chunks.length - 1)) / 2;
+  if (needed > budget) {
+    return {
+      batches: [],
+      complete: false,
+      error: `${count} photos require ${needed} exhaustive Claude batches (limit ${budget})`,
+    };
+  }
+
+  const batches: number[][] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    for (let j = i + 1; j < chunks.length; j++) {
+      batches.push([...chunks[i], ...chunks[j]]);
+    }
+  }
+  return { batches, complete: true, error: null };
+}
+
 // Parse the vision response. `ids` in the response are "p<N>" markers (1-based
 // over the photos the server actually sent); `idToIndex` maps them back to
 // entry indexes. Anything malformed is dropped — a parse gap must never turn
@@ -302,8 +359,14 @@ export type DedupeFolderResult = {
   folder: string;
   label: string;
   totalVisible: number;
+  /** Photos readable and eligible for the Claude vision pass. */
+  visionEligible: number;
   scannedForVision: number;
+  /** Successful Claude calls used for this folder. */
+  visionBatchCount: number;
   visionUsed: boolean;
+  /** True only when every visible photo was readable and pair-covered. */
+  visionComplete: boolean;
   visionError: string | null;
   groups: DedupeGroup[];
 };

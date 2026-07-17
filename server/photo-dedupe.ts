@@ -12,9 +12,10 @@
 //   1. dHash near-duplicate clustering (deterministic, works with no API key).
 //      Reuses stored photo_labels.perceptual_hash; computes + persists missing
 //      hashes from disk.
-//   2. One batched Claude vision call per folder ("same scene, different
-//      angle" grouping) — fail-soft: any error degrades that folder to
-//      hash-only results, never fails the scan.
+//   2. A batched Claude vision pass per folder ("same scene, different
+//      angle" grouping). Manual scans use one fail-soft sampled call; strict
+//      Dashboard automation opts into bounded exhaustive pair-cover batches
+//      and rejects incomplete coverage upstream.
 //
 // All grouping/keeper/validation decisions live in shared/photo-dedupe-logic.ts.
 
@@ -26,6 +27,7 @@ import { storage } from "./storage";
 import { computeDhash } from "./photo-hashing";
 import {
   buildDedupeVisionInstruction,
+  buildCompleteVisionBatchPlan,
   buildDuplicateGroupsForFolder,
   clusterHashPairs,
   parseDedupeVisionGroups,
@@ -41,9 +43,21 @@ const MODEL = process.env.PHOTO_DEDUPE_MODEL || "claude-sonnet-4-6";
 const ANTHROPIC_TIMEOUT_MS = 120_000;
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-// Cap on photos inlined into the per-folder vision call. Hash clustering still
-// covers EVERY photo; beyond the cap only the AI same-scene signal thins out.
-const VISION_PHOTO_CAP = Number(process.env.PHOTO_DEDUPE_VISION_CAP || 60);
+// Cap on photos inlined into any one vision call. Hash clustering always covers
+// every photo. Manual scans sample down to this cap; strict scans build bounded
+// pair-cover calls so every visible pair is compared or fail explicitly.
+const VISION_PHOTO_CAP = (() => {
+  const n = Number(process.env.PHOTO_DEDUPE_VISION_CAP || 60);
+  return Number.isFinite(n) && n >= 2 ? Math.floor(n) : 60;
+})();
+// Exhaustive pair-cover mode is reserved for strict dashboard automation.
+// Manual Photos-tab scans retain one sampled call per folder. At 60 photos per
+// call, 12 pair-cover calls can exhaustively compare up to 150 photos; larger
+// folders fail explicitly instead of returning a false clean result.
+const COMPLETE_VISION_MAX_BATCHES = (() => {
+  const n = Number(process.env.PHOTO_DEDUPE_COMPLETE_MAX_BATCHES || 12);
+  return Number.isFinite(n) && n >= 1 ? Math.min(30, Math.floor(n)) : 12;
+})();
 // Images are downscaled for the vision call — scene identity doesn't need
 // full resolution, and 60 full-res photos would blow the request size.
 const VISION_IMAGE_WIDTH = 640;
@@ -64,6 +78,11 @@ export type DedupeScanGroupInput = {
   /** Visible filenames in rendered gallery order (the client's photos array). */
   filenames: string[];
   captions?: Record<string, string>;
+};
+
+export type DedupeScanOptions = {
+  /** Compare every visible photo pair with Claude or report incomplete. */
+  requireCompleteVision?: boolean;
 };
 
 // ── Scan store (apply validates against the stored proposal) ───────────────
@@ -165,6 +184,7 @@ function evenSampleIndices(n: number, cap: number): number[] {
 async function scanOneFolder(
   group: DedupeScanGroupInput,
   apiKey: string | undefined,
+  options: DedupeScanOptions,
 ): Promise<DedupeFolderResult> {
   const dir = publicPhotoDir(group.folder);
   let diskFiles: string[] = [];
@@ -229,31 +249,53 @@ async function scanOneFolder(
 
   let visionGroups: VisionDupeGroup[] = [];
   let visionUsed = false;
+  let visionComplete = entries.length < 2;
   let visionError: string | null = null;
   let scannedForVision = 0;
+  let visionBatchCount = 0;
   const visionDisabled = process.env.PHOTO_DEDUPE_VISION_DISABLED === "1";
+  const readable = entries
+    .map((e, i) => ({ entry: e, buffer: buffers[i] }))
+    .filter((x) => x.buffer != null) as Array<{ entry: DedupePhotoEntry; buffer: Buffer }>;
   if (apiKey && !visionDisabled && entries.length >= 2) {
-    const readable = entries
-      .map((e, i) => ({ entry: e, buffer: buffers[i] }))
-      .filter((x) => x.buffer != null) as Array<{ entry: DedupePhotoEntry; buffer: Buffer }>;
-    const sampleIdx = evenSampleIndices(readable.length, VISION_PHOTO_CAP);
-    const sample = sampleIdx.map((i) => readable[i]);
-    scannedForVision = sample.length;
-    if (sample.length >= 2) {
-      const idToIndex = new Map<string, number>();
-      const photos = sample.map((s, n) => {
-        const id = `p${n + 1}`;
-        idToIndex.set(id, s.entry.galleryIndex);
-        return { id, buffer: s.buffer, caption: s.entry.caption };
-      });
-      try {
-        const parsed = await callDedupeVision(apiKey, group.label || group.folder, photos);
-        visionGroups = parseDedupeVisionGroups(parsed, idToIndex);
-        visionUsed = true;
-      } catch (e: any) {
-        visionError = String(e?.message ?? e).slice(0, 200);
-        console.error(`[photo-dedupe] vision pass failed for ${group.folder}: ${visionError}`);
+    const plan = options.requireCompleteVision
+      ? buildCompleteVisionBatchPlan(readable.length, VISION_PHOTO_CAP, COMPLETE_VISION_MAX_BATCHES)
+      : {
+          batches: [evenSampleIndices(readable.length, VISION_PHOTO_CAP)],
+          complete: readable.length <= VISION_PHOTO_CAP,
+          error: null,
+        };
+    if (options.requireCompleteVision && !plan.complete) {
+      visionError = plan.error || "complete Claude pair coverage could not be planned";
+    } else {
+      const covered = new Set<number>();
+      for (let batchIndex = 0; batchIndex < plan.batches.length; batchIndex++) {
+        const sample = plan.batches[batchIndex].map((i) => readable[i]);
+        if (sample.length < 2) continue;
+        const idToIndex = new Map<string, number>();
+        const photos = sample.map((s, n) => {
+          const id = `p${n + 1}`;
+          idToIndex.set(id, s.entry.galleryIndex);
+          return { id, buffer: s.buffer, caption: s.entry.caption };
+        });
+        try {
+          const batchLabel = plan.batches.length > 1
+            ? `${group.label || group.folder} (coverage batch ${batchIndex + 1}/${plan.batches.length})`
+            : group.label || group.folder;
+          const parsed = await callDedupeVision(apiKey, batchLabel, photos);
+          visionGroups.push(...parseDedupeVisionGroups(parsed, idToIndex));
+          visionUsed = true;
+          visionBatchCount += 1;
+          for (const s of sample) covered.add(s.entry.galleryIndex);
+        } catch (e: any) {
+          visionError = String(e?.message ?? e).slice(0, 200);
+          console.error(`[photo-dedupe] vision pass failed for ${group.folder}: ${visionError}`);
+          break;
+        }
       }
+      scannedForVision = covered.size;
+      visionComplete = plan.complete && visionError == null && readable.length === entries.length &&
+        scannedForVision === entries.length && visionBatchCount === plan.batches.length;
     }
   } else if (!apiKey) {
     visionError = "no ANTHROPIC_API_KEY";
@@ -267,8 +309,11 @@ async function scanOneFolder(
     folder: group.folder,
     label: group.label || group.folder,
     totalVisible: entries.length,
+    visionEligible: readable.length,
     scannedForVision,
+    visionBatchCount,
     visionUsed,
+    visionComplete,
     visionError,
     groups,
   };
@@ -276,11 +321,12 @@ async function scanOneFolder(
 
 export async function scanForDuplicatePhotos(
   groups: DedupeScanGroupInput[],
+  options: DedupeScanOptions = {},
 ): Promise<PhotoDedupeProposal> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   const folders: DedupeFolderResult[] = [];
   for (const g of groups) {
-    folders.push(await scanOneFolder(g, apiKey));
+    folders.push(await scanOneFolder(g, apiKey, options));
   }
   const { groupCount, removableCount, warnings } = summarizeDedupeFolders(folders);
   const proposal: PhotoDedupeProposal = {
