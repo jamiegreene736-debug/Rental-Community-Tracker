@@ -57,6 +57,10 @@ export function bumpChannelUsage(
 }
 
 export type CleanSelectorOptions = {
+  // Restrict candidates to a caller-resolved logical gallery. This is required
+  // when multiple units share one physical folder and virtual staging makes
+  // their active filenames diverge.
+  allowedFilenames?: readonly string[];
   // When true, exclude photos that are active on ANY other channel
   // too (not just the target). Matches the spec's "strict clean
   // mode" — prevents re-using the operator's own VRBO photos for
@@ -91,7 +95,8 @@ export async function selectCleanPhotosForChannel(
 ): Promise<CleanSelectorResult> {
   const tolerance = opts.tolerance ?? DUPLICATE_DISTANCE;
   const labels = await storage.getPhotoLabelsByFolder(folder);
-  const visible = labels.filter((l) => !l.hidden);
+  const allowedFilenames = opts.allowedFilenames ? new Set(opts.allowedFilenames) : null;
+  const visible = labels.filter((l) => !l.hidden && (!allowedFilenames || allowedFilenames.has(l.filename)));
   const result: CleanSelectorResult = { selected: [], rejected: [], totalCandidates: visible.length };
 
   // Build the exclusion hash set: every hash currently active on the

@@ -24,6 +24,8 @@ export type GuestyPhoto = {
   url: string;
   caption?: string;
   source?: string;
+  /** Logical builder unit identity; omitted for community/external photos. */
+  unitId?: string;
 };
 
 export type GuestyDescriptions = {

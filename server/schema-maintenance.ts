@@ -632,6 +632,128 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured bulk_combo_listing_job_items re-mix + interruption columns");
 
+  // Approval-based virtual staging. Generated assets live on the mounted photo
+  // volume; these rows provide durable job progress, immutable-original
+  // provenance, and the single active candidate for each logical gallery photo.
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS photo_original_assets (
+      id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      property_id integer NOT NULL,
+      unit_id text NOT NULL,
+      folder text NOT NULL,
+      filename text NOT NULL,
+      source_sha256 text NOT NULL,
+      storage_relative_path text NOT NULL,
+      mime_type text NOT NULL,
+      byte_size integer NOT NULL,
+      width integer,
+      height integer,
+      created_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS photo_original_assets_source_idx
+      ON photo_original_assets (property_id, unit_id, folder, filename, source_sha256)
+  `);
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS virtual_staging_jobs (
+      id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      property_id integer NOT NULL,
+      unit_id text NOT NULL,
+      unit_label text NOT NULL,
+      folder text NOT NULL,
+      status text NOT NULL DEFAULT 'queued',
+      total integer NOT NULL DEFAULT 0,
+      completed integer NOT NULL DEFAULT 0,
+      failed integer NOT NULL DEFAULT 0,
+      model text,
+      error text,
+      requested_by text,
+      approved_by text,
+      selected_candidate_ids jsonb,
+      confirmed_at timestamp,
+      created_at timestamp NOT NULL DEFAULT now(),
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS virtual_staging_jobs_active_unit_idx
+      ON virtual_staging_jobs (property_id, unit_id)
+      WHERE status IN ('queued', 'running')
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS virtual_staging_jobs_unit_created_idx
+      ON virtual_staging_jobs (property_id, unit_id, created_at DESC)
+  `);
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS virtual_staging_candidates (
+      id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      job_id varchar NOT NULL,
+      property_id integer NOT NULL,
+      unit_id text NOT NULL,
+      folder text NOT NULL,
+      original_asset_id varchar NOT NULL,
+      original_filename text NOT NULL,
+      active_filename_at_request text NOT NULL,
+      candidate_filename text NOT NULL,
+      staging_relative_path text,
+      source_sha256 text NOT NULL,
+      room_label text NOT NULL,
+      metadata_snapshot jsonb,
+      status text NOT NULL DEFAULT 'pending',
+      error text,
+      attempt integer NOT NULL DEFAULT 0,
+      generation_token text,
+      generation_lease_expires_at timestamp,
+      model text,
+      active boolean NOT NULL DEFAULT false,
+      approved_by text,
+      approved_at timestamp,
+      created_at timestamp NOT NULL DEFAULT now(),
+      updated_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    ALTER TABLE virtual_staging_candidates
+      ADD COLUMN IF NOT EXISTS generation_token text,
+      ADD COLUMN IF NOT EXISTS generation_lease_expires_at timestamp
+  `);
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS virtual_staging_candidates_job_source_idx
+      ON virtual_staging_candidates (job_id, original_filename)
+  `);
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS virtual_staging_candidates_filename_idx
+      ON virtual_staging_candidates (candidate_filename)
+  `);
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS virtual_staging_candidates_active_source_idx
+      ON virtual_staging_candidates (property_id, unit_id, folder, original_filename)
+      WHERE active = true
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS virtual_staging_candidates_folder_active_idx
+      ON virtual_staging_candidates (folder, active)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS virtual_staging_candidates_job_created_idx
+      ON virtual_staging_candidates (job_id, created_at ASC)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS virtual_staging_candidates_generation_lease_idx
+      ON virtual_staging_candidates (generation_lease_expires_at)
+      WHERE status = 'generating'
+  `);
+  // Candidate metadata is prepared as hidden before a file is copied into the
+  // top-level gallery. This narrow uniqueness guard prevents two confirm
+  // requests from creating duplicate label rows without changing legacy rows.
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS photo_labels_virtual_staged_unique_idx
+      ON photo_labels (folder, filename)
+      WHERE filename LIKE 'virtual-staged-%'
+  `);
+  console.log("[schema] ensured approval-based virtual-staging tables and indexes");
+
   await db.execute(sql`
     ALTER TABLE photo_labels
       ADD COLUMN IF NOT EXISTS bedroom_cluster_id text,

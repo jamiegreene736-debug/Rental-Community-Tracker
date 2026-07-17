@@ -17,10 +17,17 @@
 // … → community-end. This component renders sections keyed by the `source`
 // field each photo carries.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RotateCcw, RotateCw, ChevronLeft, ChevronRight, GripVertical } from "lucide-react";
 import { bestOrderIndices, scopeForSource } from "@shared/photo-order";
 import { normalizePhotoVerdictKey, photoVerdictKeyFromUrl } from "@shared/photo-verdict-keys";
+import { Button } from "@/components/ui/button";
+import VirtualStagingDialog, {
+  type VirtualStagingConfirmedResult,
+  type VirtualStagingUnit,
+} from "./VirtualStagingDialog";
+
+export type { VirtualStagingUnit } from "./VirtualStagingDialog";
 
 type PhotoIn = { url: string; caption?: string; source?: string };
 export type CoverCollageSelection = { left: PhotoIn; right: PhotoIn };
@@ -62,6 +69,10 @@ export type CommunityPhotoVerdict = {
 
 export type PhotoCuratorProps = {
   photos: PhotoIn[];
+  /** Stable, server-validatable Unit A/B identities for virtual staging. */
+  propertyId?: number;
+  virtualStagingUnits?: VirtualStagingUnit[];
+  onVirtualStagingConfirmed?: (result: VirtualStagingConfirmedResult) => void | Promise<void>;
   // folder → source URL on Zillow/Airbnb/VRBO. Populated by the parent
   // from each unit's _source.json so we can render a "View on Zillow"
   // link next to each section header. Optional — links just won't
@@ -120,6 +131,9 @@ export type PhotoCuratorProps = {
 
 export default function PhotoCurator({
   photos,
+  propertyId,
+  virtualStagingUnits,
+  onVirtualStagingConfirmed,
   sourceUrlsByFolder,
   onOverridesChanged,
   coverCollageEnabled,
@@ -149,8 +163,37 @@ export default function PhotoCurator({
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
   const [relabelingFolder, setRelabelingFolder] = useState<string | null>(null);
   const [relabelProgress, setRelabelProgress] = useState<{ done: number; total: number } | null>(null);
+  const [virtualStagingOpen, setVirtualStagingOpen] = useState(false);
+  const [virtualStagingUnit, setVirtualStagingUnit] = useState<VirtualStagingUnit | null>(null);
+  const [virtualStagingBusy, setVirtualStagingBusy] = useState(false);
+  const [virtualStagingSession, setVirtualStagingSession] = useState(0);
+  const virtualStagingLaunchGuard = useRef(false);
+  const virtualStagingTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const virtualStagingControlsRef = useRef<HTMLDivElement | null>(null);
 
   const reorderEnabled = !!onReorderSection;
+
+  const launchVirtualStaging = useCallback((unit: VirtualStagingUnit, trigger: HTMLButtonElement) => {
+    if (
+      virtualStagingLaunchGuard.current
+      || !unit.photoInventoryReady
+      || unit.photoCount <= 0
+      || typeof propertyId !== "number"
+      || !Number.isFinite(propertyId)
+    ) return;
+    // Synchronous guard closes the gap before React commits the disabled state.
+    virtualStagingLaunchGuard.current = true;
+    virtualStagingTriggerRef.current = trigger;
+    setVirtualStagingBusy(true);
+    setVirtualStagingUnit(unit);
+    setVirtualStagingSession((session) => session + 1);
+    setVirtualStagingOpen(true);
+  }, [propertyId]);
+
+  const handleVirtualStagingBusyChange = useCallback((busy: boolean) => {
+    virtualStagingLaunchGuard.current = busy;
+    setVirtualStagingBusy(busy);
+  }, []);
 
   const localFolders = useMemo(() => {
     const set = new Set<string>();
@@ -501,6 +544,78 @@ export default function PhotoCurator({
 
   return (
     <div style={{ marginBottom: 16 }}>
+      {!!virtualStagingUnits?.length && (
+        <div
+          ref={virtualStagingControlsRef}
+          tabIndex={-1}
+          className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-violet-200 bg-violet-50/60 p-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid="virtual-staging-controls"
+        >
+          <div>
+            <div className="text-sm font-semibold text-slate-900">Virtual Staging</div>
+            <div className="mt-0.5 text-xs text-slate-600">
+              Generate alternatives from the preserved originals, then approve each replacement.
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {virtualStagingUnits.slice(0, 2).map((unit) => {
+              const inventoryPending = !unit.photoInventoryReady;
+              const noPhotos = unit.photoCount <= 0;
+              const invalidProperty = typeof propertyId !== "number" || !Number.isFinite(propertyId);
+              const isActiveUnit = virtualStagingBusy && virtualStagingUnit?.id === unit.id;
+              const disabled = inventoryPending || noPhotos || invalidProperty || virtualStagingBusy;
+              const testId = `button-restage-${unit.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+              const title = inventoryPending
+                ? `${unit.label} photo inventory is still loading.`
+                : noPhotos
+                ? `${unit.label} has no photos to restage.`
+                : invalidProperty
+                  ? "This property is not ready for virtual staging."
+                  : virtualStagingBusy
+                    ? "Wait for the current virtual-staging job to finish."
+                    : `Generate virtual-staging alternatives for ${unit.label}.`;
+              return (
+                <Button
+                  key={unit.id}
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={disabled}
+                  title={title}
+                  onClick={(event) => launchVirtualStaging(unit, event.currentTarget)}
+                  data-testid={testId}
+                >
+                  {inventoryPending
+                    ? `Loading ${unit.label} photos…`
+                    : isActiveUnit
+                      ? `Restaging ${unit.label}…`
+                      : `Restage ${unit.label}`}
+                  <span className="text-[11px] font-normal text-muted-foreground">
+                    {inventoryPending
+                      ? "Checking inventory"
+                      : `${unit.photoCount} photo${unit.photoCount === 1 ? "" : "s"}`}
+                  </span>
+                </Button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {virtualStagingUnit && typeof propertyId === "number" && Number.isFinite(propertyId) && (
+        <VirtualStagingDialog
+          key={virtualStagingSession}
+          open={virtualStagingOpen}
+          propertyId={propertyId}
+          unit={virtualStagingUnit}
+          onOpenChange={setVirtualStagingOpen}
+          onBusyChange={handleVirtualStagingBusyChange}
+          onConfirmed={onVirtualStagingConfirmed}
+          returnFocusElement={virtualStagingTriggerRef.current}
+          returnFocusFallbackElement={virtualStagingControlsRef.current}
+        />
+      )}
+
       {/* Channel-limits banner — quick visual check against each
           platform's photo cap. Green ✓ when visibleCount ≤ max, red ✗
           when over. */}

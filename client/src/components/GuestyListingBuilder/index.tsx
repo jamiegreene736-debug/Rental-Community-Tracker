@@ -15,7 +15,7 @@ import {
 } from "@/data/bedding-config";
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
-import PhotoCurator, { type CoverCollageSelection } from "./PhotoCurator";
+import PhotoCurator, { type CoverCollageSelection, type VirtualStagingUnit } from "./PhotoCurator";
 import { PhotoSyncStatusPanel } from "@/components/PhotoSyncStatusPanel";
 import { RateChangeDisplay, RateChangesList } from "@/components/RateChangeDisplay";
 import {
@@ -277,6 +277,7 @@ type Props = {
   // folder → source listing URL (Zillow/Airbnb/VRBO). Fed straight to the
   // PhotoCurator so each unit section can show a "View source listing" link.
   sourceUrlsByFolder?: Record<string, string>;
+  virtualStagingUnits?: VirtualStagingUnit[];
   isSingleListing?: boolean;
   onBuildComplete?: (result: { listingId: string | null }) => void;
   onUpdateComplete?: (result: { listingId: string | null }) => void;
@@ -286,6 +287,7 @@ type Props = {
   // and `propertyData.photos` rebuilds without a full page reload — the
   // tab badge "Photos (N)" and the deleted tile disappear immediately.
   onPhotoOverridesChanged?: () => void;
+  onVirtualStagingConfirmed?: () => void;
 };
 
 const DEFAULT_BOOKING_RULES = {
@@ -1015,7 +1017,7 @@ function GuestyRatePushCard({
   );
 }
 
-export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, isSingleListing = false, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged }: Props) {
+export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, virtualStagingUnits, isSingleListing = false, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged, onVirtualStagingConfirmed }: Props) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
@@ -4301,31 +4303,48 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       type ReqGroup = {
         role: "community" | "unit";
         label: string;
+        unitId?: string;
         folder: string;
         filenames: string[];
         captions: Record<string, string>;
         expectedBedrooms?: number;
         sourceUrl?: string;
       };
-      const byFolder = new Map<string, ReqGroup>();
+      const byGallery = new Map<string, ReqGroup>();
       let expectedCommunity = "";
       for (const p of photos) {
         const parsed = parse(p.url);
         if (!parsed) continue;
         const src = String(p.source ?? "");
         const role: "community" | "unit" = /^community\b/i.test(src) ? "community" : "unit";
+        const unitId = role === "unit" && typeof p.unitId === "string" && p.unitId.trim()
+          ? p.unitId.trim()
+          : undefined;
         if (role === "community" && !expectedCommunity) {
           expectedCommunity = src.replace(/^community\s*[—–-]\s*/i, "").trim();
         }
-        let g = byFolder.get(parsed.folder);
+        // A physical folder can intentionally back multiple logical units. Keep
+        // those galleries separate so scoped staged variants and unit-level
+        // provenance are checked against the unit that actually rendered them.
+        const galleryKey = role === "community"
+          ? `community:${parsed.folder}`
+          : `unit:${parsed.folder}:${unitId ?? src}`;
+        let g = byGallery.get(galleryKey);
         if (!g) {
-          g = { role, label: src || parsed.folder, folder: parsed.folder, filenames: [], captions: {} };
-          byFolder.set(parsed.folder, g);
+          g = {
+            role,
+            label: src || parsed.folder,
+            ...(unitId ? { unitId } : {}),
+            folder: parsed.folder,
+            filenames: [],
+            captions: {},
+          };
+          byGallery.set(galleryKey, g);
         }
         if (!g.filenames.includes(parsed.filename)) g.filenames.push(parsed.filename);
         if (p.caption) g.captions[parsed.filename] = p.caption;
       }
-      for (const g of byFolder.values()) {
+      for (const g of Array.from(byGallery.values())) {
         if (g.role !== "unit") continue;
         const m = g.label.match(/\((\d+)\s*BR\)/i);
         if (m) g.expectedBedrooms = Number(m[1]);
@@ -4334,7 +4353,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         const src = sourceUrlsByFolder?.[g.folder];
         if (src) g.sourceUrl = src;
       }
-      const groups = Array.from(byFolder.values())
+      const groups = Array.from(byGallery.values())
         .sort((a, b) => (a.role === b.role ? a.label.localeCompare(b.label) : a.role === "community" ? -1 : 1));
       if (groups.length === 0) {
         setCommunityCheckError("No local photo folders found to check.");
@@ -8915,7 +8934,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 )}
 
                 {activeTab === "photos" && (
-                  photos.length > 0
+                  photos.length > 0 || (virtualStagingUnits?.length ?? 0) > 0
                     ? <div>
                         {/* Push Photos header */}
                         <div style={{ marginBottom: 16 }}>
@@ -8925,7 +8944,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <button
                                   className="glb-btn glb-btn-primary"
                                   onClick={() => upscaleAndUpload(photos, doUpscale)}
-                                  disabled={!selectedId}
+                                  disabled={!selectedId || photos.length === 0}
                                   data-testid="btn-upscale-upload"
                                   style={{ fontSize: 13 }}
                                 >
@@ -9381,6 +9400,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             legacy two-photo picker → canvas flow. */}
                         <PhotoCurator
                           photos={photos}
+                          propertyId={propertyId}
+                          virtualStagingUnits={virtualStagingUnits}
+                          onVirtualStagingConfirmed={onVirtualStagingConfirmed}
                           sourceUrlsByFolder={sourceUrlsByFolder}
                           onOverridesChanged={onPhotoOverridesChanged}
                           onReorderSection={reorderSection}

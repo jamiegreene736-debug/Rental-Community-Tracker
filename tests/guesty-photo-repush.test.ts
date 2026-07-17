@@ -89,9 +89,27 @@ check("photos with no label row at all fall back to the filename caption", (() =
   return photos[0]?.caption === "Lanai View";
 })());
 
-check("a duplicate folder is only emitted once (shared-gallery guard)", (() => {
+check("identical files from a shared folder are emitted only once", (() => {
   const photos = assembleGuestyPushPhotos([unitGallery, unitGallery]);
   return photos.filter((p) => p.localPath.includes("01-bedroom.jpg")).length === 1;
+})());
+
+check("shared folders preserve distinct per-unit staged candidates", (() => {
+  const photos = assembleGuestyPushPhotos([
+    {
+      folder: "shared-unit-gallery",
+      scope: "unit",
+      files: ["virtual-staged-unit-a.jpg", "02-kitchen.jpg"],
+    },
+    {
+      folder: "shared-unit-gallery",
+      scope: "unit",
+      files: ["virtual-staged-unit-b.jpg", "02-kitchen.jpg"],
+    },
+  ]);
+  return photos.filter((p) => p.localPath.endsWith("/02-kitchen.jpg")).length === 1
+    && photos.some((p) => p.localPath.endsWith("/virtual-staged-unit-a.jpg"))
+    && photos.some((p) => p.localPath.endsWith("/virtual-staged-unit-b.jpg"));
 })());
 
 check("empty folders contribute nothing",

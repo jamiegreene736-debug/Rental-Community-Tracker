@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { fallbackWalkForResort, type WalkResult } from "@shared/walking-distance";
 import { orderGallery } from "@shared/photo-order";
 import { useParams, useLocation } from "wouter";
@@ -107,6 +107,10 @@ function captionFromFilename(filename: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function unitPhotoInventoryKey(unitId: string): string {
+  return `unit:${unitId}`;
+}
+
 // ─── Builder page ─────────────────────────────────────────────────────────────
 export default function Builder() {
   const { propertyId: pidStr } = useParams<{ propertyId: string }>();
@@ -210,6 +214,21 @@ export default function Builder() {
     for (const u of property.units) if (u.photoFolder) folders.add(u.photoFolder);
     return Array.from(folders);
   }, [property]);
+  const photoInventories = useMemo(() => {
+    if (!property) return [];
+    return [
+      ...property.units
+        .filter((unit) => !!unit.photoFolder)
+        .map((unit) => ({
+          key: unitPhotoInventoryKey(unit.id),
+          folder: unit.photoFolder,
+          unitId: unit.id,
+        })),
+      ...(property.communityPhotoFolder
+        ? [{ key: property.communityPhotoFolder, folder: property.communityPhotoFolder, unitId: null }]
+        : []),
+    ];
+  }, [property]);
   const { labelFor, isHidden, categoryFor, sortOrderFor, refresh: refreshPhotoLabels } = usePhotoLabels(allFolders);
 
   // Walking-distance between units. Only meaningful for multi-unit
@@ -248,22 +267,34 @@ export default function Builder() {
   // photos (from the Apify swap path) show up — the static array only ever
   // had 8 filenames, so a 30-photo rescrape was invisible to the builder.
   const [folderFiles, setFolderFiles] = useState<Record<string, string[]>>({});
+  const [folderInventoryReady, setFolderInventoryReady] = useState<Set<string>>(new Set());
+  const [folderFilesVersion, setFolderFilesVersion] = useState(0);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const out: Record<string, string[]> = {};
-      await Promise.all(allFolders.map(async (f) => {
+      const ready = new Set<string>();
+      await Promise.all(photoInventories.map(async ({ key, folder, unitId }) => {
         try {
-          const r = await fetch(`/api/photos/community/${encodeURIComponent(f)}`);
+          const unitQuery = unitId
+            ? `?propertyId=${encodeURIComponent(String(propertyId))}&unitId=${encodeURIComponent(unitId)}`
+            : "";
+          const r = await fetch(`/api/photos/community/${encodeURIComponent(folder)}${unitQuery}`);
           if (!r.ok) return;
-          const data = await r.json() as Array<{ filename: string }>;
-          if (Array.isArray(data)) out[f] = data.map((d) => d.filename);
+          const data = await r.json() as Array<{ filename: string; hidden?: boolean }>;
+          if (Array.isArray(data)) {
+            out[key] = data.filter((d) => d.hidden !== true).map((d) => d.filename);
+            ready.add(key);
+          }
         } catch {}
       }));
-      if (!cancelled) setFolderFiles(out);
+      if (!cancelled) {
+        setFolderFiles(out);
+        setFolderInventoryReady(ready);
+      }
     })();
     return () => { cancelled = true; };
-  }, [allFolders]);
+  }, [folderFilesVersion, photoInventories, propertyId]);
 
   // Fetch the source URL (Zillow / Airbnb / VRBO) stamped into each
   // folder's _source.json by the last rescrape. PhotoCurator renders a
@@ -338,15 +369,17 @@ export default function Builder() {
       url: string;
       caption: string;
       source: string;
+      unitId?: string;
       text: string;            // ranking signal for the hero-first default
       sortOrder: number | null;
     };
-    const entryFor = (folder: string, filename: string, source: string): PhotoEntry => {
+    const entryFor = (folder: string, filename: string, source: string, unitId?: string): PhotoEntry => {
       const caption = getLabel(folder, filename) ?? staticLabelFor(folder, filename) ?? captionFromFilename(filename);
       return {
         url: `${origin}/photos/${folder}/${filename}`,
         caption,
         source,
+        unitId,
         // Combine caption + labeler category + filename for the best chance
         // at a meaningful category match in the hero-first default sort.
         text: [caption, getCategory(folder, filename), filename].filter(Boolean).join(" "),
@@ -355,22 +388,22 @@ export default function Builder() {
     };
     // Prefer the live folder listing (what's actually on disk after any
     // rescrape), fall back to the static array. Hidden photos are dropped.
-    const visibleFiles = (folder: string, fallback: string[]): string[] => {
-      const live = folderFiles[folder];
+    const visibleFiles = (folder: string, fallback: string[], inventoryKey = folder): string[] => {
+      const live = folderFiles[inventoryKey];
       return (Array.isArray(live) ? live : fallback).filter((f) => !hidden(folder, f));
     };
 
-    const photos: Array<{ url: string; caption: string; source: string }> = [];
+    const photos: NonNullable<GuestyPropertyData["photos"]> = [];
 
     // Units first, in unit order (A, B, …). Each unit gallery is ordered
     // independently (hero-first by default; a manual drag wins).
     units.forEach((u, i) => {
       const source = `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`;
       const unitPhotos = Array.isArray(u.photos) ? u.photos : [];
-      const files = visibleFiles(u.photoFolder, unitPhotos.map((p) => p.filename));
-      const entries = files.map((f) => entryFor(u.photoFolder, f, source));
+      const files = visibleFiles(u.photoFolder, unitPhotos.map((p) => p.filename), unitPhotoInventoryKey(u.id));
+      const entries = files.map((f) => entryFor(u.photoFolder, f, source, u.id));
       for (const e of orderGallery(entries, "unit")) {
-        photos.push({ url: e.url, caption: e.caption, source: e.source });
+        photos.push({ url: e.url, caption: e.caption, source: e.source, unitId: e.unitId });
       }
     });
 
@@ -481,6 +514,26 @@ export default function Builder() {
     };
   }, [property, pricing, propertyId, labelFor, isHidden, categoryFor, sortOrderFor, folderFiles, walkResult]);
 
+  const virtualStagingUnits = useMemo(() => {
+    if (!property) return [];
+    return property.units.slice(0, 2).map((unit, index) => {
+      const inventoryKey = unitPhotoInventoryKey(unit.id);
+      const photoInventoryReady = folderInventoryReady.has(inventoryKey);
+      const filenames = photoInventoryReady ? (folderFiles[inventoryKey] ?? []) : [];
+      return {
+        id: unit.id,
+        label: `Unit ${String.fromCharCode(65 + index)}`,
+        photoCount: filenames.filter((filename) => !isHidden(unit.photoFolder, filename)).length,
+        photoInventoryReady,
+      };
+    });
+  }, [folderFiles, folderInventoryReady, isHidden, property]);
+
+  const refreshPhotoAssets = useCallback(() => {
+    setFolderFilesVersion((version) => version + 1);
+    void refreshPhotoLabels();
+  }, [refreshPhotoLabels]);
+
   if (!property) {
     if (draftLoading) {
       return (
@@ -522,8 +575,10 @@ export default function Builder() {
         propertyData={propertyData}
         propertyId={propertyId}
         sourceUrlsByFolder={sourceUrlsByFolder}
+        virtualStagingUnits={virtualStagingUnits}
         isSingleListing={property.units.length === 1}
         onPhotoOverridesChanged={refreshPhotoLabels}
+        onVirtualStagingConfirmed={refreshPhotoAssets}
         onBuildComplete={(result) => {
           if (result.listingId) {
             toast({

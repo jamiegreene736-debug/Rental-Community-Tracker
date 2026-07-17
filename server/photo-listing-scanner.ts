@@ -80,6 +80,7 @@ import { haversineFeet } from "@shared/walking-distance";
 import { geocode, reverseGeocodeToStreetAddress } from "./walking-distance";
 import { agreementImageIdentityHolds, computeDhash, isDuplicateHash, THUMBNAIL_IDENTITY_DISTANCE } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
+import { folderHasActiveVirtualStagingVariants } from "./virtual-staging-gallery";
 import { unitBuilderData } from "../client/src/data/unit-builder-data";
 
 // Resolve via the shared SearchAPI key resolver. Single-key mode since
@@ -944,6 +945,19 @@ export async function runPhotoListingCheckForFolder(
     photosChecked: 0,
     lensCalls: 0,
   };
+
+  // This scanner is intentionally folder-scoped, but an active staged photo
+  // is unit-scoped. A shared physical folder can therefore project different
+  // galleries for different units. Scanning its raw label/file union would
+  // inspect inactive originals and sibling variants, then could trigger an
+  // automated replacement for the wrong unit. Preserve the prior verdict as
+  // inconclusive until this caller supplies propertyId + unitId context.
+  if (await folderHasActiveVirtualStagingVariants(folder)) {
+    const priorRow = await storage.getPhotoListingCheckByFolder(folder);
+    result.errorMessage = "Active virtual-staging variants require property and unit context — folder-only scan skipped";
+    await persist(result, priorRow, { inconclusive: true });
+    return result;
+  }
 
   // Skip folders we can't cross-validate. Without a real unit-number
   // hint, every Lens match is accepted blindly — and in a condo

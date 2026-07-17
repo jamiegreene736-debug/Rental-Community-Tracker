@@ -33,6 +33,8 @@ import {
 import { listPhotoFiles } from "./photo-labeler";
 import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
+import { resolveVirtualStagingGalleryFiles } from "./virtual-staging-gallery";
+import { isVirtualStagingCandidateFilename } from "@shared/virtual-staging";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 const photosRoot = () => path.join(process.cwd(), "client/public/photos");
@@ -138,13 +140,20 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
     folder: string,
     scope: "unit" | "community",
     staticLabels?: Record<string, string>,
-  ): Promise<GuestyPushGallery> => ({
-    folder,
-    scope,
-    files: (await listPhotoFiles(path.join(photosRoot(), folder)).catch(() => [] as string[])).slice().sort(),
-    labels: await storage.getPhotoLabelsByFolder(folder).catch(() => []),
-    staticLabels,
-  });
+    unitId?: string,
+  ): Promise<GuestyPushGallery> => {
+    const diskFiles = (await listPhotoFiles(path.join(photosRoot(), folder)).catch(() => [] as string[])).slice().sort();
+    const files = unitId
+      ? await resolveVirtualStagingGalleryFiles({ diskFilenames: diskFiles, propertyId, unitId, folder })
+      : diskFiles.filter((filename) => !isVirtualStagingCandidateFilename(filename));
+    return {
+      folder,
+      scope,
+      files,
+      labels: await storage.getPhotoLabelsByFolder(folder).catch(() => []),
+      staticLabels,
+    };
+  };
 
   // Units first (A, B, …) — same across-gallery order as the builder Photos
   // tab. Static unit-builder-data captions only apply to a builder unit's
@@ -156,7 +165,7 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
     const staticLabels = !active.replaced && Array.isArray(unit.photos)
       ? Object.fromEntries(unit.photos.map((p) => [p.filename, p.label]))
       : undefined;
-    galleries.push(await galleryFor(active.activeFolder, "unit", staticLabels));
+    galleries.push(await galleryFor(active.activeFolder, "unit", staticLabels, unit.id));
   }
   // Community last.
   const communityFolder = builder ? builder.communityPhotoFolder : draft!.communityFolder;

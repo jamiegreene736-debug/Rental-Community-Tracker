@@ -6,6 +6,7 @@ import { clearAutoReplaceQueue, listAutoFixActivity, listAutoReplaceJobs, startA
 import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, listUnitAuditJobs, startUnitAuditSweep, startUnitAuditSweepBulk } from "./unit-audit-sweep";
 import { getUnitAuditCronStatus, runUnitAuditCronSweep } from "./unit-audit-scheduler";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
+import { assembleGuestyPushPhotos, type GuestyPushGallery } from "@shared/guesty-photo-repush";
 import { withUnitSwapPropertyWriteLock } from "./unit-swap-write-lock";
 import { buildPricingAuditReceipt, type PricingAuditReceipt } from "./pricing-audit-receipt";
 import {
@@ -56,6 +57,12 @@ import {
   type GuestyPushListingHistory,
 } from "@shared/guesty-push-history";
 import { backfillGuestyPushHistory, getGuestyPushHistory, recordGuestyPush } from "./guesty-push-history";
+import { registerVirtualStagingRoutes, resolveVirtualStagingUnit } from "./virtual-staging-routes";
+import {
+  folderHasActiveVirtualStagingVariants,
+  resolveVirtualStagingGalleryFiles,
+} from "./virtual-staging-gallery";
+import { isVirtualStagingCandidateFilename } from "@shared/virtual-staging";
 import { getLicenseProvenance, recordLicenseProvenance } from "./license-provenance";
 import { sanitizeLicenseProvenanceClientPatch, type LicenseProvenanceField, type LicenseProvenanceMethod } from "@shared/license-provenance";
 import {
@@ -266,7 +273,7 @@ import {
   normalizeUnitClaim,
   unitVerificationClaims,
 } from "@shared/folder-unit-map";
-import { replacementPhotoFolderForUnit, unitSwapSnapshotForUnit } from "@shared/unit-swap-photos";
+import { replacementPhotoFolderForUnit, resolveActiveUnitPhotoFolders, unitSwapSnapshotForUnit } from "@shared/unit-swap-photos";
 import { classifyStagedUnitCommunityAudit } from "@shared/unit-replacement-community-gate";
 import { checkCommunityType } from "@shared/community-type";
 import { isSameHawaiiStreetFamily } from "@shared/hawaii-street-family";
@@ -6793,6 +6800,7 @@ export async function registerRoutes(
   // inside requireAuth like everything else.
   registerAssistantRoutes(app);
   registerCoworkPromptRunRoutes(app);
+  registerVirtualStagingRoutes(app);
 
   void (async () => {
     try {
@@ -32263,19 +32271,40 @@ Return ONLY compact JSON with this exact shape:
     }
   });
 
-  // Serve community photo listing as { url, filename }[] — used by Builder Step 3
+  // Serve folder inventory with server-resolved visibility. Unit context is
+  // required to project active virtual-staging variants safely because legacy
+  // property configs can intentionally share one physical folder.
   app.get("/api/photos/community/:folder", async (req, res) => {
     const folder = req.params.folder.replace(/[^a-zA-Z0-9_-]/g, "");
     if (!folder) return res.status(400).json({ error: "Missing folder" });
+    const rawPropertyId = req.query.propertyId;
+    const rawUnitId = req.query.unitId;
+    const hasUnitContext = rawPropertyId !== undefined || rawUnitId !== undefined;
+    const propertyId = typeof rawPropertyId === "string" ? Number(rawPropertyId) : NaN;
+    const unitId = typeof rawUnitId === "string" ? rawUnitId.trim() : "";
+    if (hasUnitContext && (
+      !Number.isSafeInteger(propertyId)
+      || propertyId === 0
+      || !unitId
+      || unitId.length > 200
+    )) {
+      return res.status(400).json({ error: "Valid propertyId and unitId are required together" });
+    }
     const folderPath = path.join(process.cwd(), "client/public/photos", folder);
     try {
       const files = await fs.promises.readdir(folderPath).catch(() => []);
-      const imageFiles = (files as string[])
+      const diskImageFiles = (files as string[])
         .filter((f: string) => /\.(jpg|jpeg|png|webp)$/i.test(f))
         .sort();
+      const imageFiles = hasUnitContext
+        ? await resolveVirtualStagingGalleryFiles({ diskFilenames: diskImageFiles, propertyId, unitId, folder })
+        : diskImageFiles.filter((filename) => !isVirtualStagingCandidateFilename(filename));
+      const labels = await storage.getPhotoLabelsByFolder(folder);
+      const hiddenFiles = new Set(labels.filter((label) => label.hidden).map((label) => label.filename));
       const result = imageFiles.map((f: string) => ({
         url: `/photos/${folder}/${f}`,
         filename: f,
+        hidden: hiddenFiles.has(f),
       }));
       res.json(result);
     } catch {
@@ -32291,7 +32320,7 @@ Return ONLY compact JSON with this exact shape:
     try {
       const files = await fs.promises.readdir(folderPath).catch(() => []);
       const imageFiles = files
-        .filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f))
+        .filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f) && !isVirtualStagingCandidateFilename(f))
         .sort();
       res.json({ folder, files: imageFiles });
     } catch {
@@ -49431,42 +49460,64 @@ Return ONLY compact JSON with this exact shape:
       emit({ type: "swap", folder, kept: swapResult.kept, downloaded: swapResult.downloaded });
 
       // 4. Assemble photos[] from disk + push to each affected Guesty listing.
-      // Order: community folder first, then each unit folder in builder.units
-      // order. Filenames sorted lexicographically inside each folder. Captions
-      // come from the photoLabels DB (userLabel beats label) with a humanized-
-      // filename fallback. push-photos enforces the 50-photo Guesty/VRBO cap
+      // Order: community folder first, then each logical unit in builder.units
+      // order. A physical folder may intentionally be shared by multiple units,
+      // so every unit gets its own virtual-staging projection before final-path
+      // deduplication. push-photos enforces the 50-photo Guesty/VRBO cap
       // server-side, so we don't trim here.
       const photosRoot = path.join(process.cwd(), "client/public/photos");
-      const captionFallback = (filename: string): string =>
-        filename.replace(/\.[^.]+$/, "")
-          .replace(/^\d+[-_]?/, "")
-          .replace(/[-_]+/g, " ")
-          .replace(/\b\w/g, (c) => c.toUpperCase())
-          .trim() || "Photo";
-      async function assemblePhotosFor(propertyId: number): Promise<{ localPath: string; caption: string }[]> {
+      const assemblePhotosFor = async (
+        propertyId: number,
+      ): Promise<{ localPath: string; caption: string }[]> => {
         const builder = unitBuilderData.find((p) => p.propertyId === propertyId);
         if (!builder) return [];
-        const orderedFolders = [builder.communityPhotoFolder, ...builder.units.map((u) => u.photoFolder)];
-        const out: { localPath: string; caption: string }[] = [];
-        const seen = new Set<string>();   // dedupe in case the same folder appears twice
-        for (const f of orderedFolders) {
-          if (seen.has(f)) continue;
-          seen.add(f);
-          const dir = path.join(photosRoot, f);
-          let files: string[] = [];
-          try { files = await listPhotoFiles(dir); } catch { continue; }
-          if (files.length === 0) continue;
-          const labels = await storage.getPhotoLabelsByFolder(f);
-          const labelByFile = new Map(labels.map((r) => [r.filename, r.userLabel ?? r.label]));
-          for (const filename of files.slice().sort()) {
-            out.push({
-              localPath: `/photos/${f}/${filename}`,
-              caption: labelByFile.get(filename) ?? captionFallback(filename),
-            });
-          }
+        const swaps = await storage.getUnitSwaps(propertyId).catch(() => []);
+        const activeFolders = resolveActiveUnitPhotoFolders(propertyId, builder.units, swaps);
+        const galleries: GuestyPushGallery[] = [];
+        const galleryFor = async (
+          folder: string,
+          scope: "unit" | "community",
+          unitId?: string,
+          staticLabels?: Record<string, string>,
+        ): Promise<GuestyPushGallery> => {
+          const diskFiles = await listPhotoFiles(path.join(photosRoot, folder)).catch(() => [] as string[]);
+          const files = unitId
+            ? await resolveVirtualStagingGalleryFiles({
+                diskFilenames: diskFiles.slice().sort(),
+                propertyId,
+                unitId,
+                folder,
+              })
+            : diskFiles
+                .filter((filename) => !isVirtualStagingCandidateFilename(filename))
+                .sort();
+          return {
+            folder,
+            scope,
+            files,
+            labels: await storage.getPhotoLabelsByFolder(folder).catch(() => []),
+            staticLabels,
+          };
+        };
+
+        if (builder.communityPhotoFolder) {
+          galleries.push(await galleryFor(
+            builder.communityPhotoFolder,
+            "community",
+            undefined,
+            Object.fromEntries(builder.communityPhotos.map((photo) => [photo.filename, photo.label])),
+          ));
         }
-        return out;
-      }
+        for (const unit of builder.units) {
+          const active = activeFolders.find((entry) => entry.unitId === unit.id);
+          if (!active?.activeFolder) continue;
+          const staticLabels = !active.replaced
+            ? Object.fromEntries(unit.photos.map((photo) => [photo.filename, photo.label]))
+            : undefined;
+          galleries.push(await galleryFor(active.activeFolder, "unit", unit.id, staticLabels));
+        }
+        return assembleGuestyPushPhotos(galleries);
+      };
 
       const successes: string[] = [];
       for (const a of affected) {
@@ -49948,6 +49999,8 @@ Return ONLY compact JSON with this exact shape:
   //   channel: "vrbo" | "booking",         // airbnb stays on Guesty
   //   partnerListingRef: string,           // sidecar's portal/extranet id
   //   folder?: string,                     // pull clean photos from this unit folder
+  //   propertyId?: number,                 // required with unitId for a staged folder
+  //   unitId?: string,                     // required with propertyId for a staged folder
   //   photos?: Array<{ url, caption? }>,   // OR explicit URL list
   //   strictCrossChannelClean?: boolean,
   //   maxPhotos?: number,                  // cap; defaults to channel's published max
@@ -49970,6 +50023,8 @@ Return ONLY compact JSON with this exact shape:
       channel?: unknown;
       partnerListingRef?: unknown;
       folder?: unknown;
+      propertyId?: unknown;
+      unitId?: unknown;
       photos?: unknown;
       strictCrossChannelClean?: unknown;
       maxPhotos?: unknown;
@@ -49979,6 +50034,23 @@ Return ONLY compact JSON with this exact shape:
     const partnerListingRef = typeof body.partnerListingRef === "string" ? body.partnerListingRef : "";
     if (!partnerListingRef) return res.status(400).json({ error: "partnerListingRef required" });
     const folder = typeof body.folder === "string" ? body.folder : null;
+    const propertyId = typeof body.propertyId === "number"
+      && Number.isSafeInteger(body.propertyId)
+      && body.propertyId !== 0
+      ? body.propertyId
+      : null;
+    const unitId = typeof body.unitId === "string"
+      && body.unitId.trim()
+      && body.unitId.trim().length <= 200
+      ? body.unitId.trim()
+      : null;
+    if (
+      folder
+      && (body.propertyId !== undefined || body.unitId !== undefined)
+      && (propertyId === null || unitId === null)
+    ) {
+      return res.status(400).json({ error: "propertyId must be a non-zero integer and unitId must be 1-200 characters" });
+    }
     const explicitPhotos = Array.isArray(body.photos)
       ? (body.photos as unknown[]).filter((p): p is { url: string; caption?: string } => {
           if (!p || typeof p !== "object") return false;
@@ -50001,8 +50073,40 @@ Return ONLY compact JSON with this exact shape:
     if (explicitPhotos && explicitPhotos.length > 0) {
       photos = explicitPhotos.slice(0, maxPhotos);
     } else if (folder) {
+      if (!/^[\w-]+$/.test(folder)) {
+        return res.status(400).json({ error: "invalid folder" });
+      }
       try {
         const { selectCleanPhotosForChannel } = await import("./photo-clean-selector");
+        const hasActiveVariants = await folderHasActiveVirtualStagingVariants(folder);
+        if (hasActiveVariants && (propertyId === null || unitId === null)) {
+          return res.status(400).json({
+            error: "propertyId and unitId are required when a folder has active virtual-staging variants",
+          });
+        }
+        let allowedFilenames: string[] | undefined;
+        if (hasActiveVariants && propertyId !== null && unitId !== null) {
+          let resolvedUnit: Awaited<ReturnType<typeof resolveVirtualStagingUnit>>;
+          try {
+            resolvedUnit = await resolveVirtualStagingUnit(propertyId, unitId);
+          } catch (error: any) {
+            const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 500
+              ? error.status
+              : 400;
+            return res.status(status).json({ error: error?.message ?? "Property or unit was not found" });
+          }
+          if (resolvedUnit.folder !== folder) {
+            return res.status(400).json({
+              error: "folder does not belong to the supplied propertyId and unitId",
+            });
+          }
+          allowedFilenames = await resolveVirtualStagingGalleryFiles({
+            diskFilenames: await listPhotoFiles(path.join(process.cwd(), "client/public/photos", folder)),
+            propertyId,
+            unitId,
+            folder,
+          });
+        }
         const sync = await storage.getPhotoSync(guestyListingId, channel);
         let extraExcludedHashes: string[] = [];
         if (sync?.previousBadHashes) {
@@ -50012,6 +50116,7 @@ Return ONLY compact JSON with this exact shape:
           strictCrossChannelClean,
           maxResults: maxPhotos,
           extraExcludedHashes,
+          allowedFilenames,
         });
         // Selected rows reference local files in /photos/<folder>/. The
         // sidecar can't reach localhost — we need a public URL. Build

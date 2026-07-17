@@ -61,10 +61,9 @@ export function captionFromFilename(filename: string): string {
  */
 export function assembleGuestyPushPhotos(galleries: GuestyPushGallery[]): GuestyPushPhoto[] {
   const out: GuestyPushPhoto[] = [];
-  const seenFolders = new Set<string>();
+  const seenLocalPaths = new Set<string>();
   for (const gallery of galleries) {
-    if (!gallery?.folder || seenFolders.has(gallery.folder)) continue;
-    seenFolders.add(gallery.folder);
+    if (!gallery?.folder) continue;
     const labelByFile = new Map<string, GuestyPushLabelRow>(
       (gallery.labels ?? []).map((row) => [row.filename, row]),
     );
@@ -85,7 +84,10 @@ export function assembleGuestyPushPhotos(galleries: GuestyPushGallery[]): Guesty
         };
       });
     for (const entry of orderGallery(entries, gallery.scope)) {
-      out.push({ localPath: `/photos/${gallery.folder}/${entry.filename}`, caption: entry.caption });
+      const localPath = `/photos/${gallery.folder}/${entry.filename}`;
+      if (seenLocalPaths.has(localPath)) continue;
+      seenLocalPaths.add(localPath);
+      out.push({ localPath, caption: entry.caption });
     }
   }
   return out;

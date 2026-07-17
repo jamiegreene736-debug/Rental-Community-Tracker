@@ -11,6 +11,8 @@ import { draftUnitIdForSlot } from "../shared/auto-replace-job-logic";
 import { storage } from "./storage";
 import type { CheckGroupInput, PhotoCommunityCheckRequest } from "./photo-community-check";
 import type { CommunityDraft } from "../shared/schema";
+import { isVirtualStagingCandidateFilename } from "../shared/virtual-staging";
+import { resolveVirtualStagingGalleryFiles } from "./virtual-staging-gallery";
 
 const IMAGE_EXT = /\.(?:jpe?g|png|webp|gif)$/i;
 
@@ -87,7 +89,10 @@ function effectiveCaption(
   return (fromDb?.trim() || staticCaption?.trim() || captionFromFilename(filename));
 }
 
-export async function listPublishedFilenames(folder: string): Promise<string[]> {
+export async function listPublishedFilenames(
+  folder: string,
+  unitContext?: { propertyId: number; unitId: string },
+): Promise<string[]> {
   const dir = publicPhotoDir(folder);
   let diskFiles: string[] = [];
   try {
@@ -97,7 +102,10 @@ export async function listPublishedFilenames(folder: string): Promise<string[]> 
   }
   const labels = await storage.getPhotoLabelsByFolder(folder);
   const hidden = new Set(labels.filter((l) => l.hidden).map((l) => l.filename));
-  return diskFiles.filter((f) => !hidden.has(f));
+  const scopedFiles = unitContext
+    ? await resolveVirtualStagingGalleryFiles({ ...unitContext, folder, diskFilenames: diskFiles })
+    : diskFiles.filter((filename) => !isVirtualStagingCandidateFilename(filename));
+  return scopedFiles.filter((f) => !hidden.has(f));
 }
 
 export type ConfiguredPhotoFolderStatus = {
@@ -111,13 +119,18 @@ export type ConfiguredPhotoFolderStatus = {
 };
 
 async function configuredFolderStatus(
-  input: Omit<ConfiguredPhotoFolderStatus, "publishedCount">,
+  input: Omit<ConfiguredPhotoFolderStatus, "publishedCount"> & { propertyId?: number },
 ): Promise<ConfiguredPhotoFolderStatus> {
   const folder = String(input.folder ?? "").trim() || null;
+  const { propertyId, ...statusInput } = input;
   return {
-    ...input,
+    ...statusInput,
     folder,
-    publishedCount: folder ? (await listPublishedFilenames(folder)).length : 0,
+    publishedCount: folder
+      ? (await listPublishedFilenames(folder, propertyId != null && input.unitId
+        ? { propertyId, unitId: input.unitId }
+        : undefined)).length
+      : 0,
   };
 }
 
@@ -155,6 +168,7 @@ export async function configuredPhotoFolderStatusesForProperty(
         label: `Unit ${String.fromCharCode(65 + i)} (${unit.bedrooms}BR)`,
         folder: active?.activeFolder ?? unit.photoFolder ?? null,
         unitId: unit.id,
+        propertyId,
         expectedBedrooms: unit.bedrooms,
       }));
     }
@@ -192,7 +206,7 @@ export async function configuredPhotoFolderStatusesForProperty(
       label: `Community — ${draft.name}`,
       folder: communityFolder,
     }),
-    ...unitInputs.map((input) => configuredFolderStatus(input)),
+    ...unitInputs.map((input) => configuredFolderStatus({ ...input, propertyId })),
   ]);
 }
 
@@ -204,8 +218,12 @@ export async function buildGroupFromPublishedFolder(
   expectedBedrooms?: number,
   unitDescription?: string,
   unitId?: string,
+  propertyId?: number,
 ): Promise<CheckGroupInput | null> {
-  const filenames = await listPublishedFilenames(folder);
+  const filenames = await listPublishedFilenames(
+    folder,
+    role === "unit" && unitId && propertyId != null ? { propertyId, unitId } : undefined,
+  );
   if (filenames.length === 0) return null;
 
   const labels = await storage.getPhotoLabelsByFolder(folder);
@@ -315,6 +333,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
           u.bedrooms,
           unitDescriptionFromBuilder(u),
           u.id,
+          propertyId,
         );
       }
       if (!g) {
@@ -326,6 +345,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
           u.bedrooms,
           unitDescriptionFromBuilder(u),
           u.id,
+          propertyId,
         );
       }
       if (g) groups.push(g);
@@ -370,6 +390,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
       u1Br,
       draftUnitDesc("unit1"),
       draftUnitIdForSlot(draft.id, "a"),
+      propertyId,
     );
     if (g1) groups.push(g1);
   }
@@ -382,6 +403,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
       u2Br,
       draftUnitDesc("unit2"),
       draftUnitIdForSlot(draft.id, "b"),
+      propertyId,
     );
     if (g2) groups.push(g2);
   }

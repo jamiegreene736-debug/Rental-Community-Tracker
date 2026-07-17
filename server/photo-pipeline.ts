@@ -35,6 +35,7 @@ import {
 } from "../shared/bedroom-same-room-logic";
 import { groupSameBedroomsViaVision, type SameRoomRep } from "./bedroom-same-room-vision";
 import { storage } from "./storage";
+import { isVirtualStagingCandidateFilename } from "../shared/virtual-staging";
 
 // Category priority. Lower index = higher priority (kept first).
 // Matches the vocabulary the unit-kind prompt returns in photo-labeler.ts.
@@ -696,10 +697,12 @@ export async function downloadAndPrioritize(opts: {
   const { folder, folderPath, scrapedUrls, maxKeep, anthropicKey, kind, requiredBedrooms, requiredBathrooms } = opts;
   await fs.promises.mkdir(folderPath, { recursive: true });
 
-  // Step 0: clear existing images. Leave _source.json + other metadata.
+  // Step 0: clear scrape-owned images. Approved virtual-staging variants are
+  // separate durable assets and must survive a rescrape of their originals.
+  // Their active/original visibility is preserved in photo_labels.
   const existing = await fs.promises.readdir(folderPath).catch(() => []);
   for (const f of existing) {
-    if (/\.(jpg|jpeg|png|webp)$/i.test(f)) {
+    if (/\.(jpg|jpeg|png|webp)$/i.test(f) && !isVirtualStagingCandidateFilename(f)) {
       await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
     }
   }
@@ -861,7 +864,9 @@ export async function downloadAndPrioritize(opts: {
 
   // Step 6: persist labels under final filenames.
   if (anthropicKey) {
-    await storage.deletePhotoLabelsByFolder(folder).catch(() => {});
+    // Never wholesale-delete label rows here. upsertPhotoLabel intentionally
+    // updates only model fields, preserving human captions/categories, hidden
+    // state, order, and any active virtual-staging candidate across rescrapes.
     for (let i = 0; i < kept.length; i++) {
       const k = kept[i];
       if (k.label) {
