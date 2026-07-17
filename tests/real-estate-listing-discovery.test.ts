@@ -109,6 +109,10 @@ assert.equal(detectRealEstateListingPortal(mirrors[1].url), "realtor");
 assert.equal(detectRealEstateListingPortal(mirrors[2].url), "redfin");
 assert.equal(detectRealEstateListingPortal(mirrors[3].url), "homes");
 assert.equal(detectRealEstateListingPortal("https://www.vrbo.com/123"), null, "OTA pages are not photo discovery sources");
+assert.equal(detectRealEstateListingPortal("https://evil-redfin.com/FL/Test/220-Young-Ave/home/123"), null);
+assert.equal(detectRealEstateListingPortal("redfin.com/FL/Test/220-Young-Ave/home/not-a-number"), null);
+assert.equal(detectRealEstateListingPortal("redfin.com/FL/Test/220-Young-Ave/home/123"), "redfin");
+assert.equal(canonicalListingUrlKey(`${"#".repeat(10_000)}////`), "", "fallback URL cleanup must stay bounded on hostile text");
 assert.equal(
   parseListingAddressFromUrl(mirrors[3].url),
   "220 Young Ave Unit 27",
