@@ -50,7 +50,7 @@ export const buyIns = pgTable("buy_ins", {
   // picked it). Doubles as the idempotency guard: a row at "booked" is
   // never re-driven through checkout. See memory buy-in-checkout-automation-plan.
   bookingStatus: text("booking_status").notNull().default("not_started"),
-  // not_started | queued | in_progress | awaiting_payment | booked | failed
+  // not_started | queued | in_progress | awaiting_payment | request_submitted | booked | failed
   bookingConfirmation: text("booking_confirmation"), // VRBO itinerary/confirmation number, set on confirmed purchase
   bookedAt: timestamp("booked_at"), // when the purchase actually completed on vrbo.com
   travelerEmail: text("traveler_email"), // the unique per-unit alias used as the VRBO traveler email
@@ -97,6 +97,37 @@ export const insertBuyInSchema = createInsertSchema(buyIns).omit({
 
 export type InsertBuyIn = z.infer<typeof insertBuyInSchema>;
 export type BuyIn = typeof buyIns.$inferSelect;
+
+// Durable relay for Cowork prompts that are too large for Claude Desktop's
+// 14,336-character deep-link limit. The browser creates a short-lived row,
+// then Claude Desktop receives a tiny bootstrap prompt pointing at the
+// authenticated plain-text endpoint. Prompt rows contain operational context
+// (guest name, dates, listing URLs), but never payment-card data.
+export const coworkPromptRuns = pgTable("cowork_prompt_runs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  kind: text("kind").notNull(),
+  reservationId: text("reservation_id"),
+  prompt: text("prompt").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+});
+
+export type CoworkPromptRun = typeof coworkPromptRuns.$inferSelect;
+
+// Reservation-scoped mutex for checkout preparation. A short-lived claim
+// serializes Cowork and the legacy sidecar path until the checkout reaches the
+// durable awaiting_payment handoff (or fails/releases). One row per
+// reservation makes the invariant enforceable across Railway instances.
+export const buyInCheckoutClaims = pgTable("buy_in_checkout_claims", {
+  reservationId: text("reservation_id").primaryKey(),
+  buyInId: integer("buy_in_id").notNull(),
+  claimToken: text("claim_token").notNull().unique(),
+  owner: text("owner").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+});
+
+export type BuyInCheckoutClaim = typeof buyInCheckoutClaims.$inferSelect;
 
 export const sidecarSearchVariations = pgTable("sidecar_search_variations", {
   id: serial("id").primaryKey(),

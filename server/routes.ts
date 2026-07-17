@@ -143,6 +143,8 @@ import {
   registerOperationDiagnosticsRoutes,
   setOperationDiagnosticsQueueHooks,
 } from "./operation-diagnostics-api";
+import { registerCoworkPromptRunRoutes } from "./cowork-prompt-runs";
+import { BuyInCheckoutClaimError } from "./buy-in-checkout-claims";
 import { consultGrokAboutSingleListing } from "./grok-single-listing-consult";
 import { consultGrokAboutCitywideCandidates } from "./grok-citywide-candidate-consult";
 import { consultGrokAboutChannelIndependence } from "./grok-channel-consult";
@@ -6639,6 +6641,7 @@ export async function registerRoutes(
   // behind PLATFORM_ASSISTANT_ENABLED. Registered first so its routes sit
   // inside requireAuth like everything else.
   registerAssistantRoutes(app);
+  registerCoworkPromptRunRoutes(app);
 
   void (async () => {
     try {
@@ -9444,10 +9447,10 @@ export async function registerRoutes(
         "managementCompany", "managementContact", "arrivalNotes",
         "groundFloorStatus", "groundFloorEvidence",
         "notes", "status",
-        // Booking lifecycle — writable so the Cowork checkout prompt (Phase 2 of
-        // shared/cowork-buyin-prompt.ts) can record a completed VRBO purchase.
-        // Setting bookingStatus "booked" also arms the buy-in-checkout-job
-        // idempotency guard (a booked row is never re-driven through checkout).
+        // Booking lifecycle — Cowork first records the human payment handoff,
+        // then records either a confirmed booking or request-only submission
+        // after the operator makes the final Checkout click. Setting "booked"
+        // also arms the buy-in-checkout-job idempotency guard.
         "bookingStatus", "bookingConfirmation",
       ];
       const filtered: Record<string, any> = {};
@@ -9455,7 +9458,7 @@ export async function registerRoutes(
         if (key in req.body) filtered[key] = req.body[key];
       }
       if (filtered.bookingStatus !== undefined) {
-        const allowedBookingStatuses = ["not_started", "queued", "in_progress", "awaiting_payment", "booked", "failed"];
+        const allowedBookingStatuses = ["not_started", "queued", "in_progress", "awaiting_payment", "request_submitted", "booked", "failed"];
         if (!allowedBookingStatuses.includes(String(filtered.bookingStatus))) {
           return res.status(400).json({ error: `Invalid bookingStatus (expected one of ${allowedBookingStatuses.join(", ")})` });
         }
@@ -9492,6 +9495,9 @@ export async function registerRoutes(
       if (!deleted) return res.status(404).json({ error: "Buy-in not found" });
       res.json({ success: true });
     } catch (err: any) {
+      if (err instanceof BuyInCheckoutClaimError) {
+        return res.status(err.status).json({ error: err.message });
+      }
       res.status(500).json({ error: "Failed to delete buy-in", message: err.message });
     }
   });
@@ -13883,15 +13889,25 @@ Requirements:
     try {
       const buyInId = parseInt(req.params.id, 10);
       if (!Number.isFinite(buyInId)) return res.status(400).json({ error: "Invalid buy-in id" });
+      const buyIn = await storage.getBuyIn(buyInId);
+      if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
+      const attachedReservationId = String(buyIn.guestyReservationId ?? "").trim();
+      const requestedReservationId = String(req.body?.reservationId ?? "").trim();
+      if (!attachedReservationId) {
+        return res.status(409).json({ error: "Attach the buy-in to a reservation before creating its traveler email" });
+      }
+      if (requestedReservationId && requestedReservationId !== attachedReservationId) {
+        return res.status(409).json({ error: "Buy-in is not attached to the supplied reservation" });
+      }
       const { ensureTravelerEmailForBuyIn, CheckoutValidationError } = await import("./buy-in-checkout-job");
       const email = await ensureTravelerEmailForBuyIn({
         buyInId,
-        reservationId: String(req.body?.reservationId ?? "").trim() || null,
+        reservationId: attachedReservationId,
         guestFirstName: req.body?.guestFirstName ?? null,
         guestLastName: req.body?.guestLastName ?? null,
       });
-      const buyIn = await storage.getBuyIn(buyInId);
-      res.json({ ok: true, email, buyIn });
+      const updatedBuyIn = await storage.getBuyIn(buyInId);
+      res.json({ ok: true, email, buyIn: updatedBuyIn });
     } catch (err: any) {
       const { CheckoutValidationError } = await import("./buy-in-checkout-job");
       if (err instanceof CheckoutValidationError) {
@@ -23023,6 +23039,9 @@ Requirements:
       if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
       res.json(buyIn);
     } catch (err: any) {
+      if (err instanceof BuyInCheckoutClaimError) {
+        return res.status(err.status).json({ error: err.message });
+      }
       res.status(500).json({ error: "Failed to detach buy-in", message: err.message });
     }
   });
