@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
-import { clearAutoReplaceQueue, listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
+import { clearAutoReplaceQueue, listAutoFixActivity, listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, listUnitAuditJobs, startUnitAuditSweep, startUnitAuditSweepBulk } from "./unit-audit-sweep";
 import { getUnitAuditCronStatus, runUnitAuditCronSweep } from "./unit-audit-scheduler";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
@@ -34382,6 +34382,7 @@ Return ONLY compact JSON with this exact shape:
       propertyId: Number(body.propertyId),
       unitId: String(body.unitId ?? ""),
       unitLabel: typeof body.unitLabel === "string" ? body.unitLabel : undefined,
+      origin: "operator",
     });
     if (!result.ok) return res.status(result.status).json({ error: result.error });
     return res.status(202).json({ job: result.job });
@@ -34389,6 +34390,16 @@ Return ONLY compact JSON with this exact shape:
 
   app.get("/api/replacement/auto-jobs", async (_req, res) => {
     res.json(await listAutoReplaceJobs());
+  });
+
+  app.get("/api/replacement/auto-fix-activity", async (req, res) => {
+    try {
+      res.setHeader("Cache-Control", "no-store");
+      res.json(await listAutoFixActivity(req.query.limit));
+    } catch (err: any) {
+      console.warn("[auto-replace] activity read failed", err?.message ?? err);
+      res.status(500).json({ error: "Failed to load automatic fix activity" });
+    }
   });
 
   // Operator "Clear queue" — removes finished (and unresumably-stuck) jobs

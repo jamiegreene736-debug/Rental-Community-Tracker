@@ -68,6 +68,7 @@ import {
   Pause,
   Play,
   ExternalLink,
+  History,
 } from "lucide-react";
 import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { occupancyForBedrooms } from "@/data/bedding-config";
@@ -193,6 +194,67 @@ type Property = {
 };
 
 type BulkPhotoCommunityItemStatus = "queued" | "running" | "completed" | "failed" | "skipped" | "cancelled";
+type AutoFixActivityEvent = {
+  id: number;
+  jobId: string;
+  propertyId: number | null;
+  propertyName: string | null;
+  unitId: string | null;
+  unitLabel: string | null;
+  origin: "operator" | "operator-audit" | "scheduled-audit" | "automatic-retry" | "legacy-recovery" | "unknown";
+  status: "started" | "retry-scheduled" | "retry-started" | "succeeded" | "failed" | "skipped";
+  attemptNumber: number;
+  occurredAt: string;
+  scheduledFor: string | null;
+  message: string;
+};
+
+const AUTO_FIX_ACTIVITY_STATUS_LABELS: Record<AutoFixActivityEvent["status"], string> = {
+  started: "Started",
+  "retry-scheduled": "Retry scheduled",
+  "retry-started": "Retry started",
+  succeeded: "Succeeded",
+  failed: "Failed",
+  skipped: "Skipped",
+};
+
+const AUTO_FIX_RETRY_STATUS_LABELS: Record<AutoFixActivityEvent["status"], string> = {
+  started: "started",
+  "retry-scheduled": "scheduled",
+  "retry-started": "started",
+  succeeded: "succeeded",
+  failed: "failed",
+  skipped: "skipped",
+};
+
+const AUTO_FIX_ACTIVITY_STATUS_TONES: Record<AutoFixActivityEvent["status"], string> = {
+  started: "border-blue-200 bg-blue-50 text-blue-700",
+  "retry-scheduled": "border-violet-200 bg-violet-50 text-violet-700",
+  "retry-started": "border-indigo-200 bg-indigo-50 text-indigo-700",
+  succeeded: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  failed: "border-red-200 bg-red-50 text-red-700",
+  skipped: "border-amber-200 bg-amber-50 text-amber-700",
+};
+
+const AUTO_FIX_ACTIVITY_ORIGIN_LABELS: Record<AutoFixActivityEvent["origin"], string> = {
+  operator: "Dashboard action",
+  "operator-audit": "Operator audit",
+  "scheduled-audit": "Scheduled audit",
+  "automatic-retry": "Automatic retry",
+  "legacy-recovery": "Legacy recovery",
+  unknown: "System",
+};
+
+const AUTO_REPLACE_PHASE_TONES: Record<AutoReplacePhase, string> = {
+  queued: "bg-slate-100 text-slate-700 border-slate-200",
+  finding: "bg-blue-50 text-blue-700 border-blue-200",
+  committing: "bg-amber-50 text-amber-700 border-amber-200",
+  verifying: "bg-sky-50 text-sky-700 border-sky-200",
+  retry_wait: "bg-violet-50 text-violet-700 border-violet-200",
+  completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  failed: "bg-red-50 text-red-700 border-red-200",
+};
+
 type BulkPhotoCommunityJob = {
   id: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -3177,6 +3239,26 @@ function AdminDashboard() {
     staleTime: 5_000,
     refetchOnWindowFocus: true,
   });
+  // Durable automatic-fix history is separate from the clearable live queue.
+  // Fetch it only when the operator opens the activity dialog; while open,
+  // poll lightly so a scheduled retry or background completion appears there.
+  const {
+    data: autoFixActivity,
+    isLoading: autoFixActivityLoading,
+    isError: autoFixActivityError,
+    refetch: refetchAutoFixActivity,
+  } = useQuery<{ events: AutoFixActivityEvent[] }>({
+    queryKey: ["/api/replacement/auto-fix-activity"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/replacement/auto-fix-activity?limit=100");
+      if (!r.ok) throw new Error(`Photo replacement activity returned HTTP ${r.status}`);
+      return r.json();
+    },
+    enabled: autoReplaceQueueOpen,
+    refetchInterval: autoReplaceQueueOpen ? 15_000 : false,
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  });
   // When a job this page watched goes terminal: refresh the duplicate-photos
   // indicators (photo checks + Comm QA), keep the photo-check poll alive so
   // the verification rescan's verdict lands, and toast the outcome once.
@@ -3194,6 +3276,7 @@ function AdminDashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
       queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/unit-swaps"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/replacement/auto-fix-activity"] });
       // Draft jobs repoint unit{1,2}PhotoFolder server-side — refetch the
       // drafts so photoByProperty tracks the NEW folder (the stale row would
       // otherwise stay flagged and re-enable the Replace button for a second
@@ -3231,7 +3314,6 @@ function AdminDashboard() {
     onSuccess: (data) => {
       queryClient.setQueryData(["/api/replacement/auto-jobs"], { activeCount: data.activeCount, jobs: data.jobs });
       queryClient.invalidateQueries({ queryKey: ["/api/replacement/auto-jobs"] });
-      if (data.jobs.length === 0) setAutoReplaceQueueOpen(false);
       toast({
         title: "Replacement queue cleared",
         description: data.activeCount > 0
@@ -3253,6 +3335,7 @@ function AdminDashboard() {
     },
     onSuccess: (_data, vars) => {
       queryClient.invalidateQueries({ queryKey: ["/api/replacement/auto-jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/replacement/auto-fix-activity"] });
       toast({
         title: `Auto replace started — ${vars.unitLabel}`,
         description: "Finding a clean same-community unit, committing it, and verifying — all in the background. You can leave; track it via the replacement queue banner.",
@@ -4970,6 +5053,23 @@ function AdminDashboard() {
                 size="sm"
                 variant="outline"
                 className="h-8 gap-1.5"
+                onClick={() => setAutoReplaceQueueOpen(true)}
+                data-testid="button-auto-fix-log"
+                title="See when photo replacements and automatic retries were attempted"
+              >
+                <History className="h-3.5 w-3.5" />
+                Replacement log
+                {(autoReplaceQueue?.activeCount ?? 0) > 0 && (
+                  <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-[10px]">
+                    {autoReplaceQueue!.activeCount}
+                  </Badge>
+                )}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 gap-1.5"
                 disabled={selectedBulkPricingCount === 0 || bulkAuditStarting}
                 onClick={() => void startBulkUnitAudit(selectedBulkPricingProperties.map((p) => p.id))}
                 data-testid="button-bulk-unit-audit"
@@ -5868,7 +5968,7 @@ function AdminDashboard() {
                   onClick={() => setAutoReplaceQueueOpen(true)}
                   data-testid="button-open-auto-replace-queue"
                 >
-                  View queue
+                  View activity
                 </Button>
                 {(autoReplaceQueue?.jobs ?? []).some((job) => !isAutoReplacePhaseActive(job.phase)) && (
                   <Button
@@ -7678,59 +7778,141 @@ function AdminDashboard() {
           </p>
         </DialogContent>
       </Dialog>
-      {/* One-click auto-replace queue dialog — read-only view of the server-side
-          orchestrator jobs (find → auto-commit → verify). */}
+      {/* Photo-replacement activity: live auto-replace work plus a durable attempt
+          history that remains after the clearable queue receipts disappear. */}
       <Dialog open={autoReplaceQueueOpen} onOpenChange={setAutoReplaceQueueOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto" data-testid="dialog-auto-fix-activity">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <RefreshCw className="h-4 w-4" /> Photo replacement queue
+              <History className="h-4 w-4" /> Photo replacement activity
             </DialogTitle>
             <DialogDescription>
-              Each job finds a clean same-community unit (Claude-vision checked), commits its photos
-              automatically, then verifies the new gallery is off Airbnb/VRBO/Booking and in-community.
-              Runs fully server-side — closing this page never stops it.
+              See when the system tried, retried, skipped, or completed a unit-photo replacement. Active work runs
+              fully server-side, and the attempt history remains after finished queue items are cleared.
             </DialogDescription>
           </DialogHeader>
-          <div className="max-h-96 space-y-1.5 overflow-y-auto">
-            {(autoReplaceQueue?.jobs ?? []).length === 0 ? (
-              <p className="text-sm text-muted-foreground">No replacement jobs yet.</p>
-            ) : (autoReplaceQueue?.jobs ?? []).map((job) => {
-              const phaseTone: Record<AutoReplacePhase, string> = {
-                queued: "bg-slate-100 text-slate-700 border-slate-200",
-                finding: "bg-blue-50 text-blue-700 border-blue-200",
-                committing: "bg-amber-50 text-amber-700 border-amber-200",
-                verifying: "bg-sky-50 text-sky-700 border-sky-200",
-                retry_wait: "bg-violet-50 text-violet-700 border-violet-200",
-                completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
-                failed: "bg-red-50 text-red-700 border-red-200",
-              };
-              return (
-                <div key={job.jobId} className="rounded border p-2 text-xs" data-testid={`row-auto-replace-${job.jobId}`}>
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="min-w-0 font-medium">{job.propertyName} · {job.unitLabel}</span>
-                    <Badge variant="outline" className={`capitalize ${phaseTone[job.phase]}`}>
-                      {isAutoReplacePhaseActive(job.phase) && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-                      {job.phase === "retry_wait" ? "retry scheduled" : job.phase}
-                    </Badge>
-                  </div>
-                  {job.newUnitLabel || job.newAddress ? (
-                    <p className="mt-0.5 text-emerald-700 dark:text-emerald-400">
-                      New unit: {job.newUnitLabel || "—"}{job.newAddress ? ` · ${job.newAddress}` : ""}
-                    </p>
-                  ) : null}
-                  <p className={`mt-0.5 ${job.phase === "failed" ? "text-red-700 dark:text-red-300" : "text-muted-foreground"}`}>
-                    {job.phase === "failed" ? (job.error ?? "Failed") : (job.message ?? "—")}
-                  </p>
-                </div>
-              );
-            })}
+          <div className="space-y-2" data-testid="section-auto-fix-active">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Active now</p>
+            {(autoReplaceQueue?.jobs ?? []).filter((job) => isAutoReplacePhaseActive(job.phase)).length === 0 ? (
+              <p className="rounded border border-dashed px-3 py-3 text-sm text-muted-foreground" data-testid="text-auto-fix-none-active">
+                No photo replacement is running right now.
+              </p>
+            ) : (
+              <div className="max-h-44 space-y-1.5 overflow-y-auto">
+                {(autoReplaceQueue?.jobs ?? []).filter((job) => isAutoReplacePhaseActive(job.phase)).map((job) => {
+                  return (
+                    <div key={job.jobId} className="rounded border p-2 text-xs" data-testid={`row-auto-replace-${job.jobId}`}>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="min-w-0 font-medium">{job.propertyName} · {job.unitLabel}</span>
+                        <Badge variant="outline" className={`capitalize ${AUTO_REPLACE_PHASE_TONES[job.phase]}`}>
+                          <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                          {job.phase === "retry_wait" ? "retry scheduled" : job.phase}
+                        </Badge>
+                      </div>
+                      {job.newUnitLabel || job.newAddress ? (
+                        <p className="mt-0.5 text-emerald-700 dark:text-emerald-400">
+                          New unit: {job.newUnitLabel || "—"}{job.newAddress ? ` · ${job.newAddress}` : ""}
+                        </p>
+                      ) : null}
+                      <p className="mt-0.5 text-muted-foreground">{job.message ?? "—"}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs text-muted-foreground">
+
+          {(autoReplaceQueue?.jobs ?? []).some((job) => !isAutoReplacePhaseActive(job.phase)) ? (
+            <div className="space-y-2" data-testid="section-auto-fix-recent-receipts">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Recent queue receipts</p>
+                <span className="text-[11px] text-muted-foreground">Fallback receipts remain for up to 2 hours.</span>
+              </div>
+              <div className="max-h-36 space-y-1.5 overflow-y-auto">
+                {(autoReplaceQueue?.jobs ?? []).filter((job) => !isAutoReplacePhaseActive(job.phase)).map((job) => (
+                  <div key={job.jobId} className="rounded border p-2 text-xs" data-testid={`row-auto-replace-receipt-${job.jobId}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0 font-medium">{job.propertyName} · {job.unitLabel}</span>
+                      <Badge variant="outline" className={`capitalize ${AUTO_REPLACE_PHASE_TONES[job.phase]}`}>
+                        {job.phase}
+                      </Badge>
+                    </div>
+                    {job.newUnitLabel || job.newAddress ? (
+                      <p className="mt-0.5 text-emerald-700 dark:text-emerald-400">
+                        New unit: {job.newUnitLabel || "—"}{job.newAddress ? ` · ${job.newAddress}` : ""}
+                      </p>
+                    ) : null}
+                    <p className={`mt-0.5 ${job.phase === "failed" ? "text-red-700 dark:text-red-300" : "text-muted-foreground"}`}>
+                      {job.phase === "failed" ? (job.error ?? "Failed") : (job.message ?? "—")}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="space-y-2" data-testid="section-auto-fix-history">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Attempt history</p>
+            {autoFixActivityLoading ? (
+              <div className="flex items-center gap-2 rounded border border-dashed px-3 py-3 text-sm text-muted-foreground" data-testid="auto-fix-history-loading">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading photo replacement history…
+              </div>
+            ) : autoFixActivityError ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700" data-testid="auto-fix-history-error">
+                <span>Photo replacement history could not be loaded.</span>
+                <Button type="button" size="sm" variant="outline" onClick={() => void refetchAutoFixActivity()}>
+                  Try again
+                </Button>
+              </div>
+            ) : (autoFixActivity?.events ?? []).length === 0 ? (
+              <p className="rounded border border-dashed px-3 py-3 text-sm text-muted-foreground" data-testid="auto-fix-history-empty">
+                No photo replacement attempts have been recorded yet.
+              </p>
+            ) : (
+              <div className="max-h-72 space-y-1.5 overflow-y-auto">
+                {(autoFixActivity?.events ?? []).map((event) => {
+                  const statusLabel = event.attemptNumber > 0
+                    ? `Retry ${event.attemptNumber} ${AUTO_FIX_RETRY_STATUS_LABELS[event.status]}`
+                    : AUTO_FIX_ACTIVITY_STATUS_LABELS[event.status];
+                  const propertyLabel = event.propertyName
+                    || (event.propertyId ? `Property ${event.propertyId}` : "Photo replacement");
+                  const unitLabel = event.unitLabel || event.unitId;
+                  return (
+                    <div key={event.id} className="rounded border p-2.5 text-xs" data-testid={`row-auto-fix-activity-${event.id}`}>
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-medium">
+                            {propertyLabel}{unitLabel ? ` · ${unitLabel}` : ""}
+                          </p>
+                          <p className="text-[11px] text-muted-foreground">
+                            {formatShortDateTime(event.occurredAt)} · {AUTO_FIX_ACTIVITY_ORIGIN_LABELS[event.origin]}
+                          </p>
+                        </div>
+                        <Badge variant="outline" className={AUTO_FIX_ACTIVITY_STATUS_TONES[event.status]}>
+                          {statusLabel}
+                        </Badge>
+                      </div>
+                      <p className={`mt-1 ${event.status === "failed" ? "text-red-700 dark:text-red-300" : "text-muted-foreground"}`}>
+                        {event.message || "No details recorded."}
+                      </p>
+                      {event.scheduledFor ? (
+                        <p className="mt-1 font-medium text-violet-700 dark:text-violet-300">
+                          Scheduled for {formatShortDateTime(event.scheduledFor)}
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-2">
+            <span className="max-w-md text-xs text-muted-foreground" data-testid="text-auto-fix-history-retention">
               {(autoReplaceQueue?.activeCount ?? 0) > 0
-                ? "Running jobs are never cleared — they keep going server-side."
+                ? "Running jobs are never cleared. "
                 : ""}
+              Clearing finished queue items never deletes this attempt history.
             </span>
             <Button
               type="button"

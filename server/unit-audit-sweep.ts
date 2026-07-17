@@ -1109,6 +1109,7 @@ async function runPhotoFixRung(
     propertyId: target.propertyId,
     unitId: ref.unitId,
     unitLabel: ref.label,
+    origin: record.source === "cron" ? "scheduled-audit" : "operator-audit",
     requireBedroomPhotoCoverage: opts.requireBedroomPhotoCoverage === true,
   });
   if (!started.ok) return { ok: false, note: `unit replacement did not start (${started.error})` };

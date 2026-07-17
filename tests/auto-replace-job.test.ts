@@ -47,6 +47,7 @@ console.log("auto-replace-job: one-click replace orchestration logic");
 const NOW = Date.parse("2026-07-04T22:00:00Z");
 const rec = (over: Partial<AutoReplaceJobRecord>): AutoReplaceJobRecord => ({
   jobId: "arj-1",
+  origin: "operator",
   phase: "finding",
   propertyId: 23,
   unitId: "prop23-kl-3br",
@@ -81,7 +82,7 @@ const rec = (over: Partial<AutoReplaceJobRecord>): AutoReplaceJobRecord => ({
     noUnit: { phase: "finding", propertyId: 23 },
   }));
   check("valid records kept; bad phase / missing unit dropped",
-    Object.keys(store).length === 1 && store.good.unitLabel === "u");
+    Object.keys(store).length === 1 && store.good.unitLabel === "u" && store.good.origin === "unknown");
 }
 {
   const oversized = "u".repeat(AUTO_REPLACE_UNIT_ID_MAX_LENGTH + 1);
@@ -421,8 +422,16 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
 {
   const { readFileSync } = await import("node:fs");
   const orch = readFileSync(new URL("../server/auto-replace-jobs.ts", import.meta.url), "utf8");
+  const retryPromotionSource = orch.slice(
+    orch.indexOf("async function activateDueAutoReplaceRetry"),
+    orch.indexOf("// Boot/interval watchdog"),
+  );
   check("retry promotion holds a short per-target claim, validates folder + swap snapshot, and persists strictly before launch",
-    /activateDueAutoReplaceRetry[\s\S]{0,1200}acquireAutoReplaceTargetLock\(record\)[\s\S]{0,2400}retryUnitSwapSnapshot[\s\S]{0,900}folderStillHasPhotoFinding[\s\S]{0,2500}persistAutoReplaceRecord\(record, \{ strict: true \}\)[\s\S]{0,500}runAutoReplaceJob\(record\)/.test(orch));
+    retryPromotionSource.includes("acquireAutoReplaceTargetLock(record)") &&
+    retryPromotionSource.includes("retryUnitSwapSnapshot") &&
+    retryPromotionSource.includes("folderStillHasPhotoFinding") &&
+    /persistAutoReplaceRecord\(record, \{[\s\S]{0,120}strict: true/.test(retryPromotionSource) &&
+    retryPromotionSource.indexOf("persistAutoReplaceRecord(record") < retryPromotionSource.indexOf("runAutoReplaceJob(record)"));
   const legacyRetrySource = orch.slice(
     orch.indexOf("async function scheduleLegacyAutoReplaceRetry"),
     orch.indexOf("async function activateDueAutoReplaceRetry"),
@@ -439,9 +448,14 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
   check("a retry-wait record cannot bypass the due-time watchdog",
     /if \(record\.phase === "retry_wait"\) \{[\s\S]{0,100}return;/.test(orch) &&
     /if \(persistedActive\) \{[\s\S]{0,400}return \{ ok: true, job: persistedActive \};/.test(orch));
+  const startSource = orch.slice(
+    orch.indexOf("export async function startAutoReplaceJob"),
+    orch.indexOf("export async function listAutoReplaceJobs"),
+  );
   check("new jobs acquire a per-target lock and require durable persistence before launch",
-    /targetLock = await acquireAutoReplaceTargetLock\(\{ propertyId, unitId \}\)/.test(orch) &&
-    /persistAutoReplaceRecord\(record, \{ strict: true \}\)[\s\S]{0,300}runAutoReplaceJob\(record\)/.test(orch) &&
+    /targetLock = await acquireAutoReplaceTargetLock\(\{ propertyId, unitId \}\)/.test(startSource) &&
+    /persistAutoReplaceRecord\(record, \{[\s\S]{0,120}strict: true/.test(startSource) &&
+    startSource.indexOf("persistAutoReplaceRecord(record") < startSource.indexOf("runAutoReplaceJob(record)") &&
     /SELECT "value" FROM app_settings WHERE "key" = \$1 FOR UPDATE/.test(orch));
   const runSource = orch.slice(
     orch.indexOf("async function runAutoReplaceJob"),
@@ -465,15 +479,85 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     runSource.includes("AUTO_REPLACE_RUNNER_HEARTBEAT_MS") &&
     /renewAutoReplaceRunnerLease[\s\S]{0,700}authoritative\?\.jobId !== current\.jobId/.test(orch) &&
     runSource.indexOf("await confirmRunnerLease()") < runSource.indexOf('postLoopback("/api/unit-swaps"'));
+  const failureSource = orch.slice(
+    orch.indexOf("async function finishAutoReplaceFailure"),
+    orch.indexOf("// The same find payload"),
+  );
   check("retry scheduling is strictly persisted and awaited",
-    /async function finishAutoReplaceFailure[\s\S]{0,1800}await persistAutoReplaceRecord\(record, \{ strict: true, expectedRunnerId \}\)/.test(orch) &&
+    /await persistAutoReplaceRecord\(record, \{[\s\S]{0,120}strict: true,[\s\S]{0,120}expectedRunnerId/.test(failureSource) &&
     /await finishAutoReplaceFailure\(record, STUCK_AUTO_REPLACE_ERROR/.test(orch));
+
+  // Durable automatic-fix activity is a semantic transition log, not a copy
+  // of heartbeat/progress messages. Lock every lifecycle seam that answers
+  // whether the system actually tried, retried, stopped, succeeded, or failed.
+  const activityTransactionSource = orch.slice(
+    orch.indexOf("async function mutateStoreTransaction"),
+    orch.indexOf("function enqueueStoreMutation"),
+  );
+  check("activity rows commit with their job transition (and fail open behind a savepoint)",
+    activityTransactionSource.includes("const activity = mutate(store, now) ?? []") &&
+    activityTransactionSource.includes("INSERT INTO queue_job_events") &&
+    activityTransactionSource.includes("SAVEPOINT auto_fix_activity_write") &&
+    activityTransactionSource.indexOf("INSERT INTO queue_job_events") < activityTransactionSource.indexOf('client.query("COMMIT")'));
+
+  check("replacement start is recorded only after the runner lease is actually claimed",
+    startSource.includes("origin?: AutoReplaceOrigin") &&
+    startSource.includes("origin,") &&
+    !/activity:\s*\[autoFixActivity\(record, "started"/.test(startSource) &&
+    runnerClaimSource.includes('retryAttempt ? "retry-started" : "started"') &&
+    runnerClaimSource.includes("after the runner lease was acquired"));
+
+  check("automatic retry outcomes cannot inherit the original operator/audit label",
+    /origin:\s*opts\.origin \?\? \(attemptNumber > 0 \? "automatic-retry" : record\.origin\)/.test(orch));
+
+  check("retry scheduling records the failed attempt and its scheduled retry",
+    /autoFixActivity\(record, "failed", error/.test(failureSource) &&
+    /autoFixActivity\([\s\S]{0,120}record,[\s\S]{0,80}"retry-scheduled"/.test(failureSource) &&
+    failureSource.includes("scheduledFor: record.nextRetryAt"));
+  check("terminal failure records a final failed activity event",
+    /phase:\s*"failed"[\s\S]{0,600}activity:\s*\[autoFixActivity\(record, "failed"/.test(failureSource));
+
+  const retryActivationSource = retryPromotionSource;
+  check("due retries record safe-stop skips; actual retry starts are recorded at runner claim",
+    /activity:\s*\[autoFixActivity\([\s\S]{0,160}"skipped"/.test(retryActivationSource) &&
+    !/activity:\s*\[autoFixActivity\([\s\S]{0,160}"retry-started"/.test(retryActivationSource) &&
+    runnerClaimSource.includes('retryAttempt ? "retry-started" : "started"'));
+
+  const verifySource = orch.slice(
+    orch.indexOf("async function runAutoReplaceVerifyPhase"),
+    orch.indexOf("export async function startAutoReplaceJob"),
+  );
+  check("successful verification records a succeeded activity event",
+    /activity:\s*\[autoFixActivity\(record, "succeeded"/.test(verifySource));
+
   const storageSource = readFileSync(new URL("../server/storage.ts", import.meta.url), "utf8");
   check("photo finding lookup uses the newest check row",
     /getPhotoListingCheckByFolder[\s\S]{0,350}orderBy\(desc\(photoListingChecks\.checkedAt\)\)[\s\S]{0,80}limit\(1\)/.test(storageSource));
   check("commit loop burns a 502 photo-hydration failure and tries the next option",
     /status === 502 && \(data\?\.coverageShort === true \|\| \/photo\/i\.test/.test(orch));
   const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  const auditSweep = readFileSync(new URL("../server/unit-audit-sweep.ts", import.meta.url), "utf8");
+  check("the direct one-click route attributes replacement activity to the operator",
+    /app\.post\("\/api\/replacement\/auto-jobs"[\s\S]{0,500}origin:\s*"operator"/.test(routes));
+  check("unit-audit replacements distinguish scheduled automation from operator-run audits",
+    /startAutoReplaceJob\(\{[\s\S]{0,300}origin:\s*record\.source === "cron" \? "scheduled-audit" : "operator-audit"/.test(auditSweep));
+  check("the read-only automatic-fix activity endpoint is wired to the bounded history query",
+    /app\.get\("\/api\/replacement\/auto-fix-activity"[\s\S]{0,250}listAutoFixActivity\(req\.query\.limit\)/.test(routes) &&
+    /export async function listAutoFixActivity[\s\S]{0,800}WHERE job_type = \$1[\s\S]{0,180}ORDER BY created_at DESC, id DESC[\s\S]{0,120}parseAutoFixActivityRows/.test(orch));
+  const clearQueueSource = orch.slice(
+    orch.indexOf("export async function clearAutoReplaceQueue"),
+    orch.indexOf("async function persistAutoReplaceRecord"),
+  );
+  check("clearing the live queue never deletes the independent activity history",
+    clearQueueSource.includes("clearableAutoReplaceJobIds") &&
+    !clearQueueSource.includes("queue_job_events") &&
+    !clearQueueSource.includes("AUTO_FIX_ACTIVITY_JOB_TYPE"));
+  const homeSource = readFileSync(new URL("../client/src/pages/home.tsx", import.meta.url), "utf8");
+  check("activity UI is accurately scoped and keeps recent terminal queue receipts as a logging fallback",
+    homeSource.includes("Photo replacement activity") &&
+    homeSource.includes('data-testid="section-auto-fix-recent-receipts"') &&
+    homeSource.includes("Retry ${event.attemptNumber} ${AUTO_FIX_RETRY_STATUS_LABELS[event.status]}") &&
+    !homeSource.includes("> Automatic fix activity<"));
   const swapLock = readFileSync(new URL("../server/unit-swap-write-lock.ts", import.meta.url), "utf8");
   check("manual and automatic swap writers share a separately bounded property lock",
     (routes.match(/withUnitSwapPropertyWriteLock\(/g)?.length ?? 0) >= 5 &&
