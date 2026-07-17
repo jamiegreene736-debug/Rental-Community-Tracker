@@ -4,6 +4,34 @@ import { db } from "./db";
 // Keep production usable when schema-only fields are added but `db:push`
 // has not been run inside Railway yet. These are additive, nullable columns.
 export async function ensureRuntimeSchema(): Promise<void> {
+  // Cowork checkout preparation depends on both tables immediately after boot:
+  // prompt runs bridge oversized Claude deep links, while reservation-scoped
+  // claims prevent duplicate checkout sessions across workers. Keep these in
+  // the authoritative additive schema path because the non-interactive
+  // drizzle push can safely decline an ambiguous create-vs-rename prompt.
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS cowork_prompt_runs (
+      id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      kind text NOT NULL,
+      reservation_id text,
+      prompt text NOT NULL,
+      created_at timestamp NOT NULL DEFAULT now(),
+      expires_at timestamp NOT NULL
+    )
+  `);
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS buy_in_checkout_claims (
+      reservation_id text PRIMARY KEY,
+      buy_in_id integer NOT NULL,
+      claim_token text NOT NULL,
+      owner text NOT NULL,
+      created_at timestamp NOT NULL DEFAULT now(),
+      expires_at timestamp NOT NULL,
+      CONSTRAINT buy_in_checkout_claims_claim_token_unique UNIQUE (claim_token)
+    )
+  `);
+  console.log("[schema] ensured Cowork prompt relay + buy-in checkout claim tables");
+
   await db.execute(sql`
     ALTER TABLE buy_ins
       ADD COLUMN IF NOT EXISTS unit_address text,
