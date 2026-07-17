@@ -1,8 +1,8 @@
 import { and, eq } from "drizzle-orm";
 
-import { virtualStagingCandidates } from "@shared/schema";
 import { resolveScopedVirtualStagingGallery } from "@shared/virtual-staging";
 import { db } from "./db";
+import { virtualStagingCandidates } from "./virtual-staging-schema";
 
 /**
  * Folder-only consumers cannot safely choose between active variants because a

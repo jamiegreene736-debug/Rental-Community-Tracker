@@ -8,14 +8,16 @@ import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import {
   communityDrafts,
   photoLabels,
-  photoOriginalAssets,
   unitSwaps,
+} from "@shared/schema";
+import {
+  photoOriginalAssets,
   virtualStagingCandidates,
   virtualStagingJobs,
   type PhotoOriginalAsset,
   type VirtualStagingCandidate,
   type VirtualStagingJob,
-} from "@shared/schema";
+} from "./virtual-staging-schema";
 import {
   resolveVirtualStagingSources,
   isVirtualStagingCandidateFilename,

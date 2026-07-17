@@ -304,6 +304,31 @@ test("generation recovery uses fenced expiring leases", () => {
   assert.match(schema, /ADD COLUMN IF NOT EXISTS generation_lease_expires_at timestamp/);
 });
 
+test("runtime virtual-staging tables stay outside Railway's db:push schema", () => {
+  const sharedSchema = fs.readFileSync(
+    path.resolve(process.cwd(), "shared/schema.ts"),
+    "utf8",
+  );
+  const runtimeSchema = fs.readFileSync(
+    path.resolve(process.cwd(), "server/virtual-staging-schema.ts"),
+    "utf8",
+  );
+  const drizzleConfig = fs.readFileSync(
+    path.resolve(process.cwd(), "drizzle.config.ts"),
+    "utf8",
+  );
+
+  for (const table of [
+    "photo_original_assets",
+    "virtual_staging_jobs",
+    "virtual_staging_candidates",
+  ]) {
+    assert.doesNotMatch(sharedSchema, new RegExp(table));
+    assert.match(runtimeSchema, new RegExp(table));
+    assert.match(drizzleConfig, new RegExp(`!${table}`));
+  }
+});
+
 test("retry enqueue is atomic and every detached task is observed", () => {
   const routes = fs.readFileSync(
     path.resolve(process.cwd(), "server/virtual-staging-routes.ts"),
