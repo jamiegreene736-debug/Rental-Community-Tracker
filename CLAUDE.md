@@ -43,6 +43,26 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-17 (Cowork buy-in find + safe checkout preparation): Jamie replaced the older
+  automated-card design. The primary bookings action now runs search/attach and VRBO checkout
+  preparation in one Cowork brief. Cowork uses the booking guest's exact name, the generated
+  per-buy-in alias, phone `8084606509`, and billing address `131 Continental Drive, Newark, DE
+  19702`; it selects only the damage waiver and keeps the 15% guard. It MUST leave all card
+  fields blank, MUST NOT click final Book/Confirm/Pay, records `awaiting_payment`, leaves the
+  tab open, and hands off with: "Finished buy-in — please add credit card and click checkout.
+  No purchase has been submitted." After the operator explicitly confirms their click, only
+  real confirmation evidence becomes `booked`; request-to-book becomes `request_submitted`;
+  ambiguity stays awaiting payment. A token-owned, expiring reservation-scoped checkout claim
+  blocks a second queued/in-progress/awaiting-payment sibling across Cowork and the legacy
+  sidecar; completion/release/reset provide safe recovery, and detach/delete reject active
+  reservation lanes rather than orphaning a claim. Alias minting rejects reservation
+  mismatches. Prompt record values are bounded, quoted, single-line data,
+  never instructions. Bulk runs allow one outstanding handoff and emit one final signal. Combined briefs
+  use the authenticated, expiring `cowork_prompt_runs` relay to avoid the desktop deep-link
+  cap; find-only remains a fallback. This SUPERSEDES the 2026-07-05 local card-file/full-auto
+  and separate-primary-button notes, plus the 2026-07-13 attach-only bulk default. See the
+  corresponding Load-Bearing section and Decision Log entry in `AGENTS.md`.
+
 - 2026-07-15 (TAT pull "Guesty listing compliance fetch timed out after 20s" — rate-limit patience +
   fail-open): NOT a lookup defect (don't re-chase): live logs show a Guesty 429 at 4:36:00 PM put
   guesty-sync's global gate into its retry-after pause (≤120s); the TAT pull at 4:36:54 queued behind

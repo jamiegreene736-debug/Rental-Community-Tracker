@@ -56,8 +56,8 @@ import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared
 import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBuyInPrompt, buildCoworkBulkBuyInPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, type CoworkBuyInPromptInput } from "@shared/cowork-buyin-prompt";
-import { buildCoworkDeepLink, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
+import { buildCoworkBuyInPrompt, buildCoworkBulkFindAndPreparePrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkFindAndPreparePrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, type CoworkBuyInPromptInput } from "@shared/cowork-buyin-prompt";
+import { buildCoworkDeepLink, buildCoworkPromptRunBootstrap, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
 
 // Is this attached buy-in already on the VRBO channel? Drives the
 // "Find on VRBO" re-channel button + slot badges (operator prefers to book
@@ -68,6 +68,12 @@ function buyInUrlIsVrbo(url: string | null | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+const ACTIVE_BUY_IN_CHECKOUT_STATUSES = new Set(["queued", "in_progress", "awaiting_payment"]);
+
+function buyInHasActiveCheckout(buyIn: Pick<BuyIn, "bookingStatus"> | null | undefined): boolean {
+  return Boolean(buyIn && ACTIVE_BUY_IN_CHECKOUT_STATUSES.has(String(buyIn.bookingStatus ?? "")));
 }
 import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
 import { unitCommunityVerdictBadge } from "@shared/community-verdict-badge";
@@ -2342,9 +2348,14 @@ function BuyInEscalationStages({
 // truncates ?q= at 14,336 chars and the prompts' money guards live at the
 // END — in that case Cowork opens empty and the toast says to paste.
 // The deep link only PRE-FILLS; nothing runs until the operator presses send
-// in Claude Desktop, so the checkout prompt's "sending is the approval"
-// semantics are preserved.
-async function launchCoworkPrompt(prompt: string): Promise<CoworkLaunchResult> {
+// in Claude Desktop, so checkout preparation only starts after the operator
+// explicitly sends its prompt.
+type CoworkPromptRunKind = "find-and-prepare" | "prepare-checkout" | "bulk-find-and-prepare";
+
+async function launchCoworkPrompt(
+  prompt: string,
+  savedRun?: { kind: CoworkPromptRunKind; reservationId?: string },
+): Promise<CoworkLaunchResult> {
   let copied = false;
   if (navigator.clipboard) {
     try {
@@ -2357,24 +2368,47 @@ async function launchCoworkPrompt(prompt: string): Promise<CoworkLaunchResult> {
   if (!shouldAutoLaunchCowork(navigator.userAgent)) {
     return { copied, launched: false, promptIncluded: false };
   }
-  const link = buildCoworkDeepLink(prompt);
+
+  let launchPrompt = prompt;
+  let runStored = false;
+  if (savedRun) {
+    try {
+      const response = await apiRequest("POST", "/api/cowork/prompt-runs", {
+        kind: savedRun.kind,
+        reservationId: savedRun.reservationId ?? null,
+        prompt,
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || typeof body?.path !== "string") {
+        throw new Error(body?.error || `HTTP ${response.status}`);
+      }
+      const runUrl = new URL(body.path, window.location.origin).toString();
+      launchPrompt = buildCoworkPromptRunBootstrap(runUrl, window.location.origin);
+      runStored = true;
+    } catch (error) {
+      // Safe degradation: launch the original prompt directly when it fits;
+      // otherwise Cowork opens empty and the complete clipboard copy remains
+      // the handoff. Never truncate the original prompt.
+      console.warn("[cowork] could not save prompt run; using direct/clipboard launch", error);
+    }
+  }
+
+  const link = buildCoworkDeepLink(launchPrompt);
   try {
     // A custom-scheme assignment hands off to the OS (Safari/Chrome show an
     // "Open Claude?" confirm) and does NOT navigate the SPA away.
     window.location.href = link.url;
-    return { copied, launched: true, promptIncluded: link.promptIncluded };
+    return { copied, launched: true, promptIncluded: link.promptIncluded, runStored };
   } catch {
-    return { copied, launched: false, promptIncluded: false };
+    return { copied, launched: false, promptIncluded: false, runStored };
   }
 }
 
-// "Auto Cowork" (find prompt) — generates the buy-in search prompt and hands it
-// straight to Cowork (deep link + clipboard) for an agent to search the open web
-// (Google, PM sites, Airbnb/VRBO/Booking) for the two cheapest buy-in units for
-// this reservation and attach them via the manual-attach API. Same-community
-// first, then a city-wide fallback, and NEVER beyond city-wide (operator's
-// spec). The prompt itself is built by the shared, tested
-// buildCoworkBuyInPrompt() so the search/attach contract stays in one place.
+// Primary Auto Cowork flow: search + attach, then continue in the SAME Cowork
+// task to prepare checkout and hand the card/final click back to the operator.
+// The full brief is saved behind portal auth and Claude Desktop gets a short
+// launcher, avoiding its 14,336-character deep-link truncation. The dialog
+// keeps a deliberate find+attach-only fallback for exceptional cases.
 function CoworkBuyInPromptButton({
   reservation,
   propertyId,
@@ -2392,9 +2426,8 @@ function CoworkBuyInPromptButton({
   const [open, setOpen] = useState(false);
   const toDateOnly = (s: string | undefined): string =>
     !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
-  const prompt = useMemo(
-    () =>
-      buildCoworkBuyInPrompt({
+  const promptInput = useMemo<CoworkBuyInPromptInput>(
+    () => ({
         reservationId: reservation._id,
         guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? null,
         propertyId,
@@ -2427,16 +2460,26 @@ function CoworkBuyInPromptButton({
       }),
     [reservation, propertyId, propertyName, community, units],
   );
+  const prompt = useMemo(() => buildCoworkFindAndPreparePrompt(promptInput), [promptInput]);
+  const findOnlyPrompt = useMemo(() => buildCoworkBuyInPrompt(promptInput), [promptInput]);
+  const activeCheckout = reservation.slots.find((slot) => buyInHasActiveCheckout(slot.buyIn))?.buyIn ?? null;
   const copy = async () => {
     try {
       await navigator.clipboard?.writeText(prompt);
-      toast({ title: "Cowork prompt copied", description: "Paste it into Cowork to run the search + attach." });
+      toast({ title: "Cowork prompt copied", description: "Paste it into Cowork to find, attach, and prepare checkout." });
     } catch {
       toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
     }
   };
   const launch = async () => {
-    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The buy-in search prompt");
+    const t = coworkLaunchToastCopy(
+      await launchCoworkPrompt(prompt, { kind: "find-and-prepare", reservationId: reservation._id }),
+      "The find-and-prepare buy-in prompt",
+    );
+    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
+  };
+  const launchFindOnly = async () => {
+    const t = coworkLaunchToastCopy(await launchCoworkPrompt(findOnlyPrompt), "The find-and-attach-only prompt");
     toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
   };
   return (
@@ -2451,23 +2494,42 @@ function CoworkBuyInPromptButton({
           setOpen(true);
           void launch();
         }}
+        disabled={Boolean(activeCheckout)}
         data-testid={`button-cowork-prompt-${reservation._id}`}
-        title="Opens a new Cowork task in Claude Desktop pre-filled with the buy-in search prompt — web-search + manually attach the cheapest buy-in units (search only — booking has its own separate button)"
+        title={activeCheckout
+          ? `${activeCheckout.unitLabel || "Another unit"} already has checkout status ${activeCheckout.bookingStatus}; finish or resolve that handoff first`
+          : "Opens Cowork to find and attach the buy-in, prepare checkout, then stop for your credit card and final Checkout click"}
       >
         <Sparkles className="mr-1 h-3.5 w-3.5" />
-        Auto Cowork
+        Auto Cowork · find + prepare
       </Button>
+      {activeCheckout ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 px-2 text-xs"
+          onClick={(e) => {
+            e.stopPropagation();
+            void launchFindOnly();
+          }}
+          data-testid={`button-cowork-find-only-active-handoff-${reservation._id}`}
+          title="A checkout handoff is already active, so this fallback searches and attaches only"
+        >
+          Find &amp; attach only
+        </Button>
+      ) : null}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Auto Cowork — buy-in search prompt</DialogTitle>
+            <DialogTitle>Auto Cowork — find, attach, and prepare checkout</DialogTitle>
             <DialogDescription>
-              On your Mac this just opened a new Cowork task in Claude Desktop with the prompt below
-              pre-filled — press send there to run it (it&apos;s also on your clipboard if you&apos;d
-              rather paste). It searches Google, PM company sites, Airbnb, VRBO and Booking.com for
-              the cheapest units (same community first, then a city-wide fallback, never beyond the
-              city) and attaches them with the manual-attach method, then stops. Review the attached
-              picks, then use the separate &quot;Auto checkout&quot; button to book them on VRBO.
+              This opens a saved, authenticated brief in Cowork. Press send in Claude Desktop: it
+              searches and attaches the qualifying unit, then continues to VRBO checkout with the
+              booking guest&apos;s exact name, that unit&apos;s generated alias, our phone and billing
+              address, and the damage waiver only. Cowork leaves every card field empty, never
+              submits the purchase, and pauses with the checkout tab open for you to add the card
+              and click Checkout. Use the fallback below when you intentionally want attachment only.
             </DialogDescription>
           </DialogHeader>
           <textarea
@@ -2478,9 +2540,18 @@ function CoworkBuyInPromptButton({
             onFocus={(e) => e.currentTarget.select()}
           />
           <DialogFooter>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => void launchFindOnly()}
+              data-testid={`button-cowork-find-only-${reservation._id}`}
+            >
+              Find &amp; attach only
+            </Button>
             <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-prompt-copy-${reservation._id}`}>
               <Copy className="mr-1 h-3.5 w-3.5" />
-              Copy again
+              Copy full prompt
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2489,12 +2560,10 @@ function CoworkBuyInPromptButton({
   );
 }
 
-// "Checkout prompt" — the SEPARATE book-only Cowork prompt (operator spec
-// 2026-07-05: booking must not ride along with the find prompt). Built from
-// the reservation's ALREADY-attached buy-ins after the operator reviewed them;
-// running the prompt is the approval, so it books without a further checkpoint
-// (damage waiver only, guest name everywhere, alias email, 15% price guard,
-// card read from the local card file — never stored in the app/prompt).
+// "Prepare checkout" — the SEPARATE Cowork prompt for ALREADY-attached buy-ins
+// after the operator reviewed them. Cowork fills the traveler details, applies
+// the damage-waiver-only + price guards, and leaves the checkout tab open. The
+// operator always supplies the card and makes the final Checkout click.
 function CoworkCheckoutPromptButton({
   reservation,
   propertyName,
@@ -2526,13 +2595,19 @@ function CoworkCheckoutPromptButton({
   const copy = async () => {
     try {
       await navigator.clipboard?.writeText(prompt);
-      toast({ title: "Checkout prompt copied", description: "Paste it into Cowork to book the attached units on VRBO." });
+      toast({
+        title: "Checkout-preparation prompt copied",
+        description: "Paste it into Cowork to prepare the attached units for payment.",
+      });
     } catch {
       toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
     }
   };
   const launch = async () => {
-    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The checkout prompt");
+    const t = coworkLaunchToastCopy(
+      await launchCoworkPrompt(prompt, { kind: "prepare-checkout", reservationId: reservation._id }),
+      "The checkout-preparation prompt",
+    );
     toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
   };
   return (
@@ -2548,25 +2623,24 @@ function CoworkCheckoutPromptButton({
           void launch();
         }}
         data-testid={`button-cowork-checkout-prompt-${reservation._id}`}
-        title="Opens a new Cowork task pre-filled with the prompt that BOOKS the attached unit(s) on VRBO — damage waiver only, guest name + alias email, your standing card. Nothing runs until you press send in Claude Desktop; sending it is the approval."
+        title="Opens a new Cowork task that prepares the attached unit checkout, leaves the VRBO tab open, and asks you to add the card and click Checkout"
       >
         <ShoppingCart className="mr-1 h-3.5 w-3.5" />
-        Auto checkout (books on VRBO)
+        Prepare checkout in Cowork
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Auto checkout — books the attached units</DialogTitle>
+            <DialogTitle>Prepare checkout — stops before payment</DialogTitle>
             <DialogDescription>
               On your Mac this just opened a new Cowork task with the prompt pre-filled (it&apos;s
-              also on your clipboard). This prompt BOOKS — nothing runs until you press send in
-              Claude Desktop, and sending it is your approval; there is no further checkpoint. It checks each attached unit out on vrbo.com with the
-              damage waiver only (all insurance and add-ons declined), the guest&apos;s name on every
-              name field, the auto-minted guest alias email, and your standing card read from the
-              local file on your Mac (~/Documents/vrbo-booking-card.txt — keep it up to date; card
-              details never live in this app or the prompt). Built-in guards: already-booked units
-              are skipped, and it pauses to ask you if a checkout total runs more than 15% over the
-              attached cost.
+              also on your clipboard). Nothing runs until you press send in Claude Desktop. Cowork
+              prepares each attached unit on vrbo.com with the damage waiver only (all insurance
+              and add-ons declined), the booking guest&apos;s name, the auto-minted guest alias email,
+              our booking phone, and the fixed billing address. It never enters card details or
+              makes the final payment. Cowork leaves the checkout tab open and says
+              &quot;Finished buy-in — please add credit card and click checkout. No purchase has been submitted.&quot; Already-booked
+              and Ready-for-card units are skipped, and the 15% checkout-total guard still applies.
             </DialogDescription>
           </DialogHeader>
           <textarea
@@ -5218,6 +5292,7 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
   const [job, setJob] = useState<CheckoutJobClientStatus | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [resettingClaim, setResettingClaim] = useState(false);
 
   // Rediscover any live checkout job for this unit on mount (survives reloads).
   useEffect(() => {
@@ -5291,6 +5366,30 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
     }
   };
 
+  const resetCheckoutClaim = async () => {
+    const confirmed = window.confirm(
+      "Reset this checkout preparation only if its Cowork or sidecar task has stopped. " +
+      "Resetting releases this unit's checkout lane and allows a new task to start. Continue?",
+    );
+    if (!confirmed) return;
+    setResettingClaim(true);
+    try {
+      await apiRequest("POST", "/api/cowork/checkout-claims/reset", {
+        reservationId: reservation._id,
+        buyInId: buyIn.id,
+      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] }),
+      ]);
+      toast({ title: "Checkout preparation reset", description: "The stale claim was marked failed. You can start a fresh checkout task." });
+    } catch (error: any) {
+      toast({ title: "Could not reset checkout", description: String(error?.message ?? error), variant: "destructive" });
+    } finally {
+      setResettingClaim(false);
+    }
+  };
+
   const booked = job?.status === "completed" || buyIn.bookingStatus === "booked";
   const confirmation = job?.confirmationNumber ?? buyIn.bookingConfirmation;
   if (booked) {
@@ -5305,19 +5404,80 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
     );
   }
 
-  const live = !!jobId && job && !job.done;
-  if (live && job) {
-    const awaiting = job.status === "awaiting_payment";
+  // Cowork persists awaiting_payment on the buy-in row before handing payment
+  // back to the operator. Prefer that durable state as well as a live job so a
+  // reload cannot turn a prepared checkout back into a "Buy this unit in"
+  // action and invite a duplicate checkout attempt.
+  const awaitingPayment = job?.status === "awaiting_payment" || buyIn.bookingStatus === "awaiting_payment";
+  if (awaitingPayment) {
     return (
       <span
-        className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] font-medium ${awaiting
-          ? "border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-600 dark:bg-amber-950/40 dark:text-amber-200"
-          : "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"}`}
+        className="inline-flex items-center gap-1 rounded border border-amber-400 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900 dark:border-amber-600 dark:bg-amber-950/40 dark:text-amber-200"
+        title="Checkout is prepared and left open. Add the credit card, then click Checkout in the checkout window."
+        data-testid={`status-bought-in-${reservation._id}-${buyIn.id}`}
+        data-booking-status="awaiting_payment"
+      >
+        <WalletCards className="h-3.5 w-3.5" />
+        Ready for card · add card + click Checkout
+      </span>
+    );
+  }
+
+  if (buyIn.bookingStatus === "request_submitted") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded border border-violet-300 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-900 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-200"
+        title={buyIn.bookingConfirmation
+          ? `VRBO request submitted · ${buyIn.bookingConfirmation} · awaiting host approval`
+          : "VRBO request submitted · awaiting host approval"}
+        data-testid={`status-request-submitted-${reservation._id}-${buyIn.id}`}
+        data-booking-status="request_submitted"
+      >
+        <Clock3 className="h-3.5 w-3.5" />
+        Request sent · awaiting host{buyIn.bookingConfirmation ? ` · ${buyIn.bookingConfirmation}` : ""}
+      </span>
+    );
+  }
+
+  const live = !!jobId && job && !job.done;
+  if (live && job) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
         title={job.message}
         data-testid={`status-bought-in-${reservation._id}-${buyIn.id}`}
       >
-        {awaiting ? <WalletCards className="h-3.5 w-3.5" /> : <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-        {awaiting ? "Enter card in the Chrome window ▸" : (job.message || "Buying in…")}
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        {job.message || "Buying in…"}
+      </span>
+    );
+  }
+
+  if (buyIn.bookingStatus === "queued" || buyIn.bookingStatus === "in_progress") {
+    return (
+      <span className="inline-flex items-center gap-1">
+        <span
+          className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
+          title="Checkout preparation has a durable claim. Resume the existing Cowork/sidecar task or reset it before starting another checkout."
+          data-testid={`status-checkout-in-progress-${reservation._id}-${buyIn.id}`}
+          data-booking-status={buyIn.bookingStatus}
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Checkout preparation in progress
+        </span>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-[11px]"
+          disabled={resettingClaim}
+          onClick={() => void resetCheckoutClaim()}
+          data-testid={`button-reset-checkout-claim-${reservation._id}-${buyIn.id}`}
+          title="Use only when the prior Cowork/sidecar checkout task is no longer running"
+        >
+          {resettingClaim ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+          Reset
+        </Button>
       </span>
     );
   }
@@ -9497,30 +9657,30 @@ export default function Bookings() {
       return !!meta?.propertyId && reservation.slotsTotal > 0 && reservation.slots.length > 0;
     })
   ), [bulkSelectedReservations, reservations, reservationPropertyMeta]);
-  // What the COWORK bulk route runs: the selected reservations that still have
-  // at least one OPEN slot. The find prompt ends at ATTACH and never detaches,
-  // so fully-attached bookings are skipped here (detach a unit first, or use
-  // the server queue, to re-search one of those).
+  // What the COWORK bulk route runs: selected reservations with at least one
+  // OPEN slot and no active checkout claim/handoff. It never detaches, but each
+  // safe reservation continues from attach into sequential checkout
+  // preparation + human payment handoffs.
   const selectedBulkCoworkReservations = useMemo(
-    () => selectedBulkEligibleReservations.filter((r) => r.slots.some((slot) => !slot.buyIn)),
+    () => selectedBulkEligibleReservations.filter(
+      (r) => r.slots.some((slot) => !slot.buyIn)
+        && !r.slots.some((slot) => buyInHasActiveCheckout(slot.buyIn)),
+    ),
     [selectedBulkEligibleReservations],
   );
-  // Route the bulk buy-in process through Cowork (operator spec 2026-07-13):
-  // build ONE batch prompt — each selected reservation's brief is the exact
-  // single-button find prompt — copy it, and deep-link a new Cowork task
-  // (launchCoworkPrompt handles the over-cap clipboard handoff; a multi-
-  // reservation batch always exceeds the 14,336-char deep-link cap, so the
-  // operator pastes once and sends). Inputs mirror CoworkBuyInPromptButton
-  // exactly: EMPTY slots only, remaining net revenue (full minus attached
-  // slot costs) so the per-brief profit guard sees the budget that's left.
+  // Route the bulk process through one durable Cowork run. Each reservation is
+  // isolated and worked in order; only one payment handoff may be outstanding
+  // across the whole batch. The short prompt-run launcher avoids deep-link
+  // truncation while the clipboard keeps the full fallback.
   const startBulkCoworkFind = async () => {
     const selected = selectedBulkEligibleReservations;
+    const selectedWithOpenSlots = selected.filter((r) => r.slots.some((slot) => !slot.buyIn));
     const withOpenSlots = selectedBulkCoworkReservations;
     if (withOpenSlots.length === 0) {
       toast({
-        title: "No open buy-in slots in the selection",
+        title: "No safe open buy-in slots in the selection",
         description:
-          "The Cowork route fills OPEN slots only — it never detaches. Detach a unit first (or use the server queue) to re-search an already-filled booking.",
+          "Cowork fills OPEN slots only and will not start while a sibling checkout is queued, in progress, or ready for card. Finish that handoff, detach a unit, or use the server queue as appropriate.",
       });
       return;
     }
@@ -9565,11 +9725,15 @@ export default function Bookings() {
       });
       return;
     }
-    const prompt = buildCoworkBulkBuyInPrompt(inputs);
+    const prompt = buildCoworkBulkFindAndPreparePrompt(inputs);
     const notes: string[] = [];
-    const skippedAttached = selected.length - withOpenSlots.length;
+    const skippedAttached = selected.length - selectedWithOpenSlots.length;
     if (skippedAttached > 0) {
       notes.push(`${skippedAttached} fully-attached booking${skippedAttached === 1 ? " was" : "s were"} skipped (Cowork fills open slots only).`);
+    }
+    const skippedActiveCheckout = selectedWithOpenSlots.length - withOpenSlots.length;
+    if (skippedActiveCheckout > 0) {
+      notes.push(`${skippedActiveCheckout} booking${skippedActiveCheckout === 1 ? " was" : "s were"} skipped because a checkout is already queued, in progress, or ready for card.`);
     }
     const overflow = withOpenSlots.length - capped.length;
     if (overflow > 0) {
@@ -9578,10 +9742,10 @@ export default function Bookings() {
     setBulkCoworkPrompt(prompt);
     setBulkCoworkNote(notes.join(" "));
     setBulkCoworkOpen(true);
-    const result = await launchCoworkPrompt(prompt);
+    const result = await launchCoworkPrompt(prompt, { kind: "bulk-find-and-prepare" });
     const t = coworkLaunchToastCopy(
       result,
-      inputs.length === 1 ? "The buy-in search prompt" : `The ${inputs.length}-reservation buy-in batch prompt`,
+      inputs.length === 1 ? "The find-and-prepare prompt" : `The ${inputs.length}-reservation find-and-prepare batch`,
     );
     toast({
       title: t.title,
@@ -10536,9 +10700,9 @@ export default function Bookings() {
                   >
                     Clear
                   </Button>
-                  {/* The bulk process routes through Cowork (operator spec
-                      2026-07-13): ONE Claude Desktop task works the selected
-                      bookings' open slots one reservation at a time. The
+                  {/* The bulk process routes through Cowork: ONE Claude
+                      Desktop task works selected bookings one reservation at
+                      a time, including one-at-a-time payment handoffs. The
                       server engine stays available below as the fallback —
                       it's the only route from a phone, and the only one that
                       detaches + re-searches fully-attached bookings. Both are
@@ -10550,10 +10714,10 @@ export default function Bookings() {
                     onClick={startBulkCoworkFind}
                     disabled={bulkBuyInQueueRunning || selectedBulkCoworkReservations.length === 0}
                     data-testid="button-run-bulk-cowork"
-                    title="Route the bulk buy-in process through Cowork: one Claude Desktop task searches the web and attaches the cheapest qualifying units to the selected bookings' OPEN slots, one reservation at a time. Never books, never detaches."
+                    title="Route the bulk buy-in process through Cowork: find and attach open slots, then prepare one checkout at a time for your card and final Checkout click. Never detaches or submits payment."
                   >
                     <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-                    Auto Cowork bulk ({selectedBulkCoworkReservations.length})
+                    Auto Cowork bulk · find + prepare ({selectedBulkCoworkReservations.length})
                   </Button>
                   <Button
                     type="button"
@@ -11751,16 +11915,26 @@ export default function Bookings() {
                                 }))}
                             />
                           )}
-                          {/* "Checkout prompt" — SEPARATE from the find prompt (operator
-                              spec 2026-07-05). Shown once at least one buy-in is attached
-                              and not yet booked; builds the book-only Cowork prompt from
-                              the attached slots' own buy-in rows. */}
-                          {r.slots.some((s) => s.buyIn && s.buyIn.bookingStatus !== "booked") && (
+                          {/* "Prepare checkout" stays separate from the find prompt because
+                              the checkout builder needs the attached buy-in IDs. Units that
+                              are already booked or waiting for the operator's card are left
+                              alone; their durable per-unit status renders below. */}
+                          {!r.slots.some((s) => buyInHasActiveCheckout(s.buyIn)) && r.slots.some(
+                            (s) => s.buyIn
+                              && s.buyIn.bookingStatus !== "booked"
+                              && s.buyIn.bookingStatus !== "request_submitted",
+                          ) && (
                             <CoworkCheckoutPromptButton
                               reservation={r}
                               propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? "Vacation rental"}
                               units={r.slots
-                                .filter((s): s is SlotInfo & { buyIn: BuyIn } => Boolean(s.buyIn && s.buyIn.bookingStatus !== "booked"))
+                                .filter(
+                                  (s): s is SlotInfo & { buyIn: BuyIn } => Boolean(
+                                    s.buyIn
+                                      && s.buyIn.bookingStatus !== "booked"
+                                      && s.buyIn.bookingStatus !== "request_submitted",
+                                  ),
+                                )
                                 .map((s) => ({
                                   buyInId: s.buyIn.id,
                                   unitLabel: s.buyIn.unitLabel || s.unitLabel,
@@ -12357,8 +12531,11 @@ export default function Bookings() {
                                     size="sm"
                                     variant="ghost"
                                     onClick={() => slot.buyIn && detachMutation.mutate({ buyInId: slot.buyIn.id, reservationId: r._id })}
-                                    disabled={detachMutation.isPending}
+                                    disabled={detachMutation.isPending || r.slots.some((s) => buyInHasActiveCheckout(s.buyIn))}
                                     data-testid={`button-detach-${r._id}-${slot.unitId}`}
+                                    title={r.slots.some((s) => buyInHasActiveCheckout(s.buyIn))
+                                      ? "Finish or resolve the active checkout handoff before detaching any unit"
+                                      : "Detach this buy-in unit"}
                                   >
                                     <Unlink className="h-3.5 w-3.5 mr-1" /> Detach
                                   </Button>
@@ -12808,15 +12985,14 @@ export default function Bookings() {
       <Dialog open={bulkCoworkOpen} onOpenChange={setBulkCoworkOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Auto Cowork — bulk buy-in batch</DialogTitle>
+            <DialogTitle>Auto Cowork — bulk find + prepare batch</DialogTitle>
             <DialogDescription>
-              On your Mac this just opened a new Cowork task in Claude Desktop — press send there to
-              run it. If the composer is empty (multi-reservation batches are too long to pre-fill
-              via the link), paste first: the whole batch prompt is on your clipboard. Cowork works
-              the reservations ONE AT A TIME — same search rules and attach method as the
-              per-booking Auto Cowork button — and chimes once when the whole batch is done. It
-              never books anything and never touches slots that already have buy-ins. Don&apos;t run
-              the server bulk queue on these same bookings while Cowork is working them.
+              This saved batch opens through a short Cowork launcher, so the complete instructions
+              cannot be truncated. Cowork works reservations one at a time: find and attach, prepare
+              one checkout, then pause for your card and Checkout click before it verifies the result
+              or moves forward. It never enters card data, submits payment, detaches existing units,
+              or keeps two unpaid checkout tabs open. The complete fallback prompt is also on your
+              clipboard. Don&apos;t run the server bulk queue on these bookings at the same time.
               {bulkCoworkNote ? ` ${bulkCoworkNote}` : ""}
             </DialogDescription>
           </DialogHeader>

@@ -50,6 +50,10 @@ import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, inArray, ne, sql } from "drizzle-orm";
 import { DESCRIPTION_OVERRIDE_FIELDS, type PropertyDescriptionOverrideField } from "@shared/description-copy";
 import { photoListingScanWasInconclusive } from "@shared/photo-listing-decision";
+import {
+  deleteBuyInWithCheckoutGuard,
+  detachBuyInWithCheckoutGuard,
+} from "./buy-in-checkout-claims";
 
 function listingUrlKey(url: string | null | undefined): string {
   if (!url) return "";
@@ -432,8 +436,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteBuyIn(id: number): Promise<boolean> {
-    const result = await db.delete(buyIns).where(eq(buyIns.id, id)).returning();
-    return result.length > 0;
+    return deleteBuyInWithCheckoutGuard(id);
   }
 
   async getBuyInCandidates(params: { propertyId: number; unitId: string; checkIn: string; checkOut: string }): Promise<BuyIn[]> {
@@ -543,12 +546,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async detachBuyIn(buyInId: number): Promise<BuyIn | undefined> {
-    const [row] = await db
-      .update(buyIns)
-      .set({ guestyReservationId: null, attachedAt: null })
-      .where(eq(buyIns.id, buyInId))
-      .returning();
-    return row;
+    return detachBuyInWithCheckoutGuard(buyInId);
   }
 
   async upsertReservationCancellationAudit(audit: InsertReservationCancellationAudit): Promise<ReservationCancellationAudit> {

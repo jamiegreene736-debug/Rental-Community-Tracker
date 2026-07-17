@@ -670,6 +670,46 @@ NOTE: as of 2026-06-27 the SERVER side (queue, tools, commit guards, orchestrati
 built + unit-tested (`tests/buyin-agent-*.test.ts`); the RUNNER BRAIN (`runAgent`) needs a live
 smoke (ANTHROPIC_API_KEY + live server + online sidecar) — not exercisable by the repo tests.
 
+### Cowork browser checkout is a human-payment handoff (Load-Bearing, 2026-07-17)
+
+The bookings-page primary Cowork action is one continuous **find + attach + prepare
+checkout** run. It does not submit a purchase. After attachment, Cowork may prepare only a
+VRBO checkout, using the booking guest's exact full name for every name field, the alias
+returned verbatim by `POST /api/buy-ins/:id/traveler-email`, phone `8084606509`, and billing
+address `131 Continental Drive, Newark, DE 19702`. Missing guest first/last name or a
+non-VRBO attached URL fails closed. Damage waiver is the only optional protection Cowork may
+select; all other insurance/add-ons are declined, and the existing 15% total-price guard
+still applies.
+
+**Payment is always human-only.** Cowork never reads a card file, enters a card number,
+expiry, or security code, and never clicks the final Book/Confirm/Pay control. It records
+`bookingStatus: "awaiting_payment"`, leaves the checkout tab open, and says exactly:
+`Finished buy-in — please add credit card and click checkout. No purchase has been submitted.`
+Only after the operator explicitly says they clicked Checkout may Cowork inspect the result:
+confirmed evidence becomes `booked`; a request-to-book submission becomes
+`request_submitted`; an unclear result remains `awaiting_payment` and is never blindly
+retried. Only one payment handoff may be outstanding at a time, including bulk runs. This is
+server-enforced by `buy_in_checkout_claims` plus the admin-only
+`/api/cowork/checkout-claims` transaction: a Postgres advisory lock serializes each
+reservation, rejects queued/in-progress/awaiting-payment siblings, and marks the claimed
+unit `in_progress` before Cowork opens checkout. Owner tokens make a lost-response retry
+idempotent; complete/release transitions atomically clear the lane; abandoned claims expire
+after two hours; and the UI offers an explicit Reset for a dead queued/in-progress task. The
+legacy sidecar checkout worker uses the same coordinator, so it cannot race Cowork. The UI
+also blocks combined/separate launches while a sibling carries an active durable status.
+Detach and delete must acquire that same reservation lane and reject while any sibling is
+queued, in progress, awaiting payment, or owns a claim; never orphan a live checkout claim.
+
+Large briefs use the authenticated, admin-only `cowork_prompt_runs` relay (24-hour expiry,
+private/no-store response) because a combined brief exceeds Claude Desktop's deep-link cap.
+The clipboard still receives the full prompt first and direct launch remains the safe
+fallback. The old find-only action remains available as an explicit fallback, but it is no
+longer the primary path. This supersedes the 2026-07-05 local-card/full-auto checkout and
+separate-primary-button decisions, and the 2026-07-13 attach-only bulk default. External
+booking/listing values are collapsed to bounded single-line quoted data and explicitly marked
+as never-instructions; bulk briefs hoist the bot protocol and true completion signal exactly
+once. Traveler-alias creation rejects a reservation ID that does not match the attached buy-in.
+
 ### Read-only inbox buy-in search (dry-run auto-fill) (Load-Bearing, 2026-06-17)
 
 The guest inbox's **"Do buy-in search"** button (`client/src/pages/inbox.tsx`, on an
@@ -5043,3 +5083,5 @@ Welcome. When in doubt, ask the human.
 2026-07-15 · Jamie (dashboard screenshot, Poipu Kapili "VRBO: Unit B"): "If this unit was detected on VRBO then why weren't the photos replaced and the column updated automatically? Please diagnose and fix then merge PR." · DIAGNOSED from the prod job stores + FIXED the pass-through the 2026-07-06 entry above claimed complete (`claude/vrbo-photo-sync-fix-1f0fa6`, PR #1049) · The automation DID fire: the Jul 13 audit sweep's ota-scan flipped `draft-25-unit-b` to VRBO found and the photo-fix ladder ran the replace rung (`arj_mrj9fn84`) — the find surfaced TWO clean Redfin candidates (2221 Kapili Rd unit-29, unit-4; findRestarts 1) and BOTH burned at commit as "gallery could not be scraped (bot-walled)", so photo-fix failed honestly and the column stayed red. ROOT CAUSE (partially supersedes the 2026-07-06 pass-through claim): `/api/replacement/find-unit` verifies the full gallery (`scrapedPhotoUrls` — photo floor + interior probe run on those exact https URLs) but its `foundUnits[].photos` carry ONLY the Google SERP thumbnail, which is a base64 `data:` URI (the persisted find record proves it — 92×92 JPEG data URIs); the orchestrator's `^https?://` filter therefore produced an EMPTY `photoUrls` fallback on EVERY auto-replace commit since the day the pass-through shipped — a commit-time bot-wall always burned the candidate (same signature on Mauna Lani `arj_mrjad22w`). THREE fixes: (1) foundUnits now carry the FULL proven gallery as `photoUrls` (https-only, cap 120; persists verbatim through the find-job record so it survives restarts); (2) BOTH commit callers (orchestrator `POST /api/unit-swaps` body, UnitReplacementFlow) prefer `unit.photoUrls` over mapping the display thumbnail; (3) `hydrateUnitSwapPhotoFolder`'s fallback fires on a THIN scrape too (< MIN_INDEPENDENT_UNIT_PHOTOS — a sold-stripped page returns exactly 1 og:image, which bypassed the empty-only trigger and died at the MIN floor), find-phase URLs UNIONED behind the fresh scrape (fresh-scrape-first preserved). All commit gates (409 duplicate-source, bedroom-coverage, MIN floor) unchanged. Source-locked in tests/auto-replace-job.test.ts (69/0). Verified: full npm test exit 0, build clean, `npm run check` 338 = baseline; post-deploy the Poipu Kapili audit was re-run live to confirm the replace rung commits.
 
 2026-07-17 · Jamie (Bedding-tab screenshot): "When I click the button scan photos for bedding please have this time stamp the actual moment this was scanned. Then please have it automatically apply the suggested bedding and bathroom layouts if the % of confidence is above 60%. Finally, then once this has been applied have it push to Guesty. If no Guesty listing is yet created just have it save the information and time stamp." · ACCEPTED — intentional reversal of Bedding PHOTO scan's proposal-only rule for the EXPLICIT TAB BUTTON ONLY · Every click runs the fresh POST and displays its server completion timestamp even when no usable unit photos exist; canonical unit IDs prevent omitted-photo units from shifting evidence onto the wrong config; only VISION evidence with `confidence > 0.60` auto-applies (exactly 60% does not; caption fallback is review-only because labels may be stale); the merged browser-local builder config is saved before any external write; the Guesty listing selected at click time uses that saved config to build the existing Bedding projection; no mapping is a successful save-only outcome; Guesty failure retains the saved layout/timestamp and exposes retry copy, including after a tab remount. Stored-scan hydration and the dashboard audit remain read-only/flag-only and never auto-push. Bathroom fixture suggestions save into the builder config; Guesty's structured Bedding write continues to carry bedroom/bathroom counts, occupancy, and `listingRooms` because Guesty has no structured shower/tub layout field.
+
+2026-07-17 · Jamie: "Have the buy-in process push to Cowork, then Cowork go to checkout and check out the buy-in listing ... finished buy in please add credit card and click check out"; follow-up: "Please implement all of this and then merge PR with main." · ACCEPTED — human-payment Cowork handoff supersedes the 2026-07-05 automated-card/local-card-file and separate-primary-button decisions plus the 2026-07-13 attach-only bulk default · PRIMARY FLOW: one Cowork run finds, creates, and attaches each buy-in, immediately prepares its VRBO checkout, records `awaiting_payment`, leaves the checkout tab open, and hands control to the operator. IDENTITY is fixed at the prompt boundary: exact booking guest full name for every name field (missing first/last fails closed), alias returned verbatim by `/api/buy-ins/:id/traveler-email`, phone `8084606509`, billing `131 Continental Drive, Newark, DE 19702`. PAYMENT BOUNDARY: damage waiver only; 15% price guard; no card-file read, no card entry, no final Book/Confirm/Pay click, and no blind retry. Exact handoff: "Finished buy-in — please add credit card and click checkout. No purchase has been submitted." After the operator explicitly confirms their click, Cowork may only classify evidence: `booked` with confirmation, `request_submitted` for a request-to-book, or unchanged `awaiting_payment` when unclear. UI persists both non-final states after reload and blocks duplicate preparation. CONCURRENCY + RECOVERY: `buy_in_checkout_claims` gives each reservation one token-owned lane; transaction-scoped advisory locking rejects active siblings and marks the target `in_progress`; same-token retries are idempotent; complete/release/reset clear the lane; dead claims expire after two hours; the operator gets a Reset UI; detach/delete take the same lane and reject active siblings instead of orphaning claims; and the legacy sidecar uses the same coordinator. BULK is sequential with one outstanding human handoff and one true final signal. Non-VRBO attaches fail into the existing re-channel flow; find-only remains an explicit fallback. SECURITY: external prompt values are bounded, single-line, quoted data (never instructions), and traveler-alias creation verifies the supplied reservation matches the attached buy-in. TRANSPORT: combined prompts use the authenticated admin-only, expiring `cowork_prompt_runs` Postgres relay so the full brief survives Claude Desktop's 14,336-character deep-link cap; clipboard/direct fallback is retained. Schema changes stay on boot-time `npm run db:push` (no bespoke SQL). Locked by `tests/cowork-buyin-prompt.test.ts` and `tests/cowork-launch.test.ts`.

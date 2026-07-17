@@ -16,9 +16,17 @@
 import { storage } from "./storage";
 import { bookVrboUnitViaSidecar, getHeartbeat } from "./vrbo-sidecar-queue";
 import { createSimpleLoginAlias, extractSimpleLoginAliasEmail } from "./simplelogin";
+import { BUY_IN_CHECKOUT_PHONE } from "@shared/buy-in-checkout-profile";
+import {
+  BuyInCheckoutClaimError,
+  claimBuyInCheckout,
+  clearBuyInCheckoutClaim,
+  completeBuyInCheckoutClaim,
+  failBuyInCheckoutClaim,
+} from "./buy-in-checkout-claims";
 
 // Operator's fixed VRBO traveler phone for every buy-in (808 460 6509).
-export const BUYIN_BOOKING_PHONE = process.env.BUYIN_BOOKING_PHONE || "8084606509";
+export const BUYIN_BOOKING_PHONE = BUY_IN_CHECKOUT_PHONE;
 
 // Per-GUEST booking email domain (operator, 2026-06-10). Each guest gets the
 // deterministic address firstname.lastname@emailprivaccy.com — a SimpleLogin
@@ -241,6 +249,8 @@ function bedroomsFromBuyIn(notes: string | null | undefined): number | undefined
 
 // ── job runner ────────────────────────────────────────────────────────────────
 async function runCheckoutJob(job: CheckoutJob): Promise<void> {
+  const claimToken = `sidecar_${job.id}`;
+  let claimActive = false;
   try {
     const buyIn = await storage.getBuyIn(job.buyInId);
     if (!buyIn) throw new CheckoutValidationError(`Buy-in ${job.buyInId} not found`);
@@ -269,8 +279,14 @@ async function runCheckoutJob(job: CheckoutJob): Promise<void> {
       throw new CheckoutValidationError("The local VRBO sidecar is offline — start it before booking a unit in");
     }
 
+    await claimBuyInCheckout({
+      reservationId: job.reservationId,
+      buyInId: job.buyInId,
+      claimToken,
+      owner: "sidecar",
+    });
+    claimActive = true;
     setStatus(job, "running", "Creating a unique booking email for this unit…");
-    await storage.updateBuyIn(job.buyInId, { bookingStatus: "in_progress", bookingError: null });
 
     const email = await ensureTravelerEmailForBuyIn({
       buyInId: job.buyInId,
@@ -304,7 +320,14 @@ async function runCheckoutJob(job: CheckoutJob): Promise<void> {
               "awaiting_payment",
               "Ready for payment — enter your card details in the Chrome window that just popped up (yellow border), then click “Book now”.",
             );
-            void storage.updateBuyIn(job.buyInId, { bookingStatus: "awaiting_payment" }).catch(() => {});
+            void completeBuyInCheckoutClaim({
+              reservationId: job.reservationId,
+              buyInId: job.buyInId,
+              claimToken,
+              owner: "sidecar",
+            })
+              .then(() => { claimActive = false; })
+              .catch((error) => console.error("[buy-in-checkout] failed to complete checkout claim", error));
           }
         } else if (stage) {
           touch(job, { phase: stage });
@@ -315,11 +338,29 @@ async function runCheckoutJob(job: CheckoutJob): Promise<void> {
     if (job.canceled) {
       setStatus(job, "failed", "Checkout canceled");
       job.error = "Canceled by operator";
+      if (claimActive) {
+        await failBuyInCheckoutClaim({
+          reservationId: job.reservationId,
+          buyInId: job.buyInId,
+          claimToken,
+          owner: "sidecar",
+        }, "Canceled by operator").catch(() => {});
+        claimActive = false;
+      }
       await storage.updateBuyIn(job.buyInId, { bookingStatus: "failed", bookingError: "Canceled by operator" }).catch(() => {});
       return;
     }
 
     if (result?.confirmed) {
+      if (claimActive) {
+        await clearBuyInCheckoutClaim({
+          reservationId: job.reservationId,
+          buyInId: job.buyInId,
+          claimToken,
+          owner: "sidecar",
+        }).catch(() => {});
+        claimActive = false;
+      }
       job.confirmationNumber = result.confirmationNumber ?? null;
       setStatus(job, "completed", result.confirmationNumber ? `Booked ✓ — confirmation ${result.confirmationNumber}` : "Booked ✓");
       await storage.updateBuyIn(job.buyInId, {
@@ -340,12 +381,31 @@ async function runCheckoutJob(job: CheckoutJob): Promise<void> {
         : `Checkout did not complete: ${reason}`;
     setStatus(job, "failed", msg);
     job.error = msg;
+    if (claimActive) {
+      await failBuyInCheckoutClaim({
+        reservationId: job.reservationId,
+        buyInId: job.buyInId,
+        claimToken,
+        owner: "sidecar",
+      }, msg).catch(() => {});
+      claimActive = false;
+    }
     await storage.updateBuyIn(job.buyInId, { bookingStatus: "failed", bookingError: msg.slice(0, 500) }).catch(() => {});
   } catch (e: any) {
     const msg = String(e?.message ?? e);
     setStatus(job, "failed", msg);
     job.error = msg;
-    await storage.updateBuyIn(job.buyInId, { bookingStatus: "failed", bookingError: msg.slice(0, 500) }).catch(() => {});
+    if (claimActive) {
+      await failBuyInCheckoutClaim({
+        reservationId: job.reservationId,
+        buyInId: job.buyInId,
+        claimToken,
+        owner: "sidecar",
+      }, msg).catch(() => {});
+      claimActive = false;
+    } else if (!(e instanceof BuyInCheckoutClaimError && e.status === 409)) {
+      await storage.updateBuyIn(job.buyInId, { bookingStatus: "failed", bookingError: msg.slice(0, 500) }).catch(() => {});
+    }
   } finally {
     finalize(job);
   }
