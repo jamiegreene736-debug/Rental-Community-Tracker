@@ -2402,7 +2402,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getPhotoListingCheckByFolder(folder: string): Promise<PhotoListingCheck | undefined> {
-    const [row] = await db.select().from(photoListingChecks).where(eq(photoListingChecks.photoFolder, folder));
+    const [row] = await db.select()
+      .from(photoListingChecks)
+      .where(eq(photoListingChecks.photoFolder, folder))
+      .orderBy(desc(photoListingChecks.checkedAt))
+      .limit(1);
     return row;
   }
 
