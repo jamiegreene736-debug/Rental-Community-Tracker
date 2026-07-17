@@ -1177,6 +1177,7 @@ check(
   const { fileURLToPath } = await import("node:url");
   const here = path.dirname(fileURLToPath(import.meta.url));
   const bookingsSrc = fs.readFileSync(path.join(here, "../client/src/pages/bookings.tsx"), "utf8");
+  const schemaMaintenanceSrc = fs.readFileSync(path.join(here, "../server/schema-maintenance.ts"), "utf8");
   check(
     "bookings: Auto Cowork bulk button exists and builds the batch via the shared builder",
     bookingsSrc.includes('data-testid="button-run-bulk-cowork"') && bookingsSrc.includes("buildCoworkBulkFindAndPreparePrompt(inputs)"),
@@ -1202,6 +1203,14 @@ check(
   check(
     "bookings: server engine still available as the fallback (relabeled, same handler)",
     bookingsSrc.includes("Run bulk buy-ins (server)") && bookingsSrc.includes("onClick={startBulkBuyInQueue}"),
+  );
+  check(
+    "schema maintenance: boot creates the durable Cowork prompt relay table",
+    /CREATE TABLE IF NOT EXISTS cowork_prompt_runs \([\s\S]*?id varchar PRIMARY KEY DEFAULT gen_random_uuid\(\)[\s\S]*?prompt text NOT NULL[\s\S]*?expires_at timestamp NOT NULL[\s\S]*?\)/.test(schemaMaintenanceSrc),
+  );
+  check(
+    "schema maintenance: boot creates reservation-scoped checkout claims with the Drizzle constraint name",
+    /CREATE TABLE IF NOT EXISTS buy_in_checkout_claims \([\s\S]*?reservation_id text PRIMARY KEY[\s\S]*?buy_in_id integer NOT NULL[\s\S]*?claim_token text NOT NULL[\s\S]*?CONSTRAINT buy_in_checkout_claims_claim_token_unique UNIQUE \(claim_token\)[\s\S]*?\)/.test(schemaMaintenanceSrc),
   );
 }
 
