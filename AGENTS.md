@@ -4626,15 +4626,29 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    ("N claimed bedrooms have no bedroom photo — unverifiable"), never
    guessed or padded; the prompt forbids padding to the claimed count and
    the strict parse drops entries with out-of-range/duplicate photo
-   indexes or unrecognizable beds. Detections under
-   `BEDDING_SCAN_MIN_CONFIDENCE` (0.6) render but never apply/compare.
-   (b) PROPOSAL-ONLY — nothing auto-applies. The tab's "🔎 Scan photos
-   for bedding" button renders a panel; the operator clicks Apply per
-   unit (`mergeBeddingScanIntoUnit`: biggest bed → Master slot, en-suite
-   evidence SETS + unions but never unsets, bathroom features replace
-   only matched slots, bedroom/bathroom COUNTS never change) and then
-   pushes via the existing Push Bedding button. The operator's
-   localStorage config remains the ONLY push source (#9 intact).
+   indexes or unrecognizable beds. `BEDDING_SCAN_MIN_CONFIDENCE` is 0.6:
+   audit/manual comparison remains inclusive, while the explicit tab-button
+   auto-apply is STRICTLY ABOVE it (`confidence > 0.6`; exactly 60% stays
+   untouched).
+   (b) EXPLICIT BUTTON AUTO-APPLY (operator reversal, 2026-07-17) — a fresh
+   "🔎 Scan photos for bedding" click matches scan rows to the canonical
+   builder `unitId` (NEVER array position; a unit with no photos is omitted
+   and would shift later rows), applies >60% VISION findings only
+   (`mergeBeddingScanIntoUnit`: biggest bed → Master slot, en-suite evidence
+   SETS + unions but never unsets, full-bath features replace only matched
+   slots, bedroom/bathroom COUNTS never change), requires the server-stamped
+   evidence/timestamp to persist, synchronously saves the exact resulting
+   localStorage config, and uses that saved config to build the supported
+   Guesty Bedding projection for the listing snapshotted at click time. With no Guesty
+   listing it stops after save; the server-stamped scan + timestamp still live
+   in `bedding_photo_scans.v1` (the applied layout follows the builder's existing
+   browser-local persistence model). A per-unit/no-key vision failure may still
+   render caption-derived evidence, but it is REVIEW-ONLY and can never auto-apply
+   or push. A push failure never rolls back the saved config
+   or timestamp and is surfaced for manual retry. Hydrating a stored/audit scan
+   remains READ-ONLY — auto-apply/push only occurs inside the explicit POST
+   click handler — and the operator can still hand-edit or re-apply afterward.
+   The operator's localStorage config remains the ONLY push source (#9 intact).
    (c) The AUDIT reuses the same engine: stageLayout calls
    `beddingPhotoCheckForAudit` (kill `AUDIT_BEDDING_PHOTO_CHECK=0`),
    which reuses a fingerprint-fresh stored scan
@@ -4653,7 +4667,7 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    `BEDDING_SCAN_VISION_DISABLED=1` → caption-derived fallback
    (method:"captions", flagged in the receipt — captions are themselves
    vision-authored labels, weaker but not blind). Locked by
-   tests/bedding-photo-scan.test.ts (65, in the npm chain), which ALSO
+   tests/bedding-photo-scan.test.ts (in the npm chain), which ALSO
    source-guards the audit-pricing → `markScannerGuestyRatePush` →
    `/api/dashboard/price-scans` → dashboard-invalidation chain (the
    2026-07-14 operator ask that the audit's rate pushes move the Last
@@ -5027,3 +5041,5 @@ Welcome. When in doubt, ask the human.
 2026-07-15 · Jamie (Descriptions-tab licenses screenshot, Royal Kahana draft -46): "When I tried to pull the license nothing happened. Also, no error was shown etc. Please diagnose and fix. Then merge PR." · DIAGNOSED from the live Railway edge log + prod provenance API, fixed (`claude/license-pull-failure-fff202`) · NOT a lookup failure (don't re-chase): the operator's "Pull real GET license" click at 00:53:47Z queued behind a Guesty rate-limit pause, the client's own 45s `AbortSignal.timeout` closed the request (edge log: HTTP 499 at exactly 45002ms), and the SERVER-side pull (#1045 persist + #1046 patient window) then landed + stamped at 00:55:53Z — 126s after the click, proven by the field's provenance stamp on GET /api/builder/compliance/-46. The gap was pure visibility: after the in-tab timeout the ONLY re-read was the 30s-throttled focus/visibilitychange listener, so an operator sitting ON the tab watching the button saw literally nothing ("nothing happened, no error"). FIX (client-only, `GuestyListingBuilder/index.tsx`): post-timeout PULL WATCHER — when a single-field pull (TMK/GET/TAT/STR) times out in-tab, `watchForServerPullLanding` polls `reloadComplianceValues` (first check 5s, then 15s, ~170s total — past the server's 150s patient window) until the field's provenance stamp CHANGES (server-savedAt vs server-savedAt baseline captured before the fetch — clock skew can't matter; any change ends the watch, the success toast is reserved for `method:"online-pull"`). While watching: the button is DISABLED with a "Still pulling on the server..." label + an amber inline hint (a re-issued request would only add Guesty gate pressure — same rationale as the #1046 never-re-issue rule), the timeout toast is informational (not destructive) and says the page is watching; landing → success toast + the value/stamp render in place; nothing after ~3 min → honest destructive "pull did not save" toast. Watches are per-field token-guarded (concurrent fields coexist) and a property switch cancels them. `reloadComplianceValues` now RETURNS its payload so the watcher needs no second fetch. Verified: license-provenance 80/0 (8 new source guards), full `npm test` REAL exit 0, `npm run check` 338 = baseline, build clean (strings bundle-grepped), and the EXACT incident replayed on the BUILT bundle (static SPA server + Playwright, hung /api/builder/get-lookup + compliance stamp landing at +48s: timeout toast → watching label/hint/disabled → value + "Pulled online" stamp on-screen at +50s with zero tab switch, one single lookup request — 14/0).
 
 2026-07-15 · Jamie (dashboard screenshot, Poipu Kapili "VRBO: Unit B"): "If this unit was detected on VRBO then why weren't the photos replaced and the column updated automatically? Please diagnose and fix then merge PR." · DIAGNOSED from the prod job stores + FIXED the pass-through the 2026-07-06 entry above claimed complete (`claude/vrbo-photo-sync-fix-1f0fa6`, PR #1049) · The automation DID fire: the Jul 13 audit sweep's ota-scan flipped `draft-25-unit-b` to VRBO found and the photo-fix ladder ran the replace rung (`arj_mrj9fn84`) — the find surfaced TWO clean Redfin candidates (2221 Kapili Rd unit-29, unit-4; findRestarts 1) and BOTH burned at commit as "gallery could not be scraped (bot-walled)", so photo-fix failed honestly and the column stayed red. ROOT CAUSE (partially supersedes the 2026-07-06 pass-through claim): `/api/replacement/find-unit` verifies the full gallery (`scrapedPhotoUrls` — photo floor + interior probe run on those exact https URLs) but its `foundUnits[].photos` carry ONLY the Google SERP thumbnail, which is a base64 `data:` URI (the persisted find record proves it — 92×92 JPEG data URIs); the orchestrator's `^https?://` filter therefore produced an EMPTY `photoUrls` fallback on EVERY auto-replace commit since the day the pass-through shipped — a commit-time bot-wall always burned the candidate (same signature on Mauna Lani `arj_mrjad22w`). THREE fixes: (1) foundUnits now carry the FULL proven gallery as `photoUrls` (https-only, cap 120; persists verbatim through the find-job record so it survives restarts); (2) BOTH commit callers (orchestrator `POST /api/unit-swaps` body, UnitReplacementFlow) prefer `unit.photoUrls` over mapping the display thumbnail; (3) `hydrateUnitSwapPhotoFolder`'s fallback fires on a THIN scrape too (< MIN_INDEPENDENT_UNIT_PHOTOS — a sold-stripped page returns exactly 1 og:image, which bypassed the empty-only trigger and died at the MIN floor), find-phase URLs UNIONED behind the fresh scrape (fresh-scrape-first preserved). All commit gates (409 duplicate-source, bedroom-coverage, MIN floor) unchanged. Source-locked in tests/auto-replace-job.test.ts (69/0). Verified: full npm test exit 0, build clean, `npm run check` 338 = baseline; post-deploy the Poipu Kapili audit was re-run live to confirm the replace rung commits.
+
+2026-07-17 · Jamie (Bedding-tab screenshot): "When I click the button scan photos for bedding please have this time stamp the actual moment this was scanned. Then please have it automatically apply the suggested bedding and bathroom layouts if the % of confidence is above 60%. Finally, then once this has been applied have it push to Guesty. If no Guesty listing is yet created just have it save the information and time stamp." · ACCEPTED — intentional reversal of Bedding PHOTO scan's proposal-only rule for the EXPLICIT TAB BUTTON ONLY · Every click runs the fresh POST and displays its server completion timestamp even when no usable unit photos exist; canonical unit IDs prevent omitted-photo units from shifting evidence onto the wrong config; only VISION evidence with `confidence > 0.60` auto-applies (exactly 60% does not; caption fallback is review-only because labels may be stale); the merged browser-local builder config is saved before any external write; the Guesty listing selected at click time uses that saved config to build the existing Bedding projection; no mapping is a successful save-only outcome; Guesty failure retains the saved layout/timestamp and exposes retry copy, including after a tab remount. Stored-scan hydration and the dashboard audit remain read-only/flag-only and never auto-push. Bathroom fixture suggestions save into the builder config; Guesty's structured Bedding write continues to carry bedroom/bathroom counts, occupancy, and `listingRooms` because Guesty has no structured shower/tub layout field.

@@ -2132,7 +2132,8 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
   // The Guesty rooms read lives in server/bedding-photo-scan.ts — this module
   // stays push-free per the layout stage's source lock. Findings are
   // flag-only, like every layout finding: the remedy is the Bedding tab
-  // (Scan photos for bedding → Apply → Push). Unphotographed bedrooms are
+  // (clicking Scan photos for bedding auto-applies >60% findings and pushes
+  // when mapped). Unphotographed bedrooms are
   // reported as unverifiable, never guessed. Kill: AUDIT_BEDDING_PHOTO_CHECK=0.
   let beddingMismatch = false;
   let beddingClean = false;
@@ -2170,7 +2171,7 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
     return {
       verdict: "attention",
       detail: beddingMismatch
-        ? "The unit photos disagree with the pushed Guesty bed layout — open the Bedding tab, run Scan photos for bedding, Apply, and push."
+        ? "The unit photos disagree with the pushed Guesty bed layout — open the Bedding tab and click Scan photos for bedding to auto-apply and push."
         : "Layout numbers partially disagree with Guesty — review the Bedding tab.",
       items,
     };

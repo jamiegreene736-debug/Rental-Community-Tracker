@@ -80,6 +80,8 @@ const SOURCE_PAGE_CHECK_DISABLED = process.env.SOURCE_PAGE_COMMUNITY_CHECK_DISAB
 export type CheckGroupInput = {
   role: "community" | "unit";
   label: string;
+  /** Canonical builder unit id; server-populated for unit groups. */
+  unitId?: string;
   folder: string;
   filenames?: string[];
   captions?: Record<string, string>;

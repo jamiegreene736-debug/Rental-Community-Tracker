@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { guestyService } from "@/services/guestyService";
 import {
@@ -26,7 +26,9 @@ import type { GuestyBedType } from "@/data/guesty-listing-config";
 import {
   BEDDING_SCAN_MIN_CONFIDENCE,
   BEDDING_SCAN_FEATURE_LABELS,
+  autoApplyBeddingScanToUnits,
   describeDetectedBeds,
+  isBeddingScanAutoApplyEligible,
   mergeBeddingScanIntoUnit,
   type BeddingPhotoScanRecord,
   type BeddingScanUnit,
@@ -84,9 +86,60 @@ interface Props {
   onGuestyPushRecorded?: (status: "success" | "error", message: string) => void;
 }
 
+type BeddingScanOutcome = {
+  tone: "success" | "warning";
+  message: string;
+};
+
+type BeddingScanWorkflowResult = {
+  record?: BeddingPhotoScanRecord;
+  configSnapshot?: string;
+  applied: Record<string, string>;
+  outcome?: BeddingScanOutcome;
+  error?: string;
+};
+
+type ActiveBeddingScanWorkflow = {
+  done: Promise<BeddingScanWorkflowResult>;
+  finish: (result: BeddingScanWorkflowResult) => void;
+};
+
+// The parent unmounts this tab when the operator navigates elsewhere. Keep the
+// one authoritative workflow outside the component so a remount cannot launch
+// a duplicate scan/push while the original request is still completing.
+const activeBeddingScanWorkflows = new Map<number, ActiveBeddingScanWorkflow>();
+const completedBeddingScanWorkflows = new Map<number, BeddingScanWorkflowResult>();
+const latestBeddingConfigs = new Map<number, PropertyBeddingConfig>();
+
+function beginBeddingScanWorkflow(propertyId: number): ActiveBeddingScanWorkflow | null {
+  if (activeBeddingScanWorkflows.has(propertyId)) return null;
+  completedBeddingScanWorkflows.delete(propertyId);
+  let finish = (_result: BeddingScanWorkflowResult) => {};
+  const done = new Promise<BeddingScanWorkflowResult>((resolve) => { finish = resolve; });
+  const workflow = { done, finish };
+  activeBeddingScanWorkflows.set(propertyId, workflow);
+  return workflow;
+}
+
+function finishBeddingScanWorkflow(
+  propertyId: number,
+  workflow: ActiveBeddingScanWorkflow,
+  result: BeddingScanWorkflowResult,
+): void {
+  if (activeBeddingScanWorkflows.get(propertyId) === workflow) {
+    activeBeddingScanWorkflows.delete(propertyId);
+  }
+  completedBeddingScanWorkflows.set(propertyId, result);
+  workflow.finish(result);
+}
+
 export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }: Props) {
   const { toast } = useToast();
-  const [config, setConfig] = useState<PropertyBeddingConfig>(() => loadBeddingConfig(propertyId));
+  const [config, setConfig] = useState<PropertyBeddingConfig>(() => {
+    const initial = loadBeddingConfig(propertyId);
+    latestBeddingConfigs.set(propertyId, initial);
+    return initial;
+  });
   const [pushing, setPushing] = useState(false);
   // spaceDirty = the operator hand-edited the Space text; auto-regeneration is
   // paused and the text persists across tab switches until "Regenerate".
@@ -94,48 +147,138 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
   const [spaceText, setSpaceText] = useState(() =>
     loadSpaceTextOverride(propertyId) ?? buildSpaceDescription(loadBeddingConfig(propertyId)));
   const [pushingSpace, setPushingSpace] = useState(false);
-  // Bedding PHOTO scan — Claude vision proposal over the unit's actual photos.
-  // NOTHING auto-applies: the operator reviews the panel and clicks Apply per
-  // unit (their manual edits keep winning — apply just writes the config state,
-  // which persists through the normal localStorage save).
+  // Bedding PHOTO scan — a fresh button click auto-applies detections strictly
+  // above 60%, saves the merged config, then builds the supported Guesty
+  // Bedding projection from it when a listing is connected.
+  // Hydrating a stored/audit scan never applies or pushes anything.
   const [beddingScan, setBeddingScan] = useState<BeddingPhotoScanRecord | null>(null);
   const [beddingScanFresh, setBeddingScanFresh] = useState(false);
-  const [beddingScanning, setBeddingScanning] = useState(false);
+  const [beddingScanning, setBeddingScanning] = useState(() => activeBeddingScanWorkflows.has(propertyId));
   const [beddingScanError, setBeddingScanError] = useState<string | null>(null);
   const [beddingScanApplied, setBeddingScanApplied] = useState<Record<string, string>>({});
+  const [beddingScanOutcome, setBeddingScanOutcome] = useState<BeddingScanOutcome | null>(null);
+  const configRef = useRef(config);
+  const activePropertyIdRef = useRef(propertyId);
+  const latestScanTimestampRef = useRef(0);
+  const scanInFlightRef = useRef(false);
+  const pushInFlightRef = useRef(false);
+  configRef.current = config;
+  activePropertyIdRef.current = propertyId;
+
+  const acceptScanRecord = useCallback((record: BeddingPhotoScanRecord, fresh: boolean): boolean => {
+    const timestamp = Date.parse(record.scannedAt);
+    const comparableTimestamp = Number.isFinite(timestamp) ? timestamp : 0;
+    if (comparableTimestamp < latestScanTimestampRef.current) return false;
+    const completed = completedBeddingScanWorkflows.get(propertyId);
+    const completedTimestamp = completed?.record ? Date.parse(completed.record.scannedAt) : Number.NaN;
+    if (completed?.record && Number.isFinite(completedTimestamp) && comparableTimestamp > completedTimestamp) {
+      // A newer audit/stored scan is read-only. Never attach an older explicit
+      // click's "applied/pushed" outcome to that newer evidence record.
+      completedBeddingScanWorkflows.delete(propertyId);
+      setBeddingScanApplied({});
+      setBeddingScanOutcome(null);
+      setBeddingScanError(null);
+    }
+    latestScanTimestampRef.current = comparableTimestamp;
+    setBeddingScan(record);
+    setBeddingScanFresh(fresh);
+    return true;
+  }, [propertyId]);
 
   // Reload when property changes
   useEffect(() => {
+    latestScanTimestampRef.current = 0;
     const c = loadBeddingConfig(propertyId);
+    latestBeddingConfigs.set(propertyId, c);
+    configRef.current = c;
     setConfig(c);
     const override = loadSpaceTextOverride(propertyId);
     setSpaceDirty(override != null);
     setSpaceText(override ?? buildSpaceDescription(c));
   }, [propertyId]);
 
+  // If the tab remounts while its original workflow is still running, consume
+  // its one shared result. Completed results remain available for later in-app
+  // remounts so push failures and retry copy cannot disappear on a tab change.
+  useEffect(() => {
+    let cancelled = false;
+    const workflow = activeBeddingScanWorkflows.get(propertyId);
+    setBeddingScanning(workflow != null);
+    const applyResult = (result: BeddingScanWorkflowResult) => {
+      if (cancelled) return;
+      // The workflow saved before resolving. Always hydrate the current
+      // localStorage value so a later remount cannot replay its old snapshot
+      // over manual edits made after completion.
+      const saved = loadBeddingConfig(propertyId);
+      latestBeddingConfigs.set(propertyId, saved);
+      configRef.current = saved;
+      setConfig(saved);
+      setBeddingScanning(false);
+      const accepted = result.record ? acceptScanRecord(result.record, true) : true;
+      if (!accepted) {
+        // A newer audit scan won the timestamp race while this click was still
+        // pushing. Keep the newer evidence and never attach this older click's
+        // outcome/applied notes to it.
+        completedBeddingScanWorkflows.delete(propertyId);
+        setBeddingScanApplied({});
+        setBeddingScanOutcome(null);
+        setBeddingScanError(null);
+        return;
+      }
+      setBeddingScanApplied(result.applied);
+      setBeddingScanOutcome(result.outcome ?? null);
+      setBeddingScanError(result.error ?? null);
+    };
+
+    if (workflow) void workflow.done.then(applyResult);
+    else {
+      const completed = completedBeddingScanWorkflows.get(propertyId);
+      if (completed) applyResult(completed);
+    }
+    return () => { cancelled = true; };
+  }, [acceptScanRecord, propertyId]);
+
   // Hydrate the last stored photo scan (an audit sweep may have already paid
   // for one — the store is shared with the unit-audit layout stage).
   useEffect(() => {
     let cancelled = false;
-    setBeddingScan(null);
-    setBeddingScanFresh(false);
-    setBeddingScanError(null);
-    setBeddingScanApplied({});
-    fetch(`/api/builder/bedding-photo-scan/${propertyId}`)
+    const hasWorkflowContext = activeBeddingScanWorkflows.has(propertyId)
+      || completedBeddingScanWorkflows.has(propertyId);
+    if (!hasWorkflowContext) {
+      setBeddingScan(null);
+      setBeddingScanFresh(false);
+      setBeddingScanError(null);
+      setBeddingScanApplied({});
+      setBeddingScanOutcome(null);
+    }
+    fetch(`/api/builder/bedding-photo-scan/${propertyId}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled || !data?.record) return;
-        setBeddingScan(data.record as BeddingPhotoScanRecord);
-        setBeddingScanFresh(data.fresh === true);
+        acceptScanRecord(data.record as BeddingPhotoScanRecord, data.fresh === true);
       })
       .catch(() => { /* proposal panel just stays hidden */ });
     return () => { cancelled = true; };
-  }, [propertyId]);
+  }, [acceptScanRecord, propertyId]);
 
   // Auto-persist on change + refresh generated space text (unless hand-edited)
   useEffect(() => {
-    saveBeddingConfig(config);
     if (!spaceDirty) setSpaceText(buildSpaceDescription(config));
+    // A remounted tab initially holds the pre-scan config while the shared
+    // workflow finishes. That stale render must never overwrite the config the
+    // workflow explicitly saves immediately before its Guesty push.
+    if (activeBeddingScanWorkflows.has(propertyId)) return;
+    latestBeddingConfigs.set(propertyId, config);
+    saveBeddingConfig(config);
+    const completed = completedBeddingScanWorkflows.get(propertyId);
+    if (completed?.configSnapshot && completed.configSnapshot !== JSON.stringify(config)) {
+      completedBeddingScanWorkflows.delete(propertyId);
+      setBeddingScanApplied({});
+      setBeddingScanOutcome({
+        tone: "warning",
+        message: "Bedding was edited after the photo scan. The current edits are saved in this browser; push Bedding to Guesty when ready.",
+      });
+    }
   }, [config, spaceDirty]);
 
   const totals = useMemo(() => ({
@@ -151,7 +294,11 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
 
   // ── Mutators ────────────────────────────────────────────────────────────
   const updateUnit = useCallback((unitId: string, fn: (u: UnitBeddingConfig) => UnitBeddingConfig) => {
-    setConfig(c => ({ ...c, units: c.units.map(u => u.unitId === unitId ? fn(u) : u) }));
+    setConfig(c => {
+      const next = { ...c, units: c.units.map(u => u.unitId === unitId ? fn(u) : u) };
+      latestBeddingConfigs.set(next.propertyId, next);
+      return next;
+    });
   }, []);
 
   const updateBedroom = (unitId: string, roomNumber: number, fn: (b: BedroomDetail) => BedroomDetail) =>
@@ -183,81 +330,222 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
   }));
 
   // ── Push to Guesty ──────────────────────────────────────────────────────
-  const handlePush = useCallback(async () => {
-    if (!guestyListingId || pushing) return;
+  const pushBeddingConfigToGuesty = useCallback(async (
+    listingId: string,
+    configToPush: PropertyBeddingConfig,
+  ): Promise<{
+    ok: boolean;
+    bedrooms: number;
+    bathrooms: number;
+    sleeps: number;
+    error?: string;
+  }> => {
+    const bedrooms = totalBedrooms(configToPush);
+    const bathrooms = totalBathrooms(configToPush);
+    const sleeps = headlineSleeps(configToPush.propertyId, configToPush);
+    if (pushInFlightRef.current) {
+      return { ok: false, bedrooms, bathrooms, sleeps, error: "A bedding push is already in progress." };
+    }
+
+    pushInFlightRef.current = true;
     setPushing(true);
     try {
-      await guestyService.updateListingDetails(guestyListingId, {
-        bedrooms: totals.bedrooms || undefined,
-        bathrooms: totals.bathrooms || undefined,
-        accommodates: totals.sleeps || undefined,
-        listingRooms: buildGuestyListingRooms(config),
+      await guestyService.updateListingDetails(listingId, {
+        bedrooms: bedrooms || undefined,
+        bathrooms: bathrooms || undefined,
+        accommodates: sleeps || undefined,
+        listingRooms: buildGuestyListingRooms(configToPush),
       });
-      const message = `Bedding updated: ${totals.bedrooms} BR, ${totals.bathrooms} bath, sleeps ${totals.sleeps}`;
+      const message = `Bedding updated: ${bedrooms} BR, ${bathrooms} bath, sleeps ${sleeps}`;
       onGuestyPushRecorded?.("success", message);
-      toast({
-        title: "Bedding pushed to Guesty",
-        description: `${totals.bedrooms} bedroom${totals.bedrooms !== 1 ? "s" : ""}, ${totals.bathrooms} bath${totals.bathrooms !== 1 ? "s" : ""}, sleeps ${totals.sleeps}.`,
-      });
+      return { ok: true, bedrooms, bathrooms, sleeps };
     } catch (e) {
-      const message = (e as Error).message;
-      onGuestyPushRecorded?.("error", message);
-      toast({ title: "Push failed", description: message, variant: "destructive" });
+      const error = (e as Error).message;
+      onGuestyPushRecorded?.("error", error);
+      return { ok: false, bedrooms, bathrooms, sleeps, error };
     } finally {
+      pushInFlightRef.current = false;
       setPushing(false);
     }
-  }, [guestyListingId, pushing, totals, config, onGuestyPushRecorded, toast]);
+  }, [onGuestyPushRecorded]);
+
+  const handlePush = useCallback(async () => {
+    if (!guestyListingId || pushing || beddingScanning) return;
+    const result = await pushBeddingConfigToGuesty(guestyListingId, config);
+    if (result.ok) {
+      const completed = completedBeddingScanWorkflows.get(propertyId);
+      if (completed?.outcome?.message.includes("Guesty push failed")) {
+        const outcome: BeddingScanOutcome = {
+          tone: "success",
+          message: `Manual retry succeeded. Guesty now has ${result.bedrooms} bedrooms, ${result.bathrooms} bathrooms, sleeps ${result.sleeps}, and the saved bed layout.`,
+        };
+        completedBeddingScanWorkflows.set(propertyId, { ...completed, outcome, error: undefined });
+        setBeddingScanOutcome(outcome);
+        setBeddingScanError(null);
+      }
+      toast({
+        title: "Bedding pushed to Guesty",
+        description: `${result.bedrooms} bedroom${result.bedrooms !== 1 ? "s" : ""}, ${result.bathrooms} bath${result.bathrooms !== 1 ? "s" : ""}, sleeps ${result.sleeps}.`,
+      });
+      return;
+    }
+    toast({ title: "Push failed", description: result.error, variant: "destructive" });
+  }, [beddingScanning, config, guestyListingId, propertyId, pushing, pushBeddingConfigToGuesty, toast]);
 
   // ── Bedding photo scan ────────────────────────────────────────────────────
   const handleBeddingScan = useCallback(async () => {
-    if (beddingScanning) return;
+    if (beddingScanning || scanInFlightRef.current || pushInFlightRef.current) return;
+    const scannedPropertyId = propertyId;
+    const scannedGuestyListingId = guestyListingId;
+    const workflow = beginBeddingScanWorkflow(scannedPropertyId);
+    if (!workflow) return;
+    const completion: BeddingScanWorkflowResult = { applied: {} };
+    scanInFlightRef.current = true;
     setBeddingScanning(true);
     setBeddingScanError(null);
+    setBeddingScanOutcome(null);
+    setBeddingScanApplied({});
     try {
       const r = await fetch("/api/builder/bedding-photo-scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ propertyId }),
+        body: JSON.stringify({ propertyId: scannedPropertyId }),
+        cache: "no-store",
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok || !data?.record) throw new Error(data?.error ?? `HTTP ${r.status}`);
-      setBeddingScan(data.record as BeddingPhotoScanRecord);
-      setBeddingScanFresh(true);
-      setBeddingScanApplied({});
-      toast({
-        title: "Bedding photo scan complete",
-        description: data.record.method === "vision"
-          ? "Claude looked at the unit photos — review the proposal below, then Apply."
-          : "Vision was unavailable — the proposal is derived from existing photo labels.",
-      });
-    } catch (e) {
-      setBeddingScanError((e as Error).message);
-      toast({ title: "Bedding photo scan failed", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBeddingScanning(false);
-    }
-  }, [beddingScanning, propertyId, toast]);
+      const record = data.record as BeddingPhotoScanRecord;
+      if (record.propertyId !== scannedPropertyId) {
+        throw new Error("The bedding scan response did not match this property.");
+      }
+      completion.record = record;
+      // A scan can take minutes. Never apply an old property's completion after
+      // the operator has navigated to a different builder.
+      if (activePropertyIdRef.current !== scannedPropertyId) {
+        completion.outcome = {
+          tone: "warning",
+          message: "The scan and timestamp were saved, but this builder moved to another property before completion, so nothing was applied or pushed.",
+        };
+        return;
+      }
+      if (!acceptScanRecord(record, true)) {
+        // Another scan/audit completed after this click and is already on
+        // screen. Never apply or push older evidence over that newer record.
+        completion.record = undefined;
+        completion.outcome = {
+          tone: "warning",
+          message: "This scan finished after a newer bedding scan was already saved, so its older suggestions were not applied or pushed.",
+        };
+        setBeddingScanOutcome(completion.outcome);
+        toast({ title: "Older bedding scan ignored", description: completion.outcome.message });
+        return;
+      }
 
-  const handleApplyBeddingScan = useCallback((scanUnit: BeddingScanUnit, unitIndex: number) => {
-    const target = config.units[unitIndex];
-    if (!target) return;
-    const result = mergeBeddingScanIntoUnit(target, scanUnit);
-    if (!result.changed) {
-      toast({ title: "Nothing to apply", description: "No detection cleared the confidence floor for this unit." });
+      // A scan can outlive the component that started it. Merge into the latest
+      // config from a remounted tab instead of the starter's stale closure.
+      const liveConfig = latestBeddingConfigs.get(scannedPropertyId);
+      const currentConfig = liveConfig?.propertyId === scannedPropertyId
+        ? liveConfig
+        : loadBeddingConfig(scannedPropertyId);
+      const autoApplied = autoApplyBeddingScanToUnits(currentConfig.units, record.units);
+      const nextConfig: PropertyBeddingConfig = { ...currentConfig, units: autoApplied.units };
+
+      // Persist before any external write. A failed Guesty push never rolls back
+      // the photo-proven builder config or the server-stamped scan record.
+      if (!saveBeddingConfig(nextConfig)) {
+        throw new Error("The scan finished, but the bedding layout could not be saved in this browser. Guesty was not updated.");
+      }
+      completion.configSnapshot = JSON.stringify(nextConfig);
+      latestBeddingConfigs.set(scannedPropertyId, nextConfig);
+      configRef.current = nextConfig;
+      setConfig(nextConfig);
+      completion.applied = Object.fromEntries(autoApplied.appliedUnits.map((unit) => [
+        unit.unitId,
+        unit.applied.join(" · "),
+      ]));
+      setBeddingScanApplied(completion.applied);
+
+      const scannedAt = new Date(record.scannedAt).toLocaleString();
+      const captionOnlyCount = autoApplied.skippedScanUnits.filter((unit) => unit.reason === "non-vision-evidence").length;
+      const unmatchedCount = autoApplied.skippedScanUnits.length - captionOnlyCount;
+      const captionSuffix = captionOnlyCount > 0
+        ? ` ${captionOnlyCount} caption-derived unit result${captionOnlyCount === 1 ? " was" : "s were"} left review-only because Claude did not successfully inspect those photos.`
+        : "";
+      const unmatchedSuffix = unmatchedCount > 0
+        ? ` ${unmatchedCount} unmatched unit result${unmatchedCount === 1 ? " was" : "s were"} left untouched.`
+        : "";
+      const skippedSuffix = captionSuffix + unmatchedSuffix;
+      if (autoApplied.appliedUnits.length === 0) {
+        const message = `Scan saved at ${scannedAt}. No vision-backed bed or full-bath feature strictly above 60% changed the configured layout, so nothing was applied or pushed.${skippedSuffix}`;
+        completion.outcome = { tone: "warning", message };
+        setBeddingScanOutcome(completion.outcome);
+        toast({ title: "Bedding scan saved", description: message });
+        return;
+      }
+
+      const appliedCount = autoApplied.appliedUnits.length;
+      if (!scannedGuestyListingId) {
+        const message = `Auto-applied and saved vision-backed suggestions above 60% for ${appliedCount} unit${appliedCount === 1 ? "" : "s"} at ${scannedAt}. No Guesty listing was connected when the scan began, so no push was attempted.${skippedSuffix}`;
+        completion.outcome = { tone: "success", message };
+        setBeddingScanOutcome(completion.outcome);
+        toast({ title: "Bedding scan applied and saved", description: message });
+        return;
+      }
+
+      // The property, listing id, and recording callback are all captured from
+      // the click render. A later selection can never redirect this write.
+      const pushed = await pushBeddingConfigToGuesty(scannedGuestyListingId, nextConfig);
+      if (pushed.ok) {
+        const message = `Auto-applied and saved vision-backed suggestions above 60% for ${appliedCount} unit${appliedCount === 1 ? "" : "s"}, then pushed the Guesty listing selected when the scan began: ${pushed.bedrooms} bedrooms, ${pushed.bathrooms} bathrooms, sleeps ${pushed.sleeps}, and the bed layout.${skippedSuffix}`;
+        completion.outcome = { tone: "success", message };
+        setBeddingScanOutcome(completion.outcome);
+        toast({ title: "Bedding scan applied and pushed to Guesty", description: message });
+        return;
+      }
+
+      const message = `The scan and auto-applied layout were saved at ${scannedAt}, but the Guesty push failed: ${pushed.error ?? "Unknown error"}. Use “Push Bedding to Guesty” to retry.${skippedSuffix}`;
+      completion.outcome = { tone: "warning", message };
+      setBeddingScanOutcome(completion.outcome);
+      toast({ title: "Saved, but Guesty was not updated", description: message, variant: "destructive" });
+    } catch (e) {
+      completion.error = (e as Error).message;
+      if (activePropertyIdRef.current === scannedPropertyId) {
+        setBeddingScanError(completion.error);
+        toast({ title: "Bedding photo workflow failed", description: completion.error, variant: "destructive" });
+      }
+    } finally {
+      scanInFlightRef.current = false;
+      setBeddingScanning(false);
+      finishBeddingScanWorkflow(scannedPropertyId, workflow, completion);
+    }
+  }, [acceptScanRecord, beddingScanning, guestyListingId, propertyId, pushBeddingConfigToGuesty, toast]);
+
+  const handleApplyBeddingScan = useCallback((scanUnit: BeddingScanUnit) => {
+    const target = scanUnit.unitId
+      ? config.units.find((unit) => unit.unitId === scanUnit.unitId)
+      : undefined;
+    if (!target || scanUnit.evidenceMethod !== "vision") {
+      toast({ title: "Review only", description: "Only vision-backed results with a canonical unit ID can be applied." });
       return;
     }
-    updateUnit(target.unitId, () => result.unit as UnitBeddingConfig);
+    const result = mergeBeddingScanIntoUnit(target, scanUnit, { requireAboveMinimum: true });
+    if (!result.changed) {
+      toast({ title: "Nothing to apply", description: "No detection was above the 60% auto-apply threshold for this unit." });
+      return;
+    }
+    updateUnit(target.unitId, () => result.unit);
     setBeddingScanApplied((prev) => ({ ...prev, [target.unitId]: result.applied.join(" · ") }));
     toast({
       title: `Applied photo-detected bedding to Unit ${target.unitLabel}`,
       description: [...result.applied, ...result.notes].join(" · ").slice(0, 300)
-        + " — review below, then Push Bedding to Guesty.",
+        + " — saved in the builder; push again if you want this re-apply sent to Guesty.",
     });
   }, [config.units, toast, updateUnit]);
 
   const handleReset = () => {
     if (!confirm("Reset bedding config for this property to defaults? Your edits will be lost.")) return;
     const c = resetBeddingConfig(propertyId);
+    latestBeddingConfigs.set(propertyId, c);
     clearSpaceTextOverride(propertyId);
     setSpaceDirty(false);
     setConfig(c);
@@ -293,7 +581,11 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
   }, [guestyListingId, pushingSpace, spaceText, toast]);
 
   return (
-    <div data-testid="bedding-tab">
+    <fieldset
+      data-testid="bedding-tab"
+      disabled={beddingScanning || pushing}
+      style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+    >
       {/* Summary header */}
       <div style={{ ...cellStyle, background: "#eff6ff", border: "1px solid #bfdbfe", display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
         <div>
@@ -317,16 +609,16 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <button
             onClick={handleBeddingScan}
-            disabled={beddingScanning}
+            disabled={beddingScanning || pushing}
             style={{
-              ...inputStyle, cursor: beddingScanning ? "wait" : "pointer",
+              ...inputStyle, cursor: beddingScanning || pushing ? "wait" : "pointer",
               background: beddingScanning ? "#c4b5fd" : "#7c3aed", color: "#fff",
               borderColor: "transparent", fontWeight: 600,
             }}
             data-testid="btn-bedding-scan"
-            title="Claude vision reads the unit photos and proposes bed types, en-suite evidence, and bathroom fixtures — nothing is applied until you click Apply"
+            title="Runs a fresh scan, saves vision-backed suggestions above 60%, and pushes the supported bedding fields to the Guesty listing selected at click time"
           >
-            {beddingScanning ? "⏳ Claude is reading the photos…" : "🔎 Scan photos for bedding"}
+            {beddingScanning ? (pushing ? "⏳ Pushing scanned bedding…" : "⏳ Claude is reading the photos…") : "🔎 Scan photos for bedding"}
           </button>
           <button
             onClick={handleReset}
@@ -337,7 +629,7 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
           </button>
           <button
             onClick={handlePush}
-            disabled={!guestyListingId || pushing}
+            disabled={!guestyListingId || pushing || beddingScanning}
             style={{
               ...inputStyle, cursor: guestyListingId ? "pointer" : "not-allowed",
               background: pushing ? "#94a3b8" : "#0f766e", color: "#fff",
@@ -351,37 +643,65 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
         </div>
       </div>
 
-      {/* Bedding photo-scan proposal — photo-proven bedding, explicit Apply */}
+      {/* Bedding photo scan — fresh button clicks auto-apply; stored scans stay review-only. */}
       {beddingScanError && (
         <div style={{ ...cellStyle, background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", fontSize: 13 }}>
-          Bedding photo scan failed: {beddingScanError}
+          Bedding photo workflow failed: {beddingScanError}
         </div>
       )}
-      {beddingScan && beddingScan.units.length > 0 && (
+      {beddingScan && (
         <div style={{ ...cellStyle, background: "#f5f3ff", border: "1px solid #ddd6fe" }} data-testid="bedding-scan-panel">
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: "#5b21b6" }}>
               {beddingScan.method === "vision" ? "🤖 Claude read the unit photos" : "🏷 Proposal from existing photo labels (vision unavailable)"}
             </div>
             <div style={{ fontSize: 11, color: "#7c6f9f" }}>
-              scanned {new Date(beddingScan.scannedAt).toLocaleString()}
+              scanned <time dateTime={beddingScan.scannedAt}>{new Date(beddingScan.scannedAt).toLocaleString()}</time>
             </div>
-            {!beddingScanFresh && (
+            {!beddingScanFresh && Object.keys(beddingScan.fingerprints ?? {}).length > 0 && (
               <span style={{ fontSize: 11, background: "#fef3c7", border: "1px solid #fcd34d", color: "#92400e", borderRadius: 999, padding: "2px 8px" }}>
                 photos changed since this scan — re-scan for current evidence
               </span>
             )}
           </div>
           <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>
-            Only what the photos prove: confident detections fill the matching unit below when you click Apply;
-            bedrooms with no photo evidence are flagged and left exactly as configured. Your edits always win —
-            nothing applies automatically, and you can hand-edit after applying.
+            A fresh button click automatically applies and saves vision-backed bedding and full-bath suggestions strictly
+            above 60%, then pushes Guesty's supported Bedding fields (bed layout, bedroom/bathroom counts, and occupancy)
+            to the listing selected when you clicked. Caption fallback is review-only and never auto-pushes. Shower/tub
+            details stay saved in this browser's builder config and generated Space copy because Guesty has no structured
+            field for them. Bedrooms without photo evidence and suggestions at 60% or below stay exactly as configured.
           </div>
+          {beddingScanOutcome && (
+            <div style={{
+              fontSize: 12,
+              color: beddingScanOutcome.tone === "success" ? "#047857" : "#92400e",
+              background: beddingScanOutcome.tone === "success" ? "#ecfdf5" : "#fffbeb",
+              border: `1px solid ${beddingScanOutcome.tone === "success" ? "#a7f3d0" : "#fde68a"}`,
+              borderRadius: 6,
+              padding: "6px 8px",
+              marginBottom: 10,
+            }} data-testid="bedding-scan-outcome">
+              {beddingScanOutcome.message}
+            </div>
+          )}
+          {beddingScan.units.length === 0 && (
+            <div style={{ fontSize: 12, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, padding: "6px 8px" }}>
+              The scan completed and was timestamped, but no unit photos were available to apply.
+            </div>
+          )}
           {beddingScan.units.map((su, i) => {
-            const cfgUnit = config.units[i];
-            const confidentBedrooms = su.bedrooms.filter((b) => b.confidence >= BEDDING_SCAN_MIN_CONFIDENCE);
+            const cfgUnit = su.unitId
+              ? config.units.find((unit) => unit.unitId === su.unitId)
+              : undefined;
+            const confidentBedrooms = su.bedrooms.filter((b) =>
+              isBeddingScanAutoApplyEligible(b.confidence));
             const lowBedrooms = su.bedrooms.length - confidentBedrooms.length;
-            const confidentBaths = su.bathrooms.filter((b) => b.confidence >= BEDDING_SCAN_MIN_CONFIDENCE);
+            const confidentBaths = su.bathrooms.filter((b) =>
+              isBeddingScanAutoApplyEligible(b.confidence));
+            const actionableBaths = confidentBaths.filter((b) => !b.isHalf && b.features.length > 0);
+            const canApply = su.evidenceMethod === "vision"
+              && cfgUnit != null
+              && (confidentBedrooms.length > 0 || actionableBaths.length > 0);
             const appliedNote = cfgUnit ? beddingScanApplied[cfgUnit.unitId] : undefined;
             return (
               <div key={`${su.folder}-${i}`} style={{ background: "#fff", border: "1px solid #e9e5f8", borderRadius: 6, padding: 10, marginBottom: 8 }}>
@@ -391,25 +711,28 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
                   {su.photosScanned > 0 && (
                     <div style={{ fontSize: 11, color: "#6b7280" }}>{su.photosScanned} photos read</div>
                   )}
+                  <div style={{ fontSize: 11, color: su.evidenceMethod === "vision" ? "#047857" : "#92400e" }}>
+                    {su.evidenceMethod === "vision" ? "Vision evidence" : "Caption fallback — review only"}
+                  </div>
                   {cfgUnit && (
                     <button
-                      onClick={() => handleApplyBeddingScan(su, i)}
-                      disabled={confidentBedrooms.length === 0 && confidentBaths.length === 0}
+                      onClick={() => handleApplyBeddingScan(su)}
+                      disabled={!canApply}
                       style={{
-                        ...inputStyle, marginLeft: "auto", cursor: confidentBedrooms.length || confidentBaths.length ? "pointer" : "not-allowed",
-                        background: confidentBedrooms.length || confidentBaths.length ? "#059669" : "#e5e7eb",
-                        color: confidentBedrooms.length || confidentBaths.length ? "#fff" : "#9ca3af",
+                        ...inputStyle, marginLeft: "auto", cursor: canApply ? "pointer" : "not-allowed",
+                        background: canApply ? "#059669" : "#e5e7eb",
+                        color: canApply ? "#fff" : "#9ca3af",
                         borderColor: "transparent", fontWeight: 600, fontSize: 12,
                       }}
                       data-testid={`btn-bedding-apply-${cfgUnit.unitId}`}
                     >
-                      ✓ Apply to Unit {cfgUnit.unitLabel}
+                      {appliedNote ? "↻ Reapply" : "✓ Apply"} to Unit {cfgUnit.unitLabel}
                     </button>
                   )}
                 </div>
                 {appliedNote && (
                   <div style={{ fontSize: 12, color: "#047857", background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 6, padding: "4px 8px", marginBottom: 6 }}>
-                    ✓ Applied: {appliedNote} — review + Push Bedding to Guesty.
+                    ✓ Applied and saved: {appliedNote}
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
@@ -424,6 +747,7 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
                     <span key={`bath-${bi}`} style={{ fontSize: 12, background: "#ecfeff", border: "1px solid #a5f3fc", color: "#155e75", borderRadius: 999, padding: "3px 10px" }}>
                       🛁 {b.isHalf ? "Half bath" : b.features.map((f) => BEDDING_SCAN_FEATURE_LABELS[f]).join(", ")}
                       {` · ${Math.round(b.confidence * 100)}%`}
+                      {b.isHalf && " · evidence only; counts stay unchanged"}
                     </span>
                   ))}
                   {confidentBedrooms.length === 0 && confidentBaths.length === 0 && (
@@ -438,7 +762,7 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
                       <div>⚠ {su.unphotographedBedrooms} of {su.expectedBedrooms} claimed bedroom{su.expectedBedrooms === 1 ? "" : "s"} ha{su.unphotographedBedrooms === 1 ? "s" : "ve"} no bedroom photo — those slots stay as configured (verify manually or find better photos).</div>
                     )}
                     {lowBedrooms > 0 && (
-                      <div>⚠ {lowBedrooms} detection{lowBedrooms === 1 ? "" : "s"} below the {Math.round(BEDDING_SCAN_MIN_CONFIDENCE * 100)}% confidence floor — not applied.</div>
+                      <div>⚠ {lowBedrooms} detection{lowBedrooms === 1 ? "" : "s"} at or below {Math.round(BEDDING_SCAN_MIN_CONFIDENCE * 100)}% confidence — not applied.</div>
                     )}
                     {su.warning && <div>⚠ {su.warning}</div>}
                   </div>
@@ -446,9 +770,10 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
               </div>
             );
           })}
-          {beddingScan.units.length !== config.units.length && (
+          {beddingScan.units.some((scanUnit) =>
+            !scanUnit.unitId || !config.units.some((unit) => unit.unitId === scanUnit.unitId)) && (
             <div style={{ fontSize: 11, color: "#92400e" }}>
-              ⚠ The scan found {beddingScan.units.length} photographed unit{beddingScan.units.length === 1 ? "" : "s"} but this property has {config.units.length} configured — Apply matches by position, so double-check unit order.
+              ⚠ One or more scan results could not be matched to a stable builder unit ID and were left untouched.
             </div>
           )}
         </div>
@@ -732,6 +1057,6 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
       <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8, lineHeight: 1.5 }}>
         Edits auto-save locally. <b>Push Bedding to Guesty</b> sends bedroom/bathroom counts and room configuration. <b>Push Space to Guesty</b> sends the prose description including bedroom names to the listing's Space field.
       </div>
-    </div>
+    </fieldset>
   );
 }

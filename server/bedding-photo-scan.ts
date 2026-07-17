@@ -77,19 +77,24 @@ export async function loadBeddingScanStore(): Promise<Record<string, BeddingPhot
   }
 }
 
-function persistBeddingScan(record: BeddingPhotoScanRecord): Promise<void> {
-  storeTail = storeTail.then(async () => {
+function persistBeddingScan(record: BeddingPhotoScanRecord): Promise<boolean> {
+  const write = storeTail.then(async () => {
     try {
       const raw = await storage.getSetting(BEDDING_PHOTO_SCANS_SETTING_KEY);
       const map = parseBeddingScanStore(raw ?? null);
       map[String(record.propertyId)] = record;
       await storage.setSetting(BEDDING_PHOTO_SCANS_SETTING_KEY, serializeBeddingScanStore(map));
-    } catch {
+      return true;
+    } catch (err: any) {
       // Fail-soft: an unpersisted scan just re-runs next time — the store is a
-      // spend-saver + tab-hydration convenience, never a blocker.
+      // spend-saver for audits. The explicit tab route opts into required
+      // persistence so it can never claim a timestamp was saved when it wasn't.
+      console.warn(`[bedding-scan] could not persist property ${record.propertyId}: ${err?.message ?? err}`);
+      return false;
     }
   });
-  return storeTail;
+  storeTail = write.then(() => undefined);
+  return write;
 }
 
 /** The stored scan + whether it still describes the CURRENT published photo set. */
@@ -192,14 +197,12 @@ function captionFilesForGroup(group: CheckGroupInput): CaptionFallbackFile[] {
   }));
 }
 
-function confidentBedroomCount(unit: Pick<BeddingScanUnit, "bedrooms">): number {
-  return unit.bedrooms.filter((b) => b.confidence >= BEDDING_SCAN_MIN_CONFIDENCE).length;
-}
-
 // ── Scan ─────────────────────────────────────────────────────────────────────
 
 export type ScanBeddingOptions = {
   anthropicApiKey?: string;
+  /** Explicit tab clicks require the scan/timestamp to be durably saved. */
+  requirePersistence?: boolean;
 };
 
 /**
@@ -234,6 +237,7 @@ export async function scanBeddingPhotosForProperty(
       : null;
 
     const base: Omit<BeddingScanUnit, "bedrooms" | "bathrooms" | "photosScanned" | "unphotographedBedrooms"> = {
+      unitId: group.unitId,
       folder: group.folder,
       label: group.label,
       expectedBedrooms,
@@ -243,11 +247,16 @@ export async function scanBeddingPhotosForProperty(
       bedrooms: BeddingScanUnit["bedrooms"],
       bathrooms: BeddingScanUnit["bathrooms"],
       photosScanned: number,
+      evidenceMethod?: BeddingScanUnit["evidenceMethod"],
       warning?: string,
     ) => {
-      const confident = bedrooms.filter((b) => b.confidence >= BEDDING_SCAN_MIN_CONFIDENCE).length;
+      // Audit coverage deliberately remains inclusive at the 60% floor. The
+      // stricter >60% rule belongs only to the explicit tab auto-apply seam.
+      const confident = bedrooms.filter((b) =>
+        b.confidence >= BEDDING_SCAN_MIN_CONFIDENCE).length;
       units.push({
         ...base,
+        evidenceMethod,
         bedrooms,
         bathrooms,
         photosScanned,
@@ -258,7 +267,7 @@ export async function scanBeddingPhotosForProperty(
 
     if (!useVision) {
       const { bedrooms, bathrooms } = captionFallbackBedding(captionFilesForGroup(group));
-      finalizeUnit(bedrooms, bathrooms, 0, apiKey ? "Vision disabled — derived from existing photo labels." : "No ANTHROPIC_API_KEY — derived from existing photo labels.");
+      finalizeUnit(bedrooms, bathrooms, 0, "captions", apiKey ? "Vision disabled — derived from existing photo labels; review only, not auto-applied." : "No ANTHROPIC_API_KEY — derived from existing photo labels; review only, not auto-applied.");
       continue;
     }
 
@@ -269,7 +278,7 @@ export async function scanBeddingPhotosForProperty(
       if (p) photos.push(p);
     }
     if (photos.length === 0) {
-      finalizeUnit([], [], 0, "No readable photos on disk for this unit yet.");
+      finalizeUnit([], [], 0, undefined, "No readable photos on disk for this unit yet.");
       continue;
     }
 
@@ -295,12 +304,12 @@ export async function scanBeddingPhotosForProperty(
         confidence: b.confidence,
         photos: b.photoIndexes.map((i) => photos[i - 1]?.filename).filter((f): f is string => !!f),
       }));
-      finalizeUnit(bedrooms, bathrooms, photos.length);
+      finalizeUnit(bedrooms, bathrooms, photos.length, "vision");
     } catch (err: any) {
       // FAIL-SOFT to the caption fallback for THIS unit; the warning keeps the
       // degradation visible (honesty over silence).
       const { bedrooms, bathrooms } = captionFallbackBedding(captionFilesForGroup(group));
-      finalizeUnit(bedrooms, bathrooms, photos.length, `Vision scan failed (${String(err?.message ?? err).slice(0, 160)}) — derived from existing photo labels instead.`);
+      finalizeUnit(bedrooms, bathrooms, photos.length, "captions", `Vision scan failed (${String(err?.message ?? err).slice(0, 160)}) — derived from existing photo labels instead; review only, not auto-applied.`);
       console.warn(`[bedding-scan] vision failed for ${group.folder} (property ${propertyId}): ${err?.message ?? err}`);
     }
   }
@@ -313,7 +322,10 @@ export async function scanBeddingPhotosForProperty(
     units,
     fingerprints,
   };
-  await persistBeddingScan(record);
+  const persisted = await persistBeddingScan(record);
+  if (opts.requirePersistence && !persisted) {
+    throw new Error("The bedding scan finished, but its result and timestamp could not be saved. Guesty was not updated.");
+  }
   return record;
 }
 

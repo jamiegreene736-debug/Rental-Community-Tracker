@@ -24496,18 +24496,18 @@ Requirements:
   // bedding" button AND the unit-audit layout stage's evidence source. Runs
   // ONE batched Claude vision call per unit over the unit's Bedrooms/Bathrooms
   // photos and returns detected bed types, en-suite evidence, and bathroom
-  // fixtures. NEVER writes the bedding config or pushes to Guesty — the result
-  // is a PROPOSAL the operator applies in the Bedding tab (their localStorage
-  // config stays the single push source; Load-Bearing: the layout stage never
-  // auto-pushes). Persists to app_settings `bedding_photo_scans.v1` so the tab
-  // can hydrate a scan an audit already paid for.
+  // fixtures. The endpoint persists the server-stamped evidence record; the
+  // explicit Bedding-tab click then applies/saves >60% detections and invokes
+  // the existing client-side bedding push when a listing is connected. The
+  // unit-audit layout stage remains GET/compare-only and never auto-pushes.
   app.post("/api/builder/bedding-photo-scan", async (req: Request, res: Response) => {
     const propertyId = Number((req.body ?? {}).propertyId);
-    if (!Number.isFinite(propertyId) || propertyId === 0) {
+    if (!Number.isInteger(propertyId) || propertyId === 0) {
       return res.status(400).json({ ok: false, error: "propertyId required" });
     }
     try {
-      const record = await scanBeddingPhotosForProperty(propertyId);
+      const record = await scanBeddingPhotosForProperty(propertyId, { requirePersistence: true });
+      res.set("Cache-Control", "no-store");
       return res.json({ ok: true, record, fresh: true });
     } catch (err: any) {
       console.error("[bedding-photo-scan]", err?.message ?? err);
@@ -24519,11 +24519,12 @@ Requirements:
   // whether it still matches the current published photo set (fingerprint).
   app.get("/api/builder/bedding-photo-scan/:propertyId", async (req: Request, res: Response) => {
     const propertyId = Number(req.params.propertyId);
-    if (!Number.isFinite(propertyId) || propertyId === 0) {
+    if (!Number.isInteger(propertyId) || propertyId === 0) {
       return res.status(400).json({ ok: false, error: "propertyId required" });
     }
     try {
       const { record, fresh } = await loadStoredBeddingScan(propertyId);
+      res.set("Cache-Control", "no-store");
       return res.json({ ok: true, record, fresh });
     } catch (err: any) {
       return res.json({ ok: true, record: null, fresh: false, warning: String(err?.message ?? err) });
