@@ -19,7 +19,10 @@
 
 export const UNIT_AUDIT_STORE_SETTING_KEY = "unit_audit_sweeps.v1";
 export const UNIT_AUDIT_REPORTS_SETTING_KEY = "unit_audit_reports.v1";
-export const UNIT_AUDIT_STORE_CAP = 16;
+// The dashboard bulk action accepts up to 40 properties. Keep at least one
+// complete bulk run in the resumable store; the old cap of 16 could evict
+// queued jobs before they ever acquired the single global worker slot.
+export const UNIT_AUDIT_STORE_CAP = 80;
 export const UNIT_AUDIT_STORE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export const UNIT_AUDIT_REPORTS_CAP = 80;
 // A sweep is a chain of bounded verify calls (the longest legs — the Lens +
@@ -28,8 +31,65 @@ export const UNIT_AUDIT_REPORTS_CAP = 80;
 // dead process, not a slow stage.
 export const UNIT_AUDIT_RESUME_WINDOW_MS = 60 * 60 * 1000;
 export const MAX_UNIT_AUDIT_RESUMES = 3;
+// A strict bulk audit may commit a candidate that passes the disposable
+// staging gate but is contradicted by the fresh post-commit audit. Try a
+// bounded number of distinct committed candidates; historical/burned source
+// exclusion prevents cycling back to the same listing.
+export const MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS = 3;
 export const STUCK_UNIT_AUDIT_ERROR =
   "The audit sweep was interrupted by server restarts and could not resume — re-run it from the Audit column.";
+
+/**
+ * Serialize a store mutation while keeping the queue usable after failure.
+ * `operation` preserves rejection for strict durability callers; `tail`
+ * absorbs it solely so a later queued operation still executes.
+ */
+export function queueRecoverableUnitAuditMutation(
+  previousTail: Promise<void>,
+  work: () => Promise<void>,
+): { operation: Promise<void>; tail: Promise<void> } {
+  const operation = previousTail.then(work);
+  return { operation, tail: operation.catch(() => undefined) };
+}
+
+export type UnitAuditConfiguredPhotoFolder = {
+  role: "community" | "unit";
+  label: string;
+  folder: string | null;
+  publishedCount: number;
+  unitId?: string;
+};
+
+export function classifyUnitAuditConfiguredPhotoCoverage<T extends UnitAuditConfiguredPhotoFolder>(input: {
+  configured: T[] | null;
+  represented: Array<Pick<UnitAuditConfiguredPhotoFolder, "role" | "label" | "folder">>;
+  requiredUnits: Array<{ label: string; unitId: string }>;
+}): {
+  inventoryUnavailable: boolean;
+  communityStatus: T | null;
+  communityMissing: boolean;
+  missingUnits: T[];
+} {
+  if (!input.configured) {
+    return { inventoryUnavailable: true, communityStatus: null, communityMissing: true, missingUnits: [] };
+  }
+  const communityStatus = input.configured.find((group) => group.role === "community") ?? null;
+  const configuredUnits = input.configured.filter((group) => group.role === "unit");
+  const represented = (configured: T) => !!configured.folder && input.represented.some((group) =>
+    group.role === configured.role && group.label === configured.label && group.folder === configured.folder);
+  const requiredUnitStatusMissing = input.requiredUnits.some((unit) =>
+    !configuredUnits.some((group) => group.unitId === unit.unitId || group.label === unit.label));
+  const positiveFolderOmitted = input.configured.some((group) => group.publishedCount > 0 && !represented(group));
+  if (!communityStatus || requiredUnitStatusMissing || positiveFolderOmitted) {
+    return { inventoryUnavailable: true, communityStatus, communityMissing: true, missingUnits: [] };
+  }
+  return {
+    inventoryUnavailable: false,
+    communityStatus,
+    communityMissing: communityStatus.publishedCount === 0,
+    missingUnits: configuredUnits.filter((group) => group.publishedCount === 0),
+  };
+}
 
 // Stage order IS the execution order. Photo stages run first because the
 // content stages (collage, layout, descriptions) audit what the final photo
@@ -121,9 +181,31 @@ export type UnitAuditJobRecord = {
   autoFix: boolean;
   /** Photo fix ladder's last rung (PR 3): allow the bounded one-click unit
    * replacement when re-scrape / find-new-source can't fix the photos.
-   * Default ON per the confirmed plan (max 1 replacement per unit per
-   * sweep); requires autoFix; AUDIT_REPLACE_DISABLED=1 is the global kill. */
+   * Default ON per the confirmed plan. Standard sweeps attempt one committed
+   * replacement per unit; fullAutomation may try up to the strict bounded cap
+   * when a fresh positive post-commit check rejects a candidate. Requires
+   * autoFix; AUDIT_REPLACE_DISABLED=1 is the global kill. */
   allowReplace: boolean;
+  /** Strict end-to-end automation used by the dashboard's "Audit selected"
+   * action. It regenerates/rescans every requested artifact, requires Claude
+   * provenance, persists useful results even without Guesty, and forces a
+   * fresh SearchAPI Airbnb pricing run. Manual single-property audits and
+   * weekly cron retain their narrower/fail-soft behavior. */
+  fullAutomation: boolean;
+  /** Durable handoff to the end-of-sweep Guesty gallery sync. This survives a
+   * Railway restart after local photo mutation but before pictures[] is PUT. */
+  pendingGuestyGallerySync: boolean;
+  /** Dedupe subset of the pending gallery changes, for an honest receipt. */
+  pendingDedupeHiddenCount: number;
+  /** A strict photo mutation landed after the last accepted Claude collage.
+   * The post-retry seam must regenerate before final gallery verification. */
+  coverCollageNeedsRefresh: boolean;
+  /** Exact cover-collage URL generated by THIS strict audit. The final Guesty
+   * gallery sync must prove this identity is first, never accept an older
+   * caption-matching collage returned by an eventually-consistent GET. */
+  requiredCoverCollageUrl: string | null;
+  /** Durable idempotency receipt for the final exact mapped-gallery readback. */
+  finalGuestyGalleryVerified: boolean;
   /** Who started the sweep. "cron" = the weekly auto-audit scheduler — those
    * runs reuse the weekly photo-cron's OTA rows (wider fresh window) instead
    * of re-spending Lens budget, and default the replacement rung OFF. */
@@ -205,6 +287,24 @@ export function parseUnitAuditStore(raw: string | null | undefined): Record<stri
         // start default) — a resumed pre-upgrade sweep behaves like a fresh one.
         autoFix: typeof v.autoFix === "boolean" ? v.autoFix : true,
         allowReplace: typeof v.allowReplace === "boolean" ? v.allowReplace : true,
+        fullAutomation: v.fullAutomation === true,
+        pendingGuestyGallerySync: v.pendingGuestyGallerySync === true,
+        pendingDedupeHiddenCount: typeof v.pendingDedupeHiddenCount === "number" && Number.isFinite(v.pendingDedupeHiddenCount)
+          ? Math.max(0, Math.floor(v.pendingDedupeHiddenCount))
+          : 0,
+        coverCollageNeedsRefresh: v.coverCollageNeedsRefresh === true,
+        requiredCoverCollageUrl: typeof v.requiredCoverCollageUrl === "string"
+          && v.requiredCoverCollageUrl.trim().length <= 2_000
+          && /^https?:\/\//i.test(v.requiredCoverCollageUrl.trim())
+          ? v.requiredCoverCollageUrl.trim()
+          : null,
+        // The completion marker is valid only in the atomic state written by
+        // clearGuestyGallerySyncPending: no remaining obligation and no
+        // outstanding collage identity. Fail closed on corrupt/partial rows.
+        finalGuestyGalleryVerified: v.finalGuestyGalleryVerified === true
+          && v.pendingGuestyGallerySync !== true
+          && v.coverCollageNeedsRefresh !== true
+          && v.requiredCoverCollageUrl == null,
         source: v.source === "cron" ? "cron" : "manual",
       };
     }
@@ -212,6 +312,22 @@ export function parseUnitAuditStore(raw: string | null | undefined): Record<stri
   } catch {
     return {};
   }
+}
+
+export function shouldRetryCommittedFullAutomationReplacement(input: {
+  fullAutomation: boolean;
+  rung: PhotoFixRung;
+  gateDecision: "accept" | "reject" | "inconclusive";
+  reasonCode: "verified" | "community-mismatch" | "bedroom-coverage" | "inconclusive";
+  strictSyncFailed: boolean;
+  committedAttempts: number;
+}): boolean {
+  return input.fullAutomation
+    && input.rung === "replace"
+    && input.gateDecision === "reject"
+    && (input.reasonCode === "community-mismatch" || input.reasonCode === "bedroom-coverage")
+    && !input.strictSyncFailed
+    && input.committedAttempts < MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS;
 }
 
 export function serializeUnitAuditStore(store: Record<string, UnitAuditJobRecord>, nowMs: number): string {
@@ -848,6 +964,44 @@ export function unitAuditVerifyReadRetryable(status: number): boolean {
 // pause; the caller caps total attempts so the stage ceiling always holds.
 export function unitAuditVerifyReadBackoffMs(failedAttempts: number): number {
   return Math.max(1, failedAttempts) * 10_000;
+}
+
+// Standard/manual sweeps keep their historical bounded child-job windows so
+// an unusually slow background repair can be surfaced for later follow-up.
+// Strict "Audit selected" sweeps cannot do that: those children mutate the
+// same galleries consumed by later description/collage/pricing stages, so the
+// parent must keep polling past its normal deadline until the child reaches a
+// terminal state.
+export function unitAuditChildPollShouldTimeout(
+  fullAutomation: boolean,
+  nowMs: number,
+  deadlineMs: number,
+): boolean {
+  return !fullAutomation && nowMs > deadlineMs;
+}
+
+// A strict parent cannot acknowledge cancellation while one of its detached
+// child jobs is still able to mutate the gallery. Standard/manual runs retain
+// their immediate-cancel behavior; strict runs defer cancellation only until
+// the observed child is terminal.
+export function unitAuditChildPollShouldCancel(
+  fullAutomation: boolean,
+  cancellationRequested: boolean,
+  childActive: boolean,
+): boolean {
+  return cancellationRequested && (!fullAutomation || !childActive);
+}
+
+// When strict cancellation arrives during a mutating child, observing the
+// child as terminal is not enough: the parent must first consume that terminal
+// result and persist any gallery-sync obligation. Standard runs keep their
+// historical immediate-cancel behavior.
+export function unitAuditChildPollShouldProcessTerminalBeforeCancel(
+  fullAutomation: boolean,
+  cancellationRequested: boolean,
+  childActive: boolean,
+): boolean {
+  return fullAutomation && cancellationRequested && !childActive;
 }
 
 // Queue summary (active first, then recent terminals) — mirrors the

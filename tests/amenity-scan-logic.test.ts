@@ -4,6 +4,7 @@ import fs from "node:fs";
 import {
   buildAmenityDetectionInstruction,
   buildAmenityLocationResearchPrompt,
+  isAmenityDetectionResponse,
   parseAmenityDetectionJson,
   mergeDetectedAmenities,
 } from "../shared/amenity-scan-logic";
@@ -17,6 +18,15 @@ import {
   HAWAII_BASE_AMENITY_KEYS,
   getAmenityLabel,
 } from "../shared/guesty-amenity-catalog";
+import {
+  AmenityStrictVisionError,
+  assertCompleteAmenityPhotoGroupCoverage,
+  buildAmenityPhotoFingerprint,
+  buildAmenityScanProvenance,
+  groupsWithIncompleteAmenityPhotoCoverage,
+  groupsWithoutReadableAmenityPhotos,
+  isCompleteClaudeAmenityVision,
+} from "../server/amenity-scan-provenance";
 
 let passed = 0;
 let failed = 0;
@@ -29,6 +39,128 @@ console.log("amenity-scan-logic: photo-driven amenity detection + add-only merge
 
 const VALID = AMENITY_CATALOG_KEYS;
 const VISION_KEYS = new Set(AMENITY_VISION_TARGETS.map((t) => t.key));
+
+check("vision response accepts an empty present[] result", isAmenityDetectionResponse({ present: [] }));
+check("vision response rejects JSON without a detection array", !isAmenityDetectionResponse({ message: "done" }));
+
+// ── durable strict-scan provenance ───────────────────────────────────────────
+{
+  const photoA = {
+    groupLabel: "Community",
+    role: "community" as const,
+    filename: "pool.jpg",
+    bytes: Buffer.from("pool-photo"),
+  };
+  const photoB = {
+    groupLabel: "Unit 2BR",
+    role: "unit" as const,
+    filename: "kitchen.jpg",
+    bytes: Buffer.from("kitchen-photo"),
+  };
+  const fingerprint = buildAmenityPhotoFingerprint([photoA, photoB]);
+  check("photo fingerprint is a versioned SHA-256", /^sha256:[0-9a-f]{64}$/.test(fingerprint ?? ""));
+  check("photo fingerprint is independent of directory iteration order",
+    fingerprint === buildAmenityPhotoFingerprint([photoB, photoA]));
+  check("photo fingerprint changes when a file is replaced in place",
+    fingerprint !== buildAmenityPhotoFingerprint([{ ...photoA, bytes: Buffer.from("replacement") }, photoB]));
+
+  const complete = buildAmenityScanProvenance({
+    model: "claude-test",
+    photoFingerprint: fingerprint,
+    photosConsidered: 2,
+    groupsConsidered: 2,
+    groupsWithReadablePhotos: 2,
+    batchesAttempted: 2,
+    batchesSucceeded: 2,
+    batchesFailed: 0,
+  });
+  const partial = buildAmenityScanProvenance({
+    model: "claude-test",
+    photoFingerprint: fingerprint,
+    photosConsidered: 2,
+    groupsConsidered: 2,
+    groupsWithReadablePhotos: 2,
+    batchesAttempted: 2,
+    batchesSucceeded: 1,
+    batchesFailed: 1,
+  });
+  check("strict completion accepts only all-success Claude batches",
+    isCompleteClaudeAmenityVision(complete) && !isCompleteClaudeAmenityVision(partial));
+  check("partial scan provenance is explicit", partial.method === "partial-vision");
+  const error = new AmenityStrictVisionError("vision-batch-failed", "strict scan failed", partial);
+  check("strict scan failures preserve a machine-readable code and provenance",
+    error.code === "vision-batch-failed" && error.provenance === partial);
+
+  const groupCoverage = [
+    { role: "community" as const, label: "Kaha Lani community", folder: "kaha-lani", readablePhotos: 3 },
+    { role: "unit" as const, label: "Unit 121", folder: "kaha-lani-unit-121", readablePhotos: 0 },
+  ];
+  check("strict group coverage identifies a published folder with no readable sample",
+    groupsWithoutReadableAmenityPhotos(groupCoverage).map((group) => group.folder).join(",") === "kaha-lani-unit-121");
+  let coverageError: unknown;
+  try {
+    assertCompleteAmenityPhotoGroupCoverage(groupCoverage, buildAmenityScanProvenance({
+      model: "claude-test",
+      photosConsidered: 3,
+      groupsConsidered: 2,
+      groupsWithReadablePhotos: 1,
+      batchesAttempted: 0,
+      batchesSucceeded: 0,
+      batchesFailed: 0,
+    }));
+  } catch (err) {
+    coverageError = err;
+  }
+  check("strict group coverage fails before vision and cannot claim complete provenance",
+    coverageError instanceof AmenityStrictVisionError
+    && coverageError.code === "incomplete-photo-group-coverage"
+    && coverageError.provenance.photosConsidered === 3
+    && coverageError.provenance.groupsWithReadablePhotos === 1
+    && !isCompleteClaudeAmenityVision(coverageError.provenance));
+  check("strict group coverage names the unreadable folder for diagnostics",
+    coverageError instanceof Error && coverageError.message.includes("kaha-lani-unit-121"));
+  let completeCoverageThrew = false;
+  try {
+    assertCompleteAmenityPhotoGroupCoverage(
+      groupCoverage.map((group) => ({ ...group, readablePhotos: 1 })),
+      complete,
+    );
+  } catch {
+    completeCoverageThrew = true;
+  }
+  check("strict group coverage accepts every intended group contributing a readable sample",
+    !completeCoverageThrew);
+
+  const partiallyReadable = [
+    { role: "community" as const, label: "Community", folder: "community", publishedPhotos: 3, readablePhotos: 2 },
+    { role: "unit" as const, label: "Unit", folder: "unit", publishedPhotos: 4, readablePhotos: 4 },
+  ];
+  check("strict coverage detects even one published photo omitted or unreadable",
+    groupsWithIncompleteAmenityPhotoCoverage(partiallyReadable).map((group) => group.folder).join(",") === "community");
+  let partialPhotoError: unknown;
+  try {
+    assertCompleteAmenityPhotoGroupCoverage(partiallyReadable, complete);
+  } catch (err) {
+    partialPhotoError = err;
+  }
+  check("strict coverage refuses a sampled subset that merely represents every group",
+    partialPhotoError instanceof AmenityStrictVisionError
+    && partialPhotoError.message.includes("2/3 readable"));
+
+  const incompleteCoverageReceipt = buildAmenityScanProvenance({
+    model: "claude-test",
+    photoFingerprint: fingerprint,
+    photosConsidered: 1,
+    groupsConsidered: 2,
+    groupsWithReadablePhotos: 1,
+    batchesAttempted: 1,
+    batchesSucceeded: 1,
+    batchesFailed: 0,
+  });
+  check("a successful aggregate batch cannot make an incomplete-folder receipt look complete",
+    incompleteCoverageReceipt.method === "partial-vision"
+    && !isCompleteClaudeAmenityVision(incompleteCoverageReceipt));
+}
 
 // ── catalog integrity ────────────────────────────────────────────────────────
 check("every vision target key exists in the catalog",
@@ -225,6 +357,11 @@ const read = (p: string) => fs.readFileSync(p, "utf8"); // repo-root cwd (matche
   check("amenity-scan result carries the location section", /location:\s*\{/.test(scanSrc));
   check("amenity-scan unions both legs before the add-only merge",
     scanSrc.includes("...visionDetected, ...location.detected"));
+  check("strict amenity automation scans every published photo, not the manual representative cap",
+    scanSrc.includes("opts.requireVision")
+    && scanSrc.includes("Number.MAX_SAFE_INTEGER")
+    && scanSrc.includes("publishedPhotos: loaded.publishedPhotos")
+    && scanSrc.includes("assertCompleteAmenityPhotoGroupCoverage(groupCoverage"));
 }
 {
   const locSrc = read("server/amenity-location-research.ts");
@@ -242,6 +379,9 @@ const read = (p: string) => fs.readFileSync(p, "utf8"); // repo-root cwd (matche
     routesSrc.includes("pushAmenityKeysToGuestyListing(listingId, scan.next)"));
   check("union helper preserves the listing's current Guesty amenities (add-only)",
     routesSrc.includes("...existingGuestyAmenities,"));
+  check("add-only Guesty sync fails closed when the current set cannot be read",
+    routesSrc.includes("Could not read the current Guesty amenities before the add-only push")
+    && !routesSrc.includes("current-set read failed — proceed with the app set only"));
   check("schedule-sync auto-pushes saved amenities on mapping",
     /upsertGuestyPropertyMap\(propertyId, guestyListingId\);[\s\S]{0,400}autoPushSavedAmenitiesForProperty\(propertyId, guestyListingId, "schedule-sync"\)/.test(routesSrc));
   check("dashboard Connect-to-Guesty auto-pushes saved amenities",

@@ -6,8 +6,22 @@
 import fs from "fs";
 import path from "path";
 
+const INTERNAL_STAGING_FOLDER_RE = /^\.[a-zA-Z0-9_-]+\.staging-\d+-[a-f0-9]{8}$/;
+
+/**
+ * Keep the hydration pipeline's tightly-scoped hidden staging folder intact
+ * while continuing to sanitize every public/user-supplied folder name. The
+ * staged replacement audit must read the disposable files before atomic
+ * rename; replacing its leading dot with "-" points at a non-existent path.
+ */
+export function photoFolderDiskName(folder: string): string {
+  return INTERNAL_STAGING_FOLDER_RE.test(folder)
+    ? folder
+    : folder.replace(/[^a-zA-Z0-9_-]+/g, "-");
+}
+
 export function publicPhotoDir(folder: string): string {
-  const safe = folder.replace(/[^a-zA-Z0-9_-]+/g, "-");
+  const safe = photoFolderDiskName(folder);
   return path.resolve(process.cwd(), "client/public/photos", safe);
 }
 

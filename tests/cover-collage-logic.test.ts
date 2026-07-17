@@ -8,9 +8,11 @@
 //      photo with itself.
 //   3. The panel ESRGAN gate is SHORT-side based (cover-crop scales by the
 //      short side), unlike the push spec's long-side gate.
-//   4. Source guards: the endpoint wiring, the fail-soft vision posture, the
-//      in-system saves, the relabel-all skip, and the client one-click +
-//      manual-fallback surfaces.
+//   4. Source guards: manual generation stays fail-soft while the dashboard's
+//      full-audit rail can require a real Claude pick (never a heuristic).
+//   5. A property-scoped audit can save the JPEG + receipt before Guesty exists;
+//      when a listing is mapped, Guesty sync remains an optional second step.
+//   6. The relabel-all skip and client one-click + manual-fallback surfaces.
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
@@ -61,6 +63,16 @@ assert.equal(parseCollageVisionPick(null, 5), null);
 assert.equal(parseCollageVisionPick("nope", 5), null);
 const longReason = parseCollageVisionPick({ left: 1, right: 2, reasoning: "x".repeat(2000) }, 5);
 assert.ok(longReason && longReason.reasoning!.length <= 500, "reasoning capped");
+assert.equal(
+  parseCollageVisionPick({ left: 1, right: 2, rightScene: "lanai" }, 5)?.rightScene,
+  "lanai",
+  "right-panel visual classification retained",
+);
+assert.equal(
+  parseCollageVisionPick({ left: 1, right: 2, rightScene: "bedroom" }, 5)?.rightScene,
+  undefined,
+  "unknown right-panel classification rejected",
+);
 console.log("  ✓ parseCollageVisionPick accepts only a usable two-photo pick");
 
 // ── heuristic fallback: old client scoring, community LEFT / patio RIGHT ────
@@ -115,11 +127,13 @@ console.log("  ✓ evenSampleIndices");
 const prompt = buildCollageVisionPrompt(24);
 assert.ok(prompt.includes("numbered 1-24"), "prompt states the photo count");
 assert.ok(/LEFT panel/.test(prompt) && /RIGHT panel/.test(prompt), "left/right roles spelled out");
-assert.ok(/ocean or beach view/i.test(prompt), "destination shot guidance");
-assert.ok(/living area/i.test(prompt), "living-space guidance");
+assert.ok(/section: "Community/i.test(prompt), "community-source guidance");
+assert.ok(/PATIO\/LANAI\/BALCONY/i.test(prompt), "unit-patio guidance");
+assert.ok(/do not put a unit photo on the community side/i.test(prompt), "source-role guard is explicit");
 assert.ok(/DIFFERENT subjects/.test(prompt), "no two-angles-of-the-same-thing rule");
 assert.ok(/bathrooms, floor plans, maps/.test(prompt), "cover-mistake ban list");
 assert.ok(/SQUARE/.test(prompt), "square-crop survival rule");
+assert.ok(prompt.includes('"rightScene"'), "right-panel scene classification required");
 assert.ok(prompt.includes('{"left": <photo number>, "right": <photo number>'), "JSON contract");
 console.log("  ✓ buildCollageVisionPrompt");
 
@@ -144,15 +158,39 @@ assert.ok(
 );
 assert.ok(
   engine.includes("heuristicCollagePick(candidates)"),
-  "engine degrades to the caption heuristic (fail-soft) — never hard-fails on a vision error",
+  "manual generation retains the caption-heuristic fallback",
 );
 assert.ok(
-  /catch \(e: any\) \{\s*\n\s*console\.warn\(`\[cover-collage\] vision pick failed/.test(engine),
-  "vision errors are caught + logged, not thrown",
+  engine.includes("if (opts.requireVision && !visionEnabled)") &&
+  engine.includes("Claude cover selection requires ANTHROPIC_API_KEY") &&
+  engine.includes("Claude cover selection is disabled by COVER_COLLAGE_VISION_DISABLED"),
+  "strict generation refuses to start when Claude vision is unavailable",
+);
+assert.ok(
+  engine.includes("if (opts.requireVision) {") &&
+  engine.includes("Claude could not select the cover collage:") &&
+  engine.includes('if (opts.requireVision) throw new Error("Claude did not return a usable cover-collage pair")'),
+  "strict generation propagates Claude failures and unusable picks instead of falling back",
+);
+assert.ok(
+  engine.includes("vision pick failed (falling back to caption heuristic)") &&
+  engine.indexOf("Claude could not select the cover collage:") < engine.indexOf("vision pick failed (falling back to caption heuristic)"),
+  "manual generation still catches a Claude error and falls back after the strict branch",
 );
 assert.ok(
   engine.includes("parseCollageVisionPick(raw, sampled.length)"),
   "vision reply validated before use",
+);
+assert.ok(
+  engine.includes("vision pick did not place a community photo on the left") &&
+  engine.includes("vision pick did not place a unit patio photo on the right") &&
+  engine.includes("vision pick did not prove the right panel is a patio"),
+  "vision picks are rejected when they contradict community-left/unit-right",
+);
+assert.ok(
+  engine.includes("vision pick has no published community-photo pool for the left panel") &&
+  engine.includes("vision pick has no published unit-photo pool for the right patio panel"),
+  "strict vision refuses to build a collage without both community and unit candidate pools",
 );
 assert.ok(
   engine.includes('resize(COLLAGE_PANEL_PX, COLLAGE_PANEL_PX, { fit: "cover", position: "centre" })'),
@@ -169,6 +207,9 @@ assert.ok(
   routes.includes('app.post("/api/builder/auto-cover-collage"'),
   "auto endpoint registered",
 );
+const autoRouteStart = routes.indexOf('app.post("/api/builder/auto-cover-collage"');
+const autoRouteEnd = routes.indexOf("// POST /api/builder/resolve-license-requirements", autoRouteStart);
+const autoRoute = routes.slice(autoRouteStart, autoRouteEnd);
 assert.ok(
   routes.includes("await generateAutoCoverCollage({"),
   "endpoint drives the engine",
@@ -194,6 +235,38 @@ assert.ok(
   routes.includes("await storage.getSetting(COVER_COLLAGE_SETTING_KEY)") &&
   routes.includes("await storage.setSetting(COVER_COLLAGE_SETTING_KEY"),
   "collage record persisted in app_settings",
+);
+assert.ok(
+  autoRoute.includes("listingId?: string | null") &&
+  autoRoute.includes("propertyId?: number | string | null") &&
+  autoRoute.includes('if (!listingId && propertyId == null)') &&
+  autoRoute.includes('error: "listingId or propertyId required"'),
+  "auto endpoint accepts a propertyId without requiring a Guesty listingId",
+);
+assert.ok(
+  autoRoute.includes("const auditRequest = propertyId != null") &&
+  autoRoute.includes("if (!auditRequest && !process.env.IMGBB_API_KEY)") &&
+  autoRoute.includes("requireVision: requireVision === true"),
+  "property-scoped audit generation does not require ImgBB and forwards the strict-Claude flag",
+);
+assert.ok(
+  autoRoute.includes('`property-${propertyId < 0 ? `neg-${Math.abs(propertyId)}` : propertyId}`') &&
+  autoRoute.includes("await fs.promises.writeFile(path.join(dir, file), collage.buffer)") &&
+  autoRoute.includes('...(propertyId != null ? [`property:${propertyId}`] : [])') &&
+  autoRoute.includes("await persistCoverCollageRecords(recordKeys"),
+  "property-scoped JPEG and property:<id> receipt are durably saved",
+);
+assert.ok(
+  autoRoute.indexOf("await fs.promises.writeFile(path.join(dir, file), collage.buffer)") < autoRoute.indexOf("if (listingId) {") &&
+  autoRoute.includes("if (auditRequest && (!savedPath || !savedRecord))") &&
+  autoRoute.includes('reason: "No Guesty listing mapped"'),
+  "local persistence happens before optional Guesty sync and is sufficient when no listing is mapped",
+);
+assert.ok(
+  autoRoute.includes("if (listingId) {") &&
+  autoRoute.includes("pushed = await pushCoverCollageToGuesty(") &&
+  autoRoute.includes("guestySynced: pushed?.ok === true"),
+  "mapped listings still receive the collage and the receipt records Guesty sync status",
 );
 assert.ok(
   routes.includes("f !== COVER_COLLAGE_DISK_FOLDER && (!onlyFolder || f === onlyFolder)"),
@@ -230,6 +303,10 @@ assert.ok(
 assert.ok(
   builderUi.includes("existingPhotos: lastPushedPictures.length > 0 ? lastPushedPictures : undefined"),
   "race-free pictures list forwarded (same contract as the manual upload-collage call)",
+);
+assert.ok(
+  !builderUi.includes("requireVision:"),
+  "manual Photos-tab generation does not opt into strict audit behavior",
 );
 console.log("  ✓ builder client wiring locked");
 

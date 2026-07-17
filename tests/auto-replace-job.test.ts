@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { unitSwapSnapshotForUnit } from "../shared/unit-swap-photos";
 import {
+  AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS,
   AUTO_REPLACE_RETRY_BACKOFF_MS,
   AUTO_REPLACE_RESUME_WINDOW_MS,
   AUTO_REPLACE_STORE_CAP,
@@ -13,6 +14,8 @@ import {
   STUCK_AUTO_REPLACE_COMMIT_ERROR,
   STUCK_AUTO_REPLACE_ERROR,
   STUCK_AUTO_REPLACE_VERIFY_ERROR,
+  autoReplaceCommunityRetryBackoffMs,
+  autoReplaceGuestyPushSatisfied,
   autoReplaceRetryBackoffMs,
   clearableAutoReplaceJobIds,
   draftUnitIdForSlot,
@@ -23,6 +26,7 @@ import {
   isAutoReplaceRetryPending,
   isLegacyAutoReplaceFailureRetryable,
   newestAutoReplaceJobsByTarget,
+  isStagedCommunityAuditInconclusive,
   parseDraftUnitId,
   nextStepFromFindJob,
   parseAutoReplaceStore,
@@ -34,6 +38,7 @@ import {
   summarizeAutoReplaceQueue,
   type AutoReplaceJobRecord,
 } from "../shared/auto-replace-job-logic";
+import { classifyStagedUnitCommunityAudit } from "../shared/unit-replacement-community-gate";
 
 let passed = 0;
 let failed = 0;
@@ -58,6 +63,7 @@ const rec = (over: Partial<AutoReplaceJobRecord>): AutoReplaceJobRecord => ({
   newUnitLabel: null,
   newAddress: null,
   replacementFolder: null,
+  guestyPhotoPush: null,
   message: null,
   error: null,
   createdAt: NOW - 5 * 60_000,
@@ -65,6 +71,7 @@ const rec = (over: Partial<AutoReplaceJobRecord>): AutoReplaceJobRecord => ({
   resumeCount: 0,
   findRestarts: 0,
   requireBedroomPhotoCoverage: false,
+  requireFullCommunityAudit: false,
   retryPhotoFolder: null,
   retryUnitSwapSnapshot: null,
   runnerId: null,
@@ -314,6 +321,144 @@ check("stuck-unresumable find job → restart", nextStepFromFindJob({ status: "f
 check("fresh-search budget is bounded", MAX_AUTO_REPLACE_FIND_RESTARTS >= 1 && MAX_AUTO_REPLACE_FIND_RESTARTS <= 3);
 check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >= 5);
 
+// ── strict replacement synchronization + inconclusive retry decisions ───────
+{
+  const synced = {
+    status: "synced" as const,
+    guestyListingId: "g-23",
+    photoCount: 42,
+    successCount: 42,
+    verifiedCount: 42,
+    skipped: null,
+    error: null,
+    completedAt: NOW,
+  };
+  const failedPush = { ...synced, status: "failed" as const, successCount: 0, error: "Guesty 429" };
+  check("mapped strict replacement accepts only a persisted successful Guesty gallery push",
+    autoReplaceGuestyPushSatisfied(synced, true)
+    && !autoReplaceGuestyPushSatisfied(failedPush, true)
+    && !autoReplaceGuestyPushSatisfied(null, true));
+  check("unmapped replacement is a valid local-only result even without a push receipt",
+    autoReplaceGuestyPushSatisfied(null, false));
+
+  check("only typed staged-community 503 responses retry without burning",
+    isStagedCommunityAuditInconclusive(503, { communityGateInconclusive: true })
+    && !isStagedCommunityAuditInconclusive(503, { communityGateInconclusive: false })
+    && !isStagedCommunityAuditInconclusive(422, { communityGateInconclusive: true }));
+  const retryWaits = Array.from(
+    { length: AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS - 1 },
+    (_, i) => autoReplaceCommunityRetryBackoffMs(i + 1),
+  );
+  check("same-candidate inconclusive retries are bounded and exponentially backed off",
+    AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS === 3
+    && retryWaits.length === 2
+    && retryWaits[0] > 0
+    && retryWaits[1] === retryWaits[0] * 2);
+}
+
+// ── staged full-community gate ─────────────────────────────────────────────
+// A candidate is only commit-safe after positive community + unit + bedroom
+// evidence. Positive mismatches burn it; missing evidence remains an explicit
+// inconclusive result (never a false pass and never a permanent burn).
+{
+  const verified = {
+    ok: true,
+    allSameCommunity: "yes" as const,
+    community: { matchesExpected: "yes" as const, overallStatus: "verified" },
+    units: [{
+      label: "Unit A",
+      folder: "replacement-staging-a",
+      sameAsCommunity: "yes" as const,
+      reason: "6/6 interior photos match.",
+    }],
+    bedroomCoverage: {
+      matchesListing: "yes" as const,
+      units: [{
+        label: "Unit A",
+        folder: "replacement-staging-a",
+        matchesListing: "yes" as const,
+        bedroomsFound: 2,
+        expectedBedrooms: 2,
+      }],
+    },
+    sourcePages: [],
+  };
+  const accepted = classifyStagedUnitCommunityAudit(verified, { targetFolder: "replacement-staging-a" });
+  check("staged candidate accepts only after positive community + unit + bedroom evidence",
+    accepted.decision === "accept" && accepted.burnCandidate === false);
+
+  const unreadableSource = classifyStagedUnitCommunityAudit({
+    ...verified,
+    sourcePages: [{
+      unitLabel: "Unit A",
+      url: "https://example.invalid/listing",
+      match: "uncertain",
+      unreadable: true,
+      reason: "The source page was auth-gated.",
+    }],
+  }, { targetFolder: "replacement-staging-a" });
+  check("missing or unreadable source-page evidence does not block an otherwise-positive staged audit",
+    accepted.decision === "accept" && unreadableSource.decision === "accept");
+
+  const sourceContradiction = classifyStagedUnitCommunityAudit({
+    ...verified,
+    sourcePages: [{
+      unitLabel: "Unit A",
+      url: "https://example.com/listing",
+      match: "no",
+      identifiedCommunity: "Different Resort",
+      confidence: 0.92,
+      reason: "The listing names a different resort.",
+    }],
+  }, { targetFolder: "replacement-staging-a" });
+  check("a strong source-page contradiction still rejects and burns the candidate",
+    sourceContradiction.decision === "reject"
+    && sourceContradiction.burnCandidate === true
+    && sourceContradiction.reasonCode === "community-mismatch");
+
+  const communityMismatch = classifyStagedUnitCommunityAudit({
+    ...verified,
+    allSameCommunity: "no",
+    community: { matchesExpected: "no", overallStatus: "mismatch", identifiedCommunity: "Different Resort" },
+  }, { targetFolder: "replacement-staging-a" });
+  check("positive staged community mismatch rejects and burns the candidate",
+    communityMismatch.decision === "reject" && communityMismatch.burnCandidate === true);
+
+  const bedroomShort = classifyStagedUnitCommunityAudit({
+    ...verified,
+    bedroomCoverage: {
+      matchesListing: "no",
+      units: [{
+        label: "Unit A",
+        folder: "replacement-staging-a",
+        matchesListing: "no",
+        bedroomsFound: 1,
+        expectedBedrooms: 2,
+        reason: "Only one distinct bedroom is photographed.",
+      }],
+    },
+  }, { targetFolder: "replacement-staging-a", bedroomCoverageReliable: true });
+  check("reliable staged bedroom shortfall rejects and burns the candidate",
+    bedroomShort.decision === "reject" && bedroomShort.burnCandidate === true);
+
+  const uncertain = classifyStagedUnitCommunityAudit({
+    ...verified,
+    ok: false,
+    warning: "ANTHROPIC_API_KEY not configured",
+    allSameCommunity: "no",
+    community: null,
+    units: [{
+      label: "Unit A",
+      folder: "replacement-staging-a",
+      sameAsCommunity: "no",
+      reason: "Only 3 interior photos checked — need 5+ to confirm same community.",
+    }],
+    bedroomCoverage: null,
+  }, { targetFolder: "replacement-staging-a", bedroomCoverageReliable: false });
+  check("staged audit uncertainty is inconclusive — neither accepted nor burned",
+    uncertain.decision === "inconclusive" && uncertain.burnCandidate === false);
+}
+
 // ── commit candidate picking ─────────────────────────────────────────────────
 {
   const units = [{ url: "https://z/1" }, { url: "https://z/2" }, { url: "" }];
@@ -447,7 +592,7 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     legacyRetrySource.includes("await mutateStoreStrict"));
   check("a retry-wait record cannot bypass the due-time watchdog",
     /if \(record\.phase === "retry_wait"\) \{[\s\S]{0,100}return;/.test(orch) &&
-    /if \(persistedActive\) \{[\s\S]{0,400}return \{ ok: true, job: persistedActive \};/.test(orch));
+    /persistedActive && autoReplaceJobSatisfiesRequestedGates\(persistedActive, input\)[\s\S]{0,400}return \{ ok: true, job: persistedActive \};/.test(orch));
   const startSource = orch.slice(
     orch.indexOf("export async function startAutoReplaceJob"),
     orch.indexOf("export async function listAutoReplaceJobs"),
@@ -533,6 +678,9 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
   const storageSource = readFileSync(new URL("../server/storage.ts", import.meta.url), "utf8");
   check("photo finding lookup uses the newest check row",
     /getPhotoListingCheckByFolder[\s\S]{0,350}orderBy\(desc\(photoListingChecks\.checkedAt\)\)[\s\S]{0,80}limit\(1\)/.test(storageSource));
+  check("replacement find excludes all historical swap sources plus this job's rejected candidates",
+    orch.includes("collectUnitSwapSkipUrls(swaps, extraSkipUrls)")
+    && !/latestUnitSwapsByUnit\(await storage\.getUnitSwaps\(propertyId\)/.test(orch));
   check("commit loop burns a 502 photo-hydration failure and tries the next option",
     /status === 502 && \(data\?\.coverageShort === true \|\| \/photo\/i\.test/.test(orch));
   const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
@@ -584,7 +732,7 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     lockAt >= 0 && lockAt < snapshotAt && snapshotAt < hydrateAt && hydrateAt < insertAt &&
     atomicCreate.includes("unitSwapSnapshotForUnit") && atomicCreate.includes('reason: "target-changed"'));
   check("POST /api/unit-swaps hydrates with the sidecar scrape tier (bot-walled galleries recover)",
-    /hydrateUnitSwapPhotoFolder\(parsed\.data, \{ useSidecar: true, fallbackPhotoUrls, requireBedroomPhotoCoverage \}\)/.test(routes));
+    /hydrateUnitSwapPhotoFolder\(parsed\.data, \{[\s\S]{0,220}useSidecar: true,[\s\S]{0,220}fallbackPhotoUrls,[\s\S]{0,220}requireBedroomPhotoCoverage/.test(routes));
   // 2026-07-06: the commit re-scrape can fail while ALL scrape tiers are
   // degraded (Apify 403 + ScrapingBee quota + 0-photo sidecar run) even
   // though the FIND phase scraped the gallery minutes earlier — the found
@@ -641,7 +789,8 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     /opts\.requireBedroomPhotoCoverage === true/.test(routes) &&
     /result\.labeled > 0/.test(routes) &&
     /result\.bedroomCount < coverageExpected/.test(routes) &&
-    routes.includes("coverageShort: true"));
+    routes.includes("coverageShort: true") &&
+    /coverageShort: true,[\s\S]{0,120}candidateRejected: true,[\s\S]{0,120}candidateRejection: "bedroom-coverage"/.test(routes));
   check("orchestrator threads requireBedroomPhotoCoverage from the record into the commit body",
     /requireBedroomPhotoCoverage: record\.requireBedroomPhotoCoverage === true/.test(orch));
   check("orchestrator counts coverage burns separately for the all-burned failure message",
@@ -657,24 +806,112 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
   // find phase (same bounded findRestarts budget as the deploy-burst path)
   // with every burned URL excluded so the fresh search can't refind them.
   check("coverage-exhausted commit re-enters the find with burned URLs excluded (bounded restarts)",
-    /burnedCoverage > 0 && record\.findRestarts < MAX_AUTO_REPLACE_FIND_RESTARTS/.test(orch) &&
+    /burnedCoverage > 0 \|\| burnedCommunity > 0/.test(orch) &&
     orch.includes("continue findCommit") &&
     /assembleFindPayload\(record\.propertyId, record\.unitId, record\.attemptedUrls\)/.test(orch));
+
+  // End-to-end staged gate: auto-replace opts in; the disposable folder is
+  // checked with the same full engine before the destructive destination
+  // replacement; only a typed positive contradiction burns the URL.
+  const gateCall = routes.indexOf("verifyStagedUnitSwapCommunity(");
+  const destructiveRename = routes.indexOf("await fs.promises.rm(folderPath", gateCall);
+  check("staged full-community gate is persisted and opt-in (standalone/manual auto-replace stays backwards-compatible)",
+    /requireFullCommunityAudit: record\.requireFullCommunityAudit === true/.test(orch)
+    && /requireFullCommunityAudit: input\.requireFullCommunityAudit === true/.test(orch));
+  check("strict automatic replacement never reuses a stale prior hydration receipt as a pass",
+    /existingSavedCount !== null && opts\.requireFullCommunityAudit !== true/.test(routes));
+  check("staged full-community audit runs before destination rm/rename",
+    gateCall >= 0 && destructiveRename > gateCall &&
+    routes.includes("const verifyStagedUnitSwapCommunity = async") &&
+    routes.includes("const result = await runPhotoCommunityCheck("));
+  check("staged gate retries inconclusive evidence a bounded number of times",
+    routes.includes("STAGED_UNIT_COMMUNITY_GATE_MAX_ATTEMPTS = 2") &&
+    routes.includes("STAGED_UNIT_COMMUNITY_GATE_RETRY_MS"));
+  const { photoFolderDiskName } = await import("../server/photo-folder-source");
+  check("full audit resolves the hidden hydration staging folder without weakening public path sanitization",
+    photoFolderDiskName(".replacement-p23-uprop23-a.staging-1784311200000-deadbeef")
+      === ".replacement-p23-uprop23-a.staging-1784311200000-deadbeef" &&
+    photoFolderDiskName("../../outside") === "-outside");
+  check("positive staged mismatch is a typed candidate rejection and auto-replace burns it",
+    routes.includes("candidateRejected: hydrated.candidateRejected") &&
+    /status === 422 && data\?\.candidateRejected === true/.test(orch) &&
+    orch.includes("burnedCommunity"));
+  check("inconclusive staged audit returns a typed non-destructive 503 and is never added to attemptedUrls",
+    routes.includes("communityGateInconclusive") &&
+    /hydrated\.communityGateInconclusive[\s\S]{0,80}\? 503/.test(routes) &&
+    !/status === 503[\s\S]{0,300}attemptedUrls/.test(orch));
+  check("orchestrator retries a typed inconclusive 503 on the same URL with bounded backoff before failing non-destructively",
+    orch.includes("AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS")
+    && orch.includes("autoReplaceCommunityRetryBackoffMs(attempt)")
+    && /community audit remained inconclusive/.test(orch));
+  const reuseUpgradeSource = orch.slice(
+    orch.indexOf("async function reuseOrUpgradeAutoReplaceJob"),
+    orch.indexOf("export async function startAutoReplaceJob"),
+  );
+  check("strict reuse upgrades only queued/finding jobs through the transactional newest-authority store",
+    reuseUpgradeSource.includes("await mutateStoreStrict")
+    && reuseUpgradeSource.includes("newestAutoReplaceJobsByTarget(Object.values(store))")
+    && reuseUpgradeSource.includes('authoritative.phase !== "queued" && authoritative.phase !== "finding"')
+    && reuseUpgradeSource.includes("requireFullCommunityAudit: authoritative.requireFullCommunityAudit"));
+  check("already-strict reuse is idempotent while post-boundary non-strict reuse fails closed",
+    reuseUpgradeSource.indexOf("autoReplaceJobSatisfiesRequestedGates(authoritative, requested)")
+      < reuseUpgradeSource.indexOf('outcome = { kind: "blocked"')
+    && /reuse\.kind === "blocked"[\s\S]{0,180}status: 409/.test(orch));
+  check("a cross-instance strict upgrade is monotonic and adopted by the runner lease before commit",
+    /requireFullCommunityAudit: snapshot\.requireFullCommunityAudit \|\| current\?\.requireFullCommunityAudit === true/.test(orch)
+    && orch.includes("requireFullCommunityAudit ||= current.requireFullCommunityAudit"));
+  const commitPostAt = orch.indexOf('postLoopback("/api/unit-swaps"');
+  const targetChangedAt = orch.indexOf("data?.targetChanged === true", commitPostAt);
+  const generic409At = orch.indexOf("if (status === 409)", targetChangedAt + 1);
+  const commitPostSource = orch.slice(commitPostAt, generic409At);
+  check("commit sends snapshot and full-community gates and handles targetChanged before generic 409",
+    commitPostSource.includes("expectedUnitSwapSnapshot: record.retryUnitSwapSnapshot")
+    && commitPostSource.includes("requireFullCommunityAudit: record.requireFullCommunityAudit === true")
+    && targetChangedAt > commitPostAt && generic409At > targetChangedAt);
+  check("auto-replace awaits persistence of the terminal Guesty push receipt before completing",
+    /Object\.assign\(record, \{\s*phase: "completed",\s*guestyPhotoPush,/.test(orch)
+    && /persistAutoReplaceRecord\(record,\s*\{\s*strict:\s*true,\s*expectedRunnerId,[\s\S]{0,220}activity:/.test(orch));
 }
 
-// requireBedroomPhotoCoverage survives the persisted store round-trip (a
+// Strict audit commit gates survive the persisted store round-trip (a
 // deploy mid-commit must not resume WITHOUT the gate and commit a short
 // gallery the pre-deploy attempt would have refused).
 {
   const round = parseAutoReplaceStore(serializeAutoReplaceStore(
-    { j: rec({ jobId: "j", requireBedroomPhotoCoverage: true }) }, NOW));
-  check("requireBedroomPhotoCoverage round-trips through the persisted store",
-    round.j.requireBedroomPhotoCoverage === true);
+    { j: rec({ jobId: "j", requireBedroomPhotoCoverage: true, requireFullCommunityAudit: true }) }, NOW));
+  check("replacement coverage + full-community gates round-trip through the persisted store",
+    round.j.requireBedroomPhotoCoverage === true && round.j.requireFullCommunityAudit === true);
   const legacy = parseAutoReplaceStore(JSON.stringify({
     old: { phase: "finding", propertyId: 23, unitId: "u", createdAt: 1, updatedAt: 2 },
   }));
-  check("legacy records without the field parse to coverage-gate OFF",
-    legacy.old.requireBedroomPhotoCoverage === false);
+  check("legacy records without the fields parse both strict gates OFF",
+    legacy.old.requireBedroomPhotoCoverage === false && legacy.old.requireFullCommunityAudit === false);
+}
+
+// The awaited Guesty result survives a deploy/store round-trip, while legacy
+// terminal records remain parseable but deliberately lack strict proof.
+{
+  const pushReceipt = {
+    status: "synced" as const,
+    guestyListingId: "g-23",
+    photoCount: 40,
+    successCount: 40,
+    verifiedCount: 40,
+    skipped: null,
+    error: null,
+    completedAt: NOW,
+  };
+  const round = parseAutoReplaceStore(serializeAutoReplaceStore(
+    { j: rec({ jobId: "j", phase: "completed", guestyPhotoPush: pushReceipt }) }, NOW));
+  check("awaited Guesty gallery push outcome round-trips through the persisted auto-replace job",
+    round.j.guestyPhotoPush?.status === "synced"
+    && round.j.guestyPhotoPush.successCount === 40
+    && round.j.guestyPhotoPush.guestyListingId === "g-23");
+  const legacy = parseAutoReplaceStore(JSON.stringify({
+    old: { phase: "completed", propertyId: 23, unitId: "u", createdAt: 1, updatedAt: 2 },
+  }));
+  check("legacy replacement jobs parse with no fabricated Guesty push proof",
+    legacy.old.guestyPhotoPush === null);
 }
 
 // ── draft (negative-id) unit identity ─────────────────────────────────────────

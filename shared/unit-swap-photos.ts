@@ -46,6 +46,49 @@ export function unitSwapSnapshotForUnit(
   return `${String(latest.id ?? "unknown")}:${createdAt}:${latest.committed === true ? "committed" : "pending"}`;
 }
 
+/**
+ * Build the replacement search's durable source exclusion list.
+ *
+ * Every historical swap for the property matters here, not only the active
+ * (latest) swap per unit: an older source may have been replaced precisely
+ * because it failed an audit, and proposing it again would make the automatic
+ * repair loop cycle. `rejectedUrls` carries candidates burned by the current
+ * job (duplicate source, inaccessible gallery, bedroom shortfall, and similar
+ * candidate-level failures).
+ *
+ * URL query/hash variants are the same listing for replacement purposes. The
+ * first spelling is preserved for the downstream request while deduplication
+ * uses a host+path identity key.
+ */
+export function collectUnitSwapSkipUrls(
+  swaps: Array<{ newSourceUrl?: unknown }>,
+  rejectedUrls: unknown[] = [],
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  const add = (raw: unknown): void => {
+    if (typeof raw !== "string") return;
+    const value = raw.trim();
+    if (!/^https?:\/\//i.test(value)) return;
+    let key: string;
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "http:" && url.protocol !== "https:") return;
+      key = `${url.hostname.replace(/^www\./i, "").toLowerCase()}${url.pathname.replace(/\/+$/, "").toLowerCase()}`;
+    } catch {
+      return;
+    }
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push(value);
+  };
+
+  for (const swap of swaps) add(swap?.newSourceUrl);
+  for (const url of rejectedUrls) add(url);
+  return out;
+}
+
 export type ActiveUnitPhotoFolder = {
   unitId: string;
   originalFolder: string;

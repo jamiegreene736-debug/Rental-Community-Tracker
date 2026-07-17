@@ -34,6 +34,33 @@ export type AmenityDetectionParse = {
 };
 
 /**
+ * Durable evidence describing how the photo leg of an amenity scan completed.
+ * `photoFingerprint` identifies the exact sampled photo set; callers can save
+ * it and later detect that a gallery changed after the scan.
+ */
+export type AmenityScanProvenance = {
+  method: "claude-vision" | "partial-vision" | "baseline-only";
+  model?: string;
+  photoFingerprint?: string;
+  photosConsidered: number;
+  /** Intended published community/unit folders represented by this scan. */
+  groupsConsidered: number;
+  /** Intended folders that contributed at least one readable sampled photo. */
+  groupsWithReadablePhotos: number;
+  batchesAttempted: number;
+  batchesSucceeded: number;
+  batchesFailed: number;
+  completedAt: string;
+};
+
+/** Empty arrays are valid (Claude saw no target amenities); missing arrays are not. */
+export function isAmenityDetectionResponse(value: unknown): boolean {
+  return Array.isArray(value)
+    || Array.isArray((value as any)?.present)
+    || Array.isArray((value as any)?.amenities);
+}
+
+/**
  * Build the vision instruction. Present-only: for each target amenity the model
  * decides whether the photos CLEARLY show it, and returns only what it can see.
  */

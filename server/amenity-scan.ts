@@ -26,11 +26,22 @@ import {
 } from "@shared/guesty-amenity-catalog";
 import {
   buildAmenityDetectionInstruction,
+  isAmenityDetectionResponse,
   parseAmenityDetectionJson,
   mergeDetectedAmenities,
   type AmenityDetection,
+  type AmenityScanProvenance,
 } from "@shared/amenity-scan-logic";
 import { researchLocationAmenitiesForProperty } from "./amenity-location-research";
+import {
+  AmenityStrictVisionError,
+  assertCompleteAmenityPhotoGroupCoverage,
+  buildAmenityPhotoFingerprint,
+  buildAmenityScanProvenance,
+  groupsWithoutReadableAmenityPhotos,
+  type AmenityPhotoGroupCoverage,
+  isCompleteClaudeAmenityVision,
+} from "./amenity-scan-provenance";
 
 const MODEL = process.env.AMENITY_SCAN_MODEL || "claude-sonnet-4-6";
 const ANTHROPIC_TIMEOUT_MS = 90_000;
@@ -39,9 +50,14 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 // Per-group photo caps + how many images ride in one vision call. Kept small so
 // each call stays well under the timeout; batches only UNION detections (add-only),
 // so splitting is lossless. Env-tunable for tighter/looser budgets.
-const COMMUNITY_PHOTO_CAP = Number(process.env.AMENITY_SCAN_COMMUNITY_CAP || 12);
-const UNIT_PHOTO_CAP = Number(process.env.AMENITY_SCAN_UNIT_CAP || 12);
-const VISION_BATCH_SIZE = Number(process.env.AMENITY_SCAN_BATCH_SIZE || 12);
+function positiveIntegerEnv(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : fallback;
+}
+
+const COMMUNITY_PHOTO_CAP = positiveIntegerEnv(process.env.AMENITY_SCAN_COMMUNITY_CAP, 12);
+const UNIT_PHOTO_CAP = positiveIntegerEnv(process.env.AMENITY_SCAN_UNIT_CAP, 12);
+const VISION_BATCH_SIZE = positiveIntegerEnv(process.env.AMENITY_SCAN_BATCH_SIZE, 12);
 
 export type AmenityScanResult = {
   ok: boolean;
@@ -59,6 +75,10 @@ export type AmenityScanResult = {
   filledFromBaseline: boolean;
   photosScanned: number;
   groupsScanned: number;
+  /** True only when every intended photo batch completed through Claude vision. */
+  strictVisionComplete: boolean;
+  /** Durable method/model/photo-set evidence for audit verification. */
+  provenance: AmenityScanProvenance;
   /** Surrounding-area (web search) leg — "Shopping Nearby" etc. */
   location: {
     researched: boolean;
@@ -109,19 +129,24 @@ function evenSampleIndices(n: number, cap: number): number[] {
   return Array.from(out).sort((a, b) => a - b);
 }
 
-async function loadGroupPhotos(group: CheckGroupInput, cap: number): Promise<LoadedPhoto[]> {
+async function loadGroupPhotos(
+  group: CheckGroupInput,
+  cap: number,
+): Promise<{ photos: LoadedPhoto[]; publishedPhotos: number }> {
   const dir = publicPhotoDir(group.folder);
   let diskFiles: string[] = [];
   try {
     diskFiles = (await fs.promises.readdir(dir)).filter((f) => IMAGE_EXT.test(f));
   } catch {
-    return [];
+    return { photos: [], publishedPhotos: 0 };
   }
   const diskSet = new Set(diskFiles);
-  const requested = Array.isArray(group.filenames) && group.filenames.length > 0
-    ? group.filenames.map((f) => path.basename(String(f))).filter((f) => IMAGE_EXT.test(f) && diskSet.has(f))
-    : diskFiles.slice().sort();
-  const ordered = Array.from(new Set(requested));
+  const intended = Array.from(new Set(
+    Array.isArray(group.filenames) && group.filenames.length > 0
+      ? group.filenames.map((f) => path.basename(String(f))).filter((f) => IMAGE_EXT.test(f))
+      : diskFiles.slice().sort(),
+  ));
+  const ordered = intended.filter((filename) => diskSet.has(filename));
   const idxs = evenSampleIndices(ordered.length, cap);
   const out: LoadedPhoto[] = [];
   for (const i of idxs) {
@@ -141,7 +166,7 @@ async function loadGroupPhotos(group: CheckGroupInput, cap: number): Promise<Loa
       // skip unreadable
     }
   }
-  return out;
+  return { photos: out, publishedPhotos: intended.length };
 }
 
 async function callAmenityVision(apiKey: string, content: any[]): Promise<unknown> {
@@ -181,12 +206,15 @@ export type ScanAmenitiesOptions = {
   baseline?: string[];
   /** Anthropic key (defaults to env). Empty → no vision, baseline-only merge. */
   anthropicApiKey?: string;
+  /** Reject fail-soft/baseline/partial results; used by dashboard full audits. */
+  requireVision?: boolean;
 };
 
 /**
  * Scan a property's photos for amenities and return the add-only merged set.
- * Never throws for the "no vision available" case — it degrades to a
- * baseline/current merge with a warning, so a fresh draft is still filled out.
+ * By default, never throws for the "no vision available" case — it degrades to
+ * a baseline/current merge with a warning, so a fresh draft is still filled
+ * out. `requireVision` instead rejects any baseline-only or partial scan.
  */
 export async function scanAmenitiesForProperty(
   propertyId: number,
@@ -210,7 +238,8 @@ export async function scanAmenitiesForProperty(
     visionDetail: AmenityDetection[],
     photosScanned: number,
     groupsScanned: number,
-    warning?: string,
+    warning: string | undefined,
+    provenance: AmenityScanProvenance,
   ): Promise<AmenityScanResult> => {
     const location = await locationPromise;
     // Union the two legs. Keys are disjoint by design (vision targets vs
@@ -240,6 +269,8 @@ export async function scanAmenitiesForProperty(
       filledFromBaseline: merged.filledFromBaseline,
       photosScanned,
       groupsScanned,
+      strictVisionComplete: isCompleteClaudeAmenityVision(provenance),
+      provenance,
       location: {
         researched: location.researched,
         detected: location.detected,
@@ -251,21 +282,106 @@ export async function scanAmenitiesForProperty(
   };
 
   if (groups.length === 0) {
-    return finalize([], [], 0, 0, built ? "No photo folders found for this property." : "Property not found.");
+    const provenance = buildAmenityScanProvenance({
+      model: MODEL,
+      photosConsidered: 0,
+      groupsConsidered: 0,
+      groupsWithReadablePhotos: 0,
+      batchesAttempted: 0,
+      batchesSucceeded: 0,
+      batchesFailed: 0,
+    });
+    if (opts.requireVision) {
+      throw new AmenityStrictVisionError(
+        "no-photo-groups",
+        built ? "No photo folders found for this property." : "Property not found.",
+        provenance,
+      );
+    }
+    return finalize([], [], 0, 0, built ? "No photo folders found for this property." : "Property not found.", provenance);
   }
   if (!apiKey) {
-    return finalize([], [], 0, groups.length, "No ANTHROPIC_API_KEY — filled the standard baseline without a photo scan.");
+    const provenance = buildAmenityScanProvenance({
+      model: MODEL,
+      photosConsidered: 0,
+      groupsConsidered: groups.length,
+      groupsWithReadablePhotos: 0,
+      batchesAttempted: 0,
+      batchesSucceeded: 0,
+      batchesFailed: 0,
+    });
+    if (opts.requireVision) {
+      throw new AmenityStrictVisionError(
+        "missing-api-key",
+        "No ANTHROPIC_API_KEY — a Claude photo scan is required.",
+        provenance,
+      );
+    }
+    return finalize([], [], 0, groups.length, "No ANTHROPIC_API_KEY — filled the standard baseline without a photo scan.", provenance);
   }
 
-  // Load + sample photos per group.
+  // Manual tab scans keep the historical representative sample. Strict
+  // Dashboard automation loads every published photo so its "complete Claude
+  // scan" receipt cannot hide an unsampled amenity in the gallery.
   const photos: LoadedPhoto[] = [];
+  const groupCoverage: AmenityPhotoGroupCoverage[] = [];
   for (const g of groups) {
-    const cap = g.role === "community" ? COMMUNITY_PHOTO_CAP : UNIT_PHOTO_CAP;
-    photos.push(...await loadGroupPhotos(g, cap));
+    const cap = opts.requireVision
+      ? Number.MAX_SAFE_INTEGER
+      : g.role === "community" ? COMMUNITY_PHOTO_CAP : UNIT_PHOTO_CAP;
+    const loaded = await loadGroupPhotos(g, cap);
+    photos.push(...loaded.photos);
+    groupCoverage.push({
+      role: g.role,
+      label: g.label,
+      folder: g.folder,
+      publishedPhotos: loaded.publishedPhotos,
+      readablePhotos: loaded.photos.length,
+    });
   }
   if (photos.length === 0) {
-    return finalize([], [], 0, groups.length, "No readable photos on disk for this property yet.");
+    const provenance = buildAmenityScanProvenance({
+      model: MODEL,
+      photosConsidered: 0,
+      groupsConsidered: groups.length,
+      groupsWithReadablePhotos: 0,
+      batchesAttempted: 0,
+      batchesSucceeded: 0,
+      batchesFailed: 0,
+    });
+    if (opts.requireVision) {
+      throw new AmenityStrictVisionError(
+        "no-readable-photos",
+        "No readable photos on disk for this property yet.",
+        provenance,
+      );
+    }
+    return finalize([], [], 0, groups.length, "No readable photos on disk for this property yet.", provenance);
   }
+
+  const missingGroups = groupsWithoutReadableAmenityPhotos(groupCoverage);
+  if (opts.requireVision) {
+    const provenance = buildAmenityScanProvenance({
+      model: MODEL,
+      photosConsidered: photos.length,
+      groupsConsidered: groupCoverage.length,
+      groupsWithReadablePhotos: groupCoverage.length - missingGroups.length,
+      batchesAttempted: 0,
+      batchesSucceeded: 0,
+      batchesFailed: 0,
+    });
+    assertCompleteAmenityPhotoGroupCoverage(groupCoverage, provenance);
+  }
+  const coverageWarning = missingGroups.length > 0
+    ? `${missingGroups.length} photo ${missingGroups.length === 1 ? "folder was" : "folders were"} unreadable and skipped.`
+    : undefined;
+
+  const photoFingerprint = buildAmenityPhotoFingerprint(photos.map((photo) => ({
+    groupLabel: photo.groupLabel,
+    role: photo.role,
+    filename: photo.filename,
+    bytes: photo.buffer,
+  })));
 
   const instruction = buildAmenityDetectionInstruction(AMENITY_VISION_TARGETS, {
     communityName: community,
@@ -276,7 +392,9 @@ export async function scanAmenitiesForProperty(
   const bestByKey = new Map<string, AmenityDetection>();
   const confRank: Record<string, number> = { high: 3, medium: 2, low: 1 };
   let batchErrors = 0;
-  for (const batch of chunk(photos, VISION_BATCH_SIZE)) {
+  let batchesSucceeded = 0;
+  const batches = chunk(photos, VISION_BATCH_SIZE);
+  for (const batch of batches) {
     const content: any[] = [{ type: "text", text: instruction }];
     // number photos per group so the model can cite "Community photo 2".
     const counters = new Map<string, number>();
@@ -289,7 +407,11 @@ export async function scanAmenitiesForProperty(
     }
     try {
       const parsed = await callAmenityVision(apiKey, content);
+      if (!isAmenityDetectionResponse(parsed)) {
+        throw new Error("vision response did not contain a present[] array");
+      }
       const { detail } = parseAmenityDetectionJson(parsed, AMENITY_CATALOG_KEYS);
+      batchesSucceeded += 1;
       for (const d of detail) {
         const prev = bestByKey.get(d.key);
         if (!prev || confRank[d.confidence] > confRank[prev.confidence]) bestByKey.set(d.key, d);
@@ -302,10 +424,28 @@ export async function scanAmenitiesForProperty(
 
   const detail = Array.from(bestByKey.values());
   const detected = detail.filter((d) => d.confidence !== "low").map((d) => d.key);
-  const warning = batchErrors > 0 && detected.length === 0
+  const visionWarning = batchErrors > 0 && detected.length === 0
     ? "The photo scan could not complete; filled the standard baseline only."
     : batchErrors > 0
       ? `Some photo batches failed (${batchErrors}); results may be partial.`
       : undefined;
-  return finalize(detected, detail, photos.length, groups.length, warning);
+  const warning = [coverageWarning, visionWarning].filter(Boolean).join(" ") || undefined;
+  const provenance = buildAmenityScanProvenance({
+    model: MODEL,
+    photoFingerprint,
+    photosConsidered: photos.length,
+    groupsConsidered: groupCoverage.length,
+    groupsWithReadablePhotos: groupCoverage.length - missingGroups.length,
+    batchesAttempted: batches.length,
+    batchesSucceeded,
+    batchesFailed: batchErrors,
+  });
+  if (opts.requireVision && !isCompleteClaudeAmenityVision(provenance)) {
+    throw new AmenityStrictVisionError(
+      "vision-batch-failed",
+      `Claude amenity scan was incomplete: ${batchErrors} of ${batches.length} photo batches failed.`,
+      provenance,
+    );
+  }
+  return finalize(detected, detail, photos.length, groups.length, warning, provenance);
 }

@@ -48,6 +48,7 @@ import {
 } from "./community-photo-verify";
 import { getSearchApiKey } from "./searchapi";
 import { verifyUnitSourcePages } from "./source-page-community-check";
+import { photoFolderDiskName } from "./photo-folder-source";
 import {
   summarizeSourcePages,
   sourcePageIsStrongContradiction,
@@ -231,7 +232,7 @@ export {
 // ── Disk helpers ────────────────────────────────────────────────────────────
 
 function publicPhotoDir(folder: string): string {
-  const safe = folder.replace(/[^a-zA-Z0-9_-]+/g, "-");
+  const safe = photoFolderDiskName(folder);
   return path.resolve(process.cwd(), "client/public/photos", safe);
 }
 

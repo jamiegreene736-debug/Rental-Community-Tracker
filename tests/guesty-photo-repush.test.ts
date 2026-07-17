@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
+import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import {
   assembleGuestyPushPhotos,
   captionFromFilename,
@@ -141,6 +144,107 @@ const read = (rel: string) => fs.readFileSync(path.join(here, "..", rel), "utf8"
     src.includes("skipGuestyPhotoPush === true"));
   check("retroactive repush endpoint exists",
     src.includes("/api/replacement/repush-guesty-photos"));
+  check("strict final-audit push pins the trusted current URL directly instead of failing on a stale pre-read",
+    src.includes('? { original: requiredCoverCollageUrl, caption: "Cover Collage" }')
+    && src.includes("if (!requiredCoverCollageUrl) {")
+    && src.includes("prove the whole exact ordered gallery with the retrying read-back below"));
+  check("required collage identity is rejected unless the request is authenticated internal loopback",
+    src.includes("rawRequiredCoverCollageUrl != null && !isAuthenticatedInternalGalleryPush(req)")
+    && src.includes('req.headers["x-admin-secret"]')
+    && src.includes("supplied.length === expected.length && timingSafeEqual(supplied, expected)"));
+  check("strict final-audit verification compares the exact normalized ordered gallery with Cover Collage first",
+    src.includes("strictGuestyPicturesExactlyMatch(savedPictures, picturesForPut())")
+    && src.includes('savedFirst?.caption === "Cover Collage"')
+    && src.includes('strictGalleryVerification ? exactMatch : savedLen >= expectedTotal')
+    && src.includes('strictGalleryVerified'));
+  check("strict gallery mode requires the explicit trusted URL; intermediate/manual pushes keep count verification",
+    src.includes("const strictGalleryVerification = requiredCoverCollageUrl != null")
+    && !src.includes("strictGalleryVerificationRequirement")
+    && src.includes("intermediate replacement")
+    && src.includes('strictGalleryVerification ? exactMatch : savedLen >= expectedTotal'));
+
+  // Execute the production comparison helpers directly from their marked
+  // source block. Regression: count-only verification used to accept both of
+  // these stale galleries, even though hidden/old photos were still present.
+  const helperStart = src.indexOf("type NormalizedGuestyPicture");
+  const helperEnd = src.indexOf("const AMENITY_SCAN_RECEIPTS_SETTING_KEY", helperStart);
+  let strictMatch: ((actual: unknown, expected: unknown) => boolean) | null = null;
+  if (helperStart >= 0 && helperEnd > helperStart) {
+    const helperSource = `${src.slice(helperStart, helperEnd)}\n(globalThis as any).__strictMatch = strictGuestyPicturesExactlyMatch;`;
+    const js = ts.transpileModule(helperSource, {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const context: Record<string, unknown> = { URL };
+    vm.runInNewContext(js, context);
+    strictMatch = context.__strictMatch as typeof strictMatch;
+  }
+  const expected = [
+    { original: "https://cdn.example/collage.jpg", caption: "Cover Collage" },
+    { original: "https://cdn.example/new-unit.jpg", caption: "Unit Patio" },
+  ];
+  const staleEqualCount = [
+    { original: "https://cdn.example/collage.jpg", caption: "Cover Collage" },
+    { original: "https://cdn.example/hidden-old.jpg", caption: "Old Angle" },
+  ];
+  const staleLargerCount = [...staleEqualCount, { original: "https://cdn.example/extra-old.jpg", caption: "Old Bedroom" }];
+  const normalizedEquivalent = [
+    { url: "https://CDN.EXAMPLE/collage.jpg#stale-fragment", caption: "  Cover   Collage " },
+    { url: "https://cdn.example/new-unit.jpg", caption: "Unit Patio" },
+  ];
+  check("strict gallery regression: stale equal/greater counts fail, while normalized exact order passes",
+    !!strictMatch
+    && !strictMatch(staleEqualCount, expected)
+    && !strictMatch(staleLargerCount, expected)
+    && strictMatch(normalizedEquivalent, expected));
+  check("strict gallery regression: an older captioned Cover Collage cannot satisfy this audit's URL identity",
+    !!strictMatch
+    && !strictMatch([
+      { original: "https://cdn.example/older-collage.jpg", caption: "Cover Collage" },
+      expected[1],
+    ], expected));
+
+  // Execute the internal-auth boundary. A valid portal/admin secret alone is
+  // insufficient from a browser/remote socket; the exact URL capability is
+  // reserved for the same-process loopback repush.
+  const authStart = src.indexOf("function isAuthenticatedInternalGalleryPush(");
+  const authEnd = src.indexOf("type NormalizedGuestyPicture", authStart);
+  let trustedInternal: ((req: unknown) => boolean) | null = null;
+  let normalizeRequiredUrl: ((raw: unknown) => string | null) | null = null;
+  let trustedAuthCasesPass = false;
+  let emptySecretRejected = false;
+  if (authStart >= 0 && authEnd > authStart) {
+    const authSource = `${src.slice(authStart, authEnd)}\n(globalThis as any).__trustedInternal = isAuthenticatedInternalGalleryPush;\n(globalThis as any).__normalizeRequiredUrl = normalizeRequiredCoverCollageUrl;`;
+    const js = ts.transpileModule(authSource, {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const authEnv = { ADMIN_SECRET: "internal-secret" };
+    const context: Record<string, unknown> = {
+      Buffer,
+      URL,
+      timingSafeEqual,
+      process: { env: authEnv },
+      isLoopback: (req: any) => req?.socket?.remoteAddress === "127.0.0.1",
+    };
+    vm.runInNewContext(js, context);
+    trustedInternal = context.__trustedInternal as typeof trustedInternal;
+    normalizeRequiredUrl = context.__normalizeRequiredUrl as typeof normalizeRequiredUrl;
+    const internalRequest = { socket: { remoteAddress: "127.0.0.1" }, headers: { "x-admin-secret": "internal-secret" } };
+    trustedAuthCasesPass = !!trustedInternal
+      && trustedInternal(internalRequest)
+      && !trustedInternal({ socket: { remoteAddress: "203.0.113.10" }, headers: { "x-admin-secret": "internal-secret" } })
+      && !trustedInternal({ socket: { remoteAddress: "127.0.0.1" }, headers: { "x-admin-secret": "wrong-secret" } });
+    authEnv.ADMIN_SECRET = "";
+    emptySecretRejected = !!trustedInternal && !trustedInternal(internalRequest);
+  }
+  check("required collage auth regression: only loopback plus the internal secret is accepted",
+    trustedAuthCasesPass && emptySecretRejected);
+  check("required collage URL regression: only bounded absolute http(s) identities are accepted",
+    !!normalizeRequiredUrl
+    && normalizeRequiredUrl(" https://cdn.example/current.jpg ") === "https://cdn.example/current.jpg"
+    && normalizeRequiredUrl("http://cdn.example/current.jpg") === "http://cdn.example/current.jpg"
+    && normalizeRequiredUrl("javascript:alert(1)") === null
+    && normalizeRequiredUrl("http://") === null
+    && normalizeRequiredUrl(`https://cdn.example/${"x".repeat(2_100)}`) === null);
 }
 {
   const src = read("server/guesty-photo-repush.ts");
@@ -152,6 +256,14 @@ const read = (rel: string) => fs.readFileSync(path.join(here, "..", rel), "utf8"
     src.includes("pushTails"));
   check("push waits (bounded) for the fresh folder's Claude labels before publishing captions",
     src.includes("waitForFolderLabels"));
+  check("a partial upload or short Guesty read-back is never reported as a completed gallery sync",
+    src.includes("successCount === expectedPushCount") &&
+    src.includes("verifiedCount >= successCount") &&
+    src.includes("only ${verifiedCount}/${successCount} pushed photos were verified on Guesty"));
+  check("strict repush sends the required collage identity and requires both exact completion flags",
+    src.includes("...(requiredCoverCollageUrl ? { requiredCoverCollageUrl } : {})")
+    && src.includes("collagePinned && strictGalleryVerified")
+    && src.includes("the exact audit-generated Cover Collage and ordered gallery were not verified on Guesty"));
 }
 
 console.log(`\nguesty-photo-repush: ${passed} passed, ${failed} failed`);

@@ -66,6 +66,26 @@ export const STUCK_AUTO_REPLACE_COMMIT_ERROR =
 // How long a finished job stays on the dashboard queue chip.
 export const AUTO_REPLACE_SURFACE_TERMINAL_MS = 2 * 60 * 60 * 1000;
 
+// The staged community route already performs its own short evidence retry.
+// A 503 after that is still infrastructure/evidence uncertainty, not a reason
+// to burn a potentially-good candidate. The orchestrator retries that SAME
+// URL with bounded exponential backoff before it gives up non-destructively.
+export const AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_MAX_ATTEMPTS = 3;
+export const AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_BACKOFF_BASE_MS = 2_000;
+
+export function isStagedCommunityAuditInconclusive(status: number, data: unknown): boolean {
+  return status === 503
+    && !!data
+    && typeof data === "object"
+    && (data as { communityGateInconclusive?: unknown }).communityGateInconclusive === true;
+}
+
+/** retryNumber is one-based: the first retry waits BASE, then 2*BASE, capped. */
+export function autoReplaceCommunityRetryBackoffMs(retryNumber: number): number {
+  const n = Number.isFinite(retryNumber) ? Math.max(1, Math.floor(retryNumber)) : 1;
+  return Math.min(15_000, AUTO_REPLACE_COMMUNITY_INCONCLUSIVE_BACKOFF_BASE_MS * (2 ** (n - 1)));
+}
+
 export type AutoReplacePhase =
   | "queued"
   | "finding"      // replacement-find background job running
@@ -76,6 +96,48 @@ export type AutoReplacePhase =
   | "failed";
 
 export const AUTO_REPLACE_ACTIVE_PHASES: AutoReplacePhase[] = ["queued", "finding", "committing", "verifying", "retry_wait"];
+
+export type AutoReplaceGuestyPhotoPushOutcome = {
+  status: "synced" | "not-mapped" | "skipped" | "failed";
+  guestyListingId: string | null;
+  photoCount: number | null;
+  successCount: number | null;
+  verifiedCount: number | null;
+  skipped: string | null;
+  error: string | null;
+  completedAt: number;
+};
+
+const GUESTY_PHOTO_PUSH_STATUSES = new Set<AutoReplaceGuestyPhotoPushOutcome["status"]>([
+  "synced", "not-mapped", "skipped", "failed",
+]);
+
+export function parseAutoReplaceGuestyPhotoPushOutcome(raw: unknown): AutoReplaceGuestyPhotoPushOutcome | null {
+  if (!raw || typeof raw !== "object") return null;
+  const v = raw as Record<string, unknown>;
+  if (!GUESTY_PHOTO_PUSH_STATUSES.has(v.status as AutoReplaceGuestyPhotoPushOutcome["status"])) return null;
+  const numberOrNull = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? value : null;
+  return {
+    status: v.status as AutoReplaceGuestyPhotoPushOutcome["status"],
+    guestyListingId: typeof v.guestyListingId === "string" ? v.guestyListingId : null,
+    photoCount: numberOrNull(v.photoCount),
+    successCount: numberOrNull(v.successCount),
+    verifiedCount: numberOrNull(v.verifiedCount),
+    skipped: typeof v.skipped === "string" ? v.skipped : null,
+    error: typeof v.error === "string" ? v.error : null,
+    completedAt: typeof v.completedAt === "number" && Number.isFinite(v.completedAt) ? v.completedAt : 0,
+  };
+}
+
+// A local-only property is a valid end state. Once a Guesty listing is
+// mapped, however, only an awaited, successful full-gallery push satisfies a
+// strict audit; skipped/failed/legacy-missing outcomes must stay non-green.
+export function autoReplaceGuestyPushSatisfied(
+  outcome: AutoReplaceGuestyPhotoPushOutcome | null | undefined,
+  hasMappedGuestyListing: boolean,
+): boolean {
+  return !hasMappedGuestyListing || outcome?.status === "synced";
+}
 
 export type AutoReplaceJobRecord = {
   jobId: string;
@@ -92,6 +154,8 @@ export type AutoReplaceJobRecord = {
   newUnitLabel: string | null;
   newAddress: string | null;
   replacementFolder: string | null;
+  /** Awaited full-gallery push receipt. Persisted with the terminal job. */
+  guestyPhotoPush: AutoReplaceGuestyPhotoPushOutcome | null;
   message: string | null;
   error: string | null;
   createdAt: number;
@@ -107,6 +171,10 @@ export type AutoReplaceJobRecord = {
   // again — the 2026-07-12 Ilikai receipt). OTA-found/manual replacements
   // leave it off: getting off compromised photos beats gallery coverage.
   requireBedroomPhotoCoverage: boolean;
+  /** Strict dashboard-audit replacements stage and fully verify the candidate
+   * before commit. Standalone/manual auto-replace defaults off for backwards
+   * compatibility and retains its pre-existing find/commit contract. */
+  requireFullCommunityAudit: boolean;
   // Automatic retries exist only for a CURRENT photo folder whose persisted
   // Airbnb/VRBO/Booking PHOTO verdict was found when the job started. The
   // watchdog re-checks the same folder at retry time and stops if it cleared.
@@ -173,6 +241,7 @@ export function parseAutoReplaceStore(raw: string | null | undefined): Record<st
         newUnitLabel: typeof v.newUnitLabel === "string" ? v.newUnitLabel : null,
         newAddress: typeof v.newAddress === "string" ? v.newAddress : null,
         replacementFolder: typeof v.replacementFolder === "string" ? v.replacementFolder : null,
+        guestyPhotoPush: parseAutoReplaceGuestyPhotoPushOutcome(v.guestyPhotoPush),
         message: typeof v.message === "string" ? v.message : null,
         error: typeof v.error === "string" ? v.error : null,
         createdAt: typeof v.createdAt === "number" ? v.createdAt : 0,
@@ -180,6 +249,7 @@ export function parseAutoReplaceStore(raw: string | null | undefined): Record<st
         resumeCount: typeof v.resumeCount === "number" ? v.resumeCount : 0,
         findRestarts: typeof v.findRestarts === "number" ? v.findRestarts : 0,
         requireBedroomPhotoCoverage: v.requireBedroomPhotoCoverage === true,
+        requireFullCommunityAudit: v.requireFullCommunityAudit === true,
         retryPhotoFolder: typeof v.retryPhotoFolder === "string" && v.retryPhotoFolder.trim()
           ? v.retryPhotoFolder.trim()
           : null,

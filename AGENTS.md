@@ -4331,12 +4331,20 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    folder), soft-delete + ↺ Undo, every hidden file named in the receipt.
    `AUDIT_DEDUPE_SAME_SCENE=0` restores review-only. Pure
    `dedupeAutoFixSelections` is the only selection source — test-locked.
-9. **The layout stage NEVER auto-pushes.** The canonical bedding push reads
-   the operator's Bedding-tab configuration from browser localStorage
-   (`loadBuilderBeddingConfig`) — invisible server-side, so an auto-push
-   could clobber his curated bed arrangement with static defaults. The
-   receipt points at the builder's push button instead. Source-locked (the
-   sweep module must not reference `listingRooms` or PUT to Guesty).
+9. **Manual/single-property layout audits NEVER auto-push; dashboard "Audit
+   selected" has one narrow, explicit exception (2026-07-17).** The manual
+   path remains compare/proposal-only because the canonical Bedding-tab
+   config lives in browser localStorage. A `fullAutomation` bulk sweep may
+   call `applyBeddingPhotoScanForAudit`, but only with per-unit Claude-vision
+   provenance and only for photographed detections at or above
+   `BEDDING_SCAN_MIN_CONFIDENCE` (0.60). The helper overlays bed lists into
+   EXISTING Guesty bedroom slots only: it never creates/deletes rooms, changes
+   bedroom/bathroom/accommodates counts, touches common rooms, or guesses an
+   unphotographed room. Bathroom evidence and the full application receipt are
+   saved locally even without Guesty; the Bedding tab hydrates that receipt
+   once so later operator edits keep winning. Raw `listingRooms` reads/writes
+   stay isolated in `server/bedding-photo-scan.ts`; the sweep only orchestrates
+   the narrow helper.
 10. **Photo fix ladder (PR 3, stage `photo-fix`)** — runs right after the
    photo verifies, only with auto-fix on (`AUDIT_PHOTO_FIX=0` skips). Rungs
    come from pure `photoFixRungsForUnit` (test-locked): bedroom shortfall →
@@ -4356,12 +4364,15 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    `record.allowReplace` (dialog sub-checkbox, default ON) and
    `AUDIT_REPLACE_DISABLED` unset — inherently max ONE replacement per
    unit per sweep (the rung list holds one `replace`).
-11. **Bulk "Audit selected" runs sweeps ONE at a time** — every sweep burns
-   the same shared Lens/SearchAPI/vision budgets, so `runUnitAuditJob`
+11. **Bulk "Audit selected" runs strict full-automation sweeps ONE at a time**
+   — `POST /api/unit-audit/bulk` defaults `fullAutomation=true`; ordinary
+   one-property dialog audits and the weekly cron remain standard mode. Every
+   sweep burns the same shared Lens/SearchAPI/vision budgets, so `runUnitAuditJob`
    funnels through a global slot (`UNIT_AUDIT_CONCURRENCY`, default 1);
    waiting records stay `queued` with a heartbeat touch so the resume
    window never lapses in line. `POST /api/unit-audit/bulk` dedupes ids
-   and caps at 40.
+   and caps at 40. The resumable job-store cap is 80 (not 16), so one full
+   40-property batch cannot evict its own queued jobs.
 12. **Community-folder ladder (2026-07-12, from the live Coconut Plantation
    receipt):** when the community CHECK fails on the community folder
    itself, the photo-fix stage first hides positively-flagged photos —
@@ -4645,8 +4656,8 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    deterministic).
    Kill `AUDIT_AI_JUDGMENT=0` (restores "needs your eyes"); model
    `AUDIT_JUDGMENT_MODEL` (default claude-sonnet-4-6). Non-photo judgment
-   rails are deliberately UNTOUCHED: layout stays flag-only (#9 —
-   bedding truth lives in browser localStorage), licenses stay human
+   rails are deliberately UNTOUCHED: manual layout audits stay flag-only
+   (#9; the explicit fullAutomation Claude-only exception is separate), licenses stay human
    (compliance values must never be AI-guessed onto live OTA listings),
    and cron cooldown/budget blocks keep their SMS-alert escalation (#15).
    Locked by tests/photo-judgment.test.ts (65, in the npm chain).
@@ -4684,11 +4695,16 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    browser-local persistence model). A per-unit/no-key vision failure may still
    render caption-derived evidence, but it is REVIEW-ONLY and can never auto-apply
    or push. A push failure never rolls back the saved config
-   or timestamp and is surfaced for manual retry. Hydrating a stored/audit scan
-   remains READ-ONLY — auto-apply/push only occurs inside the explicit POST
-   click handler — and the operator can still hand-edit or re-apply afterward.
-   The operator's localStorage config remains the ONLY push source (#9 intact).
-   (c) The AUDIT reuses the same engine: stageLayout calls
+   or timestamp and is surfaced for manual retry. Hydrating a generic stored
+   scan remains READ-ONLY — auto-apply/push only occurs inside the explicit
+   POST click handler — and the operator can still hand-edit or re-apply afterward.
+   The operator's localStorage config remains the ONLY manual push source (#9
+   intact). The dashboard fullAutomation exception uses the same canonical-ID,
+   vision-only, strictly-above-60% merge, persists a distinct server-side
+   auditApplication receipt, safely overlays existing Guesty room slots, and
+   hydrates that receipt into browser config at most once after a successful
+   local save; generic stored-scan hydration remains read-only.
+   (c) A standard AUDIT reuses the same engine: stageLayout calls
    `beddingPhotoCheckForAudit` (kill `AUDIT_BEDDING_PHOTO_CHECK=0`),
    which reuses a fingerprint-fresh stored scan
    (`bedding_photo_scans.v1`, photoFolderFingerprint over
@@ -4696,7 +4712,8 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    compares TYPE PRESENCE ONLY vs the Guesty listing's pushed bed layout
    (quantities never compared — a second twin can be out of frame;
    Guesty-only types are flagged ONLY when every claimed bedroom is
-   photographed; sofa beds excluded). Findings are flag-only attention
+   photographed; sofa beds excluded). Findings are flag-only attention in
+   standard/manual mode
    (never `failed`), and the Guesty rooms read lives in the ENGINE module
    because the sweep source-lock forbids the rooms field name in
    unit-audit-sweep.ts (the GET-only complement of #9). A scan that
@@ -4712,6 +4729,45 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    2026-07-14 operator ask that the audit's rate pushes move the Last
    Price Scan column — verified already wired since 2026-07-12, now
    drift-locked).
+
+22. **Dashboard "Audit selected" full-automation contract (2026-07-17).**
+   This bulk entry point is deliberately stronger than the manual dialog:
+   (a) regenerate title/summary/space/neighborhood/transit/access/houseRules every run through
+   `/api/community/generate-listing`, require explicit Claude model provenance,
+   refuse every fallback, save overrides, then optionally push Guesty;
+   (b) run a complete Claude-vision amenity scan over every published photo
+   (every batch and intended folder must succeed),
+   add-only merge/save all detected + baseline + researched amenities, persist
+   a model/photo-fingerprint receipt, then optionally push Guesty;
+   (c) run the #9 strict bedding/bathroom apply over every configured unit;
+   missing, empty, omitted, or unreadable configured folders never count as a
+   smaller successfully-scanned property;
+   (d) force a fresh live SearchAPI Airbnb monthly pricing run even if
+   `STATIC_RATE_ENGINE=1`, persist the entire pricing table, and push when
+   Guesty exists; no-Guesty is a valid local completion;
+   (e) run hash + Claude same-scene dedupe again after any re-scrape/find-new/
+   replacement, then the exact full preflight community/bedroom audit. Every
+   local hide, repull, rescrape, and source replacement persists an awaited
+   end-of-sweep Guesty gallery-sync obligation. Strict child jobs must reach a
+   terminal state before later stages or cancellation can complete; the final
+   Guesty readback must exactly match the intended ordered URL/caption gallery
+   with `Cover Collage` first, never merely an equal-or-larger photo count;
+   (f) generate a Claude-vision (never heuristic) community-left + unit-patio-
+   right collage per Load-Bearing #8 (both source pools must be non-empty),
+   save it under the property before any
+   optional Guesty push, so drafts/no-Guesty listings keep the artifact; and
+   (g) replacement discovery excludes every historical and burned source, and
+   a staged candidate must positively pass community, unit, and reliable
+   bedroom evidence; source-page evidence must not positively contradict the
+   community before the current folder can be replaced. Empty community
+   folders first run the existing repull + recheck; empty/missing unit folders
+   enter the bounded repair ladder and then replacement. A committed candidate
+   with a positive community/bedroom rejection may try another distinct
+   candidate, capped at three committed candidates. Infrastructure
+   uncertainty is never a pass and never
+   destructively overwrites the current unit. `UNIT_AUDIT_AUTOFIX_DISABLED`
+   still wins; a strict stage reports `error` instead of silently accepting an
+   older artifact when automation is disabled or Claude/SearchAPI cannot run.
 
 ## Conventions
 
@@ -5086,3 +5142,5 @@ Welcome. When in doubt, ask the human.
 2026-07-17 · Jamie: "Have the buy-in process push to Cowork, then Cowork go to checkout and check out the buy-in listing ... finished buy in please add credit card and click check out"; follow-up: "Please implement all of this and then merge PR with main." · ACCEPTED — human-payment Cowork handoff supersedes the 2026-07-05 automated-card/local-card-file and separate-primary-button decisions plus the 2026-07-13 attach-only bulk default · PRIMARY FLOW: one Cowork run finds, creates, and attaches each buy-in, immediately prepares its VRBO checkout, records `awaiting_payment`, leaves the checkout tab open, and hands control to the operator. IDENTITY is fixed at the prompt boundary: exact booking guest full name for every name field (missing first/last fails closed), alias returned verbatim by `/api/buy-ins/:id/traveler-email`, phone `8084606509`, billing `131 Continental Drive, Newark, DE 19702`. PAYMENT BOUNDARY: damage waiver only; 15% price guard; no card-file read, no card entry, no final Book/Confirm/Pay click, and no blind retry. Exact handoff: "Finished buy-in — please add credit card and click checkout. No purchase has been submitted." After the operator explicitly confirms their click, Cowork may only classify evidence: `booked` with confirmation, `request_submitted` for a request-to-book, or unchanged `awaiting_payment` when unclear. UI persists both non-final states after reload and blocks duplicate preparation. CONCURRENCY + RECOVERY: `buy_in_checkout_claims` gives each reservation one token-owned lane; transaction-scoped advisory locking rejects active siblings and marks the target `in_progress`; same-token retries are idempotent; complete/release/reset clear the lane; dead claims expire after two hours; the operator gets a Reset UI; detach/delete take the same lane and reject active siblings instead of orphaning claims; and the legacy sidecar uses the same coordinator. BULK is sequential with one outstanding human handoff and one true final signal. Non-VRBO attaches fail into the existing re-channel flow; find-only remains an explicit fallback. SECURITY: external prompt values are bounded, single-line, quoted data (never instructions), and traveler-alias creation verifies the supplied reservation matches the attached buy-in. TRANSPORT: combined prompts use the authenticated admin-only, expiring `cowork_prompt_runs` Postgres relay so the full brief survives Claude Desktop's 14,336-character deep-link cap; clipboard/direct fallback is retained. Schema changes stay on boot-time `npm run db:push` (no bespoke SQL). Locked by `tests/cowork-buyin-prompt.test.ts` and `tests/cowork-launch.test.ts`.
 
 2026-07-17 · Jamie: "Disable scheduling." · ACCEPTED — Availability scheduling is now explicit opt-in. Opening the tab never enables or re-enables a schedule; the operator must use the existing Enable control. Rows created while saving other settings remain disabled. This intentionally reverses the auto-enable rule from PRs #14/#17/#18; all production schedules that were enabled under the old rule are reset to disabled once, while manual policy evaluation remains available.
+
+2026-07-17 · Jamie asked dashboard "Audit selected" to regenerate all marketing descriptions with Claude, strictly scan/apply bedding and bathroom evidence above 60%, scan/apply all amenities, research and save the entire Airbnb/SearchAPI pricing setup, remove alternate-angle duplicates, generate the Claude collage, run the full preflight community audit, and automatically keep finding units until a verified one passes; no Guesty must still save every local artifact · ACCEPTED, explicitly narrows #9/#21 for the bulk fullAutomation path only · The explicit Bedding-tab button keeps its auto-apply/push behavior above; standard one-property audits remain compare-only. The strict bulk contract and safety limits are documented in #9/#22. Guesty is an optional synchronization target, never the persistence boundary.

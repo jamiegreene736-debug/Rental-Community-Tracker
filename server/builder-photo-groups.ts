@@ -100,7 +100,103 @@ export async function listPublishedFilenames(folder: string): Promise<string[]> 
   return diskFiles.filter((f) => !hidden.has(f));
 }
 
-async function buildGroupFromPublishedFolder(
+export type ConfiguredPhotoFolderStatus = {
+  role: "community" | "unit";
+  label: string;
+  /** Null means the listing has no folder configured for this required slot. */
+  folder: string | null;
+  publishedCount: number;
+  unitId?: string;
+  expectedBedrooms?: number;
+};
+
+async function configuredFolderStatus(
+  input: Omit<ConfiguredPhotoFolderStatus, "publishedCount">,
+): Promise<ConfiguredPhotoFolderStatus> {
+  const folder = String(input.folder ?? "").trim() || null;
+  return {
+    ...input,
+    folder,
+    publishedCount: folder ? (await listPublishedFilenames(folder)).length : 0,
+  };
+}
+
+/**
+ * Inventory every photo folder the listing configuration requires, including
+ * missing and empty folders. The ordinary community-check request intentionally
+ * omits empty groups because its vision engine cannot inspect them; strict
+ * Dashboard automation uses this parallel inventory so absence can never look
+ * like a smaller, successfully scanned property.
+ */
+export async function configuredPhotoFolderStatusesForProperty(
+  propertyId: number,
+): Promise<ConfiguredPhotoFolderStatus[] | null> {
+  if (propertyId > 0) {
+    const builder = getUnitBuilderByPropertyId(propertyId);
+    if (!builder) return null;
+    const activeFolders = resolveActiveUnitPhotoFolders(
+      propertyId,
+      builder.units,
+      await storage.getUnitSwaps(propertyId),
+    );
+    const activeFolderByUnitId = new Map(activeFolders.map((folder) => [folder.unitId, folder]));
+    const statuses: ConfiguredPhotoFolderStatus[] = [
+      await configuredFolderStatus({
+        role: "community",
+        label: `Community — ${builder.complexName}`,
+        folder: builder.communityPhotoFolder,
+      }),
+    ];
+    for (let i = 0; i < builder.units.length; i += 1) {
+      const unit = builder.units[i];
+      const active = activeFolderByUnitId.get(unit.id);
+      statuses.push(await configuredFolderStatus({
+        role: "unit",
+        label: `Unit ${String.fromCharCode(65 + i)} (${unit.bedrooms}BR)`,
+        folder: active?.activeFolder ?? unit.photoFolder ?? null,
+        unitId: unit.id,
+        expectedBedrooms: unit.bedrooms,
+      }));
+    }
+    return statuses;
+  }
+
+  const draft = await storage.getCommunityDraft(-propertyId);
+  if (!draft) return null;
+  const isSingle = (draft as any).singleListing === true;
+  const u1Br = resolveDraftUnitBedrooms(draft, "unit1");
+  const u2Br = isSingle ? 0 : resolveDraftUnitBedrooms(draft, "unit2");
+  const communityFolder =
+    resolveCanonicalCommunityPhotoFolder(draft.name) ?? `community-draft-${draft.id}`;
+  const unitInputs = [
+    {
+      role: "unit" as const,
+      label: `Unit A (${u1Br}BR)`,
+      folder: draft.unit1PhotoFolder ?? null,
+      unitId: draftUnitIdForSlot(draft.id, "a"),
+      expectedBedrooms: u1Br,
+    },
+    ...(!isSingle
+      ? [{
+          role: "unit" as const,
+          label: `Unit B (${u2Br}BR)`,
+          folder: draft.unit2PhotoFolder ?? null,
+          unitId: draftUnitIdForSlot(draft.id, "b"),
+          expectedBedrooms: u2Br,
+        }]
+      : []),
+  ];
+  return Promise.all([
+    configuredFolderStatus({
+      role: "community",
+      label: `Community — ${draft.name}`,
+      folder: communityFolder,
+    }),
+    ...unitInputs.map((input) => configuredFolderStatus(input)),
+  ]);
+}
+
+export async function buildGroupFromPublishedFolder(
   role: "community" | "unit",
   label: string,
   folder: string,

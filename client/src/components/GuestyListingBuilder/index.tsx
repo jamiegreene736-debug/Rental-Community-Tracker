@@ -3854,6 +3854,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       if (neighborhood) nextEdits.neighborhood = neighborhood;
       const transit = String(gen?.transit ?? "").trim();
       if (transit) nextEdits.transit = transit;
+      const access = String(gen?.access ?? "").trim();
+      const houseRules = String(gen?.houseRules ?? "").trim();
+      if (!access || !houseRules) throw new Error("Claude omitted Guest Access or House Rules; no regenerated descriptions were saved.");
+      nextEdits.access = access;
+      nextEdits.houseRules = houseRules;
       setDescFieldEdits((prev) => ({ ...prev, ...nextEdits }));
       // Persist immediately so the regenerated copy survives a reload.
       const patchRes = await fetch(`/api/builder/descriptions/${propertyId}`, {
@@ -3867,7 +3872,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setDescPushState("idle");
       toast({
         title: "Descriptions regenerated",
-        description: "Summary, Space, Neighborhood, and Getting Around were rewritten from the source listings and saved. Review, then push to Guesty.",
+        description: "Summary, Space, Neighborhood, Getting Around, Guest Access, and House Rules were rewritten from the source listings and saved. Review, then push to Guesty.",
       });
     } catch (e) {
       setDescRegenState("error");

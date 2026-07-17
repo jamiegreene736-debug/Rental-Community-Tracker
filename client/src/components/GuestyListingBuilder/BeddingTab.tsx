@@ -29,6 +29,7 @@ import {
   autoApplyBeddingScanToUnits,
   describeDetectedBeds,
   isBeddingScanAutoApplyEligible,
+  hydrateBeddingAuditApplication,
   mergeBeddingScanIntoUnit,
   type BeddingPhotoScanRecord,
   type BeddingScanUnit,
@@ -36,6 +37,7 @@ import {
 
 const BED_TYPES: GuestyBedType[] = ["KING_BED", "QUEEN_BED", "DOUBLE_BED", "SINGLE_BED", "SOFA_BED", "BUNK_BED"];
 const BATH_FEATURES: BathFeature[] = ["walk-in-shower", "shower-tub-combo", "soaking-tub", "jetted-tub", "rain-shower", "double-vanity"];
+const auditHydrationKey = (propertyId: number) => `nexstay_bedding_audit_application_${propertyId}`;
 
 const cellStyle: React.CSSProperties = {
   border: "1px solid #e5e7eb",
@@ -150,7 +152,9 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
   // Bedding PHOTO scan — a fresh button click auto-applies detections strictly
   // above 60%, saves the merged config, then builds the supported Guesty
   // Bedding projection from it when a listing is connected.
-  // Hydrating a stored/audit scan never applies or pushes anything.
+  // Ordinary stored scans are read-only. A strict Dashboard audit application
+  // receipt may hydrate once after its local save succeeds, so a no-Guesty
+  // audit materializes without overwriting later operator edits.
   const [beddingScan, setBeddingScan] = useState<BeddingPhotoScanRecord | null>(null);
   const [beddingScanFresh, setBeddingScanFresh] = useState(false);
   const [beddingScanning, setBeddingScanning] = useState(() => activeBeddingScanWorkflows.has(propertyId));
@@ -255,7 +259,32 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled || !data?.record) return;
-        acceptScanRecord(data.record as BeddingPhotoScanRecord, data.fresh === true);
+        const record = data.record as BeddingPhotoScanRecord;
+        const fresh = data.fresh === true;
+        if (!acceptScanRecord(record, fresh)) return;
+
+        const application = record.auditApplication;
+        let alreadyHydrated = false;
+        try {
+          alreadyHydrated = !!application && localStorage.getItem(auditHydrationKey(propertyId)) === application.id;
+        } catch { /* storage unavailable: still show the durable server receipt */ }
+        if (!fresh || !application || alreadyHydrated) return;
+
+        const current = loadBeddingConfig(propertyId);
+        const hydrated = hydrateBeddingAuditApplication(current, record);
+        const nextConfig = hydrated.config as PropertyBeddingConfig;
+        if (!saveBeddingConfig(nextConfig)) {
+          setBeddingScanError("The Dashboard audit receipt could not be saved in this browser, so it was not marked as hydrated.");
+          return;
+        }
+        try { localStorage.setItem(auditHydrationKey(propertyId), application.id); } catch {}
+        if (cancelled) return;
+        latestBeddingConfigs.set(propertyId, nextConfig);
+        configRef.current = nextConfig;
+        setConfig(nextConfig);
+        setBeddingScanApplied(Object.fromEntries(
+          Object.entries(hydrated.appliedByUnitId).map(([unitId, lines]) => [unitId, lines.join(" · ")]),
+        ));
       })
       .catch(() => { /* proposal panel just stays hidden */ });
     return () => { cancelled = true; };
@@ -663,6 +692,11 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
                 photos changed since this scan — re-scan for current evidence
               </span>
             )}
+            {beddingScan.auditApplication && (
+              <span style={{ fontSize: 11, background: "#dcfce7", border: "1px solid #86efac", color: "#166534", borderRadius: 999, padding: "2px 8px" }}>
+                Dashboard audit applied {new Date(beddingScan.auditApplication.appliedAt).toLocaleString()}
+              </span>
+            )}
           </div>
           <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>
             A fresh button click automatically applies and saves vision-backed bedding and full-bath suggestions strictly
@@ -670,6 +704,9 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
             to the listing selected when you clicked. Caption fallback is review-only and never auto-pushes. Shower/tub
             details stay saved in this browser's builder config and generated Space copy because Guesty has no structured
             field for them. Bedrooms without photo evidence and suggestions at 60% or below stay exactly as configured.
+            {beddingScan.auditApplication
+              ? " This strict Dashboard-audit receipt may hydrate once by canonical unit ID; edits you make afterward remain yours."
+              : " Stored scan hydration is read-only."}
           </div>
           {beddingScanOutcome && (
             <div style={{
@@ -732,7 +769,7 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
                 </div>
                 {appliedNote && (
                   <div style={{ fontSize: 12, color: "#047857", background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 6, padding: "4px 8px", marginBottom: 6 }}>
-                    ✓ Applied and saved: {appliedNote}
+                    ✓ Applied and saved: {appliedNote}{beddingScan.auditApplication ? " — Dashboard audit receipt." : ""}
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>

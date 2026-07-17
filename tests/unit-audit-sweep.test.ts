@@ -11,11 +11,13 @@ import {
   RETRYABLE_ATTENTION_PATTERNS,
   SAME_SCENE_STABILITY_MIN_OVERLAP,
   UNIT_AUDIT_STAGE_RETRY_PASSES_DEFAULT,
+  classifyUnitAuditConfiguredPhotoCoverage,
   communityCheckUncertaintyOnly,
   communityPhotoFixSelections,
   confirmSameSceneGroups,
   dedupeAutoFixSelections,
   mergeCommunityConsensusPasses,
+  MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS,
   replaceRungOnCooldown,
   lookupUnitAuditRecord,
   photoFixRungsForUnit,
@@ -35,13 +37,18 @@ import {
   nextUnitAuditStage,
   parseUnitAuditReports,
   parseUnitAuditStore,
+  queueRecoverableUnitAuditMutation,
   rollUpUnitAuditVerdict,
   serializeUnitAuditReports,
   serializeUnitAuditStore,
   shouldResumeUnitAuditJob,
+  shouldRetryCommittedFullAutomationReplacement,
   summarizeUnitAuditCounts,
   summarizeUnitAuditQueue,
   unitAuditBadge,
+  unitAuditChildPollShouldCancel,
+  unitAuditChildPollShouldProcessTerminalBeforeCancel,
+  unitAuditChildPollShouldTimeout,
   unitAuditHeadline,
   unitAuditVerifyReadBackoffMs,
   unitAuditVerifyReadRetryable,
@@ -74,6 +81,12 @@ const record = (over: Partial<UnitAuditJobRecord> = {}): UnitAuditJobRecord => (
   resumeCount: 0,
   autoFix: true,
   allowReplace: true,
+  fullAutomation: false,
+  pendingGuestyGallerySync: false,
+  pendingDedupeHiddenCount: 0,
+  coverCollageNeedsRefresh: false,
+  requiredCoverCollageUrl: null,
+  finalGuestyGalleryVerified: false,
   source: "manual",
   ...over,
 });
@@ -103,6 +116,23 @@ check("store: garbage / null parses to empty",
   Object.keys(parseUnitAuditStore("not json")).length === 0 &&
   Object.keys(parseUnitAuditStore(null)).length === 0 &&
   Object.keys(parseUnitAuditStore("[1,2]")).length === 0);
+
+let strictQueueFailureObserved = false;
+const firstQueuedMutation = queueRecoverableUnitAuditMutation(Promise.resolve(), async () => {
+  throw new Error("simulated durable write failure");
+});
+try {
+  await firstQueuedMutation.operation;
+} catch {
+  strictQueueFailureObserved = true;
+}
+let laterQueuedMutationRan = false;
+const secondQueuedMutation = queueRecoverableUnitAuditMutation(firstQueuedMutation.tail, async () => {
+  laterQueuedMutationRan = true;
+});
+await secondQueuedMutation.operation;
+check("store queue: strict failure propagates to its caller without poisoning the next queued mutation",
+  strictQueueFailureObserved && laterQueuedMutationRan);
 
 check("store: valid record round-trips with stages intact",
   (() => {
@@ -156,6 +186,68 @@ check("store: allowReplace round-trips; legacy records default ON",
     return parsed.off2?.allowReplace === false && legacy.old?.allowReplace === true;
   })());
 
+check("store: fullAutomation round-trips; legacy records default OFF",
+  (() => {
+    const strict = record({ jobId: "strict", fullAutomation: true });
+    const parsed = parseUnitAuditStore(serializeUnitAuditStore({ strict }, NOW));
+    const legacy = parseUnitAuditStore(JSON.stringify({ old: { ...record({ jobId: "old" }), fullAutomation: undefined } }));
+    return parsed.strict?.fullAutomation === true && legacy.old?.fullAutomation === false;
+  })());
+
+check("store: pending Guesty gallery handoff survives restart; legacy records are clean",
+  (() => {
+    const pending = record({
+      jobId: "pending-gallery",
+      pendingGuestyGallerySync: true,
+      pendingDedupeHiddenCount: 4,
+      coverCollageNeedsRefresh: true,
+      requiredCoverCollageUrl: "https://cdn.example/current-audit-collage.jpg",
+      finalGuestyGalleryVerified: false,
+    });
+    const parsed = parseUnitAuditStore(serializeUnitAuditStore({ pending }, NOW));
+    const legacy = parseUnitAuditStore(JSON.stringify({ old: {
+      ...record({ jobId: "old" }),
+      pendingGuestyGallerySync: undefined,
+      pendingDedupeHiddenCount: undefined,
+      coverCollageNeedsRefresh: undefined,
+      requiredCoverCollageUrl: undefined,
+      finalGuestyGalleryVerified: undefined,
+    } }));
+    return parsed["pending-gallery"]?.pendingGuestyGallerySync === true
+      && parsed["pending-gallery"]?.pendingDedupeHiddenCount === 4
+      && parsed["pending-gallery"]?.coverCollageNeedsRefresh === true
+      && parsed["pending-gallery"]?.requiredCoverCollageUrl === "https://cdn.example/current-audit-collage.jpg"
+      && parsed["pending-gallery"]?.finalGuestyGalleryVerified === false
+      && legacy.old?.pendingGuestyGallerySync === false
+      && legacy.old?.pendingDedupeHiddenCount === 0
+      && legacy.old?.coverCollageNeedsRefresh === false
+      && legacy.old?.requiredCoverCollageUrl === null
+      && legacy.old?.finalGuestyGalleryVerified === false;
+  })());
+
+check("store: exact-gallery receipt validates URL bounds and preserves a completed marker",
+  (() => {
+    const verified = record({
+      jobId: "verified-gallery",
+      finalGuestyGalleryVerified: true,
+    });
+    const invalid = record({
+      jobId: "invalid-gallery",
+      requiredCoverCollageUrl: `https://cdn.example/${"x".repeat(2_100)}`,
+    });
+    const inconsistent = record({
+      jobId: "inconsistent-gallery",
+      pendingGuestyGallerySync: true,
+      coverCollageNeedsRefresh: true,
+      requiredCoverCollageUrl: "https://cdn.example/still-pending.jpg",
+      finalGuestyGalleryVerified: true,
+    });
+    const parsed = parseUnitAuditStore(serializeUnitAuditStore({ verified, invalid, inconsistent }, NOW));
+    return parsed["verified-gallery"]?.finalGuestyGalleryVerified === true
+      && parsed["invalid-gallery"]?.requiredCoverCollageUrl === null
+      && parsed["inconsistent-gallery"]?.finalGuestyGalleryVerified === false;
+  })());
+
 check("store: source round-trips ('cron' kept; junk/legacy defaults to 'manual')",
   (() => {
     const cron = record({ jobId: "cr", source: "cron" });
@@ -174,6 +266,34 @@ check("ladder: community mismatch skips the pointless re-scrape (same gallery, s
 check("ladder: OTA-found photos go straight to unit replacement (any photo of that unit is compromised)",
   photoFixRungsForUnit({ otaFound: true }).join(",") === "replace" &&
   photoFixRungsForUnit({ otaFound: true, bedroomShort: true, communityMismatch: true }).join(",") === "replace");
+
+check("strict ladder: a committed candidate with a positive community/bedroom failure gets another bounded attempt",
+  shouldRetryCommittedFullAutomationReplacement({
+    fullAutomation: true,
+    rung: "replace",
+    gateDecision: "reject",
+    reasonCode: "community-mismatch",
+    strictSyncFailed: false,
+    committedAttempts: 1,
+  }) && MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS === 3);
+
+check("strict ladder: inconclusive proof, sync failure, non-replace rungs, and the cap never trigger another destructive swap",
+  !shouldRetryCommittedFullAutomationReplacement({
+    fullAutomation: true, rung: "replace", gateDecision: "inconclusive", reasonCode: "inconclusive",
+    strictSyncFailed: false, committedAttempts: 1,
+  })
+  && !shouldRetryCommittedFullAutomationReplacement({
+    fullAutomation: true, rung: "replace", gateDecision: "reject", reasonCode: "bedroom-coverage",
+    strictSyncFailed: true, committedAttempts: 1,
+  })
+  && !shouldRetryCommittedFullAutomationReplacement({
+    fullAutomation: true, rung: "find-new", gateDecision: "reject", reasonCode: "community-mismatch",
+    strictSyncFailed: false, committedAttempts: 1,
+  })
+  && !shouldRetryCommittedFullAutomationReplacement({
+    fullAutomation: true, rung: "replace", gateDecision: "reject", reasonCode: "community-mismatch",
+    strictSyncFailed: false, committedAttempts: MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS,
+  }));
 
 check("ladder: no problems → no rungs",
   photoFixRungsForUnit({}).length === 0);
@@ -473,6 +593,30 @@ check("isUnitAuditStatusActive: queued/running only",
   isUnitAuditStatusActive("queued") && isUnitAuditStatusActive("running") &&
   !isUnitAuditStatusActive("completed") && !isUnitAuditStatusActive("cancelled"));
 
+const configuredCommunity = { role: "community" as const, label: "Community — Test", folder: "community-test", publishedCount: 3 };
+const configuredUnit = { role: "unit" as const, label: "Unit A (2BR)", folder: "unit-a", publishedCount: 5, unitId: "unit-a" };
+const requiredUnits = [{ label: configuredUnit.label, unitId: configuredUnit.unitId }];
+check("strict folder coverage: unavailable inventory and positive-but-omitted groups fail closed as infrastructure errors",
+  classifyUnitAuditConfiguredPhotoCoverage({ configured: null, represented: [], requiredUnits }).inventoryUnavailable &&
+  classifyUnitAuditConfiguredPhotoCoverage({
+    configured: [configuredCommunity, configuredUnit],
+    represented: [{ role: "community", label: configuredCommunity.label, folder: configuredCommunity.folder }],
+    requiredUnits,
+  }).inventoryUnavailable);
+check("strict folder coverage: genuinely empty configured folders remain repairable, not infrastructure failures",
+  (() => {
+    const coverage = classifyUnitAuditConfiguredPhotoCoverage({
+      configured: [
+        configuredCommunity,
+        { ...configuredUnit, publishedCount: 0 },
+      ],
+      represented: [{ role: "community", label: configuredCommunity.label, folder: configuredCommunity.folder }],
+      requiredUnits,
+    });
+    return !coverage.inventoryUnavailable && !coverage.communityMissing &&
+      coverage.missingUnits.length === 1 && coverage.missingUnits[0].unitId === configuredUnit.unitId;
+  })());
+
 // ── Source guards: the orchestrator must REUSE the existing engines ──────────
 const serverSrc = readFileSync(new URL("../server/unit-audit-sweep.ts", import.meta.url), "utf8");
 
@@ -516,6 +660,26 @@ check("server: request-supplied jobId lookups go through lookupUnitAuditRecord (
 check("fix: dedupe apply goes through the validated apply route (keep-one-per-group, never-empty-folder) with the shared hash-only selection",
   serverSrc.includes("/api/builder/photo-dedupe-apply") && serverSrc.includes("dedupeAutoFixSelections"));
 
+check("full automation: every multi-photo folder must complete Claude alternate-angle dedupe on initial and re-verify scans",
+  serverSrc.includes("requireCompleteVision(proposal, \"the initial gallery scan\")") &&
+  serverSrc.includes("requireCompleteVision(confirmation, \"the initial clean-gallery confirmation\")") &&
+  serverSrc.includes("requireCompleteVision(second, `the ${phase} double-check`)") &&
+  serverSrc.includes("requireCompleteVision(proposal, \"the post-hide re-scan\")") &&
+  serverSrc.includes("requireCompleteVision(finalPrimary, \"the final post-removal scan\")") &&
+  serverSrc.includes("requireCompleteVision(finalConfirmation, \"the final post-removal stability confirmation\")") &&
+  serverSrc.includes("requireCompleteVision: record.fullAutomation") &&
+  serverSrc.includes("!folder.visionComplete"));
+
+check("full automation: a second apply round cannot claim clean without a fresh two-scan stability verification",
+  serverSrc.includes("Two apply rounds completed — running the required fresh final scan") &&
+  serverSrc.includes("the strict audit will not claim the gallery is clean") &&
+  serverSrc.includes('verdict: "error"') &&
+  serverSrc.includes("AUDIT_DEDUPE_DOUBLE_CHECK=0 disables it"));
+
+check("full automation: exhaustive 100-photo pair coverage fits the dedupe stage's bounded timeout",
+  serverSrc.includes('"photo-dedupe": 40 * 60_000') &&
+  serverSrc.includes("a 100-photo folder needs six calls per exhaustive scan"));
+
 check("fix: descriptions regenerate uses the SAME generator + disclosure composition as the builder button, persists overrides, refuses generator fallback",
   serverSrc.includes("/api/community/generate-listing") &&
   serverSrc.includes("composeSummaryWithDisclosures") &&
@@ -523,21 +687,165 @@ check("fix: descriptions regenerate uses the SAME generator + disclosure composi
   serverSrc.includes("upsertPropertyDescriptionOverrides") &&
   /warning.*refused|refused.*warning/i.test(serverSrc));
 
+check("full automation: descriptions always regenerate and require explicit Claude provenance",
+  serverSrc.includes("record.fullAutomation || problems.placeholderFields") &&
+  serverSrc.includes('generation?.method !== "claude"') &&
+  serverSrc.includes("Claude description generation did not complete"));
+
+check("full automation: all seven operator-editable description fields are required and persisted",
+  serverSrc.includes('["title", "summary", "space", "neighborhood", "transit", "access", "houseRules"]') &&
+  serverSrc.includes("if (access) patch.access = access") &&
+  serverSrc.includes("if (houseRules) patch.houseRules = houseRules"));
+
+check("full automation: a Guesty description push counts only after verified read-back",
+  serverSrc.includes('(push.data as any)?.success === true') &&
+  serverSrc.includes('(push.data as any)?.verified === true'));
+
 check("fix: regenerated copy pushes ONLY the regenerated fields via push-descriptions (notes stays compliance-owned)",
   serverSrc.includes("/api/builder/push-descriptions") && !/descriptions:\s*\{[^}]*notes/.test(serverSrc));
 
 check("fix: amenities fire the scan route (scan + save + ADD-ONLY Guesty union push in one call)",
   serverSrc.includes("/api/builder/scan-amenities"));
 
+check("full automation: amenities require complete Claude vision and a durable photo-fingerprint receipt",
+  serverSrc.includes("strictVisionComplete") && serverSrc.includes("claude-vision") &&
+  serverSrc.includes("AMENITY_SCAN_RECEIPTS_SETTING_KEY") && serverSrc.includes("photoFingerprint"));
+
 check("fix: cover collage drives the one-click AI endpoint with published-photo candidates",
   serverSrc.includes("/api/builder/auto-cover-collage"));
+
+check("full automation: missing/empty configured photo folders cannot disappear from the audit",
+  serverSrc.includes("configuredPhotoFolderStatusesForProperty") &&
+  serverSrc.includes("strictPhotoFolderGaps") &&
+  serverSrc.includes("omitted folders cannot count as a successful full audit"));
+
+check("full automation: an inventory read failure stops safely and never masquerades as absent folders eligible for replacement",
+  (() => {
+    const resolveSource = serverSrc.slice(
+      serverSrc.indexOf("async function stageResolve("),
+      serverSrc.indexOf("async function stagePhotoDedupe("),
+    );
+    const photoFixSource = serverSrc.slice(
+      serverSrc.indexOf("async function stagePhotoFix("),
+      serverSrc.indexOf("async function stageDescriptions("),
+    );
+    return resolveSource.includes("strictPhotoFolderGaps(target).inventoryUnavailable") &&
+      resolveSource.indexOf("strict audit stopped before duplicate cleanup or any other mutation") < resolveSource.indexOf("targets.set(record.jobId, target)") &&
+      photoFixSource.includes("photo repair stopped before OTA planning, repull, or replacement") &&
+      photoFixSource.indexOf("photo repair stopped before OTA planning, repull, or replacement") < photoFixSource.indexOf("getPhotoListingCheckByFolder");
+  })());
+
+check("full automation: a missing/empty unit folder enters the bounded repair ladder with replacement fallback",
+  serverSrc.includes("configured photo folder is empty") &&
+  serverSrc.includes('missingFolder.folder ? ["rescrape", "find-new", "replace"] : ["replace"]') &&
+  serverSrc.includes("problems.set(missing.label, { bedroomShort: true, communityMismatch: false })"));
+
+check("full automation: an empty configured community folder enters Find-new-community-photos and rechecks; an unconfigured folder fails honestly",
+  serverSrc.includes("Community folder is empty — running Find new community photos") &&
+  serverSrc.includes("Empty community folder repull") &&
+  serverSrc.includes("Checking the newly populated community folder") &&
+  serverSrc.includes("no folder is configured, so the automatic repull cannot run"));
+
+check("full automation: collage refuses a missing community pool even when an old receipt or unit photos exist",
+  serverSrc.includes("if (strictGaps.communityMissing)") &&
+  serverSrc.includes("no existing receipt or unit-only pair was accepted"));
+
+check("full automation: mapped collage arms the durable final sync before its Guesty PUT and persists this audit's returned URL",
+  (() => {
+    const start = serverSrc.indexOf("async function stageCoverCollage(");
+    const end = serverSrc.indexOf("async function stageLayout(", start);
+    const collageStage = serverSrc.slice(start, end);
+    const arm = collageStage.indexOf("await markGuestyGallerySyncPending(record, {");
+    const invoke = collageStage.indexOf('loopbackJson("POST", "/api/builder/auto-cover-collage"');
+    const localFileVerified = collageStage.indexOf("const onDisk = await fs.promises.access(file)");
+    const acceptedIdentity = collageStage.lastIndexOf("requiredCoverCollageUrl: generatedCollageUrl");
+    return start >= 0 && end > start && arm >= 0 && invoke > arm
+      && collageStage.includes("requiredCoverCollageUrl: null")
+      && collageStage.includes("generatedCollageUrl")
+      && acceptedIdentity > localFileVerified
+      && collageStage.includes("coverCollageNeedsRefresh: false")
+      && collageStage.includes("finalGuestyGalleryVerified: false");
+  })());
+
+check("full automation: a retry-rail photo mutation forces one final Claude collage regeneration before exact sync",
+  (() => {
+    const start = serverSrc.indexOf("async function runUnitAuditJob(");
+    const end = serverSrc.indexOf("// ── Public API", start);
+    const run = serverSrc.slice(start, end);
+    const retryLoop = run.indexOf("for (let pass = 1; pass <= retryPasses; pass++)");
+    const refresh = run.indexOf("if (record.fullAutomation && record.coverCollageNeedsRefresh)");
+    const rerun = run.indexOf('await runStageForRecord(record, "cover-collage")', refresh);
+    const finalSync = run.indexOf("await noteSweepDedupeGuestySync(record)", rerun);
+    return retryLoop >= 0 && refresh > retryLoop && rerun > refresh && finalSync > rerun;
+  })());
 
 check("fix: pricing refresh drives the per-property refresh+push path (cores) / draft refresh-pricing, only when the verify found a refreshable problem",
   serverSrc.includes("/refresh-market-rates") && serverSrc.includes("/refresh-pricing") && serverSrc.includes("needsRefresh"));
 
-check("fix: layout deliberately never pushes (Bedding-tab config lives in browser localStorage) — the sweep never PUTs to Guesty",
-  !serverSrc.includes("listingRooms") && !/"PUT", `\/api\/guesty/.test(serverSrc) &&
+check("full automation: pricing always refreshes via forceSearchApi and accepts a durable local setup when Guesty is absent",
+  serverSrc.includes("record.fullAutomation || v.needsRefresh") &&
+  serverSrc.includes("forceSearchApi: record.fullAutomation") &&
+  serverSrc.includes("localOnlyAccepted"));
+
+check("full automation: pricing refresh is unconditional, while no-Guesty success is based on the saved local table",
+  (() => {
+    const verifyStart = serverSrc.indexOf("async function verifyPricing(");
+    const stageStart = serverSrc.indexOf("async function stagePricing(");
+    const stageEnd = serverSrc.indexOf("async function stageChannels(", stageStart);
+    const verifyPricingSrc = serverSrc.slice(verifyStart, stageStart);
+    const stagePricingSrc = serverSrc.slice(stageStart, stageEnd);
+    const localAcceptBranch = verifyPricingSrc.indexOf("if (!target.guestyListingId && opts.localOnlyAccepted)");
+    const missingPushBranch = verifyPricingSrc.indexOf("else if (!pushedAt)");
+    return verifyStart >= 0 && stageStart > verifyStart && stageEnd > stageStart &&
+      localAcceptBranch >= 0 && localAcceptBranch < missingPushBranch &&
+      stagePricingSrc.includes("const localOnlyAccepted = record.fullAutomation && !target.guestyListingId") &&
+      stagePricingSrc.includes("const shouldRefresh = record.fullAutomation || v.needsRefresh") &&
+      stagePricingSrc.includes('{ forceSearchApi: record.fullAutomation }') &&
+      stagePricingSrc.includes("guestyPush?.skipped && !localOnlyAccepted") &&
+      stagePricingSrc.includes("SearchAPI Airbnb market rates refreshed and the complete pricing setup saved locally");
+  })());
+
+check("layout: manual audits remain compare-only; full automation uses the strict Claude apply helper",
+  serverSrc.includes("applyBeddingPhotoScanForAudit") &&
+  serverSrc.includes("forceFresh: true") &&
+  serverSrc.includes("record.fullAutomation") &&
   /never overwrites a layout/.test(serverSrc));
+
+check("full automation: non-cancellable mutating stages are awaited to their real terminal result",
+  serverSrc.includes("record.fullAutomation && FULL_AUTOMATION_MUTATING_STAGES.has(stageId)") &&
+  serverSrc.includes("? await work") &&
+  serverSrc.includes(": await withTimeout(work"));
+
+check("child poll deadline: standard/manual behavior remains bounded",
+  !unitAuditChildPollShouldTimeout(false, NOW, NOW + 1) &&
+  unitAuditChildPollShouldTimeout(false, NOW + 1, NOW));
+
+check("child poll deadline: full automation waits past the normal ceiling for a terminal child",
+  !unitAuditChildPollShouldTimeout(true, NOW + 24 * 60 * 60_000, NOW));
+
+check("child poll cancellation: standard stops immediately; strict waits only while the child is active",
+  unitAuditChildPollShouldCancel(false, true, true) &&
+  !unitAuditChildPollShouldCancel(true, true, true) &&
+  unitAuditChildPollShouldCancel(true, true, false) &&
+  !unitAuditChildPollShouldCancel(true, false, false));
+
+check("child poll cancellation ordering: only strict terminal children are consumed before cancellation",
+  unitAuditChildPollShouldProcessTerminalBeforeCancel(true, true, false) &&
+  !unitAuditChildPollShouldProcessTerminalBeforeCancel(true, true, true) &&
+  !unitAuditChildPollShouldProcessTerminalBeforeCancel(false, true, false) &&
+  !unitAuditChildPollShouldProcessTerminalBeforeCancel(true, false, false));
+
+check("full automation: every mutating child poll uses the strict terminality deadline guard",
+  (serverSrc.match(/unitAuditChildPollShouldTimeout\(record\.fullAutomation, Date\.now\(\), deadline\)/g) ?? []).length === 4 &&
+  serverSrc.includes("find-new-source did not finish in time") &&
+  serverSrc.includes("unit replacement did not finish inside the audit window") &&
+  serverSrc.includes("Community repull did not finish in time"));
+
+check("full automation: cancellation waits for every mutating child to terminalize before the parent stops",
+  (serverSrc.match(/unitAuditChildPollShouldCancel\(record\.fullAutomation, cancellationPending, childActive\)/g) ?? []).length === 4 &&
+  (serverSrc.match(/unitAuditChildPollShouldProcessTerminalBeforeCancel\(/g) ?? []).length === 4 &&
+  serverSrc.includes("if (rungResult.cancelAfterTerminal) throw new Error(\"cancelled\")") &&
+  (serverSrc.match(/Cancellation requested — waiting for .* to finish safely/g) ?? []).length === 4);
 
 check("fix: global kill switch UNIT_AUDIT_AUTOFIX_DISABLED gates every fix path",
   serverSrc.includes("UNIT_AUDIT_AUTOFIX_DISABLED") && /autoFixEnabled\(record\)/.test(serverSrc));
@@ -575,6 +883,83 @@ check("ladder: replacement requires record.allowReplace and honors AUDIT_REPLACE
 check("ladder: waits for the photo auto-labeler before re-checking (the 0/N false-fail class)",
   serverSrc.includes("waitForFolderLabels") && serverSrc.includes("getPhotoLabelsByFolder"));
 
+check("full automation: every changed/replacement gallery is deduped again before final community + bedroom verification",
+  serverSrc.includes("Final post-change gallery") &&
+  serverSrc.indexOf("const dedupe = await stagePhotoDedupe") < serverSrc.indexOf("re-checking community + bedroom coverage after the ${rung}"));
+
+check("full automation: every local gallery mutation has a durable end-of-sweep Guesty sync handoff",
+  serverSrc.includes("pendingGuestyGallerySync: true") &&
+  serverSrc.includes("pendingDedupeHiddenCount: record.pendingDedupeHiddenCount + remove.length") &&
+  serverSrc.includes("const strictMappedFinalSync = record.fullAutomation") &&
+  serverSrc.includes("!record.finalGuestyGalleryVerified") &&
+  serverSrc.includes("if (!record.pendingGuestyGallerySync && !strictMappedFinalSync) return null") &&
+  !serverSrc.includes("dedupeHiddenThisSweep"));
+
+check("full automation: every local gallery mutator durably pre-arms exact Guesty sync before it can change files",
+  (() => {
+    const prearm = serverSrc.slice(
+      serverSrc.indexOf("async function prearmStrictGuestyGallerySync("),
+      serverSrc.indexOf("async function clearGuestyGallerySyncPending("),
+    );
+    const dedupe = serverSrc.slice(
+      serverSrc.indexOf("async function stagePhotoDedupe("),
+      serverSrc.indexOf("async function stagePhotoCommunity("),
+    );
+    const rung = serverSrc.slice(
+      serverSrc.indexOf("async function runPhotoFixRung("),
+      serverSrc.indexOf("async function runAiFinalSayAdjudication("),
+    );
+    const finalSay = serverSrc.slice(
+      serverSrc.indexOf("async function runAiFinalSayAdjudication("),
+      serverSrc.indexOf("async function stagePhotoFix("),
+    );
+    const photoFix = serverSrc.slice(
+      serverSrc.indexOf("async function stagePhotoFix("),
+      serverSrc.indexOf("async function stageDescriptions("),
+    );
+    return prearm.includes("if (record.fullAutomation)") &&
+      prearm.includes("await markGuestyGallerySyncPending(record, {") &&
+      prearm.includes("coverCollageNeedsRefresh: true") &&
+      prearm.includes("requiredCoverCollageUrl: null") &&
+      !prearm.includes("!record.pendingGuestyGallerySync") &&
+      /await prearmStrictGuestyGallerySync\(record\);\s*const apply = await loopbackJson\("POST", "\/api\/builder\/photo-dedupe-apply"/.test(dedupe) &&
+      /await prearmStrictGuestyGallerySync\(record\);\s*const r = await loopbackJson\("POST", "\/api\/builder\/rescrape-unit-photos"/.test(rung) &&
+      /await prearmStrictGuestyGallerySync\(record\);\s*const job = startPreflightPhotoFetchJob/.test(rung) &&
+      /await prearmStrictGuestyGallerySync\(record\);\s*const started = await startAutoReplaceJob/.test(rung) &&
+      /await prearmStrictGuestyGallerySync\(record\);\s*for \(const h of confirmedHides\)/.test(finalSay) &&
+      /await prearmStrictGuestyGallerySync\(record\);\s*for \(const h of selections\.hide\)/.test(photoFix) &&
+      (photoFix.match(/await prearmStrictGuestyGallerySync\(record\);\s*const repull = startCommunityPhotoRepullJob/g) ?? []).length === 2;
+  })());
+
+check("full automation: final preflight requires positive target/community/bedroom proof and only hard candidate failures retry",
+  serverSrc.includes("classifyStagedUnitCommunityAudit(recheck.result") &&
+  serverSrc.includes('strictGate?.decision === "inconclusive"') &&
+  serverSrc.includes("shouldRetryCommittedFullAutomationReplacement") &&
+  serverSrc.includes('rungQueue.push("replace")') &&
+  serverSrc.includes("MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS"));
+
+check("full automation: mapped replacement completion requires the persisted awaited Guesty push receipt",
+  serverSrc.includes("autoReplaceGuestyPushSatisfied(j.guestyPhotoPush, !!target.guestyListingId)")
+  && serverSrc.includes("requireFullCommunityAudit: record.fullAutomation")
+  && serverSrc.includes("strict audit cannot mark replacement complete")
+  && serverSrc.includes("photoChanged: true")
+  && /if \(!rungResult\.ok && !rungResult\.photoChanged\) \{\s*if \(rungResult\.cancelAfterTerminal\) throw new Error\("cancelled"\);\s*continue;\s*\}/.test(serverSrc)
+  && serverSrc.includes("local replacement gallery is clean, but Guesty synchronization is still unverified"));
+
+check("full automation: the final post-dedupe Guesty sync is awaited and a mapped failure turns the dedupe row into error",
+  serverSrc.includes("await noteSweepDedupeGuestySync(record)")
+  && serverSrc.includes("if (!record.fullAutomation)")
+  && serverSrc.includes('verdict: "error" as const')
+  && serverSrc.includes("strict audit cannot verify the live gallery"));
+
+check("full automation: final mapped sync requires this audit's collage identity plus exact ordered readback before durable clear",
+  serverSrc.includes("requiredCoverCollageUrl: record.requiredCoverCollageUrl!")
+  && serverSrc.includes("result.collagePinned === true && result.strictGalleryVerified === true")
+  && serverSrc.includes("await clearGuestyGallerySyncPending(record, {")
+  && serverSrc.includes("requiredCoverCollageUrl: null")
+  && serverSrc.includes("finalGuestyGalleryVerified: true")
+  && serverSrc.includes("Guesty exact-gallery read-back succeeded, but its durable completion receipt could not be saved"));
+
 check("ladder: a successful fix upserts the photo-community row so the roll-up reflects the POST-fix state",
   serverSrc.includes("(after photo fixes)"));
 
@@ -584,6 +969,11 @@ check("ladder: AUDIT_PHOTO_FIX=0 skips the stage",
 check("bulk: startUnitAuditSweepBulk dedupes ids and funnels through the global concurrency slot",
   serverSrc.includes("startUnitAuditSweepBulk") && serverSrc.includes("acquireSweepSlot") &&
   serverSrc.includes("UNIT_AUDIT_CONCURRENCY"));
+
+check("bulk: strict clicks never silently reuse a partially-run standard audit",
+  serverSrc.includes("A standard audit is already running for this property") &&
+  serverSrc.includes('existing.status === "queued" && existing.currentStage == null && existing.stages.length === 0') &&
+  serverSrc.includes("touch(existing, { fullAutomation: true, autoFix: true, allowReplace: true"));
 
 // ── Source guards: 2026-07-12 receipt fixes ──────────────────────────────────
 check("amenity verify: reads {amenities, otherAmenities} via the SAME endpoint the push union uses + push-parity candidates",
@@ -644,6 +1034,24 @@ check("community ladder: flagged photos hidden via the photo-labels soft-delete 
 
 check("community ladder: still-wrong folder escalates to the existing Find-new-community-photos repull job",
   serverSrc.includes("startCommunityPhotoRepullJob") && serverSrc.includes("getCommunityPhotoRepullJob"));
+
+check("gallery sync: community hides, Claude final-say hides, and completed community repulls all set the durable end-of-sweep obligation",
+  (() => {
+    const finalSay = serverSrc.slice(
+      serverSrc.indexOf("async function runAiFinalSayAdjudication("),
+      serverSrc.indexOf("async function stagePhotoFix("),
+    );
+    const photoFix = serverSrc.slice(
+      serverSrc.indexOf("async function stagePhotoFix("),
+      serverSrc.indexOf("async function stageDescriptions("),
+    );
+    return finalSay.includes("if (confirmedHides.length > 0) await prearmStrictGuestyGallerySync(record)") &&
+      finalSay.includes("if (hidden === 1 && !record.pendingGuestyGallerySync) await markGuestyGallerySyncPending(record)") &&
+      photoFix.includes("Community folder: hid") &&
+      photoFix.includes("Repull clears/rebuilds the local community folder") &&
+      (photoFix.match(/await markGuestyGallerySyncPending\(record\)/g)?.length ?? 0) >= 5 &&
+      (photoFix.match(/await prearmStrictGuestyGallerySync\(record\)/g)?.length ?? 0) >= 3;
+  })());
 
 check("dedupe stage: same-scene auto-apply is env-gated (AUDIT_DEDUPE_SAME_SCENE=0 restores review-only)",
   serverSrc.includes("AUDIT_DEDUPE_SAME_SCENE") && serverSrc.includes("includeSameScene"));
@@ -764,7 +1172,8 @@ check("route: POST /api/unit-audit/bulk wired to startUnitAuditSweepBulk",
   routesSrc.includes('app.post("/api/unit-audit/bulk"') && routesSrc.includes("startUnitAuditSweepBulk({"));
 
 check("home.tsx: 'Audit selected' bulk button posts the checked property ids",
-  homeSrc.includes("button-bulk-unit-audit") && homeSrc.includes("/api/unit-audit/bulk"));
+  homeSrc.includes("button-bulk-unit-audit") && homeSrc.includes("/api/unit-audit/bulk") &&
+  homeSrc.includes("fullAutomation: true"));
 
 // ── Self-verifying audit rails (2026-07-12): pure decisions ──────────────────
 // Operator: "fix the review so that no human intervention is needed …
@@ -941,7 +1350,7 @@ check("rail B wired: consensus helper gates on the pure uncertainty-only predica
   serverSrc.includes("mergeCommunityConsensusPasses"));
 
 check("rail B wired at BOTH seams: stage 3 AND the post-photo-fix row upsert",
-  /return communityOutcomeWithConsensus\(target, record, run\.result\);/.test(serverSrc) &&
+  /const outcome = await communityOutcomeWithConsensus\(target, record, run\.result\);/.test(serverSrc) &&
   /communityOutcomeWithConsensus\(target, record, communityResult, "\(after photo fixes\) "\)/.test(serverSrc));
 
 check("rail C wired: same-scene groups act only when a second independent scan reproduces them",

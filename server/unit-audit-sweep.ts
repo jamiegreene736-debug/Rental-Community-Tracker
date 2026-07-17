@@ -53,17 +53,22 @@ import { COVER_COLLAGE_SETTING_KEY, COVER_COLLAGE_DISK_FOLDER } from "@shared/co
 import { GUESTY_UNSUPPORTED_AMENITY_KEYS, amenityPresenceCandidates, getAmenityLabel, normalizeGuestyAmenityName } from "@shared/guesty-amenity-catalog";
 import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 import { isCuratedBuyInMarket } from "@shared/buy-in-market";
+import { sourcePageIsStrongContradiction } from "@shared/source-page-community-logic";
+import { classifyStagedUnitCommunityAudit } from "@shared/unit-replacement-community-gate";
 import {
   COMMUNITY_CONSENSUS_PASSES_DEFAULT,
   COMMUNITY_PHOTO_FIX_FLOOR,
   UNIT_AUDIT_STAGE_RETRY_PASSES_DEFAULT,
+  classifyUnitAuditConfiguredPhotoCoverage,
   communityCheckUncertaintyOnly,
   communityPhotoFixSelections,
   confirmSameSceneGroups,
   dedupeAutoFixSelections,
   mergeCommunityConsensusPasses,
+  MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS,
   photoFixRungsForUnit,
   replaceRungOnCooldown,
+  shouldRetryCommittedFullAutomationReplacement,
   unitAuditRetryStageIds,
   type PhotoFixRung,
   MAX_UNIT_AUDIT_RESUMES,
@@ -78,12 +83,16 @@ import {
   nextUnitAuditStage,
   parseUnitAuditReports,
   parseUnitAuditStore,
+  queueRecoverableUnitAuditMutation,
   rollUpUnitAuditVerdict,
   serializeUnitAuditReports,
   serializeUnitAuditStore,
   shouldResumeUnitAuditJob,
   summarizeUnitAuditQueue,
   unitAuditHeadline,
+  unitAuditChildPollShouldCancel,
+  unitAuditChildPollShouldProcessTerminalBeforeCancel,
+  unitAuditChildPollShouldTimeout,
   unitAuditVerifyReadBackoffMs,
   unitAuditVerifyReadRetryable,
   upsertUnitAuditStageResult,
@@ -115,16 +124,23 @@ import {
   verifyDupePairOnDisk,
 } from "./photo-judgment";
 import { photoListingScanWasInconclusive } from "@shared/photo-listing-decision";
-import { buildPhotoCommunityCheckRequestForProperty, listPublishedFilenames, readFolderSourceUrl, writeFolderSourceUrlIfMissing } from "./builder-photo-groups";
+import {
+  buildPhotoCommunityCheckRequestForProperty,
+  configuredPhotoFolderStatusesForProperty,
+  listPublishedFilenames,
+  readFolderSourceUrl,
+  writeFolderSourceUrlIfMissing,
+  type ConfiguredPhotoFolderStatus,
+} from "./builder-photo-groups";
 import { replacementPhotoFolderRef } from "@shared/photo-folder-utils";
 import { scanForDuplicatePhotos, type DedupeScanGroupInput } from "./photo-dedupe";
-import { beddingPhotoCheckForAudit } from "./bedding-photo-scan";
+import { applyBeddingPhotoScanForAudit, beddingPhotoCheckForAudit } from "./bedding-photo-scan";
 import type { PhotoCommunityCheckResult } from "./photo-community-check";
 import { getPreflightPhotoFetchJob, startPreflightPhotoFetchJob } from "./preflight-background-jobs";
 import { getCommunityPhotoRepullJob, startCommunityPhotoRepullJob } from "./community-photo-repull";
 import { listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import { repushGuestyPhotosForProperty } from "./guesty-photo-repush";
-import { isAutoReplacePhaseActive, draftUnitIdForSlot } from "@shared/auto-replace-job-logic";
+import { autoReplaceGuestyPushSatisfied, isAutoReplacePhaseActive, draftUnitIdForSlot } from "@shared/auto-replace-job-logic";
 import { latestUnitSwapsByUnit } from "@shared/unit-swap-photos";
 import { loopbackRequestHeaders } from "./auth";
 import { sendOperatorAlert } from "./operator-alerts";
@@ -140,10 +156,14 @@ const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 const STAGE_TIMEOUT_MS: Record<UnitAuditStageId, number> = {
   resolve: 60_000,
   // Dedupe + community ceilings grew with the 2026-07-12 double/triple-check
-  // rails: the dedupe stage may run up to 2 extra stability scans + a second
-  // apply round; the community stage may run up to 2 extra consensus checks
-  // (each an independent full Lens+vision pass, bounded per-call below).
-  "photo-dedupe": 20 * 60_000,
+  // rails. Strict dedupe now pair-covers >60-photo folders in bounded batches:
+  // a 100-photo folder needs six calls per exhaustive scan, so two required
+  // 120s-ceiling scans alone can take 24 minutes. Forty minutes covers that
+  // required clean confirmation plus normal apply/re-scan overhead; harder
+  // galleries fail explicitly at the stage ceiling instead of claiming clean.
+  // Community may run up to 2 extra consensus checks (each an independent full
+  // Lens+vision pass, bounded per-call below).
+  "photo-dedupe": 40 * 60_000,
   "photo-community": 55 * 60_000,
   "ota-scan": 16 * 60_000,
   // The ladder's worst case is real work: a re-scrape (~minutes), a
@@ -174,6 +194,15 @@ const STAGE_TIMEOUT_MS: Record<UnitAuditStageId, number> = {
 const autoFixGloballyDisabled = () =>
   /^(1|true|yes|on)$/i.test(String(process.env.UNIT_AUDIT_AUTOFIX_DISABLED ?? "").trim());
 const autoFixEnabled = (record: UnitAuditJobRecord) => record.autoFix && !autoFixGloballyDisabled();
+const FULL_AUTOMATION_MUTATING_STAGES = new Set<UnitAuditStageId>([
+  "photo-dedupe",
+  "photo-fix",
+  "descriptions",
+  "amenities",
+  "cover-collage",
+  "layout",
+  "pricing",
+]);
 
 // How fresh an existing photo_listing_checks row must be for the OTA stage to
 // reuse it instead of kicking a new deep scan (each deep scan is real Lens +
@@ -192,25 +221,38 @@ const RETRY_PASS_DELAY_MS = 20_000;
 // Rates pushed longer ago than this read as stale (matches the dashboard
 // "Last Price Scan" amber threshold — the weekly cron cadence + 1 day).
 const PRICING_STALE_DAYS = 8;
+const AMENITY_SCAN_RECEIPTS_SETTING_KEY = "amenity_scan_receipts.v1";
+const PRICING_AUDIT_RECEIPTS_SETTING_KEY = "pricing_audit_receipts.v1";
 
 const jobs = new Map<string, UnitAuditJobRecord>();
 const activeJobIds = new Set<string>();
 const cancelRequested = new Set<string>();
 
 let storeTail: Promise<void> = Promise.resolve();
-function mutateStore(mutate: (store: Record<string, UnitAuditJobRecord>, nowMs: number) => void): Promise<void> {
-  storeTail = storeTail.then(async () => {
-    try {
-      const now = Date.now();
-      const raw = await storage.getSetting(UNIT_AUDIT_STORE_SETTING_KEY);
-      const store = parseUnitAuditStore(raw ?? null);
-      mutate(store, now);
-      await storage.setSetting(UNIT_AUDIT_STORE_SETTING_KEY, serializeUnitAuditStore(store, now));
-    } catch {
-      // Fail-soft: persistence is an upgrade, never a blocker.
-    }
+function enqueueStoreMutation(
+  mutate: (store: Record<string, UnitAuditJobRecord>, nowMs: number) => void,
+): Promise<void> {
+  const queued = queueRecoverableUnitAuditMutation(storeTail, async () => {
+    const now = Date.now();
+    const raw = await storage.getSetting(UNIT_AUDIT_STORE_SETTING_KEY);
+    const store = parseUnitAuditStore(raw ?? null);
+    mutate(store, now);
+    await storage.setSetting(UNIT_AUDIT_STORE_SETTING_KEY, serializeUnitAuditStore(store, now));
   });
-  return storeTail;
+  // Later queue entries must still run after one strict caller observes a
+  // rejected operation. Keep the shared tail healed while returning the raw
+  // operation to callers that require a real durability guarantee.
+  storeTail = queued.tail;
+  return queued.operation;
+}
+
+function mutateStore(mutate: (store: Record<string, UnitAuditJobRecord>, nowMs: number) => void): Promise<void> {
+  // Historical status/heartbeat writes are best-effort.
+  return enqueueStoreMutation(mutate).catch(() => undefined);
+}
+
+function mutateStoreStrict(mutate: (store: Record<string, UnitAuditJobRecord>, nowMs: number) => void): Promise<void> {
+  return enqueueStoreMutation(mutate);
 }
 
 let reportsTail: Promise<void> = Promise.resolve();
@@ -234,6 +276,71 @@ function touch(record: UnitAuditJobRecord, patch: Partial<UnitAuditJobRecord>): 
   void mutateStore((store) => {
     store[record.jobId] = { ...record, stages: record.stages.map((s) => ({ ...s })) };
   });
+}
+
+async function touchDurably(record: UnitAuditJobRecord, patch: Partial<UnitAuditJobRecord>): Promise<void> {
+  Object.assign(record, patch, { updatedAt: Date.now() });
+  jobs.set(record.jobId, record);
+  const snapshot = { ...record, stages: record.stages.map((stage) => ({ ...stage })) };
+  await mutateStoreStrict((store) => {
+    store[record.jobId] = snapshot;
+  });
+}
+
+async function markGuestyGallerySyncPending(
+  record: UnitAuditJobRecord,
+  patch: Partial<Pick<
+    UnitAuditJobRecord,
+    "pendingDedupeHiddenCount" | "coverCollageNeedsRefresh" | "requiredCoverCollageUrl" | "finalGuestyGalleryVerified"
+  >> = {},
+): Promise<void> {
+  // Mark memory first: even if the durable write fails, this process must run
+  // the final exact sync from its failure path instead of forgetting a local
+  // mutation that already landed.
+  await touchDurably(record, {
+    finalGuestyGalleryVerified: false,
+    ...patch,
+    pendingGuestyGallerySync: true,
+  });
+}
+
+async function prearmStrictGuestyGallerySync(record: UnitAuditJobRecord): Promise<void> {
+  if (record.fullAutomation) {
+    // Re-persist even when memory is already armed. A previous strict write
+    // may have failed after updating memory, and the mutation below must not
+    // reopen that crash window by trusting the in-process flag alone.
+    await markGuestyGallerySyncPending(record, {
+      coverCollageNeedsRefresh: true,
+      requiredCoverCollageUrl: null,
+    });
+  }
+}
+
+async function clearGuestyGallerySyncPending(
+  record: UnitAuditJobRecord,
+  patch: Partial<Pick<UnitAuditJobRecord, "requiredCoverCollageUrl" | "finalGuestyGalleryVerified">> = {},
+): Promise<void> {
+  // Clear storage first. If this write fails, keep the in-memory obligation so
+  // the final/failure seam retries rather than falsely claiming synchronization.
+  const updatedAt = Date.now();
+  const snapshot: UnitAuditJobRecord = {
+    ...record,
+    pendingGuestyGallerySync: false,
+    pendingDedupeHiddenCount: 0,
+    ...patch,
+    updatedAt,
+    stages: record.stages.map((stage) => ({ ...stage })),
+  };
+  await mutateStoreStrict((store) => {
+    store[record.jobId] = snapshot;
+  });
+  Object.assign(record, {
+    pendingGuestyGallerySync: false,
+    pendingDedupeHiddenCount: 0,
+    ...patch,
+    updatedAt,
+  });
+  jobs.set(record.jobId, record);
 }
 
 async function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
@@ -331,6 +438,8 @@ type UnitAuditTarget = {
   state?: string;
   guestyListingId: string | null;
   groups: AuditPhotoGroup[];
+  /** Includes required folders that are missing/empty and thus absent from groups. */
+  configuredPhotoFolders: ConfiguredPhotoFolderStatus[] | null;
   unitRefs: UnitAuditUnitRef[];
   expectedListingBedrooms: number | null;
   unitBedroomSizes: number[];
@@ -353,7 +462,10 @@ function parseBathrooms(value: unknown): number | null {
 async function resolveUnitAuditTarget(propertyId: number): Promise<UnitAuditTarget | null> {
   const mapRow = (await storage.getGuestyPropertyMap().catch(() => []))
     .find((m) => m.propertyId === propertyId);
-  const built = await buildPhotoCommunityCheckRequestForProperty(propertyId).catch(() => null);
+  const [built, configuredPhotoFolders] = await Promise.all([
+    buildPhotoCommunityCheckRequestForProperty(propertyId).catch(() => null),
+    configuredPhotoFolderStatusesForProperty(propertyId).catch(() => null),
+  ]);
   const groups: AuditPhotoGroup[] = (built?.request.groups ?? []).map((g) => ({
     role: g.role,
     label: g.label,
@@ -379,6 +491,7 @@ async function resolveUnitAuditTarget(propertyId: number): Promise<UnitAuditTarg
       state: parsed.state || undefined,
       guestyListingId: mapRow?.guestyListingId ?? null,
       groups,
+      configuredPhotoFolders,
       unitRefs: builder.units.map((u, i) => ({
         label: `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`,
         unitId: u.id,
@@ -419,6 +532,7 @@ async function resolveUnitAuditTarget(propertyId: number): Promise<UnitAuditTarg
     state: (draft as any).state || undefined,
     guestyListingId: mapRow?.guestyListingId ?? null,
     groups,
+    configuredPhotoFolders,
     unitRefs: draftUnitRefs,
     expectedListingBedrooms: built?.request.expectedListingBedrooms ?? ((u1 + u2) || null),
     unitBedroomSizes: Array.from(new Set([u1, u2].filter((n) => n > 0))),
@@ -444,6 +558,27 @@ type StageOutcome = { verdict: UnitAuditStageVerdict; detail: string; items?: st
 
 function unitGroups(target: UnitAuditTarget): AuditPhotoGroup[] {
   return target.groups.filter((g) => g.role === "unit");
+}
+
+function strictPhotoFolderGaps(target: UnitAuditTarget): {
+  inventoryUnavailable: boolean;
+  communityMissing: boolean;
+  communityStatus: ConfiguredPhotoFolderStatus | null;
+  units: ConfiguredPhotoFolderStatus[];
+} {
+  const coverage = classifyUnitAuditConfiguredPhotoCoverage({
+    configured: target.configuredPhotoFolders,
+    represented: target.groups
+      .filter((group) => group.filenames.length > 0)
+      .map((group) => ({ role: group.role, label: group.label, folder: group.folder })),
+    requiredUnits: target.unitRefs.map((ref) => ({ label: ref.label, unitId: ref.unitId })),
+  });
+  return {
+    inventoryUnavailable: coverage.inventoryUnavailable,
+    communityMissing: coverage.communityMissing,
+    communityStatus: coverage.communityStatus,
+    units: coverage.missingUnits,
+  };
 }
 
 // PROVENANCE BACKFILL (lever 2 of the "can't confirm photos" fix): a unit
@@ -499,11 +634,18 @@ async function stageResolve(record: UnitAuditJobRecord): Promise<StageOutcome> {
   if (!target) {
     throw new Error(`Property ${record.propertyId} could not be resolved (unknown builder property / draft).`);
   }
+  if (record.fullAutomation && strictPhotoFolderGaps(target).inventoryUnavailable) {
+    throw new Error(
+      "Configured photo-folder inventory or hydrated scan groups could not be read consistently; strict audit stopped before duplicate cleanup or any other mutation.",
+    );
+  }
   targets.set(record.jobId, target);
   const items: string[] = [];
   items.push(target.guestyListingId
     ? `Guesty listing mapped (${target.guestyListingId})`
-    : "NOT connected to a Guesty listing — Guesty-side checks (collage, layout, amenity push, channels) will be skipped");
+    : record.fullAutomation
+      ? "No Guesty listing mapped — the full audit will persist descriptions, amenities, bedding evidence, pricing, and the collage locally; Guesty-only pushes/channels are not required"
+      : "NOT connected to a Guesty listing — Guesty-side checks (collage, layout, amenity push, channels) will be skipped");
   const community = target.groups.find((g) => g.role === "community");
   items.push(community
     ? `Community folder ${community.folder} — ${community.filenames.length} photos`
@@ -516,7 +658,7 @@ async function stageResolve(record: UnitAuditJobRecord): Promise<StageOutcome> {
     return { verdict: "attention", detail: "Resolved, but no unit photo folders have published photos — the photo stages cannot verify anything.", items };
   }
   return {
-    verdict: target.guestyListingId ? "pass" : "attention",
+    verdict: target.guestyListingId || record.fullAutomation ? "pass" : "attention",
     detail: `${target.propertyName} · ${target.communityName}${target.expectedListingBedrooms ? ` · ${target.expectedListingBedrooms}BR listing` : ""} · ${target.groups.length} photo folder${target.groups.length === 1 ? "" : "s"} resolved`,
     items,
   };
@@ -545,16 +687,64 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
     };
   };
 
-  let proposal = await scanForDuplicatePhotos(groupsFor(target));
+  const requireCompleteVision = (
+    scan: Awaited<ReturnType<typeof scanForDuplicatePhotos>>,
+    phase: string,
+  ): void => {
+    if (!record.fullAutomation) return;
+    const incomplete = scan.folders.filter((folder) => folder.totalVisible >= 2 && !folder.visionComplete);
+    if (incomplete.length === 0) return;
+    throw new Error(
+      `Claude alternate-angle duplicate scan was incomplete during ${phase}: ` +
+      incomplete.map((folder) => `${folder.label || folder.folder} (` +
+        `${folder.scannedForVision}/${folder.totalVisible} photos pair-covered across ${folder.visionBatchCount} batch${folder.visionBatchCount === 1 ? "" : "es"}` +
+        `${folder.visionError ? `; ${folder.visionError}` : ""})`).join("; "),
+    );
+  };
+
+  const runScan = (t: UnitAuditTarget) => scanForDuplicatePhotos(groupsFor(t), {
+    // The manual/cron audit keeps the Photos-tab's one sampled call. Only the
+    // explicit Dashboard bulk workflow pays for exhaustive pair coverage.
+    requireCompleteVision: record.fullAutomation,
+  });
+
+  const includeSameScene = String(process.env.AUDIT_DEDUPE_SAME_SCENE ?? "").trim() !== "0";
+  const doubleCheckEnabled = String(process.env.AUDIT_DEDUPE_DOUBLE_CHECK ?? "").trim() !== "0";
+  if (record.fullAutomation && !includeSameScene) {
+    throw new Error("Full dashboard automation requires alternate-angle duplicate removal, but AUDIT_DEDUPE_SAME_SCENE=0 disables it");
+  }
+  if (record.fullAutomation && !doubleCheckEnabled) {
+    throw new Error("Full dashboard automation requires an independent duplicate stability scan, but AUDIT_DEDUPE_DOUBLE_CHECK=0 disables it");
+  }
+
+  let proposal = await runScan(target);
+  requireCompleteVision(proposal, "the initial gallery scan");
   let s = summarize(proposal);
   const items: string[] = [...s.lines];
   if (proposal.note) items.push(proposal.note);
   if (s.all.length === 0) {
-    return {
-      verdict: "pass",
-      detail: `No duplicates found across ${target.groups.length} folder${target.groups.length === 1 ? "" : "s"}${proposal.visionUsed ? " (hash + AI same-scene scan)" : " (hash-only scan)"}.`,
-      items: proposal.note ? [proposal.note] : undefined,
-    };
+    if (!record.fullAutomation) {
+      return {
+        verdict: "pass",
+        detail: `No duplicates found across ${target.groups.length} folder${target.groups.length === 1 ? "" : "s"}${proposal.visionUsed ? " (hash + AI same-scene scan)" : " (hash-only scan)"}.`,
+        items: proposal.note ? [proposal.note] : undefined,
+      };
+    }
+    touch(record, { message: "Confirming the clean gallery with a second exhaustive Claude scan…" });
+    const confirmation = await runScan(targets.get(record.jobId) ?? target);
+    requireCompleteVision(confirmation, "the initial clean-gallery confirmation");
+    const confirmedSummary = summarize(confirmation);
+    if (confirmedSummary.all.length === 0) {
+      return {
+        verdict: "pass",
+        detail: `No duplicates found across ${target.groups.length} folder${target.groups.length === 1 ? "" : "s"}; two exhaustive Claude scans independently confirmed the gallery clean.`,
+        items: ["Every visible photo was pair-covered by both strict Claude scans."],
+      };
+    }
+    proposal = confirmation;
+    s = confirmedSummary;
+    items.push(...confirmedSummary.lines);
+    items.push("The independent clean-gallery confirmation found candidates; continuing through the normal stability and removal rail.");
   }
 
   // AUTO-FIX: hide the removable extras via the existing apply route — same
@@ -574,9 +764,6 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
   // only one scan proposes is AI noise — left visible, never a review item.
   // Hash groups are deterministic and skip the double-check.
   // AUDIT_DEDUPE_DOUBLE_CHECK=0 restores single-scan behavior.
-  const includeSameScene = String(process.env.AUDIT_DEDUPE_SAME_SCENE ?? "").trim() !== "0";
-  const doubleCheckEnabled = String(process.env.AUDIT_DEDUPE_DOUBLE_CHECK ?? "").trim() !== "0";
-
   // Stability-filter a scan's same-scene groups with one extra independent
   // scan. Falls back to trusting the single scan when the double-check can't
   // run vision (no key / disabled) — never treats "could not re-check" as
@@ -587,7 +774,8 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
   ): Promise<{ confirmed: ReturnType<typeof summarize>["sameScene"]; checked: boolean }> => {
     if (!doubleCheckEnabled || sameScene.length === 0) return { confirmed: sameScene, checked: false };
     touch(record, { message: `Double-checking ${sameScene.length} AI same-scene group${sameScene.length === 1 ? "" : "s"} with an independent re-scan (${phase})…` });
-    const second = await scanForDuplicatePhotos(groupsFor(targets.get(record.jobId) ?? target));
+    const second = await runScan(targets.get(record.jobId) ?? target);
+    requireCompleteVision(second, `the ${phase} double-check`);
     if (!second.visionUsed) {
       items.push(`Double-check scan ran hash-only (vision unavailable) — keeping the single-scan same-scene groups (${phase})`);
       return { confirmed: sameScene, checked: false };
@@ -607,6 +795,7 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
     remove: Array<{ folder: string; filename: string }>,
   ): Promise<boolean> => {
     touch(record, { message: `Hiding ${remove.length} duplicate photo${remove.length === 1 ? "" : "s"} (hash + same-scene extras; soft-delete, undoable)…` });
+    await prearmStrictGuestyGallerySync(record);
     const apply = await loopbackJson("POST", "/api/builder/photo-dedupe-apply", { scanId, remove }, 60_000)
       .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
     if (apply.status >= 400) {
@@ -614,9 +803,12 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
       return false;
     }
     items.push(`Auto-fixed: ${remove.length} duplicate photo${remove.length === 1 ? "" : "s"} hidden (soft-delete — ↺ Undo on the Photos tab): ${remove.map((r) => r.filename).slice(0, 8).join(", ")}${remove.length > 8 ? ", …" : ""}`);
-    // Feed the end-of-sweep Guesty gallery sync (startSweepDedupeGuestySync):
-    // the hide alone never reaches the live listing.
-    dedupeHiddenThisSweep.set(record.jobId, (dedupeHiddenThisSweep.get(record.jobId) ?? 0) + remove.length);
+    // Feed the end-of-sweep Guesty gallery sync. Persist this handoff in the
+    // job record: Railway can restart after the local hide but before the
+    // pictures[] PUT, and an in-memory counter would silently lose the sync.
+    await markGuestyGallerySyncPending(record, {
+      pendingDedupeHiddenCount: record.pendingDedupeHiddenCount + remove.length,
+    });
     // Re-resolve the target so re-scans AND every later stage (e.g. the
     // collage candidate list) see the surviving photo set.
     const refreshedTarget = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
@@ -648,35 +840,48 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
       // RE-VERIFY with the same stability rule: a fresh scan over the
       // survivors proposes new vision pairings — only double-confirmed ones
       // get ONE more apply round; the rest are noise, not review items.
-      proposal = await scanForDuplicatePhotos(groupsFor(targets.get(record.jobId) ?? target));
+      proposal = await runScan(targets.get(record.jobId) ?? target);
+      requireCompleteVision(proposal, "the post-hide re-scan");
       s = summarize(proposal);
+      let residual = {
+        confirmed: [] as ReturnType<typeof summarize>["sameScene"],
+        checked: false,
+      };
       if (includeSameScene && s.sameScene.length > 0) {
-        const residual = await stabilityFilter(s.sameScene, "re-verify");
+        residual = await stabilityFilter(s.sameScene, "re-verify");
         unstableNoise += s.sameScene.length - residual.confirmed.length;
-        if (residual.checked && residual.confirmed.length > 0) {
-          const sel2 = dedupeAutoFixSelections(
-            residual.confirmed.map((g) => ({ kind: g.kind, folder: g.folder, members: g.members })),
-            { includeSameScene: true },
-          );
-          if (sel2.remove.length > 0) {
-            if (!(await applyRemovals(proposal.scanId, sel2.remove))) {
-              return {
-                verdict: "attention",
-                detail: `${residual.confirmed.length} double-confirmed same-scene group${residual.confirmed.length === 1 ? "" : "s"} remain but the auto-hide was refused — review with 🧹 Scan photos & remove duplicates.`,
-                items,
-              };
-            }
-            hiddenTotal += sel2.remove.length;
+      }
+      // The second round consumes deterministic hash groups too. Previously a
+      // hash group exposed only after round one was left outstanding even
+      // though the apply budget had not been used for it.
+      const secondRoundGroups = [...s.hash, ...residual.confirmed];
+      if (secondRoundGroups.length > 0) {
+        const sel2 = dedupeAutoFixSelections(
+          secondRoundGroups.map((g) => ({ kind: g.kind, folder: g.folder, members: g.members })),
+          { includeSameScene: true },
+        );
+        if (sel2.remove.length > 0) {
+          if (!(await applyRemovals(proposal.scanId, sel2.remove))) {
+            return {
+              verdict: "attention",
+              detail: `${secondRoundGroups.length} re-confirmed duplicate group${secondRoundGroups.length === 1 ? "" : "s"} remain but the auto-hide was refused — review with 🧹 Scan photos & remove duplicates.`,
+              items,
+            };
           }
-          // Round cap: two apply rounds per sweep. Any further same-scene
-          // candidates would need their own double-check — the next audit
-          // re-checks them. Hash groups (deterministic) still decide below.
-          s = { ...s, sameScene: [] };
-          items.push("Two apply rounds completed — any further same-scene candidates get double-checked on the next audit");
-        } else if (residual.checked) {
-          // Every residual candidate failed the double-check → noise.
-          s = { ...s, sameScene: [] };
+          hiddenTotal += sel2.remove.length;
         }
+        // Round cap: two apply rounds per sweep. Strict automation now runs
+        // two fresh scans below and refuses to claim clean if a confirmed
+        // group survives. Manual audits keep the historical next-audit cap.
+        if (record.fullAutomation) {
+          items.push("Two apply rounds completed — running the required fresh final scan and stability confirmation");
+        } else {
+          s = { ...s, hash: [], sameScene: [] };
+          items.push("Two apply rounds completed — any further duplicate candidates get checked on the next audit");
+        }
+      } else if (residual.checked) {
+        // Every residual candidate failed the double-check → noise.
+        s = { ...s, sameScene: [] };
       }
     } else if (includeSameScene && stable.checked && s.hash.length === 0 && stable.confirmed.length === 0) {
       // Nothing survived the double-check: the whole proposal was AI noise.
@@ -686,6 +891,50 @@ async function stagePhotoDedupe(target: UnitAuditTarget, record: UnitAuditJobRec
         items,
       };
     }
+  }
+
+  if (record.fullAutomation && hiddenTotal > 0) {
+    touch(record, { message: "Running the final fresh exhaustive duplicate scan and independent stability confirmation…" });
+    const currentTarget = targets.get(record.jobId) ?? target;
+    const finalPrimary = await runScan(currentTarget);
+    requireCompleteVision(finalPrimary, "the final post-removal scan");
+    const finalPrimarySummary = summarize(finalPrimary);
+    const finalConfirmation = await runScan(targets.get(record.jobId) ?? currentTarget);
+    requireCompleteVision(finalConfirmation, "the final post-removal stability confirmation");
+    const finalConfirmationSummary = summarize(finalConfirmation);
+    const finalSameScene = confirmSameSceneGroups(
+      finalPrimarySummary.sameScene,
+      finalConfirmationSummary.sameScene,
+    );
+    const reverseFinalSameScene = confirmSameSceneGroups(
+      finalConfirmationSummary.sameScene,
+      finalPrimarySummary.sameScene,
+    );
+    unstableNoise += finalSameScene.noise.length + reverseFinalSameScene.noise.length;
+    const finalSameSceneCount = Math.max(
+      finalSameScene.confirmed.length,
+      reverseFinalSameScene.confirmed.length,
+    );
+    const finalHash = finalPrimarySummary.hash.length > 0
+      ? finalPrimarySummary.hash
+      : finalConfirmationSummary.hash;
+    items.push(
+      `Final verification: ${finalPrimary.folders.reduce((sum, folder) => sum + folder.scannedForVision, 0)} visible photo pair-cover position${finalPrimary.folders.reduce((sum, folder) => sum + folder.scannedForVision, 0) === 1 ? "" : "s"} checked in each of two fresh Claude scans`,
+    );
+    if (finalHash.length > 0 || finalSameSceneCount > 0) {
+      const remaining = [
+        finalHash.length > 0 ? `${finalHash.length} hash duplicate group${finalHash.length === 1 ? "" : "s"}` : null,
+        finalSameSceneCount > 0
+          ? `${finalSameSceneCount} double-confirmed same-scene group${finalSameSceneCount === 1 ? "" : "s"}`
+          : null,
+      ].filter(Boolean).join(" + ");
+      return {
+        verdict: "error",
+        detail: `${hiddenTotal} duplicate photo${hiddenTotal === 1 ? " was" : "s were"} hidden, but ${remaining} remain after the two-round cap; the strict audit will not claim the gallery is clean.`,
+        items,
+      };
+    }
+    s = { ...finalPrimarySummary, all: [], hash: [], sameScene: [], lines: [] };
   }
 
   const fixedNote = hiddenTotal > 0
@@ -864,10 +1113,33 @@ function communityProblemsByUnit(result: PhotoCommunityCheckResult): Map<string,
   for (const u of result.units ?? []) {
     if (u.sameAsCommunity === "no") ensure(u.label).communityMismatch = true;
   }
+  // The full pre-flight engine treats a strongly contradictory source page
+  // as a hard community failure even when generic interiors happen to look
+  // plausible. Thread that unit-specific failure into the replacement ladder
+  // so strict Audit selected finds another unit instead of stopping at a red
+  // report with no automatic remedy.
+  for (const source of result.sourcePages ?? []) {
+    if (sourcePageIsStrongContradiction(source)) ensure(source.unitLabel).communityMismatch = true;
+  }
   return out;
 }
 
 async function stagePhotoCommunity(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
+  const strictGaps = record.fullAutomation ? strictPhotoFolderGaps(target) : null;
+  if (strictGaps?.inventoryUnavailable) {
+    return {
+      verdict: "error",
+      detail: "The configured photo-folder inventory could not be read, so the full community audit stopped without treating folders as absent or replacing a unit.",
+    };
+  }
+  if (strictGaps?.communityMissing) {
+    const folder = strictGaps.communityStatus?.folder;
+    return {
+      verdict: "failed",
+      detail: "The configured community photo folder is missing or empty, so the full community audit cannot be proven.",
+      items: [folder ? `Community folder ${folder} has no published photos` : "No community photo folder is configured"],
+    };
+  }
   if (unitGroups(target).length === 0 && !target.groups.some((g) => g.role === "community")) {
     return { verdict: "error", detail: "No published photos — the community/bedroom check cannot run." };
   }
@@ -875,7 +1147,21 @@ async function stagePhotoCommunity(target: UnitAuditTarget, record: UnitAuditJob
   if (!run.ok) {
     return { verdict: "error", detail: `Community check could not run: ${run.error}` };
   }
-  return communityOutcomeWithConsensus(target, record, run.result);
+  const outcome = await communityOutcomeWithConsensus(target, record, run.result);
+  if (strictGaps && strictGaps.units.length > 0) {
+    return {
+      verdict: "failed",
+      detail: `${strictGaps.units.length} configured unit photo folder${strictGaps.units.length === 1 ? " is" : "s are"} missing or empty; omitted folders cannot count as a successful full audit.`,
+      items: [
+        ...(outcome.items ?? []),
+        ...strictGaps.units.map((group) =>
+          group.folder
+            ? `${group.label}: configured folder ${group.folder} has no published photos`
+            : `${group.label}: no photo folder configured`),
+      ],
+    };
+  }
+  return outcome;
 }
 
 function otaRowFresh(row: { checkedAt: Date | string | null } | undefined, nowMs: number, freshHours: number): boolean {
@@ -1033,16 +1319,10 @@ function consumeCronReplaceBudget(): boolean {
 // run heals any staleness).
 const replacedThisSweep = new Set<string>();
 
-// Duplicate photos hidden by THIS sweep's dedupe auto-fix (jobId → count).
-// The hide is a local photo_labels.hidden soft-delete — invisible to the
-// mapped Guesty listing until its pictures[] is re-PUT (PR #1042 gave the
-// Photos tab's manual apply that push). The sweep's loopback apply
-// deliberately stays propertyId-free — a minutes-long gallery push
-// MID-sweep would race the later photo stages (replace rung, collage) —
-// so hides are tracked here and ONE re-push fires at sweep END instead
-// (startSweepDedupeGuestySync). In-memory like replacedThisSweep: a resume
-// mid-sweep loses the hint, and the gallery heals on any later push.
-const dedupeHiddenThisSweep = new Map<string, number>();
+// Local gallery mutations are invisible to a mapped Guesty listing until its
+// pictures[] is re-PUT. The durable pendingGuestyGallerySync fields on the job
+// record carry that handoff across Railway restarts; one re-push runs only
+// after every photo mutation has settled.
 
 async function runPhotoFixRung(
   rung: PhotoFixRung,
@@ -1051,9 +1331,10 @@ async function runPhotoFixRung(
   folder: string,
   record: UnitAuditJobRecord,
   opts: { requireBedroomPhotoCoverage?: boolean } = {},
-): Promise<{ ok: boolean; note: string }> {
+): Promise<{ ok: boolean; note: string; photoChanged?: boolean; cancelAfterTerminal?: boolean }> {
   if (rung === "rescrape") {
     touch(record, { message: `${ref.label}: re-scraping the current photo source…` });
+    await prearmStrictGuestyGallerySync(record);
     const r = await loopbackJson("POST", "/api/builder/rescrape-unit-photos", { folder }, PHOTO_FIX_RESCRAPE_TIMEOUT_MS)
       .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
     if (r.status >= 400) {
@@ -1068,6 +1349,7 @@ async function runPhotoFixRung(
     const skipUrls = (await Promise.all(unitGroups(target).map((g) => readFolderSourceUrl(g.folder))))
       .filter((u): u is string => !!u);
     touch(record, { message: `${ref.label}: searching for a new photo source listing…` });
+    await prearmStrictGuestyGallerySync(record);
     const job = startPreflightPhotoFetchJob({
       draftId: target.isDraft ? -target.propertyId : 0,
       propertyId: target.propertyId,
@@ -1085,17 +1367,41 @@ async function runPhotoFixRung(
     });
     const deadline = Date.now() + PHOTO_FIX_FIND_NEW_CEILING_MS;
     for (;;) {
-      if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
       const j = getPreflightPhotoFetchJob(job.id);
-      if (!j) return { ok: false, note: "find-new-source job vanished" };
+      if (!j) {
+        if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+        return { ok: false, note: "find-new-source job vanished" };
+      }
+      const childActive = j.status !== "completed" && j.status !== "failed" && j.status !== "cancelled";
+      const cancellationPending = cancelRequested.has(record.jobId);
+      const cancelAfterTerminal = unitAuditChildPollShouldProcessTerminalBeforeCancel(
+        record.fullAutomation, cancellationPending, childActive,
+      );
+      if (unitAuditChildPollShouldCancel(record.fullAutomation, cancellationPending, childActive) && !cancelAfterTerminal) {
+        throw new Error("cancelled");
+      }
       if (j.status === "completed") {
-        return { ok: true, note: `found a new source${j.savedCount != null ? ` (${j.savedCount} photos saved)` : ""}${j.sourceUrl ? ` — ${j.sourceUrl}` : ""}` };
+        return {
+          ok: true,
+          note: `found a new source${j.savedCount != null ? ` (${j.savedCount} photos saved)` : ""}${j.sourceUrl ? ` — ${j.sourceUrl}` : ""}`,
+          cancelAfterTerminal,
+        };
       }
       if (j.status === "failed" || j.status === "cancelled") {
-        return { ok: false, note: `find-new-source ${j.status}: ${j.error ?? j.message ?? "no reason given"}` };
+        return {
+          ok: false,
+          note: `find-new-source ${j.status}: ${j.error ?? j.message ?? "no reason given"}`,
+          cancelAfterTerminal,
+        };
       }
-      if (Date.now() > deadline) return { ok: false, note: "find-new-source did not finish in time" };
-      touch(record, { message: `${ref.label}: ${j.message || "searching for a new photo source…"}` });
+      if (unitAuditChildPollShouldTimeout(record.fullAutomation, Date.now(), deadline)) {
+        return { ok: false, note: "find-new-source did not finish in time" };
+      }
+      touch(record, {
+        message: cancellationPending
+          ? `${ref.label}: Cancellation requested — waiting for find-new photo search to finish safely (${j.message || "working…"})`
+          : `${ref.label}: ${j.message || "searching for a new photo source…"}`,
+      });
       await new Promise((r) => setTimeout(r, 10_000));
     }
   }
@@ -1105,31 +1411,69 @@ async function runPhotoFixRung(
   // OTA-clean, community-matched candidates, which is what makes the result
   // trustworthy for the OTA-found case.
   touch(record, { message: `${ref.label}: replacing the unit (find → commit → verify — the long rung)…` });
+  await prearmStrictGuestyGallerySync(record);
   const started = await startAutoReplaceJob({
     propertyId: target.propertyId,
     unitId: ref.unitId,
     unitLabel: ref.label,
     origin: record.source === "cron" ? "scheduled-audit" : "operator-audit",
     requireBedroomPhotoCoverage: opts.requireBedroomPhotoCoverage === true,
+    requireFullCommunityAudit: record.fullAutomation,
   });
   if (!started.ok) return { ok: false, note: `unit replacement did not start (${started.error})` };
   const replaceJobId = started.job.jobId;
   const deadline = Date.now() + PHOTO_FIX_REPLACE_CEILING_MS;
   for (;;) {
-    if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
     const jobs2 = await listAutoReplaceJobs();
     const j = jobs2.jobs.find((x) => x.jobId === replaceJobId);
-    if (!j) return { ok: false, note: "replacement job record vanished" };
-    if (!isAutoReplacePhaseActive(j.phase)) {
-      if (j.phase === "completed") {
-        return { ok: true, note: `unit replaced — ${j.newUnitLabel ?? "new unit"}${j.newAddress ? ` (${j.newAddress})` : ""}` };
-      }
-      return { ok: false, note: `unit replacement failed: ${j.error ?? j.message ?? "no reason given"}` };
+    if (!j) {
+      if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+      return { ok: false, note: "replacement job record vanished" };
     }
-    if (Date.now() > deadline) {
+    const childActive = isAutoReplacePhaseActive(j.phase);
+    const cancellationPending = cancelRequested.has(record.jobId);
+    const cancelAfterTerminal = unitAuditChildPollShouldProcessTerminalBeforeCancel(
+      record.fullAutomation, cancellationPending, childActive,
+    );
+    if (unitAuditChildPollShouldCancel(record.fullAutomation, cancellationPending, childActive) && !cancelAfterTerminal) {
+      throw new Error("cancelled");
+    }
+    if (!childActive) {
+      if (j.phase === "completed") {
+        if (record.fullAutomation && !autoReplaceGuestyPushSatisfied(j.guestyPhotoPush, !!target.guestyListingId)) {
+          const outcome = j.guestyPhotoPush;
+          const reason = outcome?.error ?? outcome?.skipped ?? (outcome ? outcome.status : "missing persisted push receipt");
+          return {
+            ok: false,
+            // The swap itself is already committed. Continue through target
+            // refresh, post-swap dedupe, and community verification so the
+            // local gallery is fully tidied even though this strict stage must
+            // ultimately remain failed for lack of Guesty synchronization.
+            photoChanged: true,
+            cancelAfterTerminal,
+            note: `unit swap committed locally, but the required awaited Guesty gallery push did not sync (${reason}) — the strict audit cannot mark replacement complete`,
+          };
+        }
+        return {
+          ok: true,
+          note: `unit replaced — ${j.newUnitLabel ?? "new unit"}${j.newAddress ? ` (${j.newAddress})` : ""}`,
+          cancelAfterTerminal,
+        };
+      }
+      return {
+        ok: false,
+        note: `unit replacement failed: ${j.error ?? j.message ?? "no reason given"}`,
+        cancelAfterTerminal,
+      };
+    }
+    if (unitAuditChildPollShouldTimeout(record.fullAutomation, Date.now(), deadline)) {
       return { ok: false, note: "unit replacement did not finish inside the audit window — it keeps running; check the dashboard replace queue" };
     }
-    touch(record, { message: `${ref.label}: replacement ${j.phase} — ${j.message ?? "working…"}` });
+    touch(record, {
+      message: cancellationPending
+        ? `${ref.label}: Cancellation requested — waiting for unit replacement to finish safely (${j.phase})`
+        : `${ref.label}: replacement ${j.phase} — ${j.message ?? "working…"}`,
+    });
     await new Promise((r) => setTimeout(r, 15_000));
   }
 }
@@ -1260,6 +1604,7 @@ async function runAiFinalSayAdjudication(
   let hidden = 0;
   const hiddenActions: typeof plan.hide = [];
   let putFailed = 0;
+  if (confirmedHides.length > 0) await prearmStrictGuestyGallerySync(record);
   for (const h of confirmedHides) {
     if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
     const put = await loopbackJson("PUT", `/api/photo-labels/${encodeURIComponent(h.folder)}/${encodeURIComponent(h.filename)}`, { hidden: true }, 30_000)
@@ -1268,6 +1613,7 @@ async function runAiFinalSayAdjudication(
       hidden += 1;
       hiddenActions.push(h);
       items.push(`AI judgment: hid ${h.folder}/${h.filename} (soft-delete — ↺ Undo on the Photos tab) — ${h.reason}`);
+      if (hidden === 1 && !record.pendingGuestyGallerySync) await markGuestyGallerySyncPending(record);
     } else {
       putFailed += 1;
       items.push(`AI judgment: could NOT hide ${h.folder}/${h.filename} (${String((put.data as any)?.error ?? `HTTP ${put.status}`)})`);
@@ -1302,10 +1648,18 @@ async function runAiFinalSayAdjudication(
 
 async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
   if (String(process.env.AUDIT_PHOTO_FIX ?? "").trim() === "0") {
-    return { verdict: "skipped", detail: "Photo fix ladder disabled via AUDIT_PHOTO_FIX=0." };
+    return record.fullAutomation
+      ? { verdict: "error", detail: "Full dashboard automation requires the photo repair/replacement ladder, but AUDIT_PHOTO_FIX=0 disables it." }
+      : { verdict: "skipped", detail: "Photo fix ladder disabled via AUDIT_PHOTO_FIX=0." };
   }
   if (!autoFixEnabled(record)) {
     return { verdict: "skipped", detail: "Verify-only run — the photo fix ladder (re-scrape → new source → replace unit) only runs with auto-fix on." };
+  }
+  if (record.fullAutomation && strictPhotoFolderGaps(target).inventoryUnavailable) {
+    return {
+      verdict: "error",
+      detail: "Configured photo-folder inventory or hydrated scan groups are unavailable — photo repair stopped before OTA planning, repull, or replacement.",
+    };
   }
 
   // What needs fixing? Community/bedroom problems from the stage-3 result
@@ -1332,6 +1686,79 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
   // re-check again.
   let communityFolderStillBad = false;
   const communityGroupOf = (t: UnitAuditTarget) => t.groups.find((g) => g.role === "community");
+  const initialStrictGaps = record.fullAutomation ? strictPhotoFolderGaps(target) : null;
+  if (initialStrictGaps?.communityMissing) {
+    const configuredFolder = initialStrictGaps.communityStatus?.folder;
+    if (!configuredFolder) {
+      anyStillFailing = true;
+      communityFolderStillBad = true;
+      items.push("Community folder: no folder is configured, so the automatic repull cannot run");
+    } else {
+      touch(record, { message: "Community folder is empty — running Find new community photos before any strict audit can pass…" });
+      await prearmStrictGuestyGallerySync(record);
+      const repull = startCommunityPhotoRepullJob({
+        communityName: target.communityName,
+        communityFolder: configuredFolder,
+        city: target.city,
+        state: target.state,
+      });
+      const deadline = Date.now() + PHOTO_FIX_REPULL_CEILING_MS;
+      let repullCompleted = false;
+      let repullVerified = false;
+      for (;;) {
+        const job = getCommunityPhotoRepullJob(repull.id);
+        if (!job) {
+          if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+          items.push("Empty community folder repull job vanished");
+          break;
+        }
+        const childActive = job.status !== "completed" && job.status !== "failed" && job.status !== "cancelled";
+        const cancellationPending = cancelRequested.has(record.jobId);
+        const cancelAfterTerminal = unitAuditChildPollShouldProcessTerminalBeforeCancel(
+          record.fullAutomation, cancellationPending, childActive,
+        );
+        if (unitAuditChildPollShouldCancel(record.fullAutomation, cancellationPending, childActive) && !cancelAfterTerminal) {
+          throw new Error("cancelled");
+        }
+        if (job.status === "completed") {
+          repullCompleted = true;
+          anyFixed = true;
+          items.push(`Empty community folder repull: ${job.savedCount ?? 0} photos saved${job.verifiedCount != null ? `, ${job.verifiedCount} verified` : ""}`);
+          await markGuestyGallerySyncPending(record);
+          if (cancelAfterTerminal) throw new Error("cancelled");
+          const refreshed = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
+          if (refreshed) { targets.set(record.jobId, refreshed); target = refreshed; }
+          const recheck = await runCommunityCheck(target, record, "Checking the newly populated community folder…");
+          if (recheck.ok && recheck.result.community) {
+            communityResult = recheck.result;
+            repullVerified = true;
+          } else {
+            items.push(`Empty community folder repull could not be fully rechecked${recheck.ok ? " (community result missing)" : ` (${recheck.error})`}`);
+          }
+          break;
+        }
+        if (job.status === "failed" || job.status === "cancelled") {
+          items.push(`Empty community folder repull ${job.status}: ${job.message || "no reason given"}`);
+          if (cancelAfterTerminal) throw new Error("cancelled");
+          break;
+        }
+        if (unitAuditChildPollShouldTimeout(record.fullAutomation, Date.now(), deadline)) {
+          items.push("Empty community folder repull did not finish in time — it keeps running; re-run the audit later");
+          break;
+        }
+        touch(record, {
+          message: cancellationPending
+            ? `Cancellation requested — waiting for empty-community repull to finish safely (${job.phase})`
+            : `Empty community folder repull ${job.phase}: ${job.message || "working…"}`,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10_000));
+      }
+      if (!repullCompleted || !repullVerified || strictPhotoFolderGaps(target).communityMissing) {
+        anyStillFailing = true;
+        communityFolderStillBad = true;
+      }
+    }
+  }
   if (communityResult?.community) {
     const cg = communityGroupOf(target);
     const c = communityResult.community;
@@ -1347,12 +1774,18 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     if (selections && selections.hide.length > 0) {
       touch(record, { message: `Hiding ${selections.hide.length} flagged community photo${selections.hide.length === 1 ? "" : "s"} (soft-delete, undoable)…` });
       let hidden = 0;
+      await prearmStrictGuestyGallerySync(record);
       for (const h of selections.hide) {
         if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
         const put = await loopbackJson("PUT", `/api/photo-labels/${encodeURIComponent(h.folder)}/${encodeURIComponent(h.filename)}`, { hidden: true }, 30_000)
           .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
-        if (put.status < 400) { hidden += 1; items.push(`Community folder: hid ${h.filename} — ${h.reason}`); }
-        else items.push(`Community folder: could NOT hide ${h.filename} (${String((put.data as any)?.error ?? `HTTP ${put.status}`)})`);
+        if (put.status < 400) {
+          hidden += 1;
+          items.push(`Community folder: hid ${h.filename} — ${h.reason}`);
+          if (hidden === 1 && !record.pendingGuestyGallerySync) await markGuestyGallerySyncPending(record);
+        } else {
+          items.push(`Community folder: could NOT hide ${h.filename} (${String((put.data as any)?.error ?? `HTTP ${put.status}`)})`);
+        }
       }
       if (selections.skippedForFloor > 0) {
         items.push(`Community folder: ${selections.skippedForFloor} more flagged photo(s) left visible to keep at least ${COMMUNITY_PHOTO_FIX_FLOOR} photos — the repull below (or Find new community photos) replaces them`);
@@ -1371,6 +1804,7 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     const stillBad = communityResult?.community?.matchesExpected === "no" || (selections?.skippedForFloor ?? 0) > 0;
     if (stillBad && cg) {
       touch(record, { message: "Community folder still reads wrong — running Find new community photos (research + re-scrape + verify)…" });
+      await prearmStrictGuestyGallerySync(record);
       const repull = startCommunityPhotoRepullJob({
         communityName: target.communityName,
         communityFolder: communityGroupOf(target)?.folder ?? cg.folder,
@@ -1379,12 +1813,27 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
       });
       const deadline = Date.now() + PHOTO_FIX_REPULL_CEILING_MS;
       for (;;) {
-        if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
         const j = getCommunityPhotoRepullJob(repull.id);
-        if (!j) { items.push("Community repull job vanished"); break; }
+        if (!j) {
+          if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+          items.push("Community repull job vanished");
+          break;
+        }
+        const childActive = j.status !== "completed" && j.status !== "failed" && j.status !== "cancelled";
+        const cancellationPending = cancelRequested.has(record.jobId);
+        const cancelAfterTerminal = unitAuditChildPollShouldProcessTerminalBeforeCancel(
+          record.fullAutomation, cancellationPending, childActive,
+        );
+        if (unitAuditChildPollShouldCancel(record.fullAutomation, cancellationPending, childActive) && !cancelAfterTerminal) {
+          throw new Error("cancelled");
+        }
         if (j.status === "completed") {
           items.push(`Community repull: ${j.savedCount ?? 0} photos saved, ${j.removedCount ?? 0} mismatches removed${j.verifiedCount != null ? `, ${j.verifiedCount} verified` : ""}`);
           anyFixed = true;
+          // Repull clears/rebuilds the local community folder. Even if the
+          // final count happens to match, Guesty's prior byte set is stale.
+          await markGuestyGallerySyncPending(record);
+          if (cancelAfterTerminal) throw new Error("cancelled");
           const refreshed = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
           if (refreshed) { targets.set(record.jobId, refreshed); target = refreshed; }
           const recheck = await runCommunityCheck(target, record, "Re-checking the community folder after the repull…");
@@ -1393,10 +1842,18 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
         }
         if (j.status === "failed" || j.status === "cancelled") {
           items.push(`Community repull ${j.status}: ${j.message || "no reason given"}`);
+          if (cancelAfterTerminal) throw new Error("cancelled");
           break;
         }
-        if (Date.now() > deadline) { items.push("Community repull did not finish in time — it keeps running; re-run the audit later"); break; }
-        touch(record, { message: `Community repull ${j.phase}: ${j.message || "working…"}` });
+        if (unitAuditChildPollShouldTimeout(record.fullAutomation, Date.now(), deadline)) {
+          items.push("Community repull did not finish in time — it keeps running; re-run the audit later");
+          break;
+        }
+        touch(record, {
+          message: cancellationPending
+            ? `Cancellation requested — waiting for community repull to finish safely (${j.phase})`
+            : `Community repull ${j.phase}: ${j.message || "working…"}`,
+        });
         await new Promise((r) => setTimeout(r, 10_000));
       }
     }
@@ -1424,6 +1881,14 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
   }
 
   const problems = communityResult ? communityProblemsByUnit(communityResult) : new Map<string, { bedroomShort: boolean; communityMismatch: boolean }>();
+  const strictFolderGaps = record.fullAutomation ? strictPhotoFolderGaps(target) : null;
+  for (const missing of strictFolderGaps?.units ?? []) {
+    // An omitted/empty unit folder is a real bedroom-photo failure, not a
+    // smaller property. Feed it into the normal bounded repair ladder so a
+    // source refresh can heal an empty folder and replacement remains the
+    // terminal fallback.
+    problems.set(missing.label, { bedroomShort: true, communityMismatch: false });
+  }
 
   // PROVE a bedroom shortfall before the ladder may act on it (2026-07-12,
   // unattended-replacement rail #1): the bedroom engine reads photo LABELS,
@@ -1453,6 +1918,9 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
       }
     }
   }
+  for (const missing of strictFolderGaps?.units ?? []) {
+    problems.set(missing.label, { bedroomShort: true, communityMismatch: false });
+  }
 
   const otaFoundByLabel = new Set<string>();
   for (const g of unitGroups(target)) {
@@ -1467,17 +1935,22 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
   const plans: UnitPlan[] = [];
   for (const ref of target.unitRefs) {
     const group = unitGroups(target).find((g) => g.label === ref.label);
-    if (!group) continue;
+    const missingFolder = strictFolderGaps?.units.find((missing) =>
+      missing.unitId === ref.unitId || missing.label === ref.label);
+    if (!group && !missingFolder) continue;
     const p = problems.get(ref.label) ?? { bedroomShort: false, communityMismatch: false };
     const otaFound = otaFoundByLabel.has(ref.label);
-    const rungs = photoFixRungsForUnit({ bedroomShort: p.bedroomShort, communityMismatch: p.communityMismatch, otaFound });
+    const rungs: PhotoFixRung[] = missingFolder
+      ? (missingFolder.folder ? ["rescrape", "find-new", "replace"] : ["replace"])
+      : photoFixRungsForUnit({ bedroomShort: p.bedroomShort, communityMismatch: p.communityMismatch, otaFound });
     if (rungs.length === 0) continue;
     const why = [
+      missingFolder ? (missingFolder.folder ? "configured photo folder is empty" : "no photo folder is configured") : null,
       otaFound ? "photos/address found on another OTA listing" : null,
       p.communityMismatch ? "photos not confirmed in the community" : null,
-      p.bedroomShort ? "not enough bedroom photos" : null,
+      p.bedroomShort && !missingFolder ? "not enough bedroom photos" : null,
     ].filter((s): s is string => !!s);
-    plans.push({ ref, folder: group.folder, rungs, why, bedroomShort: p.bedroomShort });
+    plans.push({ ref, folder: missingFolder?.folder ?? group?.folder ?? "", rungs, why, bedroomShort: p.bedroomShort });
   }
   if (plans.length === 0 && !anyFixed && !communityFolderStillBad) {
     // AI FINAL SAY settled every residual judgment call with keeps only
@@ -1531,7 +2004,10 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     let healed = false;
     let blockedOnPermission = false;
     let blockedSoft = false;
-    for (const rung of plan.rungs) {
+    const rungQueue = [...plan.rungs];
+    let committedReplacementAttempts = 0;
+    for (let rungIndex = 0; rungIndex < rungQueue.length; rungIndex += 1) {
+      const rung = rungQueue[rungIndex];
       if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
       if (rung === "replace" && !replaceAllowed) {
         blockedOnPermission = true;
@@ -1575,10 +2051,29 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
         requireBedroomPhotoCoverage: plan.bedroomShort,
       });
       items.push(`${plan.ref.label}: ${rung} — ${rungResult.ok ? rungResult.note : `✕ ${rungResult.note}`}`);
-      if (!rungResult.ok) continue;
+      if (!rungResult.ok && !rungResult.photoChanged) {
+        if (rungResult.cancelAfterTerminal) throw new Error("cancelled");
+        continue;
+      }
+      const strictSyncFailed = !rungResult.ok && rungResult.photoChanged === true;
+      if (rung === "replace") committedReplacementAttempts += 1;
+      else {
+        // Re-scrape/find-new replace the local folder without touching Guesty.
+        // Carry a durable sync obligation to the sweep's final gallery seam.
+        await markGuestyGallerySyncPending(record);
+      }
       // A committed swap means downstream stages must re-ground content in
       // the NEW unit (descriptions regenerate, collage re-composes).
-      if (rung === "replace") replacedThisSweep.add(record.jobId);
+      if (rung === "replace") {
+        replacedThisSweep.add(record.jobId);
+        // The replacement orchestrator has just completed its awaited Guesty
+        // gallery push. On a verified push, every prior local change rode
+        // along and the durable obligation clears. If that awaited push failed,
+        // retain the obligation so the end seam can make one final attempt.
+        if (rungResult.ok) await clearGuestyGallerySyncPending(record);
+        else await markGuestyGallerySyncPending(record);
+      }
+      if (rungResult.cancelAfterTerminal) throw new Error("cancelled");
 
       // Photos changed: re-resolve the target (active folders may have moved),
       // wait for the auto-labeler, then re-check. Later stages read the
@@ -1593,6 +2088,37 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
       touch(record, { message: `${plan.ref.label}: waiting for the photo auto-labeler on ${newFolder}…` });
       const labelsReady = await waitForFolderLabels(newFolder);
       if (!labelsReady) items.push(`${plan.ref.label}: photo labels were still generating after 4 min — the re-check may under-count bedrooms; re-run the audit if it reads short`);
+
+      // A re-scrape/find-new/replacement can introduce exact copies or several
+      // angles of the same scene after the sweep's initial dedupe stage. In
+      // full dashboard mode, run the same hash + Claude same-scene engine over
+      // the new final gallery before community/bedroom verification. This is
+      // deliberately before the check: bedroom coverage must reflect the
+      // photos that will actually remain visible.
+      if (record.fullAutomation) {
+        touch(record, { message: `${plan.ref.label}: tidying the changed gallery (exact + alternate-angle duplicate removal)…` });
+        const dedupe = await stagePhotoDedupe(target, record);
+        items.push(`${plan.ref.label}: final dedupe — ${dedupe.detail}`);
+        if (dedupe.items?.length) items.push(...dedupe.items.map((line) => `${plan.ref.label} dedupe: ${line}`));
+        touch(record, {
+          stages: upsertUnitAuditStageResult(record.stages, {
+            stage: "photo-dedupe",
+            verdict: dedupe.verdict,
+            detail: `Final post-change gallery: ${dedupe.detail}`,
+            items: dedupe.items,
+          }),
+        });
+        if (dedupe.verdict !== "pass" && dedupe.verdict !== "fixed") {
+          items.push(`${plan.ref.label}: changed gallery could not be proven duplicate-free — trying the next repair rung`);
+          continue;
+        }
+        const afterDedupe = await resolveUnitAuditTarget(target.propertyId).catch(() => null);
+        if (afterDedupe) {
+          targets.set(record.jobId, afterDedupe);
+          target = afterDedupe;
+          plan.folder = unitGroups(target).find((g) => g.label === plan.ref.label)?.folder ?? plan.folder;
+        }
+      }
       const recheck = await runCommunityCheck(target, record, `${plan.ref.label}: re-checking community + bedroom coverage after the ${rung}…`);
       if (!recheck.ok) {
         items.push(`${plan.ref.label}: re-check could not run (${recheck.error})`);
@@ -1601,9 +2127,24 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
       communityResult = recheck.result;
       const after = communityProblemsByUnit(recheck.result).get(plan.ref.label);
       const stillOta = rung === "replace" ? false : otaFoundByLabel.has(plan.ref.label);
-      if (!after?.bedroomShort && !after?.communityMismatch && !stillOta) {
-        healed = true;
+      const strictGate = record.fullAutomation
+        ? classifyStagedUnitCommunityAudit(recheck.result, {
+            targetFolder: plan.folder,
+            bedroomCoverageReliable: labelsReady,
+          })
+        : null;
+      if (strictGate?.decision === "inconclusive") {
+        items.push(`${plan.ref.label}: final full preflight proof was inconclusive (${strictGate.reason}) — no candidate was burned and no additional destructive replacement was started`);
+        continue;
+      }
+      const strictVerified = !record.fullAutomation || strictGate?.decision === "accept";
+      if (strictVerified && !after?.bedroomShort && !after?.communityMismatch && !stillOta) {
         anyFixed = true;
+        if (strictSyncFailed) {
+          items.push(`${plan.ref.label}: local replacement gallery is clean, but Guesty synchronization is still unverified — this audit remains failed`);
+          break;
+        }
+        healed = true;
         if (rung === "replace") {
           // The flagged photos are gone with the old unit; the replace flow's
           // find phase only accepts OTA-clean candidates and it already
@@ -1612,6 +2153,21 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
         }
         items.push(`${plan.ref.label}: ✓ re-verified clean after the ${rung}`);
         break;
+      }
+      if (strictGate?.decision === "reject") {
+        items.push(`${plan.ref.label}: final full preflight rejected this gallery (${strictGate.reason})`);
+      }
+      if (strictGate && shouldRetryCommittedFullAutomationReplacement({
+        fullAutomation: record.fullAutomation,
+        rung,
+        gateDecision: strictGate.decision,
+        reasonCode: strictGate.reasonCode,
+        strictSyncFailed,
+        committedAttempts: committedReplacementAttempts,
+      })) {
+        rungQueue.push("replace");
+        items.push(`${plan.ref.label}: committed candidate ${committedReplacementAttempts}/${MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS} failed a positive community/bedroom check — automatically finding another distinct unit`);
+        continue;
       }
       items.push(`${plan.ref.label}: still ${[after?.bedroomShort ? "short on bedroom photos" : null, after?.communityMismatch ? "unconfirmed community" : null, stillOta ? "OTA-flagged" : null].filter(Boolean).join(" + ")} — trying the next rung`);
     }
@@ -1766,7 +2322,12 @@ function describeDescriptionProblems(fields: Record<string, string>): {
 // composition, persisted as overrides, then the regenerated fields (ONLY)
 // are pushed to Guesty. `notes` is never touched (compliance-owned) and a
 // generator fallback (`warning` set) is REFUSED — never applied.
-async function regenerateDescriptionsForTarget(target: UnitAuditTarget): Promise<{ ok: boolean; note: string; patch?: Record<string, string> }> {
+async function regenerateDescriptionsForTarget(target: UnitAuditTarget): Promise<{
+  ok: boolean;
+  note: string;
+  patch?: Record<string, string>;
+  guestyStatus?: "not-requested" | "pushed" | "failed";
+}> {
   type GenUnit = { bedrooms: number; folder: string | null };
   let units: GenUnit[] = [];
   let address = "";
@@ -1798,6 +2359,15 @@ async function regenerateDescriptionsForTarget(target: UnitAuditTarget): Promise
   }, 4 * 60_000).catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
   if (status >= 400) return { ok: false, note: `Generator call failed: ${String((gen as any)?.error ?? `HTTP ${status}`)}` };
   if ((gen as any)?.warning) return { ok: false, note: `Generator returned fallback copy — refused (never applied): ${String((gen as any).warning)}` };
+  if ((gen as any)?.generation?.method !== "claude") {
+    return { ok: false, note: "Generator did not prove Claude provenance — refused (never applied)." };
+  }
+
+  const requiredClaudeFields = ["title", "summary", "space", "neighborhood", "transit", "access", "houseRules"];
+  const missingClaudeFields = requiredClaudeFields.filter((field) => !String((gen as any)?.[field] ?? "").trim());
+  if (missingClaudeFields.length > 0) {
+    return { ok: false, note: `Claude omitted required description field(s): ${missingClaudeFields.join(", ")} — nothing was saved.` };
+  }
 
   const summaryBody = [gen?.summary, gen?.space].map((s: unknown) => String(s ?? "").trim()).filter(Boolean).join("\n\n");
   if (!summaryBody) return { ok: false, note: "Generator returned no description copy." };
@@ -1816,29 +2386,44 @@ async function regenerateDescriptionsForTarget(target: UnitAuditTarget): Promise
     !singleListing ? String((gen as any)?.walk?.description ?? "").trim() : "",
   );
   const patch: Record<string, string> = {};
+  const title = String((gen as any)?.title ?? "").trim();
+  if (title) patch.title = title;
   if (summary) patch.summary = summary;
   if (space) patch.space = space;
   const neighborhood = String((gen as any)?.neighborhood ?? "").trim();
   if (neighborhood) patch.neighborhood = neighborhood;
   const transit = String((gen as any)?.transit ?? "").trim();
   if (transit) patch.transit = transit;
-  if (Object.keys(patch).length === 0) return { ok: false, note: "Generator produced no usable fields." };
+  const access = String((gen as any)?.access ?? "").trim();
+  if (access) patch.access = access;
+  const houseRules = String((gen as any)?.houseRules ?? "").trim();
+  if (houseRules) patch.houseRules = houseRules;
+  const requiredGeneratedFields = ["title", "summary", "space", "neighborhood", "transit", "access", "houseRules"];
+  const missingGeneratedFields = requiredGeneratedFields.filter((field) => !String(patch[field] ?? "").trim());
+  if (missingGeneratedFields.length > 0) {
+    return { ok: false, note: `Claude omitted required description field(s): ${missingGeneratedFields.join(", ")} — nothing was saved.` };
+  }
 
   await storage.upsertPropertyDescriptionOverrides(target.propertyId, patch);
-  let note = `Regenerated ${Object.keys(patch).join(", ")} from the real source listings and saved as overrides`;
+  let note = `Regenerated ${Object.keys(patch).join(", ")} with ${(gen as any).generation.model ?? "Claude"} from the real source listings and saved as overrides`;
 
+  let guestyStatus: "not-requested" | "pushed" | "failed" = "not-requested";
   if (target.guestyListingId) {
     const push = await loopbackJson("POST", "/api/builder/push-descriptions", {
       listingId: target.guestyListingId,
       descriptions: patch,
     }, 60_000).catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
-    note += push.status < 400
-      ? "; pushed to Guesty (placeholder guard re-passed)"
-      : `; Guesty push failed (${String((push.data as any)?.error ?? `HTTP ${push.status}`)}) — push from the Descriptions tab`;
+    if (push.status < 400 && (push.data as any)?.success === true && (push.data as any)?.verified === true) {
+      guestyStatus = "pushed";
+      note += "; pushed to Guesty (placeholder guard re-passed)";
+    } else {
+      guestyStatus = "failed";
+      note += `; Guesty push failed (${String((push.data as any)?.error ?? `HTTP ${push.status}`)}) — local overrides were saved`;
+    }
   } else {
     note += "; no Guesty listing yet — the copy pushes when one is connected";
   }
-  return { ok: true, note, patch };
+  return { ok: true, note, patch, guestyStatus };
 }
 
 async function stageDescriptions(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
@@ -1851,12 +2436,27 @@ async function stageDescriptions(target: UnitAuditTarget, record: UnitAuditJobRe
   // unit — regenerate from the NEW unit's source listing even if the old
   // copy was otherwise clean (post-swap follow-through, 2026-07-12).
   const forcedBySwap = replacedThisSweep.has(record.jobId);
-  const needsFix = problems.placeholderFields.length > 0 || problems.embeddedHeaders.length > 0 || problems.emptySummary || forcedBySwap;
+  const needsFix = record.fullAutomation || problems.placeholderFields.length > 0 || problems.embeddedHeaders.length > 0 || problems.emptySummary || forcedBySwap;
   if (needsFix && autoFixEnabled(record)) {
+    if (record.fullAutomation) items.push("Full dashboard audit: regenerating every marketing-description field with Claude, even when existing copy looks valid");
     if (forcedBySwap) items.push("Regenerating because a unit was replaced earlier in this sweep — grounding the copy in the NEW unit's source listing");
     touch(record, { message: "Regenerating descriptions from the real source listings (Claude)…" });
     const fix = await regenerateDescriptionsForTarget(target);
     items.push(fix.ok ? `Auto-fixed: ${fix.note}` : `Auto-fix failed: ${fix.note}`);
+    if (!fix.ok && record.fullAutomation) {
+      return {
+        verdict: "error",
+        detail: `Claude description generation did not complete, so existing copy was not accepted: ${fix.note}`,
+        items,
+      };
+    }
+    if (fix.ok && record.fullAutomation && target.guestyListingId && fix.guestyStatus !== "pushed") {
+      return {
+        verdict: "error",
+        detail: "Claude descriptions were regenerated and saved locally, but the mapped Guesty listing did not accept the update.",
+        items,
+      };
+    }
     if (fix.ok) {
       fixedNote = fix.note;
       ({ overrides, fields } = await effectiveDescriptionFields(target));
@@ -1940,6 +2540,30 @@ async function verifyAmenities(target: UnitAuditTarget): Promise<AmenityVerify> 
   return { row, keys, scannedNote, missing, guestyCount: storedNames.length, guestyReadError: null };
 }
 
+async function readAmenityScanReceipt(propertyId: number): Promise<any | null> {
+  const raw = await storage.getSetting(AMENITY_SCAN_RECEIPTS_SETTING_KEY).catch(() => undefined);
+  try {
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === "object" && Object.prototype.hasOwnProperty.call(map, String(propertyId))
+      ? map[String(propertyId)]
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readPricingAuditReceipt(propertyId: number): Promise<any | null> {
+  const raw = await storage.getSetting(PRICING_AUDIT_RECEIPTS_SETTING_KEY).catch(() => undefined);
+  try {
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === "object" && Object.prototype.hasOwnProperty.call(map, String(propertyId))
+      ? map[String(propertyId)]
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 async function stageAmenities(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
   let v = await verifyAmenities(target);
   const items: string[] = [];
@@ -1949,16 +2573,38 @@ async function stageAmenities(target: UnitAuditTarget, record: UnitAuditJobRecor
   // persist, and (when mapped) the add-only union push to Guesty. Fire when
   // there's no AI-scanned set yet or saved amenities are missing from Guesty.
   let fixedNote = "";
-  const needsFix = !v.row || !v.row.scannedAt || (v.missing != null && v.missing.length > 0);
+  const needsFix = record.fullAutomation || !v.row || !v.row.scannedAt || (v.missing != null && v.missing.length > 0);
   if (needsFix && autoFixEnabled(record)) {
     touch(record, { message: "Scanning photos + area for amenities (Claude vision + web research), saving, and pushing add-only…" });
     // Ceiling accounting: two verify calls (worst case each AMENITY_VERIFY_
     // WORST_MS) + this scan + a 30s cushion must fit STAGE_TIMEOUT_MS.amenities.
     const scanTimeoutMs = STAGE_TIMEOUT_MS.amenities - 2 * AMENITY_VERIFY_WORST_MS - 30_000;
-    const scan = await loopbackJson("POST", "/api/builder/scan-amenities", { propertyId: target.propertyId }, scanTimeoutMs)
+    const scan = await loopbackJson("POST", "/api/builder/scan-amenities", {
+      propertyId: target.propertyId,
+      requireVision: record.fullAutomation,
+    }, scanTimeoutMs)
       .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
     if (scan.status >= 400) {
       items.push(`Auto-fix failed: amenity scan did not run (${String((scan.data as any)?.error ?? `HTTP ${scan.status}`)})`);
+      if (record.fullAutomation) {
+        return {
+          verdict: "error",
+          detail: `The required complete Claude amenity scan failed: ${String((scan.data as any)?.error ?? `HTTP ${scan.status}`)}`,
+          items,
+        };
+      }
+    } else if (record.fullAutomation && ((scan.data as any)?.strictVisionComplete !== true || (scan.data as any)?.provenance?.method !== "claude-vision")) {
+      return {
+        verdict: "error",
+        detail: "The amenity scan did not prove a complete Claude-vision pass, so its baseline/partial result was not accepted.",
+        items,
+      };
+    } else if (record.fullAutomation && target.guestyListingId && (scan.data as any)?.guesty?.synced !== true) {
+      return {
+        verdict: "error",
+        detail: `Claude detected and saved the amenities locally, but Guesty sync failed: ${String((scan.data as any)?.guesty?.error ?? "unknown Guesty error")}`,
+        items,
+      };
     } else {
       const synced = (scan.data as any)?.guesty?.synced === true;
       fixedNote = `AI amenity scan ran and saved${synced ? " + pushed add-only to Guesty" : target.guestyListingId ? " (Guesty push did not confirm — see Amenities tab)" : " (no Guesty listing yet — auto-push on connect)"}`;
@@ -1975,6 +2621,17 @@ async function stageAmenities(target: UnitAuditTarget, record: UnitAuditJobRecor
     };
   }
   items.unshift(`${v.keys.length} amenities saved in-system (source: ${v.row.source ?? "unknown"}, ${v.scannedNote})`);
+  if (record.fullAutomation) {
+    const receipt = await readAmenityScanReceipt(target.propertyId);
+    if (!receipt || receipt.strictVisionComplete !== true || receipt.method !== "claude-vision" || !receipt.photoFingerprint) {
+      return {
+        verdict: "error",
+        detail: "Amenities are saved, but the durable Claude photo-scan receipt is missing or incomplete.",
+        items,
+      };
+    }
+    items.push(`Claude vision receipt: ${receipt.model ?? "Claude"} · ${receipt.photosConsidered ?? 0} photos · ${String(receipt.photoFingerprint).slice(0, 18)}…`);
+  }
 
   if (!target.guestyListingId) {
     return {
@@ -2007,32 +2664,51 @@ async function stageAmenities(target: UnitAuditTarget, record: UnitAuditJobRecor
   };
 }
 
-async function readCoverCollageRecord(listingId: string): Promise<any> {
+async function readCoverCollageRecord(target: UnitAuditTarget, allowPropertyOnly: boolean): Promise<any> {
   const raw = await storage.getSetting(COVER_COLLAGE_SETTING_KEY).catch(() => undefined);
   try {
     const map = raw ? (JSON.parse(raw) as Record<string, any>) : {};
-    return Object.prototype.hasOwnProperty.call(map, listingId) ? map[listingId] : null;
+    const propertyKey = `property:${target.propertyId}`;
+    if (target.guestyListingId && Object.prototype.hasOwnProperty.call(map, target.guestyListingId)) return map[target.guestyListingId];
+    return allowPropertyOnly && Object.prototype.hasOwnProperty.call(map, propertyKey)
+      ? map[propertyKey]
+      : null;
   } catch {
     return null;
   }
 }
 
 async function stageCoverCollage(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
-  if (!target.guestyListingId) {
+  if (!target.guestyListingId && !record.fullAutomation) {
     return { verdict: "skipped", detail: "No Guesty listing mapped — the cover collage is generated + pinned when a listing exists." };
   }
-  let recordRow: any = await readCoverCollageRecord(target.guestyListingId);
+  if (record.fullAutomation) {
+    const strictGaps = strictPhotoFolderGaps(target);
+    if (strictGaps.inventoryUnavailable) {
+      return { verdict: "error", detail: "The configured photo-folder inventory could not be read, so the strict Claude collage was not generated or accepted." };
+    }
+    if (strictGaps.communityMissing) {
+      return {
+        verdict: "error",
+        detail: "The strict Claude collage requires a non-empty published community-photo pool for its left panel; no existing receipt or unit-only pair was accepted.",
+      };
+    }
+  }
+  let recordRow: any = await readCoverCollageRecord(target, record.fullAutomation);
   let fixedNote = "";
+  let generatedCollageUrl: string | null = null;
   // A unit replaced earlier in THIS sweep may be featured on the existing
   // collage — re-compose from the surviving photo set (post-swap
   // follow-through, 2026-07-12).
   const collageStaleFromSwap = !!recordRow && replacedThisSweep.has(record.jobId);
-  if ((!recordRow || collageStaleFromSwap) && autoFixEnabled(record)) {
+  if ((record.fullAutomation || !recordRow || collageStaleFromSwap) && autoFixEnabled(record)) {
     // AUTO-FIX: the one-click AI collage — same endpoint the Photos-tab
     // button drives, candidates built from the resolved PUBLISHED photos
     // (hidden files never reach the pick; community-group labels keep the
     // destination-left pairing heuristic honest). Vision fail-softs to the
-    // caption heuristic inside the endpoint; ImgBB + Guesty push included.
+    // caption heuristic inside the endpoint for manual audits. Full dashboard
+    // automation requires a real Claude-vision pick and saves locally before
+    // the optional ImgBB + Guesty push.
     const candidates = target.groups.flatMap((g) =>
       g.filenames.map((filename) => ({
         url: `/photos/${g.folder}/${filename}`,
@@ -2041,29 +2717,76 @@ async function stageCoverCollage(target: UnitAuditTarget, record: UnitAuditJobRe
       })),
     ).slice(0, 80); // endpoint caps vision at COVER_COLLAGE_VISION_CAP anyway
     if (candidates.length < 2) {
-      return { verdict: "attention", detail: "No AI cover collage and fewer than 2 published photos to build one from." };
+      return { verdict: record.fullAutomation ? "error" : "attention", detail: "No AI cover collage and fewer than 2 published photos to build one from." };
     }
-    touch(record, { message: "Making the AI cover collage (Claude picks the pair, composes, pushes + pins on Guesty)…" });
+    touch(record, { message: target.guestyListingId
+      ? "Making the AI cover collage (Claude picks the pair, saves locally, then pushes + pins on Guesty)…"
+      : "Making the AI cover collage (Claude picks the pair and saves it locally for this listing)…" });
+    if (record.fullAutomation && target.guestyListingId) {
+      // Arm the final exact-sync obligation BEFORE the collage endpoint's
+      // pictures[] PUT. A replacement may have cleared an earlier pending
+      // flag, and a process death after this PUT must still resume into the
+      // final verifier. Clear the previous identity because this call creates
+      // a new collage URL.
+      await markGuestyGallerySyncPending(record, {
+        requiredCoverCollageUrl: null,
+        finalGuestyGalleryVerified: false,
+      });
+    }
     const make = await loopbackJson("POST", "/api/builder/auto-cover-collage", {
-      listingId: target.guestyListingId,
+      propertyId: target.propertyId,
+      listingId: target.guestyListingId ?? null,
       photos: candidates,
+      requireVision: record.fullAutomation,
     }, STAGE_TIMEOUT_MS["cover-collage"] - 60_000).catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
     if (make.status >= 400) {
       return {
-        verdict: "attention",
+        verdict: record.fullAutomation ? "error" : "attention",
         detail: `No AI cover collage, and the auto-make failed: ${String((make.data as any)?.error ?? `HTTP ${make.status}`)} — use 🖼 Make Cover Collage on the Photos tab.`,
       };
     }
-    recordRow = await readCoverCollageRecord(target.guestyListingId);
+    if (record.fullAutomation && target.guestyListingId) {
+      const rawGeneratedCollageUrl = typeof (make.data as any)?.collageUrl === "string"
+        ? String((make.data as any).collageUrl).trim()
+        : "";
+      let validGeneratedCollageUrl = false;
+      try {
+        const parsed = new URL(rawGeneratedCollageUrl);
+        validGeneratedCollageUrl = rawGeneratedCollageUrl.length <= 2_000
+          && (parsed.protocol === "http:" || parsed.protocol === "https:")
+          && !!parsed.hostname;
+      } catch { /* invalid URL is rejected below */ }
+      if (!validGeneratedCollageUrl) {
+        return {
+          verdict: "error",
+          detail: "The collage endpoint changed Guesty but did not return a valid persisted URL identity for the required final exact-gallery verification.",
+        };
+      }
+      generatedCollageUrl = rawGeneratedCollageUrl;
+    }
+    recordRow = await readCoverCollageRecord(target, record.fullAutomation);
+    if (record.fullAutomation && (make.data as any)?.method !== "vision") {
+      return { verdict: "error", detail: "The collage endpoint did not prove a Claude-vision pick, so the generated collage was not accepted." };
+    }
+    const guestySynced = (make.data as any)?.guesty?.synced === true;
+    if (target.guestyListingId && !guestySynced) {
+      return {
+        verdict: "error",
+        detail: `The Claude collage was generated and saved locally, but Guesty sync failed: ${String((make.data as any)?.guesty?.error ?? "unknown Guesty error")}`,
+      };
+    }
     fixedNote = collageStaleFromSwap
-      ? "AI cover collage re-composed after this sweep's unit replacement, pushed to Guesty (pinned first)"
-      : "AI cover collage generated, pushed to Guesty (pinned first), and saved in-system";
+      ? `Claude cover collage re-composed after this sweep's unit replacement and saved${guestySynced ? "; pushed to Guesty (pinned first)" : " locally"}`
+      : `Claude cover collage generated and saved${guestySynced ? "; pushed to Guesty (pinned first)" : " locally (no Guesty listing mapped)"}`;
   }
   if (!recordRow) {
     return {
-      verdict: "attention",
+      verdict: record.fullAutomation ? "error" : "attention",
       detail: "No AI cover collage on file for this listing — one-click 🖼 Make Cover Collage on the Photos tab (Claude picks the pair, composes, pushes + pins).",
     };
+  }
+  if (record.fullAutomation && recordRow.method !== "vision") {
+    return { verdict: "error", detail: "The saved collage was not selected by Claude vision — the full audit will not accept a heuristic cover." };
   }
   const items: string[] = [
     `Picked ${recordRow.method === "vision" ? "by Claude vision" : "by the caption heuristic (vision fallback)"} on ${String(recordRow.createdAt ?? "").slice(0, 10)}`,
@@ -2071,19 +2794,79 @@ async function stageCoverCollage(target: UnitAuditTarget, record: UnitAuditJobRe
   if (recordRow.left?.caption || recordRow.right?.caption) {
     items.push(`Pair: ${recordRow.left?.caption ?? "?"} + ${recordRow.right?.caption ?? "?"}`);
   }
-  const file = path.join(process.cwd(), "client/public/photos", COVER_COLLAGE_DISK_FOLDER, `${String(target.guestyListingId).replace(/[^a-zA-Z0-9_-]+/g, "-")}.jpg`);
+  const savedFile = path.basename(String(recordRow.localPath ?? ""));
+  const fallbackFile = target.guestyListingId
+    ? `${String(target.guestyListingId).replace(/[^a-zA-Z0-9_-]+/g, "-")}.jpg`
+    : `property-${target.propertyId < 0 ? `neg-${Math.abs(target.propertyId)}` : target.propertyId}.jpg`;
+  const file = path.join(process.cwd(), "client/public/photos", COVER_COLLAGE_DISK_FOLDER, savedFile || fallbackFile);
   const onDisk = await fs.promises.access(file).then(() => true).catch(() => false);
   if (!onDisk) items.push("Saved collage file is missing from the photos volume (record exists; Guesty copy unaffected)");
+  if (!onDisk && record.fullAutomation) {
+    return { verdict: "error", detail: "The Claude collage receipt exists, but its locally saved JPEG is missing from the photos volume.", items };
+  }
+  if (record.fullAutomation) {
+    if (target.guestyListingId) {
+      if (!generatedCollageUrl) {
+        return { verdict: "error", detail: "The validated Claude collage is missing its current-audit Guesty URL identity.", items };
+      }
+      // Accept the new identity only after the response, durable vision
+      // receipt, and local JPEG have all been validated. This atomically marks
+      // the collage current for the final photo set and keeps exact sync armed.
+      await markGuestyGallerySyncPending(record, {
+        coverCollageNeedsRefresh: false,
+        requiredCoverCollageUrl: generatedCollageUrl,
+        finalGuestyGalleryVerified: false,
+      });
+    } else {
+      await touchDurably(record, {
+        coverCollageNeedsRefresh: false,
+        requiredCoverCollageUrl: null,
+        finalGuestyGalleryVerified: false,
+      });
+    }
+  }
   return {
     verdict: fixedNote ? "fixed" : "pass",
     detail: fixedNote
       ? `${fixedNote} (${recordRow.method === "vision" ? "Claude-vision pick" : "heuristic pick"}).`
-      : `AI cover collage on file and pushed to Guesty (pinned first)${recordRow.method === "vision" ? "" : " — heuristic pick, consider re-running for a Claude-vision pick"}.`,
+      : `AI cover collage on file${target.guestyListingId ? " and pushed to Guesty (pinned first)" : " and saved locally for this listing"}${recordRow.method === "vision" ? "" : " — heuristic pick, consider re-running for a Claude-vision pick"}.`,
     items,
   };
 }
 
-async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
+async function stageLayout(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
+  let strictApply: Awaited<ReturnType<typeof applyBeddingPhotoScanForAudit>> | null = null;
+  if (record.fullAutomation) {
+    touch(record, { message: "Scanning every unit's bedding + bathroom photos with Claude, saving >60% evidence, and safely syncing existing Guesty room slots…" });
+    try {
+      strictApply = await applyBeddingPhotoScanForAudit(target.propertyId, {
+        guestyListingId: target.guestyListingId,
+        forceFresh: true,
+      });
+    } catch (e: any) {
+      return {
+        verdict: "error",
+        detail: `Claude bedding/bathroom scan could not complete, so no fallback evidence was accepted: ${String(e?.message ?? e)}`,
+      };
+    }
+    if (strictApply.guestyStatus === "failed" || strictApply.guestyStatus === "blocked") {
+      return {
+        verdict: "error",
+        detail: strictApply.guestyStatus === "failed"
+          ? "Claude bedding/bathroom evidence was saved locally, but the Guesty bedding update failed."
+          : "Claude found confident bedding, but it could not be mapped into the existing Guesty bedroom slots without changing the room structure.",
+        items: strictApply.items,
+      };
+    }
+    if (!target.guestyListingId) {
+      return {
+        verdict: "fixed",
+        detail: "Claude bedding and bathroom scan completed; every >60% detection was saved locally for the listing (no Guesty listing mapped).",
+        items: strictApply.items,
+      };
+    }
+  }
+
   if (!target.guestyListingId) {
     return { verdict: "skipped", detail: "No Guesty listing mapped — nothing to compare the bedding/layout against." };
   }
@@ -2095,7 +2878,7 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
   if (status >= 400) {
     return { verdict: "error", detail: `Could not read the Guesty listing to verify the layout (${String((data as any)?.error ?? `HTTP ${status}`)} — after ${attemptsUsed} read attempt${attemptsUsed === 1 ? "" : "s"}).` };
   }
-  const items: string[] = [];
+  const items: string[] = [...(strictApply?.items ?? [])];
   let mismatch = false;
   let soft = false;
   const gBedrooms = Number(data?.bedrooms);
@@ -2131,14 +2914,25 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
   // Bedding tab's "Scan photos for bedding" button (a fingerprint-fresh
   // stored scan is reused, so a tab scan and an audit share one vision spend).
   // The Guesty rooms read lives in server/bedding-photo-scan.ts — this module
-  // stays push-free per the layout stage's source lock. Findings are
-  // flag-only, like every layout finding: the remedy is the Bedding tab
-  // (clicking Scan photos for bedding auto-applies >60% findings and pushes
-  // when mapped). Unphotographed bedrooms are
-  // reported as unverifiable, never guessed. Kill: AUDIT_BEDDING_PHOTO_CHECK=0.
+  // stays push-free per the layout stage's source lock. Standard audit
+  // findings are flag-only; a Bedding-tab click auto-applies fresh vision
+  // evidence strictly above 60%. Full dashboard automation has already called
+  // the strict helper above: it updates only existing bedroom slots with
+  // photographed >60% evidence, while unphotographed rooms/counts stay
+  // untouched. Unphotographed bedrooms are reported as unverifiable, never
+  // guessed.
+  // Kill: AUDIT_BEDDING_PHOTO_CHECK=0.
   let beddingMismatch = false;
   let beddingClean = false;
-  if (String(process.env.AUDIT_BEDDING_PHOTO_CHECK ?? "").trim() !== "0") {
+  const beddingReadbackEnabled = String(process.env.AUDIT_BEDDING_PHOTO_CHECK ?? "").trim() !== "0";
+  if (record.fullAutomation && !beddingReadbackEnabled) {
+    return {
+      verdict: "error",
+      detail: "Full dashboard automation requires the post-apply Claude bedding read-back, but AUDIT_BEDDING_PHOTO_CHECK=0 disables it.",
+      items,
+    };
+  }
+  if (beddingReadbackEnabled) {
     try {
       const bedding = await beddingPhotoCheckForAudit(target.propertyId, target.guestyListingId);
       items.push(...bedding.items);
@@ -2149,39 +2943,51 @@ async function stageLayout(target: UnitAuditTarget): Promise<StageOutcome> {
         beddingClean = true;
       }
     } catch (e: any) {
-      // The CHECK could not run (Guesty read / scan failure) — an attention
-      // note, never a silent pass (honesty rule) and never a hard fail (the
-      // count comparison above already verified what it could).
+      // Strict dashboard runs must prove the just-applied bedding survived a
+      // fresh Guesty read. Manual sweeps retain the historical attention-only
+      // posture because their source of truth may be browser-local curation.
+      if (record.fullAutomation) {
+        return {
+          verdict: "error",
+          detail: `Claude bedding evidence was saved/applied, but the Guesty read-back could not verify it: ${String(e?.message ?? e).slice(0, 180)}`,
+          items,
+        };
+      }
       soft = true;
       items.push(`Bedding photo check could not run (${String(e?.message ?? e).slice(0, 160)}) — re-run the audit to retry`);
     }
   }
 
   if (mismatch || soft) {
-    // DELIBERATELY no auto-push here: the canonical bedding push reads the
-    // operator's Bedding-tab configuration from browser localStorage
-    // (loadBuilderBeddingConfig), which this server-side sweep cannot see —
-    // pushing static defaults could clobber his curated bed arrangement.
-    // The remedy is one click on the builder's push button.
-    items.push("Fix: open the builder and push Bedding + sqft (the sweep never overwrites a layout — your Bedding-tab configuration lives in the browser)");
+    if (strictApply) {
+      items.push("The Claude evidence was saved/applied, but structural counts or unphotographed room details still disagree; the audit never overwrites a layout count or guesses an unseen room");
+    } else {
+      // Manual audit behavior stays proposal-only because its canonical config
+      // lives in the browser and may contain operator curation.
+      items.push("Fix: open the builder and push Bedding + sqft (the sweep never overwrites a layout — your Bedding-tab configuration lives in the browser)");
+    }
   }
   if (mismatch) {
     return { verdict: "failed", detail: "Guesty bedroom count does not match the system unit config — guests are filtering on the wrong layout.", items };
   }
   if (soft) {
     return {
-      verdict: "attention",
+      verdict: record.fullAutomation && beddingMismatch ? "error" : "attention",
       detail: beddingMismatch
-        ? "The unit photos disagree with the pushed Guesty bed layout — open the Bedding tab and click Scan photos for bedding to auto-apply and push."
+        ? record.fullAutomation
+          ? "The post-apply Guesty read-back still disagrees with Claude's confident photographed bedding; the strict audit did not accept the push."
+          : "The unit photos disagree with the pushed Guesty bed layout — open the Bedding tab and click Scan photos for bedding to auto-apply and push."
         : "Layout numbers partially disagree with Guesty — review the Bedding tab.",
       items,
     };
   }
   return {
-    verdict: "pass",
-    detail: beddingClean
-      ? "Guesty layout matches the system config (bedrooms/bathrooms/sleeps) and the photographed beds match the pushed bed layout."
-      : "Guesty layout matches the system config (bedrooms/bathrooms/sleeps).",
+    verdict: strictApply ? "fixed" : "pass",
+    detail: strictApply
+      ? "Claude bedding/bathroom evidence was saved and safely applied to existing Guesty room slots; layout counts and photographed beds re-verify clean."
+      : beddingClean
+        ? "Guesty layout matches the system config (bedrooms/bathrooms/sleeps) and the photographed beds match the pushed bed layout."
+        : "Guesty layout matches the system config (bedrooms/bathrooms/sleeps).",
     items,
   };
 }
@@ -2193,7 +2999,7 @@ type PricingVerify = {
   needsRefresh: boolean;
 };
 
-async function verifyPricing(target: UnitAuditTarget): Promise<PricingVerify> {
+async function verifyPricing(target: UnitAuditTarget, opts: { localOnlyAccepted?: boolean } = {}): Promise<PricingVerify> {
   const schedule = await storage.getScannerSchedule(target.propertyId).catch(() => undefined);
   const rates = await storage.getPropertyMarketRates(target.propertyId).catch(() => []);
   const items: string[] = [];
@@ -2221,7 +3027,9 @@ async function verifyPricing(target: UnitAuditTarget): Promise<PricingVerify> {
 
   const pushedAt = schedule?.lastGuestyRatePushAt ? new Date(schedule.lastGuestyRatePushAt as any).getTime() : null;
   const pushStatus = (schedule as any)?.lastGuestyRatePushStatus ?? null;
-  if (!pushedAt) {
+  if (!target.guestyListingId && opts.localOnlyAccepted) {
+    items.push("No Guesty listing mapped — the complete SearchAPI pricing table is saved locally and no Guesty push is required yet");
+  } else if (!pushedAt) {
     bump("attention");
     needsRefresh = true;
     items.push("Rates have never been pushed to Guesty for this property");
@@ -2276,8 +3084,16 @@ async function verifyPricing(target: UnitAuditTarget): Promise<PricingVerify> {
 }
 
 async function stagePricing(target: UnitAuditTarget, record: UnitAuditJobRecord): Promise<StageOutcome> {
-  let v = await verifyPricing(target);
+  const localOnlyAccepted = record.fullAutomation && !target.guestyListingId;
+  let v = await verifyPricing(target, { localOnlyAccepted });
   const items = [...v.items];
+  if (record.fullAutomation && String(process.env.AUDIT_PRICING_REFRESH ?? "").trim() === "0") {
+    return {
+      verdict: "error",
+      detail: "Full dashboard automation requires a fresh SearchAPI Airbnb pricing run, but AUDIT_PRICING_REFRESH=0 disables it.",
+      items,
+    };
+  }
 
   // AUTO-FIX: the SAME per-property refresh+push path the "Update market
   // pricing" queue and the weekly cron drive — SearchAPI Airbnb median scan
@@ -2286,18 +3102,75 @@ async function stagePricing(target: UnitAuditTarget, record: UnitAuditJobRecord)
   // problem (never/stale/failed/seed/missing-size/RED confirmation) so a
   // fresh table never burns SearchAPI budget. AUDIT_PRICING_REFRESH=0 kills.
   let fixedNote = "";
-  if (v.needsRefresh && autoFixEnabled(record) && String(process.env.AUDIT_PRICING_REFRESH ?? "").trim() !== "0") {
+  const shouldRefresh = record.fullAutomation || v.needsRefresh;
+  if (record.fullAutomation) items.push("Full dashboard audit: forcing a fresh live SearchAPI Airbnb pricing research run and saving the complete monthly setup");
+  if (shouldRefresh && autoFixEnabled(record) && String(process.env.AUDIT_PRICING_REFRESH ?? "").trim() !== "0") {
     touch(record, { message: "Refreshing market rates (SearchAPI Airbnb median) and pushing marked-up rates to Guesty — the long pricing leg…" });
     const refreshPath = target.isDraft
       ? `/api/community/${-target.propertyId}/refresh-pricing`
       : `/api/property/${target.propertyId}/refresh-market-rates`;
-    const refresh = await loopbackJson("POST", refreshPath, {}, STAGE_TIMEOUT_MS.pricing - 2 * 60_000)
+    const refresh = await loopbackJson("POST", refreshPath, { forceSearchApi: record.fullAutomation }, STAGE_TIMEOUT_MS.pricing - 2 * 60_000)
       .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
     if (refresh.status >= 400) {
       items.push(`Auto-fix failed: market-rate refresh did not run (${String((refresh.data as any)?.error ?? `HTTP ${refresh.status}`)})`);
+      if (record.fullAutomation) {
+        return {
+          verdict: "error",
+          detail: `The required SearchAPI Airbnb pricing refresh failed: ${String((refresh.data as any)?.error ?? `HTTP ${refresh.status}`)}`,
+          items,
+        };
+      }
     } else if ((refresh.data as any)?.alreadyRunning) {
       items.push("A market-rate refresh for this property is already running — re-run the audit after it lands");
-    } else if ((refresh.data as any)?.guestyPush?.skipped) {
+      if (record.fullAutomation) {
+        return {
+          verdict: "attention",
+          detail: "A SearchAPI pricing refresh is already running; the audit will retry before writing its receipt.",
+          items,
+        };
+      }
+    } else if (record.fullAutomation) {
+      const receipt = (refresh.data as any)?.auditReceipt;
+      const durableReceipt = await readPricingAuditReceipt(target.propertyId);
+      const expectedRows = target.unitBedroomSizes.length;
+      const receiptValid = receipt?.engine === "searchapi-airbnb"
+        && receipt?.propertyId === target.propertyId
+        && typeof receipt?.runId === "string"
+        && /^sha256:[0-9a-f]{64}$/.test(String(receipt?.rowFingerprint ?? ""))
+        && Number(receipt?.bedroomRows) === expectedRows
+        && Number(receipt?.monthsSaved) > 0
+        && Number(receipt?.searchAttemptMonths) >= Math.max(1, expectedRows)
+        && durableReceipt?.runId === receipt.runId
+        && durableReceipt?.rowFingerprint === receipt.rowFingerprint;
+      if (!receiptValid) {
+        return {
+          verdict: "error",
+          detail: "The pricing endpoint returned without a matching durable receipt for this fresh SearchAPI Airbnb run.",
+          items,
+        };
+      }
+      items.push(
+        `SearchAPI receipt ${receipt.runId}: ${receipt.searchAttemptMonths} searched month(s), ${receipt.liveCompMonths} with live comps, ` +
+        `${receipt.extrapolatedMonths} extrapolated, ${receipt.staticFallbackMonths} thin-market fallback, ${receipt.monthsSaved} saved total · ${receipt.rowFingerprint.slice(0, 18)}…`,
+      );
+      if ((refresh.data as any)?.guestyPush?.skipped && !localOnlyAccepted) {
+        const reason = String((refresh.data as any).guestyPush.reason ?? "no mapped Guesty listing / no priced months");
+        items.push(`Auto-fix PARTIAL: market rates rescanned + saved, but the Guesty push was SKIPPED — ${reason}`);
+        const re = await verifyPricing(target, { localOnlyAccepted });
+        items.push(...re.items.map((line) => `Re-verify: ${line}`));
+        return {
+          verdict: re.verdict === "pass" ? "attention" : re.verdict,
+          detail: `Rates rescanned, but the Guesty push was skipped: ${reason} — the Last Price Scan column stamps real pushes only.`,
+          items,
+        };
+      }
+      fixedNote = localOnlyAccepted
+        ? "SearchAPI Airbnb market rates refreshed and the complete pricing setup saved locally"
+        : "SearchAPI Airbnb market rates refreshed + pushed to Guesty";
+      items.push(`Auto-fixed: ${fixedNote}`);
+      v = await verifyPricing(target, { localOnlyAccepted });
+      items.push(...v.items.map((line) => `Re-verify: ${line}`));
+    } else if ((refresh.data as any)?.guestyPush?.skipped && !localOnlyAccepted) {
       // HONESTY (2026-07-12 "Last Price Scan didn't update" incident): the
       // scan saved a fresh pricing table, but NOTHING reached Guesty — the
       // refresh routes soft-skip the push (no mapped listing, no priced
@@ -2306,7 +3179,7 @@ async function stagePricing(target: UnitAuditTarget, record: UnitAuditJobRecord)
       // that instead of claiming "refreshed + pushed".
       const reason = String((refresh.data as any).guestyPush.reason ?? "no mapped Guesty listing / no priced months");
       items.push(`Auto-fix PARTIAL: market rates rescanned + saved, but the Guesty push was SKIPPED — ${reason}`);
-      const re = await verifyPricing(target);
+      const re = await verifyPricing(target, { localOnlyAccepted });
       items.push(...re.items.map((l) => `Re-verify: ${l}`));
       return {
         verdict: re.verdict === "pass" ? "attention" : re.verdict,
@@ -2314,9 +3187,11 @@ async function stagePricing(target: UnitAuditTarget, record: UnitAuditJobRecord)
         items,
       };
     } else {
-      fixedNote = "Market rates refreshed + pushed to Guesty";
+      fixedNote = localOnlyAccepted
+        ? "SearchAPI Airbnb market rates refreshed and the complete pricing setup saved locally"
+        : "SearchAPI Airbnb market rates refreshed + pushed to Guesty";
       items.push(`Auto-fixed: ${fixedNote}`);
-      v = await verifyPricing(target);
+      v = await verifyPricing(target, { localOnlyAccepted });
       items.push(...v.items.map((l) => `Re-verify: ${l}`));
     }
   }
@@ -2325,7 +3200,7 @@ async function stagePricing(target: UnitAuditTarget, record: UnitAuditJobRecord)
     return { verdict: "fixed", detail: `${fixedNote} — re-verify clean.`, items };
   }
   const detail = v.verdict === "pass"
-    ? `Pricing table fresh + pushed · ${v.items.find((i) => i.startsWith("Match confirmation")) ?? "rates verified"}`
+    ? `Pricing table fresh${localOnlyAccepted ? " + saved locally" : " + pushed"} · ${v.items.find((i) => i.startsWith("Match confirmation")) ?? "rates verified"}`
     : v.items.find((i) => /FAILED|never been pushed|stale|No market-rate|RED|AMBER|seeded/.test(i)) ?? "Pricing needs review.";
   return { verdict: v.verdict, detail, items };
 }
@@ -2408,6 +3283,9 @@ async function runStageForRecord(record: UnitAuditJobRecord, stageId: UnitAuditS
   try {
     const target = stageId === "resolve" ? null : targets.get(record.jobId) ?? null;
     if (stageId !== "resolve" && !target) throw new Error("internal: target not resolved");
+    if (record.fullAutomation && FULL_AUTOMATION_MUTATING_STAGES.has(stageId) && !autoFixEnabled(record)) {
+      throw new Error("Full dashboard automation requires auto-fix, but it is disabled for this run or by UNIT_AUDIT_AUTOFIX_DISABLED");
+    }
     const work: Promise<StageOutcome> = stageId === "resolve"
       ? stageResolve(record)
       : stageId === "photo-dedupe" ? stagePhotoDedupe(target!, record)
@@ -2417,10 +3295,17 @@ async function runStageForRecord(record: UnitAuditJobRecord, stageId: UnitAuditS
       : stageId === "descriptions" ? stageDescriptions(target!, record)
       : stageId === "amenities" ? stageAmenities(target!, record)
       : stageId === "cover-collage" ? stageCoverCollage(target!, record)
-      : stageId === "layout" ? stageLayout(target!)
+      : stageId === "layout" ? stageLayout(target!, record)
       : stageId === "pricing" ? stagePricing(target!, record)
       : stageChannels(target!);
-    outcome = await withTimeout(work, STAGE_TIMEOUT_MS[stageId], UNIT_AUDIT_STAGE_LABELS[stageId]);
+    // Promise.race cannot cancel a mutating stage. In strict bulk mode, letting
+    // the wrapper time out would start later stages while the original write
+    // kept running in the background (photo replacement vs collage/push is the
+    // dangerous case). Each strict mutating engine owns bounded network calls
+    // and polling deadlines, so await it to its real terminal result.
+    outcome = record.fullAutomation && FULL_AUTOMATION_MUTATING_STAGES.has(stageId)
+      ? await work
+      : await withTimeout(work, STAGE_TIMEOUT_MS[stageId], UNIT_AUDIT_STAGE_LABELS[stageId]);
   } catch (e: any) {
     if (String(e?.message) === "cancelled") throw e;
     // A resolve failure is fatal for the whole sweep — rethrow after recording.
@@ -2476,54 +3361,119 @@ async function acquireSweepSlot(record: UnitAuditJobRecord): Promise<void> {
 // PR #1042): if this sweep's dedupe stage hid ≥1 duplicate, fire ONE
 // full-gallery re-push so the hides reach the live Guesty listing — AFTER
 // every photo stage AND the retry rails, so a minutes-long push can never
-// race the replace rung or the collage pin. FIRE-AND-FORGET like the
-// unit-swaps hook (per-property serialized inside guesty-photo-repush; the
-// photos push ledger — the Photos tab "Pushed" chip — is the confirmation
-// surface). Skipped when the replace rung committed a swap this sweep: the
-// swap's own awaited re-push assembles the CURRENT gallery and the assembly
-// drops hidden rows, so the dedupe hides already rode along — a second push
-// would be pure duplicate Guesty load. RATE-LIMIT POSTURE: a push fires only
-// when a hide actually landed THIS sweep, so the weekly cron is
+// race the replace rung or the collage pin. Standard/manual sweeps keep the
+// historical fire-and-forget behavior (the Photos tab ledger confirms it).
+// Strict dashboard bulk audits await the push and turn a mapped push failure
+// into an error receipt, so "Audit selected" cannot finish green while Guesty
+// still serves a hidden duplicate. A completed replacement resets the hide counter immediately after
+// its awaited gallery push: pre-swap hides already rode along, while any hides
+// found by the mandatory post-swap dedupe are newer and therefore still reach
+// this one end-of-sweep push. RATE-LIMIT POSTURE: a push fires only when a hide
+// actually landed after the latest gallery push, so the weekly cron is
 // self-quenching — once the dupes are hidden, later sweeps find nothing new
 // and fire nothing; sweeps run one-at-a-time (UNIT_AUDIT_CONCURRENCY) so
 // pushes space out, and every Guesty call serializes through guesty-sync's
 // global gate. Kill switch: AUDIT_DEDUPE_GUESTY_PUSH=0.
-// Returns the honest receipt line for the photo-dedupe row (or null when
-// there is nothing to say). At-most-once per job: the map entry is consumed.
-function startSweepDedupeGuestySync(record: UnitAuditJobRecord): string | null {
-  const hidden = dedupeHiddenThisSweep.get(record.jobId) ?? 0;
-  if (hidden <= 0) return null;
-  dedupeHiddenThisSweep.delete(record.jobId);
-  const plural = hidden === 1 ? "" : "s";
-  if (String(process.env.AUDIT_DEDUPE_GUESTY_PUSH ?? "").trim() === "0") {
-    return `${hidden} hidden duplicate${plural} NOT removed from Guesty (AUDIT_DEDUPE_GUESTY_PUSH=0) — use "Push Photos to Guesty" on the Photos tab`;
-  }
-  if (replacedThisSweep.has(record.jobId)) {
-    return `${hidden} hidden duplicate${plural} already removed from Guesty by the unit replacement's gallery re-push — no extra push fired`;
-  }
+// Returns the honest receipt line plus any strict failure (or null when there
+// is nothing to say). At-most-once per job: the map entry is consumed.
+async function runSweepDedupeGuestySync(record: UnitAuditJobRecord): Promise<{ note: string; strictFailure?: string } | null> {
   const target = targets.get(record.jobId);
+  // Every mapped dashboard audit gets one final exact read-back after the
+  // collage stage, even if a successful replacement already cleared an
+  // earlier pending flag. The durable receipt makes a resumed job idempotent
+  // only after that exact current-audit collage + ordered gallery was proven.
+  const strictMappedFinalSync = record.fullAutomation
+    && !!target?.guestyListingId
+    && !record.finalGuestyGalleryVerified;
+  if (!record.pendingGuestyGallerySync && !strictMappedFinalSync) return null;
+  const hidden = record.pendingDedupeHiddenCount;
+  const plural = hidden === 1 ? "" : "s";
+  const localChange = hidden > 0
+    ? `${hidden} hidden duplicate${plural}`
+    : "the final locally changed gallery";
   if (!target?.guestyListingId) {
-    return `${hidden} hidden duplicate${plural} — property is not connected to Guesty, nothing to sync`;
+    try {
+      await clearGuestyGallerySyncPending(record, {
+        requiredCoverCollageUrl: null,
+        finalGuestyGalleryVerified: false,
+      });
+      return { note: `${localChange} saved locally — property is not connected to Guesty, nothing external to sync` };
+    } catch (e: any) {
+      const note = `${localChange} was saved locally, but its durable no-Guesty sync receipt could not be recorded (${String(e?.message ?? e)})`;
+      return record.fullAutomation ? { note, strictFailure: note } : { note };
+    }
   }
-  void repushGuestyPhotosForProperty(record.propertyId, {
-    reason: `unit-audit sweep — remove ${hidden} dedupe-hidden photo${plural} from the Guesty gallery`,
-  }).then((r) => {
-    if (!r.ok) console.warn(`[unit-audit] ${record.propertyName}: dedupe Guesty re-push did not complete — ${r.error ?? r.skipped ?? "unknown"}`);
-  }).catch((e: any) => {
-    console.warn(`[unit-audit] ${record.propertyName}: dedupe Guesty re-push failed to start — ${e?.message ?? e}`);
+  if (record.fullAutomation && !record.requiredCoverCollageUrl) {
+    const note = "Guesty exact-gallery sync was not attempted because this audit did not persist the generated Cover Collage URL identity.";
+    return { note, strictFailure: note };
+  }
+  if (String(process.env.AUDIT_DEDUPE_GUESTY_PUSH ?? "").trim() === "0") {
+    const note = `${localChange} NOT synchronized to Guesty (AUDIT_DEDUPE_GUESTY_PUSH=0) — use "Push Photos to Guesty" on the Photos tab`;
+    return record.fullAutomation ? { note, strictFailure: note } : { note };
+  }
+  const pushPromise = repushGuestyPhotosForProperty(record.propertyId, {
+    reason: record.fullAutomation
+      ? "unit-audit sweep — verify this audit's exact Cover Collage and final ordered gallery"
+      : `unit-audit sweep — synchronize final local gallery${hidden > 0 ? ` after hiding ${hidden} duplicate${plural}` : " after photo replacement"}`,
+    ...(record.fullAutomation ? { requiredCoverCollageUrl: record.requiredCoverCollageUrl! } : {}),
   });
-  return `Guesty gallery re-push started in the background to remove the ${hidden} hidden duplicate${plural} from the live listing — the Photos tab push ledger ("Pushed …") confirms completion`;
+  if (!record.fullAutomation) {
+    touch(record, {
+      pendingGuestyGallerySync: false,
+      pendingDedupeHiddenCount: 0,
+      requiredCoverCollageUrl: null,
+    });
+    void pushPromise.then((r) => {
+      if (!r.ok) console.warn(`[unit-audit] ${record.propertyName}: dedupe Guesty re-push did not complete — ${r.error ?? r.skipped ?? "unknown"}`);
+    }).catch((e: any) => {
+      console.warn(`[unit-audit] ${record.propertyName}: dedupe Guesty re-push failed to start — ${e?.message ?? e}`);
+    });
+    return { note: `Guesty gallery re-push started in the background to synchronize ${localChange} — the Photos tab push ledger ("Pushed …") confirms completion` };
+  }
+
+  try {
+    const result = await pushPromise;
+    const exactGalleryVerified = result.collagePinned === true && result.strictGalleryVerified === true;
+    if (result.ok && !result.skipped && exactGalleryVerified) {
+      try {
+        await clearGuestyGallerySyncPending(record, {
+          requiredCoverCollageUrl: null,
+          finalGuestyGalleryVerified: true,
+        });
+      } catch (e: any) {
+        const note = `Guesty exact-gallery read-back succeeded, but its durable completion receipt could not be saved (${String(e?.message ?? e)}); the sync remains pending`;
+        return { note, strictFailure: note };
+      }
+      return {
+        note: `Guesty exact gallery verified: this audit's Cover Collage is first and all ${result.successCount ?? 0} photo${result.successCount === 1 ? "" : "s"} match the intended order`,
+      };
+    }
+    const reason = result.error
+      ?? result.skipped
+      ?? (!exactGalleryVerified ? "the exact current-audit collage and ordered gallery were not proven" : "unknown Guesty push outcome");
+    const note = `Guesty gallery re-push did not complete while synchronizing ${localChange} (${reason}) — the strict audit cannot verify the live gallery`;
+    return { note, strictFailure: note };
+  } catch (e: any) {
+    const note = `Guesty gallery re-push failed while synchronizing ${localChange} (${String(e?.message ?? e)}) — the strict audit cannot verify the live gallery`;
+    return { note, strictFailure: note };
+  }
 }
 
 // Append the sync verdict to the photo-dedupe receipt row so the operator
 // can see from the receipt alone whether Guesty was updated.
-function noteSweepDedupeGuestySync(record: UnitAuditJobRecord): void {
-  const note = startSweepDedupeGuestySync(record);
-  if (!note) return;
+async function noteSweepDedupeGuestySync(record: UnitAuditJobRecord): Promise<void> {
+  const sync = await runSweepDedupeGuestySync(record);
+  if (!sync) return;
   const row = record.stages.find((s) => s.stage === "photo-dedupe");
   if (!row) return;
   touch(record, {
-    stages: upsertUnitAuditStageResult(record.stages, { ...row, items: [...(row.items ?? []), note] }),
+    stages: upsertUnitAuditStageResult(record.stages, {
+      ...row,
+      ...(sync.strictFailure
+        ? { verdict: "error" as const, detail: `${row.detail} Guesty sync failed after the local cleanup.` }
+        : {}),
+      items: [...(row.items ?? []), sync.note],
+    }),
   });
 }
 
@@ -2590,12 +3540,24 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
       }
     }
 
+    // Retry rails run after the first collage stage and may still hide,
+    // rescrape, repull, or replace photos. Every strict mutator pre-arms this
+    // durable dirty bit and clears the older collage identity before changing
+    // files. Re-compose once, after the LAST retry pass, so both local-only
+    // listings and the mapped final exact sync use a collage from the actual
+    // final gallery rather than one depicting a removed/hidden photo.
+    if (record.fullAutomation && record.coverCollageNeedsRefresh) {
+      if (cancelRequested.has(record.jobId)) throw new Error("cancelled");
+      await runStageForRecord(record, "cover-collage");
+    }
+
     // Every photo stage + the retry rails are done — safe point for the ONE
-    // background Guesty gallery re-push that propagates this sweep's dedupe
+    // Guesty gallery re-push that propagates this sweep's dedupe
     // hides to the live listing (no-op when nothing was hidden / a swap
     // already pushed). Must run BEFORE the receipt so the photo-dedupe row
-    // carries the sync verdict.
-    noteSweepDedupeGuestySync(record);
+    // carries the sync verdict. Strict dashboard runs await and verify it;
+    // standard runs preserve the background behavior.
+    await noteSweepDedupeGuestySync(record);
 
     const headline = unitAuditHeadline(record.stages);
     touch(record, { status: "completed", currentStage: null, message: headline, error: null });
@@ -2617,7 +3579,7 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
       // The hides a FAILED sweep applied are just as durable as a completed
       // sweep's — still sync them so the live listing doesn't keep serving
       // duplicates because a LATER stage (descriptions/pricing/…) errored.
-      noteSweepDedupeGuestySync(record);
+      await noteSweepDedupeGuestySync(record);
       touch(record, { status: "failed", currentStage: null, error: e?.message ?? "Audit sweep failed" });
     }
   } finally {
@@ -2627,13 +3589,12 @@ async function runUnitAuditJob(record: UnitAuditJobRecord): Promise<void> {
     targets.delete(record.jobId);
     communityResults.delete(record.jobId);
     replacedThisSweep.delete(record.jobId);
-    dedupeHiddenThisSweep.delete(record.jobId);
   }
 }
 
 // ── Public API (routes) ──────────────────────────────────────────────────────
 
-export async function startUnitAuditSweep(input: { propertyId: number; autoFix?: boolean; allowReplace?: boolean; source?: "manual" | "cron" }): Promise<
+export async function startUnitAuditSweep(input: { propertyId: number; autoFix?: boolean; allowReplace?: boolean; fullAutomation?: boolean; source?: "manual" | "cron" }): Promise<
   { ok: true; job: UnitAuditJobRecord } | { ok: false; status: number; error: string }
 > {
   const propertyId = Number(input.propertyId);
@@ -2646,13 +3607,43 @@ export async function startUnitAuditSweep(input: { propertyId: number; autoFix?:
 
   for (const existing of Array.from(jobs.values())) {
     if (existing.propertyId === propertyId && isUnitAuditStatusActive(existing.status)) {
+      if (input.fullAutomation === true && !existing.fullAutomation) {
+        // A queued job that has not acquired the worker can safely be upgraded
+        // in place. Once any standard stage has started/completed, reusing it
+        // would falsely tell Audit selected that the strict Claude/SearchAPI
+        // contract ran, even though earlier artifacts were never regenerated.
+        if (existing.status === "queued" && existing.currentStage == null && existing.stages.length === 0) {
+          touch(existing, { fullAutomation: true, autoFix: true, allowReplace: true, source: "manual" });
+          return { ok: true, job: existing };
+        }
+        return {
+          ok: false,
+          status: 409,
+          error: "A standard audit is already running for this property. Let it finish, then click Audit selected again so every strict stage runs from the beginning.",
+        };
+      }
       return { ok: true, job: existing };
     }
   }
   const raw = await storage.getSetting(UNIT_AUDIT_STORE_SETTING_KEY).catch(() => undefined);
   const persistedActive = findActiveUnitAuditJob(parseUnitAuditStore(raw ?? null), propertyId);
   if (persistedActive && !jobs.has(persistedActive.jobId)) {
+    if (input.fullAutomation === true && !persistedActive.fullAutomation) {
+      if (persistedActive.status === "queued" && persistedActive.currentStage == null && persistedActive.stages.length === 0) {
+        persistedActive.fullAutomation = true;
+        persistedActive.autoFix = true;
+        persistedActive.allowReplace = true;
+        persistedActive.source = "manual";
+      } else {
+        return {
+          ok: false,
+          status: 409,
+          error: "A standard audit is already running for this property. Let it finish, then click Audit selected again so every strict stage runs from the beginning.",
+        };
+      }
+    }
     jobs.set(persistedActive.jobId, persistedActive);
+    await mutateStore((store) => { store[persistedActive.jobId] = { ...persistedActive }; });
     void runUnitAuditJob(persistedActive);
     return { ok: true, job: persistedActive };
   }
@@ -2671,6 +3662,12 @@ export async function startUnitAuditSweep(input: { propertyId: number; autoFix?:
     resumeCount: 0,
     autoFix: input.autoFix !== false,
     allowReplace: input.allowReplace !== false,
+    fullAutomation: input.fullAutomation === true,
+    pendingGuestyGallerySync: false,
+    pendingDedupeHiddenCount: 0,
+    coverCollageNeedsRefresh: false,
+    requiredCoverCollageUrl: null,
+    finalGuestyGalleryVerified: false,
     source: input.source === "cron" ? "cron" : "manual",
   };
   jobs.set(record.jobId, record);
@@ -2686,13 +3683,20 @@ export async function startUnitAuditSweepBulk(input: {
   propertyIds: number[];
   autoFix?: boolean;
   allowReplace?: boolean;
+  fullAutomation?: boolean;
   source?: "manual" | "cron";
 }): Promise<{ started: UnitAuditJobRecord[]; skipped: Array<{ propertyId: number; error: string }> }> {
   const ids = Array.from(new Set((input.propertyIds ?? []).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n !== 0))).slice(0, 40);
   const started: UnitAuditJobRecord[] = [];
   const skipped: Array<{ propertyId: number; error: string }> = [];
   for (const propertyId of ids) {
-    const result = await startUnitAuditSweep({ propertyId, autoFix: input.autoFix, allowReplace: input.allowReplace, source: input.source });
+    const result = await startUnitAuditSweep({
+      propertyId,
+      autoFix: input.autoFix,
+      allowReplace: input.allowReplace,
+      fullAutomation: input.fullAutomation,
+      source: input.source,
+    });
     if (result.ok) started.push(result.job);
     else skipped.push({ propertyId, error: result.error });
   }

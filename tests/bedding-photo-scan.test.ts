@@ -10,7 +10,10 @@ import {
   compareDetectedBeddingToGuestyRooms,
   describeDetectedBeds,
   isBeddingScanAutoApplyEligible,
+  hydrateBeddingAuditApplication,
+  isStrictClaudeBeddingScan,
   mergeBeddingScanIntoUnit,
+  mergeBeddingScanIntoGuestyRooms,
   normalizeScanBathFeature,
   normalizeScanBedType,
   parseBeddingScanStore,
@@ -19,6 +22,7 @@ import {
   serializeBeddingScanStore,
   summarizeDetectedBedding,
   type BeddingScanUnit,
+  type BeddingPhotoScanRecord,
   type MergeUnitShape,
 } from "../shared/bedding-photo-scan";
 
@@ -285,6 +289,174 @@ check("auto-apply never writes caption-fallback evidence even when its review sc
   captionResultSkipped.skippedScanUnits[0]?.reason === "non-vision-evidence");
 
 // ── Guesty comparison (audit) ────────────────────────────────────────────────
+// Strict Dashboard-audit application / Guesty-safe overlay.
+const strictUnit: BeddingScanUnit = { ...scanUnit, method: "vision", model: "claude-test", warning: undefined };
+const strictRecord: BeddingPhotoScanRecord = {
+  propertyId: 7,
+  scannedAt: "2026-07-17T12:00:00Z",
+  method: "vision",
+  model: "claude-test",
+  units: [strictUnit],
+  fingerprints: { "unit-a": "fp" },
+};
+check("strict eligibility requires per-unit Claude provenance",
+  isStrictClaudeBeddingScan(strictRecord) &&
+  !isStrictClaudeBeddingScan({ ...strictRecord, units: [{ ...strictUnit, method: "captions" }] }) &&
+  !isStrictClaudeBeddingScan({ ...strictRecord, units: [{ ...strictUnit, warning: "fallback" }] }));
+
+const guestyOverlay = mergeBeddingScanIntoGuestyRooms([
+  { roomNumber: 0, name: "Living Room", beds: [{ type: "SOFA_BED", quantity: 1 }], keep: "common" },
+  { roomNumber: 1, name: "Master", beds: [{ type: "QUEEN_BED", quantity: 1 }], keep: "one" },
+  { roomNumber: 2, name: "Second", beds: [{ type: "DOUBLE_BED", quantity: 1 }], keep: "two" },
+  { roomNumber: 3, name: "Unphotographed", beds: [{ type: "QUEEN_BED", quantity: 1 }], keep: "three" },
+], [strictUnit]);
+const overlaidRooms = guestyOverlay.rooms as Array<Record<string, any>>;
+check("audit Guesty merge applies only >60% bedroom evidence in size order",
+  overlaidRooms[1].beds[0].type === "KING_BED" &&
+  overlaidRooms[2].beds[0].type === "SINGLE_BED" &&
+  overlaidRooms[2].beds[0].quantity === 2);
+check("audit Guesty merge preserves common area, room count, extra unphotographed room, and metadata",
+  overlaidRooms.length === 4 && overlaidRooms[0].beds[0].type === "SOFA_BED" &&
+  overlaidRooms[3].beds[0].type === "QUEEN_BED" && overlaidRooms[1].keep === "one");
+check("audit Guesty merge ignores the 40% bedroom and reports two changed rooms",
+  !guestyOverlay.blocked && guestyOverlay.changedRooms === 2 && !guestyOverlay.applied.some((line) => /Queen bed/.test(line)) &&
+  guestyOverlay.notes.some((line) => /at or below the 0.6 confidence floor/.test(line)));
+
+const auditBoundaryUnit: BeddingScanUnit = {
+  ...strictUnit,
+  expectedBedrooms: 2,
+  bedrooms: [
+    { beds: [{ type: "KING_BED", quantity: 1 }], ensuiteFeatures: [], confidence: 0.6, photos: ["exact.jpg"] },
+    { beds: [{ type: "SINGLE_BED", quantity: 2 }], ensuiteFeatures: [], confidence: 0.6001, photos: ["above.jpg"] },
+  ],
+  unphotographedBedrooms: 1,
+};
+const auditBoundaryOverlay = mergeBeddingScanIntoGuestyRooms([
+  { roomNumber: 1, beds: [{ type: "QUEEN_BED", quantity: 1 }] },
+  { roomNumber: 2, beds: [{ type: "DOUBLE_BED", quantity: 1 }] },
+], [auditBoundaryUnit]);
+const auditBoundaryRooms = auditBoundaryOverlay.rooms as Array<Record<string, any>>;
+check("audit Guesty merge excludes exactly 60% and applies 60.01%",
+  auditBoundaryOverlay.changedRooms === 1 &&
+  auditBoundaryRooms[0].beds[0].type === "SINGLE_BED" &&
+  auditBoundaryRooms[1].beds[0].type === "DOUBLE_BED" &&
+  auditBoundaryOverlay.notes.some((line) => /at or below/.test(line)));
+const noRoomOverlay = mergeBeddingScanIntoGuestyRooms([], [strictUnit]);
+check("audit Guesty merge never invents missing room slots",
+  noRoomOverlay.rooms.length === 0 && !noRoomOverlay.changed && noRoomOverlay.blocked &&
+  noRoomOverlay.notes.some((line) => /required.*Guesty has only 0/i.test(line)));
+
+const partialUnitA: BeddingScanUnit = {
+  ...strictUnit,
+  label: "Unit A",
+  expectedBedrooms: 3,
+  bedrooms: [
+    { beds: [{ type: "KING_BED", quantity: 1 }], ensuiteFeatures: [], confidence: 0.95, photos: ["a-master.jpg"] },
+  ],
+  unphotographedBedrooms: 2,
+};
+const partialUnitB: BeddingScanUnit = {
+  ...strictUnit,
+  folder: "unit-b",
+  label: "Unit B",
+  expectedBedrooms: 3,
+  bedrooms: [
+    { beds: [{ type: "QUEEN_BED", quantity: 1 }], ensuiteFeatures: [], confidence: 0.92, photos: ["b-master.jpg"] },
+    { beds: [{ type: "SINGLE_BED", quantity: 2 }], ensuiteFeatures: [], confidence: 0.88, photos: ["b-second.jpg"] },
+  ],
+  unphotographedBedrooms: 1,
+};
+const comboRooms = [
+  { roomNumber: 0, name: "Living Room", beds: [{ type: "SOFA_BED", quantity: 1 }] },
+  { roomNumber: 1, name: "Unit A Master", beds: [{ type: "DOUBLE_BED", quantity: 1 }] },
+  { roomNumber: 2, name: "Unit A Bedroom 2", beds: [{ type: "DOUBLE_BED", quantity: 1 }] },
+  { roomNumber: 3, name: "Unit A Bedroom 3", beds: [{ type: "DOUBLE_BED", quantity: 1 }] },
+  { roomNumber: 4, name: "Unit B Master", beds: [{ type: "DOUBLE_BED", quantity: 1 }] },
+  { roomNumber: 5, name: "Unit B Bedroom 2", beds: [{ type: "DOUBLE_BED", quantity: 1 }] },
+  { roomNumber: 6, name: "Unit B Bedroom 3", beds: [{ type: "DOUBLE_BED", quantity: 1 }] },
+];
+const comboOverlay = mergeBeddingScanIntoGuestyRooms(comboRooms, [partialUnitA, partialUnitB]);
+const comboOverlaidRooms = comboOverlay.rooms as Array<Record<string, any>>;
+check("audit Guesty merge reserves Unit A's unphotographed slots before assigning Unit B",
+  !comboOverlay.blocked && comboOverlay.changedRooms === 3 &&
+  comboOverlaidRooms[1].beds[0].type === "KING_BED" &&
+  comboOverlaidRooms[2].beds[0].type === "DOUBLE_BED" &&
+  comboOverlaidRooms[3].beds[0].type === "DOUBLE_BED" &&
+  comboOverlaidRooms[4].beds[0].type === "QUEEN_BED" &&
+  comboOverlaidRooms[5].beds[0].type === "SINGLE_BED" &&
+  comboOverlaidRooms[6].beds[0].type === "DOUBLE_BED");
+check("audit Guesty merge receipts preserve the correct unit-to-room ownership",
+  comboOverlay.applied.some((line) => /^Unit A, room 1:/.test(line)) &&
+  comboOverlay.applied.some((line) => /^Unit B, room 4:/.test(line)) &&
+  comboOverlay.applied.some((line) => /^Unit B, room 5:/.test(line)) &&
+  !comboOverlay.applied.some((line) => /^Unit B, room [123]:/.test(line)));
+
+const ambiguousUnit = { ...partialUnitA, expectedBedrooms: null };
+const ambiguousOverlay = mergeBeddingScanIntoGuestyRooms(comboRooms, [ambiguousUnit, partialUnitB]);
+check("audit Guesty merge blocks atomically when a unit boundary is ambiguous",
+  ambiguousOverlay.blocked && !ambiguousOverlay.changed && ambiguousOverlay.changedRooms === 0 &&
+  ambiguousOverlay.applied.length === 0 && JSON.stringify(ambiguousOverlay.rooms) === JSON.stringify(comboRooms) &&
+  ambiguousOverlay.notes.some((line) => /boundary is ambiguous/.test(line)));
+
+const shortSlotsOverlay = mergeBeddingScanIntoGuestyRooms(comboRooms.slice(0, -1), [partialUnitA, partialUnitB]);
+check("audit Guesty merge blocks atomically when Guesty lacks a reserved unit slot",
+  shortSlotsOverlay.blocked && !shortSlotsOverlay.changed && shortSlotsOverlay.changedRooms === 0 &&
+  shortSlotsOverlay.applied.length === 0 && JSON.stringify(shortSlotsOverlay.rooms) === JSON.stringify(comboRooms.slice(0, -1)) &&
+  shortSlotsOverlay.notes.some((line) => /required.*Guesty has only 5/i.test(line)));
+
+const duplicateRoomNumbers = comboRooms.map((room) => ({ ...room }));
+duplicateRoomNumbers[4].roomNumber = 3;
+const duplicateSlotsOverlay = mergeBeddingScanIntoGuestyRooms(duplicateRoomNumbers, [partialUnitA, partialUnitB]);
+check("audit Guesty merge blocks atomically when room numbering cannot prove unit ownership",
+  duplicateSlotsOverlay.blocked && !duplicateSlotsOverlay.changed && duplicateSlotsOverlay.changedRooms === 0 &&
+  duplicateSlotsOverlay.applied.length === 0 && JSON.stringify(duplicateSlotsOverlay.rooms) === JSON.stringify(duplicateRoomNumbers) &&
+  duplicateSlotsOverlay.notes.some((line) => /unique sequence/.test(line)));
+
+const auditApplication = {
+  id: "audit-1",
+  appliedAt: "2026-07-17T12:01:00Z",
+  scanScannedAt: strictRecord.scannedAt,
+  method: "vision" as const,
+  minConfidence: BEDDING_SCAN_MIN_CONFIDENCE,
+  localSaved: true as const,
+  confidentBedrooms: 2,
+  confidentBathrooms: 1,
+  belowThresholdDetections: 2,
+  guesty: { listingId: null, status: "not-requested" as const, changedRooms: 0 },
+};
+const browserConfig = {
+  propertyId: 7,
+  units: [{ unitId: "unit-a", unitLabel: "A", ...makeUnit(), livingRoom: { hasSofaBed: true } }],
+};
+const proposalOnlyHydration = hydrateBeddingAuditApplication(browserConfig, strictRecord);
+check("manual/proposal scan without an audit receipt never hydrates automatically",
+  !proposalOnlyHydration.changed && proposalOnlyHydration.config === browserConfig);
+const auditHydration = hydrateBeddingAuditApplication(browserConfig, { ...strictRecord, auditApplication });
+check("audit receipt hydrates confident bed and bath evidence into the richer local config",
+  auditHydration.changed && auditHydration.config.units[0].bedrooms[0].beds[0].type === "KING_BED" &&
+  auditHydration.config.units[0].bathrooms[0].features.includes("double-vanity"));
+check("audit hydration preserves configured counts, living-room data, and unphotographed bedroom",
+  auditHydration.config.units[0].bedrooms.length === 3 && auditHydration.config.units[0].bathrooms.length === 3 &&
+  (auditHydration.config.units[0] as any).livingRoom.hasSofaBed === true &&
+  auditHydration.config.units[0].bedrooms[2].beds[0].type === "QUEEN_BED");
+const mismatchedAuditHydration = hydrateBeddingAuditApplication(
+  { ...browserConfig, units: [{ ...browserConfig.units[0], unitId: "different-unit" }] },
+  { ...strictRecord, auditApplication },
+);
+check("audit receipt hydration never falls back to unit position",
+  !mismatchedAuditHydration.changed &&
+  mismatchedAuditHydration.config.units[0].bedrooms[0].beds[0].type === "QUEEN_BED" &&
+  mismatchedAuditHydration.notes.some((line) => /unmatched unit ID/.test(line)));
+const boundaryAuditHydration = hydrateBeddingAuditApplication(browserConfig, {
+  ...strictRecord,
+  units: [auditBoundaryUnit],
+  auditApplication,
+});
+check("audit receipt hydration excludes exactly 60% and applies 60.01%",
+  boundaryAuditHydration.changed &&
+  boundaryAuditHydration.config.units[0].bedrooms[0].beds[0].type === "SINGLE_BED" &&
+  boundaryAuditHydration.config.units[0].bedrooms[1].beds[0].type === "QUEEN_BED");
+
 const guestyRooms = parseGuestyListingRoomsForScan([
   { roomNumber: 1, name: "Master Bedroom", beds: [{ type: "KING_BED", quantity: 1 }] },
   { roomNumber: 2, beds: [{ type: "QUEEN_BED", quantity: 1 }] },
@@ -391,8 +563,24 @@ check("engine: vision kill switch + caption fallback wired",
   engineSrc.includes("BEDDING_SCAN_VISION_DISABLED") && engineSrc.includes("captionFallbackBedding"));
 check("engine: audit comparison reads the Guesty rooms HERE (sweep is locked against the string)",
   engineSrc.includes("listingRooms") && engineSrc.includes("compareDetectedBeddingToGuestyRooms"));
-check("engine: Guesty read is a GET through the gated guestyRequest — never a PUT",
-  /guestyRequest\(\s*"GET"/.test(engineSrc) && !/guestyRequest\(\s*"PUT"/.test(engineSrc));
+check("engine: strict audit apply uses gated Guesty GET + PUT while preserving the manual scan path",
+  /guestyRequest\(\s*"GET"/.test(engineSrc) && /guestyRequest\(\s*"PUT"/.test(engineSrc) &&
+  engineSrc.includes("applyBeddingPhotoScanForAudit"));
+check("engine: strict audit rejects mixed/caption provenance and durably persists an application receipt",
+  engineSrc.includes("isStrictClaudeBeddingScan") && engineSrc.includes("auditApplication") &&
+  engineSrc.includes("persistBeddingScan(record, true)"));
+check("engine: strict Dashboard bedding scans every published unit photo and fails on an unreadable subset",
+  engineSrc.includes("exhaustiveVision: true") &&
+  engineSrc.includes("selectScanFilenames(group, { exhaustive: opts.exhaustiveVision === true })") &&
+  engineSrc.includes("photos.length !== filenames.length") &&
+  engineSrc.includes("strict bedding scan could read only"));
+check("engine: strict Dashboard bedding fails before Claude when any configured unit folder is missing, empty, or omitted",
+  engineSrc.includes("configuredPhotoFolderStatusesForProperty") &&
+  engineSrc.includes("Strict bedding scan requires every configured unit folder to contain published photos") &&
+  engineSrc.includes("Strict bedding scan found no configured unit photo folders") &&
+  engineSrc.includes("scannedUnitIds"));
+check("engine: an unsafe Guesty unit-slot map is surfaced as blocked and never PUT",
+  engineSrc.includes("if (merged.blocked)") && engineSrc.includes('guestyStatus = "blocked"'));
 check("engine: fingerprints scans with photoFolderFingerprint over listPublishedFilenames (pin-store parity)",
   engineSrc.includes("photoFolderFingerprint") && engineSrc.includes("listPublishedFilenames"));
 check("engine: carries the server-resolved canonical unit id into every scan result",
@@ -446,12 +634,18 @@ check("BeddingTab: tab remounts share one workflow and retain completion/error c
 check("BeddingTab: stale GET hydration cannot replace a newer scan timestamp",
   tabSrc.includes("comparableTimestamp < latestScanTimestampRef.current") &&
   tabSrc.includes("comparableTimestamp > completedTimestamp") &&
-  tabSrc.includes("if (!acceptScanRecord(record, true))"));
+  tabSrc.includes("if (!acceptScanRecord(record, fresh))"));
 check("BeddingTab: legacy/caption rows never fall back to positional manual application",
   tabSrc.includes('scanUnit.evidenceMethod !== "vision"') &&
   !tabSrc.includes(": config.units[unitIndex]"));
-check("BeddingTab: stored-scan hydration stays read-only; auto-apply only lives in the click handler",
-  !/useEffect\([^)]*autoApplyBeddingScanToUnits/s.test(tabSrc));
+check("BeddingTab: ordinary stored hydration stays read-only; only an audit receipt can materialize once",
+  !/useEffect\([^)]*autoApplyBeddingScanToUnits/s.test(tabSrc) &&
+  tabSrc.includes("if (!fresh || !application || alreadyHydrated) return") &&
+  tabSrc.includes("hydrateBeddingAuditApplication(current, record)"));
+const auditHydrationSaveAt = tabSrc.indexOf("if (!saveBeddingConfig(nextConfig))");
+const auditHydrationMarkAt = tabSrc.indexOf("localStorage.setItem(auditHydrationKey(propertyId), application.id)");
+check("BeddingTab: audit receipt is marked hydrated only after its browser config save succeeds",
+  auditHydrationSaveAt >= 0 && auditHydrationMarkAt > auditHydrationSaveAt);
 check("BeddingTab: every completed scan renders its timestamp even with zero unit rows",
   tabSrc.includes("{beddingScan && (") &&
   !tabSrc.includes("{beddingScan && beddingScan.units.length > 0 && ("));

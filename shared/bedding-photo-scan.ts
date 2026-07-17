@@ -18,12 +18,13 @@
 //   • BeddingTab.tsx — a fresh operator-triggered scan applies VISION detections
 //     above the auto-apply threshold, saves the resulting builder config, and
 //     builds Guesty's supported Bedding projection from it when connected.
-//     Caption fallback and hydrated/audit scans stay read-only.
+//     Caption fallback and ordinary stored scans stay read-only. A durable
+//     Dashboard-audit application receipt may hydrate once by canonical unit ID
+//     so a no-Guesty audit still materializes its saved result in the builder.
 //
-// The audit-side comparison lives HERE (not in server/unit-audit-sweep.ts)
-// deliberately: the sweep module is source-locked to never contain the string
-// "listingRooms" (Load-Bearing "the layout stage NEVER auto-pushes"), so the
-// engine module reads the Guesty rooms and this module words the findings.
+// Guesty-room comparison and the safe overlay live HERE (not in
+// server/unit-audit-sweep.ts) deliberately: the sweep orchestrates the strict
+// helper but never manipulates raw Guesty room payloads itself.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const BEDDING_PHOTO_SCANS_SETTING_KEY = "bedding_photo_scans.v1";
@@ -112,7 +113,29 @@ export type BeddingScanUnit = {
   bathrooms: DetectedBathroom[];
   /** max(0, expectedBedrooms − distinct confident photographed bedrooms). */
   unphotographedBedrooms: number;
+  /** Per-unit provenance. Mixed vision/fallback records are never audit-applied. */
+  method?: "vision" | "captions";
+  model?: string | null;
   warning?: string;
+};
+
+export type BeddingAuditApplication = {
+  /** Unique receipt id; the browser uses this to hydrate the application once. */
+  id: string;
+  appliedAt: string; // ISO
+  scanScannedAt: string; // ISO
+  method: "vision";
+  minConfidence: number;
+  localSaved: true;
+  confidentBedrooms: number;
+  confidentBathrooms: number;
+  belowThresholdDetections: number;
+  guesty: {
+    listingId: string | null;
+    status: "not-requested" | "pushed" | "unchanged" | "blocked" | "failed";
+    changedRooms: number;
+    error?: string;
+  };
 };
 
 export type BeddingPhotoScanRecord = {
@@ -124,7 +147,19 @@ export type BeddingPhotoScanRecord = {
   units: BeddingScanUnit[];
   /** folder → photoFolderFingerprint at scan time (staleness detection). */
   fingerprints: Record<string, string>;
+  /** Present only after the strict Dashboard audit intentionally applies it. */
+  auditApplication?: BeddingAuditApplication;
 };
+
+/** Strict audit eligibility: every unit was read from pixels by Claude. */
+export function isStrictClaudeBeddingScan(
+  record: BeddingPhotoScanRecord | null | undefined,
+): boolean {
+  return !!record
+    && record.method === "vision"
+    && record.units.length > 0
+    && record.units.every((unit) => unit.method === "vision" && !unit.warning);
+}
 
 // ── Bed-type normalization ───────────────────────────────────────────────────
 
@@ -444,7 +479,7 @@ export type BeddingScanMergeResult<T extends MergeUnitShape = MergeUnitShape> = 
 /**
  * Apply a scan's PHOTO-PROVEN findings onto one unit's bedding config.
  * Only fills what the photos prove:
- *   • confident bedrooms (≥ minConfidence) replace the bed lists of config
+ *   • eligible confident bedrooms replace the bed lists of config
  *     slots in size order (biggest bed → Master); unphotographed slots are
  *     untouched and named in `notes`;
  *   • en-suite evidence SETS hasEnsuite + unions features; it never unsets;
@@ -452,8 +487,8 @@ export type BeddingScanMergeResult<T extends MergeUnitShape = MergeUnitShape> = 
  *     half↔half, in order); bathroom/bedroom COUNTS never change — those are
  *     listing-level facts the scan can't prove (the same bath can be
  *     photographed twice).
- * The caller chooses whether the confidence boundary is inclusive (manual /
- * audit compatibility) or strict (the explicit Bedding-tab auto-apply flow).
+ * The caller chooses whether the confidence boundary is inclusive (proposal
+ * compatibility) or strict (all automatic application flows).
  */
 export function mergeBeddingScanIntoUnit<T extends MergeUnitShape>(
   unit: T,
@@ -611,6 +646,253 @@ export function autoApplyBeddingScanToUnits<
 
 // ── Audit comparison vs the Guesty listing's pushed bed layout ───────────────
 
+export type MergePropertyUnitShape = MergeUnitShape & {
+  unitId: string;
+  unitLabel?: string;
+};
+
+export type MergePropertyShape = {
+  propertyId: number;
+  units: MergePropertyUnitShape[];
+};
+
+export type BeddingAuditHydrationResult = {
+  config: MergePropertyShape;
+  changed: boolean;
+  appliedByUnitId: Record<string, string[]>;
+  notes: string[];
+};
+
+/**
+ * Materialize a durable Dashboard-audit application into the browser's richer
+ * bedding config. The application receipt is the authorization boundary:
+ * ordinary/manual scan records remain proposals and return unchanged.
+ *
+ * Unit matching is canonical-ID-only. Counts and unphotographed slots remain
+ * untouched because `mergeBeddingScanIntoUnit` owns those safety invariants.
+ */
+export function hydrateBeddingAuditApplication(
+  config: MergePropertyShape,
+  record: BeddingPhotoScanRecord,
+): BeddingAuditHydrationResult {
+  const application = record.auditApplication;
+  if (!application || application.method !== "vision" || !isStrictClaudeBeddingScan(record)) {
+    return { config, changed: false, appliedByUnitId: {}, notes: [] };
+  }
+
+  let changed = false;
+  const appliedByUnitId: Record<string, string[]> = {};
+  const notes: string[] = [];
+  const scansByUnitId = new Map<string, BeddingScanUnit[]>();
+  for (const scan of record.units) {
+    const unitId = scan.unitId?.trim();
+    if (!unitId) {
+      notes.push(`${scan.label}: audit receipt has no canonical unit ID; left unchanged`);
+      continue;
+    }
+    const matches = scansByUnitId.get(unitId) ?? [];
+    matches.push(scan);
+    scansByUnitId.set(unitId, matches);
+  }
+
+  const units = config.units.map((unit) => {
+    const matches = scansByUnitId.get(unit.unitId);
+    if (!matches) return unit;
+    if (matches.length !== 1) {
+      notes.push(`${unit.unitLabel || unit.unitId}: audit receipt has duplicate unit IDs; left unchanged`);
+      return unit;
+    }
+    const merged = mergeBeddingScanIntoUnit(unit, matches[0], {
+      minConfidence: application.minConfidence,
+      requireAboveMinimum: true,
+    });
+    if (merged.changed) {
+      changed = true;
+      appliedByUnitId[unit.unitId] = merged.applied;
+    }
+    notes.push(...merged.notes.map((note) => `${unit.unitLabel || unit.unitId}: ${note}`));
+    return merged.unit as MergePropertyUnitShape;
+  });
+  const configUnitIds = new Set(config.units.map((unit) => unit.unitId));
+  const unmatchedScanUnits = Array.from(scansByUnitId.keys()).filter((unitId) => !configUnitIds.has(unitId));
+  if (unmatchedScanUnits.length > 0) {
+    notes.push(`Audit receipt has ${unmatchedScanUnits.length} unmatched unit ID(s); those units were left unchanged`);
+  }
+  return { config: { ...config, units }, changed, appliedByUnitId, notes };
+}
+
+export type GuestyRoomMergeResult = {
+  /** Existing room array with only confident photographed bedroom bed lists changed. */
+  rooms: unknown[];
+  changed: boolean;
+  /** True when the unit-to-room partition could not be proven safe. */
+  blocked: boolean;
+  changedRooms: number;
+  actionableBedrooms: number;
+  applied: string[];
+  notes: string[];
+};
+
+/**
+ * Overlay confident photo evidence onto existing Guesty bedroom-room slots.
+ * It never creates/deletes rooms, never touches common-area rooms, and never
+ * changes listing bedroom/bathroom/accommodates counts. Guesty has no
+ * structured bathroom-fixture field; those findings remain in the durable
+ * scan receipt and hydrate the richer Bedding-tab config.
+ *
+ * Combo listings use one flat, globally-numbered Guesty room array. Each scan
+ * unit therefore owns the next `expectedBedrooms` slots even when only some of
+ * those bedrooms were photographed. This reservation is load-bearing: without
+ * it, Unit B's first detected bedroom can be written into Unit A's unseen
+ * second bedroom. Any missing/contradictory partition evidence blocks the
+ * entire overlay before a single room is changed.
+ */
+export function mergeBeddingScanIntoGuestyRooms(
+  rawRooms: unknown,
+  units: BeddingScanUnit[],
+  minConfidence: number = BEDDING_SCAN_MIN_CONFIDENCE,
+): GuestyRoomMergeResult {
+  const sourceRooms = Array.isArray(rawRooms) ? rawRooms : [];
+  const rooms = sourceRooms.map((room) => (
+    room && typeof room === "object" && !Array.isArray(room) ? { ...(room as Record<string, unknown>) } : room
+  ));
+  const bedroomSlotIndexes: number[] = [];
+  rooms.forEach((room, index) => {
+    if (!room || typeof room !== "object" || Array.isArray(room)) return;
+    const roomNumber = Number((room as Record<string, unknown>).roomNumber);
+    if (Number.isFinite(roomNumber) && roomNumber > 0) bedroomSlotIndexes.push(index);
+  });
+  bedroomSlotIndexes.sort((a, b) => {
+    const roomA = rooms[a] as Record<string, unknown>;
+    const roomB = rooms[b] as Record<string, unknown>;
+    return Number(roomA.roomNumber) - Number(roomB.roomNumber);
+  });
+
+  const detectedByUnit = units.map((unit) => ({
+    unit,
+    bedrooms: unit.bedrooms
+      .filter((bedroom) => isBeddingScanAutoApplyEligible(bedroom.confidence, minConfidence))
+      .slice()
+      .sort((a, b) => bedroomRank(b) - bedroomRank(a)),
+  }));
+  const actionableBedrooms = detectedByUnit.reduce((total, entry) => total + entry.bedrooms.length, 0);
+  const belowThreshold = units.reduce(
+    (total, unit) => total + unit.bedrooms.filter(
+      (bedroom) => !isBeddingScanAutoApplyEligible(bedroom.confidence, minConfidence),
+    ).length,
+    0,
+  );
+
+  const applied: string[] = [];
+  const notes: string[] = [];
+  const noteBelowThreshold = () => {
+    if (belowThreshold > 0) {
+      notes.push(`${belowThreshold} bedroom detection${belowThreshold === 1 ? "" : "s"} at or below the ${minConfidence} confidence floor were not applied`);
+    }
+  };
+  const blocked = (reason: string): GuestyRoomMergeResult => {
+    notes.push(reason);
+    noteBelowThreshold();
+    return {
+      rooms,
+      changed: false,
+      blocked: true,
+      changedRooms: 0,
+      actionableBedrooms,
+      applied: [],
+      notes,
+    };
+  };
+
+  if (actionableBedrooms === 0) {
+    noteBelowThreshold();
+    return {
+      rooms,
+      changed: false,
+      blocked: false,
+      changedRooms: 0,
+      actionableBedrooms: 0,
+      applied,
+      notes,
+    };
+  }
+
+  const expectedBedroomsByUnit: number[] = [];
+  for (const { unit } of detectedByUnit) {
+    const expected = unit.expectedBedrooms;
+    if (!Number.isInteger(expected) || expected == null || expected <= 0) {
+      return blocked(
+        `Guesty bedding push blocked: ${unit.label} has no reliable expected-bedroom count, so its room-slot boundary is ambiguous`,
+      );
+    }
+    expectedBedroomsByUnit.push(expected);
+  }
+
+  const requiredSlots = expectedBedroomsByUnit.reduce((total, count) => total + count, 0);
+  if (bedroomSlotIndexes.length < requiredSlots) {
+    return blocked(
+      `Guesty bedding push blocked: ${requiredSlots} unit-partition bedroom slots are required, but Guesty has only ${bedroomSlotIndexes.length}`,
+    );
+  }
+  if (bedroomSlotIndexes.length > requiredSlots) {
+    return blocked(
+      `Guesty bedding push blocked: the units account for ${requiredSlots} bedroom slots, but Guesty has ${bedroomSlotIndexes.length}; the extra slot ownership is ambiguous`,
+    );
+  }
+
+  const roomNumbers = bedroomSlotIndexes.map((index) => Number((rooms[index] as Record<string, unknown>).roomNumber));
+  const hasCanonicalRoomSequence = roomNumbers.every((roomNumber, index) => roomNumber === index + 1);
+  if (!hasCanonicalRoomSequence) {
+    return blocked(
+      `Guesty bedding push blocked: bedroom room numbers must be one unique sequence from 1 to ${requiredSlots} before units can be partitioned safely`,
+    );
+  }
+
+  for (let index = 0; index < detectedByUnit.length; index += 1) {
+    const { unit, bedrooms } = detectedByUnit[index];
+    const expectedBedrooms = expectedBedroomsByUnit[index];
+    if (bedrooms.length > expectedBedrooms) {
+      return blocked(
+        `Guesty bedding push blocked: ${unit.label} has ${bedrooms.length} confident photographed bedrooms but only ${expectedBedrooms} reserved Guesty slots`,
+      );
+    }
+  }
+
+  let changedRooms = 0;
+  let slotCursor = 0;
+  for (let unitIndex = 0; unitIndex < detectedByUnit.length; unitIndex += 1) {
+    const { unit, bedrooms } = detectedByUnit[unitIndex];
+    const expectedBedrooms = expectedBedroomsByUnit[unitIndex];
+    const unitSlotIndexes = bedroomSlotIndexes.slice(slotCursor, slotCursor + expectedBedrooms);
+
+    bedrooms.forEach((bedroom, bedroomIndex) => {
+      const roomIndex = unitSlotIndexes[bedroomIndex];
+      const room = rooms[roomIndex] as Record<string, unknown>;
+      const beds = bedroom.beds.map((bed) => ({ type: bed.type, quantity: bed.quantity }));
+      if (JSON.stringify(room.beds ?? []) !== JSON.stringify(beds)) {
+        rooms[roomIndex] = { ...room, beds };
+        changedRooms += 1;
+      }
+      applied.push(`${unit.label}, room ${String(room.roomNumber)}: ${describeDetectedBeds(bedroom.beds)}`);
+    });
+
+    // Reserve every claimed bedroom, including slots with no photo evidence,
+    // before assigning the next unit. Never flatten Unit B into Unit A.
+    slotCursor += expectedBedrooms;
+  }
+  noteBelowThreshold();
+
+  return {
+    rooms,
+    changed: changedRooms > 0,
+    blocked: false,
+    changedRooms,
+    actionableBedrooms,
+    applied,
+    notes,
+  };
+}
+
 export type GuestyRoomLike = { roomNumber: number; beds: DetectedBed[] };
 
 /** Tolerant parse of the Guesty listing document's room array. */
@@ -645,7 +927,7 @@ export type BeddingAuditComparison = {
 export function summarizeDetectedBedding(units: BeddingScanUnit[], minConfidence: number = BEDDING_SCAN_MIN_CONFIDENCE): string {
   const parts: string[] = [];
   for (const u of units) {
-    const confident = u.bedrooms.filter((b) => b.confidence >= minConfidence);
+    const confident = u.bedrooms.filter((b) => isBeddingScanAutoApplyEligible(b.confidence, minConfidence));
     if (confident.length === 0) continue;
     parts.push(confident.map((b) => describeDetectedBeds(b.beds)).join(", "));
   }
@@ -667,7 +949,9 @@ export function compareDetectedBeddingToGuestyRooms(
   const items: string[] = [];
   let mismatch = false;
 
-  const confidentBedrooms = units.flatMap((u) => u.bedrooms.filter((b) => b.confidence >= minConfidence));
+  const confidentBedrooms = units.flatMap((u) => u.bedrooms.filter(
+    (b) => isBeddingScanAutoApplyEligible(b.confidence, minConfidence),
+  ));
   const unphotographed = units.reduce((s, u) => s + Math.max(0, u.unphotographedBedrooms), 0);
   const unverified = unphotographed > 0;
 

@@ -7,6 +7,7 @@ import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, lis
 import { getUnitAuditCronStatus, runUnitAuditCronSweep } from "./unit-audit-scheduler";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
 import { withUnitSwapPropertyWriteLock } from "./unit-swap-write-lock";
+import { buildPricingAuditReceipt, type PricingAuditReceipt } from "./pricing-audit-receipt";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
   bulkComboListingJobs as bulkComboListingJobRows,
@@ -35,6 +36,7 @@ import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/
 import { occupancyForBedrooms } from "@shared/occupancy";
 import {
   DESCRIPTION_OVERRIDE_FIELDS,
+  findDescriptionReadbackMismatches,
   findDescriptionPlaceholders,
   stripAreaSectionsFromDescription,
   type PropertyDescriptionOverrideField,
@@ -255,6 +257,7 @@ import {
   unitVerificationClaims,
 } from "@shared/folder-unit-map";
 import { replacementPhotoFolderForUnit, unitSwapSnapshotForUnit } from "@shared/unit-swap-photos";
+import { classifyStagedUnitCommunityAudit } from "@shared/unit-replacement-community-gate";
 import { checkCommunityType } from "@shared/community-type";
 import { isSameHawaiiStreetFamily } from "@shared/hawaii-street-family";
 import { checkCommunityState, isCommunityInWrongState } from "@shared/community-location-guard";
@@ -354,6 +357,7 @@ import {
   serializeBulkPhotoCommunityJob,
   startBulkPhotoCommunityCheck,
 } from "./photo-community-bulk";
+import { buildGroupFromPublishedFolder } from "./builder-photo-groups";
 import {
   MIN_DISTINCT_STRONG_PHOTO_MATCHES,
   isCommunityOrSharedPhotoCandidate,
@@ -432,6 +436,136 @@ import {
 
 const GUESTY_SUMMARY_SEPARATOR = "\n\n---\n\n";
 const COMBO_TOP_DISCLOSURE = LISTING_DISCLOSURE.replace(/\s*---\s*$/i, "").trim();
+
+// Cover-collage records share one app_settings JSON document. Serialize the
+// read-modify-write so simultaneous manual/audit generations cannot clobber
+// each other's locally persisted collage receipt.
+let coverCollageRecordTail: Promise<void> = Promise.resolve();
+async function persistCoverCollageRecords(keys: string[], record: Record<string, unknown>): Promise<void> {
+  coverCollageRecordTail = coverCollageRecordTail.catch(() => undefined).then(async () => {
+    const raw = await storage.getSetting(COVER_COLLAGE_SETTING_KEY);
+    let map: Record<string, any> = Object.create(null);
+    try {
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [key, value] of Object.entries(parsed)) {
+          if (key !== "__proto__" && key !== "constructor" && key !== "prototype") map[key] = value;
+        }
+      }
+    } catch { /* start a clean map when the old receipt is corrupt */ }
+    for (const key of keys) {
+      if (key !== "__proto__" && key !== "constructor" && key !== "prototype") map[key] = record;
+    }
+    const entries = Object.entries(map).sort((a, b) =>
+      String((b[1] as any)?.createdAt ?? "").localeCompare(String((a[1] as any)?.createdAt ?? "")),
+    );
+    await storage.setSetting(COVER_COLLAGE_SETTING_KEY, JSON.stringify(Object.fromEntries(entries.slice(0, 200))));
+  });
+  await coverCollageRecordTail;
+}
+
+/**
+ * The required collage URL is an internal audit capability, not browser
+ * input. Production self-calls carry ADMIN_SECRET and originate on the raw
+ * loopback socket; requiring both prevents an authenticated portal request
+ * from choosing an arbitrary external URL for Guesty's pictures[] payload.
+ * This capability fails closed when ADMIN_SECRET is unset; local strict-audit
+ * development must configure the same secret used by loopbackRequestHeaders.
+ */
+function isAuthenticatedInternalGalleryPush(req: Request): boolean {
+  if (!isLoopback(req)) return false;
+  const secret = process.env.ADMIN_SECRET ?? "";
+  if (!secret) return false;
+  const header = req.headers["x-admin-secret"];
+  if (typeof header !== "string") return false;
+  const supplied = Buffer.from(header);
+  const expected = Buffer.from(secret);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function normalizeRequiredCoverCollageUrl(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  if (!value || value.length > 2_000) return null;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && !!parsed.hostname
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+type NormalizedGuestyPicture = { original: string; caption: string };
+
+function normalizeGuestyPictureForVerification(raw: unknown): NormalizedGuestyPicture | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const picture = raw as Record<string, unknown>;
+  const originalRaw = String(picture.original ?? picture.url ?? "").trim();
+  if (!originalRaw) return null;
+  let original = originalRaw;
+  try {
+    const parsed = new URL(originalRaw);
+    parsed.hash = "";
+    parsed.protocol = parsed.protocol.toLowerCase();
+    parsed.hostname = parsed.hostname.toLowerCase();
+    original = parsed.toString();
+  } catch { /* local/non-standard URLs compare by their trimmed spelling */ }
+  const caption = String(picture.caption ?? "").trim().replace(/\s+/g, " ");
+  return { original, caption };
+}
+
+/** Exact order/content check. A stale gallery with an equal or larger count
+ * must not satisfy a strict audit after local hides changed the intended set. */
+function strictGuestyPicturesExactlyMatch(actualRaw: unknown, expectedRaw: unknown): boolean {
+  if (!Array.isArray(actualRaw) || !Array.isArray(expectedRaw)) return false;
+  const actual = actualRaw.map(normalizeGuestyPictureForVerification).filter((p): p is NormalizedGuestyPicture => !!p);
+  const expected = expectedRaw.map(normalizeGuestyPictureForVerification).filter((p): p is NormalizedGuestyPicture => !!p);
+  if (actual.length !== actualRaw.length || expected.length !== expectedRaw.length || actual.length !== expected.length) {
+    return false;
+  }
+  return actual.every((picture, index) =>
+    picture.original === expected[index].original
+    && picture.caption === expected[index].caption);
+}
+
+const AMENITY_SCAN_RECEIPTS_SETTING_KEY = "amenity_scan_receipts.v1";
+let amenityScanReceiptTail: Promise<void> = Promise.resolve();
+async function persistAmenityScanReceipt(propertyId: number, receipt: Record<string, unknown>): Promise<void> {
+  amenityScanReceiptTail = amenityScanReceiptTail.catch(() => undefined).then(async () => {
+    const raw = await storage.getSetting(AMENITY_SCAN_RECEIPTS_SETTING_KEY);
+    let map: Record<string, any> = Object.create(null);
+    try {
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) map = parsed;
+    } catch { /* replace a corrupt receipt map */ }
+    map[String(propertyId)] = receipt;
+    const entries = Object.entries(map).sort((a, b) =>
+      String((b[1] as any)?.completedAt ?? "").localeCompare(String((a[1] as any)?.completedAt ?? "")),
+    );
+    await storage.setSetting(AMENITY_SCAN_RECEIPTS_SETTING_KEY, JSON.stringify(Object.fromEntries(entries.slice(0, 200))));
+  });
+  await amenityScanReceiptTail;
+}
+
+const PRICING_AUDIT_RECEIPTS_SETTING_KEY = "pricing_audit_receipts.v1";
+let pricingAuditReceiptTail: Promise<void> = Promise.resolve();
+
+async function persistPricingAuditReceipt(receipt: PricingAuditReceipt): Promise<void> {
+  pricingAuditReceiptTail = pricingAuditReceiptTail.catch(() => undefined).then(async () => {
+    const raw = await storage.getSetting(PRICING_AUDIT_RECEIPTS_SETTING_KEY);
+    let map: Record<string, PricingAuditReceipt> = Object.create(null);
+    try {
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) map = parsed;
+    } catch { /* replace a corrupt receipt map */ }
+    map[String(receipt.propertyId)] = receipt;
+    const entries = Object.entries(map).sort((a, b) => b[1].completedAt.localeCompare(a[1].completedAt));
+    await storage.setSetting(PRICING_AUDIT_RECEIPTS_SETTING_KEY, JSON.stringify(Object.fromEntries(entries.slice(0, 200))));
+  });
+  await pricingAuditReceiptTail;
+}
 
 type OtaVisibilityPlatform = "booking" | "vrbo";
 type OtaVisibilityStatus = "queued" | "running" | "found" | "not_found" | "error";
@@ -1388,9 +1522,12 @@ async function refreshMarketRatesForProperty(
     onMonthBlackout?: (event: HybridMonthBlackoutEvent) => void | Promise<void>;
     shouldCancel?: () => boolean | Promise<boolean>;
     triggerType?: HybridTriggerType;
+    /** Strict audit rail: always use live SearchAPI Airbnb pricing even when
+     * the dormant STATIC_RATE_ENGINE feature flag is enabled. */
+    forceSearchApi?: boolean;
   },
 ): Promise<{ propertyId: number; rows: any[]; logs: any[]; blackouts: HybridBlackoutWindow[] }> {
-  if (staticRateEngineEnabled()) {
+  if (staticRateEngineEnabled() && hooks?.forceSearchApi !== true) {
     const target = await resolveStaticPricingTarget(propertyId, label);
     const onMonthScanned = hooks?.onMonthScanned
       ? (e: StaticProgressEvent) => hooks.onMonthScanned!(e as unknown as HybridMonthScannedEvent)
@@ -1515,12 +1652,14 @@ function pricingRowsForClient(rows: any[]): Array<{
   });
 }
 
-async function refreshPricingTabMarketRates(propertyId: number, label: string, cancelGeneration?: number): Promise<{
+async function refreshPricingTabMarketRates(propertyId: number, label: string, cancelGeneration?: number, forceSearchApi = false): Promise<{
   pricingResult: { propertyId: number; rows: any[]; logs: any[] };
   guestyPush: Awaited<ReturnType<typeof pushBulkGuestyPricingAfterRefresh>>;
+  auditReceipt?: PricingAuditReceipt;
 }> {
   const pricingResult = await refreshMarketRatesForProperty(propertyId, label, {
     triggerType: "Manual Update",
+    forceSearchApi,
   });
 
   assertPricingRefreshNotCancelled(propertyId, cancelGeneration);
@@ -1533,7 +1672,17 @@ async function refreshPricingTabMarketRates(propertyId: number, label: string, c
     guestyPush = { skipped: true, reason: e?.message ?? String(e) };
   }
 
-  return { pricingResult, guestyPush };
+  let auditReceipt: PricingAuditReceipt | undefined;
+  if (forceSearchApi) {
+    auditReceipt = buildPricingAuditReceipt({
+      propertyId,
+      rows: pricingResult.rows,
+      runId: `pricing-${Date.now().toString(36)}-${randomBytes(5).toString("hex")}`,
+    });
+    await persistPricingAuditReceipt(auditReceipt);
+  }
+
+  return { pricingResult, guestyPush, auditReceipt };
 }
 
 function summarizePricingRateChanges(logs: Array<{ bedrooms?: number | null; oldRate?: string | number | null; newRate?: string | number | null }>) {
@@ -22459,13 +22608,16 @@ Requirements:
   // concurrency slot (default one at a time; UNIT_AUDIT_CONCURRENCY raises).
   app.post("/api/unit-audit/bulk", async (req, res) => {
     try {
-      const body = (req.body ?? {}) as { propertyIds?: unknown; autoFix?: unknown; allowReplace?: unknown };
+      const body = (req.body ?? {}) as { propertyIds?: unknown; autoFix?: unknown; allowReplace?: unknown; fullAutomation?: unknown };
       const propertyIds = Array.isArray(body.propertyIds) ? body.propertyIds.map((n) => Number(n)) : [];
       if (propertyIds.length === 0) return res.status(400).json({ error: "propertyIds[] required" });
       const result = await startUnitAuditSweepBulk({
         propertyIds,
         autoFix: body.autoFix !== false,
         allowReplace: body.allowReplace !== false,
+        // This route is the dashboard's explicit end-to-end action. Keep the
+        // request flag for forward compatibility, but default strict mode on.
+        fullAutomation: body.fullAutomation !== false,
       });
       return res.json({ ok: true, ...result });
     } catch (e: any) {
@@ -23570,30 +23722,40 @@ Requirements:
   //     existingPhotos?: { original; caption }[] }  // race-free pictures list
   //
   // One click end-to-end: Claude vision picks the two best photos (LEFT =
-  // destination shot, RIGHT = living space — see the prompt in
+  // community hero, RIGHT = unit patio/lanai — Load-Bearing #8; see
   // shared/cover-collage-logic.ts; caption-heuristic fallback when vision is
   // unavailable), sharp composes the 1600×800 2-up, the collage is pushed to
   // Guesty as the pinned cover, and a copy is SAVED IN-SYSTEM:
-  //   - bytes at client/public/photos/cover-collages/<listingId>.jpg (on the
-  //     Railway volume, served at /photos/cover-collages/<listingId>.jpg)
+  //   - bytes at client/public/photos/cover-collages/<listingId-or-property>.jpg
+  //     (on the Railway volume, served under /photos/cover-collages/)
   //   - a record in app_settings under cover_collages.v1 (picks + method +
   //     reasoning + URL), newest 200 kept.
   // Both saves are best-effort and reported honestly in the response —
   // a failed save never unwinds a successful Guesty push.
   app.post("/api/builder/auto-cover-collage", async (req, res) => {
-    const { listingId, photos, existingPhotos } = req.body as {
-      listingId: string;
+    const { listingId: rawListingId, propertyId: rawPropertyId, photos, existingPhotos, requireVision } = req.body as {
+      listingId?: string | null;
+      propertyId?: number | string | null;
       photos: Array<{ url: string; caption?: string; source?: string }>;
       existingPhotos?: { original: string; caption: string }[];
+      requireVision?: boolean;
     };
-    if (!listingId || typeof listingId !== "string") {
-      return res.status(400).json({ error: "listingId required" });
+    const listingId = typeof rawListingId === "string" && rawListingId.trim() ? rawListingId.trim() : null;
+    const parsedPropertyId = rawPropertyId == null || rawPropertyId === "" ? null : Number(rawPropertyId);
+    const propertyId = parsedPropertyId != null && Number.isFinite(parsedPropertyId) && parsedPropertyId !== 0
+      ? parsedPropertyId
+      : null;
+    const auditRequest = propertyId != null;
+    if (!listingId && propertyId == null) {
+      return res.status(400).json({ error: "listingId or propertyId required" });
     }
     if (!Array.isArray(photos) || photos.length < 2) {
       return res.status(400).json({ error: "photos array with at least 2 entries required" });
     }
-    // Fail fast before burning a vision call — the push tail needs ImgBB.
-    if (!process.env.IMGBB_API_KEY) {
+    // Manual calls still promise an immediate Guesty push, so fail before a
+    // vision spend when ImgBB cannot host it. A property-scoped audit saves
+    // locally first and reports the optional Guesty sync separately.
+    if (!auditRequest && !process.env.IMGBB_API_KEY) {
       return res.status(500).json({ error: "IMGBB_API_KEY not configured" });
     }
 
@@ -23609,65 +23771,97 @@ Requirements:
     try {
       collage = await generateAutoCoverCollage({
         photos: candidates,
+        requireVision: requireVision === true,
         upscale: (buf, mimeType, scale) => upscaleWithReplicateKw(buf, mimeType, scale),
       });
     } catch (e: any) {
       return res.status(422).json({ error: e?.message ?? "Could not build the collage" });
     }
 
-    const pushed = await pushCoverCollageToGuesty(
-      listingId,
-      collage.buffer.toString("base64"),
-      existingPhotos,
-    );
-    if (!pushed.ok) return res.status(pushed.status).json(pushed.body);
-
-    // Save in-system (best-effort, reported): disk copy on the photos volume…
+    // Local persistence is independent of Guesty. This makes a property's
+    // collage a real saved audit artifact even before a Guesty listing exists.
+    const localStem = propertyId != null
+      ? `property-${propertyId < 0 ? `neg-${Math.abs(propertyId)}` : propertyId}`
+      : (String(listingId).replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120) || "listing");
     let savedPath: string | null = null;
+    let diskSaveError: string | null = null;
     try {
       const dir = path.join(process.cwd(), "client/public/photos", COVER_COLLAGE_DISK_FOLDER);
       await fs.promises.mkdir(dir, { recursive: true });
-      const file = `${listingId.replace(/[^a-zA-Z0-9_-]+/g, "-")}.jpg`;
+      const file = `${localStem}.jpg`;
       await fs.promises.writeFile(path.join(dir, file), collage.buffer);
       savedPath = `/photos/${COVER_COLLAGE_DISK_FOLDER}/${file}`;
     } catch (e: any) {
-      console.warn(`[cover-collage] disk save failed (Guesty push already succeeded): ${e?.message ?? e}`);
+      diskSaveError = e?.message ?? String(e);
+      console.warn(`[cover-collage] disk save failed: ${diskSaveError}`);
     }
-    // …and a durable record of what was picked and why.
+
+    let pushed: CoverCollagePushResult | null = null;
+    if (listingId) {
+      pushed = await pushCoverCollageToGuesty(
+        listingId,
+        collage.buffer.toString("base64"),
+        existingPhotos,
+      );
+    }
+
+    const createdAt = new Date().toISOString();
+    const recordKeys = [
+      ...(propertyId != null ? [`property:${propertyId}`] : []),
+      ...(listingId ? [listingId] : []),
+    ];
     let savedRecord = false;
+    let recordSaveError: string | null = null;
     try {
-      const raw = await storage.getSetting(COVER_COLLAGE_SETTING_KEY);
-      let map: Record<string, any> = {};
-      try { map = raw ? JSON.parse(raw) : {}; } catch { map = {}; }
-      map[listingId] = {
-        collageUrl: pushed.collageUrl,
+      await persistCoverCollageRecords(recordKeys, {
+        propertyId,
+        listingId,
+        collageUrl: pushed?.ok ? pushed.collageUrl : null,
         localPath: savedPath,
         left: collage.left,
         right: collage.right,
         method: collage.method,
         reasoning: collage.reasoning,
         model: collage.model,
-        createdAt: new Date().toISOString(),
-      };
-      const entries = Object.entries(map).sort((a, b) =>
-        String((b[1] as any)?.createdAt ?? "").localeCompare(String((a[1] as any)?.createdAt ?? "")),
-      );
-      await storage.setSetting(COVER_COLLAGE_SETTING_KEY, JSON.stringify(Object.fromEntries(entries.slice(0, 200))));
+        candidateCount: collage.candidateCount,
+        guestySynced: pushed?.ok === true,
+        guestyError: pushed && !pushed.ok ? String(pushed.body?.error ?? `HTTP ${pushed.status}`) : null,
+        createdAt,
+      });
       savedRecord = true;
     } catch (e: any) {
-      console.warn(`[cover-collage] record save failed (Guesty push already succeeded): ${e?.message ?? e}`);
+      recordSaveError = e?.message ?? String(e);
+      console.warn(`[cover-collage] record save failed: ${recordSaveError}`);
     }
 
+    if (auditRequest && (!savedPath || !savedRecord)) {
+      return res.status(500).json({
+        error: "Collage was generated but could not be durably saved in-system",
+        diskSaveError,
+        recordSaveError,
+      });
+    }
+    if (!auditRequest && pushed && !pushed.ok) {
+      return res.status(pushed.status).json(pushed.body);
+    }
+
+    const guesty = !listingId
+      ? { synced: false, skipped: true, reason: "No Guesty listing mapped" }
+      : pushed?.ok
+        ? { synced: true, skipped: false, collageUrl: pushed.collageUrl, totalPhotos: pushed.totalPhotos }
+        : { synced: false, skipped: false, error: String(pushed?.body?.error ?? `HTTP ${pushed?.status ?? 500}`) };
+
     console.log(
-      `[cover-collage] ✓ ${listingId}: ${collage.method} pick ` +
-      `(left="${collage.left.caption ?? collage.left.url}", right="${collage.right.caption ?? collage.right.url}") ` +
-      `→ ${pushed.collageUrl}${savedPath ? ` · saved ${savedPath}` : ""}`,
+      `[cover-collage] ✓ ${propertyId != null ? `property ${propertyId}` : listingId}: ${collage.method} pick ` +
+      `(left="${collage.left.caption ?? collage.left.url}", right="${collage.right.caption ?? collage.right.url}")` +
+      `${pushed?.ok ? ` → ${pushed.collageUrl}` : ""}${savedPath ? ` · saved ${savedPath}` : ""}`,
     );
 
     res.json({
       success: true,
-      collageUrl: pushed.collageUrl,
-      totalPhotos: pushed.totalPhotos,
+      collageUrl: pushed?.ok ? pushed.collageUrl : null,
+      totalPhotos: pushed?.ok ? pushed.totalPhotos : null,
+      guesty,
       picks: { left: collage.left, right: collage.right },
       method: collage.method,
       reasoning: collage.reasoning,
@@ -24043,18 +24237,24 @@ Requirements:
   ): Promise<{ synced: boolean; saved?: number; error?: string }> {
     try {
       const base = `http://127.0.0.1:${process.env.PORT || "5000"}`;
-      // Current Guesty set (best-effort; if it fails we push the app set only).
-      let existingGuestyAmenities: string[] = [];
-      try {
-        const curRes = await fetch(`${base}/api/builder/guesty-amenities?listingId=${encodeURIComponent(listingId)}`);
-        const curData = await curRes.json().catch(() => null) as any;
-        if (curRes.ok && curData) {
-          existingGuestyAmenities = [
-            ...(Array.isArray(curData.amenities) ? curData.amenities : []),
-            ...(Array.isArray(curData.otherAmenities) ? curData.otherAmenities : []),
-          ].filter((s: unknown): s is string => typeof s === "string" && s.length > 0);
-        }
-      } catch { /* current-set read failed — proceed with the app set only */ }
+      // push-amenities performs a full replace. Fail closed when the current
+      // Guesty set cannot be read: proceeding with app-only keys would delete
+      // amenities curated directly in Guesty and violate add-only semantics.
+      const curRes = await fetch(
+        `${base}/api/builder/guesty-amenities?listingId=${encodeURIComponent(listingId)}`,
+        { signal: AbortSignal.timeout(45_000) },
+      );
+      const curData = await curRes.json().catch(() => null) as any;
+      if (!curRes.ok || !curData) {
+        return {
+          synced: false,
+          error: `Could not read the current Guesty amenities before the add-only push (${curData?.error ?? `HTTP ${curRes.status}`})`,
+        };
+      }
+      const existingGuestyAmenities = [
+        ...(Array.isArray(curData.amenities) ? curData.amenities : []),
+        ...(Array.isArray(curData.otherAmenities) ? curData.otherAmenities : []),
+      ].filter((s: unknown): s is string => typeof s === "string" && s.length > 0);
       // Send both the label AND the key for each app amenity so the route's
       // canonical resolver (byNorm on labels + aliasMap on keys) has the best
       // chance to map each one, PLUS the listing's existing canonical names
@@ -24463,7 +24663,7 @@ Requirements:
   // curated in Guesty is never dropped. A fresh draft with no Guesty listing is
   // just saved in-system; the operator pushes it later.
   app.post("/api/builder/scan-amenities", async (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as { propertyId?: number; listingId?: string; currentKeys?: string[] };
+    const body = (req.body ?? {}) as { propertyId?: number; listingId?: string; currentKeys?: string[]; requireVision?: boolean };
     const propertyId = Number(body.propertyId);
     if (!Number.isFinite(propertyId)) return res.status(400).json({ ok: false, error: "propertyId required" });
     try {
@@ -24475,15 +24675,24 @@ Requirements:
         currentKeys = saved && Array.isArray(saved.amenityKeys) ? (saved.amenityKeys as string[]) : null;
       }
 
-      const scan = await scanAmenitiesForProperty(propertyId, { currentKeys });
+      const scan = await scanAmenitiesForProperty(propertyId, {
+        currentKeys,
+        requireVision: body.requireVision === true,
+      });
 
       await storage.savePropertyAmenities({
         propertyId,
         amenityKeys: scan.next,
         detected: scan.detail,
-        source: "scan",
+        source: scan.strictVisionComplete ? "scan-claude-vision" : "scan",
         photosScanned: scan.photosScanned,
         scannedAt: new Date(),
+      });
+      await persistAmenityScanReceipt(propertyId, {
+        ...scan.provenance,
+        strictVisionComplete: scan.strictVisionComplete,
+        amenityCount: scan.next.length,
+        detectedCount: scan.detail.length,
       });
 
       // Sync to Guesty only when a listing is mapped (client-selected listing or
@@ -24629,7 +24838,31 @@ Requirements:
       console.log(`[push-descriptions] GET after PUT — nickname: "${savedNickname}", publicDescription keys: ${JSON.stringify(Object.keys(savedDesc ?? {}))}`);
       console.log(`[push-descriptions] summary preview: "${String(savedDesc?.summary ?? "").slice(0, 80)}"`);
 
-      const summaryWasSaved = !!(savedDesc?.summary && savedDesc.summary.length > 10);
+      const sentFields: Record<string, unknown> = {
+        ...(payload.title ? { title: payload.title } : {}),
+        ...publicDescriptions,
+      };
+      const savedFields: Record<string, unknown> = {
+        ...(savedDesc ?? {}),
+        title: savedTitle,
+      };
+      const mismatches = findDescriptionReadbackMismatches(sentFields, savedFields);
+
+      if (mismatches.length > 0) {
+        const mismatchFields = mismatches.map((mismatch) => mismatch.field).join(", ");
+        const message = `Descriptions push did not round-trip through Guesty for: ${mismatchFields}`;
+        recordGuestyPush(listingId, "descriptions", "error", message);
+        return res.status(502).json({
+          success: false,
+          verified: false,
+          error: message,
+          mismatches,
+          sent: payload,
+          savedDescriptions: savedDesc ?? null,
+          savedNickname: savedNickname ?? null,
+          savedTitle: savedTitle ?? null,
+        });
+      }
 
       recordGuestyPush(
         listingId,
@@ -24639,7 +24872,7 @@ Requirements:
       );
       return res.json({
         success: true,
-        verified: summaryWasSaved,
+        verified: true,
         savedDescriptions: savedDesc ?? null,
         savedNickname: savedNickname ?? null,
         savedTitle: savedTitle ?? null,
@@ -24781,15 +25014,32 @@ Requirements:
       console.warn("[push-photos] IMGBB_API_KEY not configured — using app-hosted /photos fallback");
     }
 
-    const { guestyListingId, photos: rawPhotos, upscale = true } = req.body as {
+    const { guestyListingId, photos: rawPhotos, upscale = true, requiredCoverCollageUrl: rawRequiredCoverCollageUrl } = req.body as {
       guestyListingId: string;
       photos: { localPath: string; caption: string }[];
       upscale?: boolean;
+      requiredCoverCollageUrl?: string;
     };
 
     if (!guestyListingId || !Array.isArray(rawPhotos) || rawPhotos.length === 0) {
       return res.status(400).json({ error: "guestyListingId and photos[] are required" });
     }
+    if (rawRequiredCoverCollageUrl != null && !isAuthenticatedInternalGalleryPush(req)) {
+      return res.status(403).json({
+        error: "requiredCoverCollageUrl is reserved for authenticated internal audit gallery syncs",
+      });
+    }
+    const requiredCoverCollageUrl = normalizeRequiredCoverCollageUrl(rawRequiredCoverCollageUrl);
+    if (rawRequiredCoverCollageUrl != null && !requiredCoverCollageUrl) {
+      return res.status(400).json({ error: "requiredCoverCollageUrl must be a valid http(s) URL" });
+    }
+
+    // Strict mode is an explicit capability carried only by the final audit
+    // seam. Do not infer it from a pending job: intermediate replacement
+    // pushes run before the new collage exists and must retain the historical
+    // count-based behavior. The orchestrator fails closed before this call if
+    // the final mapped audit lacks its persisted identity.
+    const strictGalleryVerification = requiredCoverCollageUrl != null;
 
     // Pin an existing Cover Collage to the FRONT of the listing. The PUTs below
     // REPLACE the listing's entire pictures array, so without this a re-push
@@ -24797,16 +25047,30 @@ Requirements:
     // front and re-prepend it on every PUT so the live Guesty order stays
     //   Cover Collage → Unit A → Unit B → … → Community.
     // (No collage yet → the push is just the photos; make one via "Make Cover
-    // Collage" and it lands first.) Best-effort — a read failure just skips it.
-    let pinnedCollage: { original: string; caption: string } | null = null;
-    try {
-      const current = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
-      const pics = Array.isArray(current?.pictures) ? current.pictures : [];
-      const existing = pics.find((p: any) => (p?.caption || "") === "Cover Collage");
-      const collageUrl = existing?.original || existing?.url;
-      if (collageUrl) pinnedCollage = { original: String(collageUrl), caption: "Cover Collage" };
-    } catch (e: any) {
-      console.warn(`[push-photos] could not read existing collage (continuing without pin): ${e?.message ?? e}`);
+    // Collage" and it lands first.) Standard/manual pushes remain best-effort.
+    // The final full-automation sync supplies its own persisted, trusted
+    // collage identity and proves that exact URL in the final read-back.
+    let pinnedCollage: { original: string; caption: string } | null = requiredCoverCollageUrl
+      ? { original: requiredCoverCollageUrl, caption: "Cover Collage" }
+      : null;
+    // The strict audit already carries the persisted identity generated by
+    // this run. Do not gate its corrective PUT on an eventually-consistent
+    // pre-read that may still show the old collage; write the required URL and
+    // prove the whole exact ordered gallery with the retrying read-back below.
+    // Standard/manual calls have no such identity, so they retain the legacy
+    // best-effort GET that preserves any existing captioned cover.
+    if (!requiredCoverCollageUrl) {
+      try {
+        const current = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
+        const pics = Array.isArray(current?.pictures) ? current.pictures : [];
+        const existing = pics.find((p: any) => (p?.caption || "") === "Cover Collage");
+        const collageUrl = existing?.original || existing?.url;
+        if (collageUrl) {
+          pinnedCollage = { original: String(collageUrl), caption: "Cover Collage" };
+        }
+      } catch (e: any) {
+        console.warn(`[push-photos] could not read existing collage (continuing without pin): ${e?.message ?? e}`);
+      }
     }
     const pinnedCount = pinnedCollage ? 1 : 0;
 
@@ -25054,32 +25318,53 @@ Requirements:
     // retry. Wait 10s, verify. Give up after that and report the final
     // observed count so the UI doesn't lie.
     // Guesty's stored array includes the pinned collage, so compare against
-    // collected + pinned and report photo counts net of the collage.
+    // collected + pinned and report photo counts net of the collage. Standard
+    // pushes retain the historical count-based read-back. A strict final audit
+    // requires the exact normalized URL+caption sequence (including Cover
+    // Collage first): an eventually-consistent stale gallery can be longer
+    // than the intended post-dedupe gallery and must never produce a false
+    // green merely because its count is high enough.
     const expectedTotal = collected.length + pinnedCount;
-    let verifiedTotal = successCount + pinnedCount;
+    let verifiedTotal = strictGalleryVerification ? 0 : successCount + pinnedCount;
+    let strictGalleryVerified = !strictGalleryVerification;
     if (collected.length > 0) {
       const waits = [3000, 6000, 10000];
       for (let attempt = 0; attempt < waits.length; attempt++) {
         await new Promise((r) => setTimeout(r, waits[attempt]));
         try {
           const listing = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
-          const savedLen = Array.isArray(listing?.pictures) ? listing.pictures.length : 0;
-          emit({ type: "verify", attempt: attempt + 1, expected: expectedTotal, got: savedLen });
-          console.log(`[push-photos] Verify #${attempt + 1}: expected ${expectedTotal}, Guesty has ${savedLen}`);
-          if (savedLen >= expectedTotal) {
+          const savedPictures = Array.isArray(listing?.pictures) ? listing.pictures : [];
+          const savedLen = savedPictures.length;
+          const savedFirst = normalizeGuestyPictureForVerification(savedPictures[0]);
+          const exactMatch = strictGalleryVerification
+            && savedFirst?.caption === "Cover Collage"
+            && strictGuestyPicturesExactlyMatch(savedPictures, picturesForPut());
+          emit({
+            type: "verify",
+            attempt: attempt + 1,
+            expected: expectedTotal,
+            got: savedLen,
+            ...(strictGalleryVerification ? { exactMatch } : {}),
+          });
+          console.log(
+            `[push-photos] Verify #${attempt + 1}: expected ${expectedTotal}, Guesty has ${savedLen}`
+            + (strictGalleryVerification ? `, exact ordered gallery ${exactMatch ? "matched" : "did not match"}` : ""),
+          );
+          if (strictGalleryVerification ? exactMatch : savedLen >= expectedTotal) {
             verifiedTotal = savedLen;
+            strictGalleryVerified = true;
             break;
           }
-          // Under-count — re-PUT and loop. Don't early-break on success
-          // because some later attempts might succeed once the CDN
-          // settles.
+          // Under-count or strict content/order mismatch — re-PUT and loop.
+          // A stale equal/larger gallery is deliberately retried in strict
+          // mode instead of being accepted by count.
           try {
             await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: picturesForPut() });
-            console.log(`[push-photos] Retry PUT #${attempt + 1} — re-pushed ${expectedTotal} pictures after short-count verify`);
+            console.log(`[push-photos] Retry PUT #${attempt + 1} — re-pushed ${expectedTotal} pictures after ${strictGalleryVerification ? "exact-gallery" : "short-count"} verify`);
           } catch (e: any) {
             console.error(`[push-photos] Retry PUT #${attempt + 1} failed: ${e.message}`);
           }
-          verifiedTotal = savedLen;
+          if (!strictGalleryVerification) verifiedTotal = savedLen;
         } catch (e: any) {
           console.error(`[push-photos] Verify #${attempt + 1} GET failed: ${e.message}`);
           // Don't break — a transient GET failure shouldn't abort the loop
@@ -25089,11 +25374,14 @@ Requirements:
 
     const verifiedCount = Math.max(0, verifiedTotal - pinnedCount);
     const shortfall = collected.length - verifiedCount;
+    const strictGalleryError = strictGalleryVerification && !strictGalleryVerified
+      ? "Strict audit could not verify the exact ordered Guesty gallery with Cover Collage pinned first."
+      : null;
     recordGuestyPush(
       guestyListingId,
       "photos",
-      successCount > 0 ? "success" : "error",
-      successCount > 0 ? summarizePhotosPush(successCount, verifiedCount) : "No photos pushed to Guesty",
+      successCount > 0 && !strictGalleryError ? "success" : "error",
+      strictGalleryError ?? (successCount > 0 ? summarizePhotosPush(successCount, verifiedCount) : "No photos pushed to Guesty"),
     );
     emit({
       type: "done",
@@ -25105,6 +25393,8 @@ Requirements:
       trimmed: trimmedCount,
       maxPhotos: MAX_GUESTY_PHOTOS,
       collagePinned: pinnedCount > 0,
+      ...(strictGalleryVerification ? { strictGalleryVerified } : {}),
+      ...(strictGalleryError ? { guestyError: strictGalleryError } : {}),
     });
     console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, verified ${verifiedCount} on Guesty${shortfall > 0 ? ` (shortfall ${shortfall} — Guesty silently dropped them)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
     res.end();
@@ -37065,6 +37355,207 @@ Return ONLY compact JSON with this exact shape:
     }
   };
 
+  type UnitSwapHydrationResult = {
+    ok: boolean;
+    folder: string;
+    savedCount: number;
+    error?: string;
+    coverageShort?: boolean;
+    bedrooms?: number | null;
+    bathrooms?: number | null;
+    bedroomsFound?: number;
+    coverage?: {
+      bedroomsExpected: number | null;
+      bedroomsFound: number;
+      bedroomsShortfall: number;
+      bathroomsExpected: number | null;
+      bathroomsFound: number;
+      bathroomsShortfall: number;
+    };
+    /** Positive candidate-specific contradiction: safe for auto-replace to burn. */
+    candidateRejected?: boolean;
+    candidateRejection?: "community-mismatch" | "bedroom-coverage";
+    /** Infrastructure or missing evidence: current unit remains untouched and candidate is not burned. */
+    communityGateInconclusive?: boolean;
+    retryable?: boolean;
+  };
+
+  type StagedUnitCommunityGateReceipt = {
+    checkedAt: string;
+    attempts: number;
+    model: string;
+    photosChecked: number;
+    summary: string;
+  };
+
+  const STAGED_UNIT_COMMUNITY_GATE_MAX_ATTEMPTS = 2;
+  const STAGED_UNIT_COMMUNITY_GATE_RETRY_MS = 1_500;
+
+  const targetUnitIndexForStagedGate = (propertyId: number, oldUnitId: string): number => {
+    if (propertyId > 0) {
+      return getUnitBuilderByPropertyId(propertyId)?.units.findIndex((unit) => unit.id === oldUnitId) ?? -1;
+    }
+    if (/-unit-a$/i.test(oldUnitId)) return 0;
+    if (/-unit-b$/i.test(oldUnitId)) return 1;
+    return -1;
+  };
+
+  /**
+   * Audit a disposable replacement gallery before it can overwrite the active
+   * folder. This is the same full engine used by pre-flight, narrowed to the
+   * community folder plus the staged candidate so a separate broken sibling
+   * unit cannot deadlock this candidate's repair. The post-commit audit still
+   * runs the full property request and catches sibling issues.
+   */
+  const verifyStagedUnitSwapCommunity = async (
+    swap: {
+      propertyId: number;
+      oldUnitId: string;
+      oldBedrooms?: number | null;
+      newBedrooms?: number | null;
+      newSourceUrl: string;
+    },
+    stagingFolder: string,
+    labeledPhotoCount: number,
+  ): Promise<
+    | { ok: true; receipt: StagedUnitCommunityGateReceipt }
+    | {
+        ok: false;
+        reason: string;
+        candidateRejected: boolean;
+        candidateRejection?: "community-mismatch" | "bedroom-coverage";
+        inconclusive: boolean;
+      }
+  > => {
+    if (labeledPhotoCount <= 0) {
+      return {
+        ok: false,
+        reason: "The staged gallery has no completed photo labels, so bedroom coverage cannot be verified reliably.",
+        candidateRejected: false,
+        inconclusive: true,
+      };
+    }
+
+    const built = await buildPhotoCommunityCheckRequestForProperty(swap.propertyId).catch(() => null);
+    if (!built) {
+      return {
+        ok: false,
+        reason: "The property photo-community request could not be built.",
+        candidateRejected: false,
+        inconclusive: true,
+      };
+    }
+
+    const targetIndex = targetUnitIndexForStagedGate(swap.propertyId, swap.oldUnitId);
+    if (targetIndex < 0) {
+      return {
+        ok: false,
+        reason: "The replacement target could not be matched to a property unit.",
+        candidateRejected: false,
+        inconclusive: true,
+      };
+    }
+    const unitLetter = String.fromCharCode(65 + targetIndex);
+    const existingTarget = built.request.groups.find(
+      (group) => group.role === "unit" && new RegExp(`^Unit\\s+${unitLetter}(?:\\s|\\()`, "i").test(group.label),
+    );
+    const expectedBedrooms = swap.newBedrooms ?? swap.oldBedrooms ?? existingTarget?.expectedBedrooms ?? null;
+    if (expectedBedrooms == null || expectedBedrooms <= 0) {
+      return {
+        ok: false,
+        reason: "The replacement unit's expected bedroom count is missing.",
+        candidateRejected: false,
+        inconclusive: true,
+      };
+    }
+
+    const stagedGroup = await buildGroupFromPublishedFolder(
+      "unit",
+      `Unit ${unitLetter} (${expectedBedrooms}BR)`,
+      stagingFolder,
+      null,
+      expectedBedrooms,
+      existingTarget?.unitDescription,
+    );
+    if (!stagedGroup) {
+      return {
+        ok: false,
+        reason: "No published photos were readable from the staged replacement folder.",
+        candidateRejected: false,
+        inconclusive: true,
+      };
+    }
+    stagedGroup.sourceUrl = swap.newSourceUrl;
+
+    const communityGroups = built.request.groups.filter((group) => group.role === "community");
+    if (communityGroups.length === 0) {
+      return {
+        ok: false,
+        reason: "The community reference folder has no readable photos.",
+        candidateRejected: false,
+        inconclusive: true,
+      };
+    }
+    const request: PhotoCommunityCheckRequest = {
+      expectedCommunity: built.request.expectedCommunity,
+      expectedListingBedrooms: expectedBedrooms,
+      groups: [...communityGroups, stagedGroup],
+    };
+
+    let lastReason = "The staged community audit did not return a complete verdict.";
+    for (let attempt = 1; attempt <= STAGED_UNIT_COMMUNITY_GATE_MAX_ATTEMPTS; attempt++) {
+      try {
+        const result = await runPhotoCommunityCheck(
+          request,
+          process.env.ANTHROPIC_API_KEY ?? "",
+          Date.now(),
+        );
+        const decision = classifyStagedUnitCommunityAudit(result, {
+          targetFolder: stagingFolder,
+          bedroomCoverageReliable: true,
+        });
+        if (decision.decision === "accept") {
+          return {
+            ok: true,
+            receipt: {
+              checkedAt: new Date().toISOString(),
+              attempts: attempt,
+              model: result.model,
+              photosChecked: result.photosChecked,
+              summary: result.summary,
+            },
+          };
+        }
+        if (decision.decision === "reject") {
+          return {
+            ok: false,
+            reason: decision.reason,
+            candidateRejected: decision.burnCandidate,
+            candidateRejection: decision.reasonCode === "bedroom-coverage"
+              ? "bedroom-coverage"
+              : "community-mismatch",
+            inconclusive: false,
+          };
+        }
+        lastReason = decision.reason;
+      } catch (error: any) {
+        lastReason = error?.message ?? String(error);
+      }
+      if (attempt < STAGED_UNIT_COMMUNITY_GATE_MAX_ATTEMPTS) {
+        console.warn(
+          `[unit-swap staged-community] ${stagingFolder}: attempt ${attempt} inconclusive (${lastReason}); retrying once`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, STAGED_UNIT_COMMUNITY_GATE_RETRY_MS));
+      }
+    }
+    return {
+      ok: false,
+      reason: `The staged community audit remained inconclusive after ${STAGED_UNIT_COMMUNITY_GATE_MAX_ATTEMPTS} attempts: ${lastReason}`,
+      candidateRejected: false,
+      inconclusive: true,
+    };
+  };
+
   const hydrateUnitSwapPhotoFolder = async (
     swap: {
       propertyId: number;
@@ -37073,13 +37564,23 @@ Return ONLY compact JSON with this exact shape:
       newBedrooms?: number | null;
       newSourceUrl: string;
     },
-    opts: { useSidecar?: boolean; fallbackPhotoUrls?: string[]; requireBedroomPhotoCoverage?: boolean } = {},
-  ): Promise<{ ok: boolean; folder: string; savedCount: number; error?: string; coverageShort?: boolean; bedrooms?: number | null; bathrooms?: number | null; bedroomsFound?: number; coverage?: { bedroomsExpected: number | null; bedroomsFound: number; bedroomsShortfall: number; bathroomsExpected: number | null; bathroomsFound: number; bathroomsShortfall: number } }> => {
+    opts: {
+      useSidecar?: boolean;
+      fallbackPhotoUrls?: string[];
+      requireBedroomPhotoCoverage?: boolean;
+      requireFullCommunityAudit?: boolean;
+    } = {},
+  ): Promise<UnitSwapHydrationResult> => {
     const url = swap.newSourceUrl;
     const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
     if (!/^https?:\/\//i.test(url)) return { ok: false, folder, savedCount: 0, error: "Replacement source URL is invalid" };
     const existingSavedCount = await unitSwapPhotoFolderSavedCount(folder, url);
-    if (existingSavedCount !== null) return { ok: true, folder, savedCount: existingSavedCount };
+    // Strict automatic replacement always rebuilds a disposable stage and
+    // re-runs the live community audit. A prior receipt is provenance, not a
+    // permanent pass: the folder may have changed since it was written.
+    if (existingSavedCount !== null && opts.requireFullCommunityAudit !== true) {
+      return { ok: true, folder, savedCount: existingSavedCount };
+    }
 
     const photosBase = path.join(process.cwd(), "client/public/photos");
     const folderPath = path.join(photosBase, folder);
@@ -37137,10 +37638,15 @@ Return ONLY compact JSON with this exact shape:
         facts: listingFacts,
       });
       if (resolverProof.status === "rejected") {
+        const bedroomMismatch = resolverProof.issues.some((issue) => issue.startsWith("bedroom-mismatch:"));
         return {
           ok: false,
           folder,
           savedCount: 0,
+          coverageShort: bedroomMismatch || undefined,
+          candidateRejected: bedroomMismatch || undefined,
+          candidateRejection: bedroomMismatch ? "bedroom-coverage" : undefined,
+          retryable: bedroomMismatch || undefined,
           error: summarizeUnitPhotoProof("Replacement listing", resolverProof),
         };
       }
@@ -37188,6 +37694,9 @@ Return ONLY compact JSON with this exact shape:
           folder,
           savedCount: result.kept,
           coverageShort: true,
+          candidateRejected: true,
+          candidateRejection: "bedroom-coverage",
+          retryable: true,
           bedroomsFound: result.bedroomCount,
           coverage: result.coverage,
           error: `Replacement gallery photographs only ${result.bedroomCount} of ${coverageExpected} bedrooms — this unit is being replaced to fix a bedroom-photo shortfall, so committing a short gallery would fail the audit again.`,
@@ -37202,11 +37711,16 @@ Return ONLY compact JSON with this exact shape:
         contentFingerprints: result.keptContentFingerprints,
       });
       if (persistedProof.status === "rejected") {
+        const bedroomMismatch = persistedProof.issues.some((issue) => issue.startsWith("bedroom-mismatch:"));
         await cleanupStaging();
         return {
           ok: false,
           folder,
           savedCount: result.kept,
+          coverageShort: bedroomMismatch || undefined,
+          candidateRejected: bedroomMismatch || undefined,
+          candidateRejection: bedroomMismatch ? "bedroom-coverage" : undefined,
+          retryable: bedroomMismatch || undefined,
           error: summarizeUnitPhotoProof("Replacement saved photos", persistedProof),
         };
       }
@@ -37232,6 +37746,32 @@ Return ONLY compact JSON with this exact shape:
       sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
       sourceDoc.verifiedBy = "unit-swap";
       await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
+
+      if (opts.requireFullCommunityAudit === true) {
+        const stagedGate = await verifyStagedUnitSwapCommunity(
+          swap,
+          stagingFolder,
+          result.labeled,
+        );
+        if (!stagedGate.ok) {
+          await cleanupStaging();
+          return {
+            ok: false,
+            folder,
+            savedCount: result.kept,
+            error: stagedGate.reason,
+            candidateRejected: stagedGate.candidateRejected || undefined,
+            candidateRejection: stagedGate.candidateRejection,
+            communityGateInconclusive: stagedGate.inconclusive || undefined,
+            retryable: true,
+          };
+        }
+        sourceDoc.verificationStatus = "verified";
+        sourceDoc.verifiedBy = "unit-swap-full-community-gate";
+        sourceDoc.stagedCommunityAudit = stagedGate.receipt;
+        await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
+      }
+
       await fs.promises.rm(folderPath, { recursive: true, force: true });
       await fs.promises.rename(stagingPath, folderPath);
       // The pipeline labeled/hashed/bedroom-clustered the NEW photos under the
@@ -37399,6 +37939,7 @@ Return ONLY compact JSON with this exact shape:
       photoUrls: rawPhotoUrls,
       requireBedroomPhotoCoverage: rawRequireCoverage,
       expectedUnitSwapSnapshot: rawExpectedSnapshot,
+      requireFullCommunityAudit: rawRequireFullCommunityAudit,
       ...swapBody
     } = req.body as any;
     const fallbackPhotoUrls = Array.isArray(rawPhotoUrls)
@@ -37411,6 +37952,10 @@ Return ONLY compact JSON with this exact shape:
     const expectedUnitSwapSnapshot = typeof rawExpectedSnapshot === "string" && rawExpectedSnapshot.trim()
       ? rawExpectedSnapshot.trim()
       : null;
+    // Automatic replacement/full-audit callers opt into the full staged gate.
+    // Direct manual swaps keep their existing behavior unless they explicitly
+    // request it; no current gallery is overwritten until this gate accepts.
+    const requireFullCommunityAudit = rawRequireFullCommunityAudit === true;
     const parsed = insertUnitSwapSchema.safeParse(swapBody);
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid unit swap data", details: parsed.error.flatten() });
@@ -37468,15 +38013,34 @@ Return ONLY compact JSON with this exact shape:
     // The bounded 90s residential-IP sidecar tier (fires only when the
     // datacenter scrape comes up short) recovers exactly this; the
     // manual-URL swap route above has run with it since it shipped.
-    const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data, { useSidecar: true, fallbackPhotoUrls, requireBedroomPhotoCoverage });
+    const hydrated = await hydrateUnitSwapPhotoFolder(parsed.data, {
+      useSidecar: true,
+      fallbackPhotoUrls,
+      requireBedroomPhotoCoverage,
+      requireFullCommunityAudit,
+    });
     if (!hydrated.ok) {
-      return res.status(502).json({
-        error: `Replacement unit found, but its photos could not be saved: ${hydrated.error ?? "unknown error"}. Choose a different replacement so the builder does not reuse duplicate photos.`,
+      const status = hydrated.candidateRejected
+        ? 422
+        : hydrated.communityGateInconclusive
+          ? 503
+          : 502;
+      const error = hydrated.candidateRejected
+        ? `Replacement candidate rejected before commit: ${hydrated.error ?? "community verification failed"}`
+        : hydrated.communityGateInconclusive
+          ? `Replacement candidate was not committed because its staged community audit was inconclusive: ${hydrated.error ?? "verification unavailable"}`
+          : `Replacement unit found, but its photos could not be saved: ${hydrated.error ?? "unknown error"}. Choose a different replacement so the builder does not reuse duplicate photos.`;
+      return res.status(status).json({
+        error,
         photoFolder: hydrated.folder,
         // Distinguishes "gallery photographs too few bedrooms" from a
         // bot-walled/empty gallery so the orchestrator's burn accounting
         // (and its all-burned failure message) stays honest.
         coverageShort: hydrated.coverageShort === true ? true : undefined,
+        candidateRejected: hydrated.candidateRejected === true ? true : undefined,
+        candidateRejection: hydrated.candidateRejection,
+        communityGateInconclusive: hydrated.communityGateInconclusive === true ? true : undefined,
+        retryable: hydrated.retryable === true ? true : undefined,
       });
     }
     const created = await createUnitSwapAtomically(parsed.data, expectedUnitSwapSnapshot);
@@ -44863,10 +45427,11 @@ Return ONLY compact JSON with this exact shape:
         percent: 10,
         label: "Running SearchAPI Airbnb seasonal pricing",
       });
-      const { pricingResult, guestyPush } = await refreshPricingTabMarketRates(
+      const { pricingResult, guestyPush, auditReceipt } = await refreshPricingTabMarketRates(
         quickPropertyKey,
         String(draft.name || draft.listingTitle || `Draft ${id}`),
         quickRefreshLock.cancelGeneration,
+        (req.body as any)?.forceSearchApi === true,
       );
       setQuickRefreshProgress({
         propertyId: quickPropertyKey,
@@ -44892,6 +45457,7 @@ Return ONLY compact JSON with this exact shape:
         estimatedHighRate,
         persisted: pricingRowsForClient(pricingResult.rows),
         guestyPush,
+        auditReceipt,
         draft: updated,
       });
     } catch (e: any) {
@@ -45230,10 +45796,11 @@ Return ONLY compact JSON with this exact shape:
         percent: 10,
         label: "Running SearchAPI Airbnb seasonal pricing",
       });
-      const { pricingResult, guestyPush } = await refreshPricingTabMarketRates(
+      const { pricingResult, guestyPush, auditReceipt } = await refreshPricingTabMarketRates(
         propertyId,
         `Property ${propertyId}`,
         quickRefreshLock.cancelGeneration,
+        (req.body as any)?.forceSearchApi === true,
       );
       setQuickRefreshProgress({
         propertyId,
@@ -45253,6 +45820,7 @@ Return ONLY compact JSON with this exact shape:
         mode: "hybrid-airbnb-layered",
         persisted: pricingRowsForClient(pricingResult.rows),
         guestyPush,
+        auditReceipt,
       });
     } catch (e: any) {
       const cancelled = e?.cancelled === true;
@@ -50272,6 +50840,10 @@ Return ONLY compact JSON with this exact shape:
         : `This bundled stay combines Unit A (${unit1.bedrooms}BR) and Unit B (${unit2!.bedrooms}BR) at ${communityName}. The units are ${walk.description.toLowerCase()} Guests receive separate access details for each unit at check-in. Update bedding, bathrooms, and amenity details once the exact units are confirmed.`;
       const neighborhood = `${communityName} places guests in the ${city}, ${state} area, close to local beaches, restaurants, shopping, and outdoor activities. Add specific nearby landmarks and drive times before publishing.`;
       const transit = `A rental car is recommended for exploring ${city} and the surrounding area. Add airport distance, parking details, and walkability notes once the exact unit location is confirmed.`;
+      const access = singleListing
+        ? "Guests have private use of the booked home during their stay. Property-specific arrival and entry instructions are provided before check-in."
+        : "Guests have private use of both booked homes during their stay. Property-specific arrival and entry instructions for each home are provided before check-in.";
+      const houseRules = "Guests should care for the home and shared community spaces and follow the confirmed property and community rules supplied with the reservation.";
       const summaryWithFee = appendResortFeeNote(summary, resortFeeNote, [summary, space, neighborhood, transit].join(" "));
       const description = [summaryWithFee, space, `THE NEIGHBORHOOD\n\n${neighborhood}`, `GETTING AROUND\n\n${transit}`].join("\n\n");
 
@@ -50284,6 +50856,8 @@ Return ONLY compact JSON with this exact shape:
         space,
         neighborhood,
         transit,
+        access,
+        houseRules,
         unitA: fallbackUnitDraft(unit1),
         unitB: singleListing || !unit2 ? null : fallbackUnitDraft(unit2),
         combinedBedrooms,
@@ -50299,7 +50873,7 @@ Return ONLY compact JSON with this exact shape:
       // CODEX NOTE (2026-05-04, claude/single-listing): branch the
       // no-Anthropic fallback so single-listing drafts get a coherent
       // single-unit fallback string instead of "Two condos at…".
-      return res.json(fallbackDraft());
+      return res.json(fallbackDraft("ANTHROPIC_API_KEY is not configured; generated fallback copy was not produced by Claude."));
     }
 
     // Structured-output prompt. Mirrors the fields the existing
@@ -50329,6 +50903,7 @@ Return ONLY compact JSON with this exact shape:
     const unit1Facts = sourceFactSnippet(unit1.description);
     const unit2Facts = singleListing ? "" : sourceFactSnippet(unit2?.description);
     const SOURCE_FACTS_RULE = "- When source listing details are provided in CONTEXT, use their concrete facts (bathrooms, square footage, bedding) instead of estimating; only estimate what the details do not cover, and never contradict them.";
+    const SAFE_PUBLIC_COPY_RULE = "- Across every field, never invent access codes, entry or lock details, parking details, quiet hours, check-in or check-out times, pet rules, smoking rules, or fee specifics unless they appear in the supplied source facts. For access and houseRules, when a specific is not sourced, use neutral public-facing language that says confirmed details are provided with the reservation.";
 
     const prompt = singleListing
       ? `Generate a structured vacation rental listing draft for a STANDALONE single-unit listing at ${communityName} in ${city}, ${state}.
@@ -50349,6 +50924,8 @@ OUTPUT — return ONLY valid JSON with this exact shape:
   "space": "1-2 paragraphs describing this one unit's layout — bedrooms, what guests get, the vibe. Do NOT mention combination / two units / disclosure / unit-assignment language.",
   "neighborhood": "1-2 paragraphs about the area immediately around ${communityName} in ${city}, ${state}. Local attractions, beaches, dining, vibe. Specific to this market.",
   "transit": "1 paragraph on getting around — distance to airport, rental car notes, rideshare availability, walkability.",
+  "access": "1 short paragraph describing what spaces guests may use. Use only supplied facts; otherwise say property-specific arrival and entry details are provided with the reservation.",
+  "houseRules": "1 short paragraph of public-facing rule guidance grounded only in supplied facts; otherwise direct guests to the confirmed property and community rules supplied with the reservation.",
   "unitA": {
     "bedrooms": ${unit1.bedrooms},
     "bathrooms": "Estimated bathroom count for a ${unit1.bedrooms}BR vacation condo/townhouse — return as a string like \\"2\\" or \\"2.5\\"",
@@ -50367,6 +50944,7 @@ CONSTRAINTS
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about.
 ${SOURCE_FACTS_RULE}
+${SAFE_PUBLIC_COPY_RULE}
 - Single-unit framing — NEVER mention "two units" or "combined" or "individually owned".
 - Do not include representative-accommodation or unit-assignment disclosure language. The builder appends that at the bottom.
 - If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
@@ -50393,6 +50971,8 @@ OUTPUT — return ONLY valid JSON with this exact shape:
   "space": "1-2 paragraphs describing the combined property layout — bedroom count across both units, what guests get, why it works for a large group. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance. Do NOT include any disclosure / 'two separate units' / 'individually owned' / unit-assignment language; the builder adds those separately.",
   "neighborhood": "1-2 paragraphs about the area immediately around ${communityName} in ${city}, ${state}. Local attractions, beaches, dining, vibe. Specific to this market.",
   "transit": "1 paragraph on getting around — distance to airport, rental car notes, rideshare availability, walkability.",
+  "access": "1 short paragraph describing the spaces included with both booked units. Use only supplied facts; otherwise say property-specific arrival and entry details are provided with the reservation.",
+  "houseRules": "1 short paragraph of public-facing rule guidance grounded only in supplied facts; otherwise direct guests to the confirmed property and community rules supplied with the reservation.",
   "unitA": {
     "bedrooms": ${unit1.bedrooms},
     "bathrooms": "Estimated bathroom count for a ${unit1.bedrooms}BR vacation condo at this complex — return as a string like \\"2\\" or \\"2.5\\"",
@@ -50420,6 +51000,7 @@ CONSTRAINTS
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about. Describe in terms of what a typical condo at this kind of resort offers.
 ${SOURCE_FACTS_RULE}
+${SAFE_PUBLIC_COPY_RULE}
 - summary and space must NOT contain combo disclosure or representative-photo disclosure; the builder places those separately.
 - If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
 - Plain text only inside the strings. No Markdown. No bullet markers. No headers.
@@ -50481,6 +51062,8 @@ ${SOURCE_FACTS_RULE}
       const parsedSpace = String(parsed.space ?? "").trim();
       const parsedNeighborhood = String(parsed.neighborhood ?? "").trim();
       const parsedTransit = String(parsed.transit ?? "").trim();
+      const parsedAccess = String(parsed.access ?? "").trim();
+      const parsedHouseRules = String(parsed.houseRules ?? "").trim();
       const summaryWithFee = appendResortFeeNote(
         parsedSummary,
         resortFeeNote,
@@ -50503,6 +51086,7 @@ ${SOURCE_FACTS_RULE}
          .replace(/\bfor\s+\d+\b/i, `for ${listingSleeps}`);
 
       return res.json({
+        generation: { method: "claude", model: "claude-sonnet-4-6" },
         // Airbnb truncates titles past 50 chars. Booking.com / VRBO
         // tolerate longer but active properties keep both under 50
         // anyway, since the same title is pushed to all channels via
@@ -50517,6 +51101,8 @@ ${SOURCE_FACTS_RULE}
         space: parsedSpace,
         neighborhood: parsedNeighborhood,
         transit: parsedTransit,
+        access: parsedAccess,
+        houseRules: parsedHouseRules,
         unitA: normalizeGeneratedUnitDraft(parsed.unitA, unit1),
         unitB: singleListing || !unit2 ? null : normalizeGeneratedUnitDraft(parsed.unitB, unit2),
         combinedBedrooms,
