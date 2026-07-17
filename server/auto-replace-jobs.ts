@@ -21,20 +21,33 @@
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
 import { parseStreetCityState } from "@shared/address-listing-logic";
-import { latestUnitSwapsByUnit, replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
+import {
+  latestUnitSwapsByUnit,
+  replacementPhotoFolderForUnit,
+  resolveActiveUnitPhotoFolders,
+  unitSwapSnapshotForUnit,
+} from "@shared/unit-swap-photos";
 import { resolveCanonicalCommunityPhotoFolder } from "@shared/community-photo-folders";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import {
   AUTO_REPLACE_STORE_SETTING_KEY,
+  AUTO_REPLACE_RUNNER_LEASE_MS,
+  AUTO_REPLACE_UNIT_ID_MAX_LENGTH,
   MAX_AUTO_REPLACE_FIND_RESTARTS,
+  MAX_AUTO_REPLACE_RETRIES,
   STUCK_AUTO_REPLACE_ERROR,
   clearableAutoReplaceJobIds,
   parseDraftUnitId,
   failStuckAutoReplaceRecords,
   findActiveAutoReplaceJob,
   isAutoReplacePhaseActive,
+  isAutoReplaceRetryDue,
+  isLegacyAutoReplaceFailureRetryable,
+  newestAutoReplaceJobsByTarget,
   nextStepFromFindJob,
   parseAutoReplaceStore,
+  photoListingHasPersistentPhotoFinding,
+  planAutoReplaceRetry,
   pickCommitCandidate,
   serializeAutoReplaceStore,
   shouldResumeAutoReplaceJob,
@@ -49,7 +62,10 @@ import {
 } from "./preflight-background-jobs";
 import { repushGuestyPhotosForProperty } from "./guesty-photo-repush";
 import { loopbackRequestHeaders } from "./auth";
+import { dbPool } from "./db";
 import { storage } from "./storage";
+import pg from "pg";
+import type { PoolClient } from "pg";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 
@@ -60,31 +76,213 @@ const FIND_WAIT_CEILING_MS = 45 * 60 * 1000;
 // Consecutive "restart" poll signals required before launching a fresh search
 // (~15s at the poll interval) — a lone signal can be a store blip/write lag.
 const RESTART_SIGNAL_CONFIRM_POLLS = 3;
+const AUTO_REPLACE_RUNNER_ID = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const AUTO_REPLACE_RUNNER_HEARTBEAT_MS = 30_000;
+
+class AutoReplaceRunnerLeaseLostError extends Error {
+  constructor(jobId: string) {
+    super(`Auto-replace runner lease lost for ${jobId}`);
+  }
+}
 
 const jobs = new Map<string, AutoReplaceJobRecord>();
 const activeJobIds = new Set<string>();
 
 let storeTail: Promise<void> = Promise.resolve();
+async function mutateStoreTransaction(
+  mutate: (store: Record<string, AutoReplaceJobRecord>, nowMs: number) => void,
+): Promise<void> {
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+    // Ensure the row exists before FOR UPDATE; concurrent first writers then
+    // serialize on the primary-key conflict instead of both observing a gap.
+    await client.query(
+      `INSERT INTO app_settings ("key", "value", "updated_at") VALUES ($1, '{}', NOW()) ON CONFLICT ("key") DO NOTHING`,
+      [AUTO_REPLACE_STORE_SETTING_KEY],
+    );
+    const locked = await client.query<{ value: string }>(
+      `SELECT "value" FROM app_settings WHERE "key" = $1 FOR UPDATE`,
+      [AUTO_REPLACE_STORE_SETTING_KEY],
+    );
+    const now = Date.now();
+    const store = parseAutoReplaceStore(locked.rows[0]?.value ?? null);
+    mutate(store, now);
+    await client.query(
+      `UPDATE app_settings SET "value" = $2, "updated_at" = NOW() WHERE "key" = $1`,
+      [AUTO_REPLACE_STORE_SETTING_KEY, serializeAutoReplaceStore(store, now)],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function enqueueStoreMutation(
+  mutate: (store: Record<string, AutoReplaceJobRecord>, nowMs: number) => void,
+  strict: boolean,
+): Promise<void> {
+  const attempt = storeTail.then(() => mutateStoreTransaction(mutate));
+  // Keep the tail usable after one failed write; strict callers still receive
+  // the original rejection and MUST NOT launch destructive work.
+  storeTail = attempt.catch(() => undefined);
+  return strict ? attempt : attempt.catch(() => undefined);
+}
+
 function mutateStore(mutate: (store: Record<string, AutoReplaceJobRecord>, nowMs: number) => void): Promise<void> {
-  storeTail = storeTail.then(async () => {
-    try {
-      const now = Date.now();
-      const raw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY);
-      const store = parseAutoReplaceStore(raw ?? null);
-      mutate(store, now);
-      await storage.setSetting(AUTO_REPLACE_STORE_SETTING_KEY, serializeAutoReplaceStore(store, now));
-    } catch {
-      // Fail-soft: persistence is an upgrade, never a blocker.
+  return enqueueStoreMutation(mutate, false);
+}
+
+function mutateStoreStrict(mutate: (store: Record<string, AutoReplaceJobRecord>, nowMs: number) => void): Promise<void> {
+  return enqueueStoreMutation(mutate, true);
+}
+
+const AUTO_REPLACE_LOCK_NAMESPACE = 0x41524a;
+type AutoReplaceTargetLock = { release: () => Promise<void> };
+// Short-lived orchestration claims use a separately bounded pool so even a
+// burst across many units cannot consume the application's query pool. These
+// locks cover only validation + durable queue promotion, never external search
+// or photo hydration.
+const autoReplaceLockPool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 2,
+  application_name: "auto-replace-short-locks",
+});
+autoReplaceLockPool.on("error", (error) => {
+  console.error(`[auto-replace] short-lock pool error: ${error?.message ?? error}`);
+});
+
+function autoReplaceTargetLockKey(propertyId: number, unitId: string): number {
+  if (unitId.length > AUTO_REPLACE_UNIT_ID_MAX_LENGTH) {
+    throw new Error("Auto-replace unit id is too long");
+  }
+  let hash = 0x811c9dc5;
+  const value = `${propertyId}:${unitId}`;
+  // The explicit ceiling is load-bearing for CodeQL's loop-bound analysis.
+  // propertyId contributes at most 24 printable characters for a JS number.
+  const bound = AUTO_REPLACE_UNIT_ID_MAX_LENGTH + 25;
+  for (let i = 0; i < value.length && i < bound; i++) {
+    hash = Math.imul(hash ^ value.charCodeAt(i), 0x01000193);
+  }
+  return hash | 0;
+}
+
+async function acquireAutoReplaceTargetLock(record: Pick<AutoReplaceJobRecord, "propertyId" | "unitId">): Promise<AutoReplaceTargetLock | null> {
+  const client: PoolClient = await autoReplaceLockPool.connect();
+  const targetKey = autoReplaceTargetLockKey(record.propertyId, record.unitId);
+  try {
+    const claimed = await client.query<{ acquired: boolean }>(
+      "SELECT pg_try_advisory_lock($1::int, $2::int) AS acquired",
+      [AUTO_REPLACE_LOCK_NAMESPACE, targetKey],
+    );
+    if (claimed.rows[0]?.acquired !== true) {
+      client.release();
+      return null;
     }
-  });
-  return storeTail;
+  } catch (error) {
+    client.release();
+    throw error;
+  }
+
+  let released = false;
+  return {
+    release: async () => {
+      if (released) return;
+      released = true;
+      try {
+        await client.query("SELECT pg_advisory_unlock($1::int, $2::int)", [AUTO_REPLACE_LOCK_NAMESPACE, targetKey]);
+      } finally {
+        client.release();
+      }
+    },
+  };
 }
 
 function touch(record: AutoReplaceJobRecord, patch: Partial<AutoReplaceJobRecord>): void {
-  Object.assign(record, patch, { updatedAt: Date.now() });
+  const now = Date.now();
+  Object.assign(record, patch, {
+    updatedAt: now,
+    ...(record.runnerId === AUTO_REPLACE_RUNNER_ID
+      ? { runnerLeaseUntil: now + AUTO_REPLACE_RUNNER_LEASE_MS }
+      : {}),
+  });
   jobs.set(record.jobId, record);
+  const snapshot = { ...record, attemptedUrls: [...record.attemptedUrls] };
   void mutateStore((store) => {
-    store[record.jobId] = { ...record };
+    const current = store[record.jobId];
+    if (snapshot.runnerId && current?.runnerId !== snapshot.runnerId) return;
+    store[record.jobId] = snapshot;
+  });
+}
+
+async function claimAutoReplaceRunner(record: AutoReplaceJobRecord, resuming: boolean): Promise<boolean> {
+  let claimed: AutoReplaceJobRecord | null = null;
+  await mutateStoreStrict((store, now) => {
+    const current = store[record.jobId];
+    if (!current || current.phase === "retry_wait" || !isAutoReplacePhaseActive(current.phase)) return;
+    const authoritative = newestAutoReplaceJobsByTarget(Object.values(store))
+      .find((candidate) => candidate.propertyId === current.propertyId && candidate.unitId === current.unitId);
+    if (authoritative?.jobId !== current.jobId) return;
+    if (current.runnerId
+      && current.runnerId !== AUTO_REPLACE_RUNNER_ID
+      && (current.runnerLeaseUntil ?? 0) > now) return;
+    if (resuming && !shouldResumeAutoReplaceJob(current, now)) return;
+
+    claimed = {
+      ...current,
+      resumeCount: current.resumeCount + (resuming ? 1 : 0),
+      runnerId: AUTO_REPLACE_RUNNER_ID,
+      runnerLeaseUntil: now + AUTO_REPLACE_RUNNER_LEASE_MS,
+      updatedAt: now,
+    };
+    store[current.jobId] = claimed;
+  });
+  if (!claimed) return false;
+  Object.assign(record, claimed);
+  jobs.set(record.jobId, record);
+  return true;
+}
+
+async function renewAutoReplaceRunnerLease(
+  record: AutoReplaceJobRecord,
+): Promise<"owned" | "lost" | "unavailable"> {
+  let owned = false;
+  let leaseUntil = 0;
+  try {
+    await mutateStoreStrict((store, now) => {
+      const current = store[record.jobId];
+      if (!current || current.runnerId !== AUTO_REPLACE_RUNNER_ID) return;
+      const authoritative = newestAutoReplaceJobsByTarget(Object.values(store))
+        .find((candidate) => candidate.propertyId === current.propertyId && candidate.unitId === current.unitId);
+      if (authoritative?.jobId !== current.jobId) return;
+      leaseUntil = now + AUTO_REPLACE_RUNNER_LEASE_MS;
+      current.runnerLeaseUntil = leaseUntil;
+      current.updatedAt = now;
+      store[record.jobId] = current;
+      owned = true;
+    });
+  } catch {
+    return "unavailable";
+  }
+  if (!owned) return "lost";
+  record.runnerLeaseUntil = leaseUntil;
+  record.updatedAt = Date.now();
+  jobs.set(record.jobId, record);
+  return "owned";
+}
+
+async function releaseAutoReplaceRunnerLease(record: AutoReplaceJobRecord): Promise<void> {
+  await mutateStore((store, now) => {
+    const current = store[record.jobId];
+    if (!current || current.runnerId !== AUTO_REPLACE_RUNNER_ID) return;
+    current.runnerId = null;
+    current.runnerLeaseUntil = null;
+    current.updatedAt = now;
+    store[record.jobId] = current;
+    Object.assign(record, current);
   });
 }
 
@@ -104,7 +302,7 @@ type AutoReplaceTarget = {
   street?: string;
   city?: string;
   state?: string;
-  unit: { id: string; unitNumber: string; bedrooms: number };
+  unit: { id: string; unitNumber: string; bedrooms: number; photoFolder: string | null };
   unitIndex: number;
 };
 
@@ -125,14 +323,19 @@ async function resolveAutoReplaceTarget(propertyId: number, unitId: string): Pro
       street: parsed.street || undefined,
       city: parsed.city || undefined,
       state: parsed.state || undefined,
-      unit: { id: unit.id, unitNumber: unit.unitNumber ?? "", bedrooms: unit.bedrooms },
+      unit: {
+        id: unit.id,
+        unitNumber: unit.unitNumber ?? "",
+        bedrooms: unit.bedrooms,
+        photoFolder: unit.photoFolder ?? null,
+      },
       unitIndex: index,
     };
   }
   if (!Number.isFinite(propertyId) || propertyId >= 0) return null;
   const ref = parseDraftUnitId(unitId);
   if (!ref || ref.draftId !== -propertyId) return null;
-  const draft = await storage.getCommunityDraft(ref.draftId).catch(() => undefined);
+  const draft = await storage.getCommunityDraft(ref.draftId);
   if (!draft) return null;
   if (ref.slot === "b" && (draft as any).singleListing === true) return null;
   const bedrooms = resolveDraftUnitBedrooms(draft as any, ref.slot === "a" ? "unit1" : "unit2");
@@ -147,9 +350,91 @@ async function resolveAutoReplaceTarget(propertyId: number, unitId: string): Pro
     street: street || undefined,
     city: draft.city || undefined,
     state: draft.state || undefined,
-    unit: { id: unitId, unitNumber: ref.slot.toUpperCase(), bedrooms },
+    unit: {
+      id: unitId,
+      unitNumber: ref.slot.toUpperCase(),
+      bedrooms,
+      photoFolder: ref.slot === "a"
+        ? (draft.unit1PhotoFolder ?? `draft-${ref.draftId}-unit-a`)
+        : (draft.unit2PhotoFolder ?? `draft-${ref.draftId}-unit-b`),
+    },
     unitIndex: ref.slot === "a" ? 0 : 1,
   };
+}
+
+type AutoReplaceTargetContext = { photoFolder: string | null; unitSwapSnapshot: string };
+
+async function currentTargetContextForRecord(
+  record: Pick<AutoReplaceJobRecord, "propertyId" | "unitId">,
+): Promise<AutoReplaceTargetContext | null> {
+  const target = await resolveAutoReplaceTarget(record.propertyId, record.unitId);
+  if (!target) return null;
+  const swaps = await storage.getUnitSwaps(record.propertyId);
+  const unitSwapSnapshot = unitSwapSnapshotForUnit(swaps, record.unitId);
+  if (target.isDraft) return { photoFolder: target.unit.photoFolder, unitSwapSnapshot };
+  const photoFolder = resolveActiveUnitPhotoFolders(record.propertyId, [target.unit], swaps)[0]?.activeFolder
+    ?? target.unit.photoFolder;
+  return { photoFolder, unitSwapSnapshot };
+}
+
+async function folderStillHasPhotoFinding(folder: string | null): Promise<boolean> {
+  if (!folder) return false;
+  const row = await storage.getPhotoListingCheckByFolder(folder);
+  return photoListingHasPersistentPhotoFinding(row);
+}
+
+async function targetStillMatchesScheduledSnapshot(record: AutoReplaceJobRecord): Promise<boolean> {
+  // Legacy in-flight records predate snapshot capture. Their original resume
+  // behavior stays intact; legacy FAILED records capture a snapshot before
+  // entering retry_wait.
+  if (record.retryUnitSwapSnapshot == null) return true;
+  const current = await currentTargetContextForRecord(record);
+  if (!current || current.unitSwapSnapshot !== record.retryUnitSwapSnapshot) return false;
+  return !record.retryPhotoFolder || current.photoFolder === record.retryPhotoFolder;
+}
+
+async function finishAutoReplaceFailure(
+  record: AutoReplaceJobRecord,
+  error: string,
+  opts: { retryablePreCommit?: boolean } = {},
+): Promise<void> {
+  const previous = { ...record, attemptedUrls: [...record.attemptedUrls] };
+  const expectedRunnerId = record.runnerId === AUTO_REPLACE_RUNNER_ID
+    ? AUTO_REPLACE_RUNNER_ID
+    : undefined;
+  if (opts.retryablePreCommit) {
+    const retry = planAutoReplaceRetry(record, error, Date.now());
+    if (retry) {
+      console.warn(
+        `[auto-replace] ${record.jobId}: safe pre-commit failure; ${retry.message} (${error})`,
+      );
+      Object.assign(record, retry);
+      try {
+        await persistAutoReplaceRecord(record, { strict: true, expectedRunnerId });
+      } catch (persistError) {
+        Object.assign(record, previous);
+        throw persistError;
+      }
+      return;
+    }
+    if (record.retryPhotoFolder && record.autoRetryCount >= MAX_AUTO_REPLACE_RETRIES) {
+      error = `${error} Automatic retry limit (${MAX_AUTO_REPLACE_RETRIES}) reached.`;
+    }
+  }
+  Object.assign(record, {
+    phase: "failed",
+    nextRetryAt: null,
+    runnerId: null,
+    runnerLeaseUntil: null,
+    error,
+    updatedAt: Date.now(),
+  });
+  try {
+    await persistAutoReplaceRecord(record, { strict: true, expectedRunnerId });
+  } catch (persistError) {
+    Object.assign(record, previous);
+    throw persistError;
+  }
 }
 
 // The same find payload the manual dialog assembles (builder-preflight parity):
@@ -209,10 +494,72 @@ async function patchLoopback(path: string, body: unknown, timeoutMs: number): Pr
   return { status: resp.status, data };
 }
 
-async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
-  if (activeJobIds.has(record.jobId)) return;
-  activeJobIds.add(record.jobId);
+async function runAutoReplaceJob(
+  record: AutoReplaceJobRecord,
+  opts: { resuming?: boolean } = {},
+): Promise<void> {
+  // retry_wait is promoted only by the watchdog after its due time and a
+  // fresh persisted-photo-status check. No other caller may start it early.
+  if (record.phase === "retry_wait") {
+    return;
+  }
+  if (activeJobIds.has(record.jobId)) {
+    return;
+  }
+  let claimed = false;
   try {
+    claimed = await claimAutoReplaceRunner(record, opts.resuming === true);
+  } catch (error: any) {
+    console.warn(`[auto-replace] ${record.jobId}: runner claim failed: ${error?.message ?? error}`);
+    return;
+  }
+  if (!claimed) return;
+
+  activeJobIds.add(record.jobId);
+  if (opts.resuming) {
+    console.warn(`[auto-replace] boot-resume: claimed orphaned job ${record.jobId} (phase ${record.phase}, resume ${record.resumeCount})`);
+  }
+  let leaseLost = false;
+  let heartbeatBusy = false;
+  const heartbeat = setInterval(() => {
+    if (heartbeatBusy || leaseLost) return;
+    heartbeatBusy = true;
+    void renewAutoReplaceRunnerLease(record)
+      .then((status) => { if (status === "lost") leaseLost = true; })
+      .finally(() => { heartbeatBusy = false; });
+  }, AUTO_REPLACE_RUNNER_HEARTBEAT_MS);
+  heartbeat.unref?.();
+
+  const confirmRunnerLease = async (): Promise<boolean> => {
+    if (leaseLost) return false;
+    const status = await renewAutoReplaceRunnerLease(record);
+    if (status === "lost") leaseLost = true;
+    if (status === "unavailable") {
+      console.warn(`[auto-replace] ${record.jobId}: runner lease could not be verified; deferring before commit`);
+    }
+    return status === "owned";
+  };
+  try {
+    if (record.phase === "queued" || record.phase === "finding") {
+      let targetMatches: boolean;
+      try {
+        targetMatches = await targetStillMatchesScheduledSnapshot(record);
+      } catch (error: any) {
+        await finishAutoReplaceFailure(
+          record,
+          `Could not verify the unit's current swap state (${error?.message ?? error}).`,
+          { retryablePreCommit: true },
+        );
+        return;
+      }
+      if (!targetMatches) {
+        await finishAutoReplaceFailure(
+          record,
+          "The unit or its pending swap changed while this replacement was queued — automatic work stopped to preserve the newer choice.",
+        );
+        return;
+      }
+    }
     // Resumed mid-"verifying": the swap is already COMMITTED (newUnitLabel /
     // replacementFolder were persisted in the same touch that flipped the
     // phase) — never re-commit; just re-kick the idempotent verification legs
@@ -247,10 +594,11 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
       // search (each one is a full SearchAPI sweep).
       let restartSignals = 0;
       for (;;) {
+        if (leaseLost) return;
         if (!record.findJobId) {
           const payload = await assembleFindPayload(record.propertyId, record.unitId, record.attemptedUrls);
           if (!payload) {
-            touch(record, { phase: "failed", error: "Could not resolve this property/unit for a replacement search." });
+            await finishAutoReplaceFailure(record, "Could not resolve this property/unit for a replacement search.");
             return;
           }
           const started = startPreflightReplacementFindJob(payload);
@@ -269,7 +617,7 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
         if (step === "restart" && ++restartSignals >= RESTART_SIGNAL_CONFIRM_POLLS) {
           restartSignals = 0;
           if (record.findRestarts >= MAX_AUTO_REPLACE_FIND_RESTARTS) {
-            touch(record, { phase: "failed", error: STUCK_AUTO_REPLACE_ERROR });
+            await finishAutoReplaceFailure(record, STUCK_AUTO_REPLACE_ERROR, { retryablePreCommit: true });
             return;
           }
           console.warn(`[auto-replace] find job ${record.findJobId} died unresumably — starting a fresh search (restart ${record.findRestarts + 1}/${MAX_AUTO_REPLACE_FIND_RESTARTS})`);
@@ -281,14 +629,15 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           continue;
         }
         if (step === "fail") {
-          touch(record, {
-            phase: "failed",
-            error: String(findJob?.error ?? findJob?.message ?? "Replacement search failed — no eligible unit found."),
-          });
+          await finishAutoReplaceFailure(
+            record,
+            String(findJob?.error ?? findJob?.message ?? "Replacement search failed — no eligible unit found."),
+            { retryablePreCommit: true },
+          );
           return;
         }
         if (Date.now() - waitStart > FIND_WAIT_CEILING_MS) {
-          touch(record, { phase: "failed", error: "Replacement search did not finish in time." });
+          await finishAutoReplaceFailure(record, "Replacement search did not finish in time.", { retryablePreCommit: true });
           return;
         }
         touch(record, { message: String(findJob?.message ?? "Searching…") });
@@ -305,7 +654,7 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
         : findJob?.unit ? [findJob.unit] : [];
       const target = await resolveAutoReplaceTarget(record.propertyId, record.unitId);
       if (!target) {
-        touch(record, { phase: "failed", error: "Property/unit no longer resolvable for commit." });
+        await finishAutoReplaceFailure(record, "Property/unit no longer resolvable for commit.");
         return;
       }
       const unit = target.unit;
@@ -341,18 +690,38 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
             burnedPhotos > 0 ? `${burnedPhotos} had a gallery that could not be scraped (bot-walled or photos taken down)` : null,
             burnedCoverage > 0 ? `${burnedCoverage} photographed fewer bedrooms than the unit claims (the audit needs every bedroom in the gallery)` : null,
           ].filter(Boolean).join("; ");
-          touch(record, {
-            phase: "failed",
-            error: units.length === 0
+          await finishAutoReplaceFailure(
+            record,
+            units.length === 0
               // Resumed mid-commit but the find results are gone (store evicted
               // >24h later) — the search never said "no units", so don't claim it.
               ? "The search results were lost in a server restart — click Replace photos to run a fresh search."
               : `Every found option failed at commit${reasons ? ` (${reasons})` : ""}. Re-run the search.`,
-          });
+            { retryablePreCommit: true },
+          );
           return;
         }
         const c = candidate as Record<string, unknown>;
         const url = String(c.url ?? "");
+        if (!(await confirmRunnerLease())) return;
+        let targetMatches: boolean;
+        try {
+          targetMatches = await targetStillMatchesScheduledSnapshot(record);
+        } catch (error: any) {
+          await finishAutoReplaceFailure(
+            record,
+            `Could not verify the unit's current swap state before commit (${error?.message ?? error}).`,
+            { retryablePreCommit: true },
+          );
+          return;
+        }
+        if (!targetMatches) {
+          await finishAutoReplaceFailure(
+            record,
+            "The unit or its pending swap changed while the replacement search was running — commit stopped to preserve the newer choice.",
+          );
+          return;
+        }
         const { status, data } = await postLoopback("/api/unit-swaps", {
           // The route's fire-and-forget Guesty push is skipped here — this
           // orchestrator runs its OWN awaited push below so the dashboard
@@ -382,11 +751,23 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
             : Array.isArray(c.photos)
               ? (c.photos as Array<{ url?: unknown }>).map((p) => String(p?.url ?? "")).filter((u) => /^https?:\/\//i.test(u))
               : [],
+          // Re-checked transactionally by POST /api/unit-swaps AFTER photo
+          // hydration and immediately before INSERT. A newer manual choice
+          // therefore wins even if it lands during the long scrape.
+          expectedUnitSwapSnapshot: record.retryUnitSwapSnapshot,
           // Bedroom-shortfall replacements (audit ladder): the route aborts
           // the commit at staging when the new gallery photographs fewer
           // bedrooms than the unit claims — burned below as coverageShort.
           requireBedroomPhotoCoverage: record.requireBedroomPhotoCoverage === true,
         }, 300_000); // hydration may use the bounded 90s sidecar scrape tier
+        if (leaseLost) return;
+        if (status === 409 && data?.targetChanged === true) {
+          await finishAutoReplaceFailure(
+            record,
+            String(data?.error ?? "The unit's swap history changed before commit — automatic work stopped to preserve the newer choice."),
+          );
+          return;
+        }
         if (status === 409) {
           burnedInUse += 1;
           touch(record, { attemptedUrls: [...record.attemptedUrls, url], message: "Candidate already in use — trying the next option…" });
@@ -417,7 +798,10 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           continue;
         }
         if (status >= 400) {
-          touch(record, { phase: "failed", error: String(data?.error ?? `Unit swap failed (HTTP ${status})`) });
+          // The route returned outside the explicitly pre-commit 409/502
+          // candidate rejects above. The commit may be ambiguous; never stack
+          // an automatic second swap on top of it.
+          await finishAutoReplaceFailure(record, String(data?.error ?? `Unit swap failed (HTTP ${status})`));
           return;
         }
         committed = {
@@ -436,10 +820,10 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
           const repoint = await patchLoopback(`/api/unit-swaps/commit/${record.propertyId}`, { oldUnitId: record.unitId }, 30_000)
             .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
           if (repoint.status >= 400) {
-            touch(record, {
-              phase: "failed",
-              error: `The swap was recorded but the draft could not be repointed at the new unit (HTTP ${repoint.status}) — open builder pre-flight and use "Commit Replacements & Continue".`,
-            });
+            await finishAutoReplaceFailure(
+              record,
+              `The swap was recorded but the draft could not be repointed at the new unit (HTTP ${repoint.status}) — open builder pre-flight and use "Commit Replacements & Continue".`,
+            );
             return;
           }
         }
@@ -452,9 +836,31 @@ async function runAutoReplaceJob(record: AutoReplaceJobRecord): Promise<void> {
     break;
     } // findCommit
   } catch (e: any) {
-    touch(record, { phase: "failed", error: e?.message ?? "Auto replace failed" });
+    // Another Railway instance reclaimed the job after this runner's lease
+    // expired. The winner is now authoritative; the loser must not rewrite
+    // its phase or error receipt.
+    if (e instanceof AutoReplaceRunnerLeaseLostError) return;
+    // A verifying record is already past the destructive swap boundary. If
+    // its final durable write failed, keep it resumable so the watchdog can
+    // repeat the idempotent verification/push leg instead of falsely marking
+    // the committed swap as a generic failure.
+    if (record.phase === "verifying" && record.replacementFolder) {
+      console.error(`[auto-replace] ${record.jobId}: verify completion was not persisted; leaving it resumable: ${e?.message ?? e}`);
+      return;
+    }
+    try {
+      await finishAutoReplaceFailure(record, e?.message ?? "Auto replace failed", {
+        // A thrown request while committing may have crossed the write boundary
+        // before the response was lost. Finding/queued failures are pre-commit.
+        retryablePreCommit: record.phase === "queued" || record.phase === "finding",
+      });
+    } catch (persistError: any) {
+      console.error(`[auto-replace] ${record.jobId}: could not persist failure state: ${persistError?.message ?? persistError}`);
+    }
   } finally {
+    clearInterval(heartbeat);
     activeJobIds.delete(record.jobId);
+    await releaseAutoReplaceRunnerLease(record);
   }
 }
 
@@ -524,11 +930,24 @@ async function runAutoReplaceVerifyPhase(
     guestyPushNote = ` ⚠ Guesty photo push failed (${e?.message ?? e}) — open the builder's Photos tab and use "Push Photos to Guesty".`;
   }
 
-  touch(record, {
+  const expectedRunnerId = record.runnerId === AUTO_REPLACE_RUNNER_ID
+    ? AUTO_REPLACE_RUNNER_ID
+    : undefined;
+  const previous = { ...record, attemptedUrls: [...record.attemptedUrls] };
+  Object.assign(record, {
     phase: "completed",
     message: `${record.unitLabel} now uses ${committed.newUnitLabel || record.newUnitLabel || committed.newAddress || "the new unit"} — OTA rescan + Claude-vision community check are running.${rescanKickNote}${guestyPushNote}`,
     error: null,
+    runnerId: null,
+    runnerLeaseUntil: null,
+    updatedAt: Date.now(),
   });
+  try {
+    await persistAutoReplaceRecord(record, { strict: true, expectedRunnerId });
+  } catch (error) {
+    Object.assign(record, previous);
+    throw error;
+  }
 }
 
 export async function startAutoReplaceJob(input: {
@@ -542,53 +961,122 @@ export async function startAutoReplaceJob(input: {
 }): Promise<{ ok: true; job: AutoReplaceJobRecord } | { ok: false; status: number; error: string }> {
   const propertyId = Number(input.propertyId);
   const unitId = String(input.unitId ?? "");
+  if (unitId.length > AUTO_REPLACE_UNIT_ID_MAX_LENGTH) {
+    return { ok: false, status: 400, error: "Invalid unit id" };
+  }
   // Resolves BOTH builder properties (positive ids) and promoted drafts
   // (negative ids, `draft<id>-unit-a/b`).
   const target = await resolveAutoReplaceTarget(propertyId, unitId);
   if (!target) return { ok: false, status: 400, error: "Unknown property/unit for auto replace" };
 
-  // Double-tap guard — one active auto-replace per property+unit (memory + store).
-  for (const existing of Array.from(jobs.values())) {
-    if (existing.propertyId === propertyId && existing.unitId === unitId && isAutoReplacePhaseActive(existing.phase)) {
-      return { ok: true, job: existing };
+  // Double-tap guard — merge memory with the shared store, but keep the
+  // freshest version of each job. A newer terminal receipt must be able to
+  // supersede an older in-memory active receipt during a rolling deploy.
+  const raw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY).catch(() => undefined);
+  const combinedStore = parseAutoReplaceStore(raw ?? null);
+  for (const local of Array.from(jobs.values())) {
+    const persisted = combinedStore[local.jobId];
+    if (!persisted || (local.updatedAt || local.createdAt) >= (persisted.updatedAt || persisted.createdAt)) {
+      combinedStore[local.jobId] = local;
     }
   }
-  const raw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY).catch(() => undefined);
-  const persistedActive = findActiveAutoReplaceJob(parseAutoReplaceStore(raw ?? null), propertyId, unitId);
-  if (persistedActive && !jobs.has(persistedActive.jobId)) {
-    jobs.set(persistedActive.jobId, persistedActive);
-    void runAutoReplaceJob(persistedActive);
+  const persistedActive = findActiveAutoReplaceJob(combinedStore, propertyId, unitId);
+  if (persistedActive) {
+    if (!jobs.has(persistedActive.jobId)) jobs.set(persistedActive.jobId, persistedActive);
+    // A cross-instance double-tap only returns the shared receipt. The runner
+    // lease/watchdog owns execution; an API request must never duplicate it.
     return { ok: true, job: persistedActive };
   }
 
-  const letter = String.fromCharCode(65 + Math.max(0, target.unitIndex));
-  const numberSuffix = target.unit.unitNumber && target.unit.unitNumber !== letter
-    ? ` (${target.unit.unitNumber})`
-    : "";
-  const record: AutoReplaceJobRecord = {
-    jobId: `arj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-    phase: "queued",
-    propertyId,
-    unitId,
-    unitLabel: input.unitLabel || `Unit ${letter}${numberSuffix}`,
-    propertyName: target.propertyName,
-    findJobId: null,
-    attemptedUrls: [],
-    newUnitLabel: null,
-    newAddress: null,
-    replacementFolder: null,
-    message: "Queued",
-    error: null,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    resumeCount: 0,
-    findRestarts: 0,
-    requireBedroomPhotoCoverage: input.requireBedroomPhotoCoverage === true,
-  };
-  jobs.set(record.jobId, record);
-  await mutateStore((store) => { store[record.jobId] = { ...record }; });
-  void runAutoReplaceJob(record);
-  return { ok: true, job: record };
+  let targetLock: AutoReplaceTargetLock | null;
+  try {
+    targetLock = await acquireAutoReplaceTargetLock({ propertyId, unitId });
+  } catch {
+    return { ok: false, status: 503, error: "Could not lock this unit for replacement safely — please retry." };
+  }
+  if (!targetLock) {
+    // A concurrent instance may have persisted between the first read and the
+    // advisory-lock attempt. Return that shared record when possible; never
+    // create a second job merely because its first write is still in flight.
+    const latestRaw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY).catch(() => undefined);
+    const latestActive = findActiveAutoReplaceJob(parseAutoReplaceStore(latestRaw ?? null), propertyId, unitId);
+    if (latestActive) return { ok: true, job: latestActive };
+    return { ok: false, status: 409, error: "A replacement job for this unit is already starting — please wait a moment." };
+  }
+
+  try {
+    // Re-read after taking the cross-instance lock. This is the authoritative
+    // double-tap check for rolling Railway deployments.
+    let lockedRaw: string | undefined;
+    try {
+      lockedRaw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY);
+    } catch {
+      return { ok: false, status: 503, error: "Could not verify the replacement queue safely — please retry." };
+    }
+    const lockedActive = findActiveAutoReplaceJob(parseAutoReplaceStore(lockedRaw ?? null), propertyId, unitId);
+    if (lockedActive) {
+      jobs.set(lockedActive.jobId, lockedActive);
+      return { ok: true, job: lockedActive };
+    }
+
+    let targetContext: AutoReplaceTargetContext | null;
+    try {
+      targetContext = await currentTargetContextForRecord({ propertyId, unitId });
+    } catch {
+      return { ok: false, status: 503, error: "Could not read the unit's current swap state safely — please retry." };
+    }
+    if (!targetContext) {
+      return { ok: false, status: 503, error: "Could not capture the unit's current swap state safely — please retry." };
+    }
+    let retryPhotoFolder: string | null;
+    try {
+      retryPhotoFolder = await folderStillHasPhotoFinding(targetContext.photoFolder)
+        ? targetContext.photoFolder
+        : null;
+    } catch {
+      return { ok: false, status: 503, error: "Could not read the latest OTA photo check safely — please retry." };
+    }
+
+    const letter = String.fromCharCode(65 + Math.max(0, target.unitIndex));
+    const numberSuffix = target.unit.unitNumber && target.unit.unitNumber !== letter
+      ? ` (${target.unit.unitNumber})`
+      : "";
+    const record: AutoReplaceJobRecord = {
+      jobId: `arj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      phase: "queued",
+      propertyId,
+      unitId,
+      unitLabel: input.unitLabel || `Unit ${letter}${numberSuffix}`,
+      propertyName: target.propertyName,
+      findJobId: null,
+      attemptedUrls: [],
+      newUnitLabel: null,
+      newAddress: null,
+      replacementFolder: null,
+      message: "Queued",
+      error: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      resumeCount: 0,
+      findRestarts: 0,
+      requireBedroomPhotoCoverage: input.requireBedroomPhotoCoverage === true,
+      retryPhotoFolder,
+      retryUnitSwapSnapshot: targetContext.unitSwapSnapshot,
+      runnerId: null,
+      runnerLeaseUntil: null,
+      autoRetryCount: 0,
+      nextRetryAt: null,
+    };
+    try {
+      await persistAutoReplaceRecord(record, { strict: true });
+    } catch {
+      return { ok: false, status: 503, error: "Could not persist the replacement job safely — please retry." };
+    }
+    void runAutoReplaceJob(record);
+    return { ok: true, job: record };
+  } finally {
+    await targetLock.release().catch(() => undefined);
+  }
 }
 
 // Queue for the dashboard chip: in-memory records win (freshest), persisted
@@ -617,7 +1105,185 @@ export async function clearAutoReplaceQueue(): Promise<{ removed: number; active
   return { removed: removable.length, ...summary };
 }
 
-// Boot/interval watchdog — resume orphaned active jobs after a restart.
+async function persistAutoReplaceRecord(
+  record: AutoReplaceJobRecord,
+  opts: { strict?: boolean; expectedRunnerId?: string } = {},
+): Promise<void> {
+  const snapshot = { ...record, attemptedUrls: [...record.attemptedUrls] };
+  if (opts.strict) {
+    let accepted = false;
+    await mutateStoreStrict((store) => {
+      if (opts.expectedRunnerId && store[record.jobId]?.runnerId !== opts.expectedRunnerId) return;
+      store[record.jobId] = snapshot;
+      accepted = true;
+    });
+    if (!accepted) throw new AutoReplaceRunnerLeaseLostError(record.jobId);
+    jobs.set(record.jobId, record);
+    return;
+  }
+  jobs.set(record.jobId, record);
+  await mutateStore((store) => {
+    if (opts.expectedRunnerId && store[record.jobId]?.runnerId !== opts.expectedRunnerId) return;
+    store[record.jobId] = snapshot;
+  });
+}
+
+async function scheduleLegacyAutoReplaceRetry(record: AutoReplaceJobRecord, nowMs: number): Promise<boolean> {
+  if (!isLegacyAutoReplaceFailureRetryable(record, nowMs)) return false;
+  const targetLock = await acquireAutoReplaceTargetLock(record).catch(() => null);
+  if (!targetLock) return false;
+  try {
+    const raw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY);
+    const liveStore = parseAutoReplaceStore(raw ?? null);
+    const current = liveStore[record.jobId];
+    const authoritative = newestAutoReplaceJobsByTarget(Object.values(liveStore))
+      .find((candidate) => candidate.propertyId === record.propertyId && candidate.unitId === record.unitId);
+    if (!current || authoritative?.jobId !== record.jobId || !isLegacyAutoReplaceFailureRetryable(current, nowMs)) {
+      return false;
+    }
+    Object.assign(record, current);
+
+    const context = await currentTargetContextForRecord(record);
+    // Legacy receipts never captured their original generation. Requiring no
+    // swap is conservative but essential: otherwise a manual choice made
+    // after the old failure becomes the retry's adopted baseline.
+    if (!context?.photoFolder || context.unitSwapSnapshot !== "none"
+      || !(await folderStillHasPhotoFinding(context.photoFolder))) return false;
+    const previous = { ...record };
+    record.retryPhotoFolder = context.photoFolder;
+    record.retryUnitSwapSnapshot = context.unitSwapSnapshot;
+    const retry = planAutoReplaceRetry(record, String(record.error ?? "Auto replace failed"), nowMs);
+    if (!retry) return false;
+    Object.assign(record, retry);
+
+    let promoted = false;
+    const snapshot = { ...record, attemptedUrls: [...record.attemptedUrls] };
+    try {
+      await mutateStoreStrict((store) => {
+        const live = store[record.jobId];
+        const latest = newestAutoReplaceJobsByTarget(Object.values(store))
+          .find((candidate) => candidate.propertyId === record.propertyId && candidate.unitId === record.unitId);
+        if (!live || latest?.jobId !== record.jobId || live.phase !== "failed"
+          || live.updatedAt !== previous.updatedAt) return;
+        store[record.jobId] = snapshot;
+        promoted = true;
+      });
+    } catch (error) {
+      Object.assign(record, previous);
+      throw error;
+    }
+    if (!promoted) {
+      Object.assign(record, previous);
+      return false;
+    }
+    jobs.set(record.jobId, record);
+    console.warn(`[auto-replace] legacy-retry: ${record.jobId} scheduled for persistent finding on ${context.photoFolder}`);
+    return true;
+  } finally {
+    await targetLock.release().catch(() => undefined);
+  }
+}
+
+async function activateDueAutoReplaceRetry(record: AutoReplaceJobRecord): Promise<boolean> {
+  if (!isAutoReplaceRetryDue(record, Date.now()) || activeJobIds.has(record.jobId)) return false;
+  const targetLock = await acquireAutoReplaceTargetLock(record).catch((error) => {
+    console.warn(`[auto-replace] ${record.jobId}: retry target lock failed: ${error?.message ?? error}`);
+    return null;
+  });
+  if (!targetLock) return false;
+
+  try {
+    let persisted: AutoReplaceJobRecord | undefined;
+    try {
+      const raw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY);
+      persisted = parseAutoReplaceStore(raw ?? null)[record.jobId];
+    } catch (error: any) {
+      console.warn(`[auto-replace] ${record.jobId}: retry queue read failed; deferring: ${error?.message ?? error}`);
+      return false;
+    }
+    if (!persisted || !isAutoReplaceRetryDue(persisted, Date.now())) return false;
+    Object.assign(record, persisted);
+
+    // Re-check every piece of mutable target identity while holding the same
+    // short claim lock used by every watchdog instance. The actual swap write
+    // has its own transaction-level generation precondition.
+    let context: AutoReplaceTargetContext | null;
+    try {
+      context = await currentTargetContextForRecord(record);
+    } catch (error: any) {
+      console.warn(`[auto-replace] ${record.jobId}: retry target read failed; deferring: ${error?.message ?? error}`);
+      return false;
+    }
+    const snapshotUnchanged = record.retryUnitSwapSnapshot != null
+      && context?.unitSwapSnapshot === record.retryUnitSwapSnapshot;
+    const folderUnchanged = !!context?.photoFolder
+      && context.photoFolder === record.retryPhotoFolder;
+    let findingStillPresent = false;
+    if (folderUnchanged) {
+      try {
+        findingStillPresent = await folderStillHasPhotoFinding(context!.photoFolder);
+      } catch (error: any) {
+        console.warn(`[auto-replace] ${record.jobId}: retry photo-check read failed; deferring: ${error?.message ?? error}`);
+        return false;
+      }
+    }
+    if (!snapshotUnchanged || !findingStillPresent) {
+      const reason = !context
+        ? "the unit could no longer be resolved safely"
+        : !snapshotUnchanged
+          ? "the unit's swap history changed during the retry backoff"
+          : !folderUnchanged
+            ? "the unit's active photo folder changed during the retry backoff"
+            : "the latest Airbnb/VRBO/Booking photo check no longer reports the unit as found";
+      const previous = { ...record };
+      Object.assign(record, {
+        phase: "failed" as const,
+        nextRetryAt: null,
+        message: null,
+        error: `${record.error ?? "The replacement attempt failed."} Automatic retry stopped because ${reason}.`,
+        updatedAt: Date.now(),
+      });
+      try {
+        await persistAutoReplaceRecord(record, { strict: true });
+      } catch (error) {
+        Object.assign(record, previous);
+        throw error;
+      }
+      console.warn(`[auto-replace] ${record.jobId}: automatic retry cancelled — ${reason}`);
+      return false;
+    }
+
+    const previous = { ...record };
+    Object.assign(record, {
+      phase: "queued" as const,
+      findJobId: null,
+      resumeCount: 0,
+      nextRetryAt: null,
+      message: `Starting automatic retry ${record.autoRetryCount}/${MAX_AUTO_REPLACE_RETRIES}; rejected candidates remain excluded…`,
+      error: null,
+      updatedAt: Date.now(),
+    });
+    // Strict durability is a launch precondition. If the write fails, this
+    // process releases the target lock without starting a search; a later
+    // watchdog sweep can safely try the still-persisted retry_wait record.
+    try {
+      await persistAutoReplaceRecord(record, { strict: true });
+    } catch (error) {
+      Object.assign(record, previous);
+      throw error;
+    }
+    console.warn(`[auto-replace] retry-start: ${record.jobId} attempt ${record.autoRetryCount}/${MAX_AUTO_REPLACE_RETRIES}`);
+    void runAutoReplaceJob(record);
+    return true;
+  } finally {
+    await targetLock.release().catch((error) => {
+      console.warn(`[auto-replace] ${record.jobId}: retry target lock release failed: ${error?.message ?? error}`);
+    });
+  }
+}
+
+// Boot/interval watchdog — resume orphaned active jobs after a restart and
+// promote bounded delayed retries after re-confirming the OTA photo finding.
 // Gate: AUTO_REPLACE_RESUME_DISABLED=1.
 let resumeSweepInFlight = false;
 export async function resumeOrphanedAutoReplaceJobs(): Promise<void> {
@@ -626,27 +1292,47 @@ export async function resumeOrphanedAutoReplaceJobs(): Promise<void> {
   try {
     const raw = await storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY);
     const store = parseAutoReplaceStore(raw ?? null);
-    for (const record of Object.values(store)) {
+    const now = Date.now();
+
+    // Bridge recent failures written before retry metadata shipped. Only the
+    // newest receipt for each target is authoritative: an older failure must
+    // not be promoted after a later operator attempt or completed swap.
+    const authoritativeRecords = newestAutoReplaceJobsByTarget(Object.values(store));
+    for (const record of authoritativeRecords) {
+      await scheduleLegacyAutoReplaceRetry(record, now);
+    }
+
+    for (const record of authoritativeRecords) {
+      if (record.phase === "retry_wait") {
+        if (isAutoReplaceRetryDue(record, Date.now())) await activateDueAutoReplaceRetry(record);
+        continue;
+      }
       if (!shouldResumeAutoReplaceJob(record, Date.now())) continue;
-      if (jobs.has(record.jobId) || activeJobIds.has(record.jobId)) continue;
-      console.warn(`[auto-replace] boot-resume: re-attaching orphaned job ${record.jobId} (phase ${record.phase}, resume ${record.resumeCount + 1})`);
-      record.resumeCount += 1;
-      jobs.set(record.jobId, record);
-      void mutateStore((store2) => { store2[record.jobId] = { ...record }; });
-      void runAutoReplaceJob(record);
+      if (activeJobIds.has(record.jobId)) continue;
+      void runAutoReplaceJob(record, { resuming: true });
     }
     // Active-phase records that can NEVER come back (resume cap exhausted /
     // outside the window) become an honest terminal failure instead of
-    // pinning the queue banner "active" until the 24h eviction (2026-07-05
+    // pinning the queue banner "active" until store eviction (2026-07-05
     // Pili Mai deploy-burst incident). In-process jobs are protected.
-    const liveIds = new Set([...Array.from(jobs.keys()), ...Array.from(activeJobIds)]);
-    const stuckIds = Object.values(store).filter((r) =>
-      isAutoReplacePhaseActive(r.phase) && !liveIds.has(r.jobId) && !shouldResumeAutoReplaceJob(r, Date.now()),
+    const liveIds = new Set(Array.from(activeJobIds));
+    const stuckIds = authoritativeRecords.filter((r) =>
+      r.phase !== "retry_wait" && isAutoReplacePhaseActive(r.phase)
+        && !liveIds.has(r.jobId) && !shouldResumeAutoReplaceJob(r, Date.now()),
     ).map((r) => r.jobId);
     if (stuckIds.length > 0) {
-      console.warn(`[auto-replace] failing ${stuckIds.length} stuck unresumable job(s): ${stuckIds.join(", ")}`);
+      console.warn(`[auto-replace] reconciling ${stuckIds.length} stuck unresumable job(s): ${stuckIds.join(", ")}`);
       await mutateStore((liveStore, now) => {
-        failStuckAutoReplaceRecords(liveStore, now, liveIds);
+        // Re-evaluate authority inside the row-locked transaction: a newer
+        // receipt may have arrived since this sweep read the setting.
+        const authoritativeIds = new Set(
+          newestAutoReplaceJobsByTarget(Object.values(liveStore)).map((record) => record.jobId),
+        );
+        const protectedIds = new Set(liveIds);
+        for (const jobId of Object.keys(liveStore)) {
+          if (!authoritativeIds.has(jobId)) protectedIds.add(jobId);
+        }
+        failStuckAutoReplaceRecords(liveStore, now, protectedIds);
       });
     }
   } catch {

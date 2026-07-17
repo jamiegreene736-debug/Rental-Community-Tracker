@@ -6,6 +6,7 @@ import { clearAutoReplaceQueue, listAutoReplaceJobs, startAutoReplaceJob } from 
 import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, listUnitAuditJobs, startUnitAuditSweep, startUnitAuditSweepBulk } from "./unit-audit-sweep";
 import { getUnitAuditCronStatus, runUnitAuditCronSweep } from "./unit-audit-scheduler";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
+import { withUnitSwapPropertyWriteLock } from "./unit-swap-write-lock";
 import {
   bulkComboListingJobItems as bulkComboListingJobItemRows,
   bulkComboListingJobs as bulkComboListingJobRows,
@@ -25,8 +26,9 @@ import {
   reservationAliases,
   rentalAgreements,
   queueJobEvents as queueJobEventRows,
+  unitSwaps as unitSwapRows,
 } from "@shared/schema";
-import type { BuyIn, BookingAlternativePage } from "@shared/schema";
+import type { BuyIn, BookingAlternativePage, InsertUnitSwap, UnitSwap } from "@shared/schema";
 import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
@@ -250,7 +252,7 @@ import {
   normalizeUnitClaim,
   unitVerificationClaims,
 } from "@shared/folder-unit-map";
-import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
+import { replacementPhotoFolderForUnit, unitSwapSnapshotForUnit } from "@shared/unit-swap-photos";
 import { checkCommunityType } from "@shared/community-type";
 import { isSameHawaiiStreetFamily } from "@shared/hawaii-street-family";
 import { checkCommunityState, isCommunityInWrongState } from "@shared/community-location-guard";
@@ -34746,6 +34748,46 @@ Return ONLY compact JSON with this exact shape:
     return Array.from(latestByUnit.values());
   };
 
+  type AtomicUnitSwapCreateResult =
+    | { ok: true; swap: UnitSwap }
+    | { ok: false; reason: "target-changed"; currentSnapshot: string }
+    | { ok: false; reason: "duplicate-source"; duplicateOldUnitId: string };
+
+  // Called while the dedicated property write lock is held. The small
+  // transaction re-checks the auto worker's expected generation and inserts
+  // on one database connection; the surrounding lock also protects the photo
+  // folder promotion that precedes this write.
+  const createUnitSwapAtomically = async (
+    input: InsertUnitSwap,
+    expectedSnapshot: string | null,
+  ): Promise<AtomicUnitSwapCreateResult> => db.transaction(async (tx) => {
+    const currentSwaps = await tx.select()
+      .from(unitSwapRows)
+      .where(eq(unitSwapRows.propertyId, input.propertyId))
+      .orderBy(desc(unitSwapRows.createdAt));
+    const currentSnapshot = unitSwapSnapshotForUnit(currentSwaps, input.oldUnitId);
+    if (expectedSnapshot !== null && currentSnapshot !== expectedSnapshot) {
+      return { ok: false as const, reason: "target-changed" as const, currentSnapshot };
+    }
+
+    const newSourceKey = unitSwapListingKey(input.newSourceUrl);
+    const duplicateSource = latestUnitSwaps(currentSwaps).find((swap) =>
+      swap.oldUnitId !== input.oldUnitId
+      && newSourceKey
+      && unitSwapListingKey(swap.newSourceUrl) === newSourceKey
+    );
+    if (duplicateSource) {
+      return {
+        ok: false as const,
+        reason: "duplicate-source" as const,
+        duplicateOldUnitId: duplicateSource.oldUnitId,
+      };
+    }
+
+    const [swap] = await tx.insert(unitSwapRows).values(input).returning();
+    return { ok: true as const, swap };
+  });
+
   const activeUnitPhotoFoldersForBuilder = async (builder: typeof unitBuilderData[number]) => {
     const activeFolders = new Set<string>();
     const staleFolders = new Set<string>();
@@ -37242,6 +37284,7 @@ Return ONLY compact JSON with this exact shape:
       thumbnailUrl: null as string | null,
     };
 
+    return withUnitSwapPropertyWriteLock(propertyId, async () => {
     const activeSwaps = latestUnitSwaps(await storage.getUnitSwaps(propertyId));
     const newSourceKey = unitSwapListingKey(swapInput.newSourceUrl);
     const duplicateSource = activeSwaps.find((swap) =>
@@ -37284,10 +37327,17 @@ Return ONLY compact JSON with this exact shape:
     }
 
     const resolvedBedrooms = hydrated.bedrooms ?? swapInput.oldBedrooms ?? null;
-    const swap = await storage.createUnitSwap({
+    const created = await createUnitSwapAtomically({
       ...swapInput,
       newBedrooms: resolvedBedrooms,
-    });
+    }, null);
+    if (!created.ok) {
+      return res.status(409).json({
+        error: "This replacement listing became assigned to another unit while its photos were loading. Choose a different replacement.",
+        duplicateOldUnitId: created.reason === "duplicate-source" ? created.duplicateOldUnitId : undefined,
+      });
+    }
+    const swap = created.swap;
 
     return res.json({
       swap,
@@ -37306,6 +37356,7 @@ Return ONLY compact JSON with this exact shape:
         photos: [],
       },
     });
+    });
   });
 
   app.post("/api/unit-swaps", async (req, res) => {
@@ -37317,6 +37368,7 @@ Return ONLY compact JSON with this exact shape:
       photoFolder: _legacyPhotoFolder,
       photoUrls: rawPhotoUrls,
       requireBedroomPhotoCoverage: rawRequireCoverage,
+      expectedUnitSwapSnapshot: rawExpectedSnapshot,
       ...swapBody
     } = req.body as any;
     const fallbackPhotoUrls = Array.isArray(rawPhotoUrls)
@@ -37326,9 +37378,27 @@ Return ONLY compact JSON with this exact shape:
     // photograph every claimed bedroom or the commit aborts at staging (the
     // orchestrator burns the candidate and tries the next option).
     const requireBedroomPhotoCoverage = rawRequireCoverage === true;
+    const expectedUnitSwapSnapshot = typeof rawExpectedSnapshot === "string" && rawExpectedSnapshot.trim()
+      ? rawExpectedSnapshot.trim()
+      : null;
     const parsed = insertUnitSwapSchema.safeParse(swapBody);
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid unit swap data", details: parsed.error.flatten() });
+    }
+    return withUnitSwapPropertyWriteLock(parsed.data.propertyId, async () => {
+    // The same dedicated lock covers the precondition, folder replacement,
+    // and insert. If a manual writer won while this auto job was searching, we
+    // stop before hydration can overwrite that operator-selected photo folder.
+    if (expectedUnitSwapSnapshot !== null) {
+      const currentSwaps = await storage.getUnitSwaps(parsed.data.propertyId);
+      const currentSnapshot = unitSwapSnapshotForUnit(currentSwaps, parsed.data.oldUnitId);
+      if (currentSnapshot !== expectedUnitSwapSnapshot) {
+        return res.status(409).json({
+          error: "The unit's swap history changed before photo hydration. Automatic replacement stopped so the newer operator choice remains authoritative.",
+          targetChanged: true,
+          currentSnapshot,
+        });
+      }
     }
     const activeSwaps = latestUnitSwaps(await storage.getUnitSwaps(parsed.data.propertyId));
     const newSourceKey = unitSwapListingKey(parsed.data.newSourceUrl);
@@ -37379,7 +37449,21 @@ Return ONLY compact JSON with this exact shape:
         coverageShort: hydrated.coverageShort === true ? true : undefined,
       });
     }
-    const swap = await storage.createUnitSwap(parsed.data);
+    const created = await createUnitSwapAtomically(parsed.data, expectedUnitSwapSnapshot);
+    if (!created.ok) {
+      if (created.reason === "target-changed") {
+        return res.status(409).json({
+          error: "The unit's swap history changed while photos were loading. Automatic replacement stopped so the newer operator choice remains authoritative.",
+          targetChanged: true,
+          currentSnapshot: created.currentSnapshot,
+        });
+      }
+      return res.status(409).json({
+        error: "This replacement listing became assigned to another unit while its photos were loading. Choose a different replacement.",
+        duplicateOldUnitId: created.duplicateOldUnitId,
+      });
+    }
+    const swap = created.swap;
 
     // Fire-and-forget Guesty photo re-push (2026-07-05 operator ask): the
     // swap just replaced this unit's ACTIVE folder, but the mapped Guesty
@@ -37412,6 +37496,7 @@ Return ONLY compact JSON with this exact shape:
       bedroomsFound: hydrated.bedroomsFound,
       coverage: hydrated.coverage,
       guestyPhotoPush: skipGuestyPhotoPush ? "skipped" : "started",
+    });
     });
   });
 
@@ -37472,25 +37557,36 @@ Return ONLY compact JSON with this exact shape:
   app.get("/api/unit-swaps/:propertyId", async (req, res) => {
     const propertyId = parseInt(req.params.propertyId);
     if (isNaN(propertyId)) return res.status(400).json({ error: "Invalid propertyId" });
-    const swaps = await storage.getUnitSwaps(propertyId);
-    // storage.getUnitSwaps returns newest first. Keep only the latest row
-    // for each original unit so stale replacement attempts cannot reapply
-    // old photo folders after the operator replaces the same unit again.
-    const latestSwaps = latestUnitSwaps(swaps);
-    await Promise.all(latestSwaps.map((swap) => hydrateUnitSwapPhotoFolder(swap)));
-    return res.json({
-      swaps: latestSwaps.map((swap) => ({
-        ...swap,
-        photoFolder: replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId),
-      })),
+    return withUnitSwapPropertyWriteLock(propertyId, async () => {
+      const swaps = await storage.getUnitSwaps(propertyId);
+      // Hydration mutates the replacement folder. Serialize it with create,
+      // delete, and commit so a slow GET for an older row cannot overwrite a
+      // newer unit choice after that choice has already been recorded.
+      // storage.getUnitSwaps returns newest first; keep only the latest row
+      // for each original unit so stale attempts cannot reapply old photos.
+      const latestSwaps = latestUnitSwaps(swaps);
+      await Promise.all(latestSwaps.map((swap) => hydrateUnitSwapPhotoFolder(swap)));
+      return res.json({
+        swaps: latestSwaps.map((swap) => ({
+          ...swap,
+          photoFolder: replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId),
+        })),
+      });
     });
   });
 
   app.delete("/api/unit-swaps/:id", async (req, res) => {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ error: "Invalid id" });
-    const ok = await storage.deleteUnitSwap(id);
-    return res.json({ ok });
+    const [existing] = await db.select({ propertyId: unitSwapRows.propertyId })
+      .from(unitSwapRows)
+      .where(eq(unitSwapRows.id, id))
+      .limit(1);
+    if (!existing) return res.json({ ok: false });
+    return withUnitSwapPropertyWriteLock(existing.propertyId, async () => {
+      const ok = await storage.deleteUnitSwap(id);
+      return res.json({ ok });
+    });
   });
 
   app.patch("/api/unit-swaps/commit/:propertyId", async (req, res) => {
@@ -37505,6 +37601,7 @@ Return ONLY compact JSON with this exact shape:
     const scopeOldUnitId = typeof (req.body as any)?.oldUnitId === "string" && (req.body as any).oldUnitId.trim()
       ? String((req.body as any).oldUnitId).trim()
       : undefined;
+    return withUnitSwapPropertyWriteLock(propertyId, async () => {
     let swaps = latestUnitSwaps(await storage.getUnitSwaps(propertyId));
     if (scopeOldUnitId) swaps = swaps.filter((s) => s.oldUnitId === scopeOldUnitId);
     await storage.commitUnitSwaps(propertyId, scopeOldUnitId);
@@ -37540,6 +37637,7 @@ Return ONLY compact JSON with this exact shape:
       }
     }
     return res.json({ ok: true });
+    });
   });
 
   const QUEUE_WORKER_ID = `${process.pid}-${randomBytes(4).toString("hex")}`;

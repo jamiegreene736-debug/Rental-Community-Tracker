@@ -17,7 +17,28 @@
 
 export const AUTO_REPLACE_STORE_SETTING_KEY = "auto_replace_jobs.v1";
 export const AUTO_REPLACE_STORE_CAP = 12;
-export const AUTO_REPLACE_STORE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// Unit ids are internal slugs (normally under 40 chars). Bound the persisted
+// and request-facing value so advisory-lock key derivation cannot be used as
+// an unbounded CPU loop.
+export const AUTO_REPLACE_UNIT_ID_MAX_LENGTH = 200;
+// Terminal receipts stay hidden from the UI after two hours, but remain in
+// the capped store for a week so a delayed retry/deploy bridge is durable.
+export const AUTO_REPLACE_STORE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Persistent OTA findings get a small, delayed retry budget after a safe
+// PRE-COMMIT failure. The delays fit inside the store retention window, and
+// attempted candidate URLs stay burned across every retry.
+export const MAX_AUTO_REPLACE_RETRIES = 3;
+export const AUTO_REPLACE_RETRY_BACKOFF_MS = [10 * 60_000, 2 * 60 * 60_000, 12 * 60 * 60_000] as const;
+// Weekly photo scans are current for seven days; one day of scheduler grace
+// prevents a deployment near the boundary from discarding a valid verdict.
+export const AUTO_REPLACE_PHOTO_FINDING_MAX_AGE_MS = 8 * 24 * 60 * 60 * 1000;
+// One deploy-time bridge for failures written before retry metadata existed.
+// This is intentionally narrower than an all-found-folder sweep: only a
+// recent persisted failed job can be promoted.
+export const AUTO_REPLACE_LEGACY_RETRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Longer than the route's five-minute hydration ceiling; a healthy runner
+// heartbeats every 30s, while a killed instance becomes reclaimable in 10m.
+export const AUTO_REPLACE_RUNNER_LEASE_MS = 10 * 60 * 1000;
 // Resume window is wider than the find job's own (60 min) — the orchestrator
 // may legitimately outlive one find-job resume cycle.
 export const AUTO_REPLACE_RESUME_WINDOW_MS = 90 * 60 * 1000;
@@ -48,10 +69,11 @@ export type AutoReplacePhase =
   | "finding"      // replacement-find background job running
   | "committing"   // viable unit found — recording the swap / hydrating photos
   | "verifying"    // swap committed — OTA rescan + community-vision check kicked
+  | "retry_wait"   // safe pre-commit failure; bounded retry waits for its backoff
   | "completed"
   | "failed";
 
-export const AUTO_REPLACE_ACTIVE_PHASES: AutoReplacePhase[] = ["queued", "finding", "committing", "verifying"];
+export const AUTO_REPLACE_ACTIVE_PHASES: AutoReplacePhase[] = ["queued", "finding", "committing", "verifying", "retry_wait"];
 
 export type AutoReplaceJobRecord = {
   jobId: string;
@@ -80,6 +102,19 @@ export type AutoReplaceJobRecord = {
   // again — the 2026-07-12 Ilikai receipt). OTA-found/manual replacements
   // leave it off: getting off compromised photos beats gallery coverage.
   requireBedroomPhotoCoverage: boolean;
+  // Automatic retries exist only for a CURRENT photo folder whose persisted
+  // Airbnb/VRBO/Booking PHOTO verdict was found when the job started. The
+  // watchdog re-checks the same folder at retry time and stops if it cleared.
+  retryPhotoFolder: string | null;
+  // Latest unit-swap row at scheduling time. "none" is an explicit snapshot;
+  // null means a legacy record that never captured one.
+  retryUnitSwapSnapshot: string | null;
+  // Cross-process execution lease. Railway briefly runs old + new instances
+  // together during deploys, so process-local maps cannot be the authority.
+  runnerId: string | null;
+  runnerLeaseUntil: number | null;
+  autoRetryCount: number;
+  nextRetryAt: number | null;
 };
 
 export function isAutoReplacePhaseActive(phase: AutoReplacePhase): boolean {
@@ -105,7 +140,7 @@ export function parseDraftUnitId(unitId: unknown): { draftId: number; slot: "a" 
   return { draftId, slot: m[2].toLowerCase() as "a" | "b" };
 }
 
-const PHASES: AutoReplacePhase[] = ["queued", "finding", "committing", "verifying", "completed", "failed"];
+const PHASES: AutoReplacePhase[] = ["queued", "finding", "committing", "verifying", "retry_wait", "completed", "failed"];
 
 export function parseAutoReplaceStore(raw: string | null | undefined): Record<string, AutoReplaceJobRecord> {
   try {
@@ -116,7 +151,9 @@ export function parseAutoReplaceStore(raw: string | null | undefined): Record<st
       if (!jobId || !v || typeof v !== "object") continue;
       if (!PHASES.includes(v.phase)) continue;
       const propertyId = Number(v.propertyId);
-      const unitId = String(v.unitId ?? "");
+      const unitId = typeof v.unitId === "string" && v.unitId.length <= AUTO_REPLACE_UNIT_ID_MAX_LENGTH
+        ? v.unitId
+        : "";
       if (!Number.isFinite(propertyId) || !unitId) continue;
       out[jobId] = {
         jobId,
@@ -137,6 +174,22 @@ export function parseAutoReplaceStore(raw: string | null | undefined): Record<st
         resumeCount: typeof v.resumeCount === "number" ? v.resumeCount : 0,
         findRestarts: typeof v.findRestarts === "number" ? v.findRestarts : 0,
         requireBedroomPhotoCoverage: v.requireBedroomPhotoCoverage === true,
+        retryPhotoFolder: typeof v.retryPhotoFolder === "string" && v.retryPhotoFolder.trim()
+          ? v.retryPhotoFolder.trim()
+          : null,
+        retryUnitSwapSnapshot: typeof v.retryUnitSwapSnapshot === "string" && v.retryUnitSwapSnapshot.trim()
+          ? v.retryUnitSwapSnapshot.trim()
+          : null,
+        runnerId: typeof v.runnerId === "string" && v.runnerId.trim() ? v.runnerId.trim() : null,
+        runnerLeaseUntil: typeof v.runnerLeaseUntil === "number" && Number.isFinite(v.runnerLeaseUntil) && v.runnerLeaseUntil > 0
+          ? v.runnerLeaseUntil
+          : null,
+        autoRetryCount: typeof v.autoRetryCount === "number" && Number.isFinite(v.autoRetryCount)
+          ? Math.max(0, Math.floor(v.autoRetryCount))
+          : 0,
+        nextRetryAt: typeof v.nextRetryAt === "number" && Number.isFinite(v.nextRetryAt) && v.nextRetryAt > 0
+          ? v.nextRetryAt
+          : null,
       };
     }
     return out;
@@ -147,14 +200,25 @@ export function parseAutoReplaceStore(raw: string | null | undefined): Record<st
 
 export function serializeAutoReplaceStore(store: Record<string, AutoReplaceJobRecord>, nowMs: number): string {
   const rows = Object.values(store)
-    .filter((r) => nowMs - (r.updatedAt || r.createdAt) <= AUTO_REPLACE_STORE_MAX_AGE_MS)
-    .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt))
+    .filter((r) => nowMs - (r.updatedAt || r.createdAt) <= AUTO_REPLACE_STORE_MAX_AGE_MS);
+  const authoritativeIds = new Set(newestAutoReplaceJobsByTarget(rows).map((record) => record.jobId));
+  const retained = rows
+    // Never let a CURRENT live/waiting receipt get evicted by terminal history.
+    // An obsolete older active receipt is not protected: doing so could evict
+    // the later terminal receipt that proves it no longer has authority.
+    .sort((a, b) => Number(authoritativeIds.has(b.jobId) && isAutoReplacePhaseActive(b.phase))
+      - Number(authoritativeIds.has(a.jobId) && isAutoReplacePhaseActive(a.phase))
+      || (b.createdAt || b.updatedAt) - (a.createdAt || a.updatedAt)
+      || b.updatedAt - a.updatedAt)
     .slice(0, AUTO_REPLACE_STORE_CAP);
-  return JSON.stringify(Object.fromEntries(rows.map((r) => [r.jobId, r])));
+  return JSON.stringify(Object.fromEntries(retained.map((r) => [r.jobId, r])));
 }
 
 export function shouldResumeAutoReplaceJob(record: AutoReplaceJobRecord, nowMs: number): boolean {
   if (!isAutoReplacePhaseActive(record.phase)) return false;
+  // Delayed retries have their own due-time gate and are promoted by the
+  // watchdog only after it re-confirms the OTA photo finding.
+  if (record.phase === "retry_wait") return false;
   // "verifying" is exempt from the resume cap: the swap is already committed
   // and the remaining legs (rescan/community-check kicks + Guesty photo push)
   // are cheap and idempotent — abandoning them strands the operator's actual
@@ -166,6 +230,81 @@ export function shouldResumeAutoReplaceJob(record: AutoReplaceJobRecord, nowMs: 
   return !!aliveAt && nowMs - aliveAt <= AUTO_REPLACE_RESUME_WINDOW_MS;
 }
 
+export function autoReplaceRetryBackoffMs(autoRetryCount: number): number {
+  const index = Math.min(
+    AUTO_REPLACE_RETRY_BACKOFF_MS.length - 1,
+    Math.max(0, Math.floor(autoRetryCount)),
+  );
+  return AUTO_REPLACE_RETRY_BACKOFF_MS[index];
+}
+
+export function isAutoReplaceRetryPending(record: AutoReplaceJobRecord, nowMs: number): boolean {
+  return record.phase === "retry_wait" && record.nextRetryAt != null && record.nextRetryAt > nowMs;
+}
+
+export function isAutoReplaceRetryDue(record: AutoReplaceJobRecord, nowMs: number): boolean {
+  return record.phase === "retry_wait" && record.nextRetryAt != null && record.nextRetryAt <= nowMs;
+}
+
+export function planAutoReplaceRetry(
+  record: AutoReplaceJobRecord,
+  error: string,
+  nowMs: number,
+): Partial<AutoReplaceJobRecord> | null {
+  // replacementFolder/newUnitLabel mean a swap reached (or may have reached)
+  // the commit boundary. Automatically starting another search there is not
+  // safe; those records stay terminal for human reconciliation.
+  if (!(["queued", "finding", "committing", "failed"] as AutoReplacePhase[]).includes(record.phase)) return null;
+  if (!record.retryPhotoFolder || record.replacementFolder || record.newUnitLabel) return null;
+  if (record.autoRetryCount >= MAX_AUTO_REPLACE_RETRIES) return null;
+  const nextCount = record.autoRetryCount + 1;
+  const delayMs = autoReplaceRetryBackoffMs(record.autoRetryCount);
+  const delayMinutes = Math.round(delayMs / 60_000);
+  return {
+    phase: "retry_wait",
+    findJobId: null,
+    // Keep the inner fresh-search counter spent across delayed retries. A
+    // coverage-exhausted run that already used its two widening passes gets
+    // one genuinely fresh pass per delayed retry, not another full 3-pass
+    // budget (bounded SearchAPI spend).
+    findRestarts: record.findRestarts,
+    resumeCount: 0,
+    runnerId: null,
+    runnerLeaseUntil: null,
+    autoRetryCount: nextCount,
+    nextRetryAt: nowMs + delayMs,
+    message: `Automatic retry ${nextCount}/${MAX_AUTO_REPLACE_RETRIES} scheduled after a ${delayMinutes}-minute backoff; rejected candidates stay excluded.`,
+    error,
+    updatedAt: nowMs,
+  };
+}
+
+// Old records have no retry metadata. Only known pre-commit failure wording is
+// bridgeable; ambiguous commit/repoint/verify failures must never auto-retry.
+export function isLegacyAutoReplaceFailureRetryable(record: AutoReplaceJobRecord, nowMs: number): boolean {
+  if (record.phase !== "failed" || record.autoRetryCount !== 0) return false;
+  if (record.replacementFolder || record.newUnitLabel || record.newAddress) return false;
+  const ageMs = nowMs - (record.updatedAt || record.createdAt);
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > AUTO_REPLACE_LEGACY_RETRY_MAX_AGE_MS) return false;
+  const error = String(record.error ?? "");
+  if (/swap was recorded|may or may not have landed|repoint|swap history|do not re-run/i.test(error)) return false;
+  return /every found option failed at commit|replacement search failed|no eligible unit found|search results were lost|replacement search did not finish|replacement search kept getting interrupted|server restarts?/i.test(error);
+}
+
+export function photoListingHasPersistentPhotoFinding(row: {
+  airbnbStatus?: unknown;
+  vrboStatus?: unknown;
+  bookingStatus?: unknown;
+  checkedAt?: unknown;
+} | null | undefined, nowMs = Date.now()): boolean {
+  if (!row || ![row.airbnbStatus, row.vrboStatus, row.bookingStatus].some((status) => status === "found")) return false;
+  const checkedAtMs = row.checkedAt instanceof Date
+    ? row.checkedAt.getTime()
+    : new Date(row.checkedAt as any).getTime();
+  const ageMs = nowMs - checkedAtMs;
+  return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= AUTO_REPLACE_PHOTO_FINDING_MAX_AGE_MS;
+}
+
 // One active auto-replace per property+unit — a double-tap must not launch two
 // concurrent searches/commits for the same unit.
 export function findActiveAutoReplaceJob(
@@ -173,11 +312,31 @@ export function findActiveAutoReplaceJob(
   propertyId: number,
   unitId: string,
 ): AutoReplaceJobRecord | null {
-  for (const record of Object.values(store)) {
-    if (record.propertyId !== propertyId || record.unitId !== unitId) continue;
-    if (isAutoReplacePhaseActive(record.phase)) return record;
+  return newestAutoReplaceJobsByTarget(Object.values(store))
+    .find((record) => record.propertyId === propertyId
+      && record.unitId === unitId
+      && isAutoReplacePhaseActive(record.phase)) ?? null;
+}
+
+// A deploy can leave more than one historical receipt for a target. Only the
+// newest receipt is authoritative: promoting an older failure after a newer
+// attempt completed (or is waiting) would stack a replacement on stale intent.
+export function newestAutoReplaceJobsByTarget(
+  records: Iterable<AutoReplaceJobRecord>,
+): AutoReplaceJobRecord[] {
+  const newestByTarget = new Map<string, AutoReplaceJobRecord>();
+  // Receipt generation is its creation time. updatedAt is progress/heartbeat
+  // time and must not let an older runner become authoritative again after a
+  // later operator attempt has already produced a newer receipt.
+  const generationAt = (record: AutoReplaceJobRecord) => record.createdAt || record.updatedAt;
+  const sorted = Array.from(records).sort((a, b) =>
+    generationAt(b) - generationAt(a)
+      || b.jobId.localeCompare(a.jobId));
+  for (const record of sorted) {
+    const key = JSON.stringify([record.propertyId, record.unitId]);
+    if (!newestByTarget.has(key)) newestByTarget.set(key, record);
   }
-  return null;
+  return Array.from(newestByTarget.values());
 }
 
 // What the orchestrator should do given the find job's current state.
@@ -236,6 +395,8 @@ export function failStuckAutoReplaceRecords(
   const failedIds: string[] = [];
   for (const record of Object.values(store)) {
     if (!isAutoReplacePhaseActive(record.phase) || live.has(record.jobId)) continue;
+    if (record.runnerId && (record.runnerLeaseUntil ?? 0) > nowMs) continue;
+    if (record.phase === "retry_wait") continue;
     if (shouldResumeAutoReplaceJob(record, nowMs)) continue;
     // Phase-aware message — a stuck "verifying" record has a COMMITTED swap
     // (replacementFolder/newUnitLabel were persisted with the phase flip);
@@ -245,6 +406,16 @@ export function failStuckAutoReplaceRecords(
       : record.phase === "committing"
         ? STUCK_AUTO_REPLACE_COMMIT_ERROR
         : STUCK_AUTO_REPLACE_ERROR;
+    // A queued/finding job is provably pre-commit. If it belongs to a
+    // persistent OTA finding, convert the exhausted crash-resume cycle into
+    // the next delayed retry instead of losing the remaining retry budget.
+    if (record.phase === "queued" || record.phase === "finding") {
+      const retry = planAutoReplaceRetry(record, error, nowMs);
+      if (retry) {
+        Object.assign(record, retry);
+        continue;
+      }
+    }
     record.phase = "failed";
     record.error = error;
     record.updatedAt = nowMs;
@@ -268,10 +439,17 @@ export function clearableAutoReplaceJobIds(
   liveJobIds: Iterable<string> = [],
 ): string[] {
   const live = new Set(liveJobIds);
+  const authoritativeIds = new Set(newestAutoReplaceJobsByTarget(Object.values(store)).map((record) => record.jobId));
   return Object.values(store)
     .filter((record) => {
+      // Remove obsolete generations together with the visible receipt. If an
+      // old active row were left behind after its newer terminal tombstone was
+      // cleared, it could become authoritative again and resume destructively.
+      if (!authoritativeIds.has(record.jobId)) return true;
       if (live.has(record.jobId)) return false;
       if (!isAutoReplacePhaseActive(record.phase)) return true;
+      if (record.runnerId && (record.runnerLeaseUntil ?? 0) > nowMs) return false;
+      if (record.phase === "retry_wait") return false;
       return !shouldResumeAutoReplaceJob(record, nowMs);
     })
     .map((record) => record.jobId);
@@ -284,7 +462,10 @@ export function summarizeAutoReplaceQueue(
   store: Record<string, AutoReplaceJobRecord>,
   nowMs: number,
 ): { activeCount: number; jobs: AutoReplaceJobRecord[] } {
-  const all = Object.values(store);
+  // Hide obsolete receipts from rolling-deploy races. In particular, an old
+  // runner heartbeat must not keep the dashboard badge active after a later
+  // operator attempt has completed for the same unit.
+  const all = newestAutoReplaceJobsByTarget(Object.values(store));
   const active = all
     .filter((r) => isAutoReplacePhaseActive(r.phase))
     .sort((a, b) => a.createdAt - b.createdAt);

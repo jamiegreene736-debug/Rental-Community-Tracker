@@ -26,6 +26,26 @@ export function latestUnitSwapsByUnit<T extends { oldUnitId: string }>(swaps: T[
   return latestByUnit;
 }
 
+// Stable identity for the latest swap intent on one original unit. Used as an
+// optimistic precondition by the auto-replace worker and re-checked inside the
+// transaction that inserts a swap, so a newer manual choice always wins.
+export function unitSwapSnapshotForUnit(
+  swaps: Array<{
+    oldUnitId: string;
+    id?: unknown;
+    createdAt?: Date | string | null;
+    committed?: boolean | null;
+  }>,
+  unitId: string,
+): string {
+  const latest = latestUnitSwapsByUnit(swaps).get(unitId);
+  if (!latest) return "none";
+  const createdAt = latest.createdAt instanceof Date
+    ? latest.createdAt.toISOString()
+    : String(latest.createdAt ?? "");
+  return `${String(latest.id ?? "unknown")}:${createdAt}:${latest.committed === true ? "committed" : "pending"}`;
+}
+
 export type ActiveUnitPhotoFolder = {
   unitId: string;
   originalFolder: string;

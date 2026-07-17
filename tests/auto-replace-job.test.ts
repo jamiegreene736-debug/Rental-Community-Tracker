@@ -1,20 +1,33 @@
 import assert from "node:assert";
+import { unitSwapSnapshotForUnit } from "../shared/unit-swap-photos";
 import {
+  AUTO_REPLACE_RETRY_BACKOFF_MS,
   AUTO_REPLACE_RESUME_WINDOW_MS,
   AUTO_REPLACE_STORE_CAP,
+  AUTO_REPLACE_STORE_MAX_AGE_MS,
   AUTO_REPLACE_SURFACE_TERMINAL_MS,
+  AUTO_REPLACE_UNIT_ID_MAX_LENGTH,
   MAX_AUTO_REPLACE_FIND_RESTARTS,
+  MAX_AUTO_REPLACE_RETRIES,
   MAX_AUTO_REPLACE_RESUMES,
   STUCK_AUTO_REPLACE_COMMIT_ERROR,
   STUCK_AUTO_REPLACE_ERROR,
   STUCK_AUTO_REPLACE_VERIFY_ERROR,
+  autoReplaceRetryBackoffMs,
   clearableAutoReplaceJobIds,
   draftUnitIdForSlot,
   failStuckAutoReplaceRecords,
   findActiveAutoReplaceJob,
+  isAutoReplacePhaseActive,
+  isAutoReplaceRetryDue,
+  isAutoReplaceRetryPending,
+  isLegacyAutoReplaceFailureRetryable,
+  newestAutoReplaceJobsByTarget,
   parseDraftUnitId,
   nextStepFromFindJob,
   parseAutoReplaceStore,
+  photoListingHasPersistentPhotoFinding,
+  planAutoReplaceRetry,
   pickCommitCandidate,
   serializeAutoReplaceStore,
   shouldResumeAutoReplaceJob,
@@ -51,6 +64,12 @@ const rec = (over: Partial<AutoReplaceJobRecord>): AutoReplaceJobRecord => ({
   resumeCount: 0,
   findRestarts: 0,
   requireBedroomPhotoCoverage: false,
+  retryPhotoFolder: null,
+  retryUnitSwapSnapshot: null,
+  runnerId: null,
+  runnerLeaseUntil: null,
+  autoRetryCount: 0,
+  nextRetryAt: null,
   ...over,
 });
 
@@ -64,12 +83,161 @@ const rec = (over: Partial<AutoReplaceJobRecord>): AutoReplaceJobRecord => ({
   check("valid records kept; bad phase / missing unit dropped",
     Object.keys(store).length === 1 && store.good.unitLabel === "u");
 }
+{
+  const oversized = "u".repeat(AUTO_REPLACE_UNIT_ID_MAX_LENGTH + 1);
+  const store = parseAutoReplaceStore(JSON.stringify({
+    oversized: { phase: "finding", propertyId: 23, unitId: oversized, createdAt: 1, updatedAt: 2 },
+  }));
+  check("oversized persisted unit ids are rejected before lock-key derivation",
+    Object.keys(store).length === 0);
+}
 check("corrupt raw → empty store", Object.keys(parseAutoReplaceStore("{x")).length === 0);
 {
   const store: Record<string, AutoReplaceJobRecord> = {};
   for (let i = 0; i < AUTO_REPLACE_STORE_CAP + 3; i++) store[`j${i}`] = rec({ jobId: `j${i}`, updatedAt: NOW - i * 1000 });
   const round = parseAutoReplaceStore(serializeAutoReplaceStore(store, NOW));
   check("write-time cap keeps the newest records", Object.keys(round).length === AUTO_REPLACE_STORE_CAP && !!round.j0);
+}
+
+// ── bounded delayed retries for persistent OTA photo findings ───────────────
+{
+  const legacy = parseAutoReplaceStore(JSON.stringify({
+    old: { phase: "failed", propertyId: -25, unitId: "draft25-unit-b", createdAt: 1, updatedAt: 2 },
+    explicit: {
+      phase: "retry_wait", propertyId: -25, unitId: "draft25-unit-b", createdAt: 1, updatedAt: 2,
+      retryPhotoFolder: "draft-25-unit-b", retryUnitSwapSnapshot: "none", autoRetryCount: 2, nextRetryAt: NOW + 1,
+      runnerId: "railway-instance-1", runnerLeaseUntil: NOW + 60_000,
+    },
+    invalid: {
+      phase: "failed", propertyId: -25, unitId: "draft25-unit-b", createdAt: 1, updatedAt: 2,
+      autoRetryCount: -4, nextRetryAt: -1, runnerId: "", runnerLeaseUntil: -1,
+    },
+  }));
+  check("legacy retry and runner metadata default safely; explicit values round-trip",
+    legacy.old.retryPhotoFolder === null && legacy.old.retryUnitSwapSnapshot === null && legacy.old.autoRetryCount === 0 && legacy.old.nextRetryAt === null &&
+    legacy.explicit.retryPhotoFolder === "draft-25-unit-b" && legacy.explicit.retryUnitSwapSnapshot === "none" && legacy.explicit.autoRetryCount === 2 && legacy.explicit.nextRetryAt === NOW + 1 &&
+    legacy.explicit.runnerId === "railway-instance-1" && legacy.explicit.runnerLeaseUntil === NOW + 60_000 &&
+    legacy.old.runnerId === null && legacy.old.runnerLeaseUntil === null &&
+    legacy.invalid.autoRetryCount === 0 && legacy.invalid.nextRetryAt === null && legacy.invalid.runnerId === null && legacy.invalid.runnerLeaseUntil === null);
+}
+check("retry budget is small, monotonic, and fits inside store retention",
+  MAX_AUTO_REPLACE_RETRIES === AUTO_REPLACE_RETRY_BACKOFF_MS.length &&
+  MAX_AUTO_REPLACE_RETRIES <= 3 &&
+  AUTO_REPLACE_RETRY_BACKOFF_MS.every((delay, i, all) => delay > 0 && (i === 0 || delay > all[i - 1])) &&
+  AUTO_REPLACE_RETRY_BACKOFF_MS[MAX_AUTO_REPLACE_RETRIES - 1] < AUTO_REPLACE_STORE_MAX_AGE_MS &&
+  autoReplaceRetryBackoffMs(999) === AUTO_REPLACE_RETRY_BACKOFF_MS[MAX_AUTO_REPLACE_RETRIES - 1]);
+{
+  const base = rec({
+    phase: "failed",
+    propertyId: -25,
+    unitId: "draft25-unit-b",
+    retryPhotoFolder: "draft-25-unit-b",
+    attemptedUrls: ["https://www.redfin.com/unit-29"],
+    findRestarts: MAX_AUTO_REPLACE_FIND_RESTARTS,
+    requireBedroomPhotoCoverage: true,
+  });
+  const patch = planAutoReplaceRetry(base, "Every found option failed at commit", NOW);
+  const waiting = rec({ ...base, ...patch });
+  check("safe pre-commit retry is scheduled once with a due time",
+    patch?.phase === "retry_wait" && patch.autoRetryCount === 1 &&
+    patch.nextRetryAt === NOW + AUTO_REPLACE_RETRY_BACKOFF_MS[0]);
+  check("retry preserves rejected URLs, bedroom gate, and spent inner-search budget",
+    waiting.attemptedUrls[0] === "https://www.redfin.com/unit-29" &&
+    waiting.requireBedroomPhotoCoverage === true && waiting.findRestarts === MAX_AUTO_REPLACE_FIND_RESTARTS);
+  check("waiting retry is active/deduped but neither resumable early nor clearable/stuck-failed",
+    isAutoReplacePhaseActive(waiting.phase) &&
+    findActiveAutoReplaceJob({ waiting }, -25, "draft25-unit-b")?.jobId === waiting.jobId &&
+    isAutoReplaceRetryPending(waiting, NOW) && !isAutoReplaceRetryDue(waiting, NOW) &&
+    !shouldResumeAutoReplaceJob(waiting, NOW) &&
+    clearableAutoReplaceJobIds({ waiting }, NOW).length === 0 &&
+    failStuckAutoReplaceRecords({ waiting }, NOW + AUTO_REPLACE_RESUME_WINDOW_MS * 2).length === 0);
+  check("retry becomes due at the exact persisted boundary",
+    !isAutoReplaceRetryDue(waiting, waiting.nextRetryAt! - 1) &&
+    isAutoReplaceRetryDue(waiting, waiting.nextRetryAt!));
+
+  let capped = waiting;
+  for (let i = 1; i < MAX_AUTO_REPLACE_RETRIES; i++) {
+    const next = planAutoReplaceRetry({ ...capped, phase: "failed" }, "still no candidate", NOW + i);
+    capped = rec({ ...capped, phase: "failed", nextRetryAt: null, ...next });
+  }
+  check("retry cap is terminal and cannot reopen into an infinite loop",
+    capped.autoRetryCount === MAX_AUTO_REPLACE_RETRIES &&
+    planAutoReplaceRetry({ ...capped, phase: "failed" }, "again", NOW) === null);
+  check("completed/verifying/waiting records can never allocate another retry",
+    planAutoReplaceRetry({ ...base, phase: "completed" }, "again", NOW) === null &&
+    planAutoReplaceRetry({ ...base, phase: "verifying" }, "again", NOW) === null &&
+    planAutoReplaceRetry({ ...base, phase: "retry_wait" }, "again", NOW) === null);
+}
+check("automatic retry requires a persisted PHOTO finding (address-only is excluded)",
+  photoListingHasPersistentPhotoFinding({ airbnbStatus: "clean", vrboStatus: "found", bookingStatus: "unknown", checkedAt: new Date(NOW) }, NOW) &&
+  !photoListingHasPersistentPhotoFinding({
+    airbnbStatus: "clean", vrboStatus: "unknown", bookingStatus: "clean", vrboAddressStatus: "found", checkedAt: new Date(NOW),
+  } as any, NOW) &&
+  !photoListingHasPersistentPhotoFinding({ airbnbStatus: "found", checkedAt: new Date(0) }, NOW) &&
+  !photoListingHasPersistentPhotoFinding(null));
+{
+  const createdAt = new Date("2026-07-15T20:12:00Z");
+  check("swap snapshot distinguishes none, pending, and committed generations",
+    unitSwapSnapshotForUnit([], "unit-b") === "none" &&
+    unitSwapSnapshotForUnit([{ id: 7, oldUnitId: "unit-b", createdAt, committed: false }], "unit-b") ===
+      `7:${createdAt.toISOString()}:pending` &&
+    unitSwapSnapshotForUnit([{ id: 7, oldUnitId: "unit-b", createdAt, committed: true }], "unit-b") ===
+      `7:${createdAt.toISOString()}:committed`);
+}
+{
+  const poipu = rec({
+    phase: "failed",
+    propertyId: -25,
+    unitId: "draft25-unit-b",
+    error: "Every found option failed at commit (1 photographed fewer bedrooms than the unit claims). Re-run the search.",
+    updatedAt: NOW - 2 * 24 * 60 * 60_000,
+  });
+  check("legacy Poipu pre-commit failure is bridgeable",
+    isLegacyAutoReplaceFailureRetryable(poipu, NOW));
+  check("legacy committed/ambiguous failures are never bridgeable",
+    !isLegacyAutoReplaceFailureRetryable({ ...poipu, replacementFolder: "replacement-pdraft-25-udraft25-unit-b" }, NOW) &&
+    !isLegacyAutoReplaceFailureRetryable({ ...poipu, error: "The swap was recorded but the draft could not be repointed" }, NOW) &&
+    !isLegacyAutoReplaceFailureRetryable({ ...poipu, error: "Interrupted mid-commit; the swap may or may not have landed" }, NOW) &&
+    !isLegacyAutoReplaceFailureRetryable({ ...poipu, error: "fetch failed" }, NOW));
+}
+{
+  const waiting = rec({
+    jobId: "waiting",
+    phase: "retry_wait",
+    retryPhotoFolder: "draft-25-unit-b",
+    autoRetryCount: 1,
+    nextRetryAt: NOW + 1,
+    createdAt: NOW - 60_000,
+    updatedAt: NOW - 60_000,
+  });
+  const store: Record<string, AutoReplaceJobRecord> = { waiting };
+  for (let i = 0; i < AUTO_REPLACE_STORE_CAP + 3; i++) {
+    store[`terminal-${i}`] = rec({
+      jobId: `terminal-${i}`, unitId: `other-${i}`, phase: "failed",
+      createdAt: NOW - i, updatedAt: NOW - i,
+    });
+  }
+  const round = parseAutoReplaceStore(serializeAutoReplaceStore(store, NOW));
+  check("active retry survives the store cap ahead of newer terminal receipts", !!round.waiting);
+}
+{
+  const obsoleteActive = rec({
+    jobId: "obsolete-active", createdAt: NOW - 30_000, updatedAt: NOW,
+    runnerId: "old-runner", runnerLeaseUntil: NOW + 60_000,
+  });
+  const laterTerminal = rec({
+    jobId: "later-terminal", phase: "completed", createdAt: NOW - 20_000, updatedAt: NOW - 20_000,
+  });
+  const store: Record<string, AutoReplaceJobRecord> = { obsoleteActive, laterTerminal };
+  for (let i = 0; i < AUTO_REPLACE_STORE_CAP - 1; i++) {
+    store[`other-${i}`] = rec({
+      jobId: `other-${i}`, unitId: `other-unit-${i}`, phase: "failed",
+      createdAt: NOW - i, updatedAt: NOW - i,
+    });
+  }
+  const round = parseAutoReplaceStore(serializeAutoReplaceStore(store, NOW));
+  check("store cap keeps the later authoritative receipt over an obsolete runner heartbeat",
+    !!round["later-terminal"] && !round["obsolete-active"]);
 }
 
 // ── resume rules ─────────────────────────────────────────────────────────────
@@ -89,12 +257,46 @@ check("verifying job outside the window does not resume",
 
 // ── one active job per property+unit ─────────────────────────────────────────
 {
-  const store = { a: rec({ jobId: "a" }), b: rec({ jobId: "b", phase: "completed" }) };
+  const store = {
+    a: rec({ jobId: "a", createdAt: NOW - 1_000, updatedAt: NOW - 1_000 }),
+    b: rec({ jobId: "b", phase: "completed", createdAt: NOW - 2_000, updatedAt: NOW - 2_000 }),
+  };
   check("running job for the same property+unit is found (double-tap guard)",
     findActiveAutoReplaceJob(store, 23, "prop23-kl-3br")?.jobId === "a");
   check("terminal job does not block a new run",
     findActiveAutoReplaceJob({ b: store.b }, 23, "prop23-kl-3br") === null);
   check("other unit is not blocked", findActiveAutoReplaceJob(store, 23, "other-unit") === null);
+}
+{
+  const olderFailed = rec({ jobId: "older-failed", phase: "failed", createdAt: NOW - 4_000, updatedAt: NOW - 2_000 });
+  const newerWaiting = rec({
+    jobId: "newer-waiting",
+    phase: "retry_wait",
+    createdAt: NOW - 3_000,
+    updatedAt: NOW - 1_000,
+    retryPhotoFolder: "folder",
+    retryUnitSwapSnapshot: "none",
+    autoRetryCount: 1,
+    nextRetryAt: NOW + 60_000,
+  });
+  const otherTarget = rec({ jobId: "other-target", unitId: "other", createdAt: NOW - 5_000, updatedAt: NOW - 3_000 });
+  const authoritative = newestAutoReplaceJobsByTarget([olderFailed, newerWaiting, otherTarget]);
+  check("only the newest receipt per property/unit can resume or bridge",
+    authoritative.length === 2 && authoritative.some((record) => record.jobId === "newer-waiting")
+      && !authoritative.some((record) => record.jobId === "older-failed"));
+  check("double-tap guard returns the newest active receipt deterministically",
+    findActiveAutoReplaceJob({ olderFailed, newerWaiting }, 23, "prop23-kl-3br")?.jobId === "newer-waiting");
+  const oldHeartbeat = rec({
+    jobId: "old-heartbeat", createdAt: NOW - 10_000, updatedAt: NOW,
+    runnerId: "old-runner", runnerLeaseUntil: NOW + 60_000,
+  });
+  const laterTerminal = rec({
+    jobId: "later-terminal", phase: "completed", createdAt: NOW - 5_000, updatedAt: NOW - 4_000,
+  });
+  check("an older runner heartbeat cannot outrank a later operator receipt",
+    newestAutoReplaceJobsByTarget([oldHeartbeat, laterTerminal])[0]?.jobId === "later-terminal" &&
+    findActiveAutoReplaceJob({ oldHeartbeat, laterTerminal }, 23, "prop23-kl-3br") === null &&
+    summarizeAutoReplaceQueue({ oldHeartbeat, laterTerminal }, NOW).activeCount === 0);
 }
 
 // ── next step from find job ──────────────────────────────────────────────────
@@ -124,10 +326,10 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
 // ── queue summary ────────────────────────────────────────────────────────────
 {
   const store = {
-    oldActive: rec({ jobId: "oldActive", createdAt: NOW - 10 * 60_000 }),
-    newActive: rec({ jobId: "newActive", createdAt: NOW - 60_000, phase: "verifying" }),
-    doneRecent: rec({ jobId: "doneRecent", phase: "completed", updatedAt: NOW - 5 * 60_000 }),
-    doneOld: rec({ jobId: "doneOld", phase: "completed", updatedAt: NOW - AUTO_REPLACE_SURFACE_TERMINAL_MS - 1 }),
+    oldActive: rec({ jobId: "oldActive", unitId: "old-active-unit", createdAt: NOW - 10 * 60_000 }),
+    newActive: rec({ jobId: "newActive", unitId: "new-active-unit", createdAt: NOW - 60_000, phase: "verifying" }),
+    doneRecent: rec({ jobId: "doneRecent", unitId: "done-recent-unit", phase: "completed", updatedAt: NOW - 5 * 60_000 }),
+    doneOld: rec({ jobId: "doneOld", unitId: "done-old-unit", phase: "completed", updatedAt: NOW - AUTO_REPLACE_SURFACE_TERMINAL_MS - 1 }),
   };
   const q = summarizeAutoReplaceQueue(store, NOW);
   check("active jobs first (oldest first), then recent terminals; stale terminals dropped",
@@ -138,12 +340,16 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
 // ── operator "Clear queue" ───────────────────────────────────────────────────
 {
   const store = {
-    done: rec({ jobId: "done", phase: "completed" }),
-    dead: rec({ jobId: "dead", phase: "failed" }),
-    running: rec({ jobId: "running", phase: "finding", updatedAt: NOW - 60_000 }),
-    liveNow: rec({ jobId: "liveNow", phase: "committing", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
-    stuckStale: rec({ jobId: "stuckStale", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
-    stuckCapped: rec({ jobId: "stuckCapped", phase: "finding", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
+    done: rec({ jobId: "done", unitId: "done-unit", phase: "completed" }),
+    dead: rec({ jobId: "dead", unitId: "dead-unit", phase: "failed" }),
+    running: rec({ jobId: "running", unitId: "running-unit", phase: "finding", updatedAt: NOW - 60_000 }),
+    liveNow: rec({ jobId: "liveNow", unitId: "live-unit", phase: "committing", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
+    stuckStale: rec({ jobId: "stuckStale", unitId: "stale-unit", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
+    stuckCapped: rec({ jobId: "stuckCapped", unitId: "capped-unit", phase: "finding", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
+    leasedStale: rec({
+      jobId: "leasedStale", unitId: "leased-unit", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000,
+      runnerId: "other-instance", runnerLeaseUntil: NOW + 60_000,
+    }),
   };
   const cleared = clearableAutoReplaceJobIds(store, NOW, ["liveNow"]).sort();
   check("terminal jobs are clearable", cleared.includes("done") && cleared.includes("dead"));
@@ -151,8 +357,21 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
   check("actually-running job is NEVER clearable, even when it looks stale", !cleared.includes("liveNow"));
   check("stuck active job outside the resume window IS clearable", cleared.includes("stuckStale"));
   check("stuck active job at the resume cap IS clearable", cleared.includes("stuckCapped"));
+  check("a live cross-process runner lease is never clearable", !cleared.includes("leasedStale"));
   check("exactly the expected set clears", cleared.join(",") === "dead,done,stuckCapped,stuckStale");
   check("empty store clears nothing", clearableAutoReplaceJobIds({}, NOW).length === 0);
+}
+{
+  const obsolete = rec({
+    jobId: "obsolete", createdAt: NOW - 2_000, updatedAt: NOW,
+    runnerId: "old-runner", runnerLeaseUntil: NOW + 60_000,
+  });
+  const tombstone = rec({
+    jobId: "tombstone", phase: "completed", createdAt: NOW - 1_000, updatedAt: NOW - 1_000,
+  });
+  const cleared = clearableAutoReplaceJobIds({ obsolete, tombstone }, NOW).sort();
+  check("clearing a newer terminal receipt also removes its obsolete active generation",
+    cleared.join(",") === "obsolete,tombstone");
 }
 
 // ── watchdog terminalizes stuck unresumable records ──────────────────────────
@@ -163,6 +382,14 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     stuckStale: rec({ jobId: "stuckStale", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
     stuckCapped: rec({ jobId: "stuckCapped", phase: "committing", resumeCount: MAX_AUTO_REPLACE_RESUMES }),
     stuckVerify: rec({ jobId: "stuckVerify", phase: "verifying", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000 }),
+    leasedStale: rec({
+      jobId: "leasedStale", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000,
+      runnerId: "other-instance", runnerLeaseUntil: NOW + 60_000,
+    }),
+    stuckRetry: rec({
+      jobId: "stuckRetry", phase: "finding", updatedAt: NOW - AUTO_REPLACE_RESUME_WINDOW_MS - 60_000,
+      retryPhotoFolder: "draft-25-unit-b",
+    }),
     done: rec({ jobId: "done", phase: "completed" }),
   };
   const failedIds = failStuckAutoReplaceRecords(store, NOW, ["liveNow"]).sort();
@@ -177,8 +404,11 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
     store.stuckVerify.error === STUCK_AUTO_REPLACE_VERIFY_ERROR && /do not re-run/i.test(store.stuckVerify.error ?? ""));
   check("committing-phase stuck record warns the commit may have landed",
     store.stuckCapped.error === STUCK_AUTO_REPLACE_COMMIT_ERROR && /swap history/i.test(store.stuckCapped.error ?? ""));
+  check("stuck pre-commit job with a persistent finding spends the next delayed retry instead of terminalizing",
+    store.stuckRetry.phase === "retry_wait" && store.stuckRetry.autoRetryCount === 1 && store.stuckRetry.nextRetryAt! > NOW);
   check("resumable / live / terminal records untouched",
-    store.running.phase === "finding" && store.liveNow.phase === "committing" && store.done.phase === "completed");
+    store.running.phase === "finding" && store.liveNow.phase === "committing" &&
+    store.leasedStale.phase === "finding" && store.done.phase === "completed");
   check("a terminalized stuck record no longer blocks a retry (double-tap guard clears)",
     findActiveAutoReplaceJob({ s: store.stuckCapped }, 23, "prop23-kl-3br") === null);
 }
@@ -191,9 +421,84 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
 {
   const { readFileSync } = await import("node:fs");
   const orch = readFileSync(new URL("../server/auto-replace-jobs.ts", import.meta.url), "utf8");
+  check("retry promotion holds a short per-target claim, validates folder + swap snapshot, and persists strictly before launch",
+    /activateDueAutoReplaceRetry[\s\S]{0,1200}acquireAutoReplaceTargetLock\(record\)[\s\S]{0,2400}retryUnitSwapSnapshot[\s\S]{0,900}folderStillHasPhotoFinding[\s\S]{0,2500}persistAutoReplaceRecord\(record, \{ strict: true \}\)[\s\S]{0,500}runAutoReplaceJob\(record\)/.test(orch));
+  const legacyRetrySource = orch.slice(
+    orch.indexOf("async function scheduleLegacyAutoReplaceRetry"),
+    orch.indexOf("async function activateDueAutoReplaceRetry"),
+  );
+  check("legacy bridge locks the target, re-reads the newest receipt, rejects later swaps, and CAS-promotes",
+    legacyRetrySource.includes("acquireAutoReplaceTargetLock(record)") &&
+    legacyRetrySource.includes("storage.getSetting(AUTO_REPLACE_STORE_SETTING_KEY)") &&
+    legacyRetrySource.includes("newestAutoReplaceJobsByTarget(Object.values(liveStore))") &&
+    legacyRetrySource.includes("currentTargetContextForRecord(record)") &&
+    legacyRetrySource.includes('context.unitSwapSnapshot !== "none"') &&
+    legacyRetrySource.includes("folderStillHasPhotoFinding(context.photoFolder)") &&
+    legacyRetrySource.includes("live.updatedAt !== previous.updatedAt") &&
+    legacyRetrySource.includes("await mutateStoreStrict"));
+  check("a retry-wait record cannot bypass the due-time watchdog",
+    /if \(record\.phase === "retry_wait"\) \{[\s\S]{0,100}return;/.test(orch) &&
+    /if \(persistedActive\) \{[\s\S]{0,400}return \{ ok: true, job: persistedActive \};/.test(orch));
+  check("new jobs acquire a per-target lock and require durable persistence before launch",
+    /targetLock = await acquireAutoReplaceTargetLock\(\{ propertyId, unitId \}\)/.test(orch) &&
+    /persistAutoReplaceRecord\(record, \{ strict: true \}\)[\s\S]{0,300}runAutoReplaceJob\(record\)/.test(orch) &&
+    /SELECT "value" FROM app_settings WHERE "key" = \$1 FOR UPDATE/.test(orch));
+  const runSource = orch.slice(
+    orch.indexOf("async function runAutoReplaceJob"),
+    orch.indexOf("// Phase 3 — verifying", orch.indexOf("async function runAutoReplaceJob")),
+  );
+  check("execution never holds an advisory-lock client across the long search/commit worker",
+    !runSource.includes("acquireAutoReplaceTargetLock") &&
+    /autoReplaceLockPool = new pg\.Pool\([\s\S]{0,180}max: 2/.test(orch));
+  const runnerClaimSource = orch.slice(
+    orch.indexOf("async function claimAutoReplaceRunner"),
+    orch.indexOf("async function renewAutoReplaceRunnerLease"),
+  );
+  check("a persisted runner lease is CAS-claimed before execution and blocks a live competing instance",
+    runnerClaimSource.includes("await mutateStoreStrict") &&
+    runnerClaimSource.includes("authoritative?.jobId !== current.jobId") &&
+    runnerClaimSource.includes("current.runnerId !== AUTO_REPLACE_RUNNER_ID") &&
+    runnerClaimSource.includes("current.runnerLeaseUntil ?? 0") &&
+    runSource.indexOf("claimAutoReplaceRunner") < runSource.indexOf("activeJobIds.add"));
+  check("the runner heartbeats its lease and verifies ownership immediately before the swap POST",
+    runSource.includes("renewAutoReplaceRunnerLease(record)") &&
+    runSource.includes("AUTO_REPLACE_RUNNER_HEARTBEAT_MS") &&
+    /renewAutoReplaceRunnerLease[\s\S]{0,700}authoritative\?\.jobId !== current\.jobId/.test(orch) &&
+    runSource.indexOf("await confirmRunnerLease()") < runSource.indexOf('postLoopback("/api/unit-swaps"'));
+  check("retry scheduling is strictly persisted and awaited",
+    /async function finishAutoReplaceFailure[\s\S]{0,1800}await persistAutoReplaceRecord\(record, \{ strict: true, expectedRunnerId \}\)/.test(orch) &&
+    /await finishAutoReplaceFailure\(record, STUCK_AUTO_REPLACE_ERROR/.test(orch));
+  const storageSource = readFileSync(new URL("../server/storage.ts", import.meta.url), "utf8");
+  check("photo finding lookup uses the newest check row",
+    /getPhotoListingCheckByFolder[\s\S]{0,350}orderBy\(desc\(photoListingChecks\.checkedAt\)\)[\s\S]{0,80}limit\(1\)/.test(storageSource));
   check("commit loop burns a 502 photo-hydration failure and tries the next option",
     /status === 502 && \(data\?\.coverageShort === true \|\| \/photo\/i\.test/.test(orch));
   const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  const swapLock = readFileSync(new URL("../server/unit-swap-write-lock.ts", import.meta.url), "utf8");
+  check("manual and automatic swap writers share a separately bounded property lock",
+    (routes.match(/withUnitSwapPropertyWriteLock\(/g)?.length ?? 0) >= 5 &&
+    /unitSwapWriteLockPool = new pg\.Pool\([\s\S]{0,180}max: 2/.test(swapLock));
+  const readSwapRoute = routes.slice(
+    routes.indexOf('app.get("/api/unit-swaps/:propertyId"'),
+    routes.indexOf('app.delete("/api/unit-swaps/:id"'),
+  );
+  check("GET hydration is serialized with swap writers so an old row cannot overwrite a newer folder",
+    readSwapRoute.indexOf("withUnitSwapPropertyWriteLock") < readSwapRoute.indexOf("hydrateUnitSwapPhotoFolder"));
+  const autoSwapRoute = routes.slice(
+    routes.indexOf('app.post("/api/unit-swaps"'),
+    routes.indexOf("// POST /api/replacement/repush-guesty-photos"),
+  );
+  const lockAt = autoSwapRoute.indexOf("withUnitSwapPropertyWriteLock");
+  const snapshotAt = autoSwapRoute.indexOf("unitSwapSnapshotForUnit");
+  const hydrateAt = autoSwapRoute.indexOf("hydrateUnitSwapPhotoFolder");
+  const insertAt = autoSwapRoute.indexOf("createUnitSwapAtomically(parsed.data, expectedUnitSwapSnapshot)");
+  const atomicCreate = routes.slice(
+    routes.indexOf("const createUnitSwapAtomically"),
+    routes.indexOf("const activeUnitPhotoFoldersForBuilder"),
+  );
+  check("auto swap generation is checked under the writer lock before hydration and again before insert",
+    lockAt >= 0 && lockAt < snapshotAt && snapshotAt < hydrateAt && hydrateAt < insertAt &&
+    atomicCreate.includes("unitSwapSnapshotForUnit") && atomicCreate.includes('reason: "target-changed"'));
   check("POST /api/unit-swaps hydrates with the sidecar scrape tier (bot-walled galleries recover)",
     /hydrateUnitSwapPhotoFolder\(parsed\.data, \{ useSidecar: true, fallbackPhotoUrls, requireBedroomPhotoCoverage \}\)/.test(routes));
   // 2026-07-06: the commit re-scrape can fail while ALL scrape tiers are
