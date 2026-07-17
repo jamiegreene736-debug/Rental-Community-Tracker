@@ -3246,6 +3246,24 @@ assert.equal(
   false,
   "Availability tab should ask the server whether a mapped draft-backed property is supported",
 );
+assert.equal(
+  availabilityTabSource.includes("autoEnableCheckedRef"),
+  false,
+  "Availability tab must not silently auto-enable the pricing scheduler",
+);
+assert.equal(
+  availabilityTabSource.includes("updateSchedule({ enabled: true })"),
+  false,
+  "Availability scheduler must remain explicit opt-in",
+);
+assert.ok(
+  availabilityTabSource.includes("updateSchedule({ enabled: !schedule?.enabled })"),
+  "Availability tab should retain the explicit enable/disable control",
+);
+assert.ok(
+  routeSource.includes("enabled: body.enabled ?? existing?.enabled ?? false"),
+  "Availability schedule rows should default to disabled unless explicitly enabled",
+);
 console.log("  ✓ availability scheduler supports mapped draft-backed listings");
 
 assert.ok(

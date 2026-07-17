@@ -301,12 +301,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
     }
   };
 
-  // Tracks whether the initial GET for the schedule has completed. Uses
-  // state (not a ref) so the auto-enable useEffect below re-runs after
-  // the fetch resolves — a ref wouldn't trigger a re-render, and since
-  // `setSchedule(null)` when state is already null is a React bail-out,
-  // the useEffect would never fire for properties with no schedule row.
-  const [scheduleFetched, setScheduleFetched] = useState(false);
   const fetchSchedule = useCallback(async () => {
     if (!propertyId) return;
     try {
@@ -321,7 +315,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
         setScheduleUnsupportedReason(null);
         setSchedule(d.schedule);
       }
-      setScheduleFetched(true);
     } catch { /* ignore */ }
   }, [propertyId]);
 
@@ -350,31 +343,6 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
       }
     } catch { /* ignore */ }
   }, [propertyId, schedulerUnavailable]);
-
-  // Auto-enable the scheduler for any property the user is viewing. Covers
-  // two cases: (a) a schedule row exists but enabled=false, (b) no schedule
-  // row exists at all. POST /api/availability/schedule is idempotent +
-  // upserting, so either case is handled by the same call.
-  //
-  // Intentionally does NOT gate on `listingId` — that's the dropdown
-  // selection in the parent component, which starts empty on direct page
-  // navigation and populates only after the user picks. The scheduler cron
-  // itself validates the Guesty mapping at run-time and no-ops on unmapped
-  // properties, so enabling pre-mapping is harmless.
-  //
-  // Guards on `scheduleFetched` so we only auto-enable AFTER the initial
-  // GET completes — otherwise we'd race the fetch and potentially flip a
-  // user's explicitly-disabled schedule back on.
-  const autoEnableCheckedRef = useRef(false);
-  useEffect(() => {
-    if (autoEnableCheckedRef.current) return;
-    if (!propertyId) return;
-    if (schedulerUnavailable) return;
-    if (!scheduleFetched) return;
-    if (schedule?.enabled) { autoEnableCheckedRef.current = true; return; }
-    autoEnableCheckedRef.current = true;
-    updateSchedule({ enabled: true });
-  }, [schedule, scheduleFetched, propertyId, schedulerUnavailable, updateSchedule]);
 
   const runNow = useCallback(async () => {
     if (!propertyId || runNowBusy || schedulerUnavailable) return;
@@ -642,7 +610,8 @@ export default function AvailabilityTab({ propertyId, listingId }: { propertyId:
               ⏱ Availability pricing scheduler {schedule?.enabled ? "ON" : "OFF"}
             </div>
             <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
-              When enabled, the server runs after <b>1:00 AM Eastern</b> and refreshes base plus scarcity pricing.
+              When enabled, the server runs after <b>1:00 AM Eastern</b> and refreshes base plus scarcity pricing.{" "}
+              Schedules stay off until an operator explicitly enables them.{" "}
               Last run: <b>{schedule?.lastRunAt ? new Date(schedule.lastRunAt).toLocaleString() : "never"}</b>
               {schedule?.lastRunStatus && (() => {
                 const statusColor =
