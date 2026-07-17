@@ -15,9 +15,10 @@
 //   • server/bedding-photo-scan.ts — vision call + persistence
 //     (`bedding_photo_scans.v1` app_setting) + the audit comparison vs the
 //     Guesty listing's pushed bed layout;
-//   • BeddingTab.tsx — renders the proposal and applies it via
-//     `mergeBeddingScanIntoUnit` (explicit Apply click; the operator's manual
-//     edits always win because nothing is auto-applied).
+//   • BeddingTab.tsx — a fresh operator-triggered scan applies VISION detections
+//     above the auto-apply threshold, saves the resulting builder config, and
+//     builds Guesty's supported Bedding projection from it when connected.
+//     Caption fallback and hydrated/audit scans stay read-only.
 //
 // The audit-side comparison lives HERE (not in server/unit-audit-sweep.ts)
 // deliberately: the sweep module is source-locked to never contain the string
@@ -28,8 +29,16 @@
 export const BEDDING_PHOTO_SCANS_SETTING_KEY = "bedding_photo_scans.v1";
 export const BEDDING_SCAN_STORE_CAP = 200;
 
-/** Detections below this confidence are shown but never applied/compared. */
+/** Review/audit floor; automatic application requires strictly greater confidence. */
 export const BEDDING_SCAN_MIN_CONFIDENCE = 0.6;
+
+/** The operator asked for detections "above 60%"; exactly 60% is not eligible. */
+export function isBeddingScanAutoApplyEligible(
+  confidence: number,
+  minimumConfidence: number = BEDDING_SCAN_MIN_CONFIDENCE,
+): boolean {
+  return Number.isFinite(confidence) && confidence > minimumConfidence;
+}
 
 // Guesty bed-type vocabulary (the subset the Bedding tab edits/pushes).
 export type BeddingScanBedType =
@@ -90,6 +99,10 @@ export type DetectedBathroom = {
 };
 
 export type BeddingScanUnit = {
+  /** Stable builder unit id. Automatic application never falls back to position. */
+  unitId?: string;
+  /** Only fresh vision evidence is eligible for automatic external writes. */
+  evidenceMethod?: "vision" | "captions";
   folder: string;
   label: string;
   expectedBedrooms: number | null;
@@ -280,12 +293,28 @@ export type CaptionFallbackFile = {
 
 function bedFromCaption(caption: string): DetectedBed | null {
   const t = caption.toLowerCase();
-  const qty = /\btwo\b|\b2\b/.test(t) ? 2 : 1;
-  if (/\bking\b/.test(t)) return { type: "KING_BED", quantity: qty };
-  if (/\bqueen/.test(t)) return { type: "QUEEN_BED", quantity: qty };
-  if (/\b(double|full)\b/.test(t)) return { type: "DOUBLE_BED", quantity: qty };
-  if (/\b(twin|single)/.test(t)) return { type: "SINGLE_BED", quantity: Math.max(qty, /\btwins\b/.test(t) ? 2 : qty) };
-  if (/\bbunk/.test(t)) return { type: "BUNK_BED", quantity: qty };
+  // A room number ("Bedroom 2 with Queen Bed") is not a bed quantity. Only a
+  // number immediately attached to the bed noun, or a plural noun, means two.
+  if (/\bking\b/.test(t)) {
+    const quantity = /\b(?:two|2)\s+kings?\b|\bkings\b/.test(t) ? 2 : 1;
+    return { type: "KING_BED", quantity };
+  }
+  if (/\bqueen/.test(t)) {
+    const quantity = /\b(?:two|2)\s+queens?\b|\bqueens\b/.test(t) ? 2 : 1;
+    return { type: "QUEEN_BED", quantity };
+  }
+  if (/\b(double|full)\b/.test(t)) {
+    const quantity = /\b(?:two|2)\s+(?:double|full)s?\b|\b(?:doubles|fulls)\b/.test(t) ? 2 : 1;
+    return { type: "DOUBLE_BED", quantity };
+  }
+  if (/\b(twin|single)/.test(t)) {
+    const quantity = /\b(?:two|2)\s+(?:twin|single)s?\b|\b(?:twins|singles)\b/.test(t) ? 2 : 1;
+    return { type: "SINGLE_BED", quantity };
+  }
+  if (/\bbunk/.test(t)) {
+    const quantity = /\b(?:two|2)\s+bunks?\b|\bbunks\b/.test(t) ? 2 : 1;
+    return { type: "BUNK_BED", quantity };
+  }
   return null;
 }
 
@@ -293,6 +322,7 @@ function bathFeaturesFromCaption(caption: string): { features: BeddingScanBathFe
   const t = caption.toLowerCase();
   const features: BeddingScanBathFeature[] = [];
   if (/jetted|whirlpool|jacuzzi/.test(t)) features.push("jetted-tub");
+  else if (/(?:soaking|freestanding|standalone)\s+tub/.test(t)) features.push("soaking-tub");
   else if (/\btub\b/.test(t)) features.push("shower-tub-combo");
   if (/walk-?in shower|\bshower\b/.test(t) && !/\btub\b/.test(t)) features.push("walk-in-shower");
   if (/rain shower/.test(t)) features.push("rain-shower");
@@ -312,7 +342,9 @@ export function captionFallbackBedding(files: CaptionFallbackFile[]): {
   bedrooms: DetectedBedroom[];
   bathrooms: DetectedBathroom[];
 } {
-  const CAPTION_CONFIDENCE = 0.7; // vision-authored captions; above the apply floor
+  // This score supports review/audit comparison. Automatic application also
+  // requires evidenceMethod:"vision", so stale labels can never auto-push.
+  const CAPTION_CONFIDENCE = 0.7;
   const bedroomGroups = new Map<string, { files: string[]; bed: DetectedBed | null }>();
   const bathroomGroups = new Map<string, { files: string[]; features: BeddingScanBathFeature[]; isHalf: boolean }>();
   for (const f of files) {
@@ -395,13 +427,13 @@ export function describeDetectedBeds(beds: DetectedBed[]): string {
     .join(" + ");
 }
 
-export type BeddingScanMergeResult = {
+export type BeddingScanMergeResult<T extends MergeUnitShape = MergeUnitShape> = {
   /**
    * The updated unit. Runtime-preserves every extra field of the input via
    * spread (unitId, livingRoom, …) — the Bedding tab casts back to its own
    * UnitBeddingConfig type.
    */
-  unit: MergeUnitShape;
+  unit: T;
   /** Human-readable notes on what was applied. */
   applied: string[];
   /** What was deliberately left alone (unphotographed / low confidence / overflow). */
@@ -420,25 +452,35 @@ export type BeddingScanMergeResult = {
  *     half↔half, in order); bathroom/bedroom COUNTS never change — those are
  *     listing-level facts the scan can't prove (the same bath can be
  *     photographed twice).
- * Explicit-click semantics: nothing here auto-runs; the operator reviews the
- * proposal and can hand-edit after applying (their edits persist as usual).
+ * The caller chooses whether the confidence boundary is inclusive (manual /
+ * audit compatibility) or strict (the explicit Bedding-tab auto-apply flow).
  */
-export function mergeBeddingScanIntoUnit(
-  unit: MergeUnitShape,
+export function mergeBeddingScanIntoUnit<T extends MergeUnitShape>(
+  unit: T,
   scan: BeddingScanUnit,
-  minConfidence: number = BEDDING_SCAN_MIN_CONFIDENCE,
-): BeddingScanMergeResult {
+  options: {
+    minConfidence?: number;
+    requireAboveMinimum?: boolean;
+  } = {},
+): BeddingScanMergeResult<T> {
+  const minConfidence = options.minConfidence ?? BEDDING_SCAN_MIN_CONFIDENCE;
+  const eligible = options.requireAboveMinimum
+    ? (confidence: number) => isBeddingScanAutoApplyEligible(confidence, minConfidence)
+    : (confidence: number) => confidence >= minConfidence;
   const applied: string[] = [];
   const notes: string[] = [];
   let changed = false;
 
   const confidentBedrooms = scan.bedrooms
-    .filter((b) => b.confidence >= minConfidence)
+    .filter((b) => eligible(b.confidence))
     .slice()
     .sort((a, b) => bedroomRank(b) - bedroomRank(a));
   const lowConfidence = scan.bedrooms.length - confidentBedrooms.length;
   if (lowConfidence > 0) {
-    notes.push(`${lowConfidence} detected bedroom${lowConfidence === 1 ? "" : "s"} below the ${minConfidence} confidence floor — not applied`);
+    const threshold = `${Math.round(minConfidence * 100)}%`;
+    notes.push(options.requireAboveMinimum
+      ? `${lowConfidence} detected bedroom${lowConfidence === 1 ? "" : "s"} not above the ${threshold} auto-apply threshold — not applied`
+      : `${lowConfidence} detected bedroom${lowConfidence === 1 ? "" : "s"} below the ${threshold} confidence floor — not applied`);
   }
 
   const bedrooms = unit.bedrooms.map((slot, i) => {
@@ -465,7 +507,7 @@ export function mergeBeddingScanIntoUnit(
   }
 
   const confidentFullBaths = scan.bathrooms
-    .filter((b) => b.confidence >= minConfidence && !b.isHalf && b.features.length > 0)
+    .filter((b) => eligible(b.confidence) && !b.isHalf && b.features.length > 0)
     .slice()
     .sort((a, b) => b.features.length - a.features.length);
   const configFullBaths = unit.bathrooms.filter((b) => !b.isHalf);
@@ -486,7 +528,85 @@ export function mergeBeddingScanIntoUnit(
     return features ? { ...slot, features } : slot;
   });
 
-  return { unit: { ...unit, bedrooms, bathrooms }, applied, notes, changed };
+  return { unit: { ...unit, bedrooms, bathrooms } as T, applied, notes, changed };
+}
+
+export type BeddingScanAutoApplyUnit = {
+  unitId: string;
+  applied: string[];
+  notes: string[];
+};
+
+export type BeddingScanAutoApplySkip = {
+  unitId: string | null;
+  label: string;
+  reason: "missing-unit-id" | "duplicate-unit-id" | "no-config-unit" | "non-vision-evidence";
+};
+
+/**
+ * Auto-apply a fresh scan by canonical unit id. Position is intentionally never
+ * used: a unit without published photos is omitted from the scan array, so an
+ * index fallback could write Unit B's evidence onto Unit A.
+ */
+export function autoApplyBeddingScanToUnits<
+  T extends MergeUnitShape & { unitId: string },
+>(
+  units: readonly T[],
+  scanUnits: readonly BeddingScanUnit[],
+  minimumConfidence: number = BEDDING_SCAN_MIN_CONFIDENCE,
+): {
+  units: T[];
+  appliedUnits: BeddingScanAutoApplyUnit[];
+  skippedScanUnits: BeddingScanAutoApplySkip[];
+} {
+  const scansByUnitId = new Map<string, BeddingScanUnit[]>();
+  const skippedScanUnits: BeddingScanAutoApplySkip[] = [];
+
+  for (const scanUnit of scanUnits) {
+    const unitId = scanUnit.unitId?.trim();
+    if (!unitId) {
+      skippedScanUnits.push({ unitId: null, label: scanUnit.label, reason: "missing-unit-id" });
+      continue;
+    }
+    if (scanUnit.evidenceMethod !== "vision") {
+      skippedScanUnits.push({ unitId, label: scanUnit.label, reason: "non-vision-evidence" });
+      continue;
+    }
+    const matches = scansByUnitId.get(unitId) ?? [];
+    matches.push(scanUnit);
+    scansByUnitId.set(unitId, matches);
+  }
+
+  const configUnitIds = new Set(units.map((unit) => unit.unitId));
+  for (const [unitId, matches] of Array.from(scansByUnitId.entries())) {
+    if (matches.length > 1) {
+      skippedScanUnits.push(...matches.map((scanUnit) => ({
+        unitId,
+        label: scanUnit.label,
+        reason: "duplicate-unit-id" as const,
+      })));
+      continue;
+    }
+    if (!configUnitIds.has(unitId)) {
+      skippedScanUnits.push({ unitId, label: matches[0].label, reason: "no-config-unit" });
+    }
+  }
+
+  const appliedUnits: BeddingScanAutoApplyUnit[] = [];
+  const nextUnits = units.map((unit) => {
+    const matches = scansByUnitId.get(unit.unitId);
+    if (!matches || matches.length !== 1) return unit;
+    const result = mergeBeddingScanIntoUnit(unit, matches[0], {
+      minConfidence: minimumConfidence,
+      requireAboveMinimum: true,
+    });
+    if (result.changed) {
+      appliedUnits.push({ unitId: unit.unitId, applied: result.applied, notes: result.notes });
+    }
+    return result.unit;
+  });
+
+  return { units: nextUnits, appliedUnits, skippedScanUnits };
 }
 
 // ── Audit comparison vs the Guesty listing's pushed bed layout ───────────────
@@ -564,7 +684,7 @@ export function compareDetectedBeddingToGuestyRooms(
   const guestyBedroomRooms = (guestyRooms ?? []).filter((r) => r.roomNumber > 0);
   if (!guestyRooms || guestyBedroomRooms.length === 0) {
     mismatch = true;
-    items.push(`Bedding photo check: photos show ${detectedSummary || "photographed bedrooms"}, but the Guesty listing has NO bed layout pushed — open the Bedding tab (Scan photos for bedding → Apply) and push`);
+    items.push(`Bedding photo check: photos show ${detectedSummary || "photographed bedrooms"}, but the Guesty listing has NO bed layout pushed — open the Bedding tab and click Scan photos for bedding to auto-apply and push`);
   } else {
     const guestyTypes = new Set<BeddingScanBedType>();
     for (const r of guestyBedroomRooms) for (const bed of r.beds) if (bed.type !== "SOFA_BED") guestyTypes.add(bed.type);

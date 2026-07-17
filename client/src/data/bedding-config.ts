@@ -287,8 +287,14 @@ export function loadBeddingConfig(propertyId: number): PropertyBeddingConfig {
   return defaults;
 }
 
-export function saveBeddingConfig(config: PropertyBeddingConfig): void {
-  try { localStorage.setItem(lsKey(config.propertyId), JSON.stringify(config)); } catch {}
+/** Returns false when browser persistence is unavailable/full so callers can avoid a misleading push. */
+export function saveBeddingConfig(config: PropertyBeddingConfig): boolean {
+  try {
+    localStorage.setItem(lsKey(config.propertyId), JSON.stringify(config));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function resetBeddingConfig(propertyId: number): PropertyBeddingConfig {

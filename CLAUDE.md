@@ -257,6 +257,19 @@ Before making any changes:
   "🔎 Scan photos for bedding"; expect the proposal in ~30-60s; re-run a dashboard audit and the Bedding &
   layout row now carries "Bedding photo check:" lines.
 
+- 2026-07-17 follow-up (Bedding scan auto-apply + conditional Guesty push): Jamie explicitly reversed the
+  proposal-only rule for a FRESH click on "🔎 Scan photos for bedding". The POST completion remains the
+  server-authoritative timestamp and now renders even for an empty scan. Scan groups/results carry canonical
+  builder `unitId`; auto-apply NEVER uses array position because a unit without photos disappears from the
+  scan array. Only VISION confidence STRICTLY `> 0.60` applies (exactly 60% stays untouched; per-unit caption
+  fallback remains review-only and never auto-pushes). The explicit route
+  requires its server scan/timestamp write to succeed, and the exact merged config saves to the builder before
+  it is projected into the fields supported by the existing Guesty Bedding write for the listing snapshotted at
+  click time; an unmapped draft is a successful save-only result, and push failure retains the config + timestamp
+  for retry across tab remounts. Stored-scan hydration and the dashboard
+  audit remain read-only/flag-only — no background auto-push. Bathroom fixture findings remain builder/Space
+  data; Guesty's structured Bedding payload has only counts, occupancy, and `listingRooms`.
+
 - 2026-07-14 (dashboard "Update market pricing" → Last Price Scan column + Pricing tab timestamps):
   Operator: "make sure that it updates and time stamps the last price scan column and also in the
   pricing tab." SERVER SIDE WAS ALREADY CORRECT (don't re-chase): every bulk-queue item that pushes

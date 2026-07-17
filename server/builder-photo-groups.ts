@@ -7,6 +7,7 @@ import { resolveActiveUnitPhotoFolders } from "../shared/unit-swap-photos";
 import { resolveCanonicalCommunityPhotoFolder } from "../shared/community-photo-folders";
 import { resolveDraftUnitBedrooms, positiveDraftInteger } from "../shared/draft-unit-bedrooms";
 import { parseExpectedBedInventory } from "../shared/photo-bedroom-coverage-logic";
+import { draftUnitIdForSlot } from "../shared/auto-replace-job-logic";
 import { storage } from "./storage";
 import type { CheckGroupInput, PhotoCommunityCheckRequest } from "./photo-community-check";
 import type { CommunityDraft } from "../shared/schema";
@@ -106,6 +107,7 @@ async function buildGroupFromPublishedFolder(
   builder: PropertyUnitBuilder | null,
   expectedBedrooms?: number,
   unitDescription?: string,
+  unitId?: string,
 ): Promise<CheckGroupInput | null> {
   const filenames = await listPublishedFilenames(folder);
   if (filenames.length === 0) return null;
@@ -141,6 +143,7 @@ async function buildGroupFromPublishedFolder(
   return {
     role,
     label,
+    unitId,
     folder,
     filenames,
     captions,
@@ -215,6 +218,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
           builder,
           u.bedrooms,
           unitDescriptionFromBuilder(u),
+          u.id,
         );
       }
       if (!g) {
@@ -225,6 +229,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
           builder,
           u.bedrooms,
           unitDescriptionFromBuilder(u),
+          u.id,
         );
       }
       if (g) groups.push(g);
@@ -268,6 +273,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
       null,
       u1Br,
       draftUnitDesc("unit1"),
+      draftUnitIdForSlot(draft.id, "a"),
     );
     if (g1) groups.push(g1);
   }
@@ -279,6 +285,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
       null,
       u2Br,
       draftUnitDesc("unit2"),
+      draftUnitIdForSlot(draft.id, "b"),
     );
     if (g2) groups.push(g2);
   }
