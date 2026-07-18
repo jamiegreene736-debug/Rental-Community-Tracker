@@ -57,6 +57,12 @@ import {
   type GuestyPushListingHistory,
 } from "@shared/guesty-push-history";
 import { backfillGuestyPushHistory, getGuestyPushHistory, recordGuestyPush } from "./guesty-push-history";
+import {
+  ensurePublishedAddressForListing,
+  ensurePublishedAddressForMapping,
+  preResolvePublishedAddressForProperty,
+  pushPublishedAddressForListing,
+} from "./published-address";
 import { registerVirtualStagingRoutes, resolveVirtualStagingUnit } from "./virtual-staging-routes";
 import {
   folderHasActiveVirtualStagingVariants,
@@ -8237,6 +8243,10 @@ export async function registerRoutes(
       // New mapping → deliver any in-system saved amenities to the listing
       // automatically (fire-and-forget, add-only union; no-op when none saved).
       void autoPushSavedAmenitiesForProperty(propertyId, guestyListingId.trim(), "guesty-property-map");
+      // New mapping → make sure Guesty's "separate published address" feature
+      // is on and pointed at the clubhouse/main-building address (fire-and-
+      // forget, idempotent — skips when already enabled with the right street).
+      ensurePublishedAddressForMapping(propertyId, guestyListingId.trim(), "guesty-property-map");
       res.json(row);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to upsert Guesty property map", message: err.message });
@@ -24880,6 +24890,16 @@ Requirements:
         "success",
         summarizeDescriptionsPush(Object.keys(publicDescriptions).length + (payload.title ? 1 : 0)),
       );
+      // Every descriptions push also makes sure the "separate published
+      // address" feature is on for this listing (fire-and-forget — same
+      // never-delay-the-response contract as recordGuestyPush; skips when
+      // Guesty already shows the right published address). The audit sweep's
+      // own loopback delivery opts out — its descriptions stage runs ONE
+      // authoritative awaited push right after, and double-firing would burn
+      // 4+ extra gated Guesty calls per audited listing every sweep.
+      if ((req.body as { skipPublishedAddressEnsure?: boolean })?.skipPublishedAddressEnsure !== true) {
+        ensurePublishedAddressForListing(listingId, "push-descriptions");
+      }
       return res.json({
         success: true,
         verified: true,
@@ -24891,6 +24911,121 @@ Requirements:
       console.error(`[push-descriptions] error:`, err.message);
       recordGuestyPush(listingId, "descriptions", "error", `Descriptions push failed: ${err.message}`);
       return res.status(500).json({ success: false, error: err.message, sent: payload });
+    }
+  });
+
+  // POST /api/builder/push-published-address — the Descriptions tab's manual
+  // "Push separate published address" button. Enables Guesty's separate
+  // published address feature for the listing and points it at the community
+  // clubhouse (or the generic main-building address when no clubhouse can be
+  // found). Body: { listingId?, propertyId?, force? } — listingId wins; a
+  // mapped propertyId resolves through guesty_property_map. The manual button
+  // always re-pushes (force) and re-runs clubhouse discovery so the operator
+  // gets a fresh verification + ledger stamp.
+  app.post("/api/builder/push-published-address", async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { listingId?: string; propertyId?: number; force?: boolean };
+    // Strict integer-and-nonzero guard: Number(null)/Number("") coerce to 0,
+    // and a 0 propertyId would poison the shared resolution-cache key "0".
+    const rawPid = typeof body.propertyId === "string" ? Number(body.propertyId) : body.propertyId;
+    const propertyId =
+      typeof rawPid === "number" && Number.isInteger(rawPid) && rawPid !== 0 ? rawPid : null;
+    let listingId = typeof body.listingId === "string" && body.listingId.trim() ? body.listingId.trim() : null;
+    if (!listingId && propertyId != null) {
+      listingId = (await storage.getGuestyListingId(propertyId).catch(() => null)) ?? null;
+    }
+    if (!listingId) {
+      return res.status(400).json({ success: false, error: "listingId (or a Guesty-mapped propertyId) is required" });
+    }
+    const force = body.force !== false;
+    const result = await pushPublishedAddressForListing({
+      listingId,
+      propertyId,
+      force,
+      forceRefreshResolution: force,
+      reason: "manual-button",
+    });
+    if (!result.ok) {
+      return res.status(502).json({ success: false, error: result.error ?? "Published address push failed" });
+    }
+    return res.json({
+      success: true,
+      verified: result.verified,
+      alreadyOn: result.alreadyOn === true,
+      address: result.address ?? null,
+      pushedAt: result.pushedAt ?? null,
+    });
+  });
+
+  // POST /api/admin/push-published-addresses — one-shot backfill: walk EVERY
+  // Guesty-mapped property (positive cores + negative -draftId rows) and make
+  // sure the separate published address feature is on. Idempotent — listings
+  // already enabled with the right street are skipped (alreadyOn) unless
+  // body.force is true. Serialized on purpose: the guesty-sync global gate
+  // paces the calls, and a sequential walk keeps 429 pressure predictable.
+  // STREAMS NDJSON (one line per listing + a terminal "done" line) because a
+  // full-portfolio walk behind a Guesty 429 pause can outlive Railway's hard
+  // 15-minute edge response cap — a buffered JSON response would be cut and
+  // every per-listing result silently lost (the PR #1040 class).
+  app.post("/api/admin/push-published-addresses", async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { force?: boolean; propertyIds?: number[] };
+    const wanted =
+      Array.isArray(body.propertyIds) && body.propertyIds.length > 0
+        ? new Set(body.propertyIds.map((v) => Number(v)))
+        : null;
+    let maps: Array<{ propertyId: number; guestyListingId: string }> = [];
+    try {
+      maps = await storage.getGuestyPropertyMap();
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: `Could not read the property map: ${e?.message ?? e}` });
+    }
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.flushHeaders?.();
+    const writeLine = (obj: Record<string, unknown>) => {
+      try {
+        res.write(JSON.stringify(obj) + "\n");
+      } catch {
+        // client went away — keep the loop running server-side
+      }
+    };
+    const heartbeat = setInterval(() => writeLine({ type: "heartbeat", at: new Date().toISOString() }), 12_000);
+    try {
+      const seenListings = new Set<string>();
+      let total = 0;
+      let pushed = 0;
+      let alreadyOn = 0;
+      let failed = 0;
+      for (const row of maps) {
+        const listingId = String(row.guestyListingId ?? "").trim();
+        if (!listingId || seenListings.has(listingId)) continue;
+        if (wanted && !wanted.has(row.propertyId)) continue;
+        seenListings.add(listingId);
+        const r = await pushPublishedAddressForListing({
+          listingId,
+          propertyId: row.propertyId,
+          force: body.force === true,
+          reason: "admin-backfill",
+        }).catch((e: any) => ({ ok: false as const, verified: false as const, error: String(e?.message ?? e) }));
+        total++;
+        if (r.ok && (r as any).alreadyOn) alreadyOn++;
+        else if (r.ok) pushed++;
+        else failed++;
+        writeLine({
+          type: "listing",
+          propertyId: row.propertyId,
+          listingId,
+          ok: r.ok,
+          verified: r.verified,
+          alreadyOn: (r as any).alreadyOn === true,
+          street: (r as any).address?.street ?? null,
+          source: (r as any).address?.source ?? null,
+          error: r.ok ? undefined : r.error,
+        });
+      }
+      writeLine({ type: "done", success: failed === 0, total, pushed, alreadyOn, failed });
+    } finally {
+      clearInterval(heartbeat);
+      res.end();
     }
   });
 
@@ -31883,6 +32018,7 @@ Return ONLY compact JSON with this exact shape:
     // saved amenity selection (photo scan + area research) to it. This closes
     // the automation loop for drafts scanned BEFORE their listing existed.
     void autoPushSavedAmenitiesForProperty(propertyId, guestyListingId, "schedule-sync");
+    ensurePublishedAddressForMapping(propertyId, guestyListingId, "schedule-sync");
     const delayMs = Math.min(delayMinutes, 180) * 60 * 1000;
     setTimeout(() => {
       runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 }).catch((err) => {
@@ -31901,6 +32037,7 @@ Return ONLY compact JSON with this exact shape:
     try {
       await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
       void autoPushSavedAmenitiesForProperty(propertyId, guestyListingId, "sync-now");
+      ensurePublishedAddressForMapping(propertyId, guestyListingId, "sync-now");
       const summary = await runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 });
       res.json({ ok: !summary.startsWith("skipped:"), status: summary.startsWith("skipped:") ? "skipped" : "ok", summary });
     } catch (err: any) {
@@ -41066,6 +41203,17 @@ Return ONLY compact JSON with this exact shape:
       }
     }
 
+    // ── Published-address pre-resolve (fresh drafts) ─────────────────────────
+    // Same posture as the amenities step: no Guesty listing exists yet, so we
+    // just resolve + cache the community's clubhouse/main-building published
+    // address now (SearchAPI clubhouse discovery, keyed by -draftId). The
+    // moment the listing is created/connected, the mapping-birth hooks
+    // (ensurePublishedAddressForMapping) push it to Guesty from this cache
+    // with no second discovery spend. Fire-and-forget — never blocks the save.
+    if (!reusedExistingDraft) {
+      void preResolvePublishedAddressForProperty(-draftId);
+    }
+
     await enqueueCommunityPricingRefreshJob(draftId).catch((e: any) => {
       item.message = `Draft saved; pricing queue warning: ${e?.message ?? e}`;
     });
@@ -43414,6 +43562,7 @@ Return ONLY compact JSON with this exact shape:
         // builder create flow calls schedule-sync right after this; the
         // cooldown inside the helper absorbs the duplicate).
         void autoPushSavedAmenitiesForProperty(requestedPropertyId, guestyListingId, "guesty-import");
+        ensurePublishedAddressForMapping(requestedPropertyId, guestyListingId, "guesty-import");
         const staleRows = existingMaps.filter(
           (row) => row.guestyListingId === guestyListingId && row.propertyId < 0 && row.propertyId !== requestedPropertyId,
         );
@@ -43470,6 +43619,7 @@ Return ONLY compact JSON with this exact shape:
       const photoBackfill = await persistImportedGuestyDraftPhotos(draft, listing);
       const mapping = await storage.upsertGuestyPropertyMap(-draft.id, guestyListingId);
       void autoPushSavedAmenitiesForProperty(-draft.id, guestyListingId, "guesty-import-create");
+      ensurePublishedAddressForMapping(-draft.id, guestyListingId, "guesty-import-create");
 
       const staleRows = existingMaps.filter(
         (row) => row.guestyListingId === guestyListingId && row.propertyId < 0 && row.propertyId !== -draft.id,

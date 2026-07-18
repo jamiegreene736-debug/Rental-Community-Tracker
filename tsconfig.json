@@ -3,7 +3,12 @@
   "exclude": ["node_modules", "build", "dist", "**/*.test.ts"],
   "compilerOptions": {
     "incremental": true,
-    "tsBuildInfoFile": "./node_modules/typescript/tsbuildinfo",
+    // NOT node_modules/typescript/tsbuildinfo (the Vite template default):
+    // in a git worktree with no local node_modules, tsc CREATES that dir
+    // containing only this cache file, which then SHADOWS the parent-resolved
+    // real typescript package and breaks every test that imports it
+    // (ERR_MODULE_NOT_FOUND). .cache is not a resolvable package name.
+    "tsBuildInfoFile": "./node_modules/.cache/tsbuildinfo",
     "noEmit": true,
     "module": "ESNext",
     "strict": true,

@@ -3,11 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   VIRTUAL_STAGING_PROMPT,
+  buildVirtualStagingPrompt,
+  resolveStageableVirtualStagingSources,
   resolveVirtualStagingSources,
   reusableVirtualStagingJobId,
   sameVirtualStagingSelection,
   summarizeCandidateStatuses,
   validateVirtualStagingSelection,
+  virtualStagingContextForSource,
+  virtualStagingRecipeSignature,
   virtualStagingSessionAction,
   type SelectableVirtualStagingCandidate,
   type VirtualStagingLabelSnapshot,
@@ -167,6 +171,13 @@ test("duplicate start clicks reuse one active unit job", () => {
   assert.equal(reusableVirtualStagingJobId(jobs, 42, "unit-a"), "active");
 });
 
+test("the staging recipe signature invalidates previews from older prompts", () => {
+  assert.equal(
+    virtualStagingRecipeSignature(),
+    "virtual-staging-recipe::context-aware-furnishings-v2",
+  );
+});
+
 test("unconfirmed terminal jobs remain resumable after the Photos tab remounts", () => {
   assert.equal(reusableVirtualStagingJobId([
     { id: "review", propertyId: 42, unitId: "unit-a", status: "ready" },
@@ -208,7 +219,221 @@ test("an unconfirmed staging session resumes only for its own unit", () => {
 });
 
 test("an empty unit produces no stageable photos", () => {
-  assert.deepEqual(resolveVirtualStagingSources({ diskFilenames: [], labels: [], variants: [] }), []);
+  assert.deepEqual(resolveStageableVirtualStagingSources({ diskFilenames: [], labels: [], variants: [] }), []);
+});
+
+test("only private rooms and private outdoor spaces are eligible for paid staging", () => {
+  const cases = [
+    ["Living Areas", "living-area"],
+    ["Bedrooms", "bedroom"],
+    ["Kitchen", "kitchen"],
+    ["Bathrooms", "bathroom"],
+    ["Dining", "dining"],
+    ["Outdoor & Lanai", "private-outdoor"],
+  ] as const;
+  for (const [category, scene] of cases) {
+    const context = virtualStagingContextForSource({
+      originalFilename: `${scene}.jpg`,
+      roomLabel: category,
+      metadata: label(`${scene}.jpg`, { label: category, category }),
+    });
+    assert.equal(context?.scene, scene, category);
+    assert.equal(context?.placement, scene === "private-outdoor" ? "outdoor" : "indoor", category);
+  }
+
+  for (const category of [
+    "Views",
+    "Building Exterior",
+    "Reject",
+    "Other",
+    "Pool & Spa",
+    "Beach Access",
+    "Grounds & Landscaping",
+    "Common Areas",
+    "Activities",
+    "Amenities",
+  ]) {
+    assert.equal(virtualStagingContextForSource({
+      originalFilename: "scenic.jpg",
+      roomLabel: "Scenic Photo",
+      metadata: label("scenic.jpg", { label: "Scenic Photo", category }),
+    }), null, category);
+  }
+});
+
+test("room categories win over incidental view words", () => {
+  assert.deepEqual(virtualStagingContextForSource({
+    originalFilename: "living.jpg",
+    roomLabel: "Living Room With Ocean View",
+    metadata: label("living.jpg", { label: "Living Room With Ocean View", category: "Living Areas" }),
+  }), { scene: "living-area", placement: "indoor" });
+  assert.deepEqual(virtualStagingContextForSource({
+    originalFilename: "lanai.jpg",
+    roomLabel: "Lanai With Ocean View",
+    metadata: label("lanai.jpg", { label: "Lanai With Ocean View", category: "Outdoor & Lanai" }),
+  }), { scene: "private-outdoor", placement: "outdoor" });
+  assert.equal(virtualStagingContextForSource({
+    originalFilename: "sunset.jpg",
+    roomLabel: "Sunset From Lanai",
+    metadata: label("sunset.jpg", { label: "Sunset From Lanai", category: "Outdoor & Lanai" }),
+  }), null);
+});
+
+test("a clearly furnished lanai corrects a legacy indoor category", () => {
+  for (const [roomLabel, category] of [
+    ["Covered Dining Lanai", "Living Areas"],
+    ["Living Room Seating And Lanai", "Living Areas"],
+    ["Primary Bedroom Lanai", "Bedrooms"],
+    ["Master Bedroom Suite Lanai", "Bedrooms"],
+  ]) {
+    assert.deepEqual(virtualStagingContextForSource({
+      originalFilename: `${roomLabel}.jpg`,
+      roomLabel,
+      metadata: label(`${roomLabel}.jpg`, { label: roomLabel, category }),
+    }), { scene: "private-outdoor", placement: "outdoor" }, roomLabel);
+  }
+  for (const [roomLabel, category, scene] of [
+    ["Living Room And Lanai", "Living Areas", "living-area"],
+    ["Primary Bedroom Suite And Lanai", "Bedrooms", "bedroom"],
+    ["Master Bedroom With Lanai Access", "Bedrooms", "bedroom"],
+  ] as const) {
+    assert.deepEqual(virtualStagingContextForSource({
+      originalFilename: `${roomLabel}.jpg`,
+      roomLabel,
+      metadata: label(`${roomLabel}.jpg`, { label: roomLabel, category }),
+    }), { scene, placement: "indoor" }, roomLabel);
+  }
+});
+
+test("obvious beach and shared-amenity labels backstop a bad generated category", () => {
+  assert.equal(virtualStagingContextForSource({
+    originalFilename: "beach.jpg",
+    roomLabel: "Private Beach Cove",
+    metadata: label("beach.jpg", { label: "Private Beach Cove", category: "Living Areas" }),
+  }), null);
+  assert.equal(virtualStagingContextForSource({
+    originalFilename: "restaurant.jpg",
+    roomLabel: "Resort Restaurant",
+    metadata: label("restaurant.jpg", { label: "Resort Restaurant", category: "Dining" }),
+  }), null);
+  for (const roomLabel of [
+    "Ocean View",
+    "Oceanfront Sunset",
+    "Coastline",
+    "Mountain Vista",
+    "Pool With Ocean Backdrop",
+  ]) {
+    assert.equal(virtualStagingContextForSource({
+      originalFilename: `${roomLabel}.jpg`,
+      roomLabel,
+      metadata: label(`${roomLabel}.jpg`, { label: roomLabel, category: "Living Areas" }),
+    }), null, roomLabel);
+  }
+  assert.deepEqual(virtualStagingContextForSource({
+    originalFilename: "pool-view.jpg",
+    roomLabel: "Living Room With Pool View",
+    metadata: label("pool-view.jpg", { label: "Living Room With Pool View", category: "Living Areas" }),
+  }), { scene: "living-area", placement: "indoor" });
+  assert.deepEqual(virtualStagingContextForSource({
+    originalFilename: "open-floor-plan.jpg",
+    roomLabel: "Open Floor Plan",
+    metadata: label("open-floor-plan.jpg", { label: "Open Floor Plan", category: "Living Areas" }),
+  }), { scene: "living-area", placement: "indoor" });
+  assert.equal(virtualStagingContextForSource({
+    originalFilename: "floor-plan.jpg",
+    roomLabel: "Floor Plan",
+    metadata: label("floor-plan.jpg", { label: "Floor Plan", category: "Living Areas" }),
+  }), null);
+});
+
+test("human category overrides control staging eligibility", () => {
+  assert.deepEqual(virtualStagingContextForSource({
+    originalFilename: "patio.jpg",
+    roomLabel: "Private Patio",
+    metadata: label("patio.jpg", { category: "Views", userCategory: " Patio " }),
+  }), { scene: "private-outdoor", placement: "outdoor" });
+  assert.equal(virtualStagingContextForSource({
+    originalFilename: "view.jpg",
+    roomLabel: "Ocean View",
+    metadata: label("view.jpg", { category: "Living Areas", userCategory: "Views" }),
+  }), null);
+});
+
+test("legacy Exterior only admits a usable private outdoor space", () => {
+  for (const roomLabel of ["Covered Lanai", "Lanai Seating", "Oceanfront Patio", "Outdoor Dining"]) {
+    assert.equal(virtualStagingContextForSource({
+      originalFilename: `${roomLabel}.jpg`,
+      roomLabel,
+      metadata: label(`${roomLabel}.jpg`, { label: roomLabel, category: "Exterior" }),
+    })?.scene, "private-outdoor", roomLabel);
+  }
+  for (const roomLabel of [
+    "Balcony View",
+    "Sunset From Lanai",
+    "Garden View From Lanai",
+    "Beach Access",
+    "Building Exterior",
+  ]) {
+    assert.equal(virtualStagingContextForSource({
+      originalFilename: `${roomLabel}.jpg`,
+      roomLabel,
+      metadata: label(`${roomLabel}.jpg`, { label: roomLabel, category: "Exterior" }),
+    }), null, roomLabel);
+  }
+});
+
+test("generic legacy metadata requires an explicit furnished-space signal", () => {
+  assert.deepEqual(virtualStagingContextForSource({
+    originalFilename: "patio-sofa.jpg",
+    roomLabel: "Patio Sofa",
+    metadata: label("patio-sofa.jpg", { label: "Patio Sofa", category: null }),
+  }), { scene: "private-outdoor", placement: "outdoor" });
+  assert.deepEqual(virtualStagingContextForSource({
+    originalFilename: "living-room.jpg",
+    roomLabel: "Living Room",
+    metadata: null,
+  }), { scene: "living-area", placement: "indoor" });
+  assert.deepEqual(virtualStagingContextForSource({
+    originalFilename: "primary-bedroom-lanai.jpg",
+    roomLabel: "Primary Bedroom Lanai",
+    metadata: null,
+  }), { scene: "private-outdoor", placement: "outdoor" });
+  assert.equal(virtualStagingContextForSource({
+    originalFilename: "photo-10.jpg",
+    roomLabel: "Photo 10",
+    metadata: null,
+  }), null);
+});
+
+test("candidate planning ignores scenic and shared photos without reordering rooms", () => {
+  const sources = resolveStageableVirtualStagingSources({
+    diskFilenames: ["01-living.jpg", "02-beach.jpg", "03-lanai.jpg", "04-pool.jpg"],
+    labels: [
+      label("01-living.jpg", { label: "Living Room With Ocean View", category: "Living Areas" }),
+      label("02-beach.jpg", { label: "Private Beach Cove", category: "Views" }),
+      label("03-lanai.jpg", { label: "Lanai Dining With Ocean View", category: "Outdoor & Lanai" }),
+      label("04-pool.jpg", { label: "Community Pool", category: "Pool & Spa" }),
+    ],
+    variants: [],
+  });
+  assert.deepEqual(sources.map((source) => source.originalFilename), ["01-living.jpg", "03-lanai.jpg"]);
+  assert.deepEqual(sources.map((source) => source.stagingContext.placement), ["indoor", "outdoor"]);
+});
+
+test("active staged metadata determines whether an immutable original is restaged", () => {
+  const sources = resolveStageableVirtualStagingSources({
+    diskFilenames: ["room.jpg", "virtual-staged-active.jpg"],
+    labels: [
+      label("room.jpg", { category: "Living Areas", hidden: true }),
+      label("virtual-staged-active.jpg", { label: "Ocean Sunset", category: "Views" }),
+    ],
+    variants: [{
+      originalFilename: "room.jpg",
+      candidateFilename: "virtual-staged-active.jpg",
+      active: true,
+    }],
+  });
+  assert.deepEqual(sources, []);
 });
 
 test("partial generation success is reviewable with an individual failure", () => {
@@ -254,6 +479,19 @@ test("the maintained prompt protects architecture, perspective, and originals", 
   assert.match(VIRTUAL_STAGING_PROMPT, /walls, ceilings, floors, windows, doors/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /camera position, lens perspective, crop/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /Do not move openings/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /Hawaiian, tropical, island, coastal/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /sofa with sofa/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /visible photograph is authoritative/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /Hawaiian-style sofa only with another tasteful Hawaiian-style sofa/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /If no suitable movable furnishing is visible, make no changes/i);
+  assert.doesNotMatch(VIRTUAL_STAGING_PROMPT, /Add .*neutral contemporary luxury/i);
+
+  const outdoorPrompt = buildVirtualStagingPrompt({ scene: "private-outdoor", placement: "outdoor" });
+  assert.match(outdoorPrompt, /weather-resistant, outdoor-rated furniture/i);
+  assert.match(outdoorPrompt, /Never add an indoor sofa/i);
+  const indoorPrompt = buildVirtualStagingPrompt({ scene: "living-area", placement: "indoor" });
+  assert.match(indoorPrompt, /metadata indicates an indoor living area/i);
+  assert.match(indoorPrompt, /never introduce patio, deck, or pool furniture/i);
 });
 
 test("frontend uses the accessible dialog and keeps zero-photo controls visible", () => {
@@ -301,7 +539,9 @@ test("backend keeps credentials server-side and edits immutable image input", ()
   assert.match(service, /process\.env\.OPENAI_API_KEY/);
   assert.match(service, /process\.env\.OPENAI_IMAGE_MODEL/);
   assert.match(service, /images\.edit/);
-  assert.match(service, /VIRTUAL_STAGING_PROMPT/);
+  assert.match(service, /buildVirtualStagingPrompt/);
+  assert.match(service, /prompt: input\.prompt/);
+  assert.match(service, /get recipeSignature/);
   assert.doesNotMatch(service, /VITE_OPENAI|NEXT_PUBLIC_OPENAI|REACT_APP_OPENAI/);
 
   const replicate = fs.readFileSync(
@@ -309,6 +549,7 @@ test("backend keeps credentials server-side and edits immutable image input", ()
     "utf8",
   );
   assert.match(replicate, /input_image: file\.urls\.get/);
+  assert.match(replicate, /prompt: input\.prompt/);
   assert.match(replicate, /aspect_ratio: "match_input_image"/);
   assert.match(replicate, /generatedUrl[\s\S]*Authorization: `Bearer \$\{this\.apiToken\}`/);
   assert.match(replicate, /fetchWithTransientRetry/);
@@ -325,6 +566,29 @@ test("backend keeps credentials server-side and edits immutable image input", ()
   assert.match(routes, /RESUMABLE_JOB_STATUSES = \["queued", "running", "ready", "failed"\]/);
   assert.match(routes, /\/api\/virtual-staging\/jobs\/:jobId\/finish/);
   assert.match(routes, /selectedCandidateIds: \[\]/);
+  assert.match(routes, /resolveStageableVirtualStagingSources/);
+  assert.match(routes, /virtualStagingContextForSource/);
+  assert.match(routes, /job\.model !== (?:service\.)?recipeSignature/);
+  assert.match(routes, /Superseded by an updated virtual-staging recipe/);
+  assert.match(routes, /NOT LIKE \$\{`\$\{VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX\}%`\}/);
+  assert.match(routes, /jobIsResumableForUnit\(latest, unit\)[\s\S]*latest\.model === recipeSignature/);
+  assert.match(routes, /latest\.model\?\.startsWith\(VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX\)/);
+  assert.match(routes, /tx\.update\(virtualStagingJobs\)[\s\S]*tx\.insert\(virtualStagingJobs\)/);
+});
+
+test("confirmation rejects obsolete staging recipes before preparing files", () => {
+  const routes = fs.readFileSync(
+    path.resolve(process.cwd(), "server/virtual-staging-routes.ts"),
+    "utf8",
+  );
+  const confirmStart = routes.indexOf('app.post("/api/virtual-staging/jobs/:jobId/confirm"');
+  const finishStart = routes.indexOf('app.post("/api/virtual-staging/jobs/:jobId/finish"', confirmStart);
+  const confirmRoute = routes.slice(confirmStart, finishStart);
+  assert.match(confirmRoute, /job\.model !== getVirtualStagingService\(\)\.recipeSignature/);
+  assert.ok(
+    confirmRoute.indexOf("job.model !== getVirtualStagingService().recipeSignature")
+      < confirmRoute.indexOf("prepareConfirmationFiles(selected)"),
+  );
 });
 
 test("confirmation uses locked transaction state and hidden file preparation", () => {

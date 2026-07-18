@@ -41,6 +41,7 @@ import {
 } from "../client/src/data/unit-builder-data";
 import { parseStreetCityState } from "@shared/address-listing-logic";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
+import { pushPublishedAddressForListing } from "./published-address";
 import {
   findDescriptionPlaceholders,
   AREA_SECTION_HEADERS,
@@ -173,7 +174,10 @@ const STAGE_TIMEOUT_MS: Record<UnitAuditStageId, number> = {
   // consensus re-check before the post-fix row upserts). Bounded per-rung
   // below.
   "photo-fix": 120 * 60_000,
-  descriptions: 6 * 60_000,
+  // Descriptions: one 4-min Claude generate + a 60s Guesty push, PLUS (since
+  // 2026-07-17) the separate-published-address ensure — worst case a Guesty
+  // address GET/PUT/GET behind a 429 gate pause. Eight minutes covers both.
+  descriptions: 8 * 60_000,
   // Amenities: the scan (vision + area research + push) keeps its ~7-min
   // budget; the extra headroom covers the verify read's bounded retries over
   // Guesty rate-limit pauses (see loopbackVerifyRead — the accounting is
@@ -2412,6 +2416,10 @@ async function regenerateDescriptionsForTarget(target: UnitAuditTarget): Promise
     const push = await loopbackJson("POST", "/api/builder/push-descriptions", {
       listingId: target.guestyListingId,
       descriptions: patch,
+      // The stage runs its OWN awaited published-address ensure right after —
+      // suppress the route's fire-and-forget hook so a full-automation audit
+      // doesn't double-push the address (2 concurrent GET/PUT/GET rounds).
+      skipPublishedAddressEnsure: true,
     }, 60_000).catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
     if (push.status < 400 && (push.data as any)?.success === true && (push.data as any)?.verified === true) {
       guestyStatus = "pushed";
@@ -2465,6 +2473,37 @@ async function stageDescriptions(target: UnitAuditTarget, record: UnitAuditJobRe
     }
   }
 
+  // Separate published address (2026-07-17): every audited listing must have
+  // Guesty's published-address feature ON, pointed at the clubhouse (or the
+  // generic main-building street). Idempotent — the engine skips the PUT when
+  // Guesty already shows the target address, so weekly cron sweeps stay
+  // cheap (two reads). A failure never blocks the descriptions verdict below
+  // pass→attention: it's a listing-config gap, not broken copy. The
+  // "Auto-fix failed:" prefix deliberately makes the row rail-A retryable
+  // (transient Guesty 429/5xx heals on the automatic re-run).
+  let publishedAddressIssue: string | null = null;
+  if (target.guestyListingId && autoFixEnabled(record) && process.env.AUDIT_PUBLISHED_ADDRESS !== "0") {
+    touch(record, { message: "Verifying the separate published address on Guesty…" });
+    try {
+      const pa = await pushPublishedAddressForListing({
+        listingId: target.guestyListingId,
+        propertyId: target.propertyId,
+        reason: "unit-audit",
+      });
+      if (pa.ok && pa.alreadyOn) {
+        items.push(`Published address: already enabled (${pa.address?.street ?? "?"} · ${pa.address?.source ?? "community"})`);
+      } else if (pa.ok) {
+        items.push(`Auto-fixed: separate published address enabled (${pa.address?.street ?? "?"} · ${pa.address?.source ?? "community"})`);
+      } else {
+        publishedAddressIssue = pa.error ?? "push failed";
+        items.push(`Auto-fix failed: separate published address — ${publishedAddressIssue}`);
+      }
+    } catch (e: any) {
+      publishedAddressIssue = String(e?.message ?? e);
+      items.push(`Auto-fix failed: separate published address — ${publishedAddressIssue}`);
+    }
+  }
+
   const overrideNote = Object.keys(overrides).length > 0
     ? `${Object.keys(overrides).length} override${Object.keys(overrides).length === 1 ? "" : "s"} (✎/regenerated) in effect`
     : "no overrides — generated copy in effect";
@@ -2478,6 +2517,15 @@ async function stageDescriptions(target: UnitAuditTarget, record: UnitAuditJobRe
   }
   if (problems.embeddedHeaders.length > 0 || problems.emptySummary) {
     return { verdict: "attention", detail: "Description copy needs cleanup — see the findings below.", items };
+  }
+  // A published-address failure caps an otherwise-clean stage at attention
+  // (never a silent pass) — the copy is fine, the listing config isn't.
+  if (publishedAddressIssue) {
+    return {
+      verdict: "attention",
+      detail: `Copy is clean, but the separate published address could not be confirmed on Guesty — ${publishedAddressIssue}`,
+      items,
+    };
   }
   if (fixedNote) {
     return { verdict: "fixed", detail: `${fixedNote} — re-verify clean.`, items };

@@ -1,6 +1,5 @@
 import sharp from "sharp";
 
-import { VIRTUAL_STAGING_PROMPT } from "@shared/virtual-staging";
 import type {
   VirtualStagingGenerationInput,
   VirtualStagingGenerationResult,
@@ -184,7 +183,7 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
           },
           body: JSON.stringify({
             input: {
-              prompt: VIRTUAL_STAGING_PROMPT,
+              prompt: input.prompt,
               input_image: file.urls.get,
               aspect_ratio: "match_input_image",
               output_format: "jpg",

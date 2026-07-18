@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const workerSrc = readFileSync(new URL("../daemon/vrbo-sidecar/worker.mjs", import.meta.url), "utf8");
+const managerSrc = readFileSync(new URL("../daemon/vrbo-sidecar/chrome-sidecar-manager.mjs", import.meta.url), "utf8");
+const installerSrc = readFileSync(new URL("../scripts/install-vrbo-sidecar-launchagent.sh", import.meta.url), "utf8");
 const queueSrc = readFileSync(new URL("../server/vrbo-sidecar-queue.ts", import.meta.url), "utf8");
 
 console.log("sidecar-botwall-assist suite");
@@ -19,14 +21,59 @@ console.log("sidecar-botwall-assist suite");
 // ── 1. Extract the detector from the worker source and test it behaviorally ──
 const titleReSrc = workerSrc.match(/const LISTING_BOT_WALL_TITLE_RE =\s*\n?\s*\/.*\/i;/)?.[0];
 const bodyReSrc = workerSrc.match(/const LISTING_BOT_WALL_BODY_RE =\s*\n?\s*\/.*\/i;/)?.[0];
+const terminalFnSrc = workerSrc.match(/function detectListingTerminalDenial\(state\) \{[\s\S]*?\n\}/)?.[0];
 const detectFnSrc = workerSrc.match(/function detectListingBotWall\(state\) \{[\s\S]*?\n\}/)?.[0];
 assert.ok(titleReSrc, "LISTING_BOT_WALL_TITLE_RE exists in worker.mjs");
 assert.ok(bodyReSrc, "LISTING_BOT_WALL_BODY_RE exists in worker.mjs");
+assert.ok(terminalFnSrc, "detectListingTerminalDenial exists in worker.mjs");
 assert.ok(detectFnSrc, "detectListingBotWall exists in worker.mjs");
 
-const detectListingBotWall = new Function(
-  `${titleReSrc}\n${bodyReSrc}\n${detectFnSrc}\nreturn detectListingBotWall;`,
-)() as (state: { title?: string; bodyExcerpt?: string; bodyHtmlSnippet?: string } | null) => string | null;
+type ListingWallState = {
+  url?: string;
+  title?: string;
+  bodyExcerpt?: string;
+  bodyHtmlSnippet?: string;
+} | null;
+
+const detectors = new Function(
+  `${titleReSrc}\n${bodyReSrc}\n${terminalFnSrc}\n${detectFnSrc}\n` +
+    "return { detectListingTerminalDenial, detectListingBotWall };",
+)() as {
+  detectListingTerminalDenial: (state: ListingWallState) => string | null;
+  detectListingBotWall: (state: ListingWallState) => string | null;
+};
+const { detectListingTerminalDenial, detectListingBotWall } = detectors;
+
+// Homes.com / Akamai hard denial — there is no check for the operator to solve.
+const homesAkamaiDenial = {
+  url: "https://www.homes.com/property/example/abc123/",
+  title: "Access Denied",
+  bodyExcerpt:
+    'You don\'t have permission to access "http://www.homes.com/property/example/abc123/" on this server. ' +
+    "Reference #18.6fc3117.1784343240.15f4c59a https://errors.edgesuite.net/18.6fc3117.1784343240.15f4c59a",
+  bodyHtmlSnippet: '<a href="https://errors.edgesuite.net/18.6fc3117.1784343240.15f4c59a">reference</a>',
+};
+assert.equal(
+  detectListingTerminalDenial(homesAkamaiDenial),
+  "Akamai Access Denied",
+  "Homes.com hard denial is terminal",
+);
+assert.equal(
+  detectListingBotWall(homesAkamaiDenial),
+  null,
+  "Homes.com hard denial is not presented as a solvable manual challenge",
+);
+assert.equal(
+  detectListingTerminalDenial({
+    url: "https://errors.edgesuite.net/18.9fc3117.1784343228.336c48a0",
+    title: "An error has occurred",
+    bodyExcerpt: "",
+    bodyHtmlSnippet: "",
+  }),
+  "Akamai error redirect",
+  "the Akamai redirect page cannot be mistaken for a cleared challenge",
+);
+console.log("  ✓ terminal Akamai denials fail closed without a manual-solve wait");
 
 // Zillow / PerimeterX "Press & Hold" — the reported incident page.
 assert.ok(
@@ -157,6 +204,18 @@ assert.ok(
     assistFn.includes("surfaceVrboChallengeWindow(page, label, id)"),
     "the assist reuses the existing surfaced-window machinery",
   );
+  assert.ok(
+    assistFn.indexOf("detectListingTerminalDenial(state)") < assistFn.indexOf("detectListingBotWall(state)"),
+    "terminal denials are rejected before interactive challenge handling",
+  );
+  assert.ok(
+    assistFn.indexOf("detectListingTerminalDenial(state)") < assistFn.indexOf("SIDECAR_GALLERY_BOTWALL_ASSIST"),
+    "terminal denials fail closed even when the manual-assist feature is disabled",
+  );
+  assert.ok(
+    assistFn.includes("terminal: true"),
+    "terminal denials are returned explicitly to the gallery scraper",
+  );
 }
 // After a solved wall the scrape must re-navigate so the listing renders with
 // the fresh anti-bot cookie before the harvest.
@@ -164,12 +223,76 @@ assert.ok(
   /wallAssist\.waited && wallAssist\.cleared/.test(workerSrc),
   "a solved wall re-navigates to the listing before harvesting",
 );
+assert.ok(
+  /function throwIfListingTerminalDenial\(wallAssist\) \{[\s\S]*?terminal[\s\S]*?throw new Error/.test(workerSrc),
+  "a terminal provider denial fails the scrape instead of returning a false zero-photo success",
+);
+{
+  const galleryFn = workerSrc.match(/async function processListingGalleryScrape\(id, params\) \{[\s\S]*?\n\}\n/)?.[0] ?? "";
+  assert.ok(
+    galleryFn.includes("const postSolveState = await captureVrboChallengeState(page)"),
+    "the post-solve navigation is classified before gallery harvesting",
+  );
+  assert.ok(
+    galleryFn.includes("detectListingTerminalDenial(postSolveState)"),
+    "an Akamai redirect after a manual solve fails closed",
+  );
+  assert.ok(
+    galleryFn.includes("detectListingBotWall(postSolveState)") && galleryFn.includes("manualSolveCount >= 2"),
+    "a repeated interactive wall gets one bounded second assist and never loops forever",
+  );
+  assert.ok(
+    galleryFn.includes("harvesting whatever rendered"),
+    "the documented interactive-wall timeout fallback remains unchanged",
+  );
+}
 // The audible alert must fire for gallery labels too (gate was vrbo-only).
 assert.ok(
   /\^\(\?:vrbo\|listing_gallery_scrape\|zillow_photo_scrape\)/.test(workerSrc),
   "challenge alert sound gate covers the gallery-scrape labels",
 );
 console.log("  ✓ worker wiring guards hold");
+
+// Homes.com/Akamai treats --disable-notifications as an automation signal.
+// Keep every daemon launch path on Chrome's native notification permission.
+assert.ok(
+  !/^[ \t]*["']--disable-notifications["'],?$/m.test(managerSrc),
+  "local/server Chrome manager launch args preserve native notification permission",
+);
+assert.ok(
+  !/^[ \t]*["']--disable-notifications["'],?$/m.test(workerSrc),
+  "legacy local and headless Chrome launch args preserve native notification permission",
+);
+assert.ok(
+  managerSrc.includes("--disable-backgrounding-occluded-windows"),
+  "the independently-safe backgrounding optimization remains enabled",
+);
+console.log("  ✓ sidecar launch fingerprint remains Homes.com-compatible");
+
+// Restarting the daemon must retire old CDP roots before the patched workers
+// start. Otherwise a weeks-old Chrome process silently retains obsolete flags.
+assert.ok(
+  installerSrc.includes("dedicated_sidecar_chrome_pids"),
+  "the installer identifies dedicated sidecar Chrome root processes",
+);
+assert.ok(
+  /local max_port=9229/.test(installerSrc) && /ps -axww -o pid=,command=/.test(installerSrc),
+  "cleanup scans every hard-capped sidecar slot using untruncated process commands",
+);
+assert.ok(
+  /kill -TERM "\$\{pids\[@\]\}"[\s\S]*?kill -KILL "\$\{pids\[@\]\}"/.test(installerSrc),
+  "the installer gives exact sidecar roots a graceful exit before escalation",
+);
+const stopChromeCallIndex = installerSrc.lastIndexOf("\nstop_dedicated_sidecar_chrome\n");
+assert.ok(
+  stopChromeCallIndex >= 0 && stopChromeCallIndex < installerSrc.indexOf('launchctl bootstrap "gui/${UID}"'),
+  "stale sidecar Chrome roots are gone before the LaunchAgent is bootstrapped",
+);
+assert.ok(
+  installerSrc.includes("refusing to restart workers against stale launch flags"),
+  "the installer fails closed when a dedicated sidecar Chrome root survives",
+);
+console.log("  ✓ installer restart cannot reuse stale sidecar Chrome launch flags");
 
 // ── 4. Server wallet-pause source guards ──
 assert.ok(
