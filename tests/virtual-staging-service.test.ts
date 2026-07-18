@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
+import express from "express";
 import sharp from "sharp";
 
 import {
@@ -58,6 +61,41 @@ class TestProvider implements VirtualStagingImageProvider {
 const square = await sharp({
   create: { width: 24, height: 24, channels: 3, background: "#d1d5db" },
 }).jpeg().toBuffer();
+
+test("preview streaming serves image bytes from hidden staging storage", async () => {
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  process.env.DATABASE_URL ||= "postgresql://virtual-staging-test:virtual-staging-test@127.0.0.1:1/unused";
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "virtual-staging-preview-"));
+  const preview = path.join(directory, ".virtual-staging", "originals", "preview.jpg");
+  let server: Server | null = null;
+  try {
+    await fs.promises.mkdir(path.dirname(preview), { recursive: true });
+    await fs.promises.writeFile(preview, square);
+    const { sendVirtualStagingPreview } = await import("../server/virtual-staging-routes");
+    const app = express();
+    app.get("/preview", (_req, res) => {
+      sendVirtualStagingPreview(res, preview, "image/jpeg");
+    });
+    server = await new Promise<Server>((resolve) => {
+      const listener = app.listen(0, "127.0.0.1", () => resolve(listener));
+    });
+    const address = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${address.port}/preview`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/jpeg");
+    assert.equal(response.headers.get("cache-control"), "private, max-age=3600");
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), square);
+  } finally {
+    if (server) {
+      await new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve());
+      });
+    }
+    await fs.promises.rm(directory, { recursive: true, force: true });
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+  }
+});
 
 test("the provider receives the immutable source bytes unchanged", async () => {
   let receivedHash = "";

@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RotateCcw, RotateCw, ChevronLeft, ChevronRight, GripVertical } from "lucide-react";
 import { bestOrderIndices, scopeForSource } from "@shared/photo-order";
 import { normalizePhotoVerdictKey, photoVerdictKeyFromUrl } from "@shared/photo-verdict-keys";
+import { virtualStagingSessionAction } from "@shared/virtual-staging";
 import { Button } from "@/components/ui/button";
 import VirtualStagingDialog, {
   type VirtualStagingConfirmedResult,
@@ -165,7 +166,9 @@ export default function PhotoCurator({
   const [relabelProgress, setRelabelProgress] = useState<{ done: number; total: number } | null>(null);
   const [virtualStagingOpen, setVirtualStagingOpen] = useState(false);
   const [virtualStagingUnit, setVirtualStagingUnit] = useState<VirtualStagingUnit | null>(null);
+  const [virtualStagingPropertyId, setVirtualStagingPropertyId] = useState<number | null>(null);
   const [virtualStagingBusy, setVirtualStagingBusy] = useState(false);
+  const [virtualStagingSessionResumable, setVirtualStagingSessionResumable] = useState(false);
   const [virtualStagingSession, setVirtualStagingSession] = useState(0);
   const virtualStagingLaunchGuard = useRef(false);
   const virtualStagingTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -173,9 +176,20 @@ export default function PhotoCurator({
 
   const reorderEnabled = !!onReorderSection;
 
-  const launchVirtualStaging = useCallback((unit: VirtualStagingUnit, trigger: HTMLButtonElement) => {
+  const openVirtualStaging = useCallback((unit: VirtualStagingUnit, trigger: HTMLButtonElement) => {
+    const action = virtualStagingSessionAction({
+      requestedUnitId: unit.id,
+      sessionUnitId: virtualStagingUnit?.id ?? null,
+      hasResumableSession: virtualStagingSessionResumable && virtualStagingPropertyId === propertyId,
+    });
+    if (action === "resume") {
+      virtualStagingTriggerRef.current = trigger;
+      setVirtualStagingOpen(true);
+      return;
+    }
     if (
-      virtualStagingLaunchGuard.current
+      action === "blocked"
+      || virtualStagingLaunchGuard.current
       || !unit.photoInventoryReady
       || unit.photoCount <= 0
       || typeof propertyId !== "number"
@@ -186,14 +200,51 @@ export default function PhotoCurator({
     virtualStagingTriggerRef.current = trigger;
     setVirtualStagingBusy(true);
     setVirtualStagingUnit(unit);
+    setVirtualStagingPropertyId(propertyId);
+    setVirtualStagingSessionResumable(true);
     setVirtualStagingSession((session) => session + 1);
     setVirtualStagingOpen(true);
-  }, [propertyId]);
+  }, [propertyId, virtualStagingPropertyId, virtualStagingSessionResumable, virtualStagingUnit?.id]);
 
   const handleVirtualStagingBusyChange = useCallback((busy: boolean) => {
     virtualStagingLaunchGuard.current = busy;
     setVirtualStagingBusy(busy);
   }, []);
+
+  const handleVirtualStagingConfirmed = useCallback(async (result: VirtualStagingConfirmedResult) => {
+    // Confirmation resolves this retained review. A later Restage click should
+    // create a new keyed session instead of reopening the confirmed job.
+    setVirtualStagingSessionResumable(false);
+    virtualStagingLaunchGuard.current = false;
+    setVirtualStagingBusy(false);
+    await onVirtualStagingConfirmed?.(result);
+  }, [onVirtualStagingConfirmed]);
+
+  const handleVirtualStagingFinished = useCallback(() => {
+    setVirtualStagingSessionResumable(false);
+    virtualStagingLaunchGuard.current = false;
+    setVirtualStagingBusy(false);
+  }, []);
+
+  const handleVirtualStagingResolvedExternally = useCallback(async (result: VirtualStagingConfirmedResult) => {
+    setVirtualStagingSessionResumable(false);
+    virtualStagingLaunchGuard.current = false;
+    setVirtualStagingBusy(false);
+    await onVirtualStagingConfirmed?.(result);
+  }, [onVirtualStagingConfirmed]);
+
+  // Builder navigation can replace propertyId without unmounting this
+  // component. Drop the local controller immediately; the server keeps any
+  // live job resumable when the operator returns to that property.
+  useEffect(() => {
+    if (virtualStagingPropertyId === null || virtualStagingPropertyId === propertyId) return;
+    setVirtualStagingOpen(false);
+    setVirtualStagingUnit(null);
+    setVirtualStagingPropertyId(null);
+    setVirtualStagingSessionResumable(false);
+    virtualStagingLaunchGuard.current = false;
+    setVirtualStagingBusy(false);
+  }, [propertyId, virtualStagingPropertyId]);
 
   const localFolders = useMemo(() => {
     const set = new Set<string>();
@@ -562,18 +613,31 @@ export default function PhotoCurator({
               const inventoryPending = !unit.photoInventoryReady;
               const noPhotos = unit.photoCount <= 0;
               const invalidProperty = typeof propertyId !== "number" || !Number.isFinite(propertyId);
-              const isActiveUnit = virtualStagingBusy && virtualStagingUnit?.id === unit.id;
-              const disabled = inventoryPending || noPhotos || invalidProperty || virtualStagingBusy;
+              const sessionAction = virtualStagingSessionAction({
+                requestedUnitId: unit.id,
+                sessionUnitId: virtualStagingUnit?.id ?? null,
+                hasResumableSession: virtualStagingSessionResumable && virtualStagingPropertyId === propertyId,
+              });
+              const isCurrentSessionUnit = sessionAction === "resume";
+              const disabled = invalidProperty
+                || sessionAction === "blocked"
+                || (sessionAction === "start" && (inventoryPending || noPhotos || virtualStagingBusy));
               const testId = `button-restage-${unit.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
-              const title = inventoryPending
-                ? `${unit.label} photo inventory is still loading.`
-                : noPhotos
-                ? `${unit.label} has no photos to restage.`
-                : invalidProperty
-                  ? "This property is not ready for virtual staging."
-                  : virtualStagingBusy
-                    ? "Wait for the current virtual-staging job to finish."
-                    : `Generate virtual-staging alternatives for ${unit.label}.`;
+              const title = isCurrentSessionUnit
+                ? virtualStagingBusy
+                  ? `Return to ${unit.label}'s virtual-staging progress.`
+                  : `Review the retained virtual-staging results for ${unit.label}.`
+                : sessionAction === "blocked"
+                  ? `Finish the current ${virtualStagingUnit?.label ?? "unit"} staging review first.`
+                  : inventoryPending
+                    ? `${unit.label} photo inventory is still loading.`
+                    : noPhotos
+                      ? `${unit.label} has no photos to restage.`
+                      : invalidProperty
+                        ? "This property is not ready for virtual staging."
+                        : virtualStagingBusy
+                          ? "Wait for the current virtual-staging job to finish."
+                          : `Generate virtual-staging alternatives for ${unit.label}.`;
               return (
                 <Button
                   key={unit.id}
@@ -582,13 +646,15 @@ export default function PhotoCurator({
                   variant="outline"
                   disabled={disabled}
                   title={title}
-                  onClick={(event) => launchVirtualStaging(unit, event.currentTarget)}
+                  onClick={(event) => openVirtualStaging(unit, event.currentTarget)}
                   data-testid={testId}
                 >
-                  {inventoryPending
-                    ? `Loading ${unit.label} photos…`
-                    : isActiveUnit
-                      ? `Restaging ${unit.label}…`
+                  {isCurrentSessionUnit
+                    ? virtualStagingBusy
+                      ? `View ${unit.label} progress`
+                      : `Review ${unit.label} staging`
+                    : inventoryPending
+                      ? `Loading ${unit.label} photos…`
                       : `Restage ${unit.label}`}
                   <span className="text-[11px] font-normal text-muted-foreground">
                     {inventoryPending
@@ -602,19 +668,25 @@ export default function PhotoCurator({
         </div>
       )}
 
-      {virtualStagingUnit && typeof propertyId === "number" && Number.isFinite(propertyId) && (
-        <VirtualStagingDialog
-          key={virtualStagingSession}
-          open={virtualStagingOpen}
-          propertyId={propertyId}
-          unit={virtualStagingUnit}
-          onOpenChange={setVirtualStagingOpen}
-          onBusyChange={handleVirtualStagingBusyChange}
-          onConfirmed={onVirtualStagingConfirmed}
-          returnFocusElement={virtualStagingTriggerRef.current}
-          returnFocusFallbackElement={virtualStagingControlsRef.current}
-        />
-      )}
+      {virtualStagingUnit
+        && virtualStagingPropertyId === propertyId
+        && typeof virtualStagingPropertyId === "number"
+        && Number.isFinite(virtualStagingPropertyId)
+        && (
+          <VirtualStagingDialog
+            key={virtualStagingSession}
+            open={virtualStagingOpen}
+            propertyId={virtualStagingPropertyId}
+            unit={virtualStagingUnit}
+            onOpenChange={setVirtualStagingOpen}
+            onBusyChange={handleVirtualStagingBusyChange}
+            onConfirmed={handleVirtualStagingConfirmed}
+            onFinished={handleVirtualStagingFinished}
+            onResolvedExternally={handleVirtualStagingResolvedExternally}
+            returnFocusElement={virtualStagingTriggerRef.current}
+            returnFocusFallbackElement={virtualStagingControlsRef.current}
+          />
+        )}
 
       {/* Channel-limits banner — quick visual check against each
           platform's photo cap. Green ✓ when visibleCount ≤ max, red ✗

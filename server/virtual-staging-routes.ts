@@ -43,6 +43,7 @@ import {
 const IMAGE_FILE_RE = /\.(?:jpe?g|png|webp)$/i;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ACTIVE_JOB_STATUSES = ["queued", "running"] as const;
+const RESUMABLE_JOB_STATUSES = ["queued", "running", "ready", "failed"] as const;
 const GENERATION_LEASE_MS = 8 * 60 * 1_000;
 const RECOVERY_SWEEP_MS = 30 * 1_000;
 
@@ -399,29 +400,41 @@ async function ensureOriginalAsset(
   }
 }
 
-async function findActiveJob(propertyId: number, unitId: string): Promise<VirtualStagingJob | undefined> {
+async function findResumableJob(unit: ResolvedVirtualStagingUnit): Promise<VirtualStagingJob | undefined> {
   const [job] = await db
     .select()
     .from(virtualStagingJobs)
     .where(and(
-      eq(virtualStagingJobs.propertyId, propertyId),
-      eq(virtualStagingJobs.unitId, unitId),
-      inArray(virtualStagingJobs.status, [...ACTIVE_JOB_STATUSES]),
+      eq(virtualStagingJobs.propertyId, unit.propertyId),
+      eq(virtualStagingJobs.unitId, unit.unitId),
     ))
     .orderBy(desc(virtualStagingJobs.createdAt))
     .limit(1);
-  return job;
+  if (!job || !RESUMABLE_JOB_STATUSES.includes(job.status as typeof RESUMABLE_JOB_STATUSES[number])) {
+    return undefined;
+  }
+  // An in-flight job remains the unit's singleton even if its folder changes.
+  // Terminal previews are only reusable against the same immutable source
+  // folder; otherwise a later unit swap should start a fresh review.
+  return ACTIVE_JOB_STATUSES.includes(job.status as typeof ACTIVE_JOB_STATUSES[number])
+    || job.folder === unit.folder
+    ? job
+    : undefined;
 }
 
 function candidateDto(jobId: string, candidate: VirtualStagingCandidate): VirtualStagingCandidateDto {
   const status = candidate.status as VirtualStagingCandidateStatus;
+  // Candidate timestamps change when generation/retry completes. Versioning
+  // the URLs evicts the 404 responses produced by the old dotfile-blocked
+  // route and prevents a retry from reusing a stale browser preview.
+  const previewVersion = encodeURIComponent(asIso(candidate.updatedAt));
   return {
     id: candidate.id,
     originalFilename: candidate.originalFilename,
-    originalUrl: `/api/virtual-staging/jobs/${jobId}/candidates/${candidate.id}/original`,
+    originalUrl: `/api/virtual-staging/jobs/${jobId}/candidates/${candidate.id}/original?v=${previewVersion}`,
     roomLabel: candidate.roomLabel,
     stagedUrl: status === "succeeded"
-      ? `/api/virtual-staging/jobs/${jobId}/candidates/${candidate.id}/staged`
+      ? `/api/virtual-staging/jobs/${jobId}/candidates/${candidate.id}/staged?v=${previewVersion}`
       : null,
     status,
     error: candidate.error,
@@ -446,6 +459,7 @@ async function getJobDto(jobId: string): Promise<VirtualStagingJobDto | null> {
     total: job.total,
     completed: job.completed,
     failed: job.failed,
+    selectedCount: job.selectedCandidateIds?.length ?? 0,
     candidates: candidates.map((candidate) => candidateDto(job.id, candidate)),
     createdAt: asIso(job.createdAt),
     updatedAt: asIso(job.updatedAt),
@@ -620,7 +634,10 @@ async function createJob(
   unit: ResolvedVirtualStagingUnit,
   requestedBy: string,
 ): Promise<{ dto: VirtualStagingJobDto; duplicate: boolean }> {
-  const existing = await findActiveJob(unit.propertyId, unit.unitId);
+  // POST is intentionally resumable as well as idempotent. If the Photos tab
+  // unmounted while generation finished, the next click must reopen that
+  // unconfirmed review instead of paying for a second generation run.
+  const existing = await findResumableJob(unit);
   if (existing) return { dto: await requireJobDto(existing.id), duplicate: true };
 
   const service = getVirtualStagingService();
@@ -676,7 +693,7 @@ async function createJob(
     });
   } catch (error) {
     if (pgErrorCode(error) === "23505") {
-      const raced = await findActiveJob(unit.propertyId, unit.unitId);
+      const raced = await findResumableJob(unit);
       if (raced) return { dto: await requireJobDto(raced.id), duplicate: true };
     }
     throw error;
@@ -984,6 +1001,21 @@ function route(handler: AsyncRoute) {
   };
 }
 
+export function sendVirtualStagingPreview(
+  res: Response,
+  file: string,
+  contentType: string,
+): void {
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  // Immutable originals and candidates intentionally live below the hidden
+  // `.virtual-staging` directory. Express ignores dot-directories by default.
+  // This exception is scoped to canonical, admin-authorized paths validated by
+  // candidateContext and resolveInsidePhotosRoot; global static serving remains
+  // unchanged and cannot expose other hidden files.
+  res.sendFile(file, { dotfiles: "allow" });
+}
+
 export function registerVirtualStagingRoutes(app: Express): void {
   app.post("/api/virtual-staging/jobs", route(async (req, res) => {
     const session = requireAdmin(res);
@@ -1085,6 +1117,36 @@ export function registerVirtualStagingRoutes(app: Express): void {
     });
   }));
 
+  app.post("/api/virtual-staging/jobs/:jobId/finish", route(async (req, res) => {
+    const session = requireAdmin(res);
+    if (!session) return;
+    const jobId = routeParam(req, "jobId");
+    if (!UUID_RE.test(jobId)) throw new VirtualStagingHttpError(404, "Virtual-staging job was not found");
+    await db.transaction(async (tx) => {
+      const [job] = await tx.select().from(virtualStagingJobs)
+        .where(eq(virtualStagingJobs.id, jobId)).limit(1).for("update");
+      if (!job) throw new VirtualStagingHttpError(404, "Virtual-staging job was not found");
+      if (job.status === "confirmed") {
+        if (sameVirtualStagingSelection(job.selectedCandidateIds, [])) return;
+        throw new VirtualStagingHttpError(409, "This job was already confirmed with staged photos");
+      }
+      if (ACTIVE_JOB_STATUSES.includes(job.status as typeof ACTIVE_JOB_STATUSES[number])) {
+        throw new VirtualStagingHttpError(409, "Wait for virtual staging to finish before closing the review");
+      }
+      if (job.status !== "ready" && job.status !== "failed") {
+        throw new VirtualStagingHttpError(409, "This virtual-staging review cannot be finished");
+      }
+      await tx.update(virtualStagingJobs).set({
+        status: "confirmed",
+        selectedCandidateIds: [],
+        approvedBy: session.username,
+        confirmedAt: new Date(),
+        updatedAt: new Date(),
+      }).where(eq(virtualStagingJobs.id, jobId));
+    });
+    res.json({ job: await requireJobDto(jobId), swappedCount: 0 });
+  }));
+
   app.get("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/original", route(async (req, res) => {
     if (!requireAdmin(res)) return;
     const { asset } = await candidateContext(
@@ -1094,9 +1156,7 @@ export function registerVirtualStagingRoutes(app: Express): void {
     const file = resolveInsidePhotosRoot(asset.storageRelativePath);
     const stat = await fs.promises.stat(file).catch(() => null);
     if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Original photo was not found");
-    res.setHeader("Content-Type", asset.mimeType);
-    res.setHeader("Cache-Control", "private, max-age=3600");
-    res.sendFile(file);
+    sendVirtualStagingPreview(res, file, asset.mimeType);
   }));
 
   app.get("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/staged", route(async (req, res) => {
@@ -1111,9 +1171,7 @@ export function registerVirtualStagingRoutes(app: Express): void {
     const file = resolveInsidePhotosRoot(candidate.stagingRelativePath);
     const stat = await fs.promises.stat(file).catch(() => null);
     if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Staged photo was not found");
-    res.setHeader("Content-Type", "image/jpeg");
-    res.setHeader("Cache-Control", "private, max-age=3600");
-    res.sendFile(file);
+    sendVirtualStagingPreview(res, file, "image/jpeg");
   }));
 
   startRecoverySweep();

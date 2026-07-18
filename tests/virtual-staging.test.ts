@@ -8,6 +8,7 @@ import {
   sameVirtualStagingSelection,
   summarizeCandidateStatuses,
   validateVirtualStagingSelection,
+  virtualStagingSessionAction,
   type SelectableVirtualStagingCandidate,
   type VirtualStagingLabelSnapshot,
 } from "../shared/virtual-staging";
@@ -166,10 +167,44 @@ test("duplicate start clicks reuse one active unit job", () => {
   assert.equal(reusableVirtualStagingJobId(jobs, 42, "unit-a"), "active");
 });
 
+test("unconfirmed terminal jobs remain resumable after the Photos tab remounts", () => {
+  assert.equal(reusableVirtualStagingJobId([
+    { id: "review", propertyId: 42, unitId: "unit-a", status: "ready" },
+  ], 42, "unit-a"), "review");
+  assert.equal(reusableVirtualStagingJobId([
+    { id: "failed", propertyId: 42, unitId: "unit-a", status: "failed" },
+  ], 42, "unit-a"), "failed");
+});
+
 test("completed jobs are not reused as duplicate submissions", () => {
   assert.equal(reusableVirtualStagingJobId([
     { id: "done", propertyId: 42, unitId: "unit-a", status: "confirmed" },
   ], 42, "unit-a"), null);
+});
+
+test("a newer confirmed job supersedes an older unconfirmed review", () => {
+  assert.equal(reusableVirtualStagingJobId([
+    { id: "newer", propertyId: 42, unitId: "unit-a", status: "confirmed" },
+    { id: "older", propertyId: 42, unitId: "unit-a", status: "ready" },
+  ], 42, "unit-a"), null);
+});
+
+test("an unconfirmed staging session resumes only for its own unit", () => {
+  assert.equal(virtualStagingSessionAction({
+    requestedUnitId: "unit-a",
+    sessionUnitId: null,
+    hasResumableSession: false,
+  }), "start");
+  assert.equal(virtualStagingSessionAction({
+    requestedUnitId: "unit-a",
+    sessionUnitId: "unit-a",
+    hasResumableSession: true,
+  }), "resume");
+  assert.equal(virtualStagingSessionAction({
+    requestedUnitId: "unit-b",
+    sessionUnitId: "unit-a",
+    hasResumableSession: true,
+  }), "blocked");
 });
 
 test("an empty unit produces no stageable photos", () => {
@@ -231,12 +266,31 @@ test("frontend uses the accessible dialog and keeps zero-photo controls visible"
   assert.match(source, /Review Virtual Staging/);
   assert.match(source, /Use staged photo/);
   assert.match(source, /onEscapeKeyDown|DialogContent/);
+  const startLifecycle = source.slice(
+    source.indexOf("A keyed staging session"),
+    source.indexOf("// Poll in the background"),
+  );
+  assert.doesNotMatch(startLifecycle, /if \(!open/);
+  assert.doesNotMatch(startLifecycle, /\[open,/);
 
   const builderSource = fs.readFileSync(
     path.resolve(process.cwd(), "client/src/components/GuestyListingBuilder/index.tsx"),
     "utf8",
   );
   assert.match(builderSource, /virtualStagingUnits\?\.length/);
+
+  const curatorSource = fs.readFileSync(
+    path.resolve(process.cwd(), "client/src/components/GuestyListingBuilder/PhotoCurator.tsx"),
+    "utf8",
+  );
+  assert.match(curatorSource, /virtualStagingSessionResumable/);
+  assert.match(curatorSource, /action === "resume"[\s\S]*setVirtualStagingOpen\(true\)/);
+  assert.match(curatorSource, /Review \$\{unit\.label\} staging/);
+  assert.match(curatorSource, /onFinished=\{handleVirtualStagingFinished\}/);
+  assert.match(curatorSource, /onResolvedExternally=\{handleVirtualStagingResolvedExternally\}/);
+  assert.match(curatorSource, /virtualStagingPropertyId === propertyId/);
+  assert.match(source, /button-finish-virtual-staging-without-swaps/);
+  assert.match(source, /job\?\.status !== "confirmed"/);
 });
 
 test("backend keeps credentials server-side and edits immutable image input", () => {
@@ -258,6 +312,19 @@ test("backend keeps credentials server-side and edits immutable image input", ()
   assert.match(replicate, /aspect_ratio: "match_input_image"/);
   assert.match(replicate, /generatedUrl[\s\S]*Authorization: `Bearer \$\{this\.apiToken\}`/);
   assert.match(replicate, /fetchWithTransientRetry/);
+
+  const routes = fs.readFileSync(
+    path.resolve(process.cwd(), "server/virtual-staging-routes.ts"),
+    "utf8",
+  );
+  assert.match(routes, /sendFile\(file, \{ dotfiles: "allow" \}\)/);
+  assert.match(routes, /sendVirtualStagingPreview\(res, file, asset\.mimeType\)/);
+  assert.match(routes, /sendVirtualStagingPreview\(res, file, "image\/jpeg"\)/);
+  assert.match(routes, /original\?v=\$\{previewVersion\}/);
+  assert.match(routes, /staged\?v=\$\{previewVersion\}/);
+  assert.match(routes, /RESUMABLE_JOB_STATUSES = \["queued", "running", "ready", "failed"\]/);
+  assert.match(routes, /\/api\/virtual-staging\/jobs\/:jobId\/finish/);
+  assert.match(routes, /selectedCandidateIds: \[\]/);
 });
 
 test("confirmation uses locked transaction state and hidden file preparation", () => {
