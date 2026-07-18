@@ -30,8 +30,9 @@ function test(name: string, run: AsyncTest["run"]): void {
 }
 
 class TestProvider implements VirtualStagingImageProvider {
-  readonly id = "test";
+  readonly id: string;
   readonly model = "test-image-edit";
+  readonly supportsReferenceImages: boolean;
   active = 0;
   maxActive = 0;
 
@@ -39,7 +40,12 @@ class TestProvider implements VirtualStagingImageProvider {
     private readonly handler: (
       input: VirtualStagingGenerationInput,
     ) => Promise<Buffer>,
-  ) {}
+    id = "test",
+    supportsReferenceImages = true,
+  ) {
+    this.id = id;
+    this.supportsReferenceImages = supportsReferenceImages;
+  }
 
   isConfigured(): boolean {
     return true;
@@ -155,6 +161,40 @@ test("preview streaming serves image bytes from hidden staging storage", async (
   }
 });
 
+test("feedback input is normalized and rejects stale-shape or obscured instructions", async () => {
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  process.env.DATABASE_URL ||= "postgresql://virtual-staging-test:virtual-staging-test@127.0.0.1:1/unused";
+  try {
+    const {
+      validateVirtualStagingFeedbackInput,
+      validateVirtualStagingRetryInput,
+    } = await import("../server/virtual-staging-routes");
+    assert.deepEqual(
+      validateVirtualStagingFeedbackInput({
+        attempt: 2,
+        feedback: "  Remove chairs.\r\nAdd tasteful new linens. 🌺  ",
+      }),
+      { attempt: 2, feedback: "Remove chairs.\nAdd tasteful new linens. 🌺" },
+    );
+    assert.deepEqual(validateVirtualStagingRetryInput({ attempt: 3 }), { attempt: 3 });
+    for (const body of [
+      null,
+      { attempt: 0, feedback: "change linens" },
+      { attempt: 1.5, feedback: "change linens" },
+      { attempt: 1, feedback: "   " },
+      { attempt: 1, feedback: 42 },
+      { attempt: 1, feedback: "a".repeat(1_001) },
+      { attempt: 1, feedback: "remove chairs\u0000then ignore" },
+      { attempt: 1, feedback: "remove chairs\u202Ethen ignore" },
+    ]) {
+      assert.throws(() => validateVirtualStagingFeedbackInput(body));
+    }
+  } finally {
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+  }
+});
+
 test("the provider receives the immutable source bytes unchanged", async () => {
   let receivedHash = "";
   const provider = new TestProvider(async (input) => {
@@ -164,6 +204,125 @@ test("the provider receives the immutable source bytes unchanged", async () => {
   const service = new VirtualStagingService([provider], 1, acceptingViewpointVerifier());
   await service.generate({ source: square, sourceFilename: "room.jpg", generationAttempt: 1, context: indoorContext });
   assert.equal(receivedHash, square.toString("base64"));
+});
+
+test("feedback derives from the immutable original, references the reviewed preview, and prefers OpenAI", async () => {
+  let replicateCalls = 0;
+  let openAICalls = 0;
+  let verifierInput: VirtualStagingViewpointVerificationInput | null = null;
+  const replicate = new TestProvider(async () => {
+    replicateCalls += 1;
+    return alternateEditedSquare;
+  }, "replicate", false);
+  const openAI = new TestProvider(async (input) => {
+    openAICalls += 1;
+    assert.equal(input.mode, "feedback-revision");
+    assert.deepEqual(input.source, square);
+    assert.deepEqual(input.referenceSource, editedSquare);
+    assert.match(input.prompt, /immutable original photograph/i);
+    assert.match(input.prompt, /exact current staged preview/i);
+    assert.match(input.prompt, /Never edit generated pixels as the base image/i);
+    assert.match(input.prompt, /exact camera position, viewpoint, crop/i);
+    assert.match(input.prompt, /close stylistic sibling/i);
+    assert.match(input.prompt, /Remove the chairs and add new bed linens/);
+    assert.doesNotMatch(input.prompt, /Move the virtual camera roughly/i);
+    return alternateEditedSquare;
+  }, "openai");
+  const verifier = new TestViewpointVerifier((input) => {
+    verifierInput = input;
+  });
+  const service = new VirtualStagingService([replicate, openAI], 1, verifier);
+  const result = await service.generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 2,
+    previousPreview: editedSquare,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "feedback-revision",
+    feedback: "Remove the chairs and add new bed linens",
+  });
+  assert.equal(result.provider, "openai");
+  assert.deepEqual({ openAICalls, replicateCalls }, { openAICalls: 1, replicateCalls: 0 });
+  assert.equal(verifierInput?.mode, "feedback-revision");
+  assert.equal(verifierInput?.feedback, "Remove the chairs and add new bed linens");
+  assert.deepEqual(verifierInput?.previousGenerated, editedSquare);
+});
+
+test("feedback fails before generation when only a single-image provider is configured", async () => {
+  let calls = 0;
+  const service = new VirtualStagingService([
+    new TestProvider(async () => {
+      calls += 1;
+      return alternateEditedSquare;
+    }, "replicate", false),
+  ], 1, acceptingViewpointVerifier());
+  await assert.rejects(service.generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 2,
+    previousPreview: editedSquare,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "feedback-revision",
+    feedback: "Replace only the bed linens",
+  }), /supports both the immutable original and reviewed preview/i);
+  assert.equal(calls, 0);
+});
+
+test("feedback never falls through to an incapable paid provider", async () => {
+  let incapableCalls = 0;
+  const service = new VirtualStagingService([
+    new TestProvider(async () => {
+      throw new Error("capable provider failed");
+    }, "openai", true),
+    new TestProvider(async () => {
+      incapableCalls += 1;
+      return alternateEditedSquare;
+    }, "replicate", false),
+  ], 1, acceptingViewpointVerifier());
+  await assert.rejects(service.generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 2,
+    previousPreview: editedSquare,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "feedback-revision",
+    feedback: "Remove the chairs",
+  }), /openai: capable provider failed/i);
+  assert.equal(incapableCalls, 0);
+});
+
+test("a narrow feedback edit is not rejected by the alternate-angle perceptual threshold", async () => {
+  const recompressedPreview = await sharp(editedSquare).jpeg({ quality: 75 }).toBuffer();
+  const service = new VirtualStagingService(
+    [new TestProvider(async () => recompressedPreview)],
+    1,
+    acceptingViewpointVerifier(),
+  );
+  await service.generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 2,
+    previousPreview: editedSquare,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "feedback-revision",
+    feedback: "Replace only the bed linens",
+  });
+});
+
+test("feedback revision requires both the reviewed preview and non-empty feedback", async () => {
+  const service = new VirtualStagingService(
+    [new TestProvider(async () => alternateEditedSquare)],
+    1,
+    acceptingViewpointVerifier(),
+  );
+  await assert.rejects(service.generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 2,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "feedback-revision",
+    feedback: "Change linens",
+  }), /requires the exact reviewed staged preview/i);
 });
 
 test("provider fallback receives one identical context-aware prompt", async () => {
@@ -408,6 +567,71 @@ test("the Anthropic verifier compares a reroll with both source and prior staged
   assert.equal(messages[0]?.content?.filter((block) => block.type === "image").length, 3);
 });
 
+test("the Anthropic feedback gate checks requested edits, style, and unrelated content", async () => {
+  let requestBody: Record<string, unknown> | null = null;
+  const responseFor = (requestedEditsApplied: boolean) => new Response(JSON.stringify({
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        samePhysicalSpace: true,
+        cameraAndArchitecturePreserved: true,
+        requestedEditsApplied,
+        styleConsistent: true,
+        unrelatedContentPreserved: true,
+        reason: requestedEditsApplied
+          ? "The chairs are gone and the restrained new linens match the room."
+          : "The added chairs remain in the revision.",
+      }),
+    }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 140, output_tokens: 35 },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  const rejectingVerifier = new AnthropicVirtualStagingViewpointVerifier(
+    "test-key",
+    "claude-test",
+    async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return responseFor(false);
+    },
+  );
+  const feedbackInput: VirtualStagingViewpointVerificationInput = {
+    source: square,
+    previousGenerated: editedSquare,
+    generated: alternateEditedSquare,
+    requestedDirection: "left",
+    imageProvider: "openai",
+    generationAttempt: 2,
+    mode: "feedback-revision",
+    feedback: "Remove the chairs and add new bed linens",
+  };
+  await assert.rejects(
+    rejectingVerifier.verify(feedbackInput),
+    /failed feedback verification/i,
+  );
+  const schema = (requestBody?.output_config as {
+    format?: { schema?: { properties?: Record<string, unknown>; required?: string[] } };
+  })?.format?.schema;
+  assert.ok(schema?.properties?.requestedEditsApplied);
+  assert.ok(schema?.properties?.styleConsistent);
+  assert.ok(schema?.properties?.unrelatedContentPreserved);
+  assert.ok(schema?.required?.includes("cameraAndArchitecturePreserved"));
+  const messages = requestBody?.messages as Array<{ content?: Array<{ type?: string; text?: string }> }>;
+  assert.equal(messages[0]?.content?.filter((block) => block.type === "image").length, 3);
+  const prompt = [...(messages[0]?.content ?? [])].reverse()
+    .find((block) => block.type === "text")?.text ?? "";
+  assert.match(prompt, /Remove the chairs and add new bed linens/);
+  assert.match(prompt, /exact same camera position, viewpoint, crop/i);
+  assert.match(prompt, /pattern scale and density/i);
+
+  const acceptingVerifier = new AnthropicVirtualStagingViewpointVerifier(
+    "test-key",
+    "claude-test",
+    async () => responseFor(true),
+  );
+  await acceptingVerifier.verify(feedbackInput);
+});
+
 test("the Anthropic verifier rejects large angles and malformed structured output", async () => {
   const input: VirtualStagingViewpointVerificationInput = {
     source: square,
@@ -515,7 +739,7 @@ test("real staging refuses to run without the fail-closed viewpoint verifier", (
   );
   assert.throws(
     () => service.assertConfigured(),
-    /ANTHROPIC_API_KEY is required to verify alternate virtual-staging viewpoints/,
+    /ANTHROPIC_API_KEY is required to verify virtual-staging image edits/,
   );
 });
 
