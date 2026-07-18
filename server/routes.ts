@@ -25472,6 +25472,15 @@ Requirements:
     const expectedTotal = collected.length + pinnedCount;
     let verifiedTotal = strictGalleryVerification ? 0 : successCount + pinnedCount;
     let strictGalleryVerified = !strictGalleryVerification;
+    // The replacement contract the operator relies on: pushing N photos must
+    // leave Guesty with EXACTLY N (+ the pinned collage). A stale LARGER
+    // gallery — the old pictures[] still served by an eventually-consistent
+    // read — must trigger a corrective re-PUT, never pass "by count".
+    // lastObservedTotal is what Guesty actually reported on the most recent
+    // successful read (null = every verify GET failed); replacementConfirmed
+    // is true only when a read matched the expectation exactly.
+    let lastObservedTotal: number | null = null;
+    let replacementConfirmed = false;
     if (collected.length > 0) {
       const waits = [3000, 6000, 10000];
       for (let attempt = 0; attempt < waits.length; attempt++) {
@@ -25480,6 +25489,7 @@ Requirements:
           const listing = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
           const savedPictures = Array.isArray(listing?.pictures) ? listing.pictures : [];
           const savedLen = savedPictures.length;
+          lastObservedTotal = savedLen;
           const savedFirst = normalizeGuestyPictureForVerification(savedPictures[0]);
           const exactMatch = strictGalleryVerification
             && savedFirst?.caption === "Cover Collage"
@@ -25495,17 +25505,20 @@ Requirements:
             `[push-photos] Verify #${attempt + 1}: expected ${expectedTotal}, Guesty has ${savedLen}`
             + (strictGalleryVerification ? `, exact ordered gallery ${exactMatch ? "matched" : "did not match"}` : ""),
           );
-          if (strictGalleryVerification ? exactMatch : savedLen >= expectedTotal) {
+          if (strictGalleryVerification ? exactMatch : savedLen === expectedTotal) {
             verifiedTotal = savedLen;
             strictGalleryVerified = true;
+            replacementConfirmed = true;
             break;
           }
-          // Under-count or strict content/order mismatch — re-PUT and loop.
-          // A stale equal/larger gallery is deliberately retried in strict
-          // mode instead of being accepted by count.
+          // Count mismatch (short OR a stale larger/old gallery) or strict
+          // content/order mismatch — re-PUT and loop. An over-count means
+          // Guesty is still serving pre-push pictures, the exact failure the
+          // operator's "60 old photos must become the 40 pushed" contract
+          // exists to catch.
           try {
             await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: picturesForPut() });
-            console.log(`[push-photos] Retry PUT #${attempt + 1} — re-pushed ${expectedTotal} pictures after ${strictGalleryVerification ? "exact-gallery" : "short-count"} verify`);
+            console.log(`[push-photos] Retry PUT #${attempt + 1} — re-pushed ${expectedTotal} pictures after ${strictGalleryVerification ? "exact-gallery" : "count-mismatch"} verify`);
           } catch (e: any) {
             console.error(`[push-photos] Retry PUT #${attempt + 1} failed: ${e.message}`);
           }
@@ -25517,8 +25530,11 @@ Requirements:
       }
     }
 
-    const verifiedCount = Math.max(0, verifiedTotal - pinnedCount);
+    // Never report more photos "verified" than were actually pushed — a stale
+    // over-count read is an UNCONFIRMED replacement, not a bigger success.
+    const verifiedCount = Math.max(0, Math.min(verifiedTotal - pinnedCount, collected.length));
     const shortfall = collected.length - verifiedCount;
+    const staleExtra = lastObservedTotal != null ? Math.max(0, lastObservedTotal - expectedTotal) : 0;
     const strictGalleryError = strictGalleryVerification && !strictGalleryVerified
       ? "Strict audit could not verify the exact ordered Guesty gallery with Cover Collage pinned first."
       : null;
@@ -25538,10 +25554,19 @@ Requirements:
       trimmed: trimmedCount,
       maxPhotos: MAX_GUESTY_PHOTOS,
       collagePinned: pinnedCount > 0,
+      // Live-gallery confirmation for the Photos tab: what the push should
+      // leave on Guesty (incl. the pinned collage), what Guesty actually
+      // reported on the last read-back (null = couldn't read), whether the
+      // read matched exactly, and how many EXTRA (old/stale) pictures Guesty
+      // was still serving if it didn't.
+      expectedTotal,
+      guestyTotal: lastObservedTotal,
+      replacementConfirmed,
+      staleExtra,
       ...(strictGalleryVerification ? { strictGalleryVerified } : {}),
       ...(strictGalleryError ? { guestyError: strictGalleryError } : {}),
     });
-    console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, verified ${verifiedCount} on Guesty${shortfall > 0 ? ` (shortfall ${shortfall} — Guesty silently dropped them)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
+    console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, verified ${verifiedCount} on Guesty${shortfall > 0 ? ` (shortfall ${shortfall} — Guesty silently dropped them)` : ""}${staleExtra > 0 ? ` (Guesty still reports ${lastObservedTotal} pictures — ${staleExtra} stale extras, replacement unconfirmed)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
     res.end();
   });
 
