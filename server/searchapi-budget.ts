@@ -34,10 +34,36 @@ export function searchApiMinCredits(): number {
 
 export function parseSearchApiQuota(payload: unknown, fetchedAt: number): SearchApiQuotaSnapshot | null {
   const account = (payload as any)?.account;
-  const used = Number(account?.current_month_usage);
+  const usedRaw = Number(account?.current_month_usage);
   const allowance = Number(account?.monthly_allowance);
-  const remaining = Number(account?.remaining_credits);
-  if (!Number.isFinite(allowance) || allowance <= 0 || !Number.isFinite(remaining)) return null;
+  const creditsRemaining = Number(account?.remaining_credits);
+  if (!Number.isFinite(allowance) || allowance <= 0) return null;
+
+  // RECONCILE remaining (2026-07-18, operator: "should be rotating through two
+  // keys"): SearchAPI's docs define remaining_credits = monthly_allowance -
+  // current_month_usage, but some accounts return a remaining_credits that
+  // CONTRADICTS that — e.g. the live 35k-key /me on 2026-07-18 read
+  // {current_month_usage: 3401, monthly_allowance: 35000, remaining_credits: 0}
+  // (3,401/35,000 used yet "0 remaining"). Trusting that bogus 0 made
+  // searchApiQuotaExhausted fire on BOTH keys, so getSearchApiQuota's
+  // healthiest-key pick still reported "quota exhausted" and the bulk-combo
+  // preflight gate blocked every resort — even with ~31,599 searches left on the
+  // 35k key and a fresh 100k rotation key. So derive the canonical remaining
+  // from the two primitive counters and take the HEALTHIER of the two readings:
+  // only report exhausted when EVERY signal agrees the plan is dry. This is
+  // fail-open by design (the whole module's stated philosophy) — a contradictory
+  // low remaining_credits can never again falsely block discovery, while a
+  // genuinely over-quota account (allowance - used <= 0) still trips.
+  const used = Number.isFinite(usedRaw)
+    ? usedRaw
+    : Number.isFinite(creditsRemaining)
+      ? allowance - creditsRemaining
+      : NaN;
+  const usageRemaining = Number.isFinite(used) ? allowance - used : NaN;
+  const candidates = [usageRemaining, creditsRemaining].filter((n) => Number.isFinite(n));
+  if (candidates.length === 0) return null; // fail-open: no usable reading
+  const remaining = Math.max(...candidates);
+
   return {
     used: Number.isFinite(used) ? used : allowance - remaining,
     allowance,

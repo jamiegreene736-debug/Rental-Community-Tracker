@@ -26,9 +26,18 @@ console.log("searchapi-budget: quota parsing");
     api_usage: { searches_this_hour: 8398, hourly_rate_limit: 20000 },
   };
   const snap = parseSearchApiQuota(live, 1000);
-  check("parses the live /me shape", !!snap && snap.used === 100002 && snap.allowance === 100000 && snap.remaining === -70);
+  // remaining is reconciled to the canonical allowance - used (100000 - 100002 = -2),
+  // NOT the raw remaining_credits (-70); both are negative so exhaustion is unchanged.
+  check("parses the live /me shape", !!snap && snap.used === 100002 && snap.allowance === 100000 && snap.remaining === -2);
   check("exhausted at negative remaining", searchApiQuotaExhausted(snap, 25));
   check("describe is human-readable", !!snap && /100,002\/100,000/.test(describeSearchApiQuota(snap)), snap && describeSearchApiQuota(snap));
+
+  // REGRESSION (2026-07-18): the live 35k-key /me reported a bogus "0 remaining"
+  // that contradicted 3,401/35,000 used. Reconciliation must trust allowance -
+  // used (31,599 remaining) so the key reads HEALTHY and never falsely blocks.
+  const contradictory = parseSearchApiQuota({ account: { current_month_usage: 3401, monthly_allowance: 35000, remaining_credits: 0 } }, 0);
+  check("contradictory remaining_credits=0 reconciles to allowance - used", !!contradictory && contradictory.remaining === 31599);
+  check("contradictory quota is NOT exhausted (fixes the false block)", !searchApiQuotaExhausted(contradictory, 25));
 
   const healthy = parseSearchApiQuota({ account: { current_month_usage: 10, monthly_allowance: 100000, remaining_credits: 99990 } }, 0);
   check("healthy quota not exhausted", !searchApiQuotaExhausted(healthy, 25));
