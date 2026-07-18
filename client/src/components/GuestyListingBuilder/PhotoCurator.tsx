@@ -27,6 +27,7 @@ import VirtualStagingDialog, {
   type VirtualStagingConfirmedResult,
   type VirtualStagingUnit,
 } from "./VirtualStagingDialog";
+import VirtualStagingPhotoPickerDialog from "./VirtualStagingPhotoPickerDialog";
 
 export type { VirtualStagingUnit } from "./VirtualStagingDialog";
 
@@ -168,6 +169,11 @@ export default function PhotoCurator({
   const [virtualStagingOpen, setVirtualStagingOpen] = useState(false);
   const [virtualStagingUnit, setVirtualStagingUnit] = useState<VirtualStagingUnit | null>(null);
   const [virtualStagingPropertyId, setVirtualStagingPropertyId] = useState<number | null>(null);
+  const [virtualStagingSelectedOriginalFilenames, setVirtualStagingSelectedOriginalFilenames] = useState<readonly string[] | undefined>();
+  const [virtualStagingInitialJobId, setVirtualStagingInitialJobId] = useState<string | undefined>();
+  const [virtualStagingPickerOpen, setVirtualStagingPickerOpen] = useState(false);
+  const [virtualStagingPickerUnit, setVirtualStagingPickerUnit] = useState<VirtualStagingUnit | null>(null);
+  const [virtualStagingPickerPropertyId, setVirtualStagingPickerPropertyId] = useState<number | null>(null);
   const [virtualStagingBusy, setVirtualStagingBusy] = useState(false);
   const [virtualStagingSessionResumable, setVirtualStagingSessionResumable] = useState(false);
   const [virtualStagingSession, setVirtualStagingSession] = useState(0);
@@ -199,13 +205,63 @@ export default function PhotoCurator({
     // Synchronous guard closes the gap before React commits the disabled state.
     virtualStagingLaunchGuard.current = true;
     virtualStagingTriggerRef.current = trigger;
+    setVirtualStagingPickerUnit(unit);
+    setVirtualStagingPickerPropertyId(propertyId);
+    setVirtualStagingPickerOpen(true);
+  }, [propertyId, virtualStagingPropertyId, virtualStagingSessionResumable, virtualStagingUnit?.id]);
+
+  const closeVirtualStagingPicker = useCallback(() => {
+    setVirtualStagingPickerOpen(false);
+    setVirtualStagingPickerUnit(null);
+    setVirtualStagingPickerPropertyId(null);
+    virtualStagingLaunchGuard.current = false;
+  }, []);
+
+  const launchVirtualStagingReview = useCallback((input: {
+    unit: VirtualStagingUnit;
+    propertyId: number;
+    selectedOriginalFilenames?: readonly string[];
+    initialJobId?: string;
+  }) => {
+    if (
+      input.propertyId !== propertyId
+      || !Number.isFinite(input.propertyId)
+      || input.unit.id !== virtualStagingPickerUnit?.id
+      || input.propertyId !== virtualStagingPickerPropertyId
+    ) {
+      closeVirtualStagingPicker();
+      return;
+    }
+    setVirtualStagingPickerOpen(false);
+    setVirtualStagingPickerUnit(null);
+    setVirtualStagingPickerPropertyId(null);
     setVirtualStagingBusy(true);
-    setVirtualStagingUnit(unit);
-    setVirtualStagingPropertyId(propertyId);
+    setVirtualStagingUnit(input.unit);
+    setVirtualStagingPropertyId(input.propertyId);
+    setVirtualStagingSelectedOriginalFilenames(input.selectedOriginalFilenames);
+    setVirtualStagingInitialJobId(input.initialJobId);
     setVirtualStagingSessionResumable(true);
     setVirtualStagingSession((session) => session + 1);
     setVirtualStagingOpen(true);
-  }, [propertyId, virtualStagingPropertyId, virtualStagingSessionResumable, virtualStagingUnit?.id]);
+  }, [closeVirtualStagingPicker, propertyId, virtualStagingPickerPropertyId, virtualStagingPickerUnit?.id]);
+
+  const handleVirtualStagingPickerStart = useCallback((selectedOriginalFilenames: string[]) => {
+    if (!virtualStagingPickerUnit || virtualStagingPickerPropertyId === null) return;
+    launchVirtualStagingReview({
+      unit: virtualStagingPickerUnit,
+      propertyId: virtualStagingPickerPropertyId,
+      selectedOriginalFilenames: [...selectedOriginalFilenames],
+    });
+  }, [launchVirtualStagingReview, virtualStagingPickerPropertyId, virtualStagingPickerUnit]);
+
+  const handleVirtualStagingPickerResume = useCallback((initialJobId: string) => {
+    if (!virtualStagingPickerUnit || virtualStagingPickerPropertyId === null) return;
+    launchVirtualStagingReview({
+      unit: virtualStagingPickerUnit,
+      propertyId: virtualStagingPickerPropertyId,
+      initialJobId,
+    });
+  }, [launchVirtualStagingReview, virtualStagingPickerPropertyId, virtualStagingPickerUnit]);
 
   const handleVirtualStagingBusyChange = useCallback((busy: boolean) => {
     virtualStagingLaunchGuard.current = busy;
@@ -238,14 +294,27 @@ export default function PhotoCurator({
   // component. Drop the local controller immediately; the server keeps any
   // live job resumable when the operator returns to that property.
   useEffect(() => {
-    if (virtualStagingPropertyId === null || virtualStagingPropertyId === propertyId) return;
-    setVirtualStagingOpen(false);
-    setVirtualStagingUnit(null);
-    setVirtualStagingPropertyId(null);
-    setVirtualStagingSessionResumable(false);
+    const pickerMoved = virtualStagingPickerPropertyId !== null
+      && virtualStagingPickerPropertyId !== propertyId;
+    const reviewMoved = virtualStagingPropertyId !== null
+      && virtualStagingPropertyId !== propertyId;
+    if (!pickerMoved && !reviewMoved) return;
+    if (pickerMoved) {
+      setVirtualStagingPickerOpen(false);
+      setVirtualStagingPickerUnit(null);
+      setVirtualStagingPickerPropertyId(null);
+    }
+    if (reviewMoved) {
+      setVirtualStagingOpen(false);
+      setVirtualStagingUnit(null);
+      setVirtualStagingPropertyId(null);
+      setVirtualStagingSelectedOriginalFilenames(undefined);
+      setVirtualStagingInitialJobId(undefined);
+      setVirtualStagingSessionResumable(false);
+    }
     virtualStagingLaunchGuard.current = false;
     setVirtualStagingBusy(false);
-  }, [propertyId, virtualStagingPropertyId]);
+  }, [propertyId, virtualStagingPickerPropertyId, virtualStagingPropertyId]);
 
   const localFolders = useMemo(() => {
     const set = new Set<string>();
@@ -622,7 +691,12 @@ export default function PhotoCurator({
               const isCurrentSessionUnit = sessionAction === "resume";
               const disabled = invalidProperty
                 || sessionAction === "blocked"
-                || (sessionAction === "start" && (inventoryPending || noPhotos || virtualStagingBusy));
+                || (sessionAction === "start" && (
+                  inventoryPending
+                  || noPhotos
+                  || virtualStagingBusy
+                  || virtualStagingPickerOpen
+                ));
               const testId = `button-restage-${unit.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
               const title = isCurrentSessionUnit
                 ? virtualStagingBusy
@@ -630,6 +704,8 @@ export default function PhotoCurator({
                   : `Review the retained virtual-staging results for ${unit.label}.`
                 : sessionAction === "blocked"
                   ? `Finish the current ${virtualStagingUnit?.label ?? "unit"} staging review first.`
+                  : virtualStagingPickerOpen
+                    ? `Finish selecting photos for ${virtualStagingPickerUnit?.label ?? "the current unit"} first.`
                   : inventoryPending
                     ? `${unit.label} photo inventory is still loading.`
                     : noPhotos
@@ -654,6 +730,8 @@ export default function PhotoCurator({
                     ? virtualStagingBusy
                       ? `View ${unit.label} progress`
                       : `Review ${unit.label} staging`
+                    : virtualStagingPickerOpen && virtualStagingPickerUnit?.id === unit.id
+                      ? `Selecting ${unit.label} photos…`
                     : inventoryPending
                       ? `Loading ${unit.label} photos…`
                       : `Restage ${unit.label}`}
@@ -669,6 +747,25 @@ export default function PhotoCurator({
         </div>
       )}
 
+      {virtualStagingPickerUnit
+        && virtualStagingPickerPropertyId === propertyId
+        && typeof virtualStagingPickerPropertyId === "number"
+        && Number.isFinite(virtualStagingPickerPropertyId)
+        && (
+          <VirtualStagingPhotoPickerDialog
+            open={virtualStagingPickerOpen}
+            propertyId={virtualStagingPickerPropertyId}
+            unit={virtualStagingPickerUnit}
+            onOpenChange={(nextOpen) => {
+              if (!nextOpen) closeVirtualStagingPicker();
+            }}
+            onStart={handleVirtualStagingPickerStart}
+            onResume={handleVirtualStagingPickerResume}
+            returnFocusElement={virtualStagingTriggerRef.current}
+            returnFocusFallbackElement={virtualStagingControlsRef.current}
+          />
+        )}
+
       {virtualStagingUnit
         && virtualStagingPropertyId === propertyId
         && typeof virtualStagingPropertyId === "number"
@@ -679,6 +776,8 @@ export default function PhotoCurator({
             open={virtualStagingOpen}
             propertyId={virtualStagingPropertyId}
             unit={virtualStagingUnit}
+            selectedOriginalFilenames={virtualStagingSelectedOriginalFilenames}
+            initialJobId={virtualStagingInitialJobId}
             onOpenChange={setVirtualStagingOpen}
             onBusyChange={handleVirtualStagingBusyChange}
             onConfirmed={handleVirtualStagingConfirmed}

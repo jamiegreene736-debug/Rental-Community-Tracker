@@ -45,6 +45,10 @@ import { getUnitBuilderByPropertyId } from "./unit-builder-data";
 // server (auto-reply capacity + generated draft titles). Relative path (not the
 // @shared alias) so the tsx test runner resolves it.
 import { occupancyForBedrooms } from "../../../shared/occupancy";
+import {
+  describeBedroomReconciliation,
+  reconcileUnitBedroomSlots,
+} from "../../../shared/bedding-bedroom-reconcile";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -240,8 +244,23 @@ const lsKey = (propertyId: number) => `nexstay_bedding_${propertyId}`;
 
 // Deep-merge a stored unit into the freshly built default so any missing
 // nested fields (added later to the schema) are filled from defaults.
-function normalizeUnit(stored: Partial<UnitBeddingConfig>, def: UnitBeddingConfig): UnitBeddingConfig {
-  const bedrooms: BedroomDetail[] = Array.isArray(stored.bedrooms) && stored.bedrooms.length > 0
+//
+// LOAD-BEARING (2026-07-18): the stored bedroom array is reconciled to the
+// default's LENGTH, never taken wholesale. `def` is rebuilt on every load from
+// the authoritative record (resolveDraftUnitBedrooms for drafts,
+// unit-builder-data for static properties), so this is what lets an upstream
+// bedroom-count correction reach the tab. Without it a stale slot survives
+// forever and `totalBedrooms(config)` — literally the number the Guesty push
+// sends — keeps writing the wrong bedroom count to the live listing. See
+// shared/bedding-bedroom-reconcile.ts for the full incident. The `reconciled`
+// out-param is how loadBeddingConfigWithReconciliation reports the adjustment;
+// dropping a slot is never silent.
+function normalizeUnit(
+  stored: Partial<UnitBeddingConfig>,
+  def: UnitBeddingConfig,
+  reconciled?: string[],
+): UnitBeddingConfig {
+  const storedBedrooms: BedroomDetail[] = Array.isArray(stored.bedrooms) && stored.bedrooms.length > 0
     ? stored.bedrooms.map((b, i) => ({
         roomNumber: typeof b.roomNumber === "number" ? b.roomNumber : i + 1,
         label: typeof b.label === "string" ? b.label : labelForBedroom(i),
@@ -250,6 +269,12 @@ function normalizeUnit(stored: Partial<UnitBeddingConfig>, def: UnitBeddingConfi
         ensuiteFeatures: Array.isArray(b.ensuiteFeatures) ? b.ensuiteFeatures : [],
       }))
     : def.bedrooms;
+  const reconciliation = reconcileUnitBedroomSlots(storedBedrooms, def.bedrooms);
+  const bedrooms: BedroomDetail[] = reconciliation.bedrooms;
+  if (reconciliation.changed && reconciled) {
+    const note = describeBedroomReconciliation(def.unitLabel, reconciliation);
+    if (note) reconciled.push(note);
+  }
   const bathrooms: BathroomDetail[] = Array.isArray(stored.bathrooms)
     ? stored.bathrooms.map((b, i) => ({
         id: typeof b.id === "string" ? b.id : `bath-${i}`,
@@ -269,8 +294,17 @@ function normalizeUnit(stored: Partial<UnitBeddingConfig>, def: UnitBeddingConfi
   return { unitId: def.unitId, unitLabel: def.unitLabel, bedrooms, bathrooms, livingRoom };
 }
 
-export function loadBeddingConfig(propertyId: number): PropertyBeddingConfig {
+/**
+ * Load + reconcile, reporting any bedroom-count corrections so the tab can
+ * tell the operator rather than silently changing what they see. Callers that
+ * don't render a notice use the thin `loadBeddingConfig` wrapper below.
+ */
+export function loadBeddingConfigWithReconciliation(propertyId: number): {
+  config: PropertyBeddingConfig;
+  reconciled: string[];
+} {
   const defaults = buildDefaultBeddingConfig(propertyId);
+  const reconciled: string[] = [];
   try {
     const raw = localStorage.getItem(lsKey(propertyId));
     if (raw) {
@@ -278,13 +312,26 @@ export function loadBeddingConfig(propertyId: number): PropertyBeddingConfig {
       if (parsed && parsed.propertyId === propertyId && Array.isArray(parsed.units)) {
         const mergedUnits = defaults.units.map(d => {
           const stored = parsed.units.find(u => u.unitId === d.unitId);
-          return stored ? normalizeUnit(stored, d) : d;
+          return stored ? normalizeUnit(stored, d, reconciled) : d;
         });
-        return { propertyId, units: mergedUnits };
+        return { config: { propertyId, units: mergedUnits }, reconciled };
       }
     }
   } catch { /* fall through to defaults */ }
-  return defaults;
+  return { config: defaults, reconciled };
+}
+
+export function loadBeddingConfig(propertyId: number): PropertyBeddingConfig {
+  return loadBeddingConfigWithReconciliation(propertyId).config;
+}
+
+/**
+ * The authoritative whole-listing bedroom count, rebuilt from the record
+ * (draft row / unit-builder data) rather than from this browser's stored
+ * config. 0 means "not known yet" — see blockedBeddingPushReason.
+ */
+export function authoritativeTotalBedrooms(propertyId: number): number {
+  return totalBedrooms(buildDefaultBeddingConfig(propertyId));
 }
 
 /** Returns false when browser persistence is unavailable/full so callers can avoid a misleading push. */

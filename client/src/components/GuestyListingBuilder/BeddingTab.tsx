@@ -10,6 +10,8 @@ import {
   BATH_FEATURE_LABELS,
   BED_TYPE_LABELS,
   loadBeddingConfig,
+  loadBeddingConfigWithReconciliation,
+  authoritativeTotalBedrooms,
   saveBeddingConfig,
   resetBeddingConfig,
   loadSpaceTextOverride,
@@ -34,6 +36,7 @@ import {
   type BeddingPhotoScanRecord,
   type BeddingScanUnit,
 } from "@shared/bedding-photo-scan";
+import { blockedBeddingPushReason } from "@shared/bedding-bedroom-reconcile";
 
 const BED_TYPES: GuestyBedType[] = ["KING_BED", "QUEEN_BED", "DOUBLE_BED", "SINGLE_BED", "SOFA_BED", "BUNK_BED"];
 const BATH_FEATURES: BathFeature[] = ["walk-in-shower", "shower-tub-combo", "soaking-tub", "jetted-tub", "rain-shower", "double-vanity"];
@@ -137,6 +140,12 @@ function finishBeddingScanWorkflow(
 
 export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }: Props) {
   const { toast } = useToast();
+  // Bedroom counts corrected against this listing's records on load. Rendered
+  // as a notice because a dropped slot may be discarding a hand-added bedroom
+  // — the reconcile is never silent. See shared/bedding-bedroom-reconcile.ts.
+  const [reconciledNotes, setReconciledNotes] = useState<string[]>(
+    () => loadBeddingConfigWithReconciliation(propertyId).reconciled,
+  );
   const [config, setConfig] = useState<PropertyBeddingConfig>(() => {
     const initial = loadBeddingConfig(propertyId);
     latestBeddingConfigs.set(propertyId, initial);
@@ -192,10 +201,11 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
   // Reload when property changes
   useEffect(() => {
     latestScanTimestampRef.current = 0;
-    const c = loadBeddingConfig(propertyId);
+    const { config: c, reconciled } = loadBeddingConfigWithReconciliation(propertyId);
     latestBeddingConfigs.set(propertyId, c);
     configRef.current = c;
     setConfig(c);
+    setReconciledNotes(reconciled);
     const override = loadSpaceTextOverride(propertyId);
     setSpaceDirty(override != null);
     setSpaceText(override ?? buildSpaceDescription(c));
@@ -374,6 +384,22 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
     const sleeps = headlineSleeps(configToPush.propertyId, configToPush);
     if (pushInFlightRef.current) {
       return { ok: false, bedrooms, bathrooms, sleeps, error: "A bedding push is already in progress." };
+    }
+    // LOAD-BEARING (2026-07-18): `bedrooms` here is the length of this
+    // BROWSER's stored slot arrays, and it is the only bedroom count the
+    // Guesty listing ever receives — server-side nothing validates it (the
+    // proxy's push-history classifier is display-only). Cliffs at Princeville
+    // draft 20 was written live as a 7BR under its own "6BR for 16" title
+    // exactly this way. loadBeddingConfig now reconciles on load, so a
+    // mismatch here means the operator hand-added/removed a slot: refuse
+    // rather than desync the title, pricing, descriptions, and audit layout.
+    const blocked = blockedBeddingPushReason(
+      bedrooms,
+      authoritativeTotalBedrooms(configToPush.propertyId),
+    );
+    if (blocked) {
+      onGuestyPushRecorded?.("error", blocked);
+      return { ok: false, bedrooms, bathrooms, sleeps, error: blocked };
     }
 
     pushInFlightRef.current = true;
@@ -579,6 +605,9 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
     setSpaceDirty(false);
     setConfig(c);
     setSpaceText(buildSpaceDescription(c));
+    // A reset lands exactly on the authoritative defaults, so any earlier
+    // "we corrected your bedroom count" notice no longer describes anything.
+    setReconciledNotes([]);
   };
 
   const handleSpaceTextEdit = (text: string) => {
@@ -671,6 +700,28 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
           </button>
         </div>
       </div>
+
+      {/* Bedroom counts re-synced against this listing's records on load. */}
+      {reconciledNotes.length > 0 && (
+        <div
+          data-testid="bedding-reconciled-notice"
+          style={{
+            ...cellStyle, background: "#fffbeb", border: "1px solid #fcd34d",
+            marginTop: 8, fontSize: 13, color: "#92400e",
+          }}
+        >
+          <strong>Bedroom count re-synced.</strong>{" "}
+          This browser's saved bedding did not match the bedroom count on record for this listing,
+          so it was corrected before anything could be pushed to Guesty.
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+            {reconciledNotes.map((note) => <li key={note}>{note}</li>)}
+          </ul>
+          <div style={{ marginTop: 6 }}>
+            If a removed bedroom is real, update the unit's bedroom count on the listing record first —
+            that is what the title, pricing, and descriptions are built from.
+          </div>
+        </div>
+      )}
 
       {/* Bedding photo scan — fresh button clicks auto-apply; stored scans stay review-only. */}
       {beddingScanError && (

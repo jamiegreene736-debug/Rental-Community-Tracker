@@ -13,6 +13,7 @@ import {
   resolveVirtualStagingSources,
   reusableVirtualStagingJobId,
   sameVirtualStagingSelection,
+  selectRequestedVirtualStagingSources,
   summarizeCandidateStatuses,
   validateVirtualStagingSelection,
   virtualStagingContextForSource,
@@ -269,6 +270,45 @@ test("an empty unit produces no stageable photos", () => {
   assert.deepEqual(resolveStageableVirtualStagingSources({ diskFilenames: [], labels: [], variants: [] }), []);
 });
 
+test("the pre-generation picker selects an exact subset in server gallery order", () => {
+  const sources = [
+    { originalFilename: "living.jpg" },
+    { originalFilename: "bedroom.jpg" },
+    { originalFilename: "lanai.jpg" },
+  ];
+  assert.deepEqual(
+    selectRequestedVirtualStagingSources(sources, ["lanai.jpg", "living.jpg"]),
+    [sources[0], sources[2]],
+  );
+  assert.deepEqual(selectRequestedVirtualStagingSources(sources, undefined), sources);
+});
+
+test("the pre-generation picker rejects empty, duplicate, stale, and ineligible photos", () => {
+  const input = {
+    diskFilenames: ["living.jpg", "beach.jpg"],
+    labels: [
+      label("living.jpg", { label: "Living Room", category: "Living Areas" }),
+      label("beach.jpg", { label: "Beach View", category: "Beach Access" }),
+    ],
+    variants: [],
+  };
+  const eligible = resolveStageableVirtualStagingSources(input);
+  assert.deepEqual(eligible.map((source) => source.originalFilename), ["living.jpg"]);
+  assert.throws(() => selectRequestedVirtualStagingSources(eligible, []), /at least one/i);
+  assert.throws(
+    () => selectRequestedVirtualStagingSources(eligible, ["living.jpg", "living.jpg"]),
+    /duplicates/i,
+  );
+  assert.throws(
+    () => selectRequestedVirtualStagingSources(eligible, ["missing.jpg"]),
+    /no longer eligible/i,
+  );
+  assert.throws(
+    () => selectRequestedVirtualStagingSources(eligible, ["beach.jpg"]),
+    /no longer eligible/i,
+  );
+});
+
 test("only private rooms and private outdoor spaces are eligible for paid staging", () => {
   const cases = [
     ["Living Areas", "living-area"],
@@ -363,6 +403,26 @@ test("obvious beach and shared-amenity labels backstop a bad generated category"
     roomLabel: "Resort Restaurant",
     metadata: label("restaurant.jpg", { label: "Resort Restaurant", category: "Dining" }),
   }), null);
+  for (const roomLabel of [
+    "Community Pools With Ocean View",
+    "Shared Spas",
+    "Resort Restaurants",
+    "Golf Courses",
+    "Parking Lots",
+    "Pool Decks",
+    "Building Exteriors",
+    "Beach Views",
+    "Tennis Courts With Ocean View",
+  ]) {
+    assert.equal(virtualStagingContextForSource({
+      originalFilename: `${roomLabel}.jpg`,
+      roomLabel,
+      metadata: label(`${roomLabel}.jpg`, {
+        label: roomLabel,
+        category: "Outdoor and Lanai",
+      }),
+    }), null, roomLabel);
+  }
   for (const roomLabel of [
     "Ocean View",
     "Oceanfront Sunset",
@@ -926,6 +986,54 @@ test("folder inventory resolves visibility on the server before client refresh",
   assert.match(builder, /propertyId=.*unitId=/);
   assert.match(builder, /unitPhotoInventoryKey/);
   assert.match(builder, /photoInventoryReady/);
+});
+
+test("the Photos tab requires an explicit server-authoritative source selection before paid staging", () => {
+  const picker = fs.readFileSync(
+    path.resolve(process.cwd(), "client/src/components/GuestyListingBuilder/VirtualStagingPhotoPickerDialog.tsx"),
+    "utf8",
+  );
+  const curator = fs.readFileSync(
+    path.resolve(process.cwd(), "client/src/components/GuestyListingBuilder/PhotoCurator.tsx"),
+    "utf8",
+  );
+  const dialog = fs.readFileSync(
+    path.resolve(process.cwd(), "client/src/components/GuestyListingBuilder/VirtualStagingDialog.tsx"),
+    "utf8",
+  );
+  const routes = fs.readFileSync(
+    path.resolve(process.cwd(), "server/virtual-staging-routes.ts"),
+    "utf8",
+  );
+
+  assert.match(picker, /\/api\/virtual-staging\/units\/\$\{encodeURIComponent\(String\(propertyId\)\)\}\/\$\{encodeURIComponent\(unit\.id\)\}\/sources/);
+  assert.match(picker, /Select all eligible/);
+  assert.match(picker, /Clear all/);
+  assert.match(picker, /button-start-selected-restaging/);
+  assert.match(picker, /Beach, scenic, exterior, pool-only, and shared-amenity photos are excluded/);
+  assert.match(picker, /nextChoices\.resumableJobId/);
+  assert.doesNotMatch(picker, /apiRequest\(\s*["']POST["']/);
+  assert.ok(curator.indexOf("<VirtualStagingPhotoPickerDialog") < curator.indexOf("<VirtualStagingDialog"));
+  assert.match(curator, /selectedOriginalFilenames: \[\.\.\.selectedOriginalFilenames\]/);
+  const pickerOpenBoundary = curator.slice(
+    curator.indexOf("const openVirtualStaging"),
+    curator.indexOf("const closeVirtualStagingPicker"),
+  );
+  assert.doesNotMatch(pickerOpenBoundary, /setVirtualStagingUnit\(/);
+  assert.doesNotMatch(pickerOpenBoundary, /setVirtualStagingSession\(/);
+  assert.doesNotMatch(pickerOpenBoundary, /\/api\/virtual-staging\/jobs/);
+  assert.match(dialog, /apiRequest\("POST", "\/api\/virtual-staging\/jobs"/);
+  const resolutionCallbacks = curator.slice(
+    curator.indexOf("const handleVirtualStagingConfirmed"),
+    curator.indexOf("// Builder navigation can replace propertyId"),
+  );
+  assert.doesNotMatch(resolutionCallbacks, /setVirtualStagingSelectedOriginalFilenames\(undefined\)/);
+  assert.doesNotMatch(resolutionCallbacks, /setVirtualStagingInitialJobId\(undefined\)/);
+  assert.match(dialog, /selectedOriginalFilenames: \[\.\.\.selectedOriginalFilenames\]/);
+  assert.match(dialog, /initialJobId[\s\S]*\/api\/virtual-staging\/jobs\/\$\{encodeURIComponent\(initialJobId\)\}/);
+  assert.match(routes, /app\.get\("\/api\/virtual-staging\/units\/:propertyId\/:unitId\/sources"/);
+  assert.match(routes, /selectRequestedVirtualStagingSources/);
+  assert.match(routes, /assertResumableJobMatchesRequestedSources/);
 });
 
 test("confirmation and downstream galleries isolate shared physical folders", () => {

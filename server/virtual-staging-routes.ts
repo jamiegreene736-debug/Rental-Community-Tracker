@@ -21,6 +21,8 @@ import {
 } from "./virtual-staging-schema";
 import {
   resolveStageableVirtualStagingSources,
+  resolveVirtualStagingSources,
+  selectRequestedVirtualStagingSources,
   isVirtualStagingCandidateFilename,
   sameVirtualStagingSelection,
   summarizeCandidateStatuses,
@@ -35,6 +37,7 @@ import {
   type VirtualStagingJobDto,
   type VirtualStagingJobStatus,
   type VirtualStagingLabelSnapshot,
+  type VirtualStagingSourceChoicesDto,
 } from "@shared/virtual-staging";
 import { draftUnitIdForSlot } from "@shared/auto-replace-job-logic";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
@@ -89,7 +92,11 @@ class VirtualStagingHttpError extends Error {
   }
 }
 
-export type VirtualStagingStartInput = { propertyId: number; unitId: string };
+export type VirtualStagingStartInput = {
+  propertyId: number;
+  unitId: string;
+  selectedOriginalFilenames?: string[];
+};
 
 export type ResolvedVirtualStagingUnit = {
   propertyId: number;
@@ -182,7 +189,35 @@ export function validateVirtualStagingStartInput(body: unknown): VirtualStagingS
   if (typeof unitIdRaw !== "string" || !unitIdRaw.trim() || unitIdRaw.trim().length > 200) {
     throw new VirtualStagingHttpError(400, "unitId must be a non-empty string");
   }
-  return { propertyId, unitId: unitIdRaw.trim() };
+  const selectedRaw = (body as Record<string, unknown>).selectedOriginalFilenames;
+  if (selectedRaw === undefined) {
+    return { propertyId, unitId: unitIdRaw.trim() };
+  }
+  if (!Array.isArray(selectedRaw) || selectedRaw.length === 0 || selectedRaw.length > 200) {
+    throw new VirtualStagingHttpError(
+      400,
+      "selectedOriginalFilenames must contain between 1 and 200 photos",
+    );
+  }
+  const selectedOriginalFilenames = selectedRaw.map((value) => (
+    typeof value === "string" ? value.trim() : ""
+  ));
+  if (selectedOriginalFilenames.some((filename) => (
+    !filename
+    || filename.length > 255
+    || !IMAGE_FILE_RE.test(filename)
+    || !/^[a-zA-Z0-9_.-]+$/.test(filename)
+    || path.basename(filename) !== filename
+  ))) {
+    throw new VirtualStagingHttpError(
+      400,
+      "selectedOriginalFilenames contains an invalid photo filename",
+    );
+  }
+  if (new Set(selectedOriginalFilenames).size !== selectedOriginalFilenames.length) {
+    throw new VirtualStagingHttpError(400, "selectedOriginalFilenames contains duplicates");
+  }
+  return { propertyId, unitId: unitIdRaw.trim(), selectedOriginalFilenames };
 }
 
 export type VirtualStagingCandidateSelectionInput = {
@@ -388,7 +423,7 @@ function labelSnapshot(row: typeof photoLabels.$inferSelect): VirtualStagingLabe
   };
 }
 
-async function listUnitSources(unit: ResolvedVirtualStagingUnit) {
+async function listUnitSourceInventory(unit: ResolvedVirtualStagingUnit) {
   const directory = resolveInsidePhotosRoot(unit.folder);
   const stat = await fs.promises.stat(directory).catch(() => null);
   if (!stat?.isDirectory()) throw new VirtualStagingHttpError(409, `${unit.unitLabel} has no photo folder`);
@@ -407,7 +442,7 @@ async function listUnitSources(unit: ResolvedVirtualStagingUnit) {
       active: virtualStagingCandidates.active,
     }).from(virtualStagingCandidates).where(eq(virtualStagingCandidates.folder, unit.folder)),
   ]);
-  return resolveStageableVirtualStagingSources({
+  const input = {
     diskFilenames,
     labels: labels.map(labelSnapshot),
     // Every generated filename in this physical folder is excluded, but only
@@ -419,7 +454,15 @@ async function listUnitSources(unit: ResolvedVirtualStagingUnit) {
         && variant.propertyId === unit.propertyId
         && variant.unitId === unit.unitId,
     })),
-  });
+  };
+  return {
+    visible: resolveVirtualStagingSources(input),
+    eligible: resolveStageableVirtualStagingSources(input),
+  };
+}
+
+async function listUnitSources(unit: ResolvedVirtualStagingUnit) {
+  return (await listUnitSourceInventory(unit)).eligible;
 }
 
 export async function ensureImmutableSnapshot(destination: string, buffer: Buffer): Promise<void> {
@@ -525,6 +568,52 @@ async function findResumableJob(
   return job && job.model === recipeSignature && jobIsResumableForUnit(job, unit)
     ? job
     : undefined;
+}
+
+async function assertResumableJobMatchesRequestedSources(
+  jobId: string,
+  selectedOriginalFilenames: readonly string[] | undefined,
+): Promise<void> {
+  if (selectedOriginalFilenames === undefined) return;
+  const candidates = await db
+    .select({ originalFilename: virtualStagingCandidates.originalFilename })
+    .from(virtualStagingCandidates)
+    .where(eq(virtualStagingCandidates.jobId, jobId));
+  const existing = new Set(candidates.map((candidate) => candidate.originalFilename));
+  const requested = new Set(selectedOriginalFilenames);
+  if (
+    existing.size !== requested.size
+    || Array.from(requested).some((filename) => !existing.has(filename))
+  ) {
+    throw new VirtualStagingHttpError(
+      409,
+      "Another virtual-staging review already exists for a different photo selection. Reopen the photo picker to review it.",
+    );
+  }
+}
+
+async function sourceChoicesDto(
+  unit: ResolvedVirtualStagingUnit,
+): Promise<VirtualStagingSourceChoicesDto> {
+  const [inventory, resumableJob] = await Promise.all([
+    listUnitSourceInventory(unit),
+    findResumableJob(unit, getVirtualStagingService().recipeSignature),
+  ]);
+  return {
+    propertyId: unit.propertyId,
+    unitId: unit.unitId,
+    unitLabel: unit.unitLabel,
+    totalVisible: inventory.visible.length,
+    excludedCount: inventory.visible.length - inventory.eligible.length,
+    resumableJobId: resumableJob?.id ?? null,
+    photos: inventory.eligible.map((source) => ({
+      originalFilename: source.originalFilename,
+      previewUrl: `/photos/${encodeURIComponent(unit.folder)}/${encodeURIComponent(source.activeFilename)}`,
+      roomLabel: source.roomLabel,
+      scene: source.stagingContext.scene,
+      placement: source.stagingContext.placement,
+    })),
+  };
 }
 
 function candidateDto(jobId: string, candidate: VirtualStagingCandidate): VirtualStagingCandidateDto {
@@ -867,6 +956,7 @@ function startRecoverySweep(): void {
 async function createJob(
   unit: ResolvedVirtualStagingUnit,
   requestedBy: string,
+  selectedOriginalFilenames?: readonly string[],
 ): Promise<{ dto: VirtualStagingJobDto; duplicate: boolean }> {
   // POST is intentionally resumable as well as idempotent. If the Photos tab
   // unmounted while generation finished, the next click must reopen that
@@ -874,16 +964,28 @@ async function createJob(
   const service = getVirtualStagingService();
   const recipeSignature = service.recipeSignature;
   const existing = await findResumableJob(unit, recipeSignature);
-  if (existing) return { dto: await requireJobDto(existing.id), duplicate: true };
+  if (existing) {
+    await assertResumableJobMatchesRequestedSources(existing.id, selectedOriginalFilenames);
+    return { dto: await requireJobDto(existing.id), duplicate: true };
+  }
 
-  service.assertConfigured();
-  const sources = await listUnitSources(unit);
-  if (sources.length === 0) {
+  const eligibleSources = await listUnitSources(unit);
+  if (eligibleSources.length === 0) {
     throw new VirtualStagingHttpError(
       409,
       `${unit.unitLabel} has no furnished room or private patio/lanai photos eligible for virtual staging`,
     );
   }
+  let sources: typeof eligibleSources;
+  try {
+    sources = selectRequestedVirtualStagingSources(
+      eligibleSources,
+      selectedOriginalFilenames,
+    );
+  } catch (error) {
+    throw new VirtualStagingHttpError(409, safeErrorMessage(error));
+  }
+  service.assertConfigured();
   const assets = await Promise.all(
     sources.map((source) => ensureOriginalAsset(unit, source.originalFilename)),
   );
@@ -961,12 +1063,22 @@ async function createJob(
       return null;
     });
     if (duplicateJobId) {
+      await assertResumableJobMatchesRequestedSources(
+        duplicateJobId,
+        selectedOriginalFilenames,
+      );
       return { dto: await requireJobDto(duplicateJobId), duplicate: true };
     }
   } catch (error) {
     if (pgErrorCode(error) === "23505") {
       const raced = await findResumableJob(unit, recipeSignature);
-      if (raced) return { dto: await requireJobDto(raced.id), duplicate: true };
+      if (raced) {
+        await assertResumableJobMatchesRequestedSources(
+          raced.id,
+          selectedOriginalFilenames,
+        );
+        return { dto: await requireJobDto(raced.id), duplicate: true };
+      }
     }
     throw error;
   }
@@ -1560,12 +1672,31 @@ async function restorePreviousCandidatePreview(
 }
 
 export function registerVirtualStagingRoutes(app: Express): void {
+  app.get("/api/virtual-staging/units/:propertyId/:unitId/sources", route(async (req, res) => {
+    if (!requireAdmin(res)) return;
+    const propertyIdRaw = routeParam(req, "propertyId");
+    if (!/^-?[0-9]+$/.test(propertyIdRaw)) {
+      throw new VirtualStagingHttpError(400, "propertyId must be a non-zero integer");
+    }
+    const input = validateVirtualStagingStartInput({
+      propertyId: Number(propertyIdRaw),
+      unitId: routeParam(req, "unitId"),
+    });
+    const unit = await resolveVirtualStagingUnit(input.propertyId, input.unitId);
+    res.set("Cache-Control", "no-store");
+    res.json(await sourceChoicesDto(unit));
+  }));
+
   app.post("/api/virtual-staging/jobs", route(async (req, res) => {
     const session = requireAdmin(res);
     if (!session) return;
     const input = validateVirtualStagingStartInput(req.body);
     const unit = await resolveVirtualStagingUnit(input.propertyId, input.unitId);
-    const result = await createJob(unit, session.username);
+    const result = await createJob(
+      unit,
+      session.username,
+      input.selectedOriginalFilenames,
+    );
     res.status(result.duplicate ? 200 : 202).json(result.dto);
   }));
 

@@ -159,6 +159,24 @@ export type VirtualStagingCandidateDto = {
   lastFeedback: string | null;
 };
 
+export type VirtualStagingSourceChoiceDto = {
+  originalFilename: string;
+  previewUrl: string;
+  roomLabel: string;
+  scene: VirtualStagingScene;
+  placement: VirtualStagingContext["placement"];
+};
+
+export type VirtualStagingSourceChoicesDto = {
+  propertyId: number;
+  unitId: string;
+  unitLabel: string;
+  totalVisible: number;
+  excludedCount: number;
+  resumableJobId: string | null;
+  photos: VirtualStagingSourceChoiceDto[];
+};
+
 export type VirtualStagingJobDto = {
   id: string;
   propertyId: number;
@@ -313,7 +331,7 @@ const PRIVATE_OUTDOOR_USE_RE =
 const PURE_OUTDOOR_VIEW_RE =
   /\b(?:view|sunset|sunrise) from (?:the )?(?:lanai|patio|balcony|deck|terrace|veranda|porch)\b|^(?:ocean|garden|mountain|sunset|sunrise)?\s*(?:lanai|patio|balcony|deck|terrace|veranda|porch) view\b/i;
 const OBVIOUS_SHARED_OR_SCENIC_RE =
-  /\b(?:(?:community|shared) (?:pool|spa|amenit(?:y|ies)|grounds|area|lounge|dining)|resort (?:pool|spa|grounds|amenit(?:y|ies)|lobby|restaurant|clubhouse|fitness|gym)|(?:pool|spa) deck|poolside (?:seating|lounge|dining|chairs?)|beach (?:access|path|cove|shore|scene|view)|aerial|drone|building exterior|map|logo|tennis court|golf course|parking lot)\b/i;
+  /\b(?:(?:community|shared) (?:pools?|spas?|amenit(?:y|ies)|grounds?|areas?|lounges?|dining)|resort (?:pools?|spas?|grounds?|amenit(?:y|ies)|lobb(?:y|ies)|restaurants?|clubhouses?|fitness(?: centers?)?|gyms?)|(?:pool|spa) decks?|poolside (?:seating|lounges?|dining|chairs?)|beach (?:access|paths?|coves?|shores?|scenes?|views?)|aerial|drone|building exteriors?|maps?|logos?|tennis courts?|golf courses?|parking lots?)\b/i;
 const PURE_SCENIC_ASSET_RE =
   /^(?:ocean(?:front)? (?:view|vista|sunset|sunrise|panorama)|mountain (?:view|vista)|garden view|coast(?:line|al view|al panorama)|beach(?: view| scene)?|sunset|sunrise|landscape(?: view)?|pool with ocean backdrop)$/i;
 const FLOOR_PLAN_ASSET_RE = /^(?:unit )?floor ?plan(?: diagram| layout| graphic)?$/i;
@@ -543,6 +561,33 @@ export function resolveStageableVirtualStagingSources(
     const stagingContext = virtualStagingContextForSource(source);
     return stagingContext ? [{ ...source, stagingContext }] : [];
   });
+}
+
+/**
+ * Bind an untrusted picker submission back to the server-resolved eligible
+ * inventory. Server gallery order remains authoritative even if the client
+ * submits filenames in a different order. Omitting the picker field keeps
+ * rolling deployments compatible with the immediately previous client.
+ */
+export function selectRequestedVirtualStagingSources<
+  T extends Pick<PlannedVirtualStagingSource, "originalFilename">,
+>(
+  sources: readonly T[],
+  selectedOriginalFilenames: readonly string[] | undefined,
+): T[] {
+  if (selectedOriginalFilenames === undefined) return [...sources];
+  if (selectedOriginalFilenames.length === 0) {
+    throw new Error("Select at least one photo to restage");
+  }
+  const selected = new Set(selectedOriginalFilenames);
+  if (selected.size !== selectedOriginalFilenames.length) {
+    throw new Error("Selected photos contain duplicates");
+  }
+  const eligible = new Set(sources.map((source) => source.originalFilename));
+  if (selectedOriginalFilenames.some((filename) => !eligible.has(filename))) {
+    throw new Error("A selected photo is no longer eligible for virtual staging");
+  }
+  return sources.filter((source) => selected.has(source.originalFilename));
 }
 
 export function summarizeCandidateStatuses(
