@@ -64,20 +64,6 @@ import {
 import { communityAddressRuleForName } from "@shared/community-addresses";
 import { INCONCLUSIVE_SCAN_NOTE, decidePlatformStatus } from "@shared/photo-listing-decision";
 import { reactToPhotoListingDetections, type PhotoListingDetection } from "./photo-found-reactions";
-import {
-  ADDRESS_PLATFORMS,
-  buildAddressQuery,
-  filterAddressSerpRows,
-  parseStreetCityState,
-  type AddressPlatformKey,
-} from "@shared/address-listing-logic";
-import {
-  selectDeepFetchCandidates,
-  matchAddressInText,
-} from "@shared/address-page-match";
-import { extractGeoFromPageText } from "@shared/address-geo-match";
-import { haversineFeet } from "@shared/walking-distance";
-import { geocode, reverseGeocodeToStreetAddress } from "./walking-distance";
 import { agreementImageIdentityHolds, computeDhash, isDuplicateHash, THUMBNAIL_IDENTITY_DISTANCE } from "./photo-hashing";
 import { getSearchApiKeys } from "./searchapi";
 import { folderHasActiveVirtualStagingVariants } from "./virtual-staging-gallery";
@@ -201,14 +187,11 @@ const THUMBNAIL_MAX_BYTES = 3_000_000;
 // community-compatible OTA hits, all with slow thumbnails) can't stack the 8s
 // timeout into a multi-minute scan. Beyond the cap we fail toward counting.
 const MAX_THUMBNAIL_HASHES_PER_SCAN = 80;
-// Address-on-OTA detection leg (the complement to the photo reverse-image leg). For each scanned unit
-// folder we also run one Google `site:` text search per platform for the unit's street + city and check
-// whether the unit's address surfaces on a real Airbnb/VRBO/Booking listing page. A thief can swap the
-// photos but not the physical address, so this catches a relist the photo scan alone would miss. Set
-// PHOTO_LISTING_ADDRESS_SCAN_DISABLED=1 to turn it off (e.g. to preserve SearchAPI quota).
-const PHOTO_LISTING_ADDRESS_SCAN_DISABLED = /^(1|true|yes|on)$/i.test(
-  String(process.env.PHOTO_LISTING_ADDRESS_SCAN_DISABLED ?? "").trim(),
-);
+// NOTE: the former address-on-OTA detection leg (site:host "street" "city" SERPs per platform) was
+// REMOVED 2026-07-18 — every listing now publishes the community clubhouse / generic street via
+// Guesty's separate published address (2026-07-17), so our real unit addresses no longer appear on
+// our own listings and the "someone listed our unit's address" text-search signal is moot. The
+// photo reverse-image leg below is the only detection system.
 // Background re-scan cadence for the dashboard listing scan (the per-folder reverse-image check of
 // each unit's photos against Airbnb/VRBO/Booking). 2026-06-26 (operator ask — "ensure that this is
 // cron job once a week"): each scannable folder is re-scanned when its last check is older than this
@@ -241,43 +224,6 @@ const PHOTO_LISTING_INCONCLUSIVE_RETRY_MS = (() => {
 })();
 const LENS_TIMEOUT_MS = 45_000;
 const VERIFY_TIMEOUT_MS = 20_000;
-// Address-leg deep-fetch (recall booster): read the FULL page text of a
-// listing whose snippet didn't surface the street. Bounded + fail-open so it
-// can never break the cheap path. Kill with PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED=1.
-const ADDRESS_PAGE_FETCH_TIMEOUT_MS = 12_000;
-const ADDRESS_PAGE_MAX_BYTES = 3_000_000;
-const ADDRESS_PAGE_FETCH_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
-const PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED = /^(1|true|yes|on)$/i.test(
-  String(process.env.PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED ?? "").trim(),
-);
-// Max full-page reads PER FOLDER across all three platforms (bounds latency/cost).
-const ADDRESS_DEEP_FETCH_MAX = (() => {
-  const n = Number(process.env.PHOTO_LISTING_ADDRESS_DEEPFETCH_MAX);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 4;
-})();
-// Phase-2 coordinate cross-check: on an already-deep-fetched page (Airbnb/
-// Booking only — VRBO strips per-listing coords), if the exact street text
-// missed, compare the page's published coordinate to our unit's geocode. It
-// still passes the unit-number gate, so this is a precise corroborating signal,
-// not a fuzzy net. Kill with PHOTO_LISTING_ADDRESS_GEO_DISABLED=1.
-const PHOTO_LISTING_ADDRESS_GEO_DISABLED = /^(1|true|yes|on)$/i.test(
-  String(process.env.PHOTO_LISTING_ADDRESS_GEO_DISABLED ?? "").trim(),
-);
-// Match radius in feet. Default 2640 ft (0.5 mi) accommodates Airbnb's fuzzed
-// pin + our own geocode slop; the unit-number gate provides the real precision.
-const ADDRESS_GEO_MATCH_MAX_FEET = (() => {
-  const n = Number(process.env.PHOTO_LISTING_ADDRESS_GEO_MAX_FEET);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2640;
-})();
-// Phase-3 coverage fallback: when a folder has a resort name + city but no known
-// street (imported/draft listings with no curated rule and no parseable street),
-// derive a street by geocoding the resort and reverse-geocoding the pin to a
-// numbered street. Fail-open (any miss → the address leg is skipped as before).
-// Kill with PHOTO_LISTING_ADDRESS_GEOCODE_FALLBACK_DISABLED=1.
-const PHOTO_LISTING_ADDRESS_GEOCODE_FALLBACK_DISABLED = /^(1|true|yes|on)$/i.test(
-  String(process.env.PHOTO_LISTING_ADDRESS_GEOCODE_FALLBACK_DISABLED ?? "").trim(),
-);
 const IMAGE_EXT = /\.(?:jpe?g|png|webp)$/i;
 const STANDALONE_DRAFT_NO_UNIT_TOKEN = "__standalone_draft_no_unit_token__";
 
@@ -288,17 +234,6 @@ export type PlatformStatus = "clean" | "found" | "unknown";
 // subThresholdVerifiedMatches in shared/photo-listing-decision.ts. Old rows without the flag
 // simply never show the review badge (fail toward the pre-2026-07-12 behavior).
 export type Match = { photoUrl: string; listingUrl: string; title: string; source: string; verified?: boolean };
-// `matchType`/`evidence` are OPTIONAL and additive: legacy rows (and every
-// snippet-path match) omit them, so stored JSON and existing readers are
-// unaffected. Only the deep-fetch recall pass stamps them ("page-text").
-export type AddressMatch = {
-  platform: AddressPlatformKey;
-  url: string;
-  title: string;
-  snippet: string;
-  matchType?: "snippet" | "page-text" | "coordinate";
-  evidence?: string;
-};
 type LensCallResult = { ok: true; rows: any[] } | { ok: false; error: string };
 type PhotoCandidate = {
   filename: string;
@@ -318,10 +253,6 @@ export type ScanResult = {
   airbnbMatches: Match[];
   vrboMatches: Match[];
   bookingMatches: Match[];
-  airbnbAddressStatus: PlatformStatus;
-  vrboAddressStatus: PlatformStatus;
-  bookingAddressStatus: PlatformStatus;
-  addressMatches: AddressMatch[];
   photosChecked: number;
   lensCalls: number;
   errorMessage?: string;
@@ -411,9 +342,7 @@ async function folderCommunityContext(folder: string): Promise<FolderCommunityCo
   // returned true for EVERY Lens hit, and generic tropical-interior look-alikes
   // (a Maui "Kamaole Sands" 1BD, a "Costa del Sol" beach house, an Airbnb hub
   // page) tripped the multi-photo-agreement rule into a false FOUND right after
-  // a photo swap (operator report 2026-07-04). folderAddressContext already
-  // resolves these via the unit-swap row; this brings the photo leg's community
-  // gate to parity.
+  // a photo swap (operator report 2026-07-04).
   const builder = unitBuilderData.find((b) =>
     b.communityPhotoFolder === folder ||
     b.units.some((u) => u.photoFolder === folder) ||
@@ -442,252 +371,6 @@ function listingMatchesFolderCommunity(
   const haystack = `${title} ${source} ${link}`;
   if (listingHaystackIncompatibleWithCommunity(haystack, ctx.complexName, ctx.city)) return false;
   return communityEvidenceInResult({ title, snippet: source, link }, ctx.complexName);
-}
-
-type FolderAddressContext = { street: string; city: string; state: string };
-
-// Coverage fallback: derive a NUMBERED street for a folder that has a resort
-// name + city but no curated/parseable street. Geocodes the resort, then
-// reverse-geocodes the pin to a house-number+road (the reverse-geocoder only
-// returns numbered streets). Both providers cache; fails open to null on any
-// blip so the address leg is simply skipped, exactly as before.
-async function deriveStreetViaGeocode(name: string, city: string, state: string): Promise<string | null> {
-  if (PHOTO_LISTING_ADDRESS_GEOCODE_FALLBACK_DISABLED) return null;
-  const resort = String(name ?? "").trim();
-  const q = [resort, String(city ?? "").trim(), String(state ?? "").trim()].filter(Boolean).join(", ");
-  if (!resort || !q) return null;
-  try {
-    const coord = await geocode(q);
-    if (!coord) return null;
-    const street = (await reverseGeocodeToStreetAddress(coord.lat, coord.lng) ?? "").trim();
-    return /^\d/.test(street) ? street : null; // require a leading house number
-  } catch {
-    return null;
-  }
-}
-
-// Resolve the street + city to text-search for this folder. Prefers the
-// resort's canonical street from community-addresses (shared across units;
-// the unit-number gate disambiguates), falling back to the unit-builder /
-// draft address string. Returns null when no usable street is known — the
-// address leg is then skipped (the photo leg still runs).
-async function folderAddressContext(folder: string): Promise<FolderAddressContext | null> {
-  const builder = unitBuilderData.find((b) =>
-    b.communityPhotoFolder === folder || b.units.some((u) => u.photoFolder === folder),
-  );
-  if (builder) {
-    const rule = communityAddressRuleForName(builder.complexName);
-    // parseStreetCityState skips an embedded "Unit N"/"Bldg N" segment so a 4-part
-    // address ("1831 Poipu Rd, Unit 423, Koloa, HI 96756") yields city "Koloa", not
-    // "Unit 423" (the old parts[1] parse fed a bogus city into the SERP query).
-    const parsed = parseStreetCityState(builder.address ?? "");
-    const street = (rule?.street || parsed.street).trim();
-    const city = (rule?.city || parsed.city).trim();
-    const state = (rule?.state || parsed.state).trim();
-    if (street && city) return { street, city, state };
-    // No curated/parseable street — try the geocode coverage fallback.
-    if (city) {
-      const derived = await deriveStreetViaGeocode(builder.complexName, city, state);
-      if (derived) return { street: derived, city, state };
-    }
-    return null;
-  }
-  const ref = draftPhotoFolderRef(folder) ?? replacementPhotoFolderRef(folder);
-  if (ref?.propertyId && ref.propertyId < 0) {
-    const draft = await storage.getCommunityDraft(Math.abs(ref.propertyId));
-    if (draft) {
-      const rule = communityAddressRuleForName(String(draft.name ?? ""));
-      const parsed = parseStreetCityState(String((draft as any).streetAddress ?? ""));
-      const street = (rule?.street || parsed.street).trim();
-      const city = (rule?.city || parsed.city || String(draft.city ?? "")).trim();
-      const state = (rule?.state || parsed.state || String((draft as any).state ?? "")).trim();
-      if (street && city) return { street, city, state };
-      if (city) {
-        const derived = await deriveStreetViaGeocode(String(draft.name ?? ""), city, state);
-        if (derived) return { street: derived, city, state };
-      }
-    }
-  }
-  // Replacement / swap-backed folder (e.g. `replacement-p4-uunit-423`). These have a
-  // POSITIVE propertyId so they never hit the draft branch above — the prior code returned
-  // null here, which is why every replacement folder showed address "inconclusive". The
-  // candidate unit's real street address lives on the latest unit-swap row.
-  if (ref) {
-    const swap = await storage.getLatestUnitSwap(ref.propertyId, ref.oldUnitId);
-    if (swap?.newAddress) {
-      const parsed = parseStreetCityState(swap.newAddress);
-      if (parsed.street && parsed.city) {
-        return { street: parsed.street, city: parsed.city, state: parsed.state };
-      }
-    }
-  }
-  return null;
-}
-
-async function callGoogleTextSearch(query: string): Promise<LensCallResult> {
-  if (!SEARCHAPI_KEY) return { ok: false, error: "SEARCHAPI_API_KEY not configured" };
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
-  try {
-    const params = new URLSearchParams({ engine: "google", q: query, api_key: SEARCHAPI_KEY, num: "10" });
-    const resp = await fetch(`https://www.searchapi.io/api/v1/search?${params.toString()}`, { signal: controller.signal });
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      const msg = describeSearchApiHttpError(resp.status, body);
-      console.error(`[photo-listing-scanner] address ${msg} for "${query}"`);
-      return { ok: false, error: msg };
-    }
-    const data = await resp.json() as any;
-    return { ok: true, rows: Array.isArray(data.organic_results) ? data.organic_results : [] };
-  } catch (e: any) {
-    const msg = e?.name === "AbortError"
-      ? `Google/SearchAPI timed out after ${Math.round(VERIFY_TIMEOUT_MS / 1000)}s`
-      : `Google/SearchAPI request failed: ${e?.message ?? String(e)}`;
-    console.error(`[photo-listing-scanner] address ${msg} for "${query}"`);
-    return { ok: false, error: msg };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// Best-effort full-page fetch for the address deep-fetch pass. Returns the raw
-// HTML (size-capped) or null on ANY failure — a bot wall (403), a JS shell, a
-// timeout, or a non-text response all resolve to null so the caller simply
-// skips that candidate and the cheap snippet result stands unchanged. This is
-// what keeps the recall pass strictly additive: it can only ever ADD a match.
-async function fetchListingPageText(url: string): Promise<string | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ADDRESS_PAGE_FETCH_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url, {
-      signal: controller.signal,
-      redirect: "follow",
-      headers: { "user-agent": ADDRESS_PAGE_FETCH_UA, "accept-language": "en-US,en;q=0.9" },
-    });
-    if (!resp.ok) return null;
-    const ct = (resp.headers.get("content-type") ?? "").toLowerCase();
-    if (ct && !/text|html|json|xml/.test(ct)) return null;
-    const body = await resp.text();
-    return body.length > ADDRESS_PAGE_MAX_BYTES ? body.slice(0, ADDRESS_PAGE_MAX_BYTES) : body;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// Address-on-OTA leg. For each platform, one `site:host "street" "city"`
-// query, then keep only real listing-page URLs that surface the street.
-// Our own authorized listings are suppressed, and (unless this is a
-// standalone unique-address listing) each hit must also pass the unit-
-// number gate so a shared-resort address can't paint every owner's
-// listing red. Returns per-platform status + the matches for the UI.
-async function checkAddressOnOtas(
-  ctx: FolderAddressContext,
-  deps: {
-    authorizedUrls: Awaited<ReturnType<typeof getAuthorizedChannelUrls>>;
-    allowUnverifiedStandalone: boolean;
-    verifyUnit: (url: string) => Promise<boolean>;
-    // Injectable for tests; defaults to the real bounded, fail-open fetch.
-    fetchPageText?: (url: string) => Promise<string | null>;
-    // Injectable for tests; defaults to the real cached/throttled geocoder.
-    geocodeAddress?: (query: string) => Promise<{ lat: number; lng: number } | null>;
-  },
-): Promise<{
-  statuses: Record<AddressPlatformKey, PlatformStatus>;
-  matches: AddressMatch[];
-  anySucceeded: boolean;
-  errors: string[];
-}> {
-  const statuses: Record<AddressPlatformKey, PlatformStatus> = { airbnb: "unknown", vrbo: "unknown", booking: "unknown" };
-  const matches: AddressMatch[] = [];
-  const errors: string[] = [];
-  let anySucceeded = false;
-  const fetchPageText = deps.fetchPageText ?? fetchListingPageText;
-  const geocodeAddress = deps.geocodeAddress ?? geocode;
-  const deepFetchEnabled = !PHOTO_LISTING_ADDRESS_DEEPFETCH_DISABLED && ADDRESS_DEEP_FETCH_MAX > 0;
-  const geoCheckEnabled = deepFetchEnabled && !PHOTO_LISTING_ADDRESS_GEO_DISABLED;
-  let deepFetchBudget = ADDRESS_DEEP_FETCH_MAX; // shared across all platforms this folder
-  // Our unit's own coordinate, geocoded once per folder and only when a
-  // coordinate candidate actually turns up (lazy — avoids a geocode call on the
-  // common no-candidate path). The geocoder caches forever + fails open to null.
-  let ourCoordResolved = false;
-  let ourCoord: { lat: number; lng: number } | null = null;
-  const resolveOurCoord = async (): Promise<{ lat: number; lng: number } | null> => {
-    if (ourCoordResolved) return ourCoord;
-    ourCoordResolved = true;
-    const query = [ctx.street, ctx.city, ctx.state].filter(Boolean).join(", ");
-    ourCoord = query ? await geocodeAddress(query) : null;
-    return ourCoord;
-  };
-
-  for (const platform of ADDRESS_PLATFORMS) {
-    const query = buildAddressQuery(platform.site, ctx.street, ctx.city);
-    const serp = await callGoogleTextSearch(query);
-    if (!serp.ok) {
-      errors.push(serp.error);
-      continue; // leave this platform "unknown"
-    }
-    anySucceeded = true;
-    const candidates = filterAddressSerpRows(serp.rows as any[], platform, ctx.street);
-    const kept: AddressMatch[] = [];
-    for (const c of candidates) {
-      if (isAuthorizedUrl(c.url.toLowerCase(), deps.authorizedUrls)) continue; // our own listing — expected, not theft
-      // Unit-number gate (skipped for standalone unique-address listings):
-      // require the listing page to also surface our unit number so a
-      // sibling owner at the same resort street doesn't trip the flag.
-      if (!deps.allowUnverifiedStandalone) {
-        const ok = await deps.verifyUnit(c.url);
-        if (!ok) continue;
-      }
-      kept.push({ platform: platform.key, url: c.url, title: c.title, snippet: c.snippet });
-    }
-    // Deep-fetch recall pass (ADDITIVE, fail-open, bounded). The snippet path
-    // above is untouched; here we read the FULL page text of listing URLs whose
-    // snippet did NOT surface the street (selectDeepFetchCandidates = the rows
-    // filterAddressSerpRows dropped). A confirmed exact-street hit still passes
-    // the SAME authorized-URL + unit-number gates before it can flip a platform
-    // to "found", so precision is unchanged — this can only recover misses.
-    if (deepFetchEnabled && deepFetchBudget > 0) {
-      const deepCandidates = selectDeepFetchCandidates(serp.rows as any[], platform, ctx.street);
-      for (const c of deepCandidates) {
-        if (deepFetchBudget <= 0) break;
-        if (isAuthorizedUrl(c.url.toLowerCase(), deps.authorizedUrls)) continue; // our own listing
-        deepFetchBudget--;
-        const html = await fetchPageText(c.url);
-        if (!html) continue; // bot wall / timeout / JS shell → skip, snippet result stands
-        const m = matchAddressInText(html, { street: ctx.street, city: ctx.city });
-        let matchType: "page-text" | "coordinate" | null = m.matched ? "page-text" : null;
-        let evidence = m.matched ? m.evidence : "";
-        // Phase-2 coordinate cross-check: only when the exact street text missed
-        // (a variant/diacritic spelling, or the page hides the street), only on
-        // Airbnb/Booking (VRBO strips per-listing coords), and only when the
-        // unit-number gate is available to corroborate — never for standalone,
-        // where a loose radius with no unit number could match a neighbor.
-        if (!matchType && geoCheckEnabled && !deps.allowUnverifiedStandalone && platform.key !== "vrbo") {
-          const our = await resolveOurCoord();
-          const geo = our ? extractGeoFromPageText(html) : null;
-          if (our && geo) {
-            const feet = haversineFeet(our.lat, our.lng, geo.lat, geo.lng);
-            if (feet <= ADDRESS_GEO_MATCH_MAX_FEET) {
-              matchType = "coordinate";
-              evidence = `coordinate ~${Math.round(feet)} ft from unit`;
-            }
-          }
-        }
-        if (!matchType) continue;
-        if (!deps.allowUnverifiedStandalone) {
-          const ok = await deps.verifyUnit(c.url);
-          if (!ok) continue; // sibling owner at the same resort street — not our unit
-        }
-        kept.push({ platform: platform.key, url: c.url, title: c.title, snippet: c.snippet, matchType, evidence });
-      }
-    }
-    statuses[platform.key] = kept.length > 0 ? "found" : "clean";
-    matches.push(...kept.slice(0, 5));
-  }
-
-  return { statuses, matches, anySucceeded, errors };
 }
 
 function compactErrorDetail(text: string): string {
@@ -919,10 +602,10 @@ async function alertOnStateWorsen(
 
 export async function runPhotoListingCheckForFolder(
   folder: string,
-  // onNewDetection fires AFTER persist when this scan flipped a platform to "found" (photo leg — the
-  // same transitions that write alert rows) or surfaced a NEW address-on-OTA hit. Only the weekly
-  // scheduler passes it (unattended context: react + notify); on-demand deep checks and the
-  // audit sweep's verify rescans deliberately don't — the operator/sweep is already acting there.
+  // onNewDetection fires AFTER persist when this scan flipped a platform to "found" (the same
+  // transitions that write alert rows). Only the weekly scheduler passes it (unattended context:
+  // react + notify); on-demand deep checks and the audit sweep's verify rescans deliberately
+  // don't — the operator/sweep is already acting there.
   opts: { maxPhotos?: number; onNewDetection?: (d: PhotoListingDetection) => Promise<void> | void } = {},
 ): Promise<ScanResult> {
   // How many DISTINCT interior photos to reverse-image (1 Lens call each). Background scheduler uses
@@ -938,10 +621,6 @@ export async function runPhotoListingCheckForFolder(
     airbnbMatches: [],
     vrboMatches: [],
     bookingMatches: [],
-    airbnbAddressStatus: "unknown",
-    vrboAddressStatus: "unknown",
-    bookingAddressStatus: "unknown",
-    addressMatches: [],
     photosChecked: 0,
     lensCalls: 0,
   };
@@ -1217,14 +896,12 @@ export async function runPhotoListingCheckForFolder(
     }
   }
 
-  // Per-platform photo verdict. Address detection is a SEPARATE leg (its own columns), so this
-  // judges photos only — multi-photo agreement (>= MULTI_PHOTO_AGREEMENT strong photos) lets a
-  // repost that hides the unit number from page text still flag as "found".
+  // Per-platform photo verdict — multi-photo agreement (>= MULTI_PHOTO_AGREEMENT strong photos)
+  // lets a repost that hides the unit number from page text still flag as "found".
   const finalize = (key: "airbnb" | "vrbo" | "booking"): PlatformStatus =>
     decidePlatformStatus({
       photoHitCount: tally[key].photoHitCount,
       photoStrongCount: tally[key].photoStrongCount,
-      hasAddressHit: false,
       anyLensSucceeded,
       minMatches: MIN_MATCHES,
       agreementThreshold: MULTI_PHOTO_AGREEMENT,
@@ -1241,78 +918,21 @@ export async function runPhotoListingCheckForFolder(
   result.vrboMatches    = tally.vrbo.matches.slice(0, 20);
   result.bookingMatches = tally.booking.matches.slice(0, 20);
 
-  // Address-on-OTA leg: does this unit's street address surface on a real
-  // OTA listing page? (A relist can swap photos but not the address.) One
-  // SERP per platform; unit-number gated unless this is a standalone
-  // unique-address listing. Runs alongside the photo leg; leaving statuses
-  // "unknown" when disabled or no street is known is correct (not "clean").
-  if (!PHOTO_LISTING_ADDRESS_SCAN_DISABLED) {
-    try {
-      const addrCtx = await folderAddressContext(folder);
-      if (addrCtx) {
-        // Unit-number gate for the address leg, separate cache from the
-        // photo leg's community-aware verify (street+city already proves
-        // the resort, so we only need the unit-number confirmation here).
-        const addressVerifyCache = new Map<string, boolean>();
-        const verifyUnitForAddress = async (url: string): Promise<boolean> => {
-          const cached = addressVerifyCache.get(url);
-          if (cached !== undefined) return cached;
-          for (const token of verifyTokens) {
-            if (await verifyUrlMentionsUnit(url, token)) {
-              addressVerifyCache.set(url, true);
-              return true;
-            }
-          }
-          addressVerifyCache.set(url, false);
-          return false;
-        };
-        const addr = await checkAddressOnOtas(addrCtx, {
-          authorizedUrls,
-          allowUnverifiedStandalone,
-          verifyUnit: verifyUnitForAddress,
-        });
-        result.airbnbAddressStatus  = addr.statuses.airbnb;
-        result.vrboAddressStatus    = addr.statuses.vrbo;
-        result.bookingAddressStatus = addr.statuses.booking;
-        result.addressMatches = addr.matches.slice(0, 15);
-        if (!addr.anySucceeded && addr.errors.length > 0 && !result.errorMessage) {
-          const distinct = Array.from(new Set(addr.errors)).slice(0, 2);
-          result.errorMessage = `Address search unavailable: ${distinct.join("; ")}`;
-        }
-      }
-    } catch (e: any) {
-      console.error(`[photo-listing-scanner] address leg failed for ${folder}: ${e?.message ?? e}`);
-    }
-  }
-
   // A scan where NO photo returned a Lens result is inconclusive by construction — it is not
   // evidence that a previously-detected repost vanished. Flag it so persist() preserves prior
   // non-unknown statuses regardless of whether the underlying error string happened to match
   // isProviderUnavailableError (a 401/403/5xx can carry "SearchAPI" without the matched substrings).
   await persist(result, priorRow, { inconclusive: !anyLensSucceeded });
   const photoFoundFlips = await alertOnStateWorsen(prior, result);
-  if (opts.onNewDetection) {
-    // Address flips computed AFTER persist so outage-preserved statuses can't fabricate a
-    // transition (persist restores prior "found" on inconclusive scans → no flip).
-    const addressFoundFlips = HOST_KEYS.filter((key) => {
-      const nextStatus = key === "airbnb" ? result.airbnbAddressStatus : key === "vrbo" ? result.vrboAddressStatus : result.bookingAddressStatus;
-      if (nextStatus !== "found") return false;
-      const priorStatus = priorRow
-        ? ((priorRow as any)[`${key}AddressStatus`] as string | null | undefined) ?? "unknown"
-        : "unknown";
-      return priorStatus !== "found";
-    });
-    if (photoFoundFlips.length > 0 || addressFoundFlips.length > 0) {
-      try {
-        await opts.onNewDetection({
-          folder,
-          photoFoundFlips,
-          addressFoundFlips,
-          matchCount: result.airbnbMatches.length + result.vrboMatches.length + result.bookingMatches.length,
-        });
-      } catch (e: any) {
-        console.error(`[photo-listing-scanner] onNewDetection failed for ${folder}: ${e?.message ?? e}`);
-      }
+  if (opts.onNewDetection && photoFoundFlips.length > 0) {
+    try {
+      await opts.onNewDetection({
+        folder,
+        photoFoundFlips,
+        matchCount: result.airbnbMatches.length + result.vrboMatches.length + result.bookingMatches.length,
+      });
+    } catch (e: any) {
+      console.error(`[photo-listing-scanner] onNewDetection failed for ${folder}: ${e?.message ?? e}`);
     }
   }
   return result;
@@ -1341,26 +961,6 @@ async function persist(
       r.bookingStatus = prior.bookingStatus as PlatformStatus;
       r.bookingMatches = parseStoredMatches(prior.bookingMatches);
     }
-    // Same inconclusive-outage rule for the address leg: don't repaint a
-    // known red/green address verdict to gray just because today's SERP
-    // failed. addressMatches is restored when we fall back to the prior
-    // status so the UI keeps the cited URLs.
-    let restoredAddress = false;
-    if (r.airbnbAddressStatus === "unknown" && (prior as any).airbnbAddressStatus) {
-      r.airbnbAddressStatus = (prior as any).airbnbAddressStatus as PlatformStatus;
-      restoredAddress = true;
-    }
-    if (r.vrboAddressStatus === "unknown" && (prior as any).vrboAddressStatus) {
-      r.vrboAddressStatus = (prior as any).vrboAddressStatus as PlatformStatus;
-      restoredAddress = true;
-    }
-    if (r.bookingAddressStatus === "unknown" && (prior as any).bookingAddressStatus) {
-      r.bookingAddressStatus = (prior as any).bookingAddressStatus as PlatformStatus;
-      restoredAddress = true;
-    }
-    if (restoredAddress && r.addressMatches.length === 0) {
-      r.addressMatches = parseStoredAddressMatches((prior as any).addressMatches);
-    }
     // The note text is the shared INCONCLUSIVE_SCAN_NOTE constant — the scheduler's short-window
     // retry (getStalePhotoListingFolders) keys off it, so an inlined reworded copy would silently
     // break the 24h outage retry.
@@ -1375,152 +975,10 @@ async function persist(
     airbnbMatches:  r.airbnbMatches.length  ? JSON.stringify(r.airbnbMatches)  : null,
     vrboMatches:    r.vrboMatches.length    ? JSON.stringify(r.vrboMatches)    : null,
     bookingMatches: r.bookingMatches.length ? JSON.stringify(r.bookingMatches) : null,
-    airbnbAddressStatus:  r.airbnbAddressStatus,
-    vrboAddressStatus:    r.vrboAddressStatus,
-    bookingAddressStatus: r.bookingAddressStatus,
-    addressMatches: r.addressMatches.length ? JSON.stringify(r.addressMatches) : null,
     photosChecked: r.photosChecked,
     lensCalls:     r.lensCalls,
     errorMessage:  r.errorMessage ?? null,
   });
-}
-
-function parseStoredAddressMatches(raw?: string | null): AddressMatch[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-// Address-ONLY re-check (2026-06-30). Runs JUST the address-on-OTA leg for a folder and merges the
-// result into the existing row, WITHOUT touching the photo verdict or re-spending the (much costlier,
-// up to PHOTO_AUDIT_MAX_PHOTOS) reverse-image Lens calls. Why this exists: the address leg shipped in
-// PR #858, but every folder last scanned BEFORE that deploy still carries the default "unknown"
-// address status and reads as "inconclusive" on the dashboard until the next DEEP cron happens to
-// re-scan it (7-day cadence). A full deep re-scan just to populate the address columns would waste
-// ~30 Lens calls per folder; this backfill spends only the ~3-6 SERPs the address leg needs and
-// preserves the existing photo result verbatim. Returns null (no write) when the address leg is
-// disabled, there's no prior photo row, the folder has no unit identity, or no street is resolvable.
-export async function runAddressOnlyCheckForFolder(folder: string): Promise<ScanResult | null> {
-  if (PHOTO_LISTING_ADDRESS_SCAN_DISABLED || !SEARCHAPI_KEY) return null;
-  const prior = await storage.getPhotoListingCheckByFolder(folder);
-  if (!prior) return null; // first-time scan belongs to runPhotoListingCheckForFolder (it owns photos)
-  const rawVerifyTokens = await dynamicVerificationTokensForFolder(folder);
-  if (!rawVerifyTokens || rawVerifyTokens.length === 0) return null;
-  const allowUnverifiedStandalone = rawVerifyTokens.includes(STANDALONE_DRAFT_NO_UNIT_TOKEN);
-  const verifyTokens = rawVerifyTokens.filter((token) => token !== STANDALONE_DRAFT_NO_UNIT_TOKEN);
-  const addrCtx = await folderAddressContext(folder);
-  if (!addrCtx) return null; // no resolvable street — leave the row's address columns as-is
-
-  const authorizedUrls = await getAuthorizedChannelUrls();
-  const addressVerifyCache = new Map<string, boolean>();
-  const verifyUnitForAddress = async (url: string): Promise<boolean> => {
-    const cached = addressVerifyCache.get(url);
-    if (cached !== undefined) return cached;
-    for (const token of verifyTokens) {
-      if (await verifyUrlMentionsUnit(url, token)) {
-        addressVerifyCache.set(url, true);
-        return true;
-      }
-    }
-    addressVerifyCache.set(url, false);
-    return false;
-  };
-
-  const addr = await checkAddressOnOtas(addrCtx, {
-    authorizedUrls,
-    allowUnverifiedStandalone,
-    verifyUnit: verifyUnitForAddress,
-  });
-
-  // Outage preservation for the address leg: if every platform's SERP failed, keep the prior address
-  // statuses/matches rather than repainting a known red/green to gray.
-  const priorAddr = {
-    airbnb:  (prior as any).airbnbAddressStatus  as PlatformStatus | undefined,
-    vrbo:    (prior as any).vrboAddressStatus    as PlatformStatus | undefined,
-    booking: (prior as any).bookingAddressStatus as PlatformStatus | undefined,
-  };
-  const pick = (fresh: PlatformStatus, p?: PlatformStatus): PlatformStatus =>
-    (!addr.anySucceeded && fresh === "unknown" && p) ? p : fresh;
-
-  const addressMatches = (!addr.anySucceeded && addr.matches.length === 0)
-    ? parseStoredAddressMatches((prior as any).addressMatches)
-    : addr.matches.slice(0, 15);
-
-  // Merge: keep the prior PHOTO verdict + matches + photo error verbatim; write only the address leg.
-  await storage.upsertPhotoListingCheck({
-    photoFolder: folder,
-    airbnbStatus:  prior.airbnbStatus,
-    vrboStatus:    prior.vrboStatus,
-    bookingStatus: prior.bookingStatus,
-    airbnbMatches:  prior.airbnbMatches  ?? null,
-    vrboMatches:    prior.vrboMatches    ?? null,
-    bookingMatches: prior.bookingMatches ?? null,
-    airbnbAddressStatus:  pick(addr.statuses.airbnb,  priorAddr.airbnb),
-    vrboAddressStatus:    pick(addr.statuses.vrbo,    priorAddr.vrbo),
-    bookingAddressStatus: pick(addr.statuses.booking, priorAddr.booking),
-    addressMatches: addressMatches.length ? JSON.stringify(addressMatches) : null,
-    photosChecked: prior.photosChecked ?? 0,
-    lensCalls: prior.lensCalls ?? 0, // address-only — spent no NEW Lens calls
-    errorMessage: prior.errorMessage ?? null,
-  });
-
-  return {
-    folder,
-    airbnbStatus:  prior.airbnbStatus  as PlatformStatus,
-    vrboStatus:    prior.vrboStatus    as PlatformStatus,
-    bookingStatus: prior.bookingStatus as PlatformStatus,
-    airbnbMatches: [], vrboMatches: [], bookingMatches: [],
-    airbnbAddressStatus:  pick(addr.statuses.airbnb,  priorAddr.airbnb),
-    vrboAddressStatus:    pick(addr.statuses.vrbo,    priorAddr.vrbo),
-    bookingAddressStatus: pick(addr.statuses.booking, priorAddr.booking),
-    addressMatches,
-    photosChecked: prior.photosChecked ?? 0,
-    lensCalls: 0,
-  };
-}
-
-// Backfill the address leg across folders whose address status is still "unknown" (default: every such
-// folder with an existing photo row). Cheap relative to a deep re-scan — one address-only check per
-// folder. Sequential with a pause to stay under SearchAPI rate limits. Fire-and-forget from the admin
-// endpoint; returns a small tally for the manual/smoke caller.
-export async function runAddressBackfill(
-  opts: { folders?: string[]; pauseMs?: number; max?: number } = {},
-): Promise<{ scanned: number; updated: number; found: number }> {
-  let folders = opts.folders;
-  if (!folders) {
-    const rows = await storage.getAllPhotoListingChecks();
-    folders = rows
-      .filter((r) =>
-        [(r as any).airbnbAddressStatus, (r as any).vrboAddressStatus, (r as any).bookingAddressStatus]
-          .every((s) => (s ?? "unknown") === "unknown"),
-      )
-      .map((r) => r.photoFolder);
-  }
-  const pause = opts.pauseMs ?? 1200;
-  let scanned = 0, updated = 0, found = 0;
-  for (let i = 0; i < folders.length; i++) {
-    if (opts.max && scanned >= opts.max) break;
-    const f = folders[i];
-    try {
-      const r = await runAddressOnlyCheckForFolder(f);
-      scanned++;
-      if (r) {
-        updated++;
-        const anyFound = [r.airbnbAddressStatus, r.vrboAddressStatus, r.bookingAddressStatus].includes("found");
-        if (anyFound) found++;
-        console.error(`[photo-listing-scanner] address-backfill ${f}: a=${r.airbnbAddressStatus} v=${r.vrboAddressStatus} b=${r.bookingAddressStatus}`);
-      }
-    } catch (e: any) {
-      console.error(`[photo-listing-scanner] address-backfill ${f} crashed: ${e?.message}`);
-    }
-    if (i < folders.length - 1) await new Promise((rr) => setTimeout(rr, pause));
-  }
-  console.error(`[photo-listing-scanner] address-backfill done: ${updated}/${scanned} updated, ${found} found`);
-  return { scanned, updated, found };
 }
 
 // Returns folders that have photos (label rows or files on disk) AND
@@ -1699,11 +1157,11 @@ export async function runPhotoListingCheckForFolders(
 // request; override with PHOTO_LISTING_SCAN_INTERVAL_DAYS), runs a fresh
 // check. 2026-06-29: each stale folder now gets a DEEP scan
 // (PHOTO_LISTING_SCAN_MAX_PHOTOS, default = the full deduped interior
-// gallery) PLUS the address-on-OTA leg, so the unattended weekly audit has
-// the same ~95-100% recall as the on-demand deep button — not the old
-// 3-photo screen. Budgeted at up to PHOTO_LISTING_SCAN_MAX_PHOTOS Lens
-// calls + ~3 verification SERPs + 3 address SERPs per folder; tune depth
-// via PHOTO_LISTING_SCAN_MAX_PHOTOS. The 7-day default supersedes the
+// gallery), so the unattended weekly audit has the same ~95-100% recall
+// as the on-demand deep button — not the old 3-photo screen. Budgeted at
+// up to PHOTO_LISTING_SCAN_MAX_PHOTOS Lens calls + ~3 verification SERPs
+// per folder; tune depth via PHOTO_LISTING_SCAN_MAX_PHOTOS. The 7-day
+// default supersedes the
 // prior 24h daily cadence; the dashboard "Scanned" column shows each
 // property's most-recent folder checkedAt so a missed weekly run is
 // visible (it renders amber once older than the cadence).
@@ -1721,8 +1179,8 @@ export function startPhotoListingScheduler(maxAgeMs = PHOTO_LISTING_SCAN_MAX_AGE
       console.error(`[photo-listing-scanner] tick: ${stale.length}/${known.length} folders stale — scanning (deep, maxPhotos=${PHOTO_LISTING_SCAN_MAX_PHOTOS})`);
       // The scheduler is the UNATTENDED path, so it reacts to NEW detections: a platform flipping
       // to "found" queues the auto-fix audit sweep (cron rails: cooldown/budget/proven-shortfall)
-      // and texts the operator; a new address-on-OTA hit texts the takedown heads-up. On-demand
-      // scans deliberately don't react — the operator (or the audit sweep itself) is already there.
+      // and texts the operator. On-demand scans deliberately don't react — the operator (or the
+      // audit sweep itself) is already there.
       await runPhotoListingCheckForFolders(stale, {
         maxPhotos: PHOTO_LISTING_SCAN_MAX_PHOTOS,
         onNewDetection: reactToPhotoListingDetections,

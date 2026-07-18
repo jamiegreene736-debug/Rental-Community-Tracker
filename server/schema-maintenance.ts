@@ -225,14 +225,19 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured property_market_rates monthly_rates column");
 
+  // Address-on-OTA detection REMOVED 2026-07-18 (the clubhouse published
+  // address made the address-theft signal moot). Drop the leg's four columns
+  // so the live DB matches shared/schema.ts again — without this, drizzle-kit
+  // push sees a destructive diff on every boot and aborts (non-interactive),
+  // leaving db:push permanently dirty. Idempotent; a fresh DB has no-op drops.
   await db.execute(sql`
     ALTER TABLE photo_listing_checks
-      ADD COLUMN IF NOT EXISTS airbnb_address_status text NOT NULL DEFAULT 'unknown',
-      ADD COLUMN IF NOT EXISTS vrbo_address_status text NOT NULL DEFAULT 'unknown',
-      ADD COLUMN IF NOT EXISTS booking_address_status text NOT NULL DEFAULT 'unknown',
-      ADD COLUMN IF NOT EXISTS address_matches text
+      DROP COLUMN IF EXISTS airbnb_address_status,
+      DROP COLUMN IF EXISTS vrbo_address_status,
+      DROP COLUMN IF EXISTS booking_address_status,
+      DROP COLUMN IF EXISTS address_matches
   `);
-  console.log("[schema] ensured photo_listing_checks address-on-OTA columns");
+  console.log("[schema] dropped photo_listing_checks address-on-OTA columns (leg removed 2026-07-18)");
 
   await db.execute(sql`
     ALTER TABLE community_drafts

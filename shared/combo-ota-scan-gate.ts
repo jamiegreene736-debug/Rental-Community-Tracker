@@ -1,11 +1,11 @@
 // Decision logic for the bulk combo queue's POST-SAVE OTA deep scan gate.
 //
-// The photo-sourcing stage already OTA-preflights each candidate (3-photo Lens +
-// address SERP), but that is a cheap screen over a slice of the gallery. After
-// the draft's photos are persisted, the queue runs the SAME deep scanner the
-// dashboard Photos column / weekly cron use (`runPhotoListingCheckForFolders`,
-// full deduped gallery + address leg) over `draft-<id>-unit-a/-unit-b` and feeds
-// the per-platform verdicts through this pure gate.
+// The photo-sourcing stage already OTA-preflights each candidate, but that is a
+// cheap screen over a slice of the gallery. After the draft's photos are
+// persisted, the queue runs the SAME deep scanner the dashboard Photos column /
+// weekly cron use (`runPhotoListingCheckForFolders`, full deduped gallery) over
+// `draft-<id>-unit-a/-unit-b` and feeds the per-platform verdicts through this
+// pure gate.
 //
 // POSTURE (mirrors shared/combo-photo-community-gate.ts — an explicit operator
 // decision, 2026-07-06): skip ONLY on a POSITIVE `found`; anything the scanner

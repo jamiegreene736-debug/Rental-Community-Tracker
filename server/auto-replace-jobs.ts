@@ -20,7 +20,7 @@
 
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
-import { parseStreetCityState } from "@shared/address-listing-logic";
+import { parseStreetCityState } from "@shared/address-parse";
 import {
   collectUnitSwapSkipUrls,
   latestUnitSwapsByUnit,

@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-18 (address-on-OTA detection REMOVED — photo detection is the only theft signal now):
+  Operator: with the clubhouse published address on every listing (2026-07-17), "we no longer need
+  to see if someone is listing our units address … remove the address check/found alerts and icons
+  from the dashboard and anywhere else". SHIPPED (`claude/remove-address-detection-8cmwgw`): the
+  scanner's whole address leg is gone — per-platform `site:` SERPs, deep-fetch recall, coordinate
+  cross-check, geocode street fallback, the address-only backfill + its
+  POST /api/photo-listing-check/address-backfill endpoint, the 4 `photo_listing_checks` address
+  columns (schema-maintenance now DROPs them idempotently on boot — REQUIRED so drizzle-kit push
+  returns to a clean diff; never re-ADD), `shared/address-listing-logic.ts` / `address-page-match.ts`
+  / `address-geo-match.ts` / `address-alert-warning.ts` + their 4 test suites, the dashboard 📍
+  A/V/B mini-row + "Addr on …" line + orange address-alert banner/popup + scan-modal address
+  dots/legend, the address-found operator SMS, the audit sweep's address verdicts (OTA stage +
+  photo-fix trigger are photo-only), and all `PHOTO_LISTING_ADDRESS_*` env knobs (now inert).
+  KEPT — don't re-remove: `parseStreetCityState` moved VERBATIM to NEW `shared/address-parse.ts`
+  (published-address + unit-audit-sweep + auto-replace-jobs import it for TARGET street/city
+  resolution — unrelated to detection; tests/address-parse.test.ts carries its 7 cases), and the
+  CANDIDATE-side OTA screens (`server/combo-ota-preflight.ts`, routes' `runOtaQualifier`) keep
+  their own address searches — those qualify OTHER people's units as photo-sourcing candidates,
+  a different system. `decidePlatformStatus` lost its vestigial `hasAddressHit` input. Legacy rows
+  with an "Address search unavailable" errorMessage stay NOT-inconclusive (test-locked). See the
+  AGENTS.md "Photo OTA detection audit" section + the 2026-07-18 Decision Log line. Verified:
+  full `npm test` REAL exit 0, build clean (all detection strings — address-alert popup copy,
+  "Addr on", the backfill endpoint, the env knobs — grepped GONE from both bundles; photo-leg
+  strings intact; the one surviving 📍 is photo-community-check-report's source-page location
+  glyph, a different feature), `npm run check` per-file error sets identical to the 334-error
+  baseline.
+
 - 2026-07-17 (preflight "Find new photos" → SAME-UNIT cross-portal hunt + "Find replacement unit"
   CTA): Operator: the button "should just try to find photos of the same unit" (clicked when the
   scraped photos are crappy quality / missing bedroom shots); if it can't find different photos for
