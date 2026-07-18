@@ -2466,9 +2466,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // files stay on disk) so the Undo button can restore everything. The
   // request-building callback lives after `photos` because it reads the array.
   type DedupeGroupMemberView = { filename: string; caption: string | null; category: string | null; keep: boolean; humanTouched: boolean };
-  type DedupeGroupView = { id: string; folder: string; kind: "exact" | "near" | "same-scene"; reason: string; members: DedupeGroupMemberView[] };
-  type DedupeFolderView = { folder: string; label: string; totalVisible: number; scannedForVision: number; visionUsed: boolean; visionError: string | null; groups: DedupeGroupView[] };
-  type DedupeProposalView = { scanId: string; folders: DedupeFolderView[]; groupCount: number; removableCount: number; visionUsed: boolean; warnings: string[]; note?: string };
+  type DedupeGroupView = { id: string; folder: string; kind: "exact" | "near" | "same-scene" | "review"; reason: string; members: DedupeGroupMemberView[] };
+  // visionComplete/visionEligible/visionBatchCount were always on the wire but
+  // were omitted here, so the tab could not tell a fully-checked gallery from a
+  // partially-checked one and rendered the same green verdict for both.
+  type DedupeFolderView = {
+    folder: string; label: string; totalVisible: number; scannedForVision: number;
+    visionEligible: number; visionBatchCount: number; visionComplete: boolean;
+    visionUsed: boolean; visionError: string | null;
+    groups: DedupeGroupView[]; reviewGroups?: DedupeGroupView[];
+  };
+  type DedupeProposalView = { scanId: string; folders: DedupeFolderView[]; groupCount: number; removableCount: number; reviewGroupCount?: number; visionUsed: boolean; warnings: string[]; note?: string };
   type DedupePhase = "idle" | "running" | "done" | "error";
   const [dedupePhase, setDedupePhase] = useState<DedupePhase>("idle");
   const [dedupeResult, setDedupeResult] = useState<DedupeProposalView | null>(null);
@@ -4602,6 +4610,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setDedupePhase("error");
     }
   }, [photos]);
+
+  // Toggle one photo in the removal selection, enforcing the keep-one guard
+  // across EVERY group in that folder which contains the photo — not just the
+  // group whose checkbox was clicked. A filename can legitimately sit in both a
+  // confirmed group and a review group, so a per-group check let the operator
+  // build a selection the client accepted and the server then rejected with an
+  // unactionable "group <id> would lose ALL its photos". The server still
+  // re-enforces this; this only keeps the UI from offering an invalid state.
+  const toggleDedupePhoto = useCallback((folder: string, filename: string) => {
+    setDedupeSelected((prev) => {
+      const key = `${folder}/${filename}`;
+      const next = new Set(prev);
+      if (next.has(key)) { next.delete(key); return next; }
+      const f = dedupeResult?.folders.find((x) => x.folder === folder);
+      const allGroups = [...(f?.groups ?? []), ...(f?.reviewGroups ?? [])];
+      for (const g of allGroups) {
+        if (!g.members.some((m) => m.filename === filename)) continue;
+        const unselected = g.members.filter((m) => !next.has(`${folder}/${m.filename}`));
+        if (unselected.length <= 1) return prev;
+      }
+      next.add(key);
+      return next;
+    });
+  }, [dedupeResult]);
 
   const applyDedupeRemoval = useCallback(async () => {
     if (!dedupeResult) return;
@@ -9327,7 +9359,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 {dedupePhase === "running" && (
                                   <div style={{ fontSize: 11, color: "#854d0e", marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
                                     <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#eab308", animation: "glb-blink 1s infinite" }} />
-                                    Comparing every photo in each gallery (perceptual hash + Claude vision same-scene pass) — usually under a minute…
+                                    Comparing every photo in every gallery on this tab by perceptual hash, plus a Claude vision pass for repeat shots of the same subject from another angle. The per-gallery result below reports exactly what each pass covered. Large galleries take a few minutes…
                                   </div>
                                 )}
 
@@ -9335,10 +9367,155 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <div style={{ fontSize: 12, color: "#b91c1c", marginTop: 8 }}>✗ {dedupeError}</div>
                                 )}
 
-                                {dedupePhase === "done" && dedupeResult && dedupeResult.groupCount === 0 && (
-                                  <div style={{ fontSize: 12, color: "#166534", marginTop: 8 }}>
-                                    ✓ No duplicate or redundant photos found across {dedupeResult.folders.reduce((s, f) => s + f.totalVisible, 0)} photos.
-                                    {dedupeResult.note && <div style={{ color: "#92400e", marginTop: 4 }}>⚠ {dedupeResult.note}</div>}
+                                {/* COVERAGE RECEIPT — rendered for every completed scan, whatever the
+                                    outcome. Two reasons: (1) it is the operator's proof that BOTH unit
+                                    galleries and the community folder were actually scanned (clean
+                                    folders used to be filtered out entirely, so a silently-missing unit
+                                    looked identical to a clean one); (2) `warnings` and `note` used to
+                                    render ONLY on the groups-found branch, so a gallery whose AI pass
+                                    errored or came up short showed a bare green pass — the exact
+                                    false-clean this panel must never produce. */}
+                                {dedupePhase === "done" && dedupeResult && (
+                                  <div style={{ marginTop: 8, fontSize: 11 }}>
+                                    <div style={{ color: "#334155", fontWeight: 600, marginBottom: 3 }}>
+                                      Scanned {dedupeResult.folders.length} galler{dedupeResult.folders.length === 1 ? "y" : "ies"} · {dedupeResult.folders.reduce((s, f) => s + f.totalVisible, 0)} photos
+                                    </div>
+                                    {dedupeResult.folders.map((f) => {
+                                      const seen = Math.min(f.scannedForVision ?? 0, f.totalVisible);
+                                      const full = f.totalVisible < 2 || (f.visionComplete && !f.visionError);
+                                      return (
+                                        <div key={f.folder} style={{ color: full ? "#64748b" : "#b45309", marginBottom: 2 }}
+                                          data-testid={`dedupe-coverage-${f.folder}`}>
+                                          {full ? "✓" : "⚠"} {f.label} · {f.totalVisible} photo{f.totalVisible === 1 ? "" : "s"}
+                                          {" · "}
+                                          {f.visionError
+                                            ? (f.visionBatchCount > 0
+                                              ? `every photo hash-checked; AI angle pass stopped early after ${f.visionBatchCount} pass${f.visionBatchCount === 1 ? "" : "es"} (${f.visionError})`
+                                              : `duplicate-copy check only (AI angle pass unavailable: ${f.visionError})`)
+                                            : f.totalVisible < 2
+                                              ? "nothing to compare"
+                                              : full
+                                                ? "every photo and every pair checked"
+                                                : seen >= f.totalVisible
+                                                  // Every photo was seen, but across separate batches — so
+                                                  // a repeat between two distant photos can still be missed.
+                                                  ? `every photo hash-checked; AI angle pass saw all ${f.totalVisible} across ${f.visionBatchCount} batches, but not every pair together`
+                                                  : `every photo hash-checked; AI angle pass saw ${seen} of ${f.totalVisible}`}
+                                        </div>
+                                      );
+                                    })}
+                                    {dedupeResult.note && (
+                                      <div style={{ color: "#92400e", marginTop: 4 }}>⚠ {dedupeResult.note}</div>
+                                    )}
+                                    {(dedupeResult.warnings ?? []).map((w, i) => (
+                                      <div key={i} style={{ color: "#92400e", marginTop: 2 }}>⚠ {w}</div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {dedupePhase === "done" && dedupeResult && dedupeResult.groupCount === 0 && (() => {
+                                  const fullyChecked = dedupeResult.folders.every(
+                                    (f) => f.totalVisible < 2 || (f.visionComplete && !f.visionError),
+                                  );
+                                  const total = dedupeResult.folders.reduce((s, f) => s + f.totalVisible, 0);
+                                  return (
+                                    <div style={{ fontSize: 12, color: fullyChecked ? "#166534" : "#92400e", marginTop: 8 }}>
+                                      {fullyChecked
+                                        ? `✓ No duplicate or repeat-angle photos found across ${total} photos.`
+                                        : `✓ No duplicate copies found across ${total} photos — but the AI repeat-angle pass did not cover everything (see above), so repeat angles may remain.`}
+                                    </div>
+                                  );
+                                })()}
+
+                                {/* REVIEW TIER — possible repeat angles the engine deliberately
+                                    refuses to propose: the AI wasn't certain, or a category /
+                                    bedroom-cluster guard held the merge back. Before this existed they
+                                    were dropped silently, which is how "the same tree from a different
+                                    angle" could survive a scan that reported the gallery clean. Nothing
+                                    here is pre-selected and the weekly sweep can never auto-hide it. */}
+                                {dedupePhase === "done" && dedupeResult && dedupeApplyPhase !== "applied"
+                                  && dedupeResult.folders.some((f) => (f.reviewGroups ?? []).length > 0) && (
+                                  <div style={{ marginTop: 10, padding: 8, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6 }}>
+                                    <div style={{ fontSize: 12, color: "#92400e", marginBottom: 6 }} data-testid="dedupe-review-header">
+                                      <b>Possible repeat shots — your call.</b> These look like they might be the same subject from another angle, but the check wasn't confident enough to propose removing them. Nothing is selected; tick anything you agree is a repeat.
+                                    </div>
+                                    {dedupeResult.folders.filter((f) => (f.reviewGroups ?? []).length > 0).map((f) => (
+                                      <div key={f.folder} style={{ marginBottom: 8 }}>
+                                        <div style={{ fontSize: 12, fontWeight: 600, color: "#0f172a", margin: "6px 0 4px" }}>
+                                          {f.label} <span style={{ color: "#94a3b8", fontWeight: 400 }}>· {(f.reviewGroups ?? []).length} to review</span>
+                                        </div>
+                                        {(f.reviewGroups ?? []).map((g) => (
+                                          <div key={g.id} style={{ border: "1px solid #fde68a", background: "#fff", borderRadius: 6, padding: 8, marginBottom: 6 }}>
+                                            <div style={{ fontSize: 11, color: "#475569", marginBottom: 6 }}>
+                                              <span style={{ display: "inline-block", padding: "1px 6px", borderRadius: 999, marginRight: 6, fontWeight: 600, background: "#fef3c7", color: "#92400e" }}>
+                                                possible repeat
+                                              </span>
+                                              {g.reason}
+                                            </div>
+                                            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                              {g.members.map((m) => {
+                                                const key = `${f.folder}/${m.filename}`;
+                                                const selected = dedupeSelected.has(key);
+                                                return (
+                                                  <label key={m.filename} style={{ width: 96, cursor: "pointer", display: "block" }} title={m.caption ?? m.filename}>
+                                                    <div style={{
+                                                      position: "relative", borderRadius: 6, overflow: "hidden",
+                                                      border: selected ? "2px solid #dc2626" : "2px solid #e2e8f0",
+                                                      opacity: selected ? 0.75 : 1,
+                                                    }}>
+                                                      <img src={`/photos/${f.folder}/${m.filename}`} alt={m.caption ?? m.filename}
+                                                        style={{ width: "100%", height: 64, objectFit: "cover", display: "block" }} loading="lazy" />
+                                                      {selected && (
+                                                        <span style={{
+                                                          position: "absolute", top: 2, left: 2, fontSize: 9, fontWeight: 700, padding: "1px 4px",
+                                                          borderRadius: 4, background: "#dc2626", color: "#fff",
+                                                        }}>remove</span>
+                                                      )}
+                                                      {m.humanTouched && (
+                                                        <span title="You edited this photo's caption/category" style={{ position: "absolute", top: 2, right: 2, fontSize: 10 }}>✎</span>
+                                                      )}
+                                                    </div>
+                                                    <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
+                                                      <input
+                                                        type="checkbox"
+                                                        checked={selected}
+                                                        data-testid={`dedupe-review-check-${m.filename}`}
+                                                        onChange={() => toggleDedupePhoto(f.folder, m.filename)}
+                                                      />
+                                                      <span style={{ fontSize: 9, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                        {m.caption || m.filename}
+                                                      </span>
+                                                    </div>
+                                                  </label>
+                                                );
+                                              })}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ))}
+                                    {/* When confirmed groups exist the shared Remove button below covers
+                                        these too (the selection set is shared). With no confirmed groups
+                                        that button isn't rendered, so the review tier needs its own. */}
+                                    {dedupeResult.groupCount === 0 && (
+                                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+                                        <button
+                                          className="glb-btn"
+                                          onClick={applyDedupeRemoval}
+                                          disabled={dedupeSelected.size === 0 || dedupeApplyPhase === "applying"}
+                                          data-testid="btn-photo-dedupe-apply-review"
+                                          style={{ fontSize: 12, background: "#fee2e2", color: "#991b1b", border: "1px solid #fecaca" }}
+                                        >
+                                          {dedupeApplyPhase === "applying" ? "Removing…" : `Remove ${dedupeSelected.size} selected photo${dedupeSelected.size === 1 ? "" : "s"}`}
+                                        </button>
+                                        <span style={{ fontSize: 11, color: "#64748b" }}>
+                                          Removed photos are hidden here and removed from Guesty (files kept on disk) — you can undo right after.
+                                        </span>
+                                      </div>
+                                    )}
+                                    {dedupeResult.groupCount === 0 && dedupeApplyPhase === "error" && dedupeApplyError && (
+                                      <div style={{ fontSize: 12, color: "#b91c1c", marginTop: 6 }}>✗ {dedupeApplyError}</div>
+                                    )}
                                   </div>
                                 )}
 
@@ -9348,12 +9525,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                       Found <b>{dedupeResult.groupCount}</b> group{dedupeResult.groupCount === 1 ? "" : "s"} of duplicate / overlapping photos.
                                       {" "}Photos marked <span style={{ color: "#991b1b", fontWeight: 600 }}>remove</span> are pre-selected — the best shot of each group is kept. Nothing is removed until you confirm below.
                                     </div>
-                                    {dedupeResult.note && (
-                                      <div style={{ fontSize: 11, color: "#92400e", marginBottom: 6 }}>⚠ {dedupeResult.note}</div>
-                                    )}
-                                    {dedupeResult.warnings.map((w, i) => (
-                                      <div key={i} style={{ fontSize: 11, color: "#92400e", marginBottom: 4 }}>⚠ {w}</div>
-                                    ))}
+                                    {/* note + warnings render once in the coverage receipt above,
+                                        on every branch — do not re-add them here. */}
                                     {dedupeResult.folders.filter((f) => f.groups.length > 0).map((f) => (
                                       <div key={f.folder} style={{ marginBottom: 8 }}>
                                         <div style={{ fontSize: 12, fontWeight: 600, color: "#0f172a", margin: "6px 0 4px" }}>
@@ -9397,21 +9570,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                                       <input
                                                         type="checkbox"
                                                         checked={selected}
-                                                        onChange={() => {
-                                                          setDedupeSelected((prev) => {
-                                                            const next = new Set(prev);
-                                                            if (next.has(key)) next.delete(key);
-                                                            else {
-                                                              // Keep-one guard in the UI too: refuse to select the
-                                                              // last unselected member of this group (the server
-                                                              // enforces it again on apply).
-                                                              const unselected = g.members.filter((x) => !next.has(`${f.folder}/${x.filename}`));
-                                                              if (unselected.length <= 1) return prev;
-                                                              next.add(key);
-                                                            }
-                                                            return next;
-                                                          });
-                                                        }}
+                                                        onChange={() => toggleDedupePhoto(f.folder, m.filename)}
                                                       />
                                                       <span style={{ fontSize: 9, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                                         {m.caption || m.filename}
