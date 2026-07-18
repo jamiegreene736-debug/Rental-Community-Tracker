@@ -246,7 +246,7 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
       const outputHeight = outputMetadata.autoOrient?.height ?? outputMetadata.height;
       const outputAspectRatio = outputWidth / outputHeight;
       if (Math.abs(outputAspectRatio / sourceAspectRatio - 1) > 0.03) {
-        throw new Error("Replicate changed the source crop or aspect ratio too much to review safely");
+        throw new Error("Replicate changed the source aspect ratio too much to review safely");
       }
       const buffer = await sharp(rawOutput, { failOn: "error" })
         .rotate()
