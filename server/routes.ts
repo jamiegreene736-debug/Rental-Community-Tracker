@@ -101,6 +101,7 @@ import { upgradeListingPhotoUrlResolution } from "@shared/listing-photo-resoluti
 import { selectInboxAlternativePage, summarizeAlternativePagePayload } from "@shared/alternative-page-inbox";
 import { proxiedGuestPhotoUrl, registerGuestPhotoRoute } from "./guest-photo-upscale";
 import { parseListingAddressFromUrl, parseListingAddressFromText, streetRootFromListingAddress } from "@shared/listing-url-address";
+import { learnSiblingStreetRootsFromRejects, type RejectedDiscoveryResult } from "@shared/discovery-root-rescue";
 import {
   MAX_FULL_GALLERY_OPTIONS,
   buildEquivalentPortalQueries,
@@ -35912,7 +35913,14 @@ Return ONLY compact JSON with this exact shape:
       if (!link) return;
       const lower = unitSwapListingKey(link);
       if (!lower || candidateUrlSet.has(lower) || skipUrlSet.has(lower)) return;
-      if (allowedRoots && allowedRoots.size > 0 && !candidateRootMatches(link, allowedRoots, contextText)) return;
+      if (allowedRoots && allowedRoots.size > 0 && !candidateRootMatches(link, allowedRoots, contextText)) {
+        // Remember the rejection for the sibling-root rescue (fires only on a
+        // total gate strikeout — see the rescue block after the discovery loop).
+        if (rejectedRootGateResults.length < ROOT_RESCUE_REJECT_CAP) {
+          rejectedRootGateResults.push({ link, source, contextText, thumbnail });
+        }
+        return;
+      }
       const detected = detectSource(link);
       if (detected !== source) return;
       let unitNumber = extractUnitNumber(link, source, contextText);
@@ -35941,6 +35949,7 @@ Return ONLY compact JSON with this exact shape:
         return;
       }
       candidateUrlSet.add(lower);
+      if (allowedRoots && allowedRoots.size > 0) rootGateAdmissions += 1;
       candidates.push({
         sourceUrl: link,
         source,
@@ -36206,6 +36215,15 @@ Return ONLY compact JSON with this exact shape:
     const suppliedStreetRoot = streetRootFromListingAddress(canonicalStreet || communityAddress);
     let discoveryOrganicHits = 0;
     let discoveryFilteredHits = 0;
+    // Sibling-root rescue bookkeeping (shared/discovery-root-rescue.ts): remember
+    // what the resort-street gate rejected so that, on a TOTAL strikeout (zero
+    // admissions — the wrong-configured-street-number signature, e.g. Wavecrest's
+    // directory "8001 Kamehameha V Hwy" vs the real 7142/7146 building addresses),
+    // name-anchored recurring sibling roots can be learned and the rejects replayed.
+    const ROOT_RESCUE_REJECT_CAP = 500;
+    const rejectedRootGateResults: RejectedDiscoveryResult[] = [];
+    let rootGateAdmissions = 0;
+    let rescuedSiblingRoots: string[] = [];
 
     const runDiscoveryQuery = async (siteQuery: string) => {
       console.error(`[find-unit] Searching: ${siteQuery}`);
@@ -36435,6 +36453,46 @@ Return ONLY compact JSON with this exact shape:
             console.error(`[find-unit] Search error for "${siteQuery}": ${e?.message}`);
           }
         }));
+      }
+
+      // SIBLING-ROOT RESCUE (shared/discovery-root-rescue.ts): when the resort-
+      // street gate admitted ZERO candidates but rejected real listing links, the
+      // configured street number is likely wrong (a directory/maps address no
+      // portal indexes under — the Wavecrest "8001 vs 7142 Kamehameha V Hwy"
+      // class). Learn the resort's real building roots from rejected results
+      // whose title/snippet NAMES the community and whose URL address shares the
+      // configured street name+type (number-only difference, >=2 distinct
+      // listings, lot-significant streets excluded), then replay the rejects
+      // through the widened gate. Runs BEFORE the second-wave street-root
+      // expansion so learned roots also drive those queries.
+      if (
+        rootGateAdmissions === 0
+        && rejectedRootGateResults.length > 0
+        && directAllowedRoots
+        && directAllowedRoots.size > 0
+      ) {
+        const rescue = learnSiblingStreetRootsFromRejects({
+          communityNames: [communityName, ...discoveryCommunityNames],
+          allowedRoots: directAllowedRoots,
+          rejects: rejectedRootGateResults,
+        });
+        if (rescue.roots.length > 0) {
+          rescuedSiblingRoots = rescue.roots;
+          for (const root of rescue.roots) {
+            directAllowedRoots.add(root);
+            communityAddressRoots.add(root);
+          }
+          console.error(
+            `[find-unit] sibling-root rescue: configured street root(s) rejected every discovery hit; ` +
+            `learned ${rescue.roots.join(", ")} from ${rescue.anchoredRejects} community-named listing link(s) — replaying rejected results`,
+          );
+          const replay = rejectedRootGateResults.splice(0, rejectedRootGateResults.length);
+          const beforeReplay = candidates.length;
+          for (const r of replay) {
+            addCandidateUrl(r.link, r.source as CandidateSource, r.contextText, r.thumbnail ?? "", directAllowedRoots);
+          }
+          console.error(`[find-unit] sibling-root rescue admitted ${candidates.length - beforeReplay} candidate(s) (${candidates.length} total)`);
+        }
       }
 
       // Second-wave Google queries scoped to known/discovered resort street
@@ -37391,7 +37449,10 @@ Return ONLY compact JSON with this exact shape:
     let diagnostic: string;
     if (totalCandidates === 0) {
       if (discoveryOrganicHits > 0 && discoveryFilteredHits > 0) {
-        diagnostic = `Google returned ${discoveryOrganicHits} listing link(s) for "${communityAddress}" / "${communityName}", but all ${discoveryFilteredHits} were filtered out because they did not match the resort street (${Array.from(directAllowedRoots ?? []).join(", ") || communityAddress}). Try Expand Search or verify the community street on the draft.`;
+        const rescueNote = rescuedSiblingRoots.length > 0
+          ? ` (auto-learned sibling street root(s) ${rescuedSiblingRoots.join(", ")} from community-named listings, but no candidate survived the later checks)`
+          : ` No community-named listings on a sibling street number were found either, so the street itself may be wrong.`;
+        diagnostic = `Google returned ${discoveryOrganicHits} listing link(s) for "${communityAddress}" / "${communityName}", but all ${discoveryFilteredHits} were filtered out because they did not match the resort street (${Array.from(directAllowedRoots ?? []).join(", ") || communityAddress}).${rescueNote} Try Expand Search or verify the community street on the draft.`;
       } else {
         diagnostic = `Google's site:zillow.com / site:realtor.com / site:redfin.com${cleanChannel && cleanChannel !== "vrbo" ? " / site:vrbo.com" : ""} searches all returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
       }
