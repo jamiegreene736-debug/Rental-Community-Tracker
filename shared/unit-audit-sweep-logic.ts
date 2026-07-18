@@ -533,7 +533,7 @@ export function unitAuditBadge(
 //     never-empty-folder), so ↺ Undo stays real and the receipt lists every
 //     hidden file. AUDIT_DEDUPE_SAME_SCENE=0 restores review-only.
 export type DedupeAutoFixGroupInput = {
-  kind: "exact" | "near" | "same-scene";
+  kind: "exact" | "near" | "same-scene" | "review";
   folder: string;
   members: Array<{ filename: string; keep: boolean }>;
 };
@@ -552,6 +552,13 @@ export function dedupeAutoFixSelections(
   let hashGroupCount = 0;
   let sameSceneCount = 0;
   for (const g of groups ?? []) {
+    // "review" = operator-eyes-only possible repeats. The sweep must NEVER
+    // auto-hide them: they are the cases the engine was deliberately unsure
+    // about. Guarded here as well as at the source (the sweep's summarize()
+    // partitions with positive kind checks, so review groups never reach this
+    // function, and every review member carries keep:true so even a leak
+    // removes nothing) — three independent barriers, cheapest one first.
+    if (g.kind === "review") continue;
     if (g.kind === "same-scene") {
       sameSceneCount += 1;
       if (!includeSameScene) continue;

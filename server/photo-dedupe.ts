@@ -28,6 +28,7 @@ import { computeDhash } from "./photo-hashing";
 import {
   buildDedupeVisionInstruction,
   buildCompleteVisionBatchPlan,
+  buildManualVisionBatchPlan,
   buildDuplicateGroupsForFolder,
   clusterHashPairs,
   parseDedupeVisionGroups,
@@ -58,6 +59,24 @@ const COMPLETE_VISION_MAX_BATCHES = (() => {
   const n = Number(process.env.PHOTO_DEDUPE_COMPLETE_MAX_BATCHES || 12);
   return Number.isFinite(n) && n >= 1 ? Math.min(30, Math.floor(n)) : 12;
 })();
+// Manual Photos-tab scans get real multi-call coverage for oversized folders
+// (see buildManualVisionBatchPlan) but a MUCH smaller per-folder budget than
+// strict automation. This is a latency guard, not a spend guard: the manual
+// scan is a single synchronous HTTP response, and Railway's edge hard-cuts any
+// response at 15 minutes (documented repo-wide). A typical 2-unit property is
+// 3 folders; at 4 batches x 120s worst case that is already the ceiling, which
+// is why SCAN_BUDGET_MS below stops adding calls well before the edge cap.
+const MANUAL_VISION_MAX_BATCHES = (() => {
+  const n = Number(process.env.PHOTO_DEDUPE_MANUAL_MAX_BATCHES || 4);
+  return Number.isFinite(n) && n >= 1 ? Math.min(12, Math.floor(n)) : 4;
+})();
+// Wall-clock ceiling for the vision legs of ONE manual scan, across all
+// folders. Past this the remaining folders fall back to hash-only and say so —
+// an honest partial result always beats a response the edge silently cuts.
+const MANUAL_SCAN_BUDGET_MS = (() => {
+  const n = Number(process.env.PHOTO_DEDUPE_SCAN_BUDGET_MS || 8 * 60_000);
+  return Number.isFinite(n) && n >= 30_000 ? Math.floor(n) : 8 * 60_000;
+})();
 // Images are downscaled for the vision call — scene identity doesn't need
 // full resolution, and 60 full-res photos would blow the request size.
 const VISION_IMAGE_WIDTH = 640;
@@ -83,6 +102,12 @@ export type DedupeScanGroupInput = {
 export type DedupeScanOptions = {
   /** Compare every visible photo pair with Claude or report incomplete. */
   requireCompleteVision?: boolean;
+  /**
+   * Epoch ms after which the manual path stops issuing new vision calls and
+   * reports partial coverage. Guards the synchronous HTTP response against
+   * Railway's 15-minute edge cut. Ignored for strict automation.
+   */
+  deadlineAt?: number;
 };
 
 // ── Scan store (apply validates against the stored proposal) ───────────────
@@ -169,15 +194,12 @@ async function callDedupeVision(
   return JSON.parse(match[0]);
 }
 
-function evenSampleIndices(n: number, cap: number): number[] {
-  if (n <= 0) return [];
-  if (n <= cap) return Array.from({ length: n }, (_, i) => i);
-  const out = new Set<number>();
-  for (let i = 0; i < cap; i++) {
-    out.add(Math.min(n - 1, Math.round((i * (n - 1)) / (cap - 1))));
-  }
-  return Array.from(out).sort((a, b) => a - b);
-}
+// NOTE FOR CODEX: the even-stride sampler that used to live here is GONE on
+// purpose (2026-07-18). It silently showed Claude 60 of N photos and reported
+// the gallery as scanned, which hid exactly the repeat-angle duplicates this
+// feature exists to find. Batch planning now belongs to
+// buildManualVisionBatchPlan / buildCompleteVisionBatchPlan in
+// shared/photo-dedupe-logic.ts — do not reintroduce a local sampler here.
 
 // ── Scan ────────────────────────────────────────────────────────────────────
 
@@ -260,16 +282,24 @@ async function scanOneFolder(
   if (apiKey && !visionDisabled && entries.length >= 2) {
     const plan = options.requireCompleteVision
       ? buildCompleteVisionBatchPlan(readable.length, VISION_PHOTO_CAP, COMPLETE_VISION_MAX_BATCHES)
-      : {
-          batches: [evenSampleIndices(readable.length, VISION_PHOTO_CAP)],
-          complete: readable.length <= VISION_PHOTO_CAP,
-          error: null,
-        };
+      // Manual path: was ONE evenly-strided sample capped at VISION_PHOTO_CAP,
+      // which showed Claude 60 of 150 photos and never mentioned the other 90.
+      // Now tiered — one call when it fits, exhaustive pair-cover when
+      // affordable, else disjoint chunks so every photo is at least seen.
+      : buildManualVisionBatchPlan(readable.length, VISION_PHOTO_CAP, MANUAL_VISION_MAX_BATCHES);
     if (options.requireCompleteVision && !plan.complete) {
       visionError = plan.error || "complete Claude pair coverage could not be planned";
+    } else if (plan.error) {
+      visionError = plan.error;
     } else {
       const covered = new Set<number>();
       for (let batchIndex = 0; batchIndex < plan.batches.length; batchIndex++) {
+        // Wall-clock guard (manual path only — strict automation runs
+        // in-process as a background sweep with no HTTP response to cut).
+        if (!options.requireCompleteVision && options.deadlineAt != null && Date.now() >= options.deadlineAt) {
+          visionError = `scan time budget reached after ${batchIndex} of ${plan.batches.length} AI passes`;
+          break;
+        }
         const sample = plan.batches[batchIndex].map((i) => readable[i]);
         if (sample.length < 2) continue;
         const idToIndex = new Map<string, number>();
@@ -303,7 +333,7 @@ async function scanOneFolder(
     visionError = "disabled (PHOTO_DEDUPE_VISION_DISABLED=1)";
   }
 
-  const groups = buildDuplicateGroupsForFolder(group.folder, entries, hashPairs, visionGroups);
+  const { groups, reviewGroups } = buildDuplicateGroupsForFolder(group.folder, entries, hashPairs, visionGroups);
 
   return {
     folder: group.folder,
@@ -316,6 +346,7 @@ async function scanOneFolder(
     visionComplete,
     visionError,
     groups,
+    reviewGroups,
   };
 }
 
@@ -325,16 +356,22 @@ export async function scanForDuplicatePhotos(
 ): Promise<PhotoDedupeProposal> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   const folders: DedupeFolderResult[] = [];
+  // One budget for the whole manual scan, so N folders can't each spend the
+  // full allowance and push the response past Railway's edge cut.
+  const effective: DedupeScanOptions = options.requireCompleteVision
+    ? options
+    : { ...options, deadlineAt: options.deadlineAt ?? Date.now() + MANUAL_SCAN_BUDGET_MS };
   for (const g of groups) {
-    folders.push(await scanOneFolder(g, apiKey, options));
+    folders.push(await scanOneFolder(g, apiKey, effective));
   }
-  const { groupCount, removableCount, warnings } = summarizeDedupeFolders(folders);
+  const { groupCount, removableCount, reviewGroupCount, warnings } = summarizeDedupeFolders(folders);
   const proposal: PhotoDedupeProposal = {
     scanId: crypto.randomBytes(8).toString("hex"),
     createdAt: new Date().toISOString(),
     folders,
     groupCount,
     removableCount,
+    reviewGroupCount,
     visionUsed: folders.some((f) => f.visionUsed),
     warnings,
     note: !apiKey

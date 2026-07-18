@@ -94,6 +94,12 @@ export type CompleteVisionBatchPlan = {
   batches: number[][];
   complete: boolean;
   error: string | null;
+  /**
+   * Photo indexes the plan shows to Claude at least once. Pair coverage
+   * (`complete`) and PHOTO coverage are different guarantees: a chunked plan
+   * shows every photo but not every pair. Callers report both honestly.
+   */
+  covered?: number[];
 };
 
 /**
@@ -146,6 +152,74 @@ export function buildCompleteVisionBatchPlan(
   return { batches, complete: true, error: null };
 }
 
+/**
+ * Plan the MANUAL Photos-tab scan's vision calls.
+ *
+ * The old manual plan was a single evenly-strided SAMPLE capped at
+ * `photoCap`, so a 150-photo folder showed Claude 60 photos and never looked
+ * at the other 90 at all — while the UI still reported a clean gallery. Since
+ * the alternate-angle pass is the ONLY signal that catches "the same tree from
+ * another angle" (dHash cannot — those sit far above NEAR_DUPLICATE_DISTANCE),
+ * dropping 60% of the gallery silently is exactly the miss the operator hits.
+ *
+ * Three tiers, best coverage that fits the budget:
+ *   1. `count <= photoCap`         → one call, every pair compared (complete).
+ *   2. exhaustive pair-cover fits  → `buildCompleteVisionBatchPlan` (complete).
+ *   3. otherwise                   → DISJOINT chunks covering EVERY photo once
+ *                                    (`ceil(count / photoCap)` calls). Not
+ *                                    every pair, but every photo is seen, and
+ *                                    same-scene repeats are overwhelmingly
+ *                                    ADJACENT in scraped gallery order — so
+ *                                    this recovers most of what tier 2 would
+ *                                    find at a fraction of the spend.
+ *
+ * Tier 3 returns `complete: false` ON PURPOSE. It is never an error — callers
+ * must report it as partial pair coverage rather than suppressing the result.
+ */
+export function buildManualVisionBatchPlan(
+  photoCount: number,
+  photoCap: number,
+  maxBatches: number,
+): CompleteVisionBatchPlan {
+  const count = Number.isFinite(photoCount) ? Math.max(0, Math.floor(photoCount)) : 0;
+  const cap = Math.floor(photoCap);
+  const budget = Number.isFinite(maxBatches) ? Math.max(0, Math.floor(maxBatches)) : 0;
+  const all = (n: number) => Array.from({ length: n }, (_, i) => i);
+
+  if (count < 2) return { batches: [], complete: true, error: null, covered: all(count) };
+  if (!Number.isFinite(cap) || cap < 2) {
+    return { batches: [], complete: false, error: `vision photo cap ${String(photoCap)} is below 2`, covered: [] };
+  }
+  if (budget < 1) return { batches: [], complete: false, error: "vision batch budget is 0", covered: [] };
+
+  // Tier 1 — the whole folder fits one call.
+  if (count <= cap) return { batches: [all(count)], complete: true, error: null, covered: all(count) };
+
+  // Tier 2 — exhaustive pair cover, when it fits the budget.
+  const exhaustive = buildCompleteVisionBatchPlan(count, cap, budget);
+  if (exhaustive.complete && exhaustive.batches.length > 0) {
+    return { ...exhaustive, covered: all(count) };
+  }
+
+  // Tier 3 — disjoint chunks: every photo seen once, bounded by the budget.
+  const batches: number[][] = [];
+  for (let start = 0; start < count && batches.length < budget; start += cap) {
+    batches.push(Array.from({ length: Math.min(cap, count - start) }, (_, i) => start + i));
+  }
+  // A chunk of one photo can't be compared against anything — fold it back
+  // into the previous batch so the tail isn't silently unexamined.
+  if (batches.length > 1 && batches[batches.length - 1].length === 1) {
+    const orphan = batches.pop()!;
+    batches[batches.length - 1] = [...batches[batches.length - 1], ...orphan];
+  }
+  return {
+    batches,
+    complete: false,
+    error: null,
+    covered: Array.from(new Set(batches.flat())).sort((a, b) => a - b),
+  };
+}
+
 // Parse the vision response. `ids` in the response are "p<N>" markers (1-based
 // over the photos the server actually sent); `idToIndex` maps them back to
 // entry indexes. Anything malformed is dropped — a parse gap must never turn
@@ -182,10 +256,13 @@ export function buildDedupeVisionInstruction(folderLabel: string, photoCount: nu
   return [
     `You are reviewing ${photoCount} vacation-rental listing photos from ONE gallery ("${folderLabel}") to find REDUNDANT shots a guest gains nothing from seeing twice.`,
     ``,
+    `The specific problem to find: scraped galleries often carry TOO MANY ANGLES OF THE SAME SHOT — the same tree, the same pool, the same view, the same room photographed repeatedly from slightly different positions. Those repeats are what you are looking for.`,
+    ``,
     `Group ONLY photos you are confident show the SAME physical subject or scene — e.g. the same pool from two angles, the same palm tree closer and farther, the same bedroom shot from the doorway and from the window, near-identical exterior shots of one building face.`,
     ``,
     `Rules:`,
     `- Only group photos where seeing both adds nothing for a guest.`,
+    `- Any caption shown with a photo is MACHINE-GENERATED and may be wrong or inconsistent. Judge from the images themselves; two different captions are NOT proof of two different rooms, and two matching captions are NOT proof of one room.`,
     `- NEVER group photos of DIFFERENT rooms, even when they look similar. Two bedrooms with the same bedspread are different rooms — do not group.`,
     `- NEVER group different amenities (two different pools, two different lawns, two different buildings).`,
     `- A wide shot plus a close-up of the same room: group ONLY if the close-up shows nothing new. A detail shot of a distinct feature is NOT redundant.`,
@@ -239,20 +316,45 @@ export type DedupeGroupMember = {
 export type DedupeGroup = {
   id: string;
   folder: string;
-  kind: "exact" | "near" | "same-scene";
+  /**
+   * "review" is the OPERATOR-REVIEW tier (2026-07-18): possible repeat angles
+   * the engine deliberately refuses to propose for removal. Review groups live
+   * on `DedupeFolderResult.reviewGroups`, NEVER on `.groups` — see the
+   * load-bearing note on that field.
+   */
+  kind: "exact" | "near" | "same-scene" | "review";
   reason: string;
   members: DedupeGroupMember[];
 };
 
+export type DedupeGroupSets = {
+  /** Confirmed duplicate groups — keeper pre-picked, extras pre-selected. */
+  groups: DedupeGroup[];
+  /** Possible repeats surfaced for the operator's eyes only (nothing pre-selected). */
+  reviewGroups: DedupeGroup[];
+};
+
 // Union-find merge of hash pairs + high-confidence vision groups into final
-// duplicate groups, keeper pre-picked. Medium-confidence vision groups are
-// DISCARDED on purpose — a "maybe" must not pre-select a photo for removal.
+// duplicate groups, keeper pre-picked.
+//
+// A "maybe" must still never PRE-SELECT a photo for removal — but before
+// 2026-07-18 a maybe was thrown away entirely, so the operator never learned
+// it existed. Two suppression paths were silently eating the exact
+// "too many angles of the same shot" class the scan is meant to catch:
+//   - medium-confidence vision groups were dropped with no trace, on top of a
+//     prompt that already says "when unsure, DO NOT group" (double-conservative);
+//   - a high-confidence edge refused by `dedupeEdgeAllowed` (categories or
+//     bedroom clusters disagree) vanished — and an angle variant can NEVER be
+//     rescued by the exact-hash bypass, because two angles of one scene are far
+//     apart in hash space by construction.
+// Both now surface as REVIEW groups: reported, never pre-selected, never
+// auto-fixable. The removal safety model is unchanged.
 export function buildDuplicateGroupsForFolder(
   folder: string,
   entries: DedupePhotoEntry[],
   hashPairs: HashPair[],
   visionGroups: VisionDupeGroup[],
-): DedupeGroup[] {
+): DedupeGroupSets {
   const parent = entries.map((_, i) => i);
   const find = (x: number): number => {
     while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
@@ -270,17 +372,49 @@ export function buildDuplicateGroupsForFolder(
   // Track vision participation per ENTRY (not per union-find root — a later
   // union can re-root a cluster and orphan a root-keyed reason).
   const visionReasonByIndex = new Map<number, string>();
+  // Candidate review clusters: [member indexes, human-readable reason].
+  const reviewCandidates: Array<{ indexes: number[]; reason: string }> = [];
+
   for (const g of visionGroups) {
-    if (g.confidence !== "high") continue;
     const valid = g.indexes.filter((i) => i >= 0 && i < entries.length);
-    for (let i = 1; i < valid.length; i++) {
-      const a = valid[0];
-      const b = valid[i];
-      const gate = dedupeEdgeAllowed(entries[a], entries[b]);
-      if (!gate.allowed) continue;
-      union(a, b);
-      if (!visionReasonByIndex.has(a)) visionReasonByIndex.set(a, g.reason);
-      if (!visionReasonByIndex.has(b)) visionReasonByIndex.set(b, g.reason);
+    if (valid.length < 2) continue;
+
+    // Medium confidence: never unioned, but no longer invisible.
+    if (g.confidence !== "high") {
+      reviewCandidates.push({ indexes: valid, reason: `${g.reason} (AI was not certain)` });
+      continue;
+    }
+
+    // ALL PAIRS, each gated independently. The old code only tested
+    // valid[0]↔valid[i], so one blocked first edge discarded every other pair
+    // in the group — a 3-shot repeat where the first photo happened to carry a
+    // different machine category lost the other two as well. Union-find already
+    // gives transitivity, so a partially-gated group now degrades to its
+    // allowed sub-clusters instead of collapsing to nothing.
+    const blocked: Array<{ a: number; b: number; why: string }> = [];
+    for (let i = 0; i < valid.length; i++) {
+      for (let j = i + 1; j < valid.length; j++) {
+        const a = valid[i];
+        const b = valid[j];
+        const gate = dedupeEdgeAllowed(entries[a], entries[b]);
+        if (!gate.allowed) {
+          blocked.push({ a, b, why: gate.why ?? "guarded" });
+          continue;
+        }
+        union(a, b);
+        if (!visionReasonByIndex.has(a)) visionReasonByIndex.set(a, g.reason);
+        if (!visionReasonByIndex.has(b)) visionReasonByIndex.set(b, g.reason);
+      }
+    }
+    // Surface guarded edges that did NOT end up merged anyway (a pair can be
+    // blocked directly yet still land in one cluster transitively — that is a
+    // real merge, not a review item).
+    for (const e of blocked) {
+      if (find(e.a) === find(e.b)) continue;
+      reviewCandidates.push({
+        indexes: [e.a, e.b],
+        reason: `${g.reason} — held back for your review because ${e.why}`,
+      });
     }
   }
 
@@ -329,7 +463,49 @@ export function buildDuplicateGroupsForFolder(
     });
   }
   groups.sort((a, b) => a.id.localeCompare(b.id));
-  return groups;
+
+  // ── Review tier ───────────────────────────────────────────────────────────
+  // A candidate is dropped only when it tells the operator nothing new: every
+  // one of its photos already sits together inside a single CONFIRMED group,
+  // where it is already actionable. A candidate that merely OVERLAPS a
+  // confirmed group is kept — e.g. a third shot the category guard held back
+  // from an already-merged pair is exactly the repeat we want surfaced.
+  // (validateDedupeSelection counts distinct filenames per folder, so a photo
+  // appearing in both tiers cannot double-count against the folder's total.)
+  const confirmedSets = groups.map((g) => new Set(g.members.map((m) => m.filename)));
+
+  const reviewGroups: DedupeGroup[] = [];
+  const seenMemberSets = new Set<string>();
+  let reviewSeq = 0;
+  for (const cand of reviewCandidates) {
+    const members = Array.from(new Set(cand.indexes))
+      .filter((i) => i >= 0 && i < entries.length)
+      .sort((a, b) => entries[a].galleryIndex - entries[b].galleryIndex);
+    if (members.length < 2) continue;
+    const names = members.map((i) => entries[i].filename);
+    if (confirmedSets.some((set) => names.every((n) => set.has(n)))) continue;
+    const key = members.map((i) => entries[i].filename).join("|");
+    if (seenMemberSets.has(key)) continue;
+    seenMemberSets.add(key);
+    reviewGroups.push({
+      id: `${folder}#review${reviewSeq++}`,
+      folder,
+      kind: "review",
+      reason: cand.reason,
+      // EVERY member keeps. Nothing here is pre-selected for removal, and the
+      // sweep's auto-fix can never act on it (see dedupeAutoFixSelections).
+      members: members.map((i) => ({
+        filename: entries[i].filename,
+        caption: entries[i].caption ?? null,
+        category: entries[i].category ?? null,
+        keep: true,
+        humanTouched: !!entries[i].humanTouched,
+      })),
+    });
+  }
+  reviewGroups.sort((a, b) => a.id.localeCompare(b.id));
+
+  return { groups, reviewGroups };
 }
 
 // Deterministic keeper pick within one group (members already in gallery
@@ -369,6 +545,15 @@ export type DedupeFolderResult = {
   visionComplete: boolean;
   visionError: string | null;
   groups: DedupeGroup[];
+  /**
+   * LOAD-BEARING: possible repeats for operator review, kept OUT of `groups`.
+   * The unit-audit sweep treats `folders[].groups` being empty as "gallery is
+   * clean" (server/unit-audit-sweep.ts) — putting review candidates there would
+   * make every weekly sweep flag properties over findings it can never act on.
+   * The operator may still select these in the Photos tab; the apply validator
+   * accepts them explicitly.
+   */
+  reviewGroups: DedupeGroup[];
 };
 
 export type PhotoDedupeProposal = {
@@ -377,6 +562,8 @@ export type PhotoDedupeProposal = {
   folders: DedupeFolderResult[];
   groupCount: number;
   removableCount: number;
+  /** Possible-repeat groups surfaced for review; never counted as duplicates. */
+  reviewGroupCount: number;
   visionUsed: boolean;
   warnings: string[];
   note?: string;
@@ -385,13 +572,16 @@ export type PhotoDedupeProposal = {
 export function summarizeDedupeFolders(folders: DedupeFolderResult[]): {
   groupCount: number;
   removableCount: number;
+  reviewGroupCount: number;
   warnings: string[];
 } {
   let groupCount = 0;
   let removableCount = 0;
+  let reviewGroupCount = 0;
   const warnings: string[] = [];
   for (const f of folders) {
     groupCount += f.groups.length;
+    reviewGroupCount += (f.reviewGroups ?? []).length;
     const removable = f.groups.reduce((s, g) => s + g.members.filter((m) => !m.keep).length, 0);
     removableCount += removable;
     const remaining = f.totalVisible - removable;
@@ -402,9 +592,21 @@ export function summarizeDedupeFolders(folders: DedupeFolderResult[]): {
     }
     if (f.visionError) {
       warnings.push(`${f.label || f.folder}: AI same-scene pass unavailable (${f.visionError}) — hash-only results shown.`);
+    } else if (f.totalVisible >= 2 && !f.visionComplete) {
+      // HONESTY (2026-07-18): the engine has always computed visionComplete,
+      // but nothing consumed it on the manual path, so a partially-covered
+      // gallery reported exactly like a fully-covered one. Split the claim by
+      // signal — the hash pass genuinely covers every photo; only the
+      // alternate-angle pass can come up short.
+      const seen = Math.min(f.scannedForVision, f.totalVisible);
+      warnings.push(
+        seen < f.totalVisible
+          ? `${f.label || f.folder}: the AI alternate-angle pass covered ${seen} of ${f.totalVisible} photos — near-identical copies were checked across all of them, but repeat angles among the other ${f.totalVisible - seen} were not.`
+          : `${f.label || f.folder}: all ${f.totalVisible} photos were seen by the AI alternate-angle pass, but not every pair was compared directly — a repeat angle between distant photos could remain.`,
+      );
     }
   }
-  return { groupCount, removableCount, warnings };
+  return { groupCount, removableCount, reviewGroupCount, warnings };
 }
 
 export type DedupeSelection = { folder: string; filename: string };
@@ -439,9 +641,19 @@ export function validateDedupeSelection(
     return { ok: false, errors: ["nothing selected"], warnings, remainingByFolder };
   }
 
+  // Review groups are selectable too — they are surfaced precisely so the
+  // operator can act on them — so they must be in the allowed member set or a
+  // legitimate confirm would be rejected as "not part of any duplicate group".
+  // Every other guard below (keep-one-per-group, never empty a folder) applies
+  // to them identically. buildDuplicateGroupsForFolder guarantees a filename
+  // never appears in both a confirmed and a review group, so the per-folder
+  // removal count cannot double-count.
+  const groupsOf = (f: { groups?: DedupeGroup[]; reviewGroups?: DedupeGroup[] }): DedupeGroup[] =>
+    [...(f.groups ?? []), ...(f.reviewGroups ?? [])];
+
   const memberKeys = new Set<string>();
   for (const f of proposal.folders) {
-    for (const g of f.groups) {
+    for (const g of groupsOf(f)) {
       for (const m of g.members) memberKeys.add(`${f.folder}/${m.filename}`);
     }
   }
@@ -450,14 +662,19 @@ export function validateDedupeSelection(
   }
 
   for (const f of proposal.folders) {
-    let removedInFolder = 0;
-    for (const g of f.groups) {
-      const removedInGroup = g.members.filter((m) => selectedKeys.has(`${f.folder}/${m.filename}`)).length;
-      removedInFolder += removedInGroup;
-      if (removedInGroup >= g.members.length) {
+    // Count DISTINCT selected photos, not per-group hits. One photo can legitimately
+    // appear in a confirmed group and in a review group (e.g. a third shot the
+    // category guard held back from an already-merged pair); summing per group
+    // would count it twice and could wrongly report the folder as emptied.
+    const removedFilenames = new Set<string>();
+    for (const g of groupsOf(f)) {
+      const removedInGroup = g.members.filter((m) => selectedKeys.has(`${f.folder}/${m.filename}`));
+      for (const m of removedInGroup) removedFilenames.add(m.filename);
+      if (removedInGroup.length >= g.members.length) {
         errors.push(`group ${g.id} would lose ALL its photos — keep at least one`);
       }
     }
+    const removedInFolder = removedFilenames.size;
     const remaining = f.totalVisible - removedInFolder;
     remainingByFolder[f.folder] = remaining;
     if (removedInFolder > 0 && remaining <= 0) {
