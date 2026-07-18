@@ -43,6 +43,86 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-18 (Photo replacement activity showed "Beautiful 8 brs for 22 near Poipu Beach Park! ·
+  Unit B (3BR)" — a unit NOT in the system — GHOST/RETIRED builder entries): NOT a display bug
+  (don't re-chase): unit-builder-data.ts carries SIX legacy entries (propertyIds 7, 10, 14, 26,
+  28, 31) that were never portfolio — no home.tsx dashboard `properties` row EVER (git log -S
+  verified), no guesty_property_map row, no PROPERTY_UNIT_CONFIGS row. The weekly unit-audit
+  cron's FIRST tick (2026-07-18 01:46Z) swept `getAllUnitBuilders()` wholesale, audited all six,
+  and prop 7's photo-fix ladder (fed by weekly Lens scans of ghost folders whose photos ARE on
+  the real owners' OTA listings) auto-committed a REAL swap (unit_swaps 71, unit-323 → "Unit
+  #324", folder replacement-p7-uunit-323) with a scheduled-audit → automatic-retry receipt chain
+  in the #1055 activity dialog. Mid-diagnosis the prop-14 ghost sweep was RUNNING and 26/28/31
+  queued — cancelled live first. SHIPPED (`claude/unit-b-ghost-listing-a78468`): `retired: true`
+  on the six entries + `getActiveUnitBuilders()`/`isRetiredUnitBuilderProperty()`; enumeration
+  gates at unitAuditCronTargets, resolveUnitAuditTarget (stale queued ghost records fail their
+  resolve stage), resolveAutoReplaceTarget (all origins + pending-retry watchdog cancel),
+  reactiveSweepEligible (honest "retired from the portfolio" note), listScanableFolders
+  (retired-owned unit/replacement folders leave the Lens universe — pure spend, no consumer),
+  and the pickers (getAllMultiUnitProperties, agent portal). Retired entries are KEPT for
+  folder→context lookups (the 2026-07-04 no-context false-positive class) — never delete them
+  wholesale. LIVE CLEANUP post-deploy: ghost auto-fix rows purged from queue_job_events, ghost
+  receipts cleared from auto_replace_jobs.v1, unit_swaps 71 deleted + the replacement folder's
+  photo_labels/photo_listing_checks rows removed (volume files left inert). Locked by
+  tests/retired-properties.test.ts (16: retired-set lock, active⇄dashboard drift-lock — new
+  properties add the dashboard row + builder entry in ONE PR, removals flag retired in the same
+  PR — plus source guards on all five gates); unit-audit-sweep scheduler guard repointed
+  (200/0). Verified: full `npm test` REAL exit 0, build clean, `npm run check` = baseline
+  (0 new from this change). See AGENTS.md Unit Audit Sweep #23 + the 2026-07-18 Decision Log line.
+
+- 2026-07-17 (Separate published address — every listing, via Guesty's Address controller): Operator
+  asked for Guesty's "separate published address" feature ON for every listing, always the community
+  CLUBHOUSE address, else the generic main-building address with no unit number, ensured on unit
+  audits / new combo listings / push-descriptions, with a manual Descriptions-tab button + a
+  last-pushed timestamp. SHIPPED (`claude/guesty-separate-published-address-08ad08`): the write path
+  is `PUT /v1/address/{guestyPropertyId}/update` with ALL THREE required keys
+  `{address, publishedAddress, isPublishedAddressEnabled:true}` — NOT the listing PUT (its request
+  schema has no publishedAddress; verified against Guesty's OpenAPI docs). The engine
+  (server/published-address.ts) GETs `/address/{id}` first, ECHOES the private address verbatim
+  (never reshape it), PUTs, then read-back-verifies flag + street echo. Resolution ladder
+  (cached in app_settings `published_addresses.v1`, keyed by builder propertyId ±): clubhouse via
+  SearchAPI google_maps (`discoverCommunityClubhouseAddress`, whole-word titleMatchesResort gate so a
+  sibling resort's clubhouse never wins, clubhouse-hint title rank, reverse-geocode rescue, kill
+  `PUBLISHED_ADDRESS_CLUBHOUSE_DISCOVERY=0`) → curated rule street → private address unit-stripped →
+  builder/draft street. Published payload is STRUCTURALLY unit-free — `stripPublishedUnitTokens`
+  also strips the bare "#1834" form `streetRootFromAddress` misses (its `\b#` can't match after a
+  space; found by this PR's own tests). Hooks (fire-and-forget, 2-min cooldown, skip-when-already-on,
+  kill `PUBLISHED_ADDRESS_AUTO_PUSH_DISABLED=1`): five mapping-birth seams (the amenity auto-push
+  set), push-descriptions success, audit sweep descriptions stage (`AUDIT_PUBLISHED_ADDRESS=0`,
+  ceiling 6m→8m, failure = attention + rail-A retryable), combo pipeline pre-resolve (cache-only —
+  no listing exists there). UI: teal "Push separate published address" button under the
+  "Address (sent to Guesty)" block (always force-push + fresh discovery) + "🕐 Pushed <time> ·
+  <summary>" line from the NEW durable ledger kind `"published-address"` (added to GUESTY_PUSH_TABS;
+  summary wording test-locked; deliberately NOT in the tab-strip/chips fixed lists). Backfill:
+  `POST /api/admin/push-published-addresses` walks every mapped listing (idempotent). Verified:
+  published-address 76/0 (npm chain), full `npm test` REAL exit 0, build clean (strings bundle-
+  grepped both bundles), `npm run check` 335 = baseline (stash -u A/B identical per-file sets), UI
+  proven on the BUILT bundle (Playwright + mocked /api: POST contract {listingId, propertyId,
+  force:true}, success + ledger line flip, never-pushed fallback, unmapped-disabled — 14/0). Could
+  NOT live-smoke the Guesty leg (no creds in session) — post-deploy: run the admin backfill, then
+  spot-check a listing in Guesty (Address section shows the toggle ON + clubhouse street). ALSO FIXED
+  AT THE ROOT (same PR): tsconfig `tsBuildInfoFile` moved `node_modules/typescript/tsbuildinfo` →
+  `node_modules/.cache/tsbuildinfo` — in a worktree with no local node_modules, `npm run check`
+  CREATED a `node_modules/typescript/` dir holding only the cache file, which shadowed the
+  parent-resolved real typescript package and broke every test importing it
+  (tests/guesty-photo-repush.test.ts, ERR_MODULE_NOT_FOUND). If an old worktree still has the
+  stub, `rm -rf <worktree>/node_modules/typescript` once. Adversarially reviewed via a 4-lens
+  workflow: 17 confirmed findings all fixed pre-merge — highlights: Number(null)→0 coords would
+  have published Null Island (type-checked finiteCoord now), "Rd 10-201" trailing building-unit
+  form leaked through every strip layer (new $-anchored strip), "villa" designator mangled real
+  streets ("100 Villa Del Mar Dr"→"100 Mar Dr"; now unit-shaped-token constrained), clubhouse
+  hint pass could crown a PM storefront named after the resort (footprint constraint + negative
+  guard), transient SearchAPI failures durably cached the generic fallback (transient flag, no
+  cache write), operator-set custom published addresses were clobbered weekly (operator-wins
+  branch), audit double-push (skipPublishedAddressEnsure flag), admin backfill vs the 15-min
+  edge cap (NDJSON stream + heartbeat). LIVE BACKFILL RAN post-deploy: 24 mapped listings — 22
+  pushed+verified (19 real clubhouse addresses, e.g. Poipu Kai → 1831 Poipu Rd, Kiahuna → 2611
+  Kiahuna Plantation Dr), 1 already-on, 1 initial failure: Na Hale O Keauhou (draft -2, listing
+  6a032d12…) — Guesty's Address PUT 400s on the okina in its own stored "78-6833 Ali‘i Dr" even
+  when echoed VERBATIM. Follow-up PR adds a bounded 400-retry that re-PUTs with
+  foldHawaiianDiacritics applied to string fields only ("Ali‘i"→"Alii"; first attempt stays
+  echo-verbatim by rule).
+
 - 2026-07-17 (Descriptions tab "↻ Regenerate descriptions" — now grounded in photos + Bedding tab):
   Operator asked to double-check that the regenerate button's AI looks at the photos and the
   confirmed Bedding tab. VERIFIED-NO (don't re-chase): the button sent only bedrooms + _source.json

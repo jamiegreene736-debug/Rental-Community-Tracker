@@ -1099,6 +1099,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [editableTitle, setEditableTitle] = useState("");
   const [descPushState, setDescPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
   const [descPushError, setDescPushError] = useState<string | null>(null);
+  // Separate published address (Guesty feature, 2026-07-17): manual push
+  // state for the Descriptions-tab button. The last-pushed timestamp itself
+  // comes from the durable server ledger (serverPushHistory["published-address"]).
+  const [pubAddrPushState, setPubAddrPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
+  const [pubAddrPushError, setPubAddrPushError] = useState<string | null>(null);
+  const [pubAddrPushResult, setPubAddrPushResult] = useState<{
+    street: string;
+    source: "clubhouse" | "community";
+    label: string;
+  } | null>(null);
   // Descriptions-tab field edits (summary/space/neighborhood/transit/
   // access/houseRules). Live edits merge into effectivePropertyData (so
   // what you see is what pushes — same posture as editableTitle) and
@@ -2311,6 +2321,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // honest aggregate).
   const [pushReconcileNote, setPushReconcileNote] = useState<string | null>(null);
   const [reconciledPushSummary, setReconciledPushSummary] = useState<string | null>(null);
+  // Post-push Guesty-gallery confirmation (from the server's done event):
+  // every PUT REPLACES the listing's whole pictures[], so after a push Guesty
+  // must hold EXACTLY the pushed photos (+ pinned cover collage). The server
+  // read-back proves it; this state renders the honest verdict — pushed N,
+  // Guesty actually has M — green when they match, amber when Guesty still
+  // reports stale old photos or silently dropped some.
+  type PushGuestyConfirm = {
+    pushed: number;
+    expectedTotal: number | null;
+    guestyTotal: number | null;
+    replacementConfirmed: boolean;
+    staleExtra: number;
+    collagePinned: boolean;
+  };
+  const [pushGuestyConfirm, setPushGuestyConfirm] = useState<PushGuestyConfirm | null>(null);
+  // Live read-back progress ("Guesty reports X, expecting Y…") while the
+  // server's verify ladder runs.
+  const [pushVerifyNote, setPushVerifyNote] = useState<string | null>(null);
   // Default ON: the server now AI-upscales ONLY photos below the 1920px push
   // spec (already-large photos skip Real-ESRGAN entirely), so the toggle no
   // longer costs ~30s on every photo — just the small ones that need it.
@@ -2455,8 +2483,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // apply (propagates the removal to the live listing)? null until an apply.
   const [dedupeGuestySync, setDedupeGuestySync] = useState<{ started: boolean; reason?: string } | null>(null);
 
-  // Persisted last-push summary (survives refresh)
-  type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number };
+  // Persisted last-push summary (survives refresh). guestyTotal/collagePinned
+  // are the read-back confirmation (what Guesty actually held after the push,
+  // incl. the pinned cover collage) — optional so summaries stored by older
+  // bundles still parse.
+  type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number; guestyTotal?: number | null; collagePinned?: boolean };
   const [lastPushSummary, setLastPushSummary] = useState<PushSummary | null>(null);
 
   // Live photo count from Guesty for the selected listing
@@ -2565,6 +2596,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setUpscaleError(null);
     setPushReconcileNote(null);
     setReconciledPushSummary(null);
+    setPushGuestyConfirm(null);
+    setPushVerifyNote(null);
   }, []);
 
   // ── Cover collage ──────────────────────────────────────────────────────
@@ -2882,6 +2915,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setCheckpointCount(0);
     setPushReconcileNote(null);
     setReconciledPushSummary(null);
+    setPushGuestyConfirm(null);
+    setPushVerifyNote(null);
     // Reset the known-pushed-pictures list at the start of each push so
     // a follow-up cover-collage operation only sees URLs from THIS run.
     setLastPushedPictures([]);
@@ -2971,6 +3006,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               upscaledCount?: number;
               trimmed?: number;
               maxPhotos?: number;
+              // "done" live-gallery confirmation fields (2026-07-17): what the
+              // replacement should leave on Guesty vs what Guesty actually
+              // reported on the final read-back.
+              expectedTotal?: number;
+              guestyTotal?: number | null;
+              replacementConfirmed?: boolean;
+              staleExtra?: number;
+              collagePinned?: boolean;
               // "verify" event fields
               attempt?: number;
               expected?: number;
@@ -3003,13 +3046,22 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               setSavingToGuesty(true);
             } else if (event.type === "verify") {
               // The server re-checks Guesty after the final PUT and
-              // retries up to 3 times if pictures were silently dropped
-              // (ImgBB CDN propagation lag causes Guesty to strip URLs
-              // it can't fetch). Reflect that in-flight verification in
-              // the UI so the "saving" spinner stays honest.
+              // retries up to 3 times when the stored gallery doesn't match
+              // exactly — pictures silently dropped (ImgBB CDN propagation
+              // lag) OR a stale old gallery still being served. Reflect the
+              // live read-back in the UI so the "saving" spinner stays honest.
               setSavingToGuesty(true);
+              if (typeof event.got === "number" && typeof event.expected === "number") {
+                const drift = event.got > event.expected
+                  ? " — old photos still visible, asking Guesty to replace them again"
+                  : event.got < event.expected
+                  ? " — some photos haven't landed yet, re-pushing"
+                  : "";
+                setPushVerifyNote(`Confirming the Guesty gallery (check ${event.attempt ?? 1} of 3): Guesty reports ${event.got} photo${event.got === 1 ? "" : "s"}, this push should leave ${event.expected}${drift}…`);
+              }
             } else if (event.type === "done") {
               setSavingToGuesty(false);
+              setPushVerifyNote(null);
               setUpscaledCount(event.upscaledCount ?? 0);
               const guestyError = (event as any).guestyError as string | undefined;
               if (guestyError) setUpscaleError(`Guesty save failed: ${guestyError}`);
@@ -3031,13 +3083,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               const shortfall = event.shortfall ?? 0;
               const tot = event.total ?? 0;
               const succeeded = sc > 0 && !guestyError;
+              const guestyTotal = typeof event.guestyTotal === "number" ? event.guestyTotal : null;
+              const staleExtra = typeof event.staleExtra === "number" ? event.staleExtra : 0;
               finalResult = {
                 successCount: sc,
                 total: tot,
                 shortfall,
                 error: guestyError || (sc === 0 && tot > 0 ? "All photos failed — check per-photo errors below" : undefined),
               };
-              if (!guestyError) setGuestyPhotoCount(sc);
+              if (!guestyError) {
+                // Prefer the server's actual read-back of the live gallery
+                // (includes the pinned collage) over the net pushed count.
+                setGuestyPhotoCount(guestyTotal ?? sc);
+                setPushGuestyConfirm({
+                  pushed: sc,
+                  expectedTotal: typeof event.expectedTotal === "number" ? event.expectedTotal : null,
+                  guestyTotal,
+                  replacementConfirmed: event.replacementConfirmed === true,
+                  staleExtra,
+                  collagePinned: event.collagePinned === true,
+                });
+              }
               setUpscalePhase(sc === 0 && tot > 0 ? "error" : "done");
               if (sc === 0 && tot > 0 && !guestyError) {
                 setUpscaleError("All photos failed — check per-photo errors below");
@@ -3046,6 +3112,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 toast({
                   title: `Guesty dropped ${shortfall} photo${shortfall === 1 ? "" : "s"}`,
                   description: `Uploaded ${event.successCount ?? sc}, but only ${sc} persisted on Guesty after 3 verify retries. Usually caused by ImgBB CDN lag — re-pushing in ~30s normally recovers them.`,
+                  variant: "destructive",
+                  duration: 12000,
+                });
+              }
+              if (!guestyError && staleExtra > 0 && guestyTotal != null) {
+                toast({
+                  title: `Guesty still reports ${guestyTotal} photos`,
+                  description: `This push should leave ${event.expectedTotal ?? sc} on the listing, but Guesty's last read still showed ${staleExtra} extra old photo${staleExtra === 1 ? "" : "s"}. Guesty reads can lag ~1 min — re-check shortly, and re-push if the old photos persist.`,
                   variant: "destructive",
                   duration: 12000,
                 });
@@ -3059,6 +3133,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   total: tot,
                   upscaledCount: event.upscaledCount ?? 0,
                   failed: tot - sc,
+                  guestyTotal,
+                  collagePinned: event.collagePinned === true,
                 });
                 // Guesty processes uploaded photos asynchronously — wait 3s then poll
                 setTimeout(() => refreshGuestyPhotoCount(), 3000);
@@ -3093,6 +3169,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     // authoritative outcome even though the HTTP response died. Deadline
     // scales with how many photos the server still had in flight.
     setSavingToGuesty(false);
+    setPushVerifyNote(null);
     setPushReconcileNote(photoPushStreamLostMessage(lastSeenIndex, photos.length));
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const reconcileDeadline = Date.now() + photoPushReconcileDeadlineMs(Math.max(0, photos.length - lastSeenIndex));
@@ -3709,6 +3786,87 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       recordDataPush("descriptions", "error", (e as Error).message);
     }
   }, [descPushState, pushDescriptionsToGuesty, recordDataPush]);
+
+  // Manual "Push separate published address" (Descriptions tab, 2026-07-17).
+  // Server-side the push GETs the Guesty address entity, echoes the private
+  // address, sets publishedAddress (clubhouse or generic main-building street,
+  // no unit number) with isPublishedAddressEnabled:true, and verifies by
+  // read-back — then stamps the durable "published-address" ledger kind, which
+  // is where the timestamp line under the button reads from.
+  const pushPublishedAddress = useCallback(async () => {
+    if (!selectedId || pubAddrPushState === "pushing") return;
+    // Snapshot the target listing: if the operator switches listings while
+    // the push is in flight, the completion must not repaint the OLD
+    // listing's street against the new selection (pubAddrListingRef tracks
+    // the live selection via the reset effect below).
+    const pushedListingId = selectedId;
+    const stillCurrent = () => pubAddrListingRef.current === pushedListingId;
+    setPubAddrPushState("pushing");
+    setPubAddrPushError(null);
+    try {
+      // Clubhouse discovery + a Guesty 429 pause can take a couple minutes —
+      // give the request real headroom (feature-detected for older Safari).
+      const signal =
+        typeof AbortSignal !== "undefined" && typeof (AbortSignal as any).timeout === "function"
+          ? (AbortSignal as any).timeout(180_000)
+          : undefined;
+      const res = await fetch("/api/builder/push-published-address", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listingId: pushedListingId, propertyId, force: true }),
+        ...(signal ? { signal } : {}),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      if (!stillCurrent()) return;
+      setPubAddrPushResult(
+        data.address && data.address.street
+          ? { street: data.address.street, source: data.address.source === "clubhouse" ? "clubhouse" : "community", label: String(data.address.label ?? "") }
+          : null,
+      );
+      setPubAddrPushState("success");
+      // Refresh the durable ledger so the timestamp line flips immediately.
+      void reloadServerPushHistory();
+      toast({
+        title: "Separate published address pushed",
+        description: data.address?.street
+          ? `Guesty now publishes "${data.address.street}" (${data.address.source === "clubhouse" ? "clubhouse" : "main building"}) instead of the unit address.`
+          : "The separate published address feature is enabled on the listing.",
+      });
+    } catch (e: any) {
+      const aborted = e?.name === "AbortError" || e?.name === "TimeoutError";
+      // Definitive failures are stamped in the server ledger too — refresh
+      // the timestamp line so it agrees with the inline error; on an abort
+      // the server is still working, so re-read again once it should have
+      // landed (the copy promises the line will update).
+      void reloadServerPushHistory();
+      if (aborted) {
+        window.setTimeout(() => {
+          void reloadServerPushHistory();
+        }, 60_000);
+      }
+      if (!stillCurrent()) return;
+      setPubAddrPushState("error");
+      setPubAddrPushError(
+        aborted
+          ? "Timed out waiting for Guesty — the push keeps running on the server; check the last-pushed line in a minute."
+          : (e as Error).message,
+      );
+    }
+  }, [selectedId, propertyId, pubAddrPushState, toast, reloadServerPushHistory]);
+
+  // A listing switch must clear the push panel — a stale success banner
+  // would render the PREVIOUS listing's street as the new listing's
+  // published address. The ref also lets an in-flight push detect the switch.
+  const pubAddrListingRef = useRef<string>("");
+  useEffect(() => {
+    pubAddrListingRef.current = selectedId;
+    setPubAddrPushState("idle");
+    setPubAddrPushError(null);
+    setPubAddrPushResult(null);
+  }, [selectedId]);
 
   // The PATCH body that would persist the current edit state: an edited
   // value that differs from the generated base saves as an override; an
@@ -6833,6 +6991,70 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           {propertyData.bedrooms ? ` · ${propertyData.bedrooms} bed` : ""}
                           {propertyData.bathrooms ? ` · ${propertyData.bathrooms} bath` : ""}
                         </div>
+                        {/* Separate published address (Guesty feature): channels
+                            display the community clubhouse / generic main-building
+                            street publicly instead of the exact unit address. */}
+                        {(() => {
+                          const ledger = serverPushHistory["published-address"];
+                          return (
+                            <div style={{ marginTop: 10 }} data-testid="published-address-block">
+                              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                                <button
+                                  className="glb-btn"
+                                  disabled={!selectedId || pubAddrPushState === "pushing"}
+                                  onClick={() => pushPublishedAddress()}
+                                  data-testid="btn-push-published-address"
+                                  title="Turn on Guesty's separate published address for this listing — channels show the community clubhouse (or generic main-building) address publicly instead of the exact unit address"
+                                  style={{
+                                    background: pubAddrPushState === "success" ? "#10b981" : pubAddrPushState === "error" ? "#ef4444" : "#0d9488",
+                                    color: "#fff",
+                                    opacity: !selectedId || pubAddrPushState === "pushing" ? 0.6 : 1,
+                                  }}
+                                >
+                                  {pubAddrPushState === "pushing"
+                                    ? "Pushing published address…"
+                                    : pubAddrPushState === "success"
+                                      ? "✓ Published address pushed"
+                                      : pubAddrPushState === "error"
+                                        ? "✗ Failed — Retry"
+                                        : "Push separate published address"}
+                                </button>
+                                {!selectedId && (
+                                  <span style={{ fontSize: 11, color: "var(--muted)" }}>Select or build a listing first</span>
+                                )}
+                                {pubAddrPushState === "pushing" && (
+                                  <span style={{ fontSize: 11, color: "var(--muted)", maxWidth: 400 }}>
+                                    Finding the clubhouse address + updating Guesty — can take 1–2 minutes.
+                                  </span>
+                                )}
+                                {pubAddrPushState === "error" && pubAddrPushError && (
+                                  <span style={{ fontSize: 11, color: "#ef4444", maxWidth: 400, wordBreak: "break-word" }}>
+                                    {pubAddrPushError}
+                                  </span>
+                                )}
+                                {pubAddrPushState === "success" && pubAddrPushResult && (
+                                  <span style={{ fontSize: 11, color: "#10b981", maxWidth: 400 }}>
+                                    Channels now show "{pubAddrPushResult.street}" ({pubAddrPushResult.source === "clubhouse" ? "clubhouse" : "main building"})
+                                  </span>
+                                )}
+                              </div>
+                              <div
+                                data-testid="text-published-address-last-push"
+                                title={ledger?.pushedAt ? new Date(ledger.pushedAt).toLocaleString() : undefined}
+                                style={{
+                                  fontSize: 10,
+                                  lineHeight: 1.3,
+                                  marginTop: 4,
+                                  color: !ledger ? "var(--muted)" : ledger.status === "success" ? "#166534" : "#991b1b",
+                                }}
+                              >
+                                {ledger
+                                  ? `🕐 ${ledger.status === "success" ? "Pushed" : "Push failed"} ${formatDataPushTime(ledger.pushedAt)}${ledger.summary ? ` · ${ledger.summary}` : ""}`
+                                  : "🕐 No push recorded — push to confirm channels hide the unit address"}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
                     {descriptions ? (() => {
@@ -9318,6 +9540,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   <span style={{ color: "#16a34a", fontWeight: 600 }}>✓ Last push:</span>
                                   {lastPushSummary.successCount}/{lastPushSummary.total} photos
                                   {lastPushSummary.upscaledCount > 0 && ` (${lastPushSummary.upscaledCount} upscaled)`}
+                                  {typeof lastPushSummary.guestyTotal === "number" && (
+                                    <span style={{ color: "#15803d" }} data-testid="last-push-guesty-total">
+                                      · Guesty gallery: {lastPushSummary.guestyTotal}{lastPushSummary.collagePinned ? " (incl. cover collage)" : ""}
+                                    </span>
+                                  )}
                                   {lastPushSummary.failed > 0 && <span style={{ color: "#b45309" }}> — {lastPushSummary.failed} failed</span>}
                                   <span style={{ color: "#9ca3af", marginLeft: "auto" }}>
                                     {new Date(lastPushSummary.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
@@ -9343,16 +9570,61 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 }
                                 const failed = pushResults.filter(r => !r.success);
                                 const succeeded = pushResults.filter(r => r.success);
+                                // Guesty-gallery confirmation: the push PUT REPLACES the
+                                // listing's whole pictures[], so Guesty must end with
+                                // EXACTLY the pushed set (+ pinned cover collage). Render
+                                // pushed-vs-actually-on-Guesty from the server read-back.
+                                const c = pushGuestyConfirm;
+                                const collageSuffix = c?.collagePinned ? " + the cover collage" : "";
+                                let confirmPanel: ReactNode = null;
+                                if (c) {
+                                  if (c.replacementConfirmed && c.guestyTotal != null) {
+                                    confirmPanel = (
+                                      <div data-testid="photo-push-guesty-confirm" style={{ padding: "6px 10px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, fontSize: 12, color: "#166534" }}>
+                                        ✓ Guesty gallery confirmed: {c.guestyTotal} photo{c.guestyTotal === 1 ? "" : "s"} now on the listing — exactly the {c.pushed} pushed{collageSuffix}. All previous Guesty photos were replaced.
+                                      </div>
+                                    );
+                                  } else if (c.guestyTotal != null && c.staleExtra > 0) {
+                                    confirmPanel = (
+                                      <div data-testid="photo-push-guesty-confirm" style={{ padding: "6px 10px", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 12, color: "#92400e" }}>
+                                        ⚠ Guesty still reports <b>{c.guestyTotal}</b> photos, but this push should leave <b>{c.expectedTotal ?? c.pushed}</b> ({c.pushed} pushed{collageSuffix}) — {c.staleExtra} old photo{c.staleExtra === 1 ? "" : "s"} may not be replaced yet. Guesty reads can lag ~1 min.{" "}
+                                        <button onClick={refreshGuestyPhotoCount} style={{ fontSize: 11, color: "#92400e", background: "none", border: "1px solid #fcd34d", borderRadius: 4, padding: "1px 6px", cursor: "pointer" }}>
+                                          ↻ Re-check Guesty count
+                                        </button>{" "}
+                                        — if the extra photos persist, click "↺ Re-push Photos to Guesty".
+                                      </div>
+                                    );
+                                  } else if (c.guestyTotal != null && c.expectedTotal != null && c.guestyTotal < c.expectedTotal) {
+                                    confirmPanel = (
+                                      <div data-testid="photo-push-guesty-confirm" style={{ padding: "6px 10px", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 12, color: "#92400e" }}>
+                                        ⚠ Guesty kept <b>{c.guestyTotal}</b> of the <b>{c.expectedTotal}</b> expected photos — it silently dropped {c.expectedTotal - c.guestyTotal} (usually ImgBB CDN lag). Re-pushing in ~30s normally recovers them.
+                                      </div>
+                                    );
+                                  } else {
+                                    confirmPanel = (
+                                      <div data-testid="photo-push-guesty-confirm" style={{ padding: "6px 10px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6, fontSize: 12, color: "#475569" }}>
+                                        Pushed {c.pushed} photo{c.pushed === 1 ? "" : "s"}{collageSuffix}, but the live Guesty gallery couldn't be re-read to confirm the final count.{" "}
+                                        <button onClick={refreshGuestyPhotoCount} style={{ fontSize: 11, color: "#475569", background: "none", border: "1px solid #cbd5e1", borderRadius: 4, padding: "1px 6px", cursor: "pointer" }}>
+                                          ↻ Re-check Guesty count
+                                        </button>{" "}
+                                        — the "photos in Guesty" pill above updates when it responds.
+                                      </div>
+                                    );
+                                  }
+                                }
                                 return (
-                                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                                    <span style={{ fontSize: 13, color: failed.length > 0 ? "#d97706" : "#16a34a" }}>
-                                      ✓ {succeeded.length}/{upscaleTotal} photos pushed to Guesty
-                                      {upscaledCount > 0 && ` (${upscaledCount} upscaled)`}
-                                      {failed.length > 0 && ` — ${failed.length} failed`}
-                                    </span>
-                                    <button onClick={cancelPush} style={{ fontSize: 11, color: "#6b7280", background: "none", border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>
-                                      Reset
-                                    </button>
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                      <span style={{ fontSize: 13, color: failed.length > 0 ? "#d97706" : "#16a34a" }}>
+                                        ✓ {succeeded.length}/{upscaleTotal} photos pushed to Guesty
+                                        {upscaledCount > 0 && ` (${upscaledCount} upscaled)`}
+                                        {failed.length > 0 && ` — ${failed.length} failed`}
+                                      </span>
+                                      <button onClick={cancelPush} style={{ fontSize: 11, color: "#6b7280", background: "none", border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>
+                                        Reset
+                                      </button>
+                                    </div>
+                                    {confirmPanel}
                                   </div>
                                 );
                               })()}
@@ -9401,6 +9673,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   ? "Hosting for Guesty (AI-upscaling photos under 1920px, ~30s each). Progress saved to Guesty every 5 photos."
                                   : "Hosting for Guesty — a few seconds per photo. Progress saved to Guesty every 5 photos."}
                               </div>
+                              {/* Live Guesty read-back: the server's verify ladder is
+                                  confirming the stored gallery matches EXACTLY what
+                                  was pushed (a stale old gallery re-PUTs). */}
+                              {pushVerifyNote && (
+                                <div style={{ marginTop: 6, padding: "6px 10px", background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 6, fontSize: 12, color: "#1d4ed8" }} data-testid="photo-push-verify-note">
+                                  🔍 {pushVerifyNote}
+                                </div>
+                              )}
                               {/* Stream-loss reconcile: the edge cut the response
                                   (15-min cap) but the SERVER is still pushing —
                                   we're watching the push ledger for the result. */}

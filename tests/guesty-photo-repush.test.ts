@@ -173,13 +173,28 @@ const read = (rel: string) => fs.readFileSync(path.join(here, "..", rel), "utf8"
   check("strict final-audit verification compares the exact normalized ordered gallery with Cover Collage first",
     src.includes("strictGuestyPicturesExactlyMatch(savedPictures, picturesForPut())")
     && src.includes('savedFirst?.caption === "Cover Collage"')
-    && src.includes('strictGalleryVerification ? exactMatch : savedLen >= expectedTotal')
+    && src.includes('strictGalleryVerification ? exactMatch : savedLen === expectedTotal')
     && src.includes('strictGalleryVerified'));
   check("strict gallery mode requires the explicit trusted URL; intermediate/manual pushes keep count verification",
     src.includes("const strictGalleryVerification = requiredCoverCollageUrl != null")
     && !src.includes("strictGalleryVerificationRequirement")
     && src.includes("intermediate replacement")
-    && src.includes('strictGalleryVerification ? exactMatch : savedLen >= expectedTotal'));
+    && src.includes('strictGalleryVerification ? exactMatch : savedLen === expectedTotal'));
+  // 2026-07-17: count verification is EXACT. The push PUT replaces the whole
+  // pictures[] — pushing 40 over an old 60-photo gallery must end at 40 — so a
+  // stale LARGER read-back (the old gallery still served by an eventually-
+  // consistent GET) re-PUTs instead of passing "by count" (the old
+  // `savedLen >= expectedTotal` accepted it and over-reported verifiedCount).
+  check("count verification requires the EXACT expected total — a stale larger (old) gallery re-PUTs instead of passing by count",
+    src.includes('strictGalleryVerification ? exactMatch : savedLen === expectedTotal')
+    && !src.includes("savedLen >= expectedTotal")
+    && src.includes("lastObservedTotal = savedLen"));
+  check("done event reports the live Guesty gallery so the Photos tab can confirm pushed vs actually-on-Guesty",
+    src.includes("guestyTotal: lastObservedTotal")
+    && src.includes("replacementConfirmed = true")
+    && src.includes("staleExtra"));
+  check("verifiedCount can never exceed the number of photos actually pushed",
+    src.includes("Math.min(verifiedTotal - pinnedCount, collected.length)"));
 
   // Execute the production comparison helpers directly from their marked
   // source block. Regression: count-only verification used to accept both of

@@ -30,7 +30,7 @@
 
 import { storage } from "./storage";
 import { draftPhotoFolderRef, replacementPhotoFolderRef } from "@shared/photo-folder-utils";
-import { unitBuilderData } from "../client/src/data/unit-builder-data";
+import { isRetiredUnitBuilderProperty, unitBuilderData } from "../client/src/data/unit-builder-data";
 import { sendOperatorAlert } from "./operator-alerts";
 
 export type OtaPlatformKey = "airbnb" | "vrbo" | "booking";
@@ -89,11 +89,13 @@ export async function propertyForScannedFolder(
   return null;
 }
 
-// Only queue reactive sweeps for targets the weekly audit cron would sweep anyway: every builder
-// core property, but drafts only once they're Guesty-MAPPED — burning a sweep (and possibly a
-// SearchAPI replacement search) on a half-finished draft that isn't selling anywhere is waste.
+// Only queue reactive sweeps for targets the weekly audit cron would sweep anyway: ACTIVE builder
+// core properties (retired unit-builder-data entries have no live listing to fix — reacting to
+// them created the 2026-07-18 ghost audit/replace class), and drafts only once they're
+// Guesty-MAPPED — burning a sweep (and possibly a SearchAPI replacement search) on a
+// half-finished draft that isn't selling anywhere is waste.
 async function reactiveSweepEligible(propertyId: number): Promise<boolean> {
-  if (propertyId > 0) return true;
+  if (propertyId > 0) return !isRetiredUnitBuilderProperty(propertyId);
   const map = await storage.getGuestyPropertyMap().catch(() => []);
   return map.some((m) => m.propertyId === propertyId);
 }
@@ -109,6 +111,8 @@ export async function reactToPhotoListingDetections(d: PhotoListingDetection): P
         sweepNote = "Auto-fix sweep NOT queued (PHOTO_FOUND_AUTO_AUDIT_DISABLED=1) — use the dashboard Replace photos popup";
       } else if (!prop) {
         sweepNote = "Auto-fix sweep NOT queued (folder is not tied to a dashboard property) — use the dashboard Replace photos popup";
+      } else if (prop.propertyId > 0 && isRetiredUnitBuilderProperty(prop.propertyId)) {
+        sweepNote = "Auto-fix sweep NOT queued (property is retired from the portfolio — no live listing to fix)";
       } else if (!(await reactiveSweepEligible(prop.propertyId))) {
         sweepNote = "Auto-fix sweep NOT queued (draft is not connected to Guesty yet)";
       } else {

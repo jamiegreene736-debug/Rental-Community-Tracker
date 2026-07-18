@@ -40,6 +40,7 @@ import {
 } from "@shared/community-addresses";
 import { statesEquivalent } from "@shared/community-location-guard";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
+import { CLUBHOUSE_TITLE_HINT_RE, clubhouseDiscoveryQueries, finiteCoord } from "@shared/published-address";
 import { reverseGeocodeToStreetAddress } from "./walking-distance";
 import { callClaudeWebSearchJson } from "./claude-json";
 
@@ -331,6 +332,178 @@ If you cannot find a reliable numbered street address for this exact community, 
   }
   const found = acceptClaudeAddressCandidate(res.data, input);
   return { found, transient: false };
+}
+
+// ── Clubhouse discovery (separate published address, 2026-07-17) ─────────────
+// The Guesty "separate published address" feature wants the community's
+// CLUBHOUSE address published instead of the unit's. Same google_maps engine +
+// the SAME whole-word title gate as street discovery (precision over recall —
+// a sibling resort's clubhouse must never win), but clubhouse-flavored queries
+// and a rank preference for POIs whose title actually says clubhouse/front
+// desk/office. A plain resort-pin hit is still acceptable (the resort's own
+// map pin is usually its office/clubhouse); the caller falls back to the
+// generic main-building address when nothing clears the gate.
+
+export type ClubhouseAddressCandidate = {
+  street: string;
+  fullAddress: string;
+  matchedTitle: string;
+  query: string;
+  lat?: number;
+  lng?: number;
+};
+
+// PM/realty storefronts routinely register maps businesses NAMED AFTER the
+// resorts they serve ("<Resort> Vacation Rentals Office") — the exact title
+// class the office/reception hint words would otherwise promote. Never let
+// one win the hint pass.
+const PM_STOREFRONT_TITLE_RE = /\b(?:rentals?|realty|real\s+estate|property\s+management|properties|brokerage|vacation\s+rentals?)\b/i;
+
+function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const rad = (d: number) => (d * Math.PI) / 180;
+  const dLat = rad(bLat - aLat);
+  const dLng = rad(bLng - aLng);
+  const s =
+    Math.sin(dLat / 2) ** 2 + Math.cos(rad(aLat)) * Math.cos(rad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return 12742 * Math.asin(Math.sqrt(Math.min(1, s)));
+}
+
+/**
+ * Pick the best clubhouse candidate: two passes over the relevance-ordered
+ * maps results, both requiring the resort-token title gate + a real numbered
+ * street. Pass 1 takes a title with a clubhouse-ish hint word — but never a
+ * PM/realty storefront, and only when it shares the rank-order winner's
+ * footprint (same street root, or coords within ~1.5 km) so an off-site
+ * business named after the resort can't beat the resort's own pin. Pass 2 =
+ * the first title-matched place (the resort pin — usually its office).
+ * Pure / no network so it is unit-testable.
+ */
+export function selectClubhouseCandidate(
+  candidates: MapsAddressCandidate[],
+  resortName: string,
+  query: string,
+): ClubhouseAddressCandidate | null {
+  const usable = (c: MapsAddressCandidate): ClubhouseAddressCandidate | null => {
+    const fullAddress = String(c?.address ?? "").trim();
+    if (!fullAddress) return null;
+    const street = streetRootFromAddress(fullAddress);
+    if (!street || !isLikelyStreetAddress(street)) return null;
+    if (!titleMatchesResort(c?.title, resortName)) return null;
+    const lat = finiteCoord(c?.gps_coordinates?.latitude, 90);
+    const lng = finiteCoord(c?.gps_coordinates?.longitude, 180);
+    return {
+      street,
+      fullAddress,
+      matchedTitle: String(c?.title ?? "").trim(),
+      query,
+      ...(lat != null && lng != null ? { lat, lng } : {}),
+    };
+  };
+  let rankWinner: ClubhouseAddressCandidate | null = null;
+  for (const c of candidates) {
+    const hit = usable(c);
+    if (hit) {
+      rankWinner = hit;
+      break;
+    }
+  }
+  if (!rankWinner) return null;
+  for (const c of candidates) {
+    const title = String(c?.title ?? "");
+    if (!CLUBHOUSE_TITLE_HINT_RE.test(title)) continue;
+    if (PM_STOREFRONT_TITLE_RE.test(title)) continue;
+    const hit = usable(c);
+    if (!hit) continue;
+    const sameRoot =
+      normalizeCommunityAddressToken(hit.street) === normalizeCommunityAddressToken(rankWinner.street);
+    const nearby =
+      hit.lat != null && hit.lng != null && rankWinner.lat != null && rankWinner.lng != null
+        ? haversineKm(hit.lat, hit.lng, rankWinner.lat, rankWinner.lng) <= 1.5
+        : false;
+    if (sameRoot || nearby || hit === rankWinner) return hit;
+  }
+  return rankWinner;
+}
+
+const clubhouseCache = new Map<string, ClubhouseAddressCandidate | null>();
+
+/**
+ * Resolve a community's clubhouse street address from SearchAPI google_maps.
+ * `found` is null when the key is missing, the kill switch is set, or nothing
+ * clears the precision gate — callers fall back to the generic main-building
+ * address. `transient` is true when the miss was caused by a SearchAPI/
+ * reverse-geocode failure rather than a definitive no-match, so callers must
+ * NOT durably cache the fallback (same contract as
+ * discoverCommunityStreetAddress: a 429 blip never permanently skips a
+ * community's clubhouse). `forceRefresh` bypasses the in-process cache READ
+ * (the fresh definitive result still replaces the cached entry) — the manual
+ * button's re-discovery promise depends on it.
+ */
+export async function discoverCommunityClubhouseAddress(input: {
+  communityName?: string | null;
+  city?: string | null;
+  state?: string | null;
+  forceRefresh?: boolean;
+}): Promise<{ found: ClubhouseAddressCandidate | null; transient: boolean }> {
+  const communityName = String(input.communityName ?? "").trim();
+  if (!communityName) return { found: null, transient: false };
+  if (process.env.PUBLISHED_ADDRESS_CLUBHOUSE_DISCOVERY === "0") return { found: null, transient: false };
+  const apiKey = process.env.SEARCHAPI_API_KEY;
+  if (!apiKey) return { found: null, transient: false };
+
+  const city = String(input.city ?? "").trim();
+  const state = String(input.state ?? "").trim();
+  const cacheKey = ["clubhouse", communityName, city, state].map((v) => v.toLowerCase()).join("|");
+  if (input.forceRefresh !== true && clubhouseCache.has(cacheKey)) {
+    return { found: clubhouseCache.get(cacheKey) ?? null, transient: false };
+  }
+
+  let found: ClubhouseAddressCandidate | null = null;
+  let anyTransientError = false;
+  // A title-matched (ideally clubhouse-hinted) place with coordinates but no
+  // usable street — reverse-geocoded only when no direct street hit lands.
+  let coordsFallback: { lat: number; lng: number; matchedTitle: string; fullAddress: string; query: string } | null = null;
+  for (const query of clubhouseDiscoveryQueries(communityName, city, state)) {
+    let candidates: MapsAddressCandidate[] = [];
+    try {
+      candidates = await fetchMapsCandidates(query, apiKey);
+    } catch (e: any) {
+      anyTransientError = true;
+      console.warn(`[clubhouse-discovery] "${query}": ${e?.message ?? e}`);
+      continue;
+    }
+    const hit = selectClubhouseCandidate(candidates, communityName, query);
+    if (hit) {
+      found = hit;
+      break;
+    }
+    if (!coordsFallback) {
+      const cf = selectCoordinateFallbackCandidate(candidates, communityName);
+      if (cf) coordsFallback = { ...cf, query };
+    }
+  }
+
+  if (!found && coordsFallback) {
+    try {
+      const street = await reverseGeocodeToStreetAddress(coordsFallback.lat, coordsFallback.lng);
+      if (street && isLikelyStreetAddress(street)) {
+        found = {
+          street: streetRootFromAddress(street),
+          fullAddress: coordsFallback.fullAddress || street,
+          matchedTitle: coordsFallback.matchedTitle,
+          query: `${coordsFallback.query} (reverse-geocoded)`,
+          lat: coordsFallback.lat,
+          lng: coordsFallback.lng,
+        };
+      }
+    } catch (e: any) {
+      anyTransientError = true;
+      console.warn(`[clubhouse-discovery] reverse-geocode "${communityName}": ${e?.message ?? e}`);
+    }
+  }
+
+  if (found || !anyTransientError) clubhouseCache.set(cacheKey, found);
+  return { found, transient: !found && anyTransientError };
 }
 
 const discoveryCache = new Map<string, DiscoveredStreetAddress | null>();

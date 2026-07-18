@@ -1,6 +1,5 @@
 import sharp from "sharp";
 
-import { VIRTUAL_STAGING_PROMPT } from "@shared/virtual-staging";
 import type {
   VirtualStagingGenerationInput,
   VirtualStagingGenerationResult,
@@ -184,7 +183,7 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
           },
           body: JSON.stringify({
             input: {
-              prompt: VIRTUAL_STAGING_PROMPT,
+              prompt: input.prompt,
               input_image: file.urls.get,
               aspect_ratio: "match_input_image",
               output_format: "jpg",
@@ -247,7 +246,7 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
       const outputHeight = outputMetadata.autoOrient?.height ?? outputMetadata.height;
       const outputAspectRatio = outputWidth / outputHeight;
       if (Math.abs(outputAspectRatio / sourceAspectRatio - 1) > 0.03) {
-        throw new Error("Replicate changed the source crop or aspect ratio too much to review safely");
+        throw new Error("Replicate changed the source aspect ratio too much to review safely");
       }
       const buffer = await sharp(rawOutput, { failOn: "error" })
         .rotate()

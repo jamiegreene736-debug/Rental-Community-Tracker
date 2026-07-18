@@ -404,12 +404,69 @@ while IFS= read -r pid; do
   [[ -z "${pid}" || "${pid}" == "$$" ]] && continue
   kill "${pid}" >/dev/null 2>&1 || true
 done < <(pgrep -f "(daemon/vrbo-sidecar|Downloads/vrbo-sidecar|\\.vrbo-sidecar-daemon)/worker\\.mjs" || true)
+
+dedicated_sidecar_chrome_pids() {
+  local min_port=9222
+  # Always scan the manager's full hard-capped pool. An install that lowers
+  # MAX_LOCAL_CHROME_INSTANCES must still retire higher-numbered old slots.
+  local max_port=9229
+  local profile_arg="--user-data-dir=${HOME}/Library/Application Support/VrboSidecar-Chrome"
+  local pid command port_suffix port
+
+  while read -r pid command; do
+    [[ -z "${pid}" || "${command}" != *"--remote-debugging-port="* || "${command}" != *"${profile_arg}"* ]] && continue
+    port_suffix="${command#*--remote-debugging-port=}"
+    port="${port_suffix%% *}"
+    if [[ "${port}" =~ ^[0-9]+$ ]] && (( port >= min_port && port <= max_port )); then
+      printf '%s\n' "${pid}"
+    fi
+  done < <(ps -axww -o pid=,command=)
+}
+
+stop_dedicated_sidecar_chrome() {
+  local -a pids=()
+  local pid attempt
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] && pids+=("${pid}")
+  done < <(dedicated_sidecar_chrome_pids)
+  if (( ${#pids[@]} == 0 )); then
+    return 0
+  fi
+
+  # Chrome can take longer than the old one-second grace period to exit. If a
+  # root survives, patched workers reconnect to that stale CDP process and keep
+  # its old launch flags indefinitely. Escalate only the exact dedicated roots.
+  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if [[ -z "$(dedicated_sidecar_chrome_pids)" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  pids=()
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] && pids+=("${pid}")
+  done < <(dedicated_sidecar_chrome_pids)
+  if (( ${#pids[@]} > 0 )); then
+    echo "Dedicated sidecar Chrome did not exit after SIGTERM; force-stopping PIDs: ${pids[*]}"
+    kill -KILL "${pids[@]}" >/dev/null 2>&1 || true
+  fi
+
+  for attempt in 1 2 3 4 5; do
+    if [[ -z "$(dedicated_sidecar_chrome_pids)" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Could not stop every dedicated sidecar Chrome root; refusing to restart workers against stale launch flags." >&2
+  dedicated_sidecar_chrome_pids >&2
+  return 1
+}
+
 echo "Stopping dedicated sidecar Chrome windows, if any..."
-while IFS= read -r pid; do
-  [[ -z "${pid}" || "${pid}" == "$$" ]] && continue
-  kill "${pid}" >/dev/null 2>&1 || true
-done < <(pgrep -f "VrboSidecar-Chrome" || true)
-sleep 1
+stop_dedicated_sidecar_chrome
 
 : >"${INSTALL_DIR}/sidecar-launchd.log"
 : >"${INSTALL_DIR}/sidecar-launchd.err.log"

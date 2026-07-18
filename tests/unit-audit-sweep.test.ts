@@ -1092,8 +1092,12 @@ check("scheduler: last-run persisted in app_settings, stamped at START, first bo
   /setSetting\(UNIT_AUDIT_AUTO_LAST_RUN_KEY, new Date\(\)\.toISOString\(\)\)/.test(schedulerSrc) &&
   /first boot/.test(schedulerSrc));
 
-check("scheduler: targets = all builder properties + Guesty-MAPPED drafts only",
-  schedulerSrc.includes("getAllUnitBuilders()") && schedulerSrc.includes("getGuestyPropertyMap") &&
+// 2026-07-18: "all builder properties" became "ACTIVE builder properties" —
+// the first weekly tick swept six retired ghost entries and auto-committed a
+// unit swap for one. tests/retired-properties.test.ts locks the retired set.
+check("scheduler: targets = ACTIVE builder properties + Guesty-MAPPED drafts only",
+  schedulerSrc.includes("getActiveUnitBuilders()") && !schedulerSrc.includes("getAllUnitBuilders") &&
+  schedulerSrc.includes("getGuestyPropertyMap") &&
   /n < 0/.test(schedulerSrc));
 
 check("scheduler: cron sweeps run auto-fix ON, replacement ON by default (UNIT_AUDIT_CRON_REPLACE=0 restores flag-only), source 'cron'",

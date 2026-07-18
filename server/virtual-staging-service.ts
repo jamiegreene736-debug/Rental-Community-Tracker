@@ -1,17 +1,35 @@
 import OpenAI, { toFile } from "openai";
 import sharp from "sharp";
 
-import { VIRTUAL_STAGING_PROMPT } from "@shared/virtual-staging";
+import {
+  buildVirtualStagingPrompt,
+  virtualStagingRecipeSignature,
+  virtualStagingViewpointDirectionForSource,
+  type VirtualStagingContext,
+} from "@shared/virtual-staging";
+import { DUPLICATE_DISTANCE, hammingDistance, HASH_BITS } from "@shared/photo-hash-distance";
 import { ReplicateVirtualStagingProvider } from "./replicate-virtual-staging-provider";
+import {
+  AnthropicVirtualStagingViewpointVerifier,
+  VirtualStagingViewpointVerificationUnavailableError,
+  type VirtualStagingViewpointVerifier,
+} from "./virtual-staging-viewpoint-verifier";
 
 const DEFAULT_MODEL = "gpt-image-1.5";
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const OPENAI_TIMEOUT_MS = 5 * 60 * 1000;
 
-export type VirtualStagingGenerationInput = {
+export type VirtualStagingGenerationRequest = {
   source: Buffer;
   sourceFilename: string;
+  generationAttempt: number;
+  previousPreview?: Buffer;
+  context: VirtualStagingContext;
   endUserId?: string;
+};
+
+export type VirtualStagingGenerationInput = VirtualStagingGenerationRequest & {
+  prompt: string;
 };
 
 export type VirtualStagingGenerationResult = {
@@ -94,7 +112,7 @@ async function validateGeneratedImage(
   const resultRatio = resultWidth / resultHeight;
   const ratioDrift = Math.abs(resultRatio - sourceRatio) / sourceRatio;
   if (ratioDrift > 0.03) {
-    throw new Error("Image provider changed the source photo's crop or aspect ratio");
+    throw new Error("Image provider changed the source photo's aspect ratio");
   }
   return {
     buffer,
@@ -104,6 +122,58 @@ async function validateGeneratedImage(
     model,
     provider,
   };
+}
+
+export async function computeVirtualStagingDhash(buffer: Buffer): Promise<string> {
+  const { data, info } = await sharp(buffer, { failOn: "error" })
+    .rotate()
+    .grayscale()
+    .resize(9, 8, { fit: "fill" })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  if (info.width !== 9 || info.height !== 8 || data.length !== 72) {
+    throw new Error("Generated preview could not be compared with its source");
+  }
+  let hex = "";
+  for (let bitOffset = 0; bitOffset < HASH_BITS; bitOffset += 8) {
+    let byte = 0;
+    for (let bit = 0; bit < 8; bit += 1) {
+      const index = bitOffset + bit;
+      const row = Math.floor(index / 8);
+      const column = index % 8;
+      if (data[row * 9 + column] > data[row * 9 + column + 1]) {
+        byte |= 1 << (7 - bit);
+      }
+    }
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+async function assertMeaningfullyDifferentPreview(
+  source: Buffer,
+  generated: Buffer,
+  provider: string,
+  previousPreviewHash?: string,
+): Promise<void> {
+  // The development mock intentionally echoes the source so the job/review UI
+  // can run without spending provider credits. Real providers must produce a
+  // visibly distinct image; this hash is only a no-op/duplicate guard. The
+  // separate vision verifier decides whether permanent geometry proves that
+  // the camera viewpoint actually changed.
+  if (provider === "mock") return;
+  const [sourceHash, generatedHash] = await Promise.all([
+    computeVirtualStagingDhash(source),
+    computeVirtualStagingDhash(generated),
+  ]);
+  if (hammingDistance(sourceHash, generatedHash) <= DUPLICATE_DISTANCE) {
+    throw new Error("Image provider returned a preview too visually similar to the source photo");
+  }
+  if (previousPreviewHash) {
+    if (hammingDistance(previousPreviewHash, generatedHash) <= DUPLICATE_DISTANCE) {
+      throw new Error("Image provider returned a preview too visually similar to the previous staged angle");
+    }
+  }
 }
 
 function safeProviderError(error: unknown): string {
@@ -145,7 +215,7 @@ export class OpenAIVirtualStagingProvider implements VirtualStagingImageProvider
     const response = await client.images.edit({
       model: this.model,
       image: upload,
-      prompt: VIRTUAL_STAGING_PROMPT,
+      prompt: input.prompt,
       input_fidelity: "high",
       quality: "high",
       size: "auto",
@@ -224,6 +294,8 @@ export class VirtualStagingService {
   constructor(
     private readonly providers: readonly VirtualStagingImageProvider[],
     concurrency = parseVirtualStagingConcurrency(),
+    private readonly viewpointVerifier: VirtualStagingViewpointVerifier =
+      new AnthropicVirtualStagingViewpointVerifier(),
   ) {
     this.limiter = new Semaphore(concurrency);
   }
@@ -235,30 +307,74 @@ export class VirtualStagingService {
     ) || DEFAULT_MODEL;
   }
 
+  get recipeSignature(): string {
+    return virtualStagingRecipeSignature();
+  }
+
   assertConfigured(): void {
     if (process.env.VIRTUAL_STAGING_MOCK === "1" && process.env.NODE_ENV === "production") {
       throw new VirtualStagingConfigurationError("VIRTUAL_STAGING_MOCK cannot be enabled in production");
     }
-    if (this.configuredProviders().length === 0) {
+    const providers = this.configuredProviders();
+    if (providers.length === 0) {
       throw new VirtualStagingConfigurationError("No virtual-staging image-edit provider is configured");
+    }
+    if (providers.some((provider) => provider.id !== "mock") && !this.viewpointVerifier.isConfigured()) {
+      throw new VirtualStagingConfigurationError(
+        "ANTHROPIC_API_KEY is required to verify alternate virtual-staging viewpoints",
+      );
     }
   }
 
-  async generate(input: VirtualStagingGenerationInput): Promise<VirtualStagingGenerationResult> {
+  async generate(input: VirtualStagingGenerationRequest): Promise<VirtualStagingGenerationResult> {
     this.assertConfigured();
     const source = await validateSourceImage(input.source);
+    // Validate and fingerprint the retained prior preview before spending on a
+    // new provider call. A corrupt/missing comparison input applies to every
+    // provider, so fallback generation cannot repair it.
+    const previousPreviewHash = input.previousPreview
+      ? await computeVirtualStagingDhash(input.previousPreview)
+      : undefined;
+    const viewpointDirection = virtualStagingViewpointDirectionForSource(
+      input.sourceFilename,
+      input.generationAttempt,
+    );
+    const providerInput: VirtualStagingGenerationInput = {
+      ...input,
+      prompt: buildVirtualStagingPrompt(input.context, viewpointDirection),
+    };
     return this.limiter.run(async () => {
       const errors: string[] = [];
       for (const provider of this.configuredProviders()) {
         try {
-          const result = await provider.generate(input);
-          return await validateGeneratedImage(
+          const result = await provider.generate(providerInput);
+          const validated = await validateGeneratedImage(
             result.buffer,
             result.model,
             result.provider,
             { width: source.width, height: source.height },
           );
+          await assertMeaningfullyDifferentPreview(
+            input.source,
+            validated.buffer,
+            result.provider,
+            previousPreviewHash,
+          );
+          if (result.provider !== "mock") {
+            await this.viewpointVerifier.verify({
+              source: input.source,
+              generated: validated.buffer,
+              previousGenerated: input.previousPreview,
+              requestedDirection: viewpointDirection,
+              imageProvider: result.provider,
+              generationAttempt: input.generationAttempt,
+            });
+          }
+          return validated;
         } catch (error) {
+          // A verifier outage applies to every image provider. Stop instead of
+          // spending credits on another generation that cannot be validated.
+          if (error instanceof VirtualStagingViewpointVerificationUnavailableError) throw error;
           errors.push(`${provider.id}: ${safeProviderError(error)}`);
         }
       }
@@ -283,6 +399,8 @@ export function getVirtualStagingService(): VirtualStagingService {
     process.env.REPLICATE_VIRTUAL_STAGING_MODEL ?? "",
     process.env.OPENAI_API_KEY ? "openai" : "",
     process.env.OPENAI_IMAGE_MODEL ?? "",
+    process.env.ANTHROPIC_API_KEY ? "anthropic" : "",
+    process.env.VIRTUAL_STAGING_VIEWPOINT_MODEL ?? "",
     parseVirtualStagingConcurrency(),
   ].join("|");
   if (!defaultService || defaultServiceSignature !== signature) {
