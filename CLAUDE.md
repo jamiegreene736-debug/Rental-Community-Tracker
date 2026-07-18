@@ -43,6 +43,40 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-18 ("how does a 4 bedroom sleep 12?" — every summary now EXPLAINS its own occupancy):
+  Operator: guests keep asking; put the breakdown in the AI description for ALL listings, update the
+  methodology, then update existing listings and push to Guesty where connected. KEY FINDING (don't
+  re-chase): the arithmetic was ALREADY `shared/occupancy.ts` `occupancyForBedrooms` — "2 guests per
+  bedroom + sleeper sofas" (+2 single condo, +4 two-condo combo) since 2026-06-16 — driving the
+  title's "Sleeps N", the dashboard Guests column, and Guesty `accommodates`. The number was
+  advertised everywhere and explained nowhere; nothing needed inventing. SHIPPED
+  (`claude/listing-capacity-explanation-b925ba`): NEW pure `buildSleepingCapacityExplanation` /
+  `describesSleepingCapacity` / `ensureSleepingCapacityExplanation` / `sleepingCapacityPromptContext`
+  + `SLEEPING_CAPACITY_RULE` (shared/description-copy.ts) DERIVE the paragraph from that one rule, so
+  it can never contradict the headline. BELT AND BRACES in `/api/community/generate-listing`: both
+  prompt variants get the math as authoritative CONTEXT + the rule (Claude writes it in its own
+  voice) AND the endpoint deterministically ensures it after parsing — including on the no-key
+  FALLBACK path — because "all listings explain this" must not depend on model compliance; the ensure
+  runs BEFORE the resort-fee append so the fee caveat stays last. ONE seam covers the
+  Descriptions-tab button, the audit sweep's regenerate twin, and the bulk-combo pipeline — don't add
+  a second. HONESTY (returns null, claims NOTHING): 0 bedrooms, non-even sofa remainder, and a
+  STANDALONE listing carrying the combo +4 (would claim two sleeper sofas in one living room); sofas
+  never get a SIZE (the Bedding tab stores only a count — "queen sleeper sofa" is invented, same rule
+  `buildSpaceDescription` follows). Placement is disclosure-aware (`SUMMARY_DISCLOSURE_LEADS`) so the
+  paragraph joins the summary BODY, never under the "Unit assignment note" legalese; detection is
+  deliberately GENEROUS so a model-written explanation is never DUPLICATED in live guest copy.
+  BACKFILL is SURGICAL by operator choice (asked before building): `POST
+  /api/admin/backfill-sleeping-capacity` (NDJSON + heartbeat, DRY-RUN by default, `{execute:true}` to
+  write) inserts the paragraph into each mapped listing's CURRENT Guesty summary with NO Claude call,
+  so existing copy + hand-edited overrides survive verbatim; persists the override BEFORE the Guesty
+  PUT (order load-bearing — the override table is what a later push-descriptions sends), read-back
+  verifies, stamps the push ledger, and SKIPS any listing whose Guesty `accommodates` disagrees with
+  the computed occupancy (real bedroom-count drift = the same-day Cliffs class, a human decision).
+  Verified: description-copy 109/0 (31 new), full `npm test` green apart from the documented
+  city-vrbo-expansion.smoke flake (reproduced on a clean stash), build clean (4 strings
+  bundle-grepped), `npm run check` 335 = baseline (stash A/B identical per-file sets). See AGENTS.md
+  Load-Bearing #33 "Every summary EXPLAINS its own occupancy" + the 2026-07-18 Decision Log line.
+
 - 2026-07-18 (Photos-tab "🧹 Scan photos & remove duplicates" — does it scan BOTH units, and does it
   catch repeat angles?): Operator asked to verify + improve the methodology. BOTH UNITS: already
   correct (don't re-chase) — the request is built from the rendered `photos` array, which builder.tsx
