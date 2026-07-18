@@ -44,6 +44,8 @@ type VirtualStagingDialogProps = {
   open: boolean;
   propertyId: number;
   unit: VirtualStagingUnit;
+  selectedOriginalFilenames?: readonly string[];
+  initialJobId?: string;
   onOpenChange: (open: boolean) => void;
   onBusyChange?: (busy: boolean) => void;
   onConfirmed?: (result: VirtualStagingConfirmedResult) => void | Promise<void>;
@@ -110,6 +112,8 @@ export default function VirtualStagingDialog({
   open,
   propertyId,
   unit,
+  selectedOriginalFilenames,
+  initialJobId,
   onOpenChange,
   onBusyChange,
   onConfirmed,
@@ -131,7 +135,8 @@ export default function VirtualStagingDialog({
   const [startAttempt, setStartAttempt] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [finishing, setFinishing] = useState(false);
-  const sessionKey = `${propertyId}:${unit.id}:${startAttempt}`;
+  const selectedSourcesKey = selectedOriginalFilenames?.join("\u0000") ?? "resume-or-all";
+  const sessionKey = `${propertyId}:${unit.id}:${initialJobId ?? "new"}:${selectedSourcesKey}:${startAttempt}`;
   const startRequestRef = useRef<{ key: string; promise: Promise<VirtualStagingJob> } | null>(null);
   const retryingRef = useRef<Set<string>>(new Set());
   const confirmingRef = useRef(false);
@@ -197,10 +202,18 @@ export default function VirtualStagingDialog({
     if (!request || request.key !== requestKey) {
       request = {
         key: requestKey,
-        promise: apiRequest("POST", "/api/virtual-staging/jobs", {
-          propertyId,
-          unitId: unit.id,
-        }).then(readJob),
+        promise: initialJobId
+          ? apiRequest(
+            "GET",
+            `/api/virtual-staging/jobs/${encodeURIComponent(initialJobId)}`,
+          ).then(readJob)
+          : apiRequest("POST", "/api/virtual-staging/jobs", {
+            propertyId,
+            unitId: unit.id,
+            ...(selectedOriginalFilenames
+              ? { selectedOriginalFilenames: [...selectedOriginalFilenames] }
+              : {}),
+          }).then(readJob),
       };
       startRequestRef.current = request;
     }
@@ -212,6 +225,7 @@ export default function VirtualStagingDialog({
           sessionKey: requestKey,
           propertyId,
           unitId: unit.id,
+          ...(initialJobId ? { jobId: initialJobId } : {}),
         });
       })
       .catch((error: unknown) => {
@@ -231,7 +245,18 @@ export default function VirtualStagingDialog({
     return () => {
       cancelled = true;
     };
-  }, [applyJobSnapshot, propertyId, sessionKey, startAttempt, toast, unit.id, unit.label]);
+  }, [
+    applyJobSnapshot,
+    initialJobId,
+    propertyId,
+    selectedOriginalFilenames,
+    selectedSourcesKey,
+    sessionKey,
+    startAttempt,
+    toast,
+    unit.id,
+    unit.label,
+  ]);
 
   // Poll in the background even if the operator closes the modal. That keeps
   // the launch controls disabled until the live job actually reaches a terminal
@@ -341,7 +366,8 @@ export default function VirtualStagingDialog({
   const finishedCount = job
     ? job.candidates.filter((candidate) => candidate.status === "succeeded" || candidate.status === "failed").length
     : 0;
-  const totalCount = job?.total ?? unit.photoCount;
+  const requestedPhotoCount = selectedOriginalFilenames?.length ?? unit.photoCount;
+  const totalCount = job?.total ?? requestedPhotoCount;
   const progressPercent = totalCount > 0 ? Math.min(100, Math.round((finishedCount / totalCount) * 100)) : 0;
   const selectedSuccessfulCandidates = successfulCandidates
     .filter((candidate) => selectedCandidateKeys.has(candidateSelectionKey(candidate)));
@@ -599,7 +625,7 @@ export default function VirtualStagingDialog({
           ? "Virtual staging could not be completed."
           : job
             ? `${successfulCandidates.length} of ${totalCount} staged photos are ready to review.`
-            : `Preparing ${unit.photoCount} photos for review.`;
+            : `Preparing ${requestedPhotoCount} photos for review.`;
 
   return (
     <Dialog open={open} onOpenChange={safelyChangeOpen}>
