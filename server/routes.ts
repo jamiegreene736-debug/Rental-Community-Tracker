@@ -46025,6 +46025,107 @@ Return ONLY compact JSON with this exact shape:
     res.json({ success: true });
   });
 
+  // Delete an *added* community listing/draft from the dashboard AND everywhere
+  // else its data lives. `:id` is the DASHBOARD property id — negative for
+  // drafts (-draftId). Two guards, both authoritative server-side:
+  //   1. SCOPE: only DB-backed added listings (negative id) can be deleted here.
+  //      Positive ids are hard-coded core portfolio units (unit-builder-data.ts)
+  //      that live in code, not the DB, so there is nothing to delete.
+  //   2. GUESTY: refuse if the listing is connected to Guesty (has a
+  //      guesty_property_map row) — mirrors the dashboard's green "G" dot. The
+  //      operator must disconnect first. This prevents deleting a live listing
+  //      and its guest-messaging / booking footprint out from under Guesty.
+  // The client double-confirms in the UI; this endpoint is the point of no
+  // return. Deep DB cleanup is `storage.deleteCommunityDraftDeep`; the
+  // app_settings audit-doc prune and on-disk photo-folder removal below are
+  // best-effort and never block the delete.
+  app.delete("/api/dashboard/property/:id", async (req, res) => {
+    const dashboardId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(dashboardId)) {
+      return res.status(400).json({ error: "Invalid property id" });
+    }
+    if (dashboardId >= 0) {
+      return res.status(400).json({
+        error: "Only added community listings and drafts can be deleted. Core portfolio units are fixed.",
+      });
+    }
+    const draftId = Math.abs(dashboardId);
+    const draft = await storage.getCommunityDraft(draftId);
+    if (!draft) return res.status(404).json({ error: "Listing not found" });
+
+    const guestyListingId = await storage.getGuestyListingId(dashboardId);
+    if (guestyListingId) {
+      return res.status(409).json({
+        error: "This listing is connected to Guesty. Disconnect it from Guesty before deleting.",
+      });
+    }
+
+    let deleted: Record<string, number> = {};
+    try {
+      deleted = await storage.deleteCommunityDraftDeep(draftId);
+    } catch (err: any) {
+      console.error(`[property-delete] deep delete failed for draft ${draftId}:`, err?.message ?? err);
+      return res.status(500).json({ error: err?.message ?? "Failed to delete listing" });
+    }
+
+    // Best-effort: prune per-property records out of the app_settings audit
+    // documents (unit_audit_sweeps.v1 / unit_audit_reports.v1). Keyed by the
+    // dashboard property id. Never blocks the delete.
+    try {
+      const {
+        UNIT_AUDIT_STORE_SETTING_KEY,
+        UNIT_AUDIT_REPORTS_SETTING_KEY,
+        parseUnitAuditStore,
+        serializeUnitAuditStore,
+        parseUnitAuditReports,
+        serializeUnitAuditReports,
+      } = await import("@shared/unit-audit-sweep-logic");
+      const { pruneRecordsByPropertyId } = await import("@shared/property-deletion");
+
+      const storeRaw = await storage.getSetting(UNIT_AUDIT_STORE_SETTING_KEY);
+      if (storeRaw) {
+        const pruned = pruneRecordsByPropertyId(parseUnitAuditStore(storeRaw), dashboardId);
+        if (pruned.removed > 0) {
+          await storage.setSetting(UNIT_AUDIT_STORE_SETTING_KEY, serializeUnitAuditStore(pruned.records, Date.now()));
+          deleted["unitAuditJobs"] = pruned.removed;
+        }
+      }
+      const reportsRaw = await storage.getSetting(UNIT_AUDIT_REPORTS_SETTING_KEY);
+      if (reportsRaw) {
+        const pruned = pruneRecordsByPropertyId(parseUnitAuditReports(reportsRaw), dashboardId);
+        if (pruned.removed > 0) {
+          await storage.setSetting(UNIT_AUDIT_REPORTS_SETTING_KEY, serializeUnitAuditReports(pruned.records));
+          deleted["unitAuditReports"] = pruned.removed;
+        }
+      }
+    } catch (err: any) {
+      console.error(`[property-delete] audit-doc prune failed for draft ${draftId}:`, err?.message ?? err);
+    }
+
+    // Best-effort: remove the draft's on-disk photo folders.
+    try {
+      const { communityDraftPhotoFolders } = await import("@shared/property-deletion");
+      const photosBase = path.join(process.cwd(), "client", "public", "photos");
+      let foldersRemoved = 0;
+      for (const folder of communityDraftPhotoFolders(draftId)) {
+        const dir = path.join(photosBase, folder);
+        if (fs.existsSync(dir)) {
+          fs.rmSync(dir, { recursive: true, force: true });
+          foldersRemoved += 1;
+        }
+      }
+      if (foldersRemoved > 0) deleted["photoFolders"] = foldersRemoved;
+    } catch (err: any) {
+      console.error(`[property-delete] photo-folder removal failed for draft ${draftId}:`, err?.message ?? err);
+    }
+
+    console.log(
+      `[property-delete] removed draft ${draftId} (dashboard id ${dashboardId}, "${draft.name}"):`,
+      JSON.stringify(deleted),
+    );
+    res.json({ success: true, draftId, dashboardId, name: draft.name, deleted });
+  });
+
   app.post("/api/pricing/hybrid/run", async (req, res) => {
     const rawIds = Array.isArray(req.body?.propertyIds) ? req.body.propertyIds : [];
     const propertyIds = rawIds

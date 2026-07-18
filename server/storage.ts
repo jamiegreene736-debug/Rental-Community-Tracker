@@ -45,9 +45,11 @@ import {
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
   propertyComplianceOverrides,
   propertyDescriptionOverrides,
+  bulkPricingRefreshJobItems, bulkComboListingJobItems, communityPricingRefreshJobs,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, inArray, ne, sql } from "drizzle-orm";
+import { communityDraftPhotoFolders } from "@shared/property-deletion";
 import { DESCRIPTION_OVERRIDE_FIELDS, type PropertyDescriptionOverrideField } from "@shared/description-copy";
 import { photoListingScanWasInconclusive } from "@shared/photo-listing-decision";
 import {
@@ -212,6 +214,7 @@ export interface IStorage {
   getCommunityDraft(id: number): Promise<CommunityDraft | undefined>;
   updateCommunityDraft(id: number, data: Partial<InsertCommunityDraft>): Promise<CommunityDraft | undefined>;
   deleteCommunityDraft(id: number): Promise<boolean>;
+  deleteCommunityDraftDeep(draftId: number): Promise<Record<string, number>>;
 
   upsertPropertyMarketRate(input: InsertPropertyMarketRate): Promise<PropertyMarketRate>;
   deletePropertyMarketRate(propertyId: number, bedrooms: number): Promise<void>;
@@ -822,6 +825,87 @@ export class DatabaseStorage implements IStorage {
   async deleteCommunityDraft(id: number): Promise<boolean> {
     const result = await db.delete(communityDrafts).where(eq(communityDrafts.id, id)).returning();
     return result.length > 0;
+  }
+
+  // Thorough deletion of an *added* community draft/listing and everything the
+  // system stored for it. `deleteCommunityDraft` above removes ONLY the
+  // community_drafts row and leaves ~20 other tables orphaned; this cleans every
+  // store keyed by the draft's dashboard property id (-draftId), by its photo
+  // folders, or by the positive draft id. Modeled on the hand-rolled cleanup in
+  // POST /api/admin/cleanup-waikiki-4br-drafts but exhaustive. Buy-ins are
+  // deliberately NOT touched here (they carry a checkout-claim guard and only
+  // exist for real guest reservations on Guesty-connected listings, which this
+  // path refuses to delete). Returns per-table row counts for logging/response.
+  //
+  // Guesty-connection gating lives in the route, not here — this method assumes
+  // the caller has already confirmed the listing is safe to delete.
+  async deleteCommunityDraftDeep(draftId: number): Promise<Record<string, number>> {
+    const propertyId = -Math.abs(draftId);
+    const folders = communityDraftPhotoFolders(draftId);
+    const counts: Record<string, number> = {};
+
+    // Every table keyed by property_id (= the negative dashboard id for a draft).
+    const byProperty: Array<[string, any, any]> = [
+      ["propertyMarketRates", propertyMarketRates, propertyMarketRates.propertyId],
+      ["pricingUpdateLogs", pricingUpdateLogs, pricingUpdateLogs.propertyId],
+      ["propertyTrailingRevenue", propertyTrailingRevenue, propertyTrailingRevenue.propertyId],
+      ["propertyAmenities", propertyAmenities, propertyAmenities.propertyId],
+      ["propertyDescriptionOverrides", propertyDescriptionOverrides, propertyDescriptionOverrides.propertyId],
+      ["propertyComplianceOverrides", propertyComplianceOverrides, propertyComplianceOverrides.propertyId],
+      ["propertyBuyInMarkets", propertyBuyInMarkets, propertyBuyInMarkets.propertyId],
+      ["unitSwaps", unitSwaps, unitSwaps.propertyId],
+      ["scannerSchedule", scannerSchedule, scannerSchedule.propertyId],
+      ["scannerBlocks", scannerBlocks, scannerBlocks.propertyId],
+      ["scannerOverrides", scannerOverrides, scannerOverrides.propertyId],
+      ["scannerRunHistory", scannerRunHistory, scannerRunHistory.propertyId],
+      ["sourceabilityObservations", sourceabilityObservations, sourceabilityObservations.propertyId],
+      ["builderBookingRules", builderBookingRules, builderBookingRules.propertyId],
+      ["guestyPropertyMap", guestyPropertyMap, guestyPropertyMap.propertyId],
+      ["bulkPricingRefreshJobItems", bulkPricingRefreshJobItems, bulkPricingRefreshJobItems.propertyId],
+      ["availabilityScans", availabilityScans, availabilityScans.propertyId],
+      ["manualReservations", manualReservations, manualReservations.propertyId],
+      ["autoFillLossOptions", autoFillLossOptions, autoFillLossOptions.propertyId],
+    ];
+    for (const [label, table, column] of byProperty) {
+      const rows = await db.delete(table).where(eq(column, propertyId)).returning();
+      counts[label] = (rows as any[]).length;
+    }
+
+    // Photo tables keyed by folder name.
+    const byFolder: Array<[string, any, any]> = [
+      ["photoLabels", photoLabels, photoLabels.folder],
+      ["photoListingChecks", photoListingChecks, photoListingChecks.photoFolder],
+      ["photoListingAlerts", photoListingAlerts, photoListingAlerts.photoFolder],
+    ];
+    for (const [label, table, column] of byFolder) {
+      const rows = await db.delete(table).where(inArray(column, folders)).returning();
+      counts[label] = (rows as any[]).length;
+    }
+
+    // Tables keyed by the positive draft id.
+    const pricingJobs = await db
+      .delete(communityPricingRefreshJobs)
+      .where(eq(communityPricingRefreshJobs.draftId, Math.abs(draftId)))
+      .returning();
+    counts["communityPricingRefreshJobs"] = pricingJobs.length;
+
+    // Bulk-combo job items reference the draft they produced — unlink (don't
+    // delete the queue history), matching the admin cleanup route.
+    const unlinked = await db
+      .update(bulkComboListingJobItems)
+      .set({ draftId: null })
+      .where(eq(bulkComboListingJobItems.draftId, Math.abs(draftId)))
+      .returning();
+    counts["bulkComboListingJobItemsUnlinked"] = unlinked.length;
+
+    // Finally, the draft row itself.
+    const draftRows = await db
+      .delete(communityDrafts)
+      .where(eq(communityDrafts.id, Math.abs(draftId)))
+      .returning();
+    counts["communityDrafts"] = draftRows.length;
+
+    return counts;
   }
 
   // Per-property live market rates. One row per (propertyId, bedrooms)
