@@ -28,6 +28,11 @@ export const GUESTY_PUSH_TABS = [
   "pricing",
   "availability",
   "bookable",
+  // Not a builder tab — the "separate published address" feature push
+  // (2026-07-17). Ledger KINDS share this whitelist; the client's fixed
+  // tab-strip/chip lists simply never render this one (the Descriptions tab
+  // reads it directly for its own timestamp line).
+  "published-address",
 ] as const;
 export type GuestyPushTab = (typeof GUESTY_PUSH_TABS)[number];
 export type GuestyPushStatus = "success" | "error";

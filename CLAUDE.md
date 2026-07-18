@@ -70,6 +70,59 @@ Before making any changes:
   (200/0). Verified: full `npm test` REAL exit 0, build clean, `npm run check` = baseline
   (0 new from this change). See AGENTS.md Unit Audit Sweep #23 + the 2026-07-18 Decision Log line.
 
+- 2026-07-17 (Separate published address — every listing, via Guesty's Address controller): Operator
+  asked for Guesty's "separate published address" feature ON for every listing, always the community
+  CLUBHOUSE address, else the generic main-building address with no unit number, ensured on unit
+  audits / new combo listings / push-descriptions, with a manual Descriptions-tab button + a
+  last-pushed timestamp. SHIPPED (`claude/guesty-separate-published-address-08ad08`): the write path
+  is `PUT /v1/address/{guestyPropertyId}/update` with ALL THREE required keys
+  `{address, publishedAddress, isPublishedAddressEnabled:true}` — NOT the listing PUT (its request
+  schema has no publishedAddress; verified against Guesty's OpenAPI docs). The engine
+  (server/published-address.ts) GETs `/address/{id}` first, ECHOES the private address verbatim
+  (never reshape it), PUTs, then read-back-verifies flag + street echo. Resolution ladder
+  (cached in app_settings `published_addresses.v1`, keyed by builder propertyId ±): clubhouse via
+  SearchAPI google_maps (`discoverCommunityClubhouseAddress`, whole-word titleMatchesResort gate so a
+  sibling resort's clubhouse never wins, clubhouse-hint title rank, reverse-geocode rescue, kill
+  `PUBLISHED_ADDRESS_CLUBHOUSE_DISCOVERY=0`) → curated rule street → private address unit-stripped →
+  builder/draft street. Published payload is STRUCTURALLY unit-free — `stripPublishedUnitTokens`
+  also strips the bare "#1834" form `streetRootFromAddress` misses (its `\b#` can't match after a
+  space; found by this PR's own tests). Hooks (fire-and-forget, 2-min cooldown, skip-when-already-on,
+  kill `PUBLISHED_ADDRESS_AUTO_PUSH_DISABLED=1`): five mapping-birth seams (the amenity auto-push
+  set), push-descriptions success, audit sweep descriptions stage (`AUDIT_PUBLISHED_ADDRESS=0`,
+  ceiling 6m→8m, failure = attention + rail-A retryable), combo pipeline pre-resolve (cache-only —
+  no listing exists there). UI: teal "Push separate published address" button under the
+  "Address (sent to Guesty)" block (always force-push + fresh discovery) + "🕐 Pushed <time> ·
+  <summary>" line from the NEW durable ledger kind `"published-address"` (added to GUESTY_PUSH_TABS;
+  summary wording test-locked; deliberately NOT in the tab-strip/chips fixed lists). Backfill:
+  `POST /api/admin/push-published-addresses` walks every mapped listing (idempotent). Verified:
+  published-address 76/0 (npm chain), full `npm test` REAL exit 0, build clean (strings bundle-
+  grepped both bundles), `npm run check` 335 = baseline (stash -u A/B identical per-file sets), UI
+  proven on the BUILT bundle (Playwright + mocked /api: POST contract {listingId, propertyId,
+  force:true}, success + ledger line flip, never-pushed fallback, unmapped-disabled — 14/0). Could
+  NOT live-smoke the Guesty leg (no creds in session) — post-deploy: run the admin backfill, then
+  spot-check a listing in Guesty (Address section shows the toggle ON + clubhouse street). ALSO FIXED
+  AT THE ROOT (same PR): tsconfig `tsBuildInfoFile` moved `node_modules/typescript/tsbuildinfo` →
+  `node_modules/.cache/tsbuildinfo` — in a worktree with no local node_modules, `npm run check`
+  CREATED a `node_modules/typescript/` dir holding only the cache file, which shadowed the
+  parent-resolved real typescript package and broke every test importing it
+  (tests/guesty-photo-repush.test.ts, ERR_MODULE_NOT_FOUND). If an old worktree still has the
+  stub, `rm -rf <worktree>/node_modules/typescript` once. Adversarially reviewed via a 4-lens
+  workflow: 17 confirmed findings all fixed pre-merge — highlights: Number(null)→0 coords would
+  have published Null Island (type-checked finiteCoord now), "Rd 10-201" trailing building-unit
+  form leaked through every strip layer (new $-anchored strip), "villa" designator mangled real
+  streets ("100 Villa Del Mar Dr"→"100 Mar Dr"; now unit-shaped-token constrained), clubhouse
+  hint pass could crown a PM storefront named after the resort (footprint constraint + negative
+  guard), transient SearchAPI failures durably cached the generic fallback (transient flag, no
+  cache write), operator-set custom published addresses were clobbered weekly (operator-wins
+  branch), audit double-push (skipPublishedAddressEnsure flag), admin backfill vs the 15-min
+  edge cap (NDJSON stream + heartbeat). LIVE BACKFILL RAN post-deploy: 24 mapped listings — 22
+  pushed+verified (19 real clubhouse addresses, e.g. Poipu Kai → 1831 Poipu Rd, Kiahuna → 2611
+  Kiahuna Plantation Dr), 1 already-on, 1 initial failure: Na Hale O Keauhou (draft -2, listing
+  6a032d12…) — Guesty's Address PUT 400s on the okina in its own stored "78-6833 Ali‘i Dr" even
+  when echoed VERBATIM. Follow-up PR adds a bounded 400-retry that re-PUTs with
+  foldHawaiianDiacritics applied to string fields only ("Ali‘i"→"Alii"; first attempt stays
+  echo-verbatim by rule).
+
 - 2026-07-17 (Cowork buy-in find + safe checkout preparation): Jamie replaced the older
   automated-card design. The primary bookings action now runs search/attach and VRBO checkout
   preparation in one Cowork brief. Cowork uses the booking guest's exact name, the generated

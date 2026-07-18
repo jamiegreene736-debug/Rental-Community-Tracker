@@ -61,6 +61,8 @@ class TestProvider implements VirtualStagingImageProvider {
 const square = await sharp({
   create: { width: 24, height: 24, channels: 3, background: "#d1d5db" },
 }).jpeg().toBuffer();
+const indoorContext = { scene: "living-area", placement: "indoor" } as const;
+const outdoorContext = { scene: "private-outdoor", placement: "outdoor" } as const;
 
 test("preview streaming serves image bytes from hidden staging storage", async () => {
   const previousDatabaseUrl = process.env.DATABASE_URL;
@@ -104,8 +106,27 @@ test("the provider receives the immutable source bytes unchanged", async () => {
     return input.source;
   });
   const service = new VirtualStagingService([provider], 1);
-  await service.generate({ source: square, sourceFilename: "room.jpg" });
+  await service.generate({ source: square, sourceFilename: "room.jpg", context: indoorContext });
   assert.equal(receivedHash, square.toString("base64"));
+});
+
+test("provider fallback receives one identical context-aware prompt", async () => {
+  const prompts: string[] = [];
+  const first = new TestProvider(async (input) => {
+    prompts.push(input.prompt);
+    throw new Error("provider unavailable");
+  });
+  const second = new TestProvider(async (input) => {
+    prompts.push(input.prompt);
+    return input.source;
+  });
+  const service = new VirtualStagingService([first, second], 1);
+  await service.generate({ source: square, sourceFilename: "lanai.jpg", context: outdoorContext });
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[0], prompts[1]);
+  assert.match(prompts[0], /Hawaiian, tropical, island, coastal/i);
+  assert.match(prompts[0], /weather-resistant, outdoor-rated furniture/i);
+  assert.match(prompts[0], /Never add an indoor sofa/i);
 });
 
 test("global image-edit concurrency is bounded", async () => {
@@ -117,6 +138,7 @@ test("global image-edit concurrency is bounded", async () => {
   await Promise.all(Array.from({ length: 6 }, (_, index) => service.generate({
     source: square,
     sourceFilename: `room-${index}.jpg`,
+    context: indoorContext,
   })));
   assert.equal(provider.maxActive, 2);
 });
@@ -128,8 +150,8 @@ test("one failed photo does not discard another successful photo", async () => {
   });
   const service = new VirtualStagingService([provider], 2);
   const results = await Promise.allSettled([
-    service.generate({ source: square, sourceFilename: "good.jpg" }),
-    service.generate({ source: square, sourceFilename: "bad.jpg" }),
+    service.generate({ source: square, sourceFilename: "good.jpg", context: indoorContext }),
+    service.generate({ source: square, sourceFilename: "bad.jpg", context: indoorContext }),
   ]);
   assert.deepEqual(results.map((result) => result.status), ["fulfilled", "rejected"]);
 });
@@ -140,7 +162,7 @@ test("a provider result with materially changed crop is rejected", async () => {
   }).jpeg().toBuffer();
   const service = new VirtualStagingService([new TestProvider(async () => wide)], 1);
   await assert.rejects(
-    service.generate({ source: square, sourceFilename: "room.jpg" }),
+    service.generate({ source: square, sourceFilename: "room.jpg", context: indoorContext }),
     /crop or aspect ratio/,
   );
 });

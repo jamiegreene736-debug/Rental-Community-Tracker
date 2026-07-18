@@ -228,6 +228,40 @@ check(
   builderSrc.includes("photo-push-reconciled-done"),
 );
 
+// ── Source guards: post-push Guesty-gallery confirmation UI (2026-07-17) ───
+// The operator's replacement contract: pushing N photos must leave Guesty
+// with EXACTLY N (+ pinned collage). The done panel must show BOTH the pushed
+// count and what Guesty actually holds — green only on an exact-match
+// read-back, amber when Guesty still reports stale old photos.
+check(
+  "done event's live-gallery fields reach the confirm state",
+  builderSrc.includes("setPushGuestyConfirm({")
+  && builderSrc.includes("replacementConfirmed: event.replacementConfirmed === true"),
+);
+check(
+  "confirm panel renders pushed vs actually-on-Guesty",
+  builderSrc.includes("photo-push-guesty-confirm")
+  && builderSrc.includes("Guesty gallery confirmed:")
+  && builderSrc.includes("All previous Guesty photos were replaced."),
+);
+check(
+  "a stale (unreplaced old) gallery renders the amber warning, never a false green",
+  builderSrc.includes("may not be replaced yet")
+  && builderSrc.includes("c.replacementConfirmed && c.guestyTotal != null"),
+);
+check(
+  "the live count pill prefers the server's actual gallery read-back",
+  builderSrc.includes("setGuestyPhotoCount(guestyTotal ?? sc)"),
+);
+check(
+  "verify read-back progress renders while the server confirms the gallery",
+  builderSrc.includes("photo-push-verify-note"),
+);
+check(
+  "the persisted last-push summary carries the confirmed Guesty gallery count",
+  builderSrc.includes("last-push-guesty-total"),
+);
+
 // The server side of the contract: push-photos MUST ledger-stamp its outcome
 // at the end (that stamp IS the reconcile signal) — success and failure both.
 const routesSrc = readFileSync("server/routes.ts", "utf8");
