@@ -70,7 +70,11 @@ export async function runMarketRateScan(trigger: string): Promise<MarketRateScan
   // within the same week (picks that already pushed persist server-side).
   await storage.setSetting(LAST_RUN_SETTING_KEY, startedAt.toISOString()).catch(() => {});
 
-  const ids = configuredPropertyIds();
+  // Skip operator-deleted core properties — they're hidden from the dashboard,
+  // so re-pricing them weekly would re-seed their scanner_schedule row and burn
+  // SearchAPI on a listing that's gone. Fail-soft: [] on error.
+  const removedCore = new Set(await storage.getDeletedCorePropertyIds().catch(() => []));
+  const ids = configuredPropertyIds().filter((id) => !removedCore.has(id));
   const port = process.env.PORT || "5000";
   const results: MarketRateScanRunResult["results"] = [];
 
@@ -129,7 +133,8 @@ export async function runMarketRateScan(trigger: string): Promise<MarketRateScan
 // Only fills properties that have NEVER had a real Guesty push (seedScannerPriceScan
 // is non-clobbering), and only anchors last_run_at on the very first boot.
 export async function seedRetroactivePriceScans(): Promise<{ seeded: number; anchored: boolean }> {
-  const ids = configuredPropertyIds();
+  const removedCore = new Set(await storage.getDeletedCorePropertyIds().catch(() => []));
+  const ids = configuredPropertyIds().filter((id) => !removedCore.has(id));
   const seeds = retroactivePriceScanSeeds(ids, Date.now());
   let seeded = 0;
   for (const s of seeds) {

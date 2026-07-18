@@ -1621,8 +1621,20 @@ function AdminDashboard() {
     return out;
   }, [communityDraftsDataForRows, minimumStayData]);
 
+  // Operator-deleted CORE portfolio properties (positive ids). The static
+  // `properties` array still contains them (core rows live in code), so the
+  // dashboard hides them using this persisted server set — durable across
+  // reloads/deploys. Drafts delete their own DB row and never appear here.
+  const { data: removedCoreData } = useQuery<{ ids: number[] }>({
+    queryKey: ["/api/dashboard/removed-core-properties"],
+  });
+  const removedCoreIds = useMemo(
+    () => new Set<number>(removedCoreData?.ids ?? []),
+    [removedCoreData],
+  );
+
   const activeProperties = useMemo(() => {
-    return properties.map((p) => {
+    return properties.filter((p) => !removedCoreIds.has(p.id)).map((p) => {
       const stay = minimumStayData?.[p.id];
       const communityStay = communityMinimumStayData.get(p.community);
       const unitCount = getUnitBuilderByPropertyId(p.id)?.units.length ?? (p.multiUnit ? 2 : 1);
@@ -1651,7 +1663,7 @@ function AdminDashboard() {
         minimumStayRangeHigh: null,
       };
     });
-  }, [communityMinimumStayData, minimumStayData]);
+  }, [communityMinimumStayData, minimumStayData, removedCoreIds]);
 
   // Map community drafts → Property-shaped rows so they show up in
   // the main table next to the active 11 properties. Synthetic
@@ -3683,6 +3695,7 @@ function AdminDashboard() {
       // The row lives in /api/community/drafts; the rest are per-column caches
       // keyed by property.id that would otherwise show stale data for a beat.
       queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/removed-core-properties"] });
       queryClient.invalidateQueries({ queryKey: ["/api/guesty-property-map"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/channel-status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/unit-audit-status"] });
@@ -6252,13 +6265,14 @@ function AdminDashboard() {
                           </Button>
                         </Link>
                       ) : null}
-                      {/* Delete an added listing/draft from the system. Enabled
-                          only when the row is NOT connected to Guesty (the same
-                          signal as the green "G" dot); connected rows show a
-                          disabled trash with an explanatory tooltip so the rule
-                          is discoverable. Core (positive-id) portfolio units are
-                          never draft rows, so they never get this control. */}
-                      {isDraft && (
+                      {/* Delete a listing from the system. Enabled only when the
+                          row is NOT connected to Guesty (the same signal as the
+                          green "G" dot); connected rows show a disabled trash
+                          with an explanatory tooltip so the rule is discoverable.
+                          Available for added drafts AND core portfolio units —
+                          the server purges DB data either way and, for a core
+                          unit, persists a hide so it stays gone. */}
+                      {(isDraft || unitBuilderIds.has(property.id)) && (
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>

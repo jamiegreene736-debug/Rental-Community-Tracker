@@ -45,3 +45,29 @@ export function pruneRecordsByPropertyId<T extends { propertyId?: number }>(
   }
   return { records: out, removed };
 }
+
+// ── Deleting a CORE (hard-coded) portfolio property ──────────────────────────
+// Core properties (positive ids in client/src/data/unit-builder-data.ts) live in
+// code, not the DB, so they can't be row-deleted. Instead the operator's delete
+// is remembered as a persisted set of removed positive ids in app_settings; the
+// dashboard filters them out of its static list, the DELETE route purges their
+// DB data, and the weekly schedulers skip them so a "deleted" core property
+// stops consuming audit/pricing budget. Cross-deploy durable (the static array
+// still contains the entry, but this set keeps it hidden). Only positive
+// integers are valid core ids (negative ids are drafts, handled separately).
+export const DELETED_CORE_PROPERTY_IDS_KEY = "deleted_core_property_ids.v1";
+
+export function parseDeletedCorePropertyIds(raw: string | null | undefined): number[] {
+  try {
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    const ids = parsed.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0);
+    return Array.from(new Set(ids)).sort((a, b) => a - b);
+  } catch {
+    return [];
+  }
+}
+
+export function serializeDeletedCorePropertyIds(ids: number[]): string {
+  return JSON.stringify(parseDeletedCorePropertyIds(JSON.stringify(ids)));
+}

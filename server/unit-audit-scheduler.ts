@@ -54,7 +54,11 @@ function autoAuditDisabled(): boolean {
 // half-finished draft weekly would waste budget on listings that aren't
 // selling anywhere yet).
 export async function unitAuditCronTargets(): Promise<number[]> {
-  const coreIds = getActiveUnitBuilders().map((b) => b.propertyId).filter((n) => Number.isFinite(n) && n > 0);
+  // Operator-deleted core properties are hidden from the dashboard, so the audit
+  // cron must skip them too (else it re-creates their audit reports weekly and
+  // burns Lens/vision budget on a listing that's gone). Fail-soft: [] on error.
+  const removed = new Set(await storage.getDeletedCorePropertyIds().catch(() => []));
+  const coreIds = getActiveUnitBuilders().map((b) => b.propertyId).filter((n) => Number.isFinite(n) && n > 0 && !removed.has(n));
   const mappedDraftIds = (await storage.getGuestyPropertyMap().catch(() => []))
     .map((m) => m.propertyId)
     .filter((n) => Number.isFinite(n) && n < 0);
