@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
+  extractLastJsonObject,
   extractSourcePageSignals,
   looksLikeBotWallPage,
   signalsAreEmpty,
@@ -108,6 +109,26 @@ check("prompt names expected community", prompt.includes("Kiahuna Plantation"));
 check("prompt names the unit", prompt.includes("Unit A (2BR)"));
 check("prompt includes address signals", prompt.includes("Koloa"));
 check("prompt asks for minified JSON", prompt.includes('"match":"yes|no|uncertain"'));
+// The slot label ("Unit A") must be declared NOT-a-unit-number — live smoke
+// showed the model answering "no" for a matching community because the page's
+// "Unit B310" differed from our "Unit A" slot label.
+check("prompt marks the unit label as an internal slot name", prompt.includes("internal slot label"));
+
+console.log("source-page-community: extractLastJsonObject");
+// The exact live pattern: JSON verdict → reconsider-aloud prose → corrected JSON.
+const twoObjects = `{"match":"no","identifiedCommunity":"Wavecrest Resort","reason":"unit differs"}
+
+Wait, re-reading the rules: the community IS Wavecrest Resort. The unit number difference doesn't make it a different community.
+
+{"match":"yes","identifiedCommunity":"Wavecrest Resort","confidence":0.95,"reason":"Community matches."}`;
+const lastObj = extractLastJsonObject(twoObjects);
+check("two-objects-with-prose → LAST object wins", lastObj?.match === "yes" && lastObj?.confidence === 0.95);
+check("single object parses", extractLastJsonObject('x {"a":1} y')?.a === 1);
+check("braces inside strings do not break the scan",
+  extractLastJsonObject('{"reason":"has a } and { inside","ok":true}')?.ok === true);
+check("no JSON → null", extractLastJsonObject("no braces here") === null);
+check("truncated JSON → null", extractLastJsonObject('{"match":"yes","reason":"cut off') === null);
+check("garbage input does not throw", (() => { extractLastJsonObject(undefined as any); extractLastJsonObject(""); return true; })());
 
 console.log("source-page-community: parse verdict");
 const yesV = parseSourcePageVerdict(
@@ -231,6 +252,10 @@ console.log("source-page-community: verifyUnitSourcePages (fail-soft, offline)")
     engineSource.includes("zillow.com") && engineSource.includes("redfin.com") && engineSource.includes("realtor.com"));
   check("engine honors the SOURCE_PAGE_APIFY_RESCUE kill switch",
     engineSource.includes('SOURCE_PAGE_APIFY_RESCUE === "0"'));
+  check("engine retries once on a JSON parse failure",
+    /parse JSON/.test(engineSource) && engineSource.includes("await callOnce()"));
+  check("engine salvages the LAST JSON object before failing a parse",
+    engineSource.includes("extractLastJsonObject(res.raw)"));
 
   console.log("source-page-community: combo gate leg");
   const base: ComboPhotoGateInput = {

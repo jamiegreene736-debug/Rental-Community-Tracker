@@ -312,7 +312,7 @@ export function buildSourcePageCommunityPrompt(
     "You are verifying that a for-sale/rental LISTING PAGE is for a property located in a specific vacation-rental community (resort/condo complex) or, failing an exact name, at least the same town/area.",
     "",
     `Expected community: "${expectedCommunity.trim() || "(unspecified)"}".`,
-    `Unit: ${unitLabel}.`,
+    `Unit: ${unitLabel}. (This is OUR internal slot label — "Unit A"/"Unit B" — NOT a unit-number claim. Do NOT compare it against the unit/apartment number on the page; only the COMMUNITY/location matters.)`,
     "",
     "Below are the readable signals scraped from the listing's own source page:",
     "---",
@@ -327,6 +327,51 @@ export function buildSourcePageCommunityPrompt(
     "Respond with ONLY minified JSON:",
     '{"match":"yes|no|uncertain","identifiedCommunity":"resort/complex name or empty","identifiedLocation":"city, state or empty","confidence":0.0,"reason":"one short sentence"}',
   ].join("\n");
+}
+
+/**
+ * Extract the LAST complete top-level JSON object from free text. The model
+ * occasionally emits a JSON verdict, reconsiders aloud, then emits a corrected
+ * JSON verdict (observed live on the Wavecrest Unit A check) — a first-brace-to-
+ * last-brace parse spans both objects plus prose and fails. The LAST object is
+ * the model's final answer. String-aware brace scan; returns null when no
+ * balanced object parses.
+ */
+export function extractLastJsonObject(text: string): Record<string, unknown> | null {
+  if (typeof text !== "string" || !text) return null;
+  let last: Record<string, unknown> | null = null;
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { if (depth > 0) inString = true; continue; }
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start !== -1) {
+          try {
+            const parsed = JSON.parse(text.slice(start, i + 1));
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              last = parsed as Record<string, unknown>;
+            }
+          } catch { /* unbalanced-looking span that isn't valid JSON — keep scanning */ }
+          start = -1;
+        }
+      }
+    }
+  }
+  return last;
 }
 
 const NORM = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
