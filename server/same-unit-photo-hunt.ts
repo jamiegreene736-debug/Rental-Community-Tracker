@@ -24,8 +24,10 @@ import {
   evaluateGalleryNovelty,
   filterSameUnitSerpRows,
   sameUnitCandidateVerdict,
+  sameUnitHuntExhaustionProven,
   sameUnitHuntIdentity,
   sameUnitHuntQueries,
+  sameUnitHuntSearchComplete,
   summarizeSameUnitHuntFailure,
   canonicalKeysForExclusion,
   SAME_UNIT_HUNT_MAX_CANDIDATES_DEFAULT,
@@ -61,6 +63,24 @@ export function sameUnitHuntMinNewPhotos(): number {
 function publicPhotoDir(folder: string): string {
   const safe = folder.replace(/[^a-zA-Z0-9_-]+/g, "-");
   return path.resolve(process.cwd(), "client/public/photos", safe);
+}
+
+/**
+ * Server-side anchor fallback: the client resolves the source URL via a GET
+ * whose failures it swallows (returns null), so a transient transport blip at
+ * click time would otherwise turn into a false-permanent "no saved source
+ * listing" failure WITH the replace-unit recommendation. The folder's
+ * _source.json is the durable single-writer record — read it directly.
+ */
+export async function readFolderSourceUrl(folder: string): Promise<string | null> {
+  try {
+    const raw = await fs.promises.readFile(path.join(publicPhotoDir(folder), "_source.json"), "utf8");
+    const doc = JSON.parse(raw) as { sourceListing?: { url?: unknown } };
+    const url = doc?.sourceListing?.url;
+    return typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -229,6 +249,7 @@ export async function runSameUnitPhotoHunt(input: SameUnitHuntInput): Promise<Sa
     outcome: Exclude<SameUnitHuntOutcome, "accepted">,
     checked: SameUnitCheckedCandidate[],
     recommendReplaceUnit: boolean,
+    extras: { anchor?: "missing" | "unparseable"; searchIncomplete?: boolean } = {},
   ): SameUnitHuntFailed => ({
     outcome,
     recommendReplaceUnit,
@@ -239,35 +260,56 @@ export async function runSameUnitPhotoHunt(input: SameUnitHuntInput): Promise<Sa
       communityName: input.communityName,
       checked,
       minNewPhotos,
+      ...extras,
     }),
   });
 
-  const identity = sameUnitHuntIdentity({ sourceUrl: input.currentSourceUrl });
-  if (!identity) {
+  const folder = String(input.currentFolder ?? "").trim();
+  // Server-side anchor fallback: the client's source-URL GET fails soft, so a
+  // transport blip must not become a false-permanent "no saved source" +
+  // replace recommendation. The folder's _source.json is authoritative.
+  let anchorUrl = String(input.currentSourceUrl ?? "").trim();
+  if (!anchorUrl && folder) anchorUrl = (await readFolderSourceUrl(folder)) ?? "";
+  if (!anchorUrl) {
     // Permanent state (no anchor will appear without operator action) — the
     // honest advice IS "replace the unit or paste a URL", so the flag is set.
-    return failure("no-anchor", [], true);
+    return failure("no-anchor", [], true, { anchor: "missing" });
+  }
+  const identity = sameUnitHuntIdentity({ sourceUrl: anchorUrl });
+  if (!identity) {
+    // A source exists but its URL carries no parseable street identity —
+    // also permanent, but the message must not claim "no saved source".
+    return failure("no-anchor", [], true, { anchor: "unparseable" });
   }
 
   progress("Searching Zillow, Realtor, Redfin & Homes.com for this exact unit", 18);
   const queries = sameUnitHuntQueries(identity, input.communityStreetAddress);
+  if (queries.length === 0) {
+    // Defensive: identity requires a parsed address, which always yields
+    // queries — but an empty sweep must never masquerade as "searched and
+    // found nothing" OR as a retry-forever transient.
+    return failure("no-anchor", [], true, { anchor: "unparseable" });
+  }
   const serp = await searchSameUnitListingRows(queries);
   if (serp.responded === 0) {
     // Transient infra (quota blackout / no key) — NEVER push the operator
     // toward a destructive unit replacement off a failed search.
     return failure("search-unavailable", [], false);
   }
+  const searchIncomplete = !sameUnitHuntSearchComplete(serp);
 
   const excludeKeys = canonicalKeysForExclusion([
+    anchorUrl,
     ...(input.currentSourceUrl ? [input.currentSourceUrl] : []),
     ...input.excludeUrls,
   ]);
   const filtered = filterSameUnitSerpRows(serp.rows, identity, excludeKeys);
   if (filtered.candidates.length === 0) {
-    return failure("no-candidates", [], true);
+    // "No different photos exist" may only be asserted off a COMPLETE sweep;
+    // a partial SERP outage keeps the replace recommendation off.
+    return failure("no-candidates", [], !searchIncomplete, { searchIncomplete });
   }
 
-  const folder = String(input.currentFolder ?? "").trim();
   progress("Reading the current gallery's photo fingerprints", 30);
   const existingHashes = folder ? await loadFolderPhotoHashes(folder) : [];
 
@@ -325,5 +367,10 @@ export async function runSameUnitPhotoHunt(input: SameUnitHuntInput): Promise<Sa
       };
     }
   }
-  return failure("exhausted", checked, true);
+  // Exhaustion is only PROVEN when the sweep completed AND every candidate
+  // got a substantive verdict (duplicate-set / too-thin). Candidates that
+  // died on scrape infra or unverifiable hashing prove nothing — the flag
+  // stays off so a bot-wall/outage day can't push a destructive unit swap.
+  const proven = !searchIncomplete && sameUnitHuntExhaustionProven(checked);
+  return failure("exhausted", checked, proven, { searchIncomplete });
 }

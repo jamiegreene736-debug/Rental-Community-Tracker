@@ -902,14 +902,17 @@ async function runPreflightPhotoFetchJob(
       touchPhotoJob(job, {
         status: "completed",
         phase: "completed",
+        // "at check time": the persist re-scrapes the accepted URL itself, so
+        // the saved set can differ slightly from the hunt-verified one — the
+        // count is honest about WHEN the novelty was proven.
         message: sameUnitPick
-          ? `Found a different photo set for this exact unit on ${sameUnitPick.portal} — saved ${savedStatic} photo${savedStatic === 1 ? "" : "s"} (${sameUnitPick.newPhotoCount} new vs the previous gallery)`
+          ? `Found a different photo set for this exact unit on ${sameUnitPick.portal} — saved ${savedStatic} photo${savedStatic === 1 ? "" : "s"} (${sameUnitPick.newPhotoCount} new vs the previous gallery at check time)`
           : `Saved ${savedStatic} photo${savedStatic === 1 ? "" : "s"} from the new source`,
         progress: 100,
         finishedAt: Date.now(),
         savedCount: savedStatic,
         changeNote: sameUnitPick
-          ? `${sameUnitPick.newPhotoCount} new photo${sameUnitPick.newPhotoCount === 1 ? "" : "s"} vs the previous gallery`
+          ? `${sameUnitPick.newPhotoCount} new photo${sameUnitPick.newPhotoCount === 1 ? "" : "s"} vs the previous gallery at check time`
           : null,
         sourceUrl: typeof persistData?.sourceUrl === "string" ? persistData.sourceUrl : sourceUrl,
         proof: lastProof,

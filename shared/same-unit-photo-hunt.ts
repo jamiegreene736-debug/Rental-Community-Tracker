@@ -58,9 +58,26 @@ export interface SameUnitIdentity {
 }
 
 /**
+ * A Hawaii inline unit token: "92-1070-1-Olani-St" carries unit "1" BETWEEN
+ * the district-lot street number and the street name, with no Apt/Unit marker
+ * for extractListingUnitIdentity to find. Without this, two neighboring units
+ * in that slug family parse to identical unit-less identities and a neighbor's
+ * gallery could pass as "the same home". Only fires on the exact
+ * district(1-2) lot(3-5) unit(1-4) digit shape before a letter — a plain
+ * "2827 Poipu Rd" or district-only "57-091 Kamehameha Hwy" never matches.
+ */
+export function hawaiiInlineUnitClaim(address: string | null | undefined): string | null {
+  const raw = String(address ?? "").replace(/-+/g, " ").replace(/\s+/g, " ").trim();
+  const m = raw.match(/\b\d{1,2}\s+\d{3,5}\s+(\d{1,4})\s+(?=[A-Za-z])/);
+  return m ? m[1] : null;
+}
+
+/**
  * Build the identity anchor for the hunt from the unit's saved source listing
- * URL. Returns null when there is nothing to anchor on — no parseable address
- * AND no unit claim — in which case a same-unit search cannot run at all.
+ * URL. A parseable STREET ROOT is required: unit-claim-only anchors are
+ * rejected (return null) because a bare unit number with no provable street is
+ * exactly how a different building's same-numbered unit would slip through the
+ * candidate filter. Returns null when the URL carries no parseable address.
  */
 export function sameUnitHuntIdentity(input: {
   sourceUrl?: string | null;
@@ -72,8 +89,9 @@ export function sameUnitHuntIdentity(input: {
   const address = parseListingAddressFromUrl(sourceUrl)
     ?? (input.contextText ? parseListingAddressFromText(input.contextText) : null);
   const streetRoot = streetRootFromListingAddress(address);
-  const unitClaim = extractListingUnitIdentity(address, decodeURIComponentSafe(sourceUrl), input.contextText ?? undefined);
-  if (!streetRoot && !unitClaim) return null;
+  if (!streetRoot) return null;
+  const unitClaim = extractListingUnitIdentity(address, decodeURIComponentSafe(sourceUrl), input.contextText ?? undefined)
+    ?? hawaiiInlineUnitClaim(address);
   return {
     address,
     streetRoot,
@@ -194,8 +212,13 @@ export function filterSameUnitSerpRows(
     const contextText = `${row?.title ?? ""} ${row?.snippet ?? ""}`;
     const candidateAddress = parseListingAddressFromUrl(url) ?? parseListingAddressFromText(contextText);
     const candidateRoot = String(streetRootFromListingAddress(candidateAddress) ?? "").trim().toLowerCase();
+    // The candidate's unit claim comes from the URL slug + the parsed address
+    // ONLY — never from raw title/snippet text, where "Similar homes: Apt 5…"
+    // junk would inject a unit claim onto a page that has none (falsely
+    // rejecting a unique-address mirror) or onto the wrong listing.
     const candidateUnit = normalizedUnitKey(
-      extractListingUnitIdentity(candidateAddress, decodeURIComponentSafe(url), contextText),
+      extractListingUnitIdentity(candidateAddress, decodeURIComponentSafe(url))
+        ?? hawaiiInlineUnitClaim(candidateAddress),
     );
     if (wantedUnit) {
       // Unit-anchored: the candidate must claim the SAME unit. A candidate
@@ -207,11 +230,10 @@ export function filterSameUnitSerpRows(
         rejectedDifferentUnit += 1;
         return;
       }
-      // When the anchor's street root parsed, the candidate must prove the
-      // SAME root (from its URL slug or SERP title/snippet) — unit "201" in a
-      // different (or unprovable) building is a different home. Anchors whose
-      // own address can't parse (e.g. "Hwy" streets the parsers don't cover)
-      // fall back to unit-claim equality alone, symmetrically.
+      // The candidate must also prove the SAME street root (from its URL slug
+      // or SERP title/snippet) — unit "201" in a different (or unprovable)
+      // building is a different home. sameUnitHuntIdentity guarantees the
+      // anchor's root is non-empty, so this check always applies.
       if (wantedRoot && candidateRoot !== wantedRoot) {
         seen.add(key);
         rejectedDifferentUnit += 1;
@@ -322,9 +344,33 @@ export type SameUnitHuntOutcome =
   | "search-unavailable";
 
 /**
+ * Did the SERP sweep actually COMPLETE? A partial outage (some queries 429'd
+ * or timed out) means candidates could have been missed — "no different photos
+ * exist" may then only be asserted for what WAS searched, never as a verdict.
+ */
+export function sameUnitHuntSearchComplete(serp: { attempted: number; responded: number }): boolean {
+  return serp.attempted > 0 && serp.responded === serp.attempted;
+}
+
+/**
+ * Was exhaustion PROVEN? Only candidates whose gallery was actually scraped
+ * and judged (duplicate-set / too-thin) count as checked. A candidate that
+ * failed on scrape infra (scrape-failed / no-photos — often a bot wall) or
+ * whose photos couldn't be hashed (unverifiable) proves nothing; if ANY
+ * candidate ended that way, "no different photos exist" is not established
+ * and recommendReplaceUnit must stay false (transient infra must never push
+ * the operator toward a destructive unit swap).
+ */
+export function sameUnitHuntExhaustionProven(checked: readonly SameUnitCheckedCandidate[]): boolean {
+  return checked.length > 0
+    && checked.every((c) => c.verdict === "duplicate-set" || c.verdict === "too-thin");
+}
+
+/**
  * Operator-facing summary for a hunt that did NOT accept a candidate.
- * Wording matters: "no different photos exist" is the signal that flips the
- * UI to "Find replacement unit".
+ * Wording matters: "no different photos exist" + the Find-replacement-unit
+ * pointer only render when the verdict is PROVEN (complete search, every
+ * candidate substantively judged) — unproven outcomes read as transient.
  */
 export function summarizeSameUnitHuntFailure(input: {
   outcome: Exclude<SameUnitHuntOutcome, "accepted">;
@@ -332,15 +378,24 @@ export function summarizeSameUnitHuntFailure(input: {
   communityName: string;
   checked: readonly SameUnitCheckedCandidate[];
   minNewPhotos: number;
+  /** Whether a saved source URL existed at all vs existed-but-unparseable. */
+  anchor?: "missing" | "unparseable";
+  /** True when some SERP queries failed — the search did not complete. */
+  searchIncomplete?: boolean;
 }): string {
   const { outcome, checked } = input;
   if (outcome === "no-anchor") {
-    return "This unit has no saved source listing to anchor a same-unit photo search, so there's no way to hunt its photos on other portals. Use Find replacement unit to swap in a different unit, or Replace with URL if you have this unit's listing link.";
+    return input.anchor === "unparseable"
+      ? "This unit's saved source listing URL doesn't carry a parseable street address, so a same-unit photo search can't prove another listing is the same unit. Use Find replacement unit to swap in a different unit, or Replace with URL if you have a better listing link for this exact unit."
+      : "This unit has no saved source listing to anchor a same-unit photo search, so there's no way to hunt its photos on other portals. Use Find replacement unit to swap in a different unit, or Replace with URL if you have this unit's listing link.";
   }
   if (outcome === "search-unavailable") {
     return "The photo search couldn't run — every listing search query failed or was rate-limited. This is temporary; try again in a few minutes. The existing gallery was kept.";
   }
   if (outcome === "no-candidates") {
+    if (input.searchIncomplete) {
+      return "No other listing of this exact unit surfaced, but some search queries failed or were rate-limited, so the sweep was incomplete. This may be temporary — try again in a few minutes. The existing gallery was kept.";
+    }
     return "Searched Zillow, Realtor, Redfin, and Homes.com for this exact unit's listing on other portals and found none beyond the source already on file. No different photos of this unit exist online — use Find replacement unit to swap in a different unit with better photos.";
   }
   const dupSets = checked.filter((c) => c.verdict === "duplicate-set").length;
@@ -354,5 +409,11 @@ export function summarizeSameUnitHuntFailure(input: {
   const bestNote = dupSets > 0 && bestNew > 0
     ? ` The best option had only ${bestNew} new photo${bestNew === 1 ? "" : "s"} (${input.minNewPhotos} needed).`
     : "";
-  return `Checked ${checked.length} listing${checked.length === 1 ? "" : "s"} of this exact unit on other portals${parts.length ? ` — ${parts.join(", ")}` : ""}.${bestNote} No genuinely different photo set exists for this unit — use Find replacement unit to swap in a different unit with better photos. The existing gallery was kept.`;
+  const lead = `Checked ${checked.length} listing${checked.length === 1 ? "" : "s"} of this exact unit on other portals${parts.length ? ` — ${parts.join(", ")}` : ""}.${bestNote}`;
+  if (!sameUnitHuntExhaustionProven(checked) || input.searchIncomplete) {
+    // Some legs failed on infra — the verdict is NOT proven, so no
+    // replacement push. Transient copy instead.
+    return `${lead} Some checks didn't complete (search or scrape outage), so it's not yet proven that no different photos exist — try again in a few minutes before considering a unit replacement. The existing gallery was kept.`;
+  }
+  return `${lead} No genuinely different photo set exists for this unit — use Find replacement unit to swap in a different unit with better photos. The existing gallery was kept.`;
 }

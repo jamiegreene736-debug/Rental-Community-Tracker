@@ -5,10 +5,13 @@ import {
   canonicalKeysForExclusion,
   evaluateGalleryNovelty,
   filterSameUnitSerpRows,
+  hawaiiInlineUnitClaim,
   normalizedUnitKey,
   sameUnitCandidateVerdict,
+  sameUnitHuntExhaustionProven,
   sameUnitHuntIdentity,
   sameUnitHuntQueries,
+  sameUnitHuntSearchComplete,
   summarizeSameUnitHuntFailure,
   SAME_UNIT_HUNT_MAX_CANDIDATES_DEFAULT,
   SAME_UNIT_HUNT_MIN_NEW_PHOTOS_DEFAULT,
@@ -37,6 +40,55 @@ assert.equal(
   null,
   "an unparseable URL (no address, no unit) cannot anchor a same-unit hunt",
 );
+// A unit token WITHOUT a parseable street root must NOT anchor: a bare unit
+// number is exactly how a different building's same-numbered unit would pass.
+assert.equal(
+  sameUnitHuntIdentity({ sourceUrl: "https://www.zillow.com/homedetails/Building-A-APT-201-Koloa/1_zpid/" }),
+  null,
+  "unit-claim-only anchors are rejected — no street root, no hunt",
+);
+
+// Hawaii Hwy addresses parse (the 57-091 Kamehameha Hwy class): a neighboring
+// association's same-numbered unit must be rejected on the street root.
+const hwyAnchor = sameUnitHuntIdentity({
+  sourceUrl: "https://www.zillow.com/homedetails/57-091-Kamehameha-Hwy-APT-106-Kahuku-HI-96731/2_zpid/",
+});
+assert.ok(hwyAnchor, "Hwy street suffix must parse (Turtle Bay / Kuilima class)");
+assert.equal(hwyAnchor!.streetRoot, "57 091 kamehameha hwy");
+assert.equal(normalizedUnitKey(hwyAnchor!.unitClaim), "106");
+const hwyNeighbors = filterSameUnitSerpRows(
+  [
+    { link: "https://www.zillow.com/homedetails/57-101-Kamehameha-Hwy-APT-106-Kahuku-HI-96731/3_zpid/", title: "57-101 Kamehameha Hwy APT 106" },
+    { link: "https://www.redfin.com/HI/Kahuku/57-091-Kamehameha-Hwy-96731/unit-106/home/4", title: "57-091 Kamehameha Hwy #106" },
+  ],
+  hwyAnchor!,
+  new Set(),
+);
+assert.equal(hwyNeighbors.candidates.length, 1, "same unit number in the NEIGHBORING building must not pass");
+assert.equal(hwyNeighbors.candidates[0].portal, "redfin");
+assert.equal(hwyNeighbors.rejectedDifferentUnit, 1);
+
+// Hawaii inline-unit slugs ("92-1070-1-Olani-St" = unit 1): neighbors must not
+// collapse into one unit-less identity.
+assert.equal(hawaiiInlineUnitClaim("92 1070 1 Olani St"), "1");
+assert.equal(hawaiiInlineUnitClaim("2827 Poipu Rd Apt 201"), null);
+assert.equal(hawaiiInlineUnitClaim("57 091 Kamehameha Hwy"), null, "district-lot with no inline unit stays unit-less");
+const inlineAnchor = sameUnitHuntIdentity({
+  sourceUrl: "https://www.zillow.com/homedetails/92-1070-1-Olani-St-Kapolei-HI-96707/5_zpid/",
+});
+assert.ok(inlineAnchor);
+assert.equal(inlineAnchor!.streetRoot, "92 1070 olani st");
+assert.equal(normalizedUnitKey(inlineAnchor!.unitClaim), "1", "the inline token IS the unit claim");
+const inlineFiltered = filterSameUnitSerpRows(
+  [
+    { link: "https://www.zillow.com/homedetails/92-1070-2-Olani-St-Kapolei-HI-96707/6_zpid/", title: "92-1070-2 Olani St" },
+    { link: "https://www.redfin.com/HI/Kapolei/92-1070-Olani-St-96707/unit-1/home/7", title: "92-1070 Olani St Unit 1" },
+  ],
+  inlineAnchor!,
+  new Set(),
+);
+assert.equal(inlineFiltered.candidates.length, 1, "the NEIGHBOR inline unit must be rejected, the true mirror kept");
+assert.equal(inlineFiltered.candidates[0].portal, "redfin");
 
 // Unit-claim normalization: portal slug vs display text vs leading zeros.
 assert.equal(normalizedUnitKey("APT-2-301"), normalizedUnitKey("apt 2 0301"));
@@ -105,6 +157,20 @@ assert.equal(
   "wrong house number and a unit-bearing sub-listing are both different homes",
 );
 
+// SERP snippet junk ("Similar homes: … Apt 5") must NOT inject a unit claim
+// onto a unit-less exact-address mirror — the candidate's unit comes from its
+// URL slug + parsed address only.
+const junkSnippet = filterSameUnitSerpRows(
+  [{
+    link: "https://www.redfin.com/HI/Lihue/4460-Nehe-Rd-96766/home/777",
+    title: "4460 Nehe Rd, Lihue",
+    snippet: "Similar homes nearby: 123 Aloha St Apt 5 · cozy studio",
+  }],
+  uniqueHomeAnchor!,
+  new Set(),
+);
+assert.equal(junkSnippet.candidates.length, 1, "snippet junk must not reject the true mirror");
+
 // ── Gallery novelty (dHash) ─────────────────────────────────────────────────
 
 const zeros = "0000000000000000";
@@ -145,9 +211,37 @@ assert.equal(
   "novelty must be PROVEN — a gallery we couldn't hash may not replace a real gallery",
 );
 
+// ── Exhaustion / search-completeness honesty ────────────────────────────────
+
+assert.equal(sameUnitHuntSearchComplete({ attempted: 9, responded: 9 }), true);
+assert.equal(sameUnitHuntSearchComplete({ attempted: 9, responded: 1 }), false, "a partial SERP outage is NOT a complete search");
+assert.equal(sameUnitHuntSearchComplete({ attempted: 0, responded: 0 }), false);
+
+assert.equal(
+  sameUnitHuntExhaustionProven([
+    { url: "a", portal: "realtor", verdict: "duplicate-set" },
+    { url: "b", portal: "redfin", verdict: "too-thin" },
+  ]),
+  true,
+  "every candidate substantively judged = exhaustion proven",
+);
+assert.equal(
+  sameUnitHuntExhaustionProven([
+    { url: "a", portal: "realtor", verdict: "duplicate-set" },
+    { url: "c", portal: "homes", verdict: "scrape-failed" },
+  ]),
+  false,
+  "a candidate lost to scrape infra proves nothing — never recommend replacement off it",
+);
+assert.equal(
+  sameUnitHuntExhaustionProven([{ url: "a", portal: "zillow", verdict: "unverifiable" }]),
+  false,
+);
+assert.equal(sameUnitHuntExhaustionProven([]), false);
+
 // ── Failure summaries (the copy that flips the UI to Find replacement unit) ──
 
-const exhaustedMsg = summarizeSameUnitHuntFailure({
+const provenExhaustedMsg = summarizeSameUnitHuntFailure({
   outcome: "exhausted",
   bedrooms: 2,
   communityName: "Poipu Kai",
@@ -155,19 +249,39 @@ const exhaustedMsg = summarizeSameUnitHuntFailure({
   checked: [
     { url: "a", portal: "realtor", verdict: "duplicate-set", newCount: 2, totalCount: 20 },
     { url: "b", portal: "redfin", verdict: "too-thin", totalCount: 1 },
+  ],
+});
+assert.ok(provenExhaustedMsg.includes("Find replacement unit"), "PROVEN exhaustion points at the replacement flow");
+assert.ok(provenExhaustedMsg.includes("same photos already on file"), "duplicate sets are named");
+assert.ok(provenExhaustedMsg.includes("only 2 new photo"), "the best near-miss is reported honestly");
+assert.ok(provenExhaustedMsg.includes("existing gallery was kept"));
+
+const unprovenExhaustedMsg = summarizeSameUnitHuntFailure({
+  outcome: "exhausted",
+  bedrooms: 2,
+  communityName: "Poipu Kai",
+  minNewPhotos: 3,
+  checked: [
+    { url: "a", portal: "realtor", verdict: "duplicate-set", newCount: 1, totalCount: 20 },
     { url: "c", portal: "homes", verdict: "scrape-failed" },
   ],
 });
-assert.ok(exhaustedMsg.includes("Find replacement unit"), "exhausted copy must point at the replacement flow");
-assert.ok(exhaustedMsg.includes("same photos already on file"), "duplicate sets are named");
-assert.ok(exhaustedMsg.includes("only 2 new photo"), "the best near-miss is reported honestly");
-assert.ok(exhaustedMsg.includes("existing gallery was kept"));
+assert.ok(!unprovenExhaustedMsg.includes("Find replacement unit"), "infra-tainted exhaustion must NOT push a replacement");
+assert.ok(unprovenExhaustedMsg.includes("try again"), "infra-tainted exhaustion reads as retryable");
 
 const noAnchorMsg = summarizeSameUnitHuntFailure({
-  outcome: "no-anchor", bedrooms: 2, communityName: "Poipu Kai", minNewPhotos: 3, checked: [],
+  outcome: "no-anchor", bedrooms: 2, communityName: "Poipu Kai", minNewPhotos: 3, checked: [], anchor: "missing",
 });
 assert.ok(noAnchorMsg.includes("no saved source listing"));
 assert.ok(noAnchorMsg.includes("Find replacement unit"));
+
+const unparseableAnchorMsg = summarizeSameUnitHuntFailure({
+  outcome: "no-anchor", bedrooms: 2, communityName: "Poipu Kai", minNewPhotos: 3, checked: [], anchor: "unparseable",
+});
+assert.ok(
+  !unparseableAnchorMsg.includes("no saved source listing") && unparseableAnchorMsg.includes("parseable"),
+  "a source that EXISTS but can't be parsed must not be reported as missing",
+);
 
 const transientMsg = summarizeSameUnitHuntFailure({
   outcome: "search-unavailable", bedrooms: 2, communityName: "Poipu Kai", minNewPhotos: 3, checked: [],
@@ -179,6 +293,14 @@ const noCandidatesMsg = summarizeSameUnitHuntFailure({
   outcome: "no-candidates", bedrooms: 2, communityName: "Poipu Kai", minNewPhotos: 3, checked: [],
 });
 assert.ok(noCandidatesMsg.includes("No different photos of this unit exist online"));
+
+const partialNoCandidatesMsg = summarizeSameUnitHuntFailure({
+  outcome: "no-candidates", bedrooms: 2, communityName: "Poipu Kai", minNewPhotos: 3, checked: [], searchIncomplete: true,
+});
+assert.ok(
+  !partialNoCandidatesMsg.includes("Find replacement unit") && partialNoCandidatesMsg.includes("temporary"),
+  "no-candidates off a PARTIAL sweep must read as transient",
+);
 
 // ── Exclusion keys ──────────────────────────────────────────────────────────
 
@@ -218,9 +340,17 @@ assert.ok(
   "a SERP outage must NOT recommend replacing the unit (transient infra ≠ no photos exist)",
 );
 assert.ok(
-  huntSource.includes('return failure("no-candidates", [], true)')
-    && huntSource.includes('return failure("exhausted", checked, true)'),
-  "genuinely exhausted hunts DO recommend the replacement flow",
+  huntSource.includes('failure("no-candidates", [], !searchIncomplete'),
+  "no-candidates only recommends replacement off a COMPLETE SERP sweep",
+);
+assert.ok(
+  huntSource.includes("const proven = !searchIncomplete && sameUnitHuntExhaustionProven(checked)")
+    && huntSource.includes('failure("exhausted", checked, proven'),
+  "exhaustion must be PROVEN (complete sweep + every candidate substantively judged) before recommending replacement",
+);
+assert.ok(
+  huntSource.includes("readFolderSourceUrl(folder)"),
+  "the hunt must fall back to the folder's _source.json anchor when the client-sent source URL is missing (transport blips must not become false no-anchor verdicts)",
 );
 
 const clientSource = read("client/src/pages/builder-preflight.tsx");
@@ -235,6 +365,15 @@ assert.ok(
 assert.ok(
   clientSource.includes("button-find-replacement-unit-") && clientSource.includes("openReplacementFlowForUnit"),
   "a recommendReplaceUnit failure must render the Find-replacement-unit CTA",
+);
+assert.ok(
+  clientSource.includes("recommendReplaceUnit && !unitOverrides[unit.id]")
+    && clientSource.includes("dismissPhotoFetchReceipt(oldUnitId)"),
+  "the CTA and its sticky receipt must clear once the unit is actually replaced",
+);
+assert.ok(
+  clientSource.includes("key={targetUnit.id}"),
+  "retargeting UnitReplacementFlow must remount it — stale unit-scoped state could commit against the wrong unit",
 );
 
 const sweepSource = read("server/unit-audit-sweep.ts");

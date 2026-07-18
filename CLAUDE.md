@@ -67,7 +67,13 @@ Before making any changes:
   same-unit-photo-hunt suite green (npm chain; incl. source guards on job gating, client payload,
   CTA, and the sweep's legacy semantics), pipeline-logic + discovery-cache locks repointed (intent
   preserved), full `npm test` REAL exit 0, build clean, `npm run check` per-file error sets
-  identical to base (335 total; the documented 338 moved with main, not this change). Could NOT
+  identical to base (335 total; the documented 338 moved with main, not this change). HARDENED by a
+  5-lens adversarial review (majors all fixed — see the AGENTS.md entry): Hwy/Highway/Loop street
+  parsing (the 57-091-vs-57-101 Kamehameha Hwy neighbor class), unit-token-only anchors rejected,
+  inline Hawaii unit slugs (92-1070-1-Olani-St) carry their token, snippet junk can't inject unit
+  claims, recommendReplaceUnit requires a COMPLETE sweep + substantively-judged candidates
+  (scrape outages → retry copy, never the flag), server-side _source.json anchor fallback,
+  UnitReplacementFlow remounts on retarget, CTA/receipt clear after a replacement. Could NOT
   live-smoke SERP/scrape legs (no keys in session) — post-deploy: click "Find new photos" on a unit
   with a poor gallery; expect either "Found a different photo set for this exact unit on <portal> —
   saved N photos (M new…)" or the honest exhaustion message + the "Find replacement unit" button.

@@ -19,7 +19,7 @@ export function parseListingAddressFromUrl(url: string): string | null {
       .replace(/\s+/g, " ")
       .trim();
     const m = decoded.match(
-      /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{1,5}[A-Za-z]?)?)\b/i,
+      /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail|Hwy|Highway|Loop)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{1,5}[A-Za-z]?)?)\b/i,
     );
     return m?.[1] ? titleCase(m[1].trim()) : null;
   };
@@ -54,7 +54,7 @@ export function parseListingAddressFromUrl(url: string): string | null {
 export function parseListingAddressFromText(text: string): string | null {
   const cleaned = text.replace(/&[#a-z0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
   const m = cleaned.match(
-    /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{1,5}[A-Za-z]?)?)\b/i,
+    /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail|Hwy|Highway|Loop)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{1,5}[A-Za-z]?)?)\b/i,
   );
   return m?.[1]?.trim().replace(/\b[a-z]/g, (c) => c.toUpperCase()) ?? null;
 }
@@ -74,7 +74,7 @@ export function streetRootFromListingAddress(address: string | null): string | n
     // the Hawaii street number and name; drop it so roots match "92-1070 Olani St".
     .replace(/\b(\d{1,2})\s+(\d{3,5})\s+\d{1,4}\s+(?=[a-z])/gi, "$1 $2 ")
     .replace(/\s+/g, " ")
-    .match(/\b(\d{2,6})\s+([a-z0-9.'-]+(?:\s+[a-z0-9.'-]+){0,4})\s+(blvd|boulevard|rd|road|st|street|ave|avenue|dr|drive|ln|lane|way|cir|circle|ct|court|pkwy|parkway|pl|place|ter|terrace|trail)\b/i);
+    .match(/\b(\d{2,6})\s+([a-z0-9.'-]+(?:\s+[a-z0-9.'-]+){0,4})\s+(blvd|boulevard|rd|road|st|street|ave|avenue|dr|drive|ln|lane|way|cir|circle|ct|court|pkwy|parkway|pl|place|ter|terrace|trail|hwy|highway|loop)\b/i);
   if (!m) return null;
   const typeMap: Record<string, string> = {
     boulevard: "blvd",
@@ -88,6 +88,7 @@ export function streetRootFromListingAddress(address: string | null): string | n
     parkway: "pkwy",
     place: "pl",
     terrace: "ter",
+    highway: "hwy",
   };
   let streetName = m[2]
     .replace(/\s+/g, " ")

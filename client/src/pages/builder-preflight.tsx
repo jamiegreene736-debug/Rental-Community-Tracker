@@ -725,8 +725,12 @@ export default function BuilderPreflight() {
   // street address + bedroom count, supplements with Apify when a resort
   // street root is known, then scrapes the first usable detail result.
   // Operator clicks one button per unit; URL paste isn't needed.
+  // Restored for DRAFTS since #990; static properties joined on 2026-07-17 —
+  // "Find new photos" is now a minutes-long same-unit hunt on static rows too,
+  // so losing the job id on reload silently discarded its verdict (incl. the
+  // recommendReplaceUnit outcome). Static Re-pull still rides the rescrape job.
   const [photoFetchJobIdsByUnit, setPhotoFetchJobIdsByUnit] = useState<Record<string, string>>(() =>
-    id < 0 ? loadPhotoFetchJobIds(id) : {},
+    Number.isFinite(id) ? loadPhotoFetchJobIds(id) : {},
   );
   const [photoFetchJobsByUnit, setPhotoFetchJobsByUnit] = useState<Record<string, PreflightPhotoFetchJob>>({});
   const [photoFetchTick, setPhotoFetchTick] = useState(0);
@@ -759,7 +763,7 @@ export default function BuilderPreflight() {
   }, [activePhotoFetchUnitIds.length]);
 
   useEffect(() => {
-    if (!id || id >= 0) return;
+    if (!Number.isFinite(id)) return;
     setPhotoFetchJobIdsByUnit(loadPhotoFetchJobIds(id));
   }, [id]);
 
@@ -1833,6 +1837,10 @@ export default function BuilderPreflight() {
     setShowReplacementFlow(false);
     setReplacementTargetId(null);
     setReplacementSkipUrl(null);
+    // The unit's photo-fetch receipt describes the OLD gallery — after a
+    // replacement, a lingering "No different photos found — Find replacement
+    // unit" receipt would keep pushing a swap that already happened.
+    dismissPhotoFetchReceipt(oldUnitId);
 
     // Re-run the platform check with updated units
     const updatedUnits = property.units.map(u => {
@@ -2458,7 +2466,7 @@ export default function BuilderPreflight() {
                     {photoFetchJobForUnit(unit.id)?.status === "failed" && (
                       <div className="basis-full space-y-1 rounded-md border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-900">
                         <p>{photoFetchJobForUnit(unit.id)?.error || photoFetchJobForUnit(unit.id)?.message}</p>
-                        {photoFetchJobForUnit(unit.id)?.recommendReplaceUnit && (
+                        {photoFetchJobForUnit(unit.id)?.recommendReplaceUnit && !unitOverrides[unit.id] && (
                           <Button
                             size="sm"
                             variant="outline"
@@ -2528,6 +2536,7 @@ export default function BuilderPreflight() {
                             sticky receipt (the failed-job block already shows
                             its own copy while the job state is live). */}
                         {photoFetchReceipts[unit.id].recommendReplaceUnit
+                          && !unitOverrides[unit.id]
                           && photoFetchJobForUnit(unit.id)?.status !== "failed" && (
                           <div className="basis-full">
                             <Button
@@ -3157,7 +3166,12 @@ export default function BuilderPreflight() {
         {/* Unit replacement flow */}
         {showReplacementFlow && property.communityPhotoFolder && (
           <div className="mt-6" id="unit-replacement-flow-anchor">
+            {/* key: retargeting the flow (e.g. the Find-replacement-unit CTA
+                while it's already open for another unit) must REMOUNT it —
+                its internal search/commit state is unit-scoped, and a stale
+                mount could commit a swap against the wrong unit. */}
             <UnitReplacementFlow
+              key={targetUnit.id}
               unit={{
                 id: targetUnit.id,
                 unitNumber: targetUnit.unitNumber,
