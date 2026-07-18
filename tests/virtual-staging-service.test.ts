@@ -13,7 +13,11 @@ import {
   type VirtualStagingGenerationResult,
   type VirtualStagingImageProvider,
 } from "../server/virtual-staging-service";
-import { trustedReplicateUrl } from "../server/replicate-virtual-staging-provider";
+import {
+  ReplicateVirtualStagingProvider,
+  trustedReplicateUrl,
+  type ReplicateFetch,
+} from "../server/replicate-virtual-staging-provider";
 import {
   AnthropicVirtualStagingViewpointVerifier,
   VirtualStagingViewpointRejectedError,
@@ -126,6 +130,75 @@ const alternateEditedSquare = await sharp(alternateEditedPixels, {
 const indoorContext = { scene: "living-area", placement: "indoor" } as const;
 const outdoorContext = { scene: "private-outdoor", placement: "outdoor" } as const;
 
+function createReplicateFetchMock(
+  output: Buffer,
+  predictionStatus = 201,
+  failedUploadNumber = 0,
+): {
+  fetcher: ReplicateFetch;
+  uploads: Buffer[];
+  deletedFileIds: string[];
+  predictionBodies: Array<{ input?: Record<string, unknown> }>;
+  predictionUrls: string[];
+} {
+  const uploads: Buffer[] = [];
+  const deletedFileIds: string[] = [];
+  const predictionBodies: Array<{ input?: Record<string, unknown> }> = [];
+  const predictionUrls: string[] = [];
+  let uploadAttempts = 0;
+  const fetcher: ReplicateFetch = async (url, init) => {
+    if (url === "https://api.replicate.com/v1/files" && init.method === "POST") {
+      uploadAttempts += 1;
+      if (uploadAttempts === failedUploadNumber) {
+        return new Response(JSON.stringify({ detail: "upload rejected" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      assert.ok(init.body instanceof FormData);
+      const content = init.body.get("content");
+      assert.ok(content instanceof Blob);
+      uploads.push(Buffer.from(await content.arrayBuffer()));
+      const index = uploads.length;
+      return new Response(JSON.stringify({
+        id: `file-${index}`,
+        urls: { get: `https://api.replicate.com/v1/files/file-${index}` },
+      }), { status: 201, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.includes("/models/") && url.endsWith("/predictions")) {
+      predictionUrls.push(url);
+      predictionBodies.push(JSON.parse(String(init.body)) as { input?: Record<string, unknown> });
+      if (predictionStatus !== 201) {
+        return new Response(JSON.stringify({ detail: "prediction rejected" }), {
+          status: predictionStatus,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({
+        id: "prediction-1",
+        status: "succeeded",
+        output: "https://pbxt.replicate.delivery/output.jpg",
+      }), { status: 201, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "https://pbxt.replicate.delivery/output.jpg") {
+      return new Response(new Uint8Array(output), {
+        status: 200,
+        headers: {
+          "Content-Type": "image/jpeg",
+          "Content-Length": String(output.length),
+        },
+      });
+    }
+    const deleteMatch = url.match(/^https:\/\/api\.replicate\.com\/v1\/files\/(file-\d+)$/);
+    if (deleteMatch && init.method === "DELETE") {
+      deletedFileIds.push(deleteMatch[1]);
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected mocked Replicate request: ${init.method ?? "GET"} ${url}`);
+  };
+  return { fetcher, uploads, deletedFileIds, predictionBodies, predictionUrls };
+}
+
 test("preview streaming serves image bytes from hidden staging storage", async () => {
   const previousDatabaseUrl = process.env.DATABASE_URL;
   process.env.DATABASE_URL ||= "postgresql://virtual-staging-test:virtual-staging-test@127.0.0.1:1/unused";
@@ -213,7 +286,7 @@ test("feedback derives from the immutable original, references the reviewed prev
   const replicate = new TestProvider(async () => {
     replicateCalls += 1;
     return alternateEditedSquare;
-  }, "replicate", false);
+  }, "replicate", true);
   const openAI = new TestProvider(async (input) => {
     openAICalls += 1;
     assert.equal(input.mode, "feedback-revision");
@@ -246,6 +319,32 @@ test("feedback derives from the immutable original, references the reviewed prev
   assert.equal(verifierInput?.mode, "feedback-revision");
   assert.equal(verifierInput?.feedback, "Remove the chairs and add new bed linens");
   assert.deepEqual(verifierInput?.previousGenerated, editedSquare);
+});
+
+test("feedback uses a dual-image Replicate provider when OpenAI is not configured", async () => {
+  let calls = 0;
+  const replicate = new TestProvider(async (input) => {
+    calls += 1;
+    assert.equal(input.mode, "feedback-revision");
+    assert.deepEqual(input.source, square);
+    assert.deepEqual(input.referenceSource, editedSquare);
+    return alternateEditedSquare;
+  }, "replicate", true);
+  const result = await new VirtualStagingService(
+    [replicate],
+    1,
+    acceptingViewpointVerifier(),
+  ).generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 2,
+    previousPreview: editedSquare,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "feedback-revision",
+    feedback: "Replace only the bed linens",
+  });
+  assert.equal(result.provider, "replicate");
+  assert.equal(calls, 1);
 });
 
 test("feedback fails before generation when only a single-image provider is configured", async () => {
@@ -690,6 +789,160 @@ test("a provider result with a materially changed aspect ratio is rejected", asy
     service.generate({ source: square, sourceFilename: "room.jpg", generationAttempt: 1, context: indoorContext }),
     /aspect ratio/,
   );
+});
+
+test("Replicate feedback sends the immutable original and reviewed preview to FLUX.2 in order", async () => {
+  const mock = createReplicateFetchMock(alternateEditedSquare);
+  const provider = new ReplicateVirtualStagingProvider(
+    "test-token",
+    "black-forest-labs/flux-kontext-pro",
+    "black-forest-labs/flux-2-pro",
+    mock.fetcher,
+  );
+  const result = await provider.generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 2,
+    previousPreview: editedSquare,
+    referenceSource: editedSquare,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "feedback-revision",
+    feedback: "Replace only the bed linens",
+    prompt: "Image 1 is the immutable original. Image 2 is the reviewed preview.",
+  });
+
+  assert.equal(provider.supportsReferenceImages, true);
+  assert.equal(result.model, "black-forest-labs/flux-2-pro");
+  assert.deepEqual(mock.uploads, [square, editedSquare]);
+  assert.deepEqual(mock.predictionUrls, [
+    "https://api.replicate.com/v1/models/black-forest-labs/flux-2-pro/predictions",
+  ]);
+  assert.deepEqual(mock.predictionBodies[0]?.input, {
+    prompt: "Image 1 is the immutable original. Image 2 is the reviewed preview.",
+    input_images: [
+      "https://api.replicate.com/v1/files/file-1",
+      "https://api.replicate.com/v1/files/file-2",
+    ],
+    aspect_ratio: "match_input_image",
+    resolution: "match_input_image",
+    output_format: "jpg",
+    output_quality: 90,
+    safety_tolerance: 2,
+  });
+  assert.equal("input_image" in (mock.predictionBodies[0]?.input ?? {}), false);
+  assert.deepEqual(mock.deletedFileIds.sort(), ["file-1", "file-2"]);
+});
+
+test("Replicate feedback limits temporary reference copies to FLUX.2's pixel budget", async () => {
+  const largeOriginal = await sharp({
+    create: { width: 2_400, height: 1_800, channels: 3, background: "#d1d5db" },
+  }).jpeg().toBuffer();
+  const largePreview = await sharp({
+    create: { width: 2_400, height: 1_800, channels: 3, background: "#93c5fd" },
+  }).jpeg().toBuffer();
+  const output = await sharp({
+    create: { width: 48, height: 36, channels: 3, background: "#334155" },
+  }).jpeg().toBuffer();
+  const mock = createReplicateFetchMock(output);
+  const provider = new ReplicateVirtualStagingProvider(
+    "test-token",
+    "black-forest-labs/flux-kontext-pro",
+    "black-forest-labs/flux-2-pro",
+    mock.fetcher,
+  );
+  await provider.generate({
+    source: largeOriginal,
+    sourceFilename: "large-room.jpg",
+    generationAttempt: 2,
+    previousPreview: largePreview,
+    referenceSource: largePreview,
+    context: indoorContext,
+    mode: "feedback-revision",
+    feedback: "Update the sofa",
+    prompt: "Use Image 1 and Image 2.",
+  });
+  const dimensions = await Promise.all(mock.uploads.map(async (upload) => sharp(upload).metadata()));
+  const pixels = dimensions.map((metadata) => (metadata.width ?? 0) * (metadata.height ?? 0));
+  assert.ok(pixels.every((count) => count > 0 && count <= 4_000_000));
+  assert.ok(pixels.reduce((sum, count) => sum + count, 0) <= 8_000_000);
+  assert.deepEqual(mock.deletedFileIds.sort(), ["file-1", "file-2"]);
+});
+
+test("Replicate preserves the single-image Kontext contract for ordinary staging", async () => {
+  const mock = createReplicateFetchMock(editedSquare);
+  const provider = new ReplicateVirtualStagingProvider(
+    "test-token",
+    "black-forest-labs/flux-kontext-pro",
+    "black-forest-labs/flux-2-pro",
+    mock.fetcher,
+  );
+  const result = await provider.generate({
+    source: square,
+    sourceFilename: "living-room.jpg",
+    generationAttempt: 1,
+    context: indoorContext,
+    mode: "alternate-angle",
+    prompt: "Restage this room from a nearby angle.",
+  });
+  assert.equal(result.model, "black-forest-labs/flux-kontext-pro");
+  assert.deepEqual(mock.predictionUrls, [
+    "https://api.replicate.com/v1/models/black-forest-labs/flux-kontext-pro/predictions",
+  ]);
+  assert.deepEqual(mock.predictionBodies[0]?.input, {
+    prompt: "Restage this room from a nearby angle.",
+    input_image: "https://api.replicate.com/v1/files/file-1",
+    aspect_ratio: "match_input_image",
+    output_format: "jpg",
+    safety_tolerance: 2,
+    prompt_upsampling: false,
+  });
+  assert.equal("input_images" in (mock.predictionBodies[0]?.input ?? {}), false);
+  assert.deepEqual(mock.deletedFileIds, ["file-1"]);
+});
+
+test("Replicate feedback cleans both temporary uploads when prediction creation fails", async () => {
+  const mock = createReplicateFetchMock(alternateEditedSquare, 422);
+  const provider = new ReplicateVirtualStagingProvider(
+    "test-token",
+    "black-forest-labs/flux-kontext-pro",
+    "black-forest-labs/flux-2-pro",
+    mock.fetcher,
+  );
+  await assert.rejects(provider.generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 2,
+    previousPreview: editedSquare,
+    referenceSource: editedSquare,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "feedback-revision",
+    feedback: "Remove the chair",
+    prompt: "Use Image 1 and Image 2.",
+  }), /Replicate image edit failed \(HTTP 422\)/);
+  assert.deepEqual(mock.deletedFileIds.sort(), ["file-1", "file-2"]);
+});
+
+test("Replicate feedback cleans the source upload when the reviewed-preview upload fails", async () => {
+  const mock = createReplicateFetchMock(alternateEditedSquare, 201, 2);
+  const provider = new ReplicateVirtualStagingProvider(
+    "test-token",
+    "black-forest-labs/flux-kontext-pro",
+    "black-forest-labs/flux-2-pro",
+    mock.fetcher,
+  );
+  await assert.rejects(provider.generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 2,
+    previousPreview: editedSquare,
+    referenceSource: editedSquare,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "feedback-revision",
+    feedback: "Remove the chair",
+    prompt: "Use Image 1 and Image 2.",
+  }), /reviewed preview upload failed \(HTTP 503\)/);
+  assert.deepEqual(mock.deletedFileIds, ["file-1"]);
+  assert.equal(mock.predictionBodies.length, 0);
 });
 
 test("Replicate bearer credentials are only sent to provider-owned hosts", () => {
