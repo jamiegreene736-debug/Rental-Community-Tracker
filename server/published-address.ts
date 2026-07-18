@@ -26,6 +26,8 @@ import {
   addressLng,
   buildGuestyPublishedAddress,
   finiteCoord,
+  foldAddressObjectStrings,
+  hasNonAsciiAddressChars,
   genericPublishedPartsFromPrivateAddress,
   parsePublishedAddressStore,
   publishedAddressSatisfiesTarget,
@@ -38,7 +40,12 @@ import {
   type PublishedAddressStore,
   type ResolvedPublishedAddress,
 } from "@shared/published-address";
-import { communityAddressRuleForName, isLikelyStreetAddress, normalizeCommunityAddressToken } from "@shared/community-addresses";
+import {
+  communityAddressRuleForName,
+  foldHawaiianDiacritics,
+  isLikelyStreetAddress,
+  normalizeCommunityAddressToken,
+} from "@shared/community-addresses";
 import { parseStreetCityState } from "@shared/address-listing-logic";
 import { propertyIdForGuestyListing } from "@shared/builder-deep-link";
 import { guestyRequest } from "./guesty-sync";
@@ -471,7 +478,26 @@ export async function pushPublishedAddressForListing(input: {
     console.log(
       `[published-address] ${input.reason}: PUT /address/${addressEntityId}/update for listing ${listingId} → "${resolved.street}" (${resolved.source})`,
     );
-    await guestyRequest("PUT", `/address/${addressEntityId}/update`, putBody);
+    try {
+      await guestyRequest("PUT", `/address/${addressEntityId}/update`, putBody);
+    } catch (e: any) {
+      // Guesty's Address PUT validator 400s on non-ASCII (okina/curly quotes)
+      // even when the stored address itself carries them (live-observed on Na
+      // Hale O Keauhou, "Ali‘i Dr"). One diacritic-folded retry — same
+      // address semantically; ASCII-clean like the rest of the portfolio.
+      if (Number(e?.status) === 400 && hasNonAsciiAddressChars(putBody)) {
+        console.warn(
+          `[published-address] ${input.reason}: PUT 400 with non-ASCII address — retrying diacritic-folded for listing ${listingId}`,
+        );
+        await guestyRequest(
+          "PUT",
+          `/address/${addressEntityId}/update`,
+          foldAddressObjectStrings(putBody, foldHawaiianDiacritics),
+        );
+      } else {
+        throw e;
+      }
+    }
 
     // Read-back verification: the flag must be ON and the published street
     // must echo. Never infer enablement from presence alone.

@@ -88,7 +88,13 @@ Before making any changes:
   guard), transient SearchAPI failures durably cached the generic fallback (transient flag, no
   cache write), operator-set custom published addresses were clobbered weekly (operator-wins
   branch), audit double-push (skipPublishedAddressEnsure flag), admin backfill vs the 15-min
-  edge cap (NDJSON stream + heartbeat).
+  edge cap (NDJSON stream + heartbeat). LIVE BACKFILL RAN post-deploy: 24 mapped listings — 22
+  pushed+verified (19 real clubhouse addresses, e.g. Poipu Kai → 1831 Poipu Rd, Kiahuna → 2611
+  Kiahuna Plantation Dr), 1 already-on, 1 initial failure: Na Hale O Keauhou (draft -2, listing
+  6a032d12…) — Guesty's Address PUT 400s on the okina in its own stored "78-6833 Ali‘i Dr" even
+  when echoed VERBATIM. Follow-up PR adds a bounded 400-retry that re-PUTs with
+  foldHawaiianDiacritics applied to string fields only ("Ali‘i"→"Alii"; first attempt stays
+  echo-verbatim by rule).
 
 - 2026-07-17 (Cowork buy-in find + safe checkout preparation): Jamie replaced the older
   automated-card design. The primary bookings action now runs search/attach and VRBO checkout
