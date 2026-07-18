@@ -347,6 +347,34 @@ export function clubhouseDiscoveryQueries(
  *  resort-pin hit is still acceptable (its pin is usually the office). */
 export const CLUBHOUSE_TITLE_HINT_RE = /\b(?:club\s*house|clubhouse|amenity center|recreation center|front desk|reception|office)\b/i;
 
+// ── ASCII fold for Guesty's Address PUT validator ────────────────────────────
+// Live-observed 2026-07-17 (Na Hale O Keauhou): GET /v1/address returns the
+// stored "78-6833 Ali‘i Dr" (curly-quote okina), but PUTting that VERBATIM
+// echo back 400s — Guesty's write validator rejects the non-ASCII character
+// its own store contains. Folding the okina/macrons ("Ali‘i" → "Alii") is
+// semantically the same address and matches how every other Kona address in
+// the portfolio is written. Applied only as a bounded 400-retry, never on the
+// first attempt (echo-verbatim stays the rule).
+
+export function hasNonAsciiAddressChars(value: unknown): boolean {
+  return /[^\x20-\x7E]/.test(JSON.stringify(value ?? ""));
+}
+
+/** Deep-copy an address-shaped object with every STRING value diacritic-
+ *  folded (okina/macron dropped); numbers/objects pass through untouched. */
+export function foldAddressObjectStrings<T>(value: T, fold: (s: string) => string): T {
+  if (typeof value === "string") return fold(value) as unknown as T;
+  if (Array.isArray(value)) return value.map((v) => foldAddressObjectStrings(v, fold)) as unknown as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = foldAddressObjectStrings(v, fold);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
 // ── Ledger summary (test-locked wording) ─────────────────────────────────────
 
 export function publishedAddressSourceLabel(source: PublishedAddressSource): string {
