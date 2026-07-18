@@ -331,7 +331,7 @@ const PRIVATE_OUTDOOR_USE_RE =
 const PURE_OUTDOOR_VIEW_RE =
   /\b(?:view|sunset|sunrise) from (?:the )?(?:lanai|patio|balcony|deck|terrace|veranda|porch)\b|^(?:ocean|garden|mountain|sunset|sunrise)?\s*(?:lanai|patio|balcony|deck|terrace|veranda|porch) view\b/i;
 const OBVIOUS_SHARED_OR_SCENIC_RE =
-  /\b(?:(?:community|shared) (?:pool|spa|amenit(?:y|ies)|grounds|area|lounge|dining)|resort (?:pool|spa|grounds|amenit(?:y|ies)|lobby|restaurant|clubhouse|fitness|gym)|(?:pool|spa) deck|poolside (?:seating|lounge|dining|chairs?)|beach (?:access|path|cove|shore|scene|view)|aerial|drone|building exterior|map|logo|tennis court|golf course|parking lot)\b/i;
+  /\b(?:(?:community|shared) (?:pools?|spas?|amenit(?:y|ies)|grounds?|areas?|lounges?|dining)|resort (?:pools?|spas?|grounds?|amenit(?:y|ies)|lobb(?:y|ies)|restaurants?|clubhouses?|fitness(?: centers?)?|gyms?)|(?:pool|spa) decks?|poolside (?:seating|lounges?|dining|chairs?)|beach (?:access|paths?|coves?|shores?|scenes?|views?)|aerial|drone|building exteriors?|maps?|logos?|tennis courts?|golf courses?|parking lots?)\b/i;
 const PURE_SCENIC_ASSET_RE =
   /^(?:ocean(?:front)? (?:view|vista|sunset|sunrise|panorama)|mountain (?:view|vista)|garden view|coast(?:line|al view|al panorama)|beach(?: view| scene)?|sunset|sunrise|landscape(?: view)?|pool with ocean backdrop)$/i;
 const FLOOR_PLAN_ASSET_RE = /^(?:unit )?floor ?plan(?: diagram| layout| graphic)?$/i;

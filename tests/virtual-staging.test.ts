@@ -404,6 +404,26 @@ test("obvious beach and shared-amenity labels backstop a bad generated category"
     metadata: label("restaurant.jpg", { label: "Resort Restaurant", category: "Dining" }),
   }), null);
   for (const roomLabel of [
+    "Community Pools With Ocean View",
+    "Shared Spas",
+    "Resort Restaurants",
+    "Golf Courses",
+    "Parking Lots",
+    "Pool Decks",
+    "Building Exteriors",
+    "Beach Views",
+    "Tennis Courts With Ocean View",
+  ]) {
+    assert.equal(virtualStagingContextForSource({
+      originalFilename: `${roomLabel}.jpg`,
+      roomLabel,
+      metadata: label(`${roomLabel}.jpg`, {
+        label: roomLabel,
+        category: "Outdoor and Lanai",
+      }),
+    }), null, roomLabel);
+  }
+  for (const roomLabel of [
     "Ocean View",
     "Oceanfront Sunset",
     "Coastline",
@@ -990,7 +1010,7 @@ test("the Photos tab requires an explicit server-authoritative source selection 
   assert.match(picker, /Select all eligible/);
   assert.match(picker, /Clear all/);
   assert.match(picker, /button-start-selected-restaging/);
-  assert.match(picker, /Beach, view, exterior, pool, and shared-amenity photos are excluded/);
+  assert.match(picker, /Beach, scenic, exterior, pool-only, and shared-amenity photos are excluded/);
   assert.match(picker, /nextChoices\.resumableJobId/);
   assert.doesNotMatch(picker, /apiRequest\(\s*["']POST["']/);
   assert.ok(curator.indexOf("<VirtualStagingPhotoPickerDialog") < curator.indexOf("<VirtualStagingDialog"));

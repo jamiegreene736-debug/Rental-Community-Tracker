@@ -181,7 +181,7 @@ export default function VirtualStagingPhotoPickerDialog({
         <DialogHeader className="shrink-0 border-b px-6 pb-4 pt-6 pr-14">
           <DialogTitle>Select photos to restage — {unit.label}</DialogTitle>
           <DialogDescription>
-            Only furnished rooms and private patios are eligible. Beach, view, exterior, pool, and shared-amenity photos are excluded.
+            Only furnished rooms and private patios are eligible. Beach, scenic, exterior, pool-only, and shared-amenity photos are excluded.
           </DialogDescription>
         </DialogHeader>
 
