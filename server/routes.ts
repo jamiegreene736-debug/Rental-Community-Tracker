@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from "express";
+import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import { createServer, type Server } from "http";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
@@ -46023,6 +46024,169 @@ Return ONLY compact JSON with this exact shape:
     const ok = await storage.deleteCommunityDraft(id);
     if (!ok) return res.status(404).json({ error: "Not found" });
     res.json({ success: true });
+  });
+
+  // Delete a listing from the dashboard AND everywhere else its data lives.
+  // `:id` is the DASHBOARD property id: NEGATIVE (-draftId) for an added
+  // community draft/listing, POSITIVE for a hard-coded core portfolio property.
+  //
+  //   GUESTY GATE (both kinds, authoritative): refuse if the property is
+  //   connected to Guesty (has a guesty_property_map row) — mirrors the
+  //   dashboard's green "G" dot. The operator must disconnect first.
+  //
+  //   DRAFT (negative id): purge the community_drafts row + every store keyed by
+  //   -draftId + the draft's PRIVATE photo folders; the row then vanishes from
+  //   /api/community/drafts.
+  //
+  //   CORE (positive id): the entry lives in code (unit-builder-data.ts) and
+  //   can't be row-deleted, so the id is remembered in a persisted removed-set
+  //   (app_settings) that the dashboard + weekly schedulers filter out, and every
+  //   DB store keyed by that id is purged. Photo folders are NOT touched — core
+  //   community/unit folders are SHARED across sibling portfolio rows, so
+  //   deleting by folder would corrupt a neighbour.
+  //
+  // The client double-confirms in the UI; this endpoint is the point of no
+  // return. The app_settings audit-doc prune and on-disk photo-folder removal are
+  // best-effort and never fail the delete. Rate-limited because the draft path
+  // touches the filesystem — mirrors the express-rate-limit pattern in
+  // server/virtual-staging-routes.ts, keyed by portal session + IP.
+  const deletePropertyRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 60,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    keyGenerator: (req, res) => {
+      const session = res.locals.portalSession as { username?: string } | undefined;
+      const address = req.ip ?? req.socket.remoteAddress ?? "unknown";
+      return `${session?.username ?? "unauthenticated"}:${ipKeyGenerator(address)}`;
+    },
+    message: { error: "Too many delete requests. Please wait a moment and try again." },
+  });
+
+  // Best-effort prune of the app_settings audit docs (unit_audit_sweeps.v1 /
+  // unit_audit_reports.v1) for a deleted property id. Mutates `counts`. Never
+  // throws — a stale audit record is harmless once the row is gone.
+  async function pruneUnitAuditDocsForDeletedProperty(propertyId: number, counts: Record<string, number>): Promise<void> {
+    try {
+      const {
+        UNIT_AUDIT_STORE_SETTING_KEY,
+        UNIT_AUDIT_REPORTS_SETTING_KEY,
+        parseUnitAuditStore,
+        serializeUnitAuditStore,
+        parseUnitAuditReports,
+        serializeUnitAuditReports,
+      } = await import("@shared/unit-audit-sweep-logic");
+      const { pruneRecordsByPropertyId } = await import("@shared/property-deletion");
+
+      const storeRaw = await storage.getSetting(UNIT_AUDIT_STORE_SETTING_KEY);
+      if (storeRaw) {
+        const pruned = pruneRecordsByPropertyId(parseUnitAuditStore(storeRaw), propertyId);
+        if (pruned.removed > 0) {
+          await storage.setSetting(UNIT_AUDIT_STORE_SETTING_KEY, serializeUnitAuditStore(pruned.records, Date.now()));
+          counts["unitAuditJobs"] = pruned.removed;
+        }
+      }
+      const reportsRaw = await storage.getSetting(UNIT_AUDIT_REPORTS_SETTING_KEY);
+      if (reportsRaw) {
+        const pruned = pruneRecordsByPropertyId(parseUnitAuditReports(reportsRaw), propertyId);
+        if (pruned.removed > 0) {
+          await storage.setSetting(UNIT_AUDIT_REPORTS_SETTING_KEY, serializeUnitAuditReports(pruned.records));
+          counts["unitAuditReports"] = pruned.removed;
+        }
+      }
+    } catch (err: any) {
+      console.error(`[property-delete] audit-doc prune failed for ${propertyId}:`, err?.message ?? err);
+    }
+  }
+
+  app.delete("/api/dashboard/property/:id", deletePropertyRateLimit, async (req, res) => {
+    const dashboardId = parseInt(String(req.params.id), 10);
+    if (!Number.isFinite(dashboardId) || dashboardId === 0) {
+      return res.status(400).json({ error: "Invalid property id" });
+    }
+
+    // Guesty gate — applies to BOTH core and draft, mirrors the green "G" dot.
+    const guestyListingId = await storage.getGuestyListingId(dashboardId);
+    if (guestyListingId) {
+      return res.status(409).json({
+        error: "This listing is connected to Guesty. Disconnect it from Guesty before deleting.",
+      });
+    }
+
+    // ── CORE portfolio property (positive id) ─────────────────────────────────
+    if (dashboardId > 0) {
+      const builder = getUnitBuilderByPropertyId(dashboardId);
+      if (!builder || builder.retired) {
+        return res.status(404).json({ error: "Unknown core property" });
+      }
+      // Persist the hide FIRST so the row disappears even if the DB purge
+      // partially fails (the alternative — data gone but row still visible — is
+      // worse). The purge is then best-effort.
+      let removedCorePropertyIds: number[];
+      try {
+        removedCorePropertyIds = await storage.addDeletedCorePropertyId(dashboardId);
+      } catch (err: any) {
+        console.error(`[property-delete] failed to persist removed core id ${dashboardId}:`, err?.message ?? err);
+        return res.status(500).json({ error: "Failed to delete property" });
+      }
+      const deleted: Record<string, number> = {};
+      try {
+        Object.assign(deleted, await storage.deletePropertyDataDeep(dashboardId));
+      } catch (err: any) {
+        console.error(`[property-delete] core deep purge failed for ${dashboardId} (row already hidden):`, err?.message ?? err);
+      }
+      await pruneUnitAuditDocsForDeletedProperty(dashboardId, deleted);
+      console.log(
+        `[property-delete] removed core property ${dashboardId} ("${builder.propertyName}"):`,
+        JSON.stringify(deleted),
+      );
+      return res.json({ success: true, propertyId: dashboardId, name: builder.propertyName, deleted, removedCorePropertyIds });
+    }
+
+    // ── Added community draft/listing (negative id) ───────────────────────────
+    const draftId = Math.abs(dashboardId);
+    const draft = await storage.getCommunityDraft(draftId);
+    if (!draft) return res.status(404).json({ error: "Listing not found" });
+
+    let deleted: Record<string, number> = {};
+    try {
+      deleted = await storage.deleteCommunityDraftDeep(draftId);
+    } catch (err: any) {
+      console.error(`[property-delete] deep delete failed for draft ${draftId}:`, err?.message ?? err);
+      return res.status(500).json({ error: err?.message ?? "Failed to delete listing" });
+    }
+
+    await pruneUnitAuditDocsForDeletedProperty(dashboardId, deleted);
+
+    // Best-effort: remove the draft's on-disk photo folders (private to the draft).
+    try {
+      const { communityDraftPhotoFolders } = await import("@shared/property-deletion");
+      const photosBase = path.join(process.cwd(), "client", "public", "photos");
+      let foldersRemoved = 0;
+      for (const folder of communityDraftPhotoFolders(draftId)) {
+        const dir = path.join(photosBase, folder);
+        if (fs.existsSync(dir)) {
+          fs.rmSync(dir, { recursive: true, force: true });
+          foldersRemoved += 1;
+        }
+      }
+      if (foldersRemoved > 0) deleted["photoFolders"] = foldersRemoved;
+    } catch (err: any) {
+      console.error(`[property-delete] photo-folder removal failed for draft ${draftId}:`, err?.message ?? err);
+    }
+
+    console.log(
+      `[property-delete] removed draft ${draftId} (dashboard id ${dashboardId}, "${draft.name}"):`,
+      JSON.stringify(deleted),
+    );
+    res.json({ success: true, draftId, dashboardId, name: draft.name, deleted });
+  });
+
+  // The dashboard filters these out of its static core-property list so a
+  // deleted core portfolio unit stays gone across reloads/deploys.
+  app.get("/api/dashboard/removed-core-properties", async (_req, res) => {
+    const ids = await storage.getDeletedCorePropertyIds();
+    res.json({ ids });
   });
 
   app.post("/api/pricing/hybrid/run", async (req, res) => {

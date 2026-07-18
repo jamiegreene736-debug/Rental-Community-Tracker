@@ -30,6 +30,16 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -1456,6 +1466,11 @@ function AdminDashboard() {
   // When the operator clicks an unmapped (gray) G-dot we open the
   // connect-to-existing dialog seeded with this row's id + name.
   const [connectTarget, setConnectTarget] = useState<{ id: number; name: string } | null>(null);
+  // Two-step delete confirmation for an added (draft) listing. `deleteTarget`
+  // holds the row being deleted; `deleteStep` walks 1 → 2 through the two
+  // confirmation modals before the mutation actually fires.
+  const [deleteTarget, setDeleteTarget] = useState<Property | null>(null);
+  const [deleteStep, setDeleteStep] = useState<1 | 2>(1);
   const [selectedPricingIds, setSelectedPricingIds] = useState<Set<number>>(() => new Set());
   const [bulkPricingOpen, setBulkPricingOpen] = useState(false);
   const [bulkPricingJob, setBulkPricingJob] = useState<BulkPricingJob | null>(null);
@@ -1606,8 +1621,20 @@ function AdminDashboard() {
     return out;
   }, [communityDraftsDataForRows, minimumStayData]);
 
+  // Operator-deleted CORE portfolio properties (positive ids). The static
+  // `properties` array still contains them (core rows live in code), so the
+  // dashboard hides them using this persisted server set — durable across
+  // reloads/deploys. Drafts delete their own DB row and never appear here.
+  const { data: removedCoreData } = useQuery<{ ids: number[] }>({
+    queryKey: ["/api/dashboard/removed-core-properties"],
+  });
+  const removedCoreIds = useMemo(
+    () => new Set<number>(removedCoreData?.ids ?? []),
+    [removedCoreData],
+  );
+
   const activeProperties = useMemo(() => {
-    return properties.map((p) => {
+    return properties.filter((p) => !removedCoreIds.has(p.id)).map((p) => {
       const stay = minimumStayData?.[p.id];
       const communityStay = communityMinimumStayData.get(p.community);
       const unitCount = getUnitBuilderByPropertyId(p.id)?.units.length ?? (p.multiUnit ? 2 : 1);
@@ -1636,7 +1663,7 @@ function AdminDashboard() {
         minimumStayRangeHigh: null,
       };
     });
-  }, [communityMinimumStayData, minimumStayData]);
+  }, [communityMinimumStayData, minimumStayData, removedCoreIds]);
 
   // Map community drafts → Property-shaped rows so they show up in
   // the main table next to the active 11 properties. Synthetic
@@ -3651,14 +3678,45 @@ function AdminDashboard() {
     }
   };
 
-  const deleteDraftMutation = useMutation({
-    mutationFn: async (id: number) => {
-      await apiRequest("DELETE", `/api/community/${id}`);
+  // Delete an added listing/draft from the dashboard AND everywhere else its
+  // data lives. `property.id` is the dashboard id (negative for drafts); the
+  // server refuses positive (core) ids and any listing still connected to
+  // Guesty. Fires only after the two-step confirmation flow below.
+  const deletePropertyMutation = useMutation({
+    mutationFn: async (property: Property) => {
+      const r = await apiRequest("DELETE", `/api/dashboard/property/${property.id}`);
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
     },
-    onSuccess: () => {
+    onSuccess: (_data, property) => {
+      // The row lives in /api/community/drafts; the rest are per-column caches
+      // keyed by property.id that would otherwise show stale data for a beat.
       queryClient.invalidateQueries({ queryKey: ["/api/community/drafts"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/removed-core-properties"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/guesty-property-map"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/channel-status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/unit-audit-status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/price-scans"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/property-revenue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/minimum-stays"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/builder/photo-community-status"] });
+      setDeleteTarget(null);
+      setDeleteStep(1);
+      toast({ title: "Listing deleted", description: `${property.name} was removed from the system.` });
     },
+    onError: (e: any) =>
+      toast({ title: "Delete failed", description: e.message, variant: "destructive" }),
   });
+
+  // Open the two-step confirmation for a row (guarded again server-side).
+  const requestDeleteProperty = (property: Property) => {
+    setDeleteTarget(property);
+    setDeleteStep(1);
+  };
 
   // Promote a draft to "published" — flips the status flag so the
   // row renders as a regular active property (no DRAFT pill, Build
@@ -6158,62 +6216,98 @@ function AdminDashboard() {
                     className="sticky left-0 z-10 px-1 py-2 bg-background"
                     style={{ background: isResearchDraft ? "#fffbeb" : undefined }}
                   >
-                    {isResearchDraft ? (
-                      <div className="flex items-center gap-1">
-                        <Badge
-                          variant="outline"
-                          className="h-7 px-2 text-[10px] font-semibold bg-amber-100 border-amber-300 text-amber-900"
-                          data-testid={`badge-draft-${property.draftId}`}
-                        >
-                          DRAFT
-                        </Badge>
-                        <button
-                          onClick={() => promoteDraftMutation.mutate(property.draftId!)}
-                          disabled={promoteDraftMutation.isPending}
-                          className="text-emerald-700 hover:text-emerald-800 transition-colors p-1 disabled:opacity-50"
-                          aria-label="Promote draft to active property"
-                          data-testid={`button-promote-draft-${property.draftId}`}
-                          title="Promote to active property"
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          onClick={() => deleteDraftMutation.mutate(property.draftId!)}
-                          className="text-muted-foreground hover:text-destructive transition-colors p-1"
-                          aria-label="Delete draft"
-                          data-testid={`button-delete-draft-${property.draftId}`}
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
-                    ) : isPublishedDraft ? (
-                      <Link href={`/builder/${property.id}/preflight`}>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 text-xs px-2 gap-1"
-                          data-testid={`button-unit-builder-${property.id}`}
-                          aria-label={`Open builder for ${property.name}`}
-                        >
-                          <Hammer className="h-3 w-3" />
-                          Build
-                        </Button>
-                      </Link>
-                    ) : unitBuilderIds.has(property.id) ? (
-                      <Link href={`/builder/${property.id}/preflight`}>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 text-xs px-2 gap-1"
-                          data-testid={`button-unit-builder-${property.id}`}
-                          id={`btn-build-${property.id}`}
-                          aria-label={`Build property ${property.name}`}
-                        >
-                          <Hammer className="h-3 w-3" />
-                          Build
-                        </Button>
-                      </Link>
-                    ) : null}
+                    <div className="flex items-center gap-1">
+                      {isResearchDraft ? (
+                        <>
+                          <Badge
+                            variant="outline"
+                            className="h-7 px-2 text-[10px] font-semibold bg-amber-100 border-amber-300 text-amber-900"
+                            data-testid={`badge-draft-${property.draftId}`}
+                          >
+                            DRAFT
+                          </Badge>
+                          <button
+                            onClick={() => promoteDraftMutation.mutate(property.draftId!)}
+                            disabled={promoteDraftMutation.isPending}
+                            className="text-emerald-700 hover:text-emerald-800 transition-colors p-1 disabled:opacity-50"
+                            aria-label="Promote draft to active property"
+                            data-testid={`button-promote-draft-${property.draftId}`}
+                            title="Promote to active property"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                          </button>
+                        </>
+                      ) : isPublishedDraft ? (
+                        <Link href={`/builder/${property.id}/preflight`}>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs px-2 gap-1"
+                            data-testid={`button-unit-builder-${property.id}`}
+                            aria-label={`Open builder for ${property.name}`}
+                          >
+                            <Hammer className="h-3 w-3" />
+                            Build
+                          </Button>
+                        </Link>
+                      ) : unitBuilderIds.has(property.id) ? (
+                        <Link href={`/builder/${property.id}/preflight`}>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs px-2 gap-1"
+                            data-testid={`button-unit-builder-${property.id}`}
+                            id={`btn-build-${property.id}`}
+                            aria-label={`Build property ${property.name}`}
+                          >
+                            <Hammer className="h-3 w-3" />
+                            Build
+                          </Button>
+                        </Link>
+                      ) : null}
+                      {/* Delete a listing from the system. Enabled only when the
+                          row is NOT connected to Guesty (the same signal as the
+                          green "G" dot); connected rows show a disabled trash
+                          with an explanatory tooltip so the rule is discoverable.
+                          Available for added drafts AND core portfolio units —
+                          the server purges DB data either way and, for a core
+                          unit, persists a hide so it stays gone. */}
+                      {(isDraft || unitBuilderIds.has(property.id)) && (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex">
+                                <button
+                                  onClick={() => {
+                                    if (!guestyConnected.has(property.id)) requestDeleteProperty(property);
+                                  }}
+                                  disabled={guestyConnected.has(property.id) || deletePropertyMutation.isPending}
+                                  className={cn(
+                                    "p-1 transition-colors",
+                                    guestyConnected.has(property.id)
+                                      ? "text-muted-foreground/40 cursor-not-allowed"
+                                      : "text-muted-foreground hover:text-destructive",
+                                  )}
+                                  aria-label={
+                                    guestyConnected.has(property.id)
+                                      ? "Connected to Guesty — disconnect before deleting"
+                                      : "Delete listing from the system"
+                                  }
+                                  data-testid={`button-delete-property-${property.id}`}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {guestyConnected.has(property.id)
+                                ? "Connected to Guesty — disconnect before deleting"
+                                : "Delete listing from the system"}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell className="px-0 py-2 text-center text-xs text-muted-foreground">{idx + 1}</TableCell>
                   <TableCell className="px-0 py-2 text-center">
@@ -6822,6 +6916,68 @@ function AdminDashboard() {
         open={connectTarget !== null}
         onOpenChange={(open) => { if (!open) setConnectTarget(null); }}
       />
+
+      {/* Two-step delete confirmation for an added listing/draft. Step 1 warns
+          what will be removed; step 2 is the final "are you sure". The mutation
+          only fires on the step-2 button; the server independently re-checks the
+          Guesty-connection + scope guards. */}
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !deletePropertyMutation.isPending) {
+            setDeleteTarget(null);
+            setDeleteStep(1);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          {deleteStep === 1 ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete this listing?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  <strong>{deleteTarget?.name}</strong> will be removed from the dashboard and
+                  everywhere else its data lives — pricing, photos, amenities, descriptions,
+                  audit history and more. This can’t be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel data-testid="button-cancel-delete">Cancel</AlertDialogCancel>
+                <Button
+                  variant="destructive"
+                  onClick={() => setDeleteStep(2)}
+                  data-testid="button-confirm-delete-step-1"
+                >
+                  Continue
+                </Button>
+              </AlertDialogFooter>
+            </>
+          ) : (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This permanently deletes <strong>{deleteTarget?.name}</strong> from the system.
+                  There is no undo.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={deletePropertyMutation.isPending} data-testid="button-cancel-delete-final">
+                  Cancel
+                </AlertDialogCancel>
+                <Button
+                  variant="destructive"
+                  disabled={deletePropertyMutation.isPending}
+                  onClick={() => { if (deleteTarget) deletePropertyMutation.mutate(deleteTarget); }}
+                  data-testid="button-confirm-delete-step-2"
+                >
+                  {deletePropertyMutation.isPending ? "Deleting…" : "Delete permanently"}
+                </Button>
+              </AlertDialogFooter>
+            </>
+          )}
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Payment-failure warning popup — auto-raised when a guest payment
           FAILED or a scheduled balance charge blew past its due date without

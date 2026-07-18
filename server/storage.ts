@@ -45,9 +45,16 @@ import {
   type PropertyBuyInMarkets, type InsertPropertyBuyInMarkets, propertyBuyInMarkets,
   propertyComplianceOverrides,
   propertyDescriptionOverrides,
+  bulkPricingRefreshJobItems, bulkComboListingJobItems, communityPricingRefreshJobs,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, gte, lte, lt, or, inArray, ne, sql } from "drizzle-orm";
+import {
+  communityDraftPhotoFolders,
+  DELETED_CORE_PROPERTY_IDS_KEY,
+  parseDeletedCorePropertyIds,
+  serializeDeletedCorePropertyIds,
+} from "@shared/property-deletion";
 import { DESCRIPTION_OVERRIDE_FIELDS, type PropertyDescriptionOverrideField } from "@shared/description-copy";
 import { photoListingScanWasInconclusive } from "@shared/photo-listing-decision";
 import {
@@ -212,6 +219,10 @@ export interface IStorage {
   getCommunityDraft(id: number): Promise<CommunityDraft | undefined>;
   updateCommunityDraft(id: number, data: Partial<InsertCommunityDraft>): Promise<CommunityDraft | undefined>;
   deleteCommunityDraft(id: number): Promise<boolean>;
+  deleteCommunityDraftDeep(draftId: number): Promise<Record<string, number>>;
+  deletePropertyDataDeep(propertyId: number, opts?: { folders?: string[]; draftId?: number }): Promise<Record<string, number>>;
+  getDeletedCorePropertyIds(): Promise<number[]>;
+  addDeletedCorePropertyId(propertyId: number): Promise<number[]>;
 
   upsertPropertyMarketRate(input: InsertPropertyMarketRate): Promise<PropertyMarketRate>;
   deletePropertyMarketRate(propertyId: number, bedrooms: number): Promise<void>;
@@ -824,6 +835,107 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
+  // Thorough purge of every DB store keyed by a single dashboard property id.
+  // `propertyId` is the dashboard id: NEGATIVE (-draftId) for an added
+  // community draft, POSITIVE for a hard-coded core portfolio property.
+  //
+  // `opts.folders` — photo folders to clean (photo_labels/checks/alerts). Pass
+  // these ONLY for drafts: a draft owns private `draft-<id>-…` folders. Core
+  // properties SHARE their community/unit folders across several portfolio rows
+  // (e.g. `community-regency-poipu-kai`, `unit-423`), so cleaning by folder
+  // would corrupt a sibling property — pass no folders for a core delete.
+  // `opts.draftId` — when set, also clears the draft-id-keyed rows and deletes
+  // the community_drafts row itself (draft path only).
+  //
+  // Buy-ins are deliberately NOT touched (they carry a checkout-claim guard and
+  // only exist for real reservations on Guesty-connected listings, which the
+  // delete route refuses). Guesty-connection gating lives in the route.
+  async deletePropertyDataDeep(
+    propertyId: number,
+    opts: { folders?: string[]; draftId?: number } = {},
+  ): Promise<Record<string, number>> {
+    const folders = opts.folders ?? [];
+    const counts: Record<string, number> = {};
+
+    // Every table keyed by property_id (the dashboard id — negative for a draft,
+    // positive for a core property).
+    const byProperty: Array<[string, any, any]> = [
+      ["propertyMarketRates", propertyMarketRates, propertyMarketRates.propertyId],
+      ["pricingUpdateLogs", pricingUpdateLogs, pricingUpdateLogs.propertyId],
+      ["propertyTrailingRevenue", propertyTrailingRevenue, propertyTrailingRevenue.propertyId],
+      ["propertyAmenities", propertyAmenities, propertyAmenities.propertyId],
+      ["propertyDescriptionOverrides", propertyDescriptionOverrides, propertyDescriptionOverrides.propertyId],
+      ["propertyComplianceOverrides", propertyComplianceOverrides, propertyComplianceOverrides.propertyId],
+      ["propertyBuyInMarkets", propertyBuyInMarkets, propertyBuyInMarkets.propertyId],
+      ["unitSwaps", unitSwaps, unitSwaps.propertyId],
+      ["scannerSchedule", scannerSchedule, scannerSchedule.propertyId],
+      ["scannerBlocks", scannerBlocks, scannerBlocks.propertyId],
+      ["scannerOverrides", scannerOverrides, scannerOverrides.propertyId],
+      ["scannerRunHistory", scannerRunHistory, scannerRunHistory.propertyId],
+      ["sourceabilityObservations", sourceabilityObservations, sourceabilityObservations.propertyId],
+      ["builderBookingRules", builderBookingRules, builderBookingRules.propertyId],
+      ["guestyPropertyMap", guestyPropertyMap, guestyPropertyMap.propertyId],
+      ["bulkPricingRefreshJobItems", bulkPricingRefreshJobItems, bulkPricingRefreshJobItems.propertyId],
+      ["availabilityScans", availabilityScans, availabilityScans.propertyId],
+      ["manualReservations", manualReservations, manualReservations.propertyId],
+      ["autoFillLossOptions", autoFillLossOptions, autoFillLossOptions.propertyId],
+    ];
+    for (const [label, table, column] of byProperty) {
+      const rows = await db.delete(table).where(eq(column, propertyId)).returning();
+      counts[label] = (rows as any[]).length;
+    }
+
+    // Photo tables keyed by folder name — drafts only (see the folder note).
+    if (folders.length > 0) {
+      const byFolder: Array<[string, any, any]> = [
+        ["photoLabels", photoLabels, photoLabels.folder],
+        ["photoListingChecks", photoListingChecks, photoListingChecks.photoFolder],
+        ["photoListingAlerts", photoListingAlerts, photoListingAlerts.photoFolder],
+      ];
+      for (const [label, table, column] of byFolder) {
+        const rows = await db.delete(table).where(inArray(column, folders)).returning();
+        counts[label] = (rows as any[]).length;
+      }
+    }
+
+    // Draft-id-keyed rows + the draft row itself — draft path only.
+    if (opts.draftId != null) {
+      const draftId = Math.abs(opts.draftId);
+      const pricingJobs = await db
+        .delete(communityPricingRefreshJobs)
+        .where(eq(communityPricingRefreshJobs.draftId, draftId))
+        .returning();
+      counts["communityPricingRefreshJobs"] = pricingJobs.length;
+
+      // Bulk-combo job items reference the draft they produced — unlink (don't
+      // delete the queue history), matching the admin cleanup route.
+      const unlinked = await db
+        .update(bulkComboListingJobItems)
+        .set({ draftId: null })
+        .where(eq(bulkComboListingJobItems.draftId, draftId))
+        .returning();
+      counts["bulkComboListingJobItemsUnlinked"] = unlinked.length;
+
+      const draftRows = await db
+        .delete(communityDrafts)
+        .where(eq(communityDrafts.id, draftId))
+        .returning();
+      counts["communityDrafts"] = draftRows.length;
+    }
+
+    return counts;
+  }
+
+  // Draft/added-listing delete: purge by the -draftId property id, the draft's
+  // private photo folders, and the positive draft id.
+  async deleteCommunityDraftDeep(draftId: number): Promise<Record<string, number>> {
+    const id = Math.abs(draftId);
+    return this.deletePropertyDataDeep(-id, {
+      folders: communityDraftPhotoFolders(id),
+      draftId: id,
+    });
+  }
+
   // Per-property live market rates. One row per (propertyId, bedrooms)
   // pair — `upsertPropertyMarketRate` deletes any existing row for that
   // pair and re-inserts so callers don't need to track previous IDs.
@@ -1237,6 +1349,26 @@ export class DatabaseStorage implements IStorage {
   async setSetting(key: string, value: string): Promise<void> {
     await db.insert(appSettings).values({ key, value, updatedAt: new Date() })
       .onConflictDoUpdate({ target: appSettings.key, set: { value, updatedAt: new Date() } });
+  }
+
+  // Operator-deleted CORE (hard-coded) portfolio property ids. Core rows live in
+  // code, so "delete" persists here (app_settings) and the dashboard + schedulers
+  // filter these out. Fail-soft: a read error returns [] (nothing hidden) so a DB
+  // blip can never make the whole portfolio vanish.
+  async getDeletedCorePropertyIds(): Promise<number[]> {
+    try {
+      const raw = await this.getSetting(DELETED_CORE_PROPERTY_IDS_KEY);
+      return parseDeletedCorePropertyIds(raw ?? null);
+    } catch {
+      return [];
+    }
+  }
+
+  async addDeletedCorePropertyId(propertyId: number): Promise<number[]> {
+    const current = await this.getDeletedCorePropertyIds();
+    const next = parseDeletedCorePropertyIds(JSON.stringify([...current, propertyId]));
+    await this.setSetting(DELETED_CORE_PROPERTY_IDS_KEY, serializeDeletedCorePropertyIds(next));
+    return next;
   }
 
   async getAutoFillLossOptions(reservationId: string): Promise<AutoFillLossOptions | undefined> {
