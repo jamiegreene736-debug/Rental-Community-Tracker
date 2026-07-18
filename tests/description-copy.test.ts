@@ -5,8 +5,15 @@ import {
   DESCRIPTION_OVERRIDE_FIELDS,
   DESCRIPTION_PLACEHOLDER_PHRASES,
   GROUNDING_SNIPPET_MAX_CHARS,
+  SLEEPING_CAPACITY_RULE,
+  SUMMARY_DISCLOSURE_LEADS,
+  SUMMARY_DISCLOSURE_SEPARATOR,
+  buildSleepingCapacityExplanation,
   clampGroundingSnippet,
   confirmedBeddingBedPortion,
+  describesSleepingCapacity,
+  ensureSleepingCapacityExplanation,
+  sleepingCapacityPromptContext,
   generatedDraftCompletenessRegressions,
   composeSpaceFromUnitDescriptions,
   composeSummaryWithDisclosures,
@@ -135,7 +142,9 @@ check("read-back verifier catches an omitted non-summary field",
     && routes.includes("smoking rules")
     && routes.includes("fee specifics"));
   check("generate-listing returns access and houseRules for Claude and fallback output",
-    /const access = singleListing[\s\S]{0,1200}access,[\s\S]{0,100}houseRules,/.test(routes)
+    // Window widened 1200 -> 1600 on 2026-07-18: the fallback path gained the
+    // sleeping-capacity ensure, growing this span. Intent unchanged.
+    /const access = singleListing[\s\S]{0,1600}access,[\s\S]{0,100}houseRules,/.test(routes)
     && /access: parsedAccess,[\s\S]{0,100}houseRules: parsedHouseRules/.test(routes));
   check("bulk-combo copy step passes the real unit source URLs",
     /generate-listing[\s\S]{0,600}unit1:\s*\{\s*bedrooms:\s*effUnit1Beds,\s*url:\s*item\.unit1SourceUrl/.test(routes));
@@ -333,6 +342,132 @@ check("completeness: fields the FIRST draft lacked are not regressions",
   const sweep = readFileSync(new URL("../server/unit-audit-sweep.ts", import.meta.url), "utf8");
   check("audit-sweep regenerate passes propertyId for server-side photo/amenity grounding",
     /generate-listing", \{[\s\S]{0,600}propertyId: target\.propertyId/.test(sweep));
+}
+
+// ── sleeping-capacity explanation (2026-07-18) ───────────────────────────────
+{
+  const combo4 = buildSleepingCapacityExplanation({ bedrooms: 4, unitCount: 2 })!;
+  check("4BR combo derives the operator's arithmetic: 8 in bedrooms + 4 on sofas = 12",
+    combo4.sleeps === 12 && combo4.bedroomGuests === 8 && combo4.sofaGuests === 4 && combo4.sofaCount === 2);
+  check("4BR sentence states both numbers and the total",
+    /\b4 bedrooms sleep 8 guests at 2 per bedroom\b/.test(combo4.sentence)
+    && /\b8 plus 4 is 12 guests in total\b/.test(combo4.sentence));
+  check("combo sentence attributes one sleeper sofa to each unit",
+    /each of the 2 units has a sleeper sofa in the living area that sleeps 2/.test(combo4.sentence));
+
+  // The Bedding tab captures no sofa SIZE, so claiming one would invent a fact
+  // (same rule buildSpaceDescription follows).
+  check("never claims a sleeper-sofa size, and the prompt rule forbids one",
+    !/queen sleeper sofa|king sleeper sofa/i.test(combo4.sentence)
+    && /Never claim a size for a sleeper sofa/i.test(SLEEPING_CAPACITY_RULE));
+  // Booking.com mangles non-ASCII.
+  check("sentence is ASCII-only", /^[\x20-\x7E]*$/.test(combo4.sentence));
+
+  const single2 = buildSleepingCapacityExplanation({ bedrooms: 2, unitCount: 1 })!;
+  check("2BR standalone: 4 in bedrooms + 2 on one sofa = 6",
+    single2.sleeps === 6 && single2.sofaCount === 1
+    && /the living area has a sleeper sofa that sleeps 2/.test(single2.sentence));
+
+  check("1BR pluralization reads 'the 1 bedroom sleeps'",
+    /the 1 bedroom sleeps 2 guests/.test(buildSleepingCapacityExplanation({ bedrooms: 1, unitCount: 1 })!.sentence));
+
+  // Honesty guards — say nothing rather than assert a breakdown we can't back.
+  check("no bedrooms -> null", buildSleepingCapacityExplanation({ bedrooms: 0, unitCount: 2 }) === null);
+  check("standalone listing carrying the combo +4 -> null (never claims 2 sofas in one condo)",
+    buildSleepingCapacityExplanation({ bedrooms: 3, unitCount: 1 }) === null);
+
+  // ── placement inside a composed summary ────────────────────────────────────
+  const TOP = "Please note: this listing combines two units within the same community.";
+  const BOTTOM = "Unit assignment note: This listing uses representative accommodations.";
+  const comboSummary = [TOP, "Bring the group together at Poipu Kai.", BOTTOM].join(SUMMARY_DISCLOSURE_SEPARATOR);
+  const comboOut = ensureSleepingCapacityExplanation(comboSummary, combo4);
+  const comboBlocks = comboOut.split(SUMMARY_DISCLOSURE_SEPARATOR);
+  check("combo: paragraph lands in the BODY block, not the disclosures",
+    comboBlocks.length === 3
+    && comboBlocks[0] === TOP
+    && comboBlocks[2] === BOTTOM
+    && comboBlocks[1].includes(combo4.sentence));
+
+  const singleSummary = ["Enjoy a standalone 2-bedroom condo.", BOTTOM].join(SUMMARY_DISCLOSURE_SEPARATOR);
+  const singleBlocks = ensureSleepingCapacityExplanation(singleSummary, single2).split(SUMMARY_DISCLOSURE_SEPARATOR);
+  check("single listing (body + bottom disclosure): paragraph lands in the body",
+    singleBlocks.length === 2 && singleBlocks[1] === BOTTOM && singleBlocks[0].includes(single2.sentence));
+
+  check("plain body with no disclosures gets the paragraph appended",
+    ensureSleepingCapacityExplanation("A lovely condo.", combo4)
+      === `A lovely condo.\n\n${combo4.sentence}`);
+
+  check("degenerate all-disclosure summary gets its own block, never swallowed by one",
+    ensureSleepingCapacityExplanation([BOTTOM, BOTTOM].join(SUMMARY_DISCLOSURE_SEPARATOR), combo4)
+      .split(SUMMARY_DISCLOSURE_SEPARATOR)[1] === combo4.sentence);
+
+  check("null explanation leaves the summary untouched",
+    ensureSleepingCapacityExplanation(comboSummary, null) === comboSummary);
+
+  // ── idempotency: the backfill and the generator both re-run over live copy ──
+  check("second pass is a no-op (no duplicate paragraph)",
+    ensureSleepingCapacityExplanation(comboOut, combo4) === comboOut);
+
+  // Detection must accept Claude's OWN wording — a false negative would append
+  // a duplicate explanation to live guest-facing copy.
+  const modelWrote = "Gather 12 guests across 4 bedrooms. The bedrooms sleep 8, and a sleeper sofa in each unit brings the total to 12.";
+  check("recognises a model-written explanation and leaves it alone",
+    describesSleepingCapacity(modelWrote, combo4)
+    && ensureSleepingCapacityExplanation(modelWrote, combo4) === modelWrote);
+  check("prose naming the total but no sofa is NOT treated as explained",
+    !describesSleepingCapacity("Sleeps 12 guests across 8 beds.", combo4));
+
+  // ── prompt context mirrors the deterministic sentence ──────────────────────
+  const ctx = sleepingCapacityPromptContext(combo4);
+  check("prompt context carries the same numbers as the sentence",
+    ctx.includes("4 bedrooms sleep 8 guests at 2 per bedroom")
+    && ctx.includes("for 4 more") && ctx.includes("sleeps 12 in total"));
+  check("prompt context is empty when there is nothing honest to say",
+    sleepingCapacityPromptContext(null) === "");
+}
+
+// ── source guards: the wiring that makes every listing explain its occupancy ──
+{
+  const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  check("generate-listing derives the explanation from the listing's own unit count",
+    /buildSleepingCapacityExplanation\(\{[\s\S]{0,160}unitCount: singleListing \? 1 : 2/.test(routes));
+  check("BOTH prompt variants inject the capacity CONTEXT",
+    (routes.match(/\$\{sleepingCapacityPromptContext\(capacityExplanation\)\}/g) ?? []).length === 2);
+  check("BOTH prompt variants carry the capacity CONSTRAINT rule",
+    (routes.match(/\$\{SLEEPING_CAPACITY_RULE\}/g) ?? []).length === 2);
+  // Belt and braces: prompting alone can't guarantee "every listing explains it".
+  check("Claude path deterministically ensures the explanation before the fee note",
+    /ensureSleepingCapacityExplanation\(parsedSummary, capacityExplanation\)[\s\S]{0,400}appendResortFeeNote\(\s*summaryWithCapacity/.test(routes));
+  check("no-key fallback path ensures it too",
+    /ensureSleepingCapacityExplanation\(summary, capacityExplanation\)/.test(routes));
+
+  // The backfill is surgical by operator decision — it must never re-run Claude
+  // over the portfolio, and must persist an override so a later
+  // push-descriptions can't revert Guesty to the un-explained summary.
+  const backfill = routes.slice(routes.indexOf("/api/admin/backfill-sleeping-capacity"));
+  const backfillBody = backfill.slice(0, backfill.indexOf("/api/builder/push-photos"));
+  check("backfill streams NDJSON with a heartbeat (Railway's 15-min edge cap)",
+    /application\/x-ndjson/.test(backfillBody) && /type: "heartbeat"/.test(backfillBody));
+  check("backfill is dry-run unless { execute: true }",
+    /const execute = body\.execute === true/.test(backfillBody));
+  check("backfill inserts into the CURRENT summary rather than regenerating copy",
+    /ensureSleepingCapacityExplanation\(currentSummary, explanation\)/.test(backfillBody)
+    // No AI call anywhere in the walk — surgical by operator decision, so live
+    // OTA copy and hand-edited overrides survive verbatim.
+    && !/anthropic|requestClaudeDraft|loopbackJson/i.test(backfillBody));
+  check("backfill persists the override before pushing, so a later push can't revert it",
+    backfillBody.indexOf("upsertPropertyDescriptionOverrides") < backfillBody.indexOf('guestyRequest("PUT"'));
+  check("backfill verifies the write by read-back",
+    /normalizeDescriptionReadback\(savedSummary\) === normalizeDescriptionReadback\(nextSummary\)/.test(backfillBody));
+  check("backfill refuses to contradict the occupancy Guesty already advertises",
+    /advertised !== explanation\.sleeps/.test(backfillBody));
+
+  // Disclosure leads are matched as literal prefixes — reword a disclosure in
+  // unit-builder-data.ts and placement silently lands in the wrong block.
+  const builderData = readFileSync(new URL("../client/src/data/unit-builder-data.ts", import.meta.url), "utf8");
+  const disclosureSrc = builderData.toLowerCase();
+  check("SUMMARY_DISCLOSURE_LEADS still match the live disclosure constants",
+    SUMMARY_DISCLOSURE_LEADS.every((lead) => disclosureSrc.includes(lead)));
 }
 
 // ── override field list ──────────────────────────────────────────────────────
