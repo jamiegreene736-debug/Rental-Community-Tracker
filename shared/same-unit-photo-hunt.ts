@@ -207,9 +207,12 @@ export function filterSameUnitSerpRows(
         rejectedDifferentUnit += 1;
         return;
       }
-      // When both street roots parse they must agree (same unit number in a
-      // different building/resort is a different home).
-      if (wantedRoot && candidateRoot && candidateRoot !== wantedRoot) {
+      // When the anchor's street root parsed, the candidate must prove the
+      // SAME root (from its URL slug or SERP title/snippet) — unit "201" in a
+      // different (or unprovable) building is a different home. Anchors whose
+      // own address can't parse (e.g. "Hwy" streets the parsers don't cover)
+      // fall back to unit-claim equality alone, symmetrically.
+      if (wantedRoot && candidateRoot !== wantedRoot) {
         seen.add(key);
         rejectedDifferentUnit += 1;
         return;
