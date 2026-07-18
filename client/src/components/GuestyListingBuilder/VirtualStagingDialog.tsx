@@ -77,6 +77,10 @@ function candidateIsSelectable(candidate: VirtualStagingCandidate): boolean {
   return candidate.status === "succeeded" && !!candidate.stagedUrl;
 }
 
+function candidateSelectionKey(candidate: Pick<VirtualStagingCandidate, "id" | "attempt">): string {
+  return `${candidate.id}:${candidate.attempt}`;
+}
+
 function statusLabel(candidate: VirtualStagingCandidate): string {
   switch (candidate.status) {
     case "pending":
@@ -109,7 +113,7 @@ export default function VirtualStagingDialog({
   const [pollError, setPollError] = useState<string | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [finishError, setFinishError] = useState<string | null>(null);
-  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(new Set());
+  const [selectedCandidateKeys, setSelectedCandidateKeys] = useState<Set<string>>(new Set());
   const [retryingCandidateIds, setRetryingCandidateIds] = useState<Set<string>>(new Set());
   const [startAttempt, setStartAttempt] = useState(0);
   const [confirming, setConfirming] = useState(false);
@@ -136,7 +140,7 @@ export default function VirtualStagingDialog({
     setPollError(null);
     setConfirmError(null);
     setFinishError(null);
-    setSelectedCandidateIds(new Set());
+    setSelectedCandidateKeys(new Set());
 
     let request = startRequestRef.current;
     if (!request || request.key !== requestKey) {
@@ -236,10 +240,10 @@ export default function VirtualStagingDialog({
   // A retry can move a formerly successful candidate back into a generating or
   // failed state. Never leave an ineligible candidate selected for confirmation.
   useEffect(() => {
-    const selectableIds = new Set(successfulCandidates.map((candidate) => candidate.id));
-    setSelectedCandidateIds((current) => {
-      const next = new Set(Array.from(current).filter((id) => selectableIds.has(id)));
-      const unchanged = next.size === current.size && Array.from(current).every((id) => next.has(id));
+    const selectableKeys = new Set(successfulCandidates.map(candidateSelectionKey));
+    setSelectedCandidateKeys((current) => {
+      const next = new Set(Array.from(current).filter((key) => selectableKeys.has(key)));
+      const unchanged = next.size === current.size && Array.from(current).every((key) => next.has(key));
       return unchanged ? current : next;
     });
   }, [successfulCandidates]);
@@ -260,15 +264,17 @@ export default function VirtualStagingDialog({
     : 0;
   const totalCount = job?.total ?? unit.photoCount;
   const progressPercent = totalCount > 0 ? Math.min(100, Math.round((finishedCount / totalCount) * 100)) : 0;
-  const selectedSuccessfulIds = successfulCandidates
-    .filter((candidate) => selectedCandidateIds.has(candidate.id))
-    .map((candidate) => candidate.id);
+  const selectedSuccessfulCandidates = successfulCandidates
+    .filter((candidate) => selectedCandidateKeys.has(candidateSelectionKey(candidate)));
+  const selectedCandidateSelections = selectedSuccessfulCandidates
+    .map((candidate) => ({ id: candidate.id, attempt: candidate.attempt }));
 
-  const toggleCandidate = useCallback((candidateId: string, checked: boolean) => {
-    setSelectedCandidateIds((current) => {
+  const toggleCandidate = useCallback((candidate: VirtualStagingCandidate, checked: boolean) => {
+    setSelectedCandidateKeys((current) => {
       const next = new Set(current);
-      if (checked) next.add(candidateId);
-      else next.delete(candidateId);
+      const key = candidateSelectionKey(candidate);
+      if (checked) next.add(key);
+      else next.delete(key);
       return next;
     });
   }, []);
@@ -278,11 +284,9 @@ export default function VirtualStagingDialog({
     retryingRef.current.add(candidateId);
     setRetryingCandidateIds(new Set(retryingRef.current));
     setPollError(null);
-    setSelectedCandidateIds((current) => {
-      const next = new Set(current);
-      next.delete(candidateId);
-      return next;
-    });
+    setSelectedCandidateKeys((current) => new Set(
+      Array.from(current).filter((key) => !key.startsWith(`${candidateId}:`)),
+    ));
 
     try {
       const response = await apiRequest(
@@ -301,7 +305,7 @@ export default function VirtualStagingDialog({
   }, [job, toast]);
 
   const confirmSelection = useCallback(async () => {
-    if (!job || selectedSuccessfulIds.length === 0 || confirmingRef.current) return;
+    if (!job || selectedCandidateSelections.length === 0 || confirmingRef.current) return;
     confirmingRef.current = true;
     setConfirming(true);
     setConfirmError(null);
@@ -310,14 +314,14 @@ export default function VirtualStagingDialog({
       const response = await apiRequest(
         "POST",
         `/api/virtual-staging/jobs/${encodeURIComponent(job.id)}/confirm`,
-        { candidateIds: selectedSuccessfulIds },
+        { candidateSelections: selectedCandidateSelections },
       );
       const payload = await response.json() as { job?: unknown; swappedCount?: unknown };
       const confirmedJob = jobFromPayload(payload);
       locallyResolvedJobRef.current = confirmedJob.id;
       const swappedCount = typeof payload.swappedCount === "number"
         ? payload.swappedCount
-        : selectedSuccessfulIds.length;
+        : selectedCandidateSelections.length;
       setJob(confirmedJob);
       toast({
         title: `${swappedCount} ${unit.label} photo${swappedCount === 1 ? " was" : "s were"} replaced with virtually staged versions.`,
@@ -340,7 +344,7 @@ export default function VirtualStagingDialog({
       confirmingRef.current = false;
       setConfirming(false);
     }
-  }, [job, onConfirmed, onOpenChange, selectedSuccessfulIds, toast, unit]);
+  }, [job, onConfirmed, onOpenChange, selectedCandidateSelections, toast, unit]);
 
   const finishWithoutSwaps = useCallback(async () => {
     if (confirmingRef.current || activeJob) return;
@@ -456,7 +460,7 @@ export default function VirtualStagingDialog({
           {job && (
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 p-3">
               <div className="text-sm" aria-live="polite">
-                <span className="font-medium">{selectedSuccessfulIds.length} of {totalCount}</span>{" "}
+                <span className="font-medium">{selectedSuccessfulCandidates.length} of {totalCount}</span>{" "}
                 staged photos selected
               </div>
               <div className="flex flex-wrap gap-2">
@@ -465,7 +469,7 @@ export default function VirtualStagingDialog({
                   size="sm"
                   variant="outline"
                   disabled={successfulCandidates.length === 0 || confirming}
-                  onClick={() => setSelectedCandidateIds(new Set(successfulCandidates.map((candidate) => candidate.id)))}
+                  onClick={() => setSelectedCandidateKeys(new Set(successfulCandidates.map(candidateSelectionKey)))}
                   data-testid="button-select-all-staged"
                 >
                   Select all successful
@@ -474,8 +478,8 @@ export default function VirtualStagingDialog({
                   type="button"
                   size="sm"
                   variant="ghost"
-                  disabled={selectedCandidateIds.size === 0 || confirming}
-                  onClick={() => setSelectedCandidateIds(new Set())}
+                  disabled={selectedSuccessfulCandidates.length === 0 || confirming}
+                  onClick={() => setSelectedCandidateKeys(new Set())}
                   data-testid="button-clear-staged-selection"
                 >
                   Clear all
@@ -499,7 +503,7 @@ export default function VirtualStagingDialog({
           <div className="space-y-5">
             {job?.candidates.map((candidate, index) => {
               const selectable = candidateIsSelectable(candidate);
-              const selected = selectable && selectedCandidateIds.has(candidate.id);
+              const selected = selectable && selectedCandidateKeys.has(candidateSelectionKey(candidate));
               const retrying = retryingCandidateIds.has(candidate.id);
               const label = candidate.roomLabel?.trim() || candidate.originalFilename || `Photo ${index + 1}`;
               const checkboxId = `use-staged-${candidate.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
@@ -567,6 +571,22 @@ export default function VirtualStagingDialog({
                           >
                             Enlarge virtual staging <ExternalLink className="h-3 w-3" />
                           </a>
+                          <div className="mt-3">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={retrying || confirming || finishing}
+                              onClick={() => void retryCandidate(candidate.id)}
+                              data-testid={`button-regenerate-staging-${candidate.id}`}
+                            >
+                              {retrying ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                              {retrying ? "Generating another angle…" : "Generate another angle"}
+                            </Button>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              Replaces this preview with a newly generated nearby viewpoint.
+                            </p>
+                          </div>
                         </>
                       ) : candidate.status === "failed" ? (
                         <div className="flex min-h-44 flex-col items-center justify-center rounded-md border border-dashed border-destructive/40 bg-destructive/5 p-5 text-center">
@@ -600,7 +620,7 @@ export default function VirtualStagingDialog({
                         id={checkboxId}
                         checked={selected}
                         disabled={!selectable || confirming || finishing}
-                        onCheckedChange={(checked) => toggleCandidate(candidate.id, checked === true)}
+                        onCheckedChange={(checked) => toggleCandidate(candidate, checked === true)}
                         aria-describedby={`${checkboxId}-status`}
                         data-testid={`checkbox-use-staged-${candidate.id}`}
                       />
@@ -644,14 +664,14 @@ export default function VirtualStagingDialog({
             )}
             <Button
               type="button"
-              disabled={selectedSuccessfulIds.length === 0 || confirming || finishing || !job || job.status === "confirmed"}
+              disabled={selectedSuccessfulCandidates.length === 0 || confirming || finishing || !job || job.status === "confirmed"}
               onClick={() => void confirmSelection()}
               data-testid="button-confirm-virtual-staging"
             >
               {confirming && <Loader2 className="animate-spin" />}
               {confirming
                 ? "Saving selected photos…"
-                : `Confirm & Swap ${selectedSuccessfulIds.length} ${selectedSuccessfulIds.length === 1 ? "Photo" : "Photos"}`}
+                : `Confirm & Swap ${selectedSuccessfulCandidates.length} ${selectedSuccessfulCandidates.length === 1 ? "Photo" : "Photos"}`}
             </Button>
           </div>
         </DialogFooter>

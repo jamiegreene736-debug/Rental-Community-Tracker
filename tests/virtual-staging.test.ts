@@ -3,7 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   VIRTUAL_STAGING_PROMPT,
+  VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX,
+  VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES,
   buildVirtualStagingPrompt,
+  isSupersededVirtualStagingRecipeSignature,
   resolveStageableVirtualStagingSources,
   resolveVirtualStagingSources,
   reusableVirtualStagingJobId,
@@ -13,6 +16,7 @@ import {
   virtualStagingContextForSource,
   virtualStagingRecipeSignature,
   virtualStagingSessionAction,
+  virtualStagingViewpointDirectionForSource,
   type SelectableVirtualStagingCandidate,
   type VirtualStagingLabelSnapshot,
 } from "../shared/virtual-staging";
@@ -174,8 +178,25 @@ test("duplicate start clicks reuse one active unit job", () => {
 test("the staging recipe signature invalidates previews from older prompts", () => {
   assert.equal(
     virtualStagingRecipeSignature(),
-    "virtual-staging-recipe::context-aware-furnishings-v2",
+    "virtual-staging-recipe::context-aware-alternate-angle-v3",
   );
+  const v2 = `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-furnishings-v2`;
+  assert.deepEqual(VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES, [v2]);
+  assert.equal(isSupersededVirtualStagingRecipeSignature(v2), true);
+  assert.equal(isSupersededVirtualStagingRecipeSignature("gpt-image-1.5"), true);
+  assert.equal(isSupersededVirtualStagingRecipeSignature(null), true);
+  assert.equal(isSupersededVirtualStagingRecipeSignature(virtualStagingRecipeSignature()), false);
+  assert.equal(
+    isSupersededVirtualStagingRecipeSignature(`${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}future-v4`),
+    false,
+  );
+});
+
+test("alternate viewpoint direction is stable per attempt and flips on regeneration", () => {
+  const direction = virtualStagingViewpointDirectionForSource("living-room.jpg", 1);
+  assert.ok(direction === "left" || direction === "right");
+  assert.equal(virtualStagingViewpointDirectionForSource("living-room.jpg", 1), direction);
+  assert.notEqual(virtualStagingViewpointDirectionForSource("living-room.jpg", 2), direction);
 });
 
 test("unconfirmed terminal jobs remain resumable after the Photos tab remounts", () => {
@@ -474,24 +495,46 @@ test("candidate IDs from another job are rejected", () => {
   }), /does not belong to this unit/);
 });
 
-test("the maintained prompt protects architecture, perspective, and originals", () => {
-  assert.match(VIRTUAL_STAGING_PROMPT, /exact base image/i);
+test("the maintained prompt requests a bounded alternate angle without redesigning the room", () => {
+  assert.match(VIRTUAL_STAGING_PROMPT, /sole visual reference/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /nearby but visibly different viewpoint/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /walls, ceilings, floors, windows, doors/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /camera position, lens perspective, crop/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /same space/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /camera height, level horizon, natural real-estate lens character/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /mild natural parallax/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /mirroring the image, rotating the two-dimensional canvas/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /zooming it, or merely cropping it/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /Do not create a reverse angle/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /never invent or remove a door, window, wall/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /Do not move openings/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /Hawaiian, tropical, island, coastal/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /sofa with sofa/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /visible photograph is authoritative/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /Hawaiian-style sofa only with another tasteful Hawaiian-style sofa/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /If no suitable movable furnishing is visible, make no changes/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /If no suitable movable furnishing is visible, leave the furnishings unchanged/i);
+  assert.doesNotMatch(VIRTUAL_STAGING_PROMPT, /Preserve the condo's[^.]*camera position/i);
   assert.doesNotMatch(VIRTUAL_STAGING_PROMPT, /Add .*neutral contemporary luxury/i);
 
-  const outdoorPrompt = buildVirtualStagingPrompt({ scene: "private-outdoor", placement: "outdoor" });
+  const outdoorPrompt = buildVirtualStagingPrompt(
+    { scene: "private-outdoor", placement: "outdoor" },
+    "left",
+  );
+  assert.match(outdoorPrompt, /one to two feet to the left/i);
+  assert.match(outdoorPrompt, /5 to 10 degrees/i);
+  assert.match(outdoorPrompt, /same private outdoor platform/i);
   assert.match(outdoorPrompt, /weather-resistant, outdoor-rated furniture/i);
   assert.match(outdoorPrompt, /Never add an indoor sofa/i);
-  const indoorPrompt = buildVirtualStagingPrompt({ scene: "living-area", placement: "indoor" });
+  const indoorPrompt = buildVirtualStagingPrompt(
+    { scene: "living-area", placement: "indoor" },
+    "right",
+  );
+  assert.match(indoorPrompt, /one to two feet to the right/i);
   assert.match(indoorPrompt, /metadata indicates an indoor living area/i);
+  assert.match(indoorPrompt, /camera inside that same room/i);
   assert.match(indoorPrompt, /never introduce patio, deck, or pool furniture/i);
+  assert.match(indoorPrompt, /Final eligibility rule/i);
+  assert.match(indoorPrompt, /ignore every camera, viewpoint, and furnishing instruction above/i);
+  assert.match(indoorPrompt, /make no changes\.$/i);
 });
 
 test("frontend uses the accessible dialog and keeps zero-photo controls visible", () => {
@@ -528,6 +571,11 @@ test("frontend uses the accessible dialog and keeps zero-photo controls visible"
   assert.match(curatorSource, /onResolvedExternally=\{handleVirtualStagingResolvedExternally\}/);
   assert.match(curatorSource, /virtualStagingPropertyId === propertyId/);
   assert.match(source, /button-finish-virtual-staging-without-swaps/);
+  assert.match(source, /button-regenerate-staging-/);
+  assert.match(source, /Generate another angle/);
+  assert.match(source, /Replaces this preview with a newly generated nearby viewpoint/);
+  assert.match(source, /candidateSelectionKey\(candidate\)/);
+  assert.match(source, /candidateSelections: selectedCandidateSelections/);
   assert.match(source, /job\?\.status !== "confirmed"/);
 });
 
@@ -568,11 +616,13 @@ test("backend keeps credentials server-side and edits immutable image input", ()
   assert.match(routes, /selectedCandidateIds: \[\]/);
   assert.match(routes, /resolveStageableVirtualStagingSources/);
   assert.match(routes, /virtualStagingContextForSource/);
+  assert.match(routes, /generationAttempt: claimed\.attempt/);
   assert.match(routes, /job\.model !== (?:service\.)?recipeSignature/);
   assert.match(routes, /Superseded by an updated virtual-staging recipe/);
   assert.match(routes, /NOT LIKE \$\{`\$\{VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX\}%`\}/);
+  assert.match(routes, /VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES/);
   assert.match(routes, /jobIsResumableForUnit\(latest, unit\)[\s\S]*latest\.model === recipeSignature/);
-  assert.match(routes, /latest\.model\?\.startsWith\(VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX\)/);
+  assert.match(routes, /!isSupersededVirtualStagingRecipeSignature\(latest\.model\)/);
   assert.match(routes, /tx\.update\(virtualStagingJobs\)[\s\S]*tx\.insert\(virtualStagingJobs\)/);
 });
 
@@ -625,6 +675,10 @@ test("generation recovery uses fenced expiring leases", () => {
   assert.match(routes, /generationLeaseExpiresAt/);
   assert.match(routes, /lt\(virtualStagingCandidates\.generationLeaseExpiresAt, now\)/);
   assert.match(routes, /status: "pending"[\s\S]*previous generation worker lease expired/i);
+  assert.match(routes, /startGenerationLeaseHeartbeat\(candidateId, generationToken\)/);
+  assert.match(routes, /generationLeaseExpiresAt: new Date\(Date\.now\(\) \+ GENERATION_LEASE_MS\)/);
+  assert.match(routes, /status, "generating"[\s\S]*generationToken, generationToken/);
+  assert.match(routes, /stopLeaseHeartbeat\(\)/);
   assert.match(routes, /eq\(virtualStagingCandidates\.generationToken, generationToken\)/);
 
   const schema = fs.readFileSync(
@@ -671,8 +725,39 @@ test("retry enqueue is atomic and every detached task is observed", () => {
   assert.match(retryRoute, /db\.transaction\(async \(tx\)/);
   assert.match(retryRoute, /tx\.update\(virtualStagingJobs\)/);
   assert.match(retryRoute, /tx\.update\(virtualStagingCandidates\)/);
+  assert.match(retryRoute, /candidate\.status !== "failed" && candidate\.status !== "succeeded"/);
+  assert.match(retryRoute, /lockedCandidate\.status !== "failed" && lockedCandidate\.status !== "succeeded"/);
+  assert.match(retryRoute, /const rotateSuccessfulPreview = lockedCandidate\.status === "succeeded"/);
+  assert.match(retryRoute, /candidateFilename: virtualStagingCandidateFilename\(regenerationId\)/);
+  assert.match(retryRoute, /stagingRelativePath: candidateStorageRelativePath\(job\.id, regenerationId\)/);
+  assert.match(retryRoute, /PREVIOUS_PREVIEW_PATH_KEY/);
+  assert.match(retryRoute, /\[PREVIOUS_PREVIEW_PATH_KEY\]: lockedCandidate\.stagingRelativePath/);
+  assert.match(routes, /previous staged preview is missing and cannot be compared safely/i);
   assert.match(retryRoute, /scheduleVirtualStagingTask/);
   assert.doesNotMatch(routes, /void (?:runJob|processCandidate|recoverInterruptedJobs)\(/);
+});
+
+test("confirmation binds approval to the reviewed generation attempt", () => {
+  const routes = fs.readFileSync(
+    path.resolve(process.cwd(), "server/virtual-staging-routes.ts"),
+    "utf8",
+  );
+  assert.match(routes, /validateVirtualStagingCandidateSelections\(req\.body\)/);
+  assert.match(routes, /assertSelectedGenerationAttempts\(candidates, candidateSelections\)/);
+  assert.match(routes, /assertSelectedGenerationAttempts\(jobCandidates, candidateSelections\)/);
+  assert.match(routes, /selected staged preview changed/i);
+});
+
+test("generation verifies geometry against both the source and prior staged preview", () => {
+  const service = fs.readFileSync(
+    path.resolve(process.cwd(), "server/virtual-staging-service.ts"),
+    "utf8",
+  );
+  assert.match(service, /previousPreview/);
+  assert.match(service, /previous staged angle/);
+  assert.match(service, /viewpointVerifier\.verify/);
+  assert.match(service, /previousGenerated: input\.previousPreview/);
+  assert.match(service, /permanent geometry proves that[\s\S]*camera viewpoint actually changed/i);
 });
 
 test("rescraping preserves approved staged assets and human visibility metadata", () => {
