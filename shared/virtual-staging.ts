@@ -159,6 +159,24 @@ export type VirtualStagingCandidateDto = {
   lastFeedback: string | null;
 };
 
+export type VirtualStagingSourceChoiceDto = {
+  originalFilename: string;
+  previewUrl: string;
+  roomLabel: string;
+  scene: VirtualStagingScene;
+  placement: VirtualStagingContext["placement"];
+};
+
+export type VirtualStagingSourceChoicesDto = {
+  propertyId: number;
+  unitId: string;
+  unitLabel: string;
+  totalVisible: number;
+  excludedCount: number;
+  resumableJobId: string | null;
+  photos: VirtualStagingSourceChoiceDto[];
+};
+
 export type VirtualStagingJobDto = {
   id: string;
   propertyId: number;
@@ -543,6 +561,33 @@ export function resolveStageableVirtualStagingSources(
     const stagingContext = virtualStagingContextForSource(source);
     return stagingContext ? [{ ...source, stagingContext }] : [];
   });
+}
+
+/**
+ * Bind an untrusted picker submission back to the server-resolved eligible
+ * inventory. Server gallery order remains authoritative even if the client
+ * submits filenames in a different order. Omitting the picker field keeps
+ * rolling deployments compatible with the immediately previous client.
+ */
+export function selectRequestedVirtualStagingSources<
+  T extends Pick<PlannedVirtualStagingSource, "originalFilename">,
+>(
+  sources: readonly T[],
+  selectedOriginalFilenames: readonly string[] | undefined,
+): T[] {
+  if (selectedOriginalFilenames === undefined) return [...sources];
+  if (selectedOriginalFilenames.length === 0) {
+    throw new Error("Select at least one photo to restage");
+  }
+  const selected = new Set(selectedOriginalFilenames);
+  if (selected.size !== selectedOriginalFilenames.length) {
+    throw new Error("Selected photos contain duplicates");
+  }
+  const eligible = new Set(sources.map((source) => source.originalFilename));
+  if (selectedOriginalFilenames.some((filename) => !eligible.has(filename))) {
+    throw new Error("A selected photo is no longer eligible for virtual staging");
+  }
+  return sources.filter((source) => selected.has(source.originalFilename));
 }
 
 export function summarizeCandidateStatuses(

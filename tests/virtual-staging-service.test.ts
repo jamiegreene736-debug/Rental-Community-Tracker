@@ -752,7 +752,41 @@ test("API validators accept only canonical property, unit, and candidate IDs", a
       propertyId: 42,
       unitId: "unit-a",
     });
+    assert.deepEqual(routes.validateVirtualStagingStartInput({
+      propertyId: 42,
+      unitId: "unit-a",
+      selectedOriginalFilenames: ["living-room.jpg", "bedroom-2.png"],
+    }), {
+      propertyId: 42,
+      unitId: "unit-a",
+      selectedOriginalFilenames: ["living-room.jpg", "bedroom-2.png"],
+    });
     assert.throws(() => routes.validateVirtualStagingStartInput({ propertyId: 0, unitId: "unit-a" }), /non-zero/);
+    assert.throws(() => routes.validateVirtualStagingStartInput({
+      propertyId: 42,
+      unitId: "unit-a",
+      selectedOriginalFilenames: [],
+    }), /between 1 and 200/);
+    assert.throws(() => routes.validateVirtualStagingStartInput({
+      propertyId: 42,
+      unitId: "unit-a",
+      selectedOriginalFilenames: ["living.jpg", "living.jpg"],
+    }), /duplicates/);
+    assert.throws(() => routes.validateVirtualStagingStartInput({
+      propertyId: 42,
+      unitId: "unit-a",
+      selectedOriginalFilenames: ["../living.jpg"],
+    }), /invalid photo filename/);
+    assert.throws(() => routes.validateVirtualStagingStartInput({
+      propertyId: 42,
+      unitId: "unit-a",
+      selectedOriginalFilenames: ["living.jpg", 7],
+    }), /invalid photo filename/);
+    assert.throws(() => routes.validateVirtualStagingStartInput({
+      propertyId: 42,
+      unitId: "unit-a",
+      selectedOriginalFilenames: Array.from({ length: 201 }, (_, index) => `photo-${index}.jpg`),
+    }), /between 1 and 200/);
     const candidateId = "018f5f24-7b3a-7a50-8c82-42f63bc7a2d1";
     assert.deepEqual(
       routes.validateVirtualStagingCandidateSelections({
