@@ -4264,6 +4264,75 @@ and the legacy per-browser localStorage `nexstay_data_push_*` log. Rules:
 - Summary wording is test-locked in tests/guesty-push-history.test.ts —
   change the strings there in the same PR.
 
+### Separate published address — every listing (Load-Bearing, 2026-07-17)
+
+Guesty's "separate published address" feature (channels display a public
+address different from the private unit address) must be ON for every
+listing, pointed at the community's CLUBHOUSE address when one can be
+found, else the GENERIC main-building street — never a unit number.
+Engine in `server/published-address.ts`, pure logic in
+`shared/published-address.ts`, clubhouse discovery leg in
+`server/community-address-discovery.ts`. Rules:
+
+1. **The write path is the Address controller, NOT the listing PUT.**
+   `PUT /v1/address/{guestyPropertyId}/update` requires ALL THREE keys
+   `{ address, publishedAddress, isPublishedAddressEnabled }` (verified
+   against Guesty's OpenAPI reference 2026-07-17); `PUT /listings/{id}`
+   does not accept `publishedAddress` at all (response-only there). The
+   engine GETs `/address/{id}` first and ECHOES the private `address`
+   back verbatim — reshaping or dropping private fields would corrupt
+   the listing's real location. The Guesty property-entity id resolves
+   from the listing document exactly like push-amenities
+   (`listing.propertyId ?? property._id ?? _id ?? listingId`).
+2. **Verification is read-back, never inference.** After the PUT, GET
+   `/address/{id}` again and require `isPublishedAddressEnabled === true`
+   AND the published street/city echo (`publishedAddressSatisfiesTarget`).
+   The off-state content of `publishedAddress` is undocumented — presence
+   alone never means enabled.
+3. **The published street is structurally unit-free.**
+   `buildGuestyPublishedAddress` never emits `unitNumber`/`apartment`/
+   `floor`/`buildingName`, and `stripPublishedUnitTokens` ALSO strips the
+   bare `#1834` form that the canonical `streetRootFromAddress` misses
+   (its `\b#` boundary can't match after a space — test-locked). Don't
+   "simplify" the strip back to the canonical helper alone.
+4. **Resolution ladder = clubhouse → generic.**
+   `discoverCommunityClubhouseAddress` (SearchAPI google_maps, clubhouse-
+   flavored queries, the SAME whole-word `titleMatchesResort` gate so a
+   sibling resort's clubhouse can never win, clubhouse-hint title rank,
+   reverse-geocode coords rescue; kill
+   `PUBLISHED_ADDRESS_CLUBHOUSE_DISCOVERY=0`) → else curated
+   `COMMUNITY_ADDRESS_RULES` street → the private Guesty address with
+   unit designators stripped → builder/draft street columns. Resolutions
+   cache in app_settings `published_addresses.v1` keyed by builder
+   propertyId (positive core / negative -draftId, 300-cap LRU); the
+   manual button forces a re-resolve, hooks are cache-first.
+5. **Ensure hooks are fire-and-forget + idempotent.** Same posture as
+   `autoPushSavedAmenitiesForProperty`: void-fired, never throw, 2-min
+   cooldown, and the engine SKIPS the PUT when Guesty already shows the
+   feature on with the target street (no ledger stamp — nothing pushed).
+   Wired at: the FIVE mapping-birth seams (guesty-property-map connect,
+   schedule-sync, sync-now, guesty-import remap + create — the
+   GET-map self-heal at routes.ts is deliberately NOT hooked, matching
+   the amenity hook), push-descriptions success, the audit sweep's
+   descriptions stage (`AUDIT_PUBLISHED_ADDRESS=0` kills; failures cap
+   the stage at attention and are rail-A retryable), and the combo
+   pipeline pre-resolves (cache only — no listing exists yet). Global
+   kill for the hooks: `PUBLISHED_ADDRESS_AUTO_PUSH_DISABLED=1`.
+6. **Timestamping**: a real push stamps the durable ledger kind
+   `"published-address"` (added to `GUESTY_PUSH_TABS`; summary wording
+   test-locked: `Published address pushed (<street> · clubhouse|main
+   building)`). The Descriptions tab renders the last-push line from
+   `serverPushHistory["published-address"]` — the kind is deliberately
+   NOT in the client's fixed tab-strip/chip lists.
+7. **Surfaces**: manual "Push separate published address" button beside
+   the address display on the Descriptions tab (always force-pushes +
+   re-stamps), and `POST /api/admin/push-published-addresses` walks every
+   mapped listing for the one-shot backfill (idempotent; body
+   `{force?, propertyIds?}`).
+
+Locked by tests/published-address.test.ts (pure logic + source guards on
+every seam above).
+
 ### Unit Audit Sweep — dashboard "Audit" column (Load-Bearing, 2026-07-11)
 
 One-click per-property audit orchestrator (`server/unit-audit-sweep.ts`,
@@ -5146,3 +5215,5 @@ Welcome. When in doubt, ask the human.
 2026-07-17 · Jamie asked dashboard "Audit selected" to regenerate all marketing descriptions with Claude, strictly scan/apply bedding and bathroom evidence above 60%, scan/apply all amenities, research and save the entire Airbnb/SearchAPI pricing setup, remove alternate-angle duplicates, generate the Claude collage, run the full preflight community audit, and automatically keep finding units until a verified one passes; no Guesty must still save every local artifact · ACCEPTED, explicitly narrows #9/#21 for the bulk fullAutomation path only · The explicit Bedding-tab button keeps its auto-apply/push behavior above; standard one-property audits remain compare-only. The strict bulk contract and safety limits are documented in #9/#22. Guesty is an optional synchronization target, never the persistence boundary.
 
 2026-07-17 · Jamie: "Maximize current sources — Implement Add Combo cross-portal clustering, bounded top-candidate selection, Realtor equivalent lookup and shared discovery logic across all replacement paths" · ACCEPTED, intentionally reverses the 2026-06-22 Add Combo single-URL decision · Add Combo now groups Zillow/Realtor/Redfin/Homes mirrors by street root + normalized unit, counts physical-unit clusters (not mirror URLs) against candidate bounds, inspects at most three viable full galleries, and selects the best evidence-backed gallery instead of the first adequate result. The shared identity/query helpers are also used by canonical replacement and single-listing discovery; Realtor participates in photo-sparse equivalent lookup; the legacy replacement POST delegates to the canonical finder. LOAD-BEARING: different units at one tower address remain separate; ambiguous root-only skips never hide neighbors; cross-portal scraping chooses the richest SINGLE gallery and never unions photo arrays; OTA pages remain excluded; existing search, wall-time, sidecar, bedroom, community, and photo-proof gates remain in force.
+
+2026-07-17 · Jamie: "Separate published address feature via the Guesty API — every single listing … always utilize the listings clubhouse address. If there is no clubhouse, choose the main buildings address … generic address with no specific unit number. Whenever I do a unit audit and/or add a new combo listing and/or click the button to push descriptions etc … a manual button in each listings description near the current address … log the time/date of when the last time the feature was pushed" · ACCEPTED + shipped (`claude/guesty-separate-published-address-08ad08`) · Write path is Guesty's Address controller (`PUT /v1/address/{id}/update` with `{address, publishedAddress, isPublishedAddressEnabled:true}` — the listing PUT does NOT accept publishedAddress; private address echoed verbatim; read-back verified). Resolution ladder = clubhouse discovery (google_maps, whole-word title gate, `PUBLISHED_ADDRESS_CLUBHOUSE_DISCOVERY=0` kills) → generic unit-stripped main-building street; published payload is structurally unit-free (incl. the bare "#1834" form streetRootFromAddress misses). Ensure hooks (fire-and-forget, 2-min cooldown, skip-when-already-on, `PUBLISHED_ADDRESS_AUTO_PUSH_DISABLED=1` kills) at the five mapping-birth seams + push-descriptions success + the audit sweep's descriptions stage (`AUDIT_PUBLISHED_ADDRESS=0`; ceiling 6m→8m) + combo pipeline pre-resolve (cache only). Manual Descriptions-tab button + durable "published-address" ledger kind render the last-push timestamp; `POST /api/admin/push-published-addresses` backfills every mapped listing. See the Load-Bearing "Separate published address" section.

@@ -40,6 +40,7 @@ import {
 } from "@shared/community-addresses";
 import { statesEquivalent } from "@shared/community-location-guard";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
+import { CLUBHOUSE_TITLE_HINT_RE, clubhouseDiscoveryQueries } from "@shared/published-address";
 import { reverseGeocodeToStreetAddress } from "./walking-distance";
 import { callClaudeWebSearchJson } from "./claude-json";
 
@@ -331,6 +332,138 @@ If you cannot find a reliable numbered street address for this exact community, 
   }
   const found = acceptClaudeAddressCandidate(res.data, input);
   return { found, transient: false };
+}
+
+// ── Clubhouse discovery (separate published address, 2026-07-17) ─────────────
+// The Guesty "separate published address" feature wants the community's
+// CLUBHOUSE address published instead of the unit's. Same google_maps engine +
+// the SAME whole-word title gate as street discovery (precision over recall —
+// a sibling resort's clubhouse must never win), but clubhouse-flavored queries
+// and a rank preference for POIs whose title actually says clubhouse/front
+// desk/office. A plain resort-pin hit is still acceptable (the resort's own
+// map pin is usually its office/clubhouse); the caller falls back to the
+// generic main-building address when nothing clears the gate.
+
+export type ClubhouseAddressCandidate = {
+  street: string;
+  fullAddress: string;
+  matchedTitle: string;
+  query: string;
+  lat?: number;
+  lng?: number;
+};
+
+/**
+ * Pick the best clubhouse candidate: two passes over the relevance-ordered
+ * maps results, both requiring the resort-token title gate + a real numbered
+ * street — pass 1 takes a title with a clubhouse-ish hint word, pass 2 takes
+ * any title-matched place. Pure / no network so it is unit-testable.
+ */
+export function selectClubhouseCandidate(
+  candidates: MapsAddressCandidate[],
+  resortName: string,
+  query: string,
+): ClubhouseAddressCandidate | null {
+  const usable = (c: MapsAddressCandidate): ClubhouseAddressCandidate | null => {
+    const fullAddress = String(c?.address ?? "").trim();
+    if (!fullAddress) return null;
+    const street = streetRootFromAddress(fullAddress);
+    if (!street || !isLikelyStreetAddress(street)) return null;
+    if (!titleMatchesResort(c?.title, resortName)) return null;
+    const lat = Number(c?.gps_coordinates?.latitude);
+    const lng = Number(c?.gps_coordinates?.longitude);
+    return {
+      street,
+      fullAddress,
+      matchedTitle: String(c?.title ?? "").trim(),
+      query,
+      ...(Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : {}),
+    };
+  };
+  for (const c of candidates) {
+    if (!CLUBHOUSE_TITLE_HINT_RE.test(String(c?.title ?? ""))) continue;
+    const hit = usable(c);
+    if (hit) return hit;
+  }
+  for (const c of candidates) {
+    const hit = usable(c);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+const clubhouseCache = new Map<string, ClubhouseAddressCandidate | null>();
+
+/**
+ * Resolve a community's clubhouse street address from SearchAPI google_maps.
+ * Null when the key is missing, the kill switch is set, or nothing clears the
+ * precision gate — callers fall back to the generic main-building address.
+ * Same transient-error contract as discoverCommunityStreetAddress: only a
+ * definitive outcome is cached, so a 429 blip never permanently skips a
+ * community's clubhouse.
+ */
+export async function discoverCommunityClubhouseAddress(input: {
+  communityName?: string | null;
+  city?: string | null;
+  state?: string | null;
+}): Promise<ClubhouseAddressCandidate | null> {
+  const communityName = String(input.communityName ?? "").trim();
+  if (!communityName) return null;
+  if (process.env.PUBLISHED_ADDRESS_CLUBHOUSE_DISCOVERY === "0") return null;
+  const apiKey = process.env.SEARCHAPI_API_KEY;
+  if (!apiKey) return null;
+
+  const city = String(input.city ?? "").trim();
+  const state = String(input.state ?? "").trim();
+  const cacheKey = ["clubhouse", communityName, city, state].map((v) => v.toLowerCase()).join("|");
+  if (clubhouseCache.has(cacheKey)) return clubhouseCache.get(cacheKey) ?? null;
+
+  let found: ClubhouseAddressCandidate | null = null;
+  let anyTransientError = false;
+  // A title-matched (ideally clubhouse-hinted) place with coordinates but no
+  // usable street — reverse-geocoded only when no direct street hit lands.
+  let coordsFallback: { lat: number; lng: number; matchedTitle: string; fullAddress: string; query: string } | null = null;
+  for (const query of clubhouseDiscoveryQueries(communityName, city, state)) {
+    let candidates: MapsAddressCandidate[] = [];
+    try {
+      candidates = await fetchMapsCandidates(query, apiKey);
+    } catch (e: any) {
+      anyTransientError = true;
+      console.warn(`[clubhouse-discovery] "${query}": ${e?.message ?? e}`);
+      continue;
+    }
+    const hit = selectClubhouseCandidate(candidates, communityName, query);
+    if (hit) {
+      found = hit;
+      break;
+    }
+    if (!coordsFallback) {
+      const cf = selectCoordinateFallbackCandidate(candidates, communityName);
+      if (cf) coordsFallback = { ...cf, query };
+    }
+  }
+
+  if (!found && coordsFallback) {
+    try {
+      const street = await reverseGeocodeToStreetAddress(coordsFallback.lat, coordsFallback.lng);
+      if (street && isLikelyStreetAddress(street)) {
+        found = {
+          street: streetRootFromAddress(street),
+          fullAddress: coordsFallback.fullAddress || street,
+          matchedTitle: coordsFallback.matchedTitle,
+          query: `${coordsFallback.query} (reverse-geocoded)`,
+          lat: coordsFallback.lat,
+          lng: coordsFallback.lng,
+        };
+      }
+    } catch (e: any) {
+      anyTransientError = true;
+      console.warn(`[clubhouse-discovery] reverse-geocode "${communityName}": ${e?.message ?? e}`);
+    }
+  }
+
+  if (found || !anyTransientError) clubhouseCache.set(cacheKey, found);
+  return found;
 }
 
 const discoveryCache = new Map<string, DiscoveredStreetAddress | null>();

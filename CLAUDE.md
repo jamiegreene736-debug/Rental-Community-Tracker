@@ -43,6 +43,41 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-17 (Separate published address — every listing, via Guesty's Address controller): Operator
+  asked for Guesty's "separate published address" feature ON for every listing, always the community
+  CLUBHOUSE address, else the generic main-building address with no unit number, ensured on unit
+  audits / new combo listings / push-descriptions, with a manual Descriptions-tab button + a
+  last-pushed timestamp. SHIPPED (`claude/guesty-separate-published-address-08ad08`): the write path
+  is `PUT /v1/address/{guestyPropertyId}/update` with ALL THREE required keys
+  `{address, publishedAddress, isPublishedAddressEnabled:true}` — NOT the listing PUT (its request
+  schema has no publishedAddress; verified against Guesty's OpenAPI docs). The engine
+  (server/published-address.ts) GETs `/address/{id}` first, ECHOES the private address verbatim
+  (never reshape it), PUTs, then read-back-verifies flag + street echo. Resolution ladder
+  (cached in app_settings `published_addresses.v1`, keyed by builder propertyId ±): clubhouse via
+  SearchAPI google_maps (`discoverCommunityClubhouseAddress`, whole-word titleMatchesResort gate so a
+  sibling resort's clubhouse never wins, clubhouse-hint title rank, reverse-geocode rescue, kill
+  `PUBLISHED_ADDRESS_CLUBHOUSE_DISCOVERY=0`) → curated rule street → private address unit-stripped →
+  builder/draft street. Published payload is STRUCTURALLY unit-free — `stripPublishedUnitTokens`
+  also strips the bare "#1834" form `streetRootFromAddress` misses (its `\b#` can't match after a
+  space; found by this PR's own tests). Hooks (fire-and-forget, 2-min cooldown, skip-when-already-on,
+  kill `PUBLISHED_ADDRESS_AUTO_PUSH_DISABLED=1`): five mapping-birth seams (the amenity auto-push
+  set), push-descriptions success, audit sweep descriptions stage (`AUDIT_PUBLISHED_ADDRESS=0`,
+  ceiling 6m→8m, failure = attention + rail-A retryable), combo pipeline pre-resolve (cache-only —
+  no listing exists there). UI: teal "Push separate published address" button under the
+  "Address (sent to Guesty)" block (always force-push + fresh discovery) + "🕐 Pushed <time> ·
+  <summary>" line from the NEW durable ledger kind `"published-address"` (added to GUESTY_PUSH_TABS;
+  summary wording test-locked; deliberately NOT in the tab-strip/chips fixed lists). Backfill:
+  `POST /api/admin/push-published-addresses` walks every mapped listing (idempotent). Verified:
+  published-address 76/0 (npm chain), full `npm test` REAL exit 0, build clean (strings bundle-
+  grepped both bundles), `npm run check` 335 = baseline (stash -u A/B identical per-file sets), UI
+  proven on the BUILT bundle (Playwright + mocked /api: POST contract {listingId, propertyId,
+  force:true}, success + ledger line flip, never-pushed fallback, unmapped-disabled — 14/0). Could
+  NOT live-smoke the Guesty leg (no creds in session) — post-deploy: run the admin backfill, then
+  spot-check a listing in Guesty (Address section shows the toggle ON + clubhouse street). NOTE:
+  worktree trap fixed en route — a stale `node_modules/typescript/` dir holding only tsc's
+  tsbuildinfo shadowed the real package and broke tests/guesty-photo-repush.test.ts; `rm -rf` it
+  (it's just a cache) when `npm test` dies with ERR_MODULE_NOT_FOUND on "typescript".
+
 - 2026-07-17 (Cowork buy-in find + safe checkout preparation): Jamie replaced the older
   automated-card design. The primary bookings action now runs search/attach and VRBO checkout
   preparation in one Cowork brief. Cowork uses the booking guest's exact name, the generated
