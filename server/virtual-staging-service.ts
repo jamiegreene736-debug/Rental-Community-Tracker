@@ -480,6 +480,7 @@ export function getVirtualStagingService(): VirtualStagingService {
     process.env.REPLICATE_API_TOKEN ? "replicate-token" : "",
     process.env.REPLICATE_API_KEY ? "replicate-key" : "",
     process.env.REPLICATE_VIRTUAL_STAGING_MODEL ?? "",
+    process.env.REPLICATE_VIRTUAL_STAGING_FEEDBACK_MODEL ?? "",
     process.env.OPENAI_API_KEY ? "openai" : "",
     process.env.OPENAI_IMAGE_MODEL ?? "",
     process.env.ANTHROPIC_API_KEY ? "anthropic" : "",

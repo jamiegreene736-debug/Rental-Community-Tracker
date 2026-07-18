@@ -727,7 +727,9 @@ test("backend keeps credentials server-side and edits immutable image input", ()
     path.resolve(process.cwd(), "server/replicate-virtual-staging-provider.ts"),
     "utf8",
   );
-  assert.match(replicate, /input_image: file\.urls\.get/);
+  assert.match(replicate, /input_image: sourceFile\.url/);
+  assert.match(replicate, /input_images: \[sourceFile\.url, referenceFile\.url\]/);
+  assert.match(replicate, /DEFAULT_REPLICATE_FEEDBACK_MODEL = "black-forest-labs\/flux-2-pro"/);
   assert.match(replicate, /prompt: input\.prompt/);
   assert.match(replicate, /aspect_ratio: "match_input_image"/);
   assert.match(replicate, /generatedUrl[\s\S]*Authorization: `Bearer \$\{this\.apiToken\}`/);

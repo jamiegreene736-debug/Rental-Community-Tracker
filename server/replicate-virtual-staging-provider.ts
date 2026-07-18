@@ -7,15 +7,38 @@ import type {
 } from "./virtual-staging-service";
 
 const DEFAULT_REPLICATE_MODEL = "black-forest-labs/flux-kontext-pro";
+const DEFAULT_REPLICATE_FEEDBACK_MODEL = "black-forest-labs/flux-2-pro";
 const REPLICATE_API_ROOT = "https://api.replicate.com/v1";
 const REQUEST_TIMEOUT_MS = 30_000;
+const CLEANUP_TIMEOUT_MS = 5_000;
 const PREDICTION_TIMEOUT_MS = 5 * 60_000;
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
+// FLUX.2 allows 9 MP across all references and returns at most 4 MP when it
+// matches an input. Capping each of the two upload copies at 4 MP leaves a
+// full megapixel of headroom without changing the immutable app snapshots.
+const MAX_FEEDBACK_IMAGE_PIXELS = 4_000_000;
 const TRANSIENT_RETRY_ATTEMPTS = 3;
 
-type ReplicateFile = {
+type SupportedImageFormat = "jpeg" | "png" | "webp";
+
+type ReplicateUpload = {
+  buffer: Buffer;
+  filename: string;
+  mimeType: string;
+  width: number;
+  height: number;
+};
+
+export type ReplicateFetch = (input: string, init: RequestInit) => Promise<Response>;
+
+type ReplicateFileResponse = {
   id?: string;
   urls?: { get?: string };
+};
+
+type ReplicateFile = {
+  id: string;
+  url: string;
 };
 
 type ReplicatePrediction = {
@@ -32,6 +55,7 @@ function delay(ms: number): Promise<void> {
 }
 
 async function fetchWithTimeout(
+  fetcher: ReplicateFetch,
   input: string,
   init: RequestInit,
   timeoutMs = REQUEST_TIMEOUT_MS,
@@ -39,13 +63,14 @@ async function fetchWithTimeout(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    return await fetcher(input, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
 }
 
 async function fetchWithTransientRetry(
+  fetcher: ReplicateFetch,
   input: string,
   init: RequestInit,
   timeoutMs = REQUEST_TIMEOUT_MS,
@@ -54,7 +79,7 @@ async function fetchWithTransientRetry(
   let lastError: unknown;
   for (let attempt = 0; attempt < TRANSIENT_RETRY_ATTEMPTS; attempt += 1) {
     try {
-      const response = await fetchWithTimeout(input, init, timeoutMs);
+      const response = await fetchWithTimeout(fetcher, input, init, timeoutMs);
       lastResponse = response;
       if (response.status !== 429 && response.status < 500) return response;
     } catch (error) {
@@ -74,13 +99,65 @@ function safeMessage(raw: unknown, fallback: string): string {
   return (message || fallback).slice(0, 400);
 }
 
-function safeFilename(filename: string, format: "jpeg" | "png" | "webp"): string {
+function safeFilename(filename: string, format: SupportedImageFormat): string {
   const stem = filename
     .replace(/\.[^.]+$/, "")
     .replace(/[^a-zA-Z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || "room";
   return `${stem}.${format === "jpeg" ? "jpg" : format}`;
+}
+
+function assertModelName(model: string, setting: string): void {
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(model)) {
+    throw new Error(`${setting} must use owner/model format`);
+  }
+}
+
+async function prepareUpload(
+  buffer: Buffer,
+  filename: string,
+  maxPixels?: number,
+): Promise<ReplicateUpload> {
+  const metadata = await sharp(buffer, { failOn: "error" }).metadata();
+  if (
+    !metadata.width
+    || !metadata.height
+    || (metadata.format !== "jpeg" && metadata.format !== "png" && metadata.format !== "webp")
+  ) {
+    throw new Error("Replicate virtual staging requires a readable JPEG, PNG, or WebP source");
+  }
+  const width = metadata.autoOrient?.width ?? metadata.width;
+  const height = metadata.autoOrient?.height ?? metadata.height;
+  if (!maxPixels || width * height <= maxPixels) {
+    return {
+      buffer,
+      filename: safeFilename(filename, metadata.format),
+      mimeType: metadata.format === "jpeg" ? "image/jpeg" : `image/${metadata.format}`,
+      width,
+      height,
+    };
+  }
+
+  const scale = Math.sqrt(maxPixels / (width * height));
+  const resizedWidth = Math.max(1, Math.floor(width * scale));
+  const resizedHeight = Math.max(1, Math.floor(height * scale));
+  const resized = await sharp(buffer, { failOn: "error" })
+    .rotate()
+    .resize(resizedWidth, resizedHeight, { fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 92, mozjpeg: true })
+    .toBuffer();
+  const resizedMetadata = await sharp(resized, { failOn: "error" }).metadata();
+  if (!resizedMetadata.width || !resizedMetadata.height) {
+    throw new Error("Replicate feedback upload could not be resized safely");
+  }
+  return {
+    buffer: resized,
+    filename: safeFilename(filename, "jpeg"),
+    mimeType: "image/jpeg",
+    width: resizedMetadata.width,
+    height: resizedMetadata.height,
+  };
 }
 
 function isTrustedReplicateHost(hostname: string, root: string): boolean {
@@ -109,14 +186,15 @@ function outputUrl(prediction: ReplicatePrediction): string | null {
 
 /**
  * Uses the provider already configured by this application. Replicate Files
- * keeps the immutable source private from the browser while giving Kontext a
- * short-lived image-edit input; the generated result is immediately copied to
- * the app's durable photo volume.
+ * keeps the immutable source private from the browser while giving each model
+ * short-lived image-edit inputs; the generated result is immediately copied
+ * to the app's durable photo volume.
  */
 export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvider {
   readonly id = "replicate";
-  readonly supportsReferenceImages = false;
+  readonly supportsReferenceImages = true;
   readonly model: string;
+  readonly feedbackModel: string;
 
   constructor(
     private readonly apiToken = (
@@ -125,11 +203,14 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
       ?? ""
     ).trim(),
     model = (process.env.REPLICATE_VIRTUAL_STAGING_MODEL ?? "").trim() || DEFAULT_REPLICATE_MODEL,
+    feedbackModel = (process.env.REPLICATE_VIRTUAL_STAGING_FEEDBACK_MODEL ?? "").trim()
+      || DEFAULT_REPLICATE_FEEDBACK_MODEL,
+    private readonly fetcher: ReplicateFetch = fetch,
   ) {
-    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(model)) {
-      throw new Error("REPLICATE_VIRTUAL_STAGING_MODEL must use owner/model format");
-    }
+    assertModelName(model, "REPLICATE_VIRTUAL_STAGING_MODEL");
+    assertModelName(feedbackModel, "REPLICATE_VIRTUAL_STAGING_FEEDBACK_MODEL");
     this.model = model;
+    this.feedbackModel = feedbackModel;
   }
 
   isConfigured(): boolean {
@@ -141,40 +222,64 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
       throw new Error("REPLICATE_API_TOKEN or REPLICATE_API_KEY is not configured");
     }
 
-    const sourceMetadata = await sharp(input.source, { failOn: "error" }).metadata();
-    if (
-      !sourceMetadata.width
-      || !sourceMetadata.height
-      || (sourceMetadata.format !== "jpeg" && sourceMetadata.format !== "png" && sourceMetadata.format !== "webp")
-    ) {
-      throw new Error("Replicate virtual staging requires a readable JPEG, PNG, or WebP source");
+    const isFeedbackRevision = input.mode === "feedback-revision";
+    if (isFeedbackRevision && !input.referenceSource) {
+      throw new Error("Replicate feedback revision requires the reviewed staged preview");
     }
-    const sourceWidth = sourceMetadata.autoOrient?.width ?? sourceMetadata.width;
-    const sourceHeight = sourceMetadata.autoOrient?.height ?? sourceMetadata.height;
-    const sourceAspectRatio = sourceWidth / sourceHeight;
-    const sourceMimeType = sourceMetadata.format === "jpeg" ? "image/jpeg" : `image/${sourceMetadata.format}`;
-
-    const form = new FormData();
-    form.append(
-      "content",
-      new Blob([new Uint8Array(input.source)], { type: sourceMimeType }),
-      safeFilename(input.sourceFilename, sourceMetadata.format),
+    const sourceUpload = await prepareUpload(
+      input.source,
+      input.sourceFilename,
+      isFeedbackRevision ? MAX_FEEDBACK_IMAGE_PIXELS : undefined,
     );
-
-    const uploaded = await fetchWithTimeout(`${REPLICATE_API_ROOT}/files`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-      body: form,
-    });
-    if (!uploaded.ok) {
-      throw new Error(`Replicate source upload failed (HTTP ${uploaded.status})`);
+    const referenceUpload = isFeedbackRevision
+      ? await prepareUpload(
+        input.referenceSource!,
+        `reviewed-preview-${input.sourceFilename}`,
+        MAX_FEEDBACK_IMAGE_PIXELS,
+      )
+      : null;
+    const sourceAspectRatio = sourceUpload.width / sourceUpload.height;
+    if (referenceUpload) {
+      const referenceAspectRatio = referenceUpload.width / referenceUpload.height;
+      if (Math.abs(referenceAspectRatio / sourceAspectRatio - 1) > 0.03) {
+        throw new Error("Replicate feedback reference has a different aspect ratio from the original");
+      }
     }
-    const file = await uploaded.json() as ReplicateFile;
-    if (!file.id || !file.urls?.get) throw new Error("Replicate source upload returned no file URL");
+
+    const files: ReplicateFile[] = [];
 
     try {
+      const sourceFile = await this.upload(sourceUpload, "source");
+      files.push(sourceFile);
+      let referenceFile: ReplicateFile | null = null;
+      if (referenceUpload) {
+        referenceFile = await this.upload(referenceUpload, "reviewed preview");
+        files.push(referenceFile);
+      }
+      const selectedModel = referenceFile ? this.feedbackModel : this.model;
+      const providerInput = referenceFile
+        ? {
+          prompt: input.prompt,
+          // FLUX.2 resolves image indices in this exact order. Image 1 is the
+          // immutable original; Image 2 is the reviewed staged reference.
+          input_images: [sourceFile.url, referenceFile.url],
+          aspect_ratio: "match_input_image",
+          resolution: "match_input_image",
+          output_format: "jpg",
+          output_quality: 90,
+          safety_tolerance: 2,
+        }
+        : {
+          prompt: input.prompt,
+          input_image: sourceFile.url,
+          aspect_ratio: "match_input_image",
+          output_format: "jpg",
+          safety_tolerance: 2,
+          prompt_upsampling: false,
+        };
       const created = await fetchWithTimeout(
-        `${REPLICATE_API_ROOT}/models/${this.model}/predictions`,
+        this.fetcher,
+        `${REPLICATE_API_ROOT}/models/${selectedModel}/predictions`,
         {
           method: "POST",
           headers: {
@@ -183,14 +288,7 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
             "Cancel-After": "5m",
           },
           body: JSON.stringify({
-            input: {
-              prompt: input.prompt,
-              input_image: file.urls.get,
-              aspect_ratio: "match_input_image",
-              output_format: "jpg",
-              safety_tolerance: 2,
-              prompt_upsampling: false,
-            },
+            input: providerInput,
           }),
         },
       );
@@ -215,7 +313,7 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
         if (!pollUrl) throw new Error("Replicate image edit returned no polling URL");
         await delay(pollDelayMs + Math.floor(Math.random() * 250));
         pollDelayMs = Math.min(5_000, Math.ceil(pollDelayMs * 1.5));
-        const polled = await fetchWithTransientRetry(pollUrl, {
+        const polled = await fetchWithTransientRetry(this.fetcher, pollUrl, {
           headers: { Authorization: `Bearer ${this.apiToken}` },
         });
         if (!polled.ok) throw new Error(`Replicate progress check failed (HTTP ${polled.status})`);
@@ -227,7 +325,7 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
       }
       const generatedUrl = outputUrl(prediction);
       if (!generatedUrl) throw new Error("Replicate image edit returned no HTTPS image URL");
-      const downloaded = await fetchWithTransientRetry(generatedUrl, {
+      const downloaded = await fetchWithTransientRetry(this.fetcher, generatedUrl, {
         // Replicate's HTTP API requires authentication when fetching prediction
         // file outputs, even though the returned value is an HTTPS URL.
         headers: { Authorization: `Bearer ${this.apiToken}` },
@@ -253,22 +351,60 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
         .rotate()
         .jpeg({ quality: 92, mozjpeg: true })
         .toBuffer();
-      console.info(`[virtual-staging] Replicate prediction ${predictionId} succeeded with ${this.model}`);
+      console.info(`[virtual-staging] Replicate prediction ${predictionId} succeeded with ${selectedModel}`);
       return {
         buffer,
         mimeType: "image/jpeg",
-        width: outputMetadata.width,
-        height: outputMetadata.height,
-        model: prediction.version ? `${this.model}@${prediction.version}` : this.model,
+        width: outputWidth,
+        height: outputHeight,
+        model: prediction.version ? `${selectedModel}@${prediction.version}` : selectedModel,
         provider: this.id,
       };
     } finally {
-      // The immutable app snapshot remains; only the provider's short-lived
-      // upload is cleaned up after its prediction reaches a terminal state.
-      void fetch(`${REPLICATE_API_ROOT}/files/${encodeURIComponent(file.id)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      }).catch(() => undefined);
+      // The immutable app snapshots remain; only the provider's short-lived
+      // upload copies are cleaned after the prediction reaches a terminal state.
+      await Promise.allSettled(files.map((file) => fetchWithTimeout(
+        this.fetcher,
+        `${REPLICATE_API_ROOT}/files/${encodeURIComponent(file.id)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${this.apiToken}` },
+        },
+        CLEANUP_TIMEOUT_MS,
+      )));
     }
+  }
+
+  private async upload(upload: ReplicateUpload, label: string): Promise<ReplicateFile> {
+    const form = new FormData();
+    form.append(
+      "content",
+      new Blob([new Uint8Array(upload.buffer)], { type: upload.mimeType }),
+      upload.filename,
+    );
+    const uploaded = await fetchWithTimeout(this.fetcher, `${REPLICATE_API_ROOT}/files`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.apiToken}` },
+      body: form,
+    });
+    if (!uploaded.ok) {
+      throw new Error(`Replicate ${label} upload failed (HTTP ${uploaded.status})`);
+    }
+    const file = await uploaded.json() as ReplicateFileResponse;
+    if (!file.id || !file.urls?.get) {
+      if (file.id) {
+        await Promise.allSettled([fetchWithTimeout(
+          this.fetcher,
+          `${REPLICATE_API_ROOT}/files/${encodeURIComponent(file.id)}`,
+          {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${this.apiToken}` },
+          },
+          CLEANUP_TIMEOUT_MS,
+        )]);
+      }
+      throw new Error(`Replicate ${label} upload returned no file URL`);
+    }
+    return { id: file.id, url: file.urls.get };
   }
 }
