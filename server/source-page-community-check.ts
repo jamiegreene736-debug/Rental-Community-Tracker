@@ -11,6 +11,7 @@
 
 import {
   buildSourcePageCommunityPrompt,
+  extractLastJsonObject,
   extractSourcePageSignals,
   looksLikeBotWallPage,
   parseSourcePageVerdict,
@@ -233,14 +234,34 @@ async function verifyOneSourcePage(
   }
 
   const prompt = buildSourcePageCommunityPrompt(expectedCommunity, unit.label, signals);
-  const res = await callClaudeJson<Record<string, unknown>>({
-    model: SOURCE_PAGE_MODEL,
-    maxTokens: 400,
-    prompt,
-    temperature: 0,
-    apiKey,
-    timeoutMs: 45_000,
-  });
+  // maxTokens 600 (was 400): headroom for the model's occasional emit-JSON →
+  // reconsider-aloud → emit-corrected-JSON pattern (seen live on the Wavecrest
+  // Unit A smoke). That pattern also breaks parseJsonLoose's first-brace-to-
+  // last-brace fallback, so a parse failure first SALVAGES the LAST balanced
+  // JSON object from the raw text (the model's final answer), then retries
+  // once. Real key/HTTP errors are NOT retried (they would fail identically).
+  const callOnce = () =>
+    callClaudeJson<Record<string, unknown>>({
+      model: SOURCE_PAGE_MODEL,
+      maxTokens: 600,
+      prompt,
+      temperature: 0,
+      apiKey,
+      timeoutMs: 45_000,
+    });
+  let res = await callOnce();
+  if (!res.ok && /parse JSON/i.test(res.error)) {
+    const salvaged = res.raw ? extractLastJsonObject(res.raw) : null;
+    if (salvaged) {
+      res = { ok: true, data: salvaged, raw: res.raw! };
+    } else {
+      res = await callOnce();
+      if (!res.ok && /parse JSON/i.test(res.error) && res.raw) {
+        const retrySalvaged = extractLastJsonObject(res.raw);
+        if (retrySalvaged) res = { ok: true, data: retrySalvaged, raw: res.raw };
+      }
+    }
+  }
   if (!res.ok) {
     return {
       unitLabel: unit.label,
