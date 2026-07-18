@@ -1,4 +1,4 @@
-import { preflightPhotoDiscoveryAttempts } from "@shared/preflight-photo-discovery";
+import { findNewDiscoveryResultRejection, preflightPhotoDiscoveryAttempts } from "@shared/preflight-photo-discovery";
 import {
   auditUnitIdsNeedingRetry,
   mergeRetriedAuditUnitResult,
@@ -798,6 +798,10 @@ async function runPreflightPhotoFetchJob(
         skipUrls: Array.from(triedUrls),
         skipFirst: triedUrls.size === 0 && replacingExistingPhotos ? (input.skipFirst ?? 1) : 0,
         maxCandidates: attempt.maxCandidates,
+        // Find-new replaces a REAL gallery: a representative wrong-bedroom
+        // gallery must never come back as the "found" result (the 2026-07-18
+        // Cliffs-at-Princeville 3BR→2BR silent identity swap).
+        rejectRepresentativeFallback: findNewSource,
         // Operator-initiated: bypass the discovery cache reads (SERP + scrape) so a
         // deliberate retry hits the live portals instead of a day-old cached result.
         nocache: true,
@@ -833,7 +837,21 @@ async function runPreflightPhotoFetchJob(
       // clobber the existing gallery and then fail. Empty-unit discovery keeps
       // the old >0 acceptance (any photos beat none).
       const minAcceptable = findNewSource || staticFolderMode ? MIN_INDEPENDENT_UNIT_PHOTOS : 1;
-      if (nextPhotos.length >= minAcceptable && nextProof.status !== "rejected") {
+      // Belt-and-braces twin of the endpoint-side rejectRepresentativeFallback
+      // flag above: even if the endpoint's response shape drifts, a
+      // representative / bedroom-contradicted result must never replace a real
+      // gallery in find-new mode (shared/preflight-photo-discovery.ts).
+      const findNewRejection = findNewDiscoveryResultRejection({
+        findNewSource,
+        representativeFallback: fetchData?.representativeFallback === true
+          || nextProof.representativeFallback === true,
+        bedroomMatch: nextProof.bedroomMatch ?? null,
+      });
+      if (findNewRejection) {
+        console.warn(
+          `[photo-fetch] find-new rejecting ${nextSourceUrl ?? "(no url)"}: ${findNewRejection}`,
+        );
+      } else if (nextPhotos.length >= minAcceptable && nextProof.status !== "rejected") {
         photos = nextPhotos;
         sourceUrl = nextSourceUrl;
         break;

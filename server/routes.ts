@@ -38379,6 +38379,26 @@ Return ONLY compact JSON with this exact shape:
             update[`unit${n}Bedrooms`] = swap.newBedrooms;
           }
         }
+        // Reconcile the combo total whenever a repoint changed a unit's bedroom
+        // count. Root-caused 2026-07-18 (Cliffs at Princeville draft 20): a
+        // 3BR→4BR unit replacement updated unit2Bedrooms but left
+        // combinedBedrooms at the stale 6, so the audit's layout stage kept
+        // green-lighting the Guesty 6BR layout while the regenerated
+        // description honestly advertised "seven bedrooms" — a silent
+        // title/description/layout contradiction on the live listing. Keeping
+        // combinedBedrooms = sum of unit bedrooms makes the drift VISIBLE:
+        // the layout stage then flags the Guesty listing (and the title) as
+        // out of sync instead of validating against the stale total.
+        if (Object.keys(update).some((k) => /^unit[12]Bedrooms$/.test(k))) {
+          const u1 = typeof update.unit1Bedrooms === "number" ? update.unit1Bedrooms : draft.unit1Bedrooms ?? 0;
+          const u2 = draft.singleListing
+            ? 0
+            : typeof update.unit2Bedrooms === "number" ? update.unit2Bedrooms : draft.unit2Bedrooms ?? 0;
+          const combined = u1 + u2;
+          if (combined > 0 && combined !== (draft.combinedBedrooms ?? 0)) {
+            update.combinedBedrooms = combined;
+          }
+        }
         if (Object.keys(update).length > 0) {
           await storage.updateCommunityDraft(draftId, update as any);
         }
@@ -42124,7 +42144,7 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar, nocache } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar, nocache, rejectRepresentativeFallback } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
@@ -42154,7 +42174,16 @@ Return ONLY compact JSON with this exact shape:
       // and the bulk-combo queue never sets this, so its 2026-07-09
       // budget/keep-better protections are untouched.
       nocache?: boolean;
+      // Callers that REPLACE an existing real gallery (the audit sweep's
+      // find-new-source rung) set this so the representative wrong-bedroom
+      // fallbacks below are suppressed entirely — "no exact-BR listing found"
+      // must fail honestly there instead of substituting a smaller unit's
+      // gallery (the 2026-07-18 Cliffs-at-Princeville 3BR→2BR identity swap).
+      // Creation-time callers (add-community wizard, empty-unit Find Photos)
+      // omit it and keep the representative fallback.
+      rejectRepresentativeFallback?: boolean;
     };
+    const suppressRepresentativeFallback = rejectRepresentativeFallback === true;
     const bypassDiscoveryCaches = nocache === true;
     // Direct-url rescrape scrape options: sidecar ON only when the background
     // re-pull explicitly opts in, otherwise the long-standing no-sidecar path.
@@ -43113,7 +43142,14 @@ Return ONLY compact JSON with this exact shape:
         facts: ListingFacts;
         scrapedBedrooms: number;
       } | null;
-      if (representativeFallback) {
+      if (representativeFallback && suppressRepresentativeFallback) {
+        console.log(
+          `[fetch-unit-photos] representative fallback SUPPRESSED (rejectRepresentativeFallback) ` +
+          `community="${communityName ?? ""}" requestedBR=${requestedBedrooms} ` +
+          `scrapedBR=${representativeFallback.scrapedBedrooms} url=${representativeFallback.candidate.url}`,
+        );
+      }
+      if (representativeFallback && !suppressRepresentativeFallback) {
         const { candidate, photos, facts, scrapedBedrooms } = representativeFallback;
         const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
         console.log(
@@ -43157,7 +43193,10 @@ Return ONLY compact JSON with this exact shape:
         configuredPhotoSourceKey &&
         skipSet.has(configuredPhotoSourceKey) &&
         requestedBedrooms &&
-        requestedBedrooms >= 3
+        requestedBedrooms >= 3 &&
+        // Same rule as the representative fallback above: a gallery-replacing
+        // caller must never receive a representative (wrong/unknown-BR) reuse.
+        !suppressRepresentativeFallback
       ) {
         const facts: ListingFacts = {};
         try {
