@@ -39,7 +39,7 @@ import {
   REPRESENTATIVE_ACCOMMODATIONS_DISCLOSURE,
   SINGLE_LISTING_SAMPLE_DISCLOSURE,
 } from "../client/src/data/unit-builder-data";
-import { parseStreetCityState } from "@shared/address-listing-logic";
+import { parseStreetCityState } from "@shared/address-parse";
 import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import { pushPublishedAddressForListing } from "./published-address";
 import {
@@ -1199,7 +1199,7 @@ async function stageOtaScan(target: UnitAuditTarget, record: UnitAuditJobRecord)
   });
   const scanDisabled = String(process.env.AUDIT_OTA_SCAN ?? "").trim() === "0";
   if (stale.length > 0 && !scanDisabled) {
-    touch(record, { message: `Deep-scanning ${stale.length} unit folder${stale.length === 1 ? "" : "s"} against Airbnb/VRBO/Booking (reverse image + address)…` });
+    touch(record, { message: `Deep-scanning ${stale.length} unit folder${stale.length === 1 ? "" : "s"} against Airbnb/VRBO/Booking (reverse image)…` });
     const kick = await loopbackJson("POST", "/api/photo-listing-check/run", { folders: stale.map((f) => f.folder) }, 30_000)
       .catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
     if (kick.status >= 400) {
@@ -1236,26 +1236,23 @@ async function stageOtaScan(target: UnitAuditTarget, record: UnitAuditJobRecord)
       continue;
     }
     const photo: Array<[string, string]> = [["Airbnb", row.airbnbStatus], ["VRBO", row.vrboStatus], ["Booking.com", row.bookingStatus]];
-    const addr: Array<[string, string]> = [["Airbnb", row.airbnbAddressStatus], ["VRBO", row.vrboAddressStatus], ["Booking.com", row.bookingAddressStatus]];
     const photoFound = photo.filter(([, s]) => s === "found").map(([p]) => p);
-    const addrFound = addr.filter(([, s]) => s === "found").map(([p]) => p);
     const photoUnknown = photo.filter(([, s]) => s !== "found" && s !== "clean").map(([p]) => p);
     if (photoFound.length > 0) { found += 1; items.push(`${f.label}: photos FOUND on ${photoFound.join(", ")} — links in the dashboard duplicate-photos popup`); }
-    if (addrFound.length > 0) { found += 1; items.push(`${f.label}: street address surfaced on ${addrFound.join(", ")}`); }
-    if (photoFound.length === 0 && addrFound.length === 0) {
+    if (photoFound.length === 0) {
       const ageH = row.checkedAt ? Math.round((Date.now() - new Date(row.checkedAt as any).getTime()) / 3600_000) : null;
       const ageNote = ageH != null && ageH >= 1 ? ` (scanned ${ageH}h ago)` : "";
       if (photoUnknown.length > 0) { unverified += 1; items.push(`${f.label}: ${photoUnknown.join("/")} lookup inconclusive — not proven clean${ageNote}`); }
-      else items.push(`${f.label}: clean on Airbnb, VRBO, and Booking.com (photos + address)${ageNote}`);
+      else items.push(`${f.label}: clean on Airbnb, VRBO, and Booking.com${ageNote}`);
     }
   }
   if (found > 0) {
-    return { verdict: "failed", detail: `Photos or address found on another OTA listing for ${found} unit${found === 1 ? "" : "s"} — replace the photos (dashboard popup has the links).`, items };
+    return { verdict: "failed", detail: `Photos found on another OTA listing for ${found} unit${found === 1 ? "" : "s"} — replace the photos (dashboard popup has the links).`, items };
   }
   if (unverified > 0) {
     return { verdict: "error", detail: `${unverified} unit folder${unverified === 1 ? "" : "s"} could not be fully verified against the OTAs.`, items };
   }
-  return { verdict: "pass", detail: `No photos found on Airbnb / VRBO / Booking.com · address clean (${folders.length} unit folder${folders.length === 1 ? "" : "s"}, deep scan).`, items };
+  return { verdict: "pass", detail: `No photos found on Airbnb / VRBO / Booking.com (${folders.length} unit folder${folders.length === 1 ? "" : "s"}, deep scan).`, items };
 }
 
 // ── Stage: photo fixes — the bounded fix ladder (PR 3) ───────────────────────
@@ -1934,8 +1931,7 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
   for (const g of unitGroups(target)) {
     const row = await storage.getPhotoListingCheckByFolder(g.folder).catch(() => undefined);
     if (!row) continue;
-    const found = [row.airbnbStatus, row.vrboStatus, row.bookingStatus,
-      row.airbnbAddressStatus, row.vrboAddressStatus, row.bookingAddressStatus].some((s: any) => s === "found");
+    const found = [row.airbnbStatus, row.vrboStatus, row.bookingStatus].some((s: any) => s === "found");
     if (found) otaFoundByLabel.add(g.label);
   }
 
@@ -1954,7 +1950,7 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     if (rungs.length === 0) continue;
     const why = [
       missingFolder ? (missingFolder.folder ? "configured photo folder is empty" : "no photo folder is configured") : null,
-      otaFound ? "photos/address found on another OTA listing" : null,
+      otaFound ? "photos found on another OTA listing" : null,
       p.communityMismatch ? "photos not confirmed in the community" : null,
       p.bedroomShort && !missingFolder ? "not enough bedroom photos" : null,
     ].filter((s): s is string => !!s);

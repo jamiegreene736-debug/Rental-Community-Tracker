@@ -46,7 +46,7 @@ import {
   isLikelyStreetAddress,
   normalizeCommunityAddressToken,
 } from "@shared/community-addresses";
-import { parseStreetCityState } from "@shared/address-listing-logic";
+import { parseStreetCityState } from "@shared/address-parse";
 import { propertyIdForGuestyListing } from "@shared/builder-deep-link";
 import { guestyRequest } from "./guesty-sync";
 import { storage } from "./storage";

@@ -21,8 +21,6 @@
 //   - startUnitAuditSweep already returns the existing active job when one is queued/running for
 //     the property, so multiple folders of one property flipping in a single tick collapse into one
 //     sweep, and a flip discovered mid-sweep can't stack a duplicate.
-//   - Address-on-OTA hits get a TEXT ONLY: the remedy is a takedown request on someone else's
-//     listing — swapping our photos can't fix an address leak, so no sweep is queued for those.
 //   - unit-audit-sweep is imported LAZILY (dynamic import) so this module adds no boot-time edge
 //     into the sweep's dependency graph from the scanner.
 //
@@ -39,8 +37,6 @@ export type PhotoListingDetection = {
   folder: string;
   // Platforms whose PHOTO verdict flipped non-found → found on this scan.
   photoFoundFlips: OtaPlatformKey[];
-  // Platforms whose ADDRESS verdict flipped non-found → found on this scan.
-  addressFoundFlips: OtaPlatformKey[];
   matchCount: number;
 };
 
@@ -137,16 +133,6 @@ export async function reactToPhotoListingDetections(d: PhotoListingDetection): P
           `Photo scan: ${label} photos were FOUND on ${platformNames(d.photoFoundFlips)}` +
           `${d.matchCount > 0 ? ` (${d.matchCount} matched listing${d.matchCount === 1 ? "" : "s"})` : ""}. ` +
           `${sweepNote}. The dashboard Photos popup has the offending links.`,
-      });
-    }
-
-    if (d.addressFoundFlips.length > 0) {
-      await sendOperatorAlert({
-        dedupKey: `address-found:${d.folder}`,
-        body:
-          `Photo scan: ${label} street address surfaced on ${platformNames(d.addressFoundFlips)}. ` +
-          `A photo swap cannot fix an address leak — request a takedown on the listing. ` +
-          `The dashboard address popup has the links.`,
       });
     }
   } catch (e: any) {

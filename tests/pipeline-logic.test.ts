@@ -910,8 +910,8 @@ assert.match(
   "fetchComboPhotosForUnit must return empty when the exhausted best failed the OTA preflight (search mode; manual URLs are the deep gate's job)",
 );
 // (2) The bulk combo queue runs a POST-SAVE deep OTA scan gate over the fresh
-// draft unit folders (full-gallery Lens + address leg) and skips/rolls back on
-// a positive found — fail-open on infra, kill switch COMBO_POST_OTA_SCAN=0.
+// draft unit folders (full-gallery Lens) and skips/rolls back on a positive
+// found — fail-open on infra, kill switch COMBO_POST_OTA_SCAN=0.
 assert.match(
   routesSource,
   /COMBO_POST_OTA_SCAN[\s\S]*?runBulkComboListingStep\(job, item, "ota-scan"[\s\S]*?evaluateComboOtaScanGate/,

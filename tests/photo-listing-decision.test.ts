@@ -20,7 +20,6 @@ function check(label: string, ok: boolean) {
 const base = {
   photoHitCount: 0,
   photoStrongCount: 0,
-  hasAddressHit: false,
   anyLensSucceeded: true,
 };
 
@@ -44,11 +43,6 @@ check(
 check(
   "does NOT flag found on only 2 strong-but-unverified photos (below agreement threshold)",
   decidePlatformStatus({ ...base, photoHitCount: 0, photoStrongCount: 2 }) === "clean",
-);
-
-check(
-  "an explicit address hit (folded-in caller) is decisive found",
-  decidePlatformStatus({ ...base, hasAddressHit: true }) === "found",
 );
 
 check(
@@ -105,7 +99,7 @@ check(
 );
 
 check(
-  "address-leg-only failure on a decided photo row => NOT inconclusive (photo verdict is usable)",
+  "legacy address-leg failure note on a decided photo row => NOT inconclusive (photo verdict is usable)",
   photoListingScanWasInconclusive({ airbnbStatus: "clean", vrboStatus: "clean", bookingStatus: "clean", errorMessage: "Address search unavailable: SearchApi timed out" }) === false,
 );
 

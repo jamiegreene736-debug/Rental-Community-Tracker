@@ -108,15 +108,6 @@ import {
   type DuplicatePhotoPlatform,
 } from "@shared/duplicate-photo-warning";
 import {
-  ADDRESS_ALERT_PLATFORM_LABELS,
-  addressAlertWarningSignature,
-  addressFoundPlatforms,
-  collectAddressAlertLinks,
-  formatAddressAlertPlatforms,
-  type AddressAlertPlatform,
-  type AddressMatchRow,
-} from "@shared/address-alert-warning";
-import {
   paymentFailureWarningSignature,
   PAYMENT_ISSUE_KIND_LABELS,
   type PaymentFailureWarning,
@@ -431,7 +422,6 @@ function parsePropertyDisplayAddress(addr: string): { street: string; city: stri
 // re-raises whenever the facts change (new unit flagged, new platform, or a
 // fresh scan re-confirming the duplicates — see duplicatePhotoWarningSignature).
 const DUPLICATE_PHOTO_WARNING_DISMISSED_KEY = "nexstay_duplicate_photo_warning_dismissed";
-const ADDRESS_ALERT_WARNING_DISMISSED_KEY = "nexstay_address_alert_warning_dismissed";
 
 // Payment-failure warning popup (failed charge / overdue scheduled balance):
 // same dismissal pattern — signature persisted on dismiss, re-raised when the
@@ -1492,7 +1482,6 @@ function AdminDashboard() {
   // keep the unit's display facts so a now-clean unit (which drops out of the
   // duplicate list) can still render its green confirmation row.
   const [duplicatePhotoWarningOpen, setDuplicatePhotoWarningOpen] = useState(false);
-  const [addressAlertWarningOpen, setAddressAlertWarningOpen] = useState(false);
   const [paymentFailureWarningOpen, setPaymentFailureWarningOpen] = useState(false);
   const [buyInCoverageWarningOpen, setBuyInCoverageWarningOpen] = useState(false);
   const [arrivalDetailsWarningOpen, setArrivalDetailsWarningOpen] = useState(false);
@@ -2607,10 +2596,6 @@ function AdminDashboard() {
     airbnbMatches: PhotoMatchRow[];
     vrboMatches:   PhotoMatchRow[];
     bookingMatches: PhotoMatchRow[];
-    airbnbAddressStatus?: PhotoStatus;
-    vrboAddressStatus?: PhotoStatus;
-    bookingAddressStatus?: PhotoStatus;
-    addressMatches?: Array<{ platform: string; url: string; title: string; snippet: string }>;
     photosChecked: number;
     checkedAt: string | null;
     errorMessage: string | null;
@@ -2758,28 +2743,13 @@ function AdminDashboard() {
       vrbo: PhotoMatchedUnit[];
       booking: PhotoMatchedUnit[];
     };
-    // Address-on-OTA leg: worst per-platform status + total address matches.
-    addr: { airbnb: PhotoAggStatus; vrbo: PhotoAggStatus; booking: PhotoAggStatus };
-    addressMatchCount: number;
     // Per-folder duplicate-photo detail feeding the warning popup: every
-    // folder whose PHOTO status is FOUND on at least one OTA (address-only
-    // hits are excluded — the popup's remedy is "replace the photos").
+    // folder whose PHOTO status is FOUND on at least one OTA.
     duplicateUnits: Array<{
       folder: string;
       unitLabel: string;
       platforms: DuplicatePhotoPlatform[];
       matchCount: number;
-      checkedAt: string | null;
-    }>;
-    // Per-folder ADDRESS-on-OTA hits feeding the SEPARATE address-alert popup:
-    // every folder whose street address status is FOUND on at least one OTA.
-    // Kept apart from duplicateUnits because the remedy is an OTA takedown, not
-    // "replace the photos".
-    addressUnits: Array<{
-      folder: string;
-      unitLabel: string;
-      platforms: AddressAlertPlatform[];
-      matches: AddressMatchRow[];
       checkedAt: string | null;
     }>;
     hasScannableFolders: boolean;
@@ -2858,10 +2828,7 @@ function AdminDashboard() {
         matchedUnits: { airbnb: [], vrbo: [], booking: [] },
         reviewCounts: { airbnb: 0, vrbo: 0, booking: 0 },
         reviewUnits: { airbnb: [], vrbo: [], booking: [] },
-        addr: { airbnb: null, vrbo: null, booking: null },
-        addressMatchCount: 0,
         duplicateUnits: [],
-        addressUnits: [],
         hasScannableFolders: folders.length > 0,
         folders,
         checkedRows: 0,
@@ -2906,23 +2873,6 @@ function AdminDashboard() {
         agg.airbnb  = worst(agg.airbnb,  row.airbnbStatus);
         agg.vrbo    = worst(agg.vrbo,    row.vrboStatus);
         agg.booking = worst(agg.booking, row.bookingStatus);
-        // The address-on-OTA leg aggregates DIFFERENTLY from the photo leg. A
-        // folder whose address check was SKIPPED (no resolvable unit street —
-        // every community-*/amenity folder, plus unit folders with no saved
-        // address) reports "unknown", and must NOT mask a real clean/found
-        // result from a sibling unit folder. worst()'s unknown>clean ranking is
-        // correct for the PHOTO leg (an inconclusive Lens result should surface)
-        // but here it let a single community folder paint the whole property's
-        // 📍 row grey — hiding that the actual units are address-clean. So fold
-        // ONLY meaningful clean/found statuses and skip unknown/null. A property
-        // with no address-checkable folder keeps addr=null → the 📍 row is
-        // hidden (hasAddrData) instead of rendering an alarming all-grey row.
-        const foldAddr = (cur: PhotoAggStatus, next: PhotoStatus | null | undefined): PhotoAggStatus =>
-          next === "clean" || next === "found" ? worst(cur, next) : cur;
-        agg.addr.airbnb  = foldAddr(agg.addr.airbnb,  row.airbnbAddressStatus);
-        agg.addr.vrbo    = foldAddr(agg.addr.vrbo,    row.vrboAddressStatus);
-        agg.addr.booking = foldAddr(agg.addr.booking, row.bookingAddressStatus);
-        agg.addressMatchCount += row.addressMatches?.length ?? 0;
         agg.matchCounts.airbnb  += row.airbnbMatches?.length  ?? 0;
         agg.matchCounts.vrbo    += row.vrboMatches?.length    ?? 0;
         agg.matchCounts.booking += row.bookingMatches?.length ?? 0;
@@ -2947,22 +2897,6 @@ function AdminDashboard() {
               (row.airbnbMatches?.length ?? 0) +
               (row.vrboMatches?.length ?? 0) +
               (row.bookingMatches?.length ?? 0),
-            checkedAt: row.checkedAt,
-          });
-        }
-        // Address-on-OTA leg → separate popup (takedown, not replace-photos).
-        const addressFound = addressFoundPlatforms({
-          airbnb: row.airbnbAddressStatus,
-          vrbo: row.vrboAddressStatus,
-          booking: row.bookingAddressStatus,
-        });
-        if (addressFound.length > 0) {
-          const owners = Array.from(folderOwners.get(f)?.values() ?? []);
-          agg.addressUnits.push({
-            folder: f,
-            unitLabel: owners.length > 0 ? owners.map((o) => o.detailLabel).join(" + ") : f,
-            platforms: addressFound,
-            matches: (row.addressMatches ?? []) as AddressMatchRow[],
             checkedAt: row.checkedAt,
           });
         }
@@ -3031,56 +2965,6 @@ function AdminDashboard() {
       // localStorage unavailable — dismissal just won't persist across reloads.
     }
     setDuplicatePhotoWarningOpen(false);
-  };
-
-  // ── Address-on-OTA alert popup (Phase 3) ───────────────────────────────────
-  // Same dismissal pattern as the duplicate-photos popup, but a SEPARATE surface:
-  // when a unit's street address (not its photos) turns up on someone else's
-  // Airbnb / VRBO / Booking listing, the remedy is an OTA takedown, so this popup
-  // links the offending listings to report rather than offering "Replace photos".
-  const addressAlertUnits = useMemo(() => {
-    const out: Array<{
-      propertyId: number;
-      propertyName: string;
-      folder: string;
-      unitLabel: string;
-      platforms: AddressAlertPlatform[];
-      matches: AddressMatchRow[];
-      checkedAt: string | null;
-    }> = [];
-    const seen = new Set<string>();
-    for (const p of allProperties) {
-      const agg = photoByProperty.get(p.id);
-      for (const u of agg?.addressUnits ?? []) {
-        if (seen.has(u.folder)) continue;
-        seen.add(u.folder);
-        out.push({ propertyId: p.id, propertyName: p.name, ...u });
-      }
-    }
-    return out;
-  }, [allProperties, photoByProperty]);
-  const addressAlertSignature = useMemo(
-    () => addressAlertWarningSignature(addressAlertUnits),
-    [addressAlertUnits],
-  );
-  useEffect(() => {
-    if (!addressAlertSignature) return;
-    let dismissed = "";
-    try {
-      dismissed = window.localStorage.getItem(ADDRESS_ALERT_WARNING_DISMISSED_KEY) ?? "";
-    } catch {
-      // localStorage unavailable — the popup just re-raises.
-    }
-    if (dismissed === addressAlertSignature) return;
-    setAddressAlertWarningOpen(true);
-  }, [addressAlertSignature]);
-  const closeAddressAlertWarning = () => {
-    try {
-      window.localStorage.setItem(ADDRESS_ALERT_WARNING_DISMISSED_KEY, addressAlertSignature);
-    } catch {
-      // localStorage unavailable — dismissal just won't persist across reloads.
-    }
-    setAddressAlertWarningOpen(false);
   };
 
   // ── "Replace photos (Unit X)" wiring for the duplicate-photos popup ────────
@@ -3870,7 +3754,7 @@ function AdminDashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check"] });
       toast({
         title: "Deep photo scan started",
-        description: `${data.folders.length} folder${data.folders.length === 1 ? "" : "s"} queued (full gallery + address). Progress is shown in the dialog.`,
+        description: `${data.folders.length} folder${data.folders.length === 1 ? "" : "s"} queued (full gallery). Progress is shown in the dialog.`,
       });
     },
     onError: (e: any) => {
@@ -5933,25 +5817,6 @@ function AdminDashboard() {
               </Button>
             </div>
           )}
-          {addressAlertUnits.length > 0 && (
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-orange-300 bg-orange-50/70 px-3 py-2 text-sm dark:border-orange-900 dark:bg-orange-950/30" data-testid="banner-address-alert">
-              <div className="flex items-center gap-2 text-orange-700 dark:text-orange-300">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
-                <span className="font-medium">
-                  {addressAlertUnits.length} unit{addressAlertUnits.length === 1 ? "'s address appears" : "s' addresses appear"} on another Airbnb / VRBO / Booking.com listing
-                </span>
-              </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => setAddressAlertWarningOpen(true)}
-                data-testid="button-open-address-alert"
-              >
-                Review
-              </Button>
-            </div>
-          )}
           {(autoReplaceQueue?.jobs.length ?? 0) > 0 && (
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm dark:border-sky-900 dark:bg-sky-950/30" data-testid="banner-auto-replace-queue">
               <div className="flex items-center gap-2">
@@ -6078,7 +5943,7 @@ function AdminDashboard() {
                   </Button>
                 </TableHead>
                 <TableHead className="w-[86px] text-center px-1" title="Airbnb / VRBO / Booking.com — green = live & bookable, red = not live">Channels</TableHead>
-                <TableHead className="w-[112px] text-center px-1" title="Reverse-image search (top row A/V/B) — green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive. 📍 row = address-on-OTA check: does this unit's street address appear on an Airbnb/VRBO/Booking listing (unit-number gated, our own listings excluded). Note: Airbnb & VRBO hide exact addresses on public pages, so a green address dot there means 'not publicly published', not a guarantee the unit isn't relisted — Booking.com is the reliable address signal.">
+                <TableHead className="w-[112px] text-center px-1" title="Reverse-image search (A/V/B) — green = photos not found on that platform, red = photos appear on another listing, gray = not checked or inconclusive.">
                   <div className="flex items-center justify-center gap-1">
                     <span>Photos</span>
                     <Button
@@ -6086,7 +5951,7 @@ function AdminDashboard() {
                       variant="ghost"
                       size="icon"
                       className="h-6 w-6"
-                      title="Run a DEEP photo match scan (full gallery + address) for all scannable listings"
+                      title="Run a DEEP photo match scan (full gallery) for all scannable listings"
                       aria-label="Run photo match scan"
                       disabled={photoScanMutation.isPending}
                       onClick={() => photoScanMutation.mutate({ label: "All scannable listings" })}
@@ -6487,15 +6352,6 @@ function AdminDashboard() {
                       const matchedSummary = items
                         .filter((it) => it.status === "found")
                         .map((it) => `${it.name}: ${unitList(it.units)}`);
-                      // Address-on-OTA leg (complements the photo leg): did the
-                      // unit's street address surface on a real listing page?
-                      const addrItems: Array<{ letter: string; name: string; status: PhotoAggStatus }> = [
-                        { letter: "A", name: "Airbnb",      status: agg?.addr.airbnb  ?? null },
-                        { letter: "V", name: "VRBO",        status: agg?.addr.vrbo    ?? null },
-                        { letter: "B", name: "Booking.com", status: agg?.addr.booking ?? null },
-                      ];
-                      const hasAddrData = addrItems.some((it) => it.status != null);
-                      const addrFound = addrItems.filter((it) => it.status === "found").map((it) => it.name);
                       const folders = agg?.folders ?? [];
                       const stamp = agg?.lastCheckedAt ? new Date(agg.lastCheckedAt).toLocaleDateString() : "never";
                       const errorPreview = photoCheckErrorPreview(agg?.errorMessages?.[0]);
@@ -6534,7 +6390,7 @@ function AdminDashboard() {
                               variant="ghost"
                               size="icon"
                               className="ml-0.5 h-[18px] w-[18px] rounded"
-                              title={folders.length > 0 ? `Run a DEEP photo match scan (full gallery + address) for ${property.name}` : `Run all photo match scans; no folders resolved for ${property.name}`}
+                              title={folders.length > 0 ? `Run a DEEP photo match scan (full gallery) for ${property.name}` : `Run all photo match scans; no folders resolved for ${property.name}`}
                               aria-label={folders.length > 0 ? `Run photo match scan for ${property.name}` : `Run all photo match scans`}
                               disabled={photoScanMutation.isPending}
                               onClick={() => photoScanMutation.mutate(folders.length > 0 ? { folders, label: property.name } : { label: "All scannable listings" })}
@@ -6546,36 +6402,6 @@ function AdminDashboard() {
                           {matchedSummary.length > 0 ? (
                             <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-match-units-${property.id}`}>
                               {matchedSummary.join(" · ")}
-                            </div>
-                          ) : null}
-                          {hasAddrData ? (
-                            <div className="flex gap-1 justify-center items-center" data-testid={`photo-addr-${property.id}`}>
-                              <span className="text-[8px] leading-none mr-[1px]" title="Address-on-OTA check: does this unit's street address appear on a real Airbnb / VRBO / Booking listing page? (unit-number gated; our own listings excluded). Airbnb & VRBO hide exact addresses publicly, so a green dot there = 'not publicly published', not proof it isn't relisted; Booking.com is the reliable address signal.">📍</span>
-                              {addrItems.map((it) => {
-                                const tone = toneOf(it.status);
-                                const p = PAL[tone];
-                                const tip =
-                                  it.status === "found" ? `${it.name}: this unit's address is listed there (last checked ${stamp})` :
-                                  it.status === "clean" ? `${it.name}: address not listed (last checked ${stamp})` :
-                                  it.status === "unknown" ? `${it.name}: address check inconclusive (${stamp})` :
-                                  `${it.name}: address not checked yet`;
-                                return (
-                                  <span
-                                    key={it.letter}
-                                    title={tip}
-                                    className="inline-flex items-center justify-center h-[15px] px-0.5 rounded text-[7px] font-bold leading-none"
-                                    style={{ background: p.bg, color: "white", minWidth: 16 }}
-                                    data-testid={`photo-addr-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
-                                  >
-                                    {it.letter}{p.glyph}
-                                  </span>
-                                );
-                              })}
-                            </div>
-                          ) : null}
-                          {addrFound.length > 0 ? (
-                            <div className="max-w-[108px] truncate text-center text-[9px] font-semibold leading-tight text-red-700" data-testid={`photo-addr-found-${property.id}`}>
-                              Addr on {addrFound.join(" · ")}
                             </div>
                           ) : null}
                         </div>
@@ -7377,85 +7203,6 @@ function AdminDashboard() {
           prior rescan came back still-found/inconclusive. NOTE FOR CODEX:
           this does NOT reintroduce the PR #318 dashboard "Replace & push"
           banner — no master-sync push happens here. */}
-      {/* Address-on-OTA alert popup (Phase 3). SEPARATE from the duplicate-
-          photos popup on purpose: a stolen ADDRESS means the physical unit was
-          re-listed by someone else — a relister can swap the photos but not the
-          address — so the remedy is an OTA takedown/report, NOT replacing our
-          photos. This popup therefore surfaces the offending listings to report
-          and has no Replace-photos action. */}
-      <Dialog
-        open={addressAlertWarningOpen}
-        onOpenChange={(open) => (open ? setAddressAlertWarningOpen(true) : closeAddressAlertWarning())}
-      >
-        <DialogContent className="max-w-xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-orange-700 dark:text-orange-300">
-              <AlertTriangle className="h-4 w-4" /> A unit's address appears on another listing
-            </DialogTitle>
-            <DialogDescription>
-              The scanner found a unit's street address on an Airbnb / VRBO / Booking.com listing that isn't ours
-              (the listing was unit-number matched; our own listings are excluded). A relister can swap the photos
-              but not the physical address, so this is a strong signal the unit was re-listed by someone else. The
-              fix is an OTA <span className="font-medium">takedown / report</span>, not replacing photos — open each
-              listing below, confirm it's your unit, and report it to the platform.
-            </DialogDescription>
-          </DialogHeader>
-          {addressAlertUnits.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No units currently show their address on another Airbnb, VRBO, or Booking.com listing.
-            </p>
-          ) : (
-            <div className="max-h-96 space-y-1.5 overflow-y-auto">
-              {addressAlertUnits.map((u) => {
-                const { links, more } = collectAddressAlertLinks(u.matches);
-                return (
-                  <div
-                    key={u.folder}
-                    className="rounded border border-orange-200 bg-background p-2 text-xs dark:border-orange-900"
-                    data-testid={`row-address-alert-${u.folder}`}
-                  >
-                    <div>
-                      <span className="font-medium">{u.propertyName}</span>
-                      <span className="text-muted-foreground"> · {u.unitLabel}</span>
-                      <span className="block text-orange-700 dark:text-orange-300">
-                        Address found on {formatAddressAlertPlatforms(u.platforms)}
-                      </span>
-                    </div>
-                    {links.length > 0 && (
-                      <div className="mt-1 space-y-0.5">
-                        {links.map((l) => (
-                          <a
-                            key={l.url}
-                            href={l.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="block truncate text-primary hover:underline"
-                            title={l.snippet || l.url}
-                          >
-                            {ADDRESS_ALERT_PLATFORM_LABELS[l.platform]}: {l.title} ↗
-                          </a>
-                        ))}
-                        {more > 0 && <span className="text-muted-foreground">+{more} more</span>}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <div className="mt-3 flex justify-end">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={closeAddressAlertWarning}
-              data-testid="button-dismiss-address-alert"
-            >
-              Dismiss
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
       <Dialog
         open={duplicatePhotoWarningOpen}
         onOpenChange={(open) => (open ? setDuplicatePhotoWarningOpen(true) : closeDuplicatePhotoWarning())}
@@ -8015,7 +7762,7 @@ function AdminDashboard() {
               <Search className="h-4 w-4" /> Deep photo scan
             </DialogTitle>
             <DialogDescription>
-              Reverse-image-searching the full photo gallery + the street address of{" "}
+              Reverse-image-searching the full photo gallery of{" "}
               <span className="font-medium">{photoScanLabel || "the selected listings"}</span>{" "}
               against Airbnb / VRBO / Booking.com. This runs in the background — you can close this and the badges keep updating.
             </DialogDescription>
@@ -8069,14 +7816,7 @@ function AdminDashboard() {
                             <span className={`h-2 w-2 rounded-full ${statusDot(row?.vrboStatus)}`} />
                             <span className={`h-2 w-2 rounded-full ${statusDot(row?.bookingStatus)}`} />
                           </span>
-                          <span className="flex items-center gap-0.5" title="Address — Airbnb / VRBO / Booking">
-                            <MapPin className="h-3 w-3 text-muted-foreground" />
-                            <span className={`h-2 w-2 rounded-full ${statusDot(row?.airbnbAddressStatus)}`} />
-                            <span className={`h-2 w-2 rounded-full ${statusDot(row?.vrboAddressStatus)}`} />
-                            <span className={`h-2 w-2 rounded-full ${statusDot(row?.bookingAddressStatus)}`} />
-                          </span>
-                          {(row?.airbnbStatus === "found" || row?.vrboStatus === "found" || row?.bookingStatus === "found" ||
-                            row?.airbnbAddressStatus === "found" || row?.vrboAddressStatus === "found" || row?.bookingAddressStatus === "found") ? (
+                          {(row?.airbnbStatus === "found" || row?.vrboStatus === "found" || row?.bookingStatus === "found") ? (
                             <AlertTriangle className="h-3.5 w-3.5 text-red-600" />
                           ) : (
                             <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
@@ -8094,7 +7834,6 @@ function AdminDashboard() {
                   <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-500" /> not found</span>
                   <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-red-500" /> found</span>
                   <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-gray-300" /> inconclusive</span>
-                  <span className="flex items-center gap-1"><MapPin className="h-3 w-3" /> address</span>
                 </div>
               </div>
             );

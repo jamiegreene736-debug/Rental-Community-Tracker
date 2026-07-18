@@ -176,11 +176,9 @@ check("retry budget is small, monotonic, and fits inside store retention",
     planAutoReplaceRetry({ ...base, phase: "verifying" }, "again", NOW) === null &&
     planAutoReplaceRetry({ ...base, phase: "retry_wait" }, "again", NOW) === null);
 }
-check("automatic retry requires a persisted PHOTO finding (address-only is excluded)",
+check("automatic retry requires a persisted, fresh PHOTO finding",
   photoListingHasPersistentPhotoFinding({ airbnbStatus: "clean", vrboStatus: "found", bookingStatus: "unknown", checkedAt: new Date(NOW) }, NOW) &&
-  !photoListingHasPersistentPhotoFinding({
-    airbnbStatus: "clean", vrboStatus: "unknown", bookingStatus: "clean", vrboAddressStatus: "found", checkedAt: new Date(NOW),
-  } as any, NOW) &&
+  !photoListingHasPersistentPhotoFinding({ airbnbStatus: "clean", vrboStatus: "unknown", bookingStatus: "clean", checkedAt: new Date(NOW) }, NOW) &&
   !photoListingHasPersistentPhotoFinding({ airbnbStatus: "found", checkedAt: new Date(0) }, NOW) &&
   !photoListingHasPersistentPhotoFinding(null));
 {
