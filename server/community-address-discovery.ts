@@ -40,7 +40,7 @@ import {
 } from "@shared/community-addresses";
 import { statesEquivalent } from "@shared/community-location-guard";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
-import { CLUBHOUSE_TITLE_HINT_RE, clubhouseDiscoveryQueries } from "@shared/published-address";
+import { CLUBHOUSE_TITLE_HINT_RE, clubhouseDiscoveryQueries, finiteCoord } from "@shared/published-address";
 import { reverseGeocodeToStreetAddress } from "./walking-distance";
 import { callClaudeWebSearchJson } from "./claude-json";
 
@@ -353,11 +353,30 @@ export type ClubhouseAddressCandidate = {
   lng?: number;
 };
 
+// PM/realty storefronts routinely register maps businesses NAMED AFTER the
+// resorts they serve ("<Resort> Vacation Rentals Office") — the exact title
+// class the office/reception hint words would otherwise promote. Never let
+// one win the hint pass.
+const PM_STOREFRONT_TITLE_RE = /\b(?:rentals?|realty|real\s+estate|property\s+management|properties|brokerage|vacation\s+rentals?)\b/i;
+
+function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const rad = (d: number) => (d * Math.PI) / 180;
+  const dLat = rad(bLat - aLat);
+  const dLng = rad(bLng - aLng);
+  const s =
+    Math.sin(dLat / 2) ** 2 + Math.cos(rad(aLat)) * Math.cos(rad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return 12742 * Math.asin(Math.sqrt(Math.min(1, s)));
+}
+
 /**
  * Pick the best clubhouse candidate: two passes over the relevance-ordered
  * maps results, both requiring the resort-token title gate + a real numbered
- * street — pass 1 takes a title with a clubhouse-ish hint word, pass 2 takes
- * any title-matched place. Pure / no network so it is unit-testable.
+ * street. Pass 1 takes a title with a clubhouse-ish hint word — but never a
+ * PM/realty storefront, and only when it shares the rank-order winner's
+ * footprint (same street root, or coords within ~1.5 km) so an off-site
+ * business named after the resort can't beat the resort's own pin. Pass 2 =
+ * the first title-matched place (the resort pin — usually its office).
+ * Pure / no network so it is unit-testable.
  */
 export function selectClubhouseCandidate(
   candidates: MapsAddressCandidate[],
@@ -370,53 +389,74 @@ export function selectClubhouseCandidate(
     const street = streetRootFromAddress(fullAddress);
     if (!street || !isLikelyStreetAddress(street)) return null;
     if (!titleMatchesResort(c?.title, resortName)) return null;
-    const lat = Number(c?.gps_coordinates?.latitude);
-    const lng = Number(c?.gps_coordinates?.longitude);
+    const lat = finiteCoord(c?.gps_coordinates?.latitude, 90);
+    const lng = finiteCoord(c?.gps_coordinates?.longitude, 180);
     return {
       street,
       fullAddress,
       matchedTitle: String(c?.title ?? "").trim(),
       query,
-      ...(Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : {}),
+      ...(lat != null && lng != null ? { lat, lng } : {}),
     };
   };
-  for (const c of candidates) {
-    if (!CLUBHOUSE_TITLE_HINT_RE.test(String(c?.title ?? ""))) continue;
-    const hit = usable(c);
-    if (hit) return hit;
-  }
+  let rankWinner: ClubhouseAddressCandidate | null = null;
   for (const c of candidates) {
     const hit = usable(c);
-    if (hit) return hit;
+    if (hit) {
+      rankWinner = hit;
+      break;
+    }
   }
-  return null;
+  if (!rankWinner) return null;
+  for (const c of candidates) {
+    const title = String(c?.title ?? "");
+    if (!CLUBHOUSE_TITLE_HINT_RE.test(title)) continue;
+    if (PM_STOREFRONT_TITLE_RE.test(title)) continue;
+    const hit = usable(c);
+    if (!hit) continue;
+    const sameRoot =
+      normalizeCommunityAddressToken(hit.street) === normalizeCommunityAddressToken(rankWinner.street);
+    const nearby =
+      hit.lat != null && hit.lng != null && rankWinner.lat != null && rankWinner.lng != null
+        ? haversineKm(hit.lat, hit.lng, rankWinner.lat, rankWinner.lng) <= 1.5
+        : false;
+    if (sameRoot || nearby || hit === rankWinner) return hit;
+  }
+  return rankWinner;
 }
 
 const clubhouseCache = new Map<string, ClubhouseAddressCandidate | null>();
 
 /**
  * Resolve a community's clubhouse street address from SearchAPI google_maps.
- * Null when the key is missing, the kill switch is set, or nothing clears the
- * precision gate — callers fall back to the generic main-building address.
- * Same transient-error contract as discoverCommunityStreetAddress: only a
- * definitive outcome is cached, so a 429 blip never permanently skips a
- * community's clubhouse.
+ * `found` is null when the key is missing, the kill switch is set, or nothing
+ * clears the precision gate — callers fall back to the generic main-building
+ * address. `transient` is true when the miss was caused by a SearchAPI/
+ * reverse-geocode failure rather than a definitive no-match, so callers must
+ * NOT durably cache the fallback (same contract as
+ * discoverCommunityStreetAddress: a 429 blip never permanently skips a
+ * community's clubhouse). `forceRefresh` bypasses the in-process cache READ
+ * (the fresh definitive result still replaces the cached entry) — the manual
+ * button's re-discovery promise depends on it.
  */
 export async function discoverCommunityClubhouseAddress(input: {
   communityName?: string | null;
   city?: string | null;
   state?: string | null;
-}): Promise<ClubhouseAddressCandidate | null> {
+  forceRefresh?: boolean;
+}): Promise<{ found: ClubhouseAddressCandidate | null; transient: boolean }> {
   const communityName = String(input.communityName ?? "").trim();
-  if (!communityName) return null;
-  if (process.env.PUBLISHED_ADDRESS_CLUBHOUSE_DISCOVERY === "0") return null;
+  if (!communityName) return { found: null, transient: false };
+  if (process.env.PUBLISHED_ADDRESS_CLUBHOUSE_DISCOVERY === "0") return { found: null, transient: false };
   const apiKey = process.env.SEARCHAPI_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) return { found: null, transient: false };
 
   const city = String(input.city ?? "").trim();
   const state = String(input.state ?? "").trim();
   const cacheKey = ["clubhouse", communityName, city, state].map((v) => v.toLowerCase()).join("|");
-  if (clubhouseCache.has(cacheKey)) return clubhouseCache.get(cacheKey) ?? null;
+  if (input.forceRefresh !== true && clubhouseCache.has(cacheKey)) {
+    return { found: clubhouseCache.get(cacheKey) ?? null, transient: false };
+  }
 
   let found: ClubhouseAddressCandidate | null = null;
   let anyTransientError = false;
@@ -463,7 +503,7 @@ export async function discoverCommunityClubhouseAddress(input: {
   }
 
   if (found || !anyTransientError) clubhouseCache.set(cacheKey, found);
-  return found;
+  return { found, transient: !found && anyTransientError };
 }
 
 const discoveryCache = new Map<string, DiscoveredStreetAddress | null>();

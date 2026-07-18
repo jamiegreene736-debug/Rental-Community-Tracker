@@ -25,6 +25,7 @@ import {
   addressLat,
   addressLng,
   buildGuestyPublishedAddress,
+  finiteCoord,
   genericPublishedPartsFromPrivateAddress,
   parsePublishedAddressStore,
   publishedAddressSatisfiesTarget,
@@ -37,7 +38,7 @@ import {
   type PublishedAddressStore,
   type ResolvedPublishedAddress,
 } from "@shared/published-address";
-import { communityAddressRuleForName } from "@shared/community-addresses";
+import { communityAddressRuleForName, isLikelyStreetAddress, normalizeCommunityAddressToken } from "@shared/community-addresses";
 import { parseStreetCityState } from "@shared/address-listing-logic";
 import { propertyIdForGuestyListing } from "@shared/builder-deep-link";
 import { guestyRequest } from "./guesty-sync";
@@ -156,22 +157,35 @@ export async function resolvePublishedAddressForProperty(
   const privLng = addressLng(opts.privateAddress);
 
   let resolved: ResolvedPublishedAddress | null = null;
+  // A clubhouse miss caused by a TRANSIENT failure (SearchAPI 429/quota,
+  // reverse-geocode blip) must not durably cache the generic fallback — the
+  // next hook retries discovery instead of short-circuiting forever.
+  let clubhouseTransient = false;
 
   // ① Clubhouse — only when we know which community this is (a bare unmapped
   // listing has no community name to search for).
   if (identity?.communityName) {
-    const clubhouse = await discoverCommunityClubhouseAddress({
+    const discovery = await discoverCommunityClubhouseAddress({
       communityName: identity.communityName,
       city: identity.city,
       state: identity.state,
-    }).catch(() => null);
+      forceRefresh: opts.forceRefresh === true,
+    }).catch(() => ({ found: null, transient: true }));
+    clubhouseTransient = discovery.transient;
+    const clubhouse = discovery.found;
     if (clubhouse) {
       const parsedFull = parseStreetCityState(clubhouse.fullAddress);
+      // Reject a "city" that is itself a numbered street — google_maps
+      // addresses can lead with a venue/postal segment ("Star Route, 1000
+      // Kamehameha V Hwy, Kaunakakai, HI"), which parseStreetCityState
+      // mis-reads as street="Star Route", city="1000 Kamehameha V Hwy".
+      const parsedCity =
+        parsedFull?.city && !isLikelyStreetAddress(parsedFull.city) ? parsedFull.city : undefined;
       resolved = {
         // Belt-and-braces unit strip — a clubhouse POI address never should
         // carry one, but the published street must be structurally unit-free.
         street: publishedStreetRoot(clubhouse.street) || clubhouse.street,
-        city: parsedFull?.city || city,
+        city: parsedCity || city,
         state: parsedFull?.state || state,
         zipcode: zipFromAddressText(clubhouse.fullAddress) || zipcode,
         country,
@@ -208,7 +222,11 @@ export async function resolvePublishedAddressForProperty(
     }
   }
 
-  if (resolved && propertyId != null) writeCachedResolution(propertyId, resolved);
+  // Cache only DEFINITIVE resolutions: a generic fallback that exists solely
+  // because clubhouse discovery failed transiently stays uncached, so the
+  // very next hook re-attempts discovery instead of baking the fallback in.
+  const definitive = !(resolved?.source === "community" && clubhouseTransient && identity?.communityName);
+  if (resolved && propertyId != null && definitive) writeCachedResolution(propertyId, resolved);
   return resolved;
 }
 
@@ -236,6 +254,11 @@ export type PublishedAddressPushResult = {
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function optStr(v: unknown): string | undefined {
+  const s = String(v ?? "").trim();
+  return s ? s : undefined;
+}
 
 // Bounded GET retry: 429/5xx/network are transient (the guesty-sync global
 // gate already absorbs the pause; the retry just re-queues once), other 4xx
@@ -352,8 +375,11 @@ export async function pushPublishedAddressForListing(input: {
     }
 
     // Resolve the app-side propertyId when the caller didn't know it (e.g.
-    // the push-descriptions hook only has the listing id).
-    let propertyId = input.propertyId ?? null;
+    // the push-descriptions hook only has the listing id). `||` on purpose:
+    // 0 is not a valid builder id (positive core / negative -draftId), so a
+    // coerced 0 falls through to the map lookup instead of poisoning the
+    // shared cache key "0".
+    let propertyId = input.propertyId || null;
     if (propertyId == null) {
       try {
         const maps = await storage.getGuestyPropertyMap();
@@ -385,13 +411,49 @@ export async function pushPublishedAddressForListing(input: {
       return { ok: true, verified: true, alreadyOn: true, pushed: false, address: resultAddress(resolved) };
     }
 
+    // OPERATOR WINS (non-force only): the feature is already ON with a
+    // street that is neither our target nor the unit's own street root —
+    // that's a deliberate operator customization set in Guesty's dashboard.
+    // Hooks/audits must never clobber it (the repo-wide overrides-win rule);
+    // only the manual button / force backfill deliberately overwrite. A
+    // published street still equal to the private root (or streetless) is
+    // NOT a customization — it falls through and gets upgraded.
+    if (input.force !== true && entity.isPublishedAddressEnabled === true) {
+      const currentRoot = publishedStreetRoot(
+        String(entity.publishedAddress?.full || entity.publishedAddress?.street || ""),
+      );
+      const privateRoot = publishedStreetRoot(String(privateAddress.full || privateAddress.street || ""));
+      if (
+        currentRoot &&
+        (!privateRoot ||
+          normalizeCommunityAddressToken(currentRoot) !== normalizeCommunityAddressToken(privateRoot))
+      ) {
+        return {
+          ok: true,
+          verified: true,
+          alreadyOn: true,
+          pushed: false,
+          address: {
+            street: currentRoot,
+            city: optStr(entity.publishedAddress?.city),
+            state: optStr(entity.publishedAddress?.state),
+            source: "community",
+            label: "operator-set published address left in place",
+          },
+        };
+      }
+    }
+
     // Build the PUT body. The private address is ECHOED verbatim; we only
     // ensure a `location` exists (the PUT schema requires one per address),
     // borrowing from the listing document or the resolution when missing.
     const privateEcho: Record<string, unknown> = { ...(privateAddress as Record<string, unknown>) };
     const privLat = addressLat(privateAddress) ?? addressLat(listingAddress);
     const privLng = addressLng(privateAddress) ?? addressLng(listingAddress);
-    if (!(privateEcho.location && Number.isFinite(Number((privateEcho.location as any)?.lat)))) {
+    // Type-checked test of the NESTED location specifically (the shape the
+    // Address-controller PUT requires) — a {lat:null} location object, or a
+    // flat-lat-only listing-doc shape, must not suppress setting it.
+    if (finiteCoord((privateEcho.location as { lat?: unknown } | undefined)?.lat, 90) == null) {
       const lat = privLat ?? resolved.lat ?? null;
       const lng = privLng ?? resolved.lng ?? null;
       if (lat != null && lng != null) privateEcho.location = { lat, lng };

@@ -73,24 +73,45 @@ export type ResolvedPublishedAddress = PublishedAddressParts & {
 
 // ── Unit-designator handling ─────────────────────────────────────────────────
 
-// NOTE the standalone /#\s*.../ alternative: the canonical
-// streetRootFromAddress strips "Unit 423"/"Apt B" but NOT the bare "#1834"
-// form — its `\b(?:…|#)` boundary can never match a "#" after a space (found
-// by this module's own tests). Published addresses must be unit-free, so this
-// module layers its own strip on top of the canonical root.
-const UNIT_DESIGNATOR_RE = /(?:\b(?:apartment|apt|unit|suite|ste|building|bldg|villa)\s*\.?\s*[a-z0-9-]+\b|#\s*[a-z0-9-]+\b)/i;
+// Three strip layers on top of the canonical streetRootFromAddress, each
+// covering a form it misses (all found/locked by this module's tests):
+//  • the bare "#1834" form — streetRootFromAddress's `\b(?:…|#)` boundary can
+//    never match a "#" after a space;
+//  • the trailing hyphenated building-unit form "2695 S Kihei Rd 10-201" —
+//    its trailing strip only allows `[A-Za-z]?\d{1,5}[A-Za-z]?`, so the
+//    internal hyphen slips through (the $-anchor after a street-suffix word
+//    keeps LEADING Hawaii hyphenated house numbers "75-6082 Alii Dr" intact);
+//  • "Villa <unit>" — constrained to unit-SHAPED tokens ("Villa 2903",
+//    "Villa B") so real street names like "100 Villa Del Mar Dr" and
+//    "70 Venice Villas Ln" are never mangled into a different street.
+const STREET_SUFFIX_WORDS =
+  "Rd|Road|Dr|Drive|St|Street|Ave|Avenue|Ln|Lane|Hwy|Highway|Blvd|Boulevard|Way|Cir|Circle|Ct|Court|Pl|Place|Trl|Trail|Pkwy|Parkway";
+const UNIT_DESIGNATOR_RE = new RegExp(
+  "(?:\\b(?:apartment|apt|unit|suite|ste|building|bldg)\\s*\\.?\\s*[a-z0-9-]+\\b" +
+    "|\\bvillas?\\s*\\.?\\s*\\d[a-z0-9-]*\\b" +
+    "|\\bvilla\\s+[a-z]\\b" +
+    "|#\\s*[a-z0-9-]+\\b" +
+    `|\\b(?:${STREET_SUFFIX_WORDS})\\s+[a-z]?\\d{1,5}-\\d{1,5}[a-z]?\\s*$)`,
+  "i",
+);
 
 /** True when a street/full line still carries a unit/apt/#/bldg designator. */
 export function hasUnitDesignator(value: string | null | undefined): boolean {
   return UNIT_DESIGNATOR_RE.test(String(value ?? ""));
 }
 
-/** Remove every unit designator (incl. the bare "#1834" form) from a street
- *  line. Idempotent; collapses the leftover whitespace. */
+/** Remove every unit designator (incl. the bare "#1834" and trailing
+ *  "Rd 10-201" forms) from a street line. Idempotent; collapses whitespace. */
 export function stripPublishedUnitTokens(value: string | null | undefined): string {
   return String(value ?? "")
     .replace(/#\s*[A-Za-z0-9-]+\b/g, " ")
-    .replace(/\b(?:apartment|apt|unit|suite|ste|building|bldg|villa)\s*\.?\s*[A-Za-z0-9-]+\b/gi, " ")
+    .replace(/\b(?:apartment|apt|unit|suite|ste|building|bldg)\s*\.?\s*[A-Za-z0-9-]+\b/gi, " ")
+    .replace(/\bvillas?\s*\.?\s*\d[A-Za-z0-9-]*\b/gi, " ")
+    .replace(/\bvilla\s+[A-Za-z]\b/gi, " ")
+    .replace(
+      new RegExp(`\\b(${STREET_SUFFIX_WORDS})\\s+[A-Za-z]?\\d{1,5}-\\d{1,5}[A-Za-z]?\\s*$`, "i"),
+      "$1",
+    )
     .replace(/\s+/g, " ")
     .replace(/[\s,]+$/g, "")
     .trim();
@@ -143,18 +164,21 @@ function str(v: unknown): string | undefined {
   return s ? s : undefined;
 }
 
+// Type-checked coordinate parse (the repo's numberFromCandidate posture):
+// Number(null) === 0, so a raw Number() coercion would turn Guesty's
+// present-but-null coords into 0/0 — Null Island — and durably cache them.
+export function finiteCoord(v: unknown, absMax: number): number | null {
+  const n =
+    typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : NaN;
+  return Number.isFinite(n) && Math.abs(n) <= absMax ? n : null;
+}
+
 export function addressLat(addr: GuestyAddressLike | null | undefined): number | null {
-  const nested = Number(addr?.location?.lat);
-  if (Number.isFinite(nested)) return nested;
-  const flat = Number(addr?.lat);
-  return Number.isFinite(flat) ? flat : null;
+  return finiteCoord(addr?.location?.lat, 90) ?? finiteCoord(addr?.lat, 90);
 }
 
 export function addressLng(addr: GuestyAddressLike | null | undefined): number | null {
-  const nested = Number(addr?.location?.lng);
-  if (Number.isFinite(nested)) return nested;
-  const flat = Number(addr?.lng);
-  return Number.isFinite(flat) ? flat : null;
+  return finiteCoord(addr?.location?.lng, 180) ?? finiteCoord(addr?.lng, 180);
 }
 
 // ── PUT payload builder ──────────────────────────────────────────────────────
@@ -183,8 +207,10 @@ export function buildGuestyPublishedAddress(parts: PublishedAddressParts): Recor
   if (str(parts.state)) out.state = str(parts.state);
   if (str(parts.zipcode)) out.zipcode = str(parts.zipcode);
   if (str(parts.country)) out.country = str(parts.country);
-  if (Number.isFinite(Number(parts.lat)) && Number.isFinite(Number(parts.lng))) {
-    out.location = { lat: Number(parts.lat), lng: Number(parts.lng) };
+  const lat = finiteCoord(parts.lat, 90);
+  const lng = finiteCoord(parts.lng, 180);
+  if (lat != null && lng != null) {
+    out.location = { lat, lng };
   }
   return out;
 }
@@ -203,8 +229,9 @@ export function publishedAddressSatisfiesTarget(
   target: PublishedAddressParts,
 ): boolean {
   if (!current || typeof current !== "object") return false;
+  // `||` (not `??`) — an empty-string `full` must fall through to `street`.
   const currentStreet = stripPublishedUnitTokens(
-    streetRootFromAddress(String(current.full ?? current.street ?? "")),
+    streetRootFromAddress(String(current.full || current.street || "")),
   );
   if (!currentStreet) return false;
   const curNorm = normalizeCommunityAddressToken(currentStreet);
@@ -263,9 +290,9 @@ export function parsePublishedAddressStore(raw: string | null | undefined): Publ
         resolvedAt: isValidIso(v.resolvedAt) ? new Date(v.resolvedAt).toISOString() : new Date(0).toISOString(),
         updatedAt: isValidIso(v.updatedAt) ? new Date(v.updatedAt).toISOString() : new Date(0).toISOString(),
       };
-      const lat = Number(v.lat);
-      const lng = Number(v.lng);
-      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      const lat = finiteCoord(v.lat, 90);
+      const lng = finiteCoord(v.lng, 180);
+      if (lat != null && lng != null) {
         entry.lat = lat;
         entry.lng = lng;
       }

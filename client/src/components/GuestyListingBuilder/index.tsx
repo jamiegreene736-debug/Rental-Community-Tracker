@@ -3727,6 +3727,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // is where the timestamp line under the button reads from.
   const pushPublishedAddress = useCallback(async () => {
     if (!selectedId || pubAddrPushState === "pushing") return;
+    // Snapshot the target listing: if the operator switches listings while
+    // the push is in flight, the completion must not repaint the OLD
+    // listing's street against the new selection (pubAddrListingRef tracks
+    // the live selection via the reset effect below).
+    const pushedListingId = selectedId;
+    const stillCurrent = () => pubAddrListingRef.current === pushedListingId;
     setPubAddrPushState("pushing");
     setPubAddrPushError(null);
     try {
@@ -3739,13 +3745,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const res = await fetch("/api/builder/push-published-address", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ listingId: selectedId, propertyId, force: true }),
+        body: JSON.stringify({ listingId: pushedListingId, propertyId, force: true }),
         ...(signal ? { signal } : {}),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.success) {
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
+      if (!stillCurrent()) return;
       setPubAddrPushResult(
         data.address && data.address.street
           ? { street: data.address.street, source: data.address.source === "clubhouse" ? "clubhouse" : "community", label: String(data.address.label ?? "") }
@@ -3762,6 +3769,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       });
     } catch (e: any) {
       const aborted = e?.name === "AbortError" || e?.name === "TimeoutError";
+      // Definitive failures are stamped in the server ledger too — refresh
+      // the timestamp line so it agrees with the inline error; on an abort
+      // the server is still working, so re-read again once it should have
+      // landed (the copy promises the line will update).
+      void reloadServerPushHistory();
+      if (aborted) {
+        window.setTimeout(() => {
+          void reloadServerPushHistory();
+        }, 60_000);
+      }
+      if (!stillCurrent()) return;
       setPubAddrPushState("error");
       setPubAddrPushError(
         aborted
@@ -3770,6 +3788,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       );
     }
   }, [selectedId, propertyId, pubAddrPushState, toast, reloadServerPushHistory]);
+
+  // A listing switch must clear the push panel — a stale success banner
+  // would render the PREVIOUS listing's street as the new listing's
+  // published address. The ref also lets an in-flight push detect the switch.
+  const pubAddrListingRef = useRef<string>("");
+  useEffect(() => {
+    pubAddrListingRef.current = selectedId;
+    setPubAddrPushState("idle");
+    setPubAddrPushError(null);
+    setPubAddrPushResult(null);
+  }, [selectedId]);
 
   // The PATCH body that would persist the current edit state: an edited
   // value that differs from the generated base saves as an override; an
@@ -6914,7 +6943,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               >
                                 {ledger
                                   ? `🕐 ${ledger.status === "success" ? "Pushed" : "Push failed"} ${formatDataPushTime(ledger.pushedAt)}${ledger.summary ? ` · ${ledger.summary}` : ""}`
-                                  : "🕐 Never pushed — Guesty still publishes the full unit address"}
+                                  : "🕐 No push recorded — push to confirm channels hide the unit address"}
                               </div>
                             </div>
                           );

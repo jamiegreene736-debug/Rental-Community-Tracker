@@ -73,10 +73,22 @@ Before making any changes:
   proven on the BUILT bundle (Playwright + mocked /api: POST contract {listingId, propertyId,
   force:true}, success + ledger line flip, never-pushed fallback, unmapped-disabled — 14/0). Could
   NOT live-smoke the Guesty leg (no creds in session) — post-deploy: run the admin backfill, then
-  spot-check a listing in Guesty (Address section shows the toggle ON + clubhouse street). NOTE:
-  worktree trap fixed en route — a stale `node_modules/typescript/` dir holding only tsc's
-  tsbuildinfo shadowed the real package and broke tests/guesty-photo-repush.test.ts; `rm -rf` it
-  (it's just a cache) when `npm test` dies with ERR_MODULE_NOT_FOUND on "typescript".
+  spot-check a listing in Guesty (Address section shows the toggle ON + clubhouse street). ALSO FIXED
+  AT THE ROOT (same PR): tsconfig `tsBuildInfoFile` moved `node_modules/typescript/tsbuildinfo` →
+  `node_modules/.cache/tsbuildinfo` — in a worktree with no local node_modules, `npm run check`
+  CREATED a `node_modules/typescript/` dir holding only the cache file, which shadowed the
+  parent-resolved real typescript package and broke every test importing it
+  (tests/guesty-photo-repush.test.ts, ERR_MODULE_NOT_FOUND). If an old worktree still has the
+  stub, `rm -rf <worktree>/node_modules/typescript` once. Adversarially reviewed via a 4-lens
+  workflow: 17 confirmed findings all fixed pre-merge — highlights: Number(null)→0 coords would
+  have published Null Island (type-checked finiteCoord now), "Rd 10-201" trailing building-unit
+  form leaked through every strip layer (new $-anchored strip), "villa" designator mangled real
+  streets ("100 Villa Del Mar Dr"→"100 Mar Dr"; now unit-shaped-token constrained), clubhouse
+  hint pass could crown a PM storefront named after the resort (footprint constraint + negative
+  guard), transient SearchAPI failures durably cached the generic fallback (transient flag, no
+  cache write), operator-set custom published addresses were clobbered weekly (operator-wins
+  branch), audit double-push (skipPublishedAddressEnsure flag), admin backfill vs the 15-min
+  edge cap (NDJSON stream + heartbeat).
 
 - 2026-07-17 (Cowork buy-in find + safe checkout preparation): Jamie replaced the older
   automated-card design. The primary bookings action now runs search/attach and VRBO checkout

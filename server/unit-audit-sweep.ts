@@ -2416,6 +2416,10 @@ async function regenerateDescriptionsForTarget(target: UnitAuditTarget): Promise
     const push = await loopbackJson("POST", "/api/builder/push-descriptions", {
       listingId: target.guestyListingId,
       descriptions: patch,
+      // The stage runs its OWN awaited published-address ensure right after —
+      // suppress the route's fire-and-forget hook so a full-automation audit
+      // doesn't double-push the address (2 concurrent GET/PUT/GET rounds).
+      skipPublishedAddressEnsure: true,
     }, 60_000).catch((e) => ({ status: 599, data: { error: String(e?.message ?? e) } }));
     if (push.status < 400 && (push.data as any)?.success === true && (push.data as any)?.verified === true) {
       guestyStatus = "pushed";

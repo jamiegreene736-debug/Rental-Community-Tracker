@@ -4291,10 +4291,25 @@ Engine in `server/published-address.ts`, pure logic in
    alone never means enabled.
 3. **The published street is structurally unit-free.**
    `buildGuestyPublishedAddress` never emits `unitNumber`/`apartment`/
-   `floor`/`buildingName`, and `stripPublishedUnitTokens` ALSO strips the
-   bare `#1834` form that the canonical `streetRootFromAddress` misses
-   (its `\b#` boundary can't match after a space — test-locked). Don't
-   "simplify" the strip back to the canonical helper alone.
+   `floor`/`buildingName`, and `stripPublishedUnitTokens` ALSO strips two
+   forms the canonical `streetRootFromAddress` misses (both test-locked):
+   the bare `#1834` form (its `\b#` boundary can't match after a space)
+   and the trailing hyphenated building-unit form `"2695 S Kihei Rd
+   10-201"` ($-anchored after a street-suffix word so LEADING Hawaii
+   house numbers `75-6082 Alii Dr` survive). `villa` is a designator ONLY
+   before a unit-shaped token (`Villa 2903`, `Villa B`) — real streets
+   like `100 Villa Del Mar Dr` / `70 Venice Villas Ln` must never be
+   mangled. Don't "simplify" the strip back to the canonical helper.
+3b. **Coordinates are type-checked, never Number()-coerced.**
+   `finiteCoord` (number-or-numeric-string, range-guarded ±90/±180) backs
+   `addressLat/addressLng` because `Number(null) === 0` — a raw coercion
+   would publish Null Island `{lat:0,lng:0}` from Guesty's
+   present-but-null coords and durably cache it.
+3c. **Operator wins on non-force pushes.** When the feature is already ON
+   with a street that is neither our target nor the unit's own street
+   root, hooks/audits return `alreadyOn` ("operator-set published address
+   left in place") instead of clobbering the customization. Only the
+   manual button / `force:true` backfill overwrite deliberately.
 4. **Resolution ladder = clubhouse → generic.**
    `discoverCommunityClubhouseAddress` (SearchAPI google_maps, clubhouse-
    flavored queries, the SAME whole-word `titleMatchesResort` gate so a
@@ -4305,7 +4320,18 @@ Engine in `server/published-address.ts`, pure logic in
    unit designators stripped → builder/draft street columns. Resolutions
    cache in app_settings `published_addresses.v1` keyed by builder
    propertyId (positive core / negative -draftId, 300-cap LRU); the
-   manual button forces a re-resolve, hooks are cache-first.
+   manual button forces a re-resolve (`forceRefresh` ALSO bypasses the
+   in-process clubhouse cache read — don't drop that param), hooks are
+   cache-first. THREE precision rails on the clubhouse leg (test-locked):
+   (a) a hint-worded candidate must share the rank-winner's footprint
+   (same street root or coords ≤1.5 km) — an off-site business named
+   after the resort can't beat the resort's own pin; (b) PM/realty
+   storefront titles (`PM_STOREFRONT_TITLE_RE`) never win the hint pass;
+   (c) a parsed clubhouse "city" that is itself a numbered street (the
+   "Star Route, 1000 Kamehameha V Hwy…" maps shape) is rejected in favor
+   of the fallback city. And a TRANSIENT discovery failure (429/quota)
+   never durably caches the generic fallback — only definitive outcomes
+   are written, so the next hook retries the clubhouse.
 5. **Ensure hooks are fire-and-forget + idempotent.** Same posture as
    `autoPushSavedAmenitiesForProperty`: void-fired, never throw, 2-min
    cooldown, and the engine SKIPS the PUT when Guesty already shows the

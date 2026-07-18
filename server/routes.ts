@@ -24893,8 +24893,13 @@ Requirements:
       // Every descriptions push also makes sure the "separate published
       // address" feature is on for this listing (fire-and-forget — same
       // never-delay-the-response contract as recordGuestyPush; skips when
-      // Guesty already shows the right published address).
-      ensurePublishedAddressForListing(listingId, "push-descriptions");
+      // Guesty already shows the right published address). The audit sweep's
+      // own loopback delivery opts out — its descriptions stage runs ONE
+      // authoritative awaited push right after, and double-firing would burn
+      // 4+ extra gated Guesty calls per audited listing every sweep.
+      if ((req.body as { skipPublishedAddressEnsure?: boolean })?.skipPublishedAddressEnsure !== true) {
+        ensurePublishedAddressForListing(listingId, "push-descriptions");
+      }
       return res.json({
         success: true,
         verified: true,
@@ -24919,7 +24924,11 @@ Requirements:
   // gets a fresh verification + ledger stamp.
   app.post("/api/builder/push-published-address", async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as { listingId?: string; propertyId?: number; force?: boolean };
-    const propertyId = Number.isFinite(Number(body.propertyId)) ? Number(body.propertyId) : null;
+    // Strict integer-and-nonzero guard: Number(null)/Number("") coerce to 0,
+    // and a 0 propertyId would poison the shared resolution-cache key "0".
+    const rawPid = typeof body.propertyId === "string" ? Number(body.propertyId) : body.propertyId;
+    const propertyId =
+      typeof rawPid === "number" && Number.isInteger(rawPid) && rawPid !== 0 ? rawPid : null;
     let listingId = typeof body.listingId === "string" && body.listingId.trim() ? body.listingId.trim() : null;
     if (!listingId && propertyId != null) {
       listingId = (await storage.getGuestyListingId(propertyId).catch(() => null)) ?? null;
@@ -24953,6 +24962,10 @@ Requirements:
   // already enabled with the right street are skipped (alreadyOn) unless
   // body.force is true. Serialized on purpose: the guesty-sync global gate
   // paces the calls, and a sequential walk keeps 429 pressure predictable.
+  // STREAMS NDJSON (one line per listing + a terminal "done" line) because a
+  // full-portfolio walk behind a Guesty 429 pause can outlive Railway's hard
+  // 15-minute edge response cap — a buffered JSON response would be cut and
+  // every per-listing result silently lost (the PR #1040 class).
   app.post("/api/admin/push-published-addresses", async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as { force?: boolean; propertyIds?: number[] };
     const wanted =
@@ -24965,37 +24978,55 @@ Requirements:
     } catch (e: any) {
       return res.status(500).json({ success: false, error: `Could not read the property map: ${e?.message ?? e}` });
     }
-    const seenListings = new Set<string>();
-    const results: Array<Record<string, unknown>> = [];
-    let pushed = 0;
-    let alreadyOn = 0;
-    let failed = 0;
-    for (const row of maps) {
-      const listingId = String(row.guestyListingId ?? "").trim();
-      if (!listingId || seenListings.has(listingId)) continue;
-      if (wanted && !wanted.has(row.propertyId)) continue;
-      seenListings.add(listingId);
-      const r = await pushPublishedAddressForListing({
-        listingId,
-        propertyId: row.propertyId,
-        force: body.force === true,
-        reason: "admin-backfill",
-      }).catch((e: any) => ({ ok: false as const, verified: false as const, error: String(e?.message ?? e) }));
-      if (r.ok && r.alreadyOn) alreadyOn++;
-      else if (r.ok) pushed++;
-      else failed++;
-      results.push({
-        propertyId: row.propertyId,
-        listingId,
-        ok: r.ok,
-        verified: r.verified,
-        alreadyOn: (r as any).alreadyOn === true,
-        street: (r as any).address?.street ?? null,
-        source: (r as any).address?.source ?? null,
-        error: r.ok ? undefined : r.error,
-      });
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.flushHeaders?.();
+    const writeLine = (obj: Record<string, unknown>) => {
+      try {
+        res.write(JSON.stringify(obj) + "\n");
+      } catch {
+        // client went away — keep the loop running server-side
+      }
+    };
+    const heartbeat = setInterval(() => writeLine({ type: "heartbeat", at: new Date().toISOString() }), 12_000);
+    try {
+      const seenListings = new Set<string>();
+      let total = 0;
+      let pushed = 0;
+      let alreadyOn = 0;
+      let failed = 0;
+      for (const row of maps) {
+        const listingId = String(row.guestyListingId ?? "").trim();
+        if (!listingId || seenListings.has(listingId)) continue;
+        if (wanted && !wanted.has(row.propertyId)) continue;
+        seenListings.add(listingId);
+        const r = await pushPublishedAddressForListing({
+          listingId,
+          propertyId: row.propertyId,
+          force: body.force === true,
+          reason: "admin-backfill",
+        }).catch((e: any) => ({ ok: false as const, verified: false as const, error: String(e?.message ?? e) }));
+        total++;
+        if (r.ok && (r as any).alreadyOn) alreadyOn++;
+        else if (r.ok) pushed++;
+        else failed++;
+        writeLine({
+          type: "listing",
+          propertyId: row.propertyId,
+          listingId,
+          ok: r.ok,
+          verified: r.verified,
+          alreadyOn: (r as any).alreadyOn === true,
+          street: (r as any).address?.street ?? null,
+          source: (r as any).address?.source ?? null,
+          error: r.ok ? undefined : r.error,
+        });
+      }
+      writeLine({ type: "done", success: failed === 0, total, pushed, alreadyOn, failed });
+    } finally {
+      clearInterval(heartbeat);
+      res.end();
     }
-    return res.json({ success: failed === 0, total: results.length, pushed, alreadyOn, failed, results });
   });
 
   // POST /api/admin/reflow-description-disclaimers
