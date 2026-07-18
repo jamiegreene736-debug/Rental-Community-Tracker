@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RotateCcw, RotateCw, ChevronLeft, ChevronRight, GripVertical } from "lucide-react";
 import { bestOrderIndices, scopeForSource } from "@shared/photo-order";
+import { stripDividerCaptionSuffix } from "@shared/photo-gallery-layout";
 import { normalizePhotoVerdictKey, photoVerdictKeyFromUrl } from "@shared/photo-verdict-keys";
 import { virtualStagingSessionAction } from "@shared/virtual-staging";
 import { Button } from "@/components/ui/button";
@@ -31,7 +32,15 @@ import VirtualStagingPhotoPickerDialog from "./VirtualStagingPhotoPickerDialog";
 
 export type { VirtualStagingUnit } from "./VirtualStagingDialog";
 
-type PhotoIn = { url: string; caption?: string; source?: string };
+type PhotoIn = {
+  url: string;
+  caption?: string;
+  source?: string;
+  // Set on the community photo published between two unit galleries. It keeps
+  // the community `source`; only the rendering below treats it specially.
+  isUnitDivider?: boolean;
+  dividerNextUnitLabel?: string;
+};
 export type CoverCollageSelection = { left: PhotoIn; right: PhotoIn };
 
 type LabelMeta = {
@@ -448,7 +457,7 @@ export default function PhotoCurator({
   // community gallery). Hidden photos are already excluded upstream by the
   // builder assembly, so every rendered tile is reorderable.
   type Tile = PhotoIn & { key: string; folder: string | null; filename: string | null; meta: LabelMeta | null };
-  type Section = { source: string; photos: Tile[] };
+  type Section = { source: string; isDivider: boolean; photos: Tile[] };
   const rawSections: Section[] = [];
   {
     let current: Section | null = null;
@@ -457,8 +466,13 @@ export default function PhotoCurator({
       const key = parsed ? `${parsed.folder}/${parsed.filename}` : `ext:${p.url.slice(-80)}`;
       const m = parsed ? meta.get(key) ?? null : null;
       const src = p.source || "Other";
-      if (!current || current.source !== src) {
-        current = { source: src, photos: [] };
+      const isDivider = !!p.isUnitDivider;
+      // Split on the divider flag as well as the source: a divider carries the
+      // COMMUNITY source, so when the unit gallery that follows it is empty the
+      // divider would otherwise merge into the community section and drag the
+      // whole gallery into the divider strip.
+      if (!current || current.source !== src || current.isDivider !== isDivider) {
+        current = { source: src, isDivider, photos: [] };
         rawSections.push(current);
       }
       current.photos.push({
@@ -491,6 +505,27 @@ export default function PhotoCurator({
   const sectionFolder = (section: Section): string | null =>
     section.photos.find((p) => p.folder)?.folder ?? null;
 
+  // A divider photo lives in the COMMUNITY folder but renders in its own
+  // section between two unit galleries (see shared/photo-gallery-layout.ts).
+  // Folder-scoped order persistence must still cover it: storage
+  // .reorderPhotosInFolder only stamps sort_order on the filenames it is
+  // handed, so persisting just the community SECTION would leave the divider
+  // with a stale/absent order and the "divider = the community gallery's first
+  // photo" invariant would drift on every drag. Dividers are prepended because
+  // they are, by construction, the front of the ordered community gallery.
+  const dividerTilesForFolder = (folder: string): Tile[] =>
+    sections
+      .filter((s) => s.isDivider)
+      .flatMap((s) => s.photos)
+      .filter((p) => p.folder === folder && !!p.filename);
+
+  // Caption to persist alongside the order. For a divider tile the rendered
+  // caption carries the "— next: Unit B" tail; strip it so the suffix can never
+  // be written into photo_labels as the photo's real label.
+  const tilePersistLabel = (p: Tile, isDivider: boolean): string =>
+    p.meta?.userLabel
+    || (isDivider ? stripDividerCaptionSuffix(p.caption) || p.meta?.label || "" : p.caption || p.meta?.label || "");
+
   // Persist a new front-to-back order (by tile key) for one gallery and show
   // it immediately via the optimistic overlay.
   const applySectionOrder = (section: Section, orderedKeys: string[]) => {
@@ -501,13 +536,16 @@ export default function PhotoCurator({
       .map((k) => byKey.get(k))
       .filter((p): p is Tile => !!p && !!p.filename);
     if (ordered.length !== section.photos.length) return;
-    const filenames = ordered.map((p) => p.filename as string);
-    setOptimisticOrder((prev) => new Map(prev).set(folder, filenames));
+    // Divider tiles of this folder lead the persisted order (never for a
+    // divider section itself — those are not reorderable).
+    const leading = section.isDivider ? [] : dividerTilesForFolder(folder);
+    const full = [...leading, ...ordered];
+    setOptimisticOrder((prev) => new Map(prev).set(folder, full.map((p) => p.filename as string)));
     onReorderSection(
       folder,
-      ordered.map((p) => ({
+      full.map((p) => ({
         filename: p.filename as string,
-        label: p.meta?.userLabel || p.caption || p.meta?.label || "",
+        label: tilePersistLabel(p, leading.includes(p)),
       })),
     );
   };
@@ -1269,6 +1307,43 @@ export default function PhotoCurator({
         const sourceUrl = firstFolder ? sourceUrlsByFolder?.[firstFolder] : undefined;
         const sectionVisible = section.photos.filter((p) => !p.meta?.hidden).length;
         const canReorder = reorderEnabled && !!firstFolder && section.photos.length > 1;
+
+        // A unit divider: one community photo published between two unit
+        // galleries so the guest can see the listing is two separate units.
+        // Rendered as a slim, NON-draggable strip — it is not its own gallery,
+        // and its order is owned by the community section (it is that
+        // gallery's first photo). Change it by dragging a different community
+        // photo to position 1, or turn it off in "Gallery order" above.
+        if (section.isDivider) {
+          const tile = section.photos[0];
+          const nextUnit = tile?.dividerNextUnitLabel ?? null;
+          return (
+            <div
+              key={`${section.source}-${i}`}
+              data-testid="photo-divider-strip"
+              style={{
+                display: "flex", alignItems: "center", gap: 10, margin: "4px 0 20px",
+                padding: 8, background: "#f0f9ff", border: "1px dashed #7dd3fc", borderRadius: 6,
+              }}
+            >
+              {tile?.url && (
+                <img
+                  src={tile.url}
+                  alt={tile.caption ?? "Unit divider photo"}
+                  style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
+                />
+              )}
+              <div style={{ fontSize: 11, color: "#0c4a6e", lineHeight: 1.5 }}>
+                <strong>↔ Unit divider{nextUnit ? ` — ${nextUnit} starts here` : ""}</strong>
+                <div style={{ color: "#0369a1" }}>
+                  This community photo is published between the units so guests can see it's two
+                  separate units. It's moved out of the community block, never shown twice.
+                  {tile?.caption ? <> Caption: “{tile.caption}”.</> : null}
+                </div>
+              </div>
+            </div>
+          );
+        }
 
         return (
           <div key={`${section.source}-${i}`} style={{ marginBottom: 20 }}>

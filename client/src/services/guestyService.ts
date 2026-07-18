@@ -26,6 +26,15 @@ export type GuestyPhoto = {
   source?: string;
   /** Logical builder unit identity; omitted for community/external photos. */
   unitId?: string;
+  /**
+   * The community photo published BETWEEN two unit galleries so a guest can see
+   * the listing is two separate units. It keeps the community `source` (it is a
+   * community photo) — this flag exists only so the Photos tab can render it as
+   * a divider strip. See shared/photo-gallery-layout.ts.
+   */
+  isUnitDivider?: boolean;
+  /** Label of the unit that starts after this divider ("Unit B (3BR)"). */
+  dividerNextUnitLabel?: string;
 };
 
 export type GuestyDescriptions = {

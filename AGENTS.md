@@ -1825,6 +1825,14 @@ guards on the routes.ts wiring).
       units. The operator asked (2026-06-19) for a clean
       units-then-community grouping, so that interleave logic is GONE. Don't
       reintroduce community-opener / between-unit separators.
+      **PARTLY SUPERSEDED 2026-07-18 (PR #1086) — see "Published gallery
+      layout — unit order + unit divider" below.**
+      The operator re-asked for ONE community photo between the units (so a
+      guest scrolling the OTA gallery can see it's two units). The between-unit
+      separator is therefore BACK, but only as a single photo, MOVED out of the
+      community block (never a copy) and operator-toggleable. The
+      community-OPENER before unit A stays gone — do not reintroduce it, and do
+      not restore the old multi-photo interleave.
     - **Hero-first default is intentional and OVERRIDES old decision #2.**
       Within each gallery the default order is the category heuristic in
       `shared/photo-order.ts` (`orderGallery`): living/view/kitchen → bedrooms
@@ -1880,6 +1888,83 @@ guards on the routes.ts wiring).
       distance math live in `shared/photo-hash-distance.ts`
       (`agreementImageIdentityHolds`), locked by
       `tests/photo-hashing-identity.test.ts`.
+
+### Published gallery layout — unit order + unit divider (Load-Bearing, 2026-07-18, PR #1086)
+
+Operator ask: a Photos-tab control to choose whether Unit A's or Unit B's
+photos are shown first, and "if you can break up unit A and unit B with a
+community photo … so the guest knows that it's two units". Published order is
+now:
+
+```
+cover collage → <lead unit> → [community divider] → <next unit> → … → community
+```
+
+1. **"Collage first" was ALREADY true — no change was made for it.**
+   `/api/builder/push-photos` GETs the listing, captures the
+   `"Cover Collage"`-captioned picture and re-prepends it on every PUT (see
+   #46). Don't re-implement collage pinning in the layout.
+
+2. **`shared/photo-gallery-layout.ts` owns the ACROSS-gallery contract;
+   `shared/photo-order.ts` still owns WITHIN a gallery.** The split is
+   load-bearing: every folder-scoped operation (drag-to-reorder, "best order",
+   relabel, `photo_labels.sort_order`) keys off `orderGallery`, and the layout
+   never touches `sort_order`.
+
+3. **BOTH push assemblies must apply the layout.** `client/src/pages/builder.tsx`
+   (`propertyData.photos` — the Photos-tab gallery AND the body of the manual
+   push, which is sent verbatim) and `server/guesty-photo-repush.ts` (the
+   AUTOMATED re-push after a unit swap + the retroactive sweep). Wire one and
+   not the other and a unit replacement silently reverts the operator's chosen
+   order. Source-guarded in `tests/photo-gallery-layout.test.ts`.
+
+4. **The setting is SERVER-side (`app_settings photo_gallery_layout.v1`, keyed
+   by builder propertyId — positive core id OR `-draftId`), NOT localStorage.**
+   The automated re-push runs with no browser in the loop; a per-browser
+   preference would be invisible to it (the Bedding-tab limitation — Unit Audit
+   Sweep #9). Reads are fail-soft (an unreadable store = defaults); the operator
+   SAVE path deliberately reports errors instead of silently no-opping.
+
+5. **The divider photo is MOVED, never duplicated.** It is taken from the FRONT
+   of the already-ordered community gallery (its hero) and removed from the
+   community block, so it appears exactly once and doesn't burn one of Airbnb's
+   100 picture slots. Consequence the operator picks the divider with no extra
+   UI: drag a community photo to position 1. At least one community photo always
+   remains (`MIN_COMMUNITY_PHOTOS_AFTER_DIVIDERS`), so a thin folder just gets
+   fewer dividers — never a duplicate, never an empty community section.
+
+6. **The divider KEEPS the community `source` string** and is marked with an
+   explicit `isUnitDivider` flag instead. Giving it a source of its own broke
+   three source-driven consumers at once: the photo-community check built a
+   bogus one-photo "unit" group (`role` is derived from `/^community\b/i` on
+   `source`), the dedupe scan mislabelled the community folder, and the
+   cover-collage community/unit pools mis-sorted it. Only the renderer looks at
+   the flag.
+
+7. **Divider tiles fold back into their folder's persisted order.**
+   `storage.reorderPhotosInFolder` only stamps `sort_order` on the filenames it
+   is handed, so persisting just the community SECTION (which excludes the
+   moved divider) would leave the divider with a stale order and the
+   "divider = community photo #1" invariant would drift on every drag.
+   `PhotoCurator.dividerTilesForFolder` prepends them. PhotoCurator also splits
+   sections on the divider flag, not just `source` — otherwise a divider
+   followed by an EMPTY unit gallery merges into the community section.
+
+8. **Unit letters come from the NATURAL index, never the display order.**
+   Showing Unit B first must not rename it to "Unit A" — the letter is the
+   unit's identity in descriptions, bedding, and the audit. `unitGalleryLabel`
+   is shared so the divider caption is byte-identical across the manual and
+   automated push.
+
+9. **Divider captions are the photo's own caption + " — next: Unit B (3BR)"**
+   (operator's choice over divider-only wording: the photo still describes
+   itself). `dividerCaptionFor` is idempotent and `stripDividerCaptionSuffix`
+   runs before any caption is written back to `photo_labels`, so the tail can
+   never compound or be persisted as a photo's real label.
+
+10. **Dividers default ON** (`DEFAULT_UNIT_DIVIDERS`) per the operator's rollout
+    choice — a property with no saved row still gets one. `unitDividers: false`
+    is the explicit per-property opt-out. Single-unit listings never get one.
 
 ### Bedding-tab bedroom count is RECONCILED, never trusted (Load-Bearing, 2026-07-18)
 
@@ -5667,5 +5752,7 @@ Welcome. When in doubt, ask the human.
 2026-07-18 · Jamie: "A few people have asked me how does a 4 bedroom sleep 12 people. In the description can we please explain this? … each unit has a sleeper sofa. So it's 4 bedroom, sleeps 2 each which is 8 guests. Then two sleeper sofas, sleep two people each so that's another 4 people. 4 plus 8 is 12 … make sure that all listings have the AI description explain this … then update the methodology, then update all listings and make sure the new descriptions push to Guesty, if the unit is in fact connected to Guesty." · ACCEPTED + shipped (`claude/listing-capacity-explanation-b925ba`) · KEY FINDING (don't re-chase): the arithmetic was ALREADY the system's occupancy rule — `shared/occupancy.ts` `occupancyForBedrooms` has been "2 guests per bedroom + sleeper sofas" (+2 for a single condo, +4 for the two-condo combos) since 2026-06-16, and it already drives the title's "Sleeps N", the dashboard Guests column, and Guesty `accommodates`. Nothing needed inventing; the number was advertised everywhere and EXPLAINED nowhere. NEW pure `buildSleepingCapacityExplanation` / `describesSleepingCapacity` / `ensureSleepingCapacityExplanation` / `sleepingCapacityPromptContext` + `SLEEPING_CAPACITY_RULE` (shared/description-copy.ts) DERIVE the guest-facing paragraph from that one rule, so it can never contradict the headline ("Here is how a 4-bedroom listing sleeps 12: the 4 bedrooms sleep 8 guests at 2 per bedroom, and each of the 2 units has a sleeper sofa in the living area that sleeps 2, which adds 4 more. 8 plus 4 is 12 guests in total."). BELT AND BRACES in `/api/community/generate-listing`: both prompt variants get the math as authoritative CONTEXT + the rule (Claude writes it in its own voice), AND the endpoint deterministically ensures the paragraph after parsing — including on the no-key FALLBACK path — because "all listings explain this" must not depend on model compliance; the ensure runs before the resort-fee append so the fee caveat stays last. ONE seam covers the Descriptions-tab button, the audit sweep's regenerate twin, and the bulk-combo pipeline. HONESTY (returns null, claims nothing): 0 bedrooms, a non-even sofa remainder, and a STANDALONE listing carrying the combo +4 (would claim two sleeper sofas in one living room); sofas are never given a SIZE (the Bedding tab stores only a count — "queen sleeper sofa" would be invented, same rule `buildSpaceDescription` follows). Placement is disclosure-aware so the paragraph joins the summary BODY, never landing under the "Unit assignment note" legalese, and detection is deliberately generous so a model-written explanation is never DUPLICATED in live guest copy. BACKFILL — operator chose SURGICAL over full AI regeneration when asked: NEW `POST /api/admin/backfill-sleeping-capacity` (NDJSON + heartbeat, dry-run by default, `{execute:true}` to write) inserts the paragraph into each mapped listing's CURRENT Guesty summary and pushes it back with NO Claude call, so existing copy and hand-edited overrides survive verbatim; it persists the Descriptions-tab override BEFORE the Guesty PUT (order load-bearing — the override table is what a later push-descriptions sends, so skipping it would let the next push revert Guesty), read-back verifies, stamps the push ledger, and SKIPS any listing whose Guesty `accommodates` disagrees with the computed occupancy (real bedroom-count drift, the same-day Cliffs class — a human decision, not a paragraph that argues with the listing's own headline). See Load-Bearing #33 "Every summary EXPLAINS its own occupancy". Verified: description-copy 109/0 (31 new incl. source guards on both prompt variants, both ensure paths, and all six backfill invariants), full `npm test` green (the one failure, city-vrbo-expansion.smoke, is the documented pre-existing flake — reproduced 1-fail/1-pass on a clean stash, and none of its imports touch this change), build clean (all four new strings bundle-grepped), `npm run check` 335 = baseline with git-stash A/B showing IDENTICAL per-file error sets. One pre-existing source guard repointed (the fallback access/houseRules span grew 1200→1600 chars because the fallback gained the capacity ensure — intent preserved and re-verified by hand).
 
 2026-07-18 · Claude (follow-up to the same-day sleeping-capacity PR, found by DRY-RUNNING the backfill against all 24 live listings before writing anything) · Three fixes, none of which a test could have surfaced — only real data did. (1) TITLE DRIFT IS A SECOND SURFACE: the honesty gate compared only Guesty `accommodates`, and Mauna Lani Point (draft -13) passed it while its LIVE title read "Sleeps 12" against accommodates 16 — the backfill would have published a "sleeps 16" paragraph a guest could see contradicting the title directly above it. New pure `advertisedOccupancyFromTitle` (parses both formats `syncTitleOccupancy` pins) is now checked ALONGSIDE accommodates; either disagreement skips the listing with both numbers reported. (2) NULL DRAFT BEDROOMS: three mapped drafts (Bonita National -6, Kamaole Beach Club -86, Royal Kahana -46) carry null `unit1/unit2Bedrooms`, so the resolver sized them at 0 and skipped them — yet Guesty holds correct `bedrooms` (2/4/4) AND matching `accommodates` (6/12/12). The backfill now falls back to Guesty's bedroom count ONLY when the app side has none, and the accommodates + title gates still have to agree, so the fallback cannot smuggle in an unverified number. (3) The `there are N sleeper sofas` clause could fire on shapes the rule doesn't actually describe (e.g. a 2-unit 2BR listing, where +2 yields ONE sofa across TWO living rooms). That branch is DELETED: `buildSleepingCapacityExplanation` now returns null unless `sofaCount === unitCount` — exactly one sleeper sofa per unit, the only layout the occupancy rule encodes. Test-locked (`every explanation it DOES produce has exactly one sofa per unit`). LESSON worth keeping: the dry-run's value was not catching bugs in the diff — it was revealing that our OWN stored `bookingTitle` strings have drifted from Guesty on ~7 listings (they showed "Sleeps 8/12/14" against correct live titles and correct accommodates). Those stale DB titles are cosmetic today because the live listings are right, but they are the same drift class as the Cliffs incident and are worth a separate reconcile pass. Verified: description-copy 113/0, full `npm test` chain green (136/136 files), build clean, `npm run check` 335 = baseline.
+
+2026-07-18 · Jamie: "build out in the UI in the photos tab a button and/or a process whereby I can select if unit A's photos or unit B's photos are shown first. The photo order should therefore be: collage photo first, then unit A or unit B, then the community folder photos. If you can break up unit A and unit B with a community photo when it is pushed to Guesty, that would be great so the guest knows that it's two units." · ACCEPTED, PARTLY SUPERSEDES the 2026-06-19 "don't reintroduce between-unit separators" rule (Load-Bearing #46, PR #1086) · New "Gallery order" panel on the Photos tab (multi-unit properties only): a ▲/▼ list picking which unit leads, plus a "Separate the units with a community photo" checkbox (default ON per operator choice). Published order is now `cover collage → <lead unit> → [community divider] → <next unit> → … → community`. VERIFIED-ALREADY-TRUE, don't re-chase: "collage first" needed NO change — push-photos re-pins the "Cover Collage" picture on every PUT (#46). The between-unit separator is BACK but scoped hard: ONE photo, MOVED out of the community block (never duplicated — a copy would show twice in the guest gallery and burn one of Airbnb's 100 slots), taken from the front of the ordered community gallery so the operator re-picks it just by dragging a community photo to position 1, and floored so the community section can never empty; the community-OPENER before unit A stays gone. Pure contract in NEW `shared/photo-gallery-layout.ts` (across-gallery) — deliberately separate from `shared/photo-order.ts` (within-gallery), which still owns every `photo_labels.sort_order` operation. LOAD-BEARING: the layout is applied by BOTH push assemblies (builder.tsx `propertyData.photos` = the tab gallery AND the manual push body, and server/guesty-photo-repush.ts = the automated post-swap/retroactive push) — wiring only one lets a unit replacement silently revert the operator's order; source-guarded. Setting is SERVER-side (`app_settings photo_gallery_layout.v1`, keyed by propertyId incl. `-draftId`) precisely because the automated re-push has no browser (the Bedding-tab localStorage limitation). Three self-inflicted traps found and fixed pre-merge: (1) giving the divider its own `source` made the photo-community check build a bogus one-photo "unit" group and mislabelled the dedupe scan + collage pools — it now KEEPS the community source and carries an `isUnitDivider` flag; (2) the moved divider left the community folder's drag-reorder persisting a PARTIAL `sort_order` (reorderPhotosInFolder only stamps what it is handed), so divider tiles are folded back into their folder's persisted order; (3) sections split on the divider flag, not just source, or a divider before an EMPTY unit gallery swallows the community section. Unit letters come from the NATURAL index so reordering never renames Unit B to Unit A. Captions are the photo's own text + " — next: Unit B (3BR)" (operator's choice), idempotent and stripped before any write-back to photo_labels. Verified: photo-gallery-layout 16 groups/0 fail, full `npm test` REAL exit 0, build clean (strings bundle-grepped in BOTH bundles), `npm run check` per-file error sets IDENTICAL to the 335 baseline, and the UI proven on the BUILT bundle (static SPA server + Playwright, mocked /api — 14/14: panel renders, divider strip announces the next unit, community section drops 4→3 photos proving the move-not-copy, ▲/▼ PATCHes the unitOrder, the checkbox PATCHes unitDividers and the strip disappears). Could NOT live-push to Guesty (no creds in session) — post-deploy: open a 2-unit Photos tab, set the order, then "Push Photos to Guesty" and expect collage → lead unit → one resort photo captioned "… — next: Unit X" → other unit → the rest of the community.
 
 2026-07-18 · Claude (second follow-up, caught by READING BACK the one listing the live backfill reported as already-explained rather than trusting the counter) · `describesSleepingCapacity` scanned the WHOLE summary for a sofa mention + both numbers, which false-positived on Poipu Kai 5BR (draft 9, sleeps 14 / 10 bedroom guests): a "sofa bed" in its Unit A blurb, "14 guests" in the opening line, and the `10` inside "a short 10-minute walk from the resort" three paragraphs later were read as an explanation, so the backfill skipped a listing that had none. FIX: all three signals must now co-occur in the SAME PARAGRAPH (`body.split(/\n\s*\n/).some(...)`) — a real explanation states its arithmetic in one breath, while three unrelated facts scattered down a summary do not. The canonical sentence and any model-written one-breath version both still register, so re-running the backfill can't double-insert into the 21 listings already updated (verified: the post-fix run left them alone and updated only draft 9). Regression-locked with the exact live text that fooled it. LESSON: the generous-detection trade-off was reasoned about correctly in the abstract (a false negative duplicates guest-visible copy, a false positive merely leaves existing copy alone) but the second half was WRONG in practice — a false positive here silently left a listing unexplained, which was the entire point of the work. Counters said "already-explained"; only reading the actual listing showed it wasn't.

@@ -30,6 +30,8 @@ import {
   recentUnitSwapPropertyIds,
   type GuestyPushGallery,
 } from "@shared/guesty-photo-repush";
+import { unitGalleryLabel } from "@shared/photo-gallery-layout";
+import { getPhotoGalleryLayout } from "./photo-gallery-layout";
 import { listPhotoFiles } from "./photo-labeler";
 import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
@@ -106,11 +108,22 @@ async function draftPushUnits(propertyId: number): Promise<
   // field never persisted still stores photos under draft-<id>-unit-a/b, and
   // resolveActiveUnitPhotoFolders drops folder-less units entirely (which
   // would silently exclude a REPLACED unit's gallery from the push).
-  const units: Array<{ id: string; photoFolder?: string }> = [
-    { id: draftUnitIdForSlot(draftId, "a"), photoFolder: draft.unit1PhotoFolder ?? `draft-${draftId}-unit-a` },
+  // `bedrooms` feeds the divider caption's unit label ("… — next: Unit B (3BR)")
+  // via the shared unitGalleryLabel, so a draft's automated re-push produces the
+  // same caption as the operator's manual push from the builder.
+  const units: Array<{ id: string; photoFolder?: string; bedrooms?: number | null }> = [
+    {
+      id: draftUnitIdForSlot(draftId, "a"),
+      photoFolder: draft.unit1PhotoFolder ?? `draft-${draftId}-unit-a`,
+      bedrooms: (draft as any).unit1Bedrooms ?? null,
+    },
   ];
   if ((draft as any).singleListing !== true) {
-    units.push({ id: draftUnitIdForSlot(draftId, "b"), photoFolder: draft.unit2PhotoFolder ?? `draft-${draftId}-unit-b` });
+    units.push({
+      id: draftUnitIdForSlot(draftId, "b"),
+      photoFolder: draft.unit2PhotoFolder ?? `draft-${draftId}-unit-b`,
+      bedrooms: (draft as any).unit2Bedrooms ?? null,
+    });
   }
   return {
     propertyName: draft.name,
@@ -131,9 +144,17 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
   if (!guestyListingId) return { skipped: "no-guesty-mapping", propertyName };
 
   const swaps = await storage.getUnitSwaps(propertyId).catch(() => []);
-  const pushUnits: Array<{ id: string; photoFolder?: string; photos?: Array<{ filename: string; label: string }> }> =
-    builder ? builder.units : draft!.units;
+  const pushUnits: Array<{
+    id: string;
+    photoFolder?: string;
+    bedrooms?: number | null;
+    photos?: Array<{ filename: string; label: string }>;
+  }> = builder ? builder.units : draft!.units;
   const activeFolders = resolveActiveUnitPhotoFolders(propertyId, pushUnits, swaps);
+  // The operator's saved layout (which unit leads + the between-units community
+  // divider). Fail-soft to defaults — a preference that can't be read must
+  // never block a push that is removing stolen photos from Guesty.
+  const layout = await getPhotoGalleryLayout(propertyId).catch(() => null);
 
   const galleries: GuestyPushGallery[] = [];
   const galleryFor = async (
@@ -141,6 +162,7 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
     scope: "unit" | "community",
     staticLabels?: Record<string, string>,
     unitId?: string,
+    unitLabel?: string,
   ): Promise<GuestyPushGallery> => {
     const diskFiles = (await listPhotoFiles(path.join(photosRoot(), folder)).catch(() => [] as string[])).slice().sort();
     const files = unitId
@@ -152,6 +174,8 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
       files,
       labels: await storage.getPhotoLabelsByFolder(folder).catch(() => []),
       staticLabels,
+      unitId,
+      unitLabel,
     };
   };
 
@@ -159,13 +183,21 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
   // tab. Static unit-builder-data captions only apply to a builder unit's
   // ORIGINAL folder; replacement folders (and all draft folders) are labeled
   // by the Claude labeler / photo_labels rows.
-  for (const unit of pushUnits) {
+  // The unit LETTER comes from the natural index in pushUnits — the unit's
+  // identity — not from the operator's display order, so reordering the gallery
+  // never renames Unit B to Unit A.
+  // Indexed loop, not .entries() — the repo's TS target rejects iterating an
+  // array iterator (TS2802).
+  for (let index = 0; index < pushUnits.length; index++) {
+    const unit = pushUnits[index];
     const active = activeFolders.find((f) => f.unitId === unit.id);
     if (!active?.activeFolder) continue;
     const staticLabels = !active.replaced && Array.isArray(unit.photos)
       ? Object.fromEntries(unit.photos.map((p) => [p.filename, p.label]))
       : undefined;
-    galleries.push(await galleryFor(active.activeFolder, "unit", staticLabels, unit.id));
+    galleries.push(
+      await galleryFor(active.activeFolder, "unit", staticLabels, unit.id, unitGalleryLabel(index, unit.bedrooms)),
+    );
   }
   // Community last.
   const communityFolder = builder ? builder.communityPhotoFolder : draft!.communityFolder;
@@ -176,7 +208,7 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
     galleries.push(await galleryFor(communityFolder, "community", staticLabels));
   }
 
-  const photos = assembleGuestyPushPhotos(galleries);
+  const photos = assembleGuestyPushPhotos(galleries, layout);
   if (photos.length === 0) return { skipped: "no-photos", propertyName };
   return { photos, guestyListingId, propertyName };
 }

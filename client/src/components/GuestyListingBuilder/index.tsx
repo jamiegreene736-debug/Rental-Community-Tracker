@@ -62,6 +62,7 @@ import {
 import { BUY_IN_MARKET_LOCATIONS, curatedResortSearchName, isCuratedBuyInMarket, resolveBuyInMarketFromText } from "@shared/buy-in-market";
 import { computeMarketRateMatchConfirmation } from "@shared/market-rate-match-confirmation";
 import { builderTabFromSearch, type BuilderTabKey } from "@shared/builder-deep-link";
+import { applyUnitOrder, unitDividersEnabled, type PhotoGalleryLayout } from "@shared/photo-gallery-layout";
 
 // Reads the durable server push ledger's PHOTOS entry for a listing.
 // Fail-soft (null) — the ledger is the reconcile signal for a photo push
@@ -279,6 +280,13 @@ type Props = {
   // PhotoCurator so each unit section can show a "View source listing" link.
   sourceUrlsByFolder?: Record<string, string>;
   virtualStagingUnits?: VirtualStagingUnit[];
+  // Published gallery layout: which unit leads the pushed gallery, and whether
+  // a community photo divides the units. Server-persisted so the automated
+  // re-push applies the same order — see shared/photo-gallery-layout.ts.
+  galleryLayout?: PhotoGalleryLayout | null;
+  /** Every unit in NATURAL order (A, B, …) with its stable display label. */
+  galleryUnits?: Array<{ id: string; label: string }>;
+  onSaveGalleryLayout?: (patch: { unitOrder?: string[]; unitDividers?: boolean }) => Promise<void>;
   isSingleListing?: boolean;
   onBuildComplete?: (result: { listingId: string | null }) => void;
   onUpdateComplete?: (result: { listingId: string | null }) => void;
@@ -1018,7 +1026,143 @@ function GuestyRatePushCard({
   );
 }
 
-export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, virtualStagingUnits, isSingleListing = false, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged, onVirtualStagingConfirmed }: Props) {
+/**
+ * Photos-tab control for the PUBLISHED gallery order (2026-07-18 operator ask):
+ * which unit leads, and whether a community photo divides the units so a guest
+ * scrolling the OTA gallery can see it is two units.
+ *
+ * Only renders for multi-unit properties — a single listing has no unit order
+ * to choose and nothing to divide.
+ *
+ * Saving goes straight to the server (app_settings) rather than localStorage so
+ * the automated re-push after a unit swap applies the same order; see
+ * shared/photo-gallery-layout.ts.
+ */
+function GalleryOrderPanel({
+  units,
+  layout,
+  onSave,
+}: {
+  units: Array<{ id: string; label: string }>;
+  layout: PhotoGalleryLayout | null;
+  onSave?: (patch: { unitOrder?: string[]; unitDividers?: boolean }) => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (units.length < 2) return null;
+
+  const ordered = applyUnitOrder(
+    units.map((u) => ({ ...u, unitId: u.id })),
+    layout?.unitOrder,
+  );
+  const dividers = unitDividersEnabled(layout);
+
+  const persist = async (patch: { unitOrder?: string[]; unitDividers?: boolean }) => {
+    if (!onSave || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(patch);
+    } catch (e: any) {
+      setError(e?.message ?? "Could not save the gallery order");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const moveUnit = (index: number, delta: number) => {
+    const next = ordered.slice();
+    const target = index + delta;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    void persist({ unitOrder: next.map((u) => u.unitId) });
+  };
+
+  return (
+    <div style={{ marginBottom: 10, padding: 10, background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: "#334155" }}>🔀 Gallery order</span>
+        <span style={{ fontSize: 11, color: "#64748b", flex: 1, minWidth: 220 }}>
+          Sets the order photos are pushed to Guesty (and on to Airbnb / VRBO / Booking.com).
+        </span>
+        {saving && <span style={{ fontSize: 11, color: "#0e7490" }}>Saving…</span>}
+      </div>
+
+      {/* Which unit leads */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+        {ordered.map((unit, index) => (
+          <div
+            key={unit.unitId}
+            data-testid={`gallery-order-unit-${unit.unitId}`}
+            style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "4px 8px",
+              background: "#fff", border: "1px solid #e2e8f0", borderRadius: 4, fontSize: 12,
+            }}
+          >
+            <span style={{ color: "#94a3b8", fontVariantNumeric: "tabular-nums" }}>{index + 1}.</span>
+            <span style={{ flex: 1, color: "#334155" }}>{unit.label}</span>
+            {index === 0 && (
+              <span style={{ fontSize: 10, color: "#15803d", background: "#dcfce7", padding: "1px 6px", borderRadius: 3 }}>
+                shown first
+              </span>
+            )}
+            <button
+              className="glb-btn"
+              onClick={() => moveUnit(index, -1)}
+              disabled={index === 0 || saving || !onSave}
+              aria-label={`Move ${unit.label} earlier`}
+              data-testid={`gallery-order-up-${unit.unitId}`}
+              style={{ fontSize: 11, padding: "1px 7px" }}
+            >
+              ▲
+            </button>
+            <button
+              className="glb-btn"
+              onClick={() => moveUnit(index, 1)}
+              disabled={index === ordered.length - 1 || saving || !onSave}
+              aria-label={`Move ${unit.label} later`}
+              data-testid={`gallery-order-down-${unit.unitId}`}
+              style={{ fontSize: 11, padding: "1px 7px" }}
+            >
+              ▼
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Divider between units */}
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: "#334155", cursor: onSave ? "pointer" : "default" }}>
+        <input
+          type="checkbox"
+          checked={dividers}
+          disabled={saving || !onSave}
+          data-testid="gallery-order-dividers"
+          onChange={(e) => void persist({ unitDividers: e.target.checked })}
+          style={{ marginTop: 2 }}
+        />
+        <span>
+          Separate the units with a community photo
+          <span style={{ display: "block", fontSize: 11, color: "#64748b" }}>
+            Moves the community gallery's first photo between the units and captions it
+            “… — next: {ordered[1]?.label ?? "the next unit"}”, so guests can see the listing is two
+            separate units. The photo moves — it is never shown twice.
+          </span>
+        </span>
+      </label>
+
+      <div style={{ fontSize: 11, color: "#64748b", marginTop: 8 }}>
+        Pushed order: cover collage → {ordered.map((u) => u.label).join(dividers ? " → community photo → " : " → ")} → community photos
+      </div>
+
+      {error && (
+        <div style={{ fontSize: 12, color: "#b91c1c", marginTop: 6 }} data-testid="gallery-order-error">✗ {error}</div>
+      )}
+    </div>
+  );
+}
+
+export default function GuestyListingBuilder({ propertyData, propertyId, sourceUrlsByFolder, virtualStagingUnits, galleryLayout, galleryUnits, onSaveGalleryLayout, isSingleListing = false, onBuildComplete, onUpdateComplete, onPhotoOverridesChanged, onVirtualStagingConfirmed }: Props) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
@@ -9287,6 +9431,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   )}
                                 </div>
                               )}
+
+                              {/* ── Gallery order ─────────────────────────────
+                                  Which unit leads the published gallery, and
+                                  whether a community photo divides the units so
+                                  the guest can see it's two units. Saved
+                                  server-side so the automated re-push after a
+                                  unit swap applies the same order. */}
+                              <GalleryOrderPanel
+                                units={galleryUnits ?? []}
+                                layout={galleryLayout ?? null}
+                                onSave={onSaveGalleryLayout}
+                              />
 
                               {/* ── Photo Community Check ─────────────────────
                                   Operator QA: confirms the community folder +
