@@ -38,6 +38,7 @@ import { occupancyForBedrooms } from "@shared/occupancy";
 import {
   DESCRIPTION_OVERRIDE_FIELDS,
   SLEEPING_CAPACITY_RULE,
+  advertisedOccupancyFromTitle,
   buildSleepingCapacityExplanation,
   clampGroundingSnippet,
   describesSleepingCapacity,
@@ -25222,8 +25223,28 @@ Requirements:
             emit({ status: "skipped", reason: "no builder entry or draft for this propertyId" });
             continue;
           }
+
+          const fetched = await guestyRequest(
+            "GET",
+            `/listings/${encodeURIComponent(listingId)}?fields=${encodeURIComponent("publicDescription accommodates bedrooms title")}`,
+          ) as Record<string, unknown>;
+
+          // Older drafts were saved with null unit1/unit2Bedrooms, so the app
+          // side can't size them. Guesty carries the real bedroom count for
+          // those listings, and the accommodates + title checks below still
+          // have to agree before anything is written — so the fallback can't
+          // smuggle in an unverified number.
+          const guestyBedrooms = Number(fetched.bedrooms);
+          const bedrooms =
+            target.bedrooms > 0
+              ? target.bedrooms
+              : Number.isFinite(guestyBedrooms) && guestyBedrooms > 0
+                ? guestyBedrooms
+                : 0;
+          const bedroomSource = target.bedrooms > 0 ? "app" : "guesty";
+
           const explanation = buildSleepingCapacityExplanation({
-            bedrooms: target.bedrooms,
+            bedrooms,
             unitCount: target.unitCount,
           });
           if (!explanation) {
@@ -25231,34 +25252,44 @@ Requirements:
             emit({
               status: "skipped",
               label: target.label,
-              reason: `occupancy rule cannot explain ${target.bedrooms} bedrooms across ${target.unitCount} unit(s) — nothing claimed`,
+              reason: `occupancy rule cannot explain ${bedrooms} bedrooms across ${target.unitCount} unit(s) — nothing claimed`,
             });
             continue;
           }
-
-          const fetched = await guestyRequest(
-            "GET",
-            `/listings/${encodeURIComponent(listingId)}?fields=${encodeURIComponent("publicDescription accommodates title")}`,
-          ) as Record<string, unknown>;
           const currentPublicDescription =
             fetched.publicDescription && typeof fetched.publicDescription === "object"
               ? fetched.publicDescription as Record<string, unknown>
               : {};
           const currentSummary = String(currentPublicDescription.summary ?? "").trim();
 
-          // HONESTY GATE: never publish a breakdown that contradicts the number
-          // the listing already advertises. A disagreement here is real data
-          // drift (the Cliffs class) and needs a human, not a paragraph that
-          // argues with the listing's own "Sleeps N".
-          const advertised = Number(fetched.accommodates);
-          if (!force && Number.isFinite(advertised) && advertised > 0 && advertised !== explanation.sleeps) {
+          // HONESTY GATE: never publish a breakdown that contradicts a number
+          // the listing already advertises. A disagreement is real data drift
+          // (the 2026-07-18 Cliffs class) and needs a human, not a paragraph
+          // arguing with the listing's own headline. BOTH surfaces are checked:
+          // `accommodates` (structured capacity) and the TITLE's "Sleeps N",
+          // which can drift independently — a live Mauna Lani Point title read
+          // "Sleeps 12" against accommodates 16, and an accommodates-only gate
+          // would have published prose the guest could see contradicting it.
+          const advertisedAccommodates = Number(fetched.accommodates);
+          const advertisedTitle = advertisedOccupancyFromTitle(String(fetched.title ?? ""));
+          const contradictions: string[] = [];
+          if (Number.isFinite(advertisedAccommodates) && advertisedAccommodates > 0
+              && advertisedAccommodates !== explanation.sleeps) {
+            contradictions.push(`Guesty accommodates ${advertisedAccommodates}`);
+          }
+          if (advertisedTitle !== null && advertisedTitle !== explanation.sleeps) {
+            contradictions.push(`the listing title advertises ${advertisedTitle}`);
+          }
+          if (!force && contradictions.length > 0) {
             skipped++;
             emit({
               status: "skipped",
               label: target.label,
-              reason: `Guesty advertises accommodates ${advertised} but ${target.bedrooms} bedrooms across ${target.unitCount} unit(s) computes to ${explanation.sleeps} — review the bedroom counts before backfilling`,
-              advertised,
+              reason: `${contradictions.join(" and ")}, but ${bedrooms} bedrooms across ${target.unitCount} unit(s) computes to ${explanation.sleeps} — reconcile the listing before backfilling`,
+              accommodates: Number.isFinite(advertisedAccommodates) ? advertisedAccommodates : null,
+              titleSleeps: advertisedTitle,
               computed: explanation.sleeps,
+              guestyTitle: String(fetched.title ?? ""),
             });
             continue;
           }
@@ -25280,7 +25311,8 @@ Requirements:
               status: "would-update",
               label: target.label,
               kind: target.kind,
-              bedrooms: target.bedrooms,
+              bedrooms,
+              bedroomSource,
               unitCount: target.unitCount,
               sleeps: explanation.sleeps,
               dryRun: true,

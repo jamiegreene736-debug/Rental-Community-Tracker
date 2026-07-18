@@ -8,6 +8,7 @@ import {
   SLEEPING_CAPACITY_RULE,
   SUMMARY_DISCLOSURE_LEADS,
   SUMMARY_DISCLOSURE_SEPARATOR,
+  advertisedOccupancyFromTitle,
   buildSleepingCapacityExplanation,
   clampGroundingSnippet,
   confirmedBeddingBedPortion,
@@ -372,9 +373,26 @@ check("completeness: fields the FIRST draft lacked are not regressions",
     /the 1 bedroom sleeps 2 guests/.test(buildSleepingCapacityExplanation({ bedrooms: 1, unitCount: 1 })!.sentence));
 
   // Honesty guards — say nothing rather than assert a breakdown we can't back.
+  // The rule only describes ONE sleeper sofa per unit; any other shape is
+  // undescribable, so it must produce nothing rather than a guessed layout.
   check("no bedrooms -> null", buildSleepingCapacityExplanation({ bedrooms: 0, unitCount: 2 }) === null);
   check("standalone listing carrying the combo +4 -> null (never claims 2 sofas in one condo)",
     buildSleepingCapacityExplanation({ bedrooms: 3, unitCount: 1 }) === null);
+  check("multi-unit listing whose sofa count doesn't cover its units -> null",
+    buildSleepingCapacityExplanation({ bedrooms: 2, unitCount: 2 }) === null);
+  check("every explanation it DOES produce has exactly one sofa per unit",
+    [[4, 2], [6, 2], [7, 2], [2, 1], [1, 1]].every(([br, uc]) => {
+      const e = buildSleepingCapacityExplanation({ bedrooms: br, unitCount: uc });
+      return e !== null && e.sofaCount === e.unitCount;
+    }));
+
+  // Title-drift gate input: a stale "Sleeps N" is guest-visible in a way
+  // `accommodates` is not, so the backfill reads it too.
+  check("reads the occupancy a title advertises, both pinned formats",
+    advertisedOccupancyFromTitle("Mauna Lani Point - 6BR Condos - Sleeps 12") === 12
+    && advertisedOccupancyFromTitle("Stunning 6BR for 16 at Princeville Cliffs!") === 16
+    && advertisedOccupancyFromTitle("Poipu Kai - 6BR Villas, Pool") === null
+    && advertisedOccupancyFromTitle("") === null);
 
   // ── placement inside a composed summary ────────────────────────────────────
   const TOP = "Please note: this listing combines two units within the same community.";
@@ -459,8 +477,12 @@ check("completeness: fields the FIRST draft lacked are not regressions",
     backfillBody.indexOf("upsertPropertyDescriptionOverrides") < backfillBody.indexOf('guestyRequest("PUT"'));
   check("backfill verifies the write by read-back",
     /normalizeDescriptionReadback\(savedSummary\) === normalizeDescriptionReadback\(nextSummary\)/.test(backfillBody));
-  check("backfill refuses to contradict the occupancy Guesty already advertises",
-    /advertised !== explanation\.sleeps/.test(backfillBody));
+  check("backfill refuses to contradict EITHER surface Guesty advertises (accommodates + title)",
+    /advertisedAccommodates !== explanation\.sleeps/.test(backfillBody)
+    && /advertisedTitle !== explanation\.sleeps/.test(backfillBody)
+    && /advertisedOccupancyFromTitle\(/.test(backfillBody));
+  check("backfill falls back to Guesty's bedroom count only when the app side has none",
+    /target\.bedrooms > 0[\s\S]{0,200}guestyBedrooms > 0/.test(backfillBody));
 
   // Disclosure leads are matched as literal prefixes — reword a disclosure in
   // unit-builder-data.ts and placement silently lands in the wrong block.

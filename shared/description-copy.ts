@@ -225,20 +225,18 @@ export function buildSleepingCapacityExplanation(input: {
   if (sofaGuests <= 0 || sofaGuests % 2 !== 0) return null;
   const sofaCount = sofaGuests / 2;
 
-  // The occupancy rule's +4 is premised on the TWO-condo combos (one sleeper
-  // sofa per unit). A standalone listing carrying that +4 would have us claim
-  // two sleeper sofas in one living room — an invented fact. Say nothing
-  // instead; the headline occupancy still stands, it just goes unexplained.
-  if (unitCount === 1 && sofaCount !== 1) return null;
+  // The rule only describes ONE sleeper sofa per unit — +2 for a standalone
+  // condo, +4 for a two-condo combo. Any other shape (a standalone carrying the
+  // combo +4, which would claim two sleeper sofas in one living room; or a
+  // multi-unit listing whose sofa count doesn't cover its units) is one we
+  // cannot describe truthfully, so we say NOTHING. The headline occupancy still
+  // stands, it just goes unexplained — better than a guessed layout.
+  if (sofaCount !== unitCount) return null;
 
-  // Only claim "one in each unit" when the sofa count genuinely matches the
-  // unit count; otherwise state the sofa count plainly.
   const sofaClause =
-    unitCount > 1 && sofaCount === unitCount
+    unitCount > 1
       ? `each of the ${unitCount} units has a sleeper sofa in the living area that sleeps 2`
-      : sofaCount === 1
-        ? "the living area has a sleeper sofa that sleeps 2"
-        : `there are ${sofaCount} sleeper sofas that sleep 2 each`;
+      : "the living area has a sleeper sofa that sleeps 2";
 
   const bedroomNoun = bedrooms === 1 ? "bedroom sleeps" : "bedrooms sleep";
   const sentence =
@@ -247,6 +245,22 @@ export function buildSleepingCapacityExplanation(input: {
     `${bedroomGuests} plus ${sofaGuests} is ${sleeps} guests in total.`;
 
   return { bedrooms, unitCount, sleeps, bedroomGuests, sofaGuests, sofaCount, sentence };
+}
+
+/**
+ * The occupancy a listing TITLE advertises, or null when it names none.
+ *
+ * Mirrors the two title formats generate-listing pins with syncTitleOccupancy
+ * ("... - Sleeps 14" and "6BR for 16 ..."), so a stale title can be caught
+ * before we publish prose that contradicts it in front of a guest. Title text
+ * is guest-visible in a way `accommodates` is not, so it gets its own check.
+ */
+export function advertisedOccupancyFromTitle(title: string | null | undefined): number | null {
+  const text = String(title ?? "");
+  const match = text.match(/\bsleeps\s+(\d{1,2})\b/i) ?? text.match(/\bfor\s+(\d{1,2})\b/i);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /** Sofa-bed wording a capacity explanation may use — shared with the bed-type
