@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import type { Express, Request, Response } from "express";
+import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import sharp from "sharp";
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 
@@ -63,6 +64,21 @@ const GENERATION_MODE_KEY = "__virtualStagingGenerationMode";
 const FEEDBACK_KEY = "__virtualStagingFeedback";
 const FEEDBACK_SOURCE_ATTEMPT_KEY = "__virtualStagingFeedbackSourceAttempt";
 const FEEDBACK_GENERATION_MODE = "feedback-revision";
+const VIRTUAL_STAGING_PREVIEW_WINDOW_MS = 60_000;
+const VIRTUAL_STAGING_PREVIEW_LIMIT = 360;
+
+const virtualStagingPreviewRateLimit = rateLimit({
+  windowMs: VIRTUAL_STAGING_PREVIEW_WINDOW_MS,
+  limit: VIRTUAL_STAGING_PREVIEW_LIMIT,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  keyGenerator: (req, res) => {
+    const session = res.locals.portalSession as PortalSession | undefined;
+    const address = req.ip ?? req.socket.remoteAddress ?? "unknown";
+    return `${session?.username ?? "unauthenticated"}:${ipKeyGenerator(address)}`;
+  },
+  message: { error: "Too many virtual-staging preview requests. Please wait a minute and try again." },
+});
 
 let recoverySweepTimer: NodeJS.Timeout | null = null;
 
@@ -1701,53 +1717,65 @@ export function registerVirtualStagingRoutes(app: Express): void {
     res.json({ job: await requireJobDto(jobId), swappedCount: 0 });
   }));
 
-  app.get("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/original", route(async (req, res) => {
-    if (!requireAdmin(res)) return;
-    const { asset } = await candidateContext(
-      routeParam(req, "jobId"),
-      routeParam(req, "candidateId"),
-    );
-    const file = resolveInsidePhotosRoot(asset.storageRelativePath);
-    const stat = await fs.promises.stat(file).catch(() => null);
-    if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Original photo was not found");
-    sendVirtualStagingPreview(res, file, asset.mimeType);
-  }));
+  app.get(
+    "/api/virtual-staging/jobs/:jobId/candidates/:candidateId/original",
+    virtualStagingPreviewRateLimit,
+    route(async (req, res) => {
+      if (!requireAdmin(res)) return;
+      const { asset } = await candidateContext(
+        routeParam(req, "jobId"),
+        routeParam(req, "candidateId"),
+      );
+      const file = resolveInsidePhotosRoot(asset.storageRelativePath);
+      const stat = await fs.promises.stat(file).catch(() => null);
+      if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Original photo was not found");
+      sendVirtualStagingPreview(res, file, asset.mimeType);
+    }),
+  );
 
-  app.get("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/staged", route(async (req, res) => {
-    if (!requireAdmin(res)) return;
-    const { candidate } = await candidateContext(
-      routeParam(req, "jobId"),
-      routeParam(req, "candidateId"),
-    );
-    if (candidate.status !== "succeeded" || !candidate.stagingRelativePath) {
-      throw new VirtualStagingHttpError(404, "Staged photo is not ready");
-    }
-    const file = resolveInsidePhotosRoot(candidate.stagingRelativePath);
-    const stat = await fs.promises.stat(file).catch(() => null);
-    if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Staged photo was not found");
-    sendVirtualStagingPreview(res, file, "image/jpeg");
-  }));
+  app.get(
+    "/api/virtual-staging/jobs/:jobId/candidates/:candidateId/staged",
+    virtualStagingPreviewRateLimit,
+    route(async (req, res) => {
+      if (!requireAdmin(res)) return;
+      const { candidate } = await candidateContext(
+        routeParam(req, "jobId"),
+        routeParam(req, "candidateId"),
+      );
+      if (candidate.status !== "succeeded" || !candidate.stagingRelativePath) {
+        throw new VirtualStagingHttpError(404, "Staged photo is not ready");
+      }
+      const file = resolveInsidePhotosRoot(candidate.stagingRelativePath);
+      const stat = await fs.promises.stat(file).catch(() => null);
+      if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Staged photo was not found");
+      sendVirtualStagingPreview(res, file, "image/jpeg");
+    }),
+  );
 
-  app.get("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/previous-staged", route(async (req, res) => {
-    if (!requireAdmin(res)) return;
-    const { candidate } = await candidateContext(
-      routeParam(req, "jobId"),
-      routeParam(req, "candidateId"),
-    );
-    const snapshot = candidate.metadataSnapshot
-      && typeof candidate.metadataSnapshot === "object"
-      && !Array.isArray(candidate.metadataSnapshot)
-      ? candidate.metadataSnapshot as Record<string, unknown>
-      : {};
-    const previousPreviewRelativePath = snapshotString(snapshot, PREVIOUS_PREVIEW_PATH_KEY);
-    if (!previousPreviewRelativePath) {
-      throw new VirtualStagingHttpError(404, "Previous staged photo was not found");
-    }
-    const file = resolveInsidePhotosRoot(previousPreviewRelativePath);
-    const stat = await fs.promises.stat(file).catch(() => null);
-    if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Previous staged photo was not found");
-    sendVirtualStagingPreview(res, file, "image/jpeg");
-  }));
+  app.get(
+    "/api/virtual-staging/jobs/:jobId/candidates/:candidateId/previous-staged",
+    virtualStagingPreviewRateLimit,
+    route(async (req, res) => {
+      if (!requireAdmin(res)) return;
+      const { candidate } = await candidateContext(
+        routeParam(req, "jobId"),
+        routeParam(req, "candidateId"),
+      );
+      const snapshot = candidate.metadataSnapshot
+        && typeof candidate.metadataSnapshot === "object"
+        && !Array.isArray(candidate.metadataSnapshot)
+        ? candidate.metadataSnapshot as Record<string, unknown>
+        : {};
+      const previousPreviewRelativePath = snapshotString(snapshot, PREVIOUS_PREVIEW_PATH_KEY);
+      if (!previousPreviewRelativePath) {
+        throw new VirtualStagingHttpError(404, "Previous staged photo was not found");
+      }
+      const file = resolveInsidePhotosRoot(previousPreviewRelativePath);
+      const stat = await fs.promises.stat(file).catch(() => null);
+      if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Previous staged photo was not found");
+      sendVirtualStagingPreview(res, file, "image/jpeg");
+    }),
+  );
 
   startRecoverySweep();
 }

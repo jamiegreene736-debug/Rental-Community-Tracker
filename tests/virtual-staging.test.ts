@@ -680,6 +680,15 @@ test("backend keeps credentials server-side and edits immutable image input", ()
   assert.match(routes, /sendFile\(file, \{ dotfiles: "allow" \}\)/);
   assert.match(routes, /sendVirtualStagingPreview\(res, file, asset\.mimeType\)/);
   assert.match(routes, /sendVirtualStagingPreview\(res, file, "image\/jpeg"\)/);
+  assert.match(routes, /const virtualStagingPreviewRateLimit = rateLimit/);
+  assert.match(routes, /VIRTUAL_STAGING_PREVIEW_LIMIT = 360/);
+  assert.match(routes, /ipKeyGenerator\(address\)/);
+  for (const previewPath of ["original", "staged", "previous-staged"]) {
+    assert.match(
+      routes,
+      new RegExp(`${previewPath}\\",\\s*virtualStagingPreviewRateLimit,\\s*route`),
+    );
+  }
   assert.match(routes, /original\?v=\$\{previewVersion\}/);
   assert.match(routes, /staged\?v=\$\{previewVersion\}/);
   assert.match(routes, /RESUMABLE_JOB_STATUSES = \["queued", "running", "ready", "failed"\]/);
