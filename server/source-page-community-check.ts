@@ -12,8 +12,11 @@
 import {
   buildSourcePageCommunityPrompt,
   extractSourcePageSignals,
+  looksLikeBotWallPage,
   parseSourcePageVerdict,
   signalsAreEmpty,
+  signalsFromListingJson,
+  type SourcePageSignals,
   type SourcePageVerdict,
 } from "../shared/source-page-community-logic";
 import { callClaudeJson } from "./claude-json";
@@ -54,11 +57,116 @@ export async function fetchSourcePageHtml(url: string): Promise<string | null> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Apify rescue tier. Zillow (and increasingly Redfin/Realtor) 403-bot-wall every
+// plain HTTP fetch — from Railway's datacenter IP it is guaranteed, and even a
+// residential curl gets PerimeterX'd (verified live 2026-07-18: HTTP 403 on a
+// direct fetch with a browser UA). So the direct fetch above mostly worked only
+// for PM sites, and every Zillow-sourced unit rendered "Page unreadable".
+//
+// The rescue reuses the SAME Apify detail actors the photo pipeline already
+// pays for (~$0.005-0.01/result) and builds the location signals from their
+// structured JSON — which carries the full street/city/state, i.e. BETTER
+// signals than scraped HTML. Deliberately NOT the local Chrome sidecar
+// (operator directive 2026-07-18): this is a text/address check, not a photo
+// gallery harvest — no reason to burn the sidecar wallet or depend on the
+// operator's Mac being awake.
+//
+// Fail-soft: no token / unsupported host / actor failure all return null and
+// the verdict stays the honest "unreadable" it is today. Kill switch
+// SOURCE_PAGE_APIFY_RESCUE=0.
+// ---------------------------------------------------------------------------
+
+const APIFY_RESCUE_TIMEOUT_MS = Number(process.env.SOURCE_PAGE_APIFY_TIMEOUT_MS || 150_000);
+
+/** Actor for a source host, or null when the host has no Apify detail scraper. */
+function apifyActorForSourceHost(host: string): string | null {
+  const h = host.toLowerCase().replace(/^www\./, "");
+  const is = (domain: string) => h === domain || h.endsWith(`.${domain}`);
+  if (is("zillow.com")) return (process.env.APIFY_ZILLOW_ACTOR || "maxcopell~zillow-detail-scraper").replace("/", "~");
+  if (is("redfin.com")) return (process.env.APIFY_REDFIN_ACTOR || "kawsar~redfin-details-scraper").replace("/", "~");
+  if (is("realtor.com")) return (process.env.APIFY_REALTOR_ACTOR || "dz_omar~realtor-scraper").replace("/", "~");
+  return null;
+}
+
+// Per-URL result cache. The audit sweep's community-consensus rail re-runs the
+// full check up to 3×, and the photo-fix seam re-checks after fixes — without a
+// cache every pass would re-spend an Apify run per unit. Successful signals are
+// stable (the listing's address doesn't change), so a long TTL is safe;
+// failures retry sooner.
+const APIFY_SIGNALS_TTL_OK_MS = 12 * 60 * 60 * 1000;
+const APIFY_SIGNALS_TTL_FAIL_MS = 10 * 60 * 1000;
+const APIFY_SIGNALS_CACHE_CAP = 300;
+const apifySignalsCache = new Map<string, { at: number; signals: SourcePageSignals | null }>();
+
+/**
+ * Fetch a source page's location signals via the host's Apify detail actor.
+ * Returns null on any failure (no token, unsupported host, actor error, empty
+ * result). Exported for the rescue-injection seam + smoke testing.
+ */
+export async function fetchSourcePageSignalsViaApify(url: string): Promise<SourcePageSignals | null> {
+  if (process.env.SOURCE_PAGE_APIFY_RESCUE === "0") return null;
+  const token = process.env.APIFY_API_TOKEN;
+  if (!token) return null;
+  let host = "";
+  try { host = new URL(url).hostname; } catch { return null; }
+  const actor = apifyActorForSourceHost(host);
+  if (!actor) return null;
+
+  const cached = apifySignalsCache.get(url);
+  if (cached) {
+    const ttl = cached.signals ? APIFY_SIGNALS_TTL_OK_MS : APIFY_SIGNALS_TTL_FAIL_MS;
+    if (Date.now() - cached.at < ttl) return cached.signals;
+    apifySignalsCache.delete(url);
+  }
+
+  let signals: SourcePageSignals | null = null;
+  try {
+    const api = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+    const r = await fetch(api, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // `startUrls` is the standard Apify pattern; `urls` covers the epctex-style
+      // Realtor variant. Actors ignore unknown fields, so sending both is safe.
+      body: JSON.stringify({ startUrls: [{ url }], urls: [url], maxItems: 1 }),
+      signal: AbortSignal.timeout(APIFY_RESCUE_TIMEOUT_MS),
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.warn(`[source-page:apify] HTTP ${r.status} for ${url}: ${body.slice(0, 200)}`);
+    } else {
+      const items: unknown = await r.json().catch(() => null);
+      const item = Array.isArray(items) ? items[0] : null;
+      if (item && typeof item === "object") {
+        const extracted = signalsFromListingJson(item);
+        if (!signalsAreEmpty(extracted)) {
+          signals = extracted;
+          console.log(`[source-page:apify] ${url} → ${extracted.addressHints.length} address hints via ${actor}`);
+        } else {
+          console.warn(`[source-page:apify] ${url} → item had no usable location fields`);
+        }
+      } else {
+        console.warn(`[source-page:apify] empty dataset for ${url}`);
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[source-page:apify] ${url}: ${e?.message ?? e}`);
+  }
+
+  if (apifySignalsCache.size >= APIFY_SIGNALS_CACHE_CAP) {
+    const oldest = apifySignalsCache.keys().next().value;
+    if (oldest !== undefined) apifySignalsCache.delete(oldest);
+  }
+  apifySignalsCache.set(url, { at: Date.now(), signals });
+  return signals;
+}
+
 async function verifyOneSourcePage(
   unit: SourcePageUnitInput,
   expectedCommunity: string,
   apiKey: string,
   fetchHtml: (url: string) => Promise<string | null>,
+  fetchRescueSignals: (url: string) => Promise<SourcePageSignals | null>,
 ): Promise<SourcePageVerdict> {
   const url = String(unit.sourceUrl ?? "").trim();
   if (!/^https?:\/\//i.test(url)) {
@@ -87,7 +195,25 @@ async function verifyOneSourcePage(
   }
 
   const html = await fetchHtml(url);
-  if (!html) {
+  // A bot-wall page (Zillow serves PerimeterX walls with HTTP 200 from some
+  // edges) must not be treated as the listing — its "Access denied" title would
+  // read as non-empty signals and burn a Claude call on junk.
+  const directBlocked = !html || looksLikeBotWallPage(html);
+  let signals: SourcePageSignals | null = directBlocked ? null : extractSourcePageSignals(html!);
+  let readViaApify = false;
+
+  // Direct fetch blocked or content-free → Apify rescue (structured listing
+  // JSON from the host's detail actor). Fail-soft: null keeps the honest
+  // "unreadable" verdict below.
+  if (!signals || signalsAreEmpty(signals)) {
+    const rescued = await fetchRescueSignals(url);
+    if (rescued && !signalsAreEmpty(rescued)) {
+      signals = rescued;
+      readViaApify = true;
+    }
+  }
+
+  if (!signals) {
     return {
       unitLabel: unit.label,
       url,
@@ -96,8 +222,6 @@ async function verifyOneSourcePage(
       unreadable: true,
     };
   }
-
-  const signals = extractSourcePageSignals(html);
   if (signalsAreEmpty(signals)) {
     return {
       unitLabel: unit.label,
@@ -125,7 +249,13 @@ async function verifyOneSourcePage(
       reason: `Source-page analysis unavailable (${res.error}).`,
     };
   }
-  return parseSourcePageVerdict(res.data, unit.label, url, expectedCommunity);
+  const verdict = parseSourcePageVerdict(res.data, unit.label, url, expectedCommunity);
+  if (readViaApify) {
+    // Honesty note for the report UI: the page itself blocked us; the listing
+    // data came from the Apify scraper instead.
+    verdict.reason = `${verdict.reason} (page read via Apify scraper)`.trim();
+  }
+  return verdict;
 }
 
 /**
@@ -138,6 +268,7 @@ export async function verifyUnitSourcePages(
   expectedCommunity: string,
   apiKey: string,
   fetchHtml: (url: string) => Promise<string | null> = fetchSourcePageHtml,
+  fetchRescueSignals: (url: string) => Promise<SourcePageSignals | null> = fetchSourcePageSignalsViaApify,
 ): Promise<SourcePageVerdict[]> {
   const withUrls = units.filter((u) => String(u.sourceUrl ?? "").trim().length > 0);
   if (withUrls.length === 0) return [];
@@ -148,7 +279,7 @@ export async function verifyUnitSourcePages(
     while (cursor < withUrls.length) {
       const idx = cursor++;
       try {
-        results[idx] = await verifyOneSourcePage(withUrls[idx], expectedCommunity, apiKey, fetchHtml);
+        results[idx] = await verifyOneSourcePage(withUrls[idx], expectedCommunity, apiKey, fetchHtml, fetchRescueSignals);
       } catch (e: any) {
         results[idx] = {
           unitLabel: withUrls[idx].label,

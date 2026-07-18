@@ -177,6 +177,109 @@ export function extractSourcePageSignals(html: string): SourcePageSignals {
   };
 }
 
+/**
+ * True when a fetched page is a bot-detection wall rather than the listing —
+ * PerimeterX ("Access to this page has been denied" / press-and-hold), Imperva
+ * ("Pardon Our Interruption"), Cloudflare ("Just a moment" / "Attention Required").
+ * Zillow serves these with HTTP 200 from some edges, so a status check alone is
+ * not enough. Conservative on purpose: title markers always count; body-only
+ * markers (px-captcha etc.) count only on a COMPACT page, because a real listing
+ * page can mention "cloudflare" in a script bundle. Mirrors the sidecar's
+ * detectListingBotWall posture (compact-body guard against false positives).
+ */
+export function looksLikeBotWallPage(html: string): boolean {
+  const safe = typeof html === "string" ? html : "";
+  if (!safe) return false;
+  const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(safe);
+  const title = titleMatch ? decodeEntities(titleMatch[1]).replace(/\s+/g, " ").trim() : "";
+  if (/access (?:to this page )?has been denied|denied access|pardon our interruption|just a moment|attention required|robot or human|human verification|verify you are|security check/i.test(title)) {
+    return true;
+  }
+  const text = stripToText(safe);
+  if (text.length < 3500 && /px-?captcha|perimeterx|press\s*&\s*hold|press and hold|are you a (?:human|robot)|checking your browser/i.test(safe)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Build SourcePageSignals from a structured listing-scraper JSON item (an Apify
+ * Zillow / Redfin / Realtor detail-actor result) instead of raw HTML. Used by the
+ * Apify rescue tier when the listing page itself bot-walls plain fetches.
+ *
+ * Depth-bounded walk collecting address-ish string fields + the listing
+ * description. LOAD-BEARING: side-panel subtrees (similarHomes, nearbyHomes,
+ * comparableHomes, schools, priceHistory, ...) are SKIPPED — a "nearby homes"
+ * card can name a DIFFERENT community and would poison the verdict toward a
+ * false "no" (the exact class the photo pipeline's scoped walk guards against).
+ */
+export function signalsFromListingJson(item: unknown): SourcePageSignals {
+  const addressHints: string[] = [];
+  let title: string | undefined;
+  let description: string | undefined;
+
+  const skipKeys = new Set([
+    "similarHomes", "nearbyHomes", "nearbySchools", "schools", "priceHistory",
+    "relatedHomes", "collections", "agentListings", "comparableHomes",
+    "nearbyCities", "nearbyNeighborhoods", "nearbyZipcodes", "nearbyRegions",
+    "similarListings", "nearbyListings", "comps", "photos", "images", "imageUrls",
+    // Agent/broker subtrees: their OFFICE address (often a different city) must
+    // never read as the listing's location, and their `name` is not a title.
+    "attributionInfo", "listingAgent", "agent", "agents", "broker", "brokerage", "office", "contactRecipients",
+  ]);
+  const addressKeyRe = /^(streetAddress|street|streetName|city|state|stateOrProvince|zipcode|zip|postalCode|postal_code|addressLocality|addressRegion|addressLine1|addressLine2|unparsedAddress|fullAddress|formattedAddress|abbreviatedAddress|neighborhood|subdivision|county|community)$/i;
+  // Deliberately NO bare `name` here — Zillow items carry the listing AGENT's
+  // name in shallow `name` fields (live-verified: "Chris Coscarella" won the
+  // title over the street address). Address-shaped keys make honest titles.
+  const titleKeyRe = /^(title|headline|abbreviatedAddress|unparsedAddress|fullAddress|formattedAddress)$/i;
+  const descriptionKeyRe = /^(description|homeDescription|listingDescription|remarks|publicRemarks|marketingRemarks)$/i;
+
+  function push(v: string): void {
+    const s = v.replace(/\s+/g, " ").trim();
+    if (s && s.length <= 160 && !addressHints.includes(s) && addressHints.length < HINTS_MAX) {
+      addressHints.push(s);
+    }
+  }
+
+  function walk(o: unknown, depth: number): void {
+    if (depth > 8 || !o || typeof o !== "object") return;
+    if (Array.isArray(o)) { for (const v of o) walk(v, depth + 1); return; }
+    for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+      if (skipKeys.has(k)) continue;
+      if (typeof v === "string" || typeof v === "number") {
+        const s = String(v);
+        if (addressKeyRe.test(k)) push(s);
+        if (!title && titleKeyRe.test(k) && typeof v === "string" && v.trim().length > 3) {
+          title = v.replace(/\s+/g, " ").trim().slice(0, 200);
+        }
+        if (!description && descriptionKeyRe.test(k) && typeof v === "string" && v.trim().length > 20) {
+          description = v.replace(/\s+/g, " ").trim().slice(0, 1500);
+        }
+      } else {
+        walk(v, depth + 1);
+      }
+    }
+  }
+  walk(item, 0);
+
+  // `address` as a plain string is common on Redfin/Realtor items.
+  if (item && typeof item === "object" && !Array.isArray(item)) {
+    const addr = (item as Record<string, unknown>).address;
+    if (typeof addr === "string") {
+      push(addr);
+      if (!title) title = addr.replace(/\s+/g, " ").trim().slice(0, 200);
+    }
+  }
+
+  return {
+    title,
+    metaDescription: description,
+    addressHints,
+    headings: [],
+    snippet: description,
+  };
+}
+
 /** True when the extracted signals carry no usable location text at all. */
 export function signalsAreEmpty(sig: SourcePageSignals): boolean {
   return (

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import {
   extractSourcePageSignals,
+  looksLikeBotWallPage,
   signalsAreEmpty,
+  signalsFromListingJson,
   buildSourcePageCommunityPrompt,
   parseSourcePageVerdict,
   sourcePageIsStrongContradiction,
@@ -10,6 +15,8 @@ import {
   type SourcePageVerdict,
 } from "../shared/source-page-community-logic";
 import { verifyUnitSourcePages } from "../server/source-page-community-check";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import {
   evaluateComboPhotoCommunityGate,
   planComboBedroomRetry,
@@ -61,6 +68,39 @@ const spacedScript = extractSourcePageSignals('<body>keep<script type="x">DROP</
 check("strips script with spaced/attr end tag", !!spacedScript.snippet && !/DROP/.test(spacedScript.snippet) && /keep/.test(spacedScript.snippet) && /more/.test(spacedScript.snippet));
 const junkEndScript = extractSourcePageSignals('<body>keep<script>DROP</script\t\n bar>more</body>');
 check("strips script with junk end tag", !!junkEndScript.snippet && !/DROP/.test(junkEndScript.snippet) && /keep/.test(junkEndScript.snippet) && /more/.test(junkEndScript.snippet));
+
+console.log("source-page-community: bot-wall detection");
+const PX_WALL = `
+<html><head><title>Access to this page has been denied</title></head>
+<body><div id="px-captcha"></div><p>Press &amp; Hold to confirm you are a human (and not a bot).</p></body></html>`;
+check("PerimeterX wall page detected", looksLikeBotWallPage(PX_WALL));
+check("Imperva wall title detected", looksLikeBotWallPage("<html><head><title>Pardon Our Interruption</title></head><body></body></html>"));
+check("real listing page is NOT a wall", !looksLikeBotWallPage(HTML));
+const bigPageWithCf = `<html><head><title>123 Kiahuna Plantation Dr | Zillow</title></head><body>${"listing text ".repeat(400)}<script>var cdn="cloudflare"; var x="perimeterx-sdk";</script></body></html>`;
+check("big real page mentioning vendors in scripts is NOT a wall", !looksLikeBotWallPage(bigPageWithCf));
+check("empty/garbage input does not throw", (() => { looksLikeBotWallPage(""); looksLikeBotWallPage(undefined as any); return true; })());
+
+console.log("source-page-community: signals from Apify listing JSON");
+const zillowItem = {
+  address: { streetAddress: "2611 Kiahuna Plantation Dr", city: "Koloa", state: "HI", zipcode: "96756" },
+  abbreviatedAddress: "2611 Kiahuna Plantation Dr APT 12",
+  description: "Beautiful ground-floor condo inside the Kiahuna Plantation resort on Kauai's sunny south shore, steps from Poipu Beach.",
+  bedrooms: 2,
+  similarHomes: [{ address: { streetAddress: "1 Wailea Beach Villas Blvd", city: "Wailea", state: "HI" } }],
+  photos: [{ url: "https://photos.zillowstatic.com/x.jpg" }],
+};
+const jsonSig = signalsFromListingJson(zillowItem);
+check("street address extracted from item", jsonSig.addressHints.includes("2611 Kiahuna Plantation Dr"));
+check("city extracted from item", jsonSig.addressHints.includes("Koloa"));
+check("state extracted from item", jsonSig.addressHints.includes("HI"));
+check("description carried as signal", /Kiahuna Plantation resort/.test(jsonSig.metaDescription ?? ""));
+check("title derived from item", /Kiahuna Plantation Dr/.test(jsonSig.title ?? ""));
+check("similarHomes subtree skipped (no Wailea contamination)",
+  !jsonSig.addressHints.some((h) => /Wailea/.test(h)));
+check("item signals are non-empty", !signalsAreEmpty(jsonSig));
+check("string address form accepted", signalsFromListingJson({ address: "100 Poipu Rd, Koloa, HI" }).addressHints.includes("100 Poipu Rd, Koloa, HI"));
+check("empty item → empty signals", signalsAreEmpty(signalsFromListingJson({})));
+check("garbage item does not throw", (() => { signalsFromListingJson(null); signalsFromListingJson("x"); return true; })());
 
 console.log("source-page-community: prompt");
 const prompt = buildSourcePageCommunityPrompt("Kiahuna Plantation", "Unit A (2BR)", sig);
@@ -117,33 +157,80 @@ console.log("source-page-community: verifyUnitSourcePages (fail-soft, offline)")
   const noUrl = await verifyUnitSourcePages([{ label: "Unit A" }], "Kiahuna Plantation", "", async () => "should-not-be-called");
   check("no-URL unit is skipped from results", noUrl.length === 0);
 
-  // Fetch returns null → unreadable uncertain.
+  // Fetch returns null AND the Apify rescue has nothing → unreadable uncertain.
   const nullFetch = await verifyUnitSourcePages(
     [{ label: "Unit A", sourceUrl: "https://redfin.com/x" }],
     "Kiahuna Plantation",
     "",
     async () => null,
+    async () => null,
   );
-  check("null fetch → uncertain unreadable", nullFetch[0].match === "uncertain" && nullFetch[0].unreadable === true);
+  check("null fetch + null rescue → uncertain unreadable", nullFetch[0].match === "uncertain" && nullFetch[0].unreadable === true);
 
-  // Guesty URL → unreadable without any fetch.
+  // Guesty URL → unreadable without any fetch (and no rescue attempt).
   let fetched = false;
+  let guestyRescued = false;
   const guesty = await verifyUnitSourcePages(
     [{ label: "Unit A", sourceUrl: "https://app.guesty.com/properties/abc/property/v2" }],
     "Kiahuna Plantation",
     "",
     async () => { fetched = true; return "x"; },
+    async () => { guestyRescued = true; return null; },
   );
-  check("guesty URL → unreadable, no fetch", guesty[0].unreadable === true && fetched === false);
+  check("guesty URL → unreadable, no fetch, no rescue", guesty[0].unreadable === true && fetched === false && guestyRescued === false);
 
-  // Readable page, no ANTHROPIC key → uncertain (analysis unavailable), never throws.
+  // Readable page, no ANTHROPIC key → uncertain (analysis unavailable), never throws —
+  // and the rescue is NOT consulted when the direct fetch already produced signals.
+  let readableRescued = false;
   const readable = await verifyUnitSourcePages(
     [{ label: "Unit A", sourceUrl: "https://redfin.com/x" }],
     "Kiahuna Plantation",
     "",
     async () => HTML,
+    async () => { readableRescued = true; return null; },
   );
   check("readable + no key → uncertain (no throw)", readable[0].match === "uncertain" && readable[0].unreadable !== true);
+  check("readable page skips the Apify rescue", readableRescued === false);
+
+  console.log("source-page-community: Apify rescue tier");
+  // Direct fetch blocked (403 → null) but the Apify rescue returns real signals →
+  // the check proceeds to analysis (no key here, so "analysis unavailable") and is
+  // NOT flagged unreadable — the exact class of the "Page unreadable" incident.
+  const rescuedVerdicts = await verifyUnitSourcePages(
+    [{ label: "Unit A (2BR)", sourceUrl: "https://www.zillow.com/homedetails/x/123_zpid/" }],
+    "Kiahuna Plantation",
+    "",
+    async () => null,
+    async () => jsonSig,
+  );
+  check("blocked fetch + Apify signals → NOT unreadable", rescuedVerdicts[0].unreadable !== true);
+  check("blocked fetch + Apify signals → reached analysis", /analysis unavailable/i.test(rescuedVerdicts[0].reason));
+
+  // A 200-with-bot-wall page must ALSO fall through to the rescue — the wall's
+  // "Access denied" title must never be sent to Claude as listing signals.
+  let wallRescueCalls = 0;
+  const wallVerdicts = await verifyUnitSourcePages(
+    [{ label: "Unit A", sourceUrl: "https://www.zillow.com/homedetails/x/123_zpid/" }],
+    "Kiahuna Plantation",
+    "",
+    async () => PX_WALL,
+    async () => { wallRescueCalls++; return null; },
+  );
+  check("bot-wall 200 page triggers the rescue", wallRescueCalls === 1);
+  check("bot-wall 200 page + null rescue → unreadable", wallVerdicts[0].unreadable === true);
+
+  // SOURCE GUARDS: the engine must keep the Apify rescue as the default rescue
+  // seam and the bot-wall screen on the direct fetch — simplifying either back
+  // out silently reintroduces the "Page unreadable" class for every Zillow URL.
+  const engineSource = readFileSync(path.join(__dirname, "..", "server", "source-page-community-check.ts"), "utf8");
+  check("engine defaults rescue to fetchSourcePageSignalsViaApify",
+    engineSource.includes("= fetchSourcePageSignalsViaApify"));
+  check("engine screens direct fetches through looksLikeBotWallPage",
+    engineSource.includes("looksLikeBotWallPage(html)"));
+  check("engine maps zillow/redfin/realtor hosts to Apify actors",
+    engineSource.includes("zillow.com") && engineSource.includes("redfin.com") && engineSource.includes("realtor.com"));
+  check("engine honors the SOURCE_PAGE_APIFY_RESCUE kill switch",
+    engineSource.includes('SOURCE_PAGE_APIFY_RESCUE === "0"'));
 
   console.log("source-page-community: combo gate leg");
   const base: ComboPhotoGateInput = {
