@@ -605,6 +605,9 @@ export function BeddingTab({ propertyId, guestyListingId, onGuestyPushRecorded }
     setSpaceDirty(false);
     setConfig(c);
     setSpaceText(buildSpaceDescription(c));
+    // A reset lands exactly on the authoritative defaults, so any earlier
+    // "we corrected your bedroom count" notice no longer describes anything.
+    setReconciledNotes([]);
   };
 
   const handleSpaceTextEdit = (text: string) => {
