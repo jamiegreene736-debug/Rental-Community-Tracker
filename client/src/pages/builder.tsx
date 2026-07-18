@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fallbackWalkForResort, type WalkResult } from "@shared/walking-distance";
 import { orderGallery } from "@shared/photo-order";
+import {
+  planGalleryLayout,
+  unitGalleryLabel,
+  type PhotoGalleryLayout,
+} from "@shared/photo-gallery-layout";
 import { useParams, useLocation } from "wouter";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -168,6 +173,43 @@ export default function Builder() {
       });
     return () => { cancelled = true; };
   }, [baseProperty, propertyId]);
+
+  // ── Published gallery layout: which unit leads + the between-units community
+  // divider. Server-persisted (app_settings) rather than localStorage because
+  // server/guesty-photo-repush.ts pushes photos with no browser in the loop —
+  // a per-browser preference would be silently reverted by any automated
+  // re-push. `null` until the fetch lands, which reads as "defaults".
+  const [galleryLayout, setGalleryLayout] = useState<PhotoGalleryLayout | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setGalleryLayout(null);
+    fetch(`/api/builder/photo-gallery-layout/${propertyId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { layout?: PhotoGalleryLayout | null } | null) => {
+        if (!cancelled) setGalleryLayout(data?.layout ?? null);
+      })
+      .catch(() => {
+        // Fail-soft: the gallery still renders on defaults.
+        if (!cancelled) setGalleryLayout(null);
+      });
+    return () => { cancelled = true; };
+  }, [propertyId]);
+
+  const saveGalleryLayout = useCallback(
+    async (patch: { unitOrder?: string[]; unitDividers?: boolean }) => {
+      const resp = await fetch(`/api/builder/photo-gallery-layout/${propertyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.ok) {
+        throw new Error(data?.error ?? `Failed to save photo order (HTTP ${resp.status})`);
+      }
+      setGalleryLayout(data.layout ?? null);
+    },
+    [propertyId],
+  );
 
   const property = useMemo<PropertyUnitBuilder | null>(() => {
     if (!baseProperty) return null;
@@ -395,27 +437,55 @@ export default function Builder() {
 
     const photos: NonNullable<GuestyPropertyData["photos"]> = [];
 
-    // Units first, in unit order (A, B, …). Each unit gallery is ordered
-    // independently (hero-first by default; a manual drag wins).
-    units.forEach((u, i) => {
+    // Each unit gallery is ordered independently (hero-first by default; a
+    // manual drag wins). The A/B letter comes from the NATURAL index — the
+    // unit's identity — so the operator's display order never renames a unit.
+    const unitGalleries = units.map((u, i) => {
       const source = `Unit ${String.fromCharCode(65 + i)} (${u.bedrooms}BR)`;
       const unitPhotos = Array.isArray(u.photos) ? u.photos : [];
       const files = visibleFiles(u.photoFolder, unitPhotos.map((p) => p.filename), unitPhotoInventoryKey(u.id));
       const entries = files.map((f) => entryFor(u.photoFolder, f, source, u.id));
-      for (const e of orderGallery(entries, "unit")) {
-        photos.push({ url: e.url, caption: e.caption, source: e.source, unitId: e.unitId });
-      }
+      return {
+        unitId: u.id,
+        label: unitGalleryLabel(i, u.bedrooms),
+        photos: orderGallery(entries, "unit"),
+      };
     });
 
-    // Community last — one gallery, ordered the same way.
     const communityFolder = property.communityPhotoFolder;
-    if (communityFolder) {
-      const communitySource = `Community — ${property.complexName}`;
-      const files = visibleFiles(communityFolder, communityPhotos.map((p) => p.filename));
-      const entries = files.map((f) => entryFor(communityFolder, f, communitySource));
-      for (const e of orderGallery(entries, "community")) {
-        photos.push({ url: e.url, caption: e.caption, source: e.source });
-      }
+    const communitySource = communityFolder ? `Community — ${property.complexName}` : "";
+    const communityEntries = communityFolder
+      ? orderGallery(
+          visibleFiles(communityFolder, communityPhotos.map((p) => p.filename))
+            .map((f) => entryFor(communityFolder, f, communitySource)),
+          "community",
+        )
+      : [];
+
+    // ACROSS galleries: the operator's saved layout — lead unit → [community
+    // divider] → next unit → … → community. Same shared contract the automated
+    // re-push applies (server/guesty-photo-repush.ts), so what the Photos tab
+    // shows is what every push produces. See shared/photo-gallery-layout.ts.
+    for (const item of planGalleryLayout({
+      units: unitGalleries,
+      community: communityEntries,
+      layout: galleryLayout,
+    })) {
+      const e = item.photo;
+      photos.push({
+        url: e.url,
+        caption: e.caption,
+        // A divider KEEPS the community `source` — it is a community photo, and
+        // every source-driven consumer (photo-community check role/grouping,
+        // dedupe scan folder label, cover-collage pools) must keep classifying
+        // it as one. Only the renderer cares that it sits between the units,
+        // and it reads the explicit flag below.
+        source: e.source,
+        unitId: item.kind === "unit" ? e.unitId : undefined,
+        ...(item.kind === "divider"
+          ? { isUnitDivider: true as const, dividerNextUnitLabel: item.unitLabel }
+          : {}),
+      });
     }
 
     const parsedAddr = parseAddress(property.address);
@@ -512,7 +582,7 @@ export default function Builder() {
         instantBooking: true,
       },
     };
-  }, [property, pricing, propertyId, labelFor, isHidden, categoryFor, sortOrderFor, folderFiles, walkResult]);
+  }, [property, pricing, propertyId, labelFor, isHidden, categoryFor, sortOrderFor, folderFiles, walkResult, galleryLayout]);
 
   const virtualStagingUnits = useMemo(() => {
     if (!property) return [];
@@ -576,6 +646,12 @@ export default function Builder() {
         propertyId={propertyId}
         sourceUrlsByFolder={sourceUrlsByFolder}
         virtualStagingUnits={virtualStagingUnits}
+        galleryLayout={galleryLayout}
+        galleryUnits={property.units.map((unit, index) => ({
+          id: unit.id,
+          label: unitGalleryLabel(index, unit.bedrooms),
+        }))}
+        onSaveGalleryLayout={saveGalleryLayout}
         isSingleListing={property.units.length === 1}
         onPhotoOverridesChanged={refreshPhotoLabels}
         onVirtualStagingConfirmed={refreshPhotoAssets}

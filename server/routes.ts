@@ -374,6 +374,7 @@ import {
 import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, communityOnlyCheckRequest, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
 import { enrichCheckGroupsWithProvenance, setPhotoFolderVerification } from "./photo-folder-verification";
+import { getPhotoGalleryLayout, savePhotoGalleryLayout } from "./photo-gallery-layout";
 import { scanForDuplicatePhotos, getStoredDedupeScan, MANUAL_SCAN_BUDGET_MS, type DedupeScanGroupInput } from "./photo-dedupe";
 import { validateDedupeSelection, type DedupeSelection } from "../shared/photo-dedupe-logic";
 import { scanAmenitiesForProperty } from "./amenity-scan";
@@ -31783,6 +31784,56 @@ Return ONLY compact JSON with this exact shape:
       });
     } catch (err: any) {
       return res.status(400).json({ ok: false, error: err?.message ?? "failed to save folder verification" });
+    }
+  });
+
+  // ── Published gallery layout (2026-07-18) ──────────────────────────────────
+  // Which unit leads the pushed gallery, and whether a community photo divides
+  // the units. Keyed by builder propertyId (positive core id OR -draftId).
+  // Read by BOTH push assemblies (builder.tsx propertyData.photos and
+  // server/guesty-photo-repush.ts) — see shared/photo-gallery-layout.ts.
+  app.get("/api/builder/photo-gallery-layout/:propertyId", async (req, res) => {
+    try {
+      const propertyId = Number(req.params.propertyId);
+      if (!Number.isFinite(propertyId)) {
+        return res.status(400).json({ ok: false, error: "propertyId must be a number" });
+      }
+      const layout = await getPhotoGalleryLayout(propertyId);
+      return res.json({ ok: true, propertyId, layout });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err?.message ?? "failed to read gallery layout" });
+    }
+  });
+
+  // Body: { unitOrder?: string[], unitDividers?: boolean }. Both optional and
+  // applied independently so the two controls never clobber each other.
+  app.patch("/api/builder/photo-gallery-layout/:propertyId", async (req, res) => {
+    try {
+      const propertyId = Number(req.params.propertyId);
+      if (!Number.isFinite(propertyId)) {
+        return res.status(400).json({ ok: false, error: "propertyId must be a number" });
+      }
+      const body = (req.body ?? {}) as { unitOrder?: unknown; unitDividers?: unknown };
+      const patch: { unitOrder?: string[]; unitDividers?: boolean } = {};
+      if (body.unitOrder !== undefined) {
+        if (!Array.isArray(body.unitOrder)) {
+          return res.status(400).json({ ok: false, error: "unitOrder must be an array of unit ids" });
+        }
+        patch.unitOrder = body.unitOrder.map((id) => String(id ?? "").trim()).filter(Boolean);
+      }
+      if (body.unitDividers !== undefined) {
+        if (typeof body.unitDividers !== "boolean") {
+          return res.status(400).json({ ok: false, error: "unitDividers must be a boolean" });
+        }
+        patch.unitDividers = body.unitDividers;
+      }
+      if (patch.unitOrder === undefined && patch.unitDividers === undefined) {
+        return res.status(400).json({ ok: false, error: "nothing to update" });
+      }
+      const layout = await savePhotoGalleryLayout(propertyId, patch);
+      return res.json({ ok: true, propertyId, layout });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err?.message ?? "failed to save gallery layout" });
     }
   });
 

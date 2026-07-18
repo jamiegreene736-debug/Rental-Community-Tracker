@@ -18,6 +18,7 @@
 //   humanized filename.
 
 import { orderGallery, type PhotoScope } from "./photo-order";
+import { planGalleryLayout, type PhotoGalleryLayout } from "./photo-gallery-layout";
 
 export type GuestyPushLabelRow = {
   filename: string;
@@ -38,6 +39,10 @@ export type GuestyPushGallery = {
   labels?: GuestyPushLabelRow[];
   /** Static unit-builder-data captions, filename → label (original folders only). */
   staticLabels?: Record<string, string>;
+  /** Builder unit id — required for `scope: "unit"` so the saved unit order applies. */
+  unitId?: string;
+  /** Natural-position label ("Unit B (3BR)") used in the divider caption. */
+  unitLabel?: string;
 };
 
 export type GuestyPushPhoto = { localPath: string; caption: string };
@@ -54,14 +59,25 @@ export function captionFromFilename(filename: string): string {
 
 /**
  * Assemble the push list for POST /api/builder/push-photos from per-folder
- * galleries. Galleries are emitted in the caller's order (units first,
- * community last — the caller owns that contract); WITHIN each gallery the
- * shared orderGallery contract applies (manual sort_order wins, else the
- * hero-first category default).
+ * galleries. WITHIN each gallery the shared orderGallery contract applies
+ * (manual sort_order wins, else the hero-first category default); ACROSS
+ * galleries the shared planGalleryLayout contract applies — the operator's
+ * saved unit order plus the community-photo divider between units.
+ *
+ * LOAD-BEARING: the `layout` argument is what keeps an AUTOMATED re-push
+ * (after a unit swap, or the retroactive sweep) identical to what the operator
+ * would get from the manual "Push Photos to Guesty" button. Dropping it here
+ * silently reverts their chosen unit order on the next replacement. The caller
+ * still owns which galleries exist; planGalleryLayout owns their order.
  */
-export function assembleGuestyPushPhotos(galleries: GuestyPushGallery[]): GuestyPushPhoto[] {
-  const out: GuestyPushPhoto[] = [];
-  const seenLocalPaths = new Set<string>();
+export function assembleGuestyPushPhotos(
+  galleries: GuestyPushGallery[],
+  layout?: PhotoGalleryLayout | null,
+): GuestyPushPhoto[] {
+  type Entry = { localPath: string; caption: string };
+  const unitGalleries: Array<{ unitId: string; label: string; photos: Entry[] }> = [];
+  const community: Entry[] = [];
+
   for (const gallery of galleries) {
     if (!gallery?.folder) continue;
     const labelByFile = new Map<string, GuestyPushLabelRow>(
@@ -83,12 +99,28 @@ export function assembleGuestyPushPhotos(galleries: GuestyPushGallery[]): Guesty
           sortOrder: typeof row?.sortOrder === "number" ? row.sortOrder : null,
         };
       });
-    for (const entry of orderGallery(entries, gallery.scope)) {
-      const localPath = `/photos/${gallery.folder}/${entry.filename}`;
-      if (seenLocalPaths.has(localPath)) continue;
-      seenLocalPaths.add(localPath);
-      out.push({ localPath, caption: entry.caption });
+    const ordered = orderGallery(entries, gallery.scope).map((entry) => ({
+      localPath: `/photos/${gallery.folder}/${entry.filename}`,
+      caption: entry.caption,
+    }));
+    if (gallery.scope === "community") {
+      community.push(...ordered);
+    } else {
+      unitGalleries.push({
+        unitId: gallery.unitId ?? gallery.folder,
+        label: gallery.unitLabel ?? "",
+        photos: ordered,
+      });
     }
+  }
+
+  const out: GuestyPushPhoto[] = [];
+  const seenLocalPaths = new Set<string>();
+  for (const item of planGalleryLayout({ units: unitGalleries, community, layout })) {
+    const { localPath, caption } = item.photo;
+    if (seenLocalPaths.has(localPath)) continue;
+    seenLocalPaths.add(localPath);
+    out.push({ localPath, caption });
   }
   return out;
 }
