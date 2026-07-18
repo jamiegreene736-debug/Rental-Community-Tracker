@@ -39,10 +39,26 @@ export type VirtualStagingJobDto = {
   total: number;
   completed: number;
   failed: number;
+  selectedCount: number;
   candidates: VirtualStagingCandidateDto[];
   createdAt: string;
   updatedAt: string;
 };
+
+export type VirtualStagingSessionAction = "start" | "resume" | "blocked";
+
+/**
+ * Decide whether a unit control starts a new paid run, resumes the retained
+ * review session, or stays blocked behind another unit's unconfirmed session.
+ */
+export function virtualStagingSessionAction(input: {
+  requestedUnitId: string;
+  sessionUnitId: string | null;
+  hasResumableSession: boolean;
+}): VirtualStagingSessionAction {
+  if (!input.hasResumableSession) return "start";
+  return input.requestedUnitId === input.sessionUnitId ? "resume" : "blocked";
+}
 
 export type VirtualStagingLabelSnapshot = {
   filename: string;
@@ -239,9 +255,11 @@ export function reusableVirtualStagingJobId(
   propertyId: number,
   unitId: string,
 ): string | null {
-  return jobs.find((job) =>
+  // Callers provide newest-first rows. The newest row is authoritative: a
+  // confirmed review must supersede (rather than reveal) an older ready one.
+  const latest = jobs.find((job) =>
     job.propertyId === propertyId
-    && job.unitId === unitId
-    && (job.status === "queued" || job.status === "running"),
-  )?.id ?? null;
+    && job.unitId === unitId,
+  );
+  return latest && latest.status !== "confirmed" ? latest.id : null;
 }

@@ -42,6 +42,8 @@ type VirtualStagingDialogProps = {
   onOpenChange: (open: boolean) => void;
   onBusyChange?: (busy: boolean) => void;
   onConfirmed?: (result: VirtualStagingConfirmedResult) => void | Promise<void>;
+  onFinished?: () => void;
+  onResolvedExternally?: (result: VirtualStagingConfirmedResult) => void | Promise<void>;
   returnFocusElement?: HTMLElement | null;
   returnFocusFallbackElement?: HTMLElement | null;
 };
@@ -95,6 +97,8 @@ export default function VirtualStagingDialog({
   onOpenChange,
   onBusyChange,
   onConfirmed,
+  onFinished,
+  onResolvedExternally,
   returnFocusElement,
   returnFocusFallbackElement,
 }: VirtualStagingDialogProps) {
@@ -104,18 +108,25 @@ export default function VirtualStagingDialog({
   const [startError, setStartError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [finishError, setFinishError] = useState<string | null>(null);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(new Set());
   const [retryingCandidateIds, setRetryingCandidateIds] = useState<Set<string>>(new Set());
   const [startAttempt, setStartAttempt] = useState(0);
   const [confirming, setConfirming] = useState(false);
+  const [finishing, setFinishing] = useState(false);
   const startRequestRef = useRef<{ key: string; promise: Promise<VirtualStagingJob> } | null>(null);
   const retryingRef = useRef<Set<string>>(new Set());
   const confirmingRef = useRef(false);
+  const locallyResolvedJobRef = useRef<string | null>(null);
+  const externallyNotifiedJobRef = useRef<string | null>(null);
 
-  // Opening a fresh dialog starts exactly one server job. Keeping the promise in
-  // a ref also prevents React effect replays from issuing duplicate POSTs.
+  // A keyed staging session starts exactly one server job. Its lifecycle is
+  // intentionally independent of modal visibility: closing the dialog must not
+  // cancel the response handler, strand `starting`, or reset review selections.
+  // Keeping the promise in a ref also prevents React effect replays from issuing
+  // duplicate POSTs.
   useEffect(() => {
-    if (!open || !unit.id || !Number.isFinite(propertyId)) return;
+    if (!unit.id || !Number.isFinite(propertyId)) return;
 
     let cancelled = false;
     const requestKey = `${propertyId}:${unit.id}:${startAttempt}`;
@@ -124,6 +135,7 @@ export default function VirtualStagingDialog({
     setStartError(null);
     setPollError(null);
     setConfirmError(null);
+    setFinishError(null);
     setSelectedCandidateIds(new Set());
 
     let request = startRequestRef.current;
@@ -160,7 +172,7 @@ export default function VirtualStagingDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, propertyId, startAttempt, toast, unit.id, unit.label]);
+  }, [propertyId, startAttempt, toast, unit.id, unit.label]);
 
   // Poll in the background even if the operator closes the modal. That keeps
   // the launch controls disabled until the live job actually reaches a terminal
@@ -192,6 +204,30 @@ export default function VirtualStagingDialog({
     };
   }, [job?.id, job?.status]);
 
+  // Another tab can confirm or finish the retained job while this dialog is
+  // starting or polling it. Release the local session as soon as that durable
+  // status is observed so it cannot strand the other unit behind stale UI.
+  useEffect(() => {
+    if (
+      job?.status !== "confirmed"
+      || locallyResolvedJobRef.current === job.id
+      || externallyNotifiedJobRef.current === job.id
+    ) return;
+    externallyNotifiedJobRef.current = job.id;
+    onOpenChange(false);
+    void Promise.resolve(onResolvedExternally?.({
+      job,
+      swappedCount: job.selectedCount ?? 0,
+      unit,
+    })).catch((error: unknown) => {
+      toast({
+        title: "Virtual staging was resolved in another tab, but the gallery couldn't refresh",
+        description: errorMessage(error),
+        variant: "destructive",
+      });
+    });
+  }, [job, onOpenChange, onResolvedExternally, toast, unit]);
+
   const successfulCandidates = useMemo(
     () => job?.candidates.filter(candidateIsSelectable) ?? [],
     [job?.candidates],
@@ -209,7 +245,12 @@ export default function VirtualStagingDialog({
   }, [successfulCandidates]);
 
   const activeJob = !!job && ACTIVE_JOB_STATUSES.has(job.status);
-  const busy = (open && !job && !startError) || starting || activeJob || confirming || retryingCandidateIds.size > 0;
+  const busy = (open && !job && !startError)
+    || starting
+    || activeJob
+    || confirming
+    || finishing
+    || retryingCandidateIds.size > 0;
   useEffect(() => {
     onBusyChange?.(busy);
   }, [busy, onBusyChange]);
@@ -273,6 +314,7 @@ export default function VirtualStagingDialog({
       );
       const payload = await response.json() as { job?: unknown; swappedCount?: unknown };
       const confirmedJob = jobFromPayload(payload);
+      locallyResolvedJobRef.current = confirmedJob.id;
       const swappedCount = typeof payload.swappedCount === "number"
         ? payload.swappedCount
         : selectedSuccessfulIds.length;
@@ -299,6 +341,36 @@ export default function VirtualStagingDialog({
       setConfirming(false);
     }
   }, [job, onConfirmed, onOpenChange, selectedSuccessfulIds, toast, unit]);
+
+  const finishWithoutSwaps = useCallback(async () => {
+    if (confirmingRef.current || activeJob) return;
+    confirmingRef.current = true;
+    setFinishing(true);
+    setFinishError(null);
+    setConfirmError(null);
+
+    try {
+      if (job) {
+        const response = await apiRequest(
+          "POST",
+          `/api/virtual-staging/jobs/${encodeURIComponent(job.id)}/finish`,
+        );
+        const finishedJob = await readJob(response);
+        locallyResolvedJobRef.current = finishedJob.id;
+        setJob(finishedJob);
+      }
+      toast({ title: `Kept the original ${unit.label} photos. This staging review is finished.` });
+      onFinished?.();
+      onOpenChange(false);
+    } catch (error: unknown) {
+      const message = errorMessage(error);
+      setFinishError(message);
+      toast({ title: "Couldn't finish this staging review", description: message, variant: "destructive" });
+    } finally {
+      confirmingRef.current = false;
+      setFinishing(false);
+    }
+  }, [activeJob, job, onFinished, onOpenChange, toast, unit.label]);
 
   const safelyChangeOpen = (nextOpen: boolean) => {
     if (!nextOpen && confirmingRef.current) return;
@@ -371,6 +443,13 @@ export default function VirtualStagingDialog({
             <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm" role="alert">
               <span className="font-medium text-destructive">Nothing was swapped: </span>
               <span className="text-muted-foreground">{confirmError}</span>
+            </div>
+          )}
+
+          {finishError && (
+            <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm" role="alert">
+              <span className="font-medium text-destructive">The review is still open: </span>
+              <span className="text-muted-foreground">{finishError}</span>
             </div>
           )}
 
@@ -498,7 +577,7 @@ export default function VirtualStagingDialog({
                             size="sm"
                             variant="outline"
                             className="mt-3"
-                            disabled={retrying || confirming}
+                            disabled={retrying || confirming || finishing}
                             onClick={() => void retryCandidate(candidate.id)}
                             data-testid={`button-retry-staging-${candidate.id}`}
                           >
@@ -520,7 +599,7 @@ export default function VirtualStagingDialog({
                       <Checkbox
                         id={checkboxId}
                         checked={selected}
-                        disabled={!selectable || confirming}
+                        disabled={!selectable || confirming || finishing}
                         onCheckedChange={(checked) => toggleCandidate(candidate.id, checked === true)}
                         aria-describedby={`${checkboxId}-status`}
                         data-testid={`checkbox-use-staged-${candidate.id}`}
@@ -548,12 +627,24 @@ export default function VirtualStagingDialog({
             Originals remain preserved. Only checked staged versions will become active.
           </p>
           <div className="flex w-full flex-col-reverse gap-2 sm:w-auto sm:flex-row">
-            <Button type="button" variant="outline" disabled={confirming} onClick={() => safelyChangeOpen(false)}>
-              Cancel
+            <Button type="button" variant="outline" disabled={confirming || finishing} onClick={() => safelyChangeOpen(false)}>
+              Close for now
             </Button>
+            {((job && (job.status === "ready" || job.status === "failed")) || (startError && !job)) && (
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={confirming || finishing}
+                onClick={() => void finishWithoutSwaps()}
+                data-testid="button-finish-virtual-staging-without-swaps"
+              >
+                {finishing && <Loader2 className="animate-spin" />}
+                {finishing ? "Finishing review…" : "Finish without swaps"}
+              </Button>
+            )}
             <Button
               type="button"
-              disabled={selectedSuccessfulIds.length === 0 || confirming || !job || job.status === "confirmed"}
+              disabled={selectedSuccessfulIds.length === 0 || confirming || finishing || !job || job.status === "confirmed"}
               onClick={() => void confirmSelection()}
               data-testid="button-confirm-virtual-staging"
             >
