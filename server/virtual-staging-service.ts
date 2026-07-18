@@ -1,17 +1,26 @@
 import OpenAI, { toFile } from "openai";
 import sharp from "sharp";
 
-import { VIRTUAL_STAGING_PROMPT } from "@shared/virtual-staging";
+import {
+  buildVirtualStagingPrompt,
+  virtualStagingRecipeSignature,
+  type VirtualStagingContext,
+} from "@shared/virtual-staging";
 import { ReplicateVirtualStagingProvider } from "./replicate-virtual-staging-provider";
 
 const DEFAULT_MODEL = "gpt-image-1.5";
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const OPENAI_TIMEOUT_MS = 5 * 60 * 1000;
 
-export type VirtualStagingGenerationInput = {
+export type VirtualStagingGenerationRequest = {
   source: Buffer;
   sourceFilename: string;
+  context: VirtualStagingContext;
   endUserId?: string;
+};
+
+export type VirtualStagingGenerationInput = VirtualStagingGenerationRequest & {
+  prompt: string;
 };
 
 export type VirtualStagingGenerationResult = {
@@ -145,7 +154,7 @@ export class OpenAIVirtualStagingProvider implements VirtualStagingImageProvider
     const response = await client.images.edit({
       model: this.model,
       image: upload,
-      prompt: VIRTUAL_STAGING_PROMPT,
+      prompt: input.prompt,
       input_fidelity: "high",
       quality: "high",
       size: "auto",
@@ -235,6 +244,10 @@ export class VirtualStagingService {
     ) || DEFAULT_MODEL;
   }
 
+  get recipeSignature(): string {
+    return virtualStagingRecipeSignature();
+  }
+
   assertConfigured(): void {
     if (process.env.VIRTUAL_STAGING_MOCK === "1" && process.env.NODE_ENV === "production") {
       throw new VirtualStagingConfigurationError("VIRTUAL_STAGING_MOCK cannot be enabled in production");
@@ -244,14 +257,18 @@ export class VirtualStagingService {
     }
   }
 
-  async generate(input: VirtualStagingGenerationInput): Promise<VirtualStagingGenerationResult> {
+  async generate(input: VirtualStagingGenerationRequest): Promise<VirtualStagingGenerationResult> {
     this.assertConfigured();
     const source = await validateSourceImage(input.source);
+    const providerInput: VirtualStagingGenerationInput = {
+      ...input,
+      prompt: buildVirtualStagingPrompt(input.context),
+    };
     return this.limiter.run(async () => {
       const errors: string[] = [];
       for (const provider of this.configuredProviders()) {
         try {
-          const result = await provider.generate(input);
+          const result = await provider.generate(providerInput);
           return await validateGeneratedImage(
             result.buffer,
             result.model,

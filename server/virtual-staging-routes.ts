@@ -19,11 +19,13 @@ import {
   type VirtualStagingJob,
 } from "./virtual-staging-schema";
 import {
-  resolveVirtualStagingSources,
+  resolveStageableVirtualStagingSources,
   isVirtualStagingCandidateFilename,
   sameVirtualStagingSelection,
   summarizeCandidateStatuses,
   validateVirtualStagingSelection,
+  VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX,
+  virtualStagingContextForSource,
   type VirtualStagingCandidateDto,
   type VirtualStagingCandidateStatus,
   type VirtualStagingJobDto,
@@ -46,6 +48,8 @@ const ACTIVE_JOB_STATUSES = ["queued", "running"] as const;
 const RESUMABLE_JOB_STATUSES = ["queued", "running", "ready", "failed"] as const;
 const GENERATION_LEASE_MS = 8 * 60 * 1_000;
 const RECOVERY_SWEEP_MS = 30 * 1_000;
+const OUTDATED_RECIPE_MESSAGE =
+  "Superseded by an updated virtual-staging recipe without applying any photos.";
 
 let recoverySweepTimer: NodeJS.Timeout | null = null;
 
@@ -312,7 +316,7 @@ async function listUnitSources(unit: ResolvedVirtualStagingUnit) {
       active: virtualStagingCandidates.active,
     }).from(virtualStagingCandidates).where(eq(virtualStagingCandidates.folder, unit.folder)),
   ]);
-  return resolveVirtualStagingSources({
+  return resolveStageableVirtualStagingSources({
     diskFilenames,
     labels: labels.map(labelSnapshot),
     // Every generated filename in this physical folder is excluded, but only
@@ -400,7 +404,24 @@ async function ensureOriginalAsset(
   }
 }
 
-async function findResumableJob(unit: ResolvedVirtualStagingUnit): Promise<VirtualStagingJob | undefined> {
+function jobIsResumableForUnit(
+  job: VirtualStagingJob,
+  unit: ResolvedVirtualStagingUnit,
+): boolean {
+  if (!RESUMABLE_JOB_STATUSES.includes(job.status as typeof RESUMABLE_JOB_STATUSES[number])) {
+    return false;
+  }
+  // An in-flight job remains the unit's singleton even if its folder changes.
+  // Terminal previews are only reusable against the same immutable source
+  // folder; otherwise a later unit swap should start a fresh review.
+  return ACTIVE_JOB_STATUSES.includes(job.status as typeof ACTIVE_JOB_STATUSES[number])
+    || job.folder === unit.folder;
+}
+
+async function findResumableJob(
+  unit: ResolvedVirtualStagingUnit,
+  recipeSignature: string,
+): Promise<VirtualStagingJob | undefined> {
   const [job] = await db
     .select()
     .from(virtualStagingJobs)
@@ -410,14 +431,7 @@ async function findResumableJob(unit: ResolvedVirtualStagingUnit): Promise<Virtu
     ))
     .orderBy(desc(virtualStagingJobs.createdAt))
     .limit(1);
-  if (!job || !RESUMABLE_JOB_STATUSES.includes(job.status as typeof RESUMABLE_JOB_STATUSES[number])) {
-    return undefined;
-  }
-  // An in-flight job remains the unit's singleton even if its folder changes.
-  // Terminal previews are only reusable against the same immutable source
-  // folder; otherwise a later unit swap should start a fresh review.
-  return ACTIVE_JOB_STATUSES.includes(job.status as typeof ACTIVE_JOB_STATUSES[number])
-    || job.folder === unit.folder
+  return job && job.model === recipeSignature && jobIsResumableForUnit(job, unit)
     ? job
     : undefined;
 }
@@ -515,6 +529,22 @@ async function processCandidate(candidateId: string): Promise<void> {
   )).returning();
   if (!claimed) return;
   try {
+    const snapshot = claimed.metadataSnapshot && typeof claimed.metadataSnapshot === "object"
+      ? claimed.metadataSnapshot as Record<string, unknown>
+      : {};
+    const context = virtualStagingContextForSource({
+      originalFilename: claimed.originalFilename,
+      roomLabel: claimed.roomLabel,
+      metadata: {
+        label: snapshotString(snapshot, "label") ?? claimed.roomLabel,
+        category: snapshotString(snapshot, "category"),
+        userLabel: snapshotString(snapshot, "userLabel"),
+        userCategory: snapshotString(snapshot, "userCategory"),
+      },
+    });
+    if (!context) {
+      throw new Error("Photo is not a furnished room or private outdoor living space eligible for virtual staging");
+    }
     const [asset] = await db.select().from(photoOriginalAssets)
       .where(eq(photoOriginalAssets.id, claimed.originalAssetId)).limit(1);
     if (!asset) throw new Error("Immutable original asset is missing");
@@ -525,9 +555,14 @@ async function processCandidate(candidateId: string): Promise<void> {
     const [job] = await db.select().from(virtualStagingJobs)
       .where(eq(virtualStagingJobs.id, claimed.jobId)).limit(1);
     if (!job || job.status === "confirmed") throw new Error("Virtual-staging job is no longer active");
-    const result = await getVirtualStagingService().generate({
+    const service = getVirtualStagingService();
+    if (job.model !== service.recipeSignature) {
+      throw new Error("Virtual-staging job uses an outdated generation recipe");
+    }
+    const result = await service.generate({
       source,
       sourceFilename: claimed.originalFilename,
+      context,
       endUserId: job.requestedBy ?? undefined,
     });
     if (!claimed.stagingRelativePath) throw new Error("Candidate storage path is missing");
@@ -592,12 +627,35 @@ async function runJob(jobId: string): Promise<void> {
 }
 
 async function recoverInterruptedJobs(): Promise<void> {
+  const recipeSignature = getVirtualStagingService().recipeSignature;
+  const now = new Date();
+
+  // Jobs created before recipe versioning stored only a provider model. Retire
+  // that one known legacy shape without activating candidates so its poller
+  // releases the retained modal session. Do not retire unknown versioned jobs:
+  // during a rolling deploy they may belong to a newer healthy instance.
+  await db.update(virtualStagingJobs).set({
+    status: "confirmed",
+    selectedCandidateIds: [],
+    confirmedAt: now,
+    error: OUTDATED_RECIPE_MESSAGE,
+    updatedAt: now,
+  }).where(and(
+    inArray(virtualStagingJobs.status, [...RESUMABLE_JOB_STATUSES]),
+    or(
+      isNull(virtualStagingJobs.model),
+      sql`${virtualStagingJobs.model} NOT LIKE ${`${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}%`}`,
+    ),
+  ));
+
   const active = await db.select({ id: virtualStagingJobs.id })
     .from(virtualStagingJobs)
-    .where(inArray(virtualStagingJobs.status, [...ACTIVE_JOB_STATUSES]));
+    .where(and(
+      inArray(virtualStagingJobs.status, [...ACTIVE_JOB_STATUSES]),
+      eq(virtualStagingJobs.model, recipeSignature),
+    ));
   if (active.length === 0) return;
   const ids = active.map((job) => job.id);
-  const now = new Date();
   const legacyStaleBefore = new Date(now.getTime() - GENERATION_LEASE_MS);
   await db.update(virtualStagingCandidates).set({
     status: "pending",
@@ -637,20 +695,54 @@ async function createJob(
   // POST is intentionally resumable as well as idempotent. If the Photos tab
   // unmounted while generation finished, the next click must reopen that
   // unconfirmed review instead of paying for a second generation run.
-  const existing = await findResumableJob(unit);
+  const service = getVirtualStagingService();
+  const recipeSignature = service.recipeSignature;
+  const existing = await findResumableJob(unit, recipeSignature);
   if (existing) return { dto: await requireJobDto(existing.id), duplicate: true };
 
-  const service = getVirtualStagingService();
   service.assertConfigured();
   const sources = await listUnitSources(unit);
-  if (sources.length === 0) throw new VirtualStagingHttpError(409, `${unit.unitLabel} has no visible photos`);
+  if (sources.length === 0) {
+    throw new VirtualStagingHttpError(
+      409,
+      `${unit.unitLabel} has no furnished room or private patio/lanai photos eligible for virtual staging`,
+    );
+  }
   const assets = await Promise.all(
     sources.map((source) => ensureOriginalAsset(unit, source.originalFilename)),
   );
   const jobId = crypto.randomUUID();
   const createdMs = Date.now();
   try {
-    await db.transaction(async (tx) => {
+    const duplicateJobId = await db.transaction(async (tx): Promise<string | null> => {
+      const [latest] = await tx
+        .select()
+        .from(virtualStagingJobs)
+        .where(and(
+          eq(virtualStagingJobs.propertyId, unit.propertyId),
+          eq(virtualStagingJobs.unitId, unit.unitId),
+        ))
+        .orderBy(desc(virtualStagingJobs.createdAt))
+        .limit(1)
+        .for("update");
+      if (latest && jobIsResumableForUnit(latest, unit)) {
+        if (latest.model === recipeSignature) return latest.id;
+        if (latest.model?.startsWith(VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX)) {
+          throw new VirtualStagingHttpError(
+            409,
+            "A review from a different staging recipe is still open. Try again after the deployment finishes.",
+          );
+        }
+        const retiredAt = new Date();
+        await tx.update(virtualStagingJobs).set({
+          status: "confirmed",
+          selectedCandidateIds: [],
+          approvedBy: requestedBy,
+          confirmedAt: retiredAt,
+          error: OUTDATED_RECIPE_MESSAGE,
+          updatedAt: retiredAt,
+        }).where(eq(virtualStagingJobs.id, latest.id));
+      }
       await tx.insert(virtualStagingJobs).values({
         id: jobId,
         propertyId: unit.propertyId,
@@ -661,7 +753,7 @@ async function createJob(
         total: sources.length,
         completed: 0,
         failed: 0,
-        model: service.model,
+        model: recipeSignature,
         requestedBy,
         createdAt: new Date(createdMs),
         updatedAt: new Date(createdMs),
@@ -690,10 +782,14 @@ async function createJob(
           updatedAt: new Date(createdMs + index + 1),
         };
       }));
+      return null;
     });
+    if (duplicateJobId) {
+      return { dto: await requireJobDto(duplicateJobId), duplicate: true };
+    }
   } catch (error) {
     if (pgErrorCode(error) === "23505") {
-      const raced = await findResumableJob(unit);
+      const raced = await findResumableJob(unit, recipeSignature);
       if (raced) return { dto: await requireJobDto(raced.id), duplicate: true };
     }
     throw error;
@@ -1041,7 +1137,11 @@ export function registerVirtualStagingRoutes(app: Express): void {
     );
     if (job.status === "confirmed") throw new VirtualStagingHttpError(409, "Confirmed jobs cannot be retried");
     if (candidate.status !== "failed") throw new VirtualStagingHttpError(409, "Only failed photos can be retried");
-    getVirtualStagingService().assertConfigured();
+    const service = getVirtualStagingService();
+    if (job.model !== service.recipeSignature) {
+      throw new VirtualStagingHttpError(409, "This review used an older staging recipe. Start a new Restage run.");
+    }
+    service.assertConfigured();
     try {
       await db.transaction(async (tx) => {
         const [lockedJob] = await tx.select({ status: virtualStagingJobs.status })
@@ -1097,6 +1197,12 @@ export function registerVirtualStagingRoutes(app: Express): void {
         alreadyConfirmed: true,
       });
       return;
+    }
+    if (job.model !== getVirtualStagingService().recipeSignature) {
+      throw new VirtualStagingHttpError(
+        409,
+        "This review used an older staging recipe. Start a new Restage run.",
+      );
     }
     if (job.status !== "ready") {
       throw new VirtualStagingHttpError(409, "Wait for virtual staging to finish before confirming");
