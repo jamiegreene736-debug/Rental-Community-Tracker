@@ -481,7 +481,11 @@ async function resolveUnitAuditTarget(propertyId: number): Promise<UnitAuditTarg
 
   if (propertyId > 0) {
     const builder = getUnitBuilderByPropertyId(propertyId);
-    if (!builder) return null;
+    // Retired entries are folder-context data only, not auditable portfolio
+    // rows: startUnitAuditSweep 404s and a stale queued record fails its
+    // resolve stage instead of running a full ghost sweep (2026-07-18 —
+    // the first weekly cron tick audited six retired properties).
+    if (!builder || builder.retired === true) return null;
     const parsed = parseStreetCityState(builder.address ?? "");
     const bathrooms = builder.units.map((u) => parseBathrooms(u.bathrooms)).filter((n): n is number => n != null);
     const guests = builder.units.map((u) => Number(u.maxGuests)).filter((n) => Number.isFinite(n) && n > 0);
