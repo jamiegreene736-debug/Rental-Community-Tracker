@@ -53,6 +53,12 @@ type PreflightPhotoFetchJob = {
   sourceUrl: string | null;
   proof?: Record<string, unknown> | null;
   diagnostic?: Record<string, unknown> | null;
+  /**
+   * The same-unit photo hunt ("Find new photos") proved no genuinely different
+   * photo set of this exact unit exists online — render the
+   * "Find replacement unit" CTA. Never set on transient search failures.
+   */
+  recommendReplaceUnit?: boolean | null;
   error: string | null;
 };
 
@@ -110,6 +116,8 @@ type OperationReceipt = {
   title: string; // e.g. "Photos re-pulled" / "Full unit audit"
   detail: string; // human summary or error message
   jobId?: string; // de-dupes repeat records for the same finished job
+  /** Same-unit photo hunt exhausted — keep offering "Find replacement unit". */
+  recommendReplaceUnit?: boolean;
 };
 
 function OperationReceiptNote({
@@ -717,8 +725,12 @@ export default function BuilderPreflight() {
   // street address + bedroom count, supplements with Apify when a resort
   // street root is known, then scrapes the first usable detail result.
   // Operator clicks one button per unit; URL paste isn't needed.
+  // Restored for DRAFTS since #990; static properties joined on 2026-07-17 —
+  // "Find new photos" is now a minutes-long same-unit hunt on static rows too,
+  // so losing the job id on reload silently discarded its verdict (incl. the
+  // recommendReplaceUnit outcome). Static Re-pull still rides the rescrape job.
   const [photoFetchJobIdsByUnit, setPhotoFetchJobIdsByUnit] = useState<Record<string, string>>(() =>
-    id < 0 ? loadPhotoFetchJobIds(id) : {},
+    Number.isFinite(id) ? loadPhotoFetchJobIds(id) : {},
   );
   const [photoFetchJobsByUnit, setPhotoFetchJobsByUnit] = useState<Record<string, PreflightPhotoFetchJob>>({});
   const [photoFetchTick, setPhotoFetchTick] = useState(0);
@@ -751,7 +763,7 @@ export default function BuilderPreflight() {
   }, [activePhotoFetchUnitIds.length]);
 
   useEffect(() => {
-    if (!id || id >= 0) return;
+    if (!Number.isFinite(id)) return;
     setPhotoFetchJobIdsByUnit(loadPhotoFetchJobIds(id));
   }, [id]);
 
@@ -786,9 +798,10 @@ export default function BuilderPreflight() {
       recordPhotoFetchReceipt(unitId, {
         timestamp: Date.now(),
         success: false,
-        title: "Photo re-pull failed",
+        title: job.recommendReplaceUnit ? "No different photos found for this unit" : "Photo re-pull failed",
         detail: job.error || job.message || "No photos were saved.",
         jobId: job.id,
+        recommendReplaceUnit: job.recommendReplaceUnit === true,
       });
     }
     if (job.status === "completed") {
@@ -818,7 +831,9 @@ export default function BuilderPreflight() {
       }
     } else if (!restored && job.error) {
       toast({
-        title: "No more photo candidates",
+        title: job.recommendReplaceUnit
+          ? "No different photos exist for this unit — try replacing the unit"
+          : "No more photo candidates",
         description: job.error,
         variant: "destructive",
       });
@@ -1109,9 +1124,13 @@ export default function BuilderPreflight() {
     opts?: { findNewSource?: boolean },
   ) => {
     if (!property) return;
-    // "Find new photos": discovery for a DIFFERENT source listing — the current
-    // source + sibling sources go into skipUrls and the saved-listing rescrape is
-    // skipped, so the job can only land a gallery from a NEW listing page.
+    // "Find new photos" (2026-07-17): SAME-UNIT cross-portal hunt — the server
+    // anchors on this unit's saved source listing, hunts the other real-estate
+    // portals for THIS exact unit's pages, and replaces the gallery only when
+    // a dHash-verified different photo set is found. The current source +
+    // sibling sources still ride in skipUrls (exact-URL exclusion) and the
+    // saved-listing rescrape is skipped. On an exhausted hunt the job fails
+    // with recommendReplaceUnit and the row offers "Find replacement unit".
     const findNewSource = opts?.findNewSource === true;
     const isDraft = id < 0;
     // STATIC builder property (positive id): the row's unit comes from
@@ -1202,6 +1221,14 @@ export default function BuilderPreflight() {
         // saved listing — discovery hunts a NEW source (current one excluded).
         rescrapeSourceUrl: !findNewSource && replacingExistingPhotos && currentSourceUrl ? currentSourceUrl : undefined,
         findNewSource,
+        // "Find new photos" (2026-07-17) = SAME-UNIT cross-portal hunt: the
+        // server anchors on this unit's saved source listing and only accepts
+        // a gallery dHash-proven different from the ACTIVE folder's photos.
+        // When no different photo set exists, the job fails with
+        // recommendReplaceUnit and the row offers "Find replacement unit".
+        sameUnitOnly: findNewSource,
+        currentSourceUrl: findNewSource && currentSourceUrl ? currentSourceUrl : undefined,
+        currentFolder: findNewSource ? (isDraft ? unit.photoFolder : activeFolder) : undefined,
         // Static builder property: persist the discovered gallery into the
         // unit's ACTIVE folder (server hands it to rescrape-unit-photos).
         targetFolder: isDraft ? undefined : activeFolder,
@@ -1810,6 +1837,10 @@ export default function BuilderPreflight() {
     setShowReplacementFlow(false);
     setReplacementTargetId(null);
     setReplacementSkipUrl(null);
+    // The unit's photo-fetch receipt describes the OLD gallery — after a
+    // replacement, a lingering "No different photos found — Find replacement
+    // unit" receipt would keep pushing a swap that already happened.
+    dismissPhotoFetchReceipt(oldUnitId);
 
     // Re-run the platform check with updated units
     const updatedUnits = property.units.map(u => {
@@ -1872,6 +1903,26 @@ export default function BuilderPreflight() {
       setManualReplacingUnitId(null);
     }
   }
+
+  // "Find replacement unit" CTA (rendered when the same-unit photo hunt proved
+  // no different photos of this unit exist online). Opens the SAME
+  // UnitReplacementFlow the Platform-Check "Replace" buttons use; a property
+  // without a community folder has no automatic flow on this page, so it falls
+  // back to the manual Replace-with-URL panel instead.
+  const openReplacementFlowForUnit = (unitId: string) => {
+    if (property?.communityPhotoFolder) {
+      setSwapsCommitted(false);
+      setReplacementSkipUrl(null);
+      setReplacementTargetId(unitId);
+      setShowReplacementFlow(true);
+      window.setTimeout(() => {
+        document.getElementById("unit-replacement-flow-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 150);
+    } else {
+      setManualReplaceUnitId(unitId);
+      setManualReplaceUrl(unitOverrides[unitId]?.sourceUrl ?? "");
+    }
+  };
 
   const hasAnyResults = Object.keys(results).length > 0;
   const photoFetchJobForUnit = (unitId: string) => photoFetchJobsByUnit[unitId];
@@ -2210,8 +2261,11 @@ export default function BuilderPreflight() {
                     below. Use <strong>Re-pull all photos</strong> to rescrape this
                     unit&apos;s own listing and refresh its full gallery — if the source
                     still has the same photos it reports &ldquo;already current&rdquo;. Use{" "}
-                    <strong>Find new photos</strong> to search live for a{" "}
-                    <em>different</em> source listing and replace the gallery from it.
+                    <strong>Find new photos</strong> when the scraped photos are poor
+                    quality or missing bedrooms — it hunts <em>this exact unit&apos;s</em>{" "}
+                    listing on the other portals (Zillow, Realtor, Redfin, Homes.com) and
+                    replaces the gallery only when a genuinely different photo set is
+                    found; if none exists it offers <strong>Find replacement unit</strong>.
                     To swap in a different unit entirely, use <strong>Replace with URL</strong> (paste a listing you chose) or <strong>Find / Replace a Unit</strong> (automatic search).
                   </p>
                 );
@@ -2298,7 +2352,7 @@ export default function BuilderPreflight() {
                         disabled={unitBusy}
                         className="h-8 text-xs flex-shrink-0"
                         data-testid={`button-find-new-photos-${unit.id}`}
-                        title="Search live for a DIFFERENT listing of this unit size at this community (the current source is excluded, caches bypassed) and replace the gallery from that new source. Keeps the current gallery if nothing better is found."
+                        title="Hunt THIS exact unit's listing on the other portals (Zillow, Realtor, Redfin, Homes.com) and replace the gallery only when a genuinely different photo set is found (verified against the photos on file). If no different photos of this unit exist online you'll be offered Find replacement unit. Keeps the current gallery otherwise."
                       >
                         <Search className="h-3 w-3 mr-1" /> Find new photos
                       </Button>
@@ -2412,6 +2466,18 @@ export default function BuilderPreflight() {
                     {photoFetchJobForUnit(unit.id)?.status === "failed" && (
                       <div className="basis-full space-y-1 rounded-md border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-900">
                         <p>{photoFetchJobForUnit(unit.id)?.error || photoFetchJobForUnit(unit.id)?.message}</p>
+                        {photoFetchJobForUnit(unit.id)?.recommendReplaceUnit && !unitOverrides[unit.id] && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 text-xs border-amber-400 dark:border-amber-600 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                            onClick={() => openReplacementFlowForUnit(unit.id)}
+                            data-testid={`button-find-replacement-unit-${unit.id}`}
+                            title="No different photos of this exact unit exist online — search for a different unit in this community to replace it with"
+                          >
+                            <Search className="h-3 w-3 mr-1" /> Find replacement unit
+                          </Button>
+                        )}
                         <OperationFailureActions
                           jobType="preflight-photo-fetch"
                           jobId={photoFetchJobForUnit(unit.id)?.id}
@@ -2458,12 +2524,34 @@ export default function BuilderPreflight() {
                     {/* Sticky receipt: when this unit's photos were last
                         re-pulled and whether it worked (× dismisses). */}
                     {!isScrapingThisUnit && photoFetchReceipts[unit.id] && (
-                      <OperationReceiptNote
-                        receipt={photoFetchReceipts[unit.id]}
-                        relative={fmtRelative}
-                        onDismiss={() => dismissPhotoFetchReceipt(unit.id)}
-                        testId={`receipt-photo-fetch-${unit.id}`}
-                      />
+                      <>
+                        <OperationReceiptNote
+                          receipt={photoFetchReceipts[unit.id]}
+                          relative={fmtRelative}
+                          onDismiss={() => dismissPhotoFetchReceipt(unit.id)}
+                          testId={`receipt-photo-fetch-${unit.id}`}
+                        />
+                        {/* The hunt proved no different photos of this unit
+                            exist — keep the replacement CTA alive with the
+                            sticky receipt (the failed-job block already shows
+                            its own copy while the job state is live). */}
+                        {photoFetchReceipts[unit.id].recommendReplaceUnit
+                          && !unitOverrides[unit.id]
+                          && photoFetchJobForUnit(unit.id)?.status !== "failed" && (
+                          <div className="basis-full">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2 text-xs border-amber-400 dark:border-amber-600 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                              onClick={() => openReplacementFlowForUnit(unit.id)}
+                              data-testid={`button-find-replacement-unit-receipt-${unit.id}`}
+                              title="No different photos of this exact unit exist online — search for a different unit in this community to replace it with"
+                            >
+                              <Search className="h-3 w-3 mr-1" /> Find replacement unit
+                            </Button>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 );
@@ -3077,8 +3165,13 @@ export default function BuilderPreflight() {
 
         {/* Unit replacement flow */}
         {showReplacementFlow && property.communityPhotoFolder && (
-          <div className="mt-6">
+          <div className="mt-6" id="unit-replacement-flow-anchor">
+            {/* key: retargeting the flow (e.g. the Find-replacement-unit CTA
+                while it's already open for another unit) must REMOUNT it —
+                its internal search/commit state is unit-scoped, and a stale
+                mount could commit a swap against the wrong unit. */}
             <UnitReplacementFlow
+              key={targetUnit.id}
               unit={{
                 id: targetUnit.id,
                 unitNumber: targetUnit.unitNumber,

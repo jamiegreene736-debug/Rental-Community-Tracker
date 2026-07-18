@@ -43,6 +43,41 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-17 (preflight "Find new photos" → SAME-UNIT cross-portal hunt + "Find replacement unit"
+  CTA): Operator: the button "should just try to find photos of the same unit" (clicked when the
+  scraped photos are crappy quality / missing bedroom shots); if it can't find different photos for
+  that unit "the UI needs to say find replacement unit". SHIPPED
+  (`claude/find-new-photos-same-unit`): the button now sends `sameUnitOnly:true` +
+  `currentSourceUrl` + `currentFolder` to the photo-fetch job, which runs `runSameUnitPhotoHunt`
+  (server/same-unit-photo-hunt.ts; pure logic shared/same-unit-photo-hunt.ts) — identity from the
+  saved source URL's slug (address + unit claim + street root; the text/root parsers moved VERBATIM
+  from routes.ts to shared/listing-url-address.ts), SERP via #1059's buildEquivalentPortalQueries,
+  candidates filtered to the SAME physical unit (neighbor units / unprovable streets / OTA pages
+  never pass; cross-portal candidates tried before the source's own portal), galleries scraped via
+  loopback fetch-unit-photos {url} (tiered scraper + sidecar), and accepted ONLY when dHash novelty
+  vs the current folder proves ≥ SAME_UNIT_PHOTO_HUNT_MIN_NEW (3) genuinely NEW photos
+  (> NEAR_DUPLICATE_DISTANCE from every photo on file incl. hidden; unhashable = inconclusive,
+  never new). NO discovery fallback — an exhausted hunt fails with `recommendReplaceUnit:true` and
+  the Photo Sources row renders an amber "Find replacement unit" button (opens the page's existing
+  UnitReplacementFlow; Replace-with-URL fallback without a community folder); the flag is NEVER set
+  on transient SERP outages (honesty rule — an outage must not push a destructive swap). The Unit
+  Audit Sweep's find-new-source rung keeps legacy findNewSource (different-listing discovery)
+  untouched — test-locked. Kill `SAME_UNIT_PHOTO_HUNT_DISABLED=1` (degrades to legacy find-new
+  discovery, loudly); knobs SAME_UNIT_PHOTO_HUNT_MAX_CANDIDATES (4) / _MIN_NEW (3). Verified:
+  same-unit-photo-hunt suite green (npm chain; incl. source guards on job gating, client payload,
+  CTA, and the sweep's legacy semantics), pipeline-logic + discovery-cache locks repointed (intent
+  preserved), full `npm test` REAL exit 0, build clean, `npm run check` per-file error sets
+  identical to base (335 total; the documented 338 moved with main, not this change). HARDENED by a
+  5-lens adversarial review (majors all fixed — see the AGENTS.md entry): Hwy/Highway/Loop street
+  parsing (the 57-091-vs-57-101 Kamehameha Hwy neighbor class), unit-token-only anchors rejected,
+  inline Hawaii unit slugs (92-1070-1-Olani-St) carry their token, snippet junk can't inject unit
+  claims, recommendReplaceUnit requires a COMPLETE sweep + substantively-judged candidates
+  (scrape outages → retry copy, never the flag), server-side _source.json anchor fallback,
+  UnitReplacementFlow remounts on retarget, CTA/receipt clear after a replacement. Could NOT
+  live-smoke SERP/scrape legs (no keys in session) — post-deploy: click "Find new photos" on a unit
+  with a poor gallery; expect either "Found a different photo set for this exact unit on <portal> —
+  saved N photos (M new…)" or the honest exhaustion message + the "Find replacement unit" button.
+
 - 2026-07-18 (Photo replacement activity showed "Beautiful 8 brs for 22 near Poipu Beach Park! ·
   Unit B (3BR)" — a unit NOT in the system — GHOST/RETIRED builder entries): NOT a display bug
   (don't re-chase): unit-builder-data.ts carries SIX legacy entries (propertyIds 7, 10, 14, 26,

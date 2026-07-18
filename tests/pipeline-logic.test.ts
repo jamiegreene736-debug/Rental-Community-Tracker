@@ -815,10 +815,18 @@ assert.match(
   /isBoundedDiscovery && suppliedStreetRoot[\s\S]*listingStreetRoot\(link\) === suppliedStreetRoot[\s\S]*addCandidate\(link, "zillow"\)/,
   "bounded preflight must only admit Apify Zillow URLs that match the requested resort street root",
 );
+// streetRootFromListingAddress moved VERBATIM to shared/listing-url-address.ts
+// (2026-07-17, same-unit photo hunt) — routes.ts imports it, so the Hawaii
+// slug-normalization guard now reads the shared module.
 assert.match(
-  routesSource,
+  readFileSync("shared/listing-url-address.ts", "utf8"),
   /Redfin slugs like "92-1070-1-Olani-St"/,
   "Hawaii Redfin unit slugs must normalize to the same street root as the resort address",
+);
+assert.match(
+  routesSource,
+  /import \{ parseListingAddressFromUrl, parseListingAddressFromText, streetRootFromListingAddress \} from "@shared\/listing-url-address"/,
+  "routes.ts must import the shared street-root canonicalizers (single implementation)",
 );
 assert.match(
   routesSource,

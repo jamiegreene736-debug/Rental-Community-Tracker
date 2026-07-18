@@ -11,10 +11,12 @@ export function preflightPhotoDiscoveryAttempts(
 ): PreflightPhotoDiscoveryAttempt[] {
   // NOTE FOR CODEX: the `replacingExistingPhotos` (re-pull) branch was inert until
   // 2026-07-10 — plain re-pull still gates discovery OFF (allowDiscoveryFallback in
-  // server/preflight-background-jobs.ts), but the operator "Find new photos" mode
-  // (findNewSource) now runs these attempts with replacingExistingPhotos=true, with
-  // the relaxed `"any"` rung filtered out there (exact-bedroom only when replacing
-  // a real gallery). The EMPTY-unit "Find Photos" path is the `false` branch.
+  // server/preflight-background-jobs.ts), but findNewSource mode (now the Unit
+  // Audit Sweep's find-new-source rung; the operator "Find new photos" button
+  // moved to the sameUnitOnly hunt on 2026-07-17 and no longer reaches these
+  // attempts) runs them with replacingExistingPhotos=true, with the relaxed
+  // `"any"` rung filtered out there (exact-bedroom only when replacing a real
+  // gallery). The EMPTY-unit "Find Photos" path is the `false` branch.
   // The empty-unit caps were the binding limit on "no photos found" failures:
   // discovery harvests dozens of Zillow/Realtor/Redfin/Homes candidates but only
   // the first 6/8/10 were ever scraped. Raised to 12/14/16 so more of the

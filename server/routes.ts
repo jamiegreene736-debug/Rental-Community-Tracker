@@ -100,7 +100,7 @@ import {
 import { upgradeListingPhotoUrlResolution } from "@shared/listing-photo-resolution";
 import { selectInboxAlternativePage, summarizeAlternativePagePayload } from "@shared/alternative-page-inbox";
 import { proxiedGuestPhotoUrl, registerGuestPhotoRoute } from "./guest-photo-upscale";
-import { parseListingAddressFromUrl } from "@shared/listing-url-address";
+import { parseListingAddressFromUrl, parseListingAddressFromText, streetRootFromListingAddress } from "@shared/listing-url-address";
 import {
   MAX_FULL_GALLERY_OPTIONS,
   buildEquivalentPortalQueries,
@@ -3648,61 +3648,10 @@ function mergeFacts(primary: ListingFacts, fallback: ListingFacts): ListingFacts
 // Imported below; keep ONE implementation.
 // (see import of parseListingAddressFromUrl at the top of this file)
 
-function parseListingAddressFromText(text: string): string | null {
-  const cleaned = text.replace(/&[#a-z0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
-  const m = cleaned.match(
-    /\b(\d{2,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Blvd|Boulevard|Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle|Ct|Court|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trail)(?:\s*(?:(?:#|Unit|Apt|Apartment|Suite|Ste)\s*)?[A-Za-z]?\d{1,5}[A-Za-z]?)?)\b/i,
-  );
-  return m?.[1]?.trim().replace(/\b[a-z]/g, (c) => c.toUpperCase()) ?? null;
-}
-
-function streetRootFromListingAddress(address: string | null): string | null {
-  if (!address) return null;
-  const m = address
-    .toLowerCase()
-    .replace(/&[#a-z0-9]+;/gi, " ")
-    .replace(/[^a-z0-9.'#\s-]+/g, " ")
-    // Hawaii street numbers often use a district prefix, e.g.
-    // "78-6833 Alii Dr". Treat that as one canonical street number
-    // family ("78 6833 ...") so direct resort addresses and listing
-    // URL slugs compare to the same root.
-    .replace(/\b(\d{1,2})-(\d{3,5})(?=[\s-]+[a-z0-9])/gi, "$1 $2")
-    // Redfin slugs like "92-1070-1-Olani-St" include a unit token between
-    // the Hawaii street number and name; drop it so roots match "92-1070 Olani St".
-    .replace(/\b(\d{1,2})\s+(\d{3,5})\s+\d{1,4}\s+(?=[a-z])/gi, "$1 $2 ")
-    .replace(/\s+/g, " ")
-    .match(/\b(\d{2,6})\s+([a-z0-9.'-]+(?:\s+[a-z0-9.'-]+){0,4})\s+(blvd|boulevard|rd|road|st|street|ave|avenue|dr|drive|ln|lane|way|cir|circle|ct|court|pkwy|parkway|pl|place|ter|terrace|trail)\b/i);
-  if (!m) return null;
-  const typeMap: Record<string, string> = {
-    boulevard: "blvd",
-    road: "rd",
-    street: "st",
-    avenue: "ave",
-    drive: "dr",
-    lane: "ln",
-    circle: "cir",
-    court: "ct",
-    parkway: "pkwy",
-    place: "pl",
-    terrace: "ter",
-  };
-  let streetName = m[2]
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[.'’‘-]/g, "")
-    .replace(/^(?:n|s|e|w|north|south|east|west)\s+/i, "");
-  const streetTokens = streetName.split(/\s+/).filter(Boolean);
-  // Homes.com sometimes emits Hawaii hyphenated addresses as
-  // "78-6833-6833-Alii-Dr" for a real "78-6833 Alii Dr" unit.
-  // Collapse the duplicated street-number token so community root
-  // checks do not reject otherwise valid Na Hale O Keauhou candidates.
-  if (/^\d+$/.test(m[1]) && streetTokens.length >= 3 && streetTokens[0] === streetTokens[1]) {
-    streetTokens.splice(1, 1);
-    streetName = streetTokens.join(" ");
-  }
-  const streetType = typeMap[m[3]] ?? m[3];
-  return `${m[1]} ${streetName} ${streetType}`;
-}
+// parseListingAddressFromText + streetRootFromListingAddress moved VERBATIM to
+// shared/listing-url-address.ts (2026-07-17) so the same-unit photo hunt can
+// reuse the exact identity canonicalization. Imported at the top of this file;
+// keep ONE implementation.
 
 // Read photos from the specific known-good keys on a Zillow listing
 // payload, preserving the order the upstream actor returned them.
@@ -34758,6 +34707,9 @@ Return ONLY compact JSON with this exact shape:
       skipFirst?: number;
       rescrapeSourceUrl?: string;
       findNewSource?: boolean;
+      sameUnitOnly?: boolean;
+      currentSourceUrl?: string;
+      currentFolder?: string;
       targetFolder?: string;
     };
     const draftId = Number(body.draftId);
@@ -34801,6 +34753,13 @@ Return ONLY compact JSON with this exact shape:
         ? body.rescrapeSourceUrl.trim()
         : undefined,
       findNewSource: body.findNewSource === true,
+      sameUnitOnly: body.sameUnitOnly === true,
+      currentSourceUrl: typeof body.currentSourceUrl === "string" && /^https?:\/\//i.test(body.currentSourceUrl)
+        ? body.currentSourceUrl.trim()
+        : undefined,
+      currentFolder: typeof body.currentFolder === "string" && /^[\w-]+$/.test(body.currentFolder.trim())
+        ? body.currentFolder.trim()
+        : undefined,
       targetFolder: targetFolder || undefined,
     });
     res.status(202).json({ job });

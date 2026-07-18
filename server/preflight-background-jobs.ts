@@ -16,6 +16,11 @@ import {
   summarizeUnitPhotoProof,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
+import {
+  runSameUnitPhotoHunt,
+  sameUnitPhotoHuntEnabled,
+  type SameUnitHuntAccepted,
+} from "./same-unit-photo-hunt";
 
 type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -43,6 +48,14 @@ export type PreflightPhotoFetchJob = {
   sourceUrl: string | null;
   proof: UnitPhotoResolverProof | null;
   diagnostic: Record<string, unknown> | null;
+  /**
+   * Same-unit hunt (sameUnitOnly mode) failed because NO genuinely different
+   * photo set of this exact unit exists online — the honest next step is
+   * replacing the unit, and the client renders a "Find replacement unit" CTA.
+   * NEVER set on transient infra failures (SERP quota, scrape outage): a
+   * failed search must not push the operator toward a destructive swap.
+   */
+  recommendReplaceUnit: boolean | null;
   error: string | null;
 };
 
@@ -519,6 +532,24 @@ export type StartPreflightPhotoFetchInput = {
    */
   findNewSource?: boolean;
   /**
+   * The operator's preflight "Find new photos" button (2026-07-17): hunt for
+   * the SAME physical unit's listing pages on the other real-estate portals
+   * and accept only a gallery PROVEN different from the photos on file
+   * (dHash novelty vs `currentFolder`). No fallback to the different-listing
+   * discovery below — when the hunt exhausts, the job fails with
+   * `recommendReplaceUnit` and the UI offers "Find replacement unit" instead.
+   * Requires findNewSource (so the SAME_UNIT_PHOTO_HUNT_DISABLED kill switch
+   * degrades to the legacy find-new discovery, never to a silent no-op).
+   * The Unit Audit Sweep's find-new-source rung deliberately does NOT set
+   * this — its remediation contract (bedroom shortfall → different listing)
+   * keeps the legacy findNewSource semantics.
+   */
+  sameUnitOnly?: boolean;
+  /** The unit's saved source listing URL — the same-unit hunt's identity anchor. */
+  currentSourceUrl?: string;
+  /** The unit's ACTIVE photo folder — what the novelty check compares against. */
+  currentFolder?: string;
+  /**
    * STATIC builder property mode (draftId <= 0): the unit's ACTIVE photo folder
    * (the replacement-p<prop>-u<unit> folder once the unit was swapped, else the
    * unit's own folder) to persist the discovered gallery into. There is no draft
@@ -552,6 +583,7 @@ export function startPreflightPhotoFetchJob(input: StartPreflightPhotoFetchInput
     sourceUrl: null,
     proof: null,
     diagnostic: null,
+    recommendReplaceUnit: null,
     error: null,
   };
   photoFetchJobs.set(id, job);
@@ -568,6 +600,13 @@ async function runPreflightPhotoFetchJob(
   const base = loopbackBaseUrl();
   const replacingExistingPhotos = input.replacingExistingPhotos === true;
   const findNewSource = input.findNewSource === true;
+  // "Find new photos" (2026-07-17): SAME-UNIT cross-portal hunt. When the
+  // kill switch disables it, the request degrades to the legacy findNewSource
+  // different-listing discovery (loudly), never to a silent no-op.
+  const sameUnitMode = input.sameUnitOnly === true && sameUnitPhotoHuntEnabled();
+  if (input.sameUnitOnly === true && !sameUnitMode) {
+    console.error("[photo-fetch] SAME_UNIT_PHOTO_HUNT_DISABLED=1 — falling back to legacy find-new-source discovery");
+  }
   // STATIC builder property (no draft row): persist goes through
   // rescrape-unit-photos into input.targetFolder, and discovery never accepts a
   // thin gallery — static units are real listed properties, so a <MIN result
@@ -598,6 +637,80 @@ async function runPreflightPhotoFetchJob(
     let lastProof: UnitPhotoResolverProof | null = null;
     let lastDiagnostic: Record<string, unknown> | null = null;
 
+    // ── SAME-UNIT CROSS-PORTAL HUNT ("Find new photos", 2026-07-17) ─────────
+    // Hunt for THIS unit's listing pages on the other portals and accept only
+    // a gallery proven different (dHash novelty) from the photos on file. No
+    // fallback to the different-listing discovery below — an exhausted hunt
+    // fails the job with recommendReplaceUnit so the UI offers the unit
+    // replacement flow instead of silently substituting a neighbor's photos.
+    let sameUnitPick: SameUnitHuntAccepted | null = null;
+    if (sameUnitMode) {
+      touchPhotoJob(job, {
+        phase: "searching",
+        message: "Hunting this exact unit's listing on other portals",
+        progress: 16,
+      });
+      const hunt = await runSameUnitPhotoHunt({
+        currentSourceUrl: input.currentSourceUrl,
+        currentFolder: input.currentFolder ?? input.targetFolder,
+        communityStreetAddress: input.streetAddress,
+        communityName: input.communityName,
+        bedrooms: input.bedrooms,
+        excludeUrls: Array.from(triedUrls),
+        progress: (message, progressPct) =>
+          touchPhotoJob(job, { phase: "searching", message, progress: progressPct }),
+        scrapeGallery: async (url) => {
+          const fetchData = await postJson(`${base}/api/community/fetch-unit-photos`, {
+            url,
+            // No bedroom gate: the identity filter already proved this IS the
+            // same unit; resort condos often mis-parse scraped bedrooms.
+            bedrooms: "any",
+            // Same sidecar/timeout posture as the saved-listing re-pull leg
+            // below — background job, so the residential-IP tier is worth it.
+            useSidecar: true,
+            nocache: true,
+          }, 300_000);
+          const nextPhotos = Array.isArray(fetchData?.photos) ? fetchData.photos as Array<{ url: string }> : [];
+          const proof = fetchData?.resolverProof && typeof fetchData.resolverProof === "object"
+            ? fetchData.resolverProof as Record<string, unknown>
+            : null;
+          return {
+            photos: nextPhotos,
+            sourceUrl: typeof fetchData?.sourceUrl === "string" ? fetchData.sourceUrl : url,
+            proofRejected: (proof as { status?: string } | null)?.status === "rejected",
+            resolverProof: proof,
+            diagnostic: fetchData?.diagnostic && typeof fetchData.diagnostic === "object"
+              ? fetchData.diagnostic as Record<string, unknown>
+              : null,
+          };
+        },
+      });
+      if (hunt.outcome !== "accepted") {
+        touchPhotoJob(job, {
+          status: "failed",
+          phase: "failed",
+          message: hunt.message,
+          progress: 100,
+          finishedAt: Date.now(),
+          error: hunt.message,
+          recommendReplaceUnit: hunt.recommendReplaceUnit,
+        });
+        return;
+      }
+      sameUnitPick = hunt;
+      photos = hunt.photos;
+      sourceUrl = hunt.sourceUrl;
+      lastProof = (hunt.resolverProof as UnitPhotoResolverProof | null)
+        ?? buildUnitPhotoResolverProof({
+          photos: hunt.photos,
+          sourceUrl: hunt.sourceUrl,
+          foundVia: "url",
+          facts: null,
+        });
+      lastDiagnostic = hunt.diagnostic;
+      touchPhotoJob(job, { proof: lastProof, diagnostic: lastDiagnostic });
+    }
+
     // "Re-pull all photos": rescrape this unit's OWN saved listing first, so the
     // operator gets the full original gallery rather than a discovery wander to
     // a different (often wrong-community) listing. The Redfin comp-carousel fix
@@ -605,7 +718,7 @@ async function runPreflightPhotoFetchJob(
     // subject listing's photos. If the saved listing is off-market / too thin
     // (< MIN_INDEPENDENT_UNIT_PHOTOS), fall through to the discovery loop below —
     // the source is in skipUrls so discovery won't re-pick the dead listing.
-    if (rescrapeSourceUrl) {
+    if (rescrapeSourceUrl && !sameUnitMode) {
       touchPhotoJob(job, {
         phase: "searching",
         message: "Re-pulling this unit's saved listing",
@@ -665,7 +778,9 @@ async function runPreflightPhotoFetchJob(
     // operator's explicit "Find new photos" (findNewSource) — there, substituting a
     // different listing is the point, and skipUrls carries the current source so the
     // same listing can't be re-picked.
-    const allowDiscoveryFallback = !replacingExistingPhotos || findNewSource;
+    // Same-unit mode NEVER falls back to different-listing discovery — that
+    // silent substitution is exactly what the 2026-07-17 redesign removed.
+    const allowDiscoveryFallback = (!replacingExistingPhotos || findNewSource) && !sameUnitMode;
     for (let i = 0; allowDiscoveryFallback && photos.length === 0 && i < attempts.length; i += 1) {
       const attempt = attempts[i];
       touchPhotoJob(job, {
@@ -787,11 +902,18 @@ async function runPreflightPhotoFetchJob(
       touchPhotoJob(job, {
         status: "completed",
         phase: "completed",
-        message: `Saved ${savedStatic} photo${savedStatic === 1 ? "" : "s"} from the new source`,
+        // "at check time": the persist re-scrapes the accepted URL itself, so
+        // the saved set can differ slightly from the hunt-verified one — the
+        // count is honest about WHEN the novelty was proven.
+        message: sameUnitPick
+          ? `Found a different photo set for this exact unit on ${sameUnitPick.portal} — saved ${savedStatic} photo${savedStatic === 1 ? "" : "s"} (${sameUnitPick.newPhotoCount} new vs the previous gallery at check time)`
+          : `Saved ${savedStatic} photo${savedStatic === 1 ? "" : "s"} from the new source`,
         progress: 100,
         finishedAt: Date.now(),
         savedCount: savedStatic,
-        changeNote: null,
+        changeNote: sameUnitPick
+          ? `${sameUnitPick.newPhotoCount} new photo${sameUnitPick.newPhotoCount === 1 ? "" : "s"} vs the previous gallery at check time`
+          : null,
         sourceUrl: typeof persistData?.sourceUrl === "string" ? persistData.sourceUrl : sourceUrl,
         proof: lastProof,
         diagnostic: lastDiagnostic,
@@ -839,7 +961,9 @@ async function runPreflightPhotoFetchJob(
     touchPhotoJob(job, {
       status: "completed",
       phase: "completed",
-      message: `Saved ${saved ?? 0} photo${saved === 1 ? "" : "s"}` + (changeNote ? ` · ${changeNote}` : ""),
+      message: (sameUnitPick
+        ? `Found a different photo set for this exact unit on ${sameUnitPick.portal} — saved ${saved ?? 0} photo${saved === 1 ? "" : "s"}`
+        : `Saved ${saved ?? 0} photo${saved === 1 ? "" : "s"}`) + (changeNote ? ` · ${changeNote}` : ""),
       progress: 100,
       finishedAt: Date.now(),
       savedCount: typeof saved === "number" ? saved : null,

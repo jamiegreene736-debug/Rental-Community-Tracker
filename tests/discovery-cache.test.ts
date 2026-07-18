@@ -116,8 +116,12 @@ console.log("discovery-cache: nocache / find-new-source wiring (source locks)");
 
   const job = fs.readFileSync(new URL("../server/preflight-background-jobs.ts", import.meta.url), "utf8");
   check("re-pull leg sends nocache", (job.match(/nocache: true,/g) ?? []).length >= 2);
-  check("find-new mode enables discovery despite existing photos",
-    /allowDiscoveryFallback = !replacingExistingPhotos \|\| findNewSource;/.test(job));
+  // 2026-07-17: the operator "Find new photos" button became the sameUnitOnly
+  // hunt, which NEVER falls into discovery — but plain findNewSource (the Unit
+  // Audit Sweep's find-new-source rung) must keep enabling discovery despite
+  // existing photos.
+  check("find-new mode enables discovery despite existing photos (same-unit hunt opts out)",
+    /allowDiscoveryFallback = \(!replacingExistingPhotos \|\| findNewSource\) && !sameUnitMode;/.test(job));
   check("find-new mode drops the relaxed any-bedroom rung",
     /\.filter\(\(a\) => !findNewSource \|\| a\.bedrooms !== "any"\)/.test(job));
   check("find-new mode skips the saved-listing rescrape",
