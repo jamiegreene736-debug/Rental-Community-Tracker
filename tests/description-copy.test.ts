@@ -435,6 +435,23 @@ check("completeness: fields the FIRST draft lacked are not regressions",
   check("prose naming the total but no sofa is NOT treated as explained",
     !describesSleepingCapacity("Sleeps 12 guests across 8 beds.", combo4));
 
+  // Regression from the live backfill: a real 5BR listing (sleeps 14, 10
+  // bedroom guests) had all three signals scattered across UNRELATED
+  // paragraphs — a "sofa bed" in its Unit A blurb, "14 guests" up top, and the
+  // 10 from "a short 10-minute walk" further down. Whole-summary matching read
+  // that as an explanation and skipped a listing that had none.
+  const scattered = [
+    "Together they offer 5 bedrooms and can accommodate up to 14 guests.",
+    "Unit A is a 3-bedroom condo. Sleeps 7 with a King bed, 2 Twins, and a sofa bed.",
+    "Poipu's beloved beaches are a short 10-minute walk from the resort.",
+  ].join("\n\n");
+  const combo5 = buildSleepingCapacityExplanation({ bedrooms: 5, unitCount: 2 })!;
+  check("signals scattered across unrelated paragraphs are NOT an explanation",
+    !describesSleepingCapacity(scattered, combo5));
+  check("the paragraph rule still accepts a real one-breath explanation",
+    describesSleepingCapacity(`${scattered}\n\n${combo5.sentence}`, combo5)
+    && describesSleepingCapacity(combo5.sentence, combo5));
+
   // ── prompt context mirrors the deterministic sentence ──────────────────────
   const ctx = sleepingCapacityPromptContext(combo4);
   check("prompt context carries the same numbers as the sentence",

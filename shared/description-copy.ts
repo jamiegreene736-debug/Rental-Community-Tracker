@@ -271,11 +271,18 @@ const SOFA_BED_MENTION_RE =
 /**
  * Does this prose already explain the sleeping capacity?
  *
- * Deliberately GENEROUS: it accepts any wording that names a sleeper sofa AND
- * both numbers (bedroom guests and the total), not just our canonical
- * sentence — the prompt asks Claude to write its own version, and a
- * false NEGATIVE would append a second, duplicate explanation to live guest
- * copy. A false positive merely leaves the model's own explanation in place.
+ * Accepts any wording that names a sleeper sofa AND both numbers (bedroom
+ * guests and the total) — not just our canonical sentence, because the prompt
+ * asks Claude to write its own version and a false NEGATIVE would append a
+ * second, duplicate explanation to live guest copy.
+ *
+ * All three signals must land in the SAME PARAGRAPH. Scanning the whole
+ * summary was too loose in practice: a live 5BR listing (sleeps 14, 10 bedroom
+ * guests) matched on a "sofa bed" in its Unit A blurb, "14 guests" in its
+ * opening line, and the 10 from "a short 10-minute walk" three paragraphs
+ * later — three unrelated facts read as an explanation, so the backfill
+ * skipped a listing that was genuinely unexplained. A real explanation states
+ * its arithmetic in one breath.
  */
 export function describesSleepingCapacity(
   text: string | null | undefined,
@@ -283,9 +290,13 @@ export function describesSleepingCapacity(
 ): boolean {
   const body = String(text ?? "");
   if (!body.trim() || !explanation) return false;
-  if (!SOFA_BED_MENTION_RE.test(body)) return false;
-  const mentions = (n: number) => new RegExp(`\\b${n}\\b`).test(body);
-  return mentions(explanation.sleeps) && mentions(explanation.bedroomGuests);
+  const mentions = (paragraph: string, n: number) => new RegExp(`\\b${n}\\b`).test(paragraph);
+  return body
+    .split(/\n\s*\n/)
+    .some((paragraph) =>
+      SOFA_BED_MENTION_RE.test(paragraph)
+      && mentions(paragraph, explanation.sleeps)
+      && mentions(paragraph, explanation.bedroomGuests));
 }
 
 /** Distinctive leads of the disclosure blocks the builder sandwiches around a
