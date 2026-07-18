@@ -25949,11 +25949,18 @@ Requirements:
     };
   };
 
-  // Standing operator policy (2026-07-09): every listing's nightly minimum is 5.
-  // This is the single source of truth used by the booking-rules default, the
-  // per-push enforcement piggybacked onto every seasonal-rate push, and the
-  // bulk push-min-nights-all endpoint below.
-  const DEFAULT_MIN_NIGHTS = 5;
+  // Standing operator policy (2026-07-18, was 5 from 2026-07-09): every listing's
+  // nightly minimum is 4. This is the single source of truth used by the
+  // booking-rules default, the per-push enforcement piggybacked onto every
+  // seasonal-rate push, and the bulk push-min-nights-all endpoint below.
+  const DEFAULT_MIN_NIGHTS = 4;
+
+  // The PREVIOUS standing policy value. Load-bearing for the 5 -> 4 rollout: the
+  // bulk endpoint must LOWER listings sitting at the old policy default, but must
+  // NOT touch a minimum the operator deliberately set ABOVE it (e.g. Menehune
+  // Shores' 7-night loss-prevention rule, Decision Log 2026-06-27). Anything
+  // strictly greater than this is treated as a deliberate override and preserved.
+  const LEGACY_POLICY_MIN_NIGHTS = 5;
 
   const clampInt = (value: unknown, fallback: number, min: number, max: number): number => {
     const parsed = Number(value);
@@ -26189,10 +26196,17 @@ Requirements:
   //  • Reads Guesty's LIVE terms and ONLY acts on a confident read. A failed/empty
   //    read short-circuits to a no-op — enforcement must never write from stale or
   //    absent state, which could clobber real terms.
-  //  • It is a FLOOR, not an exact set: a listing already at >= 5 nights is left
-  //    untouched, so an operator-set higher minimum (e.g. Menehune Shores' 7-night
-  //    loss-prevention rule) is never lowered. Only listings below 5 (or with no
-  //    minimum) are raised to 5.
+  //  • "floor" mode (the per-push default) is a FLOOR, not an exact set: a listing
+  //    already at >= DEFAULT_MIN_NIGHTS is left untouched, so an operator-set higher
+  //    minimum (e.g. Menehune Shores' 7-night loss-prevention rule) is never
+  //    lowered. Only listings below the floor (or with no minimum) are raised.
+  //  • "policy" mode (the bulk rollout endpoint only) additionally LOWERS a listing
+  //    sitting at or below the previous standing policy (LEGACY_POLICY_MIN_NIGHTS)
+  //    down to DEFAULT_MIN_NIGHTS — that is what makes a policy DECREASE (5 -> 4)
+  //    actually reach Guesty, since a pure floor would skip every listing at 5.
+  //    A minimum strictly ABOVE the old policy is a deliberate operator override
+  //    and is preserved even here. Deliberately NOT the per-push default: a future
+  //    operator-set 5 must not be silently walked down by a routine rate push.
   //  • The write updates ONLY terms.minNights (carrying the other KNOWN booking-rule
   //    terms — maxNights, cancellationPolicy, instantBooking — straight back so a
   //    field-replace PUT can't drop them). availability-settings (advance notice /
@@ -26204,8 +26218,9 @@ Requirements:
 
   const enforceListingMinNights = async (
     listingId: string,
+    mode: "floor" | "policy" = "floor",
   ): Promise<
-    | { changed: false; reason: "unreadable-terms" | "already-at-floor"; minNights: number | null }
+    | { changed: false; reason: "unreadable-terms" | "already-at-floor" | "operator-override"; minNights: number | null }
     | { changed: true; minNights: number; previous: number | null; verified: boolean }
   > => {
     const liveTerms = await readGuestyTerms(listingId).catch(() => null);
@@ -26213,8 +26228,18 @@ Requirements:
       return { changed: false, reason: "unreadable-terms", minNights: null };
     }
     const liveMin = listingTermsMinNights(liveTerms);
-    if (liveMin != null && liveMin >= DEFAULT_MIN_NIGHTS) {
-      return { changed: false, reason: "already-at-floor", minNights: liveMin };
+    if (liveMin != null) {
+      if (mode === "policy") {
+        if (liveMin > LEGACY_POLICY_MIN_NIGHTS) {
+          return { changed: false, reason: "operator-override", minNights: liveMin };
+        }
+        if (liveMin === DEFAULT_MIN_NIGHTS) {
+          return { changed: false, reason: "already-at-floor", minNights: liveMin };
+        }
+        // liveMin is below the floor, or at/below the retired policy value — rewrite it.
+      } else if (liveMin >= DEFAULT_MIN_NIGHTS) {
+        return { changed: false, reason: "already-at-floor", minNights: liveMin };
+      }
     }
 
     const nextTerms: Record<string, any> = { minNights: DEFAULT_MIN_NIGHTS };
@@ -26236,11 +26261,14 @@ Requirements:
   };
 
   // POST /api/builder/booking-rules/push-min-nights-all
-  // One-shot bulk apply of the standing 5-night FLOOR to EVERY mapped Guesty
+  // One-shot bulk apply of the standing nightly minimum to EVERY mapped Guesty
   // listing (core listings + promoted drafts) via enforceListingMinNights — so the
   // operator can roll it out immediately instead of waiting for each listing's next
-  // rate push. Idempotent: listings already at >= 5 are skipped; only listings
-  // below 5 are raised, and only terms.minNights is touched.
+  // rate push. Runs in "policy" mode, so it both RAISES listings below the minimum
+  // and LOWERS listings left at the retired policy value (that is what carries a
+  // 5 -> 4 decrease through). Idempotent: listings already at exactly
+  // DEFAULT_MIN_NIGHTS are skipped, an operator-set minimum above the retired
+  // policy is preserved, and only terms.minNights is touched.
   app.post("/api/builder/booking-rules/push-min-nights-all", async (_req: Request, res: Response) => {
     const mappings = await storage.getGuestyPropertyMap();
     const results: Array<{
@@ -26256,20 +26284,28 @@ Requirements:
     for (const mapping of mappings) {
       const listingId = mapping.guestyListingId;
       try {
-        const outcome = await enforceListingMinNights(listingId);
+        const outcome = await enforceListingMinNights(listingId, "policy");
         if (!outcome.changed) {
+          const summary = outcome.reason === "already-at-floor"
+            ? `Already at the ${DEFAULT_MIN_NIGHTS}-night minimum`
+            : outcome.reason === "operator-override"
+              ? `Left at its operator-set ${outcome.minNights}-night minimum (above the retired ${LEGACY_POLICY_MIN_NIGHTS}-night policy)`
+              : "Could not read current Guesty terms — left unchanged";
           results.push({
             propertyId: mapping.propertyId,
             listingId,
-            status: outcome.reason === "already-at-floor" ? "skipped" : "error",
+            status: outcome.reason === "unreadable-terms" ? "error" : "skipped",
             changed: false,
             minNights: outcome.minNights,
             previous: null,
-            summary: outcome.reason === "already-at-floor"
-              ? `Already at or above the ${DEFAULT_MIN_NIGHTS}-night floor (min ${outcome.minNights})`
-              : "Could not read current Guesty terms — left unchanged",
+            summary,
           });
         } else {
+          const direction = outcome.previous == null
+            ? "Set"
+            : outcome.previous > DEFAULT_MIN_NIGHTS
+              ? "Lowered"
+              : "Raised";
           results.push({
             propertyId: mapping.propertyId,
             listingId,
@@ -26278,7 +26314,7 @@ Requirements:
             minNights: outcome.minNights,
             previous: outcome.previous,
             summary: outcome.verified
-              ? `Raised minimum to ${DEFAULT_MIN_NIGHTS} nights (was ${outcome.previous ?? "unset"})`
+              ? `${direction} minimum to ${DEFAULT_MIN_NIGHTS} nights (was ${outcome.previous ?? "unset"})`
               : `Pushed ${DEFAULT_MIN_NIGHTS}-night minimum but Guesty read-back did not confirm it`,
           });
         }
@@ -26529,14 +26565,17 @@ Requirements:
       });
     }
 
-    // Standing operator policy (2026-07-09): every time rates are pushed to
-    // Guesty, ensure the listing's nightly minimum is at least 5. This is the
-    // single chokepoint every rate push funnels through — the market-rate queue,
-    // the weekly scheduler, the Pricing-tab button, and draft pricing all POST
-    // here — so enforcing it here makes every listing default to a 5-night floor
-    // on its next push. Strictly non-fatal (a terms hiccup must never undo a
-    // successful calendar push) and a floor (never lowers a higher operator-set
-    // minimum; no-ops on an unreadable read — see enforceListingMinNights).
+    // Standing operator policy (2026-07-18, was 5 from 2026-07-09): every time
+    // rates are pushed to Guesty, ensure the listing's nightly minimum is at least
+    // DEFAULT_MIN_NIGHTS. This is the single chokepoint every rate push funnels
+    // through — the market-rate queue, the weekly scheduler, the Pricing-tab
+    // button, and draft pricing all POST here — so enforcing it here makes every
+    // listing default to a 4-night floor on its next push. Strictly non-fatal (a
+    // terms hiccup must never undo a successful calendar push) and deliberately
+    // "floor" mode: it never lowers a higher operator-set minimum and no-ops on an
+    // unreadable read. The 5 -> 4 rollout is carried by the bulk
+    // push-min-nights-all endpoint's "policy" mode, not by this path — see
+    // enforceListingMinNights.
     try {
       const minNightsOutcome = await enforceListingMinNights(listingId);
       if (minNightsOutcome.changed) {
