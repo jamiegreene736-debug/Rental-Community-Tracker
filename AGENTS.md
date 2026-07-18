@@ -4769,6 +4769,35 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    still wins; a strict stage reports `error` instead of silently accepting an
    older artifact when automation is disabled or Claude/SearchAPI cannot run.
 
+23. **RETIRED unit-builder-data entries are not portfolio (2026-07-18).**
+   `unit-builder-data.ts` carries six legacy entries (propertyIds 7, 10, 14,
+   26, 28, 31) flagged `retired: true` — they were never dashboard rows (no
+   home.tsx `properties` entry, no `guesty_property_map` row, no
+   `PROPERTY_UNIT_CONFIGS` row). The entries are KEPT so folder→property
+   context resolution (`folderCommunityContext`, `replacementPhotoFolderRef`
+   owners, sibling-unit claims) and historical references still work, but
+   every surface that ENUMERATES work or portfolio must use
+   `getActiveUnitBuilders()` / check `isRetiredUnitBuilderProperty`:
+   the weekly unit-audit cron (`unitAuditCronTargets`), the sweep target
+   resolver (`resolveUnitAuditTarget` — stale queued ghost records fail
+   their resolve stage), the auto-replace target resolver
+   (`resolveAutoReplaceTarget` — also cancels pending ghost retries via the
+   watchdog's "could no longer be resolved" path), photo-found reactive
+   sweeps (`reactiveSweepEligible`), the photo-listing scan universe
+   (`listScanableFolders` excludes retired-owned unit + replacement
+   folders — no Lens spend on dead listings), and the property pickers
+   (`getAllMultiUnitProperties`, agent portal). WHY: the audit cron's FIRST
+   weekly tick (2026-07-18 01:46Z) swept `getAllUnitBuilders()` wholesale,
+   audited all six ghosts, and the photo-fix ladder auto-committed a REAL
+   unit swap for retired property 7 ("Beautiful 8 brs…" → Unit #324) — the
+   incident the operator reported as "this unit doesn't exist in the
+   system". `tests/retired-properties.test.ts` locks the retired set, a
+   drift-lock (active builder ids === home.tsx dashboard ids — new
+   properties add both in one PR; removals flag `retired: true` in the same
+   PR), and source guards on all five gates. Do NOT delete retired entries
+   wholesale — folder-context lookups (the 2026-07-04 false-positive class)
+   depend on them.
+
 ## Conventions
 
 ### Branches
@@ -5146,3 +5175,5 @@ Welcome. When in doubt, ask the human.
 2026-07-17 · Jamie asked dashboard "Audit selected" to regenerate all marketing descriptions with Claude, strictly scan/apply bedding and bathroom evidence above 60%, scan/apply all amenities, research and save the entire Airbnb/SearchAPI pricing setup, remove alternate-angle duplicates, generate the Claude collage, run the full preflight community audit, and automatically keep finding units until a verified one passes; no Guesty must still save every local artifact · ACCEPTED, explicitly narrows #9/#21 for the bulk fullAutomation path only · The explicit Bedding-tab button keeps its auto-apply/push behavior above; standard one-property audits remain compare-only. The strict bulk contract and safety limits are documented in #9/#22. Guesty is an optional synchronization target, never the persistence boundary.
 
 2026-07-17 · Jamie: "Maximize current sources — Implement Add Combo cross-portal clustering, bounded top-candidate selection, Realtor equivalent lookup and shared discovery logic across all replacement paths" · ACCEPTED, intentionally reverses the 2026-06-22 Add Combo single-URL decision · Add Combo now groups Zillow/Realtor/Redfin/Homes mirrors by street root + normalized unit, counts physical-unit clusters (not mirror URLs) against candidate bounds, inspects at most three viable full galleries, and selects the best evidence-backed gallery instead of the first adequate result. The shared identity/query helpers are also used by canonical replacement and single-listing discovery; Realtor participates in photo-sparse equivalent lookup; the legacy replacement POST delegates to the canonical finder. LOAD-BEARING: different units at one tower address remain separate; ambiguous root-only skips never hide neighbors; cross-portal scraping chooses the richest SINGLE gallery and never unions photo arrays; OTA pages remain excluded; existing search, wall-time, sidecar, bedroom, community, and photo-proof gates remain in force.
+
+2026-07-18 · Jamie (Photo replacement activity screenshot): "The unit: Beautiful 8 brs for 22 near Poipu Beach Park! · Unit B (3BR) doesn't actual exist in the system. Please diagnose and fix the logs and then merge PR." · DIAGNOSED LIVE + FIXED (`claude/unit-b-ghost-listing-a78468`) · NOT a display bug — the work was real and the property is a GHOST. Prod DB: the weekly unit-audit cron's FIRST tick (2026-07-18 01:46:22Z, `unit_audit_auto.last_run_at`) enumerated `getAllUnitBuilders()` wholesale — but unit-builder-data.ts carries SIX legacy entries (7 "Beautiful 8 brs…", 10 "Fabulous 5 br…", 14, 26, 28, 31) that were never portfolio (no home.tsx dashboard row ever — verified via `git log -S` — no guesty_property_map row, no PROPERTY_UNIT_CONFIGS row). The cron swept all six; ghost sweeps for 7/10 completed ("auto-fixed" receipts), and prop 7's photo-fix ladder — fed by weekly Lens scans of ghost folders that legitimately find those photos on the real owners' OTA listings — started a scheduled-audit auto-replace whose retry COMMITTED A REAL SWAP (unit_swaps id 71: unit-323 → "Unit #324 · 1831 Poipu Rd APT 324", folder replacement-p7-uunit-323 hydrated) for a listing the operator doesn't run; the #1055 activity dialog then surfaced the ghost receipts. Mid-diagnosis the ghost sweep for 14 was RUNNING and 26/28/31 were queued — cancelled live via POST /api/unit-audit/:jobId/cancel before the fix. FIX: `retired: true` on the six entries + `getActiveUnitBuilders()`/`isRetiredUnitBuilderProperty()`; gates at unitAuditCronTargets, resolveUnitAuditTarget (stale queued ghost records fail their resolve stage), resolveAutoReplaceTarget (blocks all origins + watchdog-cancels pending ghost retries), reactiveSweepEligible (+ honest "retired from the portfolio" note), listScanableFolders (retired-owned unit + replacement folders leave the Lens scan universe), getAllMultiUnitProperties + agent portal pickers. See Load-Bearing "Unit Audit Sweep" #23. LIVE CLEANUP post-deploy: ghost auto-fix rows purged from queue_job_events, ghost receipts cleared from auto_replace_jobs.v1, unit_swaps 71 deleted + replacement-p7-uunit-323 labels/check rows removed (files on the volume left inert). Locked by tests/retired-properties.test.ts (16 checks: retired-set lock, active⇄dashboard drift-lock, source guards on all five gates); unit-audit-sweep.test.ts scheduler guard repointed to getActiveUnitBuilders (200/0). Verified: full `npm test` exit 0, build clean, `npm run check` = baseline (0 new from this change).

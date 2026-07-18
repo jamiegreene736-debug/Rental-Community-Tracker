@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-18 (Photo replacement activity showed "Beautiful 8 brs for 22 near Poipu Beach Park! ·
+  Unit B (3BR)" — a unit NOT in the system — GHOST/RETIRED builder entries): NOT a display bug
+  (don't re-chase): unit-builder-data.ts carries SIX legacy entries (propertyIds 7, 10, 14, 26,
+  28, 31) that were never portfolio — no home.tsx dashboard `properties` row EVER (git log -S
+  verified), no guesty_property_map row, no PROPERTY_UNIT_CONFIGS row. The weekly unit-audit
+  cron's FIRST tick (2026-07-18 01:46Z) swept `getAllUnitBuilders()` wholesale, audited all six,
+  and prop 7's photo-fix ladder (fed by weekly Lens scans of ghost folders whose photos ARE on
+  the real owners' OTA listings) auto-committed a REAL swap (unit_swaps 71, unit-323 → "Unit
+  #324", folder replacement-p7-uunit-323) with a scheduled-audit → automatic-retry receipt chain
+  in the #1055 activity dialog. Mid-diagnosis the prop-14 ghost sweep was RUNNING and 26/28/31
+  queued — cancelled live first. SHIPPED (`claude/unit-b-ghost-listing-a78468`): `retired: true`
+  on the six entries + `getActiveUnitBuilders()`/`isRetiredUnitBuilderProperty()`; enumeration
+  gates at unitAuditCronTargets, resolveUnitAuditTarget (stale queued ghost records fail their
+  resolve stage), resolveAutoReplaceTarget (all origins + pending-retry watchdog cancel),
+  reactiveSweepEligible (honest "retired from the portfolio" note), listScanableFolders
+  (retired-owned unit/replacement folders leave the Lens universe — pure spend, no consumer),
+  and the pickers (getAllMultiUnitProperties, agent portal). Retired entries are KEPT for
+  folder→context lookups (the 2026-07-04 no-context false-positive class) — never delete them
+  wholesale. LIVE CLEANUP post-deploy: ghost auto-fix rows purged from queue_job_events, ghost
+  receipts cleared from auto_replace_jobs.v1, unit_swaps 71 deleted + the replacement folder's
+  photo_labels/photo_listing_checks rows removed (volume files left inert). Locked by
+  tests/retired-properties.test.ts (16: retired-set lock, active⇄dashboard drift-lock — new
+  properties add the dashboard row + builder entry in ONE PR, removals flag retired in the same
+  PR — plus source guards on all five gates); unit-audit-sweep scheduler guard repointed
+  (200/0). Verified: full `npm test` REAL exit 0, build clean, `npm run check` = baseline
+  (0 new from this change). See AGENTS.md Unit Audit Sweep #23 + the 2026-07-18 Decision Log line.
+
 - 2026-07-17 (Cowork buy-in find + safe checkout preparation): Jamie replaced the older
   automated-card design. The primary bookings action now runs search/attach and VRBO checkout
   preparation in one Cowork brief. Cowork uses the booking guest's exact name, the generated

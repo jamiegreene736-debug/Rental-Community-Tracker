@@ -70,7 +70,7 @@ import {
   ExternalLink,
   History,
 } from "lucide-react";
-import { getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { getActiveUnitBuilders, getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { occupancyForBedrooms } from "@/data/bedding-config";
 import { isScannableFolder, replacementPhotoFolderRef } from "@shared/photo-folder-utils";
 import { subThresholdVerifiedMatches } from "@shared/photo-listing-decision";
@@ -1237,7 +1237,9 @@ function AgentPropertyRow({ property }: { property: AgentPortalProperty }) {
 function AgentPropertyPortal() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const properties = getAllUnitBuilders();
+  // Active portfolio only — retired builder entries are not bookable
+  // listings, so agents must never see or quote them.
+  const properties = getActiveUnitBuilders();
   const [callbackCall, setCallbackCall] = useState<AgentMissedCall | null>(null);
   const [callbackSummary, setCallbackSummary] = useState("");
 
