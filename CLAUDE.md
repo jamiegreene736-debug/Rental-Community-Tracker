@@ -123,6 +123,45 @@ Before making any changes:
   foldHawaiianDiacritics applied to string fields only ("Ali‘i"→"Alii"; first attempt stays
   echo-verbatim by rule).
 
+- 2026-07-17 (Descriptions tab "↻ Regenerate descriptions" — now grounded in photos + Bedding tab):
+  Operator asked to double-check that the regenerate button's AI looks at the photos and the
+  confirmed Bedding tab. VERIFIED-NO (don't re-chase): the button sent only bedrooms + _source.json
+  URL + address; the endpoint's `unit1.description` source-fact leg was dead code (no caller ever
+  populated it) — the prompt asked Claude to ESTIMATE bedding/bathrooms. SHIPPED
+  (`claude/descriptions-button-ai-check-a34972`): /api/community/generate-listing accepts
+  `propertyId` (builder button + audit-sweep twin both send it) and grounds BOTH prompt variants
+  server-side in per-photo Claude-vision caption digests (via
+  buildPhotoCommunityCheckRequestForProperty — active swap folders + hidden filtering + negative
+  draft ids inherited; unit groups matched by "Unit A/B" label, never array position) + the saved
+  Amenities-tab set; the builder button additionally sends per-unit `confirmedBedding`
+  (describeUnitBedding over the localStorage Bedding-tab config, matched by canonical unitId,
+  index fallback) which the prompt treats as AUTHORITATIVE and which deterministically OVERWRITES
+  the structured `bedding` field (`withConfirmedBedding`). ACCURACY CHECKED, NOT TRUSTED: pure
+  `unconfirmedBedTypeMentions` (shared/description-copy.ts; "bed"/"bedroom"-anchored so "a single
+  bedroom unit"/"full kitchen" never false-positive) audits the prose → ONE corrective retry →
+  persistent mismatch surfaces as `accuracyNotes` (deliberately NOT `warning` — every automated
+  consumer refuses `warning` wholesale) → "Review bedding mentions" toast in the tab. A 3-lens
+  adversarial review confirmed FIVE defects in the first cut, all fixed + regression-locked:
+  bathroom text ("Double vanity"/"Full Bath") masked the confirmed regexes (now bed-portion-only,
+  per-unit array cut); plural labels ("2 Kings") false-flagged correct prose (plural-tolerant now);
+  an audit-clean degenerate retry could replace a complete draft with fallback filler (retries gate
+  on generatedDraftCompletenessRegressions = []); the overwritten bedding field was audited
+  (excluded); draft bed types outside GuestyBedType rendered "undefined" in the authoritative
+  string (describeUnitBedding humanizes). All grounding is fail-soft and gathered AFTER the no-key
+  early return (fallback path byte-identical). Verified:
+  description-copy 78/0, bedding-space-copy green, pipeline-logic unitA lock repointed (intent
+  preserved), full `npm test` REAL exit 0, build clean (strings bundle-grepped both bundles),
+  `npm run check` 335 = baseline (stash A/B identical per-file sets), client half proven on the
+  BUILT bundle (static SPA server + Playwright, mocked /api: localStorage bedding config →
+  confirmedBedding + propertyId in the request, PATCH persists, accuracyNotes toast renders — 9/0).
+  Could NOT live-run the Claude leg (no ANTHROPIC key in session) — post-deploy: open a builder
+  Descriptions tab, click "↻ Regenerate descriptions"; the copy should now match the Bedding tab
+  exactly and mention only photo/amenity-supported features. WORKTREE INFRA TRAP hit twice this
+  session: `npm run check` writes `node_modules/typescript/tsbuildinfo` INSIDE the worktree,
+  creating a shadow `typescript` dir that breaks tsx module resolution for
+  tests/guesty-photo-repush.test.ts ("Cannot find package …/node_modules/typescript/index.js") —
+  `rm -rf <worktree>/node_modules/typescript` before running the full test chain.
+
 - 2026-07-17 (Cowork buy-in find + safe checkout preparation): Jamie replaced the older
   automated-card design. The primary bookings action now runs search/attach and VRBO checkout
   preparation in one Cowork brief. Cowork uses the booking guest's exact name, the generated
