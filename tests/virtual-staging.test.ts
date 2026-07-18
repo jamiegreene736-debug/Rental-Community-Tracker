@@ -8,6 +8,7 @@ import {
   VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES,
   buildVirtualStagingFeedbackPrompt,
   buildVirtualStagingPrompt,
+  chooseVirtualStagingJobSnapshot,
   isSupersededVirtualStagingRecipeSignature,
   resolveStageableVirtualStagingSources,
   resolveVirtualStagingSources,
@@ -264,6 +265,17 @@ test("job snapshots cannot cross property, unit, or known-job session boundaries
     unitId: "unit-a",
     jobId: "newer-job-a",
   }), false);
+});
+
+test("a reopened review accepts its first job snapshot and ignores stale or cross-job refreshes", () => {
+  const initial = { id: "job-a", updatedAt: "2026-07-18T18:30:00.000Z" };
+  const newer = { id: "job-a", updatedAt: "2026-07-18T18:31:00.000Z" };
+  const older = { id: "job-a", updatedAt: "2026-07-18T18:29:00.000Z" };
+  const otherJob = { id: "job-b", updatedAt: "2026-07-18T18:32:00.000Z" };
+  assert.equal(chooseVirtualStagingJobSnapshot(null, initial), initial);
+  assert.equal(chooseVirtualStagingJobSnapshot(initial, newer), newer);
+  assert.equal(chooseVirtualStagingJobSnapshot(newer, older), newer);
+  assert.equal(chooseVirtualStagingJobSnapshot(newer, otherJob), newer);
 });
 
 test("an empty unit produces no stageable photos", () => {

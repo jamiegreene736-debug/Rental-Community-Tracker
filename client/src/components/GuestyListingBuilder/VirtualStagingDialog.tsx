@@ -21,6 +21,7 @@ import type {
 } from "@shared/virtual-staging";
 import {
   VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH,
+  chooseVirtualStagingJobSnapshot,
   virtualStagingJobMatchesSession,
 } from "@shared/virtual-staging";
 
@@ -153,16 +154,7 @@ export default function VirtualStagingDialog({
       || !virtualStagingJobMatchesSession(nextJob, scope)) return;
     setJob((current) => {
       if (activeSessionKeyRef.current !== scope.sessionKey) return current;
-      if (current && current.id !== nextJob.id) return current;
-      if (!current && scope.jobId) return current;
-      if (!current) return nextJob;
-      const currentUpdatedAt = Date.parse(current.updatedAt);
-      const nextUpdatedAt = Date.parse(nextJob.updatedAt);
-      return Number.isFinite(currentUpdatedAt)
-        && Number.isFinite(nextUpdatedAt)
-        && nextUpdatedAt < currentUpdatedAt
-        ? current
-        : nextJob;
+      return chooseVirtualStagingJobSnapshot(current, nextJob);
     });
   }, []);
 

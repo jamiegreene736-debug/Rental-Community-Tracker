@@ -201,6 +201,24 @@ export function virtualStagingJobMatchesSession(
     && (session.jobId === undefined || job.id === session.jobId);
 }
 
+/**
+ * Accept the first scoped snapshot when a retained review is reopened, then
+ * keep later refreshes fenced to the same job and monotonic by update time.
+ */
+export function chooseVirtualStagingJobSnapshot<
+  T extends Pick<VirtualStagingJobDto, "id" | "updatedAt">,
+>(current: T | null, next: T): T {
+  if (!current) return next;
+  if (current.id !== next.id) return current;
+  const currentUpdatedAt = Date.parse(current.updatedAt);
+  const nextUpdatedAt = Date.parse(next.updatedAt);
+  return Number.isFinite(currentUpdatedAt)
+    && Number.isFinite(nextUpdatedAt)
+    && nextUpdatedAt < currentUpdatedAt
+    ? current
+    : next;
+}
+
 export type VirtualStagingSessionAction = "start" | "resume" | "blocked";
 
 /**
