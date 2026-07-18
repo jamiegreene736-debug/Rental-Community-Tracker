@@ -426,9 +426,26 @@ export function deriveBathAmenities(config: PropertyBeddingConfig): string[] {
   return Array.from(amenities);
 }
 
+// Draft configs can carry bed types OUTSIDE the GuestyBedType union —
+// draft-bedding.ts's parser emits TWIN_BED / FULL_BED / CAL_KING_BED /
+// CRIB / AIR_MATTRESS (the class sanitizeListingRoomsForGuesty exists
+// for). A raw BED_TYPE_LABELS lookup rendered those as "undefined" in
+// guest-adjacent text; humanize the enum name instead ("TWIN_BED" →
+// "Twin Bed").
+function bedTypeDisplayLabel(type: GuestyBedType | string): string {
+  const known = BED_TYPE_LABELS[type as GuestyBedType];
+  if (known) return known;
+  return String(type ?? "Bed")
+    .toLowerCase()
+    .split(/_+/)
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(" ") || "Bed";
+}
+
 export function describeUnitBedding(unit: UnitBeddingConfig): string {
   const beds = unit.bedrooms.map((br) => {
-    const bedDesc = br.beds.map(b => `${b.quantity > 1 ? `${b.quantity} ` : ""}${BED_TYPE_LABELS[b.type]}${b.quantity > 1 ? "s" : ""}`).join(" + ");
+    const bedDesc = br.beds.map(b => `${b.quantity > 1 ? `${b.quantity} ` : ""}${bedTypeDisplayLabel(b.type)}${b.quantity > 1 ? "s" : ""}`).join(" + ");
     const ensuite = br.hasEnsuite ? " (ensuite)" : "";
     return `${br.label}: ${bedDesc}${ensuite}`;
   });

@@ -215,39 +215,90 @@ export function photoCaptionDigest(
 /**
  * Bed-type accuracy audit for generated copy against a CONFIRMED
  * Bedding-tab string (describeUnitBedding shape — bed types appear as
- * bare labels like "King" / "2 Twin / Singles" / "sofa bed").
+ * bare labels like "King" / "2 Twin / Singles" / "2 Queens" / "sofa
+ * bed").
  *
  * Prose patterns deliberately require the word "bed"/"bedroom" next to
  * the size token ("king bed", "Queen Bedroom") so phrases like "a single
  * bedroom unit" or "full kitchen" can't false-positive; "single"/"full"
- * additionally never match on "bedroom". Returns the canonical labels of
- * bed types the prose claims but the confirmed config does not contain —
- * empty when the confirmed string is empty (no basis to audit).
+ * additionally never match on "bedroom". Confirmed patterns tolerate
+ * describeUnitBedding's bare-"s" pluralization ("2 Kings", "2 sofa
+ * beds"). Returns the canonical labels of bed types the prose claims but
+ * the confirmed config does not contain — empty when the confirmed
+ * string is empty (no basis to audit).
+ *
+ * `confirmedBedding` may be one describeUnitBedding string or an array
+ * of them (one per unit, for a whole-listing audit). Each entry is cut
+ * at its own "Bathrooms:" section BEFORE matching — bathroom labels and
+ * features ("Full Bath", "Double vanity") would otherwise satisfy the
+ * confirmed regexes and mask an invented double/full bed. The living-
+ * room sofa line precedes "Bathrooms:", so sofa evidence survives the
+ * cut.
  */
 const BED_TYPE_MENTION_PATTERNS: ReadonlyArray<{
   label: string;
   prose: RegExp;
   confirmed: RegExp;
 }> = [
-  { label: "King bed", prose: /\b(?:california\s+)?king(?:[-\s]sized?)?\s+bed(?:room)?s?\b/i, confirmed: /\bking\b/i },
-  { label: "Queen bed", prose: /\bqueen(?:[-\s]sized?)?\s+bed(?:room)?s?\b/i, confirmed: /\bqueen\b/i },
-  { label: "Double/Full bed", prose: /\b(?:double(?:[-\s]sized?)?\s+bed(?:room)?s?|full(?:[-\s]sized?)?\s+beds?)\b/i, confirmed: /\b(?:double|full)\b/i },
-  { label: "Twin/Single bed", prose: /\b(?:twin(?:[-\s]sized?)?\s+bed(?:room)?s?|single(?:[-\s]sized?)?\s+beds?)\b/i, confirmed: /\b(?:twin|single)\b/i },
+  { label: "King bed", prose: /\b(?:california\s+)?king(?:[-\s]sized?)?\s+bed(?:room)?s?\b/i, confirmed: /\bkings?\b/i },
+  { label: "Queen bed", prose: /\bqueen(?:[-\s]sized?)?\s+bed(?:room)?s?\b/i, confirmed: /\bqueens?\b/i },
+  { label: "Double/Full bed", prose: /\b(?:double(?:[-\s]sized?)?\s+bed(?:room)?s?|full(?:[-\s]sized?)?\s+beds?)\b/i, confirmed: /\b(?:double|full)s?\b/i },
+  { label: "Twin/Single bed", prose: /\b(?:twin(?:[-\s]sized?)?\s+bed(?:room)?s?|single(?:[-\s]sized?)?\s+beds?)\b/i, confirmed: /\b(?:twin|single)s?\b/i },
   { label: "Bunk bed", prose: /\bbunk\s+bed(?:room)?s?\b/i, confirmed: /\bbunk\b/i },
-  { label: "Sofa bed", prose: /\b(?:sofa\s*-?\s*beds?|sleeper\s+sofas?|sofa\s+sleepers?|pull[-\s]?out\s+(?:sofa|couch|bed)s?)\b/i, confirmed: /\bsofa\s*bed\b/i },
+  { label: "Sofa bed", prose: /\b(?:sofa\s*-?\s*beds?|sleeper\s+sofas?|sofa\s+sleepers?|pull[-\s]?out\s+(?:sofa|couch|bed)s?)\b/i, confirmed: /\bsofa\s*beds?\b/i },
 ];
+
+/** The bed-claims portion of a describeUnitBedding string: everything
+ * before its "Bathrooms:" section. */
+export function confirmedBeddingBedPortion(confirmed: string | null | undefined): string {
+  return String(confirmed ?? "").split(/\bbathrooms\s*:/i)[0].trim();
+}
 
 export function unconfirmedBedTypeMentions(
   prose: string | null | undefined,
-  confirmedBedding: string | null | undefined,
+  confirmedBedding: string | string[] | null | undefined,
 ): string[] {
   const text = String(prose ?? "");
-  const confirmed = String(confirmedBedding ?? "").trim();
+  const confirmed = (Array.isArray(confirmedBedding) ? confirmedBedding : [confirmedBedding])
+    .map((entry) => confirmedBeddingBedPortion(entry))
+    .filter(Boolean)
+    .join(" ");
   if (!text.trim() || !confirmed) return [];
   const out: string[] = [];
   for (const pattern of BED_TYPE_MENTION_PATTERNS) {
     if (pattern.prose.test(text) && !pattern.confirmed.test(confirmed)) {
       out.push(pattern.label);
+    }
+  }
+  return out;
+}
+
+/**
+ * Structural-completeness comparison between the first generated draft
+ * and its bedding-accuracy corrective retry: field names that were
+ * non-empty in the first parse but are empty/missing in the retry. The
+ * retry is only adopted when this is EMPTY — an audit-clean retry that
+ * dropped unitA (or gutted a longDescription) must never replace a
+ * complete first draft, because the response assembly would silently
+ * substitute generic fallback filler for the missing pieces.
+ */
+export function generatedDraftCompletenessRegressions(first: unknown, retry: unknown): string[] {
+  const f = (first ?? {}) as Record<string, unknown>;
+  const r = (retry ?? {}) as Record<string, unknown>;
+  const filled = (v: unknown) => String(v ?? "").trim().length > 0;
+  const out: string[] = [];
+  for (const field of ["title", "bookingTitle", "summary", "space", "neighborhood", "transit", "access", "houseRules"]) {
+    if (filled(f[field]) && !filled(r[field])) out.push(field);
+  }
+  for (const unit of ["unitA", "unitB"]) {
+    const fu = f[unit];
+    if (!fu || typeof fu !== "object") continue;
+    const ru = r[unit];
+    if (!ru || typeof ru !== "object") { out.push(unit); continue; }
+    for (const key of ["bedding", "shortDescription", "longDescription"]) {
+      if (filled((fu as Record<string, unknown>)[key]) && !filled((ru as Record<string, unknown>)[key])) {
+        out.push(`${unit}.${key}`);
+      }
     }
   }
   return out;

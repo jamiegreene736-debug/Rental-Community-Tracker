@@ -40,6 +40,7 @@ import {
   clampGroundingSnippet,
   findDescriptionReadbackMismatches,
   findDescriptionPlaceholders,
+  generatedDraftCompletenessRegressions,
   photoCaptionDigest,
   stripAreaSectionsFromDescription,
   unconfirmedBedTypeMentions,
@@ -51378,8 +51379,10 @@ ${SAFE_PUBLIC_COPY_RULE}
           : !!unit1ConfirmedBedding && !!unit2ConfirmedBedding;
         if (allUnitsConfirmed) {
           const sharedProse = [draft?.summary, draft?.space].map((s) => String(s ?? "")).join("\n");
-          const combinedConfirmed = [unit1ConfirmedBedding, unit2ConfirmedBedding].filter(Boolean).join(" ");
-          for (const t of unconfirmedBedTypeMentions(sharedProse, combinedConfirmed)) {
+          // Array form: each unit's string is cut at its OWN "Bathrooms:"
+          // section inside the helper — joining full strings first would
+          // bury unit 2's beds behind unit 1's bathroom section.
+          for (const t of unconfirmedBedTypeMentions(sharedProse, [unit1ConfirmedBedding, unit2ConfirmedBedding])) {
             notes.push(`summary/space mentions ${t} — not in the confirmed Bedding tab`);
           }
         }
@@ -51389,9 +51392,12 @@ ${SAFE_PUBLIC_COPY_RULE}
         ];
         for (const [unitDraft, confirmed, label] of unitAudits) {
           if (!unitDraft || !confirmed) continue;
-          const prose = [unitDraft.bedding, unitDraft.shortDescription, unitDraft.longDescription]
+          // The model's `bedding` field is deliberately NOT audited — it is
+          // deterministically overwritten with the confirmed string below,
+          // so a mismatch there never ships and must not burn a retry.
+          const prose = [unitDraft.shortDescription, unitDraft.longDescription]
             .map((s) => String(s ?? "")).join("\n");
-          for (const t of unconfirmedBedTypeMentions(prose, confirmed)) {
+          for (const t of unconfirmedBedTypeMentions(prose, [confirmed])) {
             notes.push(`${label} copy mentions ${t} — not in the confirmed Bedding tab`);
           }
         }
@@ -51405,9 +51411,15 @@ ${SAFE_PUBLIC_COPY_RULE}
             `${prompt}\n\nIMPORTANT CORRECTION: a previous draft mentioned bed types that are NOT in the CONFIRMED bedding (${accuracyNotes.join("; ")}). Regenerate the COMPLETE JSON again, mentioning ONLY the confirmed bed types in every field.`,
           );
           const retriedNotes = auditBeddingAccuracy(retried);
-          // Keep whichever draft contradicts the confirmed bedding less;
-          // a failed retry never discards a good first parse.
-          if (retriedNotes.length <= accuracyNotes.length) {
+          // Keep whichever draft contradicts the confirmed bedding less —
+          // but ONLY when the retry is structurally as complete as the
+          // first parse. An audit-clean retry that dropped unitA (or
+          // gutted a longDescription) would otherwise silently replace a
+          // complete draft with fallback filler downstream.
+          const regressions = generatedDraftCompletenessRegressions(parsed, retried);
+          if (regressions.length > 0) {
+            console.warn(`[community/generate-listing] bedding-accuracy retry discarded — incomplete vs first draft: ${regressions.join(", ")}`);
+          } else if (retriedNotes.length <= accuracyNotes.length) {
             parsed = retried;
             accuracyNotes = retriedNotes;
           }

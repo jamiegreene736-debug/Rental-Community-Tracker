@@ -60,9 +60,16 @@ Before making any changes:
   `unconfirmedBedTypeMentions` (shared/description-copy.ts; "bed"/"bedroom"-anchored so "a single
   bedroom unit"/"full kitchen" never false-positive) audits the prose → ONE corrective retry →
   persistent mismatch surfaces as `accuracyNotes` (deliberately NOT `warning` — every automated
-  consumer refuses `warning` wholesale) → "Review bedding mentions" toast in the tab. All grounding
-  is fail-soft and gathered AFTER the no-key early return (fallback path byte-identical). Verified:
-  description-copy 64/0 (12 pure + 11 source guards), pipeline-logic unitA lock repointed (intent
+  consumer refuses `warning` wholesale) → "Review bedding mentions" toast in the tab. A 3-lens
+  adversarial review confirmed FIVE defects in the first cut, all fixed + regression-locked:
+  bathroom text ("Double vanity"/"Full Bath") masked the confirmed regexes (now bed-portion-only,
+  per-unit array cut); plural labels ("2 Kings") false-flagged correct prose (plural-tolerant now);
+  an audit-clean degenerate retry could replace a complete draft with fallback filler (retries gate
+  on generatedDraftCompletenessRegressions = []); the overwritten bedding field was audited
+  (excluded); draft bed types outside GuestyBedType rendered "undefined" in the authoritative
+  string (describeUnitBedding humanizes). All grounding is fail-soft and gathered AFTER the no-key
+  early return (fallback path byte-identical). Verified:
+  description-copy 78/0, bedding-space-copy green, pipeline-logic unitA lock repointed (intent
   preserved), full `npm test` REAL exit 0, build clean (strings bundle-grepped both bundles),
   `npm run check` 335 = baseline (stash A/B identical per-file sets), client half proven on the
   BUILT bundle (static SPA server + Playwright, mocked /api: localStorage bedding config →

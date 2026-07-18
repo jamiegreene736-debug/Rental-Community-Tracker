@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
   buildSpaceDescription,
+  describeUnitBedding,
   type PropertyBeddingConfig,
   type UnitBeddingConfig,
 } from "../client/src/data/bedding-config";
@@ -143,6 +144,23 @@ function configWith(units: UnitBeddingConfig[]): PropertyBeddingConfig {
     assert.ok(src.includes(marker), `BeddingTab.tsx must contain "${marker}"`);
   }
   console.log("  ✓ BeddingTab preserves manual Space edits (source-guarded)");
+}
+
+// ── describeUnitBedding: out-of-union draft bed types never render "undefined"
+// draft-bedding.ts's parser emits TWIN_BED / FULL_BED / CAL_KING_BED / CRIB /
+// AIR_MATTRESS (outside GuestyBedType); the confirmedBedding grounding string
+// (2026-07-17) is guest-adjacent and must humanize them instead.
+{
+  const text = describeUnitBedding(unit({
+    bedrooms: [
+      { roomNumber: 1, label: "Master Bedroom", beds: [{ type: "CAL_KING_BED" as never, quantity: 1 }], hasEnsuite: false, ensuiteFeatures: [] },
+      { roomNumber: 2, label: "Bedroom 2", beds: [{ type: "TWIN_BED" as never, quantity: 2 }], hasEnsuite: false, ensuiteFeatures: [] },
+    ],
+  }));
+  assert.ok(!/undefined/i.test(text), `no "undefined" in describeUnitBedding output, got: ${text}`);
+  assert.ok(text.includes("Cal King Bed"), `CAL_KING_BED humanizes, got: ${text}`);
+  assert.ok(text.includes("2 Twin Beds"), `TWIN_BED pluralizes humanized, got: ${text}`);
+  console.log("  ✓ describeUnitBedding humanizes out-of-union bed types (no 'undefined')");
 }
 
 console.log("bedding-space-copy: all tests passed");

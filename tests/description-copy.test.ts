@@ -6,6 +6,8 @@ import {
   DESCRIPTION_PLACEHOLDER_PHRASES,
   GROUNDING_SNIPPET_MAX_CHARS,
   clampGroundingSnippet,
+  confirmedBeddingBedPortion,
+  generatedDraftCompletenessRegressions,
   composeSpaceFromUnitDescriptions,
   composeSummaryWithDisclosures,
   findDescriptionReadbackMismatches,
@@ -234,6 +236,61 @@ check("empty confirmed config never flags (no basis to audit)",
   unconfirmedBedTypeMentions("A King bed and a Queen bed.", "").length === 0
   && unconfirmedBedTypeMentions("", CONFIRMED).length === 0);
 
+// Review fixes (2026-07-17 adversarial pass):
+check("'Double vanity' bathroom feature cannot mask an invented double/full bed",
+  unconfirmedBedTypeMentions(
+    "A full-size bed in the second bedroom.",
+    "Master Bedroom: King (ensuite). Bathrooms: Hall Bath (Double vanity).",
+  ).includes("Double/Full bed"));
+check("'Full Bath' label cannot mask an invented full bed",
+  unconfirmedBedTypeMentions("A full bed in the den.", "Bedroom 1: King. Bathrooms: Full Bath.")
+    .includes("Double/Full bed"));
+check("plural confirmed labels ('2 Queens', '2 Kings') never false-flag correct prose",
+  unconfirmedBedTypeMentions(
+    "The master offers two King beds and the second bedroom has two Queen beds.",
+    "Master Bedroom: 2 Kings; Bedroom 2: 2 Queens. Bathrooms: Hall Bath.",
+  ).length === 0);
+check("'Living room 2 sofa beds' confirms sleeper-sofa prose",
+  unconfirmedBedTypeMentions(
+    "Two sleeper sofas round out the living room.",
+    "Bedroom 1: King. Living room 2 sofa beds. Bathrooms: Hall Bath.",
+  ).length === 0);
+check("confirmedBeddingBedPortion cuts at the Bathrooms section",
+  confirmedBeddingBedPortion("Bedroom 1: King. Bathrooms: Full Bath (Double vanity).") === "Bedroom 1: King."
+  && confirmedBeddingBedPortion(null) === "");
+check("array form audits each unit's bed portion — unit 2 beds survive unit 1's bathroom cut", (() => {
+  const hits = unconfirmedBedTypeMentions(
+    "A King bed, a Queen bed, and a double bed.",
+    ["Bedroom 1: King. Bathrooms: Full Bath (Double vanity).", "Bedroom 1: Queen. Bathrooms: Hall Bath."],
+  );
+  return hits.length === 1 && hits[0] === "Double/Full bed";
+})());
+
+const COMPLETE_DRAFT = {
+  title: "T", bookingTitle: "BT", summary: "S", space: "SP", neighborhood: "N",
+  transit: "TR", access: "A", houseRules: "H",
+  unitA: { bedding: "King", shortDescription: "short", longDescription: "long" },
+  unitB: { bedding: "Queen", shortDescription: "short", longDescription: "long" },
+};
+check("completeness: identical drafts have no regressions",
+  generatedDraftCompletenessRegressions(COMPLETE_DRAFT, COMPLETE_DRAFT).length === 0);
+check("completeness: a retry missing unitA regresses",
+  generatedDraftCompletenessRegressions(COMPLETE_DRAFT, { ...COMPLETE_DRAFT, unitA: undefined }).includes("unitA"));
+check("completeness: a retry that gutted a longDescription regresses",
+  generatedDraftCompletenessRegressions(
+    COMPLETE_DRAFT,
+    { ...COMPLETE_DRAFT, unitA: { ...COMPLETE_DRAFT.unitA, longDescription: "  " } },
+  ).includes("unitA.longDescription"));
+check("completeness: a retry that dropped summary regresses",
+  generatedDraftCompletenessRegressions(COMPLETE_DRAFT, { ...COMPLETE_DRAFT, summary: "" }).includes("summary"));
+check("completeness: a single-listing first draft (no unitB) never demands unitB of the retry",
+  generatedDraftCompletenessRegressions(
+    { ...COMPLETE_DRAFT, unitB: null },
+    { ...COMPLETE_DRAFT, unitB: null },
+  ).length === 0);
+check("completeness: fields the FIRST draft lacked are not regressions",
+  generatedDraftCompletenessRegressions({ ...COMPLETE_DRAFT, neighborhood: "" }, { ...COMPLETE_DRAFT, neighborhood: "" }).length === 0);
+
 // ── source lock: generator grounding wiring (2026-07-17) ────────────────────
 {
   const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
@@ -253,10 +310,16 @@ check("empty confirmed config never flags (no basis to audit)",
     /unitA: withConfirmedBedding\(normalizeGeneratedUnitDraft\(parsed\.unitA, unit1\), unit1ConfirmedBedding\)/.test(routes)
     && /withConfirmedBedding\(normalizeGeneratedUnitDraft\(parsed\.unitB, unit2\), unit2ConfirmedBedding\)/.test(routes));
   check("a bed-type contradiction triggers ONE corrective retry, never a fallback",
-    /auditBeddingAccuracy\(parsed\)[\s\S]{0,900}IMPORTANT CORRECTION[\s\S]{0,600}retriedNotes\.length <= accuracyNotes\.length/.test(routes));
+    /auditBeddingAccuracy\(parsed\)[\s\S]{0,900}IMPORTANT CORRECTION[\s\S]{0,1600}retriedNotes\.length <= accuracyNotes\.length/.test(routes));
   check("persistent mismatches surface as accuracyNotes — never as the warning field every consumer refuses",
     /\.\.\.\(accuracyNotes\.length > 0 \? \{ accuracyNotes \} : \{\}\)/.test(routes)
     && !/warning:\s*accuracyNotes/.test(routes));
+  check("an audit-clean but structurally incomplete retry is discarded (never replaces the first draft)",
+    /generatedDraftCompletenessRegressions\(parsed, retried\)[\s\S]{0,400}regressions\.length > 0[\s\S]{0,400}retriedNotes\.length <= accuracyNotes\.length/.test(routes));
+  check("the audit skips the model's bedding field (deterministically overwritten) and passes array-form confirmed strings",
+    /const prose = \[unitDraft\.shortDescription, unitDraft\.longDescription\]/.test(routes)
+    && !/\[unitDraft\.bedding, unitDraft\.shortDescription/.test(routes)
+    && /unconfirmedBedTypeMentions\(sharedProse, \[unit1ConfirmedBedding, unit2ConfirmedBedding\]\)/.test(routes));
 
   const builderIndex = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
   check("regenerate sends propertyId + the confirmed Bedding-tab config",
