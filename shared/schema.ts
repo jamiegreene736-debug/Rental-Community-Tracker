@@ -1048,7 +1048,7 @@ export const builderBookingRules = pgTable("builder_booking_rules", {
   // Standing operator policy (2026-07-09): the default nightly minimum is 5.
   // Inserts always specify minNights (see normalizeBuilderBookingRules), so this
   // default only governs fresh rows that omit it — kept at 5 for intent-consistency.
-  minNights: integer("min_nights").notNull().default(5),
+  minNights: integer("min_nights").notNull().default(4),
   maxNights: integer("max_nights").notNull().default(365),
   advanceNotice: integer("advance_notice").notNull().default(7),
   preparationTime: integer("preparation_time").notNull().default(1),
