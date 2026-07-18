@@ -162,3 +162,93 @@ export function composeSpaceFromUnitDescriptions(
   const walk = String(walkDescription ?? "").trim();
   return [body, walk].filter(Boolean).join("\n\n");
 }
+
+// ── Generator grounding (2026-07-17) ─────────────────────────────────────────
+// The Descriptions-tab "↻ Regenerate descriptions" button and the audit
+// sweep's regenerate twin ground /api/community/generate-listing in what the
+// system actually KNOWS about the property: the per-photo Claude-vision
+// captions (photo_labels), the saved Amenities-tab set, and — from the
+// client only, because it lives in browser localStorage — the operator's
+// CONFIRMED Bedding-tab config. These helpers are the pure pieces of that
+// grounding: snippet clamping, caption digests, and the bed-type accuracy
+// audit that backs the endpoint's single corrective retry.
+
+/** Same cap as the endpoint's source-listing fact snippet: enough for a
+ * full gallery digest, small enough that no fact line can blow up the
+ * prompt. */
+export const GROUNDING_SNIPPET_MAX_CHARS = 700;
+
+/** Collapse whitespace and cap a grounding fact line for prompt use. */
+export function clampGroundingSnippet(
+  text: unknown,
+  maxChars: number = GROUNDING_SNIPPET_MAX_CHARS,
+): string {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  return t.length > maxChars ? t.slice(0, maxChars) : t;
+}
+
+/**
+ * Digest a gallery's photo captions into one prompt-ready line: order
+ * preserved (hero-first), case-insensitive dedupe (thirty "Ocean View
+ * Lanai" shots contribute one entry), capped so a huge gallery stays a
+ * digest rather than a dump.
+ */
+export function photoCaptionDigest(
+  captions: Array<string | null | undefined>,
+  opts?: { maxItems?: number },
+): string {
+  const maxItems = Math.max(1, opts?.maxItems ?? 40);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of captions ?? []) {
+    const caption = String(raw ?? "").replace(/\s+/g, " ").trim();
+    if (!caption) continue;
+    const key = caption.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(caption);
+    if (out.length >= maxItems) break;
+  }
+  return out.join("; ");
+}
+
+/**
+ * Bed-type accuracy audit for generated copy against a CONFIRMED
+ * Bedding-tab string (describeUnitBedding shape — bed types appear as
+ * bare labels like "King" / "2 Twin / Singles" / "sofa bed").
+ *
+ * Prose patterns deliberately require the word "bed"/"bedroom" next to
+ * the size token ("king bed", "Queen Bedroom") so phrases like "a single
+ * bedroom unit" or "full kitchen" can't false-positive; "single"/"full"
+ * additionally never match on "bedroom". Returns the canonical labels of
+ * bed types the prose claims but the confirmed config does not contain —
+ * empty when the confirmed string is empty (no basis to audit).
+ */
+const BED_TYPE_MENTION_PATTERNS: ReadonlyArray<{
+  label: string;
+  prose: RegExp;
+  confirmed: RegExp;
+}> = [
+  { label: "King bed", prose: /\b(?:california\s+)?king(?:[-\s]sized?)?\s+bed(?:room)?s?\b/i, confirmed: /\bking\b/i },
+  { label: "Queen bed", prose: /\bqueen(?:[-\s]sized?)?\s+bed(?:room)?s?\b/i, confirmed: /\bqueen\b/i },
+  { label: "Double/Full bed", prose: /\b(?:double(?:[-\s]sized?)?\s+bed(?:room)?s?|full(?:[-\s]sized?)?\s+beds?)\b/i, confirmed: /\b(?:double|full)\b/i },
+  { label: "Twin/Single bed", prose: /\b(?:twin(?:[-\s]sized?)?\s+bed(?:room)?s?|single(?:[-\s]sized?)?\s+beds?)\b/i, confirmed: /\b(?:twin|single)\b/i },
+  { label: "Bunk bed", prose: /\bbunk\s+bed(?:room)?s?\b/i, confirmed: /\bbunk\b/i },
+  { label: "Sofa bed", prose: /\b(?:sofa\s*-?\s*beds?|sleeper\s+sofas?|sofa\s+sleepers?|pull[-\s]?out\s+(?:sofa|couch|bed)s?)\b/i, confirmed: /\bsofa\s*bed\b/i },
+];
+
+export function unconfirmedBedTypeMentions(
+  prose: string | null | undefined,
+  confirmedBedding: string | null | undefined,
+): string[] {
+  const text = String(prose ?? "");
+  const confirmed = String(confirmedBedding ?? "").trim();
+  if (!text.trim() || !confirmed) return [];
+  const out: string[] = [];
+  for (const pattern of BED_TYPE_MENTION_PATTERNS) {
+    if (pattern.prose.test(text) && !pattern.confirmed.test(confirmed)) {
+      out.push(pattern.label);
+    }
+  }
+  return out;
+}

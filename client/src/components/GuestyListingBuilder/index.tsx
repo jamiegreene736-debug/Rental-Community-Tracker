@@ -12,6 +12,7 @@ import {
   totalBedrooms as totalBeddingBedrooms,
   totalBathrooms as totalBeddingBathrooms,
   headlineSleeps as headlineBeddingSleeps,
+  describeUnitBedding,
 } from "@/data/bedding-config";
 import { BeddingTab } from "./BeddingTab";
 import AvailabilityTab from "./AvailabilityTab";
@@ -3802,6 +3803,21 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const units = Array.isArray(prop.units) ? prop.units : [];
       if (units.length === 0) throw new Error("No units configured for this property.");
       const singleListing = units.length === 1;
+      // CONFIRMED Bedding-tab facts (2026-07-17). The canonical bedding
+      // config lives in browser localStorage, so only the client can hand
+      // it to the generator; the server grounds photo captions + saved
+      // amenities from propertyId itself. Units match by canonical unitId
+      // (never array position alone — the id convention is shared with
+      // drafts' `draft<id>-unit-a/b`), index as fallback for legacy
+      // configs.
+      const beddingConfig = loadBuilderBeddingConfig(propertyId);
+      const confirmedBeddingFor = (unitId: string | undefined, index: number): string => {
+        const cfgUnits = Array.isArray(beddingConfig?.units) ? beddingConfig.units : [];
+        const cfg = (unitId ? cfgUnits.find((c) => c.unitId === unitId) : undefined) ?? cfgUnits[index];
+        return cfg && cfg.bedrooms.length > 0 ? describeUnitBedding(cfg) : "";
+      };
+      const unit1ConfirmedBedding = confirmedBeddingFor(units[0]?.id, 0);
+      const unit2ConfirmedBedding = singleListing ? "" : confirmedBeddingFor(units[1]?.id, 1);
       // City/state from the property address ("…, City, ST ZIP").
       const addrParts = String(prop.address ?? "").split(",").map((s) => s.trim()).filter(Boolean);
       const stateZip = (addrParts[addrParts.length - 1] ?? "").split(" ").filter(Boolean);
@@ -3818,12 +3834,24 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           city,
           state,
           singleListing,
+          // propertyId lets the SERVER ground the prompt in the per-photo
+          // Claude-vision captions + the saved Amenities-tab set (2026-07-17).
+          propertyId,
           // Address goes on unit1 only: two identical addresses would make
           // the endpoint geocode a walk between a point and itself instead
           // of using the per-resort fallback minutes.
-          unit1: { bedrooms: units[0].bedrooms, url: sourceUrlFor(units[0].photoFolder), address: prop.address },
+          unit1: {
+            bedrooms: units[0].bedrooms,
+            url: sourceUrlFor(units[0].photoFolder),
+            address: prop.address,
+            ...(unit1ConfirmedBedding ? { confirmedBedding: unit1ConfirmedBedding } : {}),
+          },
           ...(singleListing ? {} : {
-            unit2: { bedrooms: units[1].bedrooms, url: sourceUrlFor(units[1].photoFolder) },
+            unit2: {
+              bedrooms: units[1].bedrooms,
+              url: sourceUrlFor(units[1].photoFolder),
+              ...(unit2ConfirmedBedding ? { confirmedBedding: unit2ConfirmedBedding } : {}),
+            },
           }),
           suggestedRate: propertyData?.pricing?.basePrice ?? 0,
         }),
@@ -3874,8 +3902,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setDescPushState("idle");
       toast({
         title: "Descriptions regenerated",
-        description: "Summary, Space, Neighborhood, Getting Around, Guest Access, and House Rules were rewritten from the source listings and saved. Review, then push to Guesty.",
+        description: "Summary, Space, Neighborhood, Getting Around, Guest Access, and House Rules were rewritten from the source listings, the photos' AI captions, and your Bedding tab, then saved. Review, then push to Guesty.",
       });
+      // Persistent bed-type mismatch after the server's corrective retry —
+      // the copy still applied (it's editable), but flag it for review.
+      const accuracyNotes = Array.isArray(gen?.accuracyNotes)
+        ? (gen.accuracyNotes as unknown[]).filter((n): n is string => typeof n === "string" && !!n.trim())
+        : [];
+      if (accuracyNotes.length > 0) {
+        toast({
+          title: "Review bedding mentions",
+          description: `${accuracyNotes.join(". ")}. Check the Space text against the Bedding tab before pushing.`,
+          variant: "destructive",
+        });
+      }
     } catch (e) {
       setDescRegenState("error");
       setDescRegenError((e as Error).message);
@@ -6907,7 +6947,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                             disabled={descRegenState === "running"}
                             onClick={() => regenerateDescriptions()}
                             data-testid="btn-regenerate-descriptions"
-                            title="Rewrite Summary, Space, Neighborhood, and Getting Around with AI, grounded in each unit's real source listing"
+                            title="Rewrite Summary, Space, Neighborhood, and Getting Around with AI, grounded in each unit's real source listing, the photos' AI vision captions, and your confirmed Bedding tab"
                             style={{
                               background: "#0891b2",
                               color: "#fff",

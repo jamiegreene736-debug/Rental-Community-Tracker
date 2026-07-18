@@ -2353,6 +2353,10 @@ async function regenerateDescriptionsForTarget(target: UnitAuditTarget): Promise
     city: target.city ?? "",
     state: target.state ?? "",
     singleListing,
+    // propertyId (2026-07-17): the generator grounds the prompt in the
+    // per-photo Claude-vision captions + saved amenities server-side.
+    // (The Bedding-tab confirmedBedding stays client-only — localStorage.)
+    propertyId: target.propertyId,
     unit1: { bedrooms: units[0].bedrooms, url: sourceUrls[0] ?? "", address },
     ...(singleListing ? {} : { unit2: { bedrooms: units[1].bedrooms, url: sourceUrls[1] ?? "" } }),
     suggestedRate: 0,

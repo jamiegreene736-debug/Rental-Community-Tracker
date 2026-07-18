@@ -3155,6 +3155,25 @@ Load-bearing details (drift-locked in `tests/deploy-healthcheck.test.ts`):
     Guesty endpoint would need a parallel path. The flag-on-shared-
     table approach keeps the surface tiny.
 
+    **Generator grounding (2026-07-17).** `generate-listing` grounds
+    both prompt variants in three optional fact sources, all fail-soft:
+    server-side photo-caption digests + saved amenities from
+    `propertyId` (builder button AND the audit sweep's regenerate twin
+    send it; unit groups match by their deterministic "Unit A/B"
+    labels because a photo-less unit is absent and positional matching
+    would mis-assign), and the client-only CONFIRMED Bedding-tab
+    config per unit (`confirmedBedding`, localStorage — see #9). The
+    confirmed config is AUTHORITATIVE: the prompt pins every bed/bath
+    mention to it, the structured `bedding` field is deterministically
+    overwritten with it, and `unconfirmedBedTypeMentions`
+    (shared/description-copy.ts) audits the prose — one corrective
+    retry, then persistent mismatches surface as `accuracyNotes`.
+    NEVER move accuracyNotes into `warning` (every automated consumer
+    refuses `warning` wholesale and would brick regeneration on a
+    cosmetic mismatch), and keep the grounding gather AFTER the no-key
+    early return so the fallback path never touches storage. Locked by
+    tests/description-copy.test.ts.
+
 34. **`/api/single-listing/qualify` is the OTA-clean gate for the
     single-listing wizard, NOT a generic platform-check.** Operator
     hard requirement: a standalone unit only qualifies when its
@@ -5146,3 +5165,5 @@ Welcome. When in doubt, ask the human.
 2026-07-17 · Jamie asked dashboard "Audit selected" to regenerate all marketing descriptions with Claude, strictly scan/apply bedding and bathroom evidence above 60%, scan/apply all amenities, research and save the entire Airbnb/SearchAPI pricing setup, remove alternate-angle duplicates, generate the Claude collage, run the full preflight community audit, and automatically keep finding units until a verified one passes; no Guesty must still save every local artifact · ACCEPTED, explicitly narrows #9/#21 for the bulk fullAutomation path only · The explicit Bedding-tab button keeps its auto-apply/push behavior above; standard one-property audits remain compare-only. The strict bulk contract and safety limits are documented in #9/#22. Guesty is an optional synchronization target, never the persistence boundary.
 
 2026-07-17 · Jamie: "Maximize current sources — Implement Add Combo cross-portal clustering, bounded top-candidate selection, Realtor equivalent lookup and shared discovery logic across all replacement paths" · ACCEPTED, intentionally reverses the 2026-06-22 Add Combo single-URL decision · Add Combo now groups Zillow/Realtor/Redfin/Homes mirrors by street root + normalized unit, counts physical-unit clusters (not mirror URLs) against candidate bounds, inspects at most three viable full galleries, and selects the best evidence-backed gallery instead of the first adequate result. The shared identity/query helpers are also used by canonical replacement and single-listing discovery; Realtor participates in photo-sparse equivalent lookup; the legacy replacement POST delegates to the canonical finder. LOAD-BEARING: different units at one tower address remain separate; ambiguous root-only skips never hide neighbors; cross-portal scraping chooses the richest SINGLE gallery and never unions photo arrays; OTA pages remain excluded; existing search, wall-time, sidecar, bedroom, community, and photo-proof gates remain in force.
+
+2026-07-17 · Jamie: "Please just double check that when I click produce the descriptions button in the descriptions tab that the AI looks at the photos, and what is confirmed in the bedding tab etc and that it is an accurate description. If not, please fix it so that it is and merge PR with main." · VERIFIED-NO then FIXED (`claude/descriptions-button-ai-check-a34972`) · The suspicion was correct: "↻ Regenerate descriptions" sent only bedrooms + `_source.json` URL + address; the endpoint's `unit1.description` source-fact leg was DEAD CODE (no caller ever populated it), so the prompt literally asked Claude to ESTIMATE bedding/bathrooms and nothing from the photos or Bedding tab ever reached the generator. FIX (three grounding sources, all fail-soft): (1) `/api/community/generate-listing` accepts `propertyId` and grounds the prompt SERVER-side in the per-photo Claude-vision captions (via `buildPhotoCommunityCheckRequestForProperty` — active swap folders, hidden filtering, and drafts' negative ids inherited; unit groups matched by their deterministic "Unit A/B" labels, never array position, because a photo-less unit is simply absent) plus the saved Amenities-tab set (`getPropertyAmenities` → `getAmenityLabel`); the builder button and the audit sweep's regenerate twin both pass `propertyId`. (2) The builder button additionally sends each unit's CONFIRMED Bedding-tab config (`describeUnitBedding`, matched by canonical `unitId` with index fallback) — CLIENT-ONLY by necessity (localStorage, #9); the prompt marks it AUTHORITATIVE (outranks source listing details + photo evidence), and the response's structured `bedding` field is deterministically OVERWRITTEN with it (`withConfirmedBedding`). (3) ACCURACY IS CHECKED, NOT TRUSTED: pure `unconfirmedBedTypeMentions` (shared/description-copy.ts — "bed"/"bedroom"-anchored patterns so "a single bedroom unit"/"full kitchen" can't false-positive; "queen sleeper sofa" reads as the sofa bed) audits summary/space (only when EVERY unit sent a confirmed config) + per-unit copy; a mismatch triggers ONE corrective retry, and a persistent mismatch surfaces as `accuracyNotes` — deliberately NOT `warning`, which every automated consumer refuses wholesale — rendered as a review toast in the tab. LOAD-BEARING: keep `accuracyNotes` out of `warning`; keep the confirmed-bedding CONTEXT lines label-stable (test-locked count 3 across both prompt variants); the grounding gather runs AFTER the no-key early return so the fallback path stays byte-identical. Locked by tests/description-copy.test.ts (64/0, 12 new pure + 11 new source guards); tests/pipeline-logic.test.ts's unitA-coercion lock repointed to the wrapped construction (intent preserved).
