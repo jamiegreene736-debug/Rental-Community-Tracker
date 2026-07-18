@@ -1098,6 +1098,16 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [editableTitle, setEditableTitle] = useState("");
   const [descPushState, setDescPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
   const [descPushError, setDescPushError] = useState<string | null>(null);
+  // Separate published address (Guesty feature, 2026-07-17): manual push
+  // state for the Descriptions-tab button. The last-pushed timestamp itself
+  // comes from the durable server ledger (serverPushHistory["published-address"]).
+  const [pubAddrPushState, setPubAddrPushState] = useState<"idle" | "pushing" | "success" | "error">("idle");
+  const [pubAddrPushError, setPubAddrPushError] = useState<string | null>(null);
+  const [pubAddrPushResult, setPubAddrPushResult] = useState<{
+    street: string;
+    source: "clubhouse" | "community";
+    label: string;
+  } | null>(null);
   // Descriptions-tab field edits (summary/space/neighborhood/transit/
   // access/houseRules). Live edits merge into effectivePropertyData (so
   // what you see is what pushes — same posture as editableTitle) and
@@ -3708,6 +3718,87 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       recordDataPush("descriptions", "error", (e as Error).message);
     }
   }, [descPushState, pushDescriptionsToGuesty, recordDataPush]);
+
+  // Manual "Push separate published address" (Descriptions tab, 2026-07-17).
+  // Server-side the push GETs the Guesty address entity, echoes the private
+  // address, sets publishedAddress (clubhouse or generic main-building street,
+  // no unit number) with isPublishedAddressEnabled:true, and verifies by
+  // read-back — then stamps the durable "published-address" ledger kind, which
+  // is where the timestamp line under the button reads from.
+  const pushPublishedAddress = useCallback(async () => {
+    if (!selectedId || pubAddrPushState === "pushing") return;
+    // Snapshot the target listing: if the operator switches listings while
+    // the push is in flight, the completion must not repaint the OLD
+    // listing's street against the new selection (pubAddrListingRef tracks
+    // the live selection via the reset effect below).
+    const pushedListingId = selectedId;
+    const stillCurrent = () => pubAddrListingRef.current === pushedListingId;
+    setPubAddrPushState("pushing");
+    setPubAddrPushError(null);
+    try {
+      // Clubhouse discovery + a Guesty 429 pause can take a couple minutes —
+      // give the request real headroom (feature-detected for older Safari).
+      const signal =
+        typeof AbortSignal !== "undefined" && typeof (AbortSignal as any).timeout === "function"
+          ? (AbortSignal as any).timeout(180_000)
+          : undefined;
+      const res = await fetch("/api/builder/push-published-address", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listingId: pushedListingId, propertyId, force: true }),
+        ...(signal ? { signal } : {}),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      if (!stillCurrent()) return;
+      setPubAddrPushResult(
+        data.address && data.address.street
+          ? { street: data.address.street, source: data.address.source === "clubhouse" ? "clubhouse" : "community", label: String(data.address.label ?? "") }
+          : null,
+      );
+      setPubAddrPushState("success");
+      // Refresh the durable ledger so the timestamp line flips immediately.
+      void reloadServerPushHistory();
+      toast({
+        title: "Separate published address pushed",
+        description: data.address?.street
+          ? `Guesty now publishes "${data.address.street}" (${data.address.source === "clubhouse" ? "clubhouse" : "main building"}) instead of the unit address.`
+          : "The separate published address feature is enabled on the listing.",
+      });
+    } catch (e: any) {
+      const aborted = e?.name === "AbortError" || e?.name === "TimeoutError";
+      // Definitive failures are stamped in the server ledger too — refresh
+      // the timestamp line so it agrees with the inline error; on an abort
+      // the server is still working, so re-read again once it should have
+      // landed (the copy promises the line will update).
+      void reloadServerPushHistory();
+      if (aborted) {
+        window.setTimeout(() => {
+          void reloadServerPushHistory();
+        }, 60_000);
+      }
+      if (!stillCurrent()) return;
+      setPubAddrPushState("error");
+      setPubAddrPushError(
+        aborted
+          ? "Timed out waiting for Guesty — the push keeps running on the server; check the last-pushed line in a minute."
+          : (e as Error).message,
+      );
+    }
+  }, [selectedId, propertyId, pubAddrPushState, toast, reloadServerPushHistory]);
+
+  // A listing switch must clear the push panel — a stale success banner
+  // would render the PREVIOUS listing's street as the new listing's
+  // published address. The ref also lets an in-flight push detect the switch.
+  const pubAddrListingRef = useRef<string>("");
+  useEffect(() => {
+    pubAddrListingRef.current = selectedId;
+    setPubAddrPushState("idle");
+    setPubAddrPushError(null);
+    setPubAddrPushResult(null);
+  }, [selectedId]);
 
   // The PATCH body that would persist the current edit state: an edited
   // value that differs from the generated base saves as an override; an
@@ -6793,6 +6884,70 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           {propertyData.bedrooms ? ` · ${propertyData.bedrooms} bed` : ""}
                           {propertyData.bathrooms ? ` · ${propertyData.bathrooms} bath` : ""}
                         </div>
+                        {/* Separate published address (Guesty feature): channels
+                            display the community clubhouse / generic main-building
+                            street publicly instead of the exact unit address. */}
+                        {(() => {
+                          const ledger = serverPushHistory["published-address"];
+                          return (
+                            <div style={{ marginTop: 10 }} data-testid="published-address-block">
+                              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                                <button
+                                  className="glb-btn"
+                                  disabled={!selectedId || pubAddrPushState === "pushing"}
+                                  onClick={() => pushPublishedAddress()}
+                                  data-testid="btn-push-published-address"
+                                  title="Turn on Guesty's separate published address for this listing — channels show the community clubhouse (or generic main-building) address publicly instead of the exact unit address"
+                                  style={{
+                                    background: pubAddrPushState === "success" ? "#10b981" : pubAddrPushState === "error" ? "#ef4444" : "#0d9488",
+                                    color: "#fff",
+                                    opacity: !selectedId || pubAddrPushState === "pushing" ? 0.6 : 1,
+                                  }}
+                                >
+                                  {pubAddrPushState === "pushing"
+                                    ? "Pushing published address…"
+                                    : pubAddrPushState === "success"
+                                      ? "✓ Published address pushed"
+                                      : pubAddrPushState === "error"
+                                        ? "✗ Failed — Retry"
+                                        : "Push separate published address"}
+                                </button>
+                                {!selectedId && (
+                                  <span style={{ fontSize: 11, color: "var(--muted)" }}>Select or build a listing first</span>
+                                )}
+                                {pubAddrPushState === "pushing" && (
+                                  <span style={{ fontSize: 11, color: "var(--muted)", maxWidth: 400 }}>
+                                    Finding the clubhouse address + updating Guesty — can take 1–2 minutes.
+                                  </span>
+                                )}
+                                {pubAddrPushState === "error" && pubAddrPushError && (
+                                  <span style={{ fontSize: 11, color: "#ef4444", maxWidth: 400, wordBreak: "break-word" }}>
+                                    {pubAddrPushError}
+                                  </span>
+                                )}
+                                {pubAddrPushState === "success" && pubAddrPushResult && (
+                                  <span style={{ fontSize: 11, color: "#10b981", maxWidth: 400 }}>
+                                    Channels now show "{pubAddrPushResult.street}" ({pubAddrPushResult.source === "clubhouse" ? "clubhouse" : "main building"})
+                                  </span>
+                                )}
+                              </div>
+                              <div
+                                data-testid="text-published-address-last-push"
+                                title={ledger?.pushedAt ? new Date(ledger.pushedAt).toLocaleString() : undefined}
+                                style={{
+                                  fontSize: 10,
+                                  lineHeight: 1.3,
+                                  marginTop: 4,
+                                  color: !ledger ? "var(--muted)" : ledger.status === "success" ? "#166534" : "#991b1b",
+                                }}
+                              >
+                                {ledger
+                                  ? `🕐 ${ledger.status === "success" ? "Pushed" : "Push failed"} ${formatDataPushTime(ledger.pushedAt)}${ledger.summary ? ` · ${ledger.summary}` : ""}`
+                                  : "🕐 No push recorded — push to confirm channels hide the unit address"}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
                     {descriptions ? (() => {
