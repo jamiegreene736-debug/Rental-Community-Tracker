@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from "express";
+import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import { createServer, type Server } from "http";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
@@ -46039,8 +46040,25 @@ Return ONLY compact JSON with this exact shape:
   // return. Deep DB cleanup is `storage.deleteCommunityDraftDeep`; the
   // app_settings audit-doc prune and on-disk photo-folder removal below are
   // best-effort and never block the delete.
-  app.delete("/api/dashboard/property/:id", async (req, res) => {
-    const dashboardId = parseInt(req.params.id, 10);
+  //
+  // Rate-limited because the handler touches the filesystem (folder removal) —
+  // mirrors the express-rate-limit pattern in server/virtual-staging-routes.ts,
+  // keyed by portal session + IP so one operator can't hammer it. A deletion is
+  // inherently a one-at-a-time human action, so the window is generous.
+  const deletePropertyRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 60,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    keyGenerator: (req, res) => {
+      const session = res.locals.portalSession as { username?: string } | undefined;
+      const address = req.ip ?? req.socket.remoteAddress ?? "unknown";
+      return `${session?.username ?? "unauthenticated"}:${ipKeyGenerator(address)}`;
+    },
+    message: { error: "Too many delete requests. Please wait a moment and try again." },
+  });
+  app.delete("/api/dashboard/property/:id", deletePropertyRateLimit, async (req, res) => {
+    const dashboardId = parseInt(String(req.params.id), 10);
     if (!Number.isFinite(dashboardId)) {
       return res.status(400).json({ error: "Invalid property id" });
     }
