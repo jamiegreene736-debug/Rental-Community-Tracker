@@ -78,6 +78,33 @@ Before making any changes:
   with a poor gallery; expect either "Found a different photo set for this exact unit on <portal> —
   saved N photos (M new…)" or the honest exhaustion message + the "Find replacement unit" button.
 
+- 2026-07-18 (Photo replacement activity showed "Beautiful 8 brs for 22 near Poipu Beach Park! ·
+  Unit B (3BR)" — a unit NOT in the system — GHOST/RETIRED builder entries): NOT a display bug
+  (don't re-chase): unit-builder-data.ts carries SIX legacy entries (propertyIds 7, 10, 14, 26,
+  28, 31) that were never portfolio — no home.tsx dashboard `properties` row EVER (git log -S
+  verified), no guesty_property_map row, no PROPERTY_UNIT_CONFIGS row. The weekly unit-audit
+  cron's FIRST tick (2026-07-18 01:46Z) swept `getAllUnitBuilders()` wholesale, audited all six,
+  and prop 7's photo-fix ladder (fed by weekly Lens scans of ghost folders whose photos ARE on
+  the real owners' OTA listings) auto-committed a REAL swap (unit_swaps 71, unit-323 → "Unit
+  #324", folder replacement-p7-uunit-323) with a scheduled-audit → automatic-retry receipt chain
+  in the #1055 activity dialog. Mid-diagnosis the prop-14 ghost sweep was RUNNING and 26/28/31
+  queued — cancelled live first. SHIPPED (`claude/unit-b-ghost-listing-a78468`): `retired: true`
+  on the six entries + `getActiveUnitBuilders()`/`isRetiredUnitBuilderProperty()`; enumeration
+  gates at unitAuditCronTargets, resolveUnitAuditTarget (stale queued ghost records fail their
+  resolve stage), resolveAutoReplaceTarget (all origins + pending-retry watchdog cancel),
+  reactiveSweepEligible (honest "retired from the portfolio" note), listScanableFolders
+  (retired-owned unit/replacement folders leave the Lens universe — pure spend, no consumer),
+  and the pickers (getAllMultiUnitProperties, agent portal). Retired entries are KEPT for
+  folder→context lookups (the 2026-07-04 no-context false-positive class) — never delete them
+  wholesale. LIVE CLEANUP post-deploy: ghost auto-fix rows purged from queue_job_events, ghost
+  receipts cleared from auto_replace_jobs.v1, unit_swaps 71 deleted + the replacement folder's
+  photo_labels/photo_listing_checks rows removed (volume files left inert). Locked by
+  tests/retired-properties.test.ts (16: retired-set lock, active⇄dashboard drift-lock — new
+  properties add the dashboard row + builder entry in ONE PR, removals flag retired in the same
+  PR — plus source guards on all five gates); unit-audit-sweep scheduler guard repointed
+  (200/0). Verified: full `npm test` REAL exit 0, build clean, `npm run check` = baseline
+  (0 new from this change). See AGENTS.md Unit Audit Sweep #23 + the 2026-07-18 Decision Log line.
+
 - 2026-07-17 (Separate published address — every listing, via Guesty's Address controller): Operator
   asked for Guesty's "separate published address" feature ON for every listing, always the community
   CLUBHOUSE address, else the generic main-building address with no unit number, ensured on unit
@@ -130,6 +157,45 @@ Before making any changes:
   when echoed VERBATIM. Follow-up PR adds a bounded 400-retry that re-PUTs with
   foldHawaiianDiacritics applied to string fields only ("Ali‘i"→"Alii"; first attempt stays
   echo-verbatim by rule).
+
+- 2026-07-17 (Descriptions tab "↻ Regenerate descriptions" — now grounded in photos + Bedding tab):
+  Operator asked to double-check that the regenerate button's AI looks at the photos and the
+  confirmed Bedding tab. VERIFIED-NO (don't re-chase): the button sent only bedrooms + _source.json
+  URL + address; the endpoint's `unit1.description` source-fact leg was dead code (no caller ever
+  populated it) — the prompt asked Claude to ESTIMATE bedding/bathrooms. SHIPPED
+  (`claude/descriptions-button-ai-check-a34972`): /api/community/generate-listing accepts
+  `propertyId` (builder button + audit-sweep twin both send it) and grounds BOTH prompt variants
+  server-side in per-photo Claude-vision caption digests (via
+  buildPhotoCommunityCheckRequestForProperty — active swap folders + hidden filtering + negative
+  draft ids inherited; unit groups matched by "Unit A/B" label, never array position) + the saved
+  Amenities-tab set; the builder button additionally sends per-unit `confirmedBedding`
+  (describeUnitBedding over the localStorage Bedding-tab config, matched by canonical unitId,
+  index fallback) which the prompt treats as AUTHORITATIVE and which deterministically OVERWRITES
+  the structured `bedding` field (`withConfirmedBedding`). ACCURACY CHECKED, NOT TRUSTED: pure
+  `unconfirmedBedTypeMentions` (shared/description-copy.ts; "bed"/"bedroom"-anchored so "a single
+  bedroom unit"/"full kitchen" never false-positive) audits the prose → ONE corrective retry →
+  persistent mismatch surfaces as `accuracyNotes` (deliberately NOT `warning` — every automated
+  consumer refuses `warning` wholesale) → "Review bedding mentions" toast in the tab. A 3-lens
+  adversarial review confirmed FIVE defects in the first cut, all fixed + regression-locked:
+  bathroom text ("Double vanity"/"Full Bath") masked the confirmed regexes (now bed-portion-only,
+  per-unit array cut); plural labels ("2 Kings") false-flagged correct prose (plural-tolerant now);
+  an audit-clean degenerate retry could replace a complete draft with fallback filler (retries gate
+  on generatedDraftCompletenessRegressions = []); the overwritten bedding field was audited
+  (excluded); draft bed types outside GuestyBedType rendered "undefined" in the authoritative
+  string (describeUnitBedding humanizes). All grounding is fail-soft and gathered AFTER the no-key
+  early return (fallback path byte-identical). Verified:
+  description-copy 78/0, bedding-space-copy green, pipeline-logic unitA lock repointed (intent
+  preserved), full `npm test` REAL exit 0, build clean (strings bundle-grepped both bundles),
+  `npm run check` 335 = baseline (stash A/B identical per-file sets), client half proven on the
+  BUILT bundle (static SPA server + Playwright, mocked /api: localStorage bedding config →
+  confirmedBedding + propertyId in the request, PATCH persists, accuracyNotes toast renders — 9/0).
+  Could NOT live-run the Claude leg (no ANTHROPIC key in session) — post-deploy: open a builder
+  Descriptions tab, click "↻ Regenerate descriptions"; the copy should now match the Bedding tab
+  exactly and mention only photo/amenity-supported features. WORKTREE INFRA TRAP hit twice this
+  session: `npm run check` writes `node_modules/typescript/tsbuildinfo` INSIDE the worktree,
+  creating a shadow `typescript` dir that breaks tsx module resolution for
+  tests/guesty-photo-repush.test.ts ("Cannot find package …/node_modules/typescript/index.js") —
+  `rm -rf <worktree>/node_modules/typescript` before running the full test chain.
 
 - 2026-07-17 (Cowork buy-in find + safe checkout preparation): Jamie replaced the older
   automated-card design. The primary bookings action now runs search/attach and VRBO checkout

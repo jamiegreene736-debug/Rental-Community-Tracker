@@ -89,6 +89,19 @@ export type PropertyUnitBuilder = {
   // straight Condominium complex with elevator access doesn't need
   // a custom note.
   accessibilityNote?: string;
+  /**
+   * TRUE for entries that are NOT part of the live portfolio (never appeared
+   * in the dashboard's `properties` list in home.tsx, no Guesty mapping, no
+   * PROPERTY_UNIT_CONFIGS row). The entry is KEPT so folder→property context
+   * resolution and historical references still work, but every surface that
+   * ENUMERATES work or portfolio rows must skip it: the weekly unit-audit
+   * cron, photo-found reactive sweeps, auto-replace jobs, the photo-listing
+   * scan universe, and the property pickers. 2026-07-18: the audit cron's
+   * first weekly tick swept these ghosts and auto-committed a unit swap for
+   * retired property 7 ("Beautiful 8 brs…") — a listing the operator no
+   * longer has. Use getActiveUnitBuilders() when enumerating.
+   */
+  retired?: boolean;
   units: Unit[];
   hasPhotos: boolean;
   communityPhotos: CommunityPhoto[];
@@ -657,6 +670,8 @@ Located on Kauai's sunny south shore, you'll find Poipu Shopping Village, Kukui'
   },
   {
     propertyId: 7,
+    // Retired from the portfolio — see the `retired` field doc on PropertyUnitBuilder.
+    retired: true,
     propertyName: "Beautiful 8 brs for 22 near Poipu Beach Park!",
     complexName: "Regency at Poipu Kai",
     address: "1831 Poipu Rd, Bldg 3, Koloa, HI 96756",
@@ -825,6 +840,8 @@ Poipu's beloved beaches are a short 10-minute walk from the resort. Swim and sno
   },
   {
     propertyId: 10,
+    // Retired from the portfolio — see the `retired` field doc on PropertyUnitBuilder.
+    retired: true,
     propertyName: "Fabulous 5 br for 15 private beachfront Estate!",
     complexName: "Kekaha Beachfront Estate",
     address: "8497 Kekaha Rd, Kekaha, HI 96752",
@@ -897,6 +914,8 @@ Experience the authentic charm of old Hawaii plantation living with the comforts
   },
   {
     propertyId: 14,
+    // Retired from the portfolio — see the `retired` field doc on PropertyUnitBuilder.
+    retired: true,
     propertyName: "Fabulous 7 br 22 ocean view pool estate!",
     complexName: "Keauhou Estates",
     address: "78-6855 Ali'i Dr, Kailua-Kona, HI 96740",
@@ -1285,6 +1304,8 @@ Walk to Koloa Town for shopping, dining, and the historic plantation village. Ea
   },
   {
     propertyId: 26,
+    // Retired from the portfolio — see the `retired` field doc on PropertyUnitBuilder.
+    retired: true,
     propertyName: "Fabulous 7 bedroom for 23 near Magic Sands Beach!",
     complexName: "Keauhou Estates",
     address: "78-6920 Ali'i Dr, Kailua-Kona, HI 96740",
@@ -1353,6 +1374,8 @@ The Keauhou Estates gated community provides a secure, peaceful environment. Nea
   },
   {
     propertyId: 28,
+    // Retired from the portfolio — see the `retired` field doc on PropertyUnitBuilder.
+    retired: true,
     propertyName: "Beautiful ocean view Poipu 7 brs for 17! 60 yards to Beach!",
     complexName: "Poipu Brenneckes Beachside",
     address: "2298 Ho'one Rd, Koloa, HI 96756",
@@ -1493,6 +1516,8 @@ Princeville puts you at the gateway to Kauai's North Shore, with Hanalei Bay, th
   },
   {
     propertyId: 31,
+    // Retired from the portfolio — see the `retired` field doc on PropertyUnitBuilder.
+    retired: true,
     propertyName: "Fabulous 7 bedroom for 14 oceanfront Poipu pool home!",
     complexName: "Poipu Brenneckes Oceanfront",
     address: "2350 Ho'one Rd, Koloa, HI 96756",
@@ -1801,12 +1826,30 @@ export function getMultiUnitPropertyIds(): number[] {
   return unitBuilderData.map((p) => p.propertyId);
 }
 
+// Full list INCLUDING retired entries — for folder/context lookups and
+// historical references only. Anything that enumerates WORK (schedulers,
+// reactive sweeps, scan universes) or portfolio pickers must use
+// getActiveUnitBuilders() instead.
 export function getAllUnitBuilders(): PropertyUnitBuilder[] {
   return unitBuilderData;
 }
 
+// The live portfolio: builder entries that are actually operated (dashboard
+// rows). This is what the weekly unit-audit cron and every automated
+// fix pipeline may enumerate.
+export function getActiveUnitBuilders(): PropertyUnitBuilder[] {
+  return unitBuilderData.filter((p) => p.retired !== true);
+}
+
+export function isRetiredUnitBuilderProperty(propertyId: number): boolean {
+  return unitBuilderData.some((p) => p.propertyId === propertyId && p.retired === true);
+}
+
+// Property pickers (buy-in tracker). Retired entries are deliberately
+// excluded — the operator no longer runs those listings, so offering them
+// for new buy-in research is noise.
 export function getAllMultiUnitProperties(): { propertyId: number; propertyName: string; complexName: string }[] {
-  return unitBuilderData.map((p) => ({
+  return getActiveUnitBuilders().map((p) => ({
     propertyId: p.propertyId,
     propertyName: p.propertyName,
     complexName: p.complexName,

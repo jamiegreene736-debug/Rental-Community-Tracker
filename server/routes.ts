@@ -37,9 +37,13 @@ import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/
 import { occupancyForBedrooms } from "@shared/occupancy";
 import {
   DESCRIPTION_OVERRIDE_FIELDS,
+  clampGroundingSnippet,
   findDescriptionReadbackMismatches,
   findDescriptionPlaceholders,
+  generatedDraftCompletenessRegressions,
+  photoCaptionDigest,
   stripAreaSectionsFromDescription,
+  unconfirmedBedTypeMentions,
   type PropertyDescriptionOverrideField,
 } from "@shared/description-copy";
 import {
@@ -51023,12 +51027,18 @@ Return ONLY compact JSON with this exact shape:
   };
 
   app.post("/api/community/generate-listing", async (req, res) => {
-    const { communityName, city, state, unit1, unit2, suggestedRate, singleListing } = req.body as {
+    const { communityName, city, state, unit1, unit2, suggestedRate, singleListing, propertyId } = req.body as {
       communityName: string;
       city: string;
       state: string;
-      unit1: { bedrooms: number; url: string; description?: string; address?: string };
-      unit2?: { bedrooms: number; url: string; description?: string; address?: string };
+      // confirmedBedding (2026-07-17): the operator's Bedding-tab config for
+      // the unit, formatted by describeUnitBedding. Only the CLIENT can send
+      // it — the canonical config lives in browser localStorage. When
+      // present it is AUTHORITATIVE: the prompt pins bed/bath mentions to
+      // it, the response's unit `bedding` field is overwritten with it, and
+      // a bed-type contradiction triggers one corrective retry.
+      unit1: { bedrooms: number; url: string; description?: string; address?: string; confirmedBedding?: string };
+      unit2?: { bedrooms: number; url: string; description?: string; address?: string; confirmedBedding?: string };
       suggestedRate: number;
       // CODEX NOTE (2026-05-04, claude/single-listing): when true,
       // generate a SINGLE-UNIT draft — only `unitA` is populated,
@@ -51036,6 +51046,13 @@ Return ONLY compact JSON with this exact shape:
       // skip the "two units" phrasing. Default false preserves the
       // existing combo behavior.
       singleListing?: boolean;
+      // propertyId (2026-07-17): builder property id (positive core id or
+      // negative -draftId). When present the server grounds the prompt in
+      // the per-photo Claude-vision captions (photo_labels, active swap
+      // folders included) and the saved Amenities-tab set — the "AI looks
+      // at the photos" half of the grounding. Fail-soft: absent or
+      // unreadable facts never block generation.
+      propertyId?: number;
     };
 
     if (!communityName || !unit1) {
@@ -51186,6 +51203,11 @@ Return ONLY compact JSON with this exact shape:
       };
     };
 
+    // A confirmed Bedding-tab config is authoritative for the structured
+    // bedding field — restated verbatim, never the model's paraphrase.
+    const withConfirmedBedding = <T extends { bedding: string }>(draft: T, confirmed: string): T =>
+      confirmed ? { ...draft, bedding: confirmed } : draft;
+
     const fallbackDraft = (warning?: string) => {
       const fallbackTitle = singleListing
         ? `${communityName} ${unit1.bedrooms}BR in ${city}!`.slice(0, 50)
@@ -51260,7 +51282,53 @@ Return ONLY compact JSON with this exact shape:
     };
     const unit1Facts = sourceFactSnippet(unit1.description);
     const unit2Facts = singleListing ? "" : sourceFactSnippet(unit2?.description);
+
+    // ── Grounding facts (2026-07-17) ────────────────────────────────────
+    // Photo captions + saved amenities are gathered SERVER-side from
+    // propertyId (works for the builder button AND the audit sweep's
+    // loopback twin); the CONFIRMED Bedding-tab config can only arrive
+    // from the client (browser localStorage). Everything is fail-soft —
+    // a property with no labels/amenities generates exactly as before.
+    const groundingPropertyId =
+      Number.isFinite(Number(propertyId)) && Number(propertyId) !== 0 ? Number(propertyId) : null;
+    let unitAPhotoFacts = "";
+    let unitBPhotoFacts = "";
+    let communityPhotoFacts = "";
+    let amenityFacts = "";
+    if (groundingPropertyId != null) {
+      try {
+        const built = await buildPhotoCommunityCheckRequestForProperty(groundingPropertyId);
+        const digestFor = (g: { filenames?: string[]; captions?: Record<string, string> }) =>
+          clampGroundingSnippet(photoCaptionDigest((g.filenames ?? []).map((f) => g.captions?.[f])));
+        for (const g of built?.request.groups ?? []) {
+          // Unit groups are matched by their deterministic label — a unit
+          // with no published photos is simply absent, so positional
+          // matching would mis-assign Unit B's gallery to Unit A.
+          if (g.role === "community") {
+            if (!communityPhotoFacts) communityPhotoFacts = digestFor(g);
+          } else if (/^Unit A\b/.test(g.label)) {
+            unitAPhotoFacts = digestFor(g);
+          } else if (/^Unit B\b/.test(g.label)) {
+            unitBPhotoFacts = digestFor(g);
+          }
+        }
+      } catch (e: any) {
+        console.warn("[community/generate-listing] photo caption facts unavailable:", e?.message ?? e);
+      }
+      try {
+        const saved = await storage.getPropertyAmenities(groundingPropertyId);
+        const keys = Array.isArray(saved?.amenityKeys) ? (saved!.amenityKeys as string[]) : [];
+        amenityFacts = clampGroundingSnippet(keys.map((k) => getAmenityLabel(String(k))).join(", "));
+      } catch (e: any) {
+        console.warn("[community/generate-listing] saved amenities unavailable:", e?.message ?? e);
+      }
+    }
+    const unit1ConfirmedBedding = clampGroundingSnippet(unit1.confirmedBedding);
+    const unit2ConfirmedBedding = singleListing ? "" : clampGroundingSnippet(unit2?.confirmedBedding);
+
     const SOURCE_FACTS_RULE = "- When source listing details are provided in CONTEXT, use their concrete facts (bathrooms, square footage, bedding) instead of estimating; only estimate what the details do not cover, and never contradict them.";
+    const CONFIRMED_BEDDING_RULE = "- When a CONFIRMED bedding & bathrooms line is provided in CONTEXT it is authoritative, operator-verified fact: restate it exactly in that unit's bedding field, keep every bed, bedroom, bathroom, and ensuite mention in every field consistent with it, and never add, upgrade, or drop a bed type it does not list. It outranks source listing details and photo evidence when they disagree.";
+    const PHOTO_FACTS_RULE = "- When photo evidence captions are provided in CONTEXT, treat them as what this listing's photos actually show: ground view, amenity, furnishing, and finish claims in them (together with saved amenities and source listing details), and do not advertise a view or amenity that none of the supplied facts support.";
     const SAFE_PUBLIC_COPY_RULE = "- Across every field, never invent access codes, entry or lock details, parking details, quiet hours, check-in or check-out times, pet rules, smoking rules, or fee specifics unless they appear in the supplied source facts. For access and houseRules, when a specific is not sourced, use neutral public-facing language that says confirmed details are provided with the reservation.";
 
     const prompt = singleListing
@@ -51270,6 +51338,10 @@ CONTEXT
 - Single unit: ${unit1.bedrooms}-bedroom ${unit1.address ? `at ${unit1.address}` : `at ${communityName}`}${unit1.url ? ` (source: ${unit1.url})` : ""}
 - This is ONE standalone condo or townhouse — NOT a combination of two units.
 ${unit1Facts ? `- Source listing details: ${unit1Facts}` : ""}
+${unit1ConfirmedBedding ? `- CONFIRMED bedding & bathrooms (operator's Bedding tab — authoritative): ${unit1ConfirmedBedding}` : ""}
+${unitAPhotoFacts ? `- Photo evidence — AI vision captions of this unit's actual photos: ${unitAPhotoFacts}` : ""}
+${communityPhotoFacts ? `- Community photo evidence — AI vision captions of the community photos: ${communityPhotoFacts}` : ""}
+${amenityFacts ? `- Saved amenities (the listing's Amenities tab): ${amenityFacts}` : ""}
 ${resortFeeNote ? `- Resort fee note to include exactly once in summary or space: ${resortFeeNote}` : ""}
 
 OUTPUT — return ONLY valid JSON with this exact shape:
@@ -51302,6 +51374,8 @@ CONSTRAINTS
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about.
 ${SOURCE_FACTS_RULE}
+${CONFIRMED_BEDDING_RULE}
+${PHOTO_FACTS_RULE}
 ${SAFE_PUBLIC_COPY_RULE}
 - Single-unit framing — NEVER mention "two units" or "combined" or "individually owned".
 - Do not include representative-accommodation or unit-assignment disclosure language. The builder appends that at the bottom.
@@ -51317,6 +51391,12 @@ CONTEXT
 - Walking distance between units: ${walk.description} (${walk.minutes}-minute walk, source: ${walk.source})
 ${unit1Facts ? `- Unit A source listing details: ${unit1Facts}` : ""}
 ${unit2Facts ? `- Unit B source listing details: ${unit2Facts}` : ""}
+${unit1ConfirmedBedding ? `- Unit A CONFIRMED bedding & bathrooms (operator's Bedding tab — authoritative): ${unit1ConfirmedBedding}` : ""}
+${unit2ConfirmedBedding ? `- Unit B CONFIRMED bedding & bathrooms (operator's Bedding tab — authoritative): ${unit2ConfirmedBedding}` : ""}
+${unitAPhotoFacts ? `- Unit A photo evidence — AI vision captions of the unit's actual photos: ${unitAPhotoFacts}` : ""}
+${unitBPhotoFacts ? `- Unit B photo evidence — AI vision captions of the unit's actual photos: ${unitBPhotoFacts}` : ""}
+${communityPhotoFacts ? `- Community photo evidence — AI vision captions of the community photos: ${communityPhotoFacts}` : ""}
+${amenityFacts ? `- Saved amenities (the listing's Amenities tab): ${amenityFacts}` : ""}
 ${resortFeeNote ? `- Resort fee note to include exactly once in summary or space: ${resortFeeNote}` : ""}
 
 OUTPUT — return ONLY valid JSON with this exact shape:
@@ -51358,6 +51438,8 @@ CONSTRAINTS
 - Be specific about ${city}, ${state} — real local landmarks, beaches, dining. No generic "tropical paradise" copy.
 - Don't invent amenities you weren't told about. Describe in terms of what a typical condo at this kind of resort offers.
 ${SOURCE_FACTS_RULE}
+${CONFIRMED_BEDDING_RULE}
+${PHOTO_FACTS_RULE}
 ${SAFE_PUBLIC_COPY_RULE}
 - summary and space must NOT contain combo disclosure or representative-photo disclosure; the builder places those separately.
 - If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
@@ -51365,49 +51447,120 @@ ${SAFE_PUBLIC_COPY_RULE}
 - Return ONLY the JSON object — no preamble, no commentary, no \`\`\` fences.`;
 
     try {
-      const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": anthropicKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          // Sonnet 4.6 — handles this richer JSON-shape task with
-          // long prose better than Haiku, and this endpoint runs
-          // once per community (not in a hot loop). Previous ID
-          // `claude-3-5-sonnet-20241022` is the legacy alias every
-          // other endpoint had to migrate off of (PRs #97/98/99/103);
-          // the same fix unblocks this endpoint too — without it
-          // the catch block silently swallowed errors and Step 5
-          // displayed the bare 2-line fallback Jamie was seeing.
-          model: "claude-sonnet-4-6",
-          max_tokens: 4000,
-          messages: [{ role: "user", content: prompt }],
-        }),
-      });
+      const requestClaudeDraft = async (promptText: string): Promise<any> => {
+        const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": anthropicKey,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            // Sonnet 4.6 — handles this richer JSON-shape task with
+            // long prose better than Haiku, and this endpoint runs
+            // once per community (not in a hot loop). Previous ID
+            // `claude-3-5-sonnet-20241022` is the legacy alias every
+            // other endpoint had to migrate off of (PRs #97/98/99/103);
+            // the same fix unblocks this endpoint too — without it
+            // the catch block silently swallowed errors and Step 5
+            // displayed the bare 2-line fallback Jamie was seeing.
+            model: "claude-sonnet-4-6",
+            max_tokens: 4000,
+            messages: [{ role: "user", content: promptText }],
+          }),
+        });
 
-      const claudeData = await claudeResp.json().catch(() => null) as any;
+        const claudeData = await claudeResp.json().catch(() => null) as any;
 
-      if (!claudeResp.ok) {
-        const upstreamMsg = claudeData?.error?.message ?? claudeData?.error?.type ?? `HTTP ${claudeResp.status}`;
-        throw new Error(`Anthropic ${claudeResp.status}: ${upstreamMsg}`);
+        if (!claudeResp.ok) {
+          const upstreamMsg = claudeData?.error?.message ?? claudeData?.error?.type ?? `HTTP ${claudeResp.status}`;
+          throw new Error(`Anthropic ${claudeResp.status}: ${upstreamMsg}`);
+        }
+        if (claudeData?.error) {
+          throw new Error(`Anthropic error: ${claudeData.error.message ?? claudeData.error.type ?? "unknown"}`);
+        }
+
+        const text: string = claudeData?.content?.[0]?.text ?? "";
+        // Tolerate ```json fences — Sonnet sometimes wraps despite
+        // the no-Markdown instruction. Strip them before regex-matching.
+        const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "");
+        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          console.error(`[community/generate-listing] No JSON in Claude response. Head: ${text.slice(0, 200)}`);
+          throw new Error("No JSON in Claude response");
+        }
+
+        return JSON.parse(jsonMatch[0]);
+      };
+
+      let parsed = await requestClaudeDraft(prompt);
+
+      // ── Bedding-accuracy audit (2026-07-17) ─────────────────────────
+      // With a CONFIRMED Bedding-tab config in hand we can CHECK the
+      // prose instead of trusting the prompt: any bed type the copy
+      // mentions that the confirmed config doesn't contain triggers ONE
+      // corrective retry; a persistent mismatch is surfaced to the
+      // caller as `accuracyNotes` (deliberately NOT `warning` — every
+      // automated consumer refuses `warning` wholesale, and the copy is
+      // still reviewable/editable in the tab).
+      const auditBeddingAccuracy = (draft: any): string[] => {
+        const notes: string[] = [];
+        // summary/space cover the whole listing — only auditable when
+        // EVERY unit sent a confirmed config, else the other unit's real
+        // beds would false-flag.
+        const allUnitsConfirmed = singleListing
+          ? !!unit1ConfirmedBedding
+          : !!unit1ConfirmedBedding && !!unit2ConfirmedBedding;
+        if (allUnitsConfirmed) {
+          const sharedProse = [draft?.summary, draft?.space].map((s) => String(s ?? "")).join("\n");
+          // Array form: each unit's string is cut at its OWN "Bathrooms:"
+          // section inside the helper — joining full strings first would
+          // bury unit 2's beds behind unit 1's bathroom section.
+          for (const t of unconfirmedBedTypeMentions(sharedProse, [unit1ConfirmedBedding, unit2ConfirmedBedding])) {
+            notes.push(`summary/space mentions ${t} — not in the confirmed Bedding tab`);
+          }
+        }
+        const unitAudits: Array<[any, string, string]> = [
+          [draft?.unitA, unit1ConfirmedBedding, "Unit A"],
+          [draft?.unitB, unit2ConfirmedBedding, "Unit B"],
+        ];
+        for (const [unitDraft, confirmed, label] of unitAudits) {
+          if (!unitDraft || !confirmed) continue;
+          // The model's `bedding` field is deliberately NOT audited — it is
+          // deterministically overwritten with the confirmed string below,
+          // so a mismatch there never ships and must not burn a retry.
+          const prose = [unitDraft.shortDescription, unitDraft.longDescription]
+            .map((s) => String(s ?? "")).join("\n");
+          for (const t of unconfirmedBedTypeMentions(prose, [confirmed])) {
+            notes.push(`${label} copy mentions ${t} — not in the confirmed Bedding tab`);
+          }
+        }
+        return notes;
+      };
+      let accuracyNotes = auditBeddingAccuracy(parsed);
+      if (accuracyNotes.length > 0) {
+        console.warn(`[community/generate-listing] bedding-accuracy retry: ${accuracyNotes.join("; ")}`);
+        try {
+          const retried = await requestClaudeDraft(
+            `${prompt}\n\nIMPORTANT CORRECTION: a previous draft mentioned bed types that are NOT in the CONFIRMED bedding (${accuracyNotes.join("; ")}). Regenerate the COMPLETE JSON again, mentioning ONLY the confirmed bed types in every field.`,
+          );
+          const retriedNotes = auditBeddingAccuracy(retried);
+          // Keep whichever draft contradicts the confirmed bedding less —
+          // but ONLY when the retry is structurally as complete as the
+          // first parse. An audit-clean retry that dropped unitA (or
+          // gutted a longDescription) would otherwise silently replace a
+          // complete draft with fallback filler downstream.
+          const regressions = generatedDraftCompletenessRegressions(parsed, retried);
+          if (regressions.length > 0) {
+            console.warn(`[community/generate-listing] bedding-accuracy retry discarded — incomplete vs first draft: ${regressions.join(", ")}`);
+          } else if (retriedNotes.length <= accuracyNotes.length) {
+            parsed = retried;
+            accuracyNotes = retriedNotes;
+          }
+        } catch (e: any) {
+          console.warn("[community/generate-listing] bedding-accuracy retry failed:", e?.message ?? e);
+        }
       }
-      if (claudeData?.error) {
-        throw new Error(`Anthropic error: ${claudeData.error.message ?? claudeData.error.type ?? "unknown"}`);
-      }
-
-      const text: string = claudeData?.content?.[0]?.text ?? "";
-      // Tolerate ```json fences — Sonnet sometimes wraps despite
-      // the no-Markdown instruction. Strip them before regex-matching.
-      const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "");
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        console.error(`[community/generate-listing] No JSON in Claude response. Head: ${text.slice(0, 200)}`);
-        throw new Error("No JSON in Claude response");
-      }
-
-      const parsed = JSON.parse(jsonMatch[0]);
 
       // Compose the flat description (used by the Description
       // textarea on Step 5 and stored in `listingDescription`) by
@@ -51461,13 +51614,17 @@ ${SAFE_PUBLIC_COPY_RULE}
         transit: parsedTransit,
         access: parsedAccess,
         houseRules: parsedHouseRules,
-        unitA: normalizeGeneratedUnitDraft(parsed.unitA, unit1),
-        unitB: singleListing || !unit2 ? null : normalizeGeneratedUnitDraft(parsed.unitB, unit2),
+        // Confirmed Bedding-tab facts overwrite the structured bedding
+        // field deterministically — the one field that can never drift
+        // from the operator's config, whatever the model wrote.
+        unitA: withConfirmedBedding(normalizeGeneratedUnitDraft(parsed.unitA, unit1), unit1ConfirmedBedding),
+        unitB: singleListing || !unit2 ? null : withConfirmedBedding(normalizeGeneratedUnitDraft(parsed.unitB, unit2), unit2ConfirmedBedding),
         combinedBedrooms,
         suggestedRate,
         walk,
         strPermitSample,
         resortFee,
+        ...(accuracyNotes.length > 0 ? { accuracyNotes } : {}),
       });
     } catch (e: any) {
       console.warn("[community/generate-listing] Claude error:", e.message);

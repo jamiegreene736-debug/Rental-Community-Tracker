@@ -1598,8 +1598,31 @@ export async function listScanableFolders(): Promise<string[]> {
     console.error(`[photo-listing-scanner] failed to enumerate imported draft folders: ${e?.message ?? e}`);
   }
 
+  // RETIRED-property exclusion (single choke point — covers folders that
+  // entered the set via label rows, the builder seed, unit-swap rows, or
+  // anything else). Retired unit-builder-data entries have no live listing,
+  // so a weekly Lens scan of their folders is pure spend with no consumer —
+  // and its "found" verdicts fed the 2026-07-18 ghost auto-replace class
+  // (retired property 7 got a real committed swap). Community folders are
+  // untouched (isScannableFolder already excludes them).
+  const retiredIds = new Set<number>();
+  const retiredUnitFolders = new Set<string>();
+  for (const builder of unitBuilderData) {
+    if (builder.retired !== true) continue;
+    retiredIds.add(builder.propertyId);
+    for (const unit of builder.units) {
+      if (unit.photoFolder) retiredUnitFolders.add(unit.photoFolder);
+    }
+  }
+  const ownedByRetiredProperty = (folder: string): boolean => {
+    if (retiredUnitFolders.has(folder)) return true;
+    const ref = replacementPhotoFolderRef(folder);
+    return !!ref && ref.propertyId > 0 && retiredIds.has(ref.propertyId);
+  };
+
   const out: string[] = [];
   for (const folder of set) {
+    if (ownedByRetiredProperty(folder)) continue;
     const tokens = await dynamicVerificationTokensForFolder(folder);
     if (!tokens || tokens.length === 0) continue;
     if (foldersWithLabels.has(folder) || await folderHasDiskPhotos(folder)) out.push(folder);

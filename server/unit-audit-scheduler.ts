@@ -33,7 +33,7 @@
 // Kill switch: UNIT_AUDIT_AUTO_DISABLED=1.
 
 import { storage } from "./storage";
-import { getAllUnitBuilders } from "../client/src/data/unit-builder-data";
+import { getActiveUnitBuilders } from "../client/src/data/unit-builder-data";
 import { DAY_MS, WEEK_MS, nextRunDelayMs } from "./market-rate-scan-logic";
 import { resetCronReplaceBudget, startUnitAuditSweepBulk } from "./unit-audit-sweep";
 
@@ -46,12 +46,15 @@ function autoAuditDisabled(): boolean {
   return /^(1|true|yes|on)$/i.test(String(process.env.UNIT_AUDIT_AUTO_DISABLED ?? "").trim());
 }
 
-// Every dashboard row that can be audited: the configured builder properties
-// (positive core ids) + promoted drafts that are LIVE (Guesty-mapped negative
-// ids — sweeping every half-finished draft weekly would waste budget on
-// listings that aren't selling anywhere yet).
+// Every dashboard row that can be audited: the ACTIVE builder properties
+// (positive core ids; retired unit-builder-data entries are NOT dashboard
+// rows and must never be swept — the 2026-07-18 first weekly tick audited
+// six retired ghosts and auto-committed a unit swap for one) + promoted
+// drafts that are LIVE (Guesty-mapped negative ids — sweeping every
+// half-finished draft weekly would waste budget on listings that aren't
+// selling anywhere yet).
 export async function unitAuditCronTargets(): Promise<number[]> {
-  const coreIds = getAllUnitBuilders().map((b) => b.propertyId).filter((n) => Number.isFinite(n) && n > 0);
+  const coreIds = getActiveUnitBuilders().map((b) => b.propertyId).filter((n) => Number.isFinite(n) && n > 0);
   const mappedDraftIds = (await storage.getGuestyPropertyMap().catch(() => []))
     .map((m) => m.propertyId)
     .filter((n) => Number.isFinite(n) && n < 0);

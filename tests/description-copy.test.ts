@@ -4,12 +4,18 @@ import {
   AREA_SECTION_HEADERS,
   DESCRIPTION_OVERRIDE_FIELDS,
   DESCRIPTION_PLACEHOLDER_PHRASES,
+  GROUNDING_SNIPPET_MAX_CHARS,
+  clampGroundingSnippet,
+  confirmedBeddingBedPortion,
+  generatedDraftCompletenessRegressions,
   composeSpaceFromUnitDescriptions,
   composeSummaryWithDisclosures,
   findDescriptionReadbackMismatches,
   findDescriptionPlaceholders,
   normalizeDescriptionReadback,
+  photoCaptionDigest,
   stripAreaSectionsFromDescription,
+  unconfirmedBedTypeMentions,
 } from "../shared/description-copy";
 
 let passed = 0;
@@ -177,6 +183,157 @@ check("units labeled + walk line appended", (() => {
 check("empty unit text dropped; no walk line for singles",
   composeSpaceFromUnitDescriptions([{ label: "Unit A (2BR)", text: "Cozy condo." }, { label: "Unit B (2BR)", text: "" }], null)
     === "Unit A (2BR): Cozy condo.");
+
+// ── generator grounding helpers (2026-07-17) ─────────────────────────────────
+check("clampGroundingSnippet collapses whitespace and trims",
+  clampGroundingSnippet("  King   Bedroom \n Lanai\tWith Ocean View  ") === "King Bedroom Lanai With Ocean View");
+check("clampGroundingSnippet caps at the shared snippet limit",
+  clampGroundingSnippet("x".repeat(2000)).length === GROUNDING_SNIPPET_MAX_CHARS
+  && clampGroundingSnippet("abcdef", 3) === "abc");
+check("clampGroundingSnippet nullish → empty string",
+  clampGroundingSnippet(null) === "" && clampGroundingSnippet(undefined) === "");
+
+check("photoCaptionDigest dedupes case-insensitively, keeps hero-first order", (() => {
+  const digest = photoCaptionDigest([
+    "Lanai With Ocean View", "King Bedroom", "lanai with ocean view", " King Bedroom ", "Updated Kitchen",
+  ]);
+  return digest === "Lanai With Ocean View; King Bedroom; Updated Kitchen";
+})());
+check("photoCaptionDigest drops empty captions and respects maxItems", (() => {
+  const digest = photoCaptionDigest(["", null, "A", "B", "C"], { maxItems: 2 });
+  return digest === "A; B";
+})());
+check("photoCaptionDigest of nothing is empty",
+  photoCaptionDigest([]) === "" && photoCaptionDigest([null, "  "]) === "");
+
+// The confirmed string is describeUnitBedding's shape — bare bed-type
+// labels ("King", "2 Twin / Singles"), not "King bed" prose.
+const CONFIRMED = "Master Bedroom: King (ensuite); Bedroom 2: 2 Twin / Singles. Living room sofa bed. Bathrooms: Hall Bath (Walk-in shower).";
+check("prose matching the confirmed bedding passes clean",
+  unconfirmedBedTypeMentions(
+    "The master offers a King bed, the second bedroom has two twin beds, and there is a sofa bed in the living room.",
+    CONFIRMED,
+  ).length === 0);
+check("an invented Queen bed is flagged", (() => {
+  const hits = unconfirmedBedTypeMentions("The second bedroom has a Queen bed.", CONFIRMED);
+  return hits.length === 1 && hits[0] === "Queen bed";
+})());
+check("caption-style 'King Bedroom' counts as a King-bed claim",
+  unconfirmedBedTypeMentions("The King Bedroom overlooks the pool.", "Bedroom 1: Queen. Bathrooms: Hall Bath.")
+    .includes("King bed"));
+check("'a single bedroom unit' and 'full kitchen' never false-positive",
+  unconfirmedBedTypeMentions("A single bedroom unit with a full kitchen and full bathroom.", CONFIRMED).length === 0);
+check("'queen sleeper sofa' reads as the confirmed sofa bed, not a Queen bed",
+  unconfirmedBedTypeMentions("A queen sleeper sofa rounds out the living room.", CONFIRMED).length === 0);
+check("a pull-out couch is flagged when no sofa bed is confirmed", (() => {
+  const hits = unconfirmedBedTypeMentions("A pull-out couch in the den.", "Bedroom 1: King. Bathrooms: Hall Bath.");
+  return hits.length === 1 && hits[0] === "Sofa bed";
+})());
+check("'king-size bed' is flagged when the config has no King",
+  unconfirmedBedTypeMentions("Sleep on a king-size bed.", "Bedroom 1: Queen. Bathrooms: Hall Bath.")
+    .includes("King bed"));
+check("empty confirmed config never flags (no basis to audit)",
+  unconfirmedBedTypeMentions("A King bed and a Queen bed.", "").length === 0
+  && unconfirmedBedTypeMentions("", CONFIRMED).length === 0);
+
+// Review fixes (2026-07-17 adversarial pass):
+check("'Double vanity' bathroom feature cannot mask an invented double/full bed",
+  unconfirmedBedTypeMentions(
+    "A full-size bed in the second bedroom.",
+    "Master Bedroom: King (ensuite). Bathrooms: Hall Bath (Double vanity).",
+  ).includes("Double/Full bed"));
+check("'Full Bath' label cannot mask an invented full bed",
+  unconfirmedBedTypeMentions("A full bed in the den.", "Bedroom 1: King. Bathrooms: Full Bath.")
+    .includes("Double/Full bed"));
+check("plural confirmed labels ('2 Queens', '2 Kings') never false-flag correct prose",
+  unconfirmedBedTypeMentions(
+    "The master offers two King beds and the second bedroom has two Queen beds.",
+    "Master Bedroom: 2 Kings; Bedroom 2: 2 Queens. Bathrooms: Hall Bath.",
+  ).length === 0);
+check("'Living room 2 sofa beds' confirms sleeper-sofa prose",
+  unconfirmedBedTypeMentions(
+    "Two sleeper sofas round out the living room.",
+    "Bedroom 1: King. Living room 2 sofa beds. Bathrooms: Hall Bath.",
+  ).length === 0);
+check("confirmedBeddingBedPortion cuts at the Bathrooms section",
+  confirmedBeddingBedPortion("Bedroom 1: King. Bathrooms: Full Bath (Double vanity).") === "Bedroom 1: King."
+  && confirmedBeddingBedPortion(null) === "");
+check("array form audits each unit's bed portion — unit 2 beds survive unit 1's bathroom cut", (() => {
+  const hits = unconfirmedBedTypeMentions(
+    "A King bed, a Queen bed, and a double bed.",
+    ["Bedroom 1: King. Bathrooms: Full Bath (Double vanity).", "Bedroom 1: Queen. Bathrooms: Hall Bath."],
+  );
+  return hits.length === 1 && hits[0] === "Double/Full bed";
+})());
+
+const COMPLETE_DRAFT = {
+  title: "T", bookingTitle: "BT", summary: "S", space: "SP", neighborhood: "N",
+  transit: "TR", access: "A", houseRules: "H",
+  unitA: { bedding: "King", shortDescription: "short", longDescription: "long" },
+  unitB: { bedding: "Queen", shortDescription: "short", longDescription: "long" },
+};
+check("completeness: identical drafts have no regressions",
+  generatedDraftCompletenessRegressions(COMPLETE_DRAFT, COMPLETE_DRAFT).length === 0);
+check("completeness: a retry missing unitA regresses",
+  generatedDraftCompletenessRegressions(COMPLETE_DRAFT, { ...COMPLETE_DRAFT, unitA: undefined }).includes("unitA"));
+check("completeness: a retry that gutted a longDescription regresses",
+  generatedDraftCompletenessRegressions(
+    COMPLETE_DRAFT,
+    { ...COMPLETE_DRAFT, unitA: { ...COMPLETE_DRAFT.unitA, longDescription: "  " } },
+  ).includes("unitA.longDescription"));
+check("completeness: a retry that dropped summary regresses",
+  generatedDraftCompletenessRegressions(COMPLETE_DRAFT, { ...COMPLETE_DRAFT, summary: "" }).includes("summary"));
+check("completeness: a single-listing first draft (no unitB) never demands unitB of the retry",
+  generatedDraftCompletenessRegressions(
+    { ...COMPLETE_DRAFT, unitB: null },
+    { ...COMPLETE_DRAFT, unitB: null },
+  ).length === 0);
+check("completeness: fields the FIRST draft lacked are not regressions",
+  generatedDraftCompletenessRegressions({ ...COMPLETE_DRAFT, neighborhood: "" }, { ...COMPLETE_DRAFT, neighborhood: "" }).length === 0);
+
+// ── source lock: generator grounding wiring (2026-07-17) ────────────────────
+{
+  const routes = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+  check("both prompt variants carry the authoritative confirmed-bedding rule",
+    (routes.match(/\$\{CONFIRMED_BEDDING_RULE\}/g) ?? []).length === 2
+    && routes.includes("authoritative, operator-verified fact"));
+  check("both prompt variants carry the photo-evidence rule",
+    (routes.match(/\$\{PHOTO_FACTS_RULE\}/g) ?? []).length === 2
+    && routes.includes("do not advertise a view or amenity that none of the supplied facts support"));
+  check("confirmed-bedding CONTEXT lines exist in single (1) + combo (2) variants",
+    (routes.match(/CONFIRMED bedding & bathrooms \(operator's Bedding tab — authoritative\)/g) ?? []).length === 3);
+  check("generate-listing grounds photo captions via the shared group builder (captions digested per unit + community)",
+    /generate-listing", async[\s\S]{0,25000}buildPhotoCommunityCheckRequestForProperty\(groundingPropertyId\)[\s\S]{0,800}photoCaptionDigest/.test(routes));
+  check("generate-listing grounds saved amenities from the property store",
+    /generate-listing", async[\s\S]{0,26000}getPropertyAmenities\(groundingPropertyId\)[\s\S]{0,400}getAmenityLabel/.test(routes));
+  check("confirmed bedding deterministically overwrites the structured bedding field",
+    /unitA: withConfirmedBedding\(normalizeGeneratedUnitDraft\(parsed\.unitA, unit1\), unit1ConfirmedBedding\)/.test(routes)
+    && /withConfirmedBedding\(normalizeGeneratedUnitDraft\(parsed\.unitB, unit2\), unit2ConfirmedBedding\)/.test(routes));
+  check("a bed-type contradiction triggers ONE corrective retry, never a fallback",
+    /auditBeddingAccuracy\(parsed\)[\s\S]{0,900}IMPORTANT CORRECTION[\s\S]{0,1600}retriedNotes\.length <= accuracyNotes\.length/.test(routes));
+  check("persistent mismatches surface as accuracyNotes — never as the warning field every consumer refuses",
+    /\.\.\.\(accuracyNotes\.length > 0 \? \{ accuracyNotes \} : \{\}\)/.test(routes)
+    && !/warning:\s*accuracyNotes/.test(routes));
+  check("an audit-clean but structurally incomplete retry is discarded (never replaces the first draft)",
+    /generatedDraftCompletenessRegressions\(parsed, retried\)[\s\S]{0,400}regressions\.length > 0[\s\S]{0,400}retriedNotes\.length <= accuracyNotes\.length/.test(routes));
+  check("the audit skips the model's bedding field (deterministically overwritten) and passes array-form confirmed strings",
+    /const prose = \[unitDraft\.shortDescription, unitDraft\.longDescription\]/.test(routes)
+    && !/\[unitDraft\.bedding, unitDraft\.shortDescription/.test(routes)
+    && /unconfirmedBedTypeMentions\(sharedProse, \[unit1ConfirmedBedding, unit2ConfirmedBedding\]\)/.test(routes));
+
+  const builderIndex = readFileSync(new URL("../client/src/components/GuestyListingBuilder/index.tsx", import.meta.url), "utf8");
+  check("regenerate sends propertyId + the confirmed Bedding-tab config",
+    /generate-listing[\s\S]{0,1400}propertyId,[\s\S]{0,900}confirmedBedding: unit1ConfirmedBedding/.test(builderIndex)
+    && builderIndex.includes("describeUnitBedding"));
+  check("regenerate matches bedding-config units by canonical unitId (index only as fallback)",
+    /cfgUnits\.find\(\(c\) => c\.unitId === unitId\)[\s\S]{0,60}\?\? cfgUnits\[index\]/.test(builderIndex));
+  check("regenerate surfaces persistent accuracyNotes to the operator",
+    /accuracyNotes[\s\S]{0,700}Review bedding mentions/.test(builderIndex));
+
+  const sweep = readFileSync(new URL("../server/unit-audit-sweep.ts", import.meta.url), "utf8");
+  check("audit-sweep regenerate passes propertyId for server-side photo/amenity grounding",
+    /generate-listing", \{[\s\S]{0,600}propertyId: target\.propertyId/.test(sweep));
+}
 
 // ── override field list ──────────────────────────────────────────────────────
 check("override fields cover the editable set + title, and exclude compliance-owned notes",

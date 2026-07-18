@@ -435,7 +435,12 @@ type AutoReplaceTarget = {
 async function resolveAutoReplaceTarget(propertyId: number, unitId: string): Promise<AutoReplaceTarget | null> {
   if (Number.isFinite(propertyId) && propertyId > 0) {
     const builder = getUnitBuilderByPropertyId(propertyId);
-    if (!builder?.communityPhotoFolder) return null;
+    // Retired portfolio entries must never be replacement targets: this
+    // blocks new jobs from every origin AND makes the retry watchdog cancel
+    // any pending ghost retry ("the unit could no longer be resolved
+    // safely") instead of committing a swap for a listing the operator no
+    // longer runs (2026-07-18: retired property 7 got a real committed swap).
+    if (!builder?.communityPhotoFolder || builder.retired === true) return null;
     const index = builder.units.findIndex((u) => u.id === unitId);
     if (index < 0) return null;
     const unit = builder.units[index];

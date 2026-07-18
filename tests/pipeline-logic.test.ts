@@ -2583,7 +2583,9 @@ assert.match(
 );
 assert.match(
   routeSource,
-  /unitA: normalizeGeneratedUnitDraft\(parsed\.unitA, unit1\)/,
+  // 2026-07-17: wrapped in withConfirmedBedding (Bedding-tab grounding) —
+  // the normalize call inside still coerces bedrooms to the selected unit.
+  /unitA: withConfirmedBedding\(normalizeGeneratedUnitDraft\(parsed\.unitA, unit1\)/,
   "generate-listing must coerce AI Unit A bedrooms back to selected unit bedrooms",
 );
 assert.match(
