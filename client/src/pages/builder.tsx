@@ -492,10 +492,10 @@ export default function Builder() {
         currency: "USD",
       },
       bookingSettings: {
-        // Standing operator policy (2026-07-09): 5-night minimum on every listing.
-        // Matches GuestyListingBuilder's DEFAULT_BOOKING_RULES so a full-build push
-        // never publishes a listing below the 5-night floor.
-        minNights: 5,
+        // Standing operator policy (2026-07-18, was 5): 4-night minimum on every
+        // listing. Matches GuestyListingBuilder's DEFAULT_BOOKING_RULES so a
+        // full-build push never publishes a listing below the 4-night floor.
+        minNights: 4,
         maxNights: 60,
         // Must match the default in GuestyListingBuilder's bookingRules
         // state so the Pricing-tab form and the full-build push can't diverge.

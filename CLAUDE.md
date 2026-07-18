@@ -79,6 +79,30 @@ Before making any changes:
   post-deploy: click the button and expect the coverage receipt + an amber "Possible repeat shots"
   panel. See AGENTS.md "Photos-tab duplicate scan" points 3-5 + the 2026-07-18 Decision Log line.
 
+- 2026-07-18 (Cliffs at Princeville "Unit A is actually a 2BR" — find-new representative-fallback
+  identity swap, diagnosed from prod DB + Railway logs at the exact 03:01Z window): NOT a display
+  bug and NOT the replace rung (don't re-chase): the weekly audit cron's photo-fix ladder ran the
+  find-new-source rung for unit A (exact-3BR discovery); fetch-unit-photos correctly skipped every
+  2BR candidate, then returned its REPRESENTATIVE FALLBACK anyway (the 2BR #3304 fractional
+  listing, proof "review"), and the job's acceptance check (`status !== "rejected"`) let it
+  REPLACE the unit's real gallery + source URL with no unit_swaps record — persist-photos then
+  re-stamped a clean "accepted" proof erasing the bedroom-mismatch evidence. SHIPPED
+  (`claude/unit-bedroom-count-fix-c2f399`): find-new mode sends `rejectRepresentativeFallback`
+  (fetch-unit-photos suppresses BOTH representative returns — best wrong-BR candidate + configured
+  reuse) + belt-and-braces pure `findNewDiscoveryResultRejection`
+  (shared/preflight-photo-discovery.ts) so representative / bedroom-contradicted results never
+  replace a real gallery (null/unparseable bedrooms still acceptable); creation-time flows
+  (add-community wizard, empty-unit Find Photos) keep the representative fallback. ALSO: the draft
+  repoint (PATCH /api/unit-swaps/commit) now reconciles combinedBedrooms = sum of unit bedrooms —
+  the 07-12 unit B 3BR→4BR replace had left combined at 6 while the description said "seven
+  bedrooms" under a "6BR" title. LIVE FIX (operator's direction — accept reality): draft 20
+  unit1Bedrooms 3→2 (2+4=6 = the Guesty layout), bedding/short-description updated, descriptions
+  regenerated + pushed to Guesty via the generate-listing→overrides→push chain (verified; copy now
+  reads "Unit A (2BR)" / "Unit B (4BR)", sleeps 16). Locked by tests/find-new-bedroom-guard.test.ts
+  (13/0). See AGENTS.md Unit Audit Sweep #24 + the 2026-07-18 Decision Log line. Verified: full
+  `npm test` REAL exit 0, build clean, `npm run check` 335 = baseline (stash A/B identical
+  per-file sets).
+
 - 2026-07-18 (address-on-OTA detection REMOVED — photo detection is the only theft signal now):
   Operator: with the clubhouse published address on every listing (2026-07-17), "we no longer need
   to see if someone is listing our units address … remove the address check/found alerts and icons

@@ -101,6 +101,7 @@ import { upgradeListingPhotoUrlResolution } from "@shared/listing-photo-resoluti
 import { selectInboxAlternativePage, summarizeAlternativePagePayload } from "@shared/alternative-page-inbox";
 import { proxiedGuestPhotoUrl, registerGuestPhotoRoute } from "./guest-photo-upscale";
 import { parseListingAddressFromUrl, parseListingAddressFromText, streetRootFromListingAddress } from "@shared/listing-url-address";
+import { learnSiblingStreetRootsFromRejects, type RejectedDiscoveryResult } from "@shared/discovery-root-rescue";
 import {
   MAX_FULL_GALLERY_OPTIONS,
   buildEquivalentPortalQueries,
@@ -25948,11 +25949,18 @@ Requirements:
     };
   };
 
-  // Standing operator policy (2026-07-09): every listing's nightly minimum is 5.
-  // This is the single source of truth used by the booking-rules default, the
-  // per-push enforcement piggybacked onto every seasonal-rate push, and the
-  // bulk push-min-nights-all endpoint below.
-  const DEFAULT_MIN_NIGHTS = 5;
+  // Standing operator policy (2026-07-18, was 5 from 2026-07-09): every listing's
+  // nightly minimum is 4. This is the single source of truth used by the
+  // booking-rules default, the per-push enforcement piggybacked onto every
+  // seasonal-rate push, and the bulk push-min-nights-all endpoint below.
+  const DEFAULT_MIN_NIGHTS = 4;
+
+  // The PREVIOUS standing policy value. Load-bearing for the 5 -> 4 rollout: the
+  // bulk endpoint must LOWER listings sitting at the old policy default, but must
+  // NOT touch a minimum the operator deliberately set ABOVE it (e.g. Menehune
+  // Shores' 7-night loss-prevention rule, Decision Log 2026-06-27). Anything
+  // strictly greater than this is treated as a deliberate override and preserved.
+  const LEGACY_POLICY_MIN_NIGHTS = 5;
 
   const clampInt = (value: unknown, fallback: number, min: number, max: number): number => {
     const parsed = Number(value);
@@ -26188,10 +26196,17 @@ Requirements:
   //  • Reads Guesty's LIVE terms and ONLY acts on a confident read. A failed/empty
   //    read short-circuits to a no-op — enforcement must never write from stale or
   //    absent state, which could clobber real terms.
-  //  • It is a FLOOR, not an exact set: a listing already at >= 5 nights is left
-  //    untouched, so an operator-set higher minimum (e.g. Menehune Shores' 7-night
-  //    loss-prevention rule) is never lowered. Only listings below 5 (or with no
-  //    minimum) are raised to 5.
+  //  • "floor" mode (the per-push default) is a FLOOR, not an exact set: a listing
+  //    already at >= DEFAULT_MIN_NIGHTS is left untouched, so an operator-set higher
+  //    minimum (e.g. Menehune Shores' 7-night loss-prevention rule) is never
+  //    lowered. Only listings below the floor (or with no minimum) are raised.
+  //  • "policy" mode (the bulk rollout endpoint only) additionally LOWERS a listing
+  //    sitting at or below the previous standing policy (LEGACY_POLICY_MIN_NIGHTS)
+  //    down to DEFAULT_MIN_NIGHTS — that is what makes a policy DECREASE (5 -> 4)
+  //    actually reach Guesty, since a pure floor would skip every listing at 5.
+  //    A minimum strictly ABOVE the old policy is a deliberate operator override
+  //    and is preserved even here. Deliberately NOT the per-push default: a future
+  //    operator-set 5 must not be silently walked down by a routine rate push.
   //  • The write updates ONLY terms.minNights (carrying the other KNOWN booking-rule
   //    terms — maxNights, cancellationPolicy, instantBooking — straight back so a
   //    field-replace PUT can't drop them). availability-settings (advance notice /
@@ -26203,8 +26218,9 @@ Requirements:
 
   const enforceListingMinNights = async (
     listingId: string,
+    mode: "floor" | "policy" = "floor",
   ): Promise<
-    | { changed: false; reason: "unreadable-terms" | "already-at-floor"; minNights: number | null }
+    | { changed: false; reason: "unreadable-terms" | "already-at-floor" | "operator-override"; minNights: number | null }
     | { changed: true; minNights: number; previous: number | null; verified: boolean }
   > => {
     const liveTerms = await readGuestyTerms(listingId).catch(() => null);
@@ -26212,8 +26228,18 @@ Requirements:
       return { changed: false, reason: "unreadable-terms", minNights: null };
     }
     const liveMin = listingTermsMinNights(liveTerms);
-    if (liveMin != null && liveMin >= DEFAULT_MIN_NIGHTS) {
-      return { changed: false, reason: "already-at-floor", minNights: liveMin };
+    if (liveMin != null) {
+      if (mode === "policy") {
+        if (liveMin > LEGACY_POLICY_MIN_NIGHTS) {
+          return { changed: false, reason: "operator-override", minNights: liveMin };
+        }
+        if (liveMin === DEFAULT_MIN_NIGHTS) {
+          return { changed: false, reason: "already-at-floor", minNights: liveMin };
+        }
+        // liveMin is below the floor, or at/below the retired policy value — rewrite it.
+      } else if (liveMin >= DEFAULT_MIN_NIGHTS) {
+        return { changed: false, reason: "already-at-floor", minNights: liveMin };
+      }
     }
 
     const nextTerms: Record<string, any> = { minNights: DEFAULT_MIN_NIGHTS };
@@ -26235,11 +26261,14 @@ Requirements:
   };
 
   // POST /api/builder/booking-rules/push-min-nights-all
-  // One-shot bulk apply of the standing 5-night FLOOR to EVERY mapped Guesty
+  // One-shot bulk apply of the standing nightly minimum to EVERY mapped Guesty
   // listing (core listings + promoted drafts) via enforceListingMinNights — so the
   // operator can roll it out immediately instead of waiting for each listing's next
-  // rate push. Idempotent: listings already at >= 5 are skipped; only listings
-  // below 5 are raised, and only terms.minNights is touched.
+  // rate push. Runs in "policy" mode, so it both RAISES listings below the minimum
+  // and LOWERS listings left at the retired policy value (that is what carries a
+  // 5 -> 4 decrease through). Idempotent: listings already at exactly
+  // DEFAULT_MIN_NIGHTS are skipped, an operator-set minimum above the retired
+  // policy is preserved, and only terms.minNights is touched.
   app.post("/api/builder/booking-rules/push-min-nights-all", async (_req: Request, res: Response) => {
     const mappings = await storage.getGuestyPropertyMap();
     const results: Array<{
@@ -26255,20 +26284,28 @@ Requirements:
     for (const mapping of mappings) {
       const listingId = mapping.guestyListingId;
       try {
-        const outcome = await enforceListingMinNights(listingId);
+        const outcome = await enforceListingMinNights(listingId, "policy");
         if (!outcome.changed) {
+          const summary = outcome.reason === "already-at-floor"
+            ? `Already at the ${DEFAULT_MIN_NIGHTS}-night minimum`
+            : outcome.reason === "operator-override"
+              ? `Left at its operator-set ${outcome.minNights}-night minimum (above the retired ${LEGACY_POLICY_MIN_NIGHTS}-night policy)`
+              : "Could not read current Guesty terms — left unchanged";
           results.push({
             propertyId: mapping.propertyId,
             listingId,
-            status: outcome.reason === "already-at-floor" ? "skipped" : "error",
+            status: outcome.reason === "unreadable-terms" ? "error" : "skipped",
             changed: false,
             minNights: outcome.minNights,
             previous: null,
-            summary: outcome.reason === "already-at-floor"
-              ? `Already at or above the ${DEFAULT_MIN_NIGHTS}-night floor (min ${outcome.minNights})`
-              : "Could not read current Guesty terms — left unchanged",
+            summary,
           });
         } else {
+          const direction = outcome.previous == null
+            ? "Set"
+            : outcome.previous > DEFAULT_MIN_NIGHTS
+              ? "Lowered"
+              : "Raised";
           results.push({
             propertyId: mapping.propertyId,
             listingId,
@@ -26277,7 +26314,7 @@ Requirements:
             minNights: outcome.minNights,
             previous: outcome.previous,
             summary: outcome.verified
-              ? `Raised minimum to ${DEFAULT_MIN_NIGHTS} nights (was ${outcome.previous ?? "unset"})`
+              ? `${direction} minimum to ${DEFAULT_MIN_NIGHTS} nights (was ${outcome.previous ?? "unset"})`
               : `Pushed ${DEFAULT_MIN_NIGHTS}-night minimum but Guesty read-back did not confirm it`,
           });
         }
@@ -26528,14 +26565,17 @@ Requirements:
       });
     }
 
-    // Standing operator policy (2026-07-09): every time rates are pushed to
-    // Guesty, ensure the listing's nightly minimum is at least 5. This is the
-    // single chokepoint every rate push funnels through — the market-rate queue,
-    // the weekly scheduler, the Pricing-tab button, and draft pricing all POST
-    // here — so enforcing it here makes every listing default to a 5-night floor
-    // on its next push. Strictly non-fatal (a terms hiccup must never undo a
-    // successful calendar push) and a floor (never lowers a higher operator-set
-    // minimum; no-ops on an unreadable read — see enforceListingMinNights).
+    // Standing operator policy (2026-07-18, was 5 from 2026-07-09): every time
+    // rates are pushed to Guesty, ensure the listing's nightly minimum is at least
+    // DEFAULT_MIN_NIGHTS. This is the single chokepoint every rate push funnels
+    // through — the market-rate queue, the weekly scheduler, the Pricing-tab
+    // button, and draft pricing all POST here — so enforcing it here makes every
+    // listing default to a 4-night floor on its next push. Strictly non-fatal (a
+    // terms hiccup must never undo a successful calendar push) and deliberately
+    // "floor" mode: it never lowers a higher operator-set minimum and no-ops on an
+    // unreadable read. The 5 -> 4 rollout is carried by the bulk
+    // push-min-nights-all endpoint's "policy" mode, not by this path — see
+    // enforceListingMinNights.
     try {
       const minNightsOutcome = await enforceListingMinNights(listingId);
       if (minNightsOutcome.changed) {
@@ -35917,7 +35957,14 @@ Return ONLY compact JSON with this exact shape:
       if (!link) return;
       const lower = unitSwapListingKey(link);
       if (!lower || candidateUrlSet.has(lower) || skipUrlSet.has(lower)) return;
-      if (allowedRoots && allowedRoots.size > 0 && !candidateRootMatches(link, allowedRoots, contextText)) return;
+      if (allowedRoots && allowedRoots.size > 0 && !candidateRootMatches(link, allowedRoots, contextText)) {
+        // Remember the rejection for the sibling-root rescue (fires only on a
+        // total gate strikeout — see the rescue block after the discovery loop).
+        if (rejectedRootGateResults.length < ROOT_RESCUE_REJECT_CAP) {
+          rejectedRootGateResults.push({ link, source, contextText, thumbnail });
+        }
+        return;
+      }
       const detected = detectSource(link);
       if (detected !== source) return;
       let unitNumber = extractUnitNumber(link, source, contextText);
@@ -35946,6 +35993,7 @@ Return ONLY compact JSON with this exact shape:
         return;
       }
       candidateUrlSet.add(lower);
+      if (allowedRoots && allowedRoots.size > 0) rootGateAdmissions += 1;
       candidates.push({
         sourceUrl: link,
         source,
@@ -36211,6 +36259,15 @@ Return ONLY compact JSON with this exact shape:
     const suppliedStreetRoot = streetRootFromListingAddress(canonicalStreet || communityAddress);
     let discoveryOrganicHits = 0;
     let discoveryFilteredHits = 0;
+    // Sibling-root rescue bookkeeping (shared/discovery-root-rescue.ts): remember
+    // what the resort-street gate rejected so that, on a TOTAL strikeout (zero
+    // admissions — the wrong-configured-street-number signature, e.g. Wavecrest's
+    // directory "8001 Kamehameha V Hwy" vs the real 7142/7146 building addresses),
+    // name-anchored recurring sibling roots can be learned and the rejects replayed.
+    const ROOT_RESCUE_REJECT_CAP = 500;
+    const rejectedRootGateResults: RejectedDiscoveryResult[] = [];
+    let rootGateAdmissions = 0;
+    let rescuedSiblingRoots: string[] = [];
 
     const runDiscoveryQuery = async (siteQuery: string) => {
       console.error(`[find-unit] Searching: ${siteQuery}`);
@@ -36440,6 +36497,46 @@ Return ONLY compact JSON with this exact shape:
             console.error(`[find-unit] Search error for "${siteQuery}": ${e?.message}`);
           }
         }));
+      }
+
+      // SIBLING-ROOT RESCUE (shared/discovery-root-rescue.ts): when the resort-
+      // street gate admitted ZERO candidates but rejected real listing links, the
+      // configured street number is likely wrong (a directory/maps address no
+      // portal indexes under — the Wavecrest "8001 vs 7142 Kamehameha V Hwy"
+      // class). Learn the resort's real building roots from rejected results
+      // whose title/snippet NAMES the community and whose URL address shares the
+      // configured street name+type (number-only difference, >=2 distinct
+      // listings, lot-significant streets excluded), then replay the rejects
+      // through the widened gate. Runs BEFORE the second-wave street-root
+      // expansion so learned roots also drive those queries.
+      if (
+        rootGateAdmissions === 0
+        && rejectedRootGateResults.length > 0
+        && directAllowedRoots
+        && directAllowedRoots.size > 0
+      ) {
+        const rescue = learnSiblingStreetRootsFromRejects({
+          communityNames: [communityName, ...discoveryCommunityNames],
+          allowedRoots: directAllowedRoots,
+          rejects: rejectedRootGateResults,
+        });
+        if (rescue.roots.length > 0) {
+          rescuedSiblingRoots = rescue.roots;
+          for (const root of rescue.roots) {
+            directAllowedRoots.add(root);
+            communityAddressRoots.add(root);
+          }
+          console.error(
+            `[find-unit] sibling-root rescue: configured street root(s) rejected every discovery hit; ` +
+            `learned ${rescue.roots.join(", ")} from ${rescue.anchoredRejects} community-named listing link(s) — replaying rejected results`,
+          );
+          const replay = rejectedRootGateResults.splice(0, rejectedRootGateResults.length);
+          const beforeReplay = candidates.length;
+          for (const r of replay) {
+            addCandidateUrl(r.link, r.source as CandidateSource, r.contextText, r.thumbnail ?? "", directAllowedRoots);
+          }
+          console.error(`[find-unit] sibling-root rescue admitted ${candidates.length - beforeReplay} candidate(s) (${candidates.length} total)`);
+        }
       }
 
       // Second-wave Google queries scoped to known/discovered resort street
@@ -37396,7 +37493,10 @@ Return ONLY compact JSON with this exact shape:
     let diagnostic: string;
     if (totalCandidates === 0) {
       if (discoveryOrganicHits > 0 && discoveryFilteredHits > 0) {
-        diagnostic = `Google returned ${discoveryOrganicHits} listing link(s) for "${communityAddress}" / "${communityName}", but all ${discoveryFilteredHits} were filtered out because they did not match the resort street (${Array.from(directAllowedRoots ?? []).join(", ") || communityAddress}). Try Expand Search or verify the community street on the draft.`;
+        const rescueNote = rescuedSiblingRoots.length > 0
+          ? ` (auto-learned sibling street root(s) ${rescuedSiblingRoots.join(", ")} from community-named listings, but no candidate survived the later checks)`
+          : ` No community-named listings on a sibling street number were found either, so the street itself may be wrong.`;
+        diagnostic = `Google returned ${discoveryOrganicHits} listing link(s) for "${communityAddress}" / "${communityName}", but all ${discoveryFilteredHits} were filtered out because they did not match the resort street (${Array.from(directAllowedRoots ?? []).join(", ") || communityAddress}).${rescueNote} Try Expand Search or verify the community street on the draft.`;
       } else {
         diagnostic = `Google's site:zillow.com / site:realtor.com / site:redfin.com${cleanChannel && cleanChannel !== "vrbo" ? " / site:vrbo.com" : ""} searches all returned 0 results for "${communityAddress}" / "${communityName}". The community may not be indexed under those search terms, or Google rate-limited SearchAPI. Try again in a few minutes.`;
       }
@@ -38382,6 +38482,26 @@ Return ONLY compact JSON with this exact shape:
           if (swap.newAddress) update[`unit${n}Address`] = swap.newAddress;
           if (typeof swap.newBedrooms === "number" && swap.newBedrooms > 0) {
             update[`unit${n}Bedrooms`] = swap.newBedrooms;
+          }
+        }
+        // Reconcile the combo total whenever a repoint changed a unit's bedroom
+        // count. Root-caused 2026-07-18 (Cliffs at Princeville draft 20): a
+        // 3BR→4BR unit replacement updated unit2Bedrooms but left
+        // combinedBedrooms at the stale 6, so the audit's layout stage kept
+        // green-lighting the Guesty 6BR layout while the regenerated
+        // description honestly advertised "seven bedrooms" — a silent
+        // title/description/layout contradiction on the live listing. Keeping
+        // combinedBedrooms = sum of unit bedrooms makes the drift VISIBLE:
+        // the layout stage then flags the Guesty listing (and the title) as
+        // out of sync instead of validating against the stale total.
+        if (Object.keys(update).some((k) => /^unit[12]Bedrooms$/.test(k))) {
+          const u1 = typeof update.unit1Bedrooms === "number" ? update.unit1Bedrooms : draft.unit1Bedrooms ?? 0;
+          const u2 = draft.singleListing
+            ? 0
+            : typeof update.unit2Bedrooms === "number" ? update.unit2Bedrooms : draft.unit2Bedrooms ?? 0;
+          const combined = u1 + u2;
+          if (combined > 0 && combined !== (draft.combinedBedrooms ?? 0)) {
+            update.combinedBedrooms = combined;
           }
         }
         if (Object.keys(update).length > 0) {
@@ -42129,7 +42249,7 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar, nocache } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar, nocache, rejectRepresentativeFallback } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
@@ -42159,7 +42279,16 @@ Return ONLY compact JSON with this exact shape:
       // and the bulk-combo queue never sets this, so its 2026-07-09
       // budget/keep-better protections are untouched.
       nocache?: boolean;
+      // Callers that REPLACE an existing real gallery (the audit sweep's
+      // find-new-source rung) set this so the representative wrong-bedroom
+      // fallbacks below are suppressed entirely — "no exact-BR listing found"
+      // must fail honestly there instead of substituting a smaller unit's
+      // gallery (the 2026-07-18 Cliffs-at-Princeville 3BR→2BR identity swap).
+      // Creation-time callers (add-community wizard, empty-unit Find Photos)
+      // omit it and keep the representative fallback.
+      rejectRepresentativeFallback?: boolean;
     };
+    const suppressRepresentativeFallback = rejectRepresentativeFallback === true;
     const bypassDiscoveryCaches = nocache === true;
     // Direct-url rescrape scrape options: sidecar ON only when the background
     // re-pull explicitly opts in, otherwise the long-standing no-sidecar path.
@@ -43118,7 +43247,14 @@ Return ONLY compact JSON with this exact shape:
         facts: ListingFacts;
         scrapedBedrooms: number;
       } | null;
-      if (representativeFallback) {
+      if (representativeFallback && suppressRepresentativeFallback) {
+        console.log(
+          `[fetch-unit-photos] representative fallback SUPPRESSED (rejectRepresentativeFallback) ` +
+          `community="${communityName ?? ""}" requestedBR=${requestedBedrooms} ` +
+          `scrapedBR=${representativeFallback.scrapedBedrooms} url=${representativeFallback.candidate.url}`,
+        );
+      }
+      if (representativeFallback && !suppressRepresentativeFallback) {
         const { candidate, photos, facts, scrapedBedrooms } = representativeFallback;
         const isConfiguredPhotoSource = configuredPhotoSourceKey !== null && listingKey(candidate.url) === configuredPhotoSourceKey;
         console.log(
@@ -43162,7 +43298,10 @@ Return ONLY compact JSON with this exact shape:
         configuredPhotoSourceKey &&
         skipSet.has(configuredPhotoSourceKey) &&
         requestedBedrooms &&
-        requestedBedrooms >= 3
+        requestedBedrooms >= 3 &&
+        // Same rule as the representative fallback above: a gallery-replacing
+        // caller must never receive a representative (wrong/unknown-BR) reuse.
+        !suppressRepresentativeFallback
       ) {
         const facts: ListingFacts = {};
         try {

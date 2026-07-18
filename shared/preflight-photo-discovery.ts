@@ -5,6 +5,39 @@ export type PreflightPhotoDiscoveryAttempt = {
   maxCandidates: number;
 };
 
+/**
+ * Acceptance gate for one discovery result inside the preflight photo-fetch
+ * job. Root-caused 2026-07-18 (Cliffs at Princeville draft 20): the audit
+ * sweep's find-new-source rung requested an exact-3BR listing, discovery found
+ * none, and fetch-unit-photos returned its REPRESENTATIVE fallback — a 2BR
+ * gallery from the same resort flagged `representativeFallback: true` with
+ * proof status "review". The job's old acceptance check (`status !==
+ * "rejected"`) let that wrong-bedroom gallery REPLACE the unit's real gallery
+ * and re-stamp its source URL, silently turning a 3BR unit into a 2BR one with
+ * no unit_swaps record. Find-new mode replaces a REAL gallery, so a
+ * representative (wrong-BR) result must never win there — that was always the
+ * stated invariant; this predicate enforces it. Empty-unit "Find Photos" and
+ * the add-community wizard keep accepting representative galleries (photos
+ * beat an empty listing at creation time).
+ */
+export function findNewDiscoveryResultRejection(input: {
+  /** True when the job replaces an existing gallery with a DIFFERENT listing. */
+  findNewSource: boolean;
+  /** The endpoint's `representativeFallback` response flag (or the proof's). */
+  representativeFallback: boolean;
+  /** Proof bedroomMatch: false = scraped bedrooms contradict the request; null/undefined = unverifiable (allowed). */
+  bedroomMatch: boolean | null | undefined;
+}): string | null {
+  if (!input.findNewSource) return null;
+  if (input.representativeFallback) {
+    return "representative wrong-bedroom gallery — must never replace a real gallery";
+  }
+  if (input.bedroomMatch === false) {
+    return "scraped bedroom count contradicts the requested bedrooms";
+  }
+  return null;
+}
+
 export function preflightPhotoDiscoveryAttempts(
   bedrooms: number,
   replacingExistingPhotos: boolean,

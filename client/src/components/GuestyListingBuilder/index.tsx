@@ -292,8 +292,8 @@ type Props = {
 };
 
 const DEFAULT_BOOKING_RULES = {
-  // Standing operator policy (2026-07-09): default nightly minimum is 5.
-  minNights: 5,
+  // Standing operator policy (2026-07-18, was 5): default nightly minimum is 4.
+  minNights: 4,
   maxNights: 365,
   advanceNotice: 7,
   preparationTime: 1,
