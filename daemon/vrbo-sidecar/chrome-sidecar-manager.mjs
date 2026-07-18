@@ -1219,7 +1219,9 @@ export class ChromeSidecarManager {
       `--window-position=${visible ? visiblePosition : this.hiddenWindowPosition}`,
       "--force-device-scale-factor=1",
       ...(visible ? [] : ["--start-minimized", "--no-startup-window"]),
-      "--disable-notifications",
+      // Keep the browser's native notification permission. Homes.com/Akamai
+      // treats Chrome's --disable-notifications fingerprint as automation and
+      // returns a terminal Access Denied page before the listing can render.
       "--disable-backgrounding-occluded-windows",
       "--no-first-run",
       "--no-default-browser-check",

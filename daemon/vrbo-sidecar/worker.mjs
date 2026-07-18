@@ -1712,7 +1712,8 @@ async function ensureChromeRunning() {
     `--window-position=${SIDE_CAR_CHROME_VISIBLE ? VISIBLE_WINDOW_POSITION : HIDDEN_WINDOW_POSITION}`,
     "--force-device-scale-factor=1",
     ...(SIDE_CAR_CHROME_VISIBLE ? [] : ["--start-minimized", "--no-startup-window"]),
-    "--disable-notifications",
+    // Preserve Chrome's native notification permission. Homes.com/Akamai
+    // hard-denies browsers launched with --disable-notifications.
     "--disable-backgrounding-occluded-windows",
     "--no-first-run",
     "--no-default-browser-check",
@@ -2411,7 +2412,8 @@ async function ensureHeadlessBrowser() {
     timezoneId: process.env.SIDECAR_TIMEZONE ?? "America/New_York",
     deviceScaleFactor: 1,
     args: [
-      "--disable-notifications",
+      // Preserve Chrome's native notification permission. Homes.com/Akamai
+      // hard-denies browsers launched with --disable-notifications.
       "--ignore-certificate-errors",
       "--no-first-run",
       "--no-default-browser-check",
@@ -8365,8 +8367,27 @@ const LISTING_BOT_WALL_TITLE_RE =
 const LISTING_BOT_WALL_BODY_RE =
   /press\s*&\s*hold|press\s+and\s+hold|pardon our interruption|px-captcha|perimeterx|(?:confirm|verify)(?: that)? you(?:'?re| are)(?: a)? human|not a robot|are you a robot|human verification|unusual traffic|checking your browser|enable javascript and cookies to continue|datadome|hcaptcha|recaptcha/i;
 
+function detectListingTerminalDenial(state) {
+  if (!state) return null;
+  const url = String(state.url ?? "");
+  const title = String(state.title ?? "").replace(/\s+/g, " ").trim();
+  const body = String(state.bodyExcerpt ?? "").replace(/\s+/g, " ").trim();
+  const html = String(state.bodyHtmlSnippet ?? "");
+  if (/^https?:\/\/errors\.edgesuite\.net\//i.test(url)) return "Akamai error redirect";
+  if (
+    /^access denied$/i.test(title) &&
+    (/you don'?t have permission to access/i.test(body) || /errors\.edgesuite\.net/i.test(`${body} ${html}`))
+  ) {
+    return "Akamai Access Denied";
+  }
+  return null;
+}
+
 function detectListingBotWall(state) {
   if (!state) return null;
+  // A terminal provider denial has no human check to complete. Treating it as
+  // interactive pins the operator in a four-minute yellow-window wait.
+  if (detectListingTerminalDenial(state)) return null;
   const title = String(state.title ?? "").replace(/\s+/g, " ").trim();
   const body = String(state.bodyExcerpt ?? "").replace(/\s+/g, " ").trim();
   const html = String(state.bodyHtmlSnippet ?? "");
@@ -8402,8 +8423,13 @@ async function setListingBotWallBanner(targetPage, label, id) {
 }
 
 async function resolveListingBotWallManually(id, label, targetUrl) {
-  if (process.env.SIDECAR_GALLERY_BOTWALL_ASSIST === "0") return { cleared: false, waited: false };
   let state = await captureVrboChallengeState(page);
+  let terminalReason = detectListingTerminalDenial(state);
+  if (terminalReason) {
+    log(`${label} ${id}: terminal provider denial on ${hostFromUrl(state?.url || targetUrl)} (${terminalReason}); no manual challenge is available`);
+    return { cleared: false, waited: false, terminal: true, reason: terminalReason };
+  }
+  if (process.env.SIDECAR_GALLERY_BOTWALL_ASSIST === "0") return { cleared: false, waited: false };
   let wallReason = detectListingBotWall(state);
   if (!wallReason) return { cleared: true, waited: false };
   if (usingHeadlessRuntime()) {
@@ -8429,6 +8455,11 @@ async function resolveListingBotWallManually(id, label, targetUrl) {
       });
       await boundedPageDelay(page, 2_500);
       state = await captureVrboChallengeState(page);
+      terminalReason = detectListingTerminalDenial(state);
+      if (terminalReason) {
+        log(`${label} ${id}: interactive challenge ended in a terminal provider denial (${terminalReason})`);
+        return { cleared: false, waited: true, terminal: true, reason: terminalReason };
+      }
       wallReason = state ? detectListingBotWall(state) : wallReason;
       if (state && !wallReason) {
         log(`${label} ${id}: bot detection cleared by the operator; continuing the scrape`);
@@ -8444,6 +8475,12 @@ async function resolveListingBotWallManually(id, label, targetUrl) {
   } finally {
     await setVrboChallengeHighlight(page, false, label, id).catch(() => {});
     await setCaptchaWindowVisibility(page, false, label, id).catch(() => {});
+  }
+}
+
+function throwIfListingTerminalDenial(wallAssist) {
+  if (wallAssist?.terminal) {
+    throw new Error(`Listing provider returned a terminal access denial (${wallAssist.reason ?? "unknown reason"})`);
   }
 }
 
@@ -8468,11 +8505,37 @@ async function processListingGalleryScrape(id, params) {
   // of silently harvesting the wall page (~0 photos) and moving on. After a
   // solve, re-navigate so the listing renders with the fresh anti-bot cookie
   // before the harvest below.
-  const wallAssist = await resolveListingBotWallManually(id, "listing_gallery_scrape", url);
+  let wallAssist = await resolveListingBotWallManually(id, "listing_gallery_scrape", url);
+  throwIfListingTerminalDenial(wallAssist);
+  let manualSolveCount = wallAssist.waited ? 1 : 0;
   if (wallAssist.waited && wallAssist.cleared) {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS }).catch(() => {});
-    await page.waitForTimeout(PAGE_SETTLE_MS);
-    await dismissObstructions(page, "listing_gallery_scrape");
+    while (wallAssist.waited && wallAssist.cleared) {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: PAGE_NAV_TIMEOUT_MS }).catch(() => {});
+      await page.waitForTimeout(PAGE_SETTLE_MS);
+      await dismissObstructions(page, "listing_gallery_scrape");
+
+      // A solved challenge can redirect the required follow-up navigation to
+      // Akamai's terminal error host. Re-classify every post-solve load before
+      // harvesting, and permit at most one additional manual solve.
+      const postSolveState = await captureVrboChallengeState(page);
+      const postSolveTerminalReason = detectListingTerminalDenial(postSolveState);
+      if (postSolveTerminalReason) {
+        throwIfListingTerminalDenial({
+          cleared: false,
+          terminal: true,
+          reason: postSolveTerminalReason,
+        });
+      }
+      const repeatedWallReason = detectListingBotWall(postSolveState);
+      if (!repeatedWallReason) break;
+      if (manualSolveCount >= 2) {
+        log(`listing_gallery_scrape ${id}: bot detection returned after ${manualSolveCount} manual solve attempts (${repeatedWallReason}); harvesting whatever rendered`);
+        break;
+      }
+      wallAssist = await resolveListingBotWallManually(id, "listing_gallery_scrape", url);
+      throwIfListingTerminalDenial(wallAssist);
+      if (wallAssist.waited) manualSolveCount += 1;
+    }
   }
 
   // Best-effort: open the full photo gallery so lazy-loaded images render.
