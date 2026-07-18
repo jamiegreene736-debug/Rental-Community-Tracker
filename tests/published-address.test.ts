@@ -12,6 +12,8 @@ import {
   addressLat,
   addressLng,
   buildGuestyPublishedAddress,
+  foldAddressObjectStrings,
+  hasNonAsciiAddressChars,
   clubhouseDiscoveryQueries,
   composePublishedFull,
   finiteCoord,
@@ -108,6 +110,22 @@ check(
   "empty-string full falls through to street in the satisfies compare",
   publishedAddressSatisfiesTarget({ full: "", street: "1831 Poipu Rd", city: "Koloa" }, { street: "1831 Poipu Rd", city: "Koloa" }),
 );
+
+console.log("published-address: okina 400-retry fold (live Na Hale O Keauhou class)");
+{
+  const body = {
+    address: { full: "78-6833 Ali‘i Dr, Kailua-Kona, HI 96740, USA", street: "78-6833 Ali‘i Drive", location: { lat: 19.57, lng: -155.96 } },
+    publishedAddress: { full: "78-6833 Alii Dr, Kailua-Kona, HI 96740", street: "78-6833 Alii Dr" },
+    isPublishedAddressEnabled: true,
+  };
+  check("non-ASCII detector fires on the okina body", hasNonAsciiAddressChars(body));
+  check("non-ASCII detector quiet on clean bodies", !hasNonAsciiAddressChars({ address: { full: "1831 Poipu Rd" } }));
+  const fold = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[ʻʼ‘’']/g, "");
+  const folded = foldAddressObjectStrings(body, fold) as typeof body;
+  check("fold drops the okina from every string field", folded.address.full.startsWith("78-6833 Alii Dr") && folded.address.street === "78-6833 Alii Drive");
+  check("fold leaves numbers + booleans untouched", folded.address.location.lat === 19.57 && folded.isPublishedAddressEnabled === true);
+  check("fold does not mutate the original", body.address.street === "78-6833 Ali‘i Drive");
+}
 check(
   "flat lat/lng (listing-document shape) is read too",
   genericPublishedPartsFromPrivateAddress({ full: "1831 Poipu Rd, Koloa, HI", lat: 1, lng: 2 })?.lat === 1,
@@ -362,6 +380,9 @@ console.log("published-address: source guards (wiring seams)");
   //    switch (stale success banner carried another listing's street).
   check("client resets the panel on listing switch", clientSrc.includes("pubAddrListingRef.current = selectedId"));
   check("client reloads the ledger in the catch path", /catch \(e: any\) \{[\s\S]{0,700}reloadServerPushHistory\(\);[\s\S]{0,400}aborted/.test(clientSrc));
+  // 10. Okina 400-retry: the engine retries a 400'd PUT once with folded
+  //     diacritics — never on the first attempt (echo-verbatim stays the rule).
+  check("engine folds + retries on 400 with non-ASCII", engineSrc.includes("hasNonAsciiAddressChars(putBody)") && engineSrc.includes("foldAddressObjectStrings(putBody, foldHawaiianDiacritics)"));
 }
 
 console.log(`\npublished-address: ${pass} passed, ${fail} failed`);
