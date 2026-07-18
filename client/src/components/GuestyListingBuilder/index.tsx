@@ -2609,11 +2609,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   }, []);
 
   // ── Cover collage ──────────────────────────────────────────────────────
-  // Primary path (one click): Claude vision picks the two best photos server-
-  // side, composes + pushes + saves — POST /api/builder/auto-cover-collage
-  // ("picking" phase). Manual fallback ("pick manually" in the banner): the
-  // legacy two-photo picker → client canvas → upload-collage, unchanged.
-  type CollagePhase = "idle" | "picking" | "upscaling" | "generating" | "uploading" | "done" | "error";
+  // BOTH paths POST /api/builder/auto-cover-collage, which composes the 2-up,
+  // pushes + pins it on Guesty, and saves the in-system copy:
+  //   - one click       → Claude vision picks the pair ("picking" phase)
+  //   - "pick manually" → the operator's pair rides along as `picks`, and the
+  //     server composes exactly that ("generating" phase; no vision spend)
+  type CollagePhase = "idle" | "picking" | "generating" | "done" | "error";
   const [collagePhase, setCollagePhase] = useState<CollagePhase>("idle");
   const [collageError, setCollageError] = useState<string | null>(null);
   const [collagePreviewUrl, setCollagePreviewUrl] = useState<string | null>(null);
@@ -2688,12 +2689,27 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return { community, patio };
   }
 
+  // Manual pair ("pick manually"): the operator already chose both photos, so
+  // this posts the SAME server endpoint the one-click AI path uses with an
+  // explicit `picks` override. The server composes, pushes + pins on Guesty,
+  // and saves the in-system copy.
+  //
+  // NOTE FOR CODEX (2026-07-18 — do NOT restore the old client flow): this used
+  // to upscale both picks via /api/builder/upscale-photo, draw them on a canvas,
+  // and POST /api/builder/upload-collage. That was slow enough to look broken —
+  // upscale-photo gates Real-ESRGAN on the 1920px PUSH spec (long side), but a
+  // collage panel is only 800px (short side, collageEsrganScale), so a typical
+  // 1280×948 community photo burned a ~30s Replicate job per pick that the AI
+  // path correctly skips, plus an ImgBB upload + browser re-download of both
+  // source photos purely to feed the canvas. The operator saw "Building
+  // collage…" sit there and read it as "nothing happened / it reverted to
+  // Claude's collage". One composer now serves both paths.
   const generateCoverCollage = useCallback(async (
     allPhotos: GuestyPropertyData["photos"],
     selection?: CoverCollageSelection,
   ) => {
     if (!selectedId) return;
-    setCollagePhase("upscaling");
+    setCollagePhase("generating");
     setCollageError(null);
     setCollagePreviewUrl(null);
     setCollagePicks(null);
@@ -2706,92 +2722,20 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         }
       : pickCollagePhotos(allPhotos);
     if (!picks) { setCollageError("No photos available"); setCollagePhase("error"); return; }
+    // Show the operator their own pick immediately — the request below is the
+    // only wait, and it must never look like a different pair is being built.
     setCollagePicks({ community: picks.community.caption || picks.community.url, patio: picks.patio.caption || picks.patio.url });
 
-    // Extract local path from URL (e.g. "/photos/kaha-lani-109/photo_00.jpg")
-    const toLocalPath = (url: string): string => {
-      try { return new URL(url, window.location.origin).pathname; }
-      catch { return url.startsWith("/") ? url : `/${url}`; }
-    };
-    const communityLocal = toLocalPath(picks.community.url);
-    const patioLocal  = toLocalPath(picks.patio.url);
-
-    // Upscale both picks via server (Real-ESRGAN → ImgBB), run in parallel
-    let communitySrc = picks.community.url;
-    let patioSrc = picks.patio.url;
-    if (communityLocal.startsWith("/photos/") || patioLocal.startsWith("/photos/")) {
-      const upscaleOne = async (localPath: string, fallback: string) => {
-        try {
-          const r = await fetch("/api/builder/upscale-photo", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ localPath }),
-          });
-          if (!r.ok) return fallback;
-          const d = await r.json() as any;
-          return d.url || fallback;
-        } catch { return fallback; }
-      };
-      [communitySrc, patioSrc] = await Promise.all([
-        communityLocal.startsWith("/photos/") ? upscaleOne(communityLocal, picks.community.url) : Promise.resolve(picks.community.url),
-        patioLocal.startsWith("/photos/")  ? upscaleOne(patioLocal,  picks.patio.url)  : Promise.resolve(picks.patio.url),
-      ]);
-    }
-
-    setCollagePhase("generating");
-
-    // Load both images (upscaled or original)
-    const loadImg = (src: string): Promise<HTMLImageElement> => new Promise((res, rej) => {
-      const img = new Image(); img.crossOrigin = "anonymous";
-      img.onload = () => res(img); img.onerror = rej; img.src = src;
-    });
-
-    let communityImg: HTMLImageElement, patioImg: HTMLImageElement;
     try {
-      [communityImg, patioImg] = await Promise.all([loadImg(communitySrc), loadImg(patioSrc)]);
-    } catch {
-      setCollageError("Failed to load photos for collage"); setCollagePhase("error"); return;
-    }
-
-    // Draw side-by-side on canvas — 1600×800 (2:1 landscape, ~1.5MB → well within limits)
-    const W = 1600, H = 800, half = W / 2;
-    const canvas = document.createElement("canvas");
-    canvas.width = W; canvas.height = H;
-    const ctx = canvas.getContext("2d")!;
-
-    const drawCover = (img: HTMLImageElement, x: number, w: number) => {
-      const scale = Math.max(w / img.width, H / img.height);
-      const sw = img.width * scale, sh = img.height * scale;
-      ctx.drawImage(img, x + (w - sw) / 2, (H - sh) / 2, sw, sh);
-    };
-
-    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, half, H); ctx.clip();
-    drawCover(communityImg, 0, half);
-    ctx.restore();
-
-    ctx.save(); ctx.beginPath(); ctx.rect(half, 0, half, H); ctx.clip();
-    drawCover(patioImg, half, half);
-    ctx.restore();
-
-    // Thin divider line
-    ctx.fillStyle = "rgba(255,255,255,0.6)";
-    ctx.fillRect(half - 1, 0, 2, H);
-
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
-    setCollagePreviewUrl(dataUrl);
-
-    // Upload to ImgBB + set as Guesty cover
-    setCollagePhase("uploading");
-    try {
-      // Prefer passing the URLs we know were just pushed (race-free
-      // against Guesty read-after-write lag). When we have no recent
-      // push on record the server falls back to a fresh GET.
-      const resp = await fetch("/api/builder/upload-collage", {
+      const resp = await fetch("/api/builder/auto-cover-collage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          base64: dataUrl,
           listingId: selectedId,
+          photos: (allPhotos ?? []).map((p) => ({ url: p.url, caption: p.caption, source: p.source })),
+          // Explicit pair — the server composes exactly these and never
+          // degrades to a vision/heuristic pick.
+          picks: { left: { url: picks.community.url }, right: { url: picks.patio.url } },
           existingPhotos: lastPushedPictures.length > 0 ? lastPushedPictures : undefined,
         }),
       });
@@ -2800,8 +2744,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         throw new Error(err.error || `Server error ${resp.status}`);
       }
       const result = await resp.json() as any;
+      setCollageMeta({
+        method: result.method === "manual" ? "manual" : result.method === "vision" ? "vision" : "heuristic",
+        reasoning: null,
+      });
       setGuestyPhotoCount(result.totalPhotos);
-      if (result.collageUrl) setGuestyCoverCollageUrl(result.collageUrl);
+      if (result.collageUrl) {
+        setGuestyCoverCollageUrl(result.collageUrl);
+        setCollagePreviewUrl(result.collageUrl);
+      }
       setCollagePhase("done");
     } catch (e: any) {
       setCollageError(e.message); setCollagePhase("error");
@@ -9893,7 +9844,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           onRequestCoverCollage={(selection) => { setCollagePhase("idle"); generateCoverCollage(photos, selection); }}
                           onRequestAutoCoverCollage={(candidates) => { generateAutoCoverCollage(candidates); }}
                           coverCollageStatus={{
-                            phase: collagePhase === "upscaling" ? "generating" : collagePhase,
+                            phase: collagePhase,
                             error: collageError,
                             preview: collagePreviewUrl,
                             picks: collagePicks

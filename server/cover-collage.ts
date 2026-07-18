@@ -25,11 +25,13 @@ import {
   heuristicCollagePick,
   parseCollageVisionPick,
   parseLocalPhotoUrl,
+  resolveForcedCollagePick,
   COLLAGE_HEIGHT,
   COLLAGE_PANEL_PX,
   COLLAGE_WIDTH,
   type CollageCandidate,
   type CollagePickIndices,
+  type ForcedCollagePick,
 } from "../shared/cover-collage-logic";
 
 const MODEL = process.env.COVER_COLLAGE_MODEL || "claude-sonnet-4-6";
@@ -56,9 +58,11 @@ export type AutoCoverCollageResult = {
   buffer: Buffer;
   left: CoverCollagePick;
   right: CoverCollagePick;
-  method: "vision" | "heuristic";
+  /** How the pair was chosen. "manual" = the operator picked both photos in
+   * the Photos-tab picker (forcedPick) — no vision spend, no fallback. */
+  method: "vision" | "heuristic" | "manual";
   reasoning: string | null;
-  /** Model that made the pick — null on the heuristic path. */
+  /** Model that made the pick — null on the heuristic and manual paths. */
   model: string | null;
   candidateCount: number;
 };
@@ -219,6 +223,9 @@ export async function generateAutoCoverCollage(opts: {
   /** Real-ESRGAN hook (routes.ts passes upscaleWithReplicateKw). Absent/null
    * result → classical resize only. */
   upscale?: (buf: Buffer, mimeType: string, scale: number) => Promise<Buffer | null>;
+  /** "pick manually": the operator's two chosen photo URLs. Bypasses vision
+   * and the heuristic entirely — see the forcedPick branch below. */
+  forcedPick?: ForcedCollagePick;
 }): Promise<AutoCoverCollageResult> {
   const candidates = resolveLocalCandidates(opts.photos ?? []);
   if (candidates.length < 2) {
@@ -226,6 +233,29 @@ export async function generateAutoCoverCollage(opts: {
       `Need at least 2 local photos on disk to build a collage (got ${candidates.length}). ` +
       "Pull photos into the gallery first, or pick two photos manually.",
     );
+  }
+
+  let pick: CollagePickIndices | null = null;
+  let method: "vision" | "heuristic" | "manual" = "heuristic";
+
+  // ── "pick manually" ────────────────────────────────────────────────────────
+  // The operator already made the choice, so there is nothing to decide: no
+  // vision call (no spend, no latency) and NO fallback. An unresolvable pick
+  // throws — silently composing Claude's pair instead is the exact 2026-07-18
+  // bug ("I selected the two photos … it reverted back to the collage that was
+  // chosen by Claude AI").
+  if (opts.forcedPick) {
+    if (opts.requireVision) {
+      throw new Error("A manually picked pair cannot satisfy a Claude-vision-required collage");
+    }
+    pick = resolveForcedCollagePick(candidates, opts.forcedPick);
+    if (!pick) {
+      throw new Error(
+        "The two photos you picked could not be resolved to files on disk. " +
+        "Re-open the picker and choose two different photos from this gallery.",
+      );
+    }
+    method = "manual";
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -238,9 +268,7 @@ export async function generateAutoCoverCollage(opts: {
     );
   }
 
-  let pick: CollagePickIndices | null = null;
-  let method: "vision" | "heuristic" = "heuristic";
-  if (visionEnabled) {
+  if (!pick && visionEnabled) {
     try {
       pick = await visionPick(apiKey!, candidates, opts.requireVision === true);
       method = "vision";

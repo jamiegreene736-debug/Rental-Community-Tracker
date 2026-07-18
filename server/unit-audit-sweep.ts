@@ -2841,7 +2841,9 @@ async function stageCoverCollage(target: UnitAuditTarget, record: UnitAuditJobRe
     return { verdict: "error", detail: "The saved collage was not selected by Claude vision — the full audit will not accept a heuristic cover." };
   }
   const items: string[] = [
-    `Picked ${recordRow.method === "vision" ? "by Claude vision" : "by the caption heuristic (vision fallback)"} on ${String(recordRow.createdAt ?? "").slice(0, 10)}`,
+    `Picked ${recordRow.method === "vision" ? "by Claude vision"
+      : recordRow.method === "manual" ? "by hand on the Photos tab"
+      : "by the caption heuristic (vision fallback)"} on ${String(recordRow.createdAt ?? "").slice(0, 10)}`,
   ];
   if (recordRow.left?.caption || recordRow.right?.caption) {
     items.push(`Pair: ${recordRow.left?.caption ?? "?"} + ${recordRow.right?.caption ?? "?"}`);
@@ -2880,8 +2882,12 @@ async function stageCoverCollage(target: UnitAuditTarget, record: UnitAuditJobRe
   return {
     verdict: fixedNote ? "fixed" : "pass",
     detail: fixedNote
-      ? `${fixedNote} (${recordRow.method === "vision" ? "Claude-vision pick" : "heuristic pick"}).`
-      : `AI cover collage on file${target.guestyListingId ? " and pushed to Guesty (pinned first)" : " and saved locally for this listing"}${recordRow.method === "vision" ? "" : " — heuristic pick, consider re-running for a Claude-vision pick"}.`,
+      ? `${fixedNote} (${recordRow.method === "vision" ? "Claude-vision pick"
+          : recordRow.method === "manual" ? "operator hand-picked pair" : "heuristic pick"}).`
+      : `Cover collage on file${target.guestyListingId ? " and pushed to Guesty (pinned first)" : " and saved locally for this listing"}${
+          recordRow.method === "vision" ? ""
+          : recordRow.method === "manual" ? " — hand-picked by the operator"
+          : " — heuristic pick, consider re-running for a Claude-vision pick"}.`,
     items,
   };
 }
