@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import type { Express, Request, Response } from "express";
+import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import sharp from "sharp";
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 
@@ -26,6 +27,7 @@ import {
   validateVirtualStagingSelection,
   VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX,
   VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES,
+  VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH,
   isSupersededVirtualStagingRecipeSignature,
   virtualStagingContextForSource,
   type VirtualStagingCandidateDto,
@@ -57,6 +59,26 @@ const RECOVERY_SWEEP_MS = 30 * 1_000;
 const OUTDATED_RECIPE_MESSAGE =
   "Superseded by an updated virtual-staging recipe without applying any photos.";
 const PREVIOUS_PREVIEW_PATH_KEY = "__virtualStagingPreviousPreviewRelativePath";
+const PREVIOUS_PREVIEW_FILENAME_KEY = "__virtualStagingPreviousPreviewFilename";
+const GENERATION_MODE_KEY = "__virtualStagingGenerationMode";
+const FEEDBACK_KEY = "__virtualStagingFeedback";
+const FEEDBACK_SOURCE_ATTEMPT_KEY = "__virtualStagingFeedbackSourceAttempt";
+const FEEDBACK_GENERATION_MODE = "feedback-revision";
+const VIRTUAL_STAGING_PREVIEW_WINDOW_MS = 60_000;
+const VIRTUAL_STAGING_PREVIEW_LIMIT = 360;
+
+const virtualStagingPreviewRateLimit = rateLimit({
+  windowMs: VIRTUAL_STAGING_PREVIEW_WINDOW_MS,
+  limit: VIRTUAL_STAGING_PREVIEW_LIMIT,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  keyGenerator: (req, res) => {
+    const session = res.locals.portalSession as PortalSession | undefined;
+    const address = req.ip ?? req.socket.remoteAddress ?? "unknown";
+    return `${session?.username ?? "unauthenticated"}:${ipKeyGenerator(address)}`;
+  },
+  message: { error: "Too many virtual-staging preview requests. Please wait a minute and try again." },
+});
 
 let recoverySweepTimer: NodeJS.Timeout | null = null;
 
@@ -199,6 +221,47 @@ export function validateVirtualStagingCandidateSelections(
     throw new VirtualStagingHttpError(400, "candidateSelections contains duplicate IDs");
   }
   return selections as VirtualStagingCandidateSelectionInput[];
+}
+
+export type VirtualStagingRetryInput = { attempt: number };
+export type VirtualStagingFeedbackInput = VirtualStagingRetryInput & { feedback: string };
+
+function validatedGenerationAttempt(body: unknown): number {
+  const attempt = body && typeof body === "object" && !Array.isArray(body)
+    ? (body as Record<string, unknown>).attempt
+    : undefined;
+  if (typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 1) {
+    throw new VirtualStagingHttpError(400, "attempt must identify the reviewed generation");
+  }
+  return attempt;
+}
+
+export function validateVirtualStagingRetryInput(body: unknown): VirtualStagingRetryInput {
+  return { attempt: validatedGenerationAttempt(body) };
+}
+
+export function validateVirtualStagingFeedbackInput(body: unknown): VirtualStagingFeedbackInput {
+  const attempt = validatedGenerationAttempt(body);
+  const rawFeedback = body && typeof body === "object" && !Array.isArray(body)
+    ? (body as Record<string, unknown>).feedback
+    : undefined;
+  if (typeof rawFeedback !== "string") {
+    throw new VirtualStagingHttpError(400, "feedback must be text");
+  }
+  const feedback = rawFeedback.replace(/\r\n?/g, "\n").trim();
+  if (!feedback) throw new VirtualStagingHttpError(400, "feedback cannot be empty");
+  if (feedback.length > VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH) {
+    throw new VirtualStagingHttpError(
+      400,
+      `feedback must be ${VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH} characters or fewer`,
+    );
+  }
+  // Keep ordinary Unicode and line breaks, but reject invisible controls that
+  // can obscure the true instruction in review or model prompts.
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u202A-\u202E\u2066-\u2069]/.test(feedback)) {
+    throw new VirtualStagingHttpError(400, "feedback contains unsupported control characters");
+  }
+  return { attempt, feedback };
 }
 
 export function virtualStagingCandidateFilename(candidateId: string): string {
@@ -466,6 +529,12 @@ async function findResumableJob(
 
 function candidateDto(jobId: string, candidate: VirtualStagingCandidate): VirtualStagingCandidateDto {
   const status = candidate.status as VirtualStagingCandidateStatus;
+  const snapshot = candidate.metadataSnapshot
+    && typeof candidate.metadataSnapshot === "object"
+    && !Array.isArray(candidate.metadataSnapshot)
+    ? candidate.metadataSnapshot as Record<string, unknown>
+    : {};
+  const previousPreviewRelativePath = snapshotString(snapshot, PREVIOUS_PREVIEW_PATH_KEY);
   // Candidate timestamps change when generation/retry completes. Versioning
   // the URLs evicts the 404 responses produced by the old dotfile-blocked
   // route and prevents a retry from reusing a stale browser preview.
@@ -478,9 +547,13 @@ function candidateDto(jobId: string, candidate: VirtualStagingCandidate): Virtua
     stagedUrl: status === "succeeded"
       ? `/api/virtual-staging/jobs/${jobId}/candidates/${candidate.id}/staged?v=${previewVersion}`
       : null,
+    previousStagedUrl: status !== "succeeded" && previousPreviewRelativePath
+      ? `/api/virtual-staging/jobs/${jobId}/candidates/${candidate.id}/previous-staged?v=${previewVersion}`
+      : null,
     status,
     error: candidate.error,
     attempt: candidate.attempt,
+    lastFeedback: snapshotString(snapshot, FEEDBACK_KEY),
   };
 }
 
@@ -515,19 +588,22 @@ async function requireJobDto(jobId: string): Promise<VirtualStagingJobDto> {
 }
 
 async function refreshJobSummary(jobId: string): Promise<void> {
-  const [job] = await db.select().from(virtualStagingJobs).where(eq(virtualStagingJobs.id, jobId)).limit(1);
-  if (!job || job.status === "confirmed") return;
-  const rows = await db.select({ status: virtualStagingCandidates.status })
-    .from(virtualStagingCandidates)
-    .where(eq(virtualStagingCandidates.jobId, jobId));
-  const summary = summarizeCandidateStatuses(rows.map((row) => row.status as VirtualStagingCandidateStatus));
-  await db.update(virtualStagingJobs).set({ ...summary, updatedAt: new Date() })
-    .where(and(eq(virtualStagingJobs.id, jobId), or(
-      eq(virtualStagingJobs.status, "queued"),
-      eq(virtualStagingJobs.status, "running"),
-      eq(virtualStagingJobs.status, "ready"),
-      eq(virtualStagingJobs.status, "failed"),
-    )));
+  await db.transaction(async (tx) => {
+    // Read candidate state only after owning the job row. Otherwise a summary
+    // computed before a concurrent restore commits can wait on this row and
+    // then overwrite the newer terminal state with stale counts.
+    const [job] = await tx.select().from(virtualStagingJobs)
+      .where(eq(virtualStagingJobs.id, jobId))
+      .limit(1)
+      .for("update");
+    if (!job || job.status === "confirmed") return;
+    const rows = await tx.select({ status: virtualStagingCandidates.status })
+      .from(virtualStagingCandidates)
+      .where(eq(virtualStagingCandidates.jobId, jobId));
+    const summary = summarizeCandidateStatuses(rows.map((row) => row.status as VirtualStagingCandidateStatus));
+    await tx.update(virtualStagingJobs).set({ ...summary, updatedAt: new Date() })
+      .where(eq(virtualStagingJobs.id, jobId));
+  });
 }
 
 async function writeCandidateAtomically(destination: string, buffer: Buffer): Promise<void> {
@@ -626,6 +702,23 @@ async function processCandidate(candidateId: string): Promise<void> {
       throw new Error("Virtual-staging job uses an outdated generation recipe");
     }
     const previousPreviewRelativePath = snapshotString(snapshot, PREVIOUS_PREVIEW_PATH_KEY);
+    const generationMode = snapshotString(snapshot, GENERATION_MODE_KEY) === FEEDBACK_GENERATION_MODE
+      ? FEEDBACK_GENERATION_MODE
+      : "alternate-angle";
+    const feedback = generationMode === FEEDBACK_GENERATION_MODE
+      ? snapshotString(snapshot, FEEDBACK_KEY)?.trim()
+      : undefined;
+    const feedbackSourceAttempt = generationMode === FEEDBACK_GENERATION_MODE
+      ? snapshotNumber(snapshot, FEEDBACK_SOURCE_ATTEMPT_KEY)
+      : null;
+    if (generationMode === FEEDBACK_GENERATION_MODE
+      && (!feedback
+        || feedbackSourceAttempt === null
+        || !Number.isSafeInteger(feedbackSourceAttempt)
+        || feedbackSourceAttempt < 1
+        || feedbackSourceAttempt >= claimed.attempt)) {
+      throw new Error("Feedback revision is not bound to a valid reviewed preview");
+    }
     let previousPreview: Buffer | undefined;
     if (previousPreviewRelativePath) {
       try {
@@ -643,6 +736,8 @@ async function processCandidate(candidateId: string): Promise<void> {
       previousPreview,
       context,
       endUserId: job.requestedBy ?? undefined,
+      mode: generationMode,
+      ...(feedback ? { feedback } : {}),
     });
     if (!claimed.stagingRelativePath) throw new Error("Candidate storage path is missing");
     await db.transaction(async (tx) => {
@@ -1217,6 +1312,253 @@ export function sendVirtualStagingPreview(
   res.sendFile(file, { dotfiles: "allow" });
 }
 
+type CandidateRegenerationMode = "alternate-angle" | "feedback-revision";
+
+async function queueCandidateRegeneration(input: {
+  job: VirtualStagingJob;
+  candidate: VirtualStagingCandidate;
+  expectedAttempt: number;
+  mode: CandidateRegenerationMode;
+  feedback?: string;
+}): Promise<void> {
+  const service = getVirtualStagingService();
+  service.assertConfigured(input.mode);
+  const regenerationId = crypto.randomUUID();
+  try {
+    await db.transaction(async (tx) => {
+      const [lockedJob] = await tx.select({
+        status: virtualStagingJobs.status,
+        model: virtualStagingJobs.model,
+      })
+        .from(virtualStagingJobs)
+        .where(eq(virtualStagingJobs.id, input.job.id))
+        .limit(1)
+        .for("update");
+      if (!lockedJob) throw new VirtualStagingHttpError(404, "Virtual-staging job was not found");
+      if (lockedJob.status === "confirmed") {
+        throw new VirtualStagingHttpError(409, "Confirmed jobs cannot be regenerated");
+      }
+      if (lockedJob.model !== service.recipeSignature) {
+        throw new VirtualStagingHttpError(409, "This review used an older staging recipe. Start a new Restage run.");
+      }
+
+      const [lockedCandidate] = await tx.select({
+        status: virtualStagingCandidates.status,
+        attempt: virtualStagingCandidates.attempt,
+        candidateFilename: virtualStagingCandidates.candidateFilename,
+        stagingRelativePath: virtualStagingCandidates.stagingRelativePath,
+        metadataSnapshot: virtualStagingCandidates.metadataSnapshot,
+      })
+        .from(virtualStagingCandidates)
+        .where(and(
+          eq(virtualStagingCandidates.id, input.candidate.id),
+          eq(virtualStagingCandidates.jobId, input.job.id),
+        ))
+        .limit(1)
+        .for("update");
+      if (!lockedCandidate
+        || (lockedCandidate.status !== "failed" && lockedCandidate.status !== "succeeded")) {
+        throw new VirtualStagingHttpError(409, "This photo is already being regenerated");
+      }
+      if (lockedCandidate.attempt !== input.expectedAttempt) {
+        throw new VirtualStagingHttpError(
+          409,
+          "This staged preview changed. Review the latest preview before regenerating it.",
+        );
+      }
+      if (input.mode === "feedback-revision" && lockedCandidate.status !== "succeeded") {
+        throw new VirtualStagingHttpError(409, "Feedback can only revise a successful staged preview");
+      }
+
+      const rotateSuccessfulPreview = lockedCandidate.status === "succeeded";
+      const currentSnapshot = lockedCandidate.metadataSnapshot
+        && typeof lockedCandidate.metadataSnapshot === "object"
+        && !Array.isArray(lockedCandidate.metadataSnapshot)
+        ? lockedCandidate.metadataSnapshot as Record<string, unknown>
+        : {};
+      const effectiveMode = !rotateSuccessfulPreview
+        && snapshotString(currentSnapshot, GENERATION_MODE_KEY) === FEEDBACK_GENERATION_MODE
+        ? FEEDBACK_GENERATION_MODE
+        : input.mode;
+      service.assertConfigured(effectiveMode);
+      let metadataSnapshot: Record<string, unknown> | undefined;
+      if (rotateSuccessfulPreview) {
+        if (!lockedCandidate.stagingRelativePath) {
+          throw new VirtualStagingHttpError(409, "The current staged preview is missing");
+        }
+        metadataSnapshot = {
+          ...currentSnapshot,
+          [PREVIOUS_PREVIEW_PATH_KEY]: lockedCandidate.stagingRelativePath,
+          [PREVIOUS_PREVIEW_FILENAME_KEY]: lockedCandidate.candidateFilename,
+        };
+        if (input.mode === "feedback-revision") {
+          metadataSnapshot[GENERATION_MODE_KEY] = FEEDBACK_GENERATION_MODE;
+          metadataSnapshot[FEEDBACK_KEY] = input.feedback!;
+          metadataSnapshot[FEEDBACK_SOURCE_ATTEMPT_KEY] = input.expectedAttempt;
+        } else {
+          // An ordinary angle reroll is a fresh recipe run. Do not silently
+          // replay feedback that was written for a different reviewed preview.
+          delete metadataSnapshot[GENERATION_MODE_KEY];
+          delete metadataSnapshot[FEEDBACK_KEY];
+          delete metadataSnapshot[FEEDBACK_SOURCE_ATTEMPT_KEY];
+        }
+      }
+
+      await tx.update(virtualStagingJobs).set({ status: "running", updatedAt: new Date() })
+        .where(eq(virtualStagingJobs.id, input.job.id));
+      // Successful previews rotate to a fresh immutable path. The old path is
+      // retained in metadata both as feedback edit input and as a reviewable
+      // fallback if the new generation fails.
+      const [queued] = await tx.update(virtualStagingCandidates).set({
+        status: "pending",
+        error: null,
+        generationToken: null,
+        generationLeaseExpiresAt: null,
+        ...(rotateSuccessfulPreview ? {
+          candidateFilename: virtualStagingCandidateFilename(regenerationId),
+          stagingRelativePath: candidateStorageRelativePath(input.job.id, regenerationId),
+          metadataSnapshot,
+        } : {}),
+        updatedAt: new Date(),
+      }).where(and(
+        eq(virtualStagingCandidates.id, input.candidate.id),
+        eq(virtualStagingCandidates.jobId, input.job.id),
+        eq(virtualStagingCandidates.status, lockedCandidate.status),
+        eq(virtualStagingCandidates.attempt, input.expectedAttempt),
+      )).returning({ id: virtualStagingCandidates.id });
+      if (!queued) throw new VirtualStagingHttpError(409, "This photo is already being regenerated");
+    });
+  } catch (error) {
+    if (pgErrorCode(error) === "23505") {
+      throw new VirtualStagingHttpError(409, "Another virtual-staging job is already active for this unit");
+    }
+    throw error;
+  }
+  scheduleVirtualStagingTask(
+    `candidate ${input.candidate.id}`,
+    () => processCandidate(input.candidate.id),
+  );
+}
+
+function retainedPreviewIdentity(
+  jobId: string,
+  snapshot: Record<string, unknown>,
+): { relativePath: string; candidateFilename: string; absolutePath: string } {
+  const relativePath = snapshotString(snapshot, PREVIOUS_PREVIEW_PATH_KEY);
+  const candidateFilename = snapshotString(snapshot, PREVIOUS_PREVIEW_FILENAME_KEY);
+  if (!relativePath || !candidateFilename || !isVirtualStagingCandidateFilename(candidateFilename)) {
+    throw new VirtualStagingHttpError(409, "The previous staged preview cannot be restored safely");
+  }
+  const retainedId = candidateFilename.slice("virtual-staged-".length, -".jpg".length);
+  if (!UUID_RE.test(retainedId)
+    || relativePath !== candidateStorageRelativePath(jobId, retainedId)) {
+    throw new VirtualStagingHttpError(409, "The previous staged preview cannot be restored safely");
+  }
+  return {
+    relativePath,
+    candidateFilename,
+    absolutePath: resolveInsidePhotosRoot(relativePath),
+  };
+}
+
+async function restorePreviousCandidatePreview(
+  jobId: string,
+  candidateId: string,
+  expectedAttempt: number,
+): Promise<void> {
+  if (!UUID_RE.test(jobId) || !UUID_RE.test(candidateId)) {
+    throw new VirtualStagingHttpError(404, "Virtual-staging photo was not found");
+  }
+  const recipeSignature = getVirtualStagingService().recipeSignature;
+  await db.transaction(async (tx) => {
+    const [lockedJob] = await tx.select({
+      status: virtualStagingJobs.status,
+      model: virtualStagingJobs.model,
+    }).from(virtualStagingJobs)
+      .where(eq(virtualStagingJobs.id, jobId))
+      .limit(1)
+      .for("update");
+    if (!lockedJob) throw new VirtualStagingHttpError(404, "Virtual-staging job was not found");
+    if (lockedJob.status === "confirmed") {
+      throw new VirtualStagingHttpError(409, "Confirmed jobs cannot restore an earlier preview");
+    }
+    if (lockedJob.model !== recipeSignature) {
+      throw new VirtualStagingHttpError(409, "This review used an older staging recipe. Start a new Restage run.");
+    }
+
+    const [lockedCandidate] = await tx.select({
+      status: virtualStagingCandidates.status,
+      attempt: virtualStagingCandidates.attempt,
+      metadataSnapshot: virtualStagingCandidates.metadataSnapshot,
+    }).from(virtualStagingCandidates)
+      .where(and(
+        eq(virtualStagingCandidates.id, candidateId),
+        eq(virtualStagingCandidates.jobId, jobId),
+      ))
+      .limit(1)
+      .for("update");
+    if (!lockedCandidate) {
+      throw new VirtualStagingHttpError(404, "Virtual-staging photo was not found");
+    }
+    if (lockedCandidate.status !== "failed") {
+      throw new VirtualStagingHttpError(409, "Only a failed regeneration can restore its previous preview");
+    }
+    if (lockedCandidate.attempt !== expectedAttempt) {
+      throw new VirtualStagingHttpError(
+        409,
+        "This staged preview changed. Review the latest preview before restoring it.",
+      );
+    }
+
+    const metadataSnapshot = lockedCandidate.metadataSnapshot
+      && typeof lockedCandidate.metadataSnapshot === "object"
+      && !Array.isArray(lockedCandidate.metadataSnapshot)
+      ? { ...lockedCandidate.metadataSnapshot as Record<string, unknown> }
+      : {};
+    const retained = retainedPreviewIdentity(jobId, metadataSnapshot);
+    const retainedStat = await fs.promises.stat(retained.absolutePath).catch(() => null);
+    if (!retainedStat?.isFile()) {
+      throw new VirtualStagingHttpError(409, "The previous staged preview file is missing");
+    }
+
+    delete metadataSnapshot[PREVIOUS_PREVIEW_PATH_KEY];
+    delete metadataSnapshot[PREVIOUS_PREVIEW_FILENAME_KEY];
+    delete metadataSnapshot[GENERATION_MODE_KEY];
+    delete metadataSnapshot[FEEDBACK_KEY];
+    delete metadataSnapshot[FEEDBACK_SOURCE_ATTEMPT_KEY];
+    const [restored] = await tx.update(virtualStagingCandidates).set({
+      status: "succeeded",
+      error: null,
+      // Restoration changes the reviewed bytes just like regeneration does.
+      // Advance the optimistic version so failed-state actions from another
+      // tab cannot immediately reroll or approve the restored preview.
+      attempt: expectedAttempt + 1,
+      candidateFilename: retained.candidateFilename,
+      stagingRelativePath: retained.relativePath,
+      metadataSnapshot,
+      generationToken: null,
+      generationLeaseExpiresAt: null,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(virtualStagingCandidates.id, candidateId),
+      eq(virtualStagingCandidates.jobId, jobId),
+      eq(virtualStagingCandidates.status, "failed"),
+      eq(virtualStagingCandidates.attempt, expectedAttempt),
+    )).returning({ id: virtualStagingCandidates.id });
+    if (!restored) {
+      throw new VirtualStagingHttpError(409, "This staged preview changed before it could be restored");
+    }
+    const candidateStatuses = await tx.select({ status: virtualStagingCandidates.status })
+      .from(virtualStagingCandidates)
+      .where(eq(virtualStagingCandidates.jobId, jobId));
+    const summary = summarizeCandidateStatuses(
+      candidateStatuses.map((row) => row.status as VirtualStagingCandidateStatus),
+    );
+    await tx.update(virtualStagingJobs).set({ ...summary, updatedAt: new Date() })
+      .where(eq(virtualStagingJobs.id, jobId));
+  });
+}
+
 export function registerVirtualStagingRoutes(app: Express): void {
   app.post("/api/virtual-staging/jobs", route(async (req, res) => {
     const session = requireAdmin(res);
@@ -1236,6 +1578,7 @@ export function registerVirtualStagingRoutes(app: Express): void {
 
   app.post("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/retry", route(async (req, res) => {
     if (!requireAdmin(res)) return;
+    const input = validateVirtualStagingRetryInput(req.body);
     const { job, candidate } = await candidateContext(
       routeParam(req, "jobId"),
       routeParam(req, "candidateId"),
@@ -1248,83 +1591,49 @@ export function registerVirtualStagingRoutes(app: Express): void {
     if (job.model !== service.recipeSignature) {
       throw new VirtualStagingHttpError(409, "This review used an older staging recipe. Start a new Restage run.");
     }
-    service.assertConfigured();
-    const regenerationId = crypto.randomUUID();
-    try {
-      await db.transaction(async (tx) => {
-        const [lockedJob] = await tx.select({ status: virtualStagingJobs.status })
-          .from(virtualStagingJobs)
-          .where(eq(virtualStagingJobs.id, job.id))
-          .limit(1)
-          .for("update");
-        if (!lockedJob) throw new VirtualStagingHttpError(404, "Virtual-staging job was not found");
-        if (lockedJob.status === "confirmed") {
-          throw new VirtualStagingHttpError(409, "Confirmed jobs cannot be retried");
-        }
-        const [lockedCandidate] = await tx.select({
-          status: virtualStagingCandidates.status,
-          stagingRelativePath: virtualStagingCandidates.stagingRelativePath,
-          metadataSnapshot: virtualStagingCandidates.metadataSnapshot,
-        })
-          .from(virtualStagingCandidates)
-          .where(and(
-            eq(virtualStagingCandidates.id, candidate.id),
-            eq(virtualStagingCandidates.jobId, job.id),
-          ))
-          .limit(1)
-          .for("update");
-        if (!lockedCandidate
-          || (lockedCandidate.status !== "failed" && lockedCandidate.status !== "succeeded")) {
-          throw new VirtualStagingHttpError(409, "This photo is already being regenerated");
-        }
-        const rotateSuccessfulPreview = lockedCandidate.status === "succeeded";
-        let metadataSnapshot: Record<string, unknown> | undefined;
-        if (rotateSuccessfulPreview) {
-          if (!lockedCandidate.stagingRelativePath) {
-            throw new VirtualStagingHttpError(409, "The current staged preview is missing");
-          }
-          const currentSnapshot = lockedCandidate.metadataSnapshot
-            && typeof lockedCandidate.metadataSnapshot === "object"
-            && !Array.isArray(lockedCandidate.metadataSnapshot)
-            ? lockedCandidate.metadataSnapshot as Record<string, unknown>
-            : {};
-          metadataSnapshot = {
-            ...currentSnapshot,
-            [PREVIOUS_PREVIEW_PATH_KEY]: lockedCandidate.stagingRelativePath,
-          };
-        }
-        await tx.update(virtualStagingJobs).set({ status: "running", updatedAt: new Date() })
-          .where(eq(virtualStagingJobs.id, job.id));
-        // A successful preview may already have been copied into the gallery by
-        // a confirmation request that later lost a race. Never overwrite that
-        // immutable filename/path; a reroll gets fresh storage identity while
-        // retaining the logical candidate ID used by the review UI.
-        const [queued] = await tx.update(virtualStagingCandidates).set({
-          status: "pending",
-          error: null,
-          generationToken: null,
-          generationLeaseExpiresAt: null,
-          ...(rotateSuccessfulPreview ? {
-            candidateFilename: virtualStagingCandidateFilename(regenerationId),
-            stagingRelativePath: candidateStorageRelativePath(job.id, regenerationId),
-            metadataSnapshot,
-          } : {}),
-          updatedAt: new Date(),
-        }).where(and(
-          eq(virtualStagingCandidates.id, candidate.id),
-          eq(virtualStagingCandidates.jobId, job.id),
-          eq(virtualStagingCandidates.status, lockedCandidate.status),
-        )).returning({ id: virtualStagingCandidates.id });
-        if (!queued) throw new VirtualStagingHttpError(409, "This photo is already being regenerated");
-      });
-    } catch (error) {
-      if (pgErrorCode(error) === "23505") {
-        throw new VirtualStagingHttpError(409, "Another virtual-staging job is already active for this unit");
-      }
-      throw error;
-    }
-    scheduleVirtualStagingTask(`candidate ${candidate.id}`, () => processCandidate(candidate.id));
+    await queueCandidateRegeneration({
+      job,
+      candidate,
+      expectedAttempt: input.attempt,
+      mode: "alternate-angle",
+    });
     res.status(202).json(await requireJobDto(job.id));
+  }));
+
+  app.post("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/feedback", route(async (req, res) => {
+    if (!requireAdmin(res)) return;
+    const input = validateVirtualStagingFeedbackInput(req.body);
+    const { job, candidate } = await candidateContext(
+      routeParam(req, "jobId"),
+      routeParam(req, "candidateId"),
+    );
+    if (job.status === "confirmed") {
+      throw new VirtualStagingHttpError(409, "Confirmed jobs cannot be regenerated");
+    }
+    if (candidate.status !== "succeeded") {
+      throw new VirtualStagingHttpError(409, "Feedback can only revise a successful staged preview");
+    }
+    const service = getVirtualStagingService();
+    if (job.model !== service.recipeSignature) {
+      throw new VirtualStagingHttpError(409, "This review used an older staging recipe. Start a new Restage run.");
+    }
+    await queueCandidateRegeneration({
+      job,
+      candidate,
+      expectedAttempt: input.attempt,
+      mode: "feedback-revision",
+      feedback: input.feedback,
+    });
+    res.status(202).json(await requireJobDto(job.id));
+  }));
+
+  app.post("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/restore-previous", route(async (req, res) => {
+    if (!requireAdmin(res)) return;
+    const input = validateVirtualStagingRetryInput(req.body);
+    const jobId = routeParam(req, "jobId");
+    const candidateId = routeParam(req, "candidateId");
+    await restorePreviousCandidatePreview(jobId, candidateId, input.attempt);
+    res.json(await requireJobDto(jobId));
   }));
 
   app.post("/api/virtual-staging/jobs/:jobId/confirm", route(async (req, res) => {
@@ -1408,32 +1717,65 @@ export function registerVirtualStagingRoutes(app: Express): void {
     res.json({ job: await requireJobDto(jobId), swappedCount: 0 });
   }));
 
-  app.get("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/original", route(async (req, res) => {
-    if (!requireAdmin(res)) return;
-    const { asset } = await candidateContext(
-      routeParam(req, "jobId"),
-      routeParam(req, "candidateId"),
-    );
-    const file = resolveInsidePhotosRoot(asset.storageRelativePath);
-    const stat = await fs.promises.stat(file).catch(() => null);
-    if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Original photo was not found");
-    sendVirtualStagingPreview(res, file, asset.mimeType);
-  }));
+  app.get(
+    "/api/virtual-staging/jobs/:jobId/candidates/:candidateId/original",
+    virtualStagingPreviewRateLimit,
+    route(async (req, res) => {
+      if (!requireAdmin(res)) return;
+      const { asset } = await candidateContext(
+        routeParam(req, "jobId"),
+        routeParam(req, "candidateId"),
+      );
+      const file = resolveInsidePhotosRoot(asset.storageRelativePath);
+      const stat = await fs.promises.stat(file).catch(() => null);
+      if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Original photo was not found");
+      sendVirtualStagingPreview(res, file, asset.mimeType);
+    }),
+  );
 
-  app.get("/api/virtual-staging/jobs/:jobId/candidates/:candidateId/staged", route(async (req, res) => {
-    if (!requireAdmin(res)) return;
-    const { candidate } = await candidateContext(
-      routeParam(req, "jobId"),
-      routeParam(req, "candidateId"),
-    );
-    if (candidate.status !== "succeeded" || !candidate.stagingRelativePath) {
-      throw new VirtualStagingHttpError(404, "Staged photo is not ready");
-    }
-    const file = resolveInsidePhotosRoot(candidate.stagingRelativePath);
-    const stat = await fs.promises.stat(file).catch(() => null);
-    if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Staged photo was not found");
-    sendVirtualStagingPreview(res, file, "image/jpeg");
-  }));
+  app.get(
+    "/api/virtual-staging/jobs/:jobId/candidates/:candidateId/staged",
+    virtualStagingPreviewRateLimit,
+    route(async (req, res) => {
+      if (!requireAdmin(res)) return;
+      const { candidate } = await candidateContext(
+        routeParam(req, "jobId"),
+        routeParam(req, "candidateId"),
+      );
+      if (candidate.status !== "succeeded" || !candidate.stagingRelativePath) {
+        throw new VirtualStagingHttpError(404, "Staged photo is not ready");
+      }
+      const file = resolveInsidePhotosRoot(candidate.stagingRelativePath);
+      const stat = await fs.promises.stat(file).catch(() => null);
+      if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Staged photo was not found");
+      sendVirtualStagingPreview(res, file, "image/jpeg");
+    }),
+  );
+
+  app.get(
+    "/api/virtual-staging/jobs/:jobId/candidates/:candidateId/previous-staged",
+    virtualStagingPreviewRateLimit,
+    route(async (req, res) => {
+      if (!requireAdmin(res)) return;
+      const { candidate } = await candidateContext(
+        routeParam(req, "jobId"),
+        routeParam(req, "candidateId"),
+      );
+      const snapshot = candidate.metadataSnapshot
+        && typeof candidate.metadataSnapshot === "object"
+        && !Array.isArray(candidate.metadataSnapshot)
+        ? candidate.metadataSnapshot as Record<string, unknown>
+        : {};
+      const previousPreviewRelativePath = snapshotString(snapshot, PREVIOUS_PREVIEW_PATH_KEY);
+      if (!previousPreviewRelativePath) {
+        throw new VirtualStagingHttpError(404, "Previous staged photo was not found");
+      }
+      const file = resolveInsidePhotosRoot(previousPreviewRelativePath);
+      const stat = await fs.promises.stat(file).catch(() => null);
+      if (!stat?.isFile()) throw new VirtualStagingHttpError(404, "Previous staged photo was not found");
+      sendVirtualStagingPreview(res, file, "image/jpeg");
+    }),
+  );
 
   startRecoverySweep();
 }

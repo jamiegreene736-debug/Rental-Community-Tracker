@@ -2,6 +2,7 @@ import OpenAI, { toFile } from "openai";
 import sharp from "sharp";
 
 import {
+  buildVirtualStagingFeedbackPrompt,
   buildVirtualStagingPrompt,
   virtualStagingRecipeSignature,
   virtualStagingViewpointDirectionForSource,
@@ -15,21 +16,29 @@ import {
   type VirtualStagingViewpointVerifier,
 } from "./virtual-staging-viewpoint-verifier";
 
-const DEFAULT_MODEL = "gpt-image-1.5";
+const DEFAULT_MODEL = "gpt-image-2";
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const OPENAI_TIMEOUT_MS = 5 * 60 * 1000;
 
 export type VirtualStagingGenerationRequest = {
+  /** Immutable original used as the geometry and property-style authority. */
   source: Buffer;
   sourceFilename: string;
   generationAttempt: number;
   previousPreview?: Buffer;
   context: VirtualStagingContext;
   endUserId?: string;
+  mode?: "alternate-angle" | "feedback-revision";
+  feedback?: string;
 };
 
-export type VirtualStagingGenerationInput = VirtualStagingGenerationRequest & {
+export type VirtualStagingGenerationInput = Omit<VirtualStagingGenerationRequest, "source"> & {
+  /** Immutable original: always the primary image/edit base. */
+  source: Buffer;
+  /** Reviewed staged preview supplied only as a visual reference for feedback. */
+  referenceSource?: Buffer;
   prompt: string;
+  mode: "alternate-angle" | "feedback-revision";
 };
 
 export type VirtualStagingGenerationResult = {
@@ -43,11 +52,12 @@ export type VirtualStagingGenerationResult = {
 
 /**
  * Small provider seam so a second image-edit backend can be added without
- * changing job or route code. Providers receive the immutable original bytes.
+ * changing job or route code.
  */
 export interface VirtualStagingImageProvider {
   readonly id: string;
   readonly model: string;
+  readonly supportsReferenceImages: boolean;
   isConfigured(): boolean;
   generate(input: VirtualStagingGenerationInput): Promise<VirtualStagingGenerationResult>;
 }
@@ -176,6 +186,13 @@ async function assertMeaningfullyDifferentPreview(
   }
 }
 
+function assertRefinementChangedPreview(reviewedPreview: Buffer, generated: Buffer, provider: string): void {
+  if (provider === "mock") return;
+  if (reviewedPreview.equals(generated)) {
+    throw new Error("Image provider returned the reviewed staged preview without applying feedback");
+  }
+}
+
 function safeProviderError(error: unknown): string {
   if (error instanceof OpenAI.APIError) {
     return `OpenAI image edit failed${error.status ? ` (HTTP ${error.status})` : ""}`;
@@ -186,6 +203,7 @@ function safeProviderError(error: unknown): string {
 
 export class OpenAIVirtualStagingProvider implements VirtualStagingImageProvider {
   readonly id = "openai";
+  readonly supportsReferenceImages = true;
   readonly model: string;
 
   constructor(
@@ -212,11 +230,29 @@ export class OpenAIVirtualStagingProvider implements VirtualStagingImageProvider
       safeUploadName(input.sourceFilename, source.format),
       { type: source.mimeType },
     );
+    let image: typeof upload | Array<typeof upload> = upload;
+    if (input.referenceSource) {
+      const reference = await validateSourceImage(input.referenceSource);
+      const sourceRatio = source.width / source.height;
+      const referenceRatio = reference.width / reference.height;
+      if (Math.abs(referenceRatio - sourceRatio) / sourceRatio > 0.03) {
+        throw new Error("Virtual-staging reference photo has a different aspect ratio");
+      }
+      const referenceUpload = await toFile(
+        input.referenceSource,
+        safeUploadName(`reviewed-preview-${input.sourceFilename}`, reference.format),
+        { type: reference.mimeType },
+      );
+      image = [upload, referenceUpload];
+    }
+    const legacyInputFidelity = /^gpt-image-2(?:$|-)/i.test(this.model)
+      ? {}
+      : { input_fidelity: "high" as const };
     const response = await client.images.edit({
       model: this.model,
-      image: upload,
+      image,
       prompt: input.prompt,
-      input_fidelity: "high",
+      ...legacyInputFidelity,
       quality: "high",
       size: "auto",
       output_format: "jpeg",
@@ -237,6 +273,7 @@ export class OpenAIVirtualStagingProvider implements VirtualStagingImageProvider
 
 class MockVirtualStagingProvider implements VirtualStagingImageProvider {
   readonly id = "mock";
+  readonly supportsReferenceImages = true;
   readonly model = "virtual-staging-mock";
 
   isConfigured(): boolean {
@@ -311,28 +348,45 @@ export class VirtualStagingService {
     return virtualStagingRecipeSignature();
   }
 
-  assertConfigured(): void {
+  assertConfigured(mode: "alternate-angle" | "feedback-revision" = "alternate-angle"): void {
     if (process.env.VIRTUAL_STAGING_MOCK === "1" && process.env.NODE_ENV === "production") {
       throw new VirtualStagingConfigurationError("VIRTUAL_STAGING_MOCK cannot be enabled in production");
     }
-    const providers = this.configuredProviders();
+    const providers = this.providersFor(mode);
     if (providers.length === 0) {
-      throw new VirtualStagingConfigurationError("No virtual-staging image-edit provider is configured");
+      throw new VirtualStagingConfigurationError(
+        mode === "feedback-revision"
+          ? "Per-photo feedback requires a configured image-edit provider that supports both the immutable original and reviewed preview"
+          : "No virtual-staging image-edit provider is configured",
+      );
     }
     if (providers.some((provider) => provider.id !== "mock") && !this.viewpointVerifier.isConfigured()) {
       throw new VirtualStagingConfigurationError(
-        "ANTHROPIC_API_KEY is required to verify alternate virtual-staging viewpoints",
+        "ANTHROPIC_API_KEY is required to verify virtual-staging image edits",
       );
     }
   }
 
   async generate(input: VirtualStagingGenerationRequest): Promise<VirtualStagingGenerationResult> {
-    this.assertConfigured();
+    const mode = input.mode ?? "alternate-angle";
+    this.assertConfigured(mode);
     const source = await validateSourceImage(input.source);
-    // Validate and fingerprint the retained prior preview before spending on a
-    // new provider call. A corrupt/missing comparison input applies to every
-    // provider, so fallback generation cannot repair it.
-    const previousPreviewHash = input.previousPreview
+    const feedback = input.feedback?.trim();
+    if (mode === "feedback-revision" && (!input.previousPreview || !feedback)) {
+      throw new Error("Feedback revision requires the exact reviewed staged preview and non-empty feedback");
+    }
+    // Validate and fingerprint retained previews before spending on a provider
+    // call. Corrupt comparison/edit input applies to every provider, so a paid
+    // fallback cannot repair it.
+    if (input.previousPreview) {
+      const previous = await validateSourceImage(input.previousPreview);
+      const sourceRatio = source.width / source.height;
+      const previousRatio = previous.width / previous.height;
+      if (Math.abs(previousRatio - sourceRatio) / sourceRatio > 0.03) {
+        throw new Error("The reviewed staged preview has a different aspect ratio from its original");
+      }
+    }
+    const previousPreviewHash = mode === "alternate-angle" && input.previousPreview
       ? await computeVirtualStagingDhash(input.previousPreview)
       : undefined;
     const viewpointDirection = virtualStagingViewpointDirectionForSource(
@@ -341,11 +395,19 @@ export class VirtualStagingService {
     );
     const providerInput: VirtualStagingGenerationInput = {
       ...input,
-      prompt: buildVirtualStagingPrompt(input.context, viewpointDirection),
+      // The immutable original remains Image 1 for every generation. The
+      // reviewed preview is reference-only, preventing iterative edits from
+      // compounding generated pixels and architectural drift.
+      source: input.source,
+      ...(mode === "feedback-revision" ? { referenceSource: input.previousPreview! } : {}),
+      mode,
+      prompt: mode === "feedback-revision"
+        ? buildVirtualStagingFeedbackPrompt(input.context, feedback!)
+        : buildVirtualStagingPrompt(input.context, viewpointDirection),
     };
     return this.limiter.run(async () => {
       const errors: string[] = [];
-      for (const provider of this.configuredProviders()) {
+      for (const provider of this.providersFor(mode)) {
         try {
           const result = await provider.generate(providerInput);
           const validated = await validateGeneratedImage(
@@ -354,12 +416,16 @@ export class VirtualStagingService {
             result.provider,
             { width: source.width, height: source.height },
           );
-          await assertMeaningfullyDifferentPreview(
-            input.source,
-            validated.buffer,
-            result.provider,
-            previousPreviewHash,
-          );
+          if (mode === "feedback-revision") {
+            assertRefinementChangedPreview(input.previousPreview!, validated.buffer, result.provider);
+          } else {
+            await assertMeaningfullyDifferentPreview(
+              input.source,
+              validated.buffer,
+              result.provider,
+              previousPreviewHash,
+            );
+          }
           if (result.provider !== "mock") {
             await this.viewpointVerifier.verify({
               source: input.source,
@@ -368,6 +434,8 @@ export class VirtualStagingService {
               requestedDirection: viewpointDirection,
               imageProvider: result.provider,
               generationAttempt: input.generationAttempt,
+              mode,
+              ...(mode === "feedback-revision" ? { feedback } : {}),
             });
           }
           return validated;
@@ -384,6 +452,21 @@ export class VirtualStagingService {
 
   private configuredProviders(): VirtualStagingImageProvider[] {
     return this.providers.filter((provider) => provider.isConfigured());
+  }
+
+  private providersFor(mode: "alternate-angle" | "feedback-revision"): VirtualStagingImageProvider[] {
+    const configured = this.configuredProviders();
+    if (mode !== "feedback-revision") return configured;
+    // Feedback is only safe when the provider sees both the immutable original
+    // and the exact preview the operator reviewed. Never make a second paid
+    // attempt through a single-image provider with silently degraded context.
+    return [
+      ...configured.filter((provider) => provider.supportsReferenceImages && provider.id === "mock"),
+      ...configured.filter((provider) => provider.supportsReferenceImages && provider.id === "openai"),
+      ...configured.filter((provider) => provider.supportsReferenceImages
+        && provider.id !== "mock"
+        && provider.id !== "openai"),
+    ];
   }
 }
 

@@ -115,6 +115,7 @@ function outputUrl(prediction: ReplicatePrediction): string | null {
  */
 export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvider {
   readonly id = "replicate";
+  readonly supportsReferenceImages = false;
   readonly model: string;
 
   constructor(

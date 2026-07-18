@@ -12,11 +12,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import type {
   VirtualStagingCandidateDto,
   VirtualStagingJobDto,
+} from "@shared/virtual-staging";
+import {
+  VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH,
+  virtualStagingJobMatchesSession,
 } from "@shared/virtual-staging";
 
 export type VirtualStagingUnit = {
@@ -50,6 +55,13 @@ type VirtualStagingDialogProps = {
 
 const ACTIVE_JOB_STATUSES = new Set<VirtualStagingJob["status"]>(["queued", "running"]);
 const POLL_INTERVAL_MS = 1_500;
+
+type JobSnapshotScope = {
+  sessionKey: string;
+  propertyId: number;
+  unitId: string;
+  jobId?: string;
+};
 
 function jobFromPayload(payload: unknown): VirtualStagingJob {
   const candidate = payload && typeof payload === "object" && "job" in payload
@@ -115,14 +127,49 @@ export default function VirtualStagingDialog({
   const [finishError, setFinishError] = useState<string | null>(null);
   const [selectedCandidateKeys, setSelectedCandidateKeys] = useState<Set<string>>(new Set());
   const [retryingCandidateIds, setRetryingCandidateIds] = useState<Set<string>>(new Set());
+  const [feedbackDrafts, setFeedbackDrafts] = useState<Map<string, string>>(new Map());
   const [startAttempt, setStartAttempt] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  const sessionKey = `${propertyId}:${unit.id}:${startAttempt}`;
   const startRequestRef = useRef<{ key: string; promise: Promise<VirtualStagingJob> } | null>(null);
   const retryingRef = useRef<Set<string>>(new Set());
   const confirmingRef = useRef(false);
+  const jobActionVersionRef = useRef(0);
   const locallyResolvedJobRef = useRef<string | null>(null);
   const externallyNotifiedJobRef = useRef<string | null>(null);
+  const activeSessionKeyRef = useRef(sessionKey);
+  // Update synchronously with the rendered property/unit so an old response
+  // cannot land between render and effect cleanup.
+  activeSessionKeyRef.current = sessionKey;
+
+  const applyJobSnapshot = useCallback((nextJob: VirtualStagingJob, scope: JobSnapshotScope) => {
+    if (activeSessionKeyRef.current !== scope.sessionKey
+      || !virtualStagingJobMatchesSession(nextJob, scope)) return;
+    setJob((current) => {
+      if (activeSessionKeyRef.current !== scope.sessionKey) return current;
+      if (current && current.id !== nextJob.id) return current;
+      if (!current && scope.jobId) return current;
+      if (!current) return nextJob;
+      const currentUpdatedAt = Date.parse(current.updatedAt);
+      const nextUpdatedAt = Date.parse(nextJob.updatedAt);
+      return Number.isFinite(currentUpdatedAt)
+        && Number.isFinite(nextUpdatedAt)
+        && nextUpdatedAt < currentUpdatedAt
+        ? current
+        : nextJob;
+    });
+  }, []);
+
+  const refreshJobSnapshot = useCallback(async (
+    jobId: string,
+    actionVersion: number,
+    scope: JobSnapshotScope,
+  ): Promise<void> => {
+    const response = await apiRequest("GET", `/api/virtual-staging/jobs/${encodeURIComponent(jobId)}`);
+    const nextJob = await readJob(response);
+    if (jobActionVersionRef.current === actionVersion) applyJobSnapshot(nextJob, scope);
+  }, [applyJobSnapshot]);
 
   // A keyed staging session starts exactly one server job. Its lifecycle is
   // intentionally independent of modal visibility: closing the dialog must not
@@ -133,7 +180,9 @@ export default function VirtualStagingDialog({
     if (!unit.id || !Number.isFinite(propertyId)) return;
 
     let cancelled = false;
-    const requestKey = `${propertyId}:${unit.id}:${startAttempt}`;
+    const requestKey = sessionKey;
+    ++jobActionVersionRef.current;
+    retryingRef.current.clear();
     setJob(null);
     setStarting(true);
     setStartError(null);
@@ -141,6 +190,8 @@ export default function VirtualStagingDialog({
     setConfirmError(null);
     setFinishError(null);
     setSelectedCandidateKeys(new Set());
+    setRetryingCandidateIds(new Set());
+    setFeedbackDrafts(new Map());
 
     let request = startRequestRef.current;
     if (!request || request.key !== requestKey) {
@@ -157,7 +208,11 @@ export default function VirtualStagingDialog({
     request.promise
       .then((nextJob) => {
         if (cancelled) return;
-        setJob(nextJob);
+        applyJobSnapshot(nextJob, {
+          sessionKey: requestKey,
+          propertyId,
+          unitId: unit.id,
+        });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -176,7 +231,7 @@ export default function VirtualStagingDialog({
     return () => {
       cancelled = true;
     };
-  }, [propertyId, startAttempt, toast, unit.id, unit.label]);
+  }, [applyJobSnapshot, propertyId, sessionKey, startAttempt, toast, unit.id, unit.label]);
 
   // Poll in the background even if the operator closes the modal. That keeps
   // the launch controls disabled until the live job actually reaches a terminal
@@ -187,11 +242,18 @@ export default function VirtualStagingDialog({
     let timer: number | undefined;
 
     const poll = async () => {
+      const actionVersion = jobActionVersionRef.current;
+      const scope: JobSnapshotScope = {
+        sessionKey,
+        propertyId,
+        unitId: unit.id,
+        jobId: job.id,
+      };
       try {
         const response = await apiRequest("GET", `/api/virtual-staging/jobs/${encodeURIComponent(job.id)}`);
         const nextJob = await readJob(response);
-        if (!cancelled) {
-          setJob(nextJob);
+        if (!cancelled && jobActionVersionRef.current === actionVersion) {
+          applyJobSnapshot(nextJob, scope);
           setPollError(null);
         }
       } catch (error: unknown) {
@@ -206,7 +268,20 @@ export default function VirtualStagingDialog({
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [job?.id, job?.status]);
+  }, [applyJobSnapshot, job?.id, job?.status, propertyId, sessionKey, unit.id]);
+
+  // A terminal review is not background-polled. Refresh once whenever it is
+  // reopened so feedback or confirmation completed in another tab is visible.
+  useEffect(() => {
+    if (!open || !job?.id) return;
+    const actionVersion = jobActionVersionRef.current;
+    void refreshJobSnapshot(job.id, actionVersion, {
+      sessionKey,
+      propertyId,
+      unitId: unit.id,
+      jobId: job.id,
+    }).catch(() => undefined);
+  }, [job?.id, open, propertyId, refreshJobSnapshot, sessionKey, unit.id]);
 
   // Another tab can confirm or finish the retained job while this dialog is
   // starting or polling it. Release the local session as soon as that durable
@@ -236,6 +311,9 @@ export default function VirtualStagingDialog({
     () => job?.candidates.filter(candidateIsSelectable) ?? [],
     [job?.candidates],
   );
+  const hasUnsubmittedFeedback = successfulCandidates.some((candidate) => (
+    feedbackDrafts.get(candidateSelectionKey(candidate))?.trim().length ?? 0
+  ) > 0);
 
   // A retry can move a formerly successful candidate back into a generating or
   // failed state. Never leave an ineligible candidate selected for confirmation.
@@ -249,12 +327,13 @@ export default function VirtualStagingDialog({
   }, [successfulCandidates]);
 
   const activeJob = !!job && ACTIVE_JOB_STATUSES.has(job.status);
+  const candidateActionInFlight = retryingCandidateIds.size > 0;
   const busy = (open && !job && !startError)
     || starting
     || activeJob
     || confirming
     || finishing
-    || retryingCandidateIds.size > 0;
+    || candidateActionInFlight;
   useEffect(() => {
     onBusyChange?.(busy);
   }, [busy, onBusyChange]);
@@ -279,33 +358,159 @@ export default function VirtualStagingDialog({
     });
   }, []);
 
-  const retryCandidate = useCallback(async (candidateId: string) => {
-    if (!job || retryingRef.current.has(candidateId)) return;
+  const retryCandidate = useCallback(async (candidate: VirtualStagingCandidate) => {
+    const candidateId = candidate.id;
+    if (!job || retryingRef.current.size > 0 || confirmingRef.current) return;
     retryingRef.current.add(candidateId);
+    const actionVersion = ++jobActionVersionRef.current;
     setRetryingCandidateIds(new Set(retryingRef.current));
     setPollError(null);
-    setSelectedCandidateKeys((current) => new Set(
-      Array.from(current).filter((key) => !key.startsWith(`${candidateId}:`)),
-    ));
 
     try {
       const response = await apiRequest(
         "POST",
         `/api/virtual-staging/jobs/${encodeURIComponent(job.id)}/candidates/${encodeURIComponent(candidateId)}/retry`,
+        { attempt: candidate.attempt },
       );
-      setJob(await readJob(response));
+      const nextJob = await readJob(response);
+      if (jobActionVersionRef.current === actionVersion) applyJobSnapshot(nextJob, {
+        sessionKey,
+        propertyId,
+        unitId: unit.id,
+        jobId: job.id,
+      });
+      if (activeSessionKeyRef.current !== sessionKey) return;
+      setSelectedCandidateKeys((current) => new Set(
+        Array.from(current).filter((key) => !key.startsWith(`${candidateId}:`)),
+      ));
     } catch (error: unknown) {
+      if (activeSessionKeyRef.current !== sessionKey) return;
       const message = errorMessage(error);
       setPollError(message);
       toast({ title: "Couldn't retry this photo", description: message, variant: "destructive" });
+      await refreshJobSnapshot(job.id, actionVersion, {
+        sessionKey,
+        propertyId,
+        unitId: unit.id,
+        jobId: job.id,
+      }).catch(() => undefined);
     } finally {
       retryingRef.current.delete(candidateId);
-      setRetryingCandidateIds(new Set(retryingRef.current));
+      if (activeSessionKeyRef.current === sessionKey) {
+        setRetryingCandidateIds(new Set(retryingRef.current));
+      }
     }
-  }, [job, toast]);
+  }, [applyJobSnapshot, job, propertyId, refreshJobSnapshot, sessionKey, toast, unit.id]);
+
+  const reviseCandidateWithFeedback = useCallback(async (candidate: VirtualStagingCandidate) => {
+    const candidateId = candidate.id;
+    const draftKey = candidateSelectionKey(candidate);
+    const feedback = feedbackDrafts.get(draftKey)?.trim() ?? "";
+    if (!job || retryingRef.current.size > 0 || confirmingRef.current || !feedback) return;
+    if (feedback.length > VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH) return;
+    retryingRef.current.add(candidateId);
+    const actionVersion = ++jobActionVersionRef.current;
+    setRetryingCandidateIds(new Set(retryingRef.current));
+    setPollError(null);
+
+    try {
+      const response = await apiRequest(
+        "POST",
+        `/api/virtual-staging/jobs/${encodeURIComponent(job.id)}/candidates/${encodeURIComponent(candidateId)}/feedback`,
+        { attempt: candidate.attempt, feedback },
+      );
+      const nextJob = await readJob(response);
+      if (jobActionVersionRef.current === actionVersion) applyJobSnapshot(nextJob, {
+        sessionKey,
+        propertyId,
+        unitId: unit.id,
+        jobId: job.id,
+      });
+      if (activeSessionKeyRef.current !== sessionKey) return;
+      setSelectedCandidateKeys((current) => new Set(
+        Array.from(current).filter((key) => !key.startsWith(`${candidateId}:`)),
+      ));
+      setFeedbackDrafts((current) => {
+        const next = new Map(current);
+        next.delete(draftKey);
+        return next;
+      });
+    } catch (error: unknown) {
+      if (activeSessionKeyRef.current !== sessionKey) return;
+      const message = errorMessage(error);
+      setPollError(message);
+      toast({ title: "Couldn't apply feedback to this photo", description: message, variant: "destructive" });
+      await refreshJobSnapshot(job.id, actionVersion, {
+        sessionKey,
+        propertyId,
+        unitId: unit.id,
+        jobId: job.id,
+      }).catch(() => undefined);
+    } finally {
+      retryingRef.current.delete(candidateId);
+      if (activeSessionKeyRef.current === sessionKey) {
+        setRetryingCandidateIds(new Set(retryingRef.current));
+      }
+    }
+  }, [applyJobSnapshot, feedbackDrafts, job, propertyId, refreshJobSnapshot, sessionKey, toast, unit.id]);
+
+  const restorePreviousPreview = useCallback(async (candidate: VirtualStagingCandidate) => {
+    const candidateId = candidate.id;
+    if (!job
+      || !candidate.previousStagedUrl
+      || retryingRef.current.size > 0
+      || confirmingRef.current) return;
+    retryingRef.current.add(candidateId);
+    const actionVersion = ++jobActionVersionRef.current;
+    setRetryingCandidateIds(new Set(retryingRef.current));
+    setPollError(null);
+
+    try {
+      const response = await apiRequest(
+        "POST",
+        `/api/virtual-staging/jobs/${encodeURIComponent(job.id)}/candidates/${encodeURIComponent(candidateId)}/restore-previous`,
+        { attempt: candidate.attempt },
+      );
+      const nextJob = await readJob(response);
+      if (jobActionVersionRef.current === actionVersion) applyJobSnapshot(nextJob, {
+        sessionKey,
+        propertyId,
+        unitId: unit.id,
+        jobId: job.id,
+      });
+      if (activeSessionKeyRef.current !== sessionKey) return;
+      setSelectedCandidateKeys((current) => new Set(
+        Array.from(current).filter((key) => !key.startsWith(`${candidateId}:`)),
+      ));
+      toast({
+        title: "Previous preview restored for review",
+        description: "Select “Use staged photo” on this photo if you want to apply it.",
+      });
+    } catch (error: unknown) {
+      if (activeSessionKeyRef.current !== sessionKey) return;
+      const message = errorMessage(error);
+      setPollError(message);
+      toast({ title: "Couldn't restore the previous preview", description: message, variant: "destructive" });
+      await refreshJobSnapshot(job.id, actionVersion, {
+        sessionKey,
+        propertyId,
+        unitId: unit.id,
+        jobId: job.id,
+      }).catch(() => undefined);
+    } finally {
+      retryingRef.current.delete(candidateId);
+      if (activeSessionKeyRef.current === sessionKey) {
+        setRetryingCandidateIds(new Set(retryingRef.current));
+      }
+    }
+  }, [applyJobSnapshot, job, propertyId, refreshJobSnapshot, sessionKey, toast, unit.id]);
 
   const confirmSelection = useCallback(async () => {
-    if (!job || selectedCandidateSelections.length === 0 || confirmingRef.current) return;
+    if (!job
+      || selectedCandidateSelections.length === 0
+      || confirmingRef.current
+      || retryingRef.current.size > 0
+      || hasUnsubmittedFeedback) return;
     confirmingRef.current = true;
     setConfirming(true);
     setConfirmError(null);
@@ -344,10 +549,13 @@ export default function VirtualStagingDialog({
       confirmingRef.current = false;
       setConfirming(false);
     }
-  }, [job, onConfirmed, onOpenChange, selectedCandidateSelections, toast, unit]);
+  }, [hasUnsubmittedFeedback, job, onConfirmed, onOpenChange, selectedCandidateSelections, toast, unit]);
 
   const finishWithoutSwaps = useCallback(async () => {
-    if (confirmingRef.current || activeJob) return;
+    if (confirmingRef.current
+      || activeJob
+      || retryingRef.current.size > 0
+      || hasUnsubmittedFeedback) return;
     confirmingRef.current = true;
     setFinishing(true);
     setFinishError(null);
@@ -374,7 +582,7 @@ export default function VirtualStagingDialog({
       confirmingRef.current = false;
       setFinishing(false);
     }
-  }, [activeJob, job, onFinished, onOpenChange, toast, unit.label]);
+  }, [activeJob, hasUnsubmittedFeedback, job, onFinished, onOpenChange, toast, unit.label]);
 
   const safelyChangeOpen = (nextOpen: boolean) => {
     if (!nextOpen && confirmingRef.current) return;
@@ -468,7 +676,7 @@ export default function VirtualStagingDialog({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={successfulCandidates.length === 0 || confirming}
+                  disabled={successfulCandidates.length === 0 || confirming || finishing || candidateActionInFlight}
                   onClick={() => setSelectedCandidateKeys(new Set(successfulCandidates.map(candidateSelectionKey)))}
                   data-testid="button-select-all-staged"
                 >
@@ -478,7 +686,7 @@ export default function VirtualStagingDialog({
                   type="button"
                   size="sm"
                   variant="ghost"
-                  disabled={selectedSuccessfulCandidates.length === 0 || confirming}
+                  disabled={selectedSuccessfulCandidates.length === 0 || confirming || finishing || candidateActionInFlight}
                   onClick={() => setSelectedCandidateKeys(new Set())}
                   data-testid="button-clear-staged-selection"
                 >
@@ -503,10 +711,13 @@ export default function VirtualStagingDialog({
           <div className="space-y-5">
             {job?.candidates.map((candidate, index) => {
               const selectable = candidateIsSelectable(candidate);
-              const selected = selectable && selectedCandidateKeys.has(candidateSelectionKey(candidate));
+              const selectionKey = candidateSelectionKey(candidate);
+              const selected = selectable && selectedCandidateKeys.has(selectionKey);
               const retrying = retryingCandidateIds.has(candidate.id);
+              const feedbackDraft = feedbackDrafts.get(selectionKey) ?? "";
               const label = candidate.roomLabel?.trim() || candidate.originalFilename || `Photo ${index + 1}`;
               const checkboxId = `use-staged-${candidate.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+              const feedbackId = `staging-feedback-${candidate.id.replace(/[^a-zA-Z0-9_-]/g, "-")}-${candidate.attempt}`;
 
               return (
                 <section
@@ -576,8 +787,11 @@ export default function VirtualStagingDialog({
                               type="button"
                               size="sm"
                               variant="outline"
-                              disabled={retrying || confirming || finishing}
-                              onClick={() => void retryCandidate(candidate.id)}
+                              disabled={!!feedbackDraft.trim() || candidateActionInFlight || confirming || finishing}
+                              title={feedbackDraft.trim()
+                                ? "Submit or clear this photo's feedback before generating another angle."
+                                : undefined}
+                              onClick={() => void retryCandidate(candidate)}
                               data-testid={`button-regenerate-staging-${candidate.id}`}
                             >
                               {retrying ? <Loader2 className="animate-spin" /> : <RefreshCw />}
@@ -587,28 +801,131 @@ export default function VirtualStagingDialog({
                               Replaces this preview with a newly generated nearby viewpoint.
                             </p>
                           </div>
+                          <div className="mt-4 rounded-md border bg-muted/20 p-3">
+                            <label htmlFor={feedbackId} className="text-sm font-medium">
+                              Feedback for this photo
+                            </label>
+                            <Textarea
+                              id={feedbackId}
+                              value={feedbackDraft}
+                              maxLength={VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH}
+                              rows={3}
+                              className="mt-2 resize-y bg-background"
+                              placeholder="Example: Remove the added chairs and replace the bed linens."
+                              disabled={retrying || confirming || finishing}
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                setFeedbackDrafts((current) => {
+                                  const next = new Map(current);
+                                  next.set(selectionKey, value);
+                                  return next;
+                                });
+                              }}
+                              aria-describedby={`${feedbackId}-help`}
+                              data-testid={`textarea-staging-feedback-${candidate.id}`}
+                            />
+                            <div id={`${feedbackId}-help`} className="mt-1 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground">
+                              <span>
+                                Changes only this preview at the same angle. Unspecified replacements stay close to the room's existing palette, materials, and regional style.
+                              </span>
+                              <span>{feedbackDraft.length}/{VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH}</span>
+                            </div>
+                            {candidate.lastFeedback && (
+                              <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                                Last submitted feedback: “{candidate.lastFeedback}”
+                              </p>
+                            )}
+                            <Button
+                              type="button"
+                              size="sm"
+                              className="mt-3"
+                              disabled={!feedbackDraft.trim() || candidateActionInFlight || confirming || finishing}
+                              onClick={() => void reviseCandidateWithFeedback(candidate)}
+                              data-testid={`button-submit-staging-feedback-${candidate.id}`}
+                            >
+                              {retrying ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                              {retrying ? "Applying feedback…" : "Regenerate with feedback"}
+                            </Button>
+                          </div>
                         </>
                       ) : candidate.status === "failed" ? (
                         <div className="flex min-h-44 flex-col items-center justify-center rounded-md border border-dashed border-destructive/40 bg-destructive/5 p-5 text-center">
+                          {candidate.previousStagedUrl && (
+                            <div className="mb-4 w-full overflow-hidden rounded-md bg-muted/40">
+                              <img
+                                src={candidate.previousStagedUrl}
+                                alt={`Previous virtually staged photo preserved for ${label}`}
+                                className="h-auto max-h-[42vh] w-full object-contain"
+                              />
+                            </div>
+                          )}
                           <p className="text-sm font-medium text-destructive">This photo could not be staged.</p>
                           {candidate.error && <p className="mt-1 text-xs text-muted-foreground">{candidate.error}</p>}
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="mt-3"
-                            disabled={retrying || confirming || finishing}
-                            onClick={() => void retryCandidate(candidate.id)}
-                            data-testid={`button-retry-staging-${candidate.id}`}
-                          >
-                            {retrying ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                            {retrying ? "Retrying…" : "Retry this photo"}
-                          </Button>
+                          {candidate.previousStagedUrl && candidate.lastFeedback && (
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              The prior preview is preserved above. Retrying will keep the same feedback request.
+                            </p>
+                          )}
+                          {candidate.previousStagedUrl && !candidate.lastFeedback && (
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              The prior preview is preserved above. You can restore it or retry the new angle.
+                            </p>
+                          )}
+                          {candidate.lastFeedback && (
+                            <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                              Feedback to retry: “{candidate.lastFeedback}”
+                            </p>
+                          )}
+                          <div className="mt-3 flex flex-wrap justify-center gap-2">
+                            {candidate.previousStagedUrl && (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="secondary"
+                                disabled={candidateActionInFlight || confirming || finishing}
+                                onClick={() => void restorePreviousPreview(candidate)}
+                                data-testid={`button-restore-previous-staging-${candidate.id}`}
+                              >
+                                {retrying ? <Loader2 className="animate-spin" /> : null}
+                                {retrying ? "Restoring…" : "Restore previous preview for review"}
+                              </Button>
+                            )}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={candidateActionInFlight || confirming || finishing}
+                              onClick={() => void retryCandidate(candidate)}
+                              data-testid={`button-retry-staging-${candidate.id}`}
+                            >
+                              {retrying ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                              {retrying ? "Retrying…" : "Retry this photo"}
+                            </Button>
+                          </div>
                         </div>
                       ) : (
-                        <div className="flex min-h-44 items-center justify-center gap-2 rounded-md border border-dashed bg-muted/20 p-5 text-sm text-muted-foreground">
-                          <Loader2 className="animate-spin" />
-                          {candidate.status === "generating" ? "Generating staged preview…" : "Waiting to generate…"}
+                        <div className="flex min-h-44 flex-col items-center justify-center rounded-md border border-dashed bg-muted/20 p-5 text-sm text-muted-foreground">
+                          {candidate.previousStagedUrl && (
+                            <>
+                              <div className="mb-3 w-full overflow-hidden rounded-md bg-muted/40 opacity-80">
+                                <img
+                                  src={candidate.previousStagedUrl}
+                                  alt={`Previous virtually staged photo retained while regenerating ${label}`}
+                                  className="h-auto max-h-[42vh] w-full object-contain"
+                                />
+                              </div>
+                              <p className="mb-3 text-xs">Previous preview retained until the replacement succeeds.</p>
+                              {candidate.lastFeedback && (
+                                <p className="mb-3 whitespace-pre-wrap break-words text-xs">
+                                  Applying feedback: “{candidate.lastFeedback}”
+                                </p>
+                              )}
+                            </>
+                          )}
+                          <div className="flex items-center gap-2">
+                            <Loader2 className="animate-spin" />
+                            {candidate.status === "generating" ? "Generating staged preview…" : "Waiting to generate…"}
+                          </div>
                         </div>
                       )}
                     </figure>
@@ -619,7 +936,7 @@ export default function VirtualStagingDialog({
                       <Checkbox
                         id={checkboxId}
                         checked={selected}
-                        disabled={!selectable || confirming || finishing}
+                        disabled={!selectable || confirming || finishing || candidateActionInFlight}
                         onCheckedChange={(checked) => toggleCandidate(candidate, checked === true)}
                         aria-describedby={`${checkboxId}-status`}
                         data-testid={`checkbox-use-staged-${candidate.id}`}
@@ -643,8 +960,15 @@ export default function VirtualStagingDialog({
         </div>
 
         <DialogFooter className="shrink-0 items-center gap-3 border-t bg-background px-6 py-4 sm:justify-between sm:space-x-0">
-          <p className="text-xs text-muted-foreground">
-            Originals remain preserved. Only checked staged versions will become active.
+          <p
+            id="virtual-staging-footer-status"
+            role="status"
+            aria-live="polite"
+            className={`text-xs ${hasUnsubmittedFeedback ? "font-medium text-amber-700" : "text-muted-foreground"}`}
+          >
+            {hasUnsubmittedFeedback
+              ? "Submit or clear typed photo feedback before finishing or confirming."
+              : "Originals remain preserved. Only checked staged versions will become active."}
           </p>
           <div className="flex w-full flex-col-reverse gap-2 sm:w-auto sm:flex-row">
             <Button type="button" variant="outline" disabled={confirming || finishing} onClick={() => safelyChangeOpen(false)}>
@@ -654,7 +978,8 @@ export default function VirtualStagingDialog({
               <Button
                 type="button"
                 variant="secondary"
-                disabled={confirming || finishing}
+                aria-describedby="virtual-staging-footer-status"
+                disabled={confirming || finishing || candidateActionInFlight || hasUnsubmittedFeedback}
                 onClick={() => void finishWithoutSwaps()}
                 data-testid="button-finish-virtual-staging-without-swaps"
               >
@@ -664,7 +989,14 @@ export default function VirtualStagingDialog({
             )}
             <Button
               type="button"
-              disabled={selectedSuccessfulCandidates.length === 0 || confirming || finishing || !job || job.status === "confirmed"}
+              aria-describedby="virtual-staging-footer-status"
+              disabled={selectedSuccessfulCandidates.length === 0
+                || confirming
+                || finishing
+                || candidateActionInFlight
+                || hasUnsubmittedFeedback
+                || !job
+                || job.status === "confirmed"}
               onClick={() => void confirmSelection()}
               data-testid="button-confirm-virtual-staging"
             >
