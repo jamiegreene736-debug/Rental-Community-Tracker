@@ -367,7 +367,7 @@ import {
 import { runPhotoListingCheckForFolders, listScanableFolders, normalizeSearchApiErrorMessage, getPhotoCheckBudget, PHOTO_AUDIT_MAX_PHOTOS } from "./photo-listing-scanner";
 import { runPhotoCommunityCheck, communityOnlyCheckRequest, type PhotoCommunityCheckRequest, type PhotoCommunityCheckResult } from "./photo-community-check";
 import { enrichCheckGroupsWithProvenance, setPhotoFolderVerification } from "./photo-folder-verification";
-import { scanForDuplicatePhotos, getStoredDedupeScan, type DedupeScanGroupInput } from "./photo-dedupe";
+import { scanForDuplicatePhotos, getStoredDedupeScan, MANUAL_SCAN_BUDGET_MS, type DedupeScanGroupInput } from "./photo-dedupe";
 import { validateDedupeSelection, type DedupeSelection } from "../shared/photo-dedupe-logic";
 import { scanAmenitiesForProperty } from "./amenity-scan";
 import { scanBeddingPhotosForProperty, loadStoredBeddingScan } from "./bedding-photo-scan";
@@ -31583,7 +31583,12 @@ Return ONLY compact JSON with this exact shape:
       if (groups.length === 0) {
         return res.status(400).json({ ok: false, error: "groups[] required (folder + filenames per gallery)" });
       }
-      const proposal = await scanForDuplicatePhotos(groups.slice(0, 12));
+      // The budget belongs to the TRANSPORT, not the engine: this is one
+      // synchronous response and Railway's edge hard-cuts at 15 minutes.
+      // Background callers (the unit-audit sweep) deliberately run unbudgeted.
+      const proposal = await scanForDuplicatePhotos(groups.slice(0, 12), {
+        deadlineAt: Date.now() + MANUAL_SCAN_BUDGET_MS,
+      });
       return res.json({ ok: true, ...proposal });
     } catch (err: any) {
       console.error("[photo-dedupe-scan]", err?.message ?? err);

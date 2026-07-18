@@ -43,6 +43,42 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-18 (Photos-tab "🧹 Scan photos & remove duplicates" — does it scan BOTH units, and does it
+  catch repeat angles?): Operator asked to verify + improve the methodology. BOTH UNITS: already
+  correct (don't re-chase) — the request is built from the rendered `photos` array, which builder.tsx
+  assembles as every unit gallery in unit order then the community folder, so all three folders were
+  always sent; the gap was that clean folders were FILTERED OUT of the result, so "Unit B scanned and
+  clean" looked identical to "Unit B never reached the scan". ANGLES: three real suppressions, all
+  fixed (`claude/unit-builder-duplicate-scan-3dbfa5`). (1) The manual path took ONE evenly-strided
+  60-photo SAMPLE, so a 150-photo gallery never showed Claude 90 of its photos — and since dHash
+  structurally cannot catch two angles of one scene, those had NO angle check — while the tab still
+  rendered "✓ No duplicate or redundant photos found across 150 photos"; `visionComplete` was computed
+  and sent but consumed by nobody on the manual path. Now tiered `buildManualVisionBatchPlan`
+  (one call → exhaustive pair-cover → disjoint chunks showing every photo at least once) + scan-wide
+  `PHOTO_DEDUPE_SCAN_BUDGET_MS`=8min guarding the synchronous response against Railway's 15-min edge
+  cut; the local `evenSampleIndices` is DELETED and test-locked against reintroduction. (2) Vision
+  unions were a STAR from `valid[0]`, so one guard-blocked edge discarded every other pair in the
+  group — now gated per pair. (3) Medium-confidence groups were discarded on top of a prompt that
+  already says "when unsure DO NOT group", and guard-blocked edges vanished silently; both now surface
+  as a REVIEW tier (`reviewGroups`, kind "review") — reported, nothing pre-selected, never auto-fixable.
+  LOAD-BEARING: reviewGroups is deliberately SEPARATE from `.groups` because the unit-audit sweep reads
+  `folders[].groups` emptiness as "gallery is clean" — putting review candidates there would make every
+  weekly cron flag properties over findings it can never act on. HONESTY: warnings + note now render on
+  EVERY completed scan (they were inside the `groupCount > 0` branch, i.e. hidden on exactly the branch
+  where a false clean is dangerous — a folder whose AI pass errored showed a bare green pass), plus a
+  per-folder coverage receipt that doubles as proof both units were scanned. HARDENED by a 4-lens adversarial review (19 confirmed
+  findings, all fixed pre-merge) — the majors were self-inflicted: the new per-pair gating let an
+  UNLABELED bridge photo transitively re-merge two DIFFERENT bedrooms into a confirmed,
+  sweep-auto-hideable group (guards now enforced cluster-wide via unionRespectingClusters —
+  do NOT simplify back to a bare union after dedupeEdgeAllowed); the HTTP-shaped deadline was
+  defaulted in the ENGINE so non-fullAutomation sweeps inherited it (budget now owned by the route);
+  and the budget was spent in folder order so the LAST gallery — typically Unit B — could get zero
+  angle coverage (each folder now gets a fair share of the remaining time). Verified: photo-dedupe
+  122/0 (was 67/0), unit-audit-sweep 200/0 untouched, full `npm test` exit 0, build clean, `npm run
+  check` 335 = baseline (stash A/B identical). Could NOT live-run the vision leg (no ANTHROPIC key) —
+  post-deploy: click the button and expect the coverage receipt + an amber "Possible repeat shots"
+  panel. See AGENTS.md "Photos-tab duplicate scan" points 3-5 + the 2026-07-18 Decision Log line.
+
 - 2026-07-18 (Cliffs at Princeville "Unit A is actually a 2BR" — find-new representative-fallback
   identity swap, diagnosed from prod DB + Railway logs at the exact 03:01Z window): NOT a display
   bug and NOT the replace rung (don't re-chase): the weekly audit cron's photo-fix ladder ran the
