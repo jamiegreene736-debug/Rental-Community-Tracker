@@ -24,6 +24,7 @@ import {
   heuristicCollagePick,
   parseCollageVisionPick,
   parseLocalPhotoUrl,
+  resolveForcedCollagePick,
   scoreCommunityShot,
   scorePatioShot,
   COLLAGE_HEIGHT,
@@ -101,6 +102,56 @@ assert.equal(heuristicCollagePick([]), null);
 assert.ok(scoreCommunityShot("Ocean view") > scoreCommunityShot("Resort grounds"));
 assert.ok(scorePatioShot("Lanai with ocean view") > scorePatioShot("Back porch"));
 console.log("  ✓ heuristicCollagePick (community left, patio right, no self-pair)");
+
+// ── resolveForcedCollagePick: the operator's "pick manually" pair ───────────
+// 2026-07-18: manual picks used to go through a client canvas + two
+// /api/builder/upscale-photo calls (Real-ESRGAN gated on the 1920 PUSH spec,
+// not the 800px panel) — slow enough that the operator read it as "nothing
+// happened … it reverted back to the collage that was chosen by Claude AI".
+// Manual now rides the same server composer via an explicit pair.
+const pool: CollageCandidate[] = [
+  { url: "/photos/community-koa-lagoon/01-community.jpg", caption: "Lanai With Ocean View", source: "Community" },
+  { url: "/photos/koa-lagoon-a/photo_00.jpg", caption: "Living Room With Ocean View", source: "Unit A" },
+  { url: "/photos/koa-lagoon-a/photo_01.jpg", caption: "Kitchen", source: "Unit A" },
+];
+assert.deepEqual(
+  resolveForcedCollagePick(pool, {
+    leftUrl: "/photos/community-koa-lagoon/01-community.jpg",
+    rightUrl: "/photos/koa-lagoon-a/photo_01.jpg",
+  }),
+  { leftIndex: 0, rightIndex: 2, reasoning: null },
+  "resolves the operator's exact pair (not the heuristic's)",
+);
+assert.deepEqual(
+  resolveForcedCollagePick(pool, {
+    leftUrl: "https://admin.vacationrentalexpertz.com/photos/koa-lagoon-a/photo_01.jpg",
+    rightUrl: "/photos/community-koa-lagoon/01-community.jpg",
+  }),
+  { leftIndex: 2, rightIndex: 0, reasoning: null },
+  "absolute URL form matches its /photos/ counterpart; operator order is honored",
+);
+assert.equal(
+  resolveForcedCollagePick(pool, { leftUrl: "/photos/koa-lagoon-a/photo_00.jpg", rightUrl: "/photos/gone/missing.jpg" }),
+  null,
+  "a pick absent from the resolved pool (external/missing on disk) → null, so the caller MUST fail",
+);
+assert.equal(
+  resolveForcedCollagePick(pool, { leftUrl: "/photos/koa-lagoon-a/photo_00.jpg", rightUrl: "/photos/koa-lagoon-a/photo_00.jpg" }),
+  null,
+  "same photo twice is not a collage",
+);
+assert.equal(resolveForcedCollagePick([], { leftUrl: "/photos/f/a.jpg", rightUrl: "/photos/f/b.jpg" }), null);
+assert.equal(resolveForcedCollagePick(pool, { leftUrl: "", rightUrl: "/photos/f/b.jpg" }), null);
+// Indices are resolved against the FILTERED candidate list, so an external
+// photo earlier in the gallery must not shift the pair.
+assert.deepEqual(
+  resolveForcedCollagePick(
+    [{ url: "/photos/f/a.jpg" }, { url: "/photos/f/b.jpg" }],
+    { leftUrl: "/photos/f/b.jpg", rightUrl: "/photos/f/a.jpg" },
+  ),
+  { leftIndex: 1, rightIndex: 0, reasoning: null },
+);
+console.log("  ✓ resolveForcedCollagePick (operator pair, never a silent substitute)");
 
 // ── panel ESRGAN gate: SHORT side vs the 800px square panel ─────────────────
 assert.equal(collageEsrganScale(4032, 3024), null, "big original skips the AI");
@@ -199,6 +250,30 @@ assert.ok(
 assert.ok(
   engine.includes("collageEsrganScale(dims.width, dims.height)"),
   "ESRGAN gated per pick by the short-side panel rule",
+);
+// A forced (operator) pick must be resolved BEFORE the vision/heuristic
+// branches and must THROW when unresolvable. If this ever degrades to an AI
+// pick, the operator gets Claude's collage after choosing their own — the
+// exact 2026-07-18 bug.
+const forcedBranch = engine.indexOf("if (opts.forcedPick) {");
+assert.ok(forcedBranch > 0, "engine handles an operator-forced pair");
+assert.ok(
+  forcedBranch < engine.indexOf("const visionEnabled ="),
+  "forced pick resolves before vision is even considered (no spend, no latency)",
+);
+assert.ok(
+  engine.includes("pick = resolveForcedCollagePick(candidates, opts.forcedPick)") &&
+  engine.slice(forcedBranch, forcedBranch + 900).includes("throw new Error("),
+  "an unresolvable forced pick throws — it never silently becomes a vision/heuristic pick",
+);
+assert.ok(
+  engine.includes('method = "manual"') &&
+  engine.includes('method: "vision" | "heuristic" | "manual"'),
+  "manual provenance is reported honestly (not mislabeled as a heuristic pick)",
+);
+assert.ok(
+  engine.includes("if (!pick && visionEnabled) {"),
+  "vision is skipped entirely once a forced pick is in hand",
 );
 console.log("  ✓ server/cover-collage.ts wiring locked");
 
@@ -308,6 +383,29 @@ assert.ok(
   !builderUi.includes("requireVision:"),
   "manual Photos-tab generation does not opt into strict audit behavior",
 );
+// The manual path posts the SAME composer with an explicit pair. The old
+// client canvas + per-pick upscale round-trip is what made a hand-picked
+// collage take minutes and look like it had done nothing.
+assert.ok(
+  builderUi.includes("picks: { left: { url: picks.community.url }, right: { url: picks.patio.url } }"),
+  "manual pair is sent to the server composer as an explicit pick",
+);
+assert.ok(
+  !builderUi.includes('fetch("/api/builder/upload-collage"') &&
+  !builderUi.includes("canvas.toDataURL(") &&
+  !builderUi.includes('fetch("/api/builder/upscale-photo"'),
+  "no client-side canvas compose or per-pick ESRGAN round-trip on the manual path",
+);
 console.log("  ✓ builder client wiring locked");
+
+// Route: a half-specified pair is rejected outright rather than quietly
+// becoming an AI pick.
+assert.ok(
+  autoRoute.includes("picks?: { left?: { url?: string }; right?: { url?: string } }") &&
+  autoRoute.includes('error: "picks must supply BOTH left.url and right.url"') &&
+  autoRoute.includes("forcedPick,"),
+  "endpoint forwards an operator pair and refuses a half-specified one",
+);
+console.log("  ✓ manual pick contract locked");
 
 console.log("cover-collage-logic: all tests passed");

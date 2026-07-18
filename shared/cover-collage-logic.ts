@@ -128,6 +128,45 @@ export function heuristicCollagePick(candidates: CollageCandidate[]): CollagePic
   return { leftIndex: left, rightIndex: right, reasoning: null };
 }
 
+// ── Operator-chosen pair ("pick manually") ──────────────────────────────────
+
+/** The operator's two picked photo URLs, straight off the PhotoCurator picker. */
+export type ForcedCollagePick = { leftUrl: string; rightUrl: string };
+
+/** Compare key for a candidate URL. Local gallery URLs compare on
+ * folder/filename so an absolute URL and its "/photos/…" form match; anything
+ * else falls back to the trimmed string. */
+function collageUrlKey(url: string): string {
+  const parsed = parseLocalPhotoUrl(url);
+  return parsed ? `${parsed.folder}/${parsed.filename}` : String(url ?? "").trim();
+}
+
+/**
+ * Resolve the operator's manually picked pair onto the resolved candidate
+ * list. Returns null when either URL isn't in the list (external photo, file
+ * missing on disk) or both picks are the same photo.
+ *
+ * NOTE FOR CODEX (load-bearing — this IS the 2026-07-18 bug): a null here must
+ * make the caller FAIL, never degrade to the vision/heuristic pick. The
+ * operator reported picking two photos and getting Claude's pair back instead;
+ * a silent fallback would reproduce exactly that. See
+ * server/cover-collage.ts's forcedPick branch.
+ */
+export function resolveForcedCollagePick(
+  candidates: CollageCandidate[],
+  forced: ForcedCollagePick,
+): CollagePickIndices | null {
+  if (!candidates?.length || !forced) return null;
+  const leftKey = collageUrlKey(forced.leftUrl);
+  const rightKey = collageUrlKey(forced.rightUrl);
+  if (!leftKey || !rightKey || leftKey === rightKey) return null;
+  const indexOf = (key: string) => candidates.findIndex((c) => collageUrlKey(c.url) === key);
+  const leftIndex = indexOf(leftKey);
+  const rightIndex = indexOf(rightKey);
+  if (leftIndex < 0 || rightIndex < 0 || leftIndex === rightIndex) return null;
+  return { leftIndex, rightIndex, reasoning: null };
+}
+
 // ── Vision prompt + parser ───────────────────────────────────────────────────
 
 /**

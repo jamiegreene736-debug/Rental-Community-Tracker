@@ -112,8 +112,9 @@ export type PhotoCuratorProps = {
     error?: string | null;
     preview?: string | null;
     picks?: { community: string; patio: string } | null;
-    /** How the last pair was chosen: "vision" (Claude) or "heuristic"
-     * (caption-score fallback). Null for the manual flow. */
+    /** How the last pair was chosen: "vision" (Claude), "heuristic"
+     * (caption-score fallback), or "manual" (the operator picked both photos
+     * in the picker below — the server composes exactly that pair). */
     method?: string | null;
     reasoning?: string | null;
   };
@@ -745,7 +746,7 @@ export default function PhotoCurator({
           phase === "done" ? "↺ Make New Cover Collage" :
           busy ? (
             phase === "picking" ? "⏳ Claude is picking the best two photos…" :
-            phase === "uploading" ? "⏳ Uploading to Guesty…" : "⏳ Building collage…"
+            phase === "uploading" ? "⏳ Uploading to Guesty…" : "⏳ Composing & setting the cover…"
           ) :
           "🖼 Make Cover Collage";
         const startAuto = () => {
@@ -801,10 +802,17 @@ export default function PhotoCurator({
               <div style={{ flexBasis: "100%", fontSize: 11, color: "#0369a1" }}>
                 {coverCollageStatus.method === "vision" ? "🤖 Claude picked: " :
                  coverCollageStatus.method === "heuristic" ? "Caption-scored (vision unavailable): " :
+                 coverCollageStatus.method === "manual" ? "✋ You picked: " :
                  "Selected: "}
                 <em>{coverCollageStatus.picks.community}</em> &nbsp;+&nbsp; <em>{coverCollageStatus.picks.patio}</em>
                 {coverCollageStatus.reasoning && (
                   <span style={{ color: "#0c4a6e" }}> — {coverCollageStatus.reasoning}</span>
+                )}
+                {busy && (
+                  <span style={{ color: "#0c4a6e" }}>
+                    {" "}— composing the 2-up and setting it as the Guesty cover. The live
+                    collage below still shows the previous cover until this finishes.
+                  </span>
                 )}
               </div>
             )}
@@ -1095,6 +1103,16 @@ export default function PhotoCurator({
             }}>
               Cover Collage — live on Guesty
             </div>
+            {/* While a new collage is being built this tile still shows the
+                PREVIOUS cover (it's what Guesty is serving right now). Say so —
+                without this the operator reads the old image as their manual
+                pick having been discarded (the 2026-07-18 report). */}
+            {(coverCollageStatus?.phase === "picking" || coverCollageStatus?.phase === "generating"
+              || coverCollageStatus?.phase === "uploading") && (
+              <span style={{ fontSize: 11, color: "#b45309", fontWeight: 600 }}>
+                ⏳ Replacing — this is still the previous cover
+              </span>
+            )}
             <a
               href={coverCollageCurrentUrl}
               target="_blank"
@@ -1134,7 +1152,7 @@ export default function PhotoCurator({
                 }}>Cover</div>
               </div>
               <div style={{ padding: "6px 10px", fontSize: 11, color: "#6b7280" }}>
-                Auto-generated 2-up community + patio collage. Regenerate via the banner above.
+                2-up community + patio collage — Claude-picked or hand-picked via the banner above.
               </div>
             </div>
           </div>

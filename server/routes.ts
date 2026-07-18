@@ -23707,12 +23707,15 @@ Requirements:
   // Both saves are best-effort and reported honestly in the response —
   // a failed save never unwinds a successful Guesty push.
   app.post("/api/builder/auto-cover-collage", async (req, res) => {
-    const { listingId: rawListingId, propertyId: rawPropertyId, photos, existingPhotos, requireVision } = req.body as {
+    const { listingId: rawListingId, propertyId: rawPropertyId, photos, existingPhotos, requireVision, picks } = req.body as {
       listingId?: string | null;
       propertyId?: number | string | null;
       photos: Array<{ url: string; caption?: string; source?: string }>;
       existingPhotos?: { original: string; caption: string }[];
       requireVision?: boolean;
+      /** "pick manually": the operator's chosen pair. Present → the engine
+       * composes EXACTLY these two and never consults vision/heuristic. */
+      picks?: { left?: { url?: string }; right?: { url?: string } };
     };
     const listingId = typeof rawListingId === "string" && rawListingId.trim() ? rawListingId.trim() : null;
     const parsedPropertyId = rawPropertyId == null || rawPropertyId === "" ? null : Number(rawPropertyId);
@@ -23741,12 +23744,25 @@ Requirements:
         source: typeof p.source === "string" ? p.source : null,
       }));
 
+    // Operator-chosen pair, when the Photos-tab "pick manually" picker drove
+    // this call. Both URLs must be present — a half-specified pick is a client
+    // bug and must not silently become an AI pick.
+    const forcedLeftUrl = typeof picks?.left?.url === "string" ? picks.left.url.trim() : "";
+    const forcedRightUrl = typeof picks?.right?.url === "string" ? picks.right.url.trim() : "";
+    if ((forcedLeftUrl || forcedRightUrl) && !(forcedLeftUrl && forcedRightUrl)) {
+      return res.status(400).json({ error: "picks must supply BOTH left.url and right.url" });
+    }
+    const forcedPick = forcedLeftUrl && forcedRightUrl
+      ? { leftUrl: forcedLeftUrl, rightUrl: forcedRightUrl }
+      : undefined;
+
     let collage: AutoCoverCollageResult;
     try {
       collage = await generateAutoCoverCollage({
         photos: candidates,
         requireVision: requireVision === true,
         upscale: (buf, mimeType, scale) => upscaleWithReplicateKw(buf, mimeType, scale),
+        forcedPick,
       });
     } catch (e: any) {
       return res.status(422).json({ error: e?.message ?? "Could not build the collage" });
