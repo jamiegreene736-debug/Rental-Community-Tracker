@@ -1825,6 +1825,13 @@ guards on the routes.ts wiring).
       units. The operator asked (2026-06-19) for a clean
       units-then-community grouping, so that interleave logic is GONE. Don't
       reintroduce community-opener / between-unit separators.
+      **PARTLY SUPERSEDED 2026-07-18 — see "Published gallery layout" below.**
+      The operator re-asked for ONE community photo between the units (so a
+      guest scrolling the OTA gallery can see it's two units). The between-unit
+      separator is therefore BACK, but only as a single photo, MOVED out of the
+      community block (never a copy) and operator-toggleable. The
+      community-OPENER before unit A stays gone — do not reintroduce it, and do
+      not restore the old multi-photo interleave.
     - **Hero-first default is intentional and OVERRIDES old decision #2.**
       Within each gallery the default order is the category heuristic in
       `shared/photo-order.ts` (`orderGallery`): living/view/kitchen → bedrooms
@@ -1880,6 +1887,83 @@ guards on the routes.ts wiring).
       distance math live in `shared/photo-hash-distance.ts`
       (`agreementImageIdentityHolds`), locked by
       `tests/photo-hashing-identity.test.ts`.
+
+### Published gallery layout — unit order + unit divider (Load-Bearing, 2026-07-18)
+
+Operator ask: a Photos-tab control to choose whether Unit A's or Unit B's
+photos are shown first, and "if you can break up unit A and unit B with a
+community photo … so the guest knows that it's two units". Published order is
+now:
+
+```
+cover collage → <lead unit> → [community divider] → <next unit> → … → community
+```
+
+1. **"Collage first" was ALREADY true — no change was made for it.**
+   `/api/builder/push-photos` GETs the listing, captures the
+   `"Cover Collage"`-captioned picture and re-prepends it on every PUT (see
+   #46). Don't re-implement collage pinning in the layout.
+
+2. **`shared/photo-gallery-layout.ts` owns the ACROSS-gallery contract;
+   `shared/photo-order.ts` still owns WITHIN a gallery.** The split is
+   load-bearing: every folder-scoped operation (drag-to-reorder, "best order",
+   relabel, `photo_labels.sort_order`) keys off `orderGallery`, and the layout
+   never touches `sort_order`.
+
+3. **BOTH push assemblies must apply the layout.** `client/src/pages/builder.tsx`
+   (`propertyData.photos` — the Photos-tab gallery AND the body of the manual
+   push, which is sent verbatim) and `server/guesty-photo-repush.ts` (the
+   AUTOMATED re-push after a unit swap + the retroactive sweep). Wire one and
+   not the other and a unit replacement silently reverts the operator's chosen
+   order. Source-guarded in `tests/photo-gallery-layout.test.ts`.
+
+4. **The setting is SERVER-side (`app_settings photo_gallery_layout.v1`, keyed
+   by builder propertyId — positive core id OR `-draftId`), NOT localStorage.**
+   The automated re-push runs with no browser in the loop; a per-browser
+   preference would be invisible to it (the Bedding-tab limitation — Unit Audit
+   Sweep #9). Reads are fail-soft (an unreadable store = defaults); the operator
+   SAVE path deliberately reports errors instead of silently no-opping.
+
+5. **The divider photo is MOVED, never duplicated.** It is taken from the FRONT
+   of the already-ordered community gallery (its hero) and removed from the
+   community block, so it appears exactly once and doesn't burn one of Airbnb's
+   100 picture slots. Consequence the operator picks the divider with no extra
+   UI: drag a community photo to position 1. At least one community photo always
+   remains (`MIN_COMMUNITY_PHOTOS_AFTER_DIVIDERS`), so a thin folder just gets
+   fewer dividers — never a duplicate, never an empty community section.
+
+6. **The divider KEEPS the community `source` string** and is marked with an
+   explicit `isUnitDivider` flag instead. Giving it a source of its own broke
+   three source-driven consumers at once: the photo-community check built a
+   bogus one-photo "unit" group (`role` is derived from `/^community\b/i` on
+   `source`), the dedupe scan mislabelled the community folder, and the
+   cover-collage community/unit pools mis-sorted it. Only the renderer looks at
+   the flag.
+
+7. **Divider tiles fold back into their folder's persisted order.**
+   `storage.reorderPhotosInFolder` only stamps `sort_order` on the filenames it
+   is handed, so persisting just the community SECTION (which excludes the
+   moved divider) would leave the divider with a stale order and the
+   "divider = community photo #1" invariant would drift on every drag.
+   `PhotoCurator.dividerTilesForFolder` prepends them. PhotoCurator also splits
+   sections on the divider flag, not just `source` — otherwise a divider
+   followed by an EMPTY unit gallery merges into the community section.
+
+8. **Unit letters come from the NATURAL index, never the display order.**
+   Showing Unit B first must not rename it to "Unit A" — the letter is the
+   unit's identity in descriptions, bedding, and the audit. `unitGalleryLabel`
+   is shared so the divider caption is byte-identical across the manual and
+   automated push.
+
+9. **Divider captions are the photo's own caption + " — next: Unit B (3BR)"**
+   (operator's choice over divider-only wording: the photo still describes
+   itself). `dividerCaptionFor` is idempotent and `stripDividerCaptionSuffix`
+   runs before any caption is written back to `photo_labels`, so the tail can
+   never compound or be persisted as a photo's real label.
+
+10. **Dividers default ON** (`DEFAULT_UNIT_DIVIDERS`) per the operator's rollout
+    choice — a property with no saved row still gets one. `unitDividers: false`
+    is the explicit per-property opt-out. Single-unit listings never get one.
 
 ### Bedding-tab bedroom count is RECONCILED, never trusted (Load-Bearing, 2026-07-18)
 
@@ -5605,3 +5689,5 @@ Welcome. When in doubt, ask the human.
 2026-07-18 · Jamie (Photos-tab screenshot, Koa Lagoon: "Building collage…" with "Selected: Lanai With Ocean View + Living Room With Ocean View"): "I'm trying to do the collage manually. I selected the two photos and it said generating the collage but nothing happened and it just reverted back to the collage that was chosen by Claude AI." → follow-up: "As an update the collage did create correctly, it just took a while." · DIAGNOSED + SHIPPED (`claude/manual-collage-generation-bug-55156e`) · NOT a functional failure and NOT a real revert (don't re-chase): the manual collage DID build and push. It was a LATENCY + HONESTY defect. ROOT CAUSE: "pick manually" was the only flow that never got the 2026-07-11 AI-collage treatment — it ran a client-side pipeline (two `/api/builder/upscale-photo` calls → browser canvas → `/api/builder/upload-collage`) whose ESRGAN gate is the **1920px PUSH spec on the LONG side**, while a collage panel is only **800px on the SHORT side** (`collageEsrganScale`). Measured against the operator's real photos on disk: a 1280×948 community shot skips the AI entirely on the one-click path but fired a ~30s Replicate job (plus a full-size ImgBB upload AND browser re-download, purely to feed the canvas) on the manual path — for pixels immediately downscaled into an 800px panel. Two Replicate jobs + four network hops before the first visible feedback, under a single frozen "⏳ Building collage…" label, while the "Cover Collage — live on Guesty" tile kept rendering the PREVIOUS (Claude-picked) cover with the caption "Auto-generated…" — which is precisely what read as "nothing happened / it reverted to Claude's collage". FIX: both paths now post `auto-cover-collage`; the manual pair rides along as an explicit `picks:{left:{url},right:{url}}` resolved by the new pure `resolveForcedCollagePick` and composed EXACTLY (`method:"manual"`, zero vision spend), so manual gains the sharp composer, the short-side gate, AND the in-system save it never had. **LOAD-BEARING: an unresolvable forced pick THROWS — it must never degrade to the vision/heuristic pick**, or the operator once again gets Claude's collage after choosing their own (source-guarded). UI honesty: "✋ You picked: X + Y", a "⏳ Replacing — this is still the previous cover" note on the live tile while a build is in flight, and the audit sweep's receipt no longer mislabels a hand-picked collage as a heuristic pick. Verified: cover-collage-logic 13 groups green (incl. 8 new forced-pick cases + never-degrade source guards), full `npm test` REAL exit 0, build clean (new strings bundle-grepped in BOTH bundles), `npm run check` 335 = baseline (stash A/B, IDENTICAL per-file error sets); engine exercised against REAL photo bytes on disk (manual pick composes the operator's pair and NOT the heuristic's, valid 1600×800 JPEG, **0 ESRGAN calls where the old 1920 gate would have fired 2**, a genuinely small 940×470 pick still upscales once, and all three unresolvable cases — missing file / same photo twice / external CDN URL — throw); manual flow proven end-to-end on the BUILT bundle (static SPA server + Playwright, mocked /api: picker → the exact clicked pair in the POST body → "You picked" + "saved in system" done state, one composer request, zero upload-collage/upscale-photo calls — 10/10). See the "AI cover collage" Load-Bearing subsection point 2b.
 
 2026-07-18 · Jamie (Bedding-tab screenshot, Cliffs at Princeville: "It's still showing 7 bedrooms when it should [be] 6") · ACCEPTED, fixed at the root + the live listing corrected · NOT a display bug and NOT the bedding photo scan (don't re-chase — the server-side scan was already correct: it derived `expectedBedrooms` 2 and 4 from the draft and its vision pass found exactly 2 bedrooms in Unit A). ROOT CAUSE: the Bedding tab's config lives in THIS BROWSER's `localStorage` (`nexstay_bedding_<propertyId>`), and `normalizeUnit` (client/src/data/bedding-config.ts) took the stored `bedrooms` array WHOLESALE, comparing nothing against the freshly-derived default. `buildDefaultBeddingConfig` rebuilds that default from the authoritative record on every load (`resolveDraftUnitBedrooms` for drafts, unit-builder-data for static props), so the correction was always available — it was simply discarded. When the 2026-07-18 identity fix set draft 20's `unit1Bedrooms` 3 → 2, Unit A kept its third slot forever: the header read 7 BR (3+4), `headlineSleeps` (drafts fall back to `totalBedrooms`) inflated `accommodates` to 18, and — because `totalBedrooms(config)` is literally the number the Guesty push sends — the LIVE listing was written `bedrooms: 7, accommodates: 18` under its own "Stunning 6BR for 16 at Princeville Cliffs!" title. Nothing server-side validates it: the proxy's `classifyGuestyProxyListingWrite` seam is explicitly display-only, so the browser's slot count is the only bedroom count Guesty ever receives. SHIPPED (`claude/bedding-bedroom-count-reconcile`): NEW pure `shared/bedding-bedroom-reconcile.ts` — `reconcileUnitBedroomSlots` corrects the stored array's LENGTH against the authoritative default (operator/scan edits on surviving slots preserved verbatim, excess dropped from the END, short lists topped up from defaults, `roomNumber` renumbered 1..N because `buildGuestyListingRooms` and the tab's mutators key on it), plus `blockedBeddingPushReason` which REFUSES a Guesty bedding push whose count contradicts the record. Wired at both seams: `normalizeUnit` reconciles on every load (so the tab self-heals on next open) and `pushBeddingConfigToGuesty` — the ONE Guesty write path shared by the manual button AND the scan auto-push — is guarded before it sends. TWO HONESTY RULES, both test-locked: (a) an EMPTY authoritative list means "unknown", NEVER "zero bedrooms", so a draft whose row hasn't loaded can't empty a real config or push `bedrooms: undefined` + empty `listingRooms`; (b) a reconciliation is REPORTED, never silent — dropping a slot may discard a hand-added bedroom, so the tab renders an amber notice naming each unit it corrected. Bathrooms deliberately NOT reconciled (the draft columns are free TEXT and half-baths are legitimately operator-owned). LIVE FIX: listing 6a32d2d6fe84350014353832 corrected in place to bedrooms 6 / bathrooms 4 / accommodates 16, dropping the stale Unit-A `1x SINGLE_BED` room and renumbering 1..6 while preserving the shared `roomNumber: 0` sofa space (pre-state asserted before the PUT; read-back verified). Verified: bedding-bedroom-reconcile 20/0, bedding-photo-scan 104/0 + bedding-space-copy + occupancy-rule untouched, full `npm test` REAL exit 0, build clean, `npm run check` 335 = baseline (stash A/B: identical per-file sets; the only diff is TS's nondeterministic union-member print order in a pre-existing preflight-verdict error), and the whole load→reconcile→push chain replayed end-to-end through the REAL client modules against draft 20's actual row (7/18 → 6/16, one operator notice, guard blocks 7 and allows 6). PORTFOLIO SWEEP (all 24 mapped listings, read-only) found no other instance of THIS bug but two unrelated pre-existing defects, deliberately NOT auto-fixed because correcting them would mean inventing bed layouts on live listings: Mauna Lani Point (draft -13, listing 6a333e06…) is live as `bedrooms: 1, bathrooms: 0` with a single EMPTY room under a "6BR" title, and Poipu Kai (static prop 9, listing 6a1e43e0…) carries junk `listingRooms` numbered #48–#57 with five empty entries (its scalar fields are all correct). Both now heal correctly via one Bedding-tab push each, since the guard + reconcile make that push record-consistent.
+
+2026-07-18 · Jamie: "build out in the UI in the photos tab a button and/or a process whereby I can select if unit A's photos or unit B's photos are shown first. The photo order should therefore be: collage photo first, then unit A or unit B, then the community folder photos. If you can break up unit A and unit B with a community photo when it is pushed to Guesty, that would be great so the guest knows that it's two units." · ACCEPTED, PARTLY SUPERSEDES the 2026-06-19 "don't reintroduce between-unit separators" rule (Load-Bearing #46) · New "Gallery order" panel on the Photos tab (multi-unit properties only): a ▲/▼ list picking which unit leads, plus a "Separate the units with a community photo" checkbox (default ON per operator choice). Published order is now `cover collage → <lead unit> → [community divider] → <next unit> → … → community`. VERIFIED-ALREADY-TRUE, don't re-chase: "collage first" needed NO change — push-photos re-pins the "Cover Collage" picture on every PUT (#46). The between-unit separator is BACK but scoped hard: ONE photo, MOVED out of the community block (never duplicated — a copy would show twice in the guest gallery and burn one of Airbnb's 100 slots), taken from the front of the ordered community gallery so the operator re-picks it just by dragging a community photo to position 1, and floored so the community section can never empty; the community-OPENER before unit A stays gone. Pure contract in NEW `shared/photo-gallery-layout.ts` (across-gallery) — deliberately separate from `shared/photo-order.ts` (within-gallery), which still owns every `photo_labels.sort_order` operation. LOAD-BEARING: the layout is applied by BOTH push assemblies (builder.tsx `propertyData.photos` = the tab gallery AND the manual push body, and server/guesty-photo-repush.ts = the automated post-swap/retroactive push) — wiring only one lets a unit replacement silently revert the operator's order; source-guarded. Setting is SERVER-side (`app_settings photo_gallery_layout.v1`, keyed by propertyId incl. `-draftId`) precisely because the automated re-push has no browser (the Bedding-tab localStorage limitation). Three self-inflicted traps found and fixed pre-merge: (1) giving the divider its own `source` made the photo-community check build a bogus one-photo "unit" group and mislabelled the dedupe scan + collage pools — it now KEEPS the community source and carries an `isUnitDivider` flag; (2) the moved divider left the community folder's drag-reorder persisting a PARTIAL `sort_order` (reorderPhotosInFolder only stamps what it is handed), so divider tiles are folded back into their folder's persisted order; (3) sections split on the divider flag, not just source, or a divider before an EMPTY unit gallery swallows the community section. Unit letters come from the NATURAL index so reordering never renames Unit B to Unit A. Captions are the photo's own text + " — next: Unit B (3BR)" (operator's choice), idempotent and stripped before any write-back to photo_labels. Verified: photo-gallery-layout 16 groups/0 fail, full `npm test` REAL exit 0, build clean (strings bundle-grepped in BOTH bundles), `npm run check` per-file error sets IDENTICAL to the 335 baseline, and the UI proven on the BUILT bundle (static SPA server + Playwright, mocked /api — 14/14: panel renders, divider strip announces the next unit, community section drops 4→3 photos proving the move-not-copy, ▲/▼ PATCHes the unitOrder, the checkbox PATCHes unitDividers and the strip disappears). Could NOT live-push to Guesty (no creds in session) — post-deploy: open a 2-unit Photos tab, set the order, then "Push Photos to Guesty" and expect collage → lead unit → one resort photo captioned "… — next: Unit X" → other unit → the rest of the community.

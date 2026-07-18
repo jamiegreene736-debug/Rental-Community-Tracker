@@ -1,8 +1,15 @@
-// Pure helpers for ordering a listing's photos before they're pushed to
-// Guesty. The published order the operator asked for (2026-06-19) is:
+// Pure helpers for ordering a listing's photos WITHIN one gallery before
+// they're pushed to Guesty.
+//
+// The order ACROSS galleries — which unit leads, and the community photo
+// published between the units — moved to shared/photo-gallery-layout.ts
+// (2026-07-18). Keep the split: everything here is folder-scoped and drives
+// `photo_labels.sort_order` (drag-to-reorder, "best order", relabel), while the
+// layout module is structural and never touches sort_order. The published
+// order is:
 //
 //   cover collage (pushed separately, prepended as the Guesty cover)
-//     → Unit A → Unit B → … → Community
+//     → <lead unit> → [community divider] → <next unit> → … → Community
 //
 // and WITHIN each gallery a "best presentation" hero-first order
 // (living / view / kitchen → bedroom suites with ensuite baths interleaved →
