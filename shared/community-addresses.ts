@@ -81,6 +81,23 @@ export const COMMUNITY_ADDRESS_RULES: CommunityAddressRule[] = [
   // generic seed on 57-101 Kuilima Dr. Street precision only scores candidates here —
   // discovery is name+city driven — so the shared canonical street is intentional.
   { names: ["Kuilima Estates", "Kuilima Estates East", "Kuilima Estates West", "Kuilima Ests East", "Kuilima Ests West"], street: "57-101 Kuilima Dr", city: "Kahuku", cityAliases: ["Turtle Bay"], state: "HI", buildingStreetRoots: ["57-101 Kuilima Dr", "57-068 Eleku Kuilima Pl"] },
+  // Wavecrest Resort (East Molokai). LOAD-BEARING street numbers: directory/maps
+  // sources list the resort office as "8001 Kamehameha V Hwy", but Zillow/Redfin/
+  // Realtor index every actual UNIT under the building addresses 7142/7144/7146/
+  // 7148 Kamehameha V Hwy (bldgs A/B/C), Kaunakakai. Root-caused 2026-07-18: the
+  // draft's 8001 street root made the find-replacement resort-street gate reject
+  // all 182 discovered listings ("no eligible replacement units found"). Rule
+  // street = 7142 (Zillow's named /b/ building page); buildingStreetRoots admit
+  // the sibling buildings.
+  {
+    names: ["Wavecrest Resort", "Wavecrest", "Wavecrest Oceanfront Resort"],
+    street: "7142 Kamehameha V Hwy",
+    city: "Kaunakakai",
+    cityAliases: ["Molokai", "East Molokai", "Ualapue", "Pukoo"],
+    state: "HI",
+    zillowBuildingUrl: "https://www.zillow.com/b/wavecrest-kaunakakai-hi-5YktLV/",
+    buildingStreetRoots: ["7142 Kamehameha V Hwy", "7144 Kamehameha V Hwy", "7146 Kamehameha V Hwy", "7148 Kamehameha V Hwy"],
+  },
 ];
 
 /** Tokens from a Hawaii hyphenated street number (e.g. 92-102) that must not be treated as condo unit IDs in listing URL slugs. */
