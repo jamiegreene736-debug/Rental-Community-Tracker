@@ -37,11 +37,18 @@ import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/
 import { occupancyForBedrooms } from "@shared/occupancy";
 import {
   DESCRIPTION_OVERRIDE_FIELDS,
+  SLEEPING_CAPACITY_RULE,
+  advertisedOccupancyFromTitle,
+  buildSleepingCapacityExplanation,
   clampGroundingSnippet,
+  describesSleepingCapacity,
+  ensureSleepingCapacityExplanation,
   findDescriptionReadbackMismatches,
   findDescriptionPlaceholders,
   generatedDraftCompletenessRegressions,
+  normalizeDescriptionReadback,
   photoCaptionDigest,
+  sleepingCapacityPromptContext,
   stripAreaSectionsFromDescription,
   unconfirmedBedTypeMentions,
   type PropertyDescriptionOverrideField,
@@ -25109,6 +25116,267 @@ Requirements:
     } catch (err: any) {
       console.error("[reflow-description-disclaimers] error:", err?.message ?? err);
       res.status(500).json({ error: "Failed to reflow description disclaimers", message: err?.message ?? String(err) });
+    }
+  });
+
+  // POST /api/admin/backfill-sleeping-capacity
+  //
+  // One-off/admin backfill (2026-07-18): guests kept asking "how does a 4
+  // bedroom sleep 12?", so every listing's summary must SHOW the arithmetic —
+  // bedrooms at 2 each, plus the sleeper sofa in each unit's living area.
+  // /api/community/generate-listing now writes that paragraph itself, so this
+  // route only exists to fix listings that were published BEFORE it.
+  //
+  // SURGICAL ON PURPOSE (operator's call): it does NOT re-run Claude over the
+  // portfolio. It takes each listing's CURRENT Guesty summary, inserts the one
+  // paragraph, and pushes that back — so existing copy and hand-edited
+  // Descriptions-tab overrides survive verbatim. A full AI regenerate would
+  // rewrite good live OTA copy and clobber those edits for no added benefit.
+  //
+  // NDJSON + heartbeat like push-published-addresses: a serialized walk behind
+  // the guesty-sync global gate (and a possible 429 pause) can outlive
+  // Railway's hard 15-minute edge cap, and a buffered response would be cut
+  // with every per-listing result lost (the PR #1040 class).
+  //
+  // Dry-run by DEFAULT — pass { execute: true } to write. Mirrors
+  // reflow-description-disclaimers, because this mutates live OTA listings.
+  app.post("/api/admin/backfill-sleeping-capacity", async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { execute?: boolean; force?: boolean; propertyIds?: number[] };
+    const execute = body.execute === true;
+    const force = body.force === true;
+    const wanted =
+      Array.isArray(body.propertyIds) && body.propertyIds.length > 0
+        ? new Set(body.propertyIds.map((v) => Number(v)))
+        : null;
+
+    let maps: Array<{ propertyId: number; guestyListingId: string }> = [];
+    let draftByPropertyId = new Map<number, Record<string, unknown>>();
+    try {
+      maps = await storage.getGuestyPropertyMap();
+      const drafts = await storage.getCommunityDrafts();
+      draftByPropertyId = new Map(drafts.map((d) => [-Number(d.id), d as unknown as Record<string, unknown>]));
+    } catch (e: any) {
+      // Only failure that can return a normal buffered error — nothing has
+      // been streamed yet, so headers are still ours to set.
+      return res.status(500).json({ success: false, error: `Could not read the property map: ${e?.message ?? e}` });
+    }
+
+    // Resolve bedrooms + unit count per mapped listing. Bedrooms come from the
+    // SUM of the unit bedroom counts (what generate-listing feeds
+    // occupancyForBedrooms), never a stored combined total — the 2026-07-18
+    // Cliffs incident showed combinedBedrooms can drift away from its own units.
+    const resolveTarget = (propertyId: number) => {
+      const builder = getUnitBuilderByPropertyId(propertyId);
+      if (builder) {
+        const units = (builder.units ?? []) as Array<{ bedrooms?: number }>;
+        return {
+          kind: "static" as const,
+          label: builder.bookingTitle ?? `Property ${propertyId}`,
+          unitCount: units.length,
+          bedrooms: units.reduce((sum, u) => sum + (Number(u?.bedrooms) || 0), 0),
+        };
+      }
+      const draft = draftByPropertyId.get(propertyId);
+      if (draft) {
+        const singleListing = draft.singleListing === true;
+        const b1 = Number(draft.unit1Bedrooms) || 0;
+        const b2 = singleListing ? 0 : Number(draft.unit2Bedrooms) || 0;
+        return {
+          kind: "draft" as const,
+          label: String(draft.bookingTitle ?? draft.listingTitle ?? draft.name ?? `Draft ${draft.id}`),
+          unitCount: singleListing ? 1 : 2,
+          bedrooms: b1 + b2,
+        };
+      }
+      return null;
+    };
+
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.flushHeaders?.();
+    const writeLine = (obj: Record<string, unknown>) => {
+      try {
+        res.write(JSON.stringify(obj) + "\n");
+      } catch {
+        // client went away — keep the loop running server-side
+      }
+    };
+    const heartbeat = setInterval(() => writeLine({ type: "heartbeat", at: new Date().toISOString() }), 12_000);
+
+    try {
+      const seenListings = new Set<string>();
+      let total = 0, updated = 0, alreadyExplained = 0, skipped = 0, failed = 0;
+
+      for (const row of maps) {
+        const listingId = String(row.guestyListingId ?? "").trim();
+        if (!listingId || seenListings.has(listingId)) continue;
+        if (wanted && !wanted.has(row.propertyId)) continue;
+        seenListings.add(listingId);
+        total++;
+
+        const emit = (fields: Record<string, unknown>) =>
+          writeLine({ type: "listing", propertyId: row.propertyId, listingId, ...fields });
+
+        try {
+          const target = resolveTarget(row.propertyId);
+          if (!target) {
+            skipped++;
+            emit({ status: "skipped", reason: "no builder entry or draft for this propertyId" });
+            continue;
+          }
+
+          const fetched = await guestyRequest(
+            "GET",
+            `/listings/${encodeURIComponent(listingId)}?fields=${encodeURIComponent("publicDescription accommodates bedrooms title")}`,
+          ) as Record<string, unknown>;
+
+          // Older drafts were saved with null unit1/unit2Bedrooms, so the app
+          // side can't size them. Guesty carries the real bedroom count for
+          // those listings, and the accommodates + title checks below still
+          // have to agree before anything is written — so the fallback can't
+          // smuggle in an unverified number.
+          const guestyBedrooms = Number(fetched.bedrooms);
+          const bedrooms =
+            target.bedrooms > 0
+              ? target.bedrooms
+              : Number.isFinite(guestyBedrooms) && guestyBedrooms > 0
+                ? guestyBedrooms
+                : 0;
+          const bedroomSource = target.bedrooms > 0 ? "app" : "guesty";
+
+          const explanation = buildSleepingCapacityExplanation({
+            bedrooms,
+            unitCount: target.unitCount,
+          });
+          if (!explanation) {
+            skipped++;
+            emit({
+              status: "skipped",
+              label: target.label,
+              reason: `occupancy rule cannot explain ${bedrooms} bedrooms across ${target.unitCount} unit(s) — nothing claimed`,
+            });
+            continue;
+          }
+          const currentPublicDescription =
+            fetched.publicDescription && typeof fetched.publicDescription === "object"
+              ? fetched.publicDescription as Record<string, unknown>
+              : {};
+          const currentSummary = String(currentPublicDescription.summary ?? "").trim();
+
+          // HONESTY GATE: never publish a breakdown that contradicts a number
+          // the listing already advertises. A disagreement is real data drift
+          // (the 2026-07-18 Cliffs class) and needs a human, not a paragraph
+          // arguing with the listing's own headline. BOTH surfaces are checked:
+          // `accommodates` (structured capacity) and the TITLE's "Sleeps N",
+          // which can drift independently — a live Mauna Lani Point title read
+          // "Sleeps 12" against accommodates 16, and an accommodates-only gate
+          // would have published prose the guest could see contradicting it.
+          const advertisedAccommodates = Number(fetched.accommodates);
+          const advertisedTitle = advertisedOccupancyFromTitle(String(fetched.title ?? ""));
+          const contradictions: string[] = [];
+          if (Number.isFinite(advertisedAccommodates) && advertisedAccommodates > 0
+              && advertisedAccommodates !== explanation.sleeps) {
+            contradictions.push(`Guesty accommodates ${advertisedAccommodates}`);
+          }
+          if (advertisedTitle !== null && advertisedTitle !== explanation.sleeps) {
+            contradictions.push(`the listing title advertises ${advertisedTitle}`);
+          }
+          if (!force && contradictions.length > 0) {
+            skipped++;
+            emit({
+              status: "skipped",
+              label: target.label,
+              reason: `${contradictions.join(" and ")}, but ${bedrooms} bedrooms across ${target.unitCount} unit(s) computes to ${explanation.sleeps} — reconcile the listing before backfilling`,
+              accommodates: Number.isFinite(advertisedAccommodates) ? advertisedAccommodates : null,
+              titleSleeps: advertisedTitle,
+              computed: explanation.sleeps,
+              guestyTitle: String(fetched.title ?? ""),
+            });
+            continue;
+          }
+
+          if (!currentSummary) {
+            skipped++;
+            emit({ status: "skipped", label: target.label, reason: "listing has no summary in Guesty to insert into" });
+            continue;
+          }
+          if (describesSleepingCapacity(currentSummary, explanation)) {
+            alreadyExplained++;
+            emit({ status: "already-explained", label: target.label, sleeps: explanation.sleeps });
+            continue;
+          }
+
+          const nextSummary = ensureSleepingCapacityExplanation(currentSummary, explanation);
+          if (!execute) {
+            emit({
+              status: "would-update",
+              label: target.label,
+              kind: target.kind,
+              bedrooms,
+              bedroomSource,
+              unitCount: target.unitCount,
+              sleeps: explanation.sleeps,
+              dryRun: true,
+              sentence: explanation.sentence,
+              preview: nextSummary.slice(0, 900),
+            });
+            continue;
+          }
+
+          // Persist as a Descriptions-tab override FIRST. The override table is
+          // what a later push-descriptions sends, so without this the next push
+          // from the builder would silently revert Guesty to the un-explained
+          // summary.
+          await storage.upsertPropertyDescriptionOverrides(row.propertyId, { summary: nextSummary });
+
+          await guestyRequest("PUT", `/listings/${encodeURIComponent(listingId)}`, {
+            publicDescription: { ...currentPublicDescription, summary: nextSummary },
+          });
+          const verify = await guestyRequest(
+            "GET",
+            `/listings/${encodeURIComponent(listingId)}?fields=${encodeURIComponent("publicDescription")}`,
+          ) as Record<string, unknown>;
+          const savedSummary = (verify.publicDescription as Record<string, unknown> | undefined)?.summary;
+          const verified =
+            normalizeDescriptionReadback(savedSummary) === normalizeDescriptionReadback(nextSummary);
+
+          recordGuestyPush(
+            listingId,
+            "descriptions",
+            verified ? "success" : "error",
+            verified
+              ? `Sleeping-capacity explanation added (sleeps ${explanation.sleeps})`
+              : "Sleeping-capacity explanation did not verify on read-back",
+          );
+
+          if (verified) updated++;
+          else failed++;
+          emit({
+            status: verified ? "updated" : "not-verified",
+            label: target.label,
+            kind: target.kind,
+            sleeps: explanation.sleeps,
+            verified,
+          });
+        } catch (e: any) {
+          failed++;
+          emit({ status: "failed", error: String(e?.message ?? e) });
+        }
+      }
+
+      writeLine({
+        type: "done",
+        execute,
+        success: failed === 0,
+        total,
+        updated,
+        alreadyExplained,
+        skipped,
+        failed,
+      });
+    } finally {
+      clearInterval(heartbeat);
+      res.end();
     }
   });
 
@@ -51268,6 +51536,21 @@ Return ONLY compact JSON with this exact shape:
     // the dashboard Guests column and everything else (was b*2+2, wrong for ≥3BR).
     const listingSleeps = occupancyForBedrooms(combinedBedrooms);
 
+    // Guests kept asking "how does a 4 bedroom sleep 12?" (2026-07-18). Every
+    // generated summary now SHOWS the arithmetic behind its headline occupancy:
+    // bedrooms at 2 each, plus the sleeper sofa in each unit's living area.
+    // The numbers are derived from occupancyForBedrooms above, so the paragraph
+    // can never disagree with the title's "Sleeps N". Null for shapes the rule
+    // can't explain honestly — then nothing is claimed. Prompted for (so Claude
+    // writes it in its own voice) AND deterministically ensured after parsing,
+    // because "all listings explain this" must not depend on the model
+    // complying. This is the ONE seam that covers the Descriptions-tab button,
+    // the audit sweep's regenerate twin, and the bulk-combo pipeline.
+    const capacityExplanation = buildSleepingCapacityExplanation({
+      bedrooms: combinedBedrooms,
+      unitCount: singleListing ? 1 : 2,
+    });
+
     // Best-effort walking distance for the description. Only used for
     // combo listings — for a single standalone unit there's only one
     // address, so the concept doesn't apply. Use a no-op placeholder.
@@ -51410,7 +51693,11 @@ Return ONLY compact JSON with this exact shape:
         ? "Guests have private use of the booked home during their stay. Property-specific arrival and entry instructions are provided before check-in."
         : "Guests have private use of both booked homes during their stay. Property-specific arrival and entry instructions for each home are provided before check-in.";
       const houseRules = "Guests should care for the home and shared community spaces and follow the confirmed property and community rules supplied with the reservation.";
-      const summaryWithFee = appendResortFeeNote(summary, resortFeeNote, [summary, space, neighborhood, transit].join(" "));
+      // The fallback copy explains the occupancy too — a missing ANTHROPIC_API_KEY
+      // must not be the reason a listing goes out unable to answer "how does a
+      // 4 bedroom sleep 12?".
+      const summaryWithCapacity = ensureSleepingCapacityExplanation(summary, capacityExplanation);
+      const summaryWithFee = appendResortFeeNote(summaryWithCapacity, resortFeeNote, [summaryWithCapacity, space, neighborhood, transit].join(" "));
       const description = [summaryWithFee, space, `THE NEIGHBORHOOD\n\n${neighborhood}`, `GETTING AROUND\n\n${transit}`].join("\n\n");
 
       return {
@@ -51523,6 +51810,7 @@ Return ONLY compact JSON with this exact shape:
 CONTEXT
 - Single unit: ${unit1.bedrooms}-bedroom ${unit1.address ? `at ${unit1.address}` : `at ${communityName}`}${unit1.url ? ` (source: ${unit1.url})` : ""}
 - This is ONE standalone condo or townhouse — NOT a combination of two units.
+${sleepingCapacityPromptContext(capacityExplanation)}
 ${unit1Facts ? `- Source listing details: ${unit1Facts}` : ""}
 ${unit1ConfirmedBedding ? `- CONFIRMED bedding & bathrooms (operator's Bedding tab — authoritative): ${unit1ConfirmedBedding}` : ""}
 ${unitAPhotoFacts ? `- Photo evidence — AI vision captions of this unit's actual photos: ${unitAPhotoFacts}` : ""}
@@ -51536,7 +51824,7 @@ OUTPUT — return ONLY valid JSON with this exact shape:
   "title": "Airbnb-style punchy headline, HARD CAP 50 chars. Format: '<Adjective> <N>BR <Type> in <Location>!'. Examples: 'Beautiful 3BR Condo in Poipu Beach!', 'Cozy 2BR Townhouse near Disney!'. Always end with !. Use only commas and hyphens for punctuation — NO em dashes (—). Count characters and STAY UNDER 50.",
   "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
   "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
-  "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point. Do NOT mention 'two units' / 'combined' / 'multi-unit' / 'representative accommodations' — this is a SINGLE standalone listing and the builder appends unit-assignment language separately.",
+  "summary": "Punchy hook leading with the strongest selling point (2-3 sentences), then a SEPARATE short paragraph explaining how the listing reaches its total occupancy using the sleeping capacity math from CONTEXT. Do NOT mention 'two units' / 'combined' / 'multi-unit' / 'representative accommodations' — this is a SINGLE standalone listing and the builder appends unit-assignment language separately.",
   "space": "1-2 paragraphs describing this one unit's layout — bedrooms, what guests get, the vibe. Do NOT mention combination / two units / disclosure / unit-assignment language.",
   "neighborhood": "1-2 paragraphs about the area immediately around ${communityName} in ${city}, ${state}. Local attractions, beaches, dining, vibe. Specific to this market.",
   "transit": "1 paragraph on getting around — distance to airport, rental car notes, rideshare availability, walkability.",
@@ -51563,6 +51851,7 @@ ${SOURCE_FACTS_RULE}
 ${CONFIRMED_BEDDING_RULE}
 ${PHOTO_FACTS_RULE}
 ${SAFE_PUBLIC_COPY_RULE}
+${SLEEPING_CAPACITY_RULE}
 - Single-unit framing — NEVER mention "two units" or "combined" or "individually owned".
 - Do not include representative-accommodation or unit-assignment disclosure language. The builder appends that at the bottom.
 - If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
@@ -51574,6 +51863,7 @@ CONTEXT
 - Unit A: ${unit1.bedrooms}-bedroom unit at ${communityName}${unit1.address ? ` (${unit1.address})` : ""}${unit1.url ? ` (source: ${unit1.url})` : ""}
 - Unit B: ${unit2!.bedrooms}-bedroom unit at ${communityName}${unit2!.address ? ` (${unit2!.address})` : ""}${unit2!.url ? ` (source: ${unit2!.url})` : ""}
 - Combined total: ${combinedBedrooms} bedrooms across two separate units
+${sleepingCapacityPromptContext(capacityExplanation)}
 - Walking distance between units: ${walk.description} (${walk.minutes}-minute walk, source: ${walk.source})
 ${unit1Facts ? `- Unit A source listing details: ${unit1Facts}` : ""}
 ${unit2Facts ? `- Unit B source listing details: ${unit2Facts}` : ""}
@@ -51591,7 +51881,7 @@ OUTPUT — return ONLY valid JSON with this exact shape:
   "title": "Airbnb-style punchy headline, HARD CAP 50 chars (Airbnb truncates beyond that). Format: '<Adjective> <N>BR for <sleeps> <Location>!'. For the <sleeps> number use EXACTLY ${listingSleeps}. Examples: 'Spacious 5 Bedroom Condo at Poipu Beach!', 'Gorgeous 6 br for 16 near Disney!', 'Beautiful 4BR for 12 in Kissimmee!'. Always end with !. Use only commas and hyphens for punctuation — Airbnb prefers them over em dashes (—). Count characters and STAY UNDER 50.",
   "bookingTitle": "Booking.com / VRBO style title, ALSO under 50 chars. Format: '<Community> - <N>BR <Type> - Sleeps <X>'. For <X> use EXACTLY ${listingSleeps}. Examples: 'Poipu Kai - 7BR Resort - Sleeps 18', 'Princeville - 5BR Condos - Sleeps 14', 'Windsor Hills - 4BR Condos - Sleeps 12'. Use hyphens (not em dashes) as separators. STAY UNDER 50.",
   "propertyType": "One of: Condominium | Townhouse | House | Villa | Apartment | Estate | Cottage | Bungalow | Loft",
-  "summary": "Single paragraph (2-3 sentences) — punchy hook leading with the strongest selling point (proximity, sleeps N, key amenity). Do NOT mention 'two separate units' or 'individually owned' or 'representative accommodations' here — the builder adds combo setup at the top and unit-assignment language at the bottom.",
+  "summary": "Punchy hook leading with the strongest selling point (proximity, sleeps N, key amenity) in 2-3 sentences, then a SEPARATE short paragraph explaining how the listing reaches its total occupancy using the sleeping capacity math from CONTEXT. Do NOT mention 'two separate units' or 'individually owned' or 'representative accommodations' here — the builder adds combo setup at the top and unit-assignment language at the bottom.",
   "space": "1-2 paragraphs describing the combined property layout — bedroom count across both units, what guests get, why it works for a large group. Mention the units are ${walk.description.toLowerCase()} — use that exact phrasing, do not invent a different distance. Do NOT include any disclosure / 'two separate units' / 'individually owned' / unit-assignment language; the builder adds those separately.",
   "neighborhood": "1-2 paragraphs about the area immediately around ${communityName} in ${city}, ${state}. Local attractions, beaches, dining, vibe. Specific to this market.",
   "transit": "1 paragraph on getting around — distance to airport, rental car notes, rideshare availability, walkability.",
@@ -51627,6 +51917,7 @@ ${SOURCE_FACTS_RULE}
 ${CONFIRMED_BEDDING_RULE}
 ${PHOTO_FACTS_RULE}
 ${SAFE_PUBLIC_COPY_RULE}
+${SLEEPING_CAPACITY_RULE}
 - summary and space must NOT contain combo disclosure or representative-photo disclosure; the builder places those separately.
 - If a resort fee note is provided in CONTEXT, include it exactly once in summary or space. Do not invent a fee amount.
 - Plain text only inside the strings. No Markdown. No bullet markers. No headers.
@@ -51761,10 +52052,21 @@ ${SAFE_PUBLIC_COPY_RULE}
       const parsedTransit = String(parsed.transit ?? "").trim();
       const parsedAccess = String(parsed.access ?? "").trim();
       const parsedHouseRules = String(parsed.houseRules ?? "").trim();
+      // The prompt ASKS Claude to explain the occupancy in its own voice; this
+      // GUARANTEES it. A model that skipped the rule gets the canonical
+      // paragraph appended, so "every listing explains how it sleeps N" holds
+      // without depending on model compliance. Runs BEFORE the resort-fee
+      // append so the fee caveat stays the last thing in the summary.
+      if (capacityExplanation && !describesSleepingCapacity(parsedSummary, capacityExplanation)) {
+        console.warn(
+          `[community/generate-listing] summary did not explain sleeps ${capacityExplanation.sleeps} — appending the canonical breakdown`,
+        );
+      }
+      const summaryWithCapacity = ensureSleepingCapacityExplanation(parsedSummary, capacityExplanation);
       const summaryWithFee = appendResortFeeNote(
-        parsedSummary,
+        summaryWithCapacity,
         resortFeeNote,
-        [parsedSummary, parsedSpace, parsedNeighborhood, parsedTransit].join(" ")
+        [summaryWithCapacity, parsedSpace, parsedNeighborhood, parsedTransit].join(" ")
       );
 
       const description = [

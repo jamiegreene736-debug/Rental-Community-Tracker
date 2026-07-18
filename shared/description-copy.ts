@@ -1,3 +1,5 @@
+import { occupancyForBedrooms } from "./occupancy";
+
 // Pure helpers for the unit-builder Descriptions tab copy pipeline.
 // Shared between the client builder (adapt-draft.ts, builder.tsx,
 // GuestyListingBuilder) and the server (push-descriptions guard, the
@@ -163,6 +165,204 @@ export function composeSpaceFromUnitDescriptions(
   return [body, walk].filter(Boolean).join("\n\n");
 }
 
+// ── Sleeping-capacity explanation (2026-07-18) ───────────────────────────────
+// Guests kept asking "how does a 4 bedroom sleep 12?" — the listings advertised
+// the headline occupancy but never showed the arithmetic behind it. That
+// arithmetic is not new: `occupancyForBedrooms` has always been "2 guests per
+// bedroom + sleeper sofas" (+2 for a single condo, +4 for the two-condo
+// combos). These helpers turn that rule into one guest-facing paragraph so
+// every listing SHOWS its own math.
+//
+// Derived, never asserted independently: the totals come straight from
+// occupancyForBedrooms, so this paragraph can never disagree with the title's
+// "Sleeps N", the dashboard Guests column, or the Guesty `accommodates` field.
+// A shape the rule cannot explain (0 bedrooms, a non-even sofa remainder)
+// returns null and NOTHING is claimed — never invent a breakdown to fill a gap.
+
+/** Sofa beds are described WITHOUT a size. The Bedding tab's living-room
+ * config captures only a count (`hasSofaBed`/`count`, no bed size), so
+ * "queen sleeper sofa" would be an invented fact — the same rule
+ * buildSpaceDescription follows ("Never claim a size for the sofa bed"). */
+export type SleepingCapacityExplanation = {
+  /** Total bedrooms across every unit on the listing. */
+  bedrooms: number;
+  /** Units the listing is assembled from (1 = standalone, 2 = combo). */
+  unitCount: number;
+  /** Headline occupancy — occupancyForBedrooms(bedrooms). */
+  sleeps: number;
+  /** Guests the bedrooms alone hold, at 2 per bedroom. */
+  bedroomGuests: number;
+  /** Guests the sleeper sofas add (sleeps - bedroomGuests). */
+  sofaGuests: number;
+  /** Sleeper sofas implied by the occupancy rule, at 2 guests each. */
+  sofaCount: number;
+  /** The guest-facing paragraph. ASCII-only (Booking.com mangles the rest). */
+  sentence: string;
+};
+
+/**
+ * Build the "here is how a 4-bedroom sleeps 12" paragraph for a listing.
+ *
+ * Returns null when the occupancy rule cannot produce a clean breakdown —
+ * no bedrooms, no headline occupancy, or a sofa remainder that isn't a whole
+ * number of 2-guest sofas. Callers must treat null as "say nothing".
+ */
+export function buildSleepingCapacityExplanation(input: {
+  bedrooms: number;
+  unitCount: number;
+}): SleepingCapacityExplanation | null {
+  const bedrooms = Number(input?.bedrooms);
+  const unitCount = Number(input?.unitCount);
+  if (!Number.isFinite(bedrooms) || bedrooms <= 0) return null;
+  if (!Number.isFinite(unitCount) || unitCount < 1) return null;
+
+  const sleeps = occupancyForBedrooms(bedrooms);
+  const bedroomGuests = bedrooms * 2;
+  const sofaGuests = sleeps - bedroomGuests;
+  // The rule always leaves a positive, even sofa remainder (+2 or +4). Anything
+  // else means the rule changed underneath us — stay silent rather than print
+  // arithmetic that doesn't add up in front of a guest.
+  if (sofaGuests <= 0 || sofaGuests % 2 !== 0) return null;
+  const sofaCount = sofaGuests / 2;
+
+  // The rule only describes ONE sleeper sofa per unit — +2 for a standalone
+  // condo, +4 for a two-condo combo. Any other shape (a standalone carrying the
+  // combo +4, which would claim two sleeper sofas in one living room; or a
+  // multi-unit listing whose sofa count doesn't cover its units) is one we
+  // cannot describe truthfully, so we say NOTHING. The headline occupancy still
+  // stands, it just goes unexplained — better than a guessed layout.
+  if (sofaCount !== unitCount) return null;
+
+  const sofaClause =
+    unitCount > 1
+      ? `each of the ${unitCount} units has a sleeper sofa in the living area that sleeps 2`
+      : "the living area has a sleeper sofa that sleeps 2";
+
+  const bedroomNoun = bedrooms === 1 ? "bedroom sleeps" : "bedrooms sleep";
+  const sentence =
+    `Here is how a ${bedrooms}-bedroom listing sleeps ${sleeps}: the ${bedrooms} ${bedroomNoun} ` +
+    `${bedroomGuests} guests at 2 per bedroom, and ${sofaClause}, which adds ${sofaGuests} more. ` +
+    `${bedroomGuests} plus ${sofaGuests} is ${sleeps} guests in total.`;
+
+  return { bedrooms, unitCount, sleeps, bedroomGuests, sofaGuests, sofaCount, sentence };
+}
+
+/**
+ * The occupancy a listing TITLE advertises, or null when it names none.
+ *
+ * Mirrors the two title formats generate-listing pins with syncTitleOccupancy
+ * ("... - Sleeps 14" and "6BR for 16 ..."), so a stale title can be caught
+ * before we publish prose that contradicts it in front of a guest. Title text
+ * is guest-visible in a way `accommodates` is not, so it gets its own check.
+ */
+export function advertisedOccupancyFromTitle(title: string | null | undefined): number | null {
+  const text = String(title ?? "");
+  const match = text.match(/\bsleeps\s+(\d{1,2})\b/i) ?? text.match(/\bfor\s+(\d{1,2})\b/i);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Sofa-bed wording a capacity explanation may use — shared with the bed-type
+ * audit's sofa pattern below so the two can't drift. */
+const SOFA_BED_MENTION_RE =
+  /\b(?:sofa\s*-?\s*beds?|sleeper\s+sofas?|sofa\s+sleepers?|pull[-\s]?out\s+(?:sofa|couch|bed)s?)\b/i;
+
+/**
+ * Does this prose already explain the sleeping capacity?
+ *
+ * Deliberately GENEROUS: it accepts any wording that names a sleeper sofa AND
+ * both numbers (bedroom guests and the total), not just our canonical
+ * sentence — the prompt asks Claude to write its own version, and a
+ * false NEGATIVE would append a second, duplicate explanation to live guest
+ * copy. A false positive merely leaves the model's own explanation in place.
+ */
+export function describesSleepingCapacity(
+  text: string | null | undefined,
+  explanation: SleepingCapacityExplanation | null | undefined,
+): boolean {
+  const body = String(text ?? "");
+  if (!body.trim() || !explanation) return false;
+  if (!SOFA_BED_MENTION_RE.test(body)) return false;
+  const mentions = (n: number) => new RegExp(`\\b${n}\\b`).test(body);
+  return mentions(explanation.sleeps) && mentions(explanation.bedroomGuests);
+}
+
+/** Distinctive leads of the disclosure blocks the builder sandwiches around a
+ * summary body (client/src/data/unit-builder-data.ts). The capacity paragraph
+ * belongs to the BODY, so placement must never land inside one of these.
+ * tests/description-copy.test.ts source-asserts these stay in sync with the
+ * disclosure constants — reword a disclosure there, update this list. */
+export const SUMMARY_DISCLOSURE_LEADS: readonly string[] = [
+  "unit assignment note:",
+  "please note: this listing combines two units",
+];
+
+function looksLikeDisclosureBlock(block: string): boolean {
+  const head = String(block ?? "").trim().toLowerCase();
+  return SUMMARY_DISCLOSURE_LEADS.some((lead) => head.startsWith(lead));
+}
+
+/**
+ * Ensure a composed Guesty summary carries the capacity explanation exactly
+ * once, as a paragraph of the summary BODY.
+ *
+ * A composed summary is `[top disclosure?] --- body --- [bottom disclosure]`
+ * (SUMMARY_DISCLOSURE_SEPARATOR). Appending blindly would push the paragraph
+ * below the "Unit assignment note" legalese; this targets the LAST
+ * non-disclosure block instead, so a combo (top/body/bottom) and a single
+ * listing (body/bottom) both land in the right place. When every block is a
+ * disclosure the paragraph becomes its own block ahead of the final one,
+ * rather than being swallowed by one.
+ */
+export function ensureSleepingCapacityExplanation(
+  summary: string | null | undefined,
+  explanation: SleepingCapacityExplanation | null | undefined,
+): string {
+  const text = String(summary ?? "");
+  if (!explanation) return text;
+  if (describesSleepingCapacity(text, explanation)) return text;
+  if (!text.trim()) return explanation.sentence;
+
+  const blocks = text.split(SUMMARY_DISCLOSURE_SEPARATOR);
+  let target = -1;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (blocks[i].trim() && !looksLikeDisclosureBlock(blocks[i])) {
+      target = i;
+      break;
+    }
+  }
+  if (target === -1) {
+    const insertAt = Math.max(0, blocks.length - 1);
+    blocks.splice(insertAt, 0, explanation.sentence);
+    return blocks.join(SUMMARY_DISCLOSURE_SEPARATOR);
+  }
+  blocks[target] = `${blocks[target].trim()}\n\n${explanation.sentence}`;
+  return blocks.join(SUMMARY_DISCLOSURE_SEPARATOR);
+}
+
+/** The CONTEXT + rule lines that make Claude write this explanation itself.
+ * Kept next to the deterministic helpers so the prompt and the fallback can
+ * never describe different arithmetic. */
+export function sleepingCapacityPromptContext(
+  explanation: SleepingCapacityExplanation | null | undefined,
+): string {
+  if (!explanation) return "";
+  const { bedrooms, sleeps, bedroomGuests, sofaGuests, sofaCount, unitCount } = explanation;
+  const sofaWhere =
+    unitCount > 1 && sofaCount === unitCount
+      ? `one sleeper sofa in the living area of each of the ${unitCount} units`
+      : `${sofaCount} sleeper sofa${sofaCount === 1 ? "" : "s"} in the living area`;
+  return (
+    `- Sleeping capacity math (authoritative — use these exact numbers): ${bedrooms} bedrooms sleep ` +
+    `${bedroomGuests} guests at 2 per bedroom, plus ${sofaWhere} sleeping 2 each for ${sofaGuests} more, ` +
+    `so the listing sleeps ${sleeps} in total.`
+  );
+}
+
+export const SLEEPING_CAPACITY_RULE =
+  "- The summary MUST explain how the listing reaches its advertised total occupancy, because guests routinely ask how a 4-bedroom sleeps 12. Use the sleeping capacity math from CONTEXT: state the guests the bedrooms hold at 2 per bedroom, that the sleeper sofa in each unit's living area sleeps 2 more, and the resulting total. Name both numbers as digits. Never claim a size for a sleeper sofa (never 'queen sleeper sofa') and never state totals that differ from the CONTEXT math.";
+
 // ── Generator grounding (2026-07-17) ─────────────────────────────────────────
 // The Descriptions-tab "↻ Regenerate descriptions" button and the audit
 // sweep's regenerate twin ground /api/community/generate-listing in what the
@@ -245,7 +445,9 @@ const BED_TYPE_MENTION_PATTERNS: ReadonlyArray<{
   { label: "Double/Full bed", prose: /\b(?:double(?:[-\s]sized?)?\s+bed(?:room)?s?|full(?:[-\s]sized?)?\s+beds?)\b/i, confirmed: /\b(?:double|full)s?\b/i },
   { label: "Twin/Single bed", prose: /\b(?:twin(?:[-\s]sized?)?\s+bed(?:room)?s?|single(?:[-\s]sized?)?\s+beds?)\b/i, confirmed: /\b(?:twin|single)s?\b/i },
   { label: "Bunk bed", prose: /\bbunk\s+bed(?:room)?s?\b/i, confirmed: /\bbunk\b/i },
-  { label: "Sofa bed", prose: /\b(?:sofa\s*-?\s*beds?|sleeper\s+sofas?|sofa\s+sleepers?|pull[-\s]?out\s+(?:sofa|couch|bed)s?)\b/i, confirmed: /\bsofa\s*beds?\b/i },
+  // Reuses SOFA_BED_MENTION_RE (declared above) so the capacity-explanation
+  // detector and this audit can never recognise different sofa wording.
+  { label: "Sofa bed", prose: SOFA_BED_MENTION_RE, confirmed: /\bsofa\s*beds?\b/i },
 ];
 
 /** The bed-claims portion of a describeUnitBedding string: everything
