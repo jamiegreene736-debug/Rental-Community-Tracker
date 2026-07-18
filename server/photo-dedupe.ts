@@ -70,10 +70,15 @@ const MANUAL_VISION_MAX_BATCHES = (() => {
   const n = Number(process.env.PHOTO_DEDUPE_MANUAL_MAX_BATCHES || 4);
   return Number.isFinite(n) && n >= 1 ? Math.min(12, Math.floor(n)) : 4;
 })();
-// Wall-clock ceiling for the vision legs of ONE manual scan, across all
-// folders. Past this the remaining folders fall back to hash-only and say so —
-// an honest partial result always beats a response the edge silently cuts.
-const MANUAL_SCAN_BUDGET_MS = (() => {
+// Wall-clock ceiling for the vision legs of ONE HTTP scan, across all folders.
+// Past this the remaining folders fall back to hash-only and say so — an honest
+// partial result always beats a response the edge silently cuts. Exported
+// because the HTTP ROUTE owns applying it (background callers run unbudgeted).
+// Folders are scanned sequentially and a folder whose share has elapsed stops
+// before starting a new batch, so at most ONE in-flight Claude call
+// (ANTHROPIC_TIMEOUT_MS = 2 min) can overrun: 8 + 2 = 10 min, inside the 15-min
+// edge cap. Raising this env past ~12 min reopens that risk.
+export const MANUAL_SCAN_BUDGET_MS = (() => {
   const n = Number(process.env.PHOTO_DEDUPE_SCAN_BUDGET_MS || 8 * 60_000);
   return Number.isFinite(n) && n >= 30_000 ? Math.floor(n) : 8 * 60_000;
 })();
@@ -356,13 +361,26 @@ export async function scanForDuplicatePhotos(
 ): Promise<PhotoDedupeProposal> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   const folders: DedupeFolderResult[] = [];
-  // One budget for the whole manual scan, so N folders can't each spend the
-  // full allowance and push the response past Railway's edge cut.
-  const effective: DedupeScanOptions = options.requireCompleteVision
-    ? options
-    : { ...options, deadlineAt: options.deadlineAt ?? Date.now() + MANUAL_SCAN_BUDGET_MS };
-  for (const g of groups) {
-    folders.push(await scanOneFolder(g, apiKey, effective));
+  // NOTE FOR CODEX: no deadline is invented here. The budget exists to protect
+  // a synchronous HTTP response from Railway's 15-min edge cut, so it is set by
+  // the HTTP route (see PHOTO_DEDUPE_SCAN_BUDGET_MS at the scan endpoint).
+  // Background callers — the unit-audit sweep, which runs in-process and makes
+  // up to four scans inside one stage — must run unbudgeted; defaulting it here
+  // silently truncated the vision leg of NON-fullAutomation sweeps.
+  const overallDeadline = options.deadlineAt;
+  for (let i = 0; i < groups.length; i++) {
+    let perFolder = options;
+    if (overallDeadline != null) {
+      // Fair share of the REMAINING budget, recomputed per folder: a quick
+      // early gallery donates its leftover time to later ones, and a slow one
+      // cannot starve the folders behind it. Without this the budget was spent
+      // in folder order, so on a large property the LAST gallery — typically
+      // Unit B — could get zero repeat-angle coverage, which is precisely the
+      // "did it check both units?" question this feature has to answer.
+      const remaining = Math.max(0, overallDeadline - Date.now());
+      perFolder = { ...options, deadlineAt: Date.now() + remaining / (groups.length - i) };
+    }
+    folders.push(await scanOneFolder(groups[i], apiKey, perFolder));
   }
   const { groupCount, removableCount, reviewGroupCount, warnings } = summarizeDedupeFolders(folders);
   const proposal: PhotoDedupeProposal = {

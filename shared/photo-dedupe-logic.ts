@@ -186,7 +186,9 @@ export function buildManualVisionBatchPlan(
   const budget = Number.isFinite(maxBatches) ? Math.max(0, Math.floor(maxBatches)) : 0;
   const all = (n: number) => Array.from({ length: n }, (_, i) => i);
 
-  if (count < 2) return { batches: [], complete: true, error: null, covered: all(count) };
+  // Nothing to compare, and no batch is sent — `covered` must not claim a photo
+  // was shown to Claude when no call carries it.
+  if (count < 2) return { batches: [], complete: true, error: null, covered: [] };
   if (!Number.isFinite(cap) || cap < 2) {
     return { batches: [], complete: false, error: `vision photo cap ${String(photoCap)} is below 2`, covered: [] };
   }
@@ -206,11 +208,13 @@ export function buildManualVisionBatchPlan(
   for (let start = 0; start < count && batches.length < budget; start += cap) {
     batches.push(Array.from({ length: Math.min(cap, count - start) }, (_, i) => start + i));
   }
-  // A chunk of one photo can't be compared against anything — fold it back
-  // into the previous batch so the tail isn't silently unexamined.
-  if (batches.length > 1 && batches[batches.length - 1].length === 1) {
-    const orphan = batches.pop()!;
-    batches[batches.length - 1] = [...batches[batches.length - 1], ...orphan];
+  // A trailing chunk of one photo can't be compared against anything. Replace
+  // it with the LAST `cap` photos (a window that overlaps the previous chunk)
+  // rather than appending the orphan — appending would push that batch to
+  // cap + 1 and break the per-call cap the caller asked for.
+  if (batches.length > 1 && batches[batches.length - 1].length < 2) {
+    const windowSize = Math.min(cap, count);
+    batches[batches.length - 1] = Array.from({ length: windowSize }, (_, i) => count - windowSize + i);
   }
   return {
     batches,
@@ -375,6 +379,58 @@ export function buildDuplicateGroupsForFolder(
   // Candidate review clusters: [member indexes, human-readable reason].
   const reviewCandidates: Array<{ indexes: number[]; reason: string }> = [];
 
+  // ── Cluster-level merge guards ────────────────────────────────────────────
+  // LOAD-BEARING: gating each PAIR is not enough, because union-find is
+  // transitive. A photo carrying no bedroom cluster is edge-allowed against
+  // BOTH bedroom 1 and bedroom 2, so unioning those two allowed pairs silently
+  // re-merges the very pair the guard refused — and the blocked-edge review
+  // path below then sees them already merged and stays quiet. The result was a
+  // confirmed group with a second bedroom's only photo pre-selected for
+  // removal, which the weekly sweep would auto-hide. So the guards are enforced
+  // over the whole CLUSTER a union would produce, not just its two endpoints.
+  const rootClusters = new Map<number, Set<string>>();
+  const rootCategories = new Map<number, Set<string>>();
+  const addTo = (map: Map<number, Set<string>>, root: number, value: string) => {
+    if (!value) return;
+    const set = map.get(root) ?? new Set<string>();
+    set.add(value);
+    map.set(root, set);
+  };
+  // Seed from the post-hash state: an exact-hash union may legitimately have
+  // already bridged categories (the documented mislabeled-copy bypass).
+  for (let i = 0; i < entries.length; i++) {
+    const r = find(i);
+    const bc = entries[i].bedroomClusterId;
+    if (bc != null) addTo(rootClusters, r, String(bc));
+    addTo(rootCategories, r, normCategory(entries[i].category));
+  }
+  const mergedSize = (map: Map<number, Set<string>>, ra: number, rb: number): number => {
+    const merged = new Set<string>(map.get(ra) ?? []);
+    for (const v of Array.from(map.get(rb) ?? [])) merged.add(v);
+    return merged.size;
+  };
+  /** Union a,b only if the resulting cluster stays guard-consistent. */
+  const unionRespectingClusters = (a: number, b: number): { ok: boolean; why?: string } => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra === rb) return { ok: true };
+    if (mergedSize(rootClusters, ra, rb) > 1) {
+      return { ok: false, why: "it would merge two different bedrooms" };
+    }
+    const exactDupe = !!entries[a].hash && !!entries[b].hash
+      && hammingDistance(entries[a].hash!, entries[b].hash!) <= DUPLICATE_DISTANCE;
+    if (!exactDupe && mergedSize(rootCategories, ra, rb) > 1) {
+      return { ok: false, why: "it would merge photos filed under different categories" };
+    }
+    const clusters = new Set<string>([...Array.from(rootClusters.get(ra) ?? []), ...Array.from(rootClusters.get(rb) ?? [])]);
+    const categories = new Set<string>([...Array.from(rootCategories.get(ra) ?? []), ...Array.from(rootCategories.get(rb) ?? [])]);
+    union(a, b);
+    const root = find(a);
+    rootClusters.set(root, clusters);
+    rootCategories.set(root, categories);
+    return { ok: true };
+  };
+
   for (const g of visionGroups) {
     const valid = g.indexes.filter((i) => i >= 0 && i < entries.length);
     if (valid.length < 2) continue;
@@ -401,7 +457,13 @@ export function buildDuplicateGroupsForFolder(
           blocked.push({ a, b, why: gate.why ?? "guarded" });
           continue;
         }
-        union(a, b);
+        // Allowed as a PAIR, but still refused if it would produce a cluster
+        // that mixes two bedrooms/categories via an unlabeled bridge photo.
+        const merge = unionRespectingClusters(a, b);
+        if (!merge.ok) {
+          blocked.push({ a, b, why: merge.why ?? "guarded" });
+          continue;
+        }
         if (!visionReasonByIndex.has(a)) visionReasonByIndex.set(a, g.reason);
         if (!visionReasonByIndex.has(b)) visionReasonByIndex.set(b, g.reason);
       }
@@ -591,8 +653,16 @@ export function summarizeDedupeFolders(folders: DedupeFolderResult[]): {
       );
     }
     if (f.visionError) {
-      warnings.push(`${f.label || f.folder}: AI same-scene pass unavailable (${f.visionError}) — hash-only results shown.`);
-    } else if (f.totalVisible >= 2 && !f.visionComplete) {
+      // A pass that ran some batches then failed is NOT "hash-only" — AI groups
+      // from the completed batches are on screen, so saying otherwise
+      // contradicts what the operator is looking at.
+      warnings.push(
+        f.visionBatchCount > 0
+          ? `${f.label || f.folder}: the AI alternate-angle pass stopped early after ${f.visionBatchCount} pass${f.visionBatchCount === 1 ? "" : "es"} (${f.visionError}) — partial AI results shown.`
+          : `${f.label || f.folder}: AI same-scene pass unavailable (${f.visionError}) — hash-only results shown.`,
+      );
+    }
+    if (!f.visionError && f.totalVisible >= 2 && !f.visionComplete) {
       // HONESTY (2026-07-18): the engine has always computed visionComplete,
       // but nothing consumed it on the manual path, so a partially-covered
       // gallery reported exactly like a fully-covered one. Split the claim by
@@ -645,9 +715,12 @@ export function validateDedupeSelection(
   // operator can act on them — so they must be in the allowed member set or a
   // legitimate confirm would be rejected as "not part of any duplicate group".
   // Every other guard below (keep-one-per-group, never empty a folder) applies
-  // to them identically. buildDuplicateGroupsForFolder guarantees a filename
-  // never appears in both a confirmed and a review group, so the per-folder
-  // removal count cannot double-count.
+  // to them identically. NOTE: a filename CAN legitimately appear in both a
+  // confirmed and a review group — a candidate is dropped only when ALL of its
+  // filenames sit together inside one confirmed group, so a third shot held
+  // back from an already-merged pair still surfaces. That is exactly why
+  // removedInFolder counts DISTINCT filenames below: summing per group would
+  // double-count such a photo and could wrongly report the folder as emptied.
   const groupsOf = (f: { groups?: DedupeGroup[]; reviewGroups?: DedupeGroup[] }): DedupeGroup[] =>
     [...(f.groups ?? []), ...(f.reviewGroups ?? [])];
 

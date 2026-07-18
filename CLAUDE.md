@@ -66,8 +66,15 @@ Before making any changes:
   weekly cron flag properties over findings it can never act on. HONESTY: warnings + note now render on
   EVERY completed scan (they were inside the `groupCount > 0` branch, i.e. hidden on exactly the branch
   where a false clean is dangerous — a folder whose AI pass errored showed a bare green pass), plus a
-  per-folder coverage receipt that doubles as proof both units were scanned. Verified: photo-dedupe
-  108/0 (was 67/0), unit-audit-sweep 200/0 untouched, full `npm test` exit 0, build clean, `npm run
+  per-folder coverage receipt that doubles as proof both units were scanned. HARDENED by a 4-lens adversarial review (19 confirmed
+  findings, all fixed pre-merge) — the majors were self-inflicted: the new per-pair gating let an
+  UNLABELED bridge photo transitively re-merge two DIFFERENT bedrooms into a confirmed,
+  sweep-auto-hideable group (guards now enforced cluster-wide via unionRespectingClusters —
+  do NOT simplify back to a bare union after dedupeEdgeAllowed); the HTTP-shaped deadline was
+  defaulted in the ENGINE so non-fullAutomation sweeps inherited it (budget now owned by the route);
+  and the budget was spent in folder order so the LAST gallery — typically Unit B — could get zero
+  angle coverage (each folder now gets a fair share of the remaining time). Verified: photo-dedupe
+  122/0 (was 67/0), unit-audit-sweep 200/0 untouched, full `npm test` exit 0, build clean, `npm run
   check` 335 = baseline (stash A/B identical). Could NOT live-run the vision leg (no ANTHROPIC key) —
   post-deploy: click the button and expect the coverage receipt + an amber "Possible repeat shots"
   panel. See AGENTS.md "Photos-tab duplicate scan" points 3-5 + the 2026-07-18 Decision Log line.

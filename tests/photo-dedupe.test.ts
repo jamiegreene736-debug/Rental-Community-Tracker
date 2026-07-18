@@ -248,7 +248,7 @@ console.log("photo-dedupe: proposal summary");
   check("summary counts groups + removable extras", groupCount === 1 && removableCount === 2 && warnings.length === 0);
   const low = summarizeDedupeFolders([{ ...folderResult, totalVisible: 3 }]);
   check("summary warns when the default removal would leave < 3 photos", low.warnings.length === 1);
-  const noVision = summarizeDedupeFolders([{ ...folderResult, visionError: "no ANTHROPIC_API_KEY" }]);
+  const noVision = summarizeDedupeFolders([{ ...folderResult, visionBatchCount: 0, visionError: "no ANTHROPIC_API_KEY" }]);
   check("summary surfaces a vision-unavailable warning", noVision.warnings.some((w) => w.includes("hash-only")));
 }
 
@@ -399,14 +399,19 @@ console.log("photo-dedupe: manual vision batch plan");
 
   check("manual plan: a folder with nothing to compare is trivially complete",
     buildManualVisionBatchPlan(1, 60, 4).complete && buildManualVisionBatchPlan(1, 60, 4).batches.length === 0);
+  check("manual plan: a folder with no batches never claims a photo was shown to Claude",
+    (buildManualVisionBatchPlan(1, 60, 4).covered ?? []).length === 0);
+  check("manual plan: no tier ever emits a batch above the per-call cap",
+    [[40,60,4],[61,60,4],[90,60,4],[121,60,3],[200,60,4],[200,60,1],[2,2,1]].every(
+      ([n, c, b]) => buildManualVisionBatchPlan(n, c, b).batches.every((x) => x.length <= c)));
   check("manual plan: a zero batch budget is an explicit error, never a silent pass",
     !buildManualVisionBatchPlan(30, 60, 0).complete && !!buildManualVisionBatchPlan(30, 60, 0).error);
   {
     // A trailing chunk of one photo cannot be compared with anything — it must
     // be folded back rather than burning a useless call or being dropped.
     const folded = buildManualVisionBatchPlan(121, 60, 3);
-    check("manual plan: an orphan tail photo is folded into the previous batch",
-      folded.batches.every((b) => b.length >= 2) && (folded.covered ?? []).length === 121);
+    check("manual plan: an orphan tail photo is absorbed without exceeding the per-call cap",
+      folded.batches.every((b) => b.length >= 2 && b.length <= 60) && (folded.covered ?? []).length === 121);
   }
 }
 
@@ -472,6 +477,61 @@ console.log("photo-dedupe: vision groups gate per PAIR, not in a star");
     v.ok && v.remainingByFolder["f"] === 2);
 }
 
+console.log("photo-dedupe: merge guards hold at CLUSTER level, not just per pair");
+
+{
+  // REGRESSION: union-find is transitive, so an unlabeled bridge photo that is
+  // edge-allowed against BOTH bedrooms would re-merge the very pair the guard
+  // refused — producing a confirmed group with a second bedroom's photo
+  // pre-selected for removal, which the weekly sweep would auto-hide.
+  const entries = [
+    entry({ filename: "bed1.jpg", galleryIndex: 0, category: "Bedrooms", bedroomClusterId: "room-1" }),
+    entry({ filename: "bed2.jpg", galleryIndex: 1, category: "Bedrooms", bedroomClusterId: "room-2" }),
+    entry({ filename: "unlabeled.jpg", galleryIndex: 2 }),
+  ];
+  const sets = buildDuplicateGroupsForFolder("f", entries, [], [
+    { indexes: [0, 1, 2], reason: "similar bedspreads", confidence: "high" },
+  ]);
+  const merged = sets.groups.find((g) =>
+    g.members.some((m) => m.filename === "bed1.jpg") && g.members.some((m) => m.filename === "bed2.jpg"));
+  check("an unlabeled bridge photo can NEVER merge two different bedrooms", !merged);
+  check("no bedroom photo is pre-selected for removal via the bridge",
+    sets.groups.every((g) => g.members.every((m) => m.keep || m.filename === "unlabeled.jpg")));
+  check("the refused bedroom merge is surfaced for review",
+    sets.reviewGroups.some((g) => g.reason.includes("bedroom")));
+}
+
+{
+  // Same transitivity hole for the CATEGORY guard.
+  const entries = [
+    entry({ filename: "kitchen.jpg", galleryIndex: 0, category: "Kitchen" }),
+    entry({ filename: "lanai.jpg", galleryIndex: 1, category: "Lanai" }),
+    entry({ filename: "unlabeled.jpg", galleryIndex: 2 }),
+  ];
+  const sets = buildDuplicateGroupsForFolder("f", entries, [], [
+    { indexes: [0, 1, 2], reason: "looks similar", confidence: "high" },
+  ]);
+  check("an unlabeled bridge photo cannot merge two different categories",
+    !sets.groups.some((g) =>
+      g.members.some((m) => m.filename === "kitchen.jpg") && g.members.some((m) => m.filename === "lanai.jpg")));
+}
+
+{
+  // The guard must not over-block: a genuine 3-shot repeat in ONE room still groups.
+  const entries = [
+    entry({ filename: "a.jpg", galleryIndex: 0, category: "Bedrooms", bedroomClusterId: "room-1" }),
+    entry({ filename: "b.jpg", galleryIndex: 1, category: "Bedrooms", bedroomClusterId: "room-1" }),
+    entry({ filename: "c.jpg", galleryIndex: 2, category: "Bedrooms", bedroomClusterId: "room-1" }),
+  ];
+  const sets = buildDuplicateGroupsForFolder("f", entries, [], [
+    { indexes: [0, 1, 2], reason: "same bedroom three angles", confidence: "high" },
+  ]);
+  check("a genuine same-room 3-shot repeat still forms ONE group of three",
+    sets.groups.length === 1 && sets.groups[0].members.length === 3);
+  check("that group keeps exactly one photo",
+    sets.groups[0].members.filter((m) => m.keep).length === 1);
+}
+
 console.log("photo-dedupe: review tier is selectable but never auto-removable");
 
 {
@@ -510,9 +570,15 @@ console.log("photo-dedupe: incomplete AI coverage is disclosed");
     pairsOnly.warnings.some((w) => w.includes("not every pair")));
   const complete = summarizeDedupeFolders([folderResult]);
   check("a fully covered gallery produces no coverage warning", complete.warnings.length === 0);
-  const errored = summarizeDedupeFolders([{ ...folderResult, visionComplete: false, visionError: "boom" }]);
-  check("an errored gallery reports the error once, not doubled with a coverage warning",
+  const errored = summarizeDedupeFolders([{ ...folderResult, visionComplete: false, visionBatchCount: 0, visionError: "boom" }]);
+  check("a gallery whose AI pass never ran reports hash-only, once",
     errored.warnings.length === 1 && errored.warnings[0].includes("hash-only"));
+  // A pass that ran some batches then failed is NOT hash-only — AI groups from
+  // the completed batches are on screen, so the copy must not contradict them.
+  const partialFail = summarizeDedupeFolders([{ ...folderResult, visionComplete: false, visionBatchCount: 2, visionError: "timeout" }]);
+  check("a partially-completed AI pass is reported as partial, not as hash-only",
+    partialFail.warnings.length === 1 && partialFail.warnings[0].includes("stopped early")
+    && !partialFail.warnings[0].includes("hash-only"));
 }
 
 console.log("photo-dedupe: prompt names the operator's actual target");
@@ -527,10 +593,19 @@ check("manual scans plan coverage with buildManualVisionBatchPlan",
   dedupeEngineSource.includes("buildManualVisionBatchPlan(readable.length, VISION_PHOTO_CAP, MANUAL_VISION_MAX_BATCHES)"));
 check("the local even-stride sampler is gone (it caused the silent under-scan)",
   !dedupeEngineSource.includes("function evenSampleIndices"));
-check("the manual scan carries a wall-clock budget so the edge cannot cut the response",
-  dedupeEngineSource.includes("MANUAL_SCAN_BUDGET_MS") && dedupeEngineSource.includes("deadlineAt"));
-check("strict automation is exempt from the manual deadline",
+check("the wall-clock budget is owned by the HTTP ROUTE, not invented by the engine",
+  routesSource.includes("deadlineAt: Date.now() + MANUAL_SCAN_BUDGET_MS")
+  && !dedupeEngineSource.includes("options.deadlineAt ?? Date.now()"));
+check("background callers (the sweep) run unbudgeted — no default deadline in the engine",
+  dedupeEngineSource.includes("const overallDeadline = options.deadlineAt;"));
+check("strict automation is exempt from the deadline check",
   dedupeEngineSource.includes("!options.requireCompleteVision && options.deadlineAt != null"));
+// The budget used to be consumed in folder order, so on a large property the
+// LAST gallery — typically Unit B — could get zero repeat-angle coverage.
+check("each folder gets a fair share of the remaining budget",
+  dedupeEngineSource.includes("remaining / (groups.length - i)"));
+check("the sweep still passes no deadline of its own",
+  !sweepSource.includes("deadlineAt"));
 check("the engine returns review groups alongside confirmed groups",
   dedupeEngineSource.includes("const { groups, reviewGroups } = buildDuplicateGroupsForFolder"));
 
@@ -558,8 +633,18 @@ check("review-only findings still get an apply button when there are no confirme
   builderIndexSource.includes(`data-testid="btn-photo-dedupe-apply-review"`));
 check("the client pre-selects removals only from confirmed groups",
   builderIndexSource.includes("for (const g of f.groups ?? [])"));
+// A filename can sit in a confirmed group AND a review group, so a per-group
+// keep-one check let the operator build a selection the server would 422.
+check("the keep-one checkbox guard spans every group containing the photo",
+  builderIndexSource.includes("const toggleDedupePhoto = useCallback")
+  && builderIndexSource.includes("const allGroups = [...(f?.groups ?? []), ...(f?.reviewGroups ?? [])];")
+  && builderIndexSource.split("toggleDedupePhoto(f.folder, m.filename)").length - 1 === 2);
+check("the coverage receipt distinguishes 'saw every photo' from 'compared every pair'",
+  builderIndexSource.includes("but not every pair together"));
 check("the in-progress copy no longer overclaims what the AI pass compares",
-  builderIndexSource.includes("both units and the community folder"));
+  builderIndexSource.includes("every photo in every gallery on this tab by perceptual hash")
+  && builderIndexSource.includes("reports exactly what each pass covered")
+  && !builderIndexSource.includes("Comparing every photo in each gallery (perceptual hash"));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0);

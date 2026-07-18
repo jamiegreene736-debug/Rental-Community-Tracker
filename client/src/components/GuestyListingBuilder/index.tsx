@@ -4660,6 +4660,30 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
   }, [photos]);
 
+  // Toggle one photo in the removal selection, enforcing the keep-one guard
+  // across EVERY group in that folder which contains the photo — not just the
+  // group whose checkbox was clicked. A filename can legitimately sit in both a
+  // confirmed group and a review group, so a per-group check let the operator
+  // build a selection the client accepted and the server then rejected with an
+  // unactionable "group <id> would lose ALL its photos". The server still
+  // re-enforces this; this only keeps the UI from offering an invalid state.
+  const toggleDedupePhoto = useCallback((folder: string, filename: string) => {
+    setDedupeSelected((prev) => {
+      const key = `${folder}/${filename}`;
+      const next = new Set(prev);
+      if (next.has(key)) { next.delete(key); return next; }
+      const f = dedupeResult?.folders.find((x) => x.folder === folder);
+      const allGroups = [...(f?.groups ?? []), ...(f?.reviewGroups ?? [])];
+      for (const g of allGroups) {
+        if (!g.members.some((m) => m.filename === filename)) continue;
+        const unselected = g.members.filter((m) => !next.has(`${folder}/${m.filename}`));
+        if (unselected.length <= 1) return prev;
+      }
+      next.add(key);
+      return next;
+    });
+  }, [dedupeResult]);
+
   const applyDedupeRemoval = useCallback(async () => {
     if (!dedupeResult) return;
     const remove = Array.from(dedupeSelected).map((key) => {
@@ -9384,7 +9408,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 {dedupePhase === "running" && (
                                   <div style={{ fontSize: 11, color: "#854d0e", marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
                                     <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#eab308", animation: "glb-blink 1s infinite" }} />
-                                    Comparing every photo in every gallery — both units and the community folder — by perceptual hash, plus a Claude vision pass for repeat shots of the same subject from another angle. Large galleries take a few minutes…
+                                    Comparing every photo in every gallery on this tab by perceptual hash, plus a Claude vision pass for repeat shots of the same subject from another angle. The per-gallery result below reports exactly what each pass covered. Large galleries take a few minutes…
                                   </div>
                                 )}
 
@@ -9414,12 +9438,18 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                           {full ? "✓" : "⚠"} {f.label} · {f.totalVisible} photo{f.totalVisible === 1 ? "" : "s"}
                                           {" · "}
                                           {f.visionError
-                                            ? `duplicate-copy check only (AI angle pass unavailable: ${f.visionError})`
+                                            ? (f.visionBatchCount > 0
+                                              ? `every photo hash-checked; AI angle pass stopped early after ${f.visionBatchCount} pass${f.visionBatchCount === 1 ? "" : "es"} (${f.visionError})`
+                                              : `duplicate-copy check only (AI angle pass unavailable: ${f.visionError})`)
                                             : f.totalVisible < 2
                                               ? "nothing to compare"
                                               : full
                                                 ? "every photo and every pair checked"
-                                                : `every photo hash-checked; AI angle pass saw ${seen} of ${f.totalVisible}`}
+                                                : seen >= f.totalVisible
+                                                  // Every photo was seen, but across separate batches — so
+                                                  // a repeat between two distant photos can still be missed.
+                                                  ? `every photo hash-checked; AI angle pass saw all ${f.totalVisible} across ${f.visionBatchCount} batches, but not every pair together`
+                                                  : `every photo hash-checked; AI angle pass saw ${seen} of ${f.totalVisible}`}
                                         </div>
                                       );
                                     })}
@@ -9499,20 +9529,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                                         type="checkbox"
                                                         checked={selected}
                                                         data-testid={`dedupe-review-check-${m.filename}`}
-                                                        onChange={() => {
-                                                          setDedupeSelected((prev) => {
-                                                            const next = new Set(prev);
-                                                            if (next.has(key)) next.delete(key);
-                                                            else {
-                                                              // Same keep-one guard as the confirmed groups —
-                                                              // the server re-enforces it on apply.
-                                                              const unselected = g.members.filter((x) => !next.has(`${f.folder}/${x.filename}`));
-                                                              if (unselected.length <= 1) return prev;
-                                                              next.add(key);
-                                                            }
-                                                            return next;
-                                                          });
-                                                        }}
+                                                        onChange={() => toggleDedupePhoto(f.folder, m.filename)}
                                                       />
                                                       <span style={{ fontSize: 9, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                                         {m.caption || m.filename}
@@ -9602,21 +9619,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                                       <input
                                                         type="checkbox"
                                                         checked={selected}
-                                                        onChange={() => {
-                                                          setDedupeSelected((prev) => {
-                                                            const next = new Set(prev);
-                                                            if (next.has(key)) next.delete(key);
-                                                            else {
-                                                              // Keep-one guard in the UI too: refuse to select the
-                                                              // last unselected member of this group (the server
-                                                              // enforces it again on apply).
-                                                              const unselected = g.members.filter((x) => !next.has(`${f.folder}/${x.filename}`));
-                                                              if (unselected.length <= 1) return prev;
-                                                              next.add(key);
-                                                            }
-                                                            return next;
-                                                          });
-                                                        }}
+                                                        onChange={() => toggleDedupePhoto(f.folder, m.filename)}
                                                       />
                                                       <span style={{ fontSize: 9, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                                         {m.caption || m.filename}
