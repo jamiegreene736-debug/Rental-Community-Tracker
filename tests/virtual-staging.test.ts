@@ -20,6 +20,7 @@ import {
   virtualStagingContextForSource,
   virtualStagingJobMatchesSession,
   virtualStagingRecipeSignature,
+  virtualStagingSceneRefreshRule,
   virtualStagingSessionAction,
   virtualStagingViewpointDirectionForSource,
   type SelectableVirtualStagingCandidate,
@@ -183,18 +184,20 @@ test("duplicate start clicks reuse one active unit job", () => {
 test("the staging recipe signature invalidates previews from older prompts", () => {
   assert.equal(
     virtualStagingRecipeSignature(),
-    "virtual-staging-recipe::context-aware-photo-feedback-v4",
+    "virtual-staging-recipe::room-preserving-refresh-v5",
   );
   const v2 = `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-furnishings-v2`;
   const v3 = `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-alternate-angle-v3`;
-  assert.deepEqual(VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES, [v2, v3]);
+  const v4 = `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-photo-feedback-v4`;
+  assert.deepEqual(VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES, [v2, v3, v4]);
   assert.equal(isSupersededVirtualStagingRecipeSignature(v2), true);
   assert.equal(isSupersededVirtualStagingRecipeSignature(v3), true);
+  assert.equal(isSupersededVirtualStagingRecipeSignature(v4), true);
   assert.equal(isSupersededVirtualStagingRecipeSignature("gpt-image-1.5"), true);
   assert.equal(isSupersededVirtualStagingRecipeSignature(null), true);
   assert.equal(isSupersededVirtualStagingRecipeSignature(virtualStagingRecipeSignature()), false);
   assert.equal(
-    isSupersededVirtualStagingRecipeSignature(`${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}future-v4`),
+    isSupersededVirtualStagingRecipeSignature(`${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}future-v6`),
     false,
   );
 });
@@ -593,46 +596,70 @@ test("candidate IDs from another job are rejected", () => {
   }), /does not belong to this unit/);
 });
 
-test("the maintained prompt requests a bounded alternate angle without redesigning the room", () => {
+test("the maintained prompt requests a subtle angle and preserves style and object inventory", () => {
   assert.match(VIRTUAL_STAGING_PROMPT, /sole visual reference/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /nearby but visibly different viewpoint/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /walls, ceilings, floors, windows, doors/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /same space/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /camera height, level horizon, natural real-estate lens character/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /mild natural parallax/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /mirroring the image, rotating the two-dimensional canvas/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /zooming it, or merely cropping it/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /Do not create a reverse angle/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /never invent or remove a door, window, wall/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /Do not move openings/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /same physical space/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /level horizon, natural real-estate lens/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /mild physical parallax/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /genuine physical camera translation and yaw with natural parallax/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /walls, ceiling, windows, doors/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /floor plane, footprint, elevation, boundaries, transitions, baseboards/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /refreshing only its surface finish or material/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /Hawaiian, tropical, island, coastal/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /sofa with sofa/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /visible photograph is authoritative/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /Hawaiian-style sofa only with another tasteful Hawaiian-style sofa/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /If no suitable movable furnishing is visible, leave the furnishings unchanged/i);
-  assert.doesNotMatch(VIRTUAL_STAGING_PROMPT, /Preserve the condo's[^.]*camera position/i);
-  assert.doesNotMatch(VIRTUAL_STAGING_PROMPT, /Add .*neutral contemporary luxury/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /close stylistic sibling/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /one-for-one/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /exactly the source seating inventory/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /Areas that are open in the source remain naturally open/i);
+  assert.doesNotMatch(VIRTUAL_STAGING_PROMPT, /add(?:ed)? (?:a )?(?:random )?chair/i);
 
   const outdoorPrompt = buildVirtualStagingPrompt(
     { scene: "private-outdoor", placement: "outdoor" },
     "left",
   );
-  assert.match(outdoorPrompt, /one to two feet to the left/i);
-  assert.match(outdoorPrompt, /5 to 10 degrees/i);
-  assert.match(outdoorPrompt, /same private outdoor platform/i);
-  assert.match(outdoorPrompt, /weather-resistant, outdoor-rated furniture/i);
-  assert.match(outdoorPrompt, /Never add an indoor sofa/i);
+  assert.match(outdoorPrompt, /6 to 12 inches to the left/i);
+  assert.match(outdoorPrompt, /2 to 5 degrees/i);
+  assert.match(outdoorPrompt, /same private platform/i);
+  assert.match(outdoorPrompt, /weather-resistant and outdoor-rated/i);
+  assert.match(outdoorPrompt, /each existing outdoor seat, table, cushion, rug, lamp, plant, and accessory one-for-one/i);
   const indoorPrompt = buildVirtualStagingPrompt(
     { scene: "living-area", placement: "indoor" },
     "right",
   );
-  assert.match(indoorPrompt, /one to two feet to the right/i);
-  assert.match(indoorPrompt, /metadata indicates an indoor living area/i);
-  assert.match(indoorPrompt, /camera inside that same room/i);
-  assert.match(indoorPrompt, /never introduce patio, deck, or pool furniture/i);
-  assert.match(indoorPrompt, /Final eligibility rule/i);
-  assert.match(indoorPrompt, /ignore every camera, viewpoint, and furnishing instruction above/i);
-  assert.match(indoorPrompt, /make no changes\.$/i);
+  assert.match(indoorPrompt, /6 to 12 inches to the right/i);
+  assert.match(indoorPrompt, /metadata identifies an indoor living area/i);
+  assert.match(indoorPrompt, /camera inside that exact room/i);
+  assert.match(indoorPrompt, /FINAL ELIGIBILITY/i);
+  assert.match(indoorPrompt, /Apply this recipe only when the photograph itself clearly shows a furnished private/i);
+  assert.match(indoorPrompt, /faithful unchanged reproduction at the exact source camera position\.$/i);
+});
+
+test("the bedroom recipe refreshes floors, linens, and existing lamps without inventing seating", () => {
+  const prompt = buildVirtualStagingPrompt(
+    { scene: "bedroom", placement: "indoor" },
+    "left",
+  );
+  assert.match(prompt, /refresh the floor surface, bed linens, and every existing movable lamp or lampshade/i);
+  assert.match(prompt, /duvet or coverlet, sheets, blankets, bed pillows/i);
+  assert.match(prompt, /Keep the bed size, mattress position, frame, headboard, nightstands, seating inventory/i);
+  assert.match(prompt, /Map any other visible movable decor one-for-one/i);
+  assert.match(prompt, /Areas that are open in the source remain naturally open/i);
+});
+
+test("every stageable scene has a one-for-one, function-preserving refresh recipe", () => {
+  const cases = [
+    [{ scene: "living-area", placement: "indoor" } as const, /seating counts and the room's circulation paths/i],
+    [{ scene: "bedroom", placement: "indoor" } as const, /bed linens, and every existing movable lamp/i],
+    [{ scene: "kitchen", placement: "indoor" } as const, /stool count, and work clearances/i],
+    [{ scene: "bathroom", placement: "indoor" } as const, /vanity, plumbing, mirrors, tub, shower, toilet/i],
+    [{ scene: "dining", placement: "indoor" } as const, /exact seat count, table footprint/i],
+    [{ scene: "private-outdoor", placement: "outdoor" } as const, /outdoor seat, table, cushion, rug, lamp, plant/i],
+  ] as const;
+  for (const [context, distinctiveRule] of cases) {
+    const rule = virtualStagingSceneRefreshRule(context);
+    assert.match(rule, /refresh the (?:floor|private platform's) surface/i);
+    assert.match(rule, /one-for-one/i);
+    assert.match(rule, distinctiveRule);
+  }
 });
 
 test("photo feedback is a same-angle surgical edit with conservative style defaults", () => {
@@ -653,8 +680,8 @@ test("photo feedback is a same-angle surgical edit with conservative style defau
   assert.match(prompt, /close stylistic sibling/i);
   assert.match(prompt, /every object or surface not explicitly named/i);
   assert.ok(prompt.indexOf("OPERATOR REQUEST") < prompt.indexOf("FINAL NON-OVERRIDABLE RULES"));
-  assert.match(prompt, /Final eligibility rule/i);
-  assert.match(prompt, /make no changes\.$/i);
+  assert.match(prompt, /FINAL ELIGIBILITY/i);
+  assert.match(prompt, /faithful unchanged reproduction at the exact source camera position\.$/i);
   assert.doesNotMatch(prompt, /Move the virtual camera roughly/i);
   assert.equal(VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH, 1_000);
 });
@@ -695,7 +722,7 @@ test("frontend uses the accessible dialog and keeps zero-photo controls visible"
   assert.match(source, /button-finish-virtual-staging-without-swaps/);
   assert.match(source, /button-regenerate-staging-/);
   assert.match(source, /Generate another angle/);
-  assert.match(source, /Replaces this preview with a newly generated nearby viewpoint/);
+  assert.match(source, /subtle new angle and same-style, one-for-one refresh/);
   assert.match(source, /Feedback for this photo/);
   assert.match(source, /Regenerate with feedback/);
   assert.match(source, /textarea-staging-feedback-/);
@@ -740,7 +767,9 @@ test("backend keeps credentials server-side and edits immutable image input", ()
     "utf8",
   );
   assert.match(replicate, /input_image: sourceFile\.url/);
-  assert.match(replicate, /input_images: \[sourceFile\.url, referenceFile\.url\]/);
+  assert.match(replicate, /input_images: referenceFile/);
+  assert.match(replicate, /\[sourceFile\.url, referenceFile\.url\]/);
+  assert.match(replicate, /DEFAULT_REPLICATE_MODEL = "black-forest-labs\/flux-2-pro"/);
   assert.match(replicate, /DEFAULT_REPLICATE_FEEDBACK_MODEL = "black-forest-labs\/flux-2-pro"/);
   assert.match(replicate, /prompt: input\.prompt/);
   assert.match(replicate, /aspect_ratio: "match_input_image"/);

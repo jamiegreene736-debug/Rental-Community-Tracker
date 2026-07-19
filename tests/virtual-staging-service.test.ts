@@ -318,6 +318,7 @@ test("feedback derives from the immutable original, references the reviewed prev
   assert.deepEqual({ openAICalls, replicateCalls }, { openAICalls: 1, replicateCalls: 0 });
   assert.equal(verifierInput?.mode, "feedback-revision");
   assert.equal(verifierInput?.feedback, "Remove the chairs and add new bed linens");
+  assert.deepEqual(verifierInput?.context, { scene: "bedroom", placement: "indoor" });
   assert.deepEqual(verifierInput?.previousGenerated, editedSquare);
 });
 
@@ -439,28 +440,28 @@ test("provider fallback receives one identical context-aware prompt", async () =
   assert.equal(prompts.length, 2);
   assert.equal(prompts[0], prompts[1]);
   assert.match(prompts[0], /Hawaiian, tropical, island, coastal/i);
-  assert.match(prompts[0], /weather-resistant, outdoor-rated furniture/i);
-  assert.match(prompts[0], /Never add an indoor sofa/i);
-  assert.match(prompts[0], /one to two feet to the (?:left|right)/i);
-  assert.match(prompts[0], /5 to 10 degrees/i);
-  assert.match(prompts[0], /mild natural parallax/i);
+  assert.match(prompts[0], /weather-resistant, outdoor-rated/i);
+  assert.match(prompts[0], /exact seating count/i);
+  assert.match(prompts[0], /6 to 12 inches to the (?:left|right)/i);
+  assert.match(prompts[0], /2 to 5 degrees/i);
+  assert.match(prompts[0], /mild physical parallax/i);
 });
 
-test("a geometry-rejected image falls through to the next configured provider", async () => {
+test("a quality-rejected image gets one bounded retry before provider fallback", async () => {
   let firstCalls = 0;
   let secondCalls = 0;
   let verificationCalls = 0;
   const first = new TestProvider(async () => {
     firstCalls += 1;
     return editedSquare;
-  });
+  }, "first-provider");
   const second = new TestProvider(async () => {
     secondCalls += 1;
     return alternateEditedSquare;
-  });
-  const verifier = new TestViewpointVerifier(() => {
+  }, "second-provider");
+  const verifier = new TestViewpointVerifier((input) => {
     verificationCalls += 1;
-    if (verificationCalls === 1) {
+    if (input.imageProvider === "first-provider") {
       throw new VirtualStagingViewpointRejectedError("same camera position");
     }
   });
@@ -471,10 +472,31 @@ test("a geometry-rejected image falls through to the next configured provider", 
     context: indoorContext,
   });
   assert.deepEqual({ firstCalls, secondCalls, verificationCalls }, {
-    firstCalls: 1,
+    firstCalls: 2,
     secondCalls: 1,
-    verificationCalls: 2,
+    verificationCalls: 3,
   });
+});
+
+test("alternate-angle quality retries are capped at two paid generations per provider", async () => {
+  let calls = 0;
+  const provider = new TestProvider(async () => {
+    calls += 1;
+    return editedSquare;
+  }, "only-provider");
+  const verifier = new TestViewpointVerifier(() => {
+    throw new VirtualStagingViewpointRejectedError("unmatched chair was added");
+  });
+  await assert.rejects(
+    new VirtualStagingService([provider], 1, verifier).generate({
+      source: square,
+      sourceFilename: "bedroom.jpg",
+      generationAttempt: 1,
+      context: { scene: "bedroom", placement: "indoor" },
+    }),
+    /unmatched chair was added/i,
+  );
+  assert.equal(calls, 2);
 });
 
 test("a viewpoint-verifier outage stops before spending on another image provider", async () => {
@@ -525,8 +547,8 @@ test("regenerating a preview requests the opposite nearby camera direction", asy
   });
   assert.equal(prompts.length, 2);
   assert.notEqual(
-    /one to two feet to the left/i.test(prompts[0]),
-    /one to two feet to the left/i.test(prompts[1]),
+    /6 to 12 inches to the left/i.test(prompts[0]),
+    /6 to 12 inches to the left/i.test(prompts[1]),
   );
 });
 
@@ -599,6 +621,7 @@ test("every real provider result must pass geometry-aware viewpoint verification
     verifiedDirection = input.requestedDirection;
     assert.deepEqual(input.source, square);
     assert.deepEqual(input.generated, editedSquare);
+    assert.deepEqual(input.context, indoorContext);
   });
   const service = new VirtualStagingService(
     [new TestProvider(async () => editedSquare)],
@@ -630,6 +653,9 @@ test("the Anthropic verifier compares a reroll with both source and prior staged
             naturalParallax: true,
             fakeTransformDetected: false,
             architecturePreserved: true,
+            styleConsistent: true,
+            objectInventoryPreserved: true,
+            sceneRefreshApplied: true,
             distinctFromPreviousViewpoint: false,
             reason: "The new candidate repeats the prior staged camera perspective.",
           }),
@@ -645,6 +671,7 @@ test("the Anthropic verifier compares a reroll with both source and prior staged
       generated: alternateEditedSquare,
       previousGenerated: editedSquare,
       requestedDirection: "left",
+      context: indoorContext,
       imageProvider: "test-provider",
       generationAttempt: 2,
     }),
@@ -662,8 +689,106 @@ test("the Anthropic verifier compares a reroll with both source and prior staged
     schema?.properties?.viewpointChange?.enum,
     ["none", "nearby-natural", "large-or-invented", "uncertain"],
   );
+  const viewpointSchema = (requestBody?.output_config as {
+    format?: { schema?: { properties?: Record<string, unknown>; required?: string[] } };
+  })?.format?.schema;
+  assert.ok(viewpointSchema?.properties?.styleConsistent);
+  assert.ok(viewpointSchema?.properties?.objectInventoryPreserved);
+  assert.ok(viewpointSchema?.properties?.sceneRefreshApplied);
+  assert.ok(viewpointSchema?.required?.includes("styleConsistent"));
+  assert.ok(viewpointSchema?.required?.includes("objectInventoryPreserved"));
+  assert.ok(viewpointSchema?.required?.includes("sceneRefreshApplied"));
   const messages = requestBody?.messages as Array<{ content?: Array<{ type?: string }> }>;
   assert.equal(messages[0]?.content?.filter((block) => block.type === "image").length, 3);
+});
+
+test("the Anthropic verifier rejects an otherwise valid bedroom angle with an added chair", async () => {
+  let requestBody: Record<string, unknown> | null = null;
+  const verifier = new AnthropicVirtualStagingViewpointVerifier(
+    "test-key",
+    "claude-test",
+    async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            samePhysicalSpace: true,
+            viewpointChange: "nearby-natural",
+            naturalParallax: true,
+            fakeTransformDetected: false,
+            architecturePreserved: true,
+            styleConsistent: true,
+            objectInventoryPreserved: false,
+            sceneRefreshApplied: true,
+            reason: "A new chair has no counterpart in the source bedroom.",
+          }),
+        }],
+        stop_reason: "end_turn",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  );
+  await assert.rejects(
+    verifier.verify({
+      source: square,
+      generated: editedSquare,
+      requestedDirection: "left",
+      context: { scene: "bedroom", placement: "indoor" },
+      imageProvider: "replicate",
+      generationAttempt: 1,
+    }),
+    /failed alternate-angle verification/i,
+  );
+  const messages = requestBody?.messages as Array<{
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+  const prompt = [...(messages[0]?.content ?? [])].reverse()
+    .find((block) => block.type === "text")?.text ?? "";
+  assert.match(prompt, /added chair/i);
+  assert.match(prompt, /refresh the floor surface, bed linens/i);
+  assert.match(prompt, /6 to 12 inches/i);
+});
+
+test("the Anthropic alternate-angle gate accepts only complete, same-style room refreshes", async () => {
+  const baseVerdict = {
+    samePhysicalSpace: true,
+    viewpointChange: "nearby-natural",
+    naturalParallax: true,
+    fakeTransformDetected: false,
+    architecturePreserved: true,
+    styleConsistent: true,
+    objectInventoryPreserved: true,
+    sceneRefreshApplied: true,
+    reason: "The bedroom has a subtle adjacent viewpoint and a complete one-for-one refresh.",
+  } as const;
+  const cases = [
+    { name: "complete refresh", overrides: {}, accepted: true },
+    { name: "style drift", overrides: { styleConsistent: false }, accepted: false },
+    { name: "missing scene refresh", overrides: { sceneRefreshApplied: false }, accepted: false },
+  ];
+  for (const testCase of cases) {
+    const verifier = new AnthropicVirtualStagingViewpointVerifier(
+      "test-key",
+      "claude-test",
+      async () => new Response(JSON.stringify({
+        content: [{
+          type: "text",
+          text: JSON.stringify({ ...baseVerdict, ...testCase.overrides, reason: testCase.name }),
+        }],
+        stop_reason: "end_turn",
+      }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    const verification = verifier.verify({
+      source: square,
+      generated: editedSquare,
+      requestedDirection: "left",
+      context: { scene: "bedroom", placement: "indoor" },
+      imageProvider: "replicate",
+      generationAttempt: 1,
+    });
+    if (testCase.accepted) await verification;
+    else await assert.rejects(verification, /failed alternate-angle verification/i);
+  }
 });
 
 test("the Anthropic feedback gate checks requested edits, style, and unrelated content", async () => {
@@ -699,6 +824,7 @@ test("the Anthropic feedback gate checks requested edits, style, and unrelated c
     previousGenerated: editedSquare,
     generated: alternateEditedSquare,
     requestedDirection: "left",
+    context: { scene: "bedroom", placement: "indoor" },
     imageProvider: "openai",
     generationAttempt: 2,
     mode: "feedback-revision",
@@ -736,6 +862,7 @@ test("the Anthropic verifier rejects large angles and malformed structured outpu
     source: square,
     generated: editedSquare,
     requestedDirection: "right",
+    context: indoorContext,
     imageProvider: "test-provider",
     generationAttempt: 1,
   };
@@ -751,6 +878,9 @@ test("the Anthropic verifier rejects large angles and malformed structured outpu
           naturalParallax: true,
           fakeTransformDetected: false,
           architecturePreserved: true,
+          styleConsistent: true,
+          objectInventoryPreserved: true,
+          sceneRefreshApplied: true,
           reason: "The candidate exposes a large unseen reverse angle.",
         }),
       }],
@@ -863,9 +993,51 @@ test("Replicate feedback limits temporary reference copies to FLUX.2's pixel bud
   });
   const dimensions = await Promise.all(mock.uploads.map(async (upload) => sharp(upload).metadata()));
   const pixels = dimensions.map((metadata) => (metadata.width ?? 0) * (metadata.height ?? 0));
-  assert.ok(pixels.every((count) => count > 0 && count <= 4_000_000));
-  assert.ok(pixels.reduce((sum, count) => sum + count, 0) <= 8_000_000);
+  assert.ok(pixels.every((count) => count > 0 && count <= 2_000_000));
+  assert.ok(pixels.reduce((sum, count) => sum + count, 0) <= 4_000_000);
   assert.deepEqual(mock.deletedFileIds.sort(), ["file-1", "file-2"]);
+});
+
+test("Replicate defaults ordinary staging to FLUX.2 with one ordered reference image", async () => {
+  const mock = createReplicateFetchMock(editedSquare);
+  const provider = (() => {
+    const previousModel = process.env.REPLICATE_VIRTUAL_STAGING_MODEL;
+    delete process.env.REPLICATE_VIRTUAL_STAGING_MODEL;
+    try {
+      return new ReplicateVirtualStagingProvider(
+        "test-token",
+        undefined,
+        "black-forest-labs/flux-2-pro",
+        mock.fetcher,
+      );
+    } finally {
+      if (previousModel === undefined) delete process.env.REPLICATE_VIRTUAL_STAGING_MODEL;
+      else process.env.REPLICATE_VIRTUAL_STAGING_MODEL = previousModel;
+    }
+  })();
+  const result = await provider.generate({
+    source: square,
+    sourceFilename: "bedroom.jpg",
+    generationAttempt: 1,
+    context: { scene: "bedroom", placement: "indoor" },
+    mode: "alternate-angle",
+    prompt: "Apply the room-preserving bedroom recipe.",
+  });
+  assert.equal(result.model, "black-forest-labs/flux-2-pro");
+  assert.deepEqual(mock.predictionUrls, [
+    "https://api.replicate.com/v1/models/black-forest-labs/flux-2-pro/predictions",
+  ]);
+  assert.deepEqual(mock.predictionBodies[0]?.input, {
+    prompt: "Apply the room-preserving bedroom recipe.",
+    input_images: ["https://api.replicate.com/v1/files/file-1"],
+    aspect_ratio: "match_input_image",
+    resolution: "match_input_image",
+    output_format: "jpg",
+    output_quality: 90,
+    safety_tolerance: 2,
+  });
+  assert.equal("input_image" in (mock.predictionBodies[0]?.input ?? {}), false);
+  assert.deepEqual(mock.deletedFileIds, ["file-1"]);
 });
 
 test("Replicate preserves the single-image Kontext contract for ordinary staging", async () => {

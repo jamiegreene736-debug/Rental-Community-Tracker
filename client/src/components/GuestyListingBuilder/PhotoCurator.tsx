@@ -713,7 +713,7 @@ export default function PhotoCurator({
           <div>
             <div className="text-sm font-semibold text-slate-900">Virtual Staging</div>
             <div className="mt-0.5 text-xs text-slate-600">
-              Generate alternatives from the preserved originals, then approve each replacement.
+              Generate subtle new angles with one-for-one, same-style room refreshes, then approve each replacement.
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">

@@ -1,6 +1,10 @@
 import sharp from "sharp";
 
-import type { VirtualStagingViewpointDirection } from "@shared/virtual-staging";
+import {
+  virtualStagingSceneRefreshRule,
+  type VirtualStagingContext,
+  type VirtualStagingViewpointDirection,
+} from "@shared/virtual-staging";
 
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
@@ -14,6 +18,7 @@ export type VirtualStagingViewpointVerificationInput = {
   generated: Buffer;
   previousGenerated?: Buffer;
   requestedDirection: VirtualStagingViewpointDirection;
+  context: VirtualStagingContext;
   imageProvider: string;
   generationAttempt: number;
   mode?: "alternate-angle" | "feedback-revision";
@@ -48,6 +53,9 @@ type ViewpointVerdict = {
   naturalParallax: boolean;
   fakeTransformDetected: boolean;
   architecturePreserved: boolean;
+  styleConsistent: boolean;
+  objectInventoryPreserved: boolean;
+  sceneRefreshApplied: boolean;
   distinctFromPreviousViewpoint?: boolean;
   reason: string;
 };
@@ -84,7 +92,19 @@ function viewpointOutputSchema(hasPreviousPreview: boolean): Record<string, unkn
     },
     architecturePreserved: {
       type: "boolean",
-      description: "True only when permanent architectural features remain consistent between views.",
+      description: "True only when permanent architecture and floor geometry remain consistent. The floor surface finish or material may change, but not its plane, footprint, elevation, boundaries, transitions, baseboards, or perspective.",
+    },
+    styleConsistent: {
+      type: "boolean",
+      description: "True only when every refreshed item and floor finish remains a close stylistic sibling of the source palette, materials, pattern scale, era, quality, function, and regional character.",
+    },
+    objectInventoryPreserved: {
+      type: "boolean",
+      description: "True only when movable objects map one-for-one by category, count, capacity, approximate size, and placement, with the exact source seating inventory and no unmatched additions.",
+    },
+    sceneRefreshApplied: {
+      type: "boolean",
+      description: "True only when the requested room-specific floor, textile, lamp, furnishing, or decor refresh is visibly present without changing the room's function.",
     },
     reason: {
       type: "string",
@@ -97,6 +117,9 @@ function viewpointOutputSchema(hasPreviousPreview: boolean): Record<string, unkn
     "naturalParallax",
     "fakeTransformDetected",
     "architecturePreserved",
+    "styleConsistent",
+    "objectInventoryPreserved",
+    "sceneRefreshApplied",
     "reason",
   ];
   if (hasPreviousPreview) {
@@ -158,17 +181,22 @@ function feedbackOutputSchema(): Record<string, unknown> {
 function viewpointPrompt(
   requestedDirection: VirtualStagingViewpointDirection,
   hasPreviousPreview: boolean,
+  context: VirtualStagingContext,
 ): string {
   const instructions = [
     "Act as a strict visual QA gate for a vacation-rental virtual-staging workflow.",
     `Image 1 is the immutable source photograph. ${hasPreviousPreview ? "Image 2 is the prior accepted staged preview, and Image 3 is the new generated candidate." : "Image 2 is the generated candidate."}`,
-    `Determine whether the new generated candidate is the same physical space photographed from a nearby but genuinely different camera viewpoint${hasPreviousPreview ? " than both the source and the prior staged preview" : " than the source"} while preserving permanent architecture.`,
-    "A small shift of roughly one to two feet and about 5 to 10 degrees is sufficient.",
+    `Determine whether the new generated candidate is the same physical space photographed from a subtly but genuinely different camera viewpoint${hasPreviousPreview ? " than both the source and the prior staged preview" : " than the source"}, with the source's object inventory and style preserved.`,
+    "The requested camera change is approximately 6 to 12 inches laterally and 2 to 5 degrees of yaw. Require a small adjacent view; reject an unchanged camera as well as a conspicuously different or invented angle.",
     "Require direct evidence from permanent geometry, such as changed perspective, parallax, vanishing lines, or changed relative positions of walls, windows, doors, columns, railings, cabinets, and fixed fixtures.",
     "Do not count changed furniture, decor, lighting, color, texture, generative rendering differences, mirroring, a two-dimensional rotation, zoom, or crop as evidence that the camera moved.",
     "Use viewpointChange=nearby-natural only for a small believable camera translation or yaw with no large unseen area. Use none for the same camera position, large-or-invented for a reverse or substantially invented angle, and uncertain when movement cannot be verified.",
     "Set naturalParallax true only when permanent features show physically plausible perspective or relative-position changes. Set fakeTransformDetected true for mirroring, 2D rotation, stretching, zooming, or crop-only tricks.",
-    "Mark samePhysicalSpace or architecturePreserved false if the candidate invents, removes, or materially relocates permanent features or depicts a different room.",
+    "A floor surface finish or material refresh is expected. Mark architecturePreserved false if the floor plane, footprint, elevation, boundaries, transitions, baseboards, or perspective changes, or if any other permanent feature is invented, removed, or materially relocated.",
+    `The classified scene is ${context.scene} (${context.placement}). Require this refresh recipe: ${virtualStagingSceneRefreshRule(context)}`,
+    "Set objectInventoryPreserved false when any movable object lacks a one-for-one source counterpart, including an added chair, bench, stool, table, lamp, plant, artwork, or accessory; when a source item disappears without a same-function replacement; or when seating count, bed capacity, scale, placement, or circulation changes.",
+    "Set styleConsistent false when a replacement changes the source palette, material family, pattern density, era, formality, quality, function, or Hawaiian, tropical, island, coastal, resort, or other regional design character.",
+    "Set sceneRefreshApplied true only when the candidate visibly refreshes the scene-specific targets while preserving room function. For a bedroom, require a refreshed floor surface, refreshed bed linens, and one-for-one refreshes of every existing movable lamp or lampshade.",
     `The generation requested a shift toward the ${requestedDirection}; direction is secondary, so accept a clearly genuine nearby shift in either direction.`,
     "Be conservative. If visual evidence is uncertain, return false for the uncertain criterion.",
   ];
@@ -237,6 +265,9 @@ function parseViewpointVerdict(payload: unknown, hasPreviousPreview: boolean): V
     || typeof record.naturalParallax !== "boolean"
     || typeof record.fakeTransformDetected !== "boolean"
     || typeof record.architecturePreserved !== "boolean"
+    || typeof record.styleConsistent !== "boolean"
+    || typeof record.objectInventoryPreserved !== "boolean"
+    || typeof record.sceneRefreshApplied !== "boolean"
     || (hasPreviousPreview && typeof record.distinctFromPreviousViewpoint !== "boolean")
     || typeof record.reason !== "string"
     || !record.reason.trim()) {
@@ -248,6 +279,9 @@ function parseViewpointVerdict(payload: unknown, hasPreviousPreview: boolean): V
     naturalParallax: record.naturalParallax,
     fakeTransformDetected: record.fakeTransformDetected,
     architecturePreserved: record.architecturePreserved,
+    styleConsistent: record.styleConsistent,
+    objectInventoryPreserved: record.objectInventoryPreserved,
+    sceneRefreshApplied: record.sceneRefreshApplied,
     ...(hasPreviousPreview
       ? { distinctFromPreviousViewpoint: record.distinctFromPreviousViewpoint as boolean }
       : {}),
@@ -398,7 +432,7 @@ export class AnthropicVirtualStagingViewpointVerifier implements VirtualStagingV
             type: "text",
             text: mode === "feedback-revision"
               ? feedbackPrompt(input.feedback!.trim())
-              : viewpointPrompt(input.requestedDirection, hasPreviousPreview),
+              : viewpointPrompt(input.requestedDirection, hasPreviousPreview, input.context),
           },
         ],
       }],
@@ -472,6 +506,9 @@ export class AnthropicVirtualStagingViewpointVerifier implements VirtualStagingV
           && viewpointVerdict!.naturalParallax
           && !viewpointVerdict!.fakeTransformDetected
           && viewpointVerdict!.architecturePreserved
+          && viewpointVerdict!.styleConsistent
+          && viewpointVerdict!.objectInventoryPreserved
+          && viewpointVerdict!.sceneRefreshApplied
           && (!hasPreviousPreview || viewpointVerdict!.distinctFromPreviousViewpoint === true);
       const usage = usageFromPayload(payload);
       console.info(`[virtual-staging] ${JSON.stringify({
@@ -492,6 +529,9 @@ export class AnthropicVirtualStagingViewpointVerifier implements VirtualStagingV
           naturalParallax: viewpointVerdict!.naturalParallax,
           fakeTransformDetected: viewpointVerdict!.fakeTransformDetected,
           architecturePreserved: viewpointVerdict!.architecturePreserved,
+          styleConsistent: viewpointVerdict!.styleConsistent,
+          objectInventoryPreserved: viewpointVerdict!.objectInventoryPreserved,
+          sceneRefreshApplied: viewpointVerdict!.sceneRefreshApplied,
           distinctFromPreviousViewpoint: viewpointVerdict!.distinctFromPreviousViewpoint ?? null,
         }),
         inputTokens: usage.inputTokens,
