@@ -399,6 +399,36 @@ const FIXTURE_LINES = [
     "the run loads ONLY its own MCP config (no user-scope servers)",
     runnerSrc.includes('"--strict-mcp-config"'),
   );
+  // 2026-07-19: the browser MCP hand-shake takes ~2.6s; a cold/contended start
+  // overran the CLI's default MCP budget and left a real run browser-less. Two
+  // belts: preflight-warm-and-verify before the run, and give the CLI a real
+  // startup budget.
+  check(
+    "the browser MCP is preflighted (warmed + verified) before the agent run, and retried",
+    runnerSrc.includes("async function preflightBrowserMcp")
+      && /for \(let attempt = 1; attempt <= BROWSER_PREFLIGHT_ATTEMPTS/.test(runnerSrc)
+      && runnerSrc.includes("if (!browserReady) {"),
+  );
+  check(
+    "a failed preflight ENDS the run (never runs browser-less), after Chrome re-checks",
+    (() => {
+      const loop = runnerSrc.slice(runnerSrc.indexOf("let browserReady"), runnerSrc.indexOf("Ad-hoc MCP config"));
+      return loop.includes("await ensureRunnerChrome();") // re-check between attempts
+        && /if \(!browserReady\) \{[\s\S]*?await fail\(/.test(loop);
+    })(),
+  );
+  check(
+    "the preflight verifies a real serverInfo handshake (not just that the process spawned)",
+    (() => {
+      const fn = runnerSrc.slice(runnerSrc.indexOf("async function preflightBrowserMcp"), runnerSrc.indexOf("// ── portal I/O"));
+      return fn.includes('buf.includes(\'"serverInfo"\')') && fn.includes('method: "initialize"');
+    })(),
+  );
+  check(
+    "the CLI gets a real MCP startup budget via MCP_TIMEOUT",
+    runnerSrc.includes("childEnv.MCP_TIMEOUT = String(CLI_MCP_TIMEOUT_MS)")
+      && /CLI_MCP_TIMEOUT_MS = Number\(process\.env\.CLAUDE_FIND_RUN_MCP_TIMEOUT_MS \?\? 30_000\)/.test(runnerSrc),
+  );
 }
 {
   const scan = runnerScanMarkers("working…\nATTENTION: bot check on vrbo.com — unit A\nstill waiting");
