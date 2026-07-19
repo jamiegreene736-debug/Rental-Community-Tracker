@@ -43,6 +43,26 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-19 (SAMPLE license IDs on LIVE listings — portfolio-wide cleanup): Operator flagged the
+  Menehune Shores listing's notes carrying "GE/TA-099-999-9999-99". NOT a guard failure (don't
+  re-chase): every sample landed BEFORE the 2026-07-10 placeholder guard; today's
+  isPlaceholderLicenseValue catches all of them. Audited every guesty_property_map listing across
+  all four compliance surfaces (notes / tags / top-level licenseNumber+taxId / Booking.com license
+  contentData): 18 of 24 carried samples; 7 in guest-visible notes. FIXED OPERATIONALLY via the
+  existing pull machinery (persist=1 → provenance) + push-compliance re-push per property — real
+  TMKs from GIS, TATs mostly from each listing's own Booking.com license object (the Guesty-listing
+  lookup leg reads it), GETs via paired-TAT derivation, STR permits from the county registries where
+  the property genuinely has one. Re-push rewrites notes+tags WHOLESALE so sample lines vanish even
+  where no real replacement exists. KEY FACTS: positive-id core properties persist via
+  property_compliance_overrides (the static unit-builder-data samples are only an unused lookup
+  seed); integrations[].bookingCom.license read-back is ASYNC channel state (a 200 PUT shows old
+  contentData until the next Guesty↔Booking sync — never diagnose a failed push from an immediate
+  read-back); top-level licenseNumber/taxId PUTs don't persist on this account (tags/notes/Booking
+  are the carriers). PR (`claude/live-sample-license-cleanup`): "TVR-2024-099" → LEGACY sample list
+  (proven fake — the Kauai registry issues only TVNC-#### numbers) + test lock + this note. Verify
+  in ~a day that the Booking.com license objects synced away their sample permit_numbers; the
+  public-listing-sourced TAT/GETs carry their source in license_provenance.v1 for spot-checking.
+
 - 2026-07-19 (bookings row: ONE Cowork-only auto-fill button + TWO separate Cowork prompts; VRBO
   80%/20% rule): Operator screenshot showed the empty-slots panel with BOTH "Auto Cowork · find +
   prepare" AND the server "⚡ Auto-fill cheapest" — wanted one Cowork-focused button, plus two

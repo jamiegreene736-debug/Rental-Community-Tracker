@@ -76,6 +76,11 @@ console.log("license-compliance-samples: generator/detector sync + county STR fo
   const staticMisses = staticDemoValues.filter((value) => !isPlaceholderLicenseValue(value));
   check("static unit-builder-data demo values are flagged", staticMisses.length === 0, staticMisses);
 
+  // Live-observed leftover from the 2026-07-19 sample-compliance audit:
+  // pushed pre-guard to Poipu Kapili's Booking.com license object, proven
+  // absent from the Kauai TVR registry (which issues only TVNC-#### numbers).
+  check("live-observed fake TVR-2024-099 is flagged", isPlaceholderLicenseValue("TVR-2024-099"));
+
   // usableLicenseValue is the push-compliance gate — samples must null out.
   check("usableLicenseValue nulls a generated sample", usableLicenseValue("TA-026-780-7890-01") === null);
   check("usableLicenseValue nulls a static demo TMK", usableLicenseValue("420150040002") === null);

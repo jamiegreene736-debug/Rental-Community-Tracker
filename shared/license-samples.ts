@@ -303,6 +303,13 @@ export const LEGACY_SAMPLE_LICENSE_VALUES: string[] = [
   // Current-format static demo permits in unit-builder-data.ts
   // (STVR-19-3461 is also emitted by the generator; -3462 is not).
   "STVR-19-3462",
+  // Observed live on the Poipu Kapili (-25) Booking.com license object during
+  // the 2026-07-19 sample-compliance audit, pushed pre-guard alongside a
+  // known sample TAT. PROVEN not a real permit: the County of Kauai TVR
+  // registry (all 401 records) contains only TVNC-#### permit numbers and
+  // has no "2024-099" in any field. Exact value only — TVR-YYYY-NNN stays a
+  // real-shaped format (see the TVR-2020-101 false-positive lock).
+  "TVR-2024-099",
 ];
 
 // Filler GET/TAT license cores used by the sample generators (current
