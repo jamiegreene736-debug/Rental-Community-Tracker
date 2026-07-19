@@ -8212,6 +8212,9 @@ export async function registerRoutes(
       // is on and pointed at the clubhouse/main-building address (fire-and-
       // forget, idempotent — skips when already enabled with the right street).
       ensurePublishedAddressForMapping(propertyId, guestyListingId.trim(), "guesty-property-map");
+      // New mapping → push the standing booking rules (7d advance-notice cutoff,
+      // min-nights floor) unless the operator already saved rules for this pair.
+      void autoPushBookingRulesForMapping(propertyId, guestyListingId.trim(), "guesty-property-map");
       res.json(row);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to upsert Guesty property map", message: err.message });
@@ -26536,6 +26539,64 @@ Requirements:
     return { row, readback, availabilityReadback, mismatches, summary };
   };
 
+  // ── Booking-rules auto-push at mapping birth (2026-07-19) ──────────────────
+  // WHY THIS EXISTS: the advance-notice cutoff was pushed portfolio-wide exactly
+  // ONCE (2026-06-02, the push-advance-notice-all sweep). Every listing mapped
+  // AFTER that date silently had NO cutoff in Guesty — the Pricing tab's Booking
+  // Rules card renders client-side defaults ("7d advance notice") when no saved
+  // row exists, so the gap was invisible until VRBO sold a next-day arrival on
+  // Royal Kahana (booked 2026-07-19 for a 2026-07-20 check-in). This hook makes
+  // booking rules a mapping-birth auto-push like amenities
+  // (autoPushSavedAmenitiesForProperty) and the published address
+  // (ensurePublishedAddressForMapping): every seam that creates a
+  // property↔listing mapping fires it.
+  //
+  // Semantics (load-bearing):
+  //  • SKIPS when a builder_booking_rules row already exists — an operator-set
+  //    config is never clobbered by a re-map/import.
+  //  • Merges the listing's LIVE Guesty terms first (maxNights 45 stays 45),
+  //    then applies the standing defaults: 7d advance notice, min-nights
+  //    floored at DEFAULT_MIN_NIGHTS (Guesty newborn listings default to 1).
+  //  • Fire-and-forget + cooldown (the builder create flow double-fires
+  //    guesty-import → schedule-sync within seconds).
+  //  • Kill switch: BOOKING_RULES_AUTO_PUSH_DISABLED=1.
+  const BOOKING_RULES_AUTO_PUSH_COOLDOWN_MS = 2 * 60 * 1000;
+  const DEFAULT_ADVANCE_NOTICE_DAYS = 7;
+  const bookingRulesAutoPushRecent = new Map<string, number>();
+
+  async function autoPushBookingRulesForMapping(
+    propertyId: number,
+    guestyListingId: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      if (process.env.BOOKING_RULES_AUTO_PUSH_DISABLED === "1") return;
+      if (!Number.isFinite(propertyId) || !guestyListingId) return;
+      const key = `${propertyId}|${guestyListingId}`;
+      const now = Date.now();
+      const recent = bookingRulesAutoPushRecent.get(key);
+      if (recent && now - recent < BOOKING_RULES_AUTO_PUSH_COOLDOWN_MS) return;
+      bookingRulesAutoPushRecent.set(key, now);
+      const existing = await storage.getBuilderBookingRules(propertyId, guestyListingId).catch(() => undefined);
+      if (existing) return; // operator-owned rules already exist — never clobber
+      const current = await currentBuilderBookingRulesForListing(propertyId, guestyListingId);
+      const rules = normalizeBuilderBookingRules({
+        ...current,
+        advanceNotice: DEFAULT_ADVANCE_NOTICE_DAYS,
+      });
+      rules.minNights = Math.max(rules.minNights, DEFAULT_MIN_NIGHTS);
+      if (rules.maxNights < rules.minNights) rules.maxNights = rules.minNights;
+      const result = await pushBuilderBookingRulesToGuesty(propertyId, guestyListingId, rules);
+      if (result.mismatches.length === 0) {
+        console.log(`[booking-rules-auto-push] ${reason}: pushed defaults for property ${propertyId} → listing ${guestyListingId} (${result.summary})`);
+      } else {
+        console.warn(`[booking-rules-auto-push] ${reason}: read-back mismatch for property ${propertyId} → listing ${guestyListingId}: ${result.summary}`);
+      }
+    } catch (e: any) {
+      console.warn(`[booking-rules-auto-push] ${reason}: error for property ${propertyId}:`, e?.message ?? e);
+    }
+  }
+
   // Enforce the standing DEFAULT_MIN_NIGHTS as a FLOOR on a single listing, without
   // disturbing any other setting. Design (hardened via adversarial review 2026-07-09):
   //  • Reads Guesty's LIVE terms and ONLY acts on a confident read. A failed/empty
@@ -26715,6 +26776,13 @@ Requirements:
       try {
         const current = await currentBuilderBookingRulesForListing(mapping.propertyId, listingId);
         const rules = normalizeBuilderBookingRules({ ...current, advanceNotice });
+        // FLOOR min-nights at the standing policy (2026-07-19). Saved rows from
+        // the 2026-06-02 sweep still carry the era's minNights=3; re-running this
+        // endpoint verbatim would push that 3 back to Guesty and LOWER listings
+        // the min-nights policy rollout already raised to 4. A deliberate higher
+        // minimum (e.g. a 7-night loss-prevention rule) passes through untouched.
+        rules.minNights = Math.max(rules.minNights, DEFAULT_MIN_NIGHTS);
+        if (rules.maxNights < rules.minNights) rules.maxNights = rules.minNights;
         const result = await pushBuilderBookingRulesToGuesty(mapping.propertyId, listingId, rules);
         results.push({
           propertyId: mapping.propertyId,
@@ -32412,6 +32480,7 @@ Return ONLY compact JSON with this exact shape:
     // the automation loop for drafts scanned BEFORE their listing existed.
     void autoPushSavedAmenitiesForProperty(propertyId, guestyListingId, "schedule-sync");
     ensurePublishedAddressForMapping(propertyId, guestyListingId, "schedule-sync");
+    void autoPushBookingRulesForMapping(propertyId, guestyListingId, "schedule-sync");
     const delayMs = Math.min(delayMinutes, 180) * 60 * 1000;
     setTimeout(() => {
       runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 }).catch((err) => {
@@ -32431,6 +32500,7 @@ Return ONLY compact JSON with this exact shape:
       await storage.upsertGuestyPropertyMap(propertyId, guestyListingId);
       void autoPushSavedAmenitiesForProperty(propertyId, guestyListingId, "sync-now");
       ensurePublishedAddressForMapping(propertyId, guestyListingId, "sync-now");
+      void autoPushBookingRulesForMapping(propertyId, guestyListingId, "sync-now");
       const summary = await runLeadTimePolicySyncForProperty(propertyId, { minSets: 3 });
       res.json({ ok: !summary.startsWith("skipped:"), status: summary.startsWith("skipped:") ? "skipped" : "ok", summary });
     } catch (err: any) {
@@ -44065,6 +44135,7 @@ Return ONLY compact JSON with this exact shape:
         // cooldown inside the helper absorbs the duplicate).
         void autoPushSavedAmenitiesForProperty(requestedPropertyId, guestyListingId, "guesty-import");
         ensurePublishedAddressForMapping(requestedPropertyId, guestyListingId, "guesty-import");
+        void autoPushBookingRulesForMapping(requestedPropertyId, guestyListingId, "guesty-import");
         const staleRows = existingMaps.filter(
           (row) => row.guestyListingId === guestyListingId && row.propertyId < 0 && row.propertyId !== requestedPropertyId,
         );
@@ -44122,6 +44193,7 @@ Return ONLY compact JSON with this exact shape:
       const mapping = await storage.upsertGuestyPropertyMap(-draft.id, guestyListingId);
       void autoPushSavedAmenitiesForProperty(-draft.id, guestyListingId, "guesty-import-create");
       ensurePublishedAddressForMapping(-draft.id, guestyListingId, "guesty-import-create");
+      void autoPushBookingRulesForMapping(-draft.id, guestyListingId, "guesty-import-create");
 
       const staleRows = existingMaps.filter(
         (row) => row.guestyListingId === guestyListingId && row.propertyId < 0 && row.propertyId !== -draft.id,
