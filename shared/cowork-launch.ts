@@ -111,6 +111,35 @@ export interface CoworkLaunchResult {
   promptIncluded: boolean;
   /** Full prompt was saved to an authenticated short-lived Tracker run. */
   runStored?: boolean;
+  /**
+   * The relay POST hit a 401 and apiRequest is already hard-navigating to
+   * /login. The caller must suppress BOTH the deep link and the toast —
+   * firing a claude:// assignment in the same tick is a second navigation,
+   * and the operator would land on the login page with an empty Cowork task
+   * stacked on top of it.
+   */
+  abortedForAuth?: boolean;
+}
+
+/**
+ * Does the operator still have to paste the prompt by hand?
+ *
+ * True whenever the brief did NOT ride into Claude Desktop's composer: a
+ * phone/tablet (no Claude Desktop), or a prompt over the deep-link cap that
+ * could not be relayed. Those are the only cases that justify showing the
+ * prompt on screen — the operator asked for the modal to stop popping up on
+ * the happy path (2026-07-19), so this predicate is the gate.
+ *
+ * LOAD-BEARING: keep BOTH terms. `!launched` implies `!promptIncluded` on
+ * every current return path, so `!promptIncluded` alone would pass today's
+ * tests — but that invariant is incidental, and reducing to one term would
+ * silently strand the operator the moment a mobile/catch path changes.
+ * Deliberately does NOT consider `copied`: when the prompt is already sitting
+ * in the Cowork composer, a failed clipboard write costs the operator nothing.
+ */
+export function coworkLaunchNeedsFallback(result: CoworkLaunchResult): boolean {
+  if (result.abortedForAuth) return false;
+  return !result.launched || !result.promptIncluded;
 }
 
 export interface CoworkLaunchToast {
@@ -125,11 +154,19 @@ export interface CoworkLaunchToast {
  */
 export function coworkLaunchToastCopy(result: CoworkLaunchResult, label: string): CoworkLaunchToast {
   if (result.launched && result.promptIncluded) {
+    // RECOVERY CLAUSE (2026-07-19): `launched` means "we fired the claude://
+    // assignment", NOT "Claude Desktop opened". The assignment never throws
+    // when the OS has no handler or the operator cancels the browser's
+    // "Open Claude?" confirm. Now that the happy path shows no modal, this
+    // toast is the ONLY thing left on screen — so it has to say what to do
+    // when nothing opened. Re-clicking is safe: the relay POST only inserts a
+    // row, and the reservation checkout claim is taken by Cowork at run time.
+    const recovery = " If Claude Desktop didn't open, click the button again.";
     return {
       title: "Opened in Cowork",
       description: result.runStored
-        ? `${label} was saved securely and its short launcher is pre-filled in a new Cowork task — press send to load and run the complete brief.${result.copied ? " (The complete brief is also on your clipboard.)" : ""}`
-        : `${label} is pre-filled in a new Cowork task — review it in Claude Desktop and press send to run it.${result.copied ? " (Also copied to your clipboard.)" : ""}`,
+        ? `${label} was saved securely and its short launcher is pre-filled in a new Cowork task — press send to load and run the complete brief.${result.copied ? " (The complete brief is also on your clipboard.)" : ""}${recovery}`
+        : `${label} is pre-filled in a new Cowork task — review it in Claude Desktop and press send to run it.${result.copied ? " (Also copied to your clipboard.)" : ""}${recovery}`,
       destructive: false,
     };
   }

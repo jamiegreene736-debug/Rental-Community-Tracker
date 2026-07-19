@@ -18,7 +18,14 @@ export const COWORK_PROMPT_RUN_TTL_MS = 24 * 60 * 60 * 1_000;
 export const COWORK_PROMPT_RUN_MAX_CHARS = 500_000;
 
 const RUN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ALLOWED_KINDS = new Set(["find-and-prepare", "prepare-checkout", "bulk-find-and-prepare"]);
+// "find" is the row-level Auto Cowork search brief. It normally rides inside
+// the deep link, but it sits within ~40 chars of the 14,336 cap for a
+// short-named property and goes OVER for longer ones (Waipouli, Mauna Lani
+// Point) — over cap, buildCoworkDeepLink refuses to embed and Cowork would
+// open EMPTY. The relay is that overflow path. Deliberately NOT named
+// "find-and-prepare": that kind was retired in the 2026-07-19 find/checkout
+// split and tests/cowork-launch.test.ts asserts the string is gone.
+const ALLOWED_KINDS = new Set(["find", "find-and-prepare", "prepare-checkout", "bulk-find-and-prepare"]);
 
 type PortalSession = { role?: string } | undefined;
 

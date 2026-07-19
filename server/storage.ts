@@ -175,6 +175,14 @@ export interface IStorage {
   // so a single reservation can have multiple attached buy-ins (one per unitId).
   getBuyInCandidates(params: { propertyId: number; unitId: string; checkIn: string; checkOut: string }): Promise<BuyIn[]>;
   getBuyInsByReservation(reservationId: string): Promise<BuyIn[]>;
+  // Cheap batch slot fingerprint for the out-of-band Cowork attach probe.
+  getBuyInSlotStatusByReservationIds(reservationIds: string[]): Promise<Record<string, {
+    unitId: string;
+    buyInId: number | null;
+    bookingStatus: string | null;
+    listingUrl: string | null;
+    costPaid: number | null;
+  }[]>>;
   // Per-guest booking inbox (firstname.lastname@emailprivaccy.com).
   getBuyInByTravelerEmail(email: string): Promise<BuyIn | undefined>;
   createGuestInboxMessage(values: InsertGuestInboxMessage): Promise<GuestInboxMessage>;
@@ -485,6 +493,55 @@ export class DatabaseStorage implements IStorage {
 
   async getBuyInsByReservation(reservationId: string): Promise<BuyIn[]> {
     return db.select().from(buyIns).where(eq(buyIns.guestyReservationId, reservationId));
+  }
+
+  /**
+   * ONE query, five columns, zero Guesty — the cheap "did a slot change?"
+   * probe behind /api/operations/buy-in-slot-status. Deliberately narrow: this
+   * runs on every tab-focus, so it must never widen into a select-* or a
+   * per-reservation loop.
+   */
+  async getBuyInSlotStatusByReservationIds(
+    reservationIds: string[],
+  ): Promise<Record<string, {
+    unitId: string;
+    buyInId: number | null;
+    bookingStatus: string | null;
+    listingUrl: string | null;
+    costPaid: number | null;
+  }[]>> {
+    const out: Record<string, {
+      unitId: string;
+      buyInId: number | null;
+      bookingStatus: string | null;
+      listingUrl: string | null;
+      costPaid: number | null;
+    }[]> = {};
+    if (!reservationIds.length) return out;
+    const rows = await db
+      .select({
+        reservationId: buyIns.guestyReservationId,
+        id: buyIns.id,
+        unitId: buyIns.unitId,
+        bookingStatus: buyIns.bookingStatus,
+        airbnbListingUrl: buyIns.airbnbListingUrl,
+        costPaid: buyIns.costPaid,
+      })
+      .from(buyIns)
+      .where(inArray(buyIns.guestyReservationId, reservationIds));
+    for (const row of rows) {
+      const key = row.reservationId;
+      if (!key) continue;
+      const cost = Number(row.costPaid);
+      (out[key] ??= []).push({
+        unitId: String(row.unitId ?? ""),
+        buyInId: row.id ?? null,
+        bookingStatus: row.bookingStatus ?? null,
+        listingUrl: row.airbnbListingUrl ?? null,
+        costPaid: Number.isFinite(cost) ? cost : null,
+      });
+    }
+    return out;
   }
 
   async getBuyInByTravelerEmail(email: string): Promise<BuyIn | undefined> {
