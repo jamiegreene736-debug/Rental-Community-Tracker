@@ -526,6 +526,11 @@ this reservation only. Example shape:
     -H "X-Run-Token: ${headless.runToken}" -d '<json body>'
 (The server pins propertyId, reservation, and dates itself — your body's
 listing URL, unitId, cost, address, and notes are what matter.)
+Send the COMPLETE create body in ONE call — do NOT probe with a minimal body
+and add fields only when the server complains. "costPaid" is REQUIRED and must
+be the unit's real total stay cost as a number greater than 0 (e.g. 1400.00);
+the create call is REJECTED without it, because it anchors the profit and 15%
+checkout guards. A buy-in recorded at 0 is a bug, never an acceptable result.
 
 `
     : "";

@@ -494,6 +494,30 @@ console.log("claude-find-run: source wiring");
   );
   check("server: attach proxy uses the RUN's reservation, never the body's", serverSrc.includes("encodeURIComponent(run.reservationId)"));
   check("server: Airbnb links rejected at the proxy too", /airbnb\\\./.test(serverSrc) && serverSrc.includes("Airbnb links can never be attached"));
+  check(
+    // 2026-07-20: a real run attached $0 buy-ins because the agent hill-climbed
+    // against the 422s down to the minimal accepted body and dropped costPaid,
+    // which the server then silently defaulted to "0". costPaid must be as hard
+    // a requirement as unitId/URL so the agent's iteration includes it.
+    "server: buy-in create REJECTS a missing/zero costPaid (no more silent $0 default)",
+    serverSrc.includes("costPaid is required and must be the unit's total stay cost")
+      && /!Number\.isFinite\(costPaid\) \|\| costPaid <= 0/.test(serverSrc)
+      && !serverSrc.includes(': "0",')
+      && serverSrc.includes("costPaid: costPaid.toFixed(2)"),
+  );
+  {
+    const promptSrc = read("../shared/cowork-buyin-prompt.ts");
+    check(
+      // Belt-and-braces on top of the server 422: the headless auth note tells
+      // the agent to send the complete body in one call and that costPaid is
+      // required + > 0. Headless-only, so the default-prompt byte-identical
+      // lock (test above) is untouched.
+      "prompt: headless note demands a complete body with a real costPaid",
+      promptSrc.includes("Send the COMPLETE create body in ONE call")
+        && promptSrc.includes('"costPaid" is REQUIRED')
+        && /recorded at 0 is a bug/.test(promptSrc),
+    );
+  }
   check("server: agent endpoints forward via 127.0.0.1 loopback", serverSrc.includes("loopbackBaseUrl") && serverSrc.includes("loopbackRequestHeaders"));
   check("server: kill switch honored at create", serverSrc.includes("CLAUDE_FIND_RUNS_DISABLED"));
 
