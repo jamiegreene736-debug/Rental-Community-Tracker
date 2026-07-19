@@ -12765,6 +12765,39 @@ async function main() {
   }
 }
 
+// ── Headless Claude find-run child (2026-07-19) ─────────────────────────────
+// One runner per Mac: LOCAL role, slot 1 only — Railway server workers run
+// this same file and must NEVER spawn it (no claude CLI, no runner Chrome
+// there). The child polls the portal's find-run queue and drives headless
+// `claude -p` sessions; see claude-find-runner.mjs. Restarts with a 30s
+// floor backoff so a crash-looping runner can't melt the Mac. Kill switch:
+// CLAUDE_FIND_RUNS_DISABLED=1.
+function maybeStartClaudeFindRunner() {
+  if (process.env.CLAUDE_FIND_RUNS_DISABLED === "1") return;
+  if (WORKER_ROLE === "server" || WORKER_SLOT !== "1") return;
+  const runnerPath = new URL("./claude-find-runner.mjs", import.meta.url).pathname;
+  let lastStart = 0;
+  const start = () => {
+    lastStart = Date.now();
+    let child;
+    try {
+      child = spawn(process.execPath, [runnerPath], { env: process.env, stdio: ["ignore", "inherit", "inherit"] });
+    } catch (e) {
+      log(`claude-find-runner spawn failed: ${e?.message ?? e}`);
+      setTimeout(start, 60_000);
+      return;
+    }
+    log(`claude-find-runner started (pid ${child.pid})`);
+    child.on("exit", (code) => {
+      const delay = Math.max(30_000 - (Date.now() - lastStart), 5_000);
+      log(`claude-find-runner exited (code ${code}) — restarting in ${Math.round(delay / 1000)}s`);
+      setTimeout(start, delay);
+    });
+  };
+  start();
+}
+maybeStartClaudeFindRunner();
+
 main().catch((e) => {
   log(`fatal: ${e.message ?? String(e)}`);
   process.exit(1);

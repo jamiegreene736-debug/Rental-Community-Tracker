@@ -153,6 +153,43 @@ If any site — especially VRBO — shows a bot check (slider puzzle, CAPTCHA,
 5. If ~15 minutes pass unsolved, pause the task, leave the tab open, and
    report exactly which unit/step is blocked so I can resume later.`;
 
+// ── HEADLESS RUN VARIANTS (2026-07-19 headless find-runner) ─────────────────
+// The zero-click runner executes this same brief via `claude -p` on the
+// operator's Mac — no Cowork window, no Chrome tools, no afplay/say (its Bash
+// allowlist is curl-only). These swap the Cowork-specific browser/alert
+// framing for the runner's: a dedicated persistent-profile Chrome driven by
+// the session's browser MCP tools, and ATTENTION:/RESUMED: marker lines that
+// the daemon wrapper turns into portal alerts + chimes. The DEFAULT (no
+// headlessRun opt) prompt is BYTE-IDENTICAL to the historical output —
+// test-locked, exactly like the bulkBrief opt.
+// NO SIZE CAP HERE: headless briefs never ride a claude:// deep link, so the
+// 14,336-char anxiety that keeps CHROME_BROWSER_RULE terse does not apply.
+const HEADLESS_BROWSER_RULE = `## Browser rule — the dedicated runner Chrome
+Browse ONLY through the browser tools connected to this session — they drive a
+dedicated Chrome with a persistent profile, so cookies and solved bot-check
+clearances survive between runs. Never clear cookies, never use incognito.
+If NO browser tools are available in this session, print a line starting
+"ATTENTION: browser tools missing", then end with a report saying the run
+could not browse — never fake listing research out of plain URL fetches.`;
+
+const HEADLESS_BOT_WALL_PROTOCOL = `${HEADLESS_BROWSER_RULE}
+
+## Bot-check protocol (VRBO especially — NEVER skip a site over this)
+If any site — especially VRBO — shows a bot check (slider puzzle, CAPTCHA,
+"verify you are human") or a sign-in wall you can't get past:
+
+1. **Do NOT skip that site and do NOT close the tab.** Leave the page sitting
+   exactly at the challenge — the operator will solve it by hand.
+2. **Print a line starting "ATTENTION: bot check on <site> — <unit/step>".**
+   The portal alerts the operator with sound; you do not play sounds yourself.
+3. **WAIT and WATCH.** Re-check the challenged tab every ~30 seconds. Do NOT
+   attempt the challenge yourself and do NOT reload the page — reloading can
+   make VRBO's wall stickier.
+4. The moment the page is past the challenge, print a line starting
+   "RESUMED: <step>" and continue from exactly where you left off.
+5. If ~15 minutes pass unsolved, stop and make your FINAL report say exactly
+   which unit/step is blocked so the operator can resume later.`;
+
 export interface CoworkBuyInUnit {
   unitId: string;
   unitLabel: string;
@@ -327,6 +364,20 @@ export interface CoworkBuyInPromptOpts {
    * the historical find-and-attach-only prompt byte-identical.
    */
   afterAttach?: "attach_only" | "prepare_checkout";
+  /**
+   * INTERNAL — set ONLY server-side when building the brief for a headless
+   * `claude -p` find-run (server/claude-find-runs.ts). Swaps the Cowork
+   * browser rule + bot-wall alert sounds for the runner's ATTENTION:/RESUMED:
+   * marker protocol, points the two attach calls at the run-scoped
+   * token-authed agent proxies (the headless agent NEVER holds the portal
+   * admin secret), and replaces the done-signal chime with "your final
+   * message is the report". Omitted keeps the prompt byte-identical —
+   * test-locked like bulkBrief. Never combine with bulkBrief/afterAttach.
+   */
+  headlessRun?: {
+    runId: string;
+    runToken: string;
+  };
 }
 
 export function buildCoworkBuyInPrompt(input: CoworkBuyInPromptInput, opts?: CoworkBuyInPromptOpts): string {
@@ -452,15 +503,58 @@ Projected loss = (combined all-in cost) − ${netRevenueLabel}.
     ? ` Also report the PROFIT MATH for the ${n === 1 ? "pick" : "set"} you attached: combined all-in cost vs the net revenue (${netRevenueLabel}) = projected profit or loss, and which branch applied — (a) same-community ${n === 1 ? "pick" : "set"} within the $${maxLoss} loss cap, (b) rolled back to a city-wide ${n === 1 ? "unit" : "same-complex pair"} to escape a same-community loss, or (c) attached at a loss because no option within the $${maxLoss} cap existed anywhere in the city (flag this loudly).`
     : "";
 
+  // Headless find-run mode (2026-07-19): server-minted run id + token point
+  // the attach calls at the run-scoped agent proxies. Sanitized like every
+  // other embedded value — bounded, single-line data, never instructions.
+  const headless = opts?.headlessRun
+    ? {
+        runId: sanitizeCoworkPromptData(opts.headlessRun.runId, 80),
+        runToken: sanitizeCoworkPromptData(opts.headlessRun.runToken, 120),
+      }
+    : null;
+  const createBuyInEndpoint = headless
+    ? `${apiRoot}/api/claude-find-runs/agent/${headless.runId}/buy-ins`
+    : `${apiRoot}/api/buy-ins`;
+  const attachBuyInEndpoint = headless
+    ? `${apiRoot}/api/claude-find-runs/agent/${headless.runId}/attach`
+    : `${apiRoot}/api/bookings/${reservationId}/attach-buy-in`;
+  const headlessAttachAuthNote = headless
+    ? `You make these API calls with your Bash tool via curl. EVERY call must carry
+the header "X-Run-Token: ${headless.runToken}" — it is scoped to THIS run and
+this reservation only. Example shape:
+  curl -sS -X POST <endpoint> -H "Content-Type: application/json" \\
+    -H "X-Run-Token: ${headless.runToken}" -d '<json body>'
+(The server pins propertyId, reservation, and dates itself — your body's
+listing URL, unitId, cost, address, and notes are what matter.)
+
+`
+    : "";
+
   // Bulk-brief mode: the bot-wall protocol is hoisted ONCE to the top of the
   // batch task, and the closing (tidy-up + done signal) fires ONCE after the
   // last reservation — see buildCoworkBulkBuyInPrompt. Both substitutions are
   // byte-identical no-ops in the default single-prompt path.
-  const botWallSection = opts?.bulkBrief
+  const botWallSection = headless
+    ? HEADLESS_BOT_WALL_PROTOCOL
+    : opts?.bulkBrief
     ? "(Browser rule + bot-check protocol: the batch-level protocol at the TOP of this task applies here in full — browse in my REAL Chrome only, alert loudly, wait for me, never skip a site over a bot wall.)"
     : BOT_WALL_PROTOCOL;
   const continueToCheckout = opts?.afterAttach === "prepare_checkout";
-  const closingSections = opts?.bulkBrief || continueToCheckout
+  const closingSections = headless
+    ? `
+
+Finally, TIDY UP THE BROWSER: close every tab you opened during this task.
+
+## How this headless run reports (no chat window)
+Your progress notes are relayed to the operator's portal automatically, and
+your FINAL MESSAGE becomes the run's saved report — so end the task with the
+COMPLETE report described above (picks, prices, addresses, booking modes,
+profit math, anything unfilled or flagged) as plain text.
+- Blocked on anything (bot check, sign-in wall, missing browser tools)? Print
+  an "ATTENTION: <what and where>" line — the portal alerts the operator with
+  sound. Print "RESUMED: <step>" when you continue. Never wait silently.
+- Do not play sounds or open extra apps; the portal owns alerting.`
+    : opts?.bulkBrief || continueToCheckout
     ? ""
     : `
 
@@ -582,11 +676,11 @@ and the BOOKING MODE (instant book vs request-only — see the booking-mode rule
 ${botWallSection}
 
 ## Attach using the manual-attach method
-For EACH unit slot, replicate the manual-attach flow (the "Manually add buy-in"
+${headlessAttachAuthNote}For EACH unit slot, replicate the manual-attach flow (the "Manually add buy-in"
 dialog). It is two API calls:
 
 1. Create the buy-in record:
-   POST ${apiRoot}/api/buy-ins
+   POST ${createBuyInEndpoint}
    {
      "propertyId": ${input.propertyId},
      "propertyName": ${JSON.stringify(propertyName)},
@@ -609,7 +703,7 @@ dialog). It is two API calls:
    anywhere else in the notes.)
 
 2. Attach it to the reservation:
-   POST ${apiRoot}/api/bookings/${reservationId}/attach-buy-in
+   POST ${attachBuyInEndpoint}
    { "buyInId": <id from step 1> }
    → If this returns 409 with "canForce": true, the units may be flagged as
      too far apart. Re-POST with { "buyInId": <id>, "force": true,
