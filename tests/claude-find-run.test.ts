@@ -429,6 +429,39 @@ const FIXTURE_LINES = [
     runnerSrc.includes("childEnv.MCP_TIMEOUT = String(CLI_MCP_TIMEOUT_MS)")
       && /CLI_MCP_TIMEOUT_MS = Number\(process\.env\.CLAUDE_FIND_RUN_MCP_TIMEOUT_MS \?\? 30_000\)/.test(runnerSrc),
   );
+  // 2026-07-19 (the ACTUAL root cause of every browser-less daemon run, proven
+  // by `ps eww` on the live runner): launchd hands the daemon
+  // PATH=/usr/bin:/bin:/usr/sbin:/sbin, where bare `spawn("npx")` is ENOENT in
+  // ~5ms — for the CLI's MCP spawn AND the preflight. Every shell test passed
+  // (full user PATH); every daemon run failed. The prior "cold-start latency"
+  // theory was a shell-side artifact.
+  check(
+    "npx is resolved to an ABSOLUTE path (env override + runtime bin dir + install locations)",
+    runnerSrc.includes("function resolveNpxBin()")
+      && runnerSrc.includes("CLAUDE_FIND_RUN_NPX_BIN")
+      && runnerSrc.includes('path.join(path.dirname(process.execPath), "npx")'),
+  );
+  check(
+    // Both spawn sites must use it — one bare "npx" left behind re-breaks the
+    // daemon while every shell test keeps passing.
+    "BOTH the MCP config and the preflight spawn use the absolute NPX_BIN, never bare npx",
+    (() => {
+      // CODE only — the runner's comments narrate the old bare-npx failure.
+      const codeOnly = runnerSrc.replace(/^\s*\/\/[^\n]*/gm, "");
+      return codeOnly.includes("chrome: { command: NPX_BIN")
+        && /spawn\(NPX_BIN, \["-y", CHROME_MCP_PKG/.test(codeOnly)
+        && !/command: "npx"/.test(codeOnly)
+        && !/spawn\("npx"/.test(codeOnly);
+    })(),
+  );
+  check(
+    // npx is a #!/usr/bin/env node script: even invoked absolutely it needs
+    // `node` resolvable on PATH, as does anything it spawns.
+    "the CLI child AND the preflight get the EXTENDED_PATH (launchd's PATH is bare)",
+    runnerSrc.includes("childEnv.PATH = EXTENDED_PATH")
+      && /env: \{ \.\.\.process\.env, PATH: EXTENDED_PATH \}/.test(runnerSrc)
+      && runnerSrc.includes("path.dirname(process.execPath), // the node actually running this daemon"),
+  );
 }
 {
   const scan = runnerScanMarkers("working…\nATTENTION: bot check on vrbo.com — unit A\nstill waiting");
