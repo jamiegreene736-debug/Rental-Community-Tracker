@@ -2478,6 +2478,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     replacementConfirmed: boolean;
     staleExtra: number;
     collagePinned: boolean;
+    // Pre-push gallery size + confirmed delta ("40 before → 33 now = 7
+    // removed"). Null when the server couldn't read the pre-push gallery or
+    // the replacement wasn't confirmed.
+    previousTotal: number | null;
+    removedCount: number | null;
   };
   const [pushGuestyConfirm, setPushGuestyConfirm] = useState<PushGuestyConfirm | null>(null);
   // Live read-back progress ("Guesty reports X, expecting Y…") while the
@@ -2639,7 +2644,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // are the read-back confirmation (what Guesty actually held after the push,
   // incl. the pinned cover collage) — optional so summaries stored by older
   // bundles still parse.
-  type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number; guestyTotal?: number | null; collagePinned?: boolean };
+  type PushSummary = { listingId: string; timestamp: number; successCount: number; total: number; upscaledCount: number; failed: number; guestyTotal?: number | null; collagePinned?: boolean; previousTotal?: number | null; removedCount?: number | null };
   const [lastPushSummary, setLastPushSummary] = useState<PushSummary | null>(null);
 
   // Live photo count from Guesty for the selected listing
@@ -3117,6 +3122,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               replacementConfirmed?: boolean;
               staleExtra?: number;
               collagePinned?: boolean;
+              previousTotal?: number | null;
+              removedCount?: number | null;
               // "verify" event fields
               attempt?: number;
               expected?: number;
@@ -3188,6 +3195,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               const succeeded = sc > 0 && !guestyError;
               const guestyTotal = typeof event.guestyTotal === "number" ? event.guestyTotal : null;
               const staleExtra = typeof event.staleExtra === "number" ? event.staleExtra : 0;
+              const previousTotal = typeof event.previousTotal === "number" ? event.previousTotal : null;
+              const removedCount = typeof event.removedCount === "number" ? event.removedCount : null;
               finalResult = {
                 successCount: sc,
                 total: tot,
@@ -3205,6 +3214,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   replacementConfirmed: event.replacementConfirmed === true,
                   staleExtra,
                   collagePinned: event.collagePinned === true,
+                  previousTotal,
+                  removedCount,
                 });
               }
               setUpscalePhase(sc === 0 && tot > 0 ? "error" : "done");
@@ -3238,6 +3249,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   failed: tot - sc,
                   guestyTotal,
                   collagePinned: event.collagePinned === true,
+                  previousTotal,
+                  removedCount,
                 });
                 // Guesty processes uploaded photos asynchronously — wait 3s then poll
                 setTimeout(() => refreshGuestyPhotoCount(), 3000);
@@ -3307,6 +3320,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
             total: photos.length,
             upscaledCount: upscaledSoFar,
             failed: Math.max(0, photos.length - successCount),
+            // The ledger summary now carries the confirmed replacement math
+            // ("N old removed — M now live in Guesty") — surface it in the
+            // persisted Last-push line too.
+            guestyTotal: counts?.liveTotal ?? null,
+            removedCount: counts?.removed ?? null,
           });
           // Guesty processes uploaded photos asynchronously — poll the live
           // count the same way the normal done path does.
@@ -9808,7 +9826,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   {lastPushSummary.upscaledCount > 0 && ` (${lastPushSummary.upscaledCount} upscaled)`}
                                   {typeof lastPushSummary.guestyTotal === "number" && (
                                     <span style={{ color: "#15803d" }} data-testid="last-push-guesty-total">
-                                      · Guesty gallery: {lastPushSummary.guestyTotal}{lastPushSummary.collagePinned ? " (incl. cover collage)" : ""}
+                                      · {lastPushSummary.guestyTotal} now live in Guesty{lastPushSummary.collagePinned ? " (incl. cover collage)" : ""}
+                                      {typeof lastPushSummary.removedCount === "number" && lastPushSummary.removedCount > 0
+                                        && ` · ${lastPushSummary.removedCount} old photo${lastPushSummary.removedCount === 1 ? "" : "s"} removed`}
                                     </span>
                                   )}
                                   {lastPushSummary.failed > 0 && <span style={{ color: "#b45309" }}> — {lastPushSummary.failed} failed</span>}
@@ -9845,9 +9865,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 let confirmPanel: ReactNode = null;
                                 if (c) {
                                   if (c.replacementConfirmed && c.guestyTotal != null) {
+                                    // The operator's replacement receipt. With a readable
+                                    // pre-push count the math is explicit ("40 before → 7
+                                    // removed, 33 now live"); without it, keep the
+                                    // confirmed-replacement claim (the read-back proved
+                                    // the gallery is exactly the pushed set either way).
+                                    const removalLine = c.previousTotal != null && c.removedCount != null
+                                      ? (c.removedCount > 0
+                                        ? ` Replaced the previous ${c.previousTotal}-photo gallery: ${c.removedCount} old photo${c.removedCount === 1 ? "" : "s"} removed, ${c.guestyTotal} now live in Guesty.`
+                                        : ` Replaced all ${c.previousTotal} previous photo${c.previousTotal === 1 ? "" : "s"} — ${c.guestyTotal} now live in Guesty.`)
+                                      : " All previous Guesty photos were replaced.";
                                     confirmPanel = (
                                       <div data-testid="photo-push-guesty-confirm" style={{ padding: "6px 10px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, fontSize: 12, color: "#166534" }}>
-                                        ✓ Guesty gallery confirmed: {c.guestyTotal} photo{c.guestyTotal === 1 ? "" : "s"} now on the listing — exactly the {c.pushed} pushed{collageSuffix}. All previous Guesty photos were replaced.
+                                        ✓ Guesty gallery confirmed: {c.guestyTotal} photo{c.guestyTotal === 1 ? "" : "s"} now on the listing — exactly the {c.pushed} pushed{collageSuffix}.{removalLine}
                                       </div>
                                     );
                                   } else if (c.guestyTotal != null && c.staleExtra > 0) {

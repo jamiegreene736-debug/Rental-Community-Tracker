@@ -144,6 +144,22 @@ check("over-verified collapses to pushed (builder emits the bare form)", (() => 
   const p = parsePhotosPushSummary(summarizePhotosPush(10, 12));
   return p?.pushed === 10 && p.verified === 10;
 })());
+check("confirmed replacement round-trips (removed + now live)", (() => {
+  const p = parsePhotosPushSummary(summarizePhotosPush(33, 33, { liveTotal: 34, removed: 7 }));
+  return p?.pushed === 33 && p.verified === 33 && p.liveTotal === 34 && p.removed === 7;
+})());
+check("confirmed replacement without a pre-push count round-trips", (() => {
+  const p = parsePhotosPushSummary(summarizePhotosPush(33, 33, { liveTotal: 34, removed: null }));
+  return p?.pushed === 33 && p.verified === 33 && p.liveTotal === 34 && p.removed === null;
+})());
+check("shortfall + confirmed replacement round-trips", (() => {
+  const p = parsePhotosPushSummary(summarizePhotosPush(45, 43, { liveTotal: 44, removed: 2 }));
+  return p?.pushed === 45 && p.verified === 43 && p.liveTotal === 44 && p.removed === 2;
+})());
+check("legacy summaries parse with null replacement fields", (() => {
+  const p = parsePhotosPushSummary("51 photos pushed (49 verified on Guesty)");
+  return p?.pushed === 51 && p.verified === 49 && p.liveTotal === null && p.removed === null;
+})());
 check("cover-collage summary is NOT a photos-push count", parsePhotosPushSummary("Cover collage pushed (12 photos on the listing)") === null);
 check("error summary never parses", parsePhotosPushSummary("No photos pushed to Guesty") === null);
 check("null/empty never parse", parsePhotosPushSummary(null) === null && parsePhotosPushSummary("") === null);
@@ -272,6 +288,36 @@ check(
 check(
   "push-photos route stamps the photos ledger on a failed final PUT too",
   routesSrc.includes(`recordGuestyPush(guestyListingId, "photos", "error", \`Photo push failed: \${e.message}\`)`),
+);
+
+// ── Source guards: replacement receipt ("N old removed — M now live") ──────
+// The operator's ask (2026-07-19): the push confirmation must state how many
+// old photos were removed and how many are now live in Guesty. The pre-push
+// count rides the existing collage-pin pre-read (no extra Guesty call), and
+// the "now live" claim is gated on a CONFIRMED read-back — a stale read must
+// never mint a removed/now-live receipt.
+check(
+  "route captures the pre-push Guesty gallery size off the collage pre-read",
+  routesSrc.includes("previousGuestyTotal = pics.length"),
+);
+check(
+  "removed count only computed from a CONFIRMED replacement",
+  routesSrc.includes("const removedCount = replacementConfirmed && previousGuestyTotal != null && lastObservedTotal != null"),
+);
+check(
+  "ledger summary carries the confirmed replacement math",
+  routesSrc.includes("summarizePhotosPush(successCount, verifiedCount, summaryConfirm)"),
+);
+check(
+  "done event emits the pre-push count + removed count",
+  routesSrc.includes("previousTotal: previousGuestyTotal")
+  && routesSrc.includes("removedCount,"),
+);
+check(
+  "confirm panel renders the removed / now-live receipt",
+  builderSrc.includes("old photo")
+  && builderSrc.includes("now live in Guesty")
+  && builderSrc.includes("c.previousTotal != null && c.removedCount != null"),
 );
 
 console.log(`\npush-reconcile: ${pass} passed, ${fail} failed`);
