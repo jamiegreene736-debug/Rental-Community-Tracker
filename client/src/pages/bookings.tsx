@@ -2350,7 +2350,7 @@ function BuyInEscalationStages({
 // The deep link only PRE-FILLS; nothing runs until the operator presses send
 // in Claude Desktop, so checkout preparation only starts after the operator
 // explicitly sends its prompt.
-type CoworkPromptRunKind = "find-and-prepare" | "prepare-checkout" | "bulk-find-and-prepare";
+type CoworkPromptRunKind = "prepare-checkout" | "bulk-find-and-prepare";
 
 async function launchCoworkPrompt(
   prompt: string,
@@ -4905,8 +4905,8 @@ function GroundFloorRequirementNotice({
         </Badge>
       </div>
       <p className="mt-1 text-[11px] leading-snug text-amber-900">
-        Auto-fill will only attach confirmed ground-floor buy-ins for the required slot{data.requiredUnits === 1 ? "" : "s"}{targetBedrooms.length ? ` (${targetBedrooms.map((b) => `${b}BR`).join(" + ")})` : ""}.
-        {data.scope === "unknown" ? " Scope is unclear, so the tool assumes at least one ground-floor unit until clarified." : ""}
+        Confirm each buy-in you attach is a ground-floor unit for the required slot{data.requiredUnits === 1 ? "" : "s"}{targetBedrooms.length ? ` (${targetBedrooms.map((b) => `${b}BR`).join(" + ")})` : ""} — the Auto Cowork search finds the cheapest match but is not restricted to ground-floor listings, so verify ground floor before checkout.
+        {data.scope === "unknown" ? " Scope is unclear, so treat at least one unit as needing ground floor until clarified." : ""}
       </p>
       {data.evidence?.[0] && (
         <p className="mt-1 truncate text-[11px] italic text-amber-800" title={data.evidence[0]}>
