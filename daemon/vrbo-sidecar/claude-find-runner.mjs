@@ -59,6 +59,17 @@ const ALLOWED_TOOLS = ["mcp__chrome", "Bash(curl:*)", "WebSearch", "WebFetch"];
 // must not go back to "@latest".
 const CHROME_MCP_PKG = process.env.CLAUDE_FIND_RUN_CHROME_MCP || "chrome-devtools-mcp@1.6.0";
 
+// The browser MCP genuinely takes ~2.6s to hand-shake (npx spawn + package load
+// + CDP connect). On a cold or contended start that exceeds the CLI's own MCP
+// startup budget and the run comes up browser-less. Preflight it — the same
+// handshake, before the costly agent run — up to this many times; a success
+// warms the npx cache and proves Chrome is reachable, so the CLI's connect
+// moments later is fast.
+const BROWSER_PREFLIGHT_ATTEMPTS = Number(process.env.CLAUDE_FIND_RUN_BROWSER_PREFLIGHT_ATTEMPTS ?? 3);
+// Startup budget handed to the CLI for the MCP connect. The default can be
+// marginal against a 2.6s connect under load; give it real headroom.
+const CLI_MCP_TIMEOUT_MS = Number(process.env.CLAUDE_FIND_RUN_MCP_TIMEOUT_MS ?? 30_000);
+
 // Must match shared/claude-find-run.ts marker constants — drift-locked by
 // tests/claude-find-run.test.ts.
 const ATTENTION_MARKER = "ATTENTION:";
@@ -272,6 +283,59 @@ async function ensureRunnerChrome() {
   return false;
 }
 
+/**
+ * Warm + verify the browser MCP before the real run.
+ *
+ * Runs the EXACT same `npx chrome-devtools-mcp … --browserUrl` the CLI is about
+ * to run and waits for its `serverInfo` handshake. A clean handshake here means
+ * the npx package is cached and Chrome's CDP is answering, so the CLI's own
+ * connect a moment later is fast and reliable. This is what makes a transient
+ * cold-start self-heal instead of producing a browser-less run.
+ *
+ * Resolves true on handshake, false on timeout/spawn error. Never throws.
+ */
+async function preflightBrowserMcp(timeoutMs = 25_000) {
+  return await new Promise((resolve) => {
+    let child;
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child?.kill("SIGKILL"); } catch {}
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    try {
+      child = spawn("npx", ["-y", CHROME_MCP_PKG, "--browserUrl", `http://127.0.0.1:${CDP_PORT}`], {
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+    } catch {
+      finish(false);
+      return;
+    }
+    let buf = "";
+    child.stdout.on("data", (d) => {
+      buf += String(d);
+      if (buf.includes('"serverInfo"')) finish(true);
+    });
+    child.on("error", () => finish(false));
+    child.on("close", () => finish(false));
+    try {
+      child.stdin.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "runner-preflight", version: "1" } },
+        }) + "\n",
+      );
+    } catch {
+      finish(false);
+    }
+  });
+}
+
 // ── portal I/O ──────────────────────────────────────────────────────────────
 async function claimRun() {
   const res = await fetch(`${SERVER}/api/claude-find-runs/claim`, {
@@ -318,6 +382,30 @@ async function handleRun(run) {
     return;
   }
 
+  // Warm + verify the browser MCP before spending an agent run. Retried,
+  // because a cold/contended first start is exactly the transient that left a
+  // real run browser-less (2026-07-19). Re-check Chrome between attempts.
+  let browserReady = false;
+  for (let attempt = 1; attempt <= BROWSER_PREFLIGHT_ATTEMPTS; attempt += 1) {
+    if (await preflightBrowserMcp()) {
+      browserReady = true;
+      if (attempt > 1) log(`run ${run.id} browser MCP ready on preflight attempt ${attempt}`);
+      break;
+    }
+    log(`run ${run.id} browser MCP preflight ${attempt}/${BROWSER_PREFLIGHT_ATTEMPTS} did not hand-shake`);
+    await ensureRunnerChrome();
+  }
+  if (!browserReady) {
+    await fail(
+      "The runner's browser (chrome-devtools-mcp) would not start after "
+      + `${BROWSER_PREFLIGHT_ATTEMPTS} attempts. Stopped rather than run without it — a browser-less `
+      + "find can only web-search and cannot verify a listing. Re-run it; if this repeats, "
+      + "check that chrome-devtools-mcp installs (npx) and that the dedicated Chrome is up on port " + CDP_PORT + ".",
+    );
+    transcript.end();
+    return;
+  }
+
   // Ad-hoc MCP config: chrome-devtools-mcp attached to the runner Chrome.
   //
   // PINNED, not @latest. "@latest" forces npx to resolve against the registry
@@ -342,6 +430,9 @@ async function handleRun(run) {
   const childEnv = { ...process.env };
   delete childEnv.ADMIN_SECRET;
   delete childEnv.CLAUDECODE;
+  // Give the CLI a real budget for the ~2.6s MCP connect. Without headroom the
+  // default can lapse under load and the browser is marked "failed" at init.
+  if (!childEnv.MCP_TIMEOUT) childEnv.MCP_TIMEOUT = String(CLI_MCP_TIMEOUT_MS);
   delete childEnv.CLAUDE_CODE_ENTRYPOINT;
   if (process.env.CLAUDE_FIND_RUN_API_KEY) childEnv.ANTHROPIC_API_KEY = process.env.CLAUDE_FIND_RUN_API_KEY;
 
