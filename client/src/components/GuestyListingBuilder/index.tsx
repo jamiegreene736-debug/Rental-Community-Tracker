@@ -1415,6 +1415,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     lastPushStatus: string | null;
     lastPushSummary: string | null;
   } | null>(null);
+  // TRUE only when the server confirmed there is NO saved booking-rules row for
+  // this listing (fetch OK, rules:null) — i.e. the card is rendering the
+  // client-side DEFAULT_BOOKING_RULES and Guesty has never been pushed them.
+  // Deliberately distinct from a failed fetch (which proves nothing). This is
+  // what the amber "never pushed" warning keys off — before 2026-07-19 the card
+  // silently rendered "7d advance notice" for never-pushed listings, which read
+  // as if the cutoff were live (the Royal Kahana next-day-booking incident).
+  const [bookingRulesNeverPushed, setBookingRulesNeverPushed] = useState(false);
 
   useEffect(() => {
     // Show the title with its "Sleeps N" already synced to the headline
@@ -1429,6 +1437,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!propertyId || !selectedId) {
       setBookingRules(DEFAULT_BOOKING_RULES);
       setBookingRulesPushInfo(null);
+      setBookingRulesNeverPushed(false);
       return;
     }
     let cancelled = false;
@@ -1440,8 +1449,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         if (!saved) {
           setBookingRules(DEFAULT_BOOKING_RULES);
           setBookingRulesPushInfo(null);
+          setBookingRulesNeverPushed(true);
           return;
         }
+        setBookingRulesNeverPushed(false);
         setBookingRules({
           minNights: Number(saved.minNights ?? DEFAULT_BOOKING_RULES.minNights),
           maxNights: Number(saved.maxNights ?? DEFAULT_BOOKING_RULES.maxNights),
@@ -1460,7 +1471,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         });
       })
       .catch(() => {
-        if (!cancelled) setBookingRulesPushInfo(null);
+        if (!cancelled) {
+          setBookingRulesPushInfo(null);
+          // A failed fetch proves nothing about push history — never warn on it.
+          setBookingRulesNeverPushed(false);
+        }
       });
     return () => { cancelled = true; };
   }, [propertyId, selectedId]);
@@ -9127,6 +9142,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           {bookingRulesPushInfo.lastPushSummary ? ` · ${bookingRulesPushInfo.lastPushSummary}` : ""}
                         </span>
                       )}
+                      {!bookingRulesPushInfo?.lastPushedAt && bookingRulesNeverPushed && !!selectedId && (
+                        <span
+                          data-testid="booking-rules-never-pushed-warning"
+                          style={{ fontSize: 11, fontWeight: 600, color: "#92400e", background: "#fef3c7", border: "1px solid #f59e0b", padding: "3px 10px", borderRadius: 6 }}
+                        >
+                          ⚠ Never pushed to Guesty — showing defaults. The live listing has NO advance-notice cutoff until you push.
+                        </span>
+                      )}
                       <button
                         disabled={!selectedId || !propertyId || pushingBooking}
                         onClick={async () => {
@@ -9148,6 +9171,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               lastPushStatus: saved?.lastPushStatus ?? "ok",
                               lastPushSummary: saved?.lastPushSummary ?? data.summary ?? null,
                             });
+                            setBookingRulesNeverPushed(false);
                             toast({
                               title: "Booking rules pushed to Guesty",
                               description: data.summary || `Min ${bookingRules.minNights} nights · ${bookingRules.advanceNotice}d advance notice · ${bookingRules.preparationTime}d prep time`,

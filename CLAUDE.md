@@ -43,6 +43,35 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-19 (VRBO next-day booking on Royal Kahana — advance-notice NEVER pushed; mapping-birth
+  auto-push shipped): Operator: guest booked 7/19 for a 7/20 arrival despite "7 days notice" in the
+  Pricing tab. NOT a Guesty sync failure and NOT a VRBO bug (don't re-chase): the Pricing tab's
+  Booking Rules card renders client-side DEFAULT_BOOKING_RULES (7d advance) whenever no
+  builder_booking_rules row exists — Royal Kahana (draft 46, listing 6a3bdba43b75bc0023cd9230) had
+  NO row, and prod Guesty showed calendarRules.advanceNotice with no defaultSettings.hours at all
+  (expedia cutoff disabled → VRBO sold the date; reservation created 2026-07-19T20:03Z, check-in
+  7/20 HST, confirmed, $6,711). The cutoff was pushed portfolio-wide exactly ONCE (2026-06-02
+  push-advance-notice-all → the only 12 rows in builder_booking_rules) and booking rules had NO
+  mapping-birth hook, so ALL 12 listings mapped after Jun 2 were exposed. SHIPPED
+  (`claude/booking-rules-advance-notice-gap`): autoPushBookingRulesForMapping beside the amenities +
+  published-address hooks at all five mapping-birth seams (skip-if-row-exists so operator rules are
+  never clobbered; merges LIVE Guesty terms so e.g. maxNights 45 survives; forces 7d advance;
+  floors minNights at DEFAULT_MIN_NIGHTS — newborn listings default to 1; 2-min cooldown; kill
+  BOOKING_RULES_AUTO_PUSH_DISABLED=1); push-advance-notice-all now FLOORS min-nights (its saved
+  rows still carry the Jun-2 era minNights=3 — a verbatim re-run would have LOWERED the live min-4
+  policy, caught pre-merge); amber "⚠ Never pushed to Guesty — showing defaults" chip on the
+  Booking Rules card (keyed off confirmed rules:null, never a failed fetch). KEY TENANT FACTS:
+  GET /listings/:id/availability-settings 404s (PUT-only endpoint) — the availability read in
+  currentBuilderBookingRulesForListing is fail-soft by design; per-channel
+  isCutOffHoursEnabled:false means "no channel override, default applies", not "cutoff off".
+  Locked by tests/booking-rules-auto-push.test.ts (18: hook semantics, 5-seam parity with the
+  amenities hook, bulk floor, UI warning). Verified: 18/0 new, full `npm test` exit 0, build clean
+  (strings bundle-grepped both bundles), `npm run check` 335 = baseline (stash A/B identical).
+  POST-MERGE LIVE STEP (same session): run POST /api/builder/booking-rules/push-advance-notice-all
+  against the deployed portal to backfill the 12 exposed listings, then re-probe
+  calendarRules.advanceNotice.defaultSettings.hours=168 on Royal Kahana + the rest. Kavitha's
+  existing reservation itself needs manual handling (operator already messaged the guest).
+
 - 2026-07-19 (SAMPLE license IDs on LIVE listings — portfolio-wide cleanup): Operator flagged the
   Menehune Shores listing's notes carrying "GE/TA-099-999-9999-99". NOT a guard failure (don't
   re-chase): every sample landed BEFORE the 2026-07-10 placeholder guard; today's
