@@ -607,10 +607,59 @@ console.log("claude-find-run: source wiring");
   check("client: button label present", bookingsSrc.includes("Auto-run · find cheapest (no window)"));
   check(
     "client: panel is ALWAYS mounted (report survives the empty-slots box disappearing)",
-    bookingsSrc.includes("<HeadlessFindRunPanel reservationId={r._id} />"),
+    /<HeadlessFindRunPanel\s+reservationId=\{r\._id\}/.test(bookingsSrc),
   );
   check("client: run start arms the fast slot-probe window", /armCoworkRunWindow\(\);\s*\n\s*void queryClient\.invalidateQueries\(\{ queryKey: claudeFindRunStatusKey/.test(bookingsSrc));
   check("client: cancel button wired", bookingsSrc.includes("button-headless-find-cancel-"));
+
+  // ── Log-UI redesign (2026-07-20) ──────────────────────────────────────────
+  check(
+    // The final report used to render twice — once truncated in the feed, once
+    // in full below. The feed now filters the echo.
+    "client: the feed drops the note that duplicates the final report",
+    bookingsSrc.includes("isFinalReportEcho(e, run.report)"),
+  );
+  check(
+    "client: events are TYPED (milestones / search / browse / notes), not one flat wall",
+    bookingsSrc.includes("classifyFindRunEvent(event)") && bookingsSrc.includes("FindRunEventRow"),
+  );
+  check(
+    "client: the report is rendered as elements, not a raw markdown <pre>",
+    bookingsSrc.includes("parseFindRunReport(markdown)")
+      && bookingsSrc.includes('data-testid="findrun-report-rendered"')
+      && !/<pre[^>]*>\s*\{run\.report\}/.test(bookingsSrc),
+  );
+  check(
+    "client: the outcome strip surfaces attached units + prices + guest verdict",
+    bookingsSrc.includes("findRunGuestVerdictBadge(verdictRaw)")
+      && /units? attached/.test(bookingsSrc)
+      && bookingsSrc.includes("guestHappyVerdict"),
+  );
+  check(
+    // 'Separate each session better' — prior runs are shown as their own rows.
+    "client: prior runs render as separated 'Earlier runs' sessions",
+    bookingsSrc.includes("findrun-history-") && bookingsSrc.includes("Earlier runs ("),
+  );
+  check("client: the panel receives the reservation's attached buy-ins", bookingsSrc.includes("attachedUnits={r.slots"));
+
+  // Server + shared history plumbing.
+  check(
+    "server: status payload carries per-reservation run history",
+    serverSrc.includes("claudeFindRunHistoryForReservation(store.runs, reservationId)") && serverSrc.includes("history,"),
+  );
+  const sharedSrc = read("../shared/claude-find-run.ts");
+  check(
+    "shared: history excludes the latest run and is capped + newest-first",
+    sharedSrc.includes("export function claudeFindRunHistoryForReservation")
+      && sharedSrc.includes("mine.slice(1, 1 + limit)"),
+  );
+  check(
+    // The verdict record shows as a first-class milestone in the feed.
+    "shared + runner: the guest-happy curl is a labelled milestone (both twins)",
+    sharedSrc.includes('if (endpoint === "guest-happy") return "Recording the guest-expectation verdict"')
+      && runnerSrc.includes('if (endpoint === "guest-happy") return "Recording the guest-expectation verdict"')
+      && runnerSrc.includes("(buy-ins|attach|guest-happy)"),
+  );
 }
 
 console.log(`\nclaude-find-run: ${pass} passed, ${fail} failed`);

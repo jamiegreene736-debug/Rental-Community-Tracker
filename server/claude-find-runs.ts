@@ -26,6 +26,7 @@ import {
   applyClaudeFindRunUpdate,
   claimNextClaudeFindRun,
   claudeFindRunWatchdogVerdict,
+  claudeFindRunHistoryForReservation,
   clientClaudeFindRunView,
   latestClaudeFindRunForReservation,
   parseClaudeFindRunStore,
@@ -250,11 +251,14 @@ export function registerClaudeFindRunRoutes(app: Express): void {
       : [];
     const store = await readStore();
     const runs: Record<string, ReturnType<typeof clientClaudeFindRunView>> = {};
+    const history: Record<string, ReturnType<typeof claudeFindRunHistoryForReservation>> = {};
     for (const reservationId of ids) {
       const latest = latestClaudeFindRunForReservation(store.runs, reservationId);
       if (latest) runs[reservationId] = clientClaudeFindRunView(latest);
+      const prior = claudeFindRunHistoryForReservation(store.runs, reservationId);
+      if (prior.length) history[reservationId] = prior;
     }
-    return res.json({ runs, disabled: claudeFindRunsDisabled() });
+    return res.json({ runs, history, disabled: claudeFindRunsDisabled() });
   }));
 
   // Operator: cancel. Status flips immediately; the runner sees cancelled on
