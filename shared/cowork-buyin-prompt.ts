@@ -738,7 +738,14 @@ separate checkout prompt I'll start myself.`}${closingSections}`;
  * mid-batch failure wastes more work. The client slices to this cap and tells
  * the operator to run the remainder as a second batch.
  */
-export const COWORK_BULK_FIND_MAX = 8;
+// Raised 8 → 12 on 2026-07-19, when bulk became FIND-ONLY. The old cap was
+// sized for the combined brief, where every extra reservation added ~2 more
+// stops for the operator's card — so a big batch meant a long tether. A
+// find-only batch is unattended: the only cost of another reservation is a
+// longer run nobody is waiting on. Sizing is not the limit either (the batch
+// goes through the durable prompt-run relay, not the deep link); the limit is
+// how much work should ride on ONE session that a bot wall could stall.
+export const COWORK_BULK_FIND_MAX = 12;
 
 /**
  * The BULK route through Cowork: ONE task that works N reservations' buy-in
@@ -955,9 +962,16 @@ ${botWallSection}
    ${apiRoot}/api/buy-ins/<buyInId>. If "bookingStatus" is "booked", is
    "request_submitted", or a confirmation is already recorded, report that
    skip and check the next unit in list order. If "bookingStatus" is "queued"
-   or "awaiting_payment", STOP: an operator handoff is already active. If it
+   or "awaiting_payment", STOP: an operator handoff is already active. NEVER
+   call the checkout-claim reset endpoint to clear that state — releasing a
+   unit that is waiting for my card is my decision alone, and doing it to a
+   unit I already paid for could buy it twice. If it
    is "in_progress", continue only by retrying step 3 with the SAME claimToken
    this task already generated; the server will say whether this task owns it.
+   If "bookingError" mentions a checkout reset by the operator, this unit was
+   handed over for payment once already: before preparing it again, check VRBO
+   My Trips and this unit's booking-alias inbox for a confirmation, and if you
+   find ANY sign it was booked, STOP and report it instead of re-preparing.
    Otherwise,
    sanity-check that the record matches the queued unit (same listing URL and
    dates covering ${checkIn} → ${checkOut}) and its "guestyReservationId"
@@ -1100,10 +1114,161 @@ export function buildCoworkFindAndPreparePrompt(
 }
 
 /**
+ * Upper bound on reservations per bulk CHECKOUT run.
+ *
+ * Deliberately its OWN literal, not an alias of COWORK_BULK_FIND_MAX: the two
+ * bound opposite things. The find cap bounds an UNATTENDED session (raise it
+ * freely — nobody is waiting). This cap bounds how long the operator will sit
+ * at the desk entering cards, because every unit in the batch stops for them.
+ * Eight reservations is already ~16 card entries. Raising the find cap must
+ * NOT drag this one up with it.
+ */
+export const COWORK_BULK_CHECKOUT_MAX = 8;
+
+/**
+ * The BULK CHECKOUT route: ONE Cowork task that walks every ALREADY-ATTACHED,
+ * unbooked unit across N reservations, one at a time, stopping for the
+ * operator's card on each. Shipped 2026-07-19 alongside the find/checkout bulk
+ * split — bulk find now runs unattended, and this is where the card work
+ * happens in ONE deliberate sitting instead of interrupting the find run.
+ *
+ * - 0 reservations → "" (callers guard).
+ * - 1 reservation → byte-identical to buildCoworkCheckoutPrompt(input) —
+ *   LOAD-BEARING equivalence (test-locked), same rule the find batch follows:
+ *   a one-item "batch" must behave exactly like the per-row button.
+ *
+ * THREE BATCH-ONLY GUARDS (do not remove — a batch is only acceptable because
+ * it carries them; without them pressing the per-row button N times is safer):
+ *  1. BATCH-WIDE SINGLE HANDOFF. The server's checkout claim lane is scoped to
+ *     ONE reservation (buy_in_checkout_claims is keyed by reservationId), so
+ *     reservation 1 sitting at awaiting_payment does NOT block a claim on
+ *     reservation 2 — a batch could otherwise open two unsubmitted payment
+ *     tabs, which no single-row task can do. The frame therefore requires a
+ *     machine check across the batch's own reservation ids before every claim.
+ *  2. PRICE FRESHNESS. The per-row button probes seconds before use; in a batch
+ *     the last reservation may be prepared an hour after launch, and the
+ *     "Find property on VRBO" flow re-points listingUrl AND costPaid on an
+ *     existing buy-in. So the brief must compare costPaid for EQUALITY, not
+ *     just presence, or the 15% guard arms against a stale total.
+ *  3. HANDOFF IDENTITY. The locked handoff sentence names no reservation, guest
+ *     or unit. That is fine when the operator just clicked one row; across ~16
+ *     handoffs it is how a card goes against the wrong booking. The frame
+ *     requires an identity line immediately before it and inside the alert.
+ */
+export function buildCoworkBulkCheckoutPrompt(
+  reservations: CoworkCheckoutPromptInput[],
+): string {
+  if (reservations.length === 0) return "";
+  if (reservations.length === 1) return buildCoworkCheckoutPrompt(reservations[0]);
+
+  const n = reservations.length;
+  const divider = "=".repeat(70);
+  const reservationIds = reservations
+    .map((input) => JSON.stringify(sanitizeCoworkPromptData(input.reservationId, 200)))
+    .join(", ");
+  const base = (reservations[0]?.baseUrl ?? "").replace(/\/+$/, "");
+  const apiRoot = base || "<APP_BASE_URL>";
+
+  const briefs = reservations
+    .map((input, i) => {
+      const guest = sanitizeCoworkPromptData(input.guestName, 160) || "(missing guest name)";
+      const property = sanitizeCoworkPromptData(input.propertyName, 240);
+      const checkIn = sanitizeCoworkPromptData(input.checkIn, 20);
+      const checkOut = sanitizeCoworkPromptData(input.checkOut, 20);
+      return `${divider}
+RESERVATION ${i + 1} of ${n} — ${JSON.stringify(guest)} @ ${JSON.stringify(property)} (${checkIn} → ${checkOut})
+${divider}
+
+${buildCoworkCheckoutPrompt(input, { bulkBrief: true })}`;
+    })
+    .join("\n\n");
+
+  return `# Task: Bulk checkout preparation — ${n} reservations, one unit at a time
+
+You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
+Every unit below is ALREADY ATTACHED and reviewed. Prepare each one's VRBO
+checkout and hand it to me for the card. You NEVER enter card details and you
+NEVER click the final Book/Confirm/Pay control — that is mine on every single
+unit, without exception.
+
+Work the reservation briefs STRICTLY one at a time, in the order listed.
+
+Batch rules (these sit ABOVE every brief and OVERRIDE anything in a brief that
+conflicts with them):
+
+- **ONE OUTSTANDING HANDOFF ACROSS THE WHOLE BATCH — machine-checked.** Each
+  brief's own guard only sees ITS reservation, and the server's claim lane is
+  per-reservation, so neither can see a sibling reservation's open payment tab.
+  Therefore, BEFORE the claim step for ANY unit, POST
+  ${apiRoot}/api/operations/buy-in-slot-status with
+  {"reservationIds": [${reservationIds}]} and read every returned row. If ANY
+  row other than the unit you are about to prepare has "bookingStatus" of
+  "awaiting_payment", "queued", or "in_progress", STOP and report it — a
+  handoff is still outstanding somewhere in this batch. Never keep two
+  unsubmitted payment tabs open, even for different reservations.
+
+- **PRICE FRESHNESS — compare, do not merely check presence.** The last
+  reservation in this batch may be prepared a long time after the first. In
+  each brief's step 1, the GET's "costPaid" must EQUAL the approved cost quoted
+  in that brief. If it differs by any amount, STOP and ask me: the unit was
+  re-priced or re-pointed after this batch was built, and the 15% checkout
+  guard would be measured against a stale total.
+
+- **NAME EVERY HANDOFF.** Immediately BEFORE the exact handoff sentence, and
+  again inside the spoken alert and the notification, state which booking and
+  which unit the card is for, in this form:
+  RESERVATION <i> of ${n} — "<guest name>" @ "<property>" — <unit label> — $<checkout total>
+  Do not reword the handoff sentence itself; add the identity line above it.
+  I will be walking back to an already-open tab ${n} times or more, and the
+  identity line is the only thing standing between that and a card entered
+  against the wrong booking.
+
+- Keep every reservation's IDs, guest identity, alias email, prices, dates, and
+  API calls isolated to its own brief. NEVER carry a value from one
+  reservation's brief into another's API calls.
+
+- **FAILURE ISOLATION, with one exception.** A unit that cannot be prepared
+  (mismatch, non-VRBO listing, price-guard stop, a page you cannot get past) is
+  reported and skipped — move to the next. THE ONE EXCEPTION: if a unit is left
+  at "awaiting_payment" and I do not complete it, the batch STOPS there; do not
+  start another unit. Report that unit's "buyInId" and its reservation id
+  explicitly in the final report, because a unit stranded at "awaiting_payment"
+  cannot be re-prepared by simply re-running this task — I have to resolve it
+  first.
+
+${BOT_WALL_PROTOCOL}
+
+${briefs}
+
+${divider}
+BATCH COMPLETE
+${divider}
+
+Deliver ONE consolidated report in reservation order: every unit prepared and
+its confirmed/request-submitted outcome, every unit still awaiting payment
+(with its buyInId + reservation id), every skip with its reason, and every
+price-guard stop. Close only the tabs you opened and that are fully finished;
+leave any unresolved checkout handoff tab open. Never touch tabs that predated
+this task.
+
+${doneSignalSection(
+    `all ${n} reservations have durable checkout outcomes recorded`,
+    "a unit still awaiting payment, a price-guard stop, or a checkout that needs review",
+  )}`;
+}
+
+/**
  * Bulk variant of the combined workflow. A reservation is not considered
  * finished until each prepared unit has gone through its human payment click
  * and Cowork has recorded the confirmed/request-submitted outcome. This keeps
  * payment tabs unambiguous: one outstanding handoff across the whole batch.
+ *
+ * DORMANT since 2026-07-19, deliberately NOT deleted. The client bulk button
+ * now sends the FIND-only batch (buildCoworkBulkBuyInPrompt) and the card work
+ * goes through buildCoworkBulkCheckoutPrompt, because the combined brief
+ * stopped for the operator on every unit and made the bulk queue impossible to
+ * walk away from. Kept + tested because this operator has reversed bulk
+ * routing decisions before (2026-07-13, 2026-07-19).
  */
 export function buildCoworkBulkFindAndPreparePrompt(
   reservations: CoworkBuyInPromptInput[],
