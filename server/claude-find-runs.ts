@@ -185,7 +185,12 @@ export function registerClaudeFindRunRoutes(app: Express): void {
       const token = randomBytes(24).toString("hex");
       const prompt = buildCoworkBuyInPrompt(
         { ...input, baseUrl: apiRoot },
-        { headlessRun: { runId: id, runToken: token } },
+        // afterAttach "guest_expectation": the run continues past attach into a
+        // READ-ONLY guest-experience check (2026-07-20) — it studies the
+        // original listing vs the attached units and records a happy/concerns/
+        // unhappy verdict; a concerns/unhappy verdict alerts the operator. Never
+        // books, detaches, or re-finds.
+        { headlessRun: { runId: id, runToken: token }, afterAttach: "guest_expectation" },
       );
       const run: ClaudeFindRunRecord = {
         id,
@@ -432,6 +437,42 @@ export function registerClaudeFindRunRoutes(app: Express): void {
       return res.status(upstream.status).json(payload);
     } catch (e) {
       return res.status(502).json({ error: `Attach failed: ${(e as Error)?.message ?? e}` });
+    }
+  }));
+
+  // Agent: record the guest-expectation verdict for the units it attached
+  // (Phase 2 of the headless find-run, 2026-07-20). Run-scoped like the other
+  // agent proxies — the agent never holds the admin secret. The reservation is
+  // ALWAYS the run's own (pinned here, never read from the body), and source is
+  // forced to "cowork". Read-only apart from stamping the verdict on the
+  // reservation's attached buy-ins.
+  app.post("/api/claude-find-runs/agent/:id/guest-happy", guarded(async (req, res) => {
+    const store = await readStore();
+    const run = findRun(store, String(req.params.id));
+    if (!run) return res.status(404).json({ error: "Run not found" });
+    if (!runTokenMatches(run, req.header("x-run-token"))) return res.status(401).json({ error: "Bad run token" });
+    if (!["claimed", "running", "attention"].includes(run.status)) {
+      return res.status(409).json({ error: `Run is ${run.status} — guest-happy calls are only valid while it is live` });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const verdict = String(body.verdict ?? "").trim().toLowerCase();
+    if (!["happy", "concerns", "unhappy"].includes(verdict)) {
+      return res.status(422).json({ error: "verdict must be one of: happy, concerns, unhappy" });
+    }
+    const feedback = typeof body.feedback === "string" ? body.feedback.slice(0, 2_000) : "";
+    try {
+      const upstream = await fetch(
+        `${loopbackBaseUrl()}/api/bookings/${encodeURIComponent(run.reservationId)}/guest-happy`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...loopbackRequestHeaders() },
+          body: JSON.stringify({ verdict, feedback, source: "cowork" }),
+        },
+      );
+      const payload = await upstream.json().catch(() => ({}));
+      return res.status(upstream.status).json(payload);
+    } catch (e) {
+      return res.status(502).json({ error: `Guest-happy record failed: ${(e as Error)?.message ?? e}` });
     }
   }));
 }

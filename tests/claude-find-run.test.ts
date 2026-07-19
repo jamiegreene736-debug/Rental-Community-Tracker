@@ -249,6 +249,42 @@ const briefInput: CoworkBuyInPromptInput = {
   check("final-message-is-the-report instruction present", /FINAL MESSAGE becomes the run's saved report/.test(headless));
   check("find-only contract survives — headless still ends at ATTACH", headless.includes("This task ends at ATTACH"));
   check("profit guard survives in the headless brief", headless.includes("## Profit guard"));
+
+  // ── Guest-expectation Phase 2 (2026-07-20): after attach, confirm the units
+  // are what the guest booked. Read-only + a run-scoped verdict record; a
+  // concerns/unhappy verdict alerts the operator. This is the config the SERVER
+  // actually builds (see the server source guard below).
+  const guest = buildCoworkBuyInPrompt(briefInput, {
+    headlessRun: { runId: "run-77", runToken: "tok-abcdef" },
+    afterAttach: "guest_expectation",
+  });
+  check("guest-expectation phase is appended", guest.includes("Phase 2 — will the GUEST be happy"));
+  check(
+    "guest-expectation replaces the ends-at-ATTACH stop with a continue",
+    !guest.includes("This task ends at ATTACH") && /continue immediately with the guest-expectation check/i.test(guest),
+  );
+  check(
+    "verdict recorded through the RUN-SCOPED proxy with the run token — never the raw endpoint",
+    guest.includes("/api/claude-find-runs/agent/run-77/guest-happy")
+      && guest.includes("X-Run-Token: tok-abcdef")
+      && !guest.includes("/api/bookings/6a") // never the raw /api/bookings/:id/guest-happy
+  );
+  check(
+    "the three verdicts are the only ones offered",
+    /"verdict":"<happy \| concerns \| unhappy>"/.test(guest),
+  );
+  check(
+    "a concerns/unhappy verdict ALERTS via the ATTENTION marker, but the agent does NOT wait",
+    /ATTENTION: Guest expectation/.test(guest) && /DO NOT wait/.test(guest) && /finish the report/.test(guest),
+  );
+  check(
+    "Phase 2 is READ-ONLY — never books, detaches, or re-finds",
+    /never\s+books, detaches, or re-finds/.test(guest) && !/enter (a|the) card/i.test(guest.slice(guest.indexOf("Phase 2 — will the GUEST"))),
+  );
+  check(
+    "guest_expectation is inert without the headless opt (only the runner drives it)",
+    !buildCoworkBuyInPrompt(briefInput, { afterAttach: "guest_expectation" }).includes("Phase 2 — will the GUEST"),
+  );
 }
 
 // ── runner classification + marker scan (.mjs) + TS-twin equivalence ─────────
@@ -486,6 +522,20 @@ console.log("claude-find-run: source wiring");
 
   const serverSrc = read("../server/claude-find-runs.ts");
   check("server: brief built with the headlessRun opt", serverSrc.includes("headlessRun: { runId: id, runToken: token }"));
+  check(
+    // 2026-07-20: the run auto-continues into the guest-expectation check.
+    "server: headless brief carries afterAttach guest_expectation",
+    serverSrc.includes('afterAttach: "guest_expectation"'),
+  );
+  check(
+    // Mirrors the buy-ins/attach proxies: run-scoped token, reservation pinned
+    // from the run, source forced to cowork, forwarded via loopback.
+    "server: run-scoped guest-happy proxy exists, pins the run's reservation, forces source cowork",
+    serverSrc.includes('app.post("/api/claude-find-runs/agent/:id/guest-happy"')
+      && serverSrc.includes("encodeURIComponent(run.reservationId)}/guest-happy")
+      && serverSrc.includes('source: "cowork"')
+      && /verdict must be one of: happy, concerns, unhappy/.test(serverSrc),
+  );
   check("server: token compared timing-safe", serverSrc.includes("timingSafeEqual"));
   check("server: single-flight 409 on an active reservation run", serverSrc.includes("activeClaudeFindRunForReservation") && serverSrc.includes("409"));
   check(
