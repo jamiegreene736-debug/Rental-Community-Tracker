@@ -59,6 +59,42 @@ const ALLOWED_TOOLS = ["mcp__chrome", "Bash(curl:*)", "WebSearch", "WebFetch"];
 // must not go back to "@latest".
 const CHROME_MCP_PKG = process.env.CLAUDE_FIND_RUN_CHROME_MCP || "chrome-devtools-mcp@1.6.0";
 
+// THE DAEMON HAS A BARE PATH — this is the actual root cause of every
+// browser-less run (2026-07-19, proven by `ps eww` on the live runner:
+// PATH=/usr/bin:/bin:/usr/sbin:/sbin). launchd does not load a login shell,
+// so `spawn("npx")` dies with ENOENT in ~5ms — for the CLI's own MCP spawn
+// AND for the preflight. Every shell-run test passed (full user PATH); every
+// daemon run failed. Two-part fix, BOTH required:
+//  - EXTENDED_PATH: npx is a `#!/usr/bin/env node` script, so even invoked by
+//    absolute path it still needs `node` resolvable on PATH — as does anything
+//    npx spawns. Prepend the runtime's own bin dir plus the usual macOS
+//    install locations to whatever PATH we inherited.
+//  - NPX_BIN: an absolute npx for the preflight spawn and the MCP config, so
+//    neither depends on PATH lookup at all.
+const EXTENDED_PATH = [
+  path.dirname(process.execPath), // the node actually running this daemon
+  path.join(os.homedir(), ".local/bin"), // claude CLI's bundled node/npx
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  process.env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin",
+].join(":");
+function resolveNpxBin() {
+  if (process.env.CLAUDE_FIND_RUN_NPX_BIN) return process.env.CLAUDE_FIND_RUN_NPX_BIN;
+  const candidates = [
+    path.join(path.dirname(process.execPath), "npx"),
+    path.join(os.homedir(), ".local/bin/npx"),
+    "/opt/homebrew/bin/npx",
+    "/usr/local/bin/npx",
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {}
+  }
+  return "npx"; // last resort: PATH lookup (works in shell contexts)
+}
+const NPX_BIN = resolveNpxBin();
+
 // The browser MCP genuinely takes ~2.6s to hand-shake (npx spawn + package load
 // + CDP connect). On a cold or contended start that exceeds the CLI's own MCP
 // startup budget and the run comes up browser-less. Preflight it — the same
@@ -307,8 +343,11 @@ async function preflightBrowserMcp(timeoutMs = 25_000) {
     };
     const timer = setTimeout(() => finish(false), timeoutMs);
     try {
-      child = spawn("npx", ["-y", CHROME_MCP_PKG, "--browserUrl", `http://127.0.0.1:${CDP_PORT}`], {
+      child = spawn(NPX_BIN, ["-y", CHROME_MCP_PKG, "--browserUrl", `http://127.0.0.1:${CDP_PORT}`], {
         stdio: ["pipe", "pipe", "ignore"],
+        // npx's shebang needs `node` resolvable, and the daemon's inherited
+        // PATH is launchd-bare — same reason the MCP config uses NPX_BIN.
+        env: { ...process.env, PATH: EXTENDED_PATH },
       });
     } catch {
       finish(false);
@@ -418,7 +457,10 @@ async function handleRun(run) {
     mcpConfigPath,
     JSON.stringify({
       mcpServers: {
-        chrome: { command: "npx", args: ["-y", CHROME_MCP_PKG, "--browserUrl", `http://127.0.0.1:${CDP_PORT}`] },
+        // NPX_BIN, never bare "npx": the CLI inherits the daemon's launchd
+        // PATH, where bare npx is ENOENT — the true cause of every
+        // browser-less run.
+        chrome: { command: NPX_BIN, args: ["-y", CHROME_MCP_PKG, "--browserUrl", `http://127.0.0.1:${CDP_PORT}`] },
       },
     }),
   );
@@ -433,6 +475,9 @@ async function handleRun(run) {
   // Give the CLI a real budget for the ~2.6s MCP connect. Without headroom the
   // default can lapse under load and the browser is marked "failed" at init.
   if (!childEnv.MCP_TIMEOUT) childEnv.MCP_TIMEOUT = String(CLI_MCP_TIMEOUT_MS);
+  // A usable PATH for everything the CLI spawns (the MCP's npx shebang needs
+  // node; WebFetch helpers etc.). The daemon's own PATH is launchd-bare.
+  childEnv.PATH = EXTENDED_PATH;
   delete childEnv.CLAUDE_CODE_ENTRYPOINT;
   if (process.env.CLAUDE_FIND_RUN_API_KEY) childEnv.ANTHROPIC_API_KEY = process.env.CLAUDE_FIND_RUN_API_KEY;
 
@@ -591,7 +636,7 @@ async function handleRun(run) {
 
 // ── main loop ───────────────────────────────────────────────────────────────
 async function main() {
-  log(`runner up — server ${SERVER}, model ${MODEL}, CDP ${CDP_PORT}, claude ${CLAUDE_BIN}`);
+  log(`runner up — server ${SERVER}, model ${MODEL}, CDP ${CDP_PORT}, claude ${CLAUDE_BIN}, npx ${NPX_BIN}`);
   process.on("SIGTERM", () => process.exit(0));
   process.on("SIGINT", () => process.exit(0));
   while (true) {
