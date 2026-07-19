@@ -185,6 +185,36 @@ check("map tolerates null/garbage input", Object.keys(buyInSlotSignatureMap(null
     "a 401 in the pre-flight aborts instead of stacking a second navigation",
     /\/\\b401\\b\/\.test\(String\(\(error as Error\)\?\.message/.test(checkoutFn),
   );
+
+  // ── Per-unit checkout buttons (operator spec 2026-07-19: "each unit I will
+  //    need to check out individually") ─────────────────────────────────────
+  console.log("cowork-refresh: per-unit checkout buttons");
+  check(
+    // The render site MAPS the unbooked units — one button each — and every
+    // button's `units` is a single-element array, so each Cowork brief is
+    // scoped to exactly one buy-in (its own task + its own card handoff).
+    "the row renders one checkout button PER unbooked unit, each scoped to that single buy-in",
+    bookingsSrc.includes(".map((s, _i, unbooked) => (")
+      && /\.map\(\(s, _i, unbooked\) => \(\s*<CoworkCheckoutPromptButton/.test(bookingsSrc)
+      && bookingsSrc.includes("units={[{")
+      && bookingsSrc.includes("key={`cowork-checkout-${s.buyIn.id}`}"),
+  );
+  check(
+    // Two buttons on one row must be tellable apart — by the operator (label)
+    // and by tests (testid). Solo rows keep the classic shapes.
+    "multi-unit rows label + id each button by unit; solo rows keep the classic label/testid",
+    bookingsSrc.includes("label={unbooked.length > 1 ? `Prepare checkout · ${s.unitLabel || s.buyIn.unitLabel}` : undefined}")
+      && bookingsSrc.includes("testIdSuffix={unbooked.length > 1 ? `-${s.buyIn.id}` : undefined}")
+      && checkoutFn.includes('{label ?? "Prepare checkout in Cowork"}')
+      && checkoutFn.includes("data-testid={`button-cowork-checkout-prompt-${reservation._id}${testIdSuffix ?? \"\"}`}"),
+  );
+  check(
+    // The reservation-scoped checkout claim allows ONE outstanding handoff, so
+    // while any unit's checkout is queued/in-progress/awaiting_payment every
+    // sibling button must hide — launching a second would 409 at the claim.
+    "all per-unit buttons hide while ANY checkout on the reservation is active",
+    /!r\.slots\.some\(\(s\) => buyInHasActiveCheckout\(s\.buyIn\)\) && r\.slots\s*\n\s*\.filter\(/.test(bookingsSrc),
+  );
 }
 
 console.log(`\ncowork-refresh: ${pass} passed, ${fail} failed`);
