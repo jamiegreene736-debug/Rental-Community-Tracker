@@ -363,7 +363,7 @@ export interface CoworkBuyInPromptOpts {
    * preparation using the buyInIds returned by the attach calls. Omitted keeps
    * the historical find-and-attach-only prompt byte-identical.
    */
-  afterAttach?: "attach_only" | "prepare_checkout";
+  afterAttach?: "attach_only" | "prepare_checkout" | "guest_expectation";
   /**
    * INTERNAL — set ONLY server-side when building the brief for a headless
    * `claude -p` find-run (server/claude-find-runs.ts). Swaps the Cowork
@@ -545,6 +545,62 @@ checkout guards. A buy-in recorded at 0 is a bug, never an acceptable result.
     ? "(Browser rule + bot-check protocol: the batch-level protocol at the TOP of this task applies here in full — browse in my REAL Chrome only, alert loudly, wait for me, never skip a site over a bot wall.)"
     : BOT_WALL_PROTOCOL;
   const continueToCheckout = opts?.afterAttach === "prepare_checkout";
+  // GUEST-EXPECTATION Phase 2 (headless find-runs, operator directive
+  // 2026-07-20): after attaching, put the guest in their own shoes and confirm
+  // the attached units are what they booked. Read-only apart from recording the
+  // verdict — never books, never detaches, never re-finds. Only the headless
+  // run drives it (it has the browser vision the comparison needs).
+  const continueToGuestCheck = opts?.afterAttach === "guest_expectation" && !!headless;
+  const guestCheckPhase = continueToGuestCheck
+    ? `
+
+${"=".repeat(70)}
+## Phase 2 — will the GUEST be happy with what you just attached?
+${"=".repeat(70)}
+
+Do this ONLY for the units you actually attached in Phase 1 (if you filled no
+slots, skip Phase 2 and just report that). This is a guest-experience check, not
+another search: put yourself in the guest's shoes. They booked
+**${propertyName}**${input.community?.trim() ? ` in ${input.community.trim()}` : ""} sight-unseen off its photos and
+description — walking into the unit(s) you attached instead, do they get what
+they paid for? Do NOT book, detach, re-find, or change any attachment here.
+
+1. **Study the ORIGINAL listing the guest booked** — find its public page
+   (search the property name + community/city; it is my own listing). Look at
+   it like a guest: the PHOTOS (finish, furniture, view, condition), the
+   bedroom count and BEDDING LAYOUT ("Rooms & beds" / "Sleeping arrangements",
+   e.g. 1 King + 1 Queen), the community/resort it promises, and headline
+   amenities. If you truly cannot find it, use this property's photos/details
+   in the app instead and say so.
+2. **Study each unit you attached the same way** — open its listing (you have
+   its URL from Phase 1), LOOK at the photos, read its bedding layout, confirm
+   its building/community.
+3. **Compare, dimension by dimension, honestly:**
+   - COMMUNITY: ${n === 1 ? "is the unit" : "are ALL the units"} in the community the guest booked?
+   - SIZE: does each unit have the bedroom count the guest expects?
+   - BEDDING LAYOUT: same or better (a King where they expected a King; 2
+     Twins replacing a King is a DOWNGRADE — flag it).
+   - QUALITY: are the photos similar or better in finish, furniture, view, and
+     condition than the original? Meaningfully dated/worse = flag it.
+4. **Record the verdict** — this stamps every attached unit with a
+   ★ Guest happy / ⚠ Guest concerns / ✕ Guest NOT happy badge in my portal.
+   NEVER skip it; a verdict only in your report leaves the units unmarked:
+     curl -sS -X POST ${apiRoot}/api/claude-find-runs/agent/${headless.runId}/guest-happy \\
+       -H "Content-Type: application/json" -H "X-Run-Token: ${headless.runToken}" \\
+       -d '{"verdict":"<happy | concerns | unhappy>","feedback":"<2-4 sentence guest\\u2019s-eye summary with the specific evidence>"}'
+   Verdict guide: everything matches or is better → "happy"; something a guest
+   would notice (older finish, different view, a Queen for a King) →
+   "concerns"; wrong community, wrong size, or clearly worse quality →
+   "unhappy".
+5. **If the verdict is "concerns" OR "unhappy", ALERT me** — print, on its own
+   line, exactly:
+     ATTENTION: Guest expectation — <one-line reason, e.g. "Unit B bedding is 2 Twins where they booked a King">
+   That sounds the alarm in my portal so I review it. Then DO NOT wait — you are
+   not blocked; finish the report and end the task normally. (A "happy" verdict
+   prints no ATTENTION line.)
+6. **Report** the full comparison per dimension — original promise vs delivered,
+   with specific evidence — then the verdict you recorded.`
+    : "";
   const closingSections = headless
     ? `
 
@@ -717,7 +773,11 @@ dialog). It is two API calls:
      never to push through units in different parts of the city.
 ${n === 1 ? "" : `
 Repeat steps 1–2 for each remaining unit slot.`}
-${continueToCheckout ? "## Phase 1 complete — report the picks, then continue to checkout preparation" : "## Done — report and STOP (do NOT book anything)"}
+${continueToCheckout
+    ? "## Phase 1 complete — report the picks, then continue to checkout preparation"
+    : continueToGuestCheck
+    ? "## Phase 1 complete — report the picks, then continue to the guest-expectation check"
+    : "## Done — report and STOP (do NOT book anything)"}
 When ${bothOrAll === "the unit" ? "the slot is" : "all slots are"} attached, report for each pick: the listing URL,
 bedrooms, unit type, its ADDRESS and how you confirmed it's in/adjacent to
 **${primaryTarget}**, the total price, whether it came from the resort or the
@@ -731,9 +791,14 @@ ${continueToCheckout
 costPaid. Do NOT stop after the attach report. Continue immediately with Phase 2
 below. Phase 2 may PREPARE checkout, but it never enters a card or submits a
 purchase.`
+    : continueToGuestCheck
+    ? `Keep every newly returned buyInId and its attached listing URL. Do NOT stop
+after the attach report. Continue immediately with the guest-expectation check
+(Phase 2) below — it is READ-ONLY apart from recording the verdict, and never
+books, detaches, or re-finds.`
     : `This task ends at ATTACH. Do **NOT** book, open a checkout page, or enter any
 payment details — I review the attached picks first, and booking runs from a
-separate checkout prompt I'll start myself.`}${closingSections}`;
+separate checkout prompt I'll start myself.`}${guestCheckPhase}${closingSections}`;
 }
 
 /**
