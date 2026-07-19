@@ -1197,8 +1197,13 @@ check(
     bookingsSrc.includes("withOpenSlots.slice(0, COWORK_BULK_FIND_MAX)") && bookingsSrc.includes("run Auto Cowork bulk again for the remaining"),
   );
   check(
-    "bookings: remaining-budget rule mirrored from the single button (net revenue minus attached costs, twice: single + bulk)",
-    (bookingsSrc.match(/getNetRevenue\(reservation\)\s*-\s*reservation\.slots\.reduce/g) ?? []).length === 2,
+    // 2026-07-19: the headless find-run button is a third consumer of the
+    // SAME remaining-budget rule (net revenue minus already-attached costs) —
+    // single Cowork button + bulk + headless. A fourth Cowork-brief entry
+    // point must mirror it too, or the profit guard inflates on partially
+    // filled combos.
+    "bookings: remaining-budget rule mirrored from the single button (net revenue minus attached costs, thrice: single + bulk + headless)",
+    (bookingsSrc.match(/getNetRevenue\(reservation\)\s*-\s*reservation\.slots\.reduce/g) ?? []).length === 3,
   );
   check(
     "bookings: server engine still available as the fallback (relabeled, same handler)",

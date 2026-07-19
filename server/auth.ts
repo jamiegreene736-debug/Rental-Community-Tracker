@@ -98,6 +98,15 @@ const PUBLIC_PATH_PREFIXES = [
   "/receipt/",
   "/admin/agreement/",
   "/api/rental-agreements/",
+  // NOTE FOR CODEX (2026-07-19, headless Claude find-runs): these are the
+  // TOKEN-authed endpoints the headless `claude -p` agent calls with curl —
+  // it deliberately never holds ADMIN_SECRET (prompt-injection blast-radius
+  // cap), so the cookie/header gate can't apply. EVERY handler under this
+  // prefix verifies the per-run X-Run-Token (timing-safe, run-scoped,
+  // dies with the run) before doing anything — see server/claude-find-runs.ts.
+  // The operator-facing routes (create/claim/status/cancel) live OUTSIDE this
+  // prefix and stay fully gated. Do not widen this to /api/claude-find-runs/.
+  "/api/claude-find-runs/agent/",
 ];
 
 const PUBLIC_PATH_EXACT = new Set<string>([

@@ -58,6 +58,7 @@ import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
 import { buildCoworkBuyInPrompt, buildCoworkBulkFindAndPreparePrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, type CoworkBuyInPromptInput } from "@shared/cowork-buyin-prompt";
 import { buildCoworkDeepLink, buildCoworkPromptRunBootstrap, coworkLaunchNeedsFallback, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
+import { ACTIVE_CLAUDE_FIND_RUN_STATUSES, claudeFindRunStatusLabel, type ClaudeFindRunClientView } from "@shared/claude-find-run";
 import { buyInSlotSignature, buyInSlotSignatureMap, type BuyInSlotStatusRow } from "@shared/buy-in-slot-signature";
 
 // Is this attached buy-in already on the VRBO channel? Drives the
@@ -2490,6 +2491,207 @@ async function launchCoworkPrompt(
   } catch {
     return { copied, launched: false, promptIncluded: false, runStored };
   }
+}
+
+// ── Headless find-run (zero-click buy-in search; operator 2026-07-19) ───────
+// The SAME find brief the Auto Cowork button builds, executed by a headless
+// `claude -p` session on the operator's Mac (the sidecar daemon's runner
+// child). No Cowork window, no send press — the click IS the start. FIND-ONLY
+// by design: the brief ends at attach; checkout stays the human-gated Cowork
+// prompt. The feedback the Cowork window used to provide lives in
+// HeadlessFindRunPanel below: live narration, attention states (bot walls),
+// and the persisted final report — all server-side, so it renders on a phone
+// too.
+const claudeFindRunStatusKey = (reservationId: string) => ["/api/claude-find-runs/status", reservationId];
+
+function useClaudeFindRun(reservationId: string) {
+  return useQuery<{ runs: Record<string, ClaudeFindRunClientView>; disabled?: boolean }>({
+    queryKey: claudeFindRunStatusKey(reservationId),
+    queryFn: async () => {
+      const res = await apiRequest("POST", "/api/claude-find-runs/status", { reservationIds: [reservationId] });
+      return res.json();
+    },
+    // Poll only while a run is live; a terminal run re-renders once and rests.
+    refetchInterval: (query) => {
+      const run = query.state.data?.runs?.[reservationId];
+      return run && ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status) ? 7_000 : false;
+    },
+    staleTime: 5_000,
+  });
+}
+
+function HeadlessFindRunButton({
+  reservation,
+  propertyId,
+  propertyName,
+  community,
+  units,
+}: {
+  reservation: GuestyReservation;
+  propertyId: number;
+  propertyName: string;
+  community: string;
+  units: { unitId: string; unitLabel: string; bedrooms: number }[];
+}) {
+  const { toast } = useToast();
+  const { data } = useClaudeFindRun(reservation._id);
+  const run = data?.runs?.[reservation._id];
+  const runActive = !!run && ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status);
+  const toDateOnly = (s: string | undefined): string =>
+    !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
+  const start = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/claude-find-runs", {
+        reservationId: reservation._id,
+        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? null,
+        propertyId,
+        propertyName,
+        community,
+        checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
+        checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
+        units,
+        party: guestPartyFromReservation(reservation),
+        // REMAINING net revenue — same basis as the Auto Cowork button (empty
+        // slots only, budget minus already-attached costs).
+        netRevenue:
+          getNetRevenue(reservation) -
+          reservation.slots.reduce((sum, s) => sum + parseFloat(String(s.buyIn?.costPaid ?? 0)), 0),
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      // Cowork-or-runner, an out-of-band attach is now plausible — speed up
+      // the slot probe the same way the Cowork buttons do.
+      armCoworkRunWindow();
+      void queryClient.invalidateQueries({ queryKey: claudeFindRunStatusKey(reservation._id) });
+      toast({
+        title: "Find-run started on your Mac",
+        description: "No window will open — watch the live log on this row. You'll hear a chime if it needs you, and when it finishes.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Could not start the find-run",
+        description: String(error?.message ?? error),
+        variant: "destructive",
+      });
+    },
+  });
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="h-8 px-2 text-xs"
+      disabled={start.isPending || runActive}
+      onClick={(e) => {
+        e.stopPropagation();
+        start.mutate();
+      }}
+      data-testid={`button-headless-find-run-${reservation._id}`}
+      title="Runs the same find-and-attach search as Auto Cowork, headless on your Mac — no Cowork window, no send press. It never books; checkout stays the separate Cowork prompt."
+    >
+      {runActive ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1 h-3.5 w-3.5" />}
+      {runActive ? "Auto-run in progress…" : "Auto-run · find cheapest (no window)"}
+    </Button>
+  );
+}
+
+function HeadlessFindRunPanel({ reservationId }: { reservationId: string }) {
+  const { toast } = useToast();
+  const { data } = useClaudeFindRun(reservationId);
+  const [showAllEvents, setShowAllEvents] = useState(false);
+  const cancel = useMutation({
+    mutationFn: async (runId: string) => {
+      const res = await apiRequest("POST", `/api/claude-find-runs/${runId}/cancel`, {});
+      return res.json();
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: claudeFindRunStatusKey(reservationId) });
+      toast({ title: "Find-run cancelled", description: "The Mac runner stops within a few seconds." });
+    },
+  });
+  const run = data?.runs?.[reservationId];
+  if (!run) return null;
+  const badge = claudeFindRunStatusLabel(run.status);
+  const active = ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status);
+  const events = showAllEvents ? run.events : run.events.slice(-8);
+  const toneClass =
+    badge.tone === "good"
+      ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+      : badge.tone === "attention"
+      ? "text-amber-800 bg-amber-50 border-amber-300"
+      : badge.tone === "bad"
+      ? "text-red-700 bg-red-50 border-red-200"
+      : "text-sky-700 bg-sky-50 border-sky-200";
+  return (
+    <div
+      className="mt-2 rounded border border-border bg-muted/30 px-3 py-2 text-xs"
+      data-testid={`headless-find-run-panel-${reservationId}`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Zap className="h-3.5 w-3.5 text-sky-600" />
+        <span className="font-medium">Headless find-run</span>
+        <span className={`rounded border px-1.5 py-0.5 text-[11px] ${toneClass}`}>
+          {active && <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />}
+          {badge.label}
+        </span>
+        {active && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-6 px-1.5 text-[11px] text-red-700"
+            disabled={cancel.isPending}
+            onClick={(e) => {
+              e.stopPropagation();
+              cancel.mutate(run.id);
+            }}
+            data-testid={`button-headless-find-cancel-${reservationId}`}
+          >
+            <Square className="mr-1 h-3 w-3" />
+            Cancel run
+          </Button>
+        )}
+      </div>
+      {run.status === "attention" && run.attentionReason && (
+        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-amber-900">
+          ⚠ The runner needs you: {run.attentionReason} — solve it in the runner's Chrome window on the Mac; it
+          resumes on its own.
+        </div>
+      )}
+      {run.error && <div className="mt-2 text-red-700">✕ {run.error}</div>}
+      {events.length > 0 && (
+        <div className="mt-2 space-y-0.5 font-mono text-[11px] text-muted-foreground">
+          {run.events.length > events.length && (
+            <button
+              type="button"
+              className="text-sky-700 underline"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowAllEvents(true);
+              }}
+            >
+              Show all {run.events.length} log lines{run.droppedEvents > 0 ? ` (${run.droppedEvents} older dropped)` : ""}
+            </button>
+          )}
+          {events.map((event, i) => (
+            <div key={`${event.at}-${i}`}>
+              <span className="opacity-60">{event.at.slice(11, 16)}</span> · {event.text}
+            </div>
+          ))}
+        </div>
+      )}
+      {run.report && (
+        <details className="mt-2" open={!active}>
+          <summary className="cursor-pointer font-medium text-emerald-800">Final report</summary>
+          <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[11px]">
+            {run.report}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
 }
 
 // The primary Auto Cowork FIND flow: search + attach the cheapest qualifying
@@ -12053,24 +12255,47 @@ export default function Bookings() {
                                     single-unit / unconfigured listings in the global view,
                                     not just configured 2-unit combos. */}
                                 {reservationMeta && r.slots.some((s) => !s.buyIn) && (
-                                  <CoworkBuyInPromptButton
-                                    reservation={r}
-                                    propertyId={reservationMeta.propertyId}
-                                    propertyName={reservationMeta.propertyName}
-                                    community={
-                                      (selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community : undefined)
-                                      ?? PROPERTY_UNIT_CONFIGS[reservationMeta.propertyId]?.community
-                                      ?? r.slots.find((s) => s.community)?.community
-                                      ?? ""
-                                    }
-                                    units={r.slots
-                                      .filter((s) => !s.buyIn)
-                                      .map((s) => ({
-                                        unitId: s.unitId,
-                                        unitLabel: s.unitLabel,
-                                        bedrooms: s.bedrooms,
-                                      }))}
-                                  />
+                                  <>
+                                    <CoworkBuyInPromptButton
+                                      reservation={r}
+                                      propertyId={reservationMeta.propertyId}
+                                      propertyName={reservationMeta.propertyName}
+                                      community={
+                                        (selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community : undefined)
+                                        ?? PROPERTY_UNIT_CONFIGS[reservationMeta.propertyId]?.community
+                                        ?? r.slots.find((s) => s.community)?.community
+                                        ?? ""
+                                      }
+                                      units={r.slots
+                                        .filter((s) => !s.buyIn)
+                                        .map((s) => ({
+                                          unitId: s.unitId,
+                                          unitLabel: s.unitLabel,
+                                          bedrooms: s.bedrooms,
+                                        }))}
+                                    />
+                                    {/* Zero-click twin: same brief, headless on the Mac —
+                                        no Cowork window, no send press. Feedback renders in
+                                        HeadlessFindRunPanel below the strip. */}
+                                    <HeadlessFindRunButton
+                                      reservation={r}
+                                      propertyId={reservationMeta.propertyId}
+                                      propertyName={reservationMeta.propertyName}
+                                      community={
+                                        (selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community : undefined)
+                                        ?? PROPERTY_UNIT_CONFIGS[reservationMeta.propertyId]?.community
+                                        ?? r.slots.find((s) => s.community)?.community
+                                        ?? ""
+                                      }
+                                      units={r.slots
+                                        .filter((s) => !s.buyIn)
+                                        .map((s) => ({
+                                          unitId: s.unitId,
+                                          unitLabel: s.unitLabel,
+                                          bedrooms: s.bedrooms,
+                                        }))}
+                                    />
+                                  </>
                                 )}
                               </div>
                             </div>
@@ -12082,6 +12307,11 @@ export default function Bookings() {
                             )}
                           </div>
                         )}
+                        {/* Headless find-run live log + final report. ALWAYS
+                            mounted (self-hides with no run): the empty-slots
+                            box above disappears the moment the run's attaches
+                            land — exactly when the report matters most. */}
+                        <HeadlessFindRunPanel reservationId={r._id} />
                         {expansionJobs[r._id] && (
                           <CityExpansionJobPoller
                             jobId={expansionJobs[r._id].jobId}
