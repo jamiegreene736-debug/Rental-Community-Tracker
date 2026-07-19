@@ -184,21 +184,31 @@ check(
     bookingsSrc.includes('from "@shared/cowork-launch"'),
   );
   check(
-    "the primary row button is the find-only Cowork prompt (checkout is a separate prompt)",
-    bookingsSrc.includes("Auto Cowork · find cheapest"),
+    // 2026-07-19: the row's deep-link find button was REMOVED. It only
+    // pre-filled a Cowork task and then waited for a send press — the friction
+    // this whole sequence existed to remove — and it sat right beside the
+    // headless twin that runs the same brief with no window and no press.
+    // ONE find button on the row, and it must be the zero-click one.
+    "the row has exactly ONE find button, and it is the headless (no send press) one",
+    bookingsSrc.includes("button-headless-find-run-")
+      && !bookingsSrc.includes("button-cowork-prompt-")
+      && !/<CoworkBuyInPromptButton/.test(bookingsSrc),
   );
   // INTENT (unchanged since 2026-07-13): no Cowork button may hand-roll its own
   // launch. The five row buttons now share one launcher via the useCoworkLaunch
   // hook, so the call-site count is 2 (hook + bulk) rather than 6 — the guard
   // is that those are the ONLY two, and that all five rows go through the hook.
   check(
-    "every Cowork action launches through launchCoworkPrompt (hook + bulk are the only call sites)",
-    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 2,
+    // 3 = the shared row hook + bulk find + bulk checkout (2026-07-19 split).
+    "every Cowork action launches through launchCoworkPrompt (hook + the two bulk runs are the only call sites)",
+    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 3,
     (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length,
   );
   check(
-    "all five row Cowork buttons launch through the shared useCoworkLaunch hook",
-    (bookingsSrc.match(/useCoworkLaunch\(/g) ?? []).length === 6, // 1 definition + 5 uses
+    // 5 = 1 definition + 4 uses (checkout, verify-community, guest-happy,
+    // find-on-VRBO). The fifth — the row find button — was removed 2026-07-19.
+    "every remaining row Cowork button launches through the shared useCoworkLaunch hook",
+    (bookingsSrc.match(/useCoworkLaunch\(/g) ?? []).length === 5,
     (bookingsSrc.match(/useCoworkLaunch\(/g) ?? []).length,
   );
   check(
@@ -221,12 +231,33 @@ check(
     bookingsSrc.includes("buildCoworkDeepLink(") && !/claude:\/\//.test(bookingsSrc.replace(/\/\/[^\n]*/g, "")),
   );
   check(
-    "row find is FIND-ONLY; checkout + bulk are their own Cowork prompts",
-    bookingsSrc.includes("buildCoworkBuyInPrompt(promptInput)")
+    // 2026-07-19: BULK split too. The bulk button used to send the combined
+    // find+checkout brief, which stopped for the operator's card on every unit
+    // and made the queue impossible to walk away from. Find and checkout are
+    // now separate runs at BOTH the row and the batch level.
+    "find and checkout are separate Cowork prompts at BOTH the row and the batch level",
+    // (The row's FIND half is now the headless runner, so there is no
+    // buildCoworkBuyInPrompt call left in this file — the runner builds it
+    // server-side from the same shared builder.)
+    bookingsSrc.includes("button-headless-find-run-")
       && !bookingsSrc.includes('kind: "find-and-prepare"')
       && bookingsSrc.includes('kind: "prepare-checkout"')
-      && bookingsSrc.includes('kind: "bulk-find-and-prepare"')
-      && bookingsSrc.includes("buildCoworkBulkFindAndPreparePrompt(inputs)"),
+      && bookingsSrc.includes('kind: "bulk-find"')
+      && bookingsSrc.includes('kind: "bulk-prepare-checkout"')
+      && bookingsSrc.includes("buildCoworkBulkBuyInPrompt(inputs)")
+      && bookingsSrc.includes("buildCoworkBulkCheckoutPrompt(inputs)"),
+  );
+  check(
+    // The regression that would silently restore ~16 card interruptions per
+    // batch and undo the whole point of the 2026-07-19 change. Compares CODE
+    // only — bookings.tsx carries a load-bearing comment naming the retired
+    // builder precisely to warn against re-wiring it.
+    "the bulk button must NEVER be re-pointed at the combined find+prepare brief",
+    (() => {
+      const codeOnly = bookingsSrc.replace(/\/\/[^\n]*/g, "");
+      return !codeOnly.includes("buildCoworkBulkFindAndPreparePrompt")
+        && !codeOnly.includes('kind: "bulk-find-and-prepare"');
+    })(),
   );
 
   // ── No modal on the happy path (operator directive 2026-07-19) ────────────
@@ -244,8 +275,13 @@ check(
       && bookingsSrc.includes("CoworkFallbackContext.Provider"),
   );
   check(
+    // Every launch path must consult the shared gate — asserted as "at least
+    // one per launch site" rather than an exact count, because the two bulk
+    // runs legitimately call it twice each (once to pick the shortened
+    // fallback TTL, once to open the dialog).
     "the fallback opens ONLY through the shared, un-reduced gate",
-    (bookingsSrc.match(/coworkLaunchNeedsFallback\(/g) ?? []).length === 2, // hook + bulk
+    (bookingsSrc.match(/coworkLaunchNeedsFallback\(/g) ?? []).length
+      >= (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length,
     (bookingsSrc.match(/coworkLaunchNeedsFallback\(/g) ?? []).length,
   );
   check(
@@ -268,8 +304,16 @@ check(
     })(),
   );
   check(
-    "the row find prompt has a relay kind, so an over-cap brief can never open Cowork empty",
-    bookingsSrc.includes('kind: "find", reservationId: reservation._id'),
+    // The row's find no longer uses a deep link at all (the headless runner
+    // executes the brief directly), so the over-cap-opens-Cowork-empty class is
+    // structurally gone for the row. BULK find still relays and is covered
+    // above. The "find" kind stays in the server's ALLOWED_KINDS for backward
+    // compatibility with relay rows minted before this deploy — dropping it
+    // would 400 a run the operator had already launched.
+    "the row find is headless; only the BULK find still needs the relay",
+    !bookingsSrc.includes('kind: "find", reservationId: reservation._id')
+      && bookingsSrc.includes('kind: "bulk-find"')
+      && fs.readFileSync(path.join(here, "../server/cowork-prompt-runs.ts"), "utf8").includes('"find"'),
   );
   check(
     "a 401 during the relay aborts the launch instead of stacking a second navigation",

@@ -56,10 +56,22 @@ import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared
 import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBuyInPrompt, buildCoworkBulkFindAndPreparePrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, type CoworkBuyInPromptInput } from "@shared/cowork-buyin-prompt";
+import { buildCoworkBulkBuyInPrompt, buildCoworkBulkCheckoutPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, COWORK_BULK_CHECKOUT_MAX, type CoworkBuyInPromptInput, type CoworkCheckoutPromptInput } from "@shared/cowork-buyin-prompt";
 import { buildCoworkDeepLink, buildCoworkPromptRunBootstrap, coworkLaunchNeedsFallback, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
 import { ACTIVE_CLAUDE_FIND_RUN_STATUSES, claudeFindRunStatusLabel, type ClaudeFindRunClientView } from "@shared/claude-find-run";
 import { buyInSlotSignature, buyInSlotSignatureMap, type BuyInSlotStatusRow } from "@shared/buy-in-slot-signature";
+import {
+  COWORK_DISPATCH_STORAGE_KEY,
+  COWORK_DISPATCH_TTL,
+  clearCoworkDispatches,
+  describeCoworkSuppression,
+  parseCoworkDispatches,
+  partitionCoworkDispatchCandidates,
+  recordCoworkDispatches,
+  serializeCoworkDispatches,
+  type CoworkDispatchKind,
+  type CoworkDispatchRecord,
+} from "@shared/cowork-dispatch-memory";
 
 // Is this attached buy-in already on the VRBO channel? Drives the
 // "Find on VRBO" re-channel button + slot badges (operator prefers to book
@@ -2415,7 +2427,7 @@ function useCoworkLaunch(label: string) {
   return { launch, launching };
 }
 
-type CoworkPromptRunKind = "find" | "prepare-checkout" | "bulk-find-and-prepare";
+type CoworkPromptRunKind = "find" | "prepare-checkout" | "bulk-find" | "bulk-prepare-checkout";
 
 async function launchCoworkPrompt(
   prompt: string,
@@ -2694,89 +2706,22 @@ function HeadlessFindRunPanel({ reservationId }: { reservationId: string }) {
   );
 }
 
-// The primary Auto Cowork FIND flow: search + attach the cheapest qualifying
-// buy-in units (VRBO preferred — see the shared prompt's CHANNEL PREFERENCE),
-// then STOP at attach. It NEVER books. Booking is a SEPARATE Cowork prompt
-// (CoworkCheckoutPromptButton) the operator starts after reviewing the picks.
-// The brief runs right at Claude Desktop's 14,336-char deep-link cap (~14.3k
-// for a short property name, OVER it for longer ones), so it launches
-// cap-first: direct embed when it fits, durable prompt-run relay when it
-// doesn't. Before that it silently opened Cowork with an EMPTY composer.
-function CoworkBuyInPromptButton({
-  reservation,
-  propertyId,
-  propertyName,
-  community,
-  units,
-}: {
-  reservation: GuestyReservation;
-  propertyId: number;
-  propertyName: string;
-  community: string;
-  units: { unitId: string; unitLabel: string; bedrooms: number }[];
-}) {
-  const { launch, launching } = useCoworkLaunch("The buy-in search prompt");
-  const toDateOnly = (s: string | undefined): string =>
-    !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
-  const promptInput = useMemo<CoworkBuyInPromptInput>(
-    () => ({
-        reservationId: reservation._id,
-        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? null,
-        propertyId,
-        propertyName,
-        community,
-        checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
-        checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
-        units,
-        // Party size (adults/children) so the search rejects units that
-        // can't sleep everyone.
-        party: guestPartyFromReservation(reservation),
-        // REMAINING net revenue = full net revenue minus what's ALREADY spent
-        // on attached slots (mirrors the bookings-page profit gate's
-        // `remainingBudget = getNetRevenue(reservation) - existingCost`, ~L3979).
-        // LOAD-BEARING: `units` above is only the EMPTY slots (filter !s.buyIn),
-        // so the prompt's "combined all-in cost" is just the picks it will
-        // attach — it must be measured against the budget LEFT after the sibling
-        // slots. Passing the FULL net revenue would inflate the budget by every
-        // already-bought unit and under-detect losses on a partially-filled
-        // combo. Resolves to <=0 (guard degrades off) for money-less rows OR an
-        // already-underwater reservation — matching buy-in-profit.ts's
-        // revenue<=0 disable rule.
-        netRevenue:
-          getNetRevenue(reservation) -
-          reservation.slots.reduce(
-            (sum, s) => sum + parseFloat(String(s.buyIn?.costPaid ?? 0)),
-            0,
-          ),
-        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
-      }),
-    [reservation, propertyId, propertyName, community, units],
-  );
-  // FIND + ATTACH ONLY (buildCoworkBuyInPrompt): the brief ends at ATTACH and
-  // never books — checkout is the separate "Prepare checkout in Cowork" prompt.
-  const prompt = useMemo(() => buildCoworkBuyInPrompt(promptInput), [promptInput]);
-  return (
-    <Button
-      type="button"
-      size="sm"
-      variant="outline"
-      className="h-8 px-2 text-xs"
-      disabled={launching}
-      onClick={(e) => {
-        e.stopPropagation();
-        // savedRun is the OVERFLOW path only (cap-first in launchCoworkPrompt).
-        // This brief runs ~14.3k and exceeds the 14,336 cap on longer property
-        // names, where it previously opened Cowork with an empty composer.
-        void launch(prompt, { kind: "find", reservationId: reservation._id });
-      }}
-      data-testid={`button-cowork-prompt-${reservation._id}`}
-      title="Opens Cowork to find and attach the cheapest qualifying buy-in units (VRBO preferred). It never books — review the picks, then use 'Prepare checkout in Cowork' to book on VRBO."
-    >
-      <Sparkles className="mr-1 h-3.5 w-3.5" />
-      Auto Cowork · find cheapest
-    </Button>
-  );
-}
+// REMOVED 2026-07-19: the row-level "Auto Cowork · find cheapest" button.
+//
+// Operator, seeing it beside the headless twin: "I thought we were now just
+// doing the one button for cowork where the prompt is automatically pushed to
+// claude cowork and starts automatically. Please remove the button that does
+// NOT do what we want it to do."
+//
+// It was the deep-link button: it pre-filled a Cowork task and then WAITED for
+// a send press in Claude Desktop — the exact friction this whole 2026-07-19
+// sequence existed to remove. HeadlessFindRunButton runs the SAME brief
+// (buildCoworkBuyInPrompt, via POST /api/claude-find-runs) with no window and
+// no send press, so keeping both on the row was pure confusion.
+//
+// buildCoworkBuyInPrompt is NOT dead — it is still the per-reservation brief
+// the headless runner executes and the body of every bulk find batch. Checkout
+// is unaffected and stays the human-gated Cowork prompt.
 
 // "Prepare checkout" — the SEPARATE Cowork prompt for ALREADY-attached buy-ins
 // after the operator reviewed them. Cowork fills the traveler details, applies
@@ -5472,9 +5417,20 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
   };
 
   const resetCheckoutClaim = async () => {
+    // A unit stranded at awaiting_payment is otherwise a dead end: this row's
+    // "Prepare checkout in Cowork" button hides while a checkout is active, and
+    // the plain reset refuses. It happens when a Cowork task is abandoned
+    // mid-handoff — much likelier now that one bulk run can span many units.
+    // Resetting it asserts "I did NOT pay", so the confirm has to say that
+    // outright: resetting a unit that WAS paid for could buy it twice.
+    const stranded = buyIn.bookingStatus === "awaiting_payment";
     const confirmed = window.confirm(
-      "Reset this checkout preparation only if its Cowork or sidecar task has stopped. " +
-      "Resetting releases this unit's checkout lane and allows a new task to start. Continue?",
+      stranded
+        ? "This unit is waiting for your card, so Cowork already opened its checkout.\n\n"
+          + "Only reset it if you did NOT complete the payment — if you did pay, resetting could let it be booked a second time.\n\n"
+          + "Reset this stranded checkout?"
+        : "Reset this checkout preparation only if its Cowork or sidecar task has stopped. "
+          + "Resetting releases this unit's checkout lane and allows a new task to start. Continue?",
     );
     if (!confirmed) return;
     setResettingClaim(true);
@@ -5482,6 +5438,8 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
       await apiRequest("POST", "/api/cowork/checkout-claims/reset", {
         reservationId: reservation._id,
         buyInId: buyIn.id,
+        // Opt-in only, and only behind the stranded-handoff confirm above.
+        allowAwaitingPayment: stranded,
       });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] }),
@@ -5516,14 +5474,34 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
   const awaitingPayment = job?.status === "awaiting_payment" || buyIn.bookingStatus === "awaiting_payment";
   if (awaitingPayment) {
     return (
-      <span
-        className="inline-flex items-center gap-1 rounded border border-amber-400 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900 dark:border-amber-600 dark:bg-amber-950/40 dark:text-amber-200"
-        title="Checkout is prepared and left open. Add the credit card, then click Checkout in the checkout window."
-        data-testid={`status-bought-in-${reservation._id}-${buyIn.id}`}
-        data-booking-status="awaiting_payment"
-      >
-        <WalletCards className="h-3.5 w-3.5" />
-        Ready for card · add card + click Checkout
+      <span className="inline-flex items-center gap-1">
+        <span
+          className="inline-flex items-center gap-1 rounded border border-amber-400 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900 dark:border-amber-600 dark:bg-amber-950/40 dark:text-amber-200"
+          title="Checkout is prepared and left open. Add the credit card, then click Checkout in the checkout window."
+          data-testid={`status-bought-in-${reservation._id}-${buyIn.id}`}
+          data-booking-status="awaiting_payment"
+        >
+          <WalletCards className="h-3.5 w-3.5" />
+          Ready for card · add card + click Checkout
+        </span>
+        {/* Escape hatch for a STRANDED handoff — a Cowork task abandoned after
+            it prepared this unit. Without it this state is a dead end: the
+            row's "Prepare checkout in Cowork" button hides while a checkout is
+            active, so there is no way back. Confirm-gated and explicit,
+            because resetting asserts the payment was never made. */}
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 px-1.5 text-[11px] text-muted-foreground"
+          disabled={resettingClaim}
+          onClick={() => void resetCheckoutClaim()}
+          data-testid={`button-reset-stranded-checkout-${reservation._id}-${buyIn.id}`}
+          title="Use only if this checkout was abandoned and you did NOT pay — it releases the unit so a new checkout can be prepared"
+        >
+          {resettingClaim ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+          Not paid — reset
+        </Button>
       </span>
     );
   }
@@ -6492,7 +6470,7 @@ function LastBuyInSearchPanel({
           className="mt-1 rounded border border-red-300 bg-red-50 px-2 py-1 text-[11px] font-medium text-red-800"
           data-testid="scan-interrupted-notice"
         >
-          ⚠ Incomplete scan — {scanMessage || "the search was interrupted mid-run (server restarted). It resumes on its own; or use Auto Cowork · find cheapest to search again."}
+          ⚠ Incomplete scan — {scanMessage || "the search was interrupted mid-run (server restarted). It resumes on its own; or use Auto-run · find cheapest to search again."}
         </p>
       )}
       {!interrupted && scanMessage ? (
@@ -8130,6 +8108,59 @@ export default function Bookings() {
   // to the same open slots — the exact double-attach hazard the button warns
   // about. The row buttons get the same guard from useCoworkLaunch.
   const [bulkCoworkLaunching, setBulkCoworkLaunching] = useState(false);
+
+  // ── Bulk dispatch memory (see shared/cowork-dispatch-memory.ts) ───────────
+  // Cowork attaches out of band over several minutes, so the selection keeps
+  // looking unfilled the whole time a batch is running. Without this, clicking
+  // the bulk button again re-sends the SAME bookings to a second racing task.
+  // localStorage, not the server: it must be correct on FIRST PAINT (a button
+  // that renders "(10)" and then silently drops to "(7)" is the very problem
+  // this fixes), and the money invariants are already held server-side.
+  const [coworkDispatches, setCoworkDispatches] = useState<CoworkDispatchRecord[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      return parseCoworkDispatches(window.localStorage.getItem(COWORK_DISPATCH_STORAGE_KEY));
+    } catch {
+      return []; // Private mode / storage disabled — degrade to no memory.
+    }
+  });
+  // M3: takes an UPDATER, never a value. The launchers call this AFTER awaiting
+  // the relay POST (143KB for a 12-reservation batch), and the storage listener
+  // below can land inside that window — a value captured at render would then
+  // write `stale + new` and ERASE the other tab's records, re-admitting those
+  // reservations to a second racing task. Never convert this back to a value.
+  const persistCoworkDispatches = useCallback(
+    (update: (prev: CoworkDispatchRecord[]) => CoworkDispatchRecord[]) => {
+      setCoworkDispatches((prev) => {
+        const next = update(prev);
+        try {
+          window.localStorage.setItem(COWORK_DISPATCH_STORAGE_KEY, serializeCoworkDispatches(next));
+        } catch { /* best-effort, same as the other nexstay_* keys */ }
+        return next;
+      });
+    },
+    [],
+  );
+  // Two tabs on one machine is a normal way to work this page, and localStorage
+  // is shared but only read at mount. Without this, tab B keeps its stale copy,
+  // renders the full count, and double-dispatches — the exact bug, now
+  // invisible because both tabs believe they are right.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== COWORK_DISPATCH_STORAGE_KEY) return;
+      try {
+        setCoworkDispatches(parseCoworkDispatches(window.localStorage.getItem(COWORK_DISPATCH_STORAGE_KEY)));
+      } catch { /* ignore */ }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+  // Re-render the "clears in" copy as time passes without touching storage.
+  const [dispatchClockMs, setDispatchClockMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setDispatchClockMs(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
   const [bulkBuyInQueueOpen, setBulkBuyInQueueOpen] = useState(false);
   const [bulkBuyInQueueItems, setBulkBuyInQueueItems] = useState<BulkBuyInQueueItem[]>([]);
   const [bulkBuyInQueueRunning, setBulkBuyInQueueRunning] = useState(false);
@@ -9709,7 +9740,7 @@ export default function Bookings() {
     if (!status) {
       toast({
         title: "Auto-fill search ended",
-        description: "The background search was lost (server restart). Use Auto Cowork · find cheapest to search again — the scan cache is warm, so it's fast.",
+        description: "The background search was lost (server restart). Use Auto-run · find cheapest to search again — the scan cache is warm, so it's fast.",
       });
       return;
     }
@@ -9891,20 +9922,105 @@ export default function Bookings() {
     ),
     [selectedBulkEligibleReservations],
   );
-  // Route the bulk process through one durable Cowork run. Each reservation is
-  // isolated and worked in order; only one payment handoff may be outstanding
-  // across the whole batch. The short prompt-run launcher avoids deep-link
-  // truncation while the clipboard keeps the full fallback.
+  // Split each bulk candidate set into what may be dispatched now and what a
+  // live Cowork run already covers. Suppression is by UNIT SET first: detach a
+  // unit and the reservation is instantly selectable again, because that newly
+  // open slot was never handed to Cowork.
+  const findDispatchSplit = useMemo(
+    () => partitionCoworkDispatchCandidates(
+      selectedBulkCoworkReservations,
+      "bulk-find",
+      coworkDispatches,
+      dispatchClockMs,
+      (r) => ({
+        reservationId: r._id,
+        unitIds: r.slots.filter((s) => !s.buyIn).map((s) => s.unitId),
+      }),
+    ),
+    [selectedBulkCoworkReservations, coworkDispatches, dispatchClockMs],
+  );
+  // The card sitting: reservations whose units are ATTACHED and still unbooked.
+  // Mirrors the per-row checkout button's predicate exactly — a reservation
+  // with a checkout already queued/in-progress/awaiting-card is excluded,
+  // because that IS the one outstanding handoff.
+  const selectedBulkCheckoutReservations = useMemo(
+    () => selectedBulkEligibleReservations.filter(
+      (r) => !r.slots.some((slot) => buyInHasActiveCheckout(slot.buyIn))
+        && r.slots.some((slot) => slot.buyIn
+          && slot.buyIn.bookingStatus !== "booked"
+          && slot.buyIn.bookingStatus !== "request_submitted"),
+    ),
+    [selectedBulkEligibleReservations],
+  );
+  // Checkout dispatches carry an EMPTY unit set (the record covers the whole
+  // reservation), because a card sitting is human-paced and re-dispatching one
+  // mid-sitting is how a second unsubmitted payment tab appears.
+  const checkoutDispatchSplit = useMemo(() => {
+    const split = partitionCoworkDispatchCandidates(
+      selectedBulkCheckoutReservations,
+      "bulk-prepare-checkout",
+      coworkDispatches,
+      dispatchClockMs,
+      (r) => ({ reservationId: r._id, unitIds: [] }),
+    );
+    // CROSS-KIND: a reservation a live FIND run is still working must not also
+    // be handed to a checkout run — that is two Cowork tasks on one booking,
+    // one of them attaching units while the other prices them for payment.
+    // Suppression is otherwise kind-scoped, so this has to be explicit.
+    const findHeld = new Set(
+      partitionCoworkDispatchCandidates(
+        selectedBulkCheckoutReservations,
+        "bulk-find",
+        coworkDispatches,
+        dispatchClockMs,
+        (r) => ({ reservationId: r._id, unitIds: [] }),
+      ).suppressed.map((s) => s.reservationId),
+    );
+    if (findHeld.size === 0) return split;
+    return {
+      ready: split.ready.filter((r) => !findHeld.has(r._id)),
+      suppressed: [
+        ...split.suppressed,
+        ...split.ready
+          .filter((r) => findHeld.has(r._id))
+          .map((r) => {
+            const rec = coworkDispatches.find((d) => d.kind === "bulk-find" && d.reservationId === r._id);
+            const at = rec?.dispatchedAtMs ?? dispatchClockMs;
+            return { item: r, reservationId: r._id, dispatchedAtMs: at, clearsAtMs: at };
+          }),
+      ],
+    };
+  }, [selectedBulkCheckoutReservations, coworkDispatches, dispatchClockMs]);
+  // Route the bulk process through one durable Cowork run — FIND ONLY.
+  //
+  // 2026-07-19 (operator: "it will require my human input which defeats the
+  // purpose of the queue"): bulk used to send the COMBINED find + prepare-
+  // checkout brief, which stops for the operator's card on EVERY unit and
+  // serializes them ("exactly one outstanding payment handoff at a time"). A
+  // batch of 8 bookings is ~16 units, so the queue interrupted them ~16 times
+  // and could never be walked away from — the send press they noticed was one
+  // interaction out of ~33. Bulk now sends the FIND-only batch brief: every
+  // reservation ends at ATTACH and nothing books, so one send fills the whole
+  // batch unattended. The card work moves to the separate bulk checkout run,
+  // where the operator does it all in one deliberate sitting.
+  //
+  // LOAD-BEARING: do NOT point this back at buildCoworkBulkFindAndPreparePrompt.
+  // That builder is retained (and still tested) but is deliberately unused by
+  // the client — re-wiring it silently restores the per-unit interruptions.
   const startBulkCoworkFind = async () => {
     if (bulkCoworkLaunching) return;
     const selected = selectedBulkEligibleReservations;
     const selectedWithOpenSlots = selected.filter((r) => r.slots.some((slot) => !slot.buyIn));
-    const withOpenSlots = selectedBulkCoworkReservations;
+    // `ready` excludes reservations a live Cowork run already covers.
+    const withOpenSlots = findDispatchSplit.ready;
     if (withOpenSlots.length === 0) {
       toast({
-        title: "No safe open buy-in slots in the selection",
-        description:
-          "Cowork fills OPEN slots only and will not start while a sibling checkout is queued, in progress, or ready for card. Finish that handoff, detach a unit, or use the server queue as appropriate.",
+        title: findDispatchSplit.suppressed.length > 0
+          ? "Those bookings are already with Cowork"
+          : "No safe open buy-in slots in the selection",
+        description: findDispatchSplit.suppressed.length > 0
+          ? "Every selected booking was sent to Cowork recently and is still being worked. Wait for the units to attach, or use \"Send anyway\" to dispatch them again."
+          : "Cowork fills OPEN slots only and will not start while a sibling checkout is queued, in progress, or ready for card. Finish that handoff, detach a unit, or use the server queue as appropriate.",
       });
       return;
     }
@@ -9949,15 +10065,23 @@ export default function Bookings() {
       });
       return;
     }
-    const prompt = buildCoworkBulkFindAndPreparePrompt(inputs);
+    const prompt = buildCoworkBulkBuyInPrompt(inputs);
     const notes: string[] = [];
     const skippedAttached = selected.length - selectedWithOpenSlots.length;
     if (skippedAttached > 0) {
       notes.push(`${skippedAttached} fully-attached booking${skippedAttached === 1 ? " was" : "s were"} skipped (Cowork fills open slots only).`);
     }
-    const skippedActiveCheckout = selectedWithOpenSlots.length - withOpenSlots.length;
+    // M6: measure against the ELIGIBLE set, not the post-suppression `ready`
+    // set — otherwise bookings held back by dispatch memory get reported as
+    // "a checkout is already queued", which is false and points at the wrong
+    // remedy. Suppression gets its own note below.
+    const skippedActiveCheckout = selectedWithOpenSlots.length - selectedBulkCoworkReservations.length;
     if (skippedActiveCheckout > 0) {
       notes.push(`${skippedActiveCheckout} booking${skippedActiveCheckout === 1 ? " was" : "s were"} skipped because a checkout is already queued, in progress, or ready for card.`);
+    }
+    const heldBack = selectedBulkCoworkReservations.length - withOpenSlots.length;
+    if (heldBack > 0) {
+      notes.push(`${heldBack} booking${heldBack === 1 ? " was" : "s were"} left out because Cowork is already working ${heldBack === 1 ? "it" : "them"} — use "Send anyway" to override.`);
     }
     const overflow = withOpenSlots.length - capped.length;
     if (overflow > 0) {
@@ -9965,30 +10089,150 @@ export default function Bookings() {
     }
     setBulkCoworkPrompt(prompt);
     setBulkCoworkNote(notes.join(" "));
-    const label = inputs.length === 1 ? "The find-and-prepare prompt" : `The ${inputs.length}-reservation find-and-prepare batch`;
+    const label = inputs.length === 1 ? "The buy-in search prompt" : `The ${inputs.length}-reservation buy-in search batch`;
     setBulkCoworkLaunching(true);
     // NOTE: keep this statement's leading form byte-exact — the bulk source
     // guard in tests/cowork-buyin-prompt.test.ts regex-matches it to prove the
     // batch goes through the durable shared launcher. (The literal is spelled
     // out only in that test; repeating it here would inflate the launch-site
     // count that tests/cowork-launch.test.ts asserts.)
-    const result = await launchCoworkPrompt(prompt, { kind: "bulk-find-and-prepare" })
+    const result = await launchCoworkPrompt(prompt, { kind: "bulk-find" })
       .finally(() => setBulkCoworkLaunching(false));
     if (result.abortedForAuth) return;
     if (result.launched) armCoworkRunWindow();
-    // Bulk is the one prompt that is ALWAYS relayed (26KB for one reservation,
-    // 185KB for eight), so it can still land on the paste path if the relay
-    // fails — that is when the operator needs the text on screen.
+    // Remember what went out, so a second click can't re-send the same
+    // bookings to a task that is still working them. Recorded from `inputs`
+    // (what the brief actually contains), never from `capped` — the build loop
+    // legitimately drops reservations with unusable dates or no property.
+    if (result.launched || result.copied) {
+      persistCoworkDispatches((prev) => recordCoworkDispatches(
+        prev,
+        inputs.map((i) => ({ reservationId: i.reservationId, unitIds: i.units.map((u) => u.unitId) })),
+        "bulk-find",
+        Date.now(),
+        // A fallback launch means the relay FAILED, so the operator may never
+        // have pasted it. Give those the base window only rather than locking
+        // the bookings away for the full batch duration. FIND ONLY — see the
+        // checkout launcher for why the same shortcut is unsafe there.
+        coworkLaunchNeedsFallback(result) ? { ttlOverrideMs: COWORK_DISPATCH_TTL["bulk-find"].baseMs } : undefined,
+      ));
+    }
+    // Bulk relays whenever the batch exceeds the deep-link cap (a single
+    // reservation's brief still fits and embeds directly), so it can land on
+    // the paste path if the relay fails — that is when the operator needs the
+    // text on screen.
     if (coworkLaunchNeedsFallback(result)) {
       setCoworkFallback({ prompt, label, note: notes.join(" ") });
     }
-    const t = coworkLaunchToastCopy(result, label);
+    const t = coworkLaunchToastCopy(result, label, "bulk");
     toast({
       title: t.title,
       // The double-attach hazard used to live only in the dialog this replaced.
       // It is a real money risk, so it now rides permanently on the toast (and
       // the trigger button's title) instead of disappearing with the modal.
       description: [t.description, ...notes, "Don't run the server bulk queue on these bookings at the same time."].join(" "),
+      variant: t.destructive ? "destructive" : undefined,
+    });
+  };
+  // The CARD SITTING (2026-07-19). Bulk find now runs unattended and ends at
+  // attach, so the card work is collected here: ONE Cowork run that walks every
+  // attached, unbooked unit in the selection and stops for the operator on each.
+  // The batch-only guards (batch-wide single handoff, price-equality, handoff
+  // identity) live in buildCoworkBulkCheckoutPrompt — see its doc comment for
+  // why a batch is only acceptable while it carries them.
+  const startBulkCoworkCheckout = async () => {
+    if (bulkCoworkLaunching) return;
+    const eligible = checkoutDispatchSplit.ready;
+    if (eligible.length === 0) {
+      toast({
+        title: "No units ready for checkout in the selection",
+        description:
+          "This prepares units that are already attached and not yet booked. Bookings with a checkout already queued, in progress, or waiting for your card are excluded — finish that handoff first.",
+      });
+      return;
+    }
+    const capped = eligible.slice(0, COWORK_BULK_CHECKOUT_MAX);
+    const toDateOnly = (s?: string) => (!s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10));
+    const inputs: CoworkCheckoutPromptInput[] = [];
+    for (const reservation of capped) {
+      const units = reservation.slots
+        .filter((s): s is SlotInfo & { buyIn: BuyIn } => Boolean(
+          s.buyIn
+            && s.buyIn.bookingStatus !== "booked"
+            && s.buyIn.bookingStatus !== "request_submitted",
+        ))
+        .map((s) => ({
+          buyInId: s.buyIn.id,
+          unitLabel: s.buyIn.unitLabel || s.unitLabel,
+          listingUrl: s.buyIn.airbnbListingUrl ?? null,
+          costPaid: s.buyIn.costPaid ?? null,
+        }));
+      if (units.length === 0) continue;
+      inputs.push({
+        reservationId: reservation._id,
+        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? null,
+        propertyName:
+          reservationPropertyMeta.get(reservation._id)?.propertyName
+          ?? selectedDisplayName
+          ?? "Vacation rental",
+        checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
+        checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
+        units,
+        party: guestPartyFromReservation(reservation),
+        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
+      });
+    }
+    if (inputs.length === 0) {
+      toast({
+        title: "Could not prepare the checkout batch",
+        description: "None of the selected bookings had an attached, unbooked unit.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const prompt = buildCoworkBulkCheckoutPrompt(inputs);
+    const notes: string[] = [];
+    const overflow = eligible.length - capped.length;
+    if (overflow > 0) {
+      notes.push(`Capped at ${COWORK_BULK_CHECKOUT_MAX} bookings — run it again for the remaining ${overflow}.`);
+    }
+    const unitCount = inputs.reduce((sum, i) => sum + i.units.length, 0);
+    setBulkCoworkPrompt(prompt);
+    setBulkCoworkNote(notes.join(" "));
+    const label = inputs.length === 1
+      ? "The checkout-preparation prompt"
+      : `The ${inputs.length}-reservation checkout batch`;
+    setBulkCoworkLaunching(true);
+    const result = await launchCoworkPrompt(prompt, { kind: "bulk-prepare-checkout" })
+      .finally(() => setBulkCoworkLaunching(false));
+    if (result.abortedForAuth) return;
+    if (result.launched) armCoworkRunWindow();
+    if (result.launched || result.copied) {
+      persistCoworkDispatches((prev) => recordCoworkDispatches(
+        prev,
+        // Empty unit set: a card sitting covers the whole reservation.
+        inputs.map((i) => ({ reservationId: i.reservationId, unitIds: [] })),
+        "bulk-prepare-checkout",
+        Date.now(),
+        // M2: NO shortened fallback window here. The fallback path means the
+        // operator pasted the brief by hand — the run is live, and a card
+        // sitting legitimately spans an afternoon. Shortening it would
+        // re-enable the button mid-sitting and let a second batch open a
+        // second unsubmitted payment tab, breaking the one invariant that is
+        // never negotiable. Re-dispatch requires the explicit "Send anyway".
+      ));
+    }
+    if (coworkLaunchNeedsFallback(result)) {
+      setCoworkFallback({ prompt, label, note: notes.join(" ") });
+    }
+    const t = coworkLaunchToastCopy(result, label, "bulk");
+    toast({
+      title: t.title,
+      description: [
+        t.description,
+        ...notes,
+        `Cowork will stop for your card on each of the ${unitCount} unit${unitCount === 1 ? "" : "s"}, one at a time — stay at the desk for this one.`,
+      ].join(" "),
       variant: t.destructive ? "destructive" : undefined,
     });
   };
@@ -10850,7 +11094,7 @@ export default function Bookings() {
               </p>
               <p className="text-sm text-amber-900/80 mt-1">
                 {hasBuyInSlots
-                  ? "You can now use Auto Cowork · find cheapest or Find buy-in without manually configuring unit slots first."
+                  ? "You can now use Auto-run · find cheapest or Find buy-in without manually configuring unit slots first."
                   : "Buy-in unit slots are only needed when Guesty does not expose enough bedroom/community detail to create a search target."}
               </p>
             </CardContent>
@@ -10955,15 +11199,79 @@ export default function Bookings() {
                     type="button"
                     size="sm"
                     onClick={() => { if (!bulkCoworkLaunching) void startBulkCoworkFind(); }}
-                    disabled={bulkBuyInQueueRunning || bulkCoworkLaunching || selectedBulkCoworkReservations.length === 0}
+                    // Count binds to `ready`, never to the raw selection: a
+                    // button that says (10) and sends 7 is the problem this
+                    // whole memory exists to prevent.
+                    disabled={bulkBuyInQueueRunning || bulkCoworkLaunching || findDispatchSplit.ready.length === 0}
                     data-testid="button-run-bulk-cowork"
-                    title="Route the bulk buy-in process through Cowork: find and attach open slots, then prepare one checkout at a time for your card and final Checkout click. Never detaches or submits payment. Don't run the server bulk queue on these bookings at the same time."
+                    title="Opens Claude Desktop with the batch pre-filled — press send THERE once, then you can walk away. Cowork finds and attaches the cheapest qualifying units for every open slot, one reservation at a time. It never books and never detaches, and it will only call you back if a site raises a bot check. Prepare the checkouts afterwards with 'Prepare all checkouts in Cowork'. Don't run the server bulk queue on these bookings at the same time."
                   >
                     <Sparkles className="h-3.5 w-3.5 mr-1.5" />
                     {bulkCoworkLaunching
                       ? "Opening Cowork…"
-                      : `Auto Cowork bulk · find + prepare (${selectedBulkCoworkReservations.length})`}
+                      : `Auto Cowork bulk · find cheapest (${Math.min(findDispatchSplit.ready.length, COWORK_BULK_FIND_MAX)})`}
                   </Button>
+                  {/* The card sitting. Deliberately a SEPARATE button from the
+                      find batch: find runs unattended, this one requires the
+                      operator at the desk for every unit. Emerald matches the
+                      per-row "Prepare checkout in Cowork" button. */}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="border-emerald-300 text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950"
+                    onClick={() => { if (!bulkCoworkLaunching) void startBulkCoworkCheckout(); }}
+                    disabled={bulkBuyInQueueRunning || bulkCoworkLaunching || checkoutDispatchSplit.ready.length === 0}
+                    data-testid="button-run-bulk-cowork-checkout"
+                    title="Prepare the VRBO checkout for every attached, unbooked unit in the selection — one Cowork run, one unit at a time. It never enters card details and never clicks the final Book/Confirm/Pay: it stops for your card on each unit, so stay at the desk for this one."
+                  >
+                    <ShoppingCart className="h-3.5 w-3.5 mr-1.5" />
+                    Prepare all checkouts in Cowork ({Math.min(checkoutDispatchSplit.ready.length, COWORK_BULK_CHECKOUT_MAX)})
+                  </Button>
+                  {/* Suppression is ALWAYS visible when it applies, with a
+                      one-click escape. A bulk queue that silently skips a
+                      booking is worse than one that double-sends — the end
+                      state there is a guest with no unit — so this never hides
+                      and never requires a tooltip to discover. */}
+                  {/* M1: ONE ROW PER KIND. Collapsing them (find-if-any, else
+                      checkout) meant that with both kinds held — reachable
+                      whenever a reservation has one open slot AND one attached
+                      unbooked unit — the checkout button read (0), was disabled
+                      (so its tooltip was suppressed too), and had no line and no
+                      override for up to 4 hours. That is this module's own
+                      stated worst case: a silently skipped booking. */}
+                  {([
+                    ["bulk-find", findDispatchSplit.suppressed, "find"],
+                    ["bulk-prepare-checkout", checkoutDispatchSplit.suppressed, "checkout"],
+                  ] as const)
+                    .filter(([, held]) => held.length > 0)
+                    .map(([kind, held, noun]) => (
+                      <span
+                        key={kind}
+                        className="inline-flex items-center gap-2 text-[11px] text-muted-foreground"
+                        data-testid={`text-cowork-dispatch-suppressed-${kind}`}
+                      >
+                        {describeCoworkSuppression(held.length, Math.min(...held.map((h) => h.dispatchedAtMs)), dispatchClockMs)}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 px-1.5 text-[11px]"
+                          disabled={bulkCoworkLaunching}
+                          onClick={() => persistCoworkDispatches((prev) => clearCoworkDispatches(
+                            prev,
+                            held.map((h) => h.reservationId),
+                            kind as CoworkDispatchKind,
+                          ))}
+                          data-testid={`button-cowork-dispatch-resend-${kind}`}
+                          title={kind === "bulk-find"
+                            ? "Dispatch these bookings again now — use this if the Cowork task was closed or you never pressed send. Two find tasks running on the same bookings can attach units from different resorts."
+                            : "Prepare these checkouts again now — use this if the Cowork task was closed or you never pressed send. Two checkout tasks running at once can leave two payment tabs open and get a card entered twice."}
+                        >
+                          Send {noun} anyway ({held.length})
+                        </Button>
+                      </span>
+                    ))}
                   {/* PERMANENT home for the double-attach hazard. It used to
                       live in the bulk dialog this change removed; a toast is
                       not a home for a real money hazard (TOAST_LIMIT is 1 and
@@ -10973,10 +11281,9 @@ export default function Bookings() {
                       Don&apos;t run the server bulk queue on these bookings at the same time.
                     </span>
                   )}
-                  {/* Bulk always relays, so Claude Desktop shows a short
-                      launcher rather than the brief. This is the on-demand way
-                      back to the actual batch text — the other five prompts
-                      arrive in the composer in full and need no such button. */}
+                  {/* A multi-reservation batch relays, so Claude Desktop
+                      shows a short launcher rather than the brief itself. This
+                      is the on-demand way back to the actual batch text. */}
                   {bulkCoworkPrompt && (
                     <Button
                       type="button"
@@ -12245,38 +12552,23 @@ export default function Bookings() {
                           <div className="bg-primary/5 border border-primary/20 rounded px-3 py-2">
                             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                               <div className="text-xs text-muted-foreground">
-                                {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · use Auto Cowork to find &amp; attach the cheapest listing for each
+                                {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · Auto-run finds &amp; attaches the cheapest listing for each
                               </div>
                               <div className="flex flex-wrap items-center gap-2">
-                                {/* "Create prompt for Cowork" — needs a resolvable buy-in
-                                    property target (same source as the per-unit Manual
-                                    attach) + at least one empty slot. Build the prompt from
-                                    the reservation's OWN empty slots so it works for
+                                {/* ONE find button on the row (operator, 2026-07-19).
+                                    The deep-link "Auto Cowork · find cheapest" twin that
+                                    used to sit here was removed: it only pre-filled a
+                                    Cowork task and then waited for a send press, which is
+                                    the friction this sequence existed to remove. This runs
+                                    the SAME brief headless on the Mac — no window, no send
+                                    press — and needs a resolvable buy-in property target
+                                    plus at least one empty slot. Built from the
+                                    reservation's OWN empty slots so it works for
                                     single-unit / unconfigured listings in the global view,
-                                    not just configured 2-unit combos. */}
+                                    not just configured 2-unit combos. Feedback renders in
+                                    HeadlessFindRunPanel below the strip. */}
                                 {reservationMeta && r.slots.some((s) => !s.buyIn) && (
                                   <>
-                                    <CoworkBuyInPromptButton
-                                      reservation={r}
-                                      propertyId={reservationMeta.propertyId}
-                                      propertyName={reservationMeta.propertyName}
-                                      community={
-                                        (selectedPropertyId ? PROPERTY_UNIT_CONFIGS[selectedPropertyId]?.community : undefined)
-                                        ?? PROPERTY_UNIT_CONFIGS[reservationMeta.propertyId]?.community
-                                        ?? r.slots.find((s) => s.community)?.community
-                                        ?? ""
-                                      }
-                                      units={r.slots
-                                        .filter((s) => !s.buyIn)
-                                        .map((s) => ({
-                                          unitId: s.unitId,
-                                          unitLabel: s.unitLabel,
-                                          bedrooms: s.bedrooms,
-                                        }))}
-                                    />
-                                    {/* Zero-click twin: same brief, headless on the Mac —
-                                        no Cowork window, no send press. Feedback renders in
-                                        HeadlessFindRunPanel below the strip. */}
                                     <HeadlessFindRunButton
                                       reservation={r}
                                       propertyId={reservationMeta.propertyId}

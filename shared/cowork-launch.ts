@@ -152,7 +152,17 @@ export interface CoworkLaunchToast {
  * One honest toast per outcome, shared by every Cowork button. `label` is the
  * short human name of the prompt ("Buy-in search prompt", "Checkout prompt"…).
  */
-export function coworkLaunchToastCopy(result: CoworkLaunchResult, label: string): CoworkLaunchToast {
+export function coworkLaunchToastCopy(
+  result: CoworkLaunchResult,
+  label: string,
+  /**
+   * Bulk launches record a dispatch, which DISABLES the button the generic
+   * recovery clause tells the operator to click again. Passing "bulk" swaps in
+   * the instruction that actually works there ("Send anyway"). Omitted = the
+   * row buttons, which stay clickable.
+   */
+  surface: "row" | "bulk" = "row",
+): CoworkLaunchToast {
   if (result.launched && result.promptIncluded) {
     // RECOVERY CLAUSE (2026-07-19): `launched` means "we fired the claude://
     // assignment", NOT "Claude Desktop opened". The assignment never throws
@@ -161,7 +171,13 @@ export function coworkLaunchToastCopy(result: CoworkLaunchResult, label: string)
     // toast is the ONLY thing left on screen — so it has to say what to do
     // when nothing opened. Re-clicking is safe: the relay POST only inserts a
     // row, and the reservation checkout claim is taken by Cowork at run time.
-    const recovery = " If Claude Desktop didn't open, click the button again.";
+    // M4: after a BULK launch the button is disabled (the dispatch was
+    // recorded), so "click the button again" dead-ends on exactly the path
+    // this clause exists for — no handler, or the operator cancelled the
+    // browser's "Open Claude?" confirm.
+    const recovery = surface === "bulk"
+      ? " If Claude Desktop didn't open, or you didn't press send there, use \"Send anyway\" below to dispatch again."
+      : " If Claude Desktop didn't open, click the button again.";
     return {
       title: "Opened in Cowork",
       description: result.runStored

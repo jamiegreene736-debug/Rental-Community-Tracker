@@ -437,9 +437,26 @@ export async function clearBuyInCheckoutClaim(input: ClaimInput): Promise<void> 
   if (outcome === "expired") throwExpiredClaimAfterCommit();
 }
 
+/**
+ * `allowAwaitingPayment` exists for ONE situation: a unit stranded at
+ * "awaiting_payment" because its Cowork task was abandoned mid-handoff.
+ *
+ * That state is otherwise a dead end — the per-row "Prepare checkout in Cowork"
+ * button hides while a checkout is active, and a plain reset refuses — so
+ * without this the operator has no in-app way back. The bulk checkout run
+ * (2026-07-19) makes stranding far more likely, since one sitting can span many
+ * units.
+ *
+ * LOAD-BEARING: it must stay OPT-IN and confirm-gated in the UI. "awaiting
+ * payment" means a checkout tab was handed over, so resetting asserts "I did
+ * NOT pay for this one". Resetting after actually paying would let the unit be
+ * prepared and bought a second time. Never make this the default, never call it
+ * from an automated path, and never let an agent set it.
+ */
 export async function resetBuyInCheckoutClaim(
   reservationIdInput: string,
   buyInIdInput: number,
+  opts?: { allowAwaitingPayment?: boolean },
 ): Promise<void> {
   const reservationId = String(reservationIdInput ?? "").trim().slice(0, 200);
   const buyInId = Number(buyInIdInput);
@@ -456,8 +473,15 @@ export async function resetBuyInCheckoutClaim(
     if (!target || String(target.reservationId ?? "") !== reservationId) {
       throw new BuyInCheckoutClaimError("Buy-in is not attached to this reservation", 404);
     }
-    if (target.bookingStatus !== "queued" && target.bookingStatus !== "in_progress") {
-      throw new BuyInCheckoutClaimError("Only a queued or in-progress checkout can be reset");
+    const resettable = target.bookingStatus === "queued"
+      || target.bookingStatus === "in_progress"
+      || (opts?.allowAwaitingPayment === true && target.bookingStatus === "awaiting_payment");
+    if (!resettable) {
+      throw new BuyInCheckoutClaimError(
+        target.bookingStatus === "awaiting_payment"
+          ? "This unit is waiting for your card. Reset it only if you did NOT complete the payment — confirm the stranded-handoff reset to do that."
+          : "Only a queued or in-progress checkout can be reset",
+      );
     }
     const [claim] = await tx
       .select({ buyInId: buyInCheckoutClaims.buyInId })
