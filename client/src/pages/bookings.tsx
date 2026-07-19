@@ -2917,17 +2917,28 @@ function HeadlessFindRunPanel({
 // after the operator reviewed them. Cowork fills the traveler details, applies
 // the damage-waiver-only + price guards, and leaves the checkout tab open. The
 // operator always supplies the card and makes the final Checkout click.
+//
+// Since 2026-07-19 the row renders ONE of these per unbooked unit (operator:
+// "each unit I will need to check out individually") — `units` is then a
+// single-element array and `label`/`testIdSuffix` name the unit. The component
+// itself stays unit-count agnostic; the builder handles both shapes.
 function CoworkCheckoutPromptButton({
   reservation,
   propertyName,
   units,
   onStaleData,
+  label,
+  testIdSuffix,
 }: {
   reservation: GuestyReservation;
   propertyName: string;
   units: { buyInId: number; unitLabel: string; listingUrl: string | null; costPaid: string | number | null }[];
   /** Re-read the bookings queries when the pre-flight finds this row is stale. */
   onStaleData: () => void;
+  /** Per-unit button text; the classic "Prepare checkout in Cowork" when absent. */
+  label?: string;
+  /** Keeps per-unit testids unique on one row; solo rows keep the classic id. */
+  testIdSuffix?: string;
 }) {
   const { toast } = useToast();
   const { launch, launching } = useCoworkLaunch("The checkout-preparation prompt");
@@ -3024,11 +3035,11 @@ function CoworkCheckoutPromptButton({
         e.stopPropagation();
         void handleClick();
       }}
-      data-testid={`button-cowork-checkout-prompt-${reservation._id}`}
+      data-testid={`button-cowork-checkout-prompt-${reservation._id}${testIdSuffix ?? ""}`}
       title="Opens a new Cowork task that prepares the attached unit checkout on vrbo.com — damage waiver only, guest's name, alias email, 15% price guard. It never enters card details and never makes the final payment: Cowork leaves the checkout tab open for you to add the card and click Checkout."
     >
       <ShoppingCart className="mr-1 h-3.5 w-3.5" />
-      Prepare checkout in Cowork
+      {label ?? "Prepare checkout in Cowork"}
     </Button>
   );
 }
@@ -12688,34 +12699,43 @@ export default function Bookings() {
                             />
                           )}
                           {/* "Prepare checkout" stays separate from the find prompt because
-                              the checkout builder needs the attached buy-in IDs. Units that
-                              are already booked or waiting for the operator's card are left
-                              alone; their durable per-unit status renders below. */}
-                          {!r.slots.some((s) => buyInHasActiveCheckout(s.buyIn)) && r.slots.some(
-                            (s) => s.buyIn
-                              && s.buyIn.bookingStatus !== "booked"
-                              && s.buyIn.bookingStatus !== "request_submitted",
-                          ) && (
-                            <CoworkCheckoutPromptButton
-                              reservation={r}
-                              propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? "Vacation rental"}
-                              units={r.slots
-                                .filter(
-                                  (s): s is SlotInfo & { buyIn: BuyIn } => Boolean(
-                                    s.buyIn
-                                      && s.buyIn.bookingStatus !== "booked"
-                                      && s.buyIn.bookingStatus !== "request_submitted",
-                                  ),
-                                )
-                                .map((s) => ({
+                              the checkout builder needs the attached buy-in IDs. ONE BUTTON
+                              PER UNBOOKED UNIT (operator spec 2026-07-19: "each unit I will
+                              need to check out individually") — every button builds a brief
+                              scoped to that single buy-in, so each unit runs as its own
+                              Cowork task with its own card handoff. All buttons hide while
+                              ANY checkout on the reservation is active because the
+                              reservation-scoped checkout claim allows exactly one
+                              outstanding handoff at a time; finish (or release) that unit
+                              and the next unit's button reappears. Units already booked or
+                              request-submitted are left alone; their durable per-unit
+                              status renders below. */}
+                          {!r.slots.some((s) => buyInHasActiveCheckout(s.buyIn)) && r.slots
+                            .filter(
+                              (s): s is SlotInfo & { buyIn: BuyIn } => Boolean(
+                                s.buyIn
+                                  && s.buyIn.bookingStatus !== "booked"
+                                  && s.buyIn.bookingStatus !== "request_submitted",
+                              ),
+                            )
+                            .map((s, _i, unbooked) => (
+                              <CoworkCheckoutPromptButton
+                                key={`cowork-checkout-${s.buyIn.id}`}
+                                reservation={r}
+                                propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? "Vacation rental"}
+                                // Solo rows keep the classic label + testid so nothing the
+                                // operator (or a test) knows by name changes shape.
+                                label={unbooked.length > 1 ? `Prepare checkout · ${s.unitLabel || s.buyIn.unitLabel}` : undefined}
+                                testIdSuffix={unbooked.length > 1 ? `-${s.buyIn.id}` : undefined}
+                                units={[{
                                   buyInId: s.buyIn.id,
                                   unitLabel: s.buyIn.unitLabel || s.unitLabel,
                                   listingUrl: s.buyIn.airbnbListingUrl ?? null,
                                   costPaid: s.buyIn.costPaid ?? null,
-                                }))}
-                              onStaleData={refreshBookingsAfterBuyInChange}
-                            />
-                          )}
+                                }]}
+                                onStaleData={refreshBookingsAfterBuyInChange}
+                              />
+                            ))}
                           <Button
                             type="button"
                             size="sm"
