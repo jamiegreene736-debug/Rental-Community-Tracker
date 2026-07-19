@@ -145,12 +145,12 @@ check("nothing worked → destructive copy-failed toast", nothing.title === "Cop
     bookingsSrc.includes('from "@shared/cowork-launch"'),
   );
   check(
-    "the primary button is labeled find + prepare",
-    bookingsSrc.includes("Auto Cowork · find + prepare"),
+    "the primary row button is the find-only Cowork prompt (checkout is a separate prompt)",
+    bookingsSrc.includes("Auto Cowork · find cheapest"),
   );
   check(
     "every Cowork action launches through launchCoworkPrompt",
-    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 7,
+    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 6,
     (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length,
   );
   check(
@@ -171,11 +171,12 @@ check("nothing worked → destructive copy-failed toast", nothing.title === "Cop
     bookingsSrc.includes("buildCoworkDeepLink(launchPrompt)") && !/claude:\/\//.test(bookingsSrc.replace(/\/\/[^\n]*/g, "")),
   );
   check(
-    "combined row + bulk flows save durable runs while find-only stays available",
-    bookingsSrc.includes('kind: "find-and-prepare"')
+    "row find is FIND-ONLY; checkout + bulk are their own Cowork prompts",
+    bookingsSrc.includes("buildCoworkBuyInPrompt(promptInput)")
+      && !bookingsSrc.includes('kind: "find-and-prepare"')
+      && bookingsSrc.includes('kind: "prepare-checkout"')
       && bookingsSrc.includes('kind: "bulk-find-and-prepare"')
-      && bookingsSrc.includes("buildCoworkFindAndPreparePrompt(promptInput)")
-      && bookingsSrc.includes("launchCoworkPrompt(findOnlyPrompt)"),
+      && bookingsSrc.includes("buildCoworkBulkFindAndPreparePrompt(inputs)"),
   );
 
   const promptRunSrc = fs.readFileSync(path.join(here, "../server/cowork-prompt-runs.ts"), "utf8");

@@ -672,14 +672,26 @@ smoke (ANTHROPIC_API_KEY + live server + online sidecar) — not exercisable by 
 
 ### Cowork browser checkout is a human-payment handoff (Load-Bearing, 2026-07-17)
 
-The bookings-page primary Cowork action is one continuous **find + attach + prepare
-checkout** run. It does not submit a purchase. After attachment, Cowork may prepare only a
-VRBO checkout, using the booking guest's exact full name for every name field, the alias
-returned verbatim by `POST /api/buy-ins/:id/traveler-email`, phone `8084606509`, and billing
-address `131 Continental Drive, Newark, DE 19702`. Missing guest first/last name or a
-non-VRBO attached URL fails closed. Damage waiver is the only optional protection Cowork may
-select; all other insurance/add-ons are declined, and the existing 15% total-price guard
-still applies.
+As of 2026-07-19 the single reservation row exposes TWO separate Cowork prompts, not one
+combined brief (operator: "there needs to be two cowork prompts … one that finds the cheapest
+units to buy in … the second … will check out the unit if the units are on VRBO"):
+- **"Auto Cowork · find cheapest"** (`buildCoworkBuyInPrompt`, the row's PRIMARY action) —
+  FIND + ATTACH ONLY. It searches + attaches the cheapest qualifying units and STOPS at
+  attach; it never opens checkout or books. VRBO is preferred over direct via the CHANNEL
+  PREFERENCE: pick VRBO unless a non-VRBO listing is BELOW 80% of the VRBO total (i.e. only a
+  >20% discount wins) — the "even if VRBO is ~10% more" rule the operator described resolves to
+  this exact 80%/20% threshold. This REPLACED the old server-side "Auto-fill cheapest" button,
+  which was removed — single-row buy-in filling is now Cowork-only. (The server-side auto-fill
+  job engine is retained for the BULK server-queue fallback + boot-resume, just with no per-row
+  manual button.)
+- **"Prepare checkout in Cowork"** (`buildCoworkCheckoutPrompt`, shown once units are attached
+  and not yet booked) — CHECKOUT PREPARATION ONLY, on the attached (operator-reviewed) units.
+It does not submit a purchase. Cowork prepares only a VRBO checkout, using the booking guest's
+exact full name for every name field, the alias returned verbatim by
+`POST /api/buy-ins/:id/traveler-email`, phone `8084606509`, and billing address `131
+Continental Drive, Newark, DE 19702`. Missing guest first/last name or a non-VRBO attached URL
+fails closed. Damage waiver is the only optional protection Cowork may select; all other
+insurance/add-ons are declined, and the existing 15% total-price guard still applies.
 
 **Payment is always human-only.** Cowork never reads a card file, enters a card number,
 expiry, or security code, and never clicks the final Book/Confirm/Pay control. It records
@@ -701,14 +713,19 @@ Detach and delete must acquire that same reservation lane and reject while any s
 queued, in progress, awaiting payment, or owns a claim; never orphan a live checkout claim.
 
 Large briefs use the authenticated, admin-only `cowork_prompt_runs` relay (24-hour expiry,
-private/no-store response) because a combined brief exceeds Claude Desktop's deep-link cap.
-The clipboard still receives the full prompt first and direct launch remains the safe
-fallback. The old find-only action remains available as an explicit fallback, but it is no
-longer the primary path. This supersedes the 2026-07-05 local-card/full-auto checkout and
-separate-primary-button decisions, and the 2026-07-13 attach-only bulk default. External
-booking/listing values are collapsed to bounded single-line quoted data and explicitly marked
-as never-instructions; bulk briefs hoist the bot protocol and true completion signal exactly
-once. Traveler-alias creation rejects a reservation ID that does not match the attached buy-in.
+private/no-store response) because they exceed Claude Desktop's deep-link cap: the checkout
+prompt (`kind: "prepare-checkout"`) and the BULK combined find+prepare batch
+(`kind: "bulk-find-and-prepare"`, still `buildCoworkFindAndPreparePrompt` per reservation) use
+it. The single-row find-only prompt fits UNDER the cap (canary in `tests/cowork-launch.test.ts`)
+and launches DIRECTLY — no relay. The clipboard always receives the full prompt first and
+direct launch remains the safe fallback. This supersedes the 2026-07-05 local-card/full-auto
+checkout and separate-primary-button decisions and the 2026-07-13 attach-only bulk default; and
+as of 2026-07-19 the single-row combined "find + attach + prepare checkout" brief is REPLACED by
+the two separate row prompts above (the combined brief survives only in the bulk route).
+External booking/listing values are collapsed to bounded single-line quoted data and explicitly
+marked as never-instructions; bulk briefs hoist the bot protocol and true completion signal
+exactly once. Traveler-alias creation rejects a reservation ID that does not match the attached
+buy-in.
 
 ### Read-only inbox buy-in search (dry-run auto-fill) (Load-Bearing, 2026-06-17)
 
@@ -5756,3 +5773,5 @@ Welcome. When in doubt, ask the human.
 2026-07-18 · Jamie: "build out in the UI in the photos tab a button and/or a process whereby I can select if unit A's photos or unit B's photos are shown first. The photo order should therefore be: collage photo first, then unit A or unit B, then the community folder photos. If you can break up unit A and unit B with a community photo when it is pushed to Guesty, that would be great so the guest knows that it's two units." · ACCEPTED, PARTLY SUPERSEDES the 2026-06-19 "don't reintroduce between-unit separators" rule (Load-Bearing #46, PR #1086) · New "Gallery order" panel on the Photos tab (multi-unit properties only): a ▲/▼ list picking which unit leads, plus a "Separate the units with a community photo" checkbox (default ON per operator choice). Published order is now `cover collage → <lead unit> → [community divider] → <next unit> → … → community`. VERIFIED-ALREADY-TRUE, don't re-chase: "collage first" needed NO change — push-photos re-pins the "Cover Collage" picture on every PUT (#46). The between-unit separator is BACK but scoped hard: ONE photo, MOVED out of the community block (never duplicated — a copy would show twice in the guest gallery and burn one of Airbnb's 100 slots), taken from the front of the ordered community gallery so the operator re-picks it just by dragging a community photo to position 1, and floored so the community section can never empty; the community-OPENER before unit A stays gone. Pure contract in NEW `shared/photo-gallery-layout.ts` (across-gallery) — deliberately separate from `shared/photo-order.ts` (within-gallery), which still owns every `photo_labels.sort_order` operation. LOAD-BEARING: the layout is applied by BOTH push assemblies (builder.tsx `propertyData.photos` = the tab gallery AND the manual push body, and server/guesty-photo-repush.ts = the automated post-swap/retroactive push) — wiring only one lets a unit replacement silently revert the operator's order; source-guarded. Setting is SERVER-side (`app_settings photo_gallery_layout.v1`, keyed by propertyId incl. `-draftId`) precisely because the automated re-push has no browser (the Bedding-tab localStorage limitation). Three self-inflicted traps found and fixed pre-merge: (1) giving the divider its own `source` made the photo-community check build a bogus one-photo "unit" group and mislabelled the dedupe scan + collage pools — it now KEEPS the community source and carries an `isUnitDivider` flag; (2) the moved divider left the community folder's drag-reorder persisting a PARTIAL `sort_order` (reorderPhotosInFolder only stamps what it is handed), so divider tiles are folded back into their folder's persisted order; (3) sections split on the divider flag, not just source, or a divider before an EMPTY unit gallery swallows the community section. Unit letters come from the NATURAL index so reordering never renames Unit B to Unit A. Captions are the photo's own text + " — next: Unit B (3BR)" (operator's choice), idempotent and stripped before any write-back to photo_labels. Verified: photo-gallery-layout 16 groups/0 fail, full `npm test` REAL exit 0, build clean (strings bundle-grepped in BOTH bundles), `npm run check` per-file error sets IDENTICAL to the 335 baseline, and the UI proven on the BUILT bundle (static SPA server + Playwright, mocked /api — 14/14: panel renders, divider strip announces the next unit, community section drops 4→3 photos proving the move-not-copy, ▲/▼ PATCHes the unitOrder, the checkbox PATCHes unitDividers and the strip disappears). Could NOT live-push to Guesty (no creds in session) — post-deploy: open a 2-unit Photos tab, set the order, then "Push Photos to Guesty" and expect collage → lead unit → one resort photo captioned "… — next: Unit X" → other unit → the rest of the community.
 
 2026-07-18 · Claude (second follow-up, caught by READING BACK the one listing the live backfill reported as already-explained rather than trusting the counter) · `describesSleepingCapacity` scanned the WHOLE summary for a sofa mention + both numbers, which false-positived on Poipu Kai 5BR (draft 9, sleeps 14 / 10 bedroom guests): a "sofa bed" in its Unit A blurb, "14 guests" in the opening line, and the `10` inside "a short 10-minute walk from the resort" three paragraphs later were read as an explanation, so the backfill skipped a listing that had none. FIX: all three signals must now co-occur in the SAME PARAGRAPH (`body.split(/\n\s*\n/).some(...)`) — a real explanation states its arithmetic in one breath, while three unrelated facts scattered down a summary do not. The canonical sentence and any model-written one-breath version both still register, so re-running the backfill can't double-insert into the 21 listings already updated (verified: the post-fix run left them alone and updated only draft 9). Regression-locked with the exact live text that fooled it. LESSON: the generous-detection trade-off was reasoned about correctly in the abstract (a false negative duplicates guest-visible copy, a false positive merely leaves existing copy alone) but the second half was WRONG in practice — a false positive here silently left a listing unexplained, which was the entire point of the work. Counters said "already-explained"; only reading the actual listing showed it wasn't.
+
+2026-07-19 · Jamie (bookings-page screenshot, the empty-slots panel showing BOTH "Auto Cowork · find + prepare" and the server "⚡ Auto-fill cheapest"): "There should now only be one auto fill cheapest button … only focused around Claude cowork … remove the other button. [Then] two cowork prompts pushed straight in Claude cowork — one that finds the cheapest units to buy in [and] one … that will check out the unit if the units are on VRBO. [Prefer] finding a unit on vrbo over direct even if vrbo is ~10% more … we defined an exact rule." · ACCEPTED, REVERSES the 2026-07-17 single-row combined "find + attach + prepare checkout" brief (client-only; the payment-handoff safety stack, the checkout-claim coordinator, and the bulk combined route are ALL unchanged) · SHIPPED (`claude/cowork-autofill-vrbo-nb9ct3`): (1) REMOVED the server-side "⚡ Auto-fill cheapest" `<Button>` (`autoFillMutation`) from the per-row empty-slots panel — single-row buy-in filling is now Cowork-only. The server auto-fill JOB ENGINE is retained (the BULK "Run bulk buy-ins (server)" fallback + boot-resume still use it), so only the per-row manual trigger + its now-orphaned `closeSlotSearchesForReservation` helper were removed. (2) The one remaining panel button, `CoworkBuyInPromptButton`, switched from the combined `buildCoworkFindAndPreparePrompt` to the FIND-ONLY `buildCoworkBuyInPrompt` and relabeled **"Auto Cowork · find cheapest"** — it searches + attaches the cheapest qualifying units and STOPS at attach (never books). It launches DIRECTLY (no `cowork_prompt_runs` relay) because the find-only brief fits under Claude Desktop's deep-link cap (the `tests/cowork-launch.test.ts` canary guards it); the `find-and-prepare` relay `kind` + the `findOnlyPrompt`/`activeCheckout` fallback machinery are gone. (3) The SECOND prompt already existed and is unchanged: **"Prepare checkout in Cowork"** (`buildCoworkCheckoutPrompt`, `kind: "prepare-checkout"`), shown once units are attached + unbooked — it books the attached units on VRBO (step 1 refuses a non-VRBO attach and points at the "Find property on VRBO" re-channel). (4) VRBO RULE (already in `buildCoworkBuyInPrompt`'s CHANNEL PREFERENCE, confirmed not changed): prefer VRBO unless a non-VRBO listing is BELOW 80% of the VRBO total (a >20% discount) — the operator's "~10% more" resolves to this exact 80%/20% escape hatch. (5) Stale copy that named the removed button — the interrupted-scan notice, two recovery toasts, the "you can now use…" helper, the City VRBO panel + bulk-queue descriptions (bookings.tsx), and the inbox dry-run search caption (inbox.tsx) — now point at "Auto Cowork · find cheapest" or describe the server path generically. Updated the "Cowork browser checkout is a human-payment handoff" Load-Bearing subsection (REPLACED the combined-brief framing with the two-prompt split; the combined brief survives only in the bulk route). Verified: cowork-launch 40/0 + cowork-buyin-prompt 284/0 + pipeline-logic all-green (source assertions repointed: primary label, launch count 7→6, row=find-only), full `npm test` REAL exit 0, `npm run build` clean (bundle-grepped: new label present, old "find + prepare" only in the BULK UI, no per-row "Auto-fill cheapest" button label), `npm run check` 334 = baseline (git-stash A/B, identical per-file error sets).
