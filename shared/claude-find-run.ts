@@ -324,6 +324,53 @@ export function scanClaudeFindRunMarkers(text: string): ClaudeFindRunMarkerScan 
  * every stdout line through this; unparseable lines are dropped (the raw
  * transcript on the Mac keeps everything).
  */
+/**
+ * Did the run come up WITHOUT its browser?
+ *
+ * The CLI's `system/init` line reports every MCP server it started. If
+ * chrome-devtools-mcp isn't `connected`, the agent cannot open a listing, read
+ * a calendar, or look at photos — and it does NOT stop. On a real run
+ * (2026-07-19) it announced "ATTENTION: browser tools missing … I will …
+ * attach the best-qualified listings I can verify" and carried on toward
+ * attaching units it had never looked at. A browser-less find-run is not a
+ * degraded run, it is the wrong run, so this returns the operator-facing
+ * error that ends it.
+ *
+ * Returns null for any non-init line and for a healthy init.
+ *
+ * SCOPE (verified against the real CLI, 2026-07-19): "connected" means the MCP
+ * PROCESS started and handshook — not that Chrome is reachable. Pointing the
+ * config at a dead port still reports "connected". That is fine: a reachable-
+ * but-broken browser makes every mcp__chrome CALL fail loudly, which the agent
+ * and the operator both see. This guard covers the silent case — the tools
+ * never existing at all.
+ *
+ * TWIN of browserMcpFailure() in daemon/vrbo-sidecar/claude-find-runner.mjs —
+ * the daemon is plain node and cannot import TS. Equivalence-locked in
+ * tests/claude-find-run.test.ts; change both together.
+ */
+export function browserMcpFailureFromInit(rawLine: string): string | null {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(rawLine);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  if (parsed.type !== "system" || parsed.subtype !== "init") return null;
+  const servers = Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers : [];
+  const chrome = servers.find((s: any) => s && s.name === "chrome");
+  if (chrome && chrome.status === "connected") return null;
+  const state = !chrome ? "was not started at all" : `reported status "${String(chrome.status)}"`;
+  return (
+    `The runner's browser did not attach — chrome-devtools-mcp ${state}. `
+    + "Without it this run can only web-search, so it cannot open listings, "
+    + "check live availability, or verify photos. Stopped rather than attach "
+    + "units it could not verify. Re-run it; if this repeats, check that the "
+    + "dedicated Chrome is up and that chrome-devtools-mcp is installed."
+  );
+}
+
 export function classifyClaudeStreamLine(rawLine: string, nowIso: string): ClaudeFindRunEvent | null {
   let parsed: any;
   try {
