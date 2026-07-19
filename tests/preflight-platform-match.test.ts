@@ -121,4 +121,102 @@ check(
   )?.status === "confirmed",
 );
 
+// ── Compound-unit-token guard (2026-07-19, Koa Lagoon "Unit B" incident) ──────
+// The live SERP row for a Koa Lagoon combo's Unit B carried a snippet describing
+// Maui Sunset #B-417 (a DIFFERENT unit in a DIFFERENT Kihei complex); the bare
+// letter claim "B" matched inside "#B-417" via `\b` at the hyphen and the check
+// rendered a false VRBO "Yes". A claim must match the COMPLETE unit token.
+const koaLagoonContext = buildPreflightMatchContext({
+  complexName: "Koa Lagoon",
+  city: "Kihei",
+  unitNumber: "Unit B",
+  address: "800 S Kihei Rd, Kihei, Hawaii, Unit B",
+  bedrooms: null,
+});
+
+check(
+  "rejects the Maui Sunset #B-417 snippet for Koa Lagoon Unit B (compound unit token)",
+  evaluatePreflightSearchResult(
+    {
+      title: "Koa Lagoon- Beachfront - Spectacular Location with ...",
+      snippet: "Maui Sunset #B-417 Spacious, Renovated Unit, Oceanfront Complex ... Kihei. Located on the beach, this condo is in North Kihei",
+      link: "https://www.vrbo.com/1234567",
+    },
+    "vrbo",
+    koaLagoonContext,
+  ) === null,
+);
+
+check(
+  "bare-letter claim does not match inside a hyphenated compound unit ID",
+  snippetMentionsUnit(
+    { title: "Maui Sunset #B-417 Oceanfront", snippet: "", link: "" },
+    "Unit B",
+    "S Kihei",
+  ) === false,
+);
+
+check(
+  "bare-letter claim does not match a slug compound like -b-417",
+  snippetMentionsUnit(
+    { title: "", snippet: "", link: "https://www.vrbo.com/maui-sunset-b-417" },
+    "Unit B",
+    "",
+  ) === false,
+);
+
+check(
+  "bare-letter claim does not match the tail of a digit-letter compound (417-B)",
+  snippetMentionsUnit(
+    { title: "Maui Sunset Unit 417-B", snippet: "", link: "" },
+    "Unit B",
+    "",
+  ) === false,
+);
+
+check(
+  "numeric claim does not match inside a longer compound unit ID (#12-34)",
+  snippetMentionsUnit(
+    { title: "Oceanfront condo #12-34", snippet: "", link: "" },
+    "12",
+    "",
+  ) === false,
+);
+
+check(
+  "still accepts a genuine letter unit marker (Unit B)",
+  snippetMentionsUnit(
+    { title: "Koa Lagoon Unit B — Oceanfront 2BR", snippet: "", link: "" },
+    "Unit B",
+    "",
+  ) === true,
+);
+
+check(
+  "still accepts a hyphen-into-words title after the unit letter (Unit B - Beachfront)",
+  snippetMentionsUnit(
+    { title: "Koa Lagoon Unit B - Beachfront condo", snippet: "", link: "" },
+    "Unit B",
+    "",
+  ) === true,
+);
+
+check(
+  "still accepts a compound claim matched in full (Unit 6-7)",
+  snippetMentionsUnit(
+    { title: "Beach cottage Unit 6-7 sleeps 10", snippet: "", link: "" },
+    "Unit 6-7",
+    "",
+  ) === true,
+);
+
+check(
+  "still accepts a letter unit in a URL slug followed by words (-b-kihei)",
+  snippetMentionsUnit(
+    { title: "", snippet: "", link: "https://www.vrbo.com/koa-lagoon-unit-b-kihei" },
+    "Unit B",
+    "",
+  ) === true,
+);
+
 console.log("preflight-platform-match tests passed");

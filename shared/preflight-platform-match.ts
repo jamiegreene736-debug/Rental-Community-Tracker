@@ -103,12 +103,20 @@ export function snippetMentionsUnit(
   for (const claim of unitClaims) {
     const num = normalizeUnitClaim(claim).replace(/^0+(?=\d)/, "");
     if (!num) continue;
+    // COMPOUND-TOKEN GUARD: a claim only counts when it matches the COMPLETE
+    // unit token in the text. `\b` alone treats a hyphen as a boundary, so the
+    // bare-letter claim "B" (a two-unit combo's "Unit B") matched inside
+    // "#B-417" — Maui Sunset's unit B-417, a DIFFERENT unit in a DIFFERENT
+    // Kihei complex — and confirmed a false VRBO listing. A hyphen/en-dash
+    // continuing into digits means the text's real unit ID is a longer
+    // compound, never ours; a digit immediately before "-<claim>" means the
+    // same on the leading side ("417-B" must not verify unit "B").
     const markerPatterns = unitClaimVariants(num).flatMap((variant) => {
       const escaped = escapeUnitRegex(variant.toLowerCase());
       return [
-        new RegExp(`\\b(?:unit|apt\\.?|apartment|villa|townhome|townhouse|building|bldg|cottage|casita)\\s*(?:#|no\\.?\\s*)?\\s*${escaped}\\b`, "i"),
-        new RegExp(`#\\s*${escaped}\\b`, "i"),
-        new RegExp(`-${escaped}(?:[\\/\\?\\-]|$)`, "i"),
+        new RegExp(`\\b(?:unit|apt\\.?|apartment|villa|townhome|townhouse|building|bldg|cottage|casita)\\s*(?:#|no\\.?\\s*)?\\s*${escaped}\\b(?![-–]\\s*\\d)`, "i"),
+        new RegExp(`#\\s*${escaped}\\b(?![-–]\\s*\\d)`, "i"),
+        new RegExp(`(?<!\\d)-${escaped}(?:[\\/\\?]|$|-(?!\\d))`, "i"),
       ];
     });
     if (markerPatterns.some((re) => re.test(text))) return true;
@@ -117,7 +125,7 @@ export function snippetMentionsUnit(
       const tail = streetTail.toLowerCase();
       for (const variant of unitClaimVariants(num)) {
         const adjacent = new RegExp(
-          `\\b${escapeUnitRegex(tail)}\\s*,?\\s*#?\\s*${escapeUnitRegex(variant.toLowerCase())}\\b`,
+          `\\b${escapeUnitRegex(tail)}\\s*,?\\s*#?\\s*${escapeUnitRegex(variant.toLowerCase())}\\b(?![-–]\\s*\\d)`,
           "i",
         );
         if (adjacent.test(text)) return true;
