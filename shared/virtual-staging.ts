@@ -2,11 +2,12 @@
  * Provider-neutral guardrails shared by every virtual-staging image backend.
  * Scene-specific instructions are appended by buildVirtualStagingPrompt.
  */
-export const VIRTUAL_STAGING_RECIPE_VERSION = "context-aware-photo-feedback-v4";
+export const VIRTUAL_STAGING_RECIPE_VERSION = "room-preserving-refresh-v5";
 export const VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX = "virtual-staging-recipe::";
 export const VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES = [
   `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-furnishings-v2`,
   `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-alternate-angle-v3`,
+  `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-photo-feedback-v4`,
 ] as const;
 
 export const VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH = 1_000;
@@ -48,26 +49,20 @@ export function virtualStagingViewpointDirectionForSource(
   return ((hash >>> 0) + attemptOffset) % 2 === 0 ? "left" : "right";
 }
 
-export const VIRTUAL_STAGING_PROMPT =
-  "Use the uploaded photograph as the sole visual reference and create a second photorealistic real-estate photograph of the same space from a nearby but visibly different viewpoint while performing a restrained virtual furniture replacement. " +
-  "First inspect the photograph to identify the actual room, the function of each movable furnishing, and the existing design language. " +
-  "The visible photograph is authoritative; if any supplied scene hint conflicts with what is visibly shown, follow the photograph. " +
-  "Preserve the property's established regional and stylistic character rather than restyling it. " +
-  "If the existing furniture or decor has a Hawaiian, tropical, island, coastal, or resort character, every replacement must retain that character; do not normalize it into generic neutral contemporary decor. " +
-  "For example, replace a Hawaiian-style sofa only with another tasteful Hawaiian-style sofa, never a generic urban sofa. " +
-  "Replace each movable item only with the same functional furniture type and approximately the same scale, footprint, orientation, seating or sleeping capacity, and placement: sofa with sofa, sectional with sectional, dining set with dining set, bed with the same bed type, and outdoor lounge or dining furniture with the corresponding outdoor furniture. " +
-  "Never substitute indoor furniture for outdoor furniture or outdoor furniture for indoor furniture. " +
-  "Regardless of metadata, furniture visibly located outdoors must be replaced only with weather-resistant outdoor furniture, and furniture visibly located indoors must be replaced only with indoor furniture. " +
-  "Preserve the condo's permanent architecture and real-world geometry: walls, ceilings, floors, windows, doors, trim, columns, room dimensions, kitchen cabinets, countertops, appliances, built-ins, permanent fixtures, balcony or lanai boundaries, and the identity of the exterior view. Reproject those fixed features consistently from the nearby viewpoint. " +
-  "Keep the source aspect ratio, camera height, level horizon, natural real-estate lens character, broadly similar framing, time of day, and ambient lighting. Create mild natural parallax so the result is clearly a second angle, not the original camera position. " +
-  "Do not fake the viewpoint difference by mirroring the image, rotating the two-dimensional canvas, stretching it, zooming it, or merely cropping it. Do not create a reverse angle or expose a large unseen portion of the room. Infer only narrow edge slivers required by the small camera shift, continuing visible materials; never invent or remove a door, window, wall, room, fixture, railing, appliance, amenity, or major architectural feature. " +
-  "Remove or replace only movable furniture, rugs, lamps, artwork, plants, and decorative accessories. " +
-  "If no suitable movable furnishing is visible, leave the furnishings unchanged and perform only the bounded nearby viewpoint shift. " +
-  "Make replacements photorealistic and correctly scaled, with physically plausible shadows. " +
-  "Do not move openings, redesign finishes, enlarge the room, change the identity of the exterior view, add people, or add text, logos, or watermarks.";
+export const VIRTUAL_STAGING_PROMPT = [
+  "GOAL: Create one photorealistic vacation-rental listing photo of the exact same physical space, using the uploaded photograph as the sole visual reference.",
+  "SOURCE AUTHORITY: First inventory the visible permanent architecture, floor boundaries, room function, every movable object, and the established design language. The photograph is authoritative when metadata differs from visible evidence.",
+  "CAMERA: Render a genuine adjacent-camera view with a level horizon, natural real-estate lens, source aspect ratio, source camera height, broadly similar framing, time of day, ambient lighting, and exterior-view identity. The small lateral move creates mild physical parallax while keeping the composition familiar.",
+  "ARCHITECTURE: Preserve the room dimensions and geometry of walls, ceiling, windows, doors, trim, columns, openings, cabinets, countertops, appliances, built-ins, permanent fixtures, railings, and outdoor-platform boundaries. Preserve the floor plane, footprint, elevation, boundaries, transitions, baseboards, and perspective while visibly refreshing only its surface finish or material.",
+  "OBJECT INVENTORY: Map every visible movable object one-for-one to the same functional category, count, approximate scale, footprint, orientation, capacity, and placement. A source sofa remains one sofa, a sectional remains one sectional, a dining set keeps its table and seat count, a bed keeps its type and sleeping capacity, and each existing lamp maps to one lamp. Areas that are open in the source remain naturally open. The result contains exactly the source seating inventory and precisely the inventoried source furniture and decor.",
+  "STYLE: Make each refreshed surface, textile, furnishing, lamp, artwork, plant, and accessory a close stylistic sibling of the source. Match its palette, material family, pattern scale and density, era, formality, quality level, function, and regional character. Hawaiian, tropical, island, coastal, or resort character remains distinctly recognizable in every refreshed item.",
+  "PLACEMENT: Indoor objects remain indoor and appropriate to the visible room function. Outdoor furniture remains weather-resistant, outdoor-rated, and on the same private outdoor platform.",
+  "REALISM: Use correct scale, material response, occlusion, contact shadows, reflections, and physically plausible lighting. Produce the new view through genuine physical camera translation and yaw with natural parallax.",
+  "OUTPUT LIMITS: Show only the narrow edge slivers implied by the small camera shift. Preserve the room and exterior-view identity. Render the property unoccupied and keep existing text, signs, labels, and branded markings exactly as photographed. Produce a clean listing photograph containing only source-grounded visual content.",
+].join(" ");
 
 const VIRTUAL_STAGING_INELIGIBLE_SCENE_GUARD =
-  "Final eligibility rule: if the photograph is primarily a beach, ocean or landscape view, building exterior, pool or shared amenity, map, logo, or floor plan rather than a furnished private room or private patio, balcony, deck, or lanai, ignore every camera, viewpoint, and furnishing instruction above and make no changes.";
+  "FINAL ELIGIBILITY: Apply this recipe only when the photograph itself clearly shows a furnished private indoor room or furnished private patio, balcony, deck, or lanai. For every other source, return a faithful unchanged reproduction at the exact source camera position.";
 
 export type VirtualStagingScene =
   | "living-area"
@@ -90,17 +85,30 @@ const SCENE_DESCRIPTION: Record<VirtualStagingScene, string> = {
   "private-outdoor": "a private outdoor patio, balcony, deck, or lanai",
 };
 
+const SCENE_REFRESH_RULE: Record<VirtualStagingScene, string> = {
+  "living-area": "Visibly refresh the floor surface and map each existing sofa, sectional, chair, table, rug, lamp, artwork, plant, and accessory one-for-one. Preserve seating counts and the room's circulation paths.",
+  bedroom: "Visibly refresh the floor surface, bed linens, and every existing movable lamp or lampshade. Bed linens include the duvet or coverlet, sheets, blankets, bed pillows, and decorative bed pillows. Keep the bed size, mattress position, frame, headboard, nightstands, seating inventory, and circulation space. Map any other visible movable decor one-for-one.",
+  kitchen: "Visibly refresh the floor surface and map each existing stool, rug, movable lamp, artwork, plant, and accessory one-for-one. Preserve cabinets, counters, backsplash geometry, appliances, islands, plumbing, stool count, and work clearances.",
+  bathroom: "Visibly refresh the floor surface and map each existing towel, bath mat, movable lamp, artwork, plant, and accessory one-for-one. Preserve the vanity, plumbing, mirrors, tub, shower, toilet, tile boundaries, and clearances.",
+  dining: "Visibly refresh the floor surface and map the existing dining table, every dining chair, rug, lamp, artwork, plant, and accessory one-for-one. Preserve the exact seat count, table footprint, and circulation space.",
+  "private-outdoor": "Visibly refresh the private platform's surface finish and map each existing outdoor seat, table, cushion, rug, lamp, plant, and accessory one-for-one. Preserve the exact seating count, platform geometry, railings, view, and circulation space; use outdoor-rated replacements.",
+};
+
+export function virtualStagingSceneRefreshRule(context: VirtualStagingContext): string {
+  return SCENE_REFRESH_RULE[context.scene];
+}
+
 export function buildVirtualStagingPrompt(
   context: VirtualStagingContext,
   viewpointDirection: VirtualStagingViewpointDirection,
 ): string {
   const viewpointInstruction =
-    `Move the virtual camera roughly one to two feet to the ${viewpointDirection}, as the space safely permits, and yaw back toward the scene center by about 5 to 10 degrees. ` +
-    "The lateral shift and mild parallax must be noticeable in side-by-side review. If the full move is physically blocked, use the smallest believable shift in that direction, but do not return the exact source camera position.";
+    `CAMERA MOVE: Shift the camera approximately 6 to 12 inches to the ${viewpointDirection}, as the visible space safely permits, then yaw 2 to 5 degrees back toward the scene center. ` +
+    "Use the smallest real adjacent viewpoint that produces mild visible parallax. Keep the camera inside the same standing area and the result recognizably close to the source composition.";
   const sceneInstruction = context.placement === "outdoor"
-    ? "The metadata indicates a private outdoor patio, balcony, deck, or lanai. Keep the camera on that same private outdoor platform, within a plausible standing area and behind any railing. When the photograph confirms an outdoor setting, use only weather-resistant, outdoor-rated furniture and outdoor-appropriate accessories. Never add an indoor sofa, bed, indoor rug, or other indoor-only furnishing."
-    : `The metadata indicates ${SCENE_DESCRIPTION[context.scene]}. Keep the camera inside that same room and never move it through a wall, window, railing, or doorway. When the photograph confirms an indoor setting, use only interior furniture appropriate for that room's actual function; never introduce patio, deck, or pool furniture indoors. If outdoor furniture is visible beyond an opening, keep it outdoor-rated and do not move it inside.`;
-  return `${VIRTUAL_STAGING_PROMPT} ${viewpointInstruction} ${sceneInstruction} ${VIRTUAL_STAGING_INELIGIBLE_SCENE_GUARD}`;
+    ? "SCENE: Metadata identifies a private outdoor patio, balcony, deck, or lanai. Keep the camera on that same private platform, within its plausible standing area and behind its railing. Furnishings remain weather-resistant and outdoor-rated."
+    : `SCENE: Metadata identifies ${SCENE_DESCRIPTION[context.scene]}. Keep the camera inside that exact room and use interior furnishings appropriate to its visible function. Objects seen outside through an opening remain outside and outdoor-rated.`;
+  return `${VIRTUAL_STAGING_PROMPT} ${viewpointInstruction} ${sceneInstruction} REFRESH RECIPE: ${virtualStagingSceneRefreshRule(context)} ${VIRTUAL_STAGING_INELIGIBLE_SCENE_GUARD}`;
 }
 
 /**

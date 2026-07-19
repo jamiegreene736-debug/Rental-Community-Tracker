@@ -12,6 +12,7 @@ import { DUPLICATE_DISTANCE, hammingDistance, HASH_BITS } from "@shared/photo-ha
 import { ReplicateVirtualStagingProvider } from "./replicate-virtual-staging-provider";
 import {
   AnthropicVirtualStagingViewpointVerifier,
+  VirtualStagingViewpointRejectedError,
   VirtualStagingViewpointVerificationUnavailableError,
   type VirtualStagingViewpointVerifier,
 } from "./virtual-staging-viewpoint-verifier";
@@ -408,42 +409,60 @@ export class VirtualStagingService {
     return this.limiter.run(async () => {
       const errors: string[] = [];
       for (const provider of this.providersFor(mode)) {
-        try {
-          const result = await provider.generate(providerInput);
-          const validated = await validateGeneratedImage(
-            result.buffer,
-            result.model,
-            result.provider,
-            { width: source.width, height: source.height },
-          );
-          if (mode === "feedback-revision") {
-            assertRefinementChangedPreview(input.previousPreview!, validated.buffer, result.provider);
-          } else {
-            await assertMeaningfullyDifferentPreview(
-              input.source,
-              validated.buffer,
+        const providerAttempts = mode === "alternate-angle" ? 2 : 1;
+        for (let providerAttempt = 1; providerAttempt <= providerAttempts; providerAttempt += 1) {
+          try {
+            const result = await provider.generate(providerInput);
+            const validated = await validateGeneratedImage(
+              result.buffer,
+              result.model,
               result.provider,
-              previousPreviewHash,
+              { width: source.width, height: source.height },
             );
+            if (mode === "feedback-revision") {
+              assertRefinementChangedPreview(input.previousPreview!, validated.buffer, result.provider);
+            } else {
+              await assertMeaningfullyDifferentPreview(
+                input.source,
+                validated.buffer,
+                result.provider,
+                previousPreviewHash,
+              );
+            }
+            if (result.provider !== "mock") {
+              await this.viewpointVerifier.verify({
+                source: input.source,
+                generated: validated.buffer,
+                previousGenerated: input.previousPreview,
+                requestedDirection: viewpointDirection,
+                context: input.context,
+                imageProvider: result.provider,
+                generationAttempt: input.generationAttempt,
+                mode,
+                ...(mode === "feedback-revision" ? { feedback } : {}),
+              });
+            }
+            return validated;
+          } catch (error) {
+            // A verifier outage applies to every image provider. Stop instead of
+            // spending credits on another generation that cannot be validated.
+            if (error instanceof VirtualStagingViewpointVerificationUnavailableError) throw error;
+            if (
+              mode === "alternate-angle"
+              && error instanceof VirtualStagingViewpointRejectedError
+              && providerAttempt < providerAttempts
+            ) {
+              console.info(`[virtual-staging] ${JSON.stringify({
+                event: "quality-retry",
+                provider: provider.id,
+                generationAttempt: input.generationAttempt,
+                providerAttempt,
+              })}`);
+              continue;
+            }
+            errors.push(`${provider.id}: ${safeProviderError(error)}`);
+            break;
           }
-          if (result.provider !== "mock") {
-            await this.viewpointVerifier.verify({
-              source: input.source,
-              generated: validated.buffer,
-              previousGenerated: input.previousPreview,
-              requestedDirection: viewpointDirection,
-              imageProvider: result.provider,
-              generationAttempt: input.generationAttempt,
-              mode,
-              ...(mode === "feedback-revision" ? { feedback } : {}),
-            });
-          }
-          return validated;
-        } catch (error) {
-          // A verifier outage applies to every image provider. Stop instead of
-          // spending credits on another generation that cannot be validated.
-          if (error instanceof VirtualStagingViewpointVerificationUnavailableError) throw error;
-          errors.push(`${provider.id}: ${safeProviderError(error)}`);
         }
       }
       throw new Error(errors.join("; ") || "Virtual staging failed");

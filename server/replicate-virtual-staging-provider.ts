@@ -6,17 +6,17 @@ import type {
   VirtualStagingImageProvider,
 } from "./virtual-staging-service";
 
-const DEFAULT_REPLICATE_MODEL = "black-forest-labs/flux-kontext-pro";
+const DEFAULT_REPLICATE_MODEL = "black-forest-labs/flux-2-pro";
 const DEFAULT_REPLICATE_FEEDBACK_MODEL = "black-forest-labs/flux-2-pro";
 const REPLICATE_API_ROOT = "https://api.replicate.com/v1";
 const REQUEST_TIMEOUT_MS = 30_000;
 const CLEANUP_TIMEOUT_MS = 5_000;
 const PREDICTION_TIMEOUT_MS = 5 * 60_000;
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
-// FLUX.2 allows 9 MP across all references and returns at most 4 MP when it
-// matches an input. Capping each of the two upload copies at 4 MP leaves a
-// full megapixel of headroom without changing the immutable app snapshots.
-const MAX_FEEDBACK_IMAGE_PIXELS = 4_000_000;
+// FLUX.2 allows 9 MP across all inputs plus output. Matching a 2 MP input keeps
+// ordinary edits near 4 MP total and two-reference feedback edits near 6 MP,
+// leaving headroom without changing the immutable app snapshots.
+const MAX_FLUX2_INPUT_IMAGE_PIXELS = 2_000_000;
 const TRANSIENT_RETRY_ATTEMPTS = 3;
 
 type SupportedImageFormat = "jpeg" | "png" | "webp";
@@ -112,6 +112,10 @@ function assertModelName(model: string, setting: string): void {
   if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(model)) {
     throw new Error(`${setting} must use owner/model format`);
   }
+}
+
+function isFlux2Model(model: string): boolean {
+  return model.toLowerCase().includes("/flux-2");
 }
 
 async function prepareUpload(
@@ -226,16 +230,18 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
     if (isFeedbackRevision && !input.referenceSource) {
       throw new Error("Replicate feedback revision requires the reviewed staged preview");
     }
+    const selectedModel = isFeedbackRevision ? this.feedbackModel : this.model;
+    const usesFlux2 = isFlux2Model(selectedModel);
     const sourceUpload = await prepareUpload(
       input.source,
       input.sourceFilename,
-      isFeedbackRevision ? MAX_FEEDBACK_IMAGE_PIXELS : undefined,
+      usesFlux2 ? MAX_FLUX2_INPUT_IMAGE_PIXELS : undefined,
     );
     const referenceUpload = isFeedbackRevision
       ? await prepareUpload(
         input.referenceSource!,
         `reviewed-preview-${input.sourceFilename}`,
-        MAX_FEEDBACK_IMAGE_PIXELS,
+        usesFlux2 ? MAX_FLUX2_INPUT_IMAGE_PIXELS : undefined,
       )
       : null;
     const sourceAspectRatio = sourceUpload.width / sourceUpload.height;
@@ -256,13 +262,14 @@ export class ReplicateVirtualStagingProvider implements VirtualStagingImageProvi
         referenceFile = await this.upload(referenceUpload, "reviewed preview");
         files.push(referenceFile);
       }
-      const selectedModel = referenceFile ? this.feedbackModel : this.model;
-      const providerInput = referenceFile
+      const providerInput = referenceFile || usesFlux2
         ? {
           prompt: input.prompt,
           // FLUX.2 resolves image indices in this exact order. Image 1 is the
-          // immutable original; Image 2 is the reviewed staged reference.
-          input_images: [sourceFile.url, referenceFile.url],
+          // immutable original; Image 2, when present, is review-only context.
+          input_images: referenceFile
+            ? [sourceFile.url, referenceFile.url]
+            : [sourceFile.url],
           aspect_ratio: "match_input_image",
           resolution: "match_input_image",
           output_format: "jpg",
