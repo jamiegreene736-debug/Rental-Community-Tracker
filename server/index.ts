@@ -9,6 +9,7 @@ import { startAvailabilityScheduler } from "./availability-scheduler";
 import { startPhotoListingScheduler } from "./photo-listing-scanner";
 import { startReplacementFindResumeWatchdog } from "./preflight-background-jobs";
 import { startAutoReplaceResumeWatchdog } from "./auto-replace-jobs";
+import { startClaudeFindRunWatchdog } from "./claude-find-runs";
 import { startUnitAuditResumeWatchdog } from "./unit-audit-sweep";
 import { startUnitAuditAutoScheduler } from "./unit-audit-scheduler";
 import { startBookingConfirmationScheduler } from "./booking-confirmations";
@@ -218,6 +219,10 @@ app.get("/api/auth/session", (_req, res) => {
       // One-click auto-replace orchestrator (find → auto-commit → verify) —
       // resume orphaned jobs the same way. Gate: AUTO_REPLACE_RESUME_DISABLED=1.
       startAutoReplaceResumeWatchdog();
+      // Headless Claude find-runs: close orphaned runs honestly (Mac runner
+      // offline / went silent / 90-min ceiling) so a row never spins forever.
+      // Gate: CLAUDE_FIND_RUN_WATCHDOG_DISABLED=1.
+      startClaudeFindRunWatchdog();
       // Unit Audit Sweep (dashboard "Audit" column) — resume orphaned sweeps
       // after a restart. Gate: UNIT_AUDIT_RESUME_DISABLED=1.
       startUnitAuditResumeWatchdog();

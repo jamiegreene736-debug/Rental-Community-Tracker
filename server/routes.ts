@@ -182,6 +182,7 @@ import {
   setOperationDiagnosticsQueueHooks,
 } from "./operation-diagnostics-api";
 import { registerCoworkPromptRunRoutes } from "./cowork-prompt-runs";
+import { registerClaudeFindRunRoutes } from "./claude-find-runs";
 import { BuyInCheckoutClaimError } from "./buy-in-checkout-claims";
 import { consultGrokAboutSingleListing } from "./grok-single-listing-consult";
 import { consultGrokAboutCitywideCandidates } from "./grok-citywide-candidate-consult";
@@ -6769,6 +6770,7 @@ export async function registerRoutes(
   // inside requireAuth like everything else.
   registerAssistantRoutes(app);
   registerCoworkPromptRunRoutes(app);
+  registerClaudeFindRunRoutes(app);
   registerVirtualStagingRoutes(app);
 
   void (async () => {
