@@ -238,9 +238,26 @@ export function summarizeAmenitiesPush(sent: number, saved: number): string {
   return saved >= sent ? base : `${base} (${saved} confirmed on Guesty)`;
 }
 
-export function summarizePhotosPush(pushed: number, verified: number): string {
+// The optional `confirm` block is appended ONLY when the push's read-back
+// ladder actually CONFIRMED the replacement (server `replacementConfirmed`) —
+// "now live in Guesty" is a claim about the real gallery, so an unconfirmed
+// stale read must keep the bare form. `liveTotal` is Guesty's actual picture
+// count (incl. a pinned cover collage); `removed` = how many pictures the
+// previous gallery had over the new one (null when the pre-push count wasn't
+// readable — e.g. the strict-audit path skips the pre-read).
+export function summarizePhotosPush(
+  pushed: number,
+  verified: number,
+  confirm?: { liveTotal: number; removed: number | null } | null,
+): string {
   const base = `${pushed} photo${pushed === 1 ? "" : "s"} pushed`;
-  return verified >= pushed ? base : `${base} (${verified} verified on Guesty)`;
+  const withVerify = verified >= pushed ? base : `${base} (${verified} verified on Guesty)`;
+  if (!confirm || !Number.isFinite(confirm.liveTotal) || confirm.liveTotal < 0) return withVerify;
+  const removed = confirm.removed != null && Number.isFinite(confirm.removed) && confirm.removed >= 0
+    ? confirm.removed
+    : null;
+  const removedPart = removed != null ? `${removed} old removed — ` : "";
+  return `${withVerify} · ${removedPart}${confirm.liveTotal} now live in Guesty`;
 }
 
 // Inverse of summarizePhotosPush. The Photos-tab stream-loss reconcile
@@ -248,18 +265,21 @@ export function summarizePhotosPush(pushed: number, verified: number): string {
 // needs the counts back out of the summary text to report honestly. Keep in
 // lockstep with the builder above — the round-trip is test-locked. Returns
 // null for any non-photos-summary string (a null just means "no counts";
-// callers must not treat it as failure).
+// callers must not treat it as failure). liveTotal/removed are null when the
+// summary predates the replacement-confirmation suffix (older ledger entries).
 export function parsePhotosPushSummary(
   summary: string | null | undefined,
-): { pushed: number; verified: number } | null {
-  const m = /^(\d+) photos? pushed(?: \((\d+) verified on Guesty\))?$/.exec(
+): { pushed: number; verified: number; liveTotal: number | null; removed: number | null } | null {
+  const m = /^(\d+) photos? pushed(?: \((\d+) verified on Guesty\))?(?: · (?:(\d+) old removed — )?(\d+) now live in Guesty)?$/.exec(
     String(summary ?? "").trim(),
   );
   if (!m) return null;
   const pushed = Number(m[1]);
   const verified = m[2] != null ? Number(m[2]) : pushed;
   if (!Number.isFinite(pushed) || !Number.isFinite(verified)) return null;
-  return { pushed, verified };
+  const liveTotal = m[4] != null ? Number(m[4]) : null;
+  const removed = m[3] != null ? Number(m[3]) : null;
+  return { pushed, verified, liveTotal, removed };
 }
 
 export function summarizePricingPush(days: number, verifiedDays: number): string {

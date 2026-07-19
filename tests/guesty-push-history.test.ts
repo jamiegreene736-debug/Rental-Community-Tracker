@@ -138,6 +138,25 @@ check("amenities singular", summarizeAmenitiesPush(1, 1) === "1 amenity pushed")
 check("photos all verified", summarizePhotosPush(45, 45) === "45 photos pushed");
 check("photos shortfall", summarizePhotosPush(45, 43) === "45 photos pushed (43 verified on Guesty)");
 check("photos singular", summarizePhotosPush(1, 1) === "1 photo pushed");
+// Confirmed-replacement suffix (2026-07-19): the operator's receipt — how many
+// old photos the push removed and how many are actually live on Guesty now.
+check(
+  "photos confirmed replacement w/ removed count",
+  summarizePhotosPush(33, 33, { liveTotal: 34, removed: 7 }) === "33 photos pushed · 7 old removed — 34 now live in Guesty",
+);
+check(
+  "photos confirmed replacement, zero removed",
+  summarizePhotosPush(33, 33, { liveTotal: 33, removed: 0 }) === "33 photos pushed · 0 old removed — 33 now live in Guesty",
+);
+check(
+  "photos confirmed replacement, pre-push count unknown",
+  summarizePhotosPush(33, 33, { liveTotal: 34, removed: null }) === "33 photos pushed · 34 now live in Guesty",
+);
+check(
+  "photos shortfall + confirmed replacement compose",
+  summarizePhotosPush(45, 43, { liveTotal: 44, removed: 2 }) === "45 photos pushed (43 verified on Guesty) · 2 old removed — 44 now live in Guesty",
+);
+check("photos null confirm keeps the bare form", summarizePhotosPush(45, 45, null) === "45 photos pushed");
 check("pricing verified", summarizePricingPush(366, 366) === "366 days of rates pushed");
 check("pricing partial", summarizePricingPush(366, 300) === "366 days of rates pushed (300 verified)");
 check("descriptions plural", summarizeDescriptionsPush(7) === "7 description fields pushed");

@@ -25444,10 +25444,16 @@ Requirements:
     // prove the whole exact ordered gallery with the retrying read-back below.
     // Standard/manual calls have no such identity, so they retain the legacy
     // best-effort GET that preserves any existing captioned cover.
+    // How many pictures Guesty held BEFORE this push. Captured off the same
+    // collage-pin pre-read (no extra Guesty call); null when unreadable or in
+    // strict-audit mode (which deliberately skips the pre-read). Feeds the
+    // operator's replacement receipt: "N old removed — M now live in Guesty".
+    let previousGuestyTotal: number | null = null;
     if (!requiredCoverCollageUrl) {
       try {
         const current = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
         const pics = Array.isArray(current?.pictures) ? current.pictures : [];
+        previousGuestyTotal = pics.length;
         const existing = pics.find((p: any) => (p?.caption || "") === "Cover Collage");
         const collageUrl = existing?.original || existing?.url;
         if (collageUrl) {
@@ -25778,11 +25784,20 @@ Requirements:
     const strictGalleryError = strictGalleryVerification && !strictGalleryVerified
       ? "Strict audit could not verify the exact ordered Guesty gallery with Cover Collage pinned first."
       : null;
+    // The replacement receipt: only a CONFIRMED read-back may claim "now live
+    // in Guesty" (a stale read is not the live gallery). removedCount is the
+    // delta vs the pre-push gallery — e.g. 40 before, 33 pushed → 7 removed.
+    const removedCount = replacementConfirmed && previousGuestyTotal != null && lastObservedTotal != null
+      ? Math.max(0, previousGuestyTotal - lastObservedTotal)
+      : null;
+    const summaryConfirm = replacementConfirmed && lastObservedTotal != null
+      ? { liveTotal: lastObservedTotal, removed: removedCount }
+      : null;
     recordGuestyPush(
       guestyListingId,
       "photos",
       successCount > 0 && !strictGalleryError ? "success" : "error",
-      strictGalleryError ?? (successCount > 0 ? summarizePhotosPush(successCount, verifiedCount) : "No photos pushed to Guesty"),
+      strictGalleryError ?? (successCount > 0 ? summarizePhotosPush(successCount, verifiedCount, summaryConfirm) : "No photos pushed to Guesty"),
     );
     emit({
       type: "done",
@@ -25803,6 +25818,11 @@ Requirements:
       guestyTotal: lastObservedTotal,
       replacementConfirmed,
       staleExtra,
+      // The replacement math the operator asked for: pre-push gallery size
+      // (null = unreadable / strict-audit) and how many old pictures this
+      // push removed (null unless the replacement was CONFIRMED).
+      previousTotal: previousGuestyTotal,
+      removedCount,
       ...(strictGalleryVerification ? { strictGalleryVerified } : {}),
       ...(strictGalleryError ? { guestyError: strictGalleryError } : {}),
     });
