@@ -351,6 +351,30 @@ export function registerClaudeFindRunRoutes(app: Express): void {
     if (/(^|\.)airbnb\./.test(host)) {
       return res.status(422).json({ error: "Airbnb links can never be attached — find the unit's VRBO/Booking.com/direct page" });
     }
+    // costPaid is REQUIRED, > 0 — this endpoint used to silently default a
+    // missing price to "0". The agent hill-climbs against error messages
+    // (proven in a real run: it iterated {} → {unitId} → {unitId,listingUrl} →
+    // {unitId,airbnbListingUrl} until a 200), so a field the server accepts
+    // when absent gets DROPPED. That produced $0 buy-ins even though the agent
+    // had found real prices — and a $0 costPaid breaks the profit calc and the
+    // checkout 15% guard, which anchor on it. Make it as hard a requirement as
+    // unitId and the URL, so the agent's iteration lands on INCLUDING it.
+    const rawCost = (body as Record<string, unknown>).costPaid;
+    // Tolerate currency formatting ("$1,400.00", "1,400") — the agent's own
+    // narration writes prices that way, and rejecting a REAL price it did send
+    // is worse than accepting a formatted one. Strip $, commas, whitespace.
+    const costPaid = typeof rawCost === "number"
+      ? rawCost
+      : typeof rawCost === "string"
+        ? Number(rawCost.replace(/[$,\s]/g, ""))
+        : NaN;
+    if (!Number.isFinite(costPaid) || costPaid <= 0) {
+      return res.status(422).json({
+        error:
+          "costPaid is required and must be the unit's total stay cost in dollars, greater than 0 "
+          + "(e.g. 1400.00). It anchors the profit and 15% checkout guards — a buy-in with no price is invalid.",
+      });
+    }
     const forwarded = {
       propertyId: run.propertyId,
       propertyName: run.propertyName,
@@ -358,7 +382,7 @@ export function registerClaudeFindRunRoutes(app: Express): void {
       unitLabel: typeof body.unitLabel === "string" ? body.unitLabel.slice(0, 200) : unitId,
       checkIn: run.checkIn,
       checkOut: run.checkOut,
-      costPaid: typeof body.costPaid === "string" || typeof body.costPaid === "number" ? String(body.costPaid) : "0",
+      costPaid: costPaid.toFixed(2),
       airbnbListingUrl: listingUrl,
       unitAddress: typeof body.unitAddress === "string" ? body.unitAddress.slice(0, 400) : null,
       managementCompany: typeof body.managementCompany === "string" ? body.managementCompany.slice(0, 200) : null,
