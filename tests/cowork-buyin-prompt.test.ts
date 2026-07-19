@@ -1142,7 +1142,9 @@ check(
   bulk.includes("AFTER THE LAST RESERVATION — final report, tidy up, done signal") && bulk.includes("ONE consolidated report"),
 );
 check("bulk: done-signal success example counts the whole batch", bulk.includes("all 2 reservations have their buy-in units attached"));
-check("bulk: batch cap constant is 8", COWORK_BULK_FIND_MAX === 8);
+// Raised 8 -> 12 on 2026-07-19: a FIND-only batch is unattended, so another
+// reservation only costs a longer run nobody is waiting on.
+check("bulk find cap is 12 (find-only batches are unattended)", COWORK_BULK_FIND_MAX === 12);
 
 const bulkCombined = buildCoworkBulkFindAndPreparePrompt([baseInput, bulkResB]);
 check(
@@ -1180,11 +1182,11 @@ check(
   const schemaMaintenanceSrc = fs.readFileSync(path.join(here, "../server/schema-maintenance.ts"), "utf8");
   check(
     "bookings: Auto Cowork bulk button exists and builds the batch via the shared builder",
-    bookingsSrc.includes('data-testid="button-run-bulk-cowork"') && bookingsSrc.includes("buildCoworkBulkFindAndPreparePrompt(inputs)"),
+    bookingsSrc.includes('data-testid="button-run-bulk-cowork"') && bookingsSrc.includes("buildCoworkBulkBuyInPrompt(inputs)"),
   );
   check(
     "bookings: the batch launches through the durable shared Cowork launcher",
-    /const result = await launchCoworkPrompt\(prompt, \{ kind: "bulk-find-and-prepare" \}\)/.test(bookingsSrc),
+    /const result = await launchCoworkPrompt\(prompt, \{ kind: "bulk-find" \}\)/.test(bookingsSrc),
   );
   check(
     "bookings: Cowork bulk fills OPEN slots only (never detaches)",

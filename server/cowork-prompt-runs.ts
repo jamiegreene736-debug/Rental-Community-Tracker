@@ -25,7 +25,19 @@ const RUN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[
 // open EMPTY. The relay is that overflow path. Deliberately NOT named
 // "find-and-prepare": that kind was retired in the 2026-07-19 find/checkout
 // split and tests/cowork-launch.test.ts asserts the string is gone.
-const ALLOWED_KINDS = new Set(["find", "find-and-prepare", "prepare-checkout", "bulk-find-and-prepare"]);
+// "bulk-find" (the batch search) and "bulk-prepare-checkout" (the batch card
+// sitting) are the 2026-07-19 split of what used to be one combined batch.
+// "bulk-find-and-prepare" and "find-and-prepare" are RETAINED deliberately, not
+// dead weight: a relay row minted before the deploy can still be fetched after
+// it, and dropping the kind would 400 a run the operator already launched.
+const ALLOWED_KINDS = new Set([
+  "find",
+  "find-and-prepare",
+  "prepare-checkout",
+  "bulk-find",
+  "bulk-prepare-checkout",
+  "bulk-find-and-prepare",
+]);
 
 type PortalSession = { role?: string } | undefined;
 
@@ -107,8 +119,19 @@ export function registerCoworkPromptRunRoutes(app: Express): void {
 
   app.post("/api/cowork/checkout-claims/reset", async (req, res) => {
     if (!requireOperator(res)) return;
+    // Match the sibling claim route's content-type guard. `=== true` below
+    // already rejects a string "true", but this endpoint can now clear a unit
+    // that is waiting for the operator's card, so it should be at least as
+    // strict as the one that merely takes a lane.
+    if (!req.is("application/json")) {
+      return res.status(415).json({ error: "Content-Type must be application/json" });
+    }
     try {
-      await resetBuyInCheckoutClaim(req.body?.reservationId, req.body?.buyInId);
+      // allowAwaitingPayment is the stranded-handoff escape hatch and must be
+      // asked for explicitly by the operator's confirm — never defaulted on.
+      await resetBuyInCheckoutClaim(req.body?.reservationId, req.body?.buyInId, {
+        allowAwaitingPayment: req.body?.allowAwaitingPayment === true,
+      });
       return res.json({ ok: true, bookingStatus: "failed" });
     } catch (error) {
       return claimErrorResponse(res, error);

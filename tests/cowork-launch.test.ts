@@ -192,8 +192,9 @@ check(
   // hook, so the call-site count is 2 (hook + bulk) rather than 6 — the guard
   // is that those are the ONLY two, and that all five rows go through the hook.
   check(
-    "every Cowork action launches through launchCoworkPrompt (hook + bulk are the only call sites)",
-    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 2,
+    // 3 = the shared row hook + bulk find + bulk checkout (2026-07-19 split).
+    "every Cowork action launches through launchCoworkPrompt (hook + the two bulk runs are the only call sites)",
+    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 3,
     (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length,
   );
   check(
@@ -221,12 +222,30 @@ check(
     bookingsSrc.includes("buildCoworkDeepLink(") && !/claude:\/\//.test(bookingsSrc.replace(/\/\/[^\n]*/g, "")),
   );
   check(
-    "row find is FIND-ONLY; checkout + bulk are their own Cowork prompts",
+    // 2026-07-19: BULK split too. The bulk button used to send the combined
+    // find+checkout brief, which stopped for the operator's card on every unit
+    // and made the queue impossible to walk away from. Find and checkout are
+    // now separate runs at BOTH the row and the batch level.
+    "find and checkout are separate Cowork prompts at BOTH the row and the batch level",
     bookingsSrc.includes("buildCoworkBuyInPrompt(promptInput)")
       && !bookingsSrc.includes('kind: "find-and-prepare"')
       && bookingsSrc.includes('kind: "prepare-checkout"')
-      && bookingsSrc.includes('kind: "bulk-find-and-prepare"')
-      && bookingsSrc.includes("buildCoworkBulkFindAndPreparePrompt(inputs)"),
+      && bookingsSrc.includes('kind: "bulk-find"')
+      && bookingsSrc.includes('kind: "bulk-prepare-checkout"')
+      && bookingsSrc.includes("buildCoworkBulkBuyInPrompt(inputs)")
+      && bookingsSrc.includes("buildCoworkBulkCheckoutPrompt(inputs)"),
+  );
+  check(
+    // The regression that would silently restore ~16 card interruptions per
+    // batch and undo the whole point of the 2026-07-19 change. Compares CODE
+    // only — bookings.tsx carries a load-bearing comment naming the retired
+    // builder precisely to warn against re-wiring it.
+    "the bulk button must NEVER be re-pointed at the combined find+prepare brief",
+    (() => {
+      const codeOnly = bookingsSrc.replace(/\/\/[^\n]*/g, "");
+      return !codeOnly.includes("buildCoworkBulkFindAndPreparePrompt")
+        && !codeOnly.includes('kind: "bulk-find-and-prepare"');
+    })(),
   );
 
   // ── No modal on the happy path (operator directive 2026-07-19) ────────────
@@ -244,8 +263,13 @@ check(
       && bookingsSrc.includes("CoworkFallbackContext.Provider"),
   );
   check(
+    // Every launch path must consult the shared gate — asserted as "at least
+    // one per launch site" rather than an exact count, because the two bulk
+    // runs legitimately call it twice each (once to pick the shortened
+    // fallback TTL, once to open the dialog).
     "the fallback opens ONLY through the shared, un-reduced gate",
-    (bookingsSrc.match(/coworkLaunchNeedsFallback\(/g) ?? []).length === 2, // hook + bulk
+    (bookingsSrc.match(/coworkLaunchNeedsFallback\(/g) ?? []).length
+      >= (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length,
     (bookingsSrc.match(/coworkLaunchNeedsFallback\(/g) ?? []).length,
   );
   check(
