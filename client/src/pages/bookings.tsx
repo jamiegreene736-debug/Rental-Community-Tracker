@@ -34,7 +34,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick, Download,
-  ShieldCheck, Paperclip, X, Minimize2, Plus, Send, Ban, Sparkles, Reply,
+  ShieldCheck, Paperclip, X, Minimize2, Plus, Send, Ban, Sparkles, Reply, AlertTriangle,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -58,7 +58,16 @@ import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
 import { buildCoworkBulkBuyInPrompt, buildCoworkBulkCheckoutPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, COWORK_BULK_CHECKOUT_MAX, type CoworkBuyInPromptInput, type CoworkCheckoutPromptInput } from "@shared/cowork-buyin-prompt";
 import { buildCoworkDeepLink, buildCoworkPromptRunBootstrap, coworkLaunchNeedsFallback, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
-import { ACTIVE_CLAUDE_FIND_RUN_STATUSES, claudeFindRunStatusLabel, type ClaudeFindRunClientView } from "@shared/claude-find-run";
+import { ACTIVE_CLAUDE_FIND_RUN_STATUSES, claudeFindRunStatusLabel, type ClaudeFindRunClientView, type ClaudeFindRunHistoryEntry } from "@shared/claude-find-run";
+import {
+  classifyFindRunEvent,
+  findRunGuestVerdictBadge,
+  formatFindRunDuration,
+  isFinalReportEcho,
+  parseFindRunReport,
+  type ReportBlock,
+  type ReportInlineSpan,
+} from "@shared/claude-find-run-display";
 import { buyInSlotSignature, buyInSlotSignatureMap, type BuyInSlotStatusRow } from "@shared/buy-in-slot-signature";
 import {
   COWORK_DISPATCH_STORAGE_KEY,
@@ -2517,7 +2526,7 @@ async function launchCoworkPrompt(
 const claudeFindRunStatusKey = (reservationId: string) => ["/api/claude-find-runs/status", reservationId];
 
 function useClaudeFindRun(reservationId: string) {
-  return useQuery<{ runs: Record<string, ClaudeFindRunClientView>; disabled?: boolean }>({
+  return useQuery<{ runs: Record<string, ClaudeFindRunClientView>; history?: Record<string, ClaudeFindRunHistoryEntry[]>; disabled?: boolean }>({
     queryKey: claudeFindRunStatusKey(reservationId),
     queryFn: async () => {
       const res = await apiRequest("POST", "/api/claude-find-runs/status", { reservationIds: [reservationId] });
@@ -2609,7 +2618,120 @@ function HeadlessFindRunButton({
   );
 }
 
-function HeadlessFindRunPanel({ reservationId }: { reservationId: string }) {
+// Render the agent's markdown report as REAL elements (headings / bold /
+// tables / lists), parsed by the pure parseFindRunReport. No HTML string is
+// built, so agent-authored text can never inject markup.
+function ReportInline({ spans }: { spans: ReportInlineSpan[] }) {
+  return (
+    <>
+      {spans.map((s, i) => (s.bold ? <strong key={i} className="font-semibold text-foreground">{s.text}</strong> : <span key={i}>{s.text}</span>))}
+    </>
+  );
+}
+function FindRunReport({ markdown }: { markdown: string }) {
+  const blocks = useMemo(() => parseFindRunReport(markdown), [markdown]);
+  return (
+    <div className="space-y-2 text-[12px] leading-relaxed text-foreground/90" data-testid="findrun-report-rendered">
+      {blocks.map((block: ReportBlock, i) => {
+        if (block.type === "hr") return <hr key={i} className="border-border/70" />;
+        if (block.type === "heading") {
+          const size = block.level <= 2 ? "text-[13px] font-semibold" : "text-[12px] font-semibold text-foreground/80";
+          return <div key={i} className={`${size} mt-1`}><ReportInline spans={block.spans} /></div>;
+        }
+        if (block.type === "list") {
+          return (
+            <ul key={i} className="ml-4 list-disc space-y-0.5">
+              {block.items.map((item, j) => <li key={j}><ReportInline spans={item} /></li>)}
+            </ul>
+          );
+        }
+        if (block.type === "table") {
+          return (
+            <div key={i} className="overflow-x-auto">
+              <table className="w-full border-collapse text-[11px]">
+                {block.header.length > 0 && (
+                  <thead>
+                    <tr className="border-b border-border">
+                      {block.header.map((cell, j) => <th key={j} className="px-2 py-1 text-left font-semibold"><ReportInline spans={cell} /></th>)}
+                    </tr>
+                  </thead>
+                )}
+                <tbody>
+                  {block.rows.map((row, r) => (
+                    <tr key={r} className="border-b border-border/40">
+                      {row.map((cell, c) => <td key={c} className="px-2 py-1 align-top"><ReportInline spans={cell} /></td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+        return <p key={i}><ReportInline spans={block.spans} /></p>;
+      })}
+    </div>
+  );
+}
+
+const FIND_RUN_TONE: Record<string, string> = {
+  good: "text-emerald-700 bg-emerald-50 border-emerald-200 dark:text-emerald-300 dark:bg-emerald-950/40 dark:border-emerald-800",
+  attention: "text-amber-800 bg-amber-50 border-amber-300 dark:text-amber-300 dark:bg-amber-950/40 dark:border-amber-700",
+  bad: "text-red-700 bg-red-50 border-red-200 dark:text-red-300 dark:bg-red-950/40 dark:border-red-800",
+  live: "text-sky-700 bg-sky-50 border-sky-200 dark:text-sky-300 dark:bg-sky-950/40 dark:border-sky-800",
+};
+
+// One typed activity line. Milestones (buy-in created / attached / verdict
+// recorded) read as section markers; browse chatter is dimmed; the agent's own
+// notes are quoted.
+function FindRunEventRow({ event }: { event: ClaudeFindRunClientView["events"][number] }) {
+  const display = classifyFindRunEvent(event);
+  const time = <span className="tabular-nums text-muted-foreground/70">{event.at.slice(11, 16)}</span>;
+  if (display.isMilestone) {
+    return (
+      <div className="flex items-center gap-1.5 border-t border-emerald-200/60 pt-1 font-medium text-emerald-700 dark:border-emerald-800/60 dark:text-emerald-400">
+        <CheckCircle2 className="h-3 w-3 shrink-0" />
+        <span className="flex-1">{event.text}</span>
+        {time}
+      </div>
+    );
+  }
+  if (display.group === "error") {
+    return <div className="flex items-start gap-1.5 text-red-700 dark:text-red-400"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" /><span className="flex-1">{event.text}</span>{time}</div>;
+  }
+  if (display.group === "note") {
+    return <div className="flex items-start gap-1.5 border-l-2 border-border pl-2 text-foreground/80"><span className="flex-1 italic">{event.text}</span>{time}</div>;
+  }
+  const Icon = display.group === "search" ? Search : display.group === "browse" ? Globe : Clock3;
+  return (
+    <div className={`flex items-center gap-1.5 ${display.dim ? "text-muted-foreground/60" : "text-muted-foreground"}`}>
+      <Icon className="h-3 w-3 shrink-0" />
+      <span className="flex-1 truncate">{event.text}</span>
+      {time}
+    </div>
+  );
+}
+
+function findRunHistoryTone(status: string): string {
+  if (status === "completed") return "text-emerald-700 dark:text-emerald-400";
+  if (status === "failed") return "text-red-700 dark:text-red-400";
+  if (status === "cancelled") return "text-muted-foreground";
+  return "text-sky-700 dark:text-sky-400";
+}
+
+interface HeadlessFindRunAttachedUnit {
+  unitLabel: string;
+  costPaid: number | null;
+  guestHappyVerdict: string | null;
+  listingUrl: string | null;
+}
+
+function HeadlessFindRunPanel({
+  reservationId,
+  attachedUnits = [],
+}: {
+  reservationId: string;
+  attachedUnits?: HeadlessFindRunAttachedUnit[];
+}) {
   const { toast } = useToast();
   const { data } = useClaudeFindRun(reservationId);
   const [showAllEvents, setShowAllEvents] = useState(false);
@@ -2624,30 +2746,45 @@ function HeadlessFindRunPanel({ reservationId }: { reservationId: string }) {
     },
   });
   const run = data?.runs?.[reservationId];
+  const history = data?.history?.[reservationId] ?? [];
   if (!run) return null;
   const badge = claudeFindRunStatusLabel(run.status);
   const active = ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status);
-  const events = showAllEvents ? run.events : run.events.slice(-8);
-  const toneClass =
-    badge.tone === "good"
-      ? "text-emerald-700 bg-emerald-50 border-emerald-200"
-      : badge.tone === "attention"
-      ? "text-amber-800 bg-amber-50 border-amber-300"
-      : badge.tone === "bad"
-      ? "text-red-700 bg-red-50 border-red-200"
-      : "text-sky-700 bg-sky-50 border-sky-200";
+  const toneClass = FIND_RUN_TONE[badge.tone] ?? FIND_RUN_TONE.live;
+  const duration = formatFindRunDuration(run.createdAt, run.endedAt);
+  const started = run.createdAt.slice(11, 16);
+
+  // The final report is captured as a note event too — drop that echo so it
+  // isn't shown twice (once truncated in the feed, once in full below).
+  const feedEvents = run.events.filter((e) => !isFinalReportEcho(e, run.report));
+  const events = showAllEvents ? feedEvents : feedEvents.slice(-10);
+  const hiddenCount = feedEvents.length - events.length;
+
+  // Outcome: what actually landed on the reservation (from the attached buy-ins).
+  const priced = attachedUnits.filter((u) => (u.costPaid ?? 0) > 0);
+  const total = priced.reduce((s, u) => s + (u.costPaid ?? 0), 0);
+  const verdictRaw = attachedUnits.find((u) => u.guestHappyVerdict)?.guestHappyVerdict ?? null;
+  const verdict = findRunGuestVerdictBadge(verdictRaw);
+  const money = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+
   return (
     <div
-      className="mt-2 rounded border border-border bg-muted/30 px-3 py-2 text-xs"
+      className="mt-2 overflow-hidden rounded-lg border border-border bg-card text-xs shadow-sm"
       data-testid={`headless-find-run-panel-${reservationId}`}
     >
-      <div className="flex flex-wrap items-center gap-2">
-        <Zap className="h-3.5 w-3.5 text-sky-600" />
-        <span className="font-medium">Headless find-run</span>
-        <span className={`rounded border px-1.5 py-0.5 text-[11px] ${toneClass}`}>
+      {/* Header */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
+        <Zap className="h-4 w-4 text-sky-600" />
+        <span className="font-semibold">Headless find-run</span>
+        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${toneClass}`}>
           {active && <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />}
           {badge.label}
         </span>
+        <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
+          <Clock3 className="h-3 w-3" />
+          {active ? `started ${started}` : `${started}${duration ? ` · ${duration}` : ""}`}
+        </span>
+        <span className="flex-1" />
         {active && (
           <Button
             type="button"
@@ -2655,10 +2792,7 @@ function HeadlessFindRunPanel({ reservationId }: { reservationId: string }) {
             variant="ghost"
             className="h-6 px-1.5 text-[11px] text-red-700"
             disabled={cancel.isPending}
-            onClick={(e) => {
-              e.stopPropagation();
-              cancel.mutate(run.id);
-            }}
+            onClick={(e) => { e.stopPropagation(); cancel.mutate(run.id); }}
             data-testid={`button-headless-find-cancel-${reservationId}`}
           >
             <Square className="mr-1 h-3 w-3" />
@@ -2666,42 +2800,98 @@ function HeadlessFindRunPanel({ reservationId }: { reservationId: string }) {
           </Button>
         )}
       </div>
-      {run.status === "attention" && run.attentionReason && (
-        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-amber-900">
-          ⚠ The runner needs you: {run.attentionReason} — solve it in the runner's Chrome window on the Mac; it
-          resumes on its own.
-        </div>
-      )}
-      {run.error && <div className="mt-2 text-red-700">✕ {run.error}</div>}
-      {events.length > 0 && (
-        <div className="mt-2 space-y-0.5 font-mono text-[11px] text-muted-foreground">
-          {run.events.length > events.length && (
-            <button
-              type="button"
-              className="text-sky-700 underline"
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowAllEvents(true);
-              }}
-            >
-              Show all {run.events.length} log lines{run.droppedEvents > 0 ? ` (${run.droppedEvents} older dropped)` : ""}
-            </button>
-          )}
-          {events.map((event, i) => (
-            <div key={`${event.at}-${i}`}>
-              <span className="opacity-60">{event.at.slice(11, 16)}</span> · {event.text}
+
+      <div className="space-y-2 px-3 py-2">
+        {/* Outcome strip — what actually landed */}
+        {(priced.length > 0 || verdict) && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-emerald-200 bg-emerald-50/60 px-2.5 py-1.5 dark:border-emerald-900 dark:bg-emerald-950/30" data-testid={`findrun-outcome-${reservationId}`}>
+            {priced.length > 0 && (
+              <span className="flex items-center gap-1 font-medium text-emerald-800 dark:text-emerald-300">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                {priced.length} unit{priced.length === 1 ? "" : "s"} attached
+                <span className="font-normal text-emerald-700/80 dark:text-emerald-400/80">
+                  · {priced.map((u) => money(u.costPaid ?? 0)).join(" + ")}
+                  {priced.length > 1 ? ` = ${money(total)}` : ""}
+                </span>
+              </span>
+            )}
+            {verdict && (
+              <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${FIND_RUN_TONE[verdict.tone]}`}>
+                {verdict.icon === "happy" ? <Star className="h-3 w-3" /> : verdict.icon === "concerns" ? <AlertTriangle className="h-3 w-3" /> : <X className="h-3 w-3" />}
+                {verdict.label}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Attention */}
+        {run.status === "attention" && run.attentionReason && (
+          <div className="flex items-start gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>The runner needs you: {run.attentionReason} — solve it in the runner&apos;s Chrome window on the Mac; it resumes on its own.</span>
+          </div>
+        )}
+        {run.error && (
+          <div className="flex items-start gap-1.5 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{run.error}</span>
+          </div>
+        )}
+
+        {/* Activity feed — typed */}
+        {feedEvents.length > 0 && (
+          <details className="group" open>
+            <summary className="flex cursor-pointer items-center gap-1 text-[11px] font-medium text-muted-foreground">
+              <span className="transition group-open:rotate-90">▸</span> Activity ({feedEvents.length})
+            </summary>
+            <div className="mt-1.5 space-y-1">
+              {hiddenCount > 0 && (
+                <button
+                  type="button"
+                  className="text-[11px] text-sky-700 underline dark:text-sky-400"
+                  onClick={(e) => { e.stopPropagation(); setShowAllEvents(true); }}
+                >
+                  Show {hiddenCount} earlier step{hiddenCount === 1 ? "" : "s"}{run.droppedEvents > 0 ? ` (+${run.droppedEvents} dropped)` : ""}
+                </button>
+              )}
+              {events.map((event, i) => <FindRunEventRow key={`${event.at}-${i}`} event={event} />)}
             </div>
-          ))}
-        </div>
-      )}
-      {run.report && (
-        <details className="mt-2" open={!active}>
-          <summary className="cursor-pointer font-medium text-emerald-800">Final report</summary>
-          <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[11px]">
-            {run.report}
-          </pre>
-        </details>
-      )}
+          </details>
+        )}
+
+        {/* Final report — rendered readably */}
+        {run.report && (
+          <details open={!active}>
+            <summary className="cursor-pointer text-[11px] font-medium text-emerald-800 dark:text-emerald-400">Final report</summary>
+            <div className="mt-1.5 max-h-96 overflow-auto rounded-md border border-border bg-background p-3">
+              <FindRunReport markdown={run.report} />
+            </div>
+          </details>
+        )}
+
+        {/* Earlier runs — each prior session, clearly separated */}
+        {history.length > 0 && (
+          <details>
+            <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground" data-testid={`findrun-history-${reservationId}`}>
+              Earlier runs ({history.length})
+            </summary>
+            <div className="mt-1.5 divide-y divide-border/50 rounded-md border border-border/60">
+              {history.map((h) => {
+                const hb = claudeFindRunStatusLabel(h.status);
+                const hDur = formatFindRunDuration(h.createdAt, h.endedAt);
+                const when = new Date(h.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+                return (
+                  <div key={h.id} className="flex items-center gap-2 px-2 py-1 text-[11px]">
+                    <span className={`font-medium ${findRunHistoryTone(h.status)}`}>{hb.label}</span>
+                    <span className="text-muted-foreground">{when}</span>
+                    {hDur && <span className="text-muted-foreground/70">· {hDur}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </details>
+        )}
+      </div>
     </div>
   );
 }
@@ -12603,7 +12793,17 @@ export default function Bookings() {
                             mounted (self-hides with no run): the empty-slots
                             box above disappears the moment the run's attaches
                             land — exactly when the report matters most. */}
-                        <HeadlessFindRunPanel reservationId={r._id} />
+                        <HeadlessFindRunPanel
+                          reservationId={r._id}
+                          attachedUnits={r.slots
+                            .filter((s): s is SlotInfo & { buyIn: BuyIn } => Boolean(s.buyIn))
+                            .map((s) => ({
+                              unitLabel: s.buyIn.unitLabel || s.unitLabel,
+                              costPaid: s.buyIn.costPaid != null ? parseFloat(String(s.buyIn.costPaid)) : null,
+                              guestHappyVerdict: s.buyIn.guestHappyVerdict ?? null,
+                              listingUrl: s.buyIn.airbnbListingUrl ?? null,
+                            }))}
+                        />
                         {expansionJobs[r._id] && (
                           <CityExpansionJobPoller
                             jobId={expansionJobs[r._id].jobId}

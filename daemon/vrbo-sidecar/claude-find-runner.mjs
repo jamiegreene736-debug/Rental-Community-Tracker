@@ -215,9 +215,10 @@ export function describeToolUse(name, input) {
     const cmd = input.command.replace(/\s+/g, " ").trim();
     // Show the endpoint, never the payload — costs/addresses belong in the
     // report, not the action feed.
-    const endpoint = /claude-find-runs\/agent\/[^/\s"']+\/(buy-ins|attach)/.exec(cmd)?.[1];
+    const endpoint = /claude-find-runs\/agent\/[^/\s"']+\/(buy-ins|attach|guest-happy)/.exec(cmd)?.[1];
     if (endpoint === "buy-ins") return "Creating a buy-in record via the portal";
     if (endpoint === "attach") return "Attaching a buy-in to the reservation";
+    if (endpoint === "guest-happy") return "Recording the guest-expectation verdict";
     return `Running: ${cmd.slice(0, 120)}`;
   }
   const short = tool.replace(/^mcp__[^_]+(?:_[^_]+)*__/, "").replace(/_/g, " ");

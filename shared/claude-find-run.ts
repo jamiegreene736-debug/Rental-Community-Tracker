@@ -264,6 +264,38 @@ export interface ClaudeFindRunClientView {
   droppedEvents: number;
 }
 
+/**
+ * A prior run for the same reservation, shown as a collapsed "earlier run" row
+ * so each session is visible and separate — WITHOUT the event/report payload
+ * (the status endpoint fans out across every visible booking; a full history
+ * per row would bloat it). id/status/timing are enough to distinguish sessions.
+ */
+export interface ClaudeFindRunHistoryEntry {
+  id: string;
+  status: ClaudeFindRunStatus;
+  createdAt: string;
+  endedAt: string | null;
+}
+
+/** Newest-first prior runs for a reservation, excluding the latest (which the
+ *  status view carries in full). Capped so the payload stays small. */
+export function claudeFindRunHistoryForReservation(
+  runs: ClaudeFindRunRecord[],
+  reservationId: string,
+  limit = 8,
+): ClaudeFindRunHistoryEntry[] {
+  const mine = runs
+    .filter((r) => r.reservationId === reservationId)
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  // mine[0] is the latest — the status view already carries it in full.
+  return mine.slice(1, 1 + limit).map((r) => ({
+    id: r.id,
+    status: r.status,
+    createdAt: r.createdAt,
+    endedAt: r.endedAt,
+  }));
+}
+
 export function clientClaudeFindRunView(run: ClaudeFindRunRecord): ClaudeFindRunClientView {
   return {
     id: run.id,
@@ -416,9 +448,10 @@ function describeClaudeToolUse(name: unknown, input: any): string {
     const cmd = input.command.replace(/\s+/g, " ").trim();
     // The agent's Bash is curl-only (attach calls). Show the endpoint, never
     // the payload — costPaid etc. belong in the report, not the action feed.
-    const endpoint = /claude-find-runs\/agent\/[^/\s"']+\/(buy-ins|attach)/.exec(cmd)?.[1];
+    const endpoint = /claude-find-runs\/agent\/[^/\s"']+\/(buy-ins|attach|guest-happy)/.exec(cmd)?.[1];
     if (endpoint === "buy-ins") return "Creating a buy-in record via the portal";
     if (endpoint === "attach") return "Attaching a buy-in to the reservation";
+    if (endpoint === "guest-happy") return "Recording the guest-expectation verdict";
     return `Running: ${cmd.slice(0, 120)}`;
   }
   const short = tool.replace(/^mcp__[^_]+(?:_[^_]+)*__/, "").replace(/_/g, " ");
