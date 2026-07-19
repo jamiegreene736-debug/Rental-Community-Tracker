@@ -23,6 +23,7 @@ import {
   activeClaudeFindRunForReservation,
   appendClaudeFindRunEvents,
   applyClaudeFindRunUpdate,
+  browserMcpFailureFromInit,
   claimNextClaudeFindRun,
   classifyClaudeStreamLine,
   claudeFindRunStatusLabel,
@@ -37,6 +38,7 @@ import {
 import { buildCoworkBuyInPrompt, type CoworkBuyInPromptInput } from "../shared/cowork-buyin-prompt";
 // The daemon runner is plain node .mjs — import its twins directly.
 import {
+  browserMcpFailure as runnerBrowserMcpFailure,
   classifyStreamLine as runnerClassify,
   scanMarkers as runnerScanMarkers,
 } from "../daemon/vrbo-sidecar/claude-find-runner.mjs";
@@ -284,6 +286,119 @@ const FIXTURE_LINES = [
     return JSON.stringify(a) === JSON.stringify(b);
   });
   check("runner .mjs and shared TS classification are behaviorally identical", twinMatches);
+}
+
+// ── The browser guard (2026-07-19) ──────────────────────────────────────────
+// A REAL run came up with chrome-devtools-mcp "failed", lost every browser
+// tool, and kept going on WebSearch alone — announcing "ATTENTION: browser
+// tools missing … I will … attach the best-qualified listings I can verify".
+// It was on its way to attaching units it had never opened, and the only trace
+// was prose inside a JSONL file on the Mac. A browser-less find-run is not a
+// degraded run, it is the wrong run.
+{
+  const init = (servers: unknown, extra: Record<string, unknown> = {}) => JSON.stringify({
+    type: "system", subtype: "init", model: "claude-sonnet-4-6", tools: ["WebSearch"],
+    mcp_servers: servers, ...extra,
+  });
+
+  check(
+    "chrome connected → no failure (the happy path stays silent)",
+    browserMcpFailureFromInit(init([{ name: "chrome", status: "connected" }])) === null,
+  );
+  check(
+    // The exact shape observed on the live run.
+    "chrome failed → run-ending error naming the cause",
+    (() => {
+      const err = browserMcpFailureFromInit(init([
+        { name: "railway-mcp-server", status: "failed" },
+        { name: "chrome", status: "failed" },
+      ]));
+      return typeof err === "string"
+        && /browser did not attach/i.test(err)
+        && /could not verify/i.test(err);
+    })(),
+  );
+  check(
+    "chrome missing entirely → also a failure (absence is not success)",
+    typeof browserMcpFailureFromInit(init([{ name: "railway-mcp-server", status: "connected" }])) === "string",
+  );
+  check(
+    "no mcp_servers field at all → failure, never assumed healthy",
+    typeof browserMcpFailureFromInit(JSON.stringify({ type: "system", subtype: "init", model: "m", tools: [] })) === "string",
+  );
+  check(
+    "a connected chrome alongside other FAILED servers is still fine",
+    browserMcpFailureFromInit(init([
+      { name: "railway-mcp-server", status: "failed" },
+      { name: "chrome", status: "connected" },
+    ])) === null,
+  );
+
+  // Only the init line decides this — never a later line.
+  check(
+    "non-init lines are ignored",
+    browserMcpFailureFromInit(JSON.stringify({ type: "assistant", message: { content: [] } })) === null
+      && browserMcpFailureFromInit(JSON.stringify({ type: "result", subtype: "success" })) === null
+      && browserMcpFailureFromInit("not json") === null,
+  );
+
+  // EQUIVALENCE LOCK — the daemon runs the .mjs copy, so a fix applied to only
+  // one implementation would leave the live Mac silently unguarded.
+  const CASES = [
+    init([{ name: "chrome", status: "connected" }]),
+    init([{ name: "chrome", status: "failed" }]),
+    init([{ name: "railway-mcp-server", status: "failed" }, { name: "chrome", status: "failed" }]),
+    init([]),
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "assistant", message: { content: [] } }),
+    "not json",
+  ];
+  check(
+    "runner .mjs and shared TS browser guard are behaviorally identical",
+    CASES.every((l) => runnerBrowserMcpFailure(l) === browserMcpFailureFromInit(l)),
+  );
+}
+
+// ── Runner wiring: the guard must actually END the run ───────────────────────
+{
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const runnerSrc = fs.readFileSync(path.join(here, "../daemon/vrbo-sidecar/claude-find-runner.mjs"), "utf8");
+
+  check(
+    "the guard kills the CLI as soon as the init line shows no browser",
+    /const failure = browserMcpFailure\(line\);/.test(runnerSrc)
+      && /browserFailure = failure;/.test(runnerSrc)
+      && /child\.kill\("SIGTERM"\)/.test(runnerSrc),
+  );
+  check(
+    // A browser-less run can still emit subtype:"success" full of
+    // web-searched guesses; that must never be recorded as a completed find.
+    "a browser failure outranks the success/result branches in the terminal classifier",
+    (() => {
+      const term = runnerSrc.slice(runnerSrc.indexOf("if (!terminalPosted)"));
+      const guard = term.indexOf("} else if (browserFailure) {");
+      const success = term.indexOf("sawResult && resultReport !== null");
+      return guard > -1 && success > -1 && guard < success;
+    })(),
+  );
+  check(
+    "the browser failure is reported as FAILED, never completed",
+    /browserFailure[\s\S]{0,400}?terminal: \{ status: "failed"/.test(runnerSrc),
+  );
+  check(
+    // "@latest" forces a registry round-trip on EVERY run; that is what blew
+    // the MCP startup window and produced the browser-less run.
+    "chrome-devtools-mcp is version-PINNED, never @latest",
+    runnerSrc.includes("chrome-devtools-mcp@1.6.0")
+      && !runnerSrc.includes("chrome-devtools-mcp@latest"),
+  );
+  check(
+    "the run loads ONLY its own MCP config (no user-scope servers)",
+    runnerSrc.includes('"--strict-mcp-config"'),
+  );
 }
 {
   const scan = runnerScanMarkers("working…\nATTENTION: bot check on vrbo.com — unit A\nstill waiting");

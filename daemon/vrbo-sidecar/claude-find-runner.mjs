@@ -55,6 +55,10 @@ const CHROME_BIN = process.env.CLAUDE_FIND_RUN_CHROME_BIN
 // the Mac is reachable. Do not add a bare "Bash".
 const ALLOWED_TOOLS = ["mcp__chrome", "Bash(curl:*)", "WebSearch", "WebFetch"];
 
+// PINNED chrome-devtools-mcp — see the mcp-config comment below for why this
+// must not go back to "@latest".
+const CHROME_MCP_PKG = process.env.CLAUDE_FIND_RUN_CHROME_MCP || "chrome-devtools-mcp@1.6.0";
+
 // Must match shared/claude-find-run.ts marker constants — drift-locked by
 // tests/claude-find-run.test.ts.
 const ATTENTION_MARKER = "ATTENTION:";
@@ -104,6 +108,54 @@ export function classifyStreamLine(rawLine, nowIso) {
     return { at: nowIso, kind: "status", text: `Runner ${outcome}${mins}.` };
   }
   return null;
+}
+
+/**
+ * Did the run come up WITHOUT its browser?
+ *
+ * The CLI's `system/init` line reports every MCP server it managed to start.
+ * If chrome-devtools-mcp isn't `connected`, the agent has no way to open a
+ * listing, read a calendar, or look at photos — it silently falls back to
+ * WebSearch/WebFetch and keeps going. That happened on a real run
+ * (2026-07-19): the agent itself said "ATTENTION: browser tools missing … I
+ * will … attach the best-qualified listings I can verify" and was on its way
+ * to attaching units it could not verify. Nothing stopped it, and the only
+ * trace was a line of prose inside a JSONL file on the Mac.
+ *
+ * A find-run without a browser is not a degraded run, it is the WRONG run —
+ * so this returns the operator-facing error that ends it. Returns null for
+ * any non-init line and for a healthy init.
+ *
+ * SCOPE (verified against the real CLI, 2026-07-19): "connected" means the MCP
+ * PROCESS started and handshook — not that Chrome is reachable. Pointing the
+ * config at a dead port still reports "connected". That is fine: a reachable-
+ * but-broken browser makes every mcp__chrome CALL fail loudly, which the agent
+ * and the operator both see. This guard covers the silent case — the tools
+ * never existing at all.
+ *
+ * Keep behaviourally identical to the shared TS twin (equivalence-locked in
+ * tests/claude-find-run.test.ts).
+ */
+export function browserMcpFailure(rawLine) {
+  let parsed;
+  try {
+    parsed = JSON.parse(rawLine);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  if (parsed.type !== "system" || parsed.subtype !== "init") return null;
+  const servers = Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers : [];
+  const chrome = servers.find((s) => s && s.name === "chrome");
+  if (chrome && chrome.status === "connected") return null;
+  const state = !chrome ? "was not started at all" : `reported status "${String(chrome.status)}"`;
+  return (
+    `The runner's browser did not attach — chrome-devtools-mcp ${state}. `
+    + "Without it this run can only web-search, so it cannot open listings, "
+    + "check live availability, or verify photos. Stopped rather than attach "
+    + "units it could not verify. Re-run it; if this repeats, check that the "
+    + "dedicated Chrome is up and that chrome-devtools-mcp is installed."
+  );
 }
 
 export function describeToolUse(name, input) {
@@ -267,12 +319,18 @@ async function handleRun(run) {
   }
 
   // Ad-hoc MCP config: chrome-devtools-mcp attached to the runner Chrome.
+  //
+  // PINNED, not @latest. "@latest" forces npx to resolve against the registry
+  // on every single run, and that round-trip is what blew the CLI's MCP
+  // startup window on 2026-07-19 — the run came up with no browser at all. A
+  // pinned version resolves from the local npx cache once it is warm.
+  // Override with CLAUDE_FIND_RUN_CHROME_MCP (e.g. to test a newer release).
   const mcpConfigPath = path.join(RUNS_DIR, `${run.id}.mcp.json`);
   fs.writeFileSync(
     mcpConfigPath,
     JSON.stringify({
       mcpServers: {
-        chrome: { command: "npx", args: ["-y", "chrome-devtools-mcp@latest", "--browserUrl", `http://127.0.0.1:${CDP_PORT}`] },
+        chrome: { command: "npx", args: ["-y", CHROME_MCP_PKG, "--browserUrl", `http://127.0.0.1:${CDP_PORT}`] },
       },
     }),
   );
@@ -296,6 +354,11 @@ async function handleRun(run) {
       "--model", MODEL,
       "--max-turns", String(MAX_TURNS),
       "--mcp-config", mcpConfigPath,
+      // Only THIS config. Without it the run also loads the operator's
+      // user-scope MCP servers (a real run pulled in "railway-mcp-server"),
+      // which is both unnecessary attack surface for an unattended agent and
+      // extra startup work competing for the same MCP init window.
+      "--strict-mcp-config",
       "--allowedTools", ...ALLOWED_TOOLS,
     ],
     { env: childEnv, cwd: RUNS_DIR, stdio: ["pipe", "pipe", "pipe"] },
@@ -310,6 +373,11 @@ async function handleRun(run) {
   let sawResult = false;
   let resultReport = null;
   let resultError = null;
+  // Set when the init line shows the browser never attached. The run is killed
+  // immediately and this becomes its terminal error — it must win over the
+  // "exited without a result" fallback below, which would otherwise bury the
+  // real cause behind a generic message.
+  let browserFailure = null;
 
   const flush = async (extra = {}) => {
     const events = buffer.splice(0, buffer.length).map((e) => ({ ...e, text: scrubToken(e.text, run.token) }));
@@ -343,6 +411,20 @@ async function handleRun(run) {
     try {
       parsed = JSON.parse(line);
     } catch {}
+    // FAIL LOUDLY, never degrade: if the browser did not attach, stop now.
+    // The agent will happily continue on WebSearch alone and attach units it
+    // never looked at — a wrong answer that looks exactly like a normal run.
+    if (!browserFailure) {
+      const failure = browserMcpFailure(line);
+      if (failure) {
+        browserFailure = failure;
+        log(`run ${run.id} has NO browser (chrome MCP not connected) — killing the CLI`);
+        buffer.push({ at: new Date().toISOString(), kind: "status", text: "Browser did not attach — stopping the run." });
+        try {
+          child.kill("SIGTERM");
+        } catch {}
+      }
+    }
     // Marker scan on the agent's own words → portal attention + local alarm.
     if (parsed?.type === "assistant") {
       for (const block of parsed.message?.content ?? []) {
@@ -382,6 +464,12 @@ async function handleRun(run) {
     terminalPosted = true;
     if (cancelled) {
       await flush(); // final events only; status is already cancelled server-side
+    } else if (browserFailure) {
+      // Ahead of every other branch: a browser-less run may still emit a
+      // "success" result full of web-searched guesses, and that must never be
+      // recorded as a completed find.
+      await flush({ terminal: { status: "failed", error: scrubToken(browserFailure, run.token) } });
+      terminalChime("failed", "Browser did not attach");
     } else if (sawResult && resultReport !== null && !resultError) {
       const authProblem = /not logged in|please run \/?login|authentication_error|invalid api key/i.test(resultReport);
       if (authProblem) {
