@@ -56,7 +56,7 @@ import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared
 import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBuyInPrompt, buildCoworkBulkFindAndPreparePrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkFindAndPreparePrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, type CoworkBuyInPromptInput } from "@shared/cowork-buyin-prompt";
+import { buildCoworkBuyInPrompt, buildCoworkBulkFindAndPreparePrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, type CoworkBuyInPromptInput } from "@shared/cowork-buyin-prompt";
 import { buildCoworkDeepLink, buildCoworkPromptRunBootstrap, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
 
 // Is this attached buy-in already on the VRBO channel? Drives the
@@ -2404,11 +2404,12 @@ async function launchCoworkPrompt(
   }
 }
 
-// Primary Auto Cowork flow: search + attach, then continue in the SAME Cowork
-// task to prepare checkout and hand the card/final click back to the operator.
-// The full brief is saved behind portal auth and Claude Desktop gets a short
-// launcher, avoiding its 14,336-character deep-link truncation. The dialog
-// keeps a deliberate find+attach-only fallback for exceptional cases.
+// The primary Auto Cowork FIND flow: search + attach the cheapest qualifying
+// buy-in units (VRBO preferred — see the shared prompt's CHANNEL PREFERENCE),
+// then STOP at attach. It NEVER books. Booking is a SEPARATE Cowork prompt
+// (CoworkCheckoutPromptButton) the operator starts after reviewing the picks.
+// The find-only brief fits under Claude Desktop's deep-link cap (canary in
+// tests/cowork-launch.test.ts), so it launches directly — no durable relay.
 function CoworkBuyInPromptButton({
   reservation,
   propertyId,
@@ -2460,26 +2461,19 @@ function CoworkBuyInPromptButton({
       }),
     [reservation, propertyId, propertyName, community, units],
   );
-  const prompt = useMemo(() => buildCoworkFindAndPreparePrompt(promptInput), [promptInput]);
-  const findOnlyPrompt = useMemo(() => buildCoworkBuyInPrompt(promptInput), [promptInput]);
-  const activeCheckout = reservation.slots.find((slot) => buyInHasActiveCheckout(slot.buyIn))?.buyIn ?? null;
+  // FIND + ATTACH ONLY (buildCoworkBuyInPrompt): the brief ends at ATTACH and
+  // never books — checkout is the separate "Prepare checkout in Cowork" prompt.
+  const prompt = useMemo(() => buildCoworkBuyInPrompt(promptInput), [promptInput]);
   const copy = async () => {
     try {
       await navigator.clipboard?.writeText(prompt);
-      toast({ title: "Cowork prompt copied", description: "Paste it into Cowork to find, attach, and prepare checkout." });
+      toast({ title: "Cowork prompt copied", description: "Paste it into Cowork to find and attach the cheapest buy-in units." });
     } catch {
       toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
     }
   };
   const launch = async () => {
-    const t = coworkLaunchToastCopy(
-      await launchCoworkPrompt(prompt, { kind: "find-and-prepare", reservationId: reservation._id }),
-      "The find-and-prepare buy-in prompt",
-    );
-    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
-  };
-  const launchFindOnly = async () => {
-    const t = coworkLaunchToastCopy(await launchCoworkPrompt(findOnlyPrompt), "The find-and-attach-only prompt");
+    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The buy-in search prompt");
     toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
   };
   return (
@@ -2494,42 +2488,23 @@ function CoworkBuyInPromptButton({
           setOpen(true);
           void launch();
         }}
-        disabled={Boolean(activeCheckout)}
         data-testid={`button-cowork-prompt-${reservation._id}`}
-        title={activeCheckout
-          ? `${activeCheckout.unitLabel || "Another unit"} already has checkout status ${activeCheckout.bookingStatus}; finish or resolve that handoff first`
-          : "Opens Cowork to find and attach the buy-in, prepare checkout, then stop for your credit card and final Checkout click"}
+        title="Opens Cowork to find and attach the cheapest qualifying buy-in units (VRBO preferred). It never books — review the picks, then use 'Prepare checkout in Cowork' to book on VRBO."
       >
         <Sparkles className="mr-1 h-3.5 w-3.5" />
-        Auto Cowork · find + prepare
+        Auto Cowork · find cheapest
       </Button>
-      {activeCheckout ? (
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-8 px-2 text-xs"
-          onClick={(e) => {
-            e.stopPropagation();
-            void launchFindOnly();
-          }}
-          data-testid={`button-cowork-find-only-active-handoff-${reservation._id}`}
-          title="A checkout handoff is already active, so this fallback searches and attaches only"
-        >
-          Find &amp; attach only
-        </Button>
-      ) : null}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Auto Cowork — find, attach, and prepare checkout</DialogTitle>
+            <DialogTitle>Auto Cowork — find and attach the cheapest buy-in units</DialogTitle>
             <DialogDescription>
-              This opens a saved, authenticated brief in Cowork. Press send in Claude Desktop: it
-              searches and attaches the qualifying unit, then continues to VRBO checkout with the
-              booking guest&apos;s exact name, that unit&apos;s generated alias, our phone and billing
-              address, and the damage waiver only. Cowork leaves every card field empty, never
-              submits the purchase, and pauses with the checkout tab open for you to add the card
-              and click Checkout. Use the fallback below when you intentionally want attachment only.
+              This opens a new Cowork task with the prompt pre-filled (it&apos;s also on your
+              clipboard). Press send in Claude Desktop: Cowork searches the web for the cheapest
+              qualifying buy-in unit(s) — same community first, VRBO preferred over direct (kept
+              unless a direct listing is more than 20% cheaper) — and attaches them. It never books
+              anything. After you review the attached units, use the separate &quot;Prepare checkout in
+              Cowork&quot; prompt to book them on VRBO.
             </DialogDescription>
           </DialogHeader>
           <textarea
@@ -2540,15 +2515,6 @@ function CoworkBuyInPromptButton({
             onFocus={(e) => e.currentTarget.select()}
           />
           <DialogFooter>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => void launchFindOnly()}
-              data-testid={`button-cowork-find-only-${reservation._id}`}
-            >
-              Find &amp; attach only
-            </Button>
             <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-prompt-copy-${reservation._id}`}>
               <Copy className="mr-1 h-3.5 w-3.5" />
               Copy full prompt
@@ -3143,7 +3109,7 @@ function CityVrboInventoryPanel({
         <div>
           <p className="font-semibold text-violet-950">City VRBO inventory</p>
           <p className="text-[10px] text-muted-foreground">
-            Runs automatically after Auto-fill cheapest if resort search fails. One city destination dropdown on VRBO ({community} + dates), exports all priced cards, then match {bedroomPlan.map((b) => `${b}BR`).join(" + ")} by shared title (not separate community names).
+            Runs automatically when a server-side buy-in search can't fill from the resort; or scan it here. One city destination dropdown on VRBO ({community} + dates), exports all priced cards, then match {bedroomPlan.map((b) => `${b}BR`).join(" + ")} by shared title (not separate community names).
           </p>
         </div>
         <Button
@@ -6387,7 +6353,7 @@ function LastBuyInSearchPanel({
           className="mt-1 rounded border border-red-300 bg-red-50 px-2 py-1 text-[11px] font-medium text-red-800"
           data-testid="scan-interrupted-notice"
         >
-          ⚠ Incomplete scan — {scanMessage || "the search was interrupted mid-run (server restarted). Re-run Auto-fill to finish."}
+          ⚠ Incomplete scan — {scanMessage || "the search was interrupted mid-run (server restarted). It resumes on its own; or use Auto Cowork · find cheapest to search again."}
         </p>
       )}
       {!interrupted && scanMessage ? (
@@ -8000,18 +7966,6 @@ export default function Bookings() {
       return next;
     });
   };
-  const closeSlotSearchesForReservation = (reservation: GuestyReservation) => {
-    if (selectedPropertyId) {
-      void queryClient.cancelQueries({ queryKey: ["/api/operations/find-buy-in", selectedPropertyId] });
-    }
-    setExpandedSlots((prev) => {
-      const next = new Set(prev);
-      for (const slot of reservation.slots) {
-        next.delete(slotKey(reservation._id, slot.unitId));
-      }
-      return next;
-    });
-  };
   const [lastAutoFillCombos, setLastAutoFillCombos] = useState<Record<string, AutoFillComboOption[]>>({});
   const [lastAutoFillAudits, setLastAutoFillAudits] = useState<Record<string, AutoFillSearchAudit[]>>({});
   // Durable "last buy-in search" per reservation (fetched from the server's
@@ -9270,7 +9224,7 @@ export default function Bookings() {
       toast({
         title: is502 || isTransient ? "Search interrupted — retry in a moment" : "Auto-fill failed",
         description: is502 || isTransient
-          ? "The buy-in search was interrupted while the app or sidecar was reconnecting. It will resume automatically when you return to this tab — or click Auto-fill cheapest again (the scan cache is warm, so it's fast)."
+          ? "The buy-in search was interrupted while the app or sidecar was reconnecting. It will resume automatically when you return to this tab (the scan cache is warm, so it's fast)."
           : raw,
         variant: "destructive",
       });
@@ -9486,7 +9440,7 @@ export default function Bookings() {
     if (!status) {
       toast({
         title: "Auto-fill search ended",
-        description: "The background search was lost (server restart). Click Auto-fill cheapest to retry — the scan cache is warm, so it's fast.",
+        description: "The background search was lost (server restart). Use Auto Cowork · find cheapest to search again — the scan cache is warm, so it's fast.",
       });
       return;
     }
@@ -10607,7 +10561,7 @@ export default function Bookings() {
               </p>
               <p className="text-sm text-amber-900/80 mt-1">
                 {hasBuyInSlots
-                  ? "You can now use Auto-fill cheapest or Find buy-in without manually configuring unit slots first."
+                  ? "You can now use Auto Cowork · find cheapest or Find buy-in without manually configuring unit slots first."
                   : "Buy-in unit slots are only needed when Guesty does not expose enough bedroom/community detail to create a search target."}
               </p>
             </CardContent>
@@ -11962,13 +11916,14 @@ export default function Bookings() {
                             VRBO guest page
                           </Button>
                         </div>
-                        {/* Auto-fill: one click to search + attach cheapest
-                            priced option for every empty slot on this row. */}
+                        {/* Auto Cowork find: one click opens a Cowork task that
+                            searches + attaches the cheapest priced option for
+                            every empty slot on this row (VRBO preferred). */}
                         {r.slotsFilled < r.slotsTotal && (
                           <div className="bg-primary/5 border border-primary/20 rounded px-3 py-2">
                             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                               <div className="text-xs text-muted-foreground">
-                                {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · auto-pick the cheapest live listing for each
+                                {r.slotsTotal - r.slotsFilled} empty {r.slotsTotal - r.slotsFilled === 1 ? "unit" : "units"} · use Auto Cowork to find &amp; attach the cheapest listing for each
                               </div>
                               <div className="flex flex-wrap items-center gap-2">
                                 {/* "Create prompt for Cowork" — needs a resolvable buy-in
@@ -11997,31 +11952,6 @@ export default function Bookings() {
                                       }))}
                                   />
                                 )}
-                                <Button
-                                  size="sm"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (autoFillRunRef.current.has(r._id)) return;
-                                    autoFillRunRef.current.add(r._id);
-                                    clearAutoFillDiagnostics(r._id);
-                                    closeSlotSearchesForReservation(r);
-                                    setAutoFillStartedByReservation((prev) => ({
-                                      ...prev,
-                                      [r._id]: Date.now(),
-                                    }));
-                                    autoFillMutation.mutate({ reservation: r });
-                                  }}
-                                  disabled={rowAutoFillRunning}
-                                  data-testid={`button-auto-fill-${r._id}`}
-                                >
-                                  {rowAutoFillRunning && !rowSidecarOnly ? (
-                                    <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Searching…</>
-                                  ) : rowSidecarOnly ? (
-                                    <><RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" /> Sidecar verifying…</>
-                                  ) : (
-                                    <><Zap className="h-3.5 w-3.5 mr-1" /> Auto-fill cheapest</>
-                                  )}
-                                </Button>
                               </div>
                             </div>
                             {rowAutoFillRunning && (
@@ -13028,7 +12958,7 @@ export default function Bookings() {
           <DialogHeader>
             <DialogTitle>Bulk buy-in queue</DialogTitle>
             <DialogDescription>
-              Sequential buy-in searches using the same Auto-fill cheapest path as individual bookings.
+              Sequential server-side buy-in searches — the fallback to the Auto Cowork buy-in flow.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">

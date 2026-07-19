@@ -43,6 +43,34 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-19 (bookings row: ONE Cowork-only auto-fill button + TWO separate Cowork prompts; VRBO
+  80%/20% rule): Operator screenshot showed the empty-slots panel with BOTH "Auto Cowork · find +
+  prepare" AND the server "⚡ Auto-fill cheapest" — wanted one Cowork-focused button, plus two
+  distinct Cowork prompts (find cheapest; checkout-if-on-VRBO), preferring VRBO "even if ~10% more".
+  SHIPPED (`claude/cowork-autofill-vrbo-nb9ct3`, client-only): (1) REMOVED the server-side
+  "Auto-fill cheapest" `<Button>` (`autoFillMutation`) from the per-row panel — single-row buy-in
+  filling is now Cowork-only; the server auto-fill ENGINE stays (bulk "Run bulk buy-ins (server)"
+  fallback + boot-resume still use it), only the per-row manual trigger + orphaned
+  `closeSlotSearchesForReservation` were removed. (2) `CoworkBuyInPromptButton` switched combined
+  `buildCoworkFindAndPreparePrompt` → FIND-ONLY `buildCoworkBuyInPrompt`, relabeled "Auto Cowork ·
+  find cheapest" (ends at ATTACH, never books; launches DIRECTLY — fits under the deep-link cap, no
+  relay; the `find-and-prepare` kind + `findOnlyPrompt`/`activeCheckout` fallback are gone).
+  (3) Second prompt already existed, unchanged: "Prepare checkout in Cowork"
+  (`buildCoworkCheckoutPrompt`, `kind: "prepare-checkout"`) books the attached units on VRBO
+  (refuses a non-VRBO attach → points at "Find property on VRBO"). (4) VRBO RULE was ALREADY in
+  `buildCoworkBuyInPrompt`'s CHANNEL PREFERENCE (DON'T re-chase): prefer VRBO unless a non-VRBO
+  listing is BELOW 80% of the VRBO total (>20% discount) — the operator's "~10% more" = this exact
+  80%/20% escape hatch. (5) Stale copy naming the removed button (interrupted-scan notice, 2 recovery
+  toasts, "you can now use…", City VRBO panel + bulk-queue descriptions, inbox dry-run caption) now
+  points at "Auto Cowork · find cheapest" / describes the server path generically. Bulk route
+  (`buildCoworkBulkFindAndPreparePrompt`) deliberately UNCHANGED — combined find+prepare survives
+  only there. Verified: cowork-launch 40/0 (assertions repointed: label, launch count 7→6,
+  row=find-only), cowork-buyin-prompt 284/0, pipeline-logic green, full `npm test` exit 0, build
+  clean (bundle-grepped: new label present; old "find + prepare" only in the BULK UI; no per-row
+  "Auto-fill cheapest" button label), `npm run check` 334 = baseline (stash A/B identical). See
+  AGENTS.md "Cowork browser checkout is a human-payment handoff" (updated: two-prompt split) + the
+  2026-07-19 Decision Log line.
+
 - 2026-07-18 ("how does a 4 bedroom sleep 12?" — every summary now EXPLAINS its own occupancy):
   Operator: guests keep asking; put the breakdown in the AI description for ALL listings, update the
   methodology, then update existing listings and push to Guesty where connected. KEY FINDING (don't

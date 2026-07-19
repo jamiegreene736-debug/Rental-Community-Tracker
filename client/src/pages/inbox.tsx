@@ -6091,7 +6091,7 @@ export default function InboxPage() {
                             </div>
                           )}
                           <div className="text-[10px] text-muted-foreground/70 mt-1">
-                            Same sidecar search as Operations “Auto-fill cheapest” — finds the cheapest same-community combos. Nothing is attached.
+                            Same sidecar buy-in search the Operations page runs — finds the cheapest same-community combos. Nothing is attached.
                           </div>
                         </div>
                       )}
