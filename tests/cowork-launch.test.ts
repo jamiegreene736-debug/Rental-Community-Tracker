@@ -303,5 +303,61 @@ check(
   );
 }
 
+// ── Drift-lock: dev/test prompts must NEVER ship in a Cowork deep link ───────
+// 2026-07-19 incident: the operator found a stale "Rental portal deep-link
+// test" task sitting in Cowork (a "plumbing test" + "LENGTH TEST" prompt full
+// of inert filler) and sent it, reasonably concluding the portal had pushed a
+// TEST into Cowork instead of a real brief. It hadn't — those links were fired
+// MANUALLY on 2026-07-13 while verifying Claude Desktop's claude:// handler,
+// and a live grep of the deployed bundle found zero test strings. This scan
+// keeps it that way: no shipped source may carry those dev-test markers, and
+// the only way a prompt may ride a cowork deep link is DYNAMICALLY through
+// buildCoworkDeepLink()'s encodeURIComponent — a hard-coded prompt after ?q=
+// fails the suite. Live-firing test prompts into the operator's Cowork is
+// banned outright; see the AGENTS.md 2026-07-19 Decision Log line.
+{
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const root = path.join(here, "..");
+  // Shipped/runtime source only. tests/ and AGENTS.md legitimately name the
+  // forbidden markers (this scanner, the decision log) and are excluded.
+  const SHIPPED_DIRS = ["client/src", "server", "shared", "daemon", "scripts"];
+  const EXTS = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".html"]);
+  const FORBIDDEN: { name: string; re: RegExp }[] = [
+    { name: "deep-link plumbing-test prompt", re: /plumbing test/i },
+    { name: "LENGTH TEST canary prompt", re: /LENGTH TEST/ },
+    { name: "inert filler padding", re: /inert filler/i },
+    { name: "browser click-test prompt", re: /BROWSER CLICK TEST/ },
+    // A literal prompt hard-coded after ?q=. Comments may only use the
+    // <placeholder> or ${template} forms; real prompts must travel through
+    // buildCoworkDeepLink (which refuses over-cap prompts and encodes).
+    { name: "hard-coded prompt in a cowork deep link", re: /cowork\/new\?q=(?![<$"'`\s]|$)/ },
+  ];
+  const offenders: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      if (!EXTS.has(path.extname(entry.name))) continue;
+      const src = fs.readFileSync(full, "utf8");
+      for (const rule of FORBIDDEN) {
+        if (rule.re.test(src)) offenders.push(`${path.relative(root, full)} → ${rule.name}`);
+      }
+    }
+  };
+  for (const dir of SHIPPED_DIRS) {
+    const full = path.join(root, dir);
+    if (fs.existsSync(full)) walk(full);
+  }
+  check(
+    "no shipped source carries a dev/test Cowork prompt or a hard-coded deep-link prompt",
+    offenders.length === 0,
+    offenders,
+  );
+}
+
 console.log(`\ncowork-launch: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
