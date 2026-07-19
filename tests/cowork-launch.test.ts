@@ -11,6 +11,7 @@ import {
   COWORK_DEEPLINK_PROMPT_MAX,
   buildCoworkDeepLink,
   buildCoworkPromptRunBootstrap,
+  coworkLaunchNeedsFallback,
   coworkLaunchToastCopy,
   shouldAutoLaunchCowork,
 } from "../shared/cowork-launch";
@@ -93,11 +94,27 @@ const realFind = buildCoworkBuyInPrompt({
   netRevenue: 5250.55,
   baseUrl: "https://admin.vacationrentalexpertz.com",
 });
+// DIAGNOSTIC, no longer a pass/fail gate on fitting. Measured 2026-07-19: this
+// fixture is ~14.2k and a longer property name ("Waipouli Beach Resort and Spa
+// - 6BR Condos - Sleeps 18") reaches 14,504 — genuinely OVER the cap. That used
+// to open Cowork with an EMPTY composer, which is why the launcher is now
+// cap-first with a prompt-run relay for the overflow. Keep the length in the
+// test NAME so growth stays visible.
 check(
-  `representative 2-slot find prompt (${realFind.length} chars) still fits under the 14336 cap`,
-  buildCoworkDeepLink(realFind).promptIncluded === true,
+  `representative 2-slot find prompt is ${realFind.length} chars (cap ${COWORK_DEEPLINK_PROMPT_MAX}, headroom ${COWORK_DEEPLINK_PROMPT_MAX - realFind.length})`,
+  realFind.length < 30_000, // sanity only: the relay is the sole provisioned fallback
   { length: realFind.length },
 );
+// The real guard: over-cap must be RELAY-handled, never truncated and never a
+// bare empty Cowork task.
+{
+  const overCap = `${realFind}${"x".repeat(COWORK_DEEPLINK_PROMPT_MAX)}`;
+  const link = buildCoworkDeepLink(overCap);
+  check(
+    "an over-cap find prompt is refused (never truncated) so the relay path takes over",
+    link.promptIncluded === false && link.url === COWORK_DEEPLINK_BASE,
+  );
+}
 
 console.log("cowork-launch: desktop-only gate");
 
@@ -131,6 +148,28 @@ check("phone path → old copied toast", copyOnly.title === "The buy-in search p
 const nothing = coworkLaunchToastCopy({ copied: false, launched: false, promptIncluded: false }, "The buy-in search prompt");
 check("nothing worked → destructive copy-failed toast", nothing.title === "Copy failed" && nothing.destructive === true);
 
+// ── The paste-fallback gate (operator directive 2026-07-19: no modal on the ──
+// happy path — a Cowork click must just push into Cowork). The modal survives
+// ONLY where the brief never reached the composer.
+console.log("cowork-launch: paste-fallback gate");
+check("pushed into the composer → NO modal", coworkLaunchNeedsFallback({ copied: true, launched: true, promptIncluded: true }) === false);
+check(
+  "pushed into the composer but clipboard failed → still NO modal (the prompt is already in Cowork)",
+  coworkLaunchNeedsFallback({ copied: false, launched: true, promptIncluded: true }) === false,
+);
+check("launched over-cap (relay failed) → modal, the operator must paste", coworkLaunchNeedsFallback({ copied: true, launched: true, promptIncluded: false }) === true);
+check("launched over-cap with no clipboard → modal", coworkLaunchNeedsFallback({ copied: false, launched: true, promptIncluded: false }) === true);
+check("phone / no Claude Desktop → modal", coworkLaunchNeedsFallback({ copied: true, launched: false, promptIncluded: false }) === true);
+check("nothing worked at all → modal", coworkLaunchNeedsFallback({ copied: false, launched: false, promptIncluded: false }) === true);
+check(
+  "401 relay redirect to /login → NO modal and no toast (a navigation is already in flight)",
+  coworkLaunchNeedsFallback({ copied: true, launched: false, promptIncluded: false, abortedForAuth: true }) === false,
+);
+check(
+  "success toast carries the didn't-open recovery instruction (the modal no longer backstops it)",
+  /click the button again/i.test(coworkLaunchToastCopy({ copied: true, launched: true, promptIncluded: true }, "The buy-in search prompt").description),
+);
+
 // ── Source assertions: every Cowork button on the bookings page launches ─────
 // through the shared helper (grep, not import — bookings.tsx drags in the
 // whole client bundle).
@@ -148,10 +187,19 @@ check("nothing worked → destructive copy-failed toast", nothing.title === "Cop
     "the primary row button is the find-only Cowork prompt (checkout is a separate prompt)",
     bookingsSrc.includes("Auto Cowork · find cheapest"),
   );
+  // INTENT (unchanged since 2026-07-13): no Cowork button may hand-roll its own
+  // launch. The five row buttons now share one launcher via the useCoworkLaunch
+  // hook, so the call-site count is 2 (hook + bulk) rather than 6 — the guard
+  // is that those are the ONLY two, and that all five rows go through the hook.
   check(
-    "every Cowork action launches through launchCoworkPrompt",
-    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 6,
+    "every Cowork action launches through launchCoworkPrompt (hook + bulk are the only call sites)",
+    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 2,
     (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length,
+  );
+  check(
+    "all five row Cowork buttons launch through the shared useCoworkLaunch hook",
+    (bookingsSrc.match(/useCoworkLaunch\(/g) ?? []).length === 6, // 1 definition + 5 uses
+    (bookingsSrc.match(/useCoworkLaunch\(/g) ?? []).length,
   );
   check(
     "clipboard copy happens BEFORE the deep link fires (paste fallback must exist by launch time)",
@@ -167,8 +215,10 @@ check("nothing worked → destructive copy-failed toast", nothing.title === "Cop
     /if \(!shouldAutoLaunchCowork\(navigator\.userAgent\)\)/.test(bookingsSrc),
   );
   check(
+    // Was pinned to buildCoworkDeepLink(launchPrompt); the cap-first rewrite
+    // renamed that local. Intent is unchanged: no hand-rolled claude:// URLs.
     "the deep link is built by the shared, cap-aware builder (no inline claude:// strings)",
-    bookingsSrc.includes("buildCoworkDeepLink(launchPrompt)") && !/claude:\/\//.test(bookingsSrc.replace(/\/\/[^\n]*/g, "")),
+    bookingsSrc.includes("buildCoworkDeepLink(") && !/claude:\/\//.test(bookingsSrc.replace(/\/\/[^\n]*/g, "")),
   );
   check(
     "row find is FIND-ONLY; checkout + bulk are their own Cowork prompts",
@@ -179,7 +229,63 @@ check("nothing worked → destructive copy-failed toast", nothing.title === "Cop
       && bookingsSrc.includes("buildCoworkBulkFindAndPreparePrompt(inputs)"),
   );
 
+  // ── No modal on the happy path (operator directive 2026-07-19) ────────────
+  check(
+    "no Cowork button force-opens a dialog on click any more",
+    !/setOpen\(true\);\s*\n\s*void launch\(/.test(bookingsSrc)
+      && !bookingsSrc.includes("textarea-cowork-prompt-")
+      && !bookingsSrc.includes("button-cowork-prompt-copy-")
+      && !bookingsSrc.includes("textarea-bulk-cowork-prompt"),
+  );
+  check(
+    "the one surviving modal is the page-level PASTE FALLBACK",
+    bookingsSrc.includes('data-testid="textarea-cowork-fallback"')
+      && bookingsSrc.includes('data-testid="button-cowork-fallback-copy"')
+      && bookingsSrc.includes("CoworkFallbackContext.Provider"),
+  );
+  check(
+    "the fallback opens ONLY through the shared, un-reduced gate",
+    (bookingsSrc.match(/coworkLaunchNeedsFallback\(/g) ?? []).length === 2, // hook + bulk
+    (bookingsSrc.match(/coworkLaunchNeedsFallback\(/g) ?? []).length,
+  );
+  check(
+    "the gate itself keeps BOTH terms (never reduced to !promptIncluded)",
+    fs.readFileSync(path.join(here, "../shared/cowork-launch.ts"), "utf8")
+      .includes("return !result.launched || !result.promptIncluded;"),
+  );
+
+  // ── CAP-FIRST: try the direct embed before reaching for the relay ─────────
+  check(
+    "the launcher is CAP-FIRST — the direct embed is attempted before the relay POST",
+    (() => {
+      const fn = bookingsSrc.slice(
+        bookingsSrc.indexOf("async function launchCoworkPrompt"),
+        bookingsSrc.indexOf("// The primary Auto Cowork FIND flow"),
+      );
+      const embedAt = fn.indexOf("buildCoworkDeepLink(prompt)");
+      const relayAt = fn.indexOf("/api/cowork/prompt-runs");
+      return embedAt > -1 && relayAt > -1 && embedAt < relayAt;
+    })(),
+  );
+  check(
+    "the row find prompt has a relay kind, so an over-cap brief can never open Cowork empty",
+    bookingsSrc.includes('kind: "find", reservationId: reservation._id'),
+  );
+  check(
+    "a 401 during the relay aborts the launch instead of stacking a second navigation",
+    bookingsSrc.includes("abortedForAuth: true") && bookingsSrc.includes("if (result.abortedForAuth) return;"),
+  );
+  check(
+    "double-click protection on every Cowork launch path",
+    (bookingsSrc.match(/disabled=\{launching\}/g) ?? []).length === 3 // find, verify, happy...
+      || bookingsSrc.includes("if (launching) return;"),
+  );
+
   const promptRunSrc = fs.readFileSync(path.join(here, "../server/cowork-prompt-runs.ts"), "utf8");
+  check(
+    "the relay accepts the row find kind",
+    /ALLOWED_KINDS = new Set\(\[[^\]]*"find"/.test(promptRunSrc),
+  );
   const schemaSrc = fs.readFileSync(path.join(here, "../shared/schema.ts"), "utf8");
   check(
     "large Cowork briefs use an authenticated durable prompt-run relay",

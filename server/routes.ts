@@ -12108,6 +12108,43 @@ Requirements:
     }
   });
 
+  // Batch buy-in SLOT fingerprint for the bookings list — the out-of-band
+  // Cowork attach probe.
+  //
+  // Cowork fills slots from Claude Desktop with no job id and no server handle,
+  // so an open bookings tab has nothing to poll. This endpoint is what it polls
+  // instead: ONE buy_ins query, five columns, ZERO Guesty calls. The client
+  // fingerprints the result (shared/buy-in-slot-signature.ts) and only
+  // invalidates the expensive Guesty-backed bookings queries when it moved.
+  //
+  // LOAD-BEARING: do NOT "simplify" this into a bookings refetch. slots[].buyIn
+  // is ours; the Guesty reservation document does not change when Cowork
+  // attaches. /api/bookings/guesty-all would pull every listing plus a
+  // paginated /reservations loop through Guesty's global rate gate — the
+  // traffic behind three documented 429/timeout incidents — on every tab focus.
+  app.post("/api/operations/buy-in-slot-status", async (req, res) => {
+    try {
+      const raw = Array.isArray(req.body?.reservationIds) ? req.body.reservationIds : [];
+      const reservationIds = Array.from(new Set<string>(
+        raw.map((id: unknown) => normalizeAlternativeText(id, 120)).filter(Boolean),
+      )).slice(0, 300);
+      const statuses = reservationIds.length
+        ? await storage.getBuyInSlotStatusByReservationIds(reservationIds)
+        : {};
+      // Reservations with no buy-ins are OMITTED rather than returned empty.
+      // The client fingerprints an absent key as the EMPTY signature (not as
+      // "no change") — that is what makes a Cowork DETACH visible. Do not
+      // "fix" the client to treat absent as no-change.
+      return res.json({ statuses });
+    } catch (err: any) {
+      // Fail-soft: this is a background freshness probe. A failure must never
+      // surface to the operator as an error, and an empty map reads as
+      // "nothing changed" — the 120s query poll stays the backstop.
+      console.warn("[buy-in-slot-status] probe failed:", err?.message ?? err);
+      return res.json({ statuses: {} });
+    }
+  });
+
   // Batch "have we sent this guest a receipt?" status for the bookings list.
   // Given reservation IDs, returns per reservation the most recent SENT receipt
   // (kind/amount/date/channel/open-tracking) + counts, so a row can show a

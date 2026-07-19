@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback, useContext, createContext } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -57,7 +57,8 @@ import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
 import { buildCoworkBuyInPrompt, buildCoworkBulkFindAndPreparePrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, type CoworkBuyInPromptInput } from "@shared/cowork-buyin-prompt";
-import { buildCoworkDeepLink, buildCoworkPromptRunBootstrap, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
+import { buildCoworkDeepLink, buildCoworkPromptRunBootstrap, coworkLaunchNeedsFallback, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
+import { buyInSlotSignature, buyInSlotSignatureMap, type BuyInSlotStatusRow } from "@shared/buy-in-slot-signature";
 
 // Is this attached buy-in already on the VRBO channel? Drives the
 // "Find on VRBO" re-channel button + slot badges (operator prefers to book
@@ -2350,7 +2351,70 @@ function BuyInEscalationStages({
 // The deep link only PRE-FILLS; nothing runs until the operator presses send
 // in Claude Desktop, so checkout preparation only starts after the operator
 // explicitly sends its prompt.
-type CoworkPromptRunKind = "prepare-checkout" | "bulk-find-and-prepare";
+// The PASTE FALLBACK surface, hoisted to page level.
+//
+// Operator directive 2026-07-19: clicking a Cowork button must push straight
+// into Cowork — no modal on the happy path. The modal survives only for the
+// cases where the brief genuinely did NOT reach the composer (phone, or an
+// over-cap prompt whose relay failed), because then pasting it is the only way
+// to run the task and the operator needs to see the text.
+//
+// LOAD-BEARING that this lives at PAGE level, not inside each row component:
+// the per-row Cowork buttons render inside conditional wrappers driven by
+// polled data. Opening a row-local dialog AFTER an await means a poll landing
+// in that window can unmount the subtree and the fallback silently never
+// renders — on precisely the path where it holds the operator's only copy.
+type CoworkFallback = { prompt: string; label: string; note?: string | null };
+
+const CoworkFallbackContext = createContext<(fallback: CoworkFallback) => void>(() => {});
+
+// "A Cowork run is plausibly in flight" window, shared between the row buttons
+// and the page's slot probe. Module scope on purpose: the buttons are separate
+// components scattered through the row tree, and threading a ref to all six
+// through props/context buys nothing — there is only ever one bookings page.
+// Nothing branches on this except the probe's poll cadence, so a stale value
+// costs at most a few cheap buy_ins queries.
+const COWORK_RUN_ARMED_MS = 15 * 60_000;
+const coworkRunArmed = { until: 0 };
+function armCoworkRunWindow() {
+  coworkRunArmed.until = Date.now() + COWORK_RUN_ARMED_MS;
+}
+
+/**
+ * Shared click behavior for every row-level Cowork button: re-entrancy guard,
+ * launch, paste-fallback-only-when-needed, one honest toast.
+ */
+function useCoworkLaunch(label: string) {
+  const { toast } = useToast();
+  const openFallback = useContext(CoworkFallbackContext);
+  const [launching, setLaunching] = useState(false);
+
+  const launch = useCallback(
+    async (prompt: string, savedRun?: { kind: CoworkPromptRunKind; reservationId?: string }) => {
+      if (launching) return;
+      setLaunching(true);
+      try {
+        const result = await launchCoworkPrompt(prompt, savedRun);
+        // A /login hard-navigation is already in flight — a toast would be
+        // pointless and the fallback dialog cannot render.
+        if (result.abortedForAuth) return;
+        // Cowork may now be working out of band; poll the cheap slot probe a
+        // little faster so an attach shows up without a manual refresh.
+        if (result.launched) armCoworkRunWindow();
+        if (coworkLaunchNeedsFallback(result)) openFallback({ prompt, label });
+        const t = coworkLaunchToastCopy(result, label);
+        toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
+      } finally {
+        setLaunching(false);
+      }
+    },
+    [label, launching, openFallback, toast],
+  );
+
+  return { launch, launching };
+}
+
+type CoworkPromptRunKind = "find" | "prepare-checkout" | "bulk-find-and-prepare";
 
 async function launchCoworkPrompt(
   prompt: string,
@@ -2369,9 +2433,24 @@ async function launchCoworkPrompt(
     return { copied, launched: false, promptIncluded: false };
   }
 
-  let launchPrompt = prompt;
+  // CAP-FIRST (2026-07-19). Try the direct embed BEFORE reaching for the relay:
+  // when the brief fits Claude Desktop's 14,336-char ?q= cap there is no relay
+  // POST, no dependency on the operator's Chrome carrying the portal session
+  // cookie, and — the point — the FULL brief is visible in the Cowork composer.
+  // That last part is load-bearing for the checkout prompt: the relay bootstrap
+  // shows ~400 chars of launcher and nothing about the money, so a brief that
+  // fits must never be relayed.
+  //
+  // The relay is now purely the OVERFLOW path. It has to exist: the row find
+  // prompt measures ~14.3k for a short property name and goes OVER for longer
+  // ones (Waipouli, Mauna Lani Point), and over cap buildCoworkDeepLink
+  // correctly refuses to embed — which used to open Cowork with an EMPTY
+  // composer. Never truncate the prompt to make it fit; the money guards,
+  // bot-wall protocol, and DONE signal all live at the END.
+  let link = buildCoworkDeepLink(prompt);
   let runStored = false;
-  if (savedRun) {
+
+  if (!link.promptIncluded && savedRun) {
     try {
       const response = await apiRequest("POST", "/api/cowork/prompt-runs", {
         kind: savedRun.kind,
@@ -2383,20 +2462,29 @@ async function launchCoworkPrompt(
         throw new Error(body?.error || `HTTP ${response.status}`);
       }
       const runUrl = new URL(body.path, window.location.origin).toString();
-      launchPrompt = buildCoworkPromptRunBootstrap(runUrl, window.location.origin);
-      runStored = true;
+      link = buildCoworkDeepLink(buildCoworkPromptRunBootstrap(runUrl, window.location.origin));
+      runStored = link.promptIncluded;
     } catch (error) {
-      // Safe degradation: launch the original prompt directly when it fits;
-      // otherwise Cowork opens empty and the complete clipboard copy remains
-      // the handoff. Never truncate the original prompt.
+      // apiRequest hard-navigates to /login on a 401. Firing the deep link now
+      // would be a SECOND navigation in the same tick — the operator would land
+      // on the login page with an empty Cowork task stacked on top of it. Bail
+      // and let the caller suppress both the link and the toast.
+      if (/\b401\b/.test(String((error as Error)?.message ?? ""))) {
+        return { copied, launched: false, promptIncluded: false, abortedForAuth: true };
+      }
+      // Safe degradation for every other failure: fall through with the bare
+      // deep link; the clipboard copy above is the handoff and the caller
+      // shows the paste fallback because promptIncluded is false.
       console.warn("[cowork] could not save prompt run; using direct/clipboard launch", error);
     }
   }
 
-  const link = buildCoworkDeepLink(launchPrompt);
   try {
     // A custom-scheme assignment hands off to the OS (Safari/Chrome show an
-    // "Open Claude?" confirm) and does NOT navigate the SPA away.
+    // "Open Claude?" confirm) and does NOT navigate the SPA away. NOTE: it also
+    // never throws when there is no handler or the operator cancels that
+    // confirm — so `launched: true` means "fired", not "Cowork opened". The
+    // toast copy carries the recovery instruction for that case.
     window.location.href = link.url;
     return { copied, launched: true, promptIncluded: link.promptIncluded, runStored };
   } catch {
@@ -2408,8 +2496,10 @@ async function launchCoworkPrompt(
 // buy-in units (VRBO preferred — see the shared prompt's CHANNEL PREFERENCE),
 // then STOP at attach. It NEVER books. Booking is a SEPARATE Cowork prompt
 // (CoworkCheckoutPromptButton) the operator starts after reviewing the picks.
-// The find-only brief fits under Claude Desktop's deep-link cap (canary in
-// tests/cowork-launch.test.ts), so it launches directly — no durable relay.
+// The brief runs right at Claude Desktop's 14,336-char deep-link cap (~14.3k
+// for a short property name, OVER it for longer ones), so it launches
+// cap-first: direct embed when it fits, durable prompt-run relay when it
+// doesn't. Before that it silently opened Cowork with an EMPTY composer.
 function CoworkBuyInPromptButton({
   reservation,
   propertyId,
@@ -2423,8 +2513,7 @@ function CoworkBuyInPromptButton({
   community: string;
   units: { unitId: string; unitLabel: string; bedrooms: number }[];
 }) {
-  const { toast } = useToast();
-  const [open, setOpen] = useState(false);
+  const { launch, launching } = useCoworkLaunch("The buy-in search prompt");
   const toDateOnly = (s: string | undefined): string =>
     !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
   const promptInput = useMemo<CoworkBuyInPromptInput>(
@@ -2464,65 +2553,26 @@ function CoworkBuyInPromptButton({
   // FIND + ATTACH ONLY (buildCoworkBuyInPrompt): the brief ends at ATTACH and
   // never books — checkout is the separate "Prepare checkout in Cowork" prompt.
   const prompt = useMemo(() => buildCoworkBuyInPrompt(promptInput), [promptInput]);
-  const copy = async () => {
-    try {
-      await navigator.clipboard?.writeText(prompt);
-      toast({ title: "Cowork prompt copied", description: "Paste it into Cowork to find and attach the cheapest buy-in units." });
-    } catch {
-      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
-    }
-  };
-  const launch = async () => {
-    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The buy-in search prompt");
-    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
-  };
   return (
-    <>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        className="h-8 px-2 text-xs"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-          void launch();
-        }}
-        data-testid={`button-cowork-prompt-${reservation._id}`}
-        title="Opens Cowork to find and attach the cheapest qualifying buy-in units (VRBO preferred). It never books — review the picks, then use 'Prepare checkout in Cowork' to book on VRBO."
-      >
-        <Sparkles className="mr-1 h-3.5 w-3.5" />
-        Auto Cowork · find cheapest
-      </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Auto Cowork — find and attach the cheapest buy-in units</DialogTitle>
-            <DialogDescription>
-              This opens a new Cowork task with the prompt pre-filled (it&apos;s also on your
-              clipboard). Press send in Claude Desktop: Cowork searches the web for the cheapest
-              qualifying buy-in unit(s) — same community first, VRBO preferred over direct (kept
-              unless a direct listing is more than 20% cheaper) — and attaches them. It never books
-              anything. After you review the attached units, use the separate &quot;Prepare checkout in
-              Cowork&quot; prompt to book them on VRBO.
-            </DialogDescription>
-          </DialogHeader>
-          <textarea
-            readOnly
-            value={prompt}
-            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
-            data-testid={`textarea-cowork-prompt-${reservation._id}`}
-            onFocus={(e) => e.currentTarget.select()}
-          />
-          <DialogFooter>
-            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-prompt-copy-${reservation._id}`}>
-              <Copy className="mr-1 h-3.5 w-3.5" />
-              Copy full prompt
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="h-8 px-2 text-xs"
+      disabled={launching}
+      onClick={(e) => {
+        e.stopPropagation();
+        // savedRun is the OVERFLOW path only (cap-first in launchCoworkPrompt).
+        // This brief runs ~14.3k and exceeds the 14,336 cap on longer property
+        // names, where it previously opened Cowork with an empty composer.
+        void launch(prompt, { kind: "find", reservationId: reservation._id });
+      }}
+      data-testid={`button-cowork-prompt-${reservation._id}`}
+      title="Opens Cowork to find and attach the cheapest qualifying buy-in units (VRBO preferred). It never books — review the picks, then use 'Prepare checkout in Cowork' to book on VRBO."
+    >
+      <Sparkles className="mr-1 h-3.5 w-3.5" />
+      Auto Cowork · find cheapest
+    </Button>
   );
 }
 
@@ -2534,13 +2584,17 @@ function CoworkCheckoutPromptButton({
   reservation,
   propertyName,
   units,
+  onStaleData,
 }: {
   reservation: GuestyReservation;
   propertyName: string;
   units: { buyInId: number; unitLabel: string; listingUrl: string | null; costPaid: string | number | null }[];
+  /** Re-read the bookings queries when the pre-flight finds this row is stale. */
+  onStaleData: () => void;
 }) {
   const { toast } = useToast();
-  const [open, setOpen] = useState(false);
+  const { launch, launching } = useCoworkLaunch("The checkout-preparation prompt");
+  const [checking, setChecking] = useState(false);
   const toDateOnly = (s: string | undefined): string =>
     !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
   const prompt = useMemo(
@@ -2558,73 +2612,87 @@ function CoworkCheckoutPromptButton({
       }),
     [reservation, propertyName, units],
   );
-  const copy = async () => {
+  // MONEY GUARD (checkout only — do NOT copy this to the other four buttons).
+  // This prompt embeds each unit's costPaid, and Cowork's 15% checkout-total
+  // guard is measured against it. If Cowork re-pointed a unit to a cheaper VRBO
+  // listing (or the operator attached from another device) since this row
+  // rendered, a stale costPaid mis-arms that guard in either direction — a
+  // false trip, or an overpay waved through. One ~50ms buy_ins query closes it.
+  const handleClick = async () => {
+    if (launching || checking) return;
+    setChecking(true);
     try {
-      await navigator.clipboard?.writeText(prompt);
-      toast({
-        title: "Checkout-preparation prompt copied",
-        description: "Paste it into Cowork to prepare the attached units for payment.",
+      // Compare ONLY the buy-ins this click is about to send. The two sides are
+      // built from different populations otherwise: the rendered slots come
+      // from a server-side first-match-by-unitId join that silently DROPS a
+      // buy-in whose unitId isn't a configured slot, while the probe returns
+      // every buy_ins row for the reservation. With one such orphan the two
+      // signatures could never converge, so every click would refresh, mismatch
+      // again, and tell the operator to "click again" forever — permanently
+      // bricking the money button on that row.
+      const sentIds = new Set(units.map((u) => u.buyInId));
+      const rows = (slots: { unitId: string; buyIn: BuyIn }[]) => slots
+        .filter((s) => sentIds.has(s.buyIn.id))
+        .map((s) => ({
+          unitId: s.unitId,
+          buyInId: s.buyIn.id,
+          bookingStatus: s.buyIn.bookingStatus ?? null,
+          listingUrl: s.buyIn.airbnbListingUrl ?? null,
+          costPaid: s.buyIn.costPaid ?? null,
+        }));
+      const local = buyInSlotSignature(rows(
+        reservation.slots.filter((s): s is SlotInfo & { buyIn: BuyIn } => Boolean(s.buyIn)),
+      ));
+      const response = await apiRequest("POST", "/api/operations/buy-in-slot-status", {
+        reservationIds: [reservation._id],
       });
-    } catch {
-      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
+      const body = await response.json().catch(() => ({}));
+      const serverRows: BuyInSlotStatusRow[] = (body?.statuses?.[reservation._id] ?? [])
+        .filter((r: BuyInSlotStatusRow) => sentIds.has(Number(r?.buyInId)));
+      const server = buyInSlotSignature(serverRows);
+      if (server !== local) {
+        onStaleData();
+        toast({
+          title: "Booking data changed — refreshed",
+          description:
+            "These units were updated since this row loaded, so the checkout prompt would have carried stale prices. Click again to build it from the current data.",
+        });
+        return;
+      }
+    } catch (error) {
+      // A 401 already hard-navigated to /login; launching now would stack a
+      // second navigation in the same tick.
+      if (/\b401\b/.test(String((error as Error)?.message ?? ""))) return;
+      // Fail-OPEN otherwise: a probe outage must not block the operator from
+      // preparing a checkout. But say so — a silent fail-open under the normal
+      // success toast would let unverified prices arm the 15% guard invisibly.
+      toast({
+        title: "Couldn't verify current prices",
+        description:
+          "The freshness check didn't respond, so this brief was built from the prices on screen. If a unit was re-priced since this row loaded, the 15% guard may be measured against a stale total.",
+      });
+    } finally {
+      setChecking(false);
     }
-  };
-  const launch = async () => {
-    const t = coworkLaunchToastCopy(
-      await launchCoworkPrompt(prompt, { kind: "prepare-checkout", reservationId: reservation._id }),
-      "The checkout-preparation prompt",
-    );
-    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
+    void launch(prompt, { kind: "prepare-checkout", reservationId: reservation._id });
   };
   return (
-    <>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        className="h-8 px-2 text-xs border-emerald-300 text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-          void launch();
-        }}
-        data-testid={`button-cowork-checkout-prompt-${reservation._id}`}
-        title="Opens a new Cowork task that prepares the attached unit checkout, leaves the VRBO tab open, and asks you to add the card and click Checkout"
-      >
-        <ShoppingCart className="mr-1 h-3.5 w-3.5" />
-        Prepare checkout in Cowork
-      </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Prepare checkout — stops before payment</DialogTitle>
-            <DialogDescription>
-              On your Mac this just opened a new Cowork task with the prompt pre-filled (it&apos;s
-              also on your clipboard). Nothing runs until you press send in Claude Desktop. Cowork
-              prepares each attached unit on vrbo.com with the damage waiver only (all insurance
-              and add-ons declined), the booking guest&apos;s name, the auto-minted guest alias email,
-              our booking phone, and the fixed billing address. It never enters card details or
-              makes the final payment. Cowork leaves the checkout tab open and says
-              &quot;Finished buy-in — please add credit card and click checkout. No purchase has been submitted.&quot; Already-booked
-              and Ready-for-card units are skipped, and the 15% checkout-total guard still applies.
-            </DialogDescription>
-          </DialogHeader>
-          <textarea
-            readOnly
-            value={prompt}
-            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
-            data-testid={`textarea-cowork-checkout-prompt-${reservation._id}`}
-            onFocus={(e) => e.currentTarget.select()}
-          />
-          <DialogFooter>
-            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-checkout-prompt-copy-${reservation._id}`}>
-              <Copy className="mr-1 h-3.5 w-3.5" />
-              Copy again
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="h-8 px-2 text-xs border-emerald-300 text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950"
+      disabled={launching || checking}
+      onClick={(e) => {
+        e.stopPropagation();
+        void handleClick();
+      }}
+      data-testid={`button-cowork-checkout-prompt-${reservation._id}`}
+      title="Opens a new Cowork task that prepares the attached unit checkout on vrbo.com — damage waiver only, guest's name, alias email, 15% price guard. It never enters card details and never makes the final payment: Cowork leaves the checkout tab open for you to add the card and click Checkout."
+    >
+      <ShoppingCart className="mr-1 h-3.5 w-3.5" />
+      Prepare checkout in Cowork
+    </Button>
   );
 }
 
@@ -2645,8 +2713,7 @@ function CoworkCommunityVerifyButton({
   community: string;
   units: { buyInId: number; unitLabel: string; listingUrl: string | null; unitAddress: string | null }[];
 }) {
-  const { toast } = useToast();
-  const [open, setOpen] = useState(false);
+  const { launch, launching } = useCoworkLaunch("The verify-community prompt");
   const prompt = useMemo(
     () =>
       buildCoworkCommunityVerifyPrompt({
@@ -2658,66 +2725,24 @@ function CoworkCommunityVerifyButton({
       }),
     [reservation, propertyName, community, units],
   );
-  const copy = async () => {
-    try {
-      await navigator.clipboard?.writeText(prompt);
-      toast({ title: "Verify-community prompt copied", description: "Paste it into Cowork to confirm the attached units belong together." });
-    } catch {
-      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
-    }
-  };
-  const launch = async () => {
-    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The verify-community prompt");
-    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
-  };
   return (
-    <>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        className="h-8 px-2 text-xs"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-          void launch();
-        }}
-        data-testid={`button-cowork-verify-community-${reservation._id}`}
-        title="Generate a Cowork prompt that verifies the attached unit(s) are in the buy-in community — same building/complex — and records each confirmed street address on the buy-in"
-      >
-        <Globe className="mr-1 h-3.5 w-3.5" />
-        Verify community
-      </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Cowork verify-community prompt</DialogTitle>
-            <DialogDescription>
-              On your Mac this just opened a new Cowork task with the prompt pre-filled — press send
-              there to run it (it&apos;s also on your clipboard). It opens each attached unit&apos;s
-              listing, pins down the exact building/complex and street address, and reports whether
-              the units are in the SAME BUILDING, the same complex, or different communities (with
-              real walking distance). It also saves each confirmed address onto the buy-in so the
-              walking-distance panel can show a measured number instead of an estimate. It never
-              books, attaches, or detaches anything.
-            </DialogDescription>
-          </DialogHeader>
-          <textarea
-            readOnly
-            value={prompt}
-            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
-            data-testid={`textarea-cowork-verify-community-${reservation._id}`}
-            onFocus={(e) => e.currentTarget.select()}
-          />
-          <DialogFooter>
-            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-verify-community-copy-${reservation._id}`}>
-              <Copy className="mr-1 h-3.5 w-3.5" />
-              Copy again
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="h-8 px-2 text-xs"
+      disabled={launching}
+      onClick={(e) => {
+        e.stopPropagation();
+        // ~6.5k — comfortably under the cap, so no relay is ever needed.
+        void launch(prompt);
+      }}
+      data-testid={`button-cowork-verify-community-${reservation._id}`}
+      title="Opens a Cowork task that verifies the attached unit(s) are in the buy-in community — same building/complex — and records each confirmed street address on the buy-in. It never books, attaches, or detaches anything."
+    >
+      <Globe className="mr-1 h-3.5 w-3.5" />
+      Verify community
+    </Button>
   );
 }
 
@@ -2738,8 +2763,7 @@ function CoworkGuestHappyButton({
   community: string;
   units: { buyInId: number; unitLabel: string; listingUrl: string | null; bedrooms: number | null }[];
 }) {
-  const { toast } = useToast();
-  const [open, setOpen] = useState(false);
+  const { launch, launching } = useCoworkLaunch("The guest-happiness prompt");
   const prompt = useMemo(
     () =>
       buildCoworkGuestHappyPrompt({
@@ -2753,66 +2777,24 @@ function CoworkGuestHappyButton({
       }),
     [reservation, propertyName, community, units],
   );
-  const copy = async () => {
-    try {
-      await navigator.clipboard?.writeText(prompt);
-      toast({ title: "Guest-happiness prompt copied", description: "Paste it into Cowork to evaluate the attached units through the guest's eyes." });
-    } catch {
-      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
-    }
-  };
-  const launch = async () => {
-    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The guest-happiness prompt");
-    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
-  };
   return (
-    <>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        className="h-8 px-2 text-xs border-amber-300 text-amber-800 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-950"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-          void launch();
-        }}
-        data-testid={`button-cowork-guest-happy-${reservation._id}`}
-        title="Generate a Cowork prompt that judges the attached unit(s) through the guest's eyes — community, size, bedding layout, and photo quality vs the listing they booked — and records the verdict + feedback"
-      >
-        <Star className="mr-1 h-3.5 w-3.5" />
-        Will guest be happy?
-      </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Cowork guest-happiness prompt</DialogTitle>
-            <DialogDescription>
-              On your Mac this just opened a new Cowork task with the prompt pre-filled — press send
-              there to run it (it&apos;s also on your clipboard). It studies the ORIGINAL listing the
-              guest booked (photos, bedding layout, community), studies each attached unit the same
-              way, and answers dimension by dimension: same community? same size? same bedding
-              layout (1 King, 1 Queen…)? similar photo quality? It records the verdict + a written
-              guest&apos;s-eye summary onto the reservation (shown on the walking-distance panel) and
-              never books, attaches, or detaches anything.
-            </DialogDescription>
-          </DialogHeader>
-          <textarea
-            readOnly
-            value={prompt}
-            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
-            data-testid={`textarea-cowork-guest-happy-${reservation._id}`}
-            onFocus={(e) => e.currentTarget.select()}
-          />
-          <DialogFooter>
-            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-guest-happy-copy-${reservation._id}`}>
-              <Copy className="mr-1 h-3.5 w-3.5" />
-              Copy again
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="h-8 px-2 text-xs border-amber-300 text-amber-800 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-950"
+      disabled={launching}
+      onClick={(e) => {
+        e.stopPropagation();
+        // ~6.9k — comfortably under the cap, so no relay is ever needed.
+        void launch(prompt);
+      }}
+      data-testid={`button-cowork-guest-happy-${reservation._id}`}
+      title="Opens a Cowork task that judges the attached unit(s) through the guest's eyes — community, size, bedding layout, and photo quality vs the listing they booked — and records the verdict + feedback. It never books, attaches, or detaches anything."
+    >
+      <Star className="mr-1 h-3.5 w-3.5" />
+      Will guest be happy?
+    </Button>
   );
 }
 
@@ -2832,8 +2814,7 @@ function CoworkFindOnVrboButton({
   propertyName: string;
   units: { buyInId: number; unitLabel: string; listingUrl: string | null; unitAddress: string | null; costPaid: string | number | null }[];
 }) {
-  const { toast } = useToast();
-  const [open, setOpen] = useState(false);
+  const { launch, launching } = useCoworkLaunch("The find-on-VRBO prompt");
   const toDateOnly = (s: string | undefined): string =>
     !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
   const prompt = useMemo(
@@ -2848,68 +2829,24 @@ function CoworkFindOnVrboButton({
       }),
     [reservation, propertyName, units],
   );
-  const copy = async () => {
-    try {
-      await navigator.clipboard?.writeText(prompt);
-      toast({ title: "Find-on-VRBO prompt copied", description: "Paste it into Cowork to hunt for the same unit's VRBO listing." });
-    } catch {
-      toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
-    }
-  };
-  const launch = async () => {
-    const t = coworkLaunchToastCopy(await launchCoworkPrompt(prompt), "The find-on-VRBO prompt");
-    toast({ title: t.title, description: t.description, variant: t.destructive ? "destructive" : undefined });
-  };
   return (
-    <>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        className="h-8 px-2 text-xs border-sky-300 text-sky-800 hover:bg-sky-50 dark:text-sky-300 dark:hover:bg-sky-950"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-          void launch();
-        }}
-        data-testid={`button-cowork-find-on-vrbo-${reservation._id}`}
-        title="Generate a Cowork prompt that hunts for the attached non-VRBO unit(s) on vrbo.com — same physical unit only — and re-points the buy-in at the VRBO listing, or records that it's genuinely not on VRBO"
-      >
-        <Search className="mr-1 h-3.5 w-3.5" />
-        Find property on VRBO
-      </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Cowork find-on-VRBO prompt</DialogTitle>
-            <DialogDescription>
-              On your Mac this just opened a new Cowork task with the prompt pre-filled — press send
-              there to run it (it&apos;s also on your clipboard). For each attached unit that lives on
-              a direct booking site or Booking.com, it pins down the exact physical unit and hunts
-              for that same unit&apos;s own listing on vrbo.com (verified by unit number, address, and
-              photos — a similar unit doesn&apos;t count). If found, it re-points the buy-in at the
-              VRBO listing (updating the cost) unless the current channel is more than 20% cheaper;
-              if the unit genuinely isn&apos;t on VRBO, it records that and the slot shows a
-              &quot;Not on VRBO&quot; badge. It never books anything, and it never touches units that
-              are already booked.
-            </DialogDescription>
-          </DialogHeader>
-          <textarea
-            readOnly
-            value={prompt}
-            className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
-            data-testid={`textarea-cowork-find-on-vrbo-${reservation._id}`}
-            onFocus={(e) => e.currentTarget.select()}
-          />
-          <DialogFooter>
-            <Button type="button" size="sm" onClick={copy} data-testid={`button-cowork-find-on-vrbo-copy-${reservation._id}`}>
-              <Copy className="mr-1 h-3.5 w-3.5" />
-              Copy again
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="h-8 px-2 text-xs border-sky-300 text-sky-800 hover:bg-sky-50 dark:text-sky-300 dark:hover:bg-sky-950"
+      disabled={launching}
+      onClick={(e) => {
+        e.stopPropagation();
+        // ~6.4k — comfortably under the cap, so no relay is ever needed.
+        void launch(prompt);
+      }}
+      data-testid={`button-cowork-find-on-vrbo-${reservation._id}`}
+      title="Opens a Cowork task that hunts for the attached non-VRBO unit(s) on vrbo.com — same physical unit only — and re-points the buy-in at the VRBO listing (unless the current channel is >20% cheaper), or records that it's genuinely not on VRBO. It never books anything."
+    >
+      <Search className="mr-1 h-3.5 w-3.5" />
+      Find property on VRBO
+    </Button>
   );
 }
 
@@ -7979,9 +7916,18 @@ export default function Bookings() {
   // The Cowork route for the bulk process: one Claude Desktop Cowork task works
   // the selected bookings' OPEN slots one reservation at a time. The dialog
   // shows the batch prompt (and "Copy again") after launch.
-  const [bulkCoworkOpen, setBulkCoworkOpen] = useState(false);
+  // Retained so the bulk trigger can re-open the last batch on demand ("View
+  // prompt"): bulk is the only flow that ALWAYS relays, so it is the one place
+  // Claude Desktop shows a short launcher instead of the brief itself.
   const [bulkCoworkPrompt, setBulkCoworkPrompt] = useState("");
   const [bulkCoworkNote, setBulkCoworkNote] = useState("");
+  const [coworkFallback, setCoworkFallback] = useState<CoworkFallback | null>(null);
+  // Re-entrancy guard for the bulk launch: the relay POST is 26KB for one
+  // reservation and ~185KB for eight, so there is a real window in which a
+  // second click would start a SECOND Cowork task racing the first to attach
+  // to the same open slots — the exact double-attach hazard the button warns
+  // about. The row buttons get the same guard from useCoworkLaunch.
+  const [bulkCoworkLaunching, setBulkCoworkLaunching] = useState(false);
   const [bulkBuyInQueueOpen, setBulkBuyInQueueOpen] = useState(false);
   const [bulkBuyInQueueItems, setBulkBuyInQueueItems] = useState<BulkBuyInQueueItem[]>([]);
   const [bulkBuyInQueueRunning, setBulkBuyInQueueRunning] = useState(false);
@@ -8406,6 +8352,127 @@ export default function Bookings() {
     staleTime: 30_000,
   });
   const relocationSentStatus = relocationSentStatusQuery.data?.statuses ?? {};
+
+  // ── Out-of-band Cowork attach probe ────────────────────────────────────────
+  // Cowork attaches buy-ins from Claude Desktop by calling this portal's own
+  // API. There is no job id, no server handle and no poller, so an open
+  // bookings tab has nothing to watch: the row keeps its stale slots and
+  // "Prepare checkout in Cowork" — which needs an attached, unbooked buy-in —
+  // simply isn't there when the operator switches back. The 120s query poll
+  // eventually catches it, but refetchIntervalInBackground defaults false so
+  // hidden ticks are skipped, leaving a button-less row for up to two minutes.
+  //
+  // LOAD-BEARING: this probes a CHEAP buy_ins-only endpoint and invalidates the
+  // expensive Guesty-backed bookings queries ONLY when the slot fingerprint
+  // actually moved. Do not "simplify" it into a focus-refetch of the bookings
+  // query: slots[].buyIn is ours and the Guesty reservation document does not
+  // change on attach, so that would put an account-wide listing pull plus a
+  // paginated /reservations loop through Guesty's global rate gate on every
+  // app switch — the traffic behind three documented 429/timeout incidents.
+  const lastProbeActedRef = useRef("");
+  const slotProbeThrottleRef = useRef(0);
+  // Always-current copy of what the rows are RENDERING, for the probe closure.
+  const renderedSlotsRef = useRef<GuestyReservation[]>([]);
+  renderedSlotsRef.current = reservations;
+
+  const probeBuyInSlots = useCallback(async (opts?: { force?: boolean }) => {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    const now = Date.now();
+    if (!opts?.force && now - slotProbeThrottleRef.current < 30_000) return;
+    // Only a THROTTLED probe stamps the clock. If the armed 15s poll stamped
+    // it, a genuine focus wake in the following 30s would be swallowed by a
+    // poll the operator never saw.
+    if (!opts?.force) slotProbeThrottleRef.current = now;
+    const ids = visibleReservationIds;
+    if (ids.length === 0) return;
+
+    let statuses: Record<string, BuyInSlotStatusRow[]> = {};
+    try {
+      const resp = await apiRequest("POST", "/api/operations/buy-in-slot-status", { reservationIds: ids });
+      statuses = (await resp.json())?.statuses ?? {};
+    } catch {
+      return; // Fail-soft: a freshness probe must never surface as an error.
+    }
+
+    // Fingerprint every id we ASKED about, not just the ones that came back:
+    // the endpoint omits reservations with no buy-in rows, so an absent key is
+    // the empty signature. Without this, a Cowork DETACH would be invisible.
+    const returned = buyInSlotSignatureMap(statuses);
+    const next: Record<string, string> = {};
+    for (const id of ids) next[id] = returned[id] ?? "";
+
+    // Compare the server against WHAT IS ON SCREEN, not against the previous
+    // probe. Comparing probe-to-probe would silently miss the common case: an
+    // attach that lands BEFORE this tab's first wake event (operator started
+    // Cowork elsewhere, or reloaded mid-run) — the first probe would just seed
+    // the post-attach signature and never refresh. Screen-vs-server is the
+    // question actually being asked: "is this row out of date?"
+    const rendered = buyInSlotSignatureMap(Object.fromEntries(
+      renderedSlotsRef.current.map((r) => [
+        r._id,
+        r.slots.filter((s) => s.buyIn).map((s) => ({
+          unitId: s.unitId,
+          buyInId: s.buyIn!.id,
+          bookingStatus: s.buyIn!.bookingStatus ?? null,
+          listingUrl: s.buyIn!.airbnbListingUrl ?? null,
+          costPaid: s.buyIn!.costPaid ?? null,
+        })),
+      ]),
+    ));
+    const stale = ids.some((id) => next[id] !== (rendered[id] ?? ""));
+    if (!stale) return;
+
+    // Never act twice on the SAME server state. Without this, a row the refetch
+    // can't reconcile (e.g. a buy-in attached to a unitId that isn't one of the
+    // rendered slots) would look permanently stale and re-invalidate forever.
+    const fingerprint = ids.map((id) => `${id}=${next[id]}`).join("|");
+    if (fingerprint === lastProbeActedRef.current) return;
+
+    // invalidateQueries defaults to cancelRefetch:true — it ABORTS an in-flight
+    // fetch and restarts it. Probing faster than the bookings endpoint's p95
+    // would starve the query forever: permanent spinner, full Guesty cost, zero
+    // updates. Never rely on the throttle alone; the p95 here is unmeasured.
+    //
+    // MUST be isFetching(), NOT getQueryState(): getQueryState is an EXACT
+    // queryHash lookup and both bookings keys are parameterized
+    // (["/api/bookings/guesty-all", {includePast, includeCanceled}]), so a bare
+    // prefix returns undefined and the guard silently never fires. isFetching
+    // prefix-matches. Verified against the installed @tanstack/query-core.
+    for (const key of [["/api/bookings/listing"], ["/api/bookings/guesty-all"]]) {
+      if (queryClient.isFetching({ queryKey: key }) > 0) return;
+    }
+    lastProbeActedRef.current = fingerprint;
+    refreshBookingsAfterBuyInChange();
+  // refreshBookingsAfterBuyInChange is re-created every render and only closes
+  // over queryClient — closure-called on purpose, deliberately NOT a dep.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleReservationIds]);
+
+  useEffect(() => {
+    const onWake = () => { void probeBuyInSlots(); };
+    // BOTH events on purpose. TanStack's focusManager (and refetchOnWindowFocus)
+    // listens to visibilitychange ONLY — and the dominant Cowork layout is the
+    // browser and Claude Desktop side by side, where the tab never becomes
+    // hidden. window.focus is the only signal that catches the app switch back.
+    window.addEventListener("focus", onWake);
+    document.addEventListener("visibilitychange", onWake);
+    return () => {
+      window.removeEventListener("focus", onWake);
+      document.removeEventListener("visibilitychange", onWake);
+    };
+  }, [probeBuyInSlots]);
+
+  useEffect(() => {
+    // Side-by-side layout again: the operator may never leave or re-focus this
+    // window during a Cowork run, so neither wake event fires. A Cowork launch
+    // click is the only "a run is plausibly in flight" signal the client has —
+    // poll a little faster while that window is armed, then go quiet.
+    const timer = setInterval(() => {
+      if (Date.now() > coworkRunArmed.until) return;
+      void probeBuyInSlots({ force: true });
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [probeBuyInSlots]);
 
   // Persistent "cancellation notice already sent" status for the visible rows,
   // so a buy-in-searched row shows a durable "Cancellation notice sent ✓" badge.
@@ -9627,6 +9694,7 @@ export default function Bookings() {
   // across the whole batch. The short prompt-run launcher avoids deep-link
   // truncation while the clipboard keeps the full fallback.
   const startBulkCoworkFind = async () => {
+    if (bulkCoworkLaunching) return;
     const selected = selectedBulkEligibleReservations;
     const selectedWithOpenSlots = selected.filter((r) => r.slots.some((slot) => !slot.buyIn));
     const withOpenSlots = selectedBulkCoworkReservations;
@@ -9695,15 +9763,30 @@ export default function Bookings() {
     }
     setBulkCoworkPrompt(prompt);
     setBulkCoworkNote(notes.join(" "));
-    setBulkCoworkOpen(true);
-    const result = await launchCoworkPrompt(prompt, { kind: "bulk-find-and-prepare" });
-    const t = coworkLaunchToastCopy(
-      result,
-      inputs.length === 1 ? "The find-and-prepare prompt" : `The ${inputs.length}-reservation find-and-prepare batch`,
-    );
+    const label = inputs.length === 1 ? "The find-and-prepare prompt" : `The ${inputs.length}-reservation find-and-prepare batch`;
+    setBulkCoworkLaunching(true);
+    // NOTE: keep this statement's leading form byte-exact — the bulk source
+    // guard in tests/cowork-buyin-prompt.test.ts regex-matches it to prove the
+    // batch goes through the durable shared launcher. (The literal is spelled
+    // out only in that test; repeating it here would inflate the launch-site
+    // count that tests/cowork-launch.test.ts asserts.)
+    const result = await launchCoworkPrompt(prompt, { kind: "bulk-find-and-prepare" })
+      .finally(() => setBulkCoworkLaunching(false));
+    if (result.abortedForAuth) return;
+    if (result.launched) armCoworkRunWindow();
+    // Bulk is the one prompt that is ALWAYS relayed (26KB for one reservation,
+    // 185KB for eight), so it can still land on the paste path if the relay
+    // fails — that is when the operator needs the text on screen.
+    if (coworkLaunchNeedsFallback(result)) {
+      setCoworkFallback({ prompt, label, note: notes.join(" ") });
+    }
+    const t = coworkLaunchToastCopy(result, label);
     toast({
       title: t.title,
-      description: [t.description, ...notes].join(" "),
+      // The double-attach hazard used to live only in the dialog this replaced.
+      // It is a real money risk, so it now rides permanently on the toast (and
+      // the trigger button's title) instead of disappearing with the modal.
+      description: [t.description, ...notes, "Don't run the server bulk queue on these bookings at the same time."].join(" "),
       variant: t.destructive ? "destructive" : undefined,
     });
   };
@@ -10386,6 +10469,10 @@ export default function Bookings() {
   }, [bulkBuyInQueueItems]);
 
   return (
+    // Every row-level Cowork button reaches the page-level paste fallback
+    // through this provider. Without it the context default is a no-op and the
+    // fallback would silently never open on the one path that needs it.
+    <CoworkFallbackContext.Provider value={setCoworkFallback}>
     <div className="min-h-screen bg-background">
       <BuyInSearchConfirmationDialog
         payload={autoFillConfirmation}
@@ -10665,14 +10752,46 @@ export default function Bookings() {
                   <Button
                     type="button"
                     size="sm"
-                    onClick={startBulkCoworkFind}
-                    disabled={bulkBuyInQueueRunning || selectedBulkCoworkReservations.length === 0}
+                    onClick={() => { if (!bulkCoworkLaunching) void startBulkCoworkFind(); }}
+                    disabled={bulkBuyInQueueRunning || bulkCoworkLaunching || selectedBulkCoworkReservations.length === 0}
                     data-testid="button-run-bulk-cowork"
-                    title="Route the bulk buy-in process through Cowork: find and attach open slots, then prepare one checkout at a time for your card and final Checkout click. Never detaches or submits payment."
+                    title="Route the bulk buy-in process through Cowork: find and attach open slots, then prepare one checkout at a time for your card and final Checkout click. Never detaches or submits payment. Don't run the server bulk queue on these bookings at the same time."
                   >
                     <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-                    Auto Cowork bulk · find + prepare ({selectedBulkCoworkReservations.length})
+                    {bulkCoworkLaunching
+                      ? "Opening Cowork…"
+                      : `Auto Cowork bulk · find + prepare (${selectedBulkCoworkReservations.length})`}
                   </Button>
+                  {/* PERMANENT home for the double-attach hazard. It used to
+                      live in the bulk dialog this change removed; a toast is
+                      not a home for a real money hazard (TOAST_LIMIT is 1 and
+                      it auto-dismisses in ~5s). */}
+                  {selectedBulkCoworkReservations.length > 0 && (
+                    <span className="text-[11px] text-amber-700 dark:text-amber-400">
+                      Don&apos;t run the server bulk queue on these bookings at the same time.
+                    </span>
+                  )}
+                  {/* Bulk always relays, so Claude Desktop shows a short
+                      launcher rather than the brief. This is the on-demand way
+                      back to the actual batch text — the other five prompts
+                      arrive in the composer in full and need no such button. */}
+                  {bulkCoworkPrompt && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="text-xs"
+                      onClick={() => setCoworkFallback({
+                        prompt: bulkCoworkPrompt,
+                        label: "The last Cowork bulk batch",
+                        note: bulkCoworkNote || null,
+                      })}
+                      data-testid="button-view-bulk-cowork-prompt"
+                      title="Show the last bulk batch prompt that was sent to Cowork"
+                    >
+                      View prompt
+                    </Button>
+                  )}
                   <Button
                     type="button"
                     size="sm"
@@ -11895,6 +12014,7 @@ export default function Bookings() {
                                   listingUrl: s.buyIn.airbnbListingUrl ?? null,
                                   costPaid: s.buyIn.costPaid ?? null,
                                 }))}
+                              onStaleData={refreshBookingsAfterBuyInChange}
                             />
                           )}
                           <Button
@@ -12912,25 +13032,28 @@ export default function Bookings() {
         )}
       </div>
 
-      <Dialog open={bulkCoworkOpen} onOpenChange={setBulkCoworkOpen}>
+      {/* PASTE FALLBACK — the only Cowork modal left, and it opens only when the
+          brief did NOT reach the composer (phone, or an over-cap prompt whose
+          relay failed). On the happy path a Cowork click shows a toast and
+          nothing else, per the operator's 2026-07-19 directive. Page-level on
+          purpose: a row-local dialog opened after an await can be unmounted by
+          a poll before it renders, exactly when it holds the only copy. */}
+      <Dialog open={!!coworkFallback} onOpenChange={(open) => { if (!open) setCoworkFallback(null); }}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Auto Cowork — bulk find + prepare batch</DialogTitle>
+            <DialogTitle>Paste this into Cowork</DialogTitle>
             <DialogDescription>
-              This saved batch opens through a short Cowork launcher, so the complete instructions
-              cannot be truncated. Cowork works reservations one at a time: find and attach, prepare
-              one checkout, then pause for your card and Checkout click before it verifies the result
-              or moves forward. It never enters card data, submits payment, detaches existing units,
-              or keeps two unpaid checkout tabs open. The complete fallback prompt is also on your
-              clipboard. Don&apos;t run the server bulk queue on these bookings at the same time.
-              {bulkCoworkNote ? ` ${bulkCoworkNote}` : ""}
+              {coworkFallback?.label ?? "The prompt"} couldn&apos;t be pre-filled through the link —
+              it&apos;s either too long for Claude Desktop&apos;s launcher or this device has no Claude
+              Desktop. Copy it below, open a new Cowork task, paste, and press send.
+              {coworkFallback?.note ? ` ${coworkFallback.note}` : ""}
             </DialogDescription>
           </DialogHeader>
           <textarea
             readOnly
-            value={bulkCoworkPrompt}
+            value={coworkFallback?.prompt ?? ""}
             className="h-80 w-full resize-y rounded border bg-muted/30 p-3 font-mono text-[11px] leading-snug"
-            data-testid="textarea-bulk-cowork-prompt"
+            data-testid="textarea-cowork-fallback"
             onFocus={(e) => e.currentTarget.select()}
           />
           <DialogFooter>
@@ -12939,16 +13062,16 @@ export default function Bookings() {
               size="sm"
               onClick={async () => {
                 try {
-                  await navigator.clipboard?.writeText(bulkCoworkPrompt);
-                  toast({ title: "Batch prompt copied", description: "Paste it into the Cowork composer and press send." });
+                  await navigator.clipboard?.writeText(coworkFallback?.prompt ?? "");
+                  toast({ title: "Prompt copied", description: "Paste it into the Cowork composer and press send." });
                 } catch {
-                  toast({ title: "Copy failed", description: "Select the text in the dialog and copy manually.", variant: "destructive" });
+                  toast({ title: "Copy failed", description: "Select the text above and copy manually.", variant: "destructive" });
                 }
               }}
-              data-testid="button-bulk-cowork-copy"
+              data-testid="button-cowork-fallback-copy"
             >
               <Copy className="mr-1 h-3.5 w-3.5" />
-              Copy again
+              Copy prompt
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -13391,6 +13514,7 @@ export default function Bookings() {
         />
       )}
     </div>
+    </CoworkFallbackContext.Provider>
   );
 }
 
