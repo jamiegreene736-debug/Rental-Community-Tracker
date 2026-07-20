@@ -541,6 +541,21 @@ const FIXTURE_LINES = [
     "the run loads ONLY its own MCP config (no user-scope servers)",
     runnerSrc.includes('"--strict-mcp-config"'),
   );
+  check(
+    // 2026-07-20: the daemon env exports ANTHROPIC_API_KEY for worker.mjs's
+    // vision fallback; if the find-run child inherits it, every run silently
+    // flips to per-token API billing (~$4-10/run measured) instead of the
+    // CLI's subscription login. The strip must come BEFORE the explicit
+    // CLAUDE_FIND_RUN_API_KEY opt-in override.
+    "the inherited ANTHROPIC_API_KEY is stripped from the find-run child env (subscription billing by default)",
+    (() => {
+      const strip = runnerSrc.indexOf("delete childEnv.ANTHROPIC_API_KEY;");
+      const optIn = runnerSrc.indexOf(
+        "if (process.env.CLAUDE_FIND_RUN_API_KEY) childEnv.ANTHROPIC_API_KEY = process.env.CLAUDE_FIND_RUN_API_KEY;",
+      );
+      return strip > -1 && optIn > -1 && strip < optIn;
+    })(),
+  );
   // 2026-07-19: the browser MCP hand-shake takes ~2.6s; a cold/contended start
   // overran the CLI's default MCP budget and left a real run browser-less. Two
   // belts: preflight-warm-and-verify before the run, and give the CLI a real
