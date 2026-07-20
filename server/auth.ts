@@ -263,6 +263,12 @@ function agentApiMethodAllowed(req: Request): boolean {
   if (method === "POST" && /^\/api\/inbox\/conversations\/[^/]+\/send$/.test(path)) return true;
   if ((method === "PUT" || method === "PATCH") && /^\/api\/inbox\/sms\/conversations\/[^/]+\/(phone|links)$/.test(path)) return true;
   if (method === "GET" && path.startsWith("/api/inbox/calls/")) return true;
+  // Unmatched texts ("Texts" tab): third-party SMS to the Quo number with no
+  // Guesty conversation (e.g. Canary verification links). Agents work the
+  // inbox and forward these links to guests. The link-to-booking stamp
+  // (/api/inbox/unmatched-texts/link) stays admin-only: deliberately NOT listed.
+  if (method === "GET" && path === "/api/inbox/unmatched-texts") return true;
+  if (method === "POST" && path === "/api/inbox/unmatched-texts/reply") return true;
   if (method === "POST" && /^\/api\/inbox\/calls\/(\d+|conversations\/[^/]+)\/acknowledge$/.test(path)) return true;
   if (method === "POST" && path === "/api/inbox/ai-draft") return true;
   // Guest-question tier badges (read-only): the agent works the same inbox and
