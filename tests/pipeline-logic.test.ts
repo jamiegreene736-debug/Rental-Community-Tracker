@@ -4365,11 +4365,14 @@ assert.ok(
     bookingsSource.includes("comboLabel.split"),
   "buy-in Guest Page action should parse combo community names from the saved label without using the operational note prefix",
 );
+// UNIFIED ALIAS (2026-07-19): the traveler email IS the unit-scoped reservation
+// alias — the legacy firstname.lastname per-guest scheme (whose unit-index
+// disambiguation could silently store ONE address on two units) must stay gone.
 assert.ok(
-  buyInCheckoutSource.includes("unitEmailIndexForBuyIn") &&
-    buyInCheckoutSource.includes("guestEmailLocalPart(firstName, lastName, unitIndex)") &&
-    buyInCheckoutSource.includes("`${l}${unitIndex}`"),
-  "multi-unit VRBO buy-ins should suffix the guest booking email local-part per unit",
+  buyInCheckoutSource.includes("getOrCreateReservationAlias") &&
+    buyInCheckoutSource.includes("travelerEmailNeedsRemint") &&
+    !buyInCheckoutSource.includes("unitEmailIndexForBuyIn"),
+  "the VRBO traveler email must reuse the unit-scoped reservation alias (one alias per unit), not a per-guest local-part scheme",
 );
 assert.ok(
   routesSource.includes("sharedVrboResortPhotos") &&

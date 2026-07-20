@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-19 (ONE email alias per buy-in unit — traveler email unified with the unit alias):
+  Operator (bookings-row screenshot): both units showed "the exact same" alias + every unit
+  rendered TWO alias blocks ("Unit email alias" + "VRBO guest thread") — merge to ONE per unit.
+  ROOT CAUSE (don't re-chase): two independent SimpleLogin systems — reservation_aliases keyed
+  (reservationId, buyInId) with the .a/.b unit-token prefix walk (correct), vs
+  buy_ins.travelerEmail minted per-GUEST (firstname.lastname@); the latter's unit-index
+  disambiguation raced sibling attaches and its "already exists" catch silently stored ONE
+  address on BOTH units. SHIPPED (`claude/email-alias-dedup-units-af17f9`): alias engine
+  extracted routes.ts → server/reservation-alias.ts (verbatim; routes imports it);
+  ensureTravelerEmailForBuyIn now mints/reuses the UNIT alias and the legacy scheme is deleted
+  (pipeline-logic lock repointed); every unit-scoped alias mint/lookup BACKFILLS
+  buy_ins.travelerEmail (never clobbers an existing value); an UNBOOKED unit sharing its
+  travelerEmail with a sibling re-mints onto its own alias (pure travelerEmailNeedsRemint in
+  shared/unified-buyin-alias.ts — BOOKED units keep their address, VRBO already has it). UI:
+  BuyInGuestThreadPanel is GONE — BuyInVendorEmailPanel is the ONE block per unit (alias badge +
+  expiry, PM contact/compose, "Email history (N)" = mergeAliasThread() dedupe across
+  buy_in_emails ∪ guest_inbox_messages — both IMAP ingesters watch the SAME mailbox for the SAME
+  address now, so display-level Message-ID/subject+sender+10-min-window dedupe is what prevents
+  every email showing twice; PM rows win ties because they carry attachments + the reverse-alias
+  reply path), host-reply composer at the bottom, legacy differing travelerEmail visible as a
+  "booking email (legacy)" badge. "Create unit alias" now also sets the booking email in one
+  click. Locked by tests/unified-buyin-alias.test.ts (25: message-id/dedupe/merge ordering,
+  remint rules, source guards on all five seams). Verified: full `npm test` REAL exit 0, build
+  clean ("VRBO guest thread" grepped GONE from the client bundle), `npm run check` 335 = baseline
+  (stash A/B identical per-file sets). Existing shared-alias rows heal on the next
+  traveler-email mint for the unbooked unit; booked units keep their live address by design.
+
 - 2026-07-19 (buy-in slot: "Mark as bought in" + "Buy this unit in" REMOVED + "Send unit
   confirmation to guest"): Operator asked for (a) a UI affordance representing that an attached
   unit was actually PAID for/bought in, (b) removal of the "Buy this unit in" button (the
