@@ -6,18 +6,16 @@ import {
   searchLocationForBuyInMarket,
 } from "@shared/buy-in-market";
 
+import {
+  guesty429MaxAttempts,
+  guesty429PauseMs,
+  parseRetryAfterMs,
+  shouldRetryGuesty429,
+} from "@shared/guesty-retry";
+
 let guestyRequestGate: Promise<void> = Promise.resolve();
 let nextGuestyRequestAt = 0;
 let guestyRateLimitPauseUntil = 0;
-
-function parseRetryAfterMs(value: string | null): number | null {
-  if (!value) return null;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 120000);
-  const dateMs = Date.parse(value);
-  if (Number.isFinite(dateMs)) return Math.max(0, Math.min(dateMs - Date.now(), 120000));
-  return null;
-}
 
 async function waitForGuestyRequestSlot() {
   const minGapMs = Math.max(0, Number(process.env.GUESTY_REQUEST_MIN_GAP_MS ?? 500));
@@ -33,15 +31,26 @@ async function waitForGuestyRequestSlot() {
 }
 
 export async function guestyRequest(method: string, endpoint: string, body?: unknown) {
-  const token = await getGuestyToken();
-  await waitForGuestyRequestSlot();
-  const res = await fetch(`https://open-api.guesty.com/v1${endpoint}`, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(Math.max(5_000, Number(process.env.GUESTY_REQUEST_TIMEOUT_MS ?? 25_000))),
-  });
-  if (!res.ok) {
+  // 429 RETRY IN PLACE (2026-07-20 "Failed to load bookings" incident): the
+  // gate below already pauses FUTURE requests when a 429 lands, but the
+  // request that received it used to throw immediately — an interactive
+  // endpoint (bookings list, inbox) unlucky enough to fire inside the window
+  // surfaced a hard 500. A 429 was never processed by Guesty, so re-queueing
+  // through the gate (which now waits out the pause) is safe for EVERY
+  // method. Bounded by GUESTY_429_RETRIES (default 2 extra attempts).
+  const maxAttempts = guesty429MaxAttempts(process.env.GUESTY_429_RETRIES);
+  let res!: Response;
+  for (let attempt = 1; ; attempt++) {
+    const token = await getGuestyToken();
+    await waitForGuestyRequestSlot();
+    res = await fetch(`https://open-api.guesty.com/v1${endpoint}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(Math.max(5_000, Number(process.env.GUESTY_REQUEST_TIMEOUT_MS ?? 25_000))),
+    });
+    if (res.ok) break;
+
     // Guesty error responses are inconsistent — sometimes JSON with message,
     // sometimes plain text, sometimes empty. Read once as text so we can
     // surface the actual body even when JSON parsing fails. Keeps the bubble
@@ -59,7 +68,11 @@ export async function guestyRequest(method: string, endpoint: string, body?: unk
     log(`[guesty] ${method} ${endpoint} → ${res.status}: ${message.slice(0, 300)}`, "guesty-error");
     const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
     if (res.status === 429) {
-      guestyRateLimitPauseUntil = Math.max(guestyRateLimitPauseUntil, Date.now() + (retryAfterMs ?? 15000));
+      guestyRateLimitPauseUntil = Math.max(guestyRateLimitPauseUntil, Date.now() + guesty429PauseMs(retryAfterMs));
+    }
+    if (shouldRetryGuesty429(res.status, attempt, maxAttempts)) {
+      log(`[guesty] 429 on ${method} ${endpoint} — waiting out the rate-limit pause, retry ${attempt}/${maxAttempts - 1}`, "guesty");
+      continue;
     }
     const err = new Error(`Guesty ${res.status} on ${method} ${endpoint}: ${message}`) as Error & {
       status?: number;

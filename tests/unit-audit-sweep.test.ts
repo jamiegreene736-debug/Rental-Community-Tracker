@@ -19,6 +19,7 @@ import {
   mergeCommunityConsensusPasses,
   MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS,
   replaceRungOnCooldown,
+  unattendedOtaDuplicateReplaceBlocked,
   lookupUnitAuditRecord,
   photoFixRungsForUnit,
   unitAuditRetryStageIds,
@@ -304,6 +305,22 @@ check("cooldown: a swap inside the window blocks another cron swap; outside/neve
   replaceRungOnCooldown(NOW - 40 * 86_400_000, NOW, 28) === false &&
   replaceRungOnCooldown(null, NOW, 28) === false &&
   replaceRungOnCooldown(NOW - 5 * 86_400_000, NOW, 0) === false);
+
+// ── OTA-duplicate findings are ALERT-ONLY unattended (2026-07-20 directive) ──
+// A cron-source sweep (weekly scheduler OR found-flip reactive) must never
+// auto-replace a unit whose photos were FOUND on another OTA — the dashboard
+// duplicate-photos alert + operator SMS are the surface, and the popup's
+// Replace photos button is the manual path. Manual sweeps still replace, and
+// bedroom-shortfall/community-mismatch automation is untouched.
+check("ota alert-only: cron + otaFound blocks; override env '1' restores auto-replace",
+  unattendedOtaDuplicateReplaceBlocked({ source: "cron", otaFound: true }) === true &&
+  unattendedOtaDuplicateReplaceBlocked({ source: "cron", otaFound: true, overrideEnvValue: "1" }) === false &&
+  unattendedOtaDuplicateReplaceBlocked({ source: "cron", otaFound: true, overrideEnvValue: "0" }) === true);
+
+check("ota alert-only: manual sweeps and non-OTA triggers are never blocked",
+  unattendedOtaDuplicateReplaceBlocked({ source: "manual", otaFound: true }) === false &&
+  unattendedOtaDuplicateReplaceBlocked({ source: "cron", otaFound: false }) === false &&
+  unattendedOtaDuplicateReplaceBlocked({ source: "manual", otaFound: false }) === false);
 
 // ── Auto-fix: duplicate-photo selection (PR 2; same-scene opt-in 2026-07-12) ─
 const DEDUPE_GROUPS = [
@@ -879,6 +896,21 @@ check("ladder: bedroom-shortfall replacements require bedroom-photo coverage on 
 
 check("ladder: replacement requires record.allowReplace and honors AUDIT_REPLACE_DISABLED",
   serverSrc.includes("record.allowReplace") && serverSrc.includes("AUDIT_REPLACE_DISABLED"));
+
+// 2026-07-20 directive: unattended OTA-duplicate replacements are ALERT-ONLY.
+// The gate must run in the replace rung path (consulting otaFoundByLabel +
+// the shared pure predicate), text the operator, and roll up as attention
+// pointing at the dashboard duplicate-photos alert — never a silent pass and
+// never an automatic swap. Removing any of these re-arms auto-replacement.
+check("ladder: cron OTA-duplicate replace is gated by unattendedOtaDuplicateReplaceBlocked over otaFoundByLabel",
+  serverSrc.includes("unattendedOtaDuplicateReplaceBlocked({") &&
+  /otaFound: otaFoundByLabel\.has\(plan\.ref\.label\)/.test(serverSrc) &&
+  serverSrc.includes("UNIT_AUDIT_CRON_OTA_REPLACE"));
+
+check("ladder: the OTA alert-only block texts the operator and reports attention with the dashboard-alert remedy",
+  serverSrc.includes("photo-duplicate-review:") &&
+  serverSrc.includes("automatic replacement is OFF for this finding") &&
+  serverSrc.includes("Duplicate photos were found on another OTA listing — automatic replacement is OFF"));
 
 check("ladder: waits for the photo auto-labeler before re-checking (the 0/N false-fail class)",
   serverSrc.includes("waitForFolderLabels") && serverSrc.includes("getPhotoLabelsByFolder"));

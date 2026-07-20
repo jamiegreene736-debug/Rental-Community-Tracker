@@ -13907,6 +13907,74 @@ Requirements:
     }
   });
 
+  // ── PM text thread (operator ask 2026-07-20: "text back and forth with the
+  // management company" beside the buy-in email history). Reuses the EXISTING
+  // Quo/OpenPhone engine + quo_sms_messages mirror — outbound via sendQuoSms,
+  // inbound via the Quo webhook (recordQuoWebhook stores PM replies keyed to
+  // their phone; QUO_WEBHOOK_SECRET must be set on Railway for inbound to
+  // mirror — the GET reports that honestly). Thread = every SMS matched on the
+  // PM phone's last 10 digits. No new tables.
+  app.get("/api/buy-ins/:id/pm-sms", async (req, res) => {
+    try {
+      const buyInId = Number(req.params.id);
+      const buyIn = await storage.getBuyIn(buyInId);
+      if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
+      const { extractPhoneForSms, pmSmsPhoneKey } = await import("@shared/pm-sms");
+      const phone = normalizePhone(String(req.query.phone ?? "").trim() || extractPhoneForSms(buyIn.managementContact));
+      const key = pmSmsPhoneKey(phone);
+      const messages = key ? await storage.getQuoSmsMessagesByPhoneLast10(key) : [];
+      res.json({
+        buyInId,
+        phone: key ? phone : "",
+        messages,
+        sms: getQuoSmsConfigStatus(),
+        // Inbound PM replies only mirror into the thread when the Quo webhook
+        // is configured — surface that so a silent thread isn't mistaken for
+        // "the PM never answered".
+        inboundConfigured: !!process.env.QUO_WEBHOOK_SECRET,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to load PM text thread", message: err.message });
+    }
+  });
+
+  app.post("/api/buy-ins/:id/pm-sms", async (req, res) => {
+    try {
+      const buyInId = Number(req.params.id);
+      const buyIn = await storage.getBuyIn(buyInId);
+      if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
+      const { pmSmsPhoneKey, pmSmsSenderLabel, managementContactNeedsPhone, formatPmSmsPhone } = await import("@shared/pm-sms");
+      const phone = normalizePhone(String(req.body?.phone ?? "").trim());
+      const body = String(req.body?.body ?? "").trim();
+      if (!pmSmsPhoneKey(phone)) return res.status(400).json({ error: "A valid PM phone number is required" });
+      if (!body) return res.status(400).json({ error: "Message text is required" });
+      const message = await sendQuoSms({
+        conversationId: null,
+        reservationId: buyIn.guestyReservationId ?? null,
+        guestName: pmSmsSenderLabel(buyIn.managementCompany),
+        to: phone,
+        body,
+      });
+      // First text to a hand-typed number: save it onto the buy-in's
+      // management contact (prepend — never clobber an existing phone, and
+      // keep the email that may already be there) so the thread reopens
+      // prefilled next time.
+      if (managementContactNeedsPhone(buyIn.managementContact)) {
+        const existing = String(buyIn.managementContact ?? "").trim();
+        const updated = existing ? `${formatPmSmsPhone(phone)} · ${existing}` : formatPmSmsPhone(phone);
+        try {
+          await storage.updateBuyIn(buyInId, { managementContact: updated });
+        } catch (err: any) {
+          console.warn("[pm-sms] managementContact phone backfill failed:", err?.message ?? err);
+        }
+      }
+      res.json({ ok: true, message });
+    } catch (err: any) {
+      console.error("[pm-sms] send failed:", err?.message ?? err);
+      res.status(500).json({ error: "Failed to send PM text", message: err.message });
+    }
+  });
+
   // Reporting pull for the actually-paid rates extracted from alias inboxes
   // (operator ask 2026-07-19: "keep this data stored somewhere so in the
   // future I can pull it for reporting"). One row per buy-in that has an
