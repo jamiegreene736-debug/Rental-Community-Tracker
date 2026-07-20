@@ -5613,6 +5613,31 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    title/description/layout contradiction). Locked by
    tests/find-new-bedroom-guard.test.ts.
 
+25. **The REPLACE rung (find-unit) is ALSO exact-bedroom — the floor gates
+   were the recurrence hole (2026-07-20).** One day after #24's live fix set
+   the Cliffs Unit A back to 2BR, the weekly audit's replace rung flipped it
+   to 3BR again through a DIFFERENT gate: every bedroom check in the
+   replacement finder (`/api/preflight/find-unit` route in routes.ts —
+   discovery-hint filter, qualifying-candidate counter, candidate scoring,
+   pre-scrape gate, post-scrape gate) was a FLOOR (`>= requiredBedrooms`,
+   "needs at least NBR"), so a 3BR candidate qualified for the 2BR
+   requirement (find job prfj_mrrhzffg_h9cq4x: payload requiredBedrooms 2 →
+   returned unit #5308 bedrooms 3), the orchestrator committed it (swap
+   #74), and the commit repoint — correct per #24 — flipped the draft to
+   3BR/7-combined. A photo replacement stands in for the SAME sellable unit
+   (operator spec since 2026-07-04: "same community + SAME bedroom count"),
+   so bigger is just as wrong as smaller: it silently changes the LISTING's
+   configured bedroom count. All gates now run through the shared pure
+   `replacementBedroomMismatch` (shared/auto-replace-job-logic.ts) — reject
+   ONLY on a positive mismatch, unknown counts pass to the downstream
+   scrape/vision checks — and the auto-replace orchestrator additionally
+   burns a positively-mismatched candidate pre-commit (like a 409; feeds
+   the bounded find-restart) so a manual route change can never reopen the
+   hole for automated commits. Manual replace-with-URL keeps its
+   operator-wins flexibility (the route itself stays permissive). Locked by
+   tests/find-new-bedroom-guard.test.ts ("replacement finder EXACT bedroom
+   rule" section).
+
 ## Conventions
 
 ### Branches
@@ -6086,3 +6111,5 @@ Welcome. When in doubt, ask the human.
 2026-07-20 · Jamie (toast screenshot, unit B): "Could not confirm management contact — 422: Email-sourced contact's quote is not verbatim-present in the cited email" · FIXED (`claude/mgmt-contact-verbatim-fix`) · NOT a hallucination: the cited VRBO confirmation genuinely names the on-site team ("Contact Alii Resorts for info related to payments…" + phone +18088796284), but the email is laced with zero-width non-joiners, en-dashes, and curly apostrophes, AND the company line sits two lines away from the phone ("Send Message" between) — an honestly-quoting model normalizes the punctuation and/or joins the contact lines, and the strict contiguous byte-collapse check rejected the real quote. The quote check is now `quoteSupportedByEmail` over `foldForContactCompare` (folds zero-width chars, dash variants, curly quotes, NBSP on both sides): contiguous folded substring OR every quote line verbatim-present (non-adjacent allowed — the prompt says "line(s)") OR ≥90% token overlap with EVERY digit run present. The HARD guarantees are untouched and test-locked: phone still digit-for-digit against the cited email (haystack excludes fromEmail — SES sender hashes are digit soup a fabricated number could substring-match), email address still must be present, fabricated quotes/phones/digit-runs still 422. tests/management-contact-lookup.test.ts gained the live VRBO-shape matrix; full chain green, check 335 = baseline.
 
 2026-07-20 · Jamie (Operations screenshot): "remove Re-Verify, Payment terms, and Guest Page from the attached-unit toolbar; improve the UI for Send Confirmation to Guest / Alternative Unit / Message AD; make the rest uniform" · SHIPPED (`claude/button-ui-cleanup-8e9746`) · The three buttons AND their now-dead machinery are fully removed (PaymentTermsButton + VrboPaymentScheduleClient type, the per-slot VerifyRateDialog + verifyTarget state, guestAlternativePageMutation + its combo-label parsers) — the capabilities themselves live on: the manual buy-in dialog still reads VRBO checkout terms via /api/operations/vrbo-payment-schedule and rates via /api/operations/verify-pm-listing, and guest pages build exclusively through RelocateGuestDialog createPage (Alternative Unit / Send unit confirmation), which already submits the same combo + proximity context. Toolbar layout is now: purchase status → three primary guest-messaging pills (Alternative Unit = brand gradient, Send unit confirmation = emerald, Message AD = sky; h-7 rounded-full) → divider → uniform h-7 ghost utilities (Inbox, Find sites, Unit details, Confirm mgmt contact) → sent badges → Detach (red hover). NOTE: the shadcn Button default variant paints a brand-teal GRADIENT via background-image — a bg-<color> override alone is invisible under it; tinted pills need `bg-none` too (twMerge treats the gradient as background-image, not a bg-color conflict). Locks repointed with intent preserved: pipeline-logic's Guest-page-action lock now guards the RelocateGuestDialog machinery + asserts the removed buttons stay gone; relocation-scenario's party-size lock repointed to createPage's const. Full `npm test` REAL exit 0, check 335 = baseline (stash A/B identical), removed strings bundle-grepped gone, toolbar proven on the BUILT bundle (static SPA + Playwright, mocked /api: presence/absence + computed pill colors emerald rgb(5,150,105) / sky rgb(2,132,199)).
+
+2026-07-20 · Jamie (builder screenshot): "Unit A is not a 3 BR it's a 2 BR. Please update and see why this changed to the incorrect bedroom count." · DIAGNOSED LIVE (prod DB: community_drafts 20, unit_swaps 74, replacement_find_jobs prfj_mrrhzffg_h9cq4x) + FIXED (`claude/cliffs-unit-a-bedrooms`) · RECURRENCE of the 2026-07-18 Cliffs incident through the OTHER rung: the 2026-07-19 weekly audit OTA-flagged Unit A's gallery (the #3304 photos live on the real owner's OTA listings) and the replace rung correctly fired — but every find-unit bedroom gate was a FLOOR (">= requiredBedrooms"), so with requiredBedrooms=2 the finder returned 3BR Redfin unit #5308, the orchestrator committed it (swap 74, 2026-07-19 07:55Z), and the #24 repoint dutifully flipped the draft to 3BR/7-combined; the audit's descriptions stage then regenerated overrides saying "Unit A (3BR)". The 2026-07-18 Decision Log had already NAMED this hole ("find-unit's bedroom gate is a MINIMUM, so a 4BR passed a 3BR requirement" — unit B's 3→4 flip) but only the find-new rung got the exact-match guard then. NOW CLOSED at both layers (Load-Bearing Unit Audit Sweep #25): shared `replacementBedroomMismatch` drives ALL five find-unit gates (exact when both counts known; unknown passes) + the auto-replace orchestrator burns mismatched candidates pre-commit (burnedBedrooms → bounded find-restart). LIVE FIX: draft 20 restored to 2/4/6 (bedding/short-description columns still carried the operator's 7/18 2BR values — the swap only touched the bedroom counts); Unit A still carries #5308's 3BR gallery + the stale 3BR description overrides — post-deploy: re-run Replace photos on Unit A (now exact-2BR) and regenerate+push descriptions. Locked by tests/find-new-bedroom-guard.test.ts (27/0); pipeline-logic's old floor-string lock repointed to the predicate. Full `npm test` REAL exit 0, check 335 = baseline (A/B identical up to TS union-ordering noise), build clean.

@@ -2681,9 +2681,14 @@ assert.ok(
   routeSource.includes("const discoveryTargetMet = (): boolean =>"),
   "replacement discovery early-stop must count qualifying bedroom candidates, not wrong-size inventory",
 );
+// 2026-07-20: the discovery filter is now the shared EXACT-match predicate —
+// the old "< requiredBedroomCount" floor let BIGGER units through, and the
+// 2026-07-19 audit committed a 3BR gallery onto the Cliffs 2BR Unit A
+// (replacements must match the unit's bedroom count exactly; see
+// tests/find-new-bedroom-guard.test.ts).
 assert.ok(
-  routeSource.includes("bedroomHint < requiredBedroomCount"),
-  "replacement discovery must skip harvesting Google hits that advertise too few bedrooms",
+  routeSource.includes("replacementBedroomMismatch(requiredBedroomCount, bedroomHint)"),
+  "replacement discovery must skip harvesting Google hits whose advertised bedrooms mismatch the unit's exact count",
 );
 assert.ok(
   routeSource.includes("harvestApifyPhotoDiscoveryBatch"),
