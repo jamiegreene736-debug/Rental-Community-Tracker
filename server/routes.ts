@@ -226,6 +226,7 @@ import { loopbackRequestHeaders, resolvePortalSession, isLoopback } from "./auth
 import { registerAssistantRoutes } from "./assistant/routes";
 import { getSidecarAutomationState, setSidecarAutomationPaused } from "./sidecar-automation";
 import { formatReceiptMoney, formatReceiptLongDate, isBookingChannel, sanitizeForBookingChannel, receiptNeedsAttention, refundSmsNeedsAttention } from "@shared/receipt-message";
+import { buildUnitConfirmationGuestMessage } from "@shared/unit-confirmation-message";
 import { getGuestReceiptStatus, setGuestReceiptsEnabled, runGuestReceipts, sendReceiptForReservation, createReceiptPage } from "./guest-receipts";
 import { getGuestComplaintScannerStatus, setGuestComplaintScannerEnabled, runGuestComplaintScan } from "./guest-complaint-scanner";
 import { fetchSearchApiWithFallback, getSearchApiKey, isSearchApiQuotaError } from "./searchapi";
@@ -10251,8 +10252,13 @@ export async function registerRoutes(
     const bathroomText = Number.isFinite(bathrooms) && bathrooms > 0 ? `${formatAlternativeNumber(bathrooms)} bathroom${bathrooms === 1 ? "" : "s"}` : "";
     const sleepsText = Number.isFinite(sleeps) && sleeps > 0 ? `sleeping up to ${Math.round(sleeps)}` : "";
     const detailText = [bedroomText, bathroomText, sleepsText].filter(Boolean).join(", ");
+    // Confirmation pages describe the guest's OWN reserved unit — "comparable"
+    // is relocation framing and must not appear there.
+    const leadSentence = item.confirmationPage === true
+      ? `${title} is reserved for your stay${community ? ` in ${community}` : ""}.`
+      : `${title} is a comparable vacation rental${community ? ` in ${community}` : ""}.`;
     return [
-      `${title} is a comparable vacation rental${community ? ` in ${community}` : ""}.`,
+      leadSentence,
       `It offers ${detailText || bedroomText}.`,
     ].filter(Boolean).join(" ");
   };
@@ -10278,6 +10284,10 @@ export async function registerRoutes(
       // booked (verdict-confirmed) — the copy must not frame it as a move to a
       // new/different community.
       sameCommunityAsOriginal: item.sameCommunityAsOriginal === true ? true : null,
+      // True on a "unit-confirmation" page: this unit is already RESERVED for
+      // the guest's stay — the copy must read as their confirmed unit, never
+      // as an alternative/replacement option.
+      confirmationPage: item.confirmationPage === true ? true : null,
     };
 
     try {
@@ -10293,7 +10303,7 @@ export async function registerRoutes(
           max_tokens: 550,
           messages: [{
             role: "user",
-            content: `Write guest-facing copy for an alternative vacation rental option.
+            content: `Write guest-facing copy for ${facts.confirmationPage ? "a vacation rental unit that is confirmed and reserved for the guest's upcoming stay" : "an alternative vacation rental option"}.
 
 Facts:
 ${JSON.stringify(facts, null, 2)}
@@ -10310,6 +10320,7 @@ Requirements:
 - Do not mention photo counts, photos available, or that photos can be reviewed.
 - Focus only on the concrete details present in the facts: the unit label, bedroom count, bathroom/sleeps count when present, and the community.
 - When sameCommunityAsOriginal is true, this unit is in the SAME community the guest originally booked. Do not describe it as a new, different, or comparable community and do not frame this as a move - frame it as staying right in the community they already chose.
+- When confirmationPage is true, this unit is already reserved for the guest's stay. Never call it an alternative, replacement, option, or comparable stay, and do not frame anything as a change or a move - write it as the unit they will be staying in.
 - Return only the copy.`,
           }],
         }),
@@ -10334,19 +10345,23 @@ Requirements:
   // stack so the community line can't leak listing names/numbers or invent
   // amenities. Deterministic fallback when no AI key (and reused by the GET
   // renderer for pages built before this field existed).
-  const alternativeCommunityDescriptionFallback = (community: unknown, area: unknown): string => {
+  const alternativeCommunityDescriptionFallback = (community: unknown, area: unknown, opts?: { confirmation?: boolean }): string => {
     const name = normalizeAlternativeText(community, 120);
     const areaName = normalizeAlternativeText(area, 120);
     const lead = name || "This community";
+    // "Comparable" is relocation framing — a unit-confirmation page describes
+    // the community the guest already booked.
+    const kindWord = opts?.confirmation ? "a welcoming" : "a comparable";
     if (areaName && (!name || normalizeResortText(name) !== normalizeResortText(areaName))) {
-      return `${lead} is a comparable vacation community located in ${areaName}, offering a relaxed island setting for your stay.`;
+      return `${lead} is ${kindWord} vacation community located in ${areaName}, offering a relaxed island setting for your stay.`;
     }
-    return `${lead} is a comparable vacation community offering a relaxed island setting for your stay.`;
+    return `${lead} is ${kindWord} vacation community offering a relaxed island setting for your stay.`;
   };
 
   const draftAlternativeCommunityDescription = async (
     community: unknown,
     area: unknown,
+    opts?: { confirmation?: boolean },
   ): Promise<{ description: string; generatedBy: "ai" | "fallback" | "curated"; warning?: string }> => {
     // Prefer our researched, fact-checked blurb when this is a community we
     // actually operate in. It can safely name real amenities (pools, beaches,
@@ -10354,7 +10369,7 @@ Requirements:
     // through to the AI/deterministic path for any unknown city-wide resort.
     const curated = resolveCuratedCommunityDescription(community, area);
     if (curated) return { description: curated, generatedBy: "curated" };
-    const fallback = alternativeCommunityDescriptionFallback(community, area);
+    const fallback = alternativeCommunityDescriptionFallback(community, area, opts);
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     const communityName = normalizeAlternativeText(community, 120);
     if (!anthropicKey || !communityName) {
@@ -10868,6 +10883,11 @@ Requirements:
         }
       }
       const alternatives = Array.isArray(payload.alternatives) ? payload.alternatives : [];
+      // "unit-confirmation" pages ("Send unit confirmation to guest") reuse
+      // this renderer with the relocation framing swapped out: a confirmation
+      // headline/intro and none of the same-community / old-community chips.
+      // Pages built before the field existed carry no pageKind = relocation.
+      const pageIsConfirmation = payload.pageKind === "unit-confirmation";
       // Sanitize persisted labels: older pages persisted the raw Guesty listing
       // title as the "community" ("Ilikai - 4BR Condos - Sleeps 12").
       const originalCommunity = normalizeCommunityContext(
@@ -10970,6 +10990,21 @@ Requirements:
           : alternativeCommunity
             ? `We have availability in ${escapeHtml(alternativeCommunityDisplay)} for this stay.`
             : `We prepared ${alternatives.length === 1 ? "this unit" : "these units"} so you can review a comparable stay in the same general area.`;
+      // Confirmation-page intro: no availability/relocation narrative at all —
+      // just "these are the exact units reserved for you" + honest capacity.
+      const confirmationContext = (() => {
+        const unitsPhrase = alternatives.length === 1 ? "the exact unit reserved" : "the exact units reserved";
+        const photosPhrase = alternatives.length === 1 ? "the unit" : "the units";
+        const lead = `Everything is confirmed for your stay - below ${alternatives.length === 1 ? "is" : "are"} ${unitsPhrase} for you, with the exact photos of ${photosPhrase} you will be staying in.`;
+        const fitClause = pagePartySize && totalSleeps >= pagePartySize
+          ? `, so your party of ${pagePartySize} will fit comfortably`
+          : "";
+        const sleepsLine = totalSleeps > 0
+          ? ` Together the ${alternatives.length === 1 ? "unit sleeps" : "units sleep"} up to ${totalSleeps} guests${fitClause}.`
+          : "";
+        return `${lead}${sleepsLine}`;
+      })();
+      const introContext = pageIsConfirmation ? confirmationContext : availabilityContext;
       const bedroomCounts = new Map<number, number>();
       for (const item of alternatives) {
         const bedrooms = Number(item?.bedrooms);
@@ -10989,14 +11024,16 @@ Requirements:
         totalSleeps > 0 ? { icon: "sleep" as const, label: `Sleeps ${totalSleeps}` } : null,
         (alternativeCommunityDisplay || (pageSameCommunity && sameCommunityPlaceLabel))
           ? { icon: "community" as const, label: `Community: ${alternativeCommunityDisplay || sameCommunityPlaceLabel}` } : null,
-        pageSameCommunity
+        // A confirmation page has no "original booking" to compare against —
+        // the same-community + old-community-distance chips are relocation-only.
+        !pageIsConfirmation && pageSameCommunity
           ? { icon: "community" as const, label: pageSameBuilding ? "Same Building as Your Original Booking" : "Same Community as Your Original Booking" } : null,
         // Same BUILDING → a walk-between-units chip is nonsense; same COMMUNITY
         // → there is no "old community" to be a drive away from (the persisted
         // drive minutes on such pages came from geocoding two labels for the
         // SAME place — the live "1 Minute Drive" artifact).
         !pageSameBuilding && Number.isFinite(unitWalkMinutes) && unitWalkMinutes > 0 ? { icon: "walk" as const, label: `Unit A/B Walk: ${Math.round(unitWalkMinutes)} Minute Walk` } : null,
-        !pageSameCommunity && Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "route" as const, label: `Distance From Old Community: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
+        !pageIsConfirmation && !pageSameCommunity && Number.isFinite(communityDriveMinutes) && communityDriveMinutes > 0 ? { icon: "route" as const, label: `Distance From Old Community: ${Math.round(communityDriveMinutes)} Minute Drive` } : null,
       ].filter(Boolean) as Array<{ icon: "amenity" | "bath" | "bed" | "calendar" | "car" | "community" | "home" | "route" | "sleep" | "walk"; label: string }>;
       const overviewBlock = overviewDetails.length
         ? `<div class="overview">${overviewDetails.map((detail) => `<span class="overview-chip">${alternativeIconSvg(detail.icon)}<span class="chip-label">${escapeHtml(detail.label)}</span></span>`).join("")}</div>`
@@ -11034,7 +11071,7 @@ Requirements:
       const communityDescription =
         resolveCuratedCommunityDescription(communityLabelForCopy, areaNameDisplay)
         || (persistedFitsCommunity ? persistedCommunityDescription : "")
-        || alternativeCommunityDescriptionFallback(communityLabelForCopy, areaNameDisplay);
+        || alternativeCommunityDescriptionFallback(communityLabelForCopy, areaNameDisplay, { confirmation: pageIsConfirmation });
       const topCommunityBlock = topCommunityPhotos.length
         ? `<section class="community-preview">
             <div class="section-heading">
@@ -11091,7 +11128,7 @@ Requirements:
                   <button type="button" data-carousel-next aria-label="Next photo">Next</button>
                 </div>` : ""}
             </div>`
-          : `<div class="empty-photos">Photos are still being gathered for this option.</div>`;
+          : `<div class="empty-photos">Photos are still being gathered for this ${pageIsConfirmation ? "unit" : "option"}.</div>`;
         // Show the clean, resolved community (e.g. "Villas of Kamalii") in the
         // unit title — NOT the raw VRBO listing title, which carries the unit
         // number + marketing cruft ("Villas of Kamalii 39 - Sleeps 14").
@@ -11127,7 +11164,7 @@ Requirements:
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       return res.send(`<!doctype html>
         <html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
-        <title>Alternative Stay Options</title>
+        <title>${pageIsConfirmation ? "Your Confirmed Stay" : "Alternative Stay Options"}</title>
         <style>
           *{box-sizing:border-box}
           html,body{max-width:100%;overflow-x:hidden}
@@ -11239,18 +11276,18 @@ Requirements:
               <span class="brand-name">VacationRentalExpertz</span>
             </div>
             <div class="hero-copy">
-              <h1>Alternative Stay Options</h1>
+              <h1>${pageIsConfirmation ? "Your Units for Your Stay" : "Alternative Stay Options"}</h1>
               <p class="stay-line">${alternativeIconSvg("calendar")}<span>${escapeHtml(payload.guestName || "Guest")} · ${escapeHtml(stayDateText || "Dates to be confirmed")}</span></p>
             </div>
           </div>
         </header>
         <main>
           <section class="intro-panel">
-            <p class="intro">${availabilityContext}</p>
+            <p class="intro">${introContext}</p>
             ${overviewBlock}
           </section>
           ${topCommunityBlock}
-          ${photoBlocks || "<p>No alternative options were attached to this page yet.</p>"}
+          ${photoBlocks || `<p>No ${pageIsConfirmation ? "units" : "alternative options"} were attached to this page yet.</p>`}
         </main>
         <script>
           document.querySelectorAll("[data-carousel]").forEach((carousel) => {
@@ -11286,6 +11323,15 @@ Requirements:
     try {
       const alternatives = Array.isArray(req.body?.alternatives) ? req.body.alternatives.slice(0, 6) : [];
       if (alternatives.length === 0) return res.status(400).json({ error: "alternatives array required" });
+      // Page kind: "relocation" (default — we moved the guest to different
+      // units) vs "unit-confirmation" ("Send unit confirmation to guest" —
+      // nothing changed; show the guest the exact units reserved for their
+      // stay). Confirmation pages reuse the WHOLE hydration pipeline below
+      // (photo scrape + vision screen + community gallery + AI copy) and only
+      // swap the guest-facing FRAMING: the renderer drops the relocation
+      // headline/chips and the drafted message confirms instead of apologizes.
+      const pageKind = req.body?.pageKind === "unit-confirmation" ? "unit-confirmation" : "relocation";
+      const isConfirmationPage = pageKind === "unit-confirmation";
       const token = randomBytes(12).toString("hex");
       const dir = path.join(process.cwd(), "tmp", "booking-alternatives");
       await fs.promises.mkdir(dir, { recursive: true });
@@ -11561,8 +11607,11 @@ Requirements:
             // Same-community relocations keep the guest's ORIGINAL community
             // name for the copy (the unit-derived extractor deliberately never
             // returns it) and tell the writer not to frame it as a new place.
-            community: cleanNewCommunity || (sameCommunity ? originalCommunity : "") || base.community,
+            // A confirmation page keeps the original community too — the units
+            // ARE the guest's booked stay, not a new place.
+            community: cleanNewCommunity || (sameCommunity || isConfirmationPage ? originalCommunity : "") || base.community,
             sameCommunityAsOriginal: sameCommunity,
+            confirmationPage: isConfirmationPage,
           },
           stay,
         );
@@ -11605,8 +11654,13 @@ Requirements:
       const communityDescriptionDraft = await draftAlternativeCommunityDescription(
         alternativeCommunity,
         areaName || alternativeCommunity,
+        { confirmation: isConfirmationPage },
       );
       const payload = {
+        // "relocation" | "unit-confirmation" — drives the GET renderer's
+        // framing. Lives in the jsonb payload (no schema column needed);
+        // absent on pages built before this field existed = relocation.
+        pageKind,
         reservationId,
         guestName: stay.guestName || "Guest",
         checkIn: stay.checkIn,
@@ -11705,6 +11759,27 @@ Requirements:
           originalBedrooms,
           partySize,
         }),
+        // "Send unit confirmation to guest": the kind-appropriate draft for a
+        // confirmation page — confirms the exact reserved units instead of
+        // apologizing for a move. Same Booking.com sanitize posture as the
+        // relocation message.
+        confirmationMessage: isConfirmationPage
+          ? (() => {
+            const msg = buildUnitConfirmationGuestMessage({
+              guestName: stay.guestName,
+              confirmationUrl: url,
+              units: hydratedAlternatives.map((a) => ({
+                bedrooms: Number(a.bedrooms) > 0 ? Math.round(Number(a.bedrooms)) : null,
+                sleeps: Number(a.sleeps) > 0 ? Math.round(Number(a.sleeps)) : null,
+              })),
+              totalSleeps,
+              partySize,
+              walkMinutes,
+              sameBuilding,
+            });
+            return String(channel ?? "").toLowerCase().includes("booking") ? sanitizeForBookingChannel(msg) : msg;
+          })()
+          : undefined,
       });
     } catch (err: any) {
       return res.status(500).json({ error: "Failed to create alternative page", message: err?.message ?? String(err) });
@@ -12020,6 +12095,9 @@ Requirements:
       )).slice(0, 300);
       const statuses: Record<string, {
         token: string;
+        // What the most recent sent page WAS ("relocation" | "unit-confirmation")
+        // so the row badge can label "Guest messaged" vs "Unit confirmation sent".
+        pageKind: string;
         messageSentAt: Date | null;
         messageChannel: string | null;
         opened: boolean;
@@ -12036,6 +12114,7 @@ Requirements:
           statuses[id] = sent
             ? {
                 token: sent.token,
+                pageKind: (sent.payload as any)?.pageKind === "unit-confirmation" ? "unit-confirmation" : "relocation",
                 messageSentAt: sent.messageSentAt,
                 messageChannel: sent.messageChannel ?? null,
                 opened: !!sent.firstOpenedAt,
@@ -14058,7 +14137,7 @@ Requirements:
   // POST /api/buy-ins/:id/traveler-email
   // Mint (or reuse) the per-guest VRBO booking email without starting checkout.
   // Used when manually attaching VRBO buy-ins so arrival confirmations land in
-  // the Operations guest thread before "Buy this unit in" is clicked.
+  // the Operations guest thread before a checkout is prepared.
   app.post("/api/buy-ins/:id/traveler-email", async (req, res) => {
     try {
       const buyInId = parseInt(req.params.id, 10);
@@ -16725,7 +16804,10 @@ Requirements:
   // The step after a unit is attached: BOOK it on vrbo.com, automated UP TO
   // payment, then surface the (yellow) sidecar Chrome window for the operator to
   // enter card details + click "Book now". One job per buy-in (single-flight).
-  // The bookings page's per-unit "Buy this unit in" button starts it and polls.
+  // DORMANT scaffold with no UI trigger since 2026-07-19 (the per-unit "Buy this
+  // unit in" button was removed — checkout runs through the Cowork prompts and
+  // purchases are recorded via the "Mark as bought in" PATCH). Kept intact per
+  // AGENTS.md; the endpoints still answer for any in-flight pollers.
   app.post("/api/operations/buy-in-checkout", async (req: Request, res: Response) => {
     try {
       const { startBuyInCheckoutJob } = await import("./buy-in-checkout-job");

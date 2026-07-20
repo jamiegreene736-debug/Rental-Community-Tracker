@@ -349,6 +349,9 @@ type AutoFillSearchSummary = {
 // by reservation. Drives the "Guest messaged ✓" badge on the bookings row.
 type RelocationSentStatus = {
   token: string;
+  // "relocation" | "unit-confirmation" — what the most recent sent page was,
+  // so the row badge reads "Guest messaged" vs "Unit confirmation sent".
+  pageKind?: string;
   messageSentAt: string | null;
   messageChannel: string | null;
   opened: boolean;
@@ -5371,26 +5374,13 @@ const FILL_SOURCE_TONE: Record<"green" | "blue" | "amber", string> = {
 // back to the durable last-scan record (lastSearchByReservation, fed by
 // /api/operations/auto-fill/last) for the reason + timestamp on anything not yet
 // full. `last` is the most-recent finished/live AutoFillJobStatus for this row.
-// ── Per-unit "Buy this unit in" button (server/buy-in-checkout-job.ts) ────────
-// Starts the VRBO checkout for ONE attached unit: automated up to payment, then
-// the sidecar Chrome window pops up (yellow border, like the CAPTCHA handoff) for
-// the operator to enter card details + click "Book now". This button only
-// triggers + reflects status; the operator always enters payment themselves.
-type CheckoutJobClientStatus = {
-  jobId: string;
-  status: "queued" | "running" | "awaiting_payment" | "completed" | "failed";
-  done: boolean;
-  phase: string;
-  message: string;
-  buyInId: number;
-  reservationId: string;
-  unitLabel: string;
-  travelerEmail: string | null;
-  confirmationNumber: string | null;
-  error: string | null;
-  timestamps: { createdAt: number; startedAt: number | null; finishedAt: number | null };
-};
-
+// ── Per-unit purchase status + "Mark as bought in" ───────────────────────────
+// Shows the durable buy_ins.bookingStatus lifecycle for an attached unit and
+// lets the operator RECORD that the purchase actually happened (paid + booked).
+// The checkout itself runs through the per-unit "Prepare checkout in Cowork"
+// button above; this control never drives a checkout. (The old "Buy this unit
+// in" trigger for the dormant sidecar checkout job was removed 2026-07-19 —
+// the server scaffold in server/buy-in-checkout-job.ts stays dormant/intact.)
 type VrboPaymentScheduleClient = {
   total: number | null;
   dueToday: number | null;
@@ -5488,85 +5478,10 @@ function PaymentTermsButton({ buyIn }: { buyIn: BuyIn }) {
   );
 }
 
-function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation: GuestyReservation }) {
+function UnitPurchaseStatus({ buyIn, reservation }: { buyIn: BuyIn; reservation: GuestyReservation }) {
   const { toast } = useToast();
-  const [job, setJob] = useState<CheckoutJobClientStatus | null>(null);
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [starting, setStarting] = useState(false);
   const [resettingClaim, setResettingClaim] = useState(false);
   const [markingBooked, setMarkingBooked] = useState(false);
-
-  // Rediscover any live checkout job for this unit on mount (survives reloads).
-  useEffect(() => {
-    let cancelled = false;
-    apiGetJson<{ jobs: Record<string, CheckoutJobClientStatus> }>(`/api/operations/buy-in-checkout/active?buyInIds=${buyIn.id}`)
-      .then((data) => {
-        if (cancelled) return;
-        const existing = data.jobs?.[String(buyIn.id)];
-        if (existing) {
-          setJob(existing);
-          if (!existing.done) setJobId(existing.jobId);
-        }
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [buyIn.id]);
-
-  // Poll while a job is live.
-  useEffect(() => {
-    if (!jobId) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const tick = async () => {
-      if (cancelled) return;
-      try {
-        const data = await apiGetJson<CheckoutJobClientStatus>(`/api/operations/buy-in-checkout/${jobId}`);
-        if (cancelled) return;
-        setJob(data);
-        if (data.done) { setJobId(null); return; }
-      } catch (e: any) {
-        // 404 = job lost (TTL/redeploy); the buy_ins row keeps the durable status.
-        if (/\b(404|401|403)\b/.test(String(e?.message ?? ""))) { if (!cancelled) setJobId(null); return; }
-      }
-      if (!cancelled) timer = setTimeout(tick, 2500);
-    };
-    timer = setTimeout(tick, 1500);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [jobId]);
-
-  const fullName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "";
-  const parts = fullName.trim().split(/\s+/).filter(Boolean);
-  const guestFirstName = reservation.guest?.firstName || parts[0] || "";
-  const guestLastName = parts.length > 1 ? parts.slice(1).join(" ") : "";
-
-  const start = async () => {
-    setStarting(true);
-    try {
-      const res = await apiRequest("POST", "/api/operations/buy-in-checkout", {
-        buyInId: buyIn.id,
-        reservationId: reservation._id,
-        guestFirstName,
-        guestLastName,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-      setJob({
-        jobId: data.jobId, status: data.status ?? "queued", done: false, phase: "queued",
-        message: "Starting…", buyInId: buyIn.id, reservationId: reservation._id, unitLabel: buyIn.unitLabel,
-        travelerEmail: null, confirmationNumber: null, error: null,
-        timestamps: { createdAt: Date.now(), startedAt: null, finishedAt: null },
-      });
-      setJobId(data.jobId);
-      toast({
-        title: "Buying this unit in",
-        description: "Driving the VRBO checkout — the Chrome window will pop up (yellow border) when it's time for you to enter the card.",
-      });
-    } catch (e: any) {
-      toast({ title: "Couldn't start the booking", description: String(e?.message ?? e), variant: "destructive" });
-    } finally {
-      setStarting(false);
-    }
-  };
 
   // The COUNTERPART of "Not paid — reset": the operator DID pay. The Cowork
   // chat used to record the result after the operator confirmed their click,
@@ -5574,6 +5489,8 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
   // handoff — there is no chat left to tell, so the operator records the
   // outcome here. Only real evidence: the confirmation number they enter, or
   // an explicit REQUEST (request-to-book stays awaiting host approval).
+  // Recording "booked" arms the never-re-book guard and hides the unit's
+  // "Prepare checkout in Cowork" button — the ONE recorder for every state.
   const markBookedAfterPayment = async () => {
     const entered = window.prompt(
       "Use this ONLY after YOU completed the payment for this unit.\n\n"
@@ -5618,6 +5535,24 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
     }
   };
 
+  // Per-state wrapper around the SAME recorder: outside the payment handoff
+  // the purchase can still complete (host accepted a request, or the unit was
+  // bought outside the portal flows entirely) and the operator records it here.
+  const markPaidButton = (opts: { label: string; title: string; variant: "default" | "outline" | "ghost" }) => (
+    <Button
+      size="sm"
+      variant={opts.variant}
+      className="h-7"
+      disabled={markingBooked}
+      onClick={() => void markBookedAfterPayment()}
+      data-testid={`button-mark-bought-in-${reservation._id}-${buyIn.id}`}
+      title={opts.title}
+    >
+      {markingBooked ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
+      {opts.label}
+    </Button>
+  );
+
   const resetCheckoutClaim = async () => {
     // A unit stranded at awaiting_payment is otherwise a dead end: this row's
     // "Prepare checkout in Cowork" button hides while a checkout is active, and
@@ -5655,13 +5590,13 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
     }
   };
 
-  const booked = job?.status === "completed" || buyIn.bookingStatus === "booked";
-  const confirmation = job?.confirmationNumber ?? buyIn.bookingConfirmation;
+  const booked = buyIn.bookingStatus === "booked";
+  const confirmation = buyIn.bookingConfirmation;
   if (booked) {
     return (
       <span
         className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
-        title={confirmation ? `Booked on VRBO · confirmation ${confirmation}` : "Booked on VRBO"}
+        title={confirmation ? `Bought in · confirmation ${confirmation}` : "Bought in — purchase recorded"}
         data-testid={`badge-bought-in-${reservation._id}-${buyIn.id}`}
       >
         <CheckCircle2 className="h-3.5 w-3.5" /> Bought in{confirmation ? ` · ${confirmation}` : ""}
@@ -5670,10 +5605,10 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
   }
 
   // Cowork persists awaiting_payment on the buy-in row before handing payment
-  // back to the operator. Prefer that durable state as well as a live job so a
-  // reload cannot turn a prepared checkout back into a "Buy this unit in"
-  // action and invite a duplicate checkout attempt.
-  const awaitingPayment = job?.status === "awaiting_payment" || buyIn.bookingStatus === "awaiting_payment";
+  // back to the operator. The durable state survives reloads, so a prepared
+  // checkout can never fall back to an idle "mark bought in" row and invite a
+  // duplicate checkout attempt.
+  const awaitingPayment = buyIn.bookingStatus === "awaiting_payment";
   if (awaitingPayment) {
     return (
       <span className="inline-flex items-center gap-1">
@@ -5722,30 +5657,23 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
 
   if (buyIn.bookingStatus === "request_submitted") {
     return (
-      <span
-        className="inline-flex items-center gap-1 rounded border border-violet-300 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-900 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-200"
-        title={buyIn.bookingConfirmation
-          ? `VRBO request submitted · ${buyIn.bookingConfirmation} · awaiting host approval`
-          : "VRBO request submitted · awaiting host approval"}
-        data-testid={`status-request-submitted-${reservation._id}-${buyIn.id}`}
-        data-booking-status="request_submitted"
-      >
-        <Clock3 className="h-3.5 w-3.5" />
-        Request sent · awaiting host{buyIn.bookingConfirmation ? ` · ${buyIn.bookingConfirmation}` : ""}
-      </span>
-    );
-  }
-
-  const live = !!jobId && job && !job.done;
-  if (live && job) {
-    return (
-      <span
-        className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
-        title={job.message}
-        data-testid={`status-bought-in-${reservation._id}-${buyIn.id}`}
-      >
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        {job.message || "Buying in…"}
+      <span className="inline-flex items-center gap-1">
+        <span
+          className="inline-flex items-center gap-1 rounded border border-violet-300 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-900 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-200"
+          title={buyIn.bookingConfirmation
+            ? `VRBO request submitted · ${buyIn.bookingConfirmation} · awaiting host approval`
+            : "VRBO request submitted · awaiting host approval"}
+          data-testid={`status-request-submitted-${reservation._id}-${buyIn.id}`}
+          data-booking-status="request_submitted"
+        >
+          <Clock3 className="h-3.5 w-3.5" />
+          Request sent · awaiting host{buyIn.bookingConfirmation ? ` · ${buyIn.bookingConfirmation}` : ""}
+        </span>
+        {markPaidButton({
+          label: "Host accepted — mark booked",
+          title: "The host approved the request and the booking was charged — record the completed purchase",
+          variant: "ghost",
+        })}
       </span>
     );
   }
@@ -5779,21 +5707,25 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
     );
   }
 
-  const failed = job?.status === "failed" || buyIn.bookingStatus === "failed";
+  const failed = buyIn.bookingStatus === "failed";
   return (
-    <Button
-      size="sm"
-      variant={failed ? "ghost" : "default"}
-      onClick={start}
-      disabled={starting}
-      data-testid={`button-buy-unit-in-${reservation._id}-${buyIn.id}`}
-      title={failed
-        ? (job?.error || buyIn.bookingError || "Retry the VRBO checkout for this unit")
-        : "Start the VRBO checkout for this unit — automated up to payment, then you enter the card"}
-    >
-      {starting ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <ShoppingCart className="h-3.5 w-3.5 mr-1" />}
-      {failed ? "Retry buy-in" : "Buy this unit in"}
-    </Button>
+    <span className="inline-flex items-center gap-1">
+      {failed && (
+        <span
+          className="inline-flex items-center gap-1 rounded border border-red-300 bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200"
+          title={buyIn.bookingError || "The last checkout preparation failed — prepare a new checkout in Cowork, or record the purchase if it was completed another way"}
+          data-testid={`status-checkout-failed-${reservation._id}-${buyIn.id}`}
+          data-booking-status="failed"
+        >
+          Checkout failed
+        </span>
+      )}
+      {markPaidButton({
+        label: "Mark as bought in",
+        title: "Record that this unit's purchase was actually completed (paid) — via the Cowork checkout or directly on the booking site",
+        variant: "outline",
+      })}
+    </span>
   );
 }
 
@@ -8261,7 +8193,7 @@ export default function Bookings() {
     | null
   >(null);
   const [relocateGuestTarget, setRelocateGuestTarget] = useState<
-    | { reservation: GuestyReservation }
+    | { reservation: GuestyReservation; kind?: "unit-confirmation" }
     | null
   >(null);
   const [arrivalDetailsMessageTarget, setArrivalDetailsMessageTarget] = useState<
@@ -13209,9 +13141,11 @@ export default function Bookings() {
                                       when there's a URL to verify; the
                                       dialog handles the loading state and
                                       manual cost edit. */}
-                                  {/* Book this attached unit on VRBO (automated up to payment;
-                                      operator enters the card in the yellow-bordered popup). */}
-                                  {slot.buyIn && <BuyThisUnitInButton buyIn={slot.buyIn} reservation={r} />}
+                                  {/* Purchase status for this attached unit: bought-in badge /
+                                      checkout lifecycle, plus "Mark as bought in" to record that
+                                      the unit was actually paid for. Checkout itself runs through
+                                      the per-unit "Prepare checkout in Cowork" button above. */}
+                                  {slot.buyIn && <UnitPurchaseStatus buyIn={slot.buyIn} reservation={r} />}
                                   {/* On-demand VRBO payment schedule (due now / balance due date). */}
                                   {slot.buyIn && <PaymentTermsButton buyIn={slot.buyIn} />}
                                   {/* Per-guest booking inbox (firstname.lastname@emailprivaccy.com). */}
@@ -13274,6 +13208,20 @@ export default function Bookings() {
                                         <Send className="h-3.5 w-3.5 mr-1" />
                                         Alternative Unit
                                       </Button>
+                                      {/* Same page/message/send machinery as Alternative Unit,
+                                          but CONFIRMS the attached units instead of framing a
+                                          move: the guest page shows the exact photos of the
+                                          units they're staying in. */}
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={(e) => { e.stopPropagation(); setRelocateGuestTarget({ reservation: r, kind: "unit-confirmation" }); }}
+                                        data-testid={`button-send-unit-confirmation-${r._id}-${slot.unitId}`}
+                                        title={`Confirm the attached units to the guest — builds a guest page with the exact photos of the units they're staying in and sends it through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "their booking channel"}`}
+                                      >
+                                        <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                                        Send unit confirmation to guest
+                                      </Button>
                                       <Button
                                         size="sm"
                                         variant="secondary"
@@ -13292,14 +13240,15 @@ export default function Bookings() {
                                   {slot.unitId === (r.slots.find((s) => s.buyIn)?.unitId ?? null)
                                     && relocationSentStatus[r._id]?.messageSentAt && (() => {
                                     const st = relocationSentStatus[r._id]!;
+                                    const isConfirmationSend = st.pageKind === "unit-confirmation";
                                     return (
                                       <span
                                         className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
-                                        title={`Relocation message sent${st.messageChannel ? ` via ${st.messageChannel}` : ""} on ${fmtDate(st.messageSentAt)}${st.opened ? ` · guest opened the link${st.openCount ? ` ${st.openCount}×` : ""}${st.lastOpenedAt ? ` (last ${fmtDate(st.lastOpenedAt)})` : ""}` : " · not opened yet"}`}
+                                        title={`${isConfirmationSend ? "Unit confirmation" : "Relocation message"} sent${st.messageChannel ? ` via ${st.messageChannel}` : ""} on ${fmtDate(st.messageSentAt)}${st.opened ? ` · guest opened the link${st.openCount ? ` ${st.openCount}×` : ""}${st.lastOpenedAt ? ` (last ${fmtDate(st.lastOpenedAt)})` : ""}` : " · not opened yet"}`}
                                         data-testid={`badge-guest-messaged-${r._id}`}
                                       >
                                         <CheckCircle2 className="h-3.5 w-3.5" />
-                                        Guest messaged {fmtDate(st.messageSentAt)}
+                                        {isConfirmationSend ? "Unit confirmation sent" : "Guest messaged"} {fmtDate(st.messageSentAt)}
                                         {st.opened ? " · opened ✓" : ""}
                                       </span>
                                     );
@@ -14218,6 +14167,7 @@ export default function Bookings() {
       {relocateGuestTarget && (
         <RelocateGuestDialog
           reservation={relocateGuestTarget.reservation}
+          kind={relocateGuestTarget.kind}
           onClose={() => setRelocateGuestTarget(null)}
         />
       )}
@@ -18504,12 +18454,20 @@ function VrboGuestPageDialog({
 // booking channel), and then tracks whether the guest opened the link.
 function RelocateGuestDialog({
   reservation,
+  kind,
   onClose,
 }: {
   reservation: GuestyReservation;
+  // "unit-confirmation" = the "Send unit confirmation to guest" button:
+  // identical page/message/send machinery, but the guest page is built with
+  // pageKind "unit-confirmation" (no relocation framing) and the drafted
+  // message CONFIRMS the exact attached units instead of apologizing for a
+  // move. Default (undefined) keeps the original relocation behavior.
+  kind?: "unit-confirmation";
   onClose: () => void;
 }) {
   const { toast } = useToast();
+  const isConfirmation = kind === "unit-confirmation";
   const channel = channelKindOf(reservation);
   const channelLabel =
     channel === "booking" ? "Booking.com"
@@ -18596,6 +18554,7 @@ function RelocateGuestDialog({
         checkIn: checkInOf(reservation),
         checkOut: checkOutOf(reservation),
         channel,
+        pageKind: isConfirmation ? "unit-confirmation" : "relocation",
         walkMinutes,
         unitWalkMinutes: walkMinutes,
         propertyLabel,
@@ -18609,11 +18568,11 @@ function RelocateGuestDialog({
         partySize,
       }).then((r) => r.json());
       if (!resp?.url || !resp?.token) throw new Error(resp?.message || resp?.error || "Guest page create failed");
-      return resp as { url: string; token: string; relocationMessage?: string };
+      return resp as { url: string; token: string; relocationMessage?: string; confirmationMessage?: string };
     },
     onSuccess: (data) => {
       setCreatedPage({ url: data.url, token: data.token });
-      setMessage(data.relocationMessage || "");
+      setMessage((isConfirmation ? data.confirmationMessage : data.relocationMessage) || "");
       // The inbox surfaces this URL per-reservation (InboxAlternativePagePanel);
       // invalidate its query so a page created here shows up there on return.
       queryClient.invalidateQueries({ queryKey: ["/api/booking-alternatives/for-reservation"] });
@@ -18698,9 +18657,11 @@ function RelocateGuestDialog({
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Alternative unit message</DialogTitle>
+          <DialogTitle>{isConfirmation ? "Unit confirmation message" : "Alternative unit message"}</DialogTitle>
           <DialogDescription>
-            {relocateVerdictConsensus
+            {isConfirmation
+              ? `Drafts a note confirming the exact units reserved for ${guestName.split(/\s+/)[0] || "the guest"}'s stay — with the guest page link showing the exact photos of the units — and sends it through ${channelLabel} (the channel they booked with). You can edit the text before sending.`
+              : relocateVerdictConsensus
               ? `Drafts a note that ${guestName.split(/\s+/)[0] || "the guest"}'s stay is still in the same ${relocateVerdictConsensus === "same_building" ? "building" : "community"} — focused on the bedroom-count change, not a move — includes the guest page link, and sends it through ${channelLabel} (the channel they booked with). You can edit the text before sending.`
               : `Drafts an apology that we've moved ${guestName.split(/\s+/)[0] || "the guest"} to a comparable property, includes the new listing's guest page link, and sends it through ${channelLabel} (the channel they booked with). You can edit the text before sending.`}
           </DialogDescription>
