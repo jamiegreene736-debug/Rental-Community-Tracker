@@ -364,9 +364,13 @@ export function matchExistingComplaintIssue(
     i.kind === "back_office" || i.kind === "property" ? i.kind : complaintKindForCategory(categoryOf(i));
 
   // Only ever merge into an issue of the SAME KIND — a refund request must never
-  // fold into a maintenance issue (different tab, different owner).
+  // fold into a maintenance issue (different tab, different owner). Back-office
+  // TASKS (kind "back_office_task" — manual operator to-dos for the agent team)
+  // are excluded OUTRIGHT: kindOf's legacy-row inference must never let the
+  // scanner append complaint notes to a hand-written task.
   const unresolved = issues
     .filter((i) => isGuestIssueUnresolved(i.status))
+    .filter((i) => i.kind !== "back_office_task")
     .filter((i) => kindOf(i) === verdict.kind);
   if (unresolved.length === 0) return null;
 

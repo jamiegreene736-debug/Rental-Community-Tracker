@@ -11,7 +11,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import {
   AlertCircle, Plus, Trash2, Loader2, CheckCircle, Clock, RotateCcw, Send, X, MessageSquare, ScanSearch,
-  ChevronRight, ChevronDown,
+  ChevronRight, ChevronDown, ClipboardList,
 } from "lucide-react";
 import {
   GUEST_ISSUE_SEVERITIES,
@@ -19,6 +19,7 @@ import {
   guestIssueSeverityLabel,
   summarizeGuestIssueStatuses,
   orderGuestIssuesResolvedLast,
+  isBackOfficeTaskConversationId,
 } from "@shared/guest-issue-logic";
 import { parseComplaintNote } from "@shared/guest-complaint-logic";
 
@@ -49,7 +50,7 @@ type GuestIssue = {
   title: string;
   description: string | null;
   severity: string;
-  kind: string; // property | back_office
+  kind: string; // property | back_office | back_office_task
   status: string;
   createdBy: string;
   createdByRole: string;
@@ -454,6 +455,15 @@ function IssueCard({
                   Back-office
                 </span>
               )}
+              {issue.kind === "back_office_task" && (
+                <span
+                  className="rounded bg-teal-100 px-1.5 py-0.5 text-[10px] font-medium text-teal-800"
+                  title="Back-office task — created by the operator for the agent team to work and mark resolved"
+                  data-testid={`badge-guest-issue-kind-${issue.id}`}
+                >
+                  Task
+                </span>
+              )}
               <span className={`text-sm font-medium ${expanded ? "" : "truncate"}`}>{issue.title}</span>
             </div>
             {/* Collapsed one-liner so a resolved (or manually-collapsed) issue still
@@ -497,7 +507,9 @@ function IssueCard({
             Opened by {authorLabel(issue.createdBy, issue.createdByRole)} · {fmtWhen(issue.createdAt)}
             {isResolved && collapsedWhen ? ` · Resolved ${collapsedWhen}` : ""}
           </div>
-          {onOpenConversation && (
+          {/* A back-office task created without a guest thread carries the sentinel
+              conversation id — there is no conversation to open, so hide the link. */}
+          {onOpenConversation && !isBackOfficeTaskConversationId(issue.conversationId) && (
             <button
               type="button"
               className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-primary hover:underline"
@@ -606,23 +618,37 @@ const TAB_FILTERS: { key: string; label: string }[] = [
 ];
 
 // Cross-conversation issues inbox tab: every issue across all guests of ONE kind
-// (property → "Guest Issues" tab, back_office → "Back-Office Issues" tab),
-// filterable by status, with the same comment / status / delete actions as the
-// per-conversation panel plus a jump-to-conversation link. Creation stays in the
-// per-conversation panel (an issue must attach to a guest thread).
+// (property → "Guest Issues" tab, back_office → "Back-Office Issues" tab,
+// back_office_task → "Back-Office Tasks" tab), filterable by status, with the
+// same comment / status / delete actions as the per-conversation panel plus a
+// jump-to-conversation link. ISSUE creation stays in the per-conversation panel
+// (an issue must attach to a guest thread); TASK creation lives here (a task is
+// an operator-written to-do — often for a third party like a PM company — and
+// needs no guest thread), gated to `canCreate` (admin-only).
 export function GuestIssuesTab({
   kind = "property",
   canDelete = false,
+  canCreate = false,
   onOpenConversation,
 }: {
-  kind?: "property" | "back_office";
+  kind?: "property" | "back_office" | "back_office_task";
   canDelete?: boolean;
+  /** Tasks tab only: show the admin "New task" creation form. */
+  canCreate?: boolean;
   onOpenConversation?: (conversationId: string) => void;
 }) {
   const qc = useQueryClient();
   const { toast } = useToast();
   const [filter, setFilter] = useState("unresolved");
   const backOffice = kind === "back_office";
+  const tasksTab = kind === "back_office_task";
+
+  // New-task form state (tasks tab, admin only).
+  const [showNewTask, setShowNewTask] = useState(false);
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskDescription, setTaskDescription] = useState("");
+  const [taskSeverity, setTaskSeverity] = useState("normal");
+  const [taskGuestName, setTaskGuestName] = useState("");
 
   const { data, isLoading, isError } = useQuery<{ issues: GuestIssue[] }>({
     queryKey: [GUEST_ISSUES_KEY, "tab", kind, filter],
@@ -634,6 +660,34 @@ export function GuestIssuesTab({
   const issues = data?.issues ?? [];
   const counts = summarizeGuestIssueStatuses(issues);
   const invalidate = () => qc.invalidateQueries({ queryKey: [GUEST_ISSUES_KEY] });
+
+  // Admin-only manual task creation (tasks tab). The server fills in the
+  // no-conversation sentinel when conversationId is omitted for this kind.
+  const createTask = useMutation({
+    mutationFn: async () => {
+      const t = taskTitle.trim();
+      if (t.length < 2) throw new Error("Please add a short title for the task.");
+      const r = await apiRequest("POST", GUEST_ISSUES_KEY, {
+        kind: "back_office_task",
+        title: t,
+        description: taskDescription.trim() || null,
+        severity: taskSeverity,
+        guestName: taskGuestName.trim() || null,
+      });
+      return r.json();
+    },
+    onSuccess: () => {
+      setTaskTitle("");
+      setTaskDescription("");
+      setTaskSeverity("normal");
+      setTaskGuestName("");
+      setShowNewTask(false);
+      invalidate();
+      toast({ title: "Task created", description: "The agent team will see it in Back-Office Tasks." });
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not create task", description: e.message, variant: "destructive" }),
+  });
 
   // Operator-only manual sweep of the guest inbox for complaints. The scanner
   // also runs automatically every ~5 min; this is the on-demand trigger. Any
@@ -657,19 +711,41 @@ export function GuestIssuesTab({
   });
 
   return (
-    <div className="space-y-4" data-testid={`panel-guest-issues-tab${backOffice ? "-back-office" : ""}`}>
+    <div
+      className="space-y-4"
+      data-testid={`panel-guest-issues-tab${tasksTab ? "-back-office-tasks" : backOffice ? "-back-office" : ""}`}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <AlertCircle className={`h-5 w-5 ${backOffice ? "text-violet-600" : "text-rose-600"}`} />
-          <h2 className="text-base font-semibold">{backOffice ? "Back-office issues" : "Guest issues"}</h2>
+          {tasksTab ? (
+            <ClipboardList className="h-5 w-5 text-teal-600" />
+          ) : (
+            <AlertCircle className={`h-5 w-5 ${backOffice ? "text-violet-600" : "text-rose-600"}`} />
+          )}
+          <h2 className="text-base font-semibold">
+            {tasksTab ? "Back-office tasks" : backOffice ? "Back-office issues" : "Guest issues"}
+          </h2>
           {filter === "unresolved" && counts.total > 0 && (
             <Badge className="bg-rose-100 text-rose-800 hover:bg-rose-100">{counts.unresolved} open</Badge>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-1">
-          {/* One scan sweeps the whole inbox and fills BOTH tabs — show the button
-              only on the property tab to avoid a redundant control. */}
-          {canDelete && !backOffice && (
+          {canCreate && tasksTab && (
+            <Button
+              size="sm"
+              variant={showNewTask ? "secondary" : "default"}
+              className="h-7 px-2.5 text-xs"
+              onClick={() => setShowNewTask((v) => !v)}
+              data-testid="button-back-office-task-new"
+            >
+              {showNewTask ? <X className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+              <span className="ml-1">{showNewTask ? "Cancel" : "New task"}</span>
+            </Button>
+          )}
+          {/* One scan sweeps the whole inbox and fills the two ISSUE tabs — show
+              the button only on the property tab to avoid a redundant control
+              (tasks are manual-only; the scanner never creates them). */}
+          {canDelete && kind === "property" && (
             <Button
               size="sm"
               variant="outline"
@@ -699,10 +775,70 @@ export function GuestIssuesTab({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        {backOffice
-          ? "Refund requests, billing disputes, and cancellation requests across your guests — auto-detected from the inbox (marked “Auto-detected”) or logged manually. Comment and mark each one ongoing or resolved."
-          : "Property-side issues (maintenance, cleanliness, noise, access, safety, amenities) across your guests. Comment and mark each one ongoing or resolved — the tab badge clears as issues are resolved. Logged from the per-conversation panel or opened automatically by the inbox scanner (marked “Auto-detected”)."}
+        {tasksTab
+          ? "To-dos the operator creates for the agent team — e.g. call or message a management company to get missing arrival details. Work the task, add updates as comments, and mark it ongoing or resolved when done."
+          : backOffice
+            ? "Refund requests, billing disputes, and cancellation requests across your guests — auto-detected from the inbox (marked “Auto-detected”) or logged manually. Comment and mark each one ongoing or resolved."
+            : "Property-side issues (maintenance, cleanliness, noise, access, safety, amenities) across your guests. Comment and mark each one ongoing or resolved — the tab badge clears as issues are resolved. Logged from the per-conversation panel or opened automatically by the inbox scanner (marked “Auto-detected”)."}
       </p>
+
+      {canCreate && tasksTab && showNewTask && (
+        <div className="space-y-2 rounded-lg border bg-muted/30 p-3" data-testid="form-back-office-task-new">
+          <Input
+            value={taskTitle}
+            onChange={(e) => setTaskTitle(e.target.value)}
+            placeholder="What needs to be done? (e.g. Call the PM company for arrival details)"
+            aria-label="Task title"
+            className="h-8 text-sm"
+            maxLength={200}
+            data-testid="input-back-office-task-title"
+          />
+          <Textarea
+            value={taskDescription}
+            onChange={(e) => setTaskDescription(e.target.value)}
+            placeholder="Details for the agent — who to contact, phone/email, what to ask for, which reservation it's about…"
+            aria-label="Task details"
+            className="min-h-[64px] text-sm"
+            data-testid="textarea-back-office-task-description"
+          />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted-foreground">Priority</span>
+              <Select value={taskSeverity} onValueChange={setTaskSeverity}>
+                <SelectTrigger className="h-8 w-28 text-xs" data-testid="select-back-office-task-severity">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {GUEST_ISSUE_SEVERITIES.map((s) => (
+                    <SelectItem key={s} value={s} className="text-xs">
+                      {guestIssueSeverityLabel(s)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Input
+                value={taskGuestName}
+                onChange={(e) => setTaskGuestName(e.target.value)}
+                placeholder="Guest / reference (optional)"
+                aria-label="Related guest or reference"
+                className="h-8 w-52 text-xs"
+                maxLength={120}
+                data-testid="input-back-office-task-guest"
+              />
+            </div>
+            <Button
+              size="sm"
+              className="h-8 text-xs"
+              disabled={createTask.isPending || taskTitle.trim().length < 2}
+              onClick={() => createTask.mutate()}
+              data-testid="button-back-office-task-create"
+            >
+              {createTask.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+              <span className="ml-1">Create task</span>
+            </Button>
+          </div>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -723,12 +859,16 @@ export function GuestIssuesTab({
         >
           <AlertCircle className="mx-auto mb-1 h-5 w-5 text-muted-foreground/60" />
           {filter === "resolved"
-            ? "No resolved issues yet."
+            ? tasksTab ? "No resolved tasks yet." : "No resolved issues yet."
             : filter === "all"
-              ? backOffice ? "No back-office issues logged yet." : "No guest issues logged yet."
+              ? tasksTab
+                ? "No back-office tasks yet — use “New task” to create one for the agent team."
+                : backOffice ? "No back-office issues logged yet." : "No guest issues logged yet."
               : filter === "unresolved"
-                ? backOffice ? "Nothing needs attention — no open refund/cancellation requests." : "Nothing needs attention — no open guest issues."
-                : `No ${filter} issues.`}
+                ? tasksTab
+                  ? "Nothing to work on — no open back-office tasks."
+                  : backOffice ? "Nothing needs attention — no open refund/cancellation requests." : "Nothing needs attention — no open guest issues."
+                : tasksTab ? `No ${filter} tasks.` : `No ${filter} issues.`}
         </div>
       ) : (
         <div className="grid items-start gap-2 lg:grid-cols-2">

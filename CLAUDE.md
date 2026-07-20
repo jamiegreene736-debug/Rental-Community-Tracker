@@ -43,6 +43,38 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (Back-Office Tasks tab — admin-created to-dos the agent team resolves): Operator
+  (Guest-Inbox screenshot): add a tab near Guest Issues, "something like Back Office Tasks",
+  where he creates a task manually as admin and the agent marks it resolved (case example:
+  "call or message this management company to get the arrival details"). SHIPPED
+  (`claude/back-office-tasks-tab-o6h7dv`): a THIRD guest-issue kind `back_office_task` on the
+  EXISTING guest-issues infra — no new tables, routes, or lifecycle (open→ongoing→resolved,
+  atomic comment+status, session-derived authorship all inherited). VISIBILITY IS THE POINT
+  (don't re-chase / don't "simplify"): tasks are the OPPOSITE of back_office issues — the tab
+  renders for BOTH roles (no isAgent gate on the trigger) and the agent list GET now strips
+  ONLY `back_office` rows instead of the old blanket `kind="property"` coercion (restoring
+  that coercion would blank the agents' tasks tab); back-office ISSUES stay operator-only on
+  every surface. CREATION is admin-only (create route coerces the agent role to property) and
+  lives IN the tab (`canCreate={isAdmin}` → "New task" form: title/details/priority/optional
+  guest ref) — not the per-conversation panel, since a task usually targets a third party
+  (PM company), not a guest thread. NO-CONVERSATION SENTINEL: `guest_issues.conversationId`
+  stays NOT NULL; an omitted conversationId on a task defaults server-side to
+  `BACK_OFFICE_TASK_CONVERSATION_ID` ("back-office-tasks", shared/guest-issue-logic.ts) and
+  the UI hides the "Open conversation" link for sentinel rows. SCANNER ISOLATION: the
+  complaint scanner never creates tasks, and `matchExistingComplaintIssue` excludes task rows
+  OUTRIGHT before its legacy-row kind inference (a hand-written task must never absorb
+  auto-detected complaint notes). Teal ClipboardList tab + unresolved-count badge; "Task"
+  chip on cards; property-tab "Scan for complaints" button gated to kind==="property" so it
+  doesn't render on the tasks tab. Locked: guest-issue-logic suite (sentinel + kind + 8
+  source guards on the visibility/creation wiring), guest-complaint-logic (task exclusion).
+  Verified: both suites + auth-agent green, full `npm test` REAL exit 0, build clean (tab
+  label + sentinel bundle-grepped both bundles), `npm run check` 334 = baseline (stash A/B
+  identical error sets), UI proven on the BUILT bundle (static SPA + Playwright, mocked
+  /api, BOTH roles: admin creates via the form → POST {kind, no conversationId}; agent sees
+  the tab, no New-task button, no Back-Office Issues tab, resolves a task; sentinel hides
+  the conversation link while thread-linked tasks keep it). See AGENTS.md Guest issues
+  tracker #8 + the 2026-07-20 Decision Log line.
+
 - 2026-07-19 (green/red ACTUALLY-PAID rate beside the unit buy-in price, stored for reporting):
   Operator (alias-panel screenshot): "Right next to the unit buy in price in like a Green or Red
   font, put the rate that was actually paid. Keep this data stored somewhere so in the future I

@@ -1638,11 +1638,33 @@ portal role). Don't "simplify" these away:
    BACK-OFFICE IS OPERATOR-ONLY (2026-07-09): the remote **agent** role never sees it.
    Enforced at BOTH layers — the UI hides the tab trigger+content for `isAgent`, AND the
    server withholds `back_office` rows from the agent role on every surface (list GET
-   forces `kind=property`, per-conversation GET filters them out, create coerces to
-   property, and the comment/status route 403s an agent on a back_office id). The property
-   "Guest Issues" tab + panel stay agent-visible. Don't rely on the UI hide alone — the
-   badge-count query + per-conversation panel would otherwise leak back-office rows to
-   agents; the server guards are load-bearing.
+   coerces a requested `kind=back_office` to property AND strips back_office rows from
+   any un-kinded fetch — updated 2026-07-20, see #8 — per-conversation GET filters them
+   out, create coerces to property, and the comment/status route 403s an agent on a
+   back_office id). The property "Guest Issues" tab + panel stay agent-visible. Don't
+   rely on the UI hide alone — the badge-count query + per-conversation panel would
+   otherwise leak back-office rows to agents; the server guards are load-bearing.
+8. **Back-Office TASKS — a third kind, agent-VISIBLE by design (2026-07-20).**
+   `kind="back_office_task"` → the **Back-Office Tasks** inbox tab: manual to-dos the
+   OPERATOR creates for the agent team to work and mark resolved (case example: "call
+   the PM company to get the missing arrival details"). Deliberately the OPPOSITE
+   visibility of back_office ISSUES: the tab renders for BOTH roles (no `isAgent` gate
+   on its trigger), the agent list GET keeps task rows (only `back_office` is stripped —
+   don't restore the old blanket `kind="property"` coercion, it would blank the agents'
+   tasks tab), and agents comment/resolve tasks through the normal comment route.
+   CREATION is admin-only (the create route coerces the agent role to `property`, so an
+   agent can never mint a task) and lives in the TAB itself (`canCreate={isAdmin}` →
+   "New task" form in `GuestIssuesTab`), not the per-conversation panel — a task usually
+   targets a third party, not a guest thread. NO-CONVERSATION SENTINEL: tasks need no
+   thread, but `guest_issues.conversationId` is NOT NULL, so an omitted conversationId
+   defaults server-side to `BACK_OFFICE_TASK_CONVERSATION_ID` ("back-office-tasks",
+   `shared/guest-issue-logic.ts`); the UI hides the "Open conversation" link for
+   sentinel rows (`isBackOfficeTaskConversationId`). SCANNER ISOLATION: the complaint
+   scanner never creates tasks (`complaintKindForCategory` only returns
+   property/back_office) and `matchExistingComplaintIssue` excludes task rows OUTRIGHT
+   before its legacy-row kind inference — a hand-written task must never absorb
+   auto-detected complaint notes. All of this is source-guard-locked in
+   `tests/guest-issue-logic.test.ts`.
 
 The panel AND the tab render for BOTH roles (agents use them in the portal);
 `canDelete={isAdmin}` hides the trash button for agents. Pure status/severity rules +
@@ -6050,3 +6072,5 @@ Welcome. When in doubt, ask the human.
 2026-07-20 · Jamie (Message AD screenshot: "no host email found in the booking-alias inbox yet" on both units while the Email history showed 5 emails): "have this pull the information from the proper alias email inboxes … also create a send via SMS button … make sure the length and formatting is appropriate." · ACCEPTED + shipped (`claude/arrival-info-email-sms-26fc63`) · The alias-inbox half was ALSO fixed concurrently by PR #1124 (same root cause, same day — refreshArrivalDetailsForReservation predated the unified per-unit alias and read only travelerEmail + guest_inbox_messages); at merge time this PR DEFERS to #1124's extraction module (aliasCandidatesForBuyIn with the attribution-exact sibling rule, extractionMessagesFromSources over buy_in_emails ∪ guest_inbox_messages via mergeAliasThread, MIME healing) and contributes the SMS leg: new pure `buildArrivalDetailsSmsMessage` (shared/arrival-details-message.ts — compact ASCII, ARRIVAL_SMS_TARGET_LIMIT 1400 with a detail-shedding ladder (notes → parking/local contact; address/codes/Wi-Fi never shed) and a hard cap under Quo's 1600) + `POST /api/bookings/:reservationId/arrival-details/send-sms` (phone ladder mirrors the refund-SMS leg: guest_phone_overrides by reservationId → Guesty guest profile; manual: rows use their saved guestPhone; 422 when no phone on file) + a "Send via SMS" toggle in the Message AD dialog (editable compact preview rebuilt from the units — never the long channel message — char/segment counter, explicit "Send SMS now" confirm, sent state re-arms on edit). SMS tests locked in tests/arrival-email-extraction.test.ts.
 
 2026-07-20 · Session flag: buy-in 539 (Jacelyn Tsu, Menehune Shores) showed "Address: 07/21/2026" — the regex arrival extractor's "Check-in:" pattern captured a CHECK-IN DATE as unitAddress (proximity panel then geocoded it to "7055.8 miles apart"), and a one-line "Wi-Fi: 'Name' PASSWORD: 'secret'" capture stored both values in wifiName · FIXED (`server/buy-in-email.ts`) · isUsableArrivalField("unitAddress") now requires looksLikeStreetAddressValue — rejects date/time/date-range shapes (looksLikeDateOrTimeValue) and demands a house-number + lettered-word token (deliberately looser than isLikelyStreetAddress, which demands a street suffix and would reject "… Loop"/"… Alanui"); covers BOTH extractors since the Claude path's isPlausiblePropertyAddressForBuyIn routes through the same gate, and corrupt stored values self-heal on the next panel reconcile via cleanExistingArrivalValue's curCorrupt path. Wi-Fi captures are split via splitWifiNameAndPassword BEFORE the usable-field check (wifiName carrying a password label is rejected, so corrupt stored names heal too) + wrapping quotes stripped. Locked in tests/arrival-email-extraction.test.ts. Live rows healed via psql: 539 → real address "760 S Kihei Rd Unit 106, Kihei, HI 96753" + wifi split; 530 ("Tue, Jul 7", past stay) → cleared.
+
+2026-07-20 · Jamie asked for a "Back Office Tasks" tab near Guest Issues where he (admin) manually creates a task — e.g. "call/message this management company to get the arrival details" — and the agent team marks it resolved · ACCEPTED · Built as a third guest-issue kind `back_office_task` on the EXISTING guest-issues infra (no new tables/routes): agent-VISIBLE tab (opposite of operator-only back_office issues — the agent list GET now strips only back_office instead of forcing kind=property), admin-only creation via a "New task" form in the tab itself, no-conversation sentinel `back-office-tasks` (conversationId stays NOT NULL, no migration), scanner isolated (matchExistingComplaintIssue excludes task rows outright). See Guest issues tracker Load-Bearing #8; source-guard-locked in tests/guest-issue-logic.test.ts.
