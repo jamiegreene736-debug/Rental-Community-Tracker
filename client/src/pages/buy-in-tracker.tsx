@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import { Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -31,7 +31,6 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import {
-  ArrowLeft,
   DollarSign,
   TrendingUp,
   TrendingDown,
@@ -1838,11 +1837,7 @@ export default function BuyInTracker() {
     <div className="min-h-screen bg-background">
       <div className="max-w-6xl mx-auto p-4 sm:p-6">
         <div className="flex items-center gap-3 mb-6 flex-wrap">
-          <Link href="/">
-            <Button variant="ghost" size="icon" data-testid="button-back-home">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+          <AppBackButton iconOnly testId="button-back-home" />
           <div className="flex-1 min-w-0">
             <h1 className="text-xl sm:text-2xl font-bold" data-testid="text-page-title">Buy-In Tracker</h1>
             <p className="text-sm text-muted-foreground">Track Airbnb purchases, guest bookings, and profitability</p>

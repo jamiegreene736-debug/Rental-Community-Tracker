@@ -3,9 +3,9 @@ import { Link, useParams } from "wouter";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  ArrowLeft,
   BedDouble,
   Bath,
   Users,
@@ -809,12 +809,7 @@ export default function UnitBuilder() {
     return (
       <div className="min-h-screen bg-background">
         <div className="max-w-[1400px] mx-auto px-4 py-6">
-          <Link href="/">
-            <Button variant="ghost" data-testid="button-back-dashboard">
-              <ArrowLeft className="h-4 w-4 mr-2" />
-              Back to Dashboard
-            </Button>
-          </Link>
+          <AppBackButton testId="button-back-dashboard" />
           <div className="mt-8 text-center">
             <h1 className="text-xl font-bold">Property not found</h1>
             <p className="text-muted-foreground mt-2">No unit builder data exists for this property.</p>
@@ -831,12 +826,7 @@ export default function UnitBuilder() {
     <div className="min-h-screen bg-background">
       <div className="max-w-[1400px] mx-auto px-4 py-6">
         <div className="mb-6">
-          <Link href="/">
-            <Button variant="ghost" data-testid="button-back-dashboard">
-              <ArrowLeft className="h-4 w-4 mr-2" />
-              Back to Dashboard
-            </Button>
-          </Link>
+          <AppBackButton testId="button-back-dashboard" />
         </div>
 
         <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
