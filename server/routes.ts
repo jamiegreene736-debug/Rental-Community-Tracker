@@ -37,6 +37,7 @@ import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { occupancyForBedrooms } from "@shared/occupancy";
+import { withListingStayDates } from "@shared/listing-stay-dates";
 import {
   DESCRIPTION_OVERRIDE_FIELDS,
   SLEEPING_CAPACITY_RULE,
@@ -18100,51 +18101,11 @@ Requirements:
       && computeUnitTypeConfidence(c, requestedBedrooms, normalizedResortName) >= (await getUnitTypeConfidenceThreshold(propertyId)));  // High-confidence gate (configurable threshold)
 
     // Append the reservation's check-in/out to the URL so the landing page
-    // opens with availability already filtered for those dates. Each platform
-    // uses different query param names.
-    const withStayDates = (source: "airbnb" | "vrbo" | "booking" | "pm", rawUrl: string): string => {
-      let u: URL;
-      try { u = new URL(rawUrl); } catch { return rawUrl; }
-      const set = (k: string, v: string) => { if (!u.searchParams.has(k)) u.searchParams.set(k, v); };
-      switch (source) {
-        case "airbnb":
-          set("check_in", checkIn);
-          set("check_out", checkOut);
-          set("adults", "2");
-          break;
-        case "vrbo":
-          // Vrbo accepts two URL date conventions; we set both to be safe.
-          // - arrival/departure: legacy params, also what Vrbo's Apollo SSR
-          //   reads to fire the rate-calendar GraphQL on initial load (the
-          //   Vrbo scraper relies on this — see pm-scraper-vrbo.ts).
-          // - startDate/endDate: modern booking-widget params; pre-fills
-          //   the date picker when the operator clicks through to the page.
-          //   Without these, the widget renders with empty date inputs even
-          //   when arrival/departure are present.
-          set("arrival", checkIn);
-          set("departure", checkOut);
-          set("startDate", checkIn);
-          set("endDate", checkOut);
-          break;
-        case "booking":
-          set("checkin", checkIn);
-          set("checkout", checkOut);
-          set("group_adults", "2");
-          break;
-        case "pm":
-          // No universal convention across PM sites — sprinkle every common
-          // param name. Sites that use one of these will pre-fill dates;
-          // sites that don't will ignore unknown params.
-          set("checkin", checkIn);
-          set("checkout", checkOut);
-          set("check_in", checkIn);
-          set("check_out", checkOut);
-          set("arrival", checkIn);
-          set("departure", checkOut);
-          break;
-      }
-      return u.toString();
-    };
+    // opens with availability already filtered for those dates. The per-platform
+    // param spellings live in shared/listing-stay-dates.ts (ONE home — the
+    // bookings-page attached-unit link uses the same helper client-side).
+    const withStayDates = (source: "airbnb" | "vrbo" | "booking" | "pm", rawUrl: string): string =>
+      withListingStayDates(rawUrl, checkIn, checkOut, source);
 
     type CommunityBounds = { sw_lat: number; sw_lng: number; ne_lat: number; ne_lng: number };
 
