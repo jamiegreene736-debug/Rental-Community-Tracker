@@ -167,6 +167,79 @@ export function isBlocklistedPropertyAddress(address: string): boolean {
   return BLOCKLISTED_ADDRESS_RES.some((re) => re.test(v));
 }
 
+const MONTH_WORD = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
+const WEEKDAY_WORD = "(?:sun|mon|tue|wed|thu|fri|sat)[a-z]*";
+const SINGLE_DATE_RES = [
+  // 07/21/2026, 7-21-26, 07.21.2026 (optionally with a trailing time)
+  /^\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}(?:\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?$/i,
+  // 2026-07-21 ISO
+  /^\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}$/,
+  // "July 21", "Jul 21, 2026", "Mon, July 21st 2026"
+  new RegExp(`^(?:${WEEKDAY_WORD},?\\s+)?${MONTH_WORD}\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?$`, "i"),
+  // "21 July 2026"
+  new RegExp(`^\\d{1,2}(?:st|nd|rd|th)?\\s+${MONTH_WORD}(?:,?\\s+\\d{4})?$`, "i"),
+  // bare time: "4:00 PM", "16:00", "4pm"
+  /^\d{1,2}(?::\d{2})?\s*(?:am|pm)$/i,
+  /^\d{1,2}:\d{2}$/,
+];
+
+function isSingleDateOrTimeToken(value: string): boolean {
+  const v = String(value ?? "").trim();
+  if (!v) return false;
+  return SINGLE_DATE_RES.some((re) => re.test(v));
+}
+
+// True for values that are a calendar date, a time, or a date range — the exact
+// shapes VRBO puts on "Check-in:" lines. A date must NEVER persist as a street
+// address (buy-in 539 stored "07/21/2026" as unitAddress and the proximity
+// panel geocoded it to nonsense).
+export function looksLikeDateOrTimeValue(value: string): boolean {
+  const v = String(value ?? "").trim();
+  if (!v) return false;
+  if (isSingleDateOrTimeToken(v)) return true;
+  const parts = v.split(/\s*(?:-|–|—|\bto\b|\bthrough\b)\s*/i).map((p) => p.trim()).filter(Boolean);
+  if (parts.length >= 2 && parts.every(isSingleDateOrTimeToken)) return true;
+  return false;
+}
+
+// Street-shape gate for unitAddress: reject date/time shapes outright, and
+// require a house-number token (digits followed by a lettered word — "760 S",
+// "2253 Poipu", the Hawaii hyphenated "75-6082 Alii") plus enough letters to be
+// a real street. Deliberately looser than shared/community-addresses.ts
+// isLikelyStreetAddress (which demands a recognized street suffix and would
+// reject real streets like "... Loop" / "... Alanui").
+export function looksLikeStreetAddressValue(value: string): boolean {
+  const v = String(value ?? "").trim();
+  if (!v) return false;
+  if (looksLikeDateOrTimeValue(v)) return false;
+  if (!/\b\d{1,6}(?:-\d{1,6})?\s+[A-Za-z][A-Za-z'.-]*/.test(v)) return false;
+  if ((v.match(/[A-Za-z]/g) ?? []).length < 4) return false;
+  return true;
+}
+
+const WIFI_PASSWORD_LABEL_RE = /\b(?:password|passcode|passphrase|pwd)\b/i;
+
+export function stripWrappingQuotes(value: string): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/^['"'"«»`]+/, "")
+    .replace(/['"'"«»`]+$/, "")
+    .trim();
+}
+
+// Split a one-line "Wi-Fi: 'SpectrumSetup-C1' PASSWORD: 'littleshark860'" capture
+// into name + password. Returns null when the capture carries no password label.
+export function splitWifiNameAndPassword(raw: string): { name: string; password: string } | null {
+  const v = String(raw ?? "").trim();
+  if (!v) return null;
+  const m = v.match(/^(.*?)[\s,;\/]*\b(?:password|passcode|passphrase|pwd)\b\s*(?:is)?\s*[:\-]?\s*(.+)$/i);
+  if (!m) return null;
+  const name = stripWrappingQuotes(m[1] ?? "");
+  const password = stripWrappingQuotes(m[2] ?? "");
+  if (!password) return null;
+  return { name, password };
+}
+
 export function isUsableArrivalField(key: string, value: string): boolean {
   const v = String(value ?? "").trim();
   if (!v) return false;
@@ -174,11 +247,15 @@ export function isUsableArrivalField(key: string, value: string): boolean {
   if (key === "unitAddress") {
     if (isBlocklistedPropertyAddress(v)) return false;
     if (v.length < 8 || !/\d/.test(v)) return false;
+    if (!looksLikeStreetAddressValue(v)) return false;
   }
   if (key === "wifiName" || key === "wifiPassword") {
     if (/guideline|unsubscribe|click here|view (?:in|online)|http/i.test(v)) return false;
     if (v.length > 80) return false;
   }
+  // A network NAME that still carries a password label is an unsplit combined
+  // capture — reject it so a corrupt stored value heals on the next reconcile.
+  if (key === "wifiName" && WIFI_PASSWORD_LABEL_RE.test(v)) return false;
   if (key === "accessCode") {
     if (/never share|secure code|verification/i.test(v) && v.length > 24) return false;
     const code = v.replace(/[^\dA-Za-z#-]/g, "");
@@ -240,12 +317,30 @@ export function parseArrivalDetailsFromText(
     /(?:access code|door code|lockbox code|entry code|keypad code)\s*[:\-]\s*([^\n]+)/i,
     /(?:your\s+secure\s+code\s+is|secure\s+code)\s*[:\-]?\s*(\d{4,8})\b/i,
   ]);
-  const wifiName = pick("wifiName", [
-    /(?:wi-?fi(?:\s*network)?(?:\s*name)?|network name|ssid)\s*[:\-]\s*([^\n]+)/i,
-  ]);
-  const wifiPassword = pick("wifiPassword", [
+  let wifiPassword = stripWrappingQuotes(pick("wifiPassword", [
     /(?:wi-?fi\s*password|network\s*password)\s*[:\-]\s*([^\n]+)/i,
-  ]);
+  ]));
+  // Wi-Fi name: split BEFORE the usable-field check — a one-line
+  // "Wi-Fi: 'Name' PASSWORD: 'secret'" capture must become two fields, never
+  // one combined wifiName (isUsableArrivalField rejects unsplit captures).
+  let wifiName = "";
+  const wifiNamePatterns = [
+    /(?:wi-?fi(?:\s*network)?(?:\s*name)?|network name|ssid)\s*[:\-]\s*([^\n]+)/i,
+  ];
+  for (const pattern of wifiNamePatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const rawCapture = stripHtmlForEmailParse(match[1]).replace(/\s+/g, " ").trim();
+    const split = splitWifiNameAndPassword(rawCapture);
+    const nameCandidate = stripWrappingQuotes(split ? split.name : rawCapture);
+    if (nameCandidate && isUsableArrivalField("wifiName", nameCandidate)) {
+      wifiName = nameCandidate.slice(0, 500);
+    }
+    if (!wifiPassword && split?.password && isUsableArrivalField("wifiPassword", split.password)) {
+      wifiPassword = split.password.slice(0, 500);
+    }
+    if (wifiName) break;
+  }
   const parkingInfo = pick("parkingInfo", [
     /(?:parking|parking info|parking instructions|assigned parking)\s*[:\-]\s*([\s\S]{0,500})(?:\n\s*\n|$)/i,
   ]);
