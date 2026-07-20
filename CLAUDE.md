@@ -43,6 +43,28 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (alias email history "the same for both aliases" + per-unit "SMS/Text History"):
+  Operator (Menehune two-unit screenshot): both units' "Email history (6)" read as identical, and
+  the PM text thread should be a per-unit collapsed menu named "SMS/Text History". DIAGNOSED LIVE
+  (prod DB + API + a client-side mergeAliasThread simulation — don't re-chase): the stored rows
+  were correctly attributed per unit ("(6)" on both was a count coincidence + near-identical VRBO
+  system emails), but TWO real alias-resolution defects stood behind it: (a) unit A's
+  buy_ins.travelerEmail is the LEGACY BASE alias (jacelyn.tsu@) while its real unit-scoped alias
+  is .ae9958.a@ — the /api/guest-inbox?buyInId= leg read ONLY travelerEmail, so it synced/read the
+  wrong mailbox key (unit A's 5 guest_inbox_messages under the scoped alias were invisible to its
+  reconciles); (b) two BOOKED units that still share one legacy travelerEmail both fetched the SAME
+  guest thread — the genuine "same history" bleed class. FIXED
+  (`claude/alias-history-per-unit`): NEW pure `guestThreadAliasesForBuyIn`
+  (shared/unified-buyin-alias.ts) — the unit's buyInId-scoped alias rows FIRST, travelerEmail only
+  when no sibling shares it (shared+scoped → scoped only; shared with NO scoped alias keeps legacy
+  behavior), reservation-level rows only for single-unit reservations; /api/guest-inbox?buyInId=
+  resolves through it and syncs/reads/reconciles EVERY alias in the set (messages unioned, deduped
+  by id). PM texts: GET /api/buy-ins/:id/pm-sms now scopes phone-matched rows to the buy-in's
+  reservation (null-reservation inbound kept) so texts to the same PM about another booking can't
+  bleed in. UI: "Email history — Unit A (6)" + a scoping line naming the unit's alias; the text
+  section renamed "SMS/Text History — Unit A (N)" (same per-unit collapsed shape as Email history).
+  Locked by tests/alias-thread-scope.test.ts (npm chain) + a repointed pm-sms panel guard.
+
 - 2026-07-20 (agent-limited buy-in view — per-reservation "Show in agent portal"): Operator: the
   agent needs a LIMITED view of the buy-in unit section — the back-and-forth PM emails, NO
   financial info (what the guest paid etc.), and only reservations he shares one by one. SHIPPED

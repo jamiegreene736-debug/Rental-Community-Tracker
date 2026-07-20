@@ -80,8 +80,10 @@ check("storage thread query matches on last-10 digits of guest_phone",
   storage.includes("getQuoSmsMessagesByPhoneLast10") &&
   storage.includes("right(regexp_replace(") &&
   storage.includes("quoSmsMessages.guestPhone"));
+// Repointed 2026-07-20 (per-unit "SMS/Text History" split): the panel now
+// threads the unit's display label into the section header.
 check("panel mounts the PM text thread beside the email history",
-  bookings.includes("<PmSmsThread buyIn={buyIn} />"));
+  bookings.includes("<PmSmsThread buyIn={buyIn} unitDisplayLabel={unitDisplayLabel} />"));
 check("thread phone input prefills from the saved management contact",
   bookings.includes("extractPhoneForSms(buyIn.managementContact ?? \"\")"));
 check("send button goes through the pm-sms POST",
