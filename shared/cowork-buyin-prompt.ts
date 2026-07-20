@@ -901,6 +901,24 @@ interface CoworkCheckoutPromptOpts {
   unitsAttachedDuringTask?: boolean;
   /** Embedded in a multi-reservation batch; hoist protocol + final signal. */
   bulkBrief?: boolean;
+  /**
+   * INTERNAL — set ONLY server-side when building the brief for a headless
+   * `claude -p` CHECKOUT run (server/claude-find-runs.ts, kind "checkout",
+   * exactly ONE unit). Swaps the Cowork browser rule + alert sounds for the
+   * runner's ATTENTION:/RESUMED: marker protocol, points every portal call at
+   * the run-scoped token-authed checkout proxies (reservation + buyInId are
+   * pinned server-side; the headless agent NEVER holds the portal admin
+   * secret), and replaces the wait-for-my-click phase with: record
+   * awaiting_payment → print the handoff ATTENTION line → leave the checkout
+   * tab open → END with the report. Card entry and the final purchase click
+   * remain HUMAN-ONLY, exactly as in the Cowork variant. Omitted keeps the
+   * prompt byte-identical — test-locked like bulkBrief. Never combine with
+   * bulkBrief/unitsAttachedDuringTask.
+   */
+  headlessRun?: {
+    runId: string;
+    runToken: string;
+  };
 }
 
 export function buildCoworkCheckoutPrompt(
@@ -957,19 +975,144 @@ export function buildCoworkCheckoutPrompt(
             `     Approved cost (costPaid): ${money(u.costPaid)}`,
         )
         .join("\n");
-  const botWallSection = opts?.bulkBrief
+  // Headless checkout mode (2026-07-20): the server-minted run id + token
+  // point every portal call at the run-scoped checkout proxies. Sanitized like
+  // every other embedded value — bounded, single-line data, never instructions.
+  const headless = opts?.headlessRun
+    ? {
+        runId: sanitizeCoworkPromptData(opts.headlessRun.runId, 80),
+        runToken: sanitizeCoworkPromptData(opts.headlessRun.runToken, 120),
+      }
+    : null;
+  const agentRoot = headless ? `${apiRoot}/api/claude-find-runs/agent/${headless.runId}` : "";
+  // Endpoint + body substitutions. The proxies pin reservationId AND buyInId
+  // server-side, so the headless bodies carry only what the agent contributes.
+  const buyInGetEndpoint = headless ? `${agentRoot}/buy-in` : `${apiRoot}/api/buy-ins/<buyInId>`;
+  const claimEndpoint = headless ? `${agentRoot}/checkout-claim` : `${apiRoot}/api/cowork/checkout-claims`;
+  const claimBody = headless
+    ? `{ "claimToken": "<this unit's cowork_UUID token>" }`
+    : `{ "reservationId": ${JSON.stringify(reservationId)}, "buyInId": <buyInId>,
+     "claimToken": "<this unit's cowork_UUID token>" }`;
+  const completeEndpoint = headless ? `${agentRoot}/checkout-claim/complete` : `${apiRoot}/api/cowork/checkout-claims/complete`;
+  const completeBody = headless
+    ? `{ "claimToken": "<the SAME token>" }`
+    : `{ "reservationId": ${JSON.stringify(reservationId)}, "buyInId": <buyInId>,
+     "claimToken": "<the SAME token>" }`;
+  const releaseEndpoint = headless ? `${agentRoot}/checkout-claim/release` : `${apiRoot}/api/cowork/checkout-claims/release`;
+  const releaseBody = headless
+    ? `{ "claimToken": "<the SAME token>", "reason": "<concise failure>" }`
+    : `{ "reservationId": ${JSON.stringify(reservationId)}, "buyInId": <buyInId>,
+     "claimToken": "<the SAME token>", "reason": "<concise failure>" }`;
+  const travelerEmailEndpoint = headless ? `${agentRoot}/traveler-email` : `${apiRoot}/api/buy-ins/<buyInId>/traveler-email`;
+  const travelerEmailBody = headless
+    ? `{ "guestFirstName": ${JSON.stringify(guestFirst || "<exact booking guest first name>")}, "guestLastName": ${JSON.stringify(guestLast || "<exact booking guest remaining name>")} }`
+    : `{ "reservationId": ${JSON.stringify(reservationId)}, "guestFirstName": ${JSON.stringify(guestFirst || "<exact booking guest first name>")}, "guestLastName": ${JSON.stringify(guestLast || "<exact booking guest remaining name>")} }`;
+  const headlessAuthNote = headless
+    ? `You make these API calls with your Bash tool via curl. EVERY call must carry
+the header "X-Run-Token: ${headless.runToken}" — it is scoped to THIS run, this
+reservation, and this one buy-in only. Example shape:
+  curl -sS -X POST <endpoint> -H "Content-Type: application/json" \\
+    -H "X-Run-Token: ${headless.runToken}" -d '<json body>'
+(The server pins the reservation and the buy-in itself — your body carries only
+the fields shown per call. The buy-in read is a plain GET with the same header.)
+
+`
+    : "";
+  const botWallSection = headless
+    ? HEADLESS_BOT_WALL_PROTOCOL
+    : opts?.bulkBrief
     ? "(Browser rule + bot-check protocol: the batch-level protocol at the TOP of this task applies here in full.)"
     : BOT_WALL_PROTOCOL;
-  const finalDoneSignal = opts?.bulkBrief
+  const finalDoneSignal = headless || opts?.bulkBrief
     ? ""
     : `\n\n${doneSignalSection(
         "every prepared buy-in has its confirmed or request-submitted result recorded",
         "a price-guard pause, missing booking guest name or alias, an unclear payment result, or a blocked checkout",
       )}`;
+  // Everything after step 10. The Cowork variant waits in-chat for the
+  // operator's click and then records the booking result; the headless variant
+  // ENDS at the handoff — the run has no chat to wait in, so the operator pays
+  // in the left-open tab and records the result with the row's
+  // "Paid — mark booked" control. Card entry + the final click stay human-only
+  // in BOTH variants.
+  const closingTail = headless
+    ? `11. **Print the payment-handoff alert.** On its own line, print exactly:
+      ATTENTION: awaiting payment — <unit label>: the checkout tab is prepared; add the card in the runner Chrome window and click Checkout
+    The portal alerts me with sound and surfaces the runner Chrome window.
 
-  return `# Task: Prepare the next attached buy-in unit for VRBO checkout — STOP before purchase
+## How this headless run hands off (no chat window)
+This run ENDS at the payment handoff — never wait for my card or my click.
+After the complete call and the ATTENTION line:
+- **KEEP THE PREPARED CHECKOUT TAB OPEN.** It IS the handoff: I add the card
+  and click Checkout in that tab myself. Never close it, never navigate it,
+  and never touch it again after the handoff is recorded.
+- Close only the OTHER tabs you opened during this task.
+- End with your FINAL MESSAGE as the complete report: the unit's listing URL,
+  checkout total vs the approved cost, protection selected and declined, exact
+  traveler name, canonical alias, phone and billing address used, and anything
+  skipped or flagged. State plainly: "No purchase has been submitted — the
+  checkout tab is open, waiting for the card."
+- The final booking result is recorded by ME after I pay (the portal's
+  "Paid — mark booked" control) — never write "booked" or "request_submitted"
+  in this run.
+- Blocked anywhere (bot check, sign-in wall, missing data)? Print an
+  "ATTENTION: <what and where>" line and "RESUMED: <step>" when you continue.
+  If ~15 minutes pass still blocked, release the claim per the failure rule
+  above, leave the page open, and end with a report saying exactly where it
+  stopped.
+- Do not play sounds or open extra apps; the portal owns alerting.`
+    : `11. **STOP immediately.** Do not open or prepare another queued unit yet. I
+    must complete this unit's card entry and final checkout first.
 
-You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
+## Required operator handoff
+Report the one prepared unit's listing URL, checkout total, protection selected
+and declined, exact traveler name, canonical alias, fixed phone and billing
+address, plus any already-booked units you skipped. Then say this exact handoff
+clearly:
+
+**Finished buy-in — please add credit card and click checkout. No purchase has been submitted.**
+
+Give one loud, one-time handoff alert:
+for i in 1 2 3; do afplay /System/Library/Sounds/Glass.aiff; done; say -r 170 "Finished buy in. Please add the credit card and click checkout."; osascript -e 'display notification "Add the credit card and click Checkout. No purchase has been submitted." with title "Buy-in ready for card" sound name "Glass"'
+
+Then TIDY UP THE BROWSER EXCEPT THE HANDOFF TAB: keep the prepared checkout
+tab open at the payment form for me. Close only the other Chrome tabs you
+opened during this task (search/listing/extra tabs). Leave tabs that were
+already open before you started untouched. The open checkout tab is the
+handoff and must not be closed.
+
+## After I make the human-only Checkout click
+WAIT without touching the page until I explicitly tell you I clicked Checkout.
+Then inspect the resulting page; never click or retry the purchase control.
+- If the exact unit + dates show a confirmed reservation, capture its
+  confirmation number and PATCH the buy-in with
+  { "bookingStatus": "booked", "bookingConfirmation": "<confirmation>",
+    "airbnbConfirmation": "<confirmation>" }. Only real confirmation evidence
+  may become "booked".
+- If VRBO says the request was submitted but is awaiting host approval, PATCH
+  { "bookingStatus": "request_submitted", "bookingConfirmation": "<request id if shown>" }.
+  Never call a request-only stay booked before the host confirms it.
+- If the result is unclear, leave "awaiting_payment" unchanged, keep the tab
+  open, and ask me. Check My Trips/the alias inbox before any retry; do not
+  infer success from a spinner or button disappearance.
+
+After recording a confirmed or request-submitted result, close that completed
+tab. If another queued unit remains, repeat the preparation steps for exactly
+that next unit and pause at the same human card/Checkout handoff. Never have
+two unsubmitted payment tabs open at once. When every queued unit has a durable
+final state, give the consolidated report${opts?.bulkBrief ? "; the batch-level completion signal runs only after all reservation briefs" : " and then the done signal below"}.${finalDoneSignal}`;
+
+  const intro = headless
+    ? `You are a headless checkout-preparation runner for the Rental Community
+Tracker (NexStay) app — no chat window; your progress is relayed to the
+operator's portal. I have ALREADY reviewed and approved the attached
+${n === 1 ? "unit" : "units"} below. This run authorizes CHECKOUT PREPARATION
+ONLY: prepare the ${n === 1 ? "unit" : "next unit"} through the payment handoff, record
+awaiting_payment, then END the run — I add the credit card and submit the
+purchase myself in the checkout tab you leave open. Do not re-run the search,
+attach anything new, enter card data, or submit a purchase. If the data below
+doesn't match what the API returns, stop and report instead.`
+    : `You are operating inside the Rental Community Tracker (NexStay) app as Cowork.
 ${opts?.unitsAttachedDuringTask
     ? `You just researched and attached the ${n === 1 ? "unit" : "units"} below in Phase 1 of this same task.`
     : `I have ALREADY reviewed and approved the attached ${n === 1 ? "unit" : "units"} below.`} This prompt
@@ -977,7 +1120,11 @@ authorizes CHECKOUT PREPARATION ONLY: prepare the next unit through the payment
 handoff, then STOP so I can add the credit card and submit that purchase myself.
 Only after I submit and you verify the result may you prepare the next unit. Do
 not re-run the search, attach anything new, enter card data, or submit
-a purchase. If the data below doesn't match what's in the app, stop and ask.
+a purchase. If the data below doesn't match what's in the app, stop and ask.`;
+
+  return `# Task: Prepare the next attached buy-in unit for VRBO checkout — STOP before purchase
+
+${intro}
 
 ${UNTRUSTED_DATA_RULE}
 
@@ -1028,8 +1175,8 @@ ${botWallSection}
 
 ## Prepare only the next eligible unit, in list order
 
-1. **Idempotency + single-handoff guard:** GET
-   ${apiRoot}/api/buy-ins/<buyInId>. If "bookingStatus" is "booked", is
+${headlessAuthNote}1. **Idempotency + single-handoff guard:** GET
+   ${buyInGetEndpoint}. If "bookingStatus" is "booked", is
    "request_submitted", or a confirmation is already recorded, report that
    skip and check the next unit in list order. If "bookingStatus" is "queued"
    or "awaiting_payment", STOP: an operator handoff is already active. NEVER
@@ -1058,16 +1205,15 @@ ${botWallSection}
    Before the first claim attempt for this unit, generate one token in the form
    \`cowork_<random UUID>\`. Keep it private and reuse that exact claimToken for
    every claim/complete/release call for this unit; never generate a second one.
-   POST ${apiRoot}/api/cowork/checkout-claims
-   { "reservationId": ${JSON.stringify(reservationId)}, "buyInId": <buyInId>,
-     "claimToken": "<this unit's cowork_UUID token>" }
+   POST ${claimEndpoint}
+   ${claimBody}
    Continue only on HTTP 200. A 409 means this unit or a sibling already has
    a queued, in-progress, or awaiting-payment checkout; report it and STOP.
    If the response is lost, retry the SAME request with the SAME token — that
    retry is idempotent. Never bypass or retry this guard in parallel.
 4. **Get this buy-in's canonical traveler alias:**
-   POST ${apiRoot}/api/buy-ins/<buyInId>/traveler-email
-   { "reservationId": ${JSON.stringify(reservationId)}, "guestFirstName": ${JSON.stringify(guestFirst || "<exact booking guest first name>")}, "guestLastName": ${JSON.stringify(guestLast || "<exact booking guest remaining name>")} }
+   POST ${travelerEmailEndpoint}
+   ${travelerEmailBody}
    Read the JSON response and use its \`email\` value VERBATIM for this unit.
    Never construct an alias, reuse another unit's alias, or fall back to a
    personal email. If the request fails or returns no valid email, POST the
@@ -1077,9 +1223,8 @@ ${botWallSection}
    Confirm the listing matches the attached unit and the quoted total is
    within the price guard.
    After the claim, if a non-resumable validation/API failure forces you to
-   abandon preparation, POST ${apiRoot}/api/cowork/checkout-claims/release with
-   { "reservationId": ${JSON.stringify(reservationId)}, "buyInId": <buyInId>,
-     "claimToken": "<the SAME token>", "reason": "<concise failure>" }
+   abandon preparation, POST ${releaseEndpoint} with
+   ${releaseBody}
    before stopping. This atomically records "failed" and frees the lane.
    Do not release the claim while actively waiting on me for a price decision
    or bot check; that claim is what prevents a duplicate checkout task.
@@ -1098,53 +1243,13 @@ ${botWallSection}
    Re-verify the dates, total within the price guard, and damage-waiver-only
    selection. Keep this checkout tab OPEN for me.
 10. **Record the handoff, not a booking:** call:
-   POST ${apiRoot}/api/cowork/checkout-claims/complete
-   { "reservationId": ${JSON.stringify(reservationId)}, "buyInId": <buyInId>,
-     "claimToken": "<the SAME token>" }
+   POST ${completeEndpoint}
+   ${completeBody}
    The server atomically records "awaiting_payment", appends the canonical
    stored traveler alias to the existing notes, and frees the preparation lane.
    Do not write a confirmation number: no purchase has been submitted. If this
    call fails, leave the checkout tab open, alert me, and report the failure.
-11. **STOP immediately.** Do not open or prepare another queued unit yet. I
-    must complete this unit's card entry and final checkout first.
-
-## Required operator handoff
-Report the one prepared unit's listing URL, checkout total, protection selected
-and declined, exact traveler name, canonical alias, fixed phone and billing
-address, plus any already-booked units you skipped. Then say this exact handoff
-clearly:
-
-**Finished buy-in — please add credit card and click checkout. No purchase has been submitted.**
-
-Give one loud, one-time handoff alert:
-for i in 1 2 3; do afplay /System/Library/Sounds/Glass.aiff; done; say -r 170 "Finished buy in. Please add the credit card and click checkout."; osascript -e 'display notification "Add the credit card and click Checkout. No purchase has been submitted." with title "Buy-in ready for card" sound name "Glass"'
-
-Then TIDY UP THE BROWSER EXCEPT THE HANDOFF TAB: keep the prepared checkout
-tab open at the payment form for me. Close only the other Chrome tabs you
-opened during this task (search/listing/extra tabs). Leave tabs that were
-already open before you started untouched. The open checkout tab is the
-handoff and must not be closed.
-
-## After I make the human-only Checkout click
-WAIT without touching the page until I explicitly tell you I clicked Checkout.
-Then inspect the resulting page; never click or retry the purchase control.
-- If the exact unit + dates show a confirmed reservation, capture its
-  confirmation number and PATCH the buy-in with
-  { "bookingStatus": "booked", "bookingConfirmation": "<confirmation>",
-    "airbnbConfirmation": "<confirmation>" }. Only real confirmation evidence
-  may become "booked".
-- If VRBO says the request was submitted but is awaiting host approval, PATCH
-  { "bookingStatus": "request_submitted", "bookingConfirmation": "<request id if shown>" }.
-  Never call a request-only stay booked before the host confirms it.
-- If the result is unclear, leave "awaiting_payment" unchanged, keep the tab
-  open, and ask me. Check My Trips/the alias inbox before any retry; do not
-  infer success from a spinner or button disappearance.
-
-After recording a confirmed or request-submitted result, close that completed
-tab. If another queued unit remains, repeat the preparation steps for exactly
-that next unit and pause at the same human card/Checkout handoff. Never have
-two unsubmitted payment tabs open at once. When every queued unit has a durable
-final state, give the consolidated report${opts?.bulkBrief ? "; the batch-level completion signal runs only after all reservation briefs" : " and then the done signal below"}.${finalDoneSignal}`;
+${closingTail}`;
 }
 
 /**

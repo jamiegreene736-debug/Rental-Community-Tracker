@@ -156,57 +156,36 @@ check("map tolerates null/garbage input", Object.keys(buyInSlotSignatureMap(null
     "a Cowork launch arms the faster poll window (side-by-side layout fires no wake event)",
     bookingsSrc.includes("armCoworkRunWindow()") && bookingsSrc.includes("coworkRunArmed.until") && bookingsSrc.includes("}, 15_000)"),
   );
-  const checkoutFn = bookingsSrc.slice(
-    bookingsSrc.indexOf("function CoworkCheckoutPromptButton"),
-    bookingsSrc.indexOf("// \"Verify community\""),
+  // ── Per-unit HEADLESS checkout buttons (operator specs 2026-07-19 "each
+  //    unit I will need to check out individually" + 2026-07-20 "executes
+  //    cowork automatically") ────────────────────────────────────────────────
+  console.log("cowork-refresh: per-unit headless checkout buttons");
+  const serverRunsSrc = fs.readFileSync(path.join(here, "../server/claude-find-runs.ts"), "utf8");
+  check(
+    // The old client-side costPaid freshness pre-flight is GONE because the
+    // problem it solved moved server-side: the run-create endpoint reads the
+    // AUTHORITATIVE buy_ins row via loopback and checkoutRunEligibility pins
+    // every money-shaped value (cost, listing URL, dates) from it. A stale
+    // client screen can no longer mis-arm the 15% guard — the client only
+    // sends identity data.
+    "the checkout brief is built from the DB buy-in row, not the client screen",
+    serverRunsSrc.includes('app.post("/api/claude-find-runs/checkout"')
+      && serverRunsSrc.includes("checkoutRunEligibility(row, reservationId)")
+      && serverRunsSrc.includes("units: [eligibility.unit]")
+      && !bookingsSrc.includes("/api/operations/buy-in-slot-status\", {\n        reservationIds: [reservation._id],"),
   );
   check(
-    "the checkout prompt pre-flights freshness so a stale costPaid can't mis-arm the 15% guard",
-    checkoutFn.includes("/api/operations/buy-in-slot-status")
-      && checkoutFn.includes("onStaleData()")
-      && checkoutFn.indexOf("onStaleData()") < checkoutFn.indexOf("void launch(prompt"),
+    // One button per unbooked unit; each click starts a headless run scoped to
+    // that single buy-in (its own run, its own card handoff).
+    "the row renders one HEADLESS checkout button PER unbooked unit",
+    /\.map\(\(s, _i, unbooked\) => \(\s*<HeadlessCheckoutRunButton/.test(bookingsSrc)
+      && bookingsSrc.includes("buyInId={s.buyIn.id}")
+      && bookingsSrc.includes("key={`headless-checkout-${s.buyIn.id}`}")
+      && bookingsSrc.includes("button-headless-checkout-run-"),
   );
   check(
-    // The rendered slots come from a first-match-by-unitId join that DROPS a
-    // buy-in whose unitId isn't a configured slot, while the probe returns
-    // every buy_ins row. Comparing the two populations wholesale means one
-    // orphan makes them never converge — every click refreshes, mismatches,
-    // and says "click again" forever, permanently bricking the money button.
-    "the pre-flight compares ONLY the buy-ins this click will send (no unconvergeable orphan)",
-    checkoutFn.includes("const sentIds = new Set(units.map((u) => u.buyInId))")
-      && checkoutFn.includes("sentIds.has(s.buyIn.id)")
-      && checkoutFn.includes("sentIds.has(Number(r?.buyInId))"),
-  );
-  check(
-    "a pre-flight outage fails OPEN but says so (silent unverified prices would arm the guard invisibly)",
-    checkoutFn.includes("Couldn't verify current prices"),
-  );
-  check(
-    "a 401 in the pre-flight aborts instead of stacking a second navigation",
-    /\/\\b401\\b\/\.test\(String\(\(error as Error\)\?\.message/.test(checkoutFn),
-  );
-
-  // ── Per-unit checkout buttons (operator spec 2026-07-19: "each unit I will
-  //    need to check out individually") ─────────────────────────────────────
-  console.log("cowork-refresh: per-unit checkout buttons");
-  check(
-    // The render site MAPS the unbooked units — one button each — and every
-    // button's `units` is a single-element array, so each Cowork brief is
-    // scoped to exactly one buy-in (its own task + its own card handoff).
-    "the row renders one checkout button PER unbooked unit, each scoped to that single buy-in",
-    bookingsSrc.includes(".map((s, _i, unbooked) => (")
-      && /\.map\(\(s, _i, unbooked\) => \(\s*<CoworkCheckoutPromptButton/.test(bookingsSrc)
-      && bookingsSrc.includes("units={[{")
-      && bookingsSrc.includes("key={`cowork-checkout-${s.buyIn.id}`}"),
-  );
-  check(
-    // Two buttons on one row must be tellable apart — by the operator (label)
-    // and by tests (testid). Solo rows keep the classic shapes.
-    "multi-unit rows label + id each button by unit; solo rows keep the classic label/testid",
-    bookingsSrc.includes("label={unbooked.length > 1 ? `Prepare checkout · ${s.unitLabel || s.buyIn.unitLabel}` : undefined}")
-      && bookingsSrc.includes("testIdSuffix={unbooked.length > 1 ? `-${s.buyIn.id}` : undefined}")
-      && checkoutFn.includes('{label ?? "Prepare checkout in Cowork"}')
-      && checkoutFn.includes("data-testid={`button-cowork-checkout-prompt-${reservation._id}${testIdSuffix ?? \"\"}`}"),
+    "multi-unit rows label each button by unit",
+    bookingsSrc.includes("`Auto checkout · ${s.unitLabel || s.buyIn.unitLabel}`"),
   );
   check(
     // The reservation-scoped checkout claim allows ONE outstanding handoff, so
@@ -214,6 +193,17 @@ check("map tolerates null/garbage input", Object.keys(buyInSlotSignatureMap(null
     // sibling button must hide — launching a second would 409 at the claim.
     "all per-unit buttons hide while ANY checkout on the reservation is active",
     /!r\.slots\.some\(\(s\) => buyInHasActiveCheckout\(s\.buyIn\)\) && r\.slots\s*\n\s*\.filter\(/.test(bookingsSrc),
+  );
+  check(
+    // Headless runs END at the handoff — there is no agent chat left to record
+    // the operator's payment, so the awaiting_payment badge must offer BOTH
+    // exits: "Paid — mark booked" (records the real outcome) and the existing
+    // "Not paid — reset" (releases a stranded handoff).
+    "awaiting_payment has a paid-outcome recorder alongside the not-paid reset",
+    bookingsSrc.includes("button-mark-booked-")
+      && bookingsSrc.includes("markBookedAfterPayment")
+      && bookingsSrc.includes('bookingStatus: "booked", bookingConfirmation: trimmed')
+      && bookingsSrc.includes("button-reset-stranded-checkout-"),
   );
 }
 

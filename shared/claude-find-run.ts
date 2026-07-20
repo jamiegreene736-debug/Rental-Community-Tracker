@@ -10,12 +10,21 @@
 // terminal report. The operator watches it all on the bookings row.
 //
 // LOAD-BEARING BOUNDARIES (see AGENTS.md "Headless Claude find-runs"):
-// - FIND-ONLY. The brief ends at ATTACH (buildCoworkBuyInPrompt semantics);
-//   checkout stays the human-gated Cowork prompt. Never wire this runner to
-//   the checkout brief — the send press there is the money approval.
-// - The agent NEVER holds the portal admin secret. It authenticates its two
-//   attach calls with a RUN-SCOPED token minted per run, accepted only by the
+// - TWO KINDS since 2026-07-20 (operator: the per-unit checkout buttons must
+//   "execute cowork automatically" like the find button): kind "find" ends at
+//   ATTACH; kind "checkout" runs the checkout-PREPARATION brief for exactly ONE
+//   pinned buy-in and ends at the awaiting_payment handoff. The MONEY approval
+//   moved, it did not disappear: the run never touches card fields and never
+//   clicks the final purchase control — the human still enters the card and
+//   makes the Checkout click in the prepared tab, then records the result via
+//   the row's "Paid — mark booked" control. (This REPLACES the original
+//   "FIND-ONLY, never wire the runner to the checkout brief" rule, whose money
+//   gate was the Cowork send press; the gate is now the card itself.)
+// - The agent NEVER holds the portal admin secret. It authenticates its portal
+//   calls with a RUN-SCOPED token minted per run, accepted only by the
 //   /api/claude-find-runs/agent/:id/* endpoints, only while the run is live.
+//   Checkout runs get their own proxies with reservationId AND buyInId pinned
+//   from the run record — the agent's body can never retarget them.
 // - `token` and `prompt` never leave the server except to the daemon (claim)
 //   and the brief itself; clientClaudeFindRunView strips both, and event text
 //   is scrubbed of the token before it is ever persisted or displayed.
@@ -52,12 +61,18 @@ export interface ClaudeFindRunEvent {
   text: string;
 }
 
+export type ClaudeFindRunKind = "find" | "checkout";
+
 export interface ClaudeFindRunRecord {
   id: string;
   reservationId: string;
   propertyId: number;
   propertyName: string;
   guestName: string | null;
+  /** Absent on pre-2026-07-20 records — treat missing as "find". */
+  kind?: ClaudeFindRunKind;
+  /** Checkout runs only: the ONE buy-in this run may prepare (proxy-pinned). */
+  buyInId?: number | null;
   status: ClaudeFindRunStatus;
   createdAt: string;
   claimedAt: string | null;
@@ -253,6 +268,7 @@ export interface ClaudeFindRunClientView {
   id: string;
   reservationId: string;
   propertyName: string;
+  kind: ClaudeFindRunKind;
   status: ClaudeFindRunStatus;
   createdAt: string;
   endedAt: string | null;
@@ -272,6 +288,7 @@ export interface ClaudeFindRunClientView {
  */
 export interface ClaudeFindRunHistoryEntry {
   id: string;
+  kind: ClaudeFindRunKind;
   status: ClaudeFindRunStatus;
   createdAt: string;
   endedAt: string | null;
@@ -290,6 +307,7 @@ export function claudeFindRunHistoryForReservation(
   // mine[0] is the latest — the status view already carries it in full.
   return mine.slice(1, 1 + limit).map((r) => ({
     id: r.id,
+    kind: r.kind ?? "find",
     status: r.status,
     createdAt: r.createdAt,
     endedAt: r.endedAt,
@@ -301,6 +319,7 @@ export function clientClaudeFindRunView(run: ClaudeFindRunRecord): ClaudeFindRun
     id: run.id,
     reservationId: run.reservationId,
     propertyName: run.propertyName,
+    kind: run.kind ?? "find",
     status: run.status,
     createdAt: run.createdAt,
     endedAt: run.endedAt,
@@ -448,10 +467,17 @@ function describeClaudeToolUse(name: unknown, input: any): string {
     const cmd = input.command.replace(/\s+/g, " ").trim();
     // The agent's Bash is curl-only (attach calls). Show the endpoint, never
     // the payload — costPaid etc. belong in the report, not the action feed.
-    const endpoint = /claude-find-runs\/agent\/[^/\s"']+\/(buy-ins|attach|guest-happy)/.exec(cmd)?.[1];
+    // Longest alternatives FIRST: "checkout-claim/complete" must not match the
+    // bare "checkout-claim", and "buy-ins" must win over "buy-in".
+    const endpoint = /claude-find-runs\/agent\/[^/\s"']+\/(buy-ins|attach|guest-happy|checkout-claim\/complete|checkout-claim\/release|checkout-claim|traveler-email|buy-in)/.exec(cmd)?.[1];
     if (endpoint === "buy-ins") return "Creating a buy-in record via the portal";
     if (endpoint === "attach") return "Attaching a buy-in to the reservation";
     if (endpoint === "guest-happy") return "Recording the guest-expectation verdict";
+    if (endpoint === "buy-in") return "Reading the buy-in record";
+    if (endpoint === "traveler-email") return "Minting the traveler alias email";
+    if (endpoint === "checkout-claim") return "Claiming the reservation's checkout lane";
+    if (endpoint === "checkout-claim/complete") return "Recording the payment handoff — awaiting your card";
+    if (endpoint === "checkout-claim/release") return "Releasing the checkout lane";
     return `Running: ${cmd.slice(0, 120)}`;
   }
   const short = tool.replace(/^mcp__[^_]+(?:_[^_]+)*__/, "").replace(/_/g, " ");
@@ -459,14 +485,20 @@ function describeClaudeToolUse(name: unknown, input: any): string {
 }
 
 /** Row badge copy for the panel's status chip. */
-export function claudeFindRunStatusLabel(status: ClaudeFindRunStatus): { label: string; tone: "active" | "attention" | "good" | "bad" } {
+export function claudeFindRunStatusLabel(
+  status: ClaudeFindRunStatus,
+  kind: ClaudeFindRunKind = "find",
+): { label: string; tone: "active" | "attention" | "good" | "bad" } {
   switch (status) {
     case "queued":
       return { label: "Queued — waiting for the Mac runner", tone: "active" };
     case "claimed":
       return { label: "Starting on the Mac…", tone: "active" };
     case "running":
-      return { label: "Running — searching for buy-ins", tone: "active" };
+      return {
+        label: kind === "checkout" ? "Running — preparing the checkout" : "Running — searching for buy-ins",
+        tone: "active",
+      };
     case "attention":
       return { label: "Needs you — the agent is blocked", tone: "attention" };
     case "completed":
@@ -477,4 +509,85 @@ export function claudeFindRunStatusLabel(status: ClaudeFindRunStatus): { label: 
     default:
       return { label: "Failed", tone: "bad" };
   }
+}
+
+// ── headless CHECKOUT runs (2026-07-20) ─────────────────────────────────────
+
+export interface CheckoutRunUnit {
+  buyInId: number;
+  unitLabel: string;
+  listingUrl: string;
+  costPaid: number;
+}
+
+/**
+ * Server-side eligibility for a headless checkout run, evaluated against the
+ * AUTHORITATIVE buy_ins row at run-create time (never against what a client
+ * screen claimed — this is what replaced the old client-side costPaid
+ * freshness pre-flight). Everything money-shaped the brief embeds comes from
+ * the row this function approved.
+ *
+ * Rules, each with a reason:
+ * - attached to THIS reservation — a run must never prepare another booking's unit;
+ * - not booked / request_submitted — re-preparing one risks a duplicate purchase;
+ * - not queued / in_progress / awaiting_payment — an operator handoff is
+ *   already active (the checkout-claim lane), and the claim would 409 anyway;
+ * - HTTPS vrbo.com listing URL — the brief only knows how to prepare a VRBO
+ *   checkout; Booking.com/direct units go through "Find property on VRBO" first;
+ * - costPaid > 0 — it anchors the 15% price guard; a $0 anchor waves any
+ *   overpay through.
+ */
+export function checkoutRunEligibility(
+  row: {
+    id?: unknown;
+    guestyReservationId?: unknown;
+    bookingStatus?: unknown;
+    airbnbListingUrl?: unknown;
+    costPaid?: unknown;
+    unitLabel?: unknown;
+    unitId?: unknown;
+  } | null | undefined,
+  reservationId: string,
+): { ok: true; unit: CheckoutRunUnit } | { ok: false; error: string } {
+  const buyInId = Number(row?.id);
+  if (!row || !Number.isFinite(buyInId)) return { ok: false, error: "Buy-in not found" };
+  if (String(row.guestyReservationId ?? "") !== reservationId) {
+    return { ok: false, error: "That buy-in is not attached to this reservation" };
+  }
+  const status = String(row.bookingStatus ?? "").trim().toLowerCase();
+  if (status === "booked" || status === "request_submitted") {
+    return { ok: false, error: "This unit already has a booking result — re-preparing it risks a duplicate purchase" };
+  }
+  if (status === "queued" || status === "in_progress" || status === "awaiting_payment") {
+    return { ok: false, error: "A checkout is already active for this unit — finish or reset it first" };
+  }
+  const listingUrl = String(row.airbnbListingUrl ?? "").trim();
+  let host = "";
+  let protocol = "";
+  try {
+    const parsed = new URL(listingUrl);
+    host = parsed.hostname.toLowerCase();
+    protocol = parsed.protocol;
+  } catch {
+    return { ok: false, error: "The buy-in has no usable listing URL" };
+  }
+  if (protocol !== "https:" || (host !== "vrbo.com" && host !== "www.vrbo.com")) {
+    return {
+      ok: false,
+      error: "The attached listing is not on vrbo.com — use \"Find property on VRBO\" to re-channel it before checkout",
+    };
+  }
+  const costPaid = Number(row.costPaid);
+  if (!Number.isFinite(costPaid) || costPaid <= 0) {
+    return { ok: false, error: "The buy-in has no recorded price (costPaid) — the 15% guard cannot be armed" };
+  }
+  return {
+    ok: true,
+    unit: {
+      buyInId,
+      unitLabel: String(row.unitLabel ?? row.unitId ?? `buy-in ${buyInId}`).slice(0, 200),
+      listingUrl,
+      costPaid,
+    },
+  };
 }
