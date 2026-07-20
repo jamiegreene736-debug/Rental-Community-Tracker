@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -29,7 +30,7 @@ import {
   type AliasEmailAttachment,
 } from "@/lib/emailAttachments";
 import {
-  ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
+  MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
   ToggleRight, X, ShieldAlert, MessageCircle, DollarSign, ClipboardList,
   FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
@@ -4622,11 +4623,7 @@ export default function InboxPage() {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <div className="border-b bg-card px-4 py-3 sm:px-6 sm:py-4 flex flex-wrap items-center gap-3 sm:gap-4">
-        <Link href="/">
-          <Button variant="ghost" size="sm" className="gap-1" data-testid="button-back-home">
-            <ArrowLeft className="h-4 w-4" /> Dashboard
-          </Button>
-        </Link>
+        <AppBackButton testId="button-back-home" />
         <div className="hidden sm:block h-5 w-px bg-border" />
         <div className="min-w-0">
           <h1 className="font-semibold text-lg leading-tight">Guest Inbox</h1>

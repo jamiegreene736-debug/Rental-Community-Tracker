@@ -3,6 +3,7 @@ import { Link, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
@@ -2578,11 +2579,7 @@ export default function AddCommunity() {
       <div className="max-w-4xl mx-auto px-3 py-4 sm:px-4 sm:py-6">
         {/* Header */}
         <div className="mb-6 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
-          <Link href="/">
-            <Button variant="ghost" size="sm" data-testid="button-back-home">
-              <ArrowLeft className="h-4 w-4 mr-1" /> Dashboard
-            </Button>
-          </Link>
+          <AppBackButton testId="button-back-home" />
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Add a New Community</h1>
             <p className="text-sm text-muted-foreground">Research, validate, and draft a new VacationRentalExpertz bundled listing</p>

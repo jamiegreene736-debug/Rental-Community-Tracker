@@ -1,9 +1,9 @@
 import { useState, useMemo } from "react";
-import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, CheckCircle, AlertTriangle, XCircle, Search, Loader2, ExternalLink, Camera, Building2, ShieldCheck, ShieldAlert } from "lucide-react";
+import { CheckCircle, AlertTriangle, XCircle, Search, Loader2, ExternalLink, Camera, Building2, ShieldCheck, ShieldAlert } from "lucide-react";
 import { unitBuilderData } from "@/data/unit-builder-data";
 
 interface UnitAudit {
@@ -142,11 +142,7 @@ export default function PhotoAudit() {
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       <div className="max-w-6xl mx-auto p-6">
         <div className="flex items-center gap-4 mb-6">
-          <Link href="/">
-            <Button variant="ghost" size="sm" data-testid="link-back-home">
-              <ArrowLeft className="h-4 w-4 mr-1" /> Back
-            </Button>
-          </Link>
+          <AppBackButton testId="link-back-home" />
           <div>
             <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100" data-testid="text-page-title">Photo Audit</h1>
             <p className="text-sm text-gray-500">Verify photo sources and check for VRBO conflicts</p>

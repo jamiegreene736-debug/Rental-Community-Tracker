@@ -86,6 +86,8 @@ export default function AppHeader() {
             <Link
               href="/"
               className="group inline-flex min-w-0 shrink-0 items-center gap-3 rounded-lg border border-[hsl(var(--brand-teal)/0.18)] bg-background/92 px-2 py-2 shadow-sm transition-colors hover:border-[hsl(var(--brand-teal)/0.35)] hover:bg-background sm:px-3"
+              aria-label="Go to Dashboard"
+              title="Go to Dashboard"
               data-testid="link-brand-home"
             >
               <span className="flex h-9 w-[132px] max-w-[42vw] items-center sm:w-[180px] sm:max-w-[52vw]">

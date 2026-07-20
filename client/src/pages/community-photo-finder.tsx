@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Search, Copy, ExternalLink, ImageOff, CheckSquare, Square, FolderDown, Loader2, RefreshCw } from "lucide-react";
+import { Search, Copy, ExternalLink, ImageOff, CheckSquare, Square, FolderDown, Loader2, RefreshCw } from "lucide-react";
 
 const COMMUNITIES = [
   "Regency at Poipu Kai",
@@ -186,12 +186,7 @@ export default function CommunityPhotoFinder() {
 
         {/* Header */}
         <div className="flex items-center gap-3 mb-6">
-          <Link href="/">
-            <Button variant="ghost" size="sm" data-testid="button-back-home">
-              <ArrowLeft className="h-4 w-4 mr-1" />
-              Home
-            </Button>
-          </Link>
+          <AppBackButton testId="button-back-home" />
           <div>
             <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">
               Community Photo Finder

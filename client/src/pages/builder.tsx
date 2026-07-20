@@ -9,6 +9,7 @@ import {
 import { useParams, useLocation } from "wouter";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { useToast } from "@/hooks/use-toast";
 import GuestyListingBuilder from "@/components/GuestyListingBuilder";
 import {
@@ -616,7 +617,7 @@ export default function Builder() {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen gap-4">
         <p className="text-muted-foreground">Property #{propertyId} not found.</p>
-        <Button variant="outline" onClick={() => navigate("/")}>Back to Dashboard</Button>
+        <AppBackButton testId="button-back-not-found" />
       </div>
     );
   }

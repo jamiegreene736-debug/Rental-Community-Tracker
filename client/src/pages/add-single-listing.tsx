@@ -26,10 +26,11 @@
 // adapt-draft.ts) know to render it as a single-unit property.
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Link, useLocation } from "wouter";
+import { useLocation } from "wouter";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
@@ -1264,11 +1265,7 @@ export default function AddSingleListing() {
       <div className="max-w-4xl mx-auto px-4 py-6">
         {/* Header */}
         <div className="mb-6 flex items-center gap-3">
-          <Link href="/">
-            <Button variant="ghost" size="sm" data-testid="button-back-home">
-              <ArrowLeft className="h-4 w-4 mr-1" /> Dashboard
-            </Button>
-          </Link>
+          <AppBackButton testId="button-back-home" />
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Add a Single Listing</h1>
             <p className="text-sm text-muted-foreground">Standalone condo or townhouse — verified clean of existing OTA listings</p>
