@@ -14268,6 +14268,7 @@ function BuyInVendorEmailPanel({
     guestName,
     checkInText: fmtDate(buyIn.checkIn),
     checkOutText: fmtDate(buyIn.checkOut),
+    paidInFull: buyIn.bookingStatus === "booked",
     fallbackPropertyName: buyIn.propertyName,
     unitLabel: buyIn.unitLabel,
   });
@@ -14322,6 +14323,7 @@ function BuyInVendorEmailPanel({
         guestName,
         checkInText: fmtDate(buyIn.checkIn),
         checkOutText: fmtDate(buyIn.checkOut),
+        paidInFull: buyIn.bookingStatus === "booked",
         fallbackPropertyName: buyIn.propertyName,
         unitLabel: buyIn.unitLabel,
       }),

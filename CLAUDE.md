@@ -66,7 +66,14 @@ Before making any changes:
   — the internal Guesty name only as last-resort fallback; compose defaults UPGRADE when the
   thread loads but only while the operator hasn't edited (lastComposeDefaultsRef guard).
   Locked by tests/arrival-request-compose.test.ts (in the npm chain) + new emailSourceUrl matrix
-  in tests/management-contact-lookup.test.ts.
+  in tests/management-contact-lookup.test.ts. SAME-DAY TEMPLATE FOLLOW-UP
+  (`claude/arrival-request-template`): the operator hand-edited the compose and asked for those
+  edits as the default — the booked sentence now reads `We booked your listing "<title>" on
+  <channel> from X to Y. Everything should be paid in full.`: NO raw listing URL when the title is
+  known (URL survives only as the last-resort identifier), NO "for <guest>" clause (guest still
+  signs), channel name via channelLabelFromListingUrl (VRBO family/Booking.com/Airbnb; PM sites →
+  none), and the paid-in-full sentence gated on bookingStatus === "booked" (never claimed for an
+  unbooked unit). Template shape + both call-site gates test-locked.
 
 - 2026-07-20 (FOLLOW-UP: "Confirm mgmt contact" 422 "quote is not verbatim-present" on an HONEST
   quote — VRBO-unicode tolerance): Operator (unit B toast). NOT a hallucination (don't re-chase):

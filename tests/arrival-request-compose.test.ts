@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   bookedListingTitleFromEmailText,
+  channelLabelFromListingUrl,
   bookedListingTitleFromNotes,
   buildArrivalRequestEmail,
   resolveBookedListingTitle,
@@ -80,22 +81,46 @@ assert.equal(
 assert.equal(resolveBookedListingTitle({ notes: null, emailTexts: [] }), "", "nothing confident yields empty");
 console.log("  ✓ resolution order");
 
-// ── template: identifies the PM's OWN listing, never just our internal name ──
+// ── channel label from the booked listing URL ──
+assert.equal(channelLabelFromListingUrl("https://www.vrbo.com/753065"), "VRBO");
+assert.equal(channelLabelFromListingUrl("https://www.abritel.fr/location/p123"), "VRBO", "VRBO brand family maps to VRBO");
+assert.equal(channelLabelFromListingUrl("https://www.booking.com/hotel/us/x.html"), "Booking.com");
+assert.equal(channelLabelFromListingUrl("https://www.airbnb.co.uk/rooms/1"), "Airbnb");
+assert.equal(channelLabelFromListingUrl("https://www.waikikibeachrentals.com/unit/7b"), "", "PM/direct sites get no channel mention");
+assert.equal(channelLabelFromListingUrl(""), "");
+console.log("  ✓ channel label derivation");
+
+// ── template: the operator's 2026-07-20 hand-edited shape ──
 const withTitle = buildArrivalRequestEmail({
   listingTitle: "Menehune Shores #623 – Top-Floor Penthouse with Stunning Ocean Views",
   listingUrl: "https://www.vrbo.com/753065",
   guestName: "Jacelyn Tsu",
   checkInText: "Jul 21, 2026",
   checkOutText: "Jul 26, 2026",
+  paidInFull: true,
   fallbackPropertyName: "Menehune Shores - 4BR Condos - Sleeps 12",
   unitLabel: "unit-b",
 });
-assert.match(withTitle.body, /your listing "Menehune Shores #623 – Top-Floor Penthouse with Stunning Ocean Views" \(https:\/\/www\.vrbo\.com\/753065\)/, "body names the booked listing + URL");
+assert.match(
+  withTitle.body,
+  /We booked your listing "Menehune Shores #623 – Top-Floor Penthouse with Stunning Ocean Views" on VRBO from Jul 21, 2026 to Jul 26, 2026\. Everything should be paid in full\./,
+  "body matches the operator's edited sentence: title + channel + dates + paid-in-full",
+);
+assert.doesNotMatch(withTitle.body, /https:\/\//, "raw listing URL removed when the title is known");
+assert.doesNotMatch(withTitle.body, /booked .* for Jacelyn/, "'for <guest>' clause removed from the booked sentence");
 assert.doesNotMatch(withTitle.body, /4BR Condos - Sleeps 12/, "our internal Guesty listing name never leaks when the booked title is known");
 assert.match(withTitle.subject, /Menehune Shores #623/, "subject names the booked listing");
-assert.match(withTitle.body, /Jacelyn Tsu/, "guest name present");
-assert.match(withTitle.body, /from Jul 21, 2026 to Jul 26, 2026/, "stay dates present");
+assert.match(withTitle.body, /Thank you,\nJacelyn Tsu/, "still signed as the guest");
 assert.match(withTitle.body, /access code, Wi-Fi, parking/, "request list intact");
+
+// Unbooked unit: no paid-in-full claim.
+const notPaid = buildArrivalRequestEmail({
+  listingTitle: "Menehune Shores #623",
+  listingUrl: "https://www.vrbo.com/753065",
+  guestName: "Jacelyn Tsu",
+  paidInFull: false,
+});
+assert.doesNotMatch(notPaid.body, /paid in full/, "paid-in-full only claimed for booked units");
 
 const urlOnly = buildArrivalRequestEmail({
   listingUrl: "https://www.vrbo.com/753065",
@@ -103,7 +128,7 @@ const urlOnly = buildArrivalRequestEmail({
   fallbackPropertyName: "Menehune Shores - 4BR Condos - Sleeps 12",
   unitLabel: "unit-b",
 });
-assert.match(urlOnly.body, /your listing https:\/\/www\.vrbo\.com\/753065/, "URL alone still identifies the unit");
+assert.match(urlOnly.body, /your listing https:\/\/www\.vrbo\.com\/753065/, "URL survives as the identifier of LAST RESORT (no title)");
 assert.doesNotMatch(urlOnly.body, /4BR Condos/, "internal name not used when the URL is known");
 
 const fallbackOnly = buildArrivalRequestEmail({
@@ -113,7 +138,7 @@ const fallbackOnly = buildArrivalRequestEmail({
 });
 assert.match(fallbackOnly.body, /Menehune Shores - unit-b/, "no title/URL falls back to the internal identity");
 assert.match(fallbackOnly.subject, /Menehune Shores - unit-b/, "fallback subject keeps the old identity");
-console.log("  ✓ template identifies the booked listing (title > URL > fallback)");
+console.log("  ✓ template matches the operator's edited shape (no URL/'for guest'; channel + paid-in-full)");
 
 // ── source guards: the panel composes through this module ──
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -122,6 +147,10 @@ assert.ok(bookingsSrc.includes("buildArrivalRequestEmail"), "panel must build co
 assert.ok(bookingsSrc.includes("resolveBookedListingTitle"), "panel must resolve the booked listing title");
 assert.ok(/emailTexts:\s*\[[\s\S]{0,200}emails\.map/.test(bookingsSrc), "panel must feed the alias-thread emails into title resolution");
 assert.ok(/lastComposeDefaultsRef/.test(bookingsSrc), "compose upgrade must be guarded so operator edits are never clobbered");
+assert.ok(
+  (bookingsSrc.match(/paidInFull: buyIn\.bookingStatus === "booked"/g) ?? []).length >= 2,
+  "both compose call sites must gate paid-in-full on the booked status",
+);
 assert.ok(/setVendorEmail\(\(cur\) => \(cur\.trim\(\) \? cur : savedEmail\)\)/.test(bookingsSrc), "PM email field must populate from the saved mgmt contact without overwriting typed input");
 console.log("  ✓ source guards: panel wiring");
 
