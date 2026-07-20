@@ -1448,42 +1448,11 @@ function usableGuestAlternativeCommunity(value: string | null | undefined): stri
   return label;
 }
 
-function alternativeCommunityFromBuyInNotes(notes: string | null | undefined, listingTitle: string): string {
-  const raw = String(notes ?? "");
-  const comboLabel = cleanGuestAlternativeLabel(
-    raw.match(/Manually attached from combo\s+(.+?)\s+—\s+\d+\s*BR\s+[^—·]+—/i)?.[1],
-  );
-  const comboCommunity = usableGuestAlternativeCommunity(comboLabel.split(/\s*·\s*/).pop());
-  if (comboCommunity) return comboCommunity;
-  const titleLead = usableGuestAlternativeCommunity(listingTitle.split(/\s+[-–—|]\s+/)[0]);
-  if (
-    titleLead &&
-    !/^(?:gorgeous|beautiful|stunning|luxury|spacious|updated|renovated|private|oceanfront|beachfront|sleeps?|bedrooms?|condos?|villas?|homes?|townhomes?|units?|studio)\b/i.test(titleLead)
-  ) {
-    return titleLead;
-  }
-  return "";
-}
-
-function originalCommunityForAlternativePage(reservation: GuestyReservation, slots: Array<SlotInfo & { buyIn: BuyIn }>): string {
-  const propertyId = Number(slots[0]?.buyIn?.propertyId);
-  const builder = Number.isFinite(propertyId) ? getUnitBuilderByPropertyId(propertyId) : undefined;
-  return cleanGuestAlternativeLabel(
-    builder?.complexName ??
-      (Number.isFinite(propertyId) ? PROPERTY_UNIT_CONFIGS[propertyId]?.community : undefined) ??
-      reservation.slots.find((slot) => slot.community)?.community ??
-      slots[0]?.buyIn?.propertyName,
-  );
-}
-
-function originalAreaForAlternativePage(reservation: GuestyReservation, slots: Array<SlotInfo & { buyIn: BuyIn }>): string {
-  const propertyId = Number(slots[0]?.buyIn?.propertyId);
-  return cleanGuestAlternativeLabel(
-    (Number.isFinite(propertyId) ? PROPERTY_UNIT_CONFIGS[propertyId]?.community : undefined) ??
-      reservation.slots.find((slot) => slot.community)?.community ??
-      "",
-  );
-}
+// The old per-slot "Guest page" toolbar button and its combo-label parsers
+// (alternativeCommunityFromBuyInNotes / originalCommunityForAlternativePage /
+// originalAreaForAlternativePage) were removed 2026-07-20 by operator request —
+// guest pages are built through the Alternative Unit / Send-unit-confirmation
+// dialog (RelocateGuestDialog createPage), which owns the same machinery.
 
 function listingIdentityKeys(item: {
   url?: string | null;
@@ -5394,102 +5363,9 @@ const FILL_SOURCE_TONE: Record<"green" | "blue" | "amber", string> = {
 // button above; this control never drives a checkout. (The old "Buy this unit
 // in" trigger for the dormant sidecar checkout job was removed 2026-07-19 —
 // the server scaffold in server/buy-in-checkout-job.ts stays dormant/intact.)
-type VrboPaymentScheduleClient = {
-  total: number | null;
-  dueToday: number | null;
-  balanceDue: number | null;
-  balanceDueDate: string | null;
-  balanceDueDateRaw?: string | null;
-  currency?: string | null;
-  paymentPlanAvailable: boolean;
-  payInFullRequired?: boolean;
-  source?: string | null;
-  url?: string;
-};
-
-// On-demand "Payment terms" for an attached VRBO unit: opens the VRBO checkout
-// page via the sidecar (no booking) and reads how much is due at booking + when
-// the balance is auto-charged. Result expands into its own full-width row below
-// the action buttons. VRBO only — HomeToGo's feed doesn't expose a schedule.
-function PaymentTermsButton({ buyIn }: { buyIn: BuyIn }) {
-  const { toast } = useToast();
-  const url = buyIn.airbnbListingUrl || "";
-  const isVrbo = /^https?:\/\/(?:www\.)?vrbo\.com\//i.test(url);
-  const [result, setResult] = useState<{ ok: boolean; paymentSchedule?: VrboPaymentScheduleClient; reason?: string } | null>(null);
-  const fetchTerms = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/operations/vrbo-payment-schedule", {
-        listingUrl: url,
-        checkIn: buyIn.checkIn,
-        checkOut: buyIn.checkOut,
-      });
-      return (await res.json()) as { ok: boolean; paymentSchedule?: VrboPaymentScheduleClient; reason?: string };
-    },
-    onMutate: () => {
-      toast({
-        title: "Reading the VRBO checkout…",
-        description: "Opening the checkout page to read the payment schedule — ~1–2 min. No booking is made.",
-      });
-    },
-    onSuccess: (data) => {
-      setResult(data);
-      if (!data.ok) {
-        toast({
-          title: "Couldn't read VRBO payment terms",
-          description: data.reason || "The checkout was slow/busy, or the listing may be unavailable for these dates. Try again.",
-          variant: "destructive",
-        });
-      }
-    },
-    onError: (e: any) =>
-      toast({ title: "Payment terms failed", description: String(e?.message ?? e), variant: "destructive" }),
-  });
-
-  if (!isVrbo || !buyIn.checkIn || !buyIn.checkOut) return null;
-  const ps = result?.ok ? result.paymentSchedule : null;
-  const fmtDate = (iso?: string | null) => {
-    if (!iso) return null;
-    const d = new Date(`${iso}T00:00:00`);
-    return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-  };
-  return (
-    <>
-      <Button
-        size="sm"
-        variant="ghost"
-        className="h-7"
-        disabled={fetchTerms.isPending}
-        onClick={() => fetchTerms.mutate()}
-        data-testid={`button-payment-terms-${buyIn.id}`}
-        title="Open the VRBO checkout (no booking) and read how much is due now + when the balance is charged"
-      >
-        {fetchTerms.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <WalletCards className="h-3.5 w-3.5 mr-1" />}
-        {fetchTerms.isPending ? "Reading checkout…" : "Payment terms"}
-      </Button>
-      {result && (
-        <div className="w-full mt-1 rounded border border-sky-200 bg-sky-50/70 px-2 py-1.5 text-[11px] dark:border-sky-900 dark:bg-sky-950/30">
-          {ps ? (
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-              <span className="font-semibold text-sky-900 dark:text-sky-200">
-                Due at booking: {fmtMoney(ps.dueToday ?? ps.total ?? 0)}
-              </span>
-              {ps.paymentPlanAvailable && ps.balanceDue ? (
-                <span className="text-foreground">
-                  Balance {fmtMoney(ps.balanceDue)} due {fmtDate(ps.balanceDueDate) ?? ps.balanceDueDateRaw ?? "later"}
-                </span>
-              ) : (
-                <span className="text-muted-foreground">Paid in full at booking (no payment plan)</span>
-              )}
-              {ps.total != null && <span className="text-muted-foreground">Total {fmtMoney(ps.total)}</span>}
-            </div>
-          ) : (
-            <span className="text-amber-700 dark:text-amber-400">{result.reason || "Couldn't read the payment schedule."}</span>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
+// (The on-demand "Payment terms" toolbar button was removed 2026-07-20 by
+// operator request. The manual buy-in attach still reads the VRBO checkout
+// schedule directly via /api/operations/vrbo-payment-schedule below.)
 
 function UnitPurchaseStatus({ buyIn, reservation }: { buyIn: BuyIn; reservation: GuestyReservation }) {
   const { toast } = useToast();
@@ -6389,6 +6265,7 @@ function GuestInboxButton({ buyIn }: { buyIn: BuyIn }) {
       <Button
         size="sm"
         variant="ghost"
+        className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
         onClick={() => setOpen(true)}
         title={`Guest inbox — ${email}`}
         data-testid={`button-guest-inbox-${buyIn.id}`}
@@ -8175,10 +8052,6 @@ export default function Bookings() {
     | null
   >(null);
   const [cancellationRange, setCancellationRange] = useState<"all" | "365" | "90">("all");
-  const [verifyTarget, setVerifyTarget] = useState<
-    | { buyIn: BuyIn; reservation: GuestyReservation }
-    | null
-  >(null);
   const [listingSitesTarget, setListingSitesTarget] = useState<
     | { buyIn: BuyIn; reservation: GuestyReservation; slot: SlotInfo }
     | null
@@ -8932,98 +8805,6 @@ export default function Bookings() {
       overrideNote: note,
     });
   };
-
-  const guestAlternativePageMutation = useMutation({
-    mutationFn: async ({ reservation, slot, buyIn }: { reservation: GuestyReservation; slot: SlotInfo; buyIn: BuyIn }) => {
-      // Present the FULL alternative combination the operator attached (e.g. a
-      // city-wide VRBO pair), not just the clicked slot — the guest message
-      // refers to "the properties in this combination." Each unit carries its
-      // own VRBO listing photos (from the Manual photo URLs marker) and gets an
-      // AI-written description server-side.
-      const attachedSlots = await fetchAttachedBuyInSlots(reservation);
-      const slotsForPage = attachedSlots.length
-        ? attachedSlots
-        : [{ ...slot, buyIn }];
-      const proximity = attachedSlots.length >= 2
-        ? await apiGetJson<UnitProximityResponse>(
-            `/api/bookings/${encodeURIComponent(reservation._id)}/unit-proximity`,
-          ).catch(() => null)
-        : null;
-      const readyProximity = proximity?.status === "ready" ? proximity : null;
-      const originalCommunity = cleanGuestAlternativeLabel(
-        readyProximity?.community ?? originalCommunityForAlternativePage(reservation, slotsForPage),
-      );
-      const originalCommunityName = originalCommunityForAlternativePage(reservation, slotsForPage);
-      const originalArea = originalAreaForAlternativePage(reservation, slotsForPage);
-      const sharedAlternativeCommunity = usableGuestAlternativeCommunity(readyProximity?.resortName);
-      const alternatives = slotsForPage.map((s) => {
-        const b = s.buyIn;
-        const photoUrls = manualBuyInPhotoUrlsFromNotes(b.notes);
-        const listingTitle = titleFromBuyInNotes(b.notes);
-        const alternativeCommunity = alternativeCommunityFromBuyInNotes(b.notes, listingTitle)
-          || sharedAlternativeCommunity
-          || cleanGuestAlternativeLabel(b.propertyName);
-        return {
-          title: usableGuestAlternativeCommunity(listingTitle) ? listingTitle : "",
-          community: usableGuestAlternativeCommunity(alternativeCommunity) ? alternativeCommunity : "",
-          originalCommunity: originalCommunityName || originalCommunity,
-          alternativeCommunity: usableGuestAlternativeCommunity(alternativeCommunity) ? alternativeCommunity : "",
-          url: b.airbnbListingUrl,
-          image: photoUrls[0] ?? "",
-          photos: photoUrls,
-          // Actual bedrooms from the listing's own title when parseable — a
-          // smaller unit filling a slot must not inherit the slot's count.
-          bedrooms: bedroomsFromListingTitleText(listingTitle) ?? s.bedrooms,
-          unitLabel: b.unitLabel,
-          address: b.unitAddress,
-          sourceLabel: sourceLabelForUrl(b.airbnbListingUrl),
-          notes: b.notes,
-        };
-      });
-      const primaryAlternativeCommunity = alternatives.find((item) => {
-        const label = usableGuestAlternativeCommunity(item.alternativeCommunity);
-        return label && label !== originalArea && label !== originalCommunityName;
-      })?.alternativeCommunity || alternatives[0]?.alternativeCommunity || sharedAlternativeCommunity || "";
-      // Same-community relocation facts (verdicts + booked bedrooms + party) —
-      // mirrors RelocateGuestDialog so the guest page framing matches the message.
-      const pageVerdicts = slotsForPage.map((s) => s.buyIn.communityVerdict);
-      const pageVerdictConsensus = sameCommunityConsensusFromVerdicts(pageVerdicts);
-      const pageSameCommunity = pageVerdictConsensus
-        ? true
-        : anyDifferentCommunityVerdict(pageVerdicts) ? false : undefined;
-      const pageOriginalBedrooms = reservation.slots.reduce(
-        (sum, s) => sum + (Number(s.bedrooms) > 0 ? Number(s.bedrooms) : 0), 0,
-      ) || null;
-      const response = await apiRequest("POST", "/api/booking-alternatives", {
-        reservationId: reservation._id,
-        guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
-        checkIn: checkInOf(reservation),
-        checkOut: checkOutOf(reservation),
-        originalCommunity: originalCommunityName || originalCommunity,
-        areaName: originalArea || originalCommunity,
-        alternativeCommunity: primaryAlternativeCommunity,
-        unitWalkMinutes: readyProximity?.walk?.minutes ?? null,
-        walkMinutes: readyProximity?.walk?.minutes ?? null,
-        alternatives,
-        sameCommunity: pageSameCommunity,
-        sameBuilding: pageVerdictConsensus === "same_building",
-        originalBedrooms: pageOriginalBedrooms,
-        partySize: guestPartyFromReservation(reservation)?.total ?? null,
-      }).then((r) => r.json());
-      if (!response?.url) throw new Error(response?.message || response?.error || "Alternative page create failed");
-      return response as { url: string; expiresAt?: string };
-    },
-    onSuccess: async (data) => {
-      try {
-        await navigator.clipboard?.writeText(data.url);
-        toast({ title: "Guest page ready", description: "Link copied and opened for review." });
-      } catch {
-        toast({ title: "Guest page ready", description: "Opened for review. Copy the URL from the new tab if needed." });
-      }
-      window.open(data.url, "_blank", "noopener,noreferrer");
-    },
-    onError: (e: any) => toast({ title: "Guest page failed", description: e?.message ?? String(e), variant: "destructive" }),
-  });
 
   const detachMutation = useMutation({
     mutationFn: ({ buyInId }: { buyInId: number; reservationId: string }) =>
@@ -13162,40 +12943,65 @@ export default function Bookings() {
                             </div>
                             </div>
                             {/* Row 2: action toolbar — its own full-width wrapping row so the
-                                8+ buttons never overflow/overlap the info column above. */}
-                            <div className="flex flex-wrap items-center gap-1">
+                                buttons never overflow/overlap the info column above. Layout:
+                                purchase status → the three primary guest-messaging actions
+                                (colored pills) → divider → uniform ghost utility buttons →
+                                sent badges → Detach. ("Re-verify", "Payment terms", and
+                                "Guest page" were removed 2026-07-20 by operator request.) */}
+                            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1.5">
                               {slot.buyIn ? (
                                 <>
-                                  {/* Verify rate — on-demand vision check
-                                      against the buy-in's PM URL. Only show
-                                      when there's a URL to verify; the
-                                      dialog handles the loading state and
-                                      manual cost edit. */}
                                   {/* Purchase status for this attached unit: bought-in badge /
                                       checkout lifecycle, plus "Mark as bought in" to record that
                                       the unit was actually paid for. Checkout itself runs through
                                       the per-unit "Prepare checkout in Cowork" button above. */}
                                   {slot.buyIn && <UnitPurchaseStatus buyIn={slot.buyIn} reservation={r} />}
-                                  {/* On-demand VRBO payment schedule (due now / balance due date). */}
-                                  {slot.buyIn && <PaymentTermsButton buyIn={slot.buyIn} />}
-                                  {/* Per-guest booking inbox (firstname.lastname@emailprivaccy.com). */}
+                                  {!isManualReservation(r) && (
+                                    <>
+                                      <Button
+                                        size="sm"
+                                        className="h-7 rounded-full px-3 text-xs font-medium shadow-sm"
+                                        onClick={(e) => { e.stopPropagation(); setRelocateGuestTarget({ reservation: r }); }}
+                                        data-testid={`button-relocate-guest-${r._id}-${slot.unitId}`}
+                                        title={`Draft + send the guest an apology with the alternative Guest Page link, through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "their booking channel"} (the channel they booked with), and track whether they open it`}
+                                      >
+                                        <Send className="h-3.5 w-3.5 mr-1.5" />
+                                        Alternative Unit
+                                      </Button>
+                                      {/* Same page/message/send machinery as Alternative Unit,
+                                          but CONFIRMS the attached units instead of framing a
+                                          move: the guest page shows the exact photos of the
+                                          units they're staying in. */}
+                                      <Button
+                                        size="sm"
+                                        className="h-7 rounded-full bg-none bg-emerald-600 px-3 text-xs font-medium text-white shadow-sm hover:bg-emerald-700 dark:bg-emerald-600 dark:text-white dark:hover:bg-emerald-500"
+                                        onClick={(e) => { e.stopPropagation(); setRelocateGuestTarget({ reservation: r, kind: "unit-confirmation" }); }}
+                                        data-testid={`button-send-unit-confirmation-${r._id}-${slot.unitId}`}
+                                        title={`Confirm the attached units to the guest — builds a guest page with the exact photos of the units they're staying in and sends it through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "their booking channel"}`}
+                                      >
+                                        <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
+                                        Send unit confirmation to guest
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        className="h-7 rounded-full bg-none bg-sky-600 px-3 text-xs font-medium text-white shadow-sm hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
+                                        onClick={(e) => { e.stopPropagation(); setArrivalDetailsMessageTarget({ reservation: r }); }}
+                                        data-testid={`button-message-ad-${r._id}-${slot.unitId}`}
+                                        title="Draft + send arrival details (address, codes, Wi-Fi, parking) from all attached units through the booking channel"
+                                      >
+                                        <FileText className="h-3.5 w-3.5 mr-1.5" />
+                                        Message AD
+                                      </Button>
+                                      <span className="mx-0.5 h-5 w-px self-center bg-border" aria-hidden="true" />
+                                    </>
+                                  )}
+                                  {/* Per-guest booking inbox (unit alias @emailprivaccy.com). */}
                                   {slot.buyIn && <GuestInboxButton buyIn={slot.buyIn} />}
                                   {slot.buyIn.airbnbListingUrl && (
                                     <Button
                                       size="sm"
                                       variant="ghost"
-                                      onClick={() => slot.buyIn && setVerifyTarget({ buyIn: slot.buyIn, reservation: r })}
-                                      data-testid={`button-verify-rate-${r._id}-${slot.unitId}`}
-                                      title="Take a screenshot of the PM page and try to extract the rate"
-                                    >
-                                      <Camera className="h-3.5 w-3.5 mr-1" />
-                                      {parseFloat(String(slot.buyIn.costPaid ?? 0)) === 0 ? "Verify rate" : "Re-verify"}
-                                    </Button>
-                                  )}
-                                  {slot.buyIn.airbnbListingUrl && (
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
+                                      className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
                                       onClick={() => slot.buyIn && setListingSitesTarget({ buyIn: slot.buyIn, reservation: r, slot })}
                                       data-testid={`button-listing-sites-${r._id}-${slot.unitId}`}
                                       title="Scan this listing's private photos for other websites"
@@ -13207,6 +13013,7 @@ export default function Bookings() {
                                   <Button
                                     size="sm"
                                     variant="ghost"
+                                    className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
                                     onClick={() => slot.buyIn && setArrivalEditor(slot.buyIn)}
                                     data-testid={`button-arrival-details-${r._id}-${slot.unitId}`}
                                     title="Edit unit address, access code, Wi-Fi, parking, and manager contact"
@@ -13219,56 +13026,6 @@ export default function Bookings() {
                                       "confirmation email arrived but no arrival
                                       details yet" chase path. */}
                                   <ConfirmManagementContactButton buyIn={slot.buyIn} />
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => slot.buyIn && guestAlternativePageMutation.mutate({ reservation: r, slot, buyIn: slot.buyIn })}
-                                    disabled={guestAlternativePageMutation.isPending}
-                                    data-testid={`button-guest-alternative-page-${r._id}-${slot.unitId}`}
-                                    title="Create a guest-facing alternative option page"
-                                  >
-                                    {guestAlternativePageMutation.isPending
-                                      ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-                                      : <ExternalLink className="h-3.5 w-3.5 mr-1" />}
-                                    Guest page
-                                  </Button>
-                                  {!isManualReservation(r) && (
-                                    <>
-                                      <Button
-                                        size="sm"
-                                        onClick={(e) => { e.stopPropagation(); setRelocateGuestTarget({ reservation: r }); }}
-                                        data-testid={`button-relocate-guest-${r._id}-${slot.unitId}`}
-                                        title={`Draft + send the guest an apology with the alternative Guest Page link, through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "their booking channel"} (the channel they booked with), and track whether they open it`}
-                                      >
-                                        <Send className="h-3.5 w-3.5 mr-1" />
-                                        Alternative Unit
-                                      </Button>
-                                      {/* Same page/message/send machinery as Alternative Unit,
-                                          but CONFIRMS the attached units instead of framing a
-                                          move: the guest page shows the exact photos of the
-                                          units they're staying in. */}
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={(e) => { e.stopPropagation(); setRelocateGuestTarget({ reservation: r, kind: "unit-confirmation" }); }}
-                                        data-testid={`button-send-unit-confirmation-${r._id}-${slot.unitId}`}
-                                        title={`Confirm the attached units to the guest — builds a guest page with the exact photos of the units they're staying in and sends it through ${channelKindOf(r) === "booking" ? "Booking.com" : channelKindOf(r) === "vrbo" ? "VRBO" : channelKindOf(r) === "airbnb" ? "Airbnb" : "their booking channel"}`}
-                                      >
-                                        <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
-                                        Send unit confirmation to guest
-                                      </Button>
-                                      <Button
-                                        size="sm"
-                                        variant="secondary"
-                                        onClick={(e) => { e.stopPropagation(); setArrivalDetailsMessageTarget({ reservation: r }); }}
-                                        data-testid={`button-message-ad-${r._id}-${slot.unitId}`}
-                                        title="Draft + send arrival details (address, codes, Wi-Fi, parking) from all attached units through the booking channel"
-                                      >
-                                        <FileText className="h-3.5 w-3.5 mr-1" />
-                                        Message AD
-                                      </Button>
-                                    </>
-                                  )}
                                   {/* Persistent confirmation that the relocation message was already
                                       sent for this reservation (rendered once, on the first filled
                                       slot). Survives closing the dialog + reloads. */}
@@ -13312,6 +13069,7 @@ export default function Bookings() {
                                   <Button
                                     size="sm"
                                     variant="ghost"
+                                    className="h-7 px-2.5 text-xs text-muted-foreground hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/40 dark:hover:text-red-300"
                                     onClick={() => slot.buyIn && detachMutation.mutate({ buyInId: slot.buyIn.id, reservationId: r._id })}
                                     disabled={detachMutation.isPending || r.slots.some((s) => buyInHasActiveCheckout(s.buyIn))}
                                     data-testid={`button-detach-${r._id}-${slot.unitId}`}
@@ -14214,17 +13972,6 @@ export default function Bookings() {
         />
       )}
 
-      {/* Per-slot Verify rate dialog — runs verify-pm-listing on demand
-          and shows the screenshot inline. Decoupled from auto-fill so a
-          slow PM site can't block the broader flow. */}
-      {verifyTarget && (
-        <VerifyRateDialog
-          buyIn={verifyTarget.buyIn}
-          reservationCheckIn={checkInOf(verifyTarget.reservation) ?? verifyTarget.buyIn.checkIn}
-          reservationCheckOut={checkOutOf(verifyTarget.reservation) ?? verifyTarget.buyIn.checkOut}
-          onClose={() => setVerifyTarget(null)}
-        />
-      )}
       {listingSitesTarget && (
         <BuyInListingSitesDialog
           buyIn={listingSitesTarget.buyIn}
@@ -15162,7 +14909,7 @@ function ConfirmManagementContactButton({
       <Button
         size="sm"
         variant="ghost"
-        className="text-sky-700 dark:text-sky-300"
+        className="h-7 px-2.5 text-xs text-sky-700 hover:text-sky-800 dark:text-sky-300 dark:hover:text-sky-200"
         disabled={lookup.isPending}
         onClick={(e) => { e.stopPropagation(); lookup.mutate(); }}
         title="Confirm the local on-site management team's contact details (from the booking emails or a Claude web lookup) and save them into the arrival information"
@@ -18450,278 +18197,9 @@ function LiveRow({
   );
 }
 
-// Dialog: per-slot on-demand "verify rate" against the buy-in's PM URL.
-// Calls /api/operations/verify-pm-listing (Playwright + Claude vision),
-// shows the screenshot inline, and lets the operator either accept the
-// extracted price or type a manual cost. Decoupled from auto-fill so a
-// slow/hung verify never blocks the broader flow.
-function VerifyRateDialog({
-  buyIn,
-  reservationCheckIn,
-  reservationCheckOut,
-  onClose,
-}: {
-  buyIn: BuyIn;
-  reservationCheckIn: string;
-  reservationCheckOut: string;
-  onClose: () => void;
-}) {
-  const { toast } = useToast();
-  type Extracted = {
-    isUnitPage?: boolean;
-    available?: boolean | null;
-    totalPrice?: number | null;
-    nightlyPrice?: number | null;
-    dateMatch?: boolean | null;
-    reason?: string;
-  };
-  const [state, setState] = useState<
-    | { kind: "loading" }
-    | { kind: "loaded"; screenshot: string | null; extracted: Extracted | null; reason?: string; manualOnly?: boolean }
-    | { kind: "error"; message: string }
-  >({ kind: "loading" });
-  const [manualCost, setManualCost] = useState("");
-  const manualPm = manualOnlyPmForUrl(buyIn.airbnbListingUrl);
-
-  const toDateOnly = (s: string): string =>
-    /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
-  const ci = toDateOnly(reservationCheckIn);
-  const co = toDateOnly(reservationCheckOut);
-
-  // Kick off the verify call once when the dialog mounts.
-  useEffect(() => {
-    let cancelled = false;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000);
-    (async () => {
-      try {
-        const resp = await fetch("/api/operations/verify-pm-listing", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            url: buyIn.airbnbListingUrl,
-            checkIn: ci,
-            checkOut: co,
-          }),
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-        if (cancelled) return;
-        if (!resp.ok) {
-          setState({ kind: "error", message: `Server returned ${resp.status}` });
-          return;
-        }
-        const data = await resp.json();
-        if (cancelled) return;
-        setState({
-          kind: "loaded",
-          screenshot: data?.screenshotBase64 ?? null,
-          extracted: data?.extracted ?? null,
-          reason: data?.reason,
-          manualOnly: data?.manualOnly === true,
-        });
-        if (data?.extracted?.totalPrice && data.extracted.totalPrice > 0) {
-          setManualCost(String(data.extracted.totalPrice));
-        }
-      } catch (e: any) {
-        clearTimeout(timeoutId);
-        if (cancelled) return;
-        setState({
-          kind: "error",
-          message: e?.name === "AbortError" ? "Verify timed out (90s)" : (e?.message ?? "Network error"),
-        });
-      }
-    })();
-    return () => {
-      cancelled = true;
-      clearTimeout(timeoutId);
-      controller.abort();
-    };
-    // Only run once on mount — buyIn.id is stable for the dialog's lifetime.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const updateCost = useMutation({
-    mutationFn: (cost: number) =>
-      apiRequest("PATCH", `/api/buy-ins/${buyIn.id}`, { costPaid: cost.toFixed(2) }).then((r) => r.json()),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-      toast({ title: "Cost updated" });
-      onClose();
-    },
-    onError: (e: any) => toast({ title: "Update failed", description: e.message, variant: "destructive" }),
-  });
-
-  const sourceHost = sourceLabelForUrl(buyIn.airbnbListingUrl);
-
-  return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Verify rate — {sourceHost}</DialogTitle>
-          <DialogDescription>
-            Loading {sourceHost} for {fmtDate(ci)} → {fmtDate(co)}, taking a screenshot, and asking Claude to read the price off the page.
-          </DialogDescription>
-        </DialogHeader>
-
-        {state.kind === "loading" && (
-          <div className="flex flex-col items-center justify-center py-12 gap-3">
-            <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">
-              This usually takes 10-60s — PM sites with read-only date pickers are slow.
-            </p>
-          </div>
-        )}
-
-        {state.kind === "error" && (
-          <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm">
-            <p className="font-medium text-destructive">Verify failed</p>
-            <p className="text-muted-foreground mt-1">{state.message}</p>
-            <p className="text-xs text-muted-foreground mt-2">
-              You can still click the link in the slot row to load the page yourself, then type the cost below.
-            </p>
-          </div>
-        )}
-
-        {state.kind === "loaded" && state.manualOnly && manualPm && (
-          <div className="space-y-3">
-            <div className="rounded-md border-2 border-amber-500/50 bg-amber-50 dark:bg-amber-950/30 p-4 space-y-2">
-              <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-                {manualPm.name} does not expose an automatic rate
-              </p>
-              <p className="text-xs text-amber-800 dark:text-amber-300">
-                {state.extracted?.reason ?? `${manualPm.name}'s public site doesn't display rates inline. Their booking flow is a contact form (reCAPTCHA-protected) that emails their team for a quote.`}
-              </p>
-              {manualPm.phone && (
-                <p className="text-sm">
-                  <span className="text-muted-foreground">Call: </span>
-                  <a
-                    href={`tel:${manualPm.phone.replace(/[^\d+]/g, "")}`}
-                    className="font-mono font-semibold text-amber-900 dark:text-amber-200 underline"
-                  >
-                    {manualPm.phone}
-                  </a>
-                </p>
-              )}
-              {manualPm.emailUrl && (
-                <p className="text-xs">
-                  <span className="text-muted-foreground">Or fill their inquiry form: </span>
-                  <a
-                    href={manualPm.emailUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-primary underline hover:no-underline"
-                  >
-                    Request Info <ExternalLink className="h-2.5 w-2.5 inline" />
-                  </a>
-                </p>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="verify-cost" className="text-xs">
-                Once you have the quote, enter the buy-in cost (USD)
-              </Label>
-              <Input
-                id="verify-cost"
-                type="number"
-                inputMode="decimal"
-                value={manualCost}
-                onChange={(e) => setManualCost(e.target.value)}
-                placeholder="e.g. 4500"
-                min="0"
-                step="0.01"
-              />
-            </div>
-          </div>
-        )}
-        {state.kind === "loaded" && !(state.manualOnly && manualPm) && (
-          <div className="space-y-3">
-            {/* Extracted info badges */}
-            <div className="flex items-center gap-2 flex-wrap text-xs">
-              {state.extracted?.isUnitPage === true && (
-                <Badge className="bg-green-100 text-green-800">Unit page</Badge>
-              )}
-              {state.extracted?.isUnitPage === false && (
-                <Badge variant="outline">Not a unit page</Badge>
-              )}
-              {state.extracted?.dateMatch === true && (
-                <Badge className="bg-green-100 text-green-800">Dates loaded</Badge>
-              )}
-              {state.extracted?.dateMatch === false && (
-                <Badge variant="outline">Dates not entered</Badge>
-              )}
-              {state.extracted?.available === true && (
-                <Badge className="bg-green-100 text-green-800">Available</Badge>
-              )}
-              {state.extracted?.available === false && (
-                <Badge variant="destructive">Unavailable</Badge>
-              )}
-              {typeof state.extracted?.totalPrice === "number" && state.extracted.totalPrice > 0 && (
-                <Badge className="bg-blue-100 text-blue-800">
-                  ${state.extracted.totalPrice.toLocaleString()} total
-                  {state.extracted.nightlyPrice ? ` · $${state.extracted.nightlyPrice}/nt` : ""}
-                </Badge>
-              )}
-            </div>
-            {state.extracted?.reason && (
-              <p className="text-xs text-muted-foreground italic">{state.extracted.reason}</p>
-            )}
-
-            {/* Screenshot */}
-            {state.screenshot && (
-              <div className="border rounded-md overflow-hidden">
-                <img
-                  src={state.screenshot}
-                  alt="PM site screenshot"
-                  className="w-full block"
-                />
-              </div>
-            )}
-
-            {/* Cost input */}
-            <div className="space-y-1.5">
-              <Label htmlFor="verify-cost" className="text-xs">
-                Buy-in cost (USD)
-              </Label>
-              <Input
-                id="verify-cost"
-                type="number"
-                inputMode="decimal"
-                value={manualCost}
-                onChange={(e) => setManualCost(e.target.value)}
-                placeholder="e.g. 4500"
-                min="0"
-                step="0.01"
-              />
-              <p className="text-[11px] text-muted-foreground">
-                Pre-filled from the extracted total when available. If the screenshot shows a price the bot missed, type it here.
-              </p>
-            </div>
-          </div>
-        )}
-
-        <DialogFooter className="flex-row justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>Close</Button>
-          <Button
-            onClick={() => {
-              const n = parseFloat(manualCost);
-              if (!isFinite(n) || n < 0) {
-                toast({ title: "Enter a valid cost", variant: "destructive" });
-                return;
-              }
-              updateCost.mutate(n);
-            }}
-            disabled={updateCost.isPending || state.kind === "loading"}
-          >
-            {updateCost.isPending ? "Saving..." : "Save cost"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
+// (The per-slot "Verify rate" / "Re-verify" toolbar button and its dialog were
+// removed 2026-07-20 by operator request. The manual buy-in dialog still reads
+// rates via /api/operations/verify-pm-listing.)
 
 function VrboGuestPageDialog({
   reservation,

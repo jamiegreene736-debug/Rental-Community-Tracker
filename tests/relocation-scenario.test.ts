@@ -196,8 +196,11 @@ check("bookings: explicit different verdict sends sameCommunity=false",
   bookingsSrc.includes("anyDifferentCommunityVerdict("));
 check("bookings: honest per-unit bedrooms from the listing title (slot config fallback)",
   bookingsSrc.includes("bedroomsFromListingTitleText(listingTitle) ?? s.bedrooms"));
+// 2026-07-20: the per-slot "Guest page" toolbar button was removed — the guest
+// page now builds only through RelocateGuestDialog's createPage, which computes
+// the same booked-bedroom total + party size before POSTing.
 check("bookings: sends the booked bedroom total + party size",
-  bookingsSrc.includes("originalBedrooms") && bookingsSrc.includes("partySize: guestPartyFromReservation(reservation)?.total ?? null"));
+  bookingsSrc.includes("originalBedrooms") && bookingsSrc.includes("const partySize = guestPartyFromReservation(reservation)?.total ?? null"));
 
 console.log(`\nrelocation-scenario: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
