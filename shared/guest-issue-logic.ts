@@ -16,13 +16,29 @@ export type GuestIssueStatus = (typeof GUEST_ISSUE_STATUSES)[number];
 export const GUEST_ISSUE_SEVERITIES = ["low", "normal", "high", "urgent"] as const;
 export type GuestIssueSeverity = (typeof GUEST_ISSUE_SEVERITIES)[number];
 
-// A guest issue is filed under one of two KINDS, each its own inbox tab:
-//   property    → Guest Issues        (maintenance, cleanliness, noise, access,
-//                                       safety, amenities, directions, general)
-//   back_office → Back-Office Issues   (refund requests, billing disputes,
-//                                       cancellation requests)
-export const GUEST_ISSUE_KINDS = ["property", "back_office"] as const;
+// A guest issue is filed under one of three KINDS, each its own inbox tab:
+//   property         → Guest Issues       (maintenance, cleanliness, noise, access,
+//                                          safety, amenities, directions, general)
+//   back_office      → Back-Office Issues (refund requests, billing disputes,
+//                                          cancellation requests) — OPERATOR-ONLY
+//   back_office_task → Back-Office Tasks  (manual to-dos the OPERATOR creates for
+//                                          the agent team to work and mark resolved,
+//                                          e.g. "call the PM company for arrival
+//                                          details") — agent-VISIBLE by design
+export const GUEST_ISSUE_KINDS = ["property", "back_office", "back_office_task"] as const;
 export type GuestIssueKind = (typeof GUEST_ISSUE_KINDS)[number];
+
+// Back-office TASKS don't have to attach to a real Guesty conversation (the work
+// is often "call/email a third party", not a guest thread). guest_issues.conversationId
+// is NOT NULL, so unattached tasks carry this sentinel instead of a schema
+// migration. Never a real Guesty conversation id (Guesty ids are hex ObjectIds),
+// so it can't collide with the per-conversation panel's queries.
+export const BACK_OFFICE_TASK_CONVERSATION_ID = "back-office-tasks";
+
+/** True when an issue's conversationId is the unattached-task sentinel (no thread to open). */
+export function isBackOfficeTaskConversationId(conversationId: unknown): boolean {
+  return conversationId === BACK_OFFICE_TASK_CONVERSATION_ID;
+}
 
 export function isGuestIssueKind(value: unknown): value is GuestIssueKind {
   return typeof value === "string" && (GUEST_ISSUE_KINDS as readonly string[]).includes(value);
@@ -36,6 +52,7 @@ export function normalizeGuestIssueKind(value: unknown): GuestIssueKind {
 }
 
 export function guestIssueKindLabel(kind: string): string {
+  if (kind === "back_office_task") return "Task";
   return kind === "back_office" ? "Back-office" : "Property";
 }
 

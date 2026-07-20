@@ -31,7 +31,7 @@ import {
 import {
   ArrowLeft, MessageSquare, Calendar, Zap, Send, Sparkles, Plus, Pencil,
   Trash2, CheckCircle, XCircle, RefreshCw, Clock, User, Building2, AlertCircle,
-  ToggleRight, X, ShieldAlert, MessageCircle, DollarSign,
+  ToggleRight, X, ShieldAlert, MessageCircle, DollarSign, ClipboardList,
   FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
   Search, Loader2, ExternalLink, Copy, Link2, MailOpen, Reply, Image,
 } from "lucide-react";
@@ -4492,8 +4492,11 @@ export default function InboxPage() {
   // Split the unresolved count by KIND so each tab shows its own flag. A row with
   // no kind (legacy) counts as property (the DB default).
   const unresolvedIssues = guestIssuesOpenData?.issues ?? [];
-  const openGuestIssueCount = unresolvedIssues.filter((i) => i?.kind !== "back_office").length;
+  const openGuestIssueCount = unresolvedIssues.filter(
+    (i) => i?.kind !== "back_office" && i?.kind !== "back_office_task",
+  ).length;
   const openBackOfficeIssueCount = unresolvedIssues.filter((i) => i?.kind === "back_office").length;
+  const openBackOfficeTaskCount = unresolvedIssues.filter((i) => i?.kind === "back_office_task").length;
 
   const approveReservation = useMutation({
     mutationFn: (id: string) =>
@@ -4679,6 +4682,20 @@ export default function InboxPage() {
                 </span>
               )}
             </TabsTrigger>
+            {/* Back-Office Tasks — manual to-dos the operator creates for the agent
+                team (e.g. "call the PM company for arrival details"). VISIBLE to
+                agents by design: they work the task and mark it resolved. */}
+            <TabsTrigger value="back-office-tasks" data-testid="tab-back-office-tasks">
+              <ClipboardList className="h-4 w-4 mr-1.5" /> Back-Office Tasks
+              {openBackOfficeTaskCount > 0 && (
+                <span
+                  className="ml-1.5 rounded-full bg-teal-600 text-white text-[10px] min-w-4 h-4 px-1 flex items-center justify-center"
+                  data-testid="badge-back-office-tasks-open"
+                >
+                  {openBackOfficeTaskCount >= 200 ? "200+" : openBackOfficeTaskCount}
+                </span>
+              )}
+            </TabsTrigger>
             {/* Back-Office Issues (refunds/cancellations/billing) is OPERATOR-ONLY —
                 hidden from the remote agent login. The server also withholds
                 back_office rows from the agent role (defense in depth). */}
@@ -4721,6 +4738,22 @@ export default function InboxPage() {
             <GuestIssuesTab
               kind="property"
               canDelete={isAdmin}
+              onOpenConversation={(conversationId) => {
+                setSelectedConvId(conversationId);
+                setActiveTab("messages");
+              }}
+            />
+          </TabsContent>
+
+          {/* ── BACK-OFFICE TASKS TAB ── (visible to operator AND agents)
+              Manual work assignments: the admin creates a task from the tab's
+              "New task" form (no guest thread required); the agent team works it
+              and marks it ongoing/resolved. Creation is admin-only. */}
+          <TabsContent value="back-office-tasks">
+            <GuestIssuesTab
+              kind="back_office_task"
+              canDelete={isAdmin}
+              canCreate={isAdmin}
               onOpenConversation={(conversationId) => {
                 setSelectedConvId(conversationId);
                 setActiveTab("messages");

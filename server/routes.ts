@@ -93,6 +93,7 @@ import {
   normalizeGuestIssueKind,
   defaultCommentBodyForStatus,
   resolvedAtForStatus,
+  BACK_OFFICE_TASK_CONVERSATION_ID,
 } from "@shared/guest-issue-logic";
 import {
   comboBedroomSplitIsInferred,
@@ -53292,16 +53293,23 @@ ${SLEEPING_CAPACITY_RULE}
     try {
       const statusRaw = String(req.query.status ?? "").trim().toLowerCase();
       const status = statusRaw && statusRaw !== "all" ? statusRaw : undefined;
-      // kind = which tab (property | back_office); unset/"all" returns both.
+      // kind = which tab (property | back_office | back_office_task); unset/"all"
+      // returns every kind.
       const kindRaw = String(req.query.kind ?? "").trim().toLowerCase();
-      let kind = kindRaw === "property" || kindRaw === "back_office" ? kindRaw : undefined;
-      // Back-office issues (refunds/cancellations/billing) are OPERATOR-ONLY — the
-      // remote agent login never sees them anywhere. Force property-only for the
-      // agent role regardless of the requested kind (the badge query sends no kind).
+      let kind = kindRaw === "property" || kindRaw === "back_office" || kindRaw === "back_office_task"
+        ? kindRaw
+        : undefined;
+      // Back-office ISSUES (refunds/cancellations/billing) are OPERATOR-ONLY — the
+      // remote agent login never sees them anywhere. Back-office TASKS are the
+      // opposite by design: the operator creates them FOR the agent team to work
+      // and mark resolved, so agents see property issues + tasks. An agent asking
+      // for back_office is coerced to property; an unset kind (the badge query)
+      // gets the post-fetch back_office strip below.
       const isAgentRole = (res.locals.portalSession as { role?: string } | undefined)?.role === "agent";
-      if (isAgentRole) kind = "property";
+      if (isAgentRole && kind === "back_office") kind = "property";
       const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
-      const issues = await storage.listGuestIssues({ status, kind, limit });
+      const fetched = await storage.listGuestIssues({ status, kind, limit });
+      const issues = isAgentRole ? fetched.filter((i) => i.kind !== "back_office") : fetched;
       if (!req.query.withComments) return res.json({ issues });
       const comments = await storage.getGuestIssueCommentsForIssues(issues.map((i) => i.id));
       const byIssue = new Map<number, typeof comments>();
@@ -53343,16 +53351,21 @@ ${SLEEPING_CAPACITY_RULE}
 
   app.post("/api/inbox/guest-issues", async (req, res) => {
     try {
-      const conversationId = String(req.body?.conversationId ?? "").trim();
-      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
       const titleCheck = validateGuestIssueTitle(req.body?.title);
       if (!titleCheck.ok) return res.status(400).json({ error: titleCheck.error });
       const description = req.body?.description != null ? String(req.body.description).trim() : "";
       const severity = normalizeGuestIssueSeverity(req.body?.severity);
-      // property (default) | back_office — but the agent role can never file a
-      // back-office issue (that tab is operator-only), so coerce it to property.
+      // property (default) | back_office | back_office_task — but the agent role
+      // can never file a back-office issue OR a task (issues are operator-only;
+      // tasks are operator-CREATED work assignments), so coerce it to property.
       const isAgentRole = (res.locals.portalSession as { role?: string } | undefined)?.role === "agent";
       const kind = isAgentRole ? "property" : normalizeGuestIssueKind(req.body?.kind);
+      // A back-office TASK doesn't have to attach to a guest thread ("call the PM
+      // company…") — an omitted conversationId falls back to the shared sentinel.
+      // Every other kind still requires a real conversation.
+      let conversationId = String(req.body?.conversationId ?? "").trim();
+      if (!conversationId && kind === "back_office_task") conversationId = BACK_OFFICE_TASK_CONVERSATION_ID;
+      if (!conversationId) return res.status(400).json({ error: "conversationId required" });
       const author = guestIssueAuthor(res);
       const issue = await storage.createGuestIssue({
         conversationId,

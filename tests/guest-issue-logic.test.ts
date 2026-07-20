@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   GUEST_ISSUE_STATUSES,
@@ -19,6 +22,8 @@ import {
   summarizeGuestIssueStatuses,
   orderGuestIssuesResolvedLast,
   validateGuestIssueTitle,
+  BACK_OFFICE_TASK_CONVERSATION_ID,
+  isBackOfficeTaskConversationId,
 } from "../shared/guest-issue-logic";
 
 console.log("guest-issue-logic suite");
@@ -26,20 +31,35 @@ console.log("guest-issue-logic suite");
 // ── status / severity constants ──
 assert.deepEqual([...GUEST_ISSUE_STATUSES], ["open", "ongoing", "resolved"]);
 assert.deepEqual([...GUEST_ISSUE_SEVERITIES], ["low", "normal", "high", "urgent"]);
-assert.deepEqual([...GUEST_ISSUE_KINDS], ["property", "back_office"]);
+assert.deepEqual([...GUEST_ISSUE_KINDS], ["property", "back_office", "back_office_task"]);
 console.log("  ✓ status + severity + kind vocabularies are stable");
 
 // ── kind guards / normalize / label ──
 assert.equal(isGuestIssueKind("back_office"), true);
+assert.equal(isGuestIssueKind("back_office_task"), true);
 assert.equal(isGuestIssueKind("nope"), false);
 assert.equal(normalizeGuestIssueKind(" Back_Office "), "back_office");
+assert.equal(normalizeGuestIssueKind("Back_Office_Task"), "back_office_task");
 assert.equal(normalizeGuestIssueKind("property"), "property");
 assert.equal(normalizeGuestIssueKind("garbage"), "property"); // default
 assert.equal(normalizeGuestIssueKind(undefined), "property");
 assert.equal(guestIssueKindLabel("back_office"), "Back-office");
+assert.equal(guestIssueKindLabel("back_office_task"), "Task");
 assert.equal(guestIssueKindLabel("property"), "Property");
 assert.equal(guestIssueKindLabel(""), "Property");
 console.log("  ✓ kind guard/normalize/label");
+
+// ── back-office task conversation sentinel ──
+// The sentinel lets an operator-created task exist WITHOUT a guest thread while
+// guest_issues.conversationId stays NOT NULL. It must never look like a real
+// Guesty conversation id (those are hex ObjectIds).
+assert.equal(BACK_OFFICE_TASK_CONVERSATION_ID, "back-office-tasks");
+assert.equal(/^[0-9a-f]{24}$/.test(BACK_OFFICE_TASK_CONVERSATION_ID), false);
+assert.equal(isBackOfficeTaskConversationId(BACK_OFFICE_TASK_CONVERSATION_ID), true);
+assert.equal(isBackOfficeTaskConversationId("69ea7b4608e5bc000f8e89ef"), false);
+assert.equal(isBackOfficeTaskConversationId(""), false);
+assert.equal(isBackOfficeTaskConversationId(null), false);
+console.log("  ✓ back-office task conversation sentinel");
 
 // ── type guards ──
 assert.equal(isGuestIssueStatus("ongoing"), true);
@@ -131,5 +151,67 @@ assert.equal(validateGuestIssueTitle(" a ").ok, false); // < 2 chars after trim
 assert.equal(validateGuestIssueTitle("x".repeat(201)).ok, false);
 assert.equal(validateGuestIssueTitle(undefined).ok, false);
 console.log("  ✓ title validation enforces 2–200 chars");
+
+// ── SOURCE GUARDS: Back-Office Tasks wiring (2026-07-20) ─────────────────────
+// Tasks (kind "back_office_task") are operator-CREATED work assignments the
+// agent team must SEE and resolve, while back-office ISSUES stay operator-only.
+// These greps lock the visibility rules against a well-meaning "simplification".
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const routesSrc = readFileSync(path.join(repoRoot, "server", "routes.ts"), "utf8");
+const storageSrc = readFileSync(path.join(repoRoot, "server", "storage.ts"), "utf8");
+const panelSrc = readFileSync(
+  path.join(repoRoot, "client", "src", "components", "GuestIssuesPanel.tsx"),
+  "utf8",
+);
+const inboxSrc = readFileSync(path.join(repoRoot, "client", "src", "pages", "inbox.tsx"), "utf8");
+
+// 1) List route: agents are stripped of back_office rows but KEEP tasks — the
+//    old blanket `if (isAgentRole) kind = "property"` must not come back.
+assert.ok(
+  routesSrc.includes('if (isAgentRole && kind === "back_office") kind = "property";'),
+  "routes.ts must coerce ONLY an agent's back_office kind (tasks stay agent-visible)",
+);
+assert.ok(
+  routesSrc.includes('isAgentRole ? fetched.filter((i) => i.kind !== "back_office") : fetched'),
+  "routes.ts list route must strip back_office rows (and only those) for the agent role",
+);
+
+// 2) Create route: an omitted conversationId on a TASK falls back to the shared
+//    sentinel; agents can never create tasks (kind coerced to property first).
+assert.ok(
+  routesSrc.includes('if (!conversationId && kind === "back_office_task") conversationId = BACK_OFFICE_TASK_CONVERSATION_ID;'),
+  "routes.ts create route must default a task's missing conversationId to the sentinel",
+);
+assert.ok(
+  routesSrc.includes('const kind = isAgentRole ? "property" : normalizeGuestIssueKind(req.body?.kind);'),
+  "routes.ts create route must coerce the agent role to kind property (no agent-created tasks)",
+);
+
+// 3) Storage kind filter accepts the task kind (else the tab shows everything).
+assert.ok(
+  storageSrc.includes('opts.kind === "back_office_task"'),
+  "storage.listGuestIssues must filter by the back_office_task kind",
+);
+
+// 4) Client: the tasks tab exists for BOTH roles (no isAgent gate on its
+//    trigger), creation is admin-gated via canCreate, and the sentinel hides
+//    the open-conversation link.
+assert.ok(
+  inboxSrc.includes('data-testid="tab-back-office-tasks"'),
+  "inbox.tsx must render the Back-Office Tasks tab trigger",
+);
+assert.ok(
+  inboxSrc.includes('kind="back_office_task"') && inboxSrc.includes("canCreate={isAdmin}"),
+  "inbox.tsx must mount GuestIssuesTab kind=back_office_task with admin-only creation",
+);
+assert.ok(
+  panelSrc.includes("!isBackOfficeTaskConversationId(issue.conversationId)"),
+  "GuestIssuesPanel must hide the open-conversation link on sentinel-conversation tasks",
+);
+assert.ok(
+  panelSrc.includes('kind: "back_office_task"'),
+  "GuestIssuesTab's New-task form must POST kind back_office_task",
+);
+console.log("  ✓ source guards: Back-Office Tasks visibility + creation wiring");
 
 console.log("guest-issue-logic suite passed");

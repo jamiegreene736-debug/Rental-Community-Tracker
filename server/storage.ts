@@ -2072,8 +2072,10 @@ export class DatabaseStorage implements IStorage {
     const conds = [] as any[];
     if (opts.status === "unresolved") conds.push(ne(guestIssues.status, "resolved"));
     else if (opts.status && opts.status !== "all") conds.push(eq(guestIssues.status, opts.status));
-    // kind = which tab (property | back_office); "all"/unset returns both.
-    if (opts.kind === "property" || opts.kind === "back_office") conds.push(eq(guestIssues.kind, opts.kind));
+    // kind = which tab (property | back_office | back_office_task); "all"/unset returns every kind.
+    if (opts.kind === "property" || opts.kind === "back_office" || opts.kind === "back_office_task") {
+      conds.push(eq(guestIssues.kind, opts.kind));
+    }
     const base = db.select().from(guestIssues);
     const filtered = conds.length ? base.where(conds.length === 1 ? conds[0] : and(...conds)) : base;
     return filtered.orderBy(desc(guestIssues.updatedAt)).limit(limit);

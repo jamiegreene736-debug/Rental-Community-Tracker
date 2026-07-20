@@ -138,7 +138,26 @@ assert.equal(matchExistingComplaintIssue(verdictMaint, [{ id: 5, status: "resolv
 const verdictOther: ComplaintVerdict = { isComplaint: true, severity: "normal", category: "other", kind: "property", title: "problem", summary: "", source: "heuristic" };
 assert.equal(matchExistingComplaintIssue(verdictOther, [{ id: 7, status: "open", title: "Guest complaint", description: "the balcony railing is loose" }], ["railing"]), 7);
 assert.equal(matchExistingComplaintIssue(verdictOther, [], []), null);
-console.log("  ✓ dedup matches unresolved same-category+kind, ignores resolved/other-kind, opens new otherwise");
+// A manual Back-Office TASK ("call the PM company for arrival details") must
+// NEVER absorb scanner complaints — even when its text would match by category
+// inference or keyword overlap. kindOf's legacy-row inference cannot claim it.
+assert.equal(
+  matchExistingComplaintIssue(
+    verdictMaint,
+    [{ id: 30, status: "open", kind: "back_office_task", title: "AC not cooling — call HVAC vendor", description: "ac not working per guest" }],
+    ["ac not working"],
+  ),
+  null,
+);
+assert.equal(
+  matchExistingComplaintIssue(
+    verdictBilling,
+    [{ id: 31, status: "open", kind: "back_office_task", title: "Refund follow-up with PM billing dept", description: "chase the refund" }],
+    ["refund"],
+  ),
+  null,
+);
+console.log("  ✓ dedup matches unresolved same-category+kind, ignores resolved/other-kind/tasks, opens new otherwise");
 
 // ── idempotency markers ──
 const iso = "2026-07-09T10:00:00.000Z";
