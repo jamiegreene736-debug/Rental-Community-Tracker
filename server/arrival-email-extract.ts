@@ -25,7 +25,9 @@ import {
   type ArrivalExtractionFieldRecord,
   type ArrivalExtractionRecord,
 } from "@shared/arrival-email-verification";
-import type { BuyIn, GuestInboxMessage } from "@shared/schema";
+import { extractReadableFromStoredMimeBody } from "@shared/email-body-format";
+import { mergeAliasThread } from "@shared/unified-buyin-alias";
+import type { BuyIn, BuyInEmail, GuestInboxMessage, ReservationAlias } from "@shared/schema";
 
 const MAX_EMAILS_FOR_EXTRACTION = 10;
 const MAX_CHARS_PER_EMAIL = 7_000;
@@ -53,12 +55,74 @@ export function extractionEmailsFromMessages(messages: GuestInboxMessage[]): Ext
     .filter((m) => m.direction !== "outbound")
     .sort((a, b) => new Date(b.receivedAt as any).getTime() - new Date(a.receivedAt as any).getTime())
     .slice(0, MAX_EMAILS_FOR_EXTRACTION)
-    .map((m) => ({
-      subject: String(m.subject ?? "").slice(0, 300),
-      fromEmail: String(m.fromEmail ?? ""),
-      receivedAt: new Date(m.receivedAt as any).toISOString(),
-      text: stripHtmlForEmailParse(String(m.body ?? "")).slice(0, MAX_CHARS_PER_EMAIL),
-    }));
+    .map((m) => {
+      // Legacy rows can hold a raw MIME fragment (the pre-2026-07-06 import
+      // class); the display path heals those — extraction must read the SAME
+      // text a human sees or codes inside encoded parts are invisible.
+      const raw = String(m.body ?? "");
+      const healed = extractReadableFromStoredMimeBody(raw) ?? raw;
+      return {
+        subject: String(m.subject ?? "").slice(0, 300),
+        fromEmail: String(m.fromEmail ?? ""),
+        receivedAt: new Date(m.receivedAt as any).toISOString(),
+        text: stripHtmlForEmailParse(healed).slice(0, MAX_CHARS_PER_EMAIL),
+      };
+    });
+}
+
+/**
+ * Every alias whose inbound mail belongs to THIS unit: the buy-in's
+ * travelerEmail plus any reservation_aliases row scoped to its buyInId (the
+ * two can differ — e.g. a legacy travelerEmail with a later unit-scoped alias
+ * mint). A reservation-LEVEL alias row (buyInId null) is only attributable to
+ * a unit when the reservation has exactly one attached buy-in; with siblings
+ * its emails can't be pinned to a unit, so it is excluded (attribution-exact
+ * rule — a sibling's door code must never land on this unit).
+ */
+export function aliasCandidatesForBuyIn(
+  buyIn: Pick<BuyIn, "id" | "travelerEmail">,
+  aliasRows: Array<Pick<ReservationAlias, "buyInId" | "aliasEmail">>,
+  attachedBuyInCount: number,
+): string[] {
+  const out = new Set<string>();
+  const add = (value: string | null | undefined) => {
+    const email = String(value ?? "").trim().toLowerCase();
+    if (email) out.add(email);
+  };
+  add(buyIn.travelerEmail);
+  for (const row of aliasRows) {
+    if (row.buyInId === buyIn.id) add(row.aliasEmail);
+    else if (row.buyInId == null && attachedBuyInCount === 1) add(row.aliasEmail);
+  }
+  return Array.from(out);
+}
+
+/**
+ * ONE extraction corpus per unit: the PM/vendor rows ingested into
+ * buy_in_emails (keyed by buyInId — this is where arrival-instruction emails
+ * land, the 2026-07-20 missed-door-code class) merged with the
+ * guest_inbox_messages rows for the unit's aliases. Reuses the display-side
+ * mergeAliasThread dedupe so an email captured by both IMAP ingesters is read
+ * once. Output rows are message-shaped for extractionEmailsFromMessages.
+ */
+export function extractionMessagesFromSources(
+  guestMessages: GuestInboxMessage[],
+  pmEmails: Array<Pick<BuyInEmail, "id" | "direction" | "fromEmail" | "toEmail" | "subject" | "body" | "providerMessageId" | "sentAt">>,
+): GuestInboxMessage[] {
+  const merged = mergeAliasThread(pmEmails, guestMessages);
+  return merged.map((row) =>
+    row.source === "pm"
+      ? ({
+          id: row.email.id,
+          direction: row.email.direction,
+          fromEmail: row.email.fromEmail,
+          toEmail: row.email.toEmail,
+          subject: row.email.subject,
+          body: row.email.body,
+          receivedAt: row.email.sentAt,
+        } as unknown as GuestInboxMessage)
+      : row.message,
+  );
 }
 
 export function buildArrivalExtractionPrompt(emails: ExtractionEmail[], buyIn?: BuyInContext | null): string {
@@ -250,32 +314,79 @@ export async function refreshArrivalDetailsForReservation(reservationId: string)
   const { syncGuestInboxForAlias } = await import("./guest-inbox-sync");
   const { expectedStateHintFromBuyIn } = await import("./buy-in-email");
   const { BUY_IN_MARKET_LOCATIONS, resolveBuyInMarket } = await import("@shared/buy-in-market");
+  const { db } = await import("./db");
+  const { buyInEmails, reservationAliases } = await import("@shared/schema");
+  const { desc, eq } = await import("drizzle-orm");
+
+  // Pull PM/vendor mail into buy_in_emails first — arrival-instruction emails
+  // land THERE (delivered to the unit-scoped alias), not necessarily in
+  // guest_inbox_messages for the travelerEmail. Throttled + fail-soft.
+  try {
+    const { syncBuyInVendorEmailsForReservation } = await import("./buy-in-email-sync");
+    await syncBuyInVendorEmailsForReservation(reservationId);
+  } catch (err: any) {
+    console.warn("[arrival-extract] vendor-email sync failed:", err?.message ?? err);
+  }
 
   const attached = await storage.getBuyInsByReservation(reservationId);
+  let aliasRows: ReservationAlias[] = [];
+  try {
+    aliasRows = await db
+      .select()
+      .from(reservationAliases)
+      .where(eq(reservationAliases.reservationId, reservationId));
+  } catch (err: any) {
+    console.warn("[arrival-extract] alias rows read failed:", err?.message ?? err);
+  }
+  let pmEmailRows: BuyInEmail[] = [];
+  try {
+    pmEmailRows = await db
+      .select()
+      .from(buyInEmails)
+      .where(eq(buyInEmails.reservationId, reservationId))
+      .orderBy(desc(buyInEmails.sentAt))
+      .limit(200);
+  } catch (err: any) {
+    console.warn("[arrival-extract] buy_in_emails read failed:", err?.message ?? err);
+  }
+
   const units: ArrivalRefreshUnitResult[] = [];
 
   for (const buyIn of attached) {
-    const alias = String(buyIn.travelerEmail ?? "").trim().toLowerCase();
+    const aliases = aliasCandidatesForBuyIn(buyIn, aliasRows, attached.length);
     const result: ArrivalRefreshUnitResult = {
       buyInId: buyIn.id,
       unitId: buyIn.unitId,
       unitLabel: buyIn.unitLabel,
-      aliasEmail: alias || null,
+      aliasEmail: aliases[0] ?? null,
       synced: null,
       messageCount: 0,
       extraction: null,
       updatedFields: [],
     };
     units.push(result);
-    if (!alias) continue;
+    const unitPmEmails = pmEmailRows.filter((e) => e.buyInId === buyIn.id);
+    if (!aliases.length && !unitPmEmails.length) continue;
 
-    try {
-      result.synced = await syncGuestInboxForAlias(alias);
-    } catch (err: any) {
-      result.synced = { imported: 0, skipped: err?.message ?? "sync failed" };
+    const guestMessages: GuestInboxMessage[] = [];
+    const seenMessageIds = new Set<number>();
+    for (const alias of aliases) {
+      try {
+        const synced = await syncGuestInboxForAlias(alias);
+        result.synced = result.synced
+          ? { imported: result.synced.imported + synced.imported, skipped: result.synced.skipped ?? synced.skipped }
+          : synced;
+      } catch (err: any) {
+        result.synced = result.synced ?? { imported: 0, skipped: err?.message ?? "sync failed" };
+      }
+      for (const msg of await storage.getGuestInboxMessages(alias, 100)) {
+        if (seenMessageIds.has(msg.id)) continue;
+        seenMessageIds.add(msg.id);
+        guestMessages.push(msg);
+      }
     }
 
-    const messages = await storage.getGuestInboxMessages(alias, 100);
+    const messages = extractionMessagesFromSources(guestMessages, unitPmEmails);
     result.messageCount = messages.length;
     if (!messages.length) continue;
 
@@ -295,7 +406,7 @@ export async function refreshArrivalDetailsForReservation(reservationId: string)
       extraction = await extractArrivalDetailsWithRegex(messages, buyIn, communityState);
     }
     if (!extraction) continue;
-    extraction.aliasEmail = alias;
+    if (result.aliasEmail) extraction.aliasEmail = result.aliasEmail;
     result.extraction = extraction;
 
     const patch: Record<string, unknown> = {};
