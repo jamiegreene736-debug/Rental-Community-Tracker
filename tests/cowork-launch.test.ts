@@ -205,10 +205,11 @@ check(
     (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length,
   );
   check(
-    // 5 = 1 definition + 4 uses (checkout, verify-community, guest-happy,
-    // find-on-VRBO). The fifth — the row find button — was removed 2026-07-19.
+    // 4 = 1 definition + 3 uses (verify-community, guest-happy, find-on-VRBO).
+    // The row find button went headless 2026-07-19; the row checkout button
+    // went headless 2026-07-20 (HeadlessCheckoutRunButton) — neither deep-links.
     "every remaining row Cowork button launches through the shared useCoworkLaunch hook",
-    (bookingsSrc.match(/useCoworkLaunch\(/g) ?? []).length === 5,
+    (bookingsSrc.match(/useCoworkLaunch\(/g) ?? []).length === 4,
     (bookingsSrc.match(/useCoworkLaunch\(/g) ?? []).length,
   );
   check(
@@ -236,12 +237,13 @@ check(
     // and made the queue impossible to walk away from. Find and checkout are
     // now separate runs at BOTH the row and the batch level.
     "find and checkout are separate Cowork prompts at BOTH the row and the batch level",
-    // (The row's FIND half is now the headless runner, so there is no
-    // buildCoworkBuyInPrompt call left in this file — the runner builds it
-    // server-side from the same shared builder.)
+    // (BOTH row halves are now headless runs — find 2026-07-19, checkout
+    // 2026-07-20 — so neither buildCoworkBuyInPrompt nor
+    // buildCoworkCheckoutPrompt is called in this file; the server builds both
+    // briefs from the same shared builders. The bulk buttons still deep-link.)
     bookingsSrc.includes("button-headless-find-run-")
+      && bookingsSrc.includes("button-headless-checkout-run-")
       && !bookingsSrc.includes('kind: "find-and-prepare"')
-      && bookingsSrc.includes('kind: "prepare-checkout"')
       && bookingsSrc.includes('kind: "bulk-find"')
       && bookingsSrc.includes('kind: "bulk-prepare-checkout"')
       && bookingsSrc.includes("buildCoworkBulkBuyInPrompt(inputs)")

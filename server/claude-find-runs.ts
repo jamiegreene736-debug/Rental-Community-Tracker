@@ -24,6 +24,7 @@ import {
   CLAUDE_FIND_RUN_STORE_KEY,
   activeClaudeFindRunForReservation,
   applyClaudeFindRunUpdate,
+  checkoutRunEligibility,
   claimNextClaudeFindRun,
   claudeFindRunWatchdogVerdict,
   claudeFindRunHistoryForReservation,
@@ -33,7 +34,11 @@ import {
   scrubClaudeFindRunToken,
   serializeClaudeFindRunStore,
 } from "@shared/claude-find-run";
-import { buildCoworkBuyInPrompt, type CoworkBuyInPromptInput } from "@shared/cowork-buyin-prompt";
+import {
+  buildCoworkBuyInPrompt,
+  buildCoworkCheckoutPrompt,
+  type CoworkBuyInPromptInput,
+} from "@shared/cowork-buyin-prompt";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 
@@ -221,6 +226,112 @@ export function registerClaudeFindRunRoutes(app: Express): void {
     });
     if ("conflict" in result && result.conflict) {
       return res.status(409).json({ error: "A find-run is already active for this reservation", run: result.conflict });
+    }
+    return res.json(result);
+  }));
+
+  // Operator: start a HEADLESS CHECKOUT run for ONE attached buy-in
+  // (2026-07-20 — the per-unit checkout buttons "execute cowork automatically"
+  // like the find button). Every money-shaped value the brief embeds (cost,
+  // listing URL, dates, unit label) is read from the AUTHORITATIVE buy_ins row
+  // via loopback and validated by checkoutRunEligibility — the client body
+  // contributes only identity/display data (guest name, property name, party).
+  // This is what replaced the old client-side costPaid freshness pre-flight.
+  app.post("/api/claude-find-runs/checkout", guarded(async (req, res) => {
+    if (!requireOperator(res)) return;
+    if (claudeFindRunsDisabled()) {
+      return res.status(503).json({ error: "Headless runs are disabled (CLAUDE_FIND_RUNS_DISABLED=1)" });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const reservationId = typeof body.reservationId === "string" ? body.reservationId.trim() : "";
+    if (!reservationId || reservationId.length > 200) return res.status(400).json({ error: "reservationId required" });
+    const buyInId = Number(body.buyInId);
+    if (!Number.isFinite(buyInId) || buyInId <= 0) return res.status(400).json({ error: "buyInId (number) required" });
+    const propertyName = typeof body.propertyName === "string" && body.propertyName.trim()
+      ? body.propertyName.trim().slice(0, 240)
+      : "Vacation rental";
+    const guestName = typeof body.guestName === "string" && body.guestName.trim() ? body.guestName.trim().slice(0, 160) : null;
+    // The exact booking guest name is REQUIRED at VRBO checkout (every name
+    // field including name-on-card) — refuse to queue a run that would only
+    // stop at that wall ten minutes in.
+    if (!guestName || !/\S\s+\S/.test(guestName)) {
+      return res.status(422).json({ error: "The booking guest's full name is required — the checkout uses it for every name field" });
+    }
+
+    let row: Record<string, unknown> | null = null;
+    try {
+      const upstream = await fetch(`${loopbackBaseUrl()}/api/buy-ins/${buyInId}`, {
+        headers: loopbackRequestHeaders(),
+      });
+      if (upstream.ok) row = (await upstream.json().catch(() => null)) as Record<string, unknown> | null;
+    } catch {
+      row = null;
+    }
+    const eligibility = checkoutRunEligibility(row, reservationId);
+    if (!eligibility.ok) return res.status(422).json({ error: eligibility.error });
+    const checkIn = typeof row?.checkIn === "string" ? row.checkIn.slice(0, 10) : "";
+    const checkOut = typeof row?.checkOut === "string" ? row.checkOut.slice(0, 10) : "";
+    if (!DATE_RE.test(checkIn) || !DATE_RE.test(checkOut)) {
+      return res.status(422).json({ error: "The buy-in row has no usable stay dates" });
+    }
+
+    const apiRoot = requestApiRoot(req);
+    const nowIso = new Date().toISOString();
+    const result = await mutateStore((store) => {
+      // ONE live run per reservation across BOTH kinds — a find run mutating
+      // the slots underneath a checkout preparation (or two checkouts racing
+      // one claim lane) is exactly the interleaving this guard exists for.
+      const active = activeClaudeFindRunForReservation(store.runs, reservationId);
+      if (active) return { conflict: clientClaudeFindRunView(active) };
+      const id = randomUUID();
+      const token = randomBytes(24).toString("hex");
+      const prompt = buildCoworkCheckoutPrompt(
+        {
+          reservationId,
+          guestName,
+          propertyName,
+          checkIn,
+          checkOut,
+          units: [eligibility.unit],
+          party: (body.party ?? null) as CoworkBuyInPromptInput["party"],
+          baseUrl: apiRoot,
+        },
+        { headlessRun: { runId: id, runToken: token } },
+      );
+      const run: ClaudeFindRunRecord = {
+        id,
+        reservationId,
+        propertyId: Number(row?.propertyId) || 0,
+        propertyName,
+        guestName,
+        kind: "checkout",
+        buyInId,
+        status: "queued",
+        createdAt: nowIso,
+        claimedAt: null,
+        heartbeatAt: null,
+        endedAt: null,
+        cancelRequested: false,
+        attentionReason: null,
+        report: null,
+        error: null,
+        events: [{
+          at: nowIso,
+          kind: "status",
+          text: `Checkout run queued for ${eligibility.unit.unitLabel} — waiting for the Mac runner to claim it.`,
+        }],
+        droppedEvents: 0,
+        token,
+        prompt,
+        unitIds: [],
+        checkIn,
+        checkOut,
+      };
+      store.runs.push(run);
+      return { run: clientClaudeFindRunView(run) };
+    });
+    if ("conflict" in result && result.conflict) {
+      return res.status(409).json({ error: "A headless run is already active for this reservation", run: result.conflict });
     }
     return res.json(result);
   }));
@@ -479,6 +590,122 @@ export function registerClaudeFindRunRoutes(app: Express): void {
       return res.status(502).json({ error: `Guest-happy record failed: ${(e as Error)?.message ?? e}` });
     }
   }));
+
+  // ── CHECKOUT-run agent proxies (2026-07-20) ───────────────────────────────
+  // Same trust model as the find proxies, tightened one notch: every call is
+  // pinned to the run's reservation AND its ONE buyInId — the agent's body
+  // carries only the claimToken / guest-name fields / failure reason. A
+  // prompt-injected checkout agent's blast radius is "prepare this one
+  // already-approved unit's checkout lane until the run ends"; it can never
+  // retarget another unit, another reservation, or write a booking result
+  // (there is deliberately NO proxy for PATCHing bookingStatus — the operator
+  // records the paid result themselves).
+
+  /** Shared gate: live run, valid token, checkout kind with a pinned buy-in. */
+  const checkoutRunFor = async (
+    req: Request,
+    res: Response,
+  ): Promise<{ run: ClaudeFindRunRecord; buyInId: number } | null> => {
+    const store = await readStore();
+    const run = findRun(store, String(req.params.id));
+    if (!run) {
+      res.status(404).json({ error: "Run not found" });
+      return null;
+    }
+    if (!runTokenMatches(run, req.header("x-run-token"))) {
+      res.status(401).json({ error: "Bad run token" });
+      return null;
+    }
+    if (!["claimed", "running", "attention"].includes(run.status)) {
+      res.status(409).json({ error: `Run is ${run.status} — checkout calls are only valid while it is live` });
+      return null;
+    }
+    const buyInId = Number(run.buyInId);
+    if (run.kind !== "checkout" || !Number.isFinite(buyInId)) {
+      res.status(403).json({ error: "This run is not a checkout run" });
+      return null;
+    }
+    return { run, buyInId };
+  };
+
+  const forwardJson = async (res: Response, url: string, init: RequestInit, failLabel: string) => {
+    try {
+      const upstream = await fetch(url, init);
+      const payload = await upstream.json().catch(() => ({}));
+      return res.status(upstream.status).json(payload);
+    } catch (e) {
+      return res.status(502).json({ error: `${failLabel}: ${(e as Error)?.message ?? e}` });
+    }
+  };
+
+  // Agent: read the run's ONE buy-in row (the brief's idempotency check).
+  app.get("/api/claude-find-runs/agent/:id/buy-in", guarded(async (req, res) => {
+    const gate = await checkoutRunFor(req, res);
+    if (!gate) return;
+    await forwardJson(
+      res,
+      `${loopbackBaseUrl()}/api/buy-ins/${gate.buyInId}`,
+      { headers: loopbackRequestHeaders() },
+      "Buy-in read failed",
+    );
+  }));
+
+  // Agent: mint the buy-in's canonical traveler alias. Guest name fields come
+  // from the body (they originate from the brief itself), everything else is
+  // pinned.
+  app.post("/api/claude-find-runs/agent/:id/traveler-email", guarded(async (req, res) => {
+    const gate = await checkoutRunFor(req, res);
+    if (!gate) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    await forwardJson(
+      res,
+      `${loopbackBaseUrl()}/api/buy-ins/${gate.buyInId}/traveler-email`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...loopbackRequestHeaders() },
+        body: JSON.stringify({
+          reservationId: gate.run.reservationId,
+          guestFirstName: typeof body.guestFirstName === "string" ? body.guestFirstName.slice(0, 80) : "",
+          guestLastName: typeof body.guestLastName === "string" ? body.guestLastName.slice(0, 120) : "",
+        }),
+      },
+      "Traveler-email mint failed",
+    );
+  }));
+
+  // Agent: claim / complete / release the reservation's one checkout lane.
+  // The claimToken is the agent's own idempotency token (cowork_UUID per the
+  // brief); the claim system's semantics are untouched — these only pin WHO
+  // the claim is for.
+  const claimProxy = (suffix: "" | "/complete" | "/release") =>
+    guarded(async (req: Request, res: Response) => {
+      const gate = await checkoutRunFor(req, res);
+      if (!gate) return;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const claimToken = typeof body.claimToken === "string" ? body.claimToken.slice(0, 120) : "";
+      if (!claimToken) return res.status(422).json({ error: "claimToken required" });
+      const forwarded: Record<string, unknown> = {
+        reservationId: gate.run.reservationId,
+        buyInId: gate.buyInId,
+        claimToken,
+      };
+      if (suffix === "/release") {
+        forwarded.reason = typeof body.reason === "string" ? body.reason.slice(0, 500) : "released by the headless checkout run";
+      }
+      await forwardJson(
+        res,
+        `${loopbackBaseUrl()}/api/cowork/checkout-claims${suffix}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...loopbackRequestHeaders() },
+          body: JSON.stringify(forwarded),
+        },
+        `Checkout claim${suffix || " create"} failed`,
+      );
+    });
+  app.post("/api/claude-find-runs/agent/:id/checkout-claim", claimProxy(""));
+  app.post("/api/claude-find-runs/agent/:id/checkout-claim/complete", claimProxy("/complete"));
+  app.post("/api/claude-find-runs/agent/:id/checkout-claim/release", claimProxy("/release"));
 }
 
 // ── watchdog (started from server/index.ts after listen) ────────────────────

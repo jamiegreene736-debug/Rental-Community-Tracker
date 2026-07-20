@@ -56,7 +56,7 @@ import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared
 import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBulkBuyInPrompt, buildCoworkBulkCheckoutPrompt, buildCoworkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, COWORK_BULK_CHECKOUT_MAX, type CoworkBuyInPromptInput, type CoworkCheckoutPromptInput } from "@shared/cowork-buyin-prompt";
+import { buildCoworkBulkBuyInPrompt, buildCoworkBulkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, COWORK_BULK_CHECKOUT_MAX, type CoworkBuyInPromptInput, type CoworkCheckoutPromptInput } from "@shared/cowork-buyin-prompt";
 import { buildCoworkDeepLink, buildCoworkPromptRunBootstrap, coworkLaunchNeedsFallback, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
 import { ACTIVE_CLAUDE_FIND_RUN_STATUSES, claudeFindRunStatusLabel, type ClaudeFindRunClientView, type ClaudeFindRunHistoryEntry } from "@shared/claude-find-run";
 import {
@@ -2748,7 +2748,7 @@ function HeadlessFindRunPanel({
   const run = data?.runs?.[reservationId];
   const history = data?.history?.[reservationId] ?? [];
   if (!run) return null;
-  const badge = claudeFindRunStatusLabel(run.status);
+  const badge = claudeFindRunStatusLabel(run.status, run.kind);
   const active = ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status);
   const toneClass = FIND_RUN_TONE[badge.tone] ?? FIND_RUN_TONE.live;
   const duration = formatFindRunDuration(run.createdAt, run.endedAt);
@@ -2775,7 +2775,7 @@ function HeadlessFindRunPanel({
       {/* Header */}
       <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
         <Zap className="h-4 w-4 text-sky-600" />
-        <span className="font-semibold">Headless find-run</span>
+        <span className="font-semibold">{run.kind === "checkout" ? "Headless checkout" : "Headless find-run"}</span>
         <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${toneClass}`}>
           {active && <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />}
           {badge.label}
@@ -2828,7 +2828,7 @@ function HeadlessFindRunPanel({
         {run.status === "attention" && run.attentionReason && (
           <div className="flex items-start gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>The runner needs you: {run.attentionReason} — solve it in the runner&apos;s Chrome window on the Mac; it resumes on its own.</span>
+            <span>The runner needs you: {run.attentionReason} — the runner&apos;s Chrome window pops up on the Mac; it resumes on its own.</span>
           </div>
         )}
         {run.error && (
@@ -2877,11 +2877,12 @@ function HeadlessFindRunPanel({
             </summary>
             <div className="mt-1.5 divide-y divide-border/50 rounded-md border border-border/60">
               {history.map((h) => {
-                const hb = claudeFindRunStatusLabel(h.status);
+                const hb = claudeFindRunStatusLabel(h.status, h.kind);
                 const hDur = formatFindRunDuration(h.createdAt, h.endedAt);
                 const when = new Date(h.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
                 return (
                   <div key={h.id} className="flex items-center gap-2 px-2 py-1 text-[11px]">
+                    {h.kind === "checkout" && <span className="rounded border border-border px-1 text-[10px] text-muted-foreground">checkout</span>}
                     <span className={`font-medium ${findRunHistoryTone(h.status)}`}>{hb.label}</span>
                     <span className="text-muted-foreground">{when}</span>
                     {hDur && <span className="text-muted-foreground/70">· {hDur}</span>}
@@ -2913,133 +2914,82 @@ function HeadlessFindRunPanel({
 // the headless runner executes and the body of every bulk find batch. Checkout
 // is unaffected and stays the human-gated Cowork prompt.
 
-// "Prepare checkout" — the SEPARATE Cowork prompt for ALREADY-attached buy-ins
-// after the operator reviewed them. Cowork fills the traveler details, applies
-// the damage-waiver-only + price guards, and leaves the checkout tab open. The
-// operator always supplies the card and makes the final Checkout click.
-//
-// Since 2026-07-19 the row renders ONE of these per unbooked unit (operator:
-// "each unit I will need to check out individually") — `units` is then a
-// single-element array and `label`/`testIdSuffix` name the unit. The component
-// itself stays unit-count agnostic; the builder handles both shapes.
-function CoworkCheckoutPromptButton({
+// "Auto checkout" — HEADLESS checkout-preparation run for ONE attached unit
+// (operator 2026-07-20: the per-unit checkout buttons must "execute cowork
+// automatically", like the find button). The click POSTs a kind:"checkout"
+// run; the server builds the brief from the AUTHORITATIVE buy_ins row
+// (costPaid / listing URL / dates are pinned server-side — this is what
+// retired the old client-side costPaid freshness pre-flight), and the Mac
+// runner executes it with no window and no send press. The run ENDS at the
+// awaiting_payment handoff: the prepared VRBO checkout tab is left open and
+// the runner Chrome is surfaced so the operator can add the card. Card entry
+// and the final Checkout click remain HUMAN-ONLY; the operator records the
+// result afterwards with the "Paid — mark booked" control on the unit's
+// status badge.
+function HeadlessCheckoutRunButton({
   reservation,
+  buyInId,
+  unitLabel,
   propertyName,
-  units,
-  onStaleData,
   label,
-  testIdSuffix,
 }: {
   reservation: GuestyReservation;
+  buyInId: number;
+  unitLabel: string;
   propertyName: string;
-  units: { buyInId: number; unitLabel: string; listingUrl: string | null; costPaid: string | number | null }[];
-  /** Re-read the bookings queries when the pre-flight finds this row is stale. */
-  onStaleData: () => void;
-  /** Per-unit button text; the classic "Prepare checkout in Cowork" when absent. */
-  label?: string;
-  /** Keeps per-unit testids unique on one row; solo rows keep the classic id. */
-  testIdSuffix?: string;
+  label: string;
 }) {
   const { toast } = useToast();
-  const { launch, launching } = useCoworkLaunch("The checkout-preparation prompt");
-  const [checking, setChecking] = useState(false);
-  const toDateOnly = (s: string | undefined): string =>
-    !s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10);
-  const prompt = useMemo(
-    () =>
-      buildCoworkCheckoutPrompt({
+  const { data } = useClaudeFindRun(reservation._id);
+  const run = data?.runs?.[reservation._id];
+  const runActive = !!run && ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status);
+  const start = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/claude-find-runs/checkout", {
         reservationId: reservation._id,
+        buyInId,
         guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? null,
         propertyName,
-        checkIn: toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn),
-        checkOut: toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut),
-        units,
-        // Party size drives VRBO's guest-count picker at checkout.
+        // Party size sets VRBO's guest-count picker at checkout.
         party: guestPartyFromReservation(reservation),
-        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
-      }),
-    [reservation, propertyName, units],
-  );
-  // MONEY GUARD (checkout only — do NOT copy this to the other four buttons).
-  // This prompt embeds each unit's costPaid, and Cowork's 15% checkout-total
-  // guard is measured against it. If Cowork re-pointed a unit to a cheaper VRBO
-  // listing (or the operator attached from another device) since this row
-  // rendered, a stale costPaid mis-arms that guard in either direction — a
-  // false trip, or an overpay waved through. One ~50ms buy_ins query closes it.
-  const handleClick = async () => {
-    if (launching || checking) return;
-    setChecking(true);
-    try {
-      // Compare ONLY the buy-ins this click is about to send. The two sides are
-      // built from different populations otherwise: the rendered slots come
-      // from a server-side first-match-by-unitId join that silently DROPS a
-      // buy-in whose unitId isn't a configured slot, while the probe returns
-      // every buy_ins row for the reservation. With one such orphan the two
-      // signatures could never converge, so every click would refresh, mismatch
-      // again, and tell the operator to "click again" forever — permanently
-      // bricking the money button on that row.
-      const sentIds = new Set(units.map((u) => u.buyInId));
-      const rows = (slots: { unitId: string; buyIn: BuyIn }[]) => slots
-        .filter((s) => sentIds.has(s.buyIn.id))
-        .map((s) => ({
-          unitId: s.unitId,
-          buyInId: s.buyIn.id,
-          bookingStatus: s.buyIn.bookingStatus ?? null,
-          listingUrl: s.buyIn.airbnbListingUrl ?? null,
-          costPaid: s.buyIn.costPaid ?? null,
-        }));
-      const local = buyInSlotSignature(rows(
-        reservation.slots.filter((s): s is SlotInfo & { buyIn: BuyIn } => Boolean(s.buyIn)),
-      ));
-      const response = await apiRequest("POST", "/api/operations/buy-in-slot-status", {
-        reservationIds: [reservation._id],
       });
-      const body = await response.json().catch(() => ({}));
-      const serverRows: BuyInSlotStatusRow[] = (body?.statuses?.[reservation._id] ?? [])
-        .filter((r: BuyInSlotStatusRow) => sentIds.has(Number(r?.buyInId)));
-      const server = buyInSlotSignature(serverRows);
-      if (server !== local) {
-        onStaleData();
-        toast({
-          title: "Booking data changed — refreshed",
-          description:
-            "These units were updated since this row loaded, so the checkout prompt would have carried stale prices. Click again to build it from the current data.",
-        });
-        return;
-      }
-    } catch (error) {
-      // A 401 already hard-navigated to /login; launching now would stack a
-      // second navigation in the same tick.
-      if (/\b401\b/.test(String((error as Error)?.message ?? ""))) return;
-      // Fail-OPEN otherwise: a probe outage must not block the operator from
-      // preparing a checkout. But say so — a silent fail-open under the normal
-      // success toast would let unverified prices arm the 15% guard invisibly.
+      return res.json();
+    },
+    onSuccess: () => {
+      // The runner works out of band — arm the faster slot probe, same as the
+      // other Cowork/headless starts.
+      armCoworkRunWindow();
+      void queryClient.invalidateQueries({ queryKey: claudeFindRunStatusKey(reservation._id) });
       toast({
-        title: "Couldn't verify current prices",
+        title: `Checkout run started · ${unitLabel}`,
         description:
-          "The freshness check didn't respond, so this brief was built from the prices on screen. If a unit was re-priced since this row loaded, the 15% guard may be measured against a stale total.",
+          "The Mac runner prepares the VRBO checkout and STOPS at the card — the prepared Chrome tab pops up and you'll hear a chime. It never enters card details and never submits the purchase.",
       });
-    } finally {
-      setChecking(false);
-    }
-    void launch(prompt, { kind: "prepare-checkout", reservationId: reservation._id });
-  };
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Could not start the checkout run",
+        description: String(error?.message ?? error),
+        variant: "destructive",
+      });
+    },
+  });
   return (
     <Button
       type="button"
       size="sm"
       variant="outline"
       className="h-8 px-2 text-xs border-emerald-300 text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950"
-      disabled={launching || checking}
+      disabled={start.isPending || runActive}
       onClick={(e) => {
         e.stopPropagation();
-        void handleClick();
+        start.mutate();
       }}
-      data-testid={`button-cowork-checkout-prompt-${reservation._id}${testIdSuffix ?? ""}`}
-      title="Opens a new Cowork task that prepares the attached unit checkout on vrbo.com — damage waiver only, guest's name, alias email, 15% price guard. It never enters card details and never makes the final payment: Cowork leaves the checkout tab open for you to add the card and click Checkout."
+      data-testid={`button-headless-checkout-run-${reservation._id}-${buyInId}`}
+      title="Runs the checkout preparation for this unit headless on your Mac — damage waiver only, guest's name, alias email, 15% price guard. It stops at the payment: the prepared checkout tab pops up for you to add the card and click Checkout yourself."
     >
-      <ShoppingCart className="mr-1 h-3.5 w-3.5" />
-      {label ?? "Prepare checkout in Cowork"}
+      {runActive ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <ShoppingCart className="mr-1 h-3.5 w-3.5" />}
+      {runActive ? "Run in progress…" : label}
     </Button>
   );
 }
@@ -5544,6 +5494,7 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
   const [jobId, setJobId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [resettingClaim, setResettingClaim] = useState(false);
+  const [markingBooked, setMarkingBooked] = useState(false);
 
   // Rediscover any live checkout job for this unit on mount (survives reloads).
   useEffect(() => {
@@ -5617,6 +5568,56 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
     }
   };
 
+  // The COUNTERPART of "Not paid — reset": the operator DID pay. The Cowork
+  // chat used to record the result after the operator confirmed their click,
+  // but a HEADLESS checkout run (2026-07-20) ends at the awaiting_payment
+  // handoff — there is no chat left to tell, so the operator records the
+  // outcome here. Only real evidence: the confirmation number they enter, or
+  // an explicit REQUEST (request-to-book stays awaiting host approval).
+  const markBookedAfterPayment = async () => {
+    const entered = window.prompt(
+      "Use this ONLY after YOU completed the payment for this unit.\n\n"
+        + "Enter the VRBO confirmation / reservation number (from the confirmation page or the booking-alias inbox).\n"
+        + "If VRBO said the REQUEST was submitted and is awaiting host approval, type: REQUEST",
+    );
+    if (entered === null) return;
+    const trimmed = entered.trim();
+    const isRequest = /^request$/i.test(trimmed);
+    if (!trimmed) {
+      const anyway = window.confirm(
+        "No confirmation number entered. Record this unit as BOOKED without one?\n\n"
+          + "(You can find the number later in the booking-alias inbox and edit the buy-in.)",
+      );
+      if (!anyway) return;
+    }
+    setMarkingBooked(true);
+    try {
+      await apiRequest(
+        "PATCH",
+        `/api/buy-ins/${buyIn.id}`,
+        isRequest
+          ? { bookingStatus: "request_submitted" }
+          : trimmed
+            ? { bookingStatus: "booked", bookingConfirmation: trimmed, airbnbConfirmation: trimmed }
+            : { bookingStatus: "booked" },
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] }),
+      ]);
+      toast({
+        title: isRequest ? "Request recorded" : "Marked booked",
+        description: isRequest
+          ? "The unit shows as awaiting host approval."
+          : "The unit now shows as bought in.",
+      });
+    } catch (error: any) {
+      toast({ title: "Could not record the result", description: String(error?.message ?? error), variant: "destructive" });
+    } finally {
+      setMarkingBooked(false);
+    }
+  };
+
   const resetCheckoutClaim = async () => {
     // A unit stranded at awaiting_payment is otherwise a dead end: this row's
     // "Prepare checkout in Cowork" button hides while a checkout is active, and
@@ -5685,11 +5686,23 @@ function BuyThisUnitInButton({ buyIn, reservation }: { buyIn: BuyIn; reservation
           <WalletCards className="h-3.5 w-3.5" />
           Ready for card · add card + click Checkout
         </span>
-        {/* Escape hatch for a STRANDED handoff — a Cowork task abandoned after
-            it prepared this unit. Without it this state is a dead end: the
-            row's "Prepare checkout in Cowork" button hides while a checkout is
-            active, so there is no way back. Confirm-gated and explicit,
-            because resetting asserts the payment was never made. */}
+        {/* The two exits from awaiting_payment. "Paid — mark booked" records
+            the operator's real outcome (headless checkout runs end at the
+            handoff, so there is no agent chat left to record it); "Not paid —
+            reset" releases a STRANDED handoff. */}
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 px-1.5 text-[11px] text-emerald-700 dark:text-emerald-400"
+          disabled={markingBooked || resettingClaim}
+          onClick={() => void markBookedAfterPayment()}
+          data-testid={`button-mark-booked-${reservation._id}-${buyIn.id}`}
+          title="Use after YOU added the card and clicked Checkout — records the confirmation number (or the submitted request) on this unit"
+        >
+          {markingBooked ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+          Paid — mark booked
+        </Button>
         <Button
           type="button"
           size="sm"
@@ -12698,16 +12711,15 @@ export default function Bookings() {
                                 }))}
                             />
                           )}
-                          {/* "Prepare checkout" stays separate from the find prompt because
-                              the checkout builder needs the attached buy-in IDs. ONE BUTTON
-                              PER UNBOOKED UNIT (operator spec 2026-07-19: "each unit I will
-                              need to check out individually") — every button builds a brief
-                              scoped to that single buy-in, so each unit runs as its own
-                              Cowork task with its own card handoff. All buttons hide while
-                              ANY checkout on the reservation is active because the
+                          {/* ONE AUTO-CHECKOUT BUTTON PER UNBOOKED UNIT (operator specs
+                              2026-07-19 "each unit I will need to check out individually" +
+                              2026-07-20 "executes cowork automatically"): each click starts
+                              a HEADLESS checkout run scoped to that single buy-in — no
+                              Cowork window, no send press. All buttons hide while ANY
+                              checkout on the reservation is active because the
                               reservation-scoped checkout claim allows exactly one
-                              outstanding handoff at a time; finish (or release) that unit
-                              and the next unit's button reappears. Units already booked or
+                              outstanding handoff at a time; finish (or reset) that unit and
+                              the next unit's button reappears. Units already booked or
                               request-submitted are left alone; their durable per-unit
                               status renders below. */}
                           {!r.slots.some((s) => buyInHasActiveCheckout(s.buyIn)) && r.slots
@@ -12719,21 +12731,15 @@ export default function Bookings() {
                               ),
                             )
                             .map((s, _i, unbooked) => (
-                              <CoworkCheckoutPromptButton
-                                key={`cowork-checkout-${s.buyIn.id}`}
+                              <HeadlessCheckoutRunButton
+                                key={`headless-checkout-${s.buyIn.id}`}
                                 reservation={r}
+                                buyInId={s.buyIn.id}
+                                unitLabel={s.unitLabel || s.buyIn.unitLabel}
                                 propertyName={reservationMeta?.propertyName ?? selectedDisplayName ?? "Vacation rental"}
-                                // Solo rows keep the classic label + testid so nothing the
-                                // operator (or a test) knows by name changes shape.
-                                label={unbooked.length > 1 ? `Prepare checkout · ${s.unitLabel || s.buyIn.unitLabel}` : undefined}
-                                testIdSuffix={unbooked.length > 1 ? `-${s.buyIn.id}` : undefined}
-                                units={[{
-                                  buyInId: s.buyIn.id,
-                                  unitLabel: s.buyIn.unitLabel || s.unitLabel,
-                                  listingUrl: s.buyIn.airbnbListingUrl ?? null,
-                                  costPaid: s.buyIn.costPaid ?? null,
-                                }]}
-                                onStaleData={refreshBookingsAfterBuyInChange}
+                                label={unbooked.length > 1
+                                  ? `Auto checkout · ${s.unitLabel || s.buyIn.unitLabel}`
+                                  : "Auto checkout (stops for your card)"}
                               />
                             ))}
                           <Button
