@@ -108,6 +108,7 @@ function buyInHasActiveCheckout(buyIn: Pick<BuyIn, "bookingStatus"> | null | und
 import { classifyBuyInListingUrl, resolvePmExtractedCost } from "@shared/manual-buy-in-url";
 import { unitCommunityVerdictBadge } from "@shared/community-verdict-badge";
 import { unitGuestHappyBadge } from "@shared/guest-happy-badge";
+import { unitHostFrictionBadge, type HostFrictionLedger } from "@shared/host-friction";
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
@@ -8788,6 +8789,17 @@ export default function Bookings() {
   });
   const receiptSentStatus = receiptSentStatusQuery.data?.statuses ?? {};
 
+  // Host-friction ledger (operator spec 2026-07-20): our own email history
+  // with each management company — contract/ID demands vs plain arrival
+  // instructions — so slot cards can badge "chill host" vs "contract + ID
+  // host". The GET lazily re-scans server-side when stale; ledger evidence
+  // beats the find-time notes grade inside unitHostFrictionBadge.
+  const hostFrictionLedgerQuery = useQuery<HostFrictionLedger>({
+    queryKey: ["/api/host-friction-ledger"],
+    staleTime: 5 * 60_000,
+  });
+  const hostFrictionLedger = hostFrictionLedgerQuery.data ?? null;
+
   useEffect(() => {
     if (!focusedReservationId) return;
     const reservationIsVisible = reservations.some((reservation) => reservation._id === focusedReservationId);
@@ -12702,6 +12714,29 @@ export default function Bookings() {
                                             data-testid={`badge-unit-guest-happy-${r._id}-${slot.unitId}`}
                                           >
                                             {gh.label}
+                                          </Badge>
+                                        );
+                                      })()}
+                                      {/* Per-unit host-friction marker (operator spec
+                                          2026-07-20): green "chill host" vs amber
+                                          "contract + ID host". Ledger evidence (our real
+                                          email history with the buy-in's management
+                                          company) beats the find-time listing-research
+                                          grade parsed from the notes segment; evidence
+                                          is in the hover title. */}
+                                      {(() => {
+                                        const hf = unitHostFrictionBadge(slot.buyIn, hostFrictionLedger);
+                                        if (!hf) return null;
+                                        return (
+                                          <Badge
+                                            variant="outline"
+                                            className={`text-[9px] ${hf.tone === "amber"
+                                              ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+                                              : "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200"}`}
+                                            title={hf.title}
+                                            data-testid={`badge-unit-host-friction-${r._id}-${slot.unitId}`}
+                                          >
+                                            {hf.label}
                                           </Badge>
                                         );
                                       })()}
