@@ -255,6 +255,9 @@ export const reservationCancellationAudits = pgTable("reservation_cancellation_a
   confirmationCode: text("confirmation_code"),
   checkIn: date("check_in"),
   checkOut: date("check_out"),
+  // When the guest originally made the booking (Guesty reservation createdAt) —
+  // shown beside cancelledAt on the dashboard refund alert.
+  bookedAt: timestamp("booked_at"),
   cancelledAt: timestamp("cancelled_at"),
   totalAmount: numeric("total_amount", { precision: 10, scale: 2 }),
   totalPaid: numeric("total_paid", { precision: 10, scale: 2 }),

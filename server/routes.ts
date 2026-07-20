@@ -22058,6 +22058,9 @@ Requirements:
       reservation?.updatedAt ??
       reservation?.createdAt,
     );
+    // When the guest BOOKED — createdAt only, no fallbacks: a wrong "booked"
+    // date is worse than none, and updatedAt/cancelledAt would lie here.
+    const bookedAt = timestampOrNull(reservation?.createdAt);
 
     return {
       propertyId,
@@ -22069,6 +22072,7 @@ Requirements:
       confirmationCode: reservation?.confirmationCode ?? null,
       checkIn: dateOnlyOrNull(reservation?.checkInDateLocalized ?? reservation?.checkIn),
       checkOut: dateOnlyOrNull(reservation?.checkOutDateLocalized ?? reservation?.checkOut),
+      bookedAt,
       cancelledAt,
       totalAmount: totalAmount.toFixed(2),
       totalPaid: totalPaid.toFixed(2),
