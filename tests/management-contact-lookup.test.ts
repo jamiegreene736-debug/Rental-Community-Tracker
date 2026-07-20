@@ -124,6 +124,77 @@ v = validateManagementContact({ ...parsed!, emailIndex: 7 }, emails);
 assert.equal(v.ok, false);
 console.log("  ✓ email-sourced contacts verify verbatim (hallucinations rejected)");
 
+// ── 2026-07-20 live failure: honest quotes from a real VRBO confirmation ─────
+// The email interleaves zero-width non-joiners, en-dashes, and curly quotes,
+// and the company line ("Contact Alii Resorts …") sits two lines away from the
+// phone number ("Send Message" between). A model quoting honestly normalizes
+// punctuation and joins the two contact lines — both used to fail the strict
+// contiguous byte-collapse and 422 the button.
+const vrboEmail: ManagementContactEmail = {
+  subject: "Your reservation has been confirmed",
+  fromEmail: "bounce-cxj3bs7rbd4eto6i4jyjwbawi4.120046@bounce.eg.vrbo.com",
+  receivedAt: "2026-07-20T03:17:42.000Z",
+  text: [
+    "Get ready for your trip, Jacelyn! Here’s your booking info and other important details.",
+    "‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌",
+    "Hosted by Menehune Shores #623 – Top-Floor Penthouse with Stunning Ocean Views's rental company",
+    "Here to help",
+    "Message the host",
+    "Contact Alii‌ Resorts for info related to payments, modifying your reservation, check-in procedures or activities in the area.",
+    "Send Message",
+    "+18088796284",
+    "24/7 Support",
+  ].join("\n"),
+};
+const vrboEmails = [vrboEmail];
+const aliiBase = parseManagementContactJson({
+  found: true,
+  companyName: "Alii Resorts",
+  phone: "+18088796284",
+  sourceKind: "email",
+  emailIndex: 0,
+  quote: "Contact Alii Resorts for info related to payments, modifying your reservation, check-in procedures or activities in the area.",
+  confidence: 0.9,
+  note: "Named as the host contact in the VRBO confirmation",
+})!;
+
+// Zero-width chars inside the email must not defeat an honest quote.
+v = validateManagementContact(aliiBase, vrboEmails);
+assert.equal(v.ok, true, "ZWNJ inside the email text cannot reject an honest quote");
+
+// Non-contiguous multi-line quote (company line + phone line, "Send Message"
+// between them in the email) — each line is verbatim, so it verifies.
+v = validateManagementContact(
+  { ...aliiBase, quote: "Contact Alii Resorts for info related to payments, modifying your reservation, check-in procedures or activities in the area.\n+18088796284" },
+  vrboEmails,
+);
+assert.equal(v.ok, true, "multi-line quote with non-adjacent verbatim lines verifies");
+
+// Punctuation normalization: the model quotes the en-dash line with an ASCII
+// hyphen and straight apostrophe — still an honest quote.
+v = validateManagementContact(
+  { ...aliiBase, quote: "Hosted by Menehune Shores #623 - Top-Floor Penthouse with Stunning Ocean Views's rental company" },
+  vrboEmails,
+);
+assert.equal(v.ok, true, "dash/apostrophe-normalized quote of a unicode line verifies");
+
+// The honesty gate is intact: an invented phone still fails digit-for-digit …
+v = validateManagementContact({ ...aliiBase, phone: "+18085550000" }, vrboEmails);
+assert.equal(v.ok, false, "invented phone still rejected");
+// … an invented quote still fails …
+v = validateManagementContact(
+  { ...aliiBase, quote: "Call the Alii Resorts concierge desk 24 hours a day for immediate arrival assistance" },
+  vrboEmails,
+);
+assert.equal(v.ok, false, "fabricated quote still rejected");
+// … and a quote whose digits are invented fails even with matching words.
+v = validateManagementContact(
+  { ...aliiBase, quote: "Contact Alii Resorts for info related to payments, modifying your reservation, check-in procedures or activities in the area. Call 5551234567" },
+  vrboEmails,
+);
+assert.equal(v.ok, false, "quote with an invented digit run still rejected");
+console.log("  ✓ live VRBO shape: honest quotes verify; hallucinations still rejected");
+
 // ── validation: web-sourced ──
 const webContact = parseManagementContactJson({
   found: true,

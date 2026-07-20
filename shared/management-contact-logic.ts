@@ -181,7 +181,54 @@ function isHttpUrl(value: string): boolean {
   return /^https?:\/\/\S+\.\S+/i.test(String(value ?? "").trim());
 }
 
-const collapse = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+/**
+ * Fold text for quote comparison. OTA emails (the 2026-07-20 VRBO confirmation
+ * class) are laced with en-dashes, curly apostrophes, and zero-width-non-joiner
+ * padding; a model quoting honestly normalizes those to ASCII, so a strict
+ * byte-collapse rejects a REAL quote. Folding both sides keeps the comparison
+ * honest (words + digits still must match) while immune to punctuation form.
+ */
+export function foldForContactCompare(s: string): string {
+  return String(s ?? "")
+    .replace(/[\u200B-\u200F\u2060\uFEFF\u00AD]/g, "") // zero-width chars / soft hyphen
+    .replace(/[\u2010-\u2015\u2212]/g, "-") // hyphen/en/em/figure/horizontal-bar dashes, minus sign
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/\u00A0/g, " ")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Is the model's quote genuinely lifted from the email? Three honest shapes:
+ * (a) a contiguous excerpt (folded substring); (b) MULTIPLE lines that each
+ * appear but are non-adjacent in the email — "Contact Alii Resorts …" and the
+ * phone line sit two lines apart in a real VRBO confirmation, and the prompt
+ * says "copy the EXACT line(s)"; (c) minor HTML-strip drift — >=90% of the
+ * quote's significant tokens present AND every digit run present, so a
+ * paraphrase that invents or alters ANY number always fails. The phone/email
+ * payload checks in validateManagementContact stay digit-for-digit regardless.
+ */
+export function quoteSupportedByEmail(quote: string, emailHaystack: string): boolean {
+  const q = foldForContactCompare(quote);
+  const h = foldForContactCompare(emailHaystack);
+  if (!q || !h) return false;
+  if (h.includes(q)) return true;
+
+  const lines = String(quote ?? "")
+    .split(/\n+/)
+    .map(foldForContactCompare)
+    .filter((l) => l.length >= 3);
+  if (lines.length > 1 && lines.every((l) => h.includes(l))) return true;
+
+  const tokens = q.split(" ").filter((t) => t.length >= 3);
+  if (!tokens.length) return false;
+  const present = tokens.filter((t) => h.includes(t)).length;
+  if (present / tokens.length < 0.9) return false;
+  const digitRuns = q.match(/\d{2,}/g) ?? [];
+  return digitRuns.every((run) => h.includes(run));
+}
 
 // National OTA support lines are never the answer — a lookup that "confirms"
 // VRBO customer service as the on-site team is worse than no result.
@@ -224,14 +271,16 @@ export function validateManagementContact(
       return { ok: false, reason: "Email-sourced contact did not cite a valid email" };
     }
     const source = emails[parsed.emailIndex];
-    const haystack = collapse(`${source.subject}\n${source.fromEmail}\n${source.text}`);
-    if (!parsed.quote || !haystack.includes(collapse(parsed.quote))) {
+    const rawHaystack = `${source.subject}\n${source.fromEmail}\n${source.text}`;
+    if (!parsed.quote || !quoteSupportedByEmail(parsed.quote, rawHaystack)) {
       return { ok: false, reason: "Email-sourced contact's quote is not verbatim-present in the cited email" };
     }
-    if (hasPhone && !phoneDigits(source.text).includes(phoneDigits(parsed.phone))) {
+    // Phone haystack deliberately excludes fromEmail — SES sender hashes are
+    // digit soup an invented number could substring-match by chance.
+    if (hasPhone && !phoneDigits(`${source.subject}\n${source.text}`).includes(phoneDigits(parsed.phone))) {
       return { ok: false, reason: "Phone number is not present in the cited email" };
     }
-    if (hasEmail && !haystack.includes(parsed.email.toLowerCase())) {
+    if (hasEmail && !foldForContactCompare(rawHaystack).includes(parsed.email.toLowerCase())) {
       return { ok: false, reason: "Email address is not present in the cited email" };
     }
     return { ok: true, contact: parsed };
