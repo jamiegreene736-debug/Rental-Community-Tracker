@@ -1209,8 +1209,17 @@ check(
     (bookingsSrc.match(/getNetRevenue\(reservation\)\s*-\s*reservation\.slots\.reduce/g) ?? []).length,
   );
   check(
-    "bookings: server engine still available as the fallback (relabeled, same handler)",
-    bookingsSrc.includes("Run bulk buy-ins (server)") && bookingsSrc.includes("onClick={startBulkBuyInQueue}"),
+    // 2026-07-20: the operator removed the "Run bulk buy-ins (server)" trigger —
+    // bulk filling is Cowork-only. The server engine stays reachable ONLY as a
+    // resumed legacy queue: the active-job discovery poll + Queue status dialog
+    // + Cancel must survive so a queue running across the removal stays visible
+    // and stoppable. A reintroduced trigger button should be a deliberate PR.
+    "bookings: server bulk trigger removed; resumed-queue surfacing retained",
+    !bookingsSrc.includes("Run bulk buy-ins (server)")
+      && !bookingsSrc.includes("startBulkBuyInQueue")
+      && bookingsSrc.includes("/api/operations/bulk-auto-fill/active")
+      && bookingsSrc.includes("button-open-bulk-buy-in-queue")
+      && bookingsSrc.includes("button-cancel-bulk-buy-in-queue"),
   );
   check(
     "schema maintenance: boot creates the durable Cowork prompt relay table",
