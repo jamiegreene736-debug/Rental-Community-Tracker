@@ -20,11 +20,15 @@ import {
   CLAUDE_FIND_RUN_RESUMED_MARKER,
   CLAUDE_FIND_RUN_STORE_CAP,
   type ClaudeFindRunRecord,
+  CLAUDE_FIND_RUN_BULK_MAX,
+  CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS,
   activeClaudeFindRunForReservation,
   appendClaudeFindRunEvents,
   applyClaudeFindRunUpdate,
   browserMcpFailureFromInit,
   claimNextClaudeFindRun,
+  claudeFindRunnerActivity,
+  claudeFindRunQueueAhead,
   classifyClaudeStreamLine,
   claudeFindRunStatusLabel,
   claudeFindRunWatchdogVerdict,
@@ -194,6 +198,107 @@ check("null raw parses to an empty store", parseClaudeFindRunStore(null).runs.le
   );
   check("90-min ceiling closes even a beating run", ceiling.action === "fail" && /90-minute ceiling/.test(ceiling.error ?? ""));
   check("terminal run → none", claudeFindRunWatchdogVerdict(makeRun({ status: "failed" }), NOW + 10 * CLAUDE_FIND_RUN_MAX_AGE_MS).action === "none");
+}
+
+// ── watchdog: BULK queue semantics (2026-07-20) ─────────────────────────────
+// The runner is sequential, so a bulk batch legitimately parks runs in
+// "queued" for hours. The watchdog must distinguish "waiting in line behind a
+// live run" from "the Mac runner is down" — and a queue-parked run must get
+// its FULL 90 minutes once it finally starts.
+{
+  const later = NOW + 45 * 60_000; // 45 min after the batch was queued
+  const busyActivity = claudeFindRunnerActivity(
+    [makeRun({ id: "head", reservationId: "res-head", status: "running", claimedAt: iso(60_000), heartbeatAt: iso(44 * 60_000) })],
+    later,
+  );
+  check("runner activity: a beating run reads as busy", busyActivity.busy === true);
+  check(
+    "queued 45 min behind a live run → NOT failed (waiting in line is the design)",
+    claudeFindRunWatchdogVerdict(makeRun({ id: "tail" }), later, busyActivity).action === "none",
+  );
+  const idleAfterFinish = claudeFindRunnerActivity(
+    [makeRun({ id: "head", status: "completed", claimedAt: iso(60_000), heartbeatAt: iso(40 * 60_000), endedAt: iso(44 * 60_000) })],
+    later,
+  );
+  check("runner activity: a finished run is not busy but leaves fresh lastActivity", idleAfterFinish.busy === false && idleAfterFinish.lastActivityMs === NOW + 44 * 60_000);
+  check(
+    // The class this basis exists for: head-of-line finishes at minute 44;
+    // every queued run's createdAt-based 5-min window lapsed long ago, but the
+    // runner is demonstrably alive — give it a fresh window from that proof.
+    "queued run right after the head finished → NOT failed (claim window re-arms from runner activity)",
+    claudeFindRunWatchdogVerdict(makeRun({ id: "tail" }), later, idleAfterFinish).action === "none",
+  );
+  check(
+    "queued run with a runner idle past the claim window → still fails as runner-offline",
+    claudeFindRunWatchdogVerdict(
+      makeRun({ id: "tail" }),
+      NOW + 50 * 60_000,
+      { busy: false, lastActivityMs: NOW + 44 * 60_000 },
+    ).action === "fail",
+  );
+  check(
+    "no activity context at all behaves exactly like the single-run original",
+    claudeFindRunWatchdogVerdict(makeRun(), NOW + CLAUDE_FIND_RUN_CLAIM_TIMEOUT_MS + 1_000).action === "fail",
+  );
+  const queueCeiling = claudeFindRunWatchdogVerdict(
+    makeRun(),
+    NOW + CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS + 1_000,
+    { busy: true, lastActivityMs: NOW + CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS },
+  );
+  check(
+    "queue ceiling closes a run even while the runner reads busy (a wedged line must not be immortal)",
+    queueCeiling.action === "fail" && /Waited in line/.test(queueCeiling.error ?? ""),
+  );
+  check(
+    // A run that waited 3 hours in line must not be closed by the 90-min
+    // ceiling 90 minutes after CREATION — the ceiling measures WORK time.
+    "running ceiling measures from claimedAt, not createdAt",
+    claudeFindRunWatchdogVerdict(
+      makeRun({ status: "running", claimedAt: iso(3 * 60 * 60_000), heartbeatAt: iso(3 * 60 * 60_000 + 5 * 60_000) }),
+      NOW + 3 * 60 * 60_000 + 10 * 60_000,
+    ).action === "none"
+      && claudeFindRunWatchdogVerdict(
+        makeRun({ status: "running", claimedAt: iso(3 * 60 * 60_000), heartbeatAt: iso(3 * 60 * 60_000 + CLAUDE_FIND_RUN_MAX_AGE_MS) }),
+        NOW + 3 * 60 * 60_000 + CLAUDE_FIND_RUN_MAX_AGE_MS + 1_000,
+      ).action === "fail",
+  );
+  check(
+    "cap × per-run ceiling stays inside the queue ceiling (re-derive one when changing the other)",
+    CLAUDE_FIND_RUN_BULK_MAX * CLAUDE_FIND_RUN_MAX_AGE_MS <= CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS,
+  );
+}
+
+// ── queue position (queueAhead) ─────────────────────────────────────────────
+{
+  const runs = [
+    makeRun({ id: "working", reservationId: "res-a", status: "running", claimedAt: iso(1_000) }),
+    makeRun({ id: "q1", reservationId: "res-b" }),
+    makeRun({ id: "cancelled-q", reservationId: "res-c", cancelRequested: true }),
+    makeRun({ id: "done", reservationId: "res-d", status: "completed" }),
+    makeRun({ id: "q2", reservationId: "res-e" }),
+  ];
+  check("first queued run counts only the one being worked", claudeFindRunQueueAhead(runs, "q1") === 1);
+  check(
+    "later queued run counts the worked run + earlier queued, skipping cancelled/terminal",
+    claudeFindRunQueueAhead(runs, "q2") === 2,
+  );
+  check("the running run itself answers 0", claudeFindRunQueueAhead(runs, "working") === 0);
+  check("unknown run answers 0", claudeFindRunQueueAhead(runs, "nope") === 0);
+  check(
+    "client view carries queueAhead only when positive",
+    clientClaudeFindRunView(makeRun(), { queueAhead: 2 }).queueAhead === 2
+      && clientClaudeFindRunView(makeRun(), { queueAhead: 0 }).queueAhead === undefined
+      && clientClaudeFindRunView(makeRun()).queueAhead === undefined,
+  );
+  const label = claudeFindRunStatusLabel("queued", "find", 2);
+  check(
+    "queued label names the position in line",
+    label.tone === "active" && /2 runs ahead/.test(label.label),
+  );
+  check(
+    "queued label without a position keeps the original copy",
+    claudeFindRunStatusLabel("queued").label === "Queued — waiting for the Mac runner",
+  );
 }
 
 // ── client view strips secrets ───────────────────────────────────────────────
@@ -523,6 +628,37 @@ console.log("claude-find-run: source wiring");
 
   const serverSrc = read("../server/claude-find-runs.ts");
   check("server: brief built with the headlessRun opt", serverSrc.includes("headlessRun: { runId: id, runToken: token }"));
+  // ── BULK (2026-07-20): one endpoint, N identical runs, queue-aware guards ──
+  check(
+    // The bulk endpoint must enqueue THE SAME record the single button
+    // creates — one shared constructor, not a parallel copy that drifts.
+    "server: bulk endpoint exists and shares the single-run constructor",
+    serverSrc.includes('app.post("/api/claude-find-runs/bulk"')
+      && (serverSrc.match(/enqueueFindRunInStore\(/g) ?? []).length >= 3, // def + single + bulk
+  );
+  check(
+    "server: bulk items are skipped (not batch-fatal) on invalid input or an active run",
+    serverSrc.includes("skipped.push({") && serverSrc.includes("continue;"),
+  );
+  check(
+    "server: bulk batch capped at CLAUDE_FIND_RUN_BULK_MAX",
+    serverSrc.includes("rawItems.length > CLAUDE_FIND_RUN_BULK_MAX"),
+  );
+  check(
+    "server: bulk enqueues inside ONE store mutation (single-flight guard sees earlier batch items)",
+    /await mutateStore\(\(store\) => \{\s*\n\s*const created/.test(serverSrc),
+  );
+  check(
+    // Without this, a bulk batch's tail runs get failed as "runner never
+    // picked this up" while the runner is busy on the head of the line.
+    "server: watchdog passes runner-activity context to every verdict",
+    serverSrc.includes("claudeFindRunnerActivity(store.runs, nowMs)")
+      && serverSrc.includes("claudeFindRunWatchdogVerdict(run, nowMs, activity)"),
+  );
+  check(
+    "server: status endpoint stamps queueAhead so queued rows can name their position",
+    serverSrc.includes("queueAhead: claudeFindRunQueueAhead(store.runs, latest.id)"),
+  );
   check(
     // 2026-07-20: the run auto-continues into the guest-expectation check.
     "server: headless brief carries afterAttach guest_expectation",
@@ -605,6 +741,18 @@ console.log("claude-find-run: source wiring");
 
   const bookingsSrc = read("../client/src/pages/bookings.tsx");
   check("client: start button POSTs /api/claude-find-runs", bookingsSrc.includes('apiRequest("POST", "/api/claude-find-runs", {'));
+  check(
+    // 2026-07-20: bulk find is headless too — the bulk button posts the batch
+    // to the bulk endpoint and gates its count on LIVE runs, not TTL memory.
+    "client: bulk button posts the batch to /api/claude-find-runs/bulk and gates on live runs",
+    bookingsSrc.includes('"/api/claude-find-runs/bulk", { items: inputs }')
+      && bookingsSrc.includes("bulkFindReady")
+      && bookingsSrc.includes("bulkFindActiveIds"),
+  );
+  check(
+    "client: queued panel badge passes queueAhead so a bulk wait reads as a line, not an outage",
+    bookingsSrc.includes("claudeFindRunStatusLabel(run.status, run.kind, run.queueAhead)"),
+  );
   check("client: button label present", bookingsSrc.includes("Auto-run · find cheapest (no window)"));
   check(
     "client: panel is ALWAYS mounted (report survives the empty-slots box disappearing)",

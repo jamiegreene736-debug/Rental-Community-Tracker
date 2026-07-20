@@ -64,9 +64,9 @@ import { ARRIVAL_SMS_HARD_LIMIT, buildArrivalDetailsGuestMessage, buildArrivalDe
 import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
-import { buildCoworkBulkBuyInPrompt, buildCoworkBulkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_FIND_MAX, COWORK_BULK_CHECKOUT_MAX, type CoworkBuyInPromptInput, type CoworkCheckoutPromptInput } from "@shared/cowork-buyin-prompt";
+import { buildCoworkBulkCheckoutPrompt, buildCoworkCommunityVerifyPrompt, buildCoworkGuestHappyPrompt, buildCoworkVrboLookupPrompt, COWORK_BULK_CHECKOUT_MAX, type CoworkBuyInPromptInput, type CoworkCheckoutPromptInput } from "@shared/cowork-buyin-prompt";
 import { buildCoworkDeepLink, buildCoworkPromptRunBootstrap, coworkLaunchNeedsFallback, coworkLaunchToastCopy, shouldAutoLaunchCowork, type CoworkLaunchResult } from "@shared/cowork-launch";
-import { ACTIVE_CLAUDE_FIND_RUN_STATUSES, claudeFindRunStatusLabel, type ClaudeFindRunClientView, type ClaudeFindRunHistoryEntry } from "@shared/claude-find-run";
+import { ACTIVE_CLAUDE_FIND_RUN_STATUSES, CLAUDE_FIND_RUN_BULK_MAX, claudeFindRunStatusLabel, type ClaudeFindRunClientView, type ClaudeFindRunHistoryEntry } from "@shared/claude-find-run";
 import {
   classifyFindRunEvent,
   findRunGuestVerdictBadge,
@@ -79,7 +79,6 @@ import {
 import { buyInSlotSignature, buyInSlotSignatureMap, type BuyInSlotStatusRow } from "@shared/buy-in-slot-signature";
 import {
   COWORK_DISPATCH_STORAGE_KEY,
-  COWORK_DISPATCH_TTL,
   clearCoworkDispatches,
   describeCoworkSuppression,
   parseCoworkDispatches,
@@ -2735,7 +2734,9 @@ function HeadlessFindRunPanel({
   const run = data?.runs?.[reservationId];
   const history = data?.history?.[reservationId] ?? [];
   if (!run) return null;
-  const badge = claudeFindRunStatusLabel(run.status, run.kind);
+  // queueAhead names the run's place in the bulk line ("2 runs ahead") so a
+  // long queued wait reads as the sequential runner working, not an outage.
+  const badge = claudeFindRunStatusLabel(run.status, run.kind, run.queueAhead);
   const active = ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status);
   const toneClass = FIND_RUN_TONE[badge.tone] ?? FIND_RUN_TONE.live;
   const duration = formatFindRunDuration(run.createdAt, run.endedAt);
@@ -9868,10 +9869,9 @@ export default function Bookings() {
       return !!meta?.propertyId && reservation.slotsTotal > 0 && reservation.slots.length > 0;
     })
   ), [bulkSelectedReservations, reservations, reservationPropertyMeta]);
-  // What the COWORK bulk route runs: selected reservations with at least one
-  // OPEN slot and no active checkout claim/handoff. It never detaches, but each
-  // safe reservation continues from attach into sequential checkout
-  // preparation + human payment handoffs.
+  // What the BULK FIND route runs: selected reservations with at least one
+  // OPEN slot and no active checkout claim/handoff. It never detaches; each
+  // safe reservation gets its own headless find-run that ends at attach.
   const selectedBulkCoworkReservations = useMemo(
     () => selectedBulkEligibleReservations.filter(
       (r) => r.slots.some((slot) => !slot.buyIn)
@@ -9879,22 +9879,44 @@ export default function Bookings() {
     ),
     [selectedBulkEligibleReservations],
   );
-  // Split each bulk candidate set into what may be dispatched now and what a
-  // live Cowork run already covers. Suppression is by UNIT SET first: detach a
-  // unit and the reservation is instantly selectable again, because that newly
-  // open slot was never handed to Cowork.
-  const findDispatchSplit = useMemo(
-    () => partitionCoworkDispatchCandidates(
-      selectedBulkCoworkReservations,
-      "bulk-find",
-      coworkDispatches,
-      dispatchClockMs,
-      (r) => ({
-        reservationId: r._id,
-        unitIds: r.slots.filter((s) => !s.buyIn).map((s) => s.unitId),
-      }),
-    ),
-    [selectedBulkCoworkReservations, coworkDispatches, dispatchClockMs],
+  // Bulk find went HEADLESS (2026-07-20): each reservation gets its own
+  // find-run and the daemon drains them one at a time. "Already being worked"
+  // is therefore a SERVER fact — the run store — not the client-side dispatch
+  // TTL memory the Cowork batch needed (a Cowork task's progress was invisible
+  // to the server; a headless run's is not). This one batch status query is
+  // what gates the button count, and the server's per-reservation active-run
+  // guard re-checks at enqueue time, so a race can only ever skip, never
+  // double-dispatch.
+  // Query the ELIGIBLE superset, not just the open-slot set: the checkout
+  // batch's cross-kind hold below also reads this, and a fully-attached
+  // reservation whose find-run is still finishing must be visible to it.
+  const bulkFindStatusIdsKey = useMemo(
+    () => selectedBulkEligibleReservations.map((r) => r._id).sort().join(","),
+    [selectedBulkEligibleReservations],
+  );
+  const { data: bulkFindRunData } = useQuery<{ runs: Record<string, ClaudeFindRunClientView> }>({
+    queryKey: ["/api/claude-find-runs/status", "bulk-gate", bulkFindStatusIdsKey],
+    enabled: selectedBulkEligibleReservations.length > 0,
+    queryFn: async () => {
+      const res = await apiRequest("POST", "/api/claude-find-runs/status", {
+        reservationIds: selectedBulkEligibleReservations.map((r) => r._id).slice(0, 100),
+      });
+      return res.json();
+    },
+    refetchInterval: 20_000,
+    staleTime: 10_000,
+  });
+  // Reservations a live headless run (find OR checkout) already covers.
+  const bulkFindActiveIds = useMemo(() => {
+    const active = new Set<string>();
+    for (const run of Object.values(bulkFindRunData?.runs ?? {})) {
+      if (ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status)) active.add(run.reservationId);
+    }
+    return active;
+  }, [bulkFindRunData]);
+  const bulkFindReady = useMemo(
+    () => selectedBulkCoworkReservations.filter((r) => !bulkFindActiveIds.has(r._id)),
+    [selectedBulkCoworkReservations, bulkFindActiveIds],
   );
   // The card sitting: reservations whose units are ATTACHED and still unbooked.
   // Mirrors the per-row checkout button's predicate exactly — a reservation
@@ -9920,19 +9942,12 @@ export default function Bookings() {
       dispatchClockMs,
       (r) => ({ reservationId: r._id, unitIds: [] }),
     );
-    // CROSS-KIND: a reservation a live FIND run is still working must not also
-    // be handed to a checkout run — that is two Cowork tasks on one booking,
-    // one of them attaching units while the other prices them for payment.
-    // Suppression is otherwise kind-scoped, so this has to be explicit.
-    const findHeld = new Set(
-      partitionCoworkDispatchCandidates(
-        selectedBulkCheckoutReservations,
-        "bulk-find",
-        coworkDispatches,
-        dispatchClockMs,
-        (r) => ({ reservationId: r._id, unitIds: [] }),
-      ).suppressed.map((s) => s.reservationId),
-    );
+    // CROSS-KIND: a reservation a live HEADLESS run is still working (find OR
+    // checkout) must not also be handed to a checkout batch — that is two
+    // agents on one booking, one attaching units while the other prices them
+    // for payment. Bulk find went headless (2026-07-20), so the hold reads the
+    // LIVE run store instead of the retired bulk-find dispatch memory.
+    const findHeld = bulkFindActiveIds;
     if (findHeld.size === 0) return split;
     return {
       ready: split.ready.filter((r) => !findHeld.has(r._id)),
@@ -9941,47 +9956,48 @@ export default function Bookings() {
         ...split.ready
           .filter((r) => findHeld.has(r._id))
           .map((r) => {
-            const rec = coworkDispatches.find((d) => d.kind === "bulk-find" && d.reservationId === r._id);
-            const at = rec?.dispatchedAtMs ?? dispatchClockMs;
+            const runAt = Date.parse(bulkFindRunData?.runs?.[r._id]?.createdAt ?? "");
+            const at = Number.isFinite(runAt) ? runAt : dispatchClockMs;
             return { item: r, reservationId: r._id, dispatchedAtMs: at, clearsAtMs: at };
           }),
       ],
     };
-  }, [selectedBulkCheckoutReservations, coworkDispatches, dispatchClockMs]);
-  // Route the bulk process through one durable Cowork run — FIND ONLY.
+  }, [selectedBulkCheckoutReservations, coworkDispatches, dispatchClockMs, bulkFindActiveIds, bulkFindRunData]);
+  // Route the bulk process through HEADLESS find-runs — FIND ONLY.
   //
   // 2026-07-19 (operator: "it will require my human input which defeats the
   // purpose of the queue"): bulk used to send the COMBINED find + prepare-
   // checkout brief, which stops for the operator's card on EVERY unit and
-  // serializes them ("exactly one outstanding payment handoff at a time"). A
-  // batch of 8 bookings is ~16 units, so the queue interrupted them ~16 times
-  // and could never be walked away from — the send press they noticed was one
-  // interaction out of ~33. Bulk now sends the FIND-only batch brief: every
-  // reservation ends at ATTACH and nothing books, so one send fills the whole
-  // batch unattended. The card work moves to the separate bulk checkout run,
-  // where the operator does it all in one deliberate sitting.
+  // serializes them. Bulk then sent the FIND-only Cowork batch brief; 2026-07-20
+  // (operator: "extend the headless runner to bulk") it went fully headless —
+  // ONE find-run per reservation via POST /api/claude-find-runs/bulk, the same
+  // run the per-row button creates, drained one at a time by the Mac runner's
+  // sequential claim loop. No Cowork window, no send press, per-row live logs.
+  // Every run still ends at ATTACH: nothing books, and the card work stays in
+  // the separate bulk checkout run below.
   //
-  // LOAD-BEARING: do NOT point this back at buildCoworkBulkFindAndPreparePrompt.
-  // That builder is retained (and still tested) but is deliberately unused by
-  // the client — re-wiring it silently restores the per-unit interruptions.
+  // LOAD-BEARING: do NOT point this back at buildCoworkBulkFindAndPreparePrompt
+  // (per-unit card interruptions) or buildCoworkBulkBuyInPrompt (the retired
+  // send-press Cowork batch — both builders survive in shared/, deliberately
+  // unused here).
   const startBulkCoworkFind = async () => {
     if (bulkCoworkLaunching) return;
     const selected = selectedBulkEligibleReservations;
     const selectedWithOpenSlots = selected.filter((r) => r.slots.some((slot) => !slot.buyIn));
-    // `ready` excludes reservations a live Cowork run already covers.
-    const withOpenSlots = findDispatchSplit.ready;
+    // `bulkFindReady` excludes reservations a live headless run already covers.
+    const withOpenSlots = bulkFindReady;
     if (withOpenSlots.length === 0) {
       toast({
-        title: findDispatchSplit.suppressed.length > 0
-          ? "Those bookings are already with Cowork"
+        title: bulkFindActiveIds.size > 0
+          ? "Those bookings already have live runs"
           : "No safe open buy-in slots in the selection",
-        description: findDispatchSplit.suppressed.length > 0
-          ? "Every selected booking was sent to Cowork recently and is still being worked. Wait for the units to attach, or use \"Send anyway\" to dispatch them again."
-          : "Cowork fills OPEN slots only and will not start while a sibling checkout is queued, in progress, or ready for card. Finish that handoff, detach a unit, or use the server queue as appropriate.",
+        description: bulkFindActiveIds.size > 0
+          ? "Every selected booking already has a headless run queued or working. Watch the live log on each row; cancel a stuck run there if needed."
+          : "The runs fill OPEN slots only and will not start while a sibling checkout is queued, in progress, or ready for card. Finish that handoff, detach a unit, or use the server queue as appropriate.",
       });
       return;
     }
-    const capped = withOpenSlots.slice(0, COWORK_BULK_FIND_MAX);
+    const capped = withOpenSlots.slice(0, CLAUDE_FIND_RUN_BULK_MAX);
     const toDateOnly = (s?: string) => (!s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10));
     const inputs: CoworkBuyInPromptInput[] = [];
     for (const reservation of capped) {
@@ -10011,85 +10027,83 @@ export default function Bookings() {
         netRevenue:
           getNetRevenue(reservation)
           - reservation.slots.reduce((sum, slot) => sum + parseFloat(String(slot.buyIn?.costPaid ?? 0)), 0),
-        baseUrl: typeof window !== "undefined" ? window.location.origin : undefined,
       });
     }
     if (inputs.length === 0) {
       toast({
-        title: "Could not prepare the Cowork batch",
+        title: "Could not prepare the bulk find-runs",
         description: "None of the selected bookings had usable dates + open slots.",
         variant: "destructive",
       });
       return;
     }
-    const prompt = buildCoworkBulkBuyInPrompt(inputs);
     const notes: string[] = [];
     const skippedAttached = selected.length - selectedWithOpenSlots.length;
     if (skippedAttached > 0) {
-      notes.push(`${skippedAttached} fully-attached booking${skippedAttached === 1 ? " was" : "s were"} skipped (Cowork fills open slots only).`);
+      notes.push(`${skippedAttached} fully-attached booking${skippedAttached === 1 ? " was" : "s were"} skipped (find-runs fill open slots only).`);
     }
-    // M6: measure against the ELIGIBLE set, not the post-suppression `ready`
-    // set — otherwise bookings held back by dispatch memory get reported as
+    // M6: measure against the ELIGIBLE set, not the post-suppression ready
+    // set — otherwise bookings held back by a live run get reported as
     // "a checkout is already queued", which is false and points at the wrong
-    // remedy. Suppression gets its own note below.
+    // remedy. Live-run holds get their own note below.
     const skippedActiveCheckout = selectedWithOpenSlots.length - selectedBulkCoworkReservations.length;
     if (skippedActiveCheckout > 0) {
       notes.push(`${skippedActiveCheckout} booking${skippedActiveCheckout === 1 ? " was" : "s were"} skipped because a checkout is already queued, in progress, or ready for card.`);
     }
     const heldBack = selectedBulkCoworkReservations.length - withOpenSlots.length;
     if (heldBack > 0) {
-      notes.push(`${heldBack} booking${heldBack === 1 ? " was" : "s were"} left out because Cowork is already working ${heldBack === 1 ? "it" : "them"} — use "Send anyway" to override.`);
+      notes.push(`${heldBack} booking${heldBack === 1 ? " already has" : "s already have"} a live run — watch ${heldBack === 1 ? "its row" : "their rows"}.`);
     }
     const overflow = withOpenSlots.length - capped.length;
     if (overflow > 0) {
-      notes.push(`Batch capped at ${COWORK_BULK_FIND_MAX} — run Auto Cowork bulk again for the remaining ${overflow}.`);
+      notes.push(`Batch capped at ${CLAUDE_FIND_RUN_BULK_MAX} — click again once these finish for the remaining ${overflow}.`);
     }
-    setBulkCoworkPrompt(prompt);
-    setBulkCoworkNote(notes.join(" "));
-    const label = inputs.length === 1 ? "The buy-in search prompt" : `The ${inputs.length}-reservation buy-in search batch`;
     setBulkCoworkLaunching(true);
-    // NOTE: keep this statement's leading form byte-exact — the bulk source
-    // guard in tests/cowork-buyin-prompt.test.ts regex-matches it to prove the
-    // batch goes through the durable shared launcher. (The literal is spelled
-    // out only in that test; repeating it here would inflate the launch-site
-    // count that tests/cowork-launch.test.ts asserts.)
-    const result = await launchCoworkPrompt(prompt, { kind: "bulk-find" })
-      .finally(() => setBulkCoworkLaunching(false));
-    if (result.abortedForAuth) return;
-    if (result.launched) armCoworkRunWindow();
-    // Remember what went out, so a second click can't re-send the same
-    // bookings to a task that is still working them. Recorded from `inputs`
-    // (what the brief actually contains), never from `capped` — the build loop
-    // legitimately drops reservations with unusable dates or no property.
-    if (result.launched || result.copied) {
-      persistCoworkDispatches((prev) => recordCoworkDispatches(
-        prev,
-        inputs.map((i) => ({ reservationId: i.reservationId, unitIds: i.units.map((u) => u.unitId) })),
-        "bulk-find",
-        Date.now(),
-        // A fallback launch means the relay FAILED, so the operator may never
-        // have pasted it. Give those the base window only rather than locking
-        // the bookings away for the full batch duration. FIND ONLY — see the
-        // checkout launcher for why the same shortcut is unsafe there.
-        coworkLaunchNeedsFallback(result) ? { ttlOverrideMs: COWORK_DISPATCH_TTL["bulk-find"].baseMs } : undefined,
-      ));
+    try {
+      // HEADLESS (2026-07-20): one run per reservation via the bulk endpoint —
+      // no Cowork window, no send press, no clipboard/relay/dispatch-memory.
+      // The server re-checks each reservation's active-run guard inside the
+      // store's write tail, so a click race can only skip, never double-queue.
+      const res = await apiRequest("POST", "/api/claude-find-runs/bulk", { items: inputs });
+      const body = (await res.json()) as {
+        created?: ClaudeFindRunClientView[];
+        skipped?: { reservationId: string; error: string }[];
+      };
+      const created = body.created ?? [];
+      const skipped = body.skipped ?? [];
+      if (created.length > 0) armCoworkRunWindow();
+      // Wake every touched row's poller so the queue positions render at once.
+      for (const run of created) {
+        void queryClient.invalidateQueries({ queryKey: claudeFindRunStatusKey(run.reservationId) });
+      }
+      void queryClient.invalidateQueries({ queryKey: ["/api/claude-find-runs/status", "bulk-gate"] });
+      if (skipped.length > 0) {
+        notes.push(`${skipped.length} not queued: ${skipped.map((s) => s.error).slice(0, 3).join("; ")}${skipped.length > 3 ? "; …" : ""}`);
+      }
+      toast({
+        title: created.length > 0
+          ? `${created.length} find-run${created.length === 1 ? "" : "s"} queued on your Mac`
+          : "No find-runs were queued",
+        // The double-attach hazard rides permanently on the toast (and the
+        // trigger button's title) — it is a real money risk.
+        description: [
+          created.length > 0
+            ? "They run one at a time with no window and no send press — watch the live log on each row. You'll hear a chime if one needs you."
+            : "Every item was skipped — see the reasons below.",
+          ...notes,
+          "Don't run the server bulk queue on these bookings at the same time.",
+        ].join(" "),
+        variant: created.length === 0 ? "destructive" : undefined,
+      });
+    } catch (error) {
+      toast({
+        title: "Could not queue the bulk find-runs",
+        description: String((error as Error)?.message ?? error),
+        variant: "destructive",
+      });
+    } finally {
+      setBulkCoworkLaunching(false);
     }
-    // Bulk relays whenever the batch exceeds the deep-link cap (a single
-    // reservation's brief still fits and embeds directly), so it can land on
-    // the paste path if the relay fails — that is when the operator needs the
-    // text on screen.
-    if (coworkLaunchNeedsFallback(result)) {
-      setCoworkFallback({ prompt, label, note: notes.join(" ") });
-    }
-    const t = coworkLaunchToastCopy(result, label, "bulk");
-    toast({
-      title: t.title,
-      // The double-attach hazard used to live only in the dialog this replaced.
-      // It is a real money risk, so it now rides permanently on the toast (and
-      // the trigger button's title) instead of disappearing with the modal.
-      description: [t.description, ...notes, "Don't run the server bulk queue on these bookings at the same time."].join(" "),
-      variant: t.destructive ? "destructive" : undefined,
-    });
   };
   // The CARD SITTING (2026-07-19). Bulk find now runs unattended and ends at
   // attach, so the card work is collected here: ONE Cowork run that walks every
@@ -11140,29 +11154,30 @@ export default function Bookings() {
                   >
                     Clear
                   </Button>
-                  {/* The bulk process routes through Cowork: ONE Claude
-                      Desktop task works selected bookings one reservation at
-                      a time, including one-at-a-time payment handoffs. The
-                      server engine stays available below as the fallback —
-                      it's the only route from a phone, and the only one that
-                      detaches + re-searches fully-attached bookings. Both are
-                      disabled while a server queue runs so the two engines
-                      never attach to the same slots concurrently. */}
+                  {/* The bulk process routes through HEADLESS find-runs
+                      (2026-07-20): one run per selected booking, drained one
+                      at a time by the Mac runner — no Cowork window, no send
+                      press, per-row live logs. The server engine stays
+                      available below as the fallback — it's the only route
+                      from a phone (the runs need the Mac awake), and the only
+                      one that detaches + re-searches fully-attached bookings.
+                      Both are disabled while a server queue runs so the two
+                      engines never attach to the same slots concurrently. */}
                   <Button
                     type="button"
                     size="sm"
                     onClick={() => { if (!bulkCoworkLaunching) void startBulkCoworkFind(); }}
-                    // Count binds to `ready`, never to the raw selection: a
-                    // button that says (10) and sends 7 is the problem this
-                    // whole memory exists to prevent.
-                    disabled={bulkBuyInQueueRunning || bulkCoworkLaunching || findDispatchSplit.ready.length === 0}
+                    // Count binds to the live-run-filtered `ready` set, never
+                    // the raw selection: a button that says (10) and sends 7
+                    // is the problem this gate exists to prevent.
+                    disabled={bulkBuyInQueueRunning || bulkCoworkLaunching || bulkFindReady.length === 0}
                     data-testid="button-run-bulk-cowork"
-                    title="Opens Claude Desktop with the batch pre-filled — press send THERE once, then you can walk away. Cowork finds and attaches the cheapest qualifying units for every open slot, one reservation at a time. It never books and never detaches, and it will only call you back if a site raises a bot check. Prepare the checkouts afterwards with 'Prepare all checkouts in Cowork'. Don't run the server bulk queue on these bookings at the same time."
+                    title="Queues a headless find-run for every selected booking — no window, no send press; they run one at a time on your Mac and you can walk away. Each run finds and attaches the cheapest qualifying units for the booking's open slots. It never books and never detaches, and you'll hear a chime if a site raises a bot check. Prepare the checkouts afterwards with 'Prepare all checkouts in Cowork'. Don't run the server bulk queue on these bookings at the same time."
                   >
                     <Sparkles className="h-3.5 w-3.5 mr-1.5" />
                     {bulkCoworkLaunching
-                      ? "Opening Cowork…"
-                      : `Auto Cowork bulk · find cheapest (${Math.min(findDispatchSplit.ready.length, COWORK_BULK_FIND_MAX)})`}
+                      ? "Queuing runs…"
+                      : `Auto bulk · find cheapest (${Math.min(bulkFindReady.length, CLAUDE_FIND_RUN_BULK_MAX)})`}
                   </Button>
                   {/* The card sitting. Deliberately a SEPARATE button from the
                       find batch: find runs unattended, this one requires the
@@ -11186,15 +11201,25 @@ export default function Bookings() {
                       booking is worse than one that double-sends — the end
                       state there is a guest with no unit — so this never hides
                       and never requires a tooltip to discover. */}
-                  {/* M1: ONE ROW PER KIND. Collapsing them (find-if-any, else
-                      checkout) meant that with both kinds held — reachable
-                      whenever a reservation has one open slot AND one attached
-                      unbooked unit — the checkout button read (0), was disabled
-                      (so its tooltip was suppressed too), and had no line and no
-                      override for up to 4 hours. That is this module's own
-                      stated worst case: a silently skipped booking. */}
+                  {/* Bookings a live headless run holds out of the find batch.
+                      No override button on purpose: the run store is the
+                      truth — a stuck run is cancelled from its own row panel,
+                      which frees the booking here on the next poll. */}
+                  {bulkFindActiveIds.size > 0 && (
+                    <span
+                      className="inline-flex items-center gap-2 text-[11px] text-muted-foreground"
+                      data-testid="text-bulk-find-live-runs"
+                    >
+                      {bulkFindActiveIds.size} booking{bulkFindActiveIds.size === 1 ? " has" : "s have"} a live run — watch or cancel on the row.
+                    </span>
+                  )}
+                  {/* M1 (checkout dispatch memory): the held-checkouts line is
+                      ALWAYS visible when it applies, with a one-click escape —
+                      a bulk queue that silently skips a booking is worse than
+                      one that double-sends. (The find half of this row retired
+                      2026-07-20 when bulk find went headless: find holds now
+                      come from the live run store above, not the TTL memory.) */}
                   {([
-                    ["bulk-find", findDispatchSplit.suppressed, "find"],
                     ["bulk-prepare-checkout", checkoutDispatchSplit.suppressed, "checkout"],
                   ] as const)
                     .filter(([, held]) => held.length > 0)
@@ -11217,9 +11242,7 @@ export default function Bookings() {
                             kind as CoworkDispatchKind,
                           ))}
                           data-testid={`button-cowork-dispatch-resend-${kind}`}
-                          title={kind === "bulk-find"
-                            ? "Dispatch these bookings again now — use this if the Cowork task was closed or you never pressed send. Two find tasks running on the same bookings can attach units from different resorts."
-                            : "Prepare these checkouts again now — use this if the Cowork task was closed or you never pressed send. Two checkout tasks running at once can leave two payment tabs open and get a card entered twice."}
+                          title="Prepare these checkouts again now — use this if the Cowork task was closed or you never pressed send. Two checkout tasks running at once can leave two payment tabs open and get a card entered twice. (Bookings held by a LIVE headless run stay held — cancel the run on its row instead.)"
                         >
                           Send {noun} anyway ({held.length})
                         </Button>
