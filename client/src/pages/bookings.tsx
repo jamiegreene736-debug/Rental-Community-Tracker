@@ -43,7 +43,8 @@ import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@sh
 import { PROPERTY_UNIT_CONFIGS, type UnitConfig } from "@shared/property-units";
 import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
-import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
+import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay, splitEmailBodyIntoSegments } from "@shared/email-body-format";
+import { stripLinkMarkers } from "@shared/email-mime";
 import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
 import { mergeAliasThread } from "@shared/unified-buyin-alias";
 import { buildArrivalRequestEmail, resolveBookedListingTitle } from "@shared/arrival-request-compose";
@@ -14807,7 +14808,7 @@ function BuyInVendorEmailPanel({
                     <div>{formatEmailTimestampForDisplay(m.receivedAt) ?? "—"} · booking thread</div>
                   </div>
                   <div className="mt-2 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
-                    {String(m.body || "").slice(0, 6000)}
+                    <EmailBodyWithLinks body={String(m.body || "").slice(0, 6000)} />
                   </div>
                 </div>
               );
@@ -14873,7 +14874,7 @@ function BuyInVendorEmailPanel({
                   </div>
                 </div>
                 <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-foreground">
-                  {formatEmailBodyForDisplay(email.body)}
+                  <EmailBodyWithLinks body={formatEmailBodyForDisplay(email.body)} />
                 </div>
                 {emailAttachments.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
@@ -15044,9 +15045,37 @@ function shortAliasEmailDate(value: string | Date | null | undefined): string {
     : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-// One-line message preview under the subject in the alias-inbox list.
+// One-line message preview under the subject in the alias-inbox list. "[link:
+// …]" markers are stripped — a 200-char tracking URL would eat the whole
+// snippet; the reading pane is where links render clickable.
 function aliasEmailSnippet(body: string | null | undefined): string {
-  return formatEmailBodyForDisplay(String(body ?? "")).replace(/\s+/g, " ").trim().slice(0, 120);
+  return stripLinkMarkers(formatEmailBodyForDisplay(String(body ?? ""))).replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+// Email body with every URL clickable — both the "[link: …]" markers stripHtml
+// preserves out of HTML emails and raw URLs plain-text emails always carried.
+// target=_blank + noreferrer: these are PM/OTA links, never same-app routes.
+function EmailBodyWithLinks({ body }: { body: string }) {
+  const segments = splitEmailBodyIntoSegments(body);
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.kind === "link" ? (
+          <a
+            key={index}
+            href={segment.href}
+            target="_blank"
+            rel="noreferrer"
+            className="break-all text-primary underline underline-offset-2"
+          >
+            {segment.value}
+          </a>
+        ) : (
+          <span key={index}>{segment.value}</span>
+        ),
+      )}
+    </>
+  );
 }
 
 // ─── "Confirm on-site management contact" (operator ask, 2026-07-20) ────────

@@ -17,6 +17,7 @@ import {
   parseEmailHeaders,
 } from "./guest-inbox-sync";
 import { parseArrivalDetailsFromText } from "./buy-in-email";
+import { stripLinkMarkers } from "@shared/email-mime";
 
 const SYNC_MIN_INTERVAL_MS = 60_000;
 const lastSyncAtByReservation = new Map<string, number>();
@@ -88,7 +89,9 @@ function surrogateMessageId(aliasEmail: string, parsed: ParsedVendorEmail): stri
     // Whitespace-normalized so the key is stable across body-formatting changes
     // (stripHtml now preserves newlines; rows imported before that were stored
     // flattened — hashing the raw body would re-key + re-import those emails).
-    (parsed.body ?? "").replace(/\s+/g, " ").slice(0, 200),
+    // "[link: …]" markers are stripped for the same reason: bodies stored
+    // before link preservation (2026-07-20) hashed without them.
+    stripLinkMarkers(parsed.body ?? "").replace(/\s+/g, " ").slice(0, 200),
   ].join("|");
   return `synth:${createHash("sha1").update(basis).digest("hex")}`;
 }
@@ -186,15 +189,21 @@ export async function syncBuyInVendorEmailsForReservation(
     .filter((id): id is number => Number.isFinite(id))
     .sort((a, b) => a - b)[0] ?? null;
 
-  // Dedup against inbound rows already stored for this reservation.
+  // Dedup against inbound rows already stored for this reservation. Body + id
+  // ride along so rows imported BEFORE link preservation (2026-07-20) can heal:
+  // the sync re-fetches the raw email anyway, and the fresh parse carries the
+  // "[link: …]" markers the stored body lost.
   const existing = await db
-    .select({ providerMessageId: buyInEmails.providerMessageId })
+    .select({ id: buyInEmails.id, providerMessageId: buyInEmails.providerMessageId, body: buyInEmails.body })
     .from(buyInEmails)
     .where(and(eq(buyInEmails.reservationId, rid), eq(buyInEmails.direction, "inbound")))
     .limit(500);
-  const seenMessageIds = new Set(
-    existing.map((r) => String(r.providerMessageId ?? "")).filter(Boolean),
+  const seenRowsByMessageId = new Map(
+    existing
+      .filter((r) => String(r.providerMessageId ?? "").length > 0)
+      .map((r) => [String(r.providerMessageId), { id: r.id, body: String(r.body ?? "") }]),
   );
+  const seenMessageIds = new Set(seenRowsByMessageId.keys());
 
   const { ImapFlow } = await import("imapflow");
   const client = new ImapFlow({
@@ -237,7 +246,22 @@ export async function syncBuyInVendorEmailsForReservation(
           if (!parsed.body && !parsed.messageId) continue;
 
           const dedupKey = parsed.messageId ?? surrogateMessageId(parsed.aliasEmail, parsed);
-          if (seenMessageIds.has(dedupKey)) continue;
+          if (seenMessageIds.has(dedupKey)) {
+            // Already imported — but if the stored body predates link
+            // preservation (no "[link:" marker) and the fresh parse recovered
+            // links, heal the row in place so the operator can click them
+            // without a re-import. Body only; every other column untouched.
+            const stored = seenRowsByMessageId.get(dedupKey);
+            if (stored && parsed.body.includes("[link: ") && !stored.body.includes("[link: ")) {
+              try {
+                await db.update(buyInEmails).set({ body: parsed.body }).where(eq(buyInEmails.id, stored.id));
+                stored.body = parsed.body;
+              } catch (err: any) {
+                console.warn("[buy-in-email] link-heal update failed:", err?.message ?? err);
+              }
+            }
+            continue;
+          }
           seenMessageIds.add(dedupKey);
 
           const contact = parsed.fromEmail ? contactBySender.get(parsed.fromEmail) ?? null : null;

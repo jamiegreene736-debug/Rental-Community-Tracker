@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { extractEmailAddress, SIMPLELOGIN_MAILBOX_EMAIL } from "./simplelogin";
-import { extractReadableTextFromMimeEmail, parseEmailHeaders } from "@shared/email-mime";
+import { extractReadableTextFromMimeEmail, parseEmailHeaders, stripLinkMarkers } from "@shared/email-mime";
 import { aliasEmailProvesPurchase } from "@shared/alias-bought-in";
 import type { InsertGuestInboxMessage } from "@shared/schema";
 
@@ -178,7 +178,9 @@ function surrogateMessageId(aliasEmail: string, parsed: ParsedRawEmail): string 
     // Whitespace-normalized so the key is stable across body-formatting changes
     // (stripHtml now preserves newlines; rows imported before that were stored
     // flattened — hashing the raw body would re-key + re-import those emails).
-    (parsed.body ?? "").replace(/\s+/g, " ").slice(0, 200),
+    // "[link: …]" markers are stripped for the same reason: bodies stored
+    // before link preservation (2026-07-20) hashed without them.
+    stripLinkMarkers(parsed.body ?? "").replace(/\s+/g, " ").slice(0, 200),
   ].join("|");
   return `synth:${createHash("sha1").update(basis).digest("hex")}`;
 }
@@ -194,7 +196,19 @@ async function importParsedEmail(parsed: ParsedRawEmail, filterAlias?: string): 
   // on every sync tick.
   const dedupKey = parsed.messageId ?? surrogateMessageId(aliasEmail, parsed);
   const recent = await storage.getGuestInboxMessages(aliasEmail, 100);
-  if (recent.some((m) => m.providerMessageId && m.providerMessageId === dedupKey)) {
+  const alreadyStored = recent.find((m) => m.providerMessageId && m.providerMessageId === dedupKey);
+  if (alreadyStored) {
+    // Already imported — but if the stored body predates link preservation
+    // (no "[link:" marker) and this fresh parse recovered links, heal the
+    // body in place so the operator can click them without a re-import.
+    const storedBody = String(alreadyStored.body ?? "");
+    if (parsed.body.includes("[link: ") && !storedBody.includes("[link: ")) {
+      try {
+        await storage.updateGuestInboxMessageBody(alreadyStored.id, parsed.body);
+      } catch (err: any) {
+        console.warn("[guest-inbox] link-heal update failed:", err?.message ?? err);
+      }
+    }
     return false;
   }
 

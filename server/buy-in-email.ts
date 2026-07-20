@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import { guestInboxImapConfig } from "./guest-inbox-sync";
+import { stripLinkMarkers } from "@shared/email-mime";
 
 export type BuyInEmailAttachment = {
   filename: string;
@@ -68,7 +69,11 @@ export function normalizeBuyInEmailAttachments(raw: unknown): BuyInEmailAttachme
 }
 
 export function stripHtmlForEmailParse(input: string): string {
-  return String(input ?? "")
+  // "[link: …]" markers (preserved hyperlinks, shared/email-mime.ts) are
+  // stripped BEFORE label parsing — a trailing marker on "Door code: 1234
+  // [link: …]" would bloat the end-of-line capture past the code-length guard
+  // and silently DROP the code.
+  return stripLinkMarkers(String(input ?? ""))
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/p>/gi, "\n")
     .replace(/<\/div>/gi, "\n")

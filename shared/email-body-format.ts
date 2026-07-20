@@ -133,6 +133,42 @@ export function formatEmailBodyForDisplay(body: string): string {
   return flowed.replace(/\n{3,}/g, "\n\n").trim();
 }
 
+export type EmailBodySegment = { kind: "text" | "link"; value: string; href?: string };
+
+// URL boundary: stop at whitespace, angle/square brackets, and quotes; then
+// trim trailing punctuation that belongs to the prose, not the URL ("see
+// https://x.com." / "(https://x.com)"). Kept deliberately simple — a rare
+// truncated tracking URL still opens the right site, while an over-greedy
+// match would glue prose onto every link.
+const URL_IN_TEXT_RE = /https?:\/\/[^\s<>\[\]"']+/g;
+
+/**
+ * Split a display-formatted email body into text/link segments so render
+ * sites can make every URL clickable — both the "[link: …]" markers stripHtml
+ * now preserves out of HTML emails AND raw URLs that plain-text emails always
+ * carried. Pure string work; the client maps link segments to <a> elements.
+ */
+export function splitEmailBodyIntoSegments(body: string): EmailBodySegment[] {
+  const text = String(body ?? "");
+  const segments: EmailBodySegment[] = [];
+  let cursor = 0;
+  // exec loop, not matchAll — the repo's TS target can't iterate matchAll's
+  // RegExpStringIterator (TS2802). Fresh regex so lastIndex never leaks.
+  const re = new RegExp(URL_IN_TEXT_RE.source, "g");
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    let url = match[0];
+    const trimmed = url.replace(/[),.;:!?]+$/, "");
+    url = trimmed.length >= "https://x".length ? trimmed : url;
+    const start = match.index;
+    if (start > cursor) segments.push({ kind: "text", value: text.slice(cursor, start) });
+    segments.push({ kind: "link", value: url, href: url });
+    cursor = start + url.length;
+  }
+  if (cursor < text.length) segments.push({ kind: "text", value: text.slice(cursor) });
+  return segments;
+}
+
 /** "Jul 7, 2026, 3:15 PM"-style stamp for the email header block; null-safe. */
 export function formatEmailTimestampForDisplay(sentAt: string | Date | null | undefined): string | null {
   if (!sentAt) return null;

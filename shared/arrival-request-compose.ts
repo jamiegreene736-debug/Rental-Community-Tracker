@@ -13,6 +13,8 @@
 // The booked listing URL is always included when known — the one identifier
 // the PM can never mis-read. Keep this module free of Node/DB/React imports.
 
+import { stripLinkMarkers } from "./email-mime";
+
 /**
  * The booked listing's title from the buy-in notes. Mirrors the confident
  * branches of routes.ts titleFromBuyInNoteText (combo / Cowork / auto-fill
@@ -48,7 +50,9 @@ function plausibleListingTitle(candidate: string): string {
  * the standalone title line directly above "Vrbo reservation ID:".
  */
 export function bookedListingTitleFromEmailText(text: string): string {
-  const t = String(text ?? "");
+  // "[link: …]" markers (preserved hyperlinks, shared/email-mime.ts) would
+  // ride along on the title/hosted-by lines and fail plausibleListingTitle.
+  const t = stripLinkMarkers(String(text ?? ""));
   if (!t.trim()) return "";
 
   const hosted = t.match(/Hosted by\s+(.{4,180}?)(?:['’]s rental company)?\s*(?:\n|$)/i);
