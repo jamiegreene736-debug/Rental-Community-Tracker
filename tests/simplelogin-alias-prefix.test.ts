@@ -44,8 +44,11 @@ test("two units on one reservation get DISTINCT first-choice prefixes (the 2026-
     unitLabel: "Unit B",
     buyInId: 527,
   });
-  assert.strictEqual(unitA[0], "thien.tran.4c015c.a");
-  assert.strictEqual(unitB[0], "thien.tran.4c015c.b");
+  // The unit token LEADS the prefix (operator 2026-07-20): a trailing ".a"
+  // vs ".b" read as "the same alias" at a glance; "unit.a." vs "unit.b."
+  // up front is visibly distinct and self-describing.
+  assert.strictEqual(unitA[0], "unit.a.thien.tran.4c015c");
+  assert.strictEqual(unitB[0], "unit.b.thien.tran.4c015c");
   assert.notStrictEqual(unitA[0], unitB[0]);
 });
 
@@ -58,9 +61,9 @@ test("candidates fall back to buyInId then entropy, all unique", () => {
     entropy: "zz99xx",
   });
   assert.deepStrictEqual(candidates, [
-    "thien.tran.4c015c.b",
-    "thien.tran.4c015c.b.b527",
-    "thien.tran.4c015c.b.zz99xx",
+    "unit.b.thien.tran.4c015c",
+    "unit.b.thien.tran.4c015c.b527",
+    "unit.b.thien.tran.4c015c.zz99xx",
   ]);
   assert.strictEqual(new Set(candidates).size, candidates.length);
 });
