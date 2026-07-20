@@ -4347,23 +4347,28 @@ assert.ok(
 	    routesSource.includes("rawListings"),
 	  "city VRBO inventory route should return JSON plus a CSV download of the raw export rows",
 	);
+// 2026-07-20: the per-slot "Guest page" toolbar button (guestAlternativePageMutation)
+// plus the "Re-verify"/"Payment terms" toolbar buttons were REMOVED by operator
+// request. Guest pages are built exclusively through the Alternative Unit /
+// Send-unit-confirmation dialog (RelocateGuestDialog createPage), which must keep
+// submitting the full attached combo, saved listing photos, and proximity context.
 assert.ok(
-  bookingsSource.includes("guestAlternativePageMutation") &&
-    bookingsSource.includes("slotsForPage") &&
+  !bookingsSource.includes("guestAlternativePageMutation") &&
+    !bookingsSource.includes("button-guest-alternative-page") &&
+    !bookingsSource.includes("button-verify-rate-") &&
+    !bookingsSource.includes("button-payment-terms-"),
+  "the removed per-slot Guest page / Re-verify / Payment terms toolbar buttons must stay gone (operator request 2026-07-20)",
+);
+assert.ok(
+  bookingsSource.includes("fetchAttachedBuyInSlots(reservation)") &&
     bookingsSource.includes("manualBuyInPhotoUrlsFromNotes") &&
     bookingsSource.includes("/unit-proximity") &&
     bookingsSource.includes("originalCommunity") &&
     bookingsSource.includes("alternativeCommunity") &&
-    bookingsSource.includes("getUnitBuilderByPropertyId") &&
     bookingsSource.includes("unitWalkMinutes") &&
-    bookingsSource.includes("walkMinutes"),
-  "buy-in Guest Page action should submit the full attached combo, saved listing photos, and community proximity context",
-);
-assert.ok(
-  bookingsSource.includes("Manually attached from combo\\s+(.+?)\\s+—\\s+\\d+\\s*BR") &&
-    bookingsSource.includes("usableGuestAlternativeCommunity") &&
-    bookingsSource.includes("comboLabel.split"),
-  "buy-in Guest Page action should parse combo community names from the saved label without using the operational note prefix",
+    bookingsSource.includes("walkMinutes") &&
+    bookingsSource.includes('pageKind: isConfirmation ? "unit-confirmation" : "relocation"'),
+  "the guest-page dialog (RelocateGuestDialog) should submit the full attached combo, saved listing photos, and community proximity context",
 );
 // UNIFIED ALIAS (2026-07-19): the traveler email IS the unit-scoped reservation
 // alias — the legacy firstname.lastname per-guest scheme (whose unit-index
