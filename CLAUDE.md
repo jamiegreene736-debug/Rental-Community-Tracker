@@ -43,6 +43,22 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (FOLLOW-UP: "Confirm mgmt contact" 422 "quote is not verbatim-present" on an HONEST
+  quote — VRBO-unicode tolerance): Operator (unit B toast). NOT a hallucination (don't re-chase):
+  the VRBO confirmation DOES name the on-site team ("Contact Alii Resorts …" + phone +18088796284),
+  but the email is laced with zero-width non-joiners, en-dashes ("#623 – Top-Floor"), and curly
+  apostrophes, AND the company line sits two lines away from the phone ("Send Message" between) —
+  a model quoting honestly normalizes punctuation / joins the contact lines, and the strict
+  contiguous byte-collapse check rejected it. FIXED (`claude/mgmt-contact-verbatim-fix`):
+  `quoteSupportedByEmail` + `foldForContactCompare` in shared/management-contact-logic.ts — folds
+  zero-width chars/dashes/curly quotes/NBSP on BOTH sides, accepts (a) contiguous folded substring,
+  (b) multi-line quotes whose every line is verbatim-present (non-adjacent allowed), (c) ≥90%
+  token overlap with EVERY digit run present. HONESTY INTACT (test-locked): the phone is still
+  verified digit-for-digit against the cited email (haystack deliberately excludes fromEmail —
+  SES sender hashes are digit soup), the email address must still be present, invented
+  quotes/phones/digit-runs still 422. Locked in tests/management-contact-lookup.test.ts (live
+  VRBO-shape cases).
+
 - 2026-07-20 (buy-in "Confirm mgmt contact" — on-site management lookup saved into arrival info):
   Operator: after a unit is attached and confirmation emails arrive but the arrival details
   haven't, add a button like "confirm local on-site management team contact details" that looks
