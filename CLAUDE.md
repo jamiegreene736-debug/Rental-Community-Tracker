@@ -43,6 +43,21 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (unit aliases "still the same" — unit token now LEADS the alias): Operator
+  (screenshot): unit A and B aliases read as identical. NOT a duplicate (don't re-chase): the
+  stored aliases were distinct but only by the trailing letter (jacelyn.tsu.ae9958.a@ vs .b@) —
+  the #1118 unit-token walk appends one char, invisible at a glance. SHIPPED
+  (`claude/unit-b-distinct-alias`): `aliasPrefixCandidates` (server/simplelogin.ts) now leads
+  unit-scoped prefixes with the unit token — new mints read `unit.b.jacelyn.tsu.ae9958@…` —
+  self-describing and visibly distinct; reservation-level aliases keep the guest-first base;
+  fallback walk (.b<id> → entropy) unchanged. Locked in tests/simplelogin-alias-prefix.test.ts.
+  LIVE FIX (same session): unit B of the Menehune reservation (buy-in 540, unbooked, zero
+  emails, empty travelerEmail — safe) had its alias row deleted + re-minted via the deployed
+  portal → `unit.b.jacelyn.tsu.ae9958@emailprivaccy.com`, travelerEmail backfilled; unit A's
+  BOOKED alias/address untouched (VRBO already has it). Existing aliases elsewhere keep their
+  old shape by design — only new mints change. Also confirmed live: buy-in 539 auto-marked
+  `booked` by the alias-email feature (previous PR working in prod).
+
 - 2026-07-20 (alias inbox: AUTO-mark bought in on any inbound alias email + Gmail-style two-pane
   redesign): Operator (screenshot of the "Unit email alias / Alias email history" panel): any email
   hitting the unit's alias IS verification the unit was bought in → auto-mark; and redesign the

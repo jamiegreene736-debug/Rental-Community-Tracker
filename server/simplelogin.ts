@@ -78,9 +78,15 @@ export function aliasPrefixCandidates(input: {
   entropy?: string;
 }): string[] {
   const unitToken = aliasUnitToken(input.unitLabel);
-  const base = [aliasPrefixForGuest(input.guestName, input.reservationId), unitToken]
-    .filter(Boolean)
-    .join(".");
+  // Unit-scoped aliases LEAD with the unit token (`unit.b.jacelyn.tsu.ae9958`)
+  // instead of trailing it (`jacelyn.tsu.ae9958.b`) — operator 2026-07-20: two
+  // units' aliases differing only in the last character before the @ read as
+  // "the same" at a glance. Putting `unit.<token>.` first makes each unit's
+  // address visibly distinct and self-describing. Reservation-level aliases
+  // (no unit token) keep the historical guest-first base.
+  const base = unitToken
+    ? `unit.${unitToken}.${aliasPrefixForGuest(input.guestName, input.reservationId)}`
+    : aliasPrefixForGuest(input.guestName, input.reservationId);
   const candidates = [base];
   if (typeof input.buyInId === "number" && Number.isFinite(input.buyInId)) {
     candidates.push(`${base}.b${input.buyInId}`);
