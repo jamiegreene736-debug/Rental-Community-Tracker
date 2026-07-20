@@ -444,6 +444,24 @@ export function nextStepFromFindJob(findJob: {
 
 // Next commit candidate: first option whose URL hasn't already been attempted
 // (a 409 duplicate-source rejection burns the URL, never retried).
+// ── Replacement bedroom EXACT-match rule (2026-07-20, Cliffs Unit A 2BR→3BR) ─
+// A photo replacement stands in for the SAME sellable unit, so a candidate
+// must have EXACTLY the unit's configured bedroom count. Every find-unit gate
+// used to be a floor (">= required", "needs at least NBR"), which let the
+// 2026-07-19 weekly audit commit a 3BR gallery onto the Cliffs at Princeville
+// 2BR Unit A — the swap-commit repoint then silently flipped the draft to
+// 3BR (combined 7) even though the Guesty listing sells 2BR+4BR. Unknown
+// counts (null) are deliberately NOT rejected here — the finder's downstream
+// scrape/vision checks own those; this only rejects a POSITIVE mismatch.
+export function replacementBedroomMismatch(
+  required: number | null | undefined,
+  candidate: number | null | undefined,
+): boolean {
+  if (typeof required !== "number" || !Number.isFinite(required) || required <= 0) return false;
+  if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate <= 0) return false;
+  return Math.round(candidate) !== Math.round(required);
+}
+
 export function pickCommitCandidate<T extends { url?: unknown }>(
   units: T[],
   attemptedUrls: string[],

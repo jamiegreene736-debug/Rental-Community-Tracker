@@ -38,6 +38,7 @@ import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { occupancyForBedrooms } from "@shared/occupancy";
+import { replacementBedroomMismatch } from "@shared/auto-replace-job-logic";
 import { withListingStayDates } from "@shared/listing-stay-dates";
 import {
   DESCRIPTION_OVERRIDE_FIELDS,
@@ -36517,17 +36518,19 @@ Return ONLY compact JSON with this exact shape:
       return roots;
     };
 
+    // EXACT bedroom rule (2026-07-20): a replacement must match the unit's
+    // bedroom count exactly — the old ">= required" floor let a 3BR gallery
+    // replace the Cliffs 2BR Unit A and repoint the draft to 3BR. Unknown
+    // hints still qualify (the post-scrape gate owns those).
     const qualifyingDiscoveryBedroomHint = (bedroomHint: number | null): boolean =>
-      !requiredBedroomCount
-      || bedroomHint === null
-      || bedroomHint >= requiredBedroomCount;
+      !replacementBedroomMismatch(requiredBedroomCount, bedroomHint);
 
     const countQualifyingDiscoveryCandidates = (): number =>
       candidates.filter((c) => qualifyingDiscoveryBedroomHint(c.bedroomHint)).length;
 
     const countExplicitBedroomCandidates = (): number =>
       requiredBedroomCount
-        ? candidates.filter((c) => typeof c.bedroomHint === "number" && c.bedroomHint >= requiredBedroomCount).length
+        ? candidates.filter((c) => typeof c.bedroomHint === "number" && c.bedroomHint === requiredBedroomCount).length
         : 0;
 
     const discoveryTargetMet = (): boolean => {
@@ -36589,11 +36592,7 @@ Return ONLY compact JSON with this exact shape:
       const addrDisplay = displayAddressFromUrl(link, source);
       const candidateContextText = `${contextText || ""} ${link}`.trim();
       const bedroomHint = extractBedroomHintFromText(candidateContextText);
-      if (
-        requiredBedroomCount
-        && typeof bedroomHint === "number"
-        && bedroomHint < requiredBedroomCount
-      ) {
+      if (replacementBedroomMismatch(requiredBedroomCount, bedroomHint)) {
         discoveryFilteredHits += 1;
         return;
       }
@@ -37307,7 +37306,7 @@ Return ONLY compact JSON with this exact shape:
     const bedroomPriority = (candidate: Candidate): number => {
       if (!requiredBedroomCount) return 1;
       if (typeof candidate.bedroomHint !== "number") return 1;
-      return candidate.bedroomHint >= requiredBedroomCount ? 0 : 2;
+      return candidate.bedroomHint === requiredBedroomCount ? 0 : 2;
     };
     candidates.sort((a, b) =>
       bedroomPriority(a) - bedroomPriority(b)
@@ -37685,19 +37684,15 @@ Return ONLY compact JSON with this exact shape:
           });
           continue;
         }
-        if (
-          requiredBedroomCount
-          && typeof candidate.bedroomHint === "number"
-          && candidate.bedroomHint < requiredBedroomCount
-        ) {
+        if (replacementBedroomMismatch(requiredBedroomCount, candidate.bedroomHint)) {
           console.error(
             `[find-unit] [${source}] ${sourceUrl} search result advertises ${candidate.bedroomHint}BR, ` +
-            `need ${requiredBedroomCount}BR — skipping before platform/photo checks`,
+            `need exactly ${requiredBedroomCount}BR — skipping before platform/photo checks`,
           );
           attempts.push({
             sourceUrl, source, address, unit: unitNumber || "?",
             verdict: "skipped-bedroom-mismatch",
-            reason: `Search result says ${candidate.bedroomHint}BR, but this replacement needs at least ${requiredBedroomCount}BR.`,
+            reason: `Search result says ${candidate.bedroomHint}BR, but this replacement must match the unit's ${requiredBedroomCount}BR exactly.`,
           });
           continue;
         }
@@ -37878,16 +37873,12 @@ Return ONLY compact JSON with this exact shape:
           if (actualBedrooms == null && typeof candidate.bedroomHint === "number") {
             actualBedrooms = candidate.bedroomHint;
           }
-          if (
-            requiredBedroomCount
-            && typeof actualBedrooms === "number"
-            && actualBedrooms < requiredBedroomCount
-          ) {
-            console.error(`[find-unit] [${source}] ${sourceUrl} has ${actualBedrooms}BR, need ${requiredBedroomCount}BR — skipping`);
+          if (replacementBedroomMismatch(requiredBedroomCount, actualBedrooms)) {
+            console.error(`[find-unit] [${source}] ${sourceUrl} has ${actualBedrooms}BR, need exactly ${requiredBedroomCount}BR — skipping`);
             attempts.push({
               sourceUrl, source, address, unit: unitNumber || "?",
               verdict: "skipped-bedroom-mismatch",
-              reason: `Listing is ${actualBedrooms}BR, but this replacement needs at least ${requiredBedroomCount}BR.`,
+              reason: `Listing is ${actualBedrooms}BR, but this replacement must match the unit's ${requiredBedroomCount}BR exactly.`,
               platformCheck,
             });
             continue;

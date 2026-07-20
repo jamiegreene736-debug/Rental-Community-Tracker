@@ -65,6 +65,7 @@ import {
   photoListingHasPersistentPhotoFinding,
   planAutoReplaceRetry,
   pickCommitCandidate,
+  replacementBedroomMismatch,
   serializeAutoReplaceStore,
   shouldResumeAutoReplaceJob,
   summarizeAutoReplaceQueue,
@@ -814,6 +815,7 @@ async function runAutoReplaceJob(
       let burnedPhotos = 0;
       let burnedCoverage = 0;
       let burnedCommunity = 0;
+      let burnedBedrooms = 0;
       for (;;) {
         const candidate = pickCommitCandidate(units as Array<{ url?: unknown }>, record.attemptedUrls);
         if (!candidate) {
@@ -823,8 +825,8 @@ async function runAutoReplaceJob(
           // same bounded restart budget the deploy-burst path uses. An
           // all-409/bot-wall exhaustion still fails: a fresh first-hit search
           // would simply refind the same unusable pool.
-          if ((burnedCoverage > 0 || burnedCommunity > 0) && record.findRestarts < MAX_AUTO_REPLACE_FIND_RESTARTS) {
-            console.warn(`[auto-replace] ${record.jobId}: all ${burnedCoverage + burnedCommunity + burnedInUse + burnedPhotos} option(s) burned (${burnedCoverage} bedroom coverage, ${burnedCommunity} community mismatch) — searching for more candidates (restart ${record.findRestarts + 1}/${MAX_AUTO_REPLACE_FIND_RESTARTS})`);
+          if ((burnedCoverage > 0 || burnedCommunity > 0 || burnedBedrooms > 0) && record.findRestarts < MAX_AUTO_REPLACE_FIND_RESTARTS) {
+            console.warn(`[auto-replace] ${record.jobId}: all ${burnedCoverage + burnedCommunity + burnedInUse + burnedPhotos + burnedBedrooms} option(s) burned (${burnedCoverage} bedroom coverage, ${burnedCommunity} community mismatch, ${burnedBedrooms} wrong bedroom count) — searching for more candidates (restart ${record.findRestarts + 1}/${MAX_AUTO_REPLACE_FIND_RESTARTS})`);
             touch(record, {
               phase: "finding",
               findJobId: null,
@@ -838,6 +840,7 @@ async function runAutoReplaceJob(
             burnedPhotos > 0 ? `${burnedPhotos} had a gallery that could not be scraped (bot-walled or photos taken down)` : null,
             burnedCoverage > 0 ? `${burnedCoverage} photographed fewer bedrooms than the unit claims (the audit needs every bedroom in the gallery)` : null,
             burnedCommunity > 0 ? `${burnedCommunity} positively mismatched the property's community` : null,
+            burnedBedrooms > 0 ? `${burnedBedrooms} had a different bedroom count than this unit (replacements must match exactly)` : null,
           ].filter(Boolean).join("; ");
           await finishAutoReplaceFailure(
             record,
@@ -852,6 +855,23 @@ async function runAutoReplaceJob(
         }
         const c = candidate as Record<string, unknown>;
         const url = String(c.url ?? "");
+        // EXACT bedroom rule (belt-and-braces to the finder's own gates,
+        // 2026-07-20): an automated commit must never change the unit's
+        // bedroom count — the swap repoint would silently flip the LISTING's
+        // configured bedrooms (Cliffs Unit A 2BR→3BR, swap #74). A positive
+        // mismatch burns the candidate like a 409; unknown counts pass
+        // through to the route's staged verification.
+        if (replacementBedroomMismatch(
+          unit.bedrooms,
+          typeof c.bedrooms === "number" ? c.bedrooms : null,
+        )) {
+          burnedBedrooms += 1;
+          touch(record, {
+            attemptedUrls: [...record.attemptedUrls, url],
+            message: `Candidate is ${String(c.bedrooms)}BR but this unit is ${String(unit.bedrooms)}BR — trying the next option…`,
+          });
+          continue;
+        }
         if (!(await confirmRunnerLease())) return;
         let targetMatches: boolean;
         try {
