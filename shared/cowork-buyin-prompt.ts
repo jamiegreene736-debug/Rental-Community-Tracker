@@ -750,7 +750,7 @@ dialog). It is two API calls:
      "checkIn": "${checkIn}",
      "checkOut": "${checkOut}",
      "costPaid": "<total stay cost for this unit, e.g. 1820.00>",
-     "airbnbListingUrl": "<the listing URL you found — VRBO/Booking.com/direct site ONLY, never airbnb.com; the field name is legacy>",
+     "airbnbListingUrl": "<the listing URL you found WITH the stay dates in its query string, so clicking it opens the unit page with the dates already filled — vrbo: ?startDate=${checkIn}&endDate=${checkOut}; booking.com: ?checkin=${checkIn}&checkout=${checkOut}; direct sites: ?checkin=${checkIn}&checkout=${checkOut}. Keep the URL's other params. VRBO/Booking.com/direct site ONLY, never airbnb.com; the field name is legacy>",
      "unitAddress": "<the unit's exact street address, e.g. 1777 Ala Moana Blvd, Honolulu, HI — REQUIRED; you captured it to prove the location, and the app uses it to verify the units are in the same community>",
      "managementCompany": "<PM company name if known, else null>",
      "groundFloorStatus": "unknown",
