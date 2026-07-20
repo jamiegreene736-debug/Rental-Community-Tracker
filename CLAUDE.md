@@ -43,6 +43,37 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-19 (green/red ACTUALLY-PAID rate beside the unit buy-in price, stored for reporting):
+  Operator (alias-panel screenshot): "Right next to the unit buy in price in like a Green or Red
+  font, put the rate that was actually paid. Keep this data stored somewhere so in the future I
+  can pull it for reporting purposes. Pull this information from the emails within the alias
+  inboxes." SHIPPED (`claude/buyin-paid-rate-tracking`): PURE deterministic extraction —
+  `selectPaidRateFromEmails` (shared/paid-rate-extraction.ts; NO AI call, label-anchored line
+  scanning so a hallucinated amount is structurally impossible, every value carries its verbatim
+  quoted line). TIER RULE (load-bearing, test-locked): booking-TOTAL labels ("Total", "Grand
+  total", "Total charged") OUTRANK paid-so-far labels ("Amount paid") — a split-payment deposit
+  receipt's "Amount paid $702.50" must not report the installment as the unit's rate; lines with
+  due/balance/remaining/refund/per-night/"payment N"/deposit NEVER produce a candidate; inbound
+  only; newest email wins within a tier; adjacent-line table layouts handled. STORAGE: new
+  `buy_ins.paid_rate` numeric + `paid_rate_source` jsonb (PaidRateSourceRecord: source email
+  subject/from/date + quote + extractedAt) — schema + schema-maintenance boot ALTER; reporting
+  pull = GET /api/reports/buy-in-paid-rates (one row per extracted rate incl. variance vs
+  costPaid). ENGINE `server/paid-rate-extract.ts` reads BOTH alias mailboxes
+  (guest_inbox_messages ∪ buy_in_emails) and fires at the SAME four seams as the 2026-07-20
+  auto-mark-bought-in feature: both 5-min IMAP ingestion ticks + reconcile on both panel reads
+  (GET /api/guest-inbox → `paidRateUpdated`, GET …/buy-in-communications →
+  `paidRateUpdatedBuyInIds`) so units whose confirmation emails were ingested BEFORE the feature
+  shipped heal the moment their panel opens; client invalidates the bookings queries on either
+  flag. UI (bookings.tsx slot card): " · paid $X" right after costPaid — `paidRateTone` renders
+  RED only when paid exceeds the recorded cost by >max($1, 0.5%), GREEN otherwise (incl. no
+  recorded cost — nothing contradicts); tooltip = source email subject/date + the quoted line.
+  Kill `PAID_RATE_EXTRACT_DISABLED=1`. Verified: paid-rate-extraction 39/0 (new, in npm chain,
+  incl. source guards on all four seams + schema + UI), full `npm test` REAL exit 0, build clean
+  (strings bundle-grepped BOTH bundles), `npm run check` 335 = baseline. Live IMAP leg not
+  smokeable in-session — post-deploy: open the screenshot units' panels; the confirmation
+  emails already in the alias history should stamp paid rates on load and the figures appear
+  beside $1,405 / $1,837.
+
 - 2026-07-20 (unit aliases "still the same" → per-unit NUMERIC tails; the interim unit.b lead-in
   was REJECTED): Operator (screenshot): unit A and B aliases read as identical. NOT a duplicate
   (don't re-chase): the stored aliases were distinct but only by the trailing letter
