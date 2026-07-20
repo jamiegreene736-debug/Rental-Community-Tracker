@@ -13334,6 +13334,34 @@ Requirements:
     }
   });
 
+  // HOST FRICTION LEDGER (operator spec 2026-07-20): per-management-company
+  // record of what past buy-in hosts actually demanded (contract/e-sign, ID
+  // verification, guest forms vs plain arrival instructions), classified from
+  // the alias inboxes. The GET serves the stored ledger and lazily kicks a
+  // background rebuild when it is stale; the POST forces a full rebuild now.
+  // Pure logic in shared/host-friction.ts, scan in server/host-friction-ledger.ts.
+  app.get("/api/host-friction-ledger", async (_req, res) => {
+    try {
+      const { loadHostFrictionLedger, ensureHostFrictionLedgerFresh } = await import("./host-friction-ledger");
+      const ledger = await loadHostFrictionLedger();
+      ensureHostFrictionLedgerFresh(ledger);
+      res.json(ledger);
+    } catch (err: any) {
+      // Fail-soft: an empty ledger just means no friction badges render.
+      res.json({ entries: [], scannedAt: null, error: err?.message });
+    }
+  });
+
+  app.post("/api/host-friction-ledger/scan", async (_req, res) => {
+    try {
+      const { scanHostFrictionLedger } = await import("./host-friction-ledger");
+      const summary = await scanHostFrictionLedger();
+      res.json({ ok: true, ...summary });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: "Host-friction scan failed", message: err.message });
+    }
+  });
+
   app.get("/api/bookings/:reservationId/rental-agreement", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;

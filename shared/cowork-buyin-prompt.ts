@@ -705,6 +705,24 @@ buy-in's notes (see the notes field below) and in your report (URL + all-in
 total + channel + how you confirmed the location). If no qualifying
 instant-book listing exists for that slot after a genuine look, say so
 explicitly in the report.
+
+HOST FRICTION — grade how demanding each pick's host is BEFORE attaching.
+Some hosts just email the door code; others demand a signed rental agreement,
+photo-ID verification, and guest forms. While qualifying a listing, check:
+its House Rules / policies for a required rental agreement (VRBO often shows
+"You'll be asked to sign a rental agreement"), ID / identity-verification or
+guest-registration requirements; whether the host is a professional PM
+company (branded host name, many listings, own booking site — these usually
+require paperwork) or an individual owner; and skim a few recent reviews for
+paperwork/verification complaints. Grade it:
+  - low — no such requirements visible and no paperwork complaints;
+  - medium — ONE of agreement / ID / guest-form required, or a professional
+    PM host with nothing explicit shown;
+  - high — a rental agreement AND ID/identity verification both required.
+When two options are otherwise comparable, prefer the LOWER-friction one —
+this never overrides the channel or booking-mode preferences and never
+relaxes rules 1–5. ALWAYS record the grade + a short reason in the buy-in
+notes (see the notes field below) and report it per pick.
 ${n === 1 ? "" : `
 PAIR RULE — the picks serve ONE guest group. All ${n === 2 ? "two" : n} picks must be in the
 SAME complex — ideally the SAME BUILDING. Two units in different complexes
@@ -755,13 +773,14 @@ dialog). It is two API calls:
      "managementCompany": "<PM company name if known, else null>",
      "groundFloorStatus": "unknown",
      "status": "active",
-     "notes": "Manually recorded buy-in for <unitLabel>. Found via Cowork web search — <resort or city scope> — <listing title>. · Booking mode: <instant book | request-only> · Instant-book backup: <backup listing URL> — $<backup all-in total>"
+     "notes": "Manually recorded buy-in for <unitLabel>. Found via Cowork web search — <resort or city scope> — <listing title>. · Booking mode: <instant book | request-only> · Instant-book backup: <backup listing URL> — $<backup all-in total> · Host friction: <low | medium | high> — <short reason, e.g. rental agreement + photo ID required per house rules>"
    }
    → returns the created record; keep its "id".
    (Notes: keep the " · " separators exactly as shown. Include the
    "Instant-book backup:" segment ONLY when this pick is request-only AND you
    found a backup; drop that segment otherwise. Never put the backup URL
-   anywhere else in the notes.)
+   anywhere else in the notes. The "Host friction:" segment is ALWAYS
+   included — it drives the host-friction badge in my portal.)
 
 2. Attach it to the reservation:
    POST ${attachBuyInEndpoint}
@@ -784,6 +803,7 @@ bedrooms, unit type, its ADDRESS and how you confirmed it's in/adjacent to
 city-wide fallback, its BOOKING MODE (instant book / request-only) — and, for
 every request-only pick, the instant-book backup you found (URL + all-in
 total + channel) or an explicit "no qualifying instant-book backup exists" —
+its HOST FRICTION grade (low / medium / high) with the evidence behind it,
 plus the combined cost, and any slot you could not fill.${reportProfitTail}
 
 ${continueToCheckout
@@ -882,9 +902,10 @@ ${divider}
 Deliver ONE consolidated report with a section per reservation, in order:
 what you attached (listing URL, bedrooms, unit type, address + how you
 confirmed the location, total price, resort vs city-wide, booking mode + the
-instant-book backup wherever a pick was request-only, and the profit math
-wherever that brief's profit guard was on), any slot you could not fill and
-why, and any reservation you had to skip entirely.
+instant-book backup wherever a pick was request-only, the host-friction grade
+with its evidence, and the profit math wherever that brief's profit guard was
+on), any slot you could not fill and why, and any reservation you had to skip
+entirely.
 
 Then TIDY UP THE BROWSER: close every Chrome tab you opened during this task
 (search results, listings, PM sites — all of them, across ALL reservations).

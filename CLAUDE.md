@@ -43,6 +43,27 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (HOST FRICTION — "are they a tough host?" research + ledger): Operator: some VRBO
+  hosts just email arrival instructions, others demand photo-ID verification + signed contracts —
+  know at find time. SHIPPED (`claude/vrbo-host-verification-research-adb055`): (1) the Cowork
+  find prompt's HOST FRICTION rule grades every pick low/medium/high from the listing (house-rules
+  rental-agreement disclosure, ID/guest-form requirements, professional-PM vs individual host,
+  review paperwork complaints) — a SUBORDINATE preference (never overrides channel/booking-mode or
+  rules 1–5) — and ALWAYS records ` · Host friction: <grade> — <reason>` in the buy-in notes
+  (after the title, titleFromBuyInNoteText-safe). (2) Per-unit slot-card badge
+  (`unitHostFrictionBadge`, shared/host-friction.ts): emerald "✓ Chill host" / amber
+  "⚠ Verification likely" / "⚠ Contract + ID host", evidence in the tooltip. (3) FRICTION LEDGER
+  (`host_friction_ledger.v1`, keyed by normalized management company; OTA/placeholder names are
+  rejected keys) — what each PM ACTUALLY demanded in past buy-ins, classified from the alias
+  inboxes via the SAME corpus helpers as arrival extraction (aliasCandidatesForBuyIn +
+  extractionMessagesFromSources + extractionEmailsFromMessages — never raw bodies); DERIVED CACHE
+  rebuilt wholesale per scan (GET /api/host-friction-ledger lazy-refreshes ≥12h; POST …/scan
+  forces). LEDGER BEATS NOTES in the badge; zero signals → no entry/badge (absence of evidence is
+  never "chill"); contract+ID → high, one demand → medium, arrival-instructions-only → low.
+  Locked by tests/host-friction.test.ts (65, npm chain). Verified: full `npm test` REAL exit 0,
+  build clean (strings bundle-grepped both bundles), check 335 = baseline. See AGENTS.md
+  "Host friction" Load-Bearing section + the 2026-07-20 Decision Log line.
+
 - 2026-07-20 (alias email history "the same for both aliases" + per-unit "SMS/Text History"):
   Operator (Menehune two-unit screenshot): both units' "Email history (6)" read as identical, and
   the PM text thread should be a per-unit collapsed menu named "SMS/Text History". DIAGNOSED LIVE
