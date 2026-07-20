@@ -199,9 +199,11 @@ check(
   // hook, so the call-site count is 2 (hook + bulk) rather than 6 — the guard
   // is that those are the ONLY two, and that all five rows go through the hook.
   check(
-    // 3 = the shared row hook + bulk find + bulk checkout (2026-07-19 split).
-    "every Cowork action launches through launchCoworkPrompt (hook + the two bulk runs are the only call sites)",
-    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 3,
+    // 2 = the shared row hook + bulk checkout. Bulk FIND went headless
+    // 2026-07-20 (one find-run per reservation via /api/claude-find-runs/bulk)
+    // so it no longer launches a Cowork task at all.
+    "every Cowork action launches through launchCoworkPrompt (hook + bulk checkout are the only call sites)",
+    (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length === 2,
     (bookingsSrc.match(/await launchCoworkPrompt\(/g) ?? []).length,
   );
   check(
@@ -236,17 +238,17 @@ check(
     // find+checkout brief, which stopped for the operator's card on every unit
     // and made the queue impossible to walk away from. Find and checkout are
     // now separate runs at BOTH the row and the batch level.
-    "find and checkout are separate Cowork prompts at BOTH the row and the batch level",
-    // (BOTH row halves are now headless runs — find 2026-07-19, checkout
-    // 2026-07-20 — so neither buildCoworkBuyInPrompt nor
-    // buildCoworkCheckoutPrompt is called in this file; the server builds both
-    // briefs from the same shared builders. The bulk buttons still deep-link.)
+    "find and checkout are separate flows at BOTH the row and the batch level",
+    // (Row find + row checkout are headless runs — 2026-07-19 / 2026-07-20 —
+    // and bulk FIND went headless too (2026-07-20, one run per reservation via
+    // /api/claude-find-runs/bulk). The one surviving Cowork deep-link batch is
+    // bulk CHECKOUT: card sittings stay a human-paced Cowork task.)
     bookingsSrc.includes("button-headless-find-run-")
       && bookingsSrc.includes("button-headless-checkout-run-")
       && !bookingsSrc.includes('kind: "find-and-prepare"')
-      && bookingsSrc.includes('kind: "bulk-find"')
+      && bookingsSrc.includes('"/api/claude-find-runs/bulk", { items: inputs }')
       && bookingsSrc.includes('kind: "bulk-prepare-checkout"')
-      && bookingsSrc.includes("buildCoworkBulkBuyInPrompt(inputs)")
+      && !bookingsSrc.replace(/\/\/[^\n]*/g, "").includes("buildCoworkBulkBuyInPrompt(")
       && bookingsSrc.includes("buildCoworkBulkCheckoutPrompt(inputs)"),
   );
   check(
@@ -306,15 +308,16 @@ check(
     })(),
   );
   check(
-    // The row's find no longer uses a deep link at all (the headless runner
-    // executes the brief directly), so the over-cap-opens-Cowork-empty class is
-    // structurally gone for the row. BULK find still relays and is covered
-    // above. The "find" kind stays in the server's ALLOWED_KINDS for backward
-    // compatibility with relay rows minted before this deploy — dropping it
-    // would 400 a run the operator had already launched.
-    "the row find is headless; only the BULK find still needs the relay",
+    // FIND no longer uses a deep link at all — row (2026-07-19) and bulk
+    // (2026-07-20) both run headless, so the over-cap-opens-Cowork-empty class
+    // is structurally gone for every find flow; only bulk CHECKOUT still
+    // relays. The "find"/"bulk-find" kinds stay in the server's ALLOWED_KINDS
+    // for backward compatibility with relay rows minted before these deploys —
+    // dropping them would 400 a run the operator had already launched.
+    "find is fully headless (row + bulk); only the bulk CHECKOUT still needs the relay",
     !bookingsSrc.includes('kind: "find", reservationId: reservation._id')
-      && bookingsSrc.includes('kind: "bulk-find"')
+      && !/launchCoworkPrompt\(prompt, \{ kind: "bulk-find" \}\)/.test(bookingsSrc)
+      && bookingsSrc.includes('kind: "bulk-prepare-checkout"')
       && fs.readFileSync(path.join(here, "../server/cowork-prompt-runs.ts"), "utf8").includes('"find"'),
   );
   check(

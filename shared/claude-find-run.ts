@@ -115,8 +115,24 @@ export const CLAUDE_FIND_RUN_CLIENT_EVENTS = 60;
 export const CLAUDE_FIND_RUN_CLAIM_TIMEOUT_MS = 5 * 60 * 1_000;
 /** claimed/running with no heartbeat for this long → runner went silent. */
 export const CLAUDE_FIND_RUN_HEARTBEAT_TIMEOUT_MS = 10 * 60 * 1_000;
-/** Absolute ceiling on any non-terminal run. */
+/** Absolute ceiling on any non-terminal run, measured from when it STARTED
+ *  (claimedAt) — queue-wait time is governed by the queue ceiling below. */
 export const CLAUDE_FIND_RUN_MAX_AGE_MS = 90 * 60 * 1_000;
+/**
+ * Absolute ceiling on QUEUE WAIT (2026-07-20, bulk). The runner is sequential
+ * — one run at a time by construction — so a bulk batch legitimately leaves
+ * runs queued for hours while the line drains. 12h = the bulk cap (8) times
+ * the per-run ceiling (90 min): the longest any honest queue can take. A run
+ * still queued past that is stuck behind a wedged store, never a live line.
+ */
+export const CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS = 12 * 60 * 60 * 1_000;
+/**
+ * Most runs one bulk click may enqueue. Matches COWORK_BULK_FIND_MAX so the
+ * batch size the operator approved for the Cowork bulk route carries over,
+ * and so cap × per-run ceiling stays inside the queue ceiling above — raise
+ * one and you must re-derive the other.
+ */
+export const CLAUDE_FIND_RUN_BULK_MAX = 8;
 
 export function parseClaudeFindRunStore(raw: string | null | undefined): ClaudeFindRunStore {
   if (!raw) return { version: 1, runs: [] };
@@ -234,17 +250,69 @@ export interface ClaudeFindRunWatchdogVerdict {
 }
 
 /**
+ * Evidence that the Mac runner exists and is working, derived from the store
+ * itself (the runner has no other registration). Used by the watchdog so a
+ * bulk batch's queued runs aren't declared "runner offline" while the runner
+ * is demonstrably busy on the run ahead of them.
+ */
+export interface ClaudeFindRunnerActivity {
+  /** A run is claimed/running/attention RIGHT NOW with a live heartbeat. */
+  busy: boolean;
+  /** Newest proof of the runner doing anything (claim / heartbeat / finish). */
+  lastActivityMs: number | null;
+}
+
+export function claudeFindRunnerActivity(runs: ClaudeFindRunRecord[], nowMs: number): ClaudeFindRunnerActivity {
+  let busy = false;
+  let last: number | null = null;
+  for (const run of runs) {
+    for (const stamp of [run.claimedAt, run.heartbeatAt, run.endedAt]) {
+      const ms = stamp ? Date.parse(stamp) : NaN;
+      if (Number.isFinite(ms) && (last === null || ms > last)) last = ms;
+    }
+    if (["claimed", "running", "attention"].includes(run.status)) {
+      const beat = Date.parse(run.heartbeatAt ?? run.claimedAt ?? run.createdAt);
+      if (Number.isFinite(beat) && nowMs - beat <= CLAUDE_FIND_RUN_HEARTBEAT_TIMEOUT_MS) busy = true;
+    }
+  }
+  return { busy, lastActivityMs: last };
+}
+
+/**
  * Server-side watchdog for orphaned runs. Honest failure messages — each names
  * what actually went wrong so the operator knows whether to check the Mac.
+ *
+ * QUEUE SEMANTICS (2026-07-20, bulk): the runner works ONE run at a time, so a
+ * bulk batch legitimately parks runs in "queued" for hours. A queued run is
+ * only "the Mac runner never picked this up" when the runner is genuinely
+ * absent: not busy on another run, and no runner activity (claim / heartbeat /
+ * finish, anywhere in the store) within the claim window either — the activity
+ * basis is what stops the head-of-line run finishing at minute 40 from
+ * instantly expiring every run behind it (their createdAt-based windows all
+ * lapsed while they waited in line, honestly). Called without the activity
+ * context it behaves exactly as the single-run original.
  */
-export function claudeFindRunWatchdogVerdict(run: ClaudeFindRunRecord, nowMs: number): ClaudeFindRunWatchdogVerdict {
+export function claudeFindRunWatchdogVerdict(
+  run: ClaudeFindRunRecord,
+  nowMs: number,
+  activity?: ClaudeFindRunnerActivity,
+): ClaudeFindRunWatchdogVerdict {
   if (!ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status)) return { action: "none" };
   const created = Date.parse(run.createdAt);
-  if (Number.isFinite(created) && nowMs - created > CLAUDE_FIND_RUN_MAX_AGE_MS) {
-    return { action: "fail", error: "Run exceeded the 90-minute ceiling and was closed by the watchdog." };
-  }
   if (run.status === "queued") {
-    if (Number.isFinite(created) && nowMs - created > CLAUDE_FIND_RUN_CLAIM_TIMEOUT_MS) {
+    if (Number.isFinite(created) && nowMs - created > CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS) {
+      return {
+        action: "fail",
+        error: "Waited in line for 12 hours without starting — closed by the watchdog. Re-run it if it is still wanted.",
+      };
+    }
+    // Waiting in line behind a live run is the bulk queue working as designed.
+    if (activity?.busy) return { action: "none" };
+    const basis = Math.max(
+      Number.isFinite(created) ? created : 0,
+      activity?.lastActivityMs ?? 0,
+    );
+    if (basis > 0 && nowMs - basis > CLAUDE_FIND_RUN_CLAIM_TIMEOUT_MS) {
       return {
         action: "fail",
         error:
@@ -252,6 +320,12 @@ export function claudeFindRunWatchdogVerdict(run: ClaudeFindRunRecord, nowMs: nu
       };
     }
     return { action: "none" };
+  }
+  // Running ceiling measures from when the run STARTED — a bulk run that
+  // waited 3 hours in line still gets its full 90 minutes of work.
+  const started = Date.parse(run.claimedAt ?? run.createdAt);
+  if (Number.isFinite(started) && nowMs - started > CLAUDE_FIND_RUN_MAX_AGE_MS) {
+    return { action: "fail", error: "Run exceeded the 90-minute ceiling and was closed by the watchdog." };
   }
   const beat = Date.parse(run.heartbeatAt ?? run.claimedAt ?? run.createdAt);
   if (Number.isFinite(beat) && nowMs - beat > CLAUDE_FIND_RUN_HEARTBEAT_TIMEOUT_MS) {
@@ -261,6 +335,28 @@ export function claudeFindRunWatchdogVerdict(run: ClaudeFindRunRecord, nowMs: nu
     };
   }
   return { action: "none" };
+}
+
+/**
+ * How many live runs stand between a QUEUED run and the runner. Store order is
+ * append order = claim order (claimNextClaudeFindRun takes the first queued),
+ * so position = every active run earlier in the array plus the one being
+ * worked. Non-queued or unknown runs answer 0.
+ */
+export function claudeFindRunQueueAhead(runs: ClaudeFindRunRecord[], runId: string): number {
+  const at = runs.findIndex((r) => r.id === runId);
+  if (at < 0 || runs[at].status !== "queued" || runs[at].cancelRequested) return 0;
+  let ahead = 0;
+  for (let i = 0; i < runs.length; i++) {
+    if (i === at) continue;
+    const other = runs[i];
+    if (!ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(other.status)) continue;
+    if (other.status === "queued" && other.cancelRequested) continue;
+    // A claimed/running/attention run is being worked NOW — ahead regardless
+    // of where the ring buffer holds it. Queued runs are ahead only if older.
+    if (other.status !== "queued" || i < at) ahead++;
+  }
+  return ahead;
 }
 
 /** What the bookings client sees — token + prompt STRIPPED, events truncated. */
@@ -278,6 +374,8 @@ export interface ClaudeFindRunClientView {
   error: string | null;
   events: ClaudeFindRunEvent[];
   droppedEvents: number;
+  /** Queued runs only: live runs ahead of it in the one-at-a-time line. */
+  queueAhead?: number;
 }
 
 /**
@@ -314,8 +412,12 @@ export function claudeFindRunHistoryForReservation(
   }));
 }
 
-export function clientClaudeFindRunView(run: ClaudeFindRunRecord): ClaudeFindRunClientView {
+export function clientClaudeFindRunView(
+  run: ClaudeFindRunRecord,
+  opts?: { queueAhead?: number },
+): ClaudeFindRunClientView {
   return {
+    ...(typeof opts?.queueAhead === "number" && opts.queueAhead > 0 ? { queueAhead: opts.queueAhead } : {}),
     id: run.id,
     reservationId: run.reservationId,
     propertyName: run.propertyName,
@@ -488,9 +590,18 @@ function describeClaudeToolUse(name: unknown, input: any): string {
 export function claudeFindRunStatusLabel(
   status: ClaudeFindRunStatus,
   kind: ClaudeFindRunKind = "find",
+  queueAhead?: number,
 ): { label: string; tone: "active" | "attention" | "good" | "bad" } {
   switch (status) {
     case "queued":
+      // Bulk parks runs in a one-at-a-time line; naming the position is what
+      // separates "waiting its turn" from "the Mac runner is down".
+      if (typeof queueAhead === "number" && queueAhead > 0) {
+        return {
+          label: `Queued — ${queueAhead} run${queueAhead === 1 ? "" : "s"} ahead in the Mac runner's line`,
+          tone: "active",
+        };
+      }
       return { label: "Queued — waiting for the Mac runner", tone: "active" };
     case "claimed":
       return { label: "Starting on the Mac…", tone: "active" };

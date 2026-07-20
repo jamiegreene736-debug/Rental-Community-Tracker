@@ -1181,12 +1181,22 @@ check(
   const bookingsSrc = fs.readFileSync(path.join(here, "../client/src/pages/bookings.tsx"), "utf8");
   const schemaMaintenanceSrc = fs.readFileSync(path.join(here, "../server/schema-maintenance.ts"), "utf8");
   check(
-    "bookings: Auto Cowork bulk button exists and builds the batch via the shared builder",
-    bookingsSrc.includes('data-testid="button-run-bulk-cowork"') && bookingsSrc.includes("buildCoworkBulkBuyInPrompt(inputs)"),
+    // 2026-07-20: bulk find went HEADLESS — the button queues one find-run per
+    // reservation (the exact per-row run) instead of building the Cowork batch
+    // brief. buildCoworkBulkBuyInPrompt is retained in shared/ but must stay
+    // unused by the client: re-wiring it restores the send-press friction the
+    // headless runner exists to remove.
+    "bookings: bulk button exists and queues HEADLESS runs (never the Cowork batch brief)",
+    bookingsSrc.includes('data-testid="button-run-bulk-cowork"')
+      && bookingsSrc.includes('"/api/claude-find-runs/bulk", { items: inputs }')
+      && !bookingsSrc.replace(/\/\/[^\n]*/g, "").includes("buildCoworkBulkBuyInPrompt("),
   );
   check(
-    "bookings: the batch launches through the durable shared Cowork launcher",
-    /const result = await launchCoworkPrompt\(prompt, \{ kind: "bulk-find" \}\)/.test(bookingsSrc),
+    // The retired Cowork bulk-find launch must not come back beside the
+    // headless dispatch — two engines attaching to the same slots is the
+    // double-attach hazard the toast warns about.
+    "bookings: the bulk find batch never launches a Cowork task any more",
+    !/launchCoworkPrompt\(prompt, \{ kind: "bulk-find" \}\)/.test(bookingsSrc),
   );
   check(
     "bookings: Cowork bulk fills OPEN slots only (never detaches)",
@@ -1195,8 +1205,8 @@ check(
       && bookingsSrc.includes("reservation.slots.filter((slot) => !slot.buyIn)"),
   );
   check(
-    "bookings: batch sliced to COWORK_BULK_FIND_MAX with an operator note for the overflow",
-    bookingsSrc.includes("withOpenSlots.slice(0, COWORK_BULK_FIND_MAX)") && bookingsSrc.includes("run Auto Cowork bulk again for the remaining"),
+    "bookings: batch sliced to CLAUDE_FIND_RUN_BULK_MAX with an operator note for the overflow",
+    bookingsSrc.includes("withOpenSlots.slice(0, CLAUDE_FIND_RUN_BULK_MAX)") && bookingsSrc.includes("click again once these finish for the remaining"),
   );
   check(
     // Every entry point that builds a find brief must apply the SAME
