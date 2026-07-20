@@ -783,6 +783,19 @@ also blocks combined/separate launches while a sibling carries an active durable
 Detach and delete must acquire that same reservation lane and reject while any sibling is
 queued, in progress, awaiting payment, or owns a claim; never orphan a live checkout claim.
 
+**Purchase RECORDING is a manual per-slot button, and the old "Buy this unit in" trigger is
+GONE (2026-07-19).** Each attached slot renders `UnitPurchaseStatus` (bookings.tsx): the durable
+`buy_ins.bookingStatus` badges plus a confirm-gated "Mark as bought in" action that PATCHes
+`/api/buy-ins/:id {bookingStatus:"booked", bookingConfirmation?}` — the same transition Cowork
+records, so it arms the never-re-book guard and hides the unit's checkout button. The
+`awaiting_payment` handoff now has BOTH honest exits side by side: "Paid — mark bought in" and
+"Not paid — reset"; `request_submitted`, `failed`, and idle rows get the mark action too. The
+per-unit "Buy this unit in" button (the dormant sidecar checkout job's only UI trigger) was
+REMOVED at the operator's direction — checkout preparation is Cowork-only. The server scaffold
+(`server/buy-in-checkout-job.ts` + its `/api/operations/buy-in-checkout*` endpoints) stays
+dormant/intact; do NOT delete it, and do NOT re-add a client trigger without operator ask.
+Locked by tests/unit-confirmation-page.test.ts (removal + both exits + durable badges).
+
 Large briefs use the authenticated, admin-only `cowork_prompt_runs` relay (24-hour expiry,
 private/no-store response) because they exceed Claude Desktop's deep-link cap: the checkout
 prompt (`kind: "prepare-checkout"`) and the BULK combined find+prepare batch
@@ -4272,6 +4285,26 @@ Load-bearing details (drift-locked in `tests/deploy-healthcheck.test.ts`):
       unconditional (it would re-trim cleaned galleries) and don't drop it (old
       pages rely on it). The screen is bounded to 45 images.
 
+48. **`pageKind: "unit-confirmation"` reuses the WHOLE alternatives pipeline with the
+    relocation framing swapped out (2026-07-19).** The bookings-row "Send unit confirmation
+    to guest" button (next to "Alternative Unit") opens the SAME RelocateGuestDialog with
+    `kind: "unit-confirmation"`: POST `/api/booking-alternatives` gets `pageKind`
+    (persisted in the jsonb payload — no schema column; absent = relocation), and the flow
+    inherits photo hydration, the vision screen (#47 still applies — a confirmation guest
+    must not be able to identify the exact source listing either), community gallery, and
+    AI copy. What changes is FRAMING only: the GET renderer swaps the h1/intro for
+    "these are the exact units reserved for you" and suppresses the
+    same-community/old-community-distance chips (there is no "original booking" to compare
+    against); the drafted message is the shared pure
+    `buildUnitConfirmationGuestMessage` (`shared/unit-confirmation-message.ts`) — plain
+    ASCII, URL on its own line, signed John Carpenter, and NEVER carries relocation
+    vocabulary (no apology/refund/move/"comparable") — the deterministic + AI unit
+    descriptions get the same `confirmationPage` rule; `sent-status` returns the sent
+    page's `pageKind` so the row badge reads "Unit confirmation sent" vs "Guest messaged".
+    Send/tracking are byte-identical (`send-guest-message` + open tracking). Don't fork a
+    second page builder for confirmations — the kind flag IS the design. Locked by
+    tests/unit-confirmation-page.test.ts.
+
 ### Portal authentication
 
 35. **Portal-wide auth gate is a single shared password keyed by
@@ -5585,6 +5618,7 @@ Examples:
 2026-07-10 · [BUTTON SEMANTICS SUPERSEDED 2026-07-17 — "Find new photos" is now the SAME-UNIT cross-portal hunt (see the 2026-07-17 entry + the "Preflight Find new photos" Load-Bearing section); the card placement, static targetFolder persist path, and thin-gallery guards below still stand.] Jamie (screenshot of a static property's preflight — Kaha Lani, both units swapped): "Usually now in the preflight check I have a button that will say find new unit photos and then it will like look for a new source to scrape photos from for that unit. Please investigate and fix why this is not showing here and fix it so that it does show here for this unit and others." · DIAGNOSED + SHIPPED (`claude/preflight-community-photos-check-2fxyao`) · ROOT CAUSE: the per-unit "Find new photos" button (#990) lives on the Photo Sources card, which was gated `isPromotedDraft` AND `handleScrapePhotosForUnit` hard-returned for positive ids — a STATIC builder property's preflight never rendered it. The gate was real: the photo-fetch job persisted ONLY via the draft-only `/api/community/:draftId/persist-photos`. FIX: the card now renders on EVERY preflight page; static rows act on the unit's ACTIVE folder (unitOverrides→replacement folder once swapped, else its own folder) — "Re-pull all photos" delegates to the EXISTING per-folder rescrape job (the committed panel's "Rescrape photos"), while "Find new photos" / empty-folder discovery runs the photo-fetch job with a new `targetFolder` input, persisting via `/api/builder/rescrape-unit-photos` (the single-writer folder path: downloadAndPrioritize + _source.json restamp — so the NEXT "Rescrape photos" re-pulls the NEW source). Guards: static discovery NEVER accepts a thin gallery (minAcceptable = MIN_INDEPENDENT_UNIT_PHOTOS in static mode, replacing or seeding); static rows count the ACTIVE folder on disk (static `photos` arrays are mostly absent — the old fallback would render a full gallery as "Find Photos" and let empty-mode discovery clobber it); sibling exclusion resolves the sibling's ACTIVE folder source. Drafts keep the #990 paths byte-identical. Locked by tests/discovery-cache.test.ts (43/0).
 2026-07-12 · Jamie (screenshot of an audit receipt showing "? unverified" + 2 review chips): "How can we fix the review so that no human intervention is needed and everything just fixes itself after like a double or triple check system sort of thing?" · SHIPPED (`claude/audit-auto-verify-f935a5`) · Four bounded self-verification rails in the Unit Audit Sweep (Load-Bearing #18 under "Unit Audit Sweep"): (A) `error` stages + transient auto-fix failures automatically re-run up to AUDIT_STAGE_RETRY_PASSES (2) times before the receipt — the "? unverified" badge now only survives a genuine triple-failure; (B) a warn-class community check with ZERO positive contradictions re-runs up to AUDIT_COMMUNITY_CONSENSUS_PASSES (3) independent times, confirmations union across passes, and all-passes-clean consensus-passes ("N could not be confirmed online" stops flagging review when 3 independent Lens+vision checks found nothing wrong) — a contradiction surfaced by ANY pass wins immediately, so the double-check can downgrade but never mask; (C) vision same-scene dedupe groups only act/flag when a SECOND independent scan reproduces them (the "still present" groups were new AI pairings each scan, not survivors — they are noise, not review items); (D) fresh-but-inconclusive OTA scan rows re-scan via the photo-cron's shared predicate instead of erroring untried. Judgment-call attention rows (layout, licenses, cooldown/budget, replace-permission) deliberately stay human. Verified: unit-audit-sweep 144/0, full `npm test` exit 0, build clean, `npm run check` 338 = baseline.
 2026-07-12 · Jamie (screenshot of the Pricing tab mid-"Update Market Rates Now": progress frozen on the 2BR leg's "24/24 → median $487" label + red "No heartbeat for 93s… scan loop may be wedged" banner): "I just clicked update market rates from within the pricing tab. Please diagnose and fix." · DIAGNOSED LIVE (bulk-refresh job 4dd5314fe54dc9eab630 state + queue events over the ADMIN_SECRET API + Railway deploy list) · NOT SearchAPI and NOT a wedge — a DEPLOY RACE: PR #1025's deployment was created 22s BEFORE the click; when it went live Railway killed the draining container mid-3BR-leg (no catch/finally ran — no item-retry/item-failed event exists), the item's heartbeatAt (then stamped ONLY on month-completion events) froze at the 2BR leg's last month, the job's 10-min lease expired, and the resume watchdog re-claimed + restarted the item at 14:48:51Z (attempt 2) which completed and pushed 720 days to Guesty at 14:51:48Z — the operator's update DID land, ~14 min after the click. FIXES (`claude/market-rates-update-bug-a2ab1c`): (1) wall-clock 15s heartbeat ticker around the running bulk-pricing item (narrow writes — one item row + job-lease renewal CONDITIONAL on lockedBy=our worker id, so a stale draining-container runner can never steal a watchdog-successor's lease) — heartbeatAt now means "worker process alive" exactly as the UI copy promises, and a legitimately-silent >10-min stretch (widened thin-market month, long Guesty push) can no longer lease-expire a live run into a duplicate runner; (2) new onMonthScanning progress event fires BEFORE each live month's SearchAPI requests ("3BR: scanning 2026-07 (1/24)…") so the label can't freeze on the previous bedroom size's 24/24 line; (3) the hybrid-pricing SearchAPI fetch rides a bounded rail — AbortSignal.timeout (MARKET_RATE_SEARCHAPI_TIMEOUT_MS, default 75s, floor 5s) + ONE in-place retry on transient failures (timeout/network/5xx; 4xx incl. 429 fail fast — the searchapi.ts key-rotation wrapper owns quota), so one hung request can't stall a month for undici's ~5-min default and one blip can't burn a whole-item restart that re-spends every month already scanned; (4) the Pricing tab's stale-heartbeat banner now tells the operator the watchdog auto-resumes within ~12 min instead of inviting a cancel of a scan that was about to heal. All rails test-locked in tests/hybrid-pricing.test.ts (source guards + a behavioral local-HTTP 503-retry/404-fail-fast test).
+2026-07-19 · Jamie: "we need a button to represent that we have actually paid/bought in the attached unit … remove the buy this unit in button as the button above it is the one we now use to check the unit out … another button next to Alternative Unit that says send unit confirmation to guest" · SHIPPED (`claude/unit-buy-in-ui-updates-239c31`) · Per-slot "Mark as bought in" records the completed purchase via the existing PATCH /api/buy-ins/:id booked transition (confirm-gated + optional confirmation number; offered from awaiting_payment as "Paid — mark bought in" beside "Not paid — reset", from request_submitted, failed, and idle states); the "Buy this unit in" trigger for the dormant sidecar checkout job was REMOVED (scaffold kept dormant/intact — endpoints still answer); "Send unit confirmation to guest" reuses the WHOLE alternatives machinery with payload pageKind "unit-confirmation" (no relocation framing on page or message; shared/unit-confirmation-message.ts). Locked by tests/unit-confirmation-page.test.ts.
 ```
 
 (Populate on first dispute.)

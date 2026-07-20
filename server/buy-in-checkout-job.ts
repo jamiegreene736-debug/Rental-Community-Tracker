@@ -377,7 +377,7 @@ async function runCheckoutJob(job: CheckoutJob): Promise<void> {
     const msg = !workerOnline
       ? `Sidecar went offline or timed out before the booking completed (${reason}).`
       : result?.stage === "awaiting_payment_timeout"
-        ? "Payment wasn't completed in time — this unit was NOT booked. Click “Buy this unit in” again to retry."
+        ? "Payment wasn't completed in time — this unit was NOT booked. Prepare a new checkout to retry."
         : `Checkout did not complete: ${reason}`;
     setStatus(job, "failed", msg);
     job.error = msg;

@@ -43,6 +43,33 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-19 (buy-in slot: "Mark as bought in" + "Buy this unit in" REMOVED + "Send unit
+  confirmation to guest"): Operator asked for (a) a UI affordance representing that an attached
+  unit was actually PAID for/bought in, (b) removal of the "Buy this unit in" button (the
+  per-unit "Prepare checkout in Cowork" above it is the checkout path now), and (c) a button next
+  to "Alternative Unit" that confirms the units to the guest with the exact photos. SHIPPED
+  (`claude/unit-buy-in-ui-updates-239c31`): (1) `BuyThisUnitInButton` → `UnitPurchaseStatus`
+  (bookings.tsx) — the dormant-scaffold trigger + its job polling are GONE (client no longer
+  calls /api/operations/buy-in-checkout; the SERVER scaffold stays dormant/intact per AGENTS.md);
+  in its place a confirm-gated "Mark as bought in" (optional confirmation-number prompt) PATCHes
+  the existing /api/buy-ins/:id booked transition (bookedAt server-stamped, never-re-book guard
+  armed, Cowork checkout button auto-hides). Offered from idle/failed rows, request_submitted
+  ("Host accepted — mark booked"), and CRUCIALLY awaiting_payment ("Paid — mark bought in"
+  beside the existing "Not paid — reset" — the two honest exits from the payment handoff). All
+  durable badges + claim resets preserved (test-locked). (2) "Send unit confirmation to guest"
+  reuses the ENTIRE alternatives machinery via payload `pageKind: "unit-confirmation"` (jsonb
+  only, no schema change; RelocateGuestDialog parameterized by kind): same photo
+  hydration/vision screen/tracking, but the page renders "Your Units for Your Stay" + an
+  exact-units intro, relocation chips suppressed, unit copy framed as the guest's confirmed
+  unit, and the message is pure `buildUnitConfirmationGuestMessage`
+  (shared/unit-confirmation-message.ts — ASCII, URL own line, no relocation vocabulary, no
+  "code:" lines so the arrival-details matcher can't fire); sent-status returns pageKind so the
+  row badge reads "Unit confirmation sent". Verified: unit-confirmation-page 33/0 (new, in npm
+  chain), relocation-scenario 82/0 + all cowork suites + pipeline-logic green, full `npm test`
+  exit 0, build clean (bundle-grepped: new strings present, "Buy this unit in" gone from the
+  client bundle), `npm run check` 335 = baseline (stash A/B identical per-file sets). See
+  AGENTS.md Cowork-checkout section + Guest alternatives #48 + the 2026-07-19 Decision Log line.
+
 - 2026-07-19 (VRBO next-day booking on Royal Kahana — advance-notice NEVER pushed; mapping-birth
   auto-push shipped): Operator: guest booked 7/19 for a 7/20 arrival despite "7 days notice" in the
   Pricing tab. NOT a Guesty sync failure and NOT a VRBO bug (don't re-chase): the Pricing tab's
