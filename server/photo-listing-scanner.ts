@@ -56,6 +56,8 @@ import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { canonicalOtaUrlCandidates, otaPlatformForUrl } from "@shared/ota-host-match";
 import { isSiblingUnitLookalikeHit } from "@shared/sibling-unit-lookalike";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
+import { confirmedMatchSetForFolder } from "./photo-match-exceptions";
+import { isConfirmedMatchUrl } from "@shared/photo-match-exceptions";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "./photo-match-guardrails";
 import {
   communityEvidenceInResult,
@@ -759,6 +761,11 @@ export async function runPhotoListingCheckForFolder(
   // (scanner proceeds without suppression rather than silently
   // skipping).
   const authorizedUrls = await getAuthorizedChannelUrls();
+  // Operator-confirmed match exceptions for THIS folder — listings the
+  // operator personally reviewed and marked "okay, stop warning". Suppressed
+  // at the same seam as our own authorized URLs, so only these EXACT listings
+  // are silenced; any new/different listing still raises the warning.
+  const confirmedOkUrls = await confirmedMatchSetForFolder(folder);
   // Per-run cache: maps listing URL → boolean. The first verify call
   // on a URL pays the SERP cost(s); later checks reuse the answer
   // even when a different photo surfaces the same listing.
@@ -815,6 +822,10 @@ export async function runPhotoListingCheckForFolder(
         // URL candidates too, so our own listing served from a
         // regional domain (airbnb.co.uk, abritel.fr) stays suppressed.
         if (canonicalOtaUrlCandidates(link).some((c) => isAuthorizedUrl(c, authorizedUrls))) return false;
+        // Operator-confirmed exception: this exact listing was reviewed and
+        // marked okay for this folder — never re-warn on it.
+        if (isConfirmedMatchUrl(confirmedOkUrls, link)
+          || canonicalOtaUrlCandidates(link).some((c) => isConfirmedMatchUrl(confirmedOkUrls, c))) return false;
         return true;
       });
       if (hits.length === 0) continue;

@@ -43,6 +43,28 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (dashboard avg tile → REALIZED paid rate + photo-match "this listing is OK" exceptions):
+  Operator: (a) the "$867 Avg Low Price/Night" tile must average what guests ACTUALLY paid in our
+  system, not the listed price; (b) the duplicate-photos warning needs a per-match escape — confirm
+  a flagged listing is okay and stop future warnings for THAT exact match while new matches still
+  raise. SHIPPED (`claude/avg-paid-rate-and-match-exceptions`): (1) revenue-30-days computes
+  `avgPaidNightlyRate` = nights-weighted revenue ÷ nights over the window's bookings (bookings
+  missing nights/amount excluded, null when none) + avgPaidNightlyNights/Bookings; the tile reads
+  it ("Avg Paid Rate/Night", "what guests paid · N bookings over M nights") and the client-side
+  listed-price avgLow computation is DELETED (test-locked gone). (2) NEW per-(folder, normalized
+  listing URL) exception allowlist — pure shared/photo-match-exceptions.ts (store shapes,
+  normalizeListingUrlForMatch — MOVED from server/authorized-urls.ts which now re-exports it so
+  the exception keys can never drift from the authorized-URL suppression keys) + fail-soft
+  app_settings store server/photo-match-exceptions.ts (`photo_match_exceptions.v1`) + routes
+  GET/POST/POST-remove /api/photo-listing-check/match-exceptions. The scanner suppresses confirmed
+  URLs at the SAME seam as Guesty-authorized URLs (canonical candidates included), folder-scoped —
+  a different listing or another unit's folder still warns. UI: green "✓ This listing is OK"
+  button beside every flagged listing link in the duplicate-photos popup (confirm dialog →
+  exception saved → the folder's DEEP rescan auto-fires so the row's verdict heals through the
+  REAL scanner path, never a faked status flip). Locked by tests/photo-match-exceptions.test.ts
+  (npm chain; normalization parity, folder scoping, caps, seam/wiring source guards + the tile
+  guards).
+
 - 2026-07-20 (FOLLOW-UP: PM email populates the pm@example.com field + compose names the BOOKED
   listing): Operator (unit B screenshot): the mgmt-contact lookup saved "Alii Resorts" but no
   email — have the scraped email populate/save into the PM contact email field, then Compose →
