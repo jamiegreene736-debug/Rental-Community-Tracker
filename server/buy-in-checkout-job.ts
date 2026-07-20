@@ -15,8 +15,9 @@
 
 import { storage } from "./storage";
 import { bookVrboUnitViaSidecar, getHeartbeat } from "./vrbo-sidecar-queue";
-import { createSimpleLoginAlias, extractSimpleLoginAliasEmail } from "./simplelogin";
+import { getOrCreateReservationAlias } from "./reservation-alias";
 import { BUY_IN_CHECKOUT_PHONE } from "@shared/buy-in-checkout-profile";
+import { travelerEmailNeedsRemint } from "@shared/unified-buyin-alias";
 import {
   BuyInCheckoutClaimError,
   claimBuyInCheckout,
@@ -28,50 +29,11 @@ import {
 // Operator's fixed VRBO traveler phone for every buy-in (808 460 6509).
 export const BUYIN_BOOKING_PHONE = BUY_IN_CHECKOUT_PHONE;
 
-// Per-GUEST booking email domain (operator, 2026-06-10). Each guest gets the
-// deterministic address firstname.lastname@emailprivaccy.com — a SimpleLogin
-// custom-domain alias that is NEVER deleted and whose received mail is stored in
-// that guest's portal inbox. Same guest (any unit / any booking) reuses the same
-// address + inbox. Spelled exactly as the operator gave it (double-c).
+// Booking email domain (operator, 2026-06-10; spelled exactly as given — double-c).
+// Kept for the /api/simplelogin/test-alias diagnostic endpoint. Since 2026-07-19
+// the traveler email is no longer minted from firstname.lastname on this domain —
+// see ensureTravelerEmailForBuyIn below.
 export const BUYIN_TRAVELER_EMAIL_DOMAIN = process.env.BUYIN_TRAVELER_EMAIL_DOMAIN || "emailprivaccy.com";
-
-function sanitizeNamePart(s: string | null | undefined): string {
-  return String(s ?? "")
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[^a-z0-9]+/g, "")
-    .trim();
-}
-
-// firstname.lastname (operator scheme). Falls back gracefully for single-name
-// guests. The "." separator matches the operator's example jamie.greene.
-// Multi-unit reservations append the unit index to the last name (marquez2) so
-// each VRBO buy-in gets a distinct SimpleLogin alias.
-export function guestEmailLocalPart(
-  firstName: string | null | undefined,
-  lastName: string | null | undefined,
-  unitIndex = 1,
-): string {
-  const f = sanitizeNamePart(firstName);
-  let l = sanitizeNamePart(lastName);
-  if (unitIndex > 1 && l) l = `${l}${unitIndex}`;
-  return [f, l].filter(Boolean).join(".") || "guest";
-}
-
-async function unitEmailIndexForBuyIn(buyInId: number, reservationId: string | null | undefined): Promise<number> {
-  const rid = String(reservationId ?? "").trim();
-  if (!rid) return 1;
-  const siblings = await storage.getBuyInsByReservation(rid);
-  if (siblings.length <= 1) return 1;
-  const sorted = [...siblings].sort((a, b) => {
-    const la = String(a.unitLabel ?? a.unitId ?? "");
-    const lb = String(b.unitLabel ?? b.unitId ?? "");
-    return la.localeCompare(lb, undefined, { numeric: true }) || a.id - b.id;
-  });
-  const idx = sorted.findIndex((row) => row.id === buyInId);
-  return idx >= 0 ? idx + 1 : 1;
-}
 
 export type EnsureTravelerEmailInput = {
   buyInId: number;
@@ -80,7 +42,14 @@ export type EnsureTravelerEmailInput = {
   guestLastName?: string | null;
 };
 
-/** Mint or reuse the per-guest VRBO booking email (SimpleLogin alias). */
+// UNIFIED ALIAS (2026-07-19, operator): each attached buy-in has exactly ONE
+// SimpleLogin alias — the unit-scoped (reservation_id, buy_in_id) alias from
+// server/reservation-alias.ts (guest.name.<res6>.<unitToken>@…). That same
+// address is the VRBO traveler email AND the PM/arrival-details thread. The old
+// per-guest firstname.lastname@ scheme is GONE: its unit-index disambiguation
+// raced sibling attaches and, on a SimpleLogin "already exists", silently stored
+// the SAME address on two units — the operator-reported duplicate.
+/** Mint or reuse the per-UNIT booking email (the unit's SimpleLogin alias). */
 export async function ensureTravelerEmailForBuyIn(input: EnsureTravelerEmailInput): Promise<string> {
   const buyInId = Number(input.buyInId);
   if (!Number.isFinite(buyInId) || buyInId <= 0) {
@@ -89,34 +58,40 @@ export async function ensureTravelerEmailForBuyIn(input: EnsureTravelerEmailInpu
   const buyIn = await storage.getBuyIn(buyInId);
   if (!buyIn) throw new CheckoutValidationError(`Buy-in ${buyInId} not found`);
 
+  const reservationId = String(input.reservationId ?? buyIn.guestyReservationId ?? "").trim();
   const existing = String(buyIn.travelerEmail ?? "").trim().toLowerCase();
-  if (existing) return existing;
+  if (existing) {
+    // Legacy duplicate heal: if a sibling unit on the same reservation carries
+    // the SAME travelerEmail (the pre-unification collision) and THIS unit is
+    // not booked yet, fall through and re-mint its own unit alias. A booked
+    // unit keeps its address — VRBO already has it on the live booking.
+    const siblings = reservationId ? await storage.getBuyInsByReservation(reservationId) : [];
+    const needsRemint = travelerEmailNeedsRemint({
+      buyInId,
+      travelerEmail: existing,
+      bookingStatus: buyIn.bookingStatus ?? null,
+      siblings,
+    });
+    if (!needsRemint) return existing;
+  }
 
+  if (!reservationId) {
+    throw new CheckoutValidationError("Attach the buy-in to a reservation before creating its booking email");
+  }
   const firstName = String(input.guestFirstName ?? "").trim();
   const lastName = String(input.guestLastName ?? "").trim();
-  if (!firstName || !lastName) {
-    throw new CheckoutValidationError("Guest first and last name are required for the booking email");
-  }
+  const guestName = [firstName, lastName].filter(Boolean).join(" ").trim() || null;
 
-  const unitIndex = await unitEmailIndexForBuyIn(buyInId, input.reservationId);
-  const localPart = guestEmailLocalPart(firstName, lastName, unitIndex);
-  let email = `${localPart}@${BUYIN_TRAVELER_EMAIL_DOMAIN}`;
-  try {
-    const alias = await createSimpleLoginAlias({
-      prefix: localPart,
-      domain: BUYIN_TRAVELER_EMAIL_DOMAIN,
-      guestName: `${firstName} ${lastName}`.trim(),
-      note: `Buy-in guest inbox · ${firstName} ${lastName}${input.reservationId ? ` · reservation ${input.reservationId}` : ""}`,
-    });
-    email = extractSimpleLoginAliasEmail(alias) || email;
-  } catch (e: any) {
-    const msg = String(e?.message ?? e).toLowerCase();
-    if (!/already|in use|exist|duplicate|taken/.test(msg)) {
-      throw new Error(`Could not create the guest booking email (${email}): ${String(e?.message ?? e)}`);
-    }
-  }
-
-  await storage.updateBuyIn(buyInId, { travelerEmail: email });
+  const { alias } = await getOrCreateReservationAlias({
+    reservationId,
+    guestName,
+    buyIns: [buyIn],
+    buyInId,
+    unitLabel: buyIn.unitLabel ?? null,
+  });
+  const email = String(alias.aliasEmail ?? "").trim().toLowerCase();
+  if (!email) throw new Error("SimpleLogin did not return an alias email for this unit");
+  if (email !== existing) await storage.updateBuyIn(buyInId, { travelerEmail: email });
   return email;
 }
 

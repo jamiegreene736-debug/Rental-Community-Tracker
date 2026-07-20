@@ -85,8 +85,9 @@ check("two-pane layout with a message-list sidebar + reading pane",
   bookingsSrc.includes("alias-inbox-row-")
   && bookingsSrc.includes("alias-inbox-")
   && bookingsSrc.includes("md:flex-row"));
-check("newest email opens by default; a stale selection falls back",
-  bookingsSrc.includes("?? emails[0] ?? null"));
+check("the inbox renders the MERGED thread (PM history + booking thread), newest open by default",
+  bookingsSrc.includes("mergedThread.map((row) =>")
+  && bookingsSrc.includes("?? mergedThread[0] ?? null"));
 check("list snippets reuse the SAME body formatter as the reading pane",
   bookingsSrc.includes("aliasEmailSnippet")
   && bookingsSrc.includes("formatEmailBodyForDisplay(String(body ?? \"\"))"));
@@ -94,7 +95,7 @@ check("reading pane keeps the masked-address + reply plumbing",
   bookingsSrc.includes("vendorVisibleEmailAddresses")
   && bookingsSrc.includes("replyRecipientForBuyInEmail"));
 check("switching messages closes a reply drafted on another one",
-  bookingsSrc.includes("if (replyingId !== null && replyingId !== email.id) closeReply();"));
+  bookingsSrc.includes('if (replyingId !== null && !(row.source === "pm" && replyingId === row.email.id)) closeReply();'));
 
 console.log(`\nalias-bought-in: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

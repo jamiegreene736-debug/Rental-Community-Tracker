@@ -43,6 +43,7 @@ import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
+import { mergeAliasThread } from "@shared/unified-buyin-alias";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
@@ -322,6 +323,7 @@ type BuyInEmailRecord = {
   subject: string;
   body: string;
   attachmentsJson?: string | null;
+  providerMessageId?: string | null;
   sentAt?: string;
   status?: string;
 };
@@ -5744,6 +5746,7 @@ type GuestInboxMessageClient = {
   body: string;
   receivedAt: string;
   direction?: "inbound" | "outbound" | string;
+  providerMessageId?: string | null;
 };
 
 function guestNamePartsFromReservation(reservation: GuestyReservation): { firstName: string; lastName: string } {
@@ -6237,183 +6240,9 @@ function ArrivalDetailsMessageDialog({
   );
 }
 
-/** Inline VRBO guest booking thread — shows arrival emails in Operations. */
-function BuyInGuestThreadPanel({ buyIn, reservation }: { buyIn: BuyIn; reservation: GuestyReservation }) {
-  const { toast } = useToast();
-  if (!isVrboListingUrl(buyIn.airbnbListingUrl)) return null;
-
-  const { firstName: guestFirstName, lastName: guestLastName } = guestNamePartsFromReservation(reservation);
-  const email = buyIn.travelerEmail;
-
-  const { data, isLoading, refetch } = useQuery<GuestInboxResponse>({
-    queryKey: ["/api/guest-inbox", buyIn.id],
-    queryFn: () => apiGetJson(`/api/guest-inbox?buyInId=${buyIn.id}`),
-    enabled: !!email,
-    refetchInterval: email ? 30_000 : false,
-  });
-
-  useEffect(() => {
-    if (!data?.arrivalExtracted) return;
-    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-    invalidateArrivalDetailsQueries();
-    queryClient.invalidateQueries({ queryKey: ["/api/bookings"], predicate: (q) => String(q.queryKey[2] ?? "") === "unit-proximity" });
-  }, [data?.arrivalExtracted, data?.arrivalFieldsUpdated?.join(",")]);
-
-  // The server reconciles the bought-in mark on every /api/guest-inbox read —
-  // an inbound email at the unit alias verifies the purchase. When THIS read
-  // performed the flip, refresh the bookings rows so the green "Bought in"
-  // badge appears without a reload.
-  useEffect(() => {
-    if (!data?.autoMarkedBoughtIn) return;
-    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-    toast({
-      title: "Marked bought in",
-      description: `Email arrived at ${buyIn.travelerEmail ?? "the unit alias"} — the purchase is verified and recorded.`,
-    });
-  }, [data?.autoMarkedBoughtIn]);
-
-  const createEmail = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", `/api/buy-ins/${buyIn.id}/traveler-email`, {
-        reservationId: reservation._id,
-        guestFirstName,
-        guestLastName,
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
-      return body as { ok: true; email: string };
-    },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
-      toast({
-        title: "Booking email ready",
-        description: `Use ${result.email} as the VRBO traveler email. Arrival messages will appear here.`,
-      });
-      void refetch();
-    },
-    onError: (e: any) => toast({ title: "Could not create booking email", description: e?.message ?? String(e), variant: "destructive" }),
-  });
-
-  const messages = data?.messages ?? [];
-  const displayEmail = email ?? data?.aliasEmail;
-  // We can only reply once the host has messaged inbound (that gives us a reply
-  // address); the server derives the host from the most recent inbound message.
-  const hasInboundHost = messages.some(
-    (m) => (m.direction ?? "inbound") === "inbound" && !!m.fromEmail && m.fromEmail.includes("@") && m.fromEmail !== "unknown@unknown",
-  );
-
-  const [replyText, setReplyText] = useState("");
-  const replyMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/guest-inbox/send", { buyInId: buyIn.id, body: replyText.trim() });
-      const b = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(b?.message || b?.error || `HTTP ${res.status}`);
-      return b;
-    },
-    onSuccess: () => {
-      setReplyText("");
-      toast({ title: "Reply sent", description: "Your reply was sent to the host through the booking alias." });
-      void refetch();
-    },
-    onError: (e: any) => toast({ title: "Could not send reply", description: e?.message ?? String(e), variant: "destructive" }),
-  });
-
-  return (
-    <div className="border-t bg-sky-50/40 px-3 py-2.5 space-y-2 dark:bg-sky-950/20" data-testid={`guest-thread-${buyIn.id}`}>
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <Mail className="h-3.5 w-3.5 text-sky-700 dark:text-sky-300" />
-        <span className="font-medium text-sky-900 dark:text-sky-100">VRBO guest thread</span>
-        {displayEmail ? (
-          <Badge variant="outline" className="font-mono text-[10px]">{displayEmail}</Badge>
-        ) : (
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-6 text-[10px]"
-            disabled={createEmail.isPending || !guestFirstName || !guestLastName}
-            onClick={() => createEmail.mutate()}
-            data-testid={`button-create-booking-email-${buyIn.id}`}
-            title={!guestFirstName || !guestLastName ? "Guest needs first and last name on the reservation" : "Create the alias email for VRBO booking"}
-          >
-            {createEmail.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
-            Create booking email
-          </Button>
-        )}
-        {displayEmail && messages.length > 0 && (
-          <Badge className="text-[10px] bg-sky-600">{messages.length} message{messages.length === 1 ? "" : "s"}</Badge>
-        )}
-      </div>
-      {!displayEmail && (
-        <p className="text-[11px] text-muted-foreground">
-          Create the alias email, then use it as the traveler email when booking on VRBO. VRBO arrival details will show here automatically.
-        </p>
-      )}
-      {displayEmail && isLoading && messages.length === 0 && (
-        <div className="flex items-center gap-2 text-[11px] text-muted-foreground py-1">
-          <Loader2 className="h-3 w-3 animate-spin" /> Loading messages…
-        </div>
-      )}
-      {displayEmail && !isLoading && messages.length === 0 && (
-        <p className="text-[11px] text-muted-foreground">
-          No messages yet — VRBO confirmations and arrival details sent to {displayEmail} will appear here.
-          {data?.syncResult?.skipped === "IMAP not configured" && (
-            <span className="block mt-1 text-amber-700 dark:text-amber-300">
-              Mailbox sync is not configured on the server — ask ops to set GUEST_INBOX_IMAP_* credentials.
-            </span>
-          )}
-        </p>
-      )}
-      {messages.length > 0 && (
-        <div className="space-y-2 max-h-64 overflow-y-auto">
-          {messages.map((m) => {
-            const outbound = (m.direction ?? "inbound") === "outbound";
-            return (
-              <div
-                key={m.id}
-                className={`rounded border p-2 text-xs ${outbound ? "bg-sky-100 dark:bg-sky-900/40 ml-6" : "bg-background mr-6"}`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-medium truncate">{outbound ? "You → host" : m.subject}</span>
-                  <span className="text-[10px] text-muted-foreground whitespace-nowrap">{fmtDate(m.receivedAt)}</span>
-                </div>
-                <div className="text-[10px] text-muted-foreground truncate">{outbound ? `To: ${m.toEmail}` : `From: ${m.fromEmail}`}</div>
-                <div className="mt-1 whitespace-pre-wrap break-words text-[11px] line-clamp-6">{String(m.body || "").slice(0, 4000)}</div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {displayEmail && hasInboundHost && (
-        <div className="space-y-1.5 border-t pt-2">
-          <Textarea
-            value={replyText}
-            onChange={(e) => setReplyText(e.target.value)}
-            placeholder="Reply to the host…"
-            className="min-h-[60px] text-xs"
-            data-testid={`guest-thread-reply-${buyIn.id}`}
-          />
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[10px] text-muted-foreground">Sends from {displayEmail} via the booking alias</span>
-            <Button
-              size="sm"
-              className="h-7 text-[11px]"
-              disabled={replyMutation.isPending || !replyText.trim()}
-              onClick={() => replyMutation.mutate()}
-              data-testid={`button-guest-thread-send-${buyIn.id}`}
-            >
-              {replyMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Send className="h-3 w-3 mr-1" />}
-              Send reply
-            </Button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+// BuyInGuestThreadPanel was MERGED into BuyInVendorEmailPanel (2026-07-19):
+// one per-unit alias now serves both the PM/arrival-details thread and the VRBO
+// booking/traveler email, so the bookings row renders ONE email block per unit.
 
 function GuestInboxButton({ buyIn }: { buyIn: BuyIn }) {
   const [open, setOpen] = useState(false);
@@ -13361,12 +13190,6 @@ export default function Bookings() {
                             />
                           )}
                           {slot.buyIn && (
-                            <BuyInGuestThreadPanel
-                              reservation={r}
-                              buyIn={slot.buyIn}
-                            />
-                          )}
-                          {slot.buyIn && (
                             <BuyInArrivalSummary
                               buyIn={slot.buyIn}
                               onEdit={() => setArrivalEditor(slot.buyIn!)}
@@ -14280,13 +14103,69 @@ function BuyInVendorEmailPanel({
   // matching uncapped list in inbox.tsx).
   const emails = (data?.emails ?? []).filter((row) => row.buyInId === buyIn.id);
 
+  // ── Unified alias (2026-07-19): the unit alias IS the VRBO traveler/booking
+  // email. The booking thread (VRBO confirmations, host mail, arrival details)
+  // renders in the SAME panel, merged+deduped with the PM history — the old
+  // separate "VRBO guest thread" block is gone.
+  const travelerEmail = String(buyIn.travelerEmail ?? "").trim();
+  const guestThreadQuery = useQuery<GuestInboxResponse>({
+    queryKey: ["/api/guest-inbox", buyIn.id],
+    queryFn: () => apiGetJson(`/api/guest-inbox?buyInId=${buyIn.id}`),
+    enabled: !!travelerEmail,
+    refetchInterval: travelerEmail ? 30_000 : false,
+  });
+  const bookingMessages = guestThreadQuery.data?.messages ?? [];
+
+  useEffect(() => {
+    if (!guestThreadQuery.data?.arrivalExtracted) return;
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+    invalidateArrivalDetailsQueries();
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings"], predicate: (q) => String(q.queryKey[2] ?? "") === "unit-proximity" });
+  }, [guestThreadQuery.data?.arrivalExtracted, guestThreadQuery.data?.arrivalFieldsUpdated?.join(",")]);
+
+  // The /api/guest-inbox read also reconciles the bought-in mark (an inbound
+  // alias email is purchase proof). Refresh the rows when it performed the
+  // flip — invalidate-only; the buy-in-communications effect below owns the
+  // toast so a race can't show it twice.
+  useEffect(() => {
+    if (!guestThreadQuery.data?.autoMarkedBoughtIn) return;
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+  }, [guestThreadQuery.data?.autoMarkedBoughtIn]);
+
   const createAlias = useMutation({
     mutationFn: () => apiRequest("POST", `/api/bookings/${reservation._id}/simplelogin/alias`, { guestName, buyInId: buyIn.id }).then((r) => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-      toast({ title: "Alias ready", description: "SimpleLogin alias saved for this booking." });
+      // The server also stamps this alias as the unit's travelerEmail (booking
+      // email) — refresh the buy-in rows so the badge + thread pick it up.
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      toast({ title: "Unit alias ready", description: "One alias for this unit — use it as the VRBO traveler email; PM emails and booking confirmations both land here." });
     },
     onError: (err: any) => toast({ title: "Alias failed", description: err?.message ?? "Could not create alias", variant: "destructive" }),
+  });
+
+  // Host reply (booking thread): possible once the host has messaged inbound.
+  const hasInboundHost = bookingMessages.some(
+    (m) => (m.direction ?? "inbound") === "inbound" && !!m.fromEmail && m.fromEmail.includes("@") && m.fromEmail !== "unknown@unknown",
+  );
+  const [hostReplyText, setHostReplyText] = useState("");
+  const hostReplyMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/guest-inbox/send", { buyInId: buyIn.id, body: hostReplyText.trim() });
+      const b = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(b?.message || b?.error || `HTTP ${res.status}`);
+      return b;
+    },
+    onSuccess: () => {
+      setHostReplyText("");
+      toast({ title: "Reply sent", description: "Your reply was sent to the host through the unit alias." });
+      void guestThreadQuery.refetch();
+    },
+    onError: (e: any) => toast({ title: "Could not send reply", description: e?.message ?? String(e), variant: "destructive" }),
   });
 
   const saveContact = useMutation({
@@ -14356,11 +14235,11 @@ function BuyInVendorEmailPanel({
     });
   }, [data?.autoMarkedBuyInIds]);
 
-  // ── Gmail-style alias inbox: which email is open in the reading pane ────────
-  // Newest email opens by default (the list is newest-first); a deleted /
-  // refetched-away selection falls back to the newest rather than a blank pane.
-  const [selectedEmailId, setSelectedEmailId] = useState<number | null>(null);
-  const openEmail = emails.find((e) => e.id === selectedEmailId) ?? emails[0] ?? null;
+  // ── Gmail-style alias inbox: which message is open in the reading pane ──────
+  // Selection is a stable row KEY over the MERGED thread (pm-<id> /
+  // booking-<id>); openRow is derived after mergeAliasThread below. Newest
+  // message opens by default; a refetched-away selection falls back to newest.
+  const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
 
   // ── Inline reply to a specific email in the Alias email history ─────────────
   // Freeform body, "Re: …" subject, sent to whoever the email is with (the PM's
@@ -14418,6 +14297,14 @@ function BuyInVendorEmailPanel({
     onError: (err: any) => toast({ title: "Reply failed", description: err?.message ?? "Could not send reply", variant: "destructive" }),
   });
 
+  // ONE history for the unit: PM/vendor emails + booking-thread messages,
+  // deduped (the unified alias means both IMAP ingesters see the same mail).
+  const mergedThread = mergeAliasThread(emails, bookingMessages);
+  // The open reading-pane row (Gmail-style inbox): the selected key when it
+  // still exists, else the newest message.
+  const openRow = mergedThread.find((r) => aliasThreadRowKey(r) === selectedRowKey) ?? mergedThread[0] ?? null;
+  const openRowKey = openRow ? aliasThreadRowKey(openRow) : null;
+
   return (
     <div className="border-t bg-muted/15 px-3 py-2.5 space-y-2">
       {showAliasControls && (
@@ -14436,6 +14323,10 @@ function BuyInVendorEmailPanel({
                 );
               })()}
             </>
+          ) : travelerEmail ? (
+            // Legacy unit: only the old per-guest booking email exists. It keeps
+            // working (VRBO mail lands below); creating the unit alias is optional.
+            <Badge variant="outline" className="font-mono text-[10px]">{travelerEmail}</Badge>
           ) : (
             <Button
               size="sm"
@@ -14443,6 +14334,7 @@ function BuyInVendorEmailPanel({
               className="h-7"
               onClick={() => createAlias.mutate()}
               disabled={createAlias.isPending || isLoading}
+              data-testid={`button-create-unit-alias-${buyIn.id}`}
             >
               {createAlias.isPending ? "Creating..." : "Create unit alias"}
             </Button>
@@ -14450,9 +14342,16 @@ function BuyInVendorEmailPanel({
           {contact?.reverseAliasEmail && (
             <Badge variant="secondary" className="font-mono text-[10px]">to PM via {contact.reverseAliasEmail}</Badge>
           )}
-          {alias && (
+          {alias && travelerEmail && travelerEmail.toLowerCase() !== String(alias.aliasEmail ?? "").toLowerCase() && (
+            // Pre-unification booking email — VRBO already has it on this unit's
+            // booking, so its mail still arrives in the thread below.
+            <Badge variant="secondary" className="font-mono text-[10px]" title="Older booking email for this unit — messages sent to it still appear in the history below.">
+              booking email (legacy): {travelerEmail}
+            </Badge>
+          )}
+          {(alias || travelerEmail) && (
             <span className="basis-full text-[11px] text-muted-foreground">
-              Saved alias messages and attachments stay in history after the alias expires.
+              One alias per unit — use it as the VRBO traveler email when booking; booking confirmations, host messages, and PM arrival-details replies all land in the history below and stay saved after the alias expires.
             </span>
           )}
         </div>
@@ -14533,20 +14432,63 @@ function BuyInVendorEmailPanel({
           </div>
         </div>
       </details>
-      <details className="rounded-md border bg-background/70 p-2" open={emails.length > 0}>
-        <summary className="cursor-pointer text-xs font-medium">Alias email history ({emails.length})</summary>
-        {emails.length === 0 && (
-          <div className="mt-2 text-[11px] text-muted-foreground">No PM/vendor emails saved for this unit yet.</div>
+      <details className="rounded-md border bg-background/70 p-2" open={mergedThread.length > 0}>
+        <summary className="cursor-pointer text-xs font-medium">Email history ({mergedThread.length})</summary>
+        {mergedThread.length === 0 && (
+          <div className="mt-2 text-[11px] text-muted-foreground">
+            No emails saved for this unit yet — PM/vendor replies, VRBO confirmations, and arrival details sent to the unit alias will appear here.
+            {guestThreadQuery.data?.syncResult?.skipped === "IMAP not configured" && (
+              <span className="block mt-1 text-amber-700 dark:text-amber-300">
+                Mailbox sync is not configured on the server — ask ops to set GUEST_INBOX_IMAP_* credentials.
+              </span>
+            )}
+          </div>
         )}
-        {emails.length > 0 && (
+        {mergedThread.length > 0 && (
         <div
           className="mt-2 flex flex-col overflow-hidden rounded-md border md:h-[440px] md:flex-row"
           data-testid={`alias-inbox-${buyIn.id}`}
         >
-          {/* Gmail-style message list: newest first; click a row to open it in
-              the reading pane. On phones the list sits above the message. */}
+          {/* Gmail-style message list over the MERGED thread (PM history ∪
+              booking thread): newest first; click a row to open it in the
+              reading pane. On phones the list sits above the message. */}
           <div className="max-h-56 shrink-0 overflow-y-auto border-b bg-muted/20 md:h-full md:max-h-none md:w-64 md:border-b-0 md:border-r lg:w-72">
-            {emails.map((email) => {
+            {mergedThread.map((row) => {
+              const rowKey = aliasThreadRowKey(row);
+              const rowOpen = rowKey === openRowKey;
+              const rowClass = `block w-full border-b border-l-2 px-2.5 py-2 text-left transition-colors last:border-b-0 ${
+                rowOpen ? "border-l-primary bg-background" : "border-l-transparent hover:bg-muted/40"
+              }`;
+              const selectRow = () => {
+                setSelectedRowKey(rowKey);
+                // Switching messages closes a reply drafted on another one.
+                if (replyingId !== null && !(row.source === "pm" && replyingId === row.email.id)) closeReply();
+              };
+              if (row.source === "booking") {
+                const m = row.message;
+                const outbound = (m.direction ?? "inbound") === "outbound";
+                return (
+                  <button
+                    type="button"
+                    key={rowKey}
+                    onClick={selectRow}
+                    aria-current={rowOpen ? "true" : undefined}
+                    className={rowClass}
+                    data-testid={`alias-inbox-row-${rowKey}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate text-[11px] font-medium">{outbound ? "You → host" : m.fromEmail}</span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">{shortAliasEmailDate(m.receivedAt)}</span>
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1.5">
+                      {outbound && <Badge variant="outline" className="h-4 shrink-0 px-1 text-[9px]">sent</Badge>}
+                      <span className="min-w-0 truncate text-[11px] font-semibold">{m.subject}</span>
+                    </div>
+                    <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{aliasEmailSnippet(m.body)}</div>
+                  </button>
+                );
+              }
+              const email = row.email;
               // Resolve THIS row's vendor for the "who it's with" line — same
               // per-email contact match the reading pane uses.
               const rowContact = data?.contacts?.find(
@@ -14557,23 +14499,14 @@ function BuyInVendorEmailPanel({
                 vendorEmail: rowContact?.vendorEmail,
                 reverseAliasEmail: rowContact?.reverseAliasEmail,
               });
-              const rowOpen = email.id === openEmail?.id;
               return (
                 <button
                   type="button"
-                  key={email.id}
-                  onClick={() => {
-                    setSelectedEmailId(email.id);
-                    // Switching messages closes a reply drafted on another one.
-                    if (replyingId !== null && replyingId !== email.id) closeReply();
-                  }}
+                  key={rowKey}
+                  onClick={selectRow}
                   aria-current={rowOpen ? "true" : undefined}
-                  className={`block w-full border-b border-l-2 px-2.5 py-2 text-left transition-colors last:border-b-0 ${
-                    rowOpen
-                      ? "border-l-primary bg-background"
-                      : "border-l-transparent hover:bg-muted/40"
-                  }`}
-                  data-testid={`alias-inbox-row-${email.id}`}
+                  className={rowClass}
+                  data-testid={`alias-inbox-row-${rowKey}`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="min-w-0 truncate text-[11px] font-medium">
@@ -14592,10 +14525,36 @@ function BuyInVendorEmailPanel({
               );
             })}
           </div>
-          {/* Reading pane: the opened email (defaults to the newest). */}
+          {/* Reading pane: the opened message (defaults to the newest). */}
           <div className="min-w-0 flex-1 overflow-y-auto bg-background">
           {(() => {
-            const email = openEmail!;
+            const row = openRow!;
+            if (row.source === "booking") {
+              // Booking-thread message (VRBO confirmation / host mail) that the
+              // PM history didn't also capture — no attachments/reverse-alias
+              // reply path; the host-reply composer below the inbox answers it.
+              const m = row.message;
+              const outbound = (m.direction ?? "inbound") === "outbound";
+              return (
+                <div className="p-3 text-[11px]">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-sm font-semibold leading-snug">{m.subject || (outbound ? "You → host" : "(no subject)")}</span>
+                    <Badge variant={outbound ? "outline" : "secondary"} className="shrink-0 text-[10px]">
+                      {outbound ? "sent" : "booking thread"}
+                    </Badge>
+                  </div>
+                  <div className="mt-1.5 space-y-0.5 border-b pb-2 text-[10px] text-muted-foreground">
+                    <div className="truncate"><span className="font-medium">From:</span> {m.fromEmail}</div>
+                    <div className="truncate"><span className="font-medium">To:</span> {m.toEmail}</div>
+                    <div>{formatEmailTimestampForDisplay(m.receivedAt) ?? "—"} · booking thread</div>
+                  </div>
+                  <div className="mt-2 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
+                    {String(m.body || "").slice(0, 6000)}
+                  </div>
+                </div>
+              );
+            }
+            const email = row.email;
             const emailAttachments = parseAliasEmailAttachments(email.attachmentsJson);
             // Show what the PM actually saw: for a reverse-alias send SimpleLogin
             // rewrites the visible From to the guest alias (…@emailprivaccy.com) and
@@ -14775,6 +14734,30 @@ function BuyInVendorEmailPanel({
         </div>
         )}
       </details>
+      {travelerEmail && hasInboundHost && (
+        <div className="space-y-1.5 rounded-md border bg-sky-50/40 p-2 dark:bg-sky-950/20">
+          <Textarea
+            value={hostReplyText}
+            onChange={(e) => setHostReplyText(e.target.value)}
+            placeholder="Reply to the host…"
+            className="min-h-[60px] text-xs"
+            data-testid={`guest-thread-reply-${buyIn.id}`}
+          />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] text-muted-foreground">Sends from {travelerEmail} via the unit alias</span>
+            <Button
+              size="sm"
+              className="h-7 text-[11px]"
+              disabled={hostReplyMutation.isPending || !hostReplyText.trim()}
+              onClick={() => hostReplyMutation.mutate()}
+              data-testid={`button-guest-thread-send-${buyIn.id}`}
+            >
+              {hostReplyMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Send className="h-3 w-3 mr-1" />}
+              Send reply
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -14782,6 +14765,12 @@ function BuyInVendorEmailPanel({
 function extractEmailForInput(value: string): string {
   const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return match?.[0] ?? "";
+}
+
+// Stable selection key for a merged alias-thread row (Gmail-style inbox):
+// PM-history rows and booking-thread rows have independent id spaces.
+function aliasThreadRowKey(row: { source: "pm" | "booking"; email?: { id: number }; message?: { id: number } }): string {
+  return row.source === "booking" ? `booking-${row.message?.id}` : `pm-${row.email?.id}`;
 }
 
 // Compact Gmail-style date for the alias-inbox list rows: time-of-day for
