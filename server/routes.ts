@@ -8872,6 +8872,14 @@ export async function registerRoutes(
       }
 
       const sortedBookings = bookings.sort((a, b) => b.bookedAt.localeCompare(a.bookedAt));
+      // Realized average nightly rate: what guests ACTUALLY paid per night
+      // across the window's bookings (nights-weighted revenue ÷ nights), not
+      // the listed low price (operator, 2026-07-20). Bookings missing a night
+      // count or an amount are excluded rather than skewing the average.
+      const paidRateBookings = bookings.filter((b) => (b.nights ?? 0) > 0 && b.amount > 0);
+      const paidNightsTotal = paidRateBookings.reduce((s, b) => s + b.nights, 0);
+      const paidAmountTotal = paidRateBookings.reduce((s, b) => s + b.amount, 0);
+      const avgPaidNightlyRate = paidNightsTotal > 0 ? Math.round(paidAmountTotal / paidNightsTotal) : null;
       const sortedPayments = payments.sort((a, b) => b.paidAt.localeCompare(a.paidAt));
       const sortedRefunds = refunds.sort((a, b) => b.refundedAt.localeCompare(a.refundedAt));
       const largestBooking = bookings
@@ -9033,6 +9041,10 @@ export async function registerRoutes(
         bookingCount48Hours,
         payments: sortedPayments,
         bookings: sortedBookings,
+        // Nights-weighted realized nightly rate for the dashboard tile.
+        avgPaidNightlyRate,
+        avgPaidNightlyNights: paidNightsTotal,
+        avgPaidNightlyBookings: paidRateBookings.length,
         largestBooking,
         highestGrossingBooking,
         highestListingEarner,
@@ -50692,6 +50704,49 @@ Return ONLY compact JSON with this exact shape:
       res.json({ started: true, folders, deep: true });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? "Failed to start photo-listing scan" });
+    }
+  });
+
+  // Operator-confirmed photo-match exceptions: "this listing is okay — stop
+  // warning about it for this unit". Per-(folder, normalized listing URL);
+  // the scanner suppresses ONLY these exact listings at the authorized-URL
+  // seam, so any NEW listing that surfaces still raises the warning. The
+  // client re-scans the folder after confirming so the row's verdict heals
+  // through the real scanner path, never by faking a status.
+  app.get("/api/photo-listing-check/match-exceptions", async (req, res) => {
+    try {
+      const { loadPhotoMatchExceptions } = await import("./photo-match-exceptions");
+      const store = await loadPhotoMatchExceptions();
+      const folder = String(req.query.folder ?? "").trim();
+      res.json(folder ? { [folder]: store[folder] ?? [] } : store);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to load match exceptions" });
+    }
+  });
+  app.post("/api/photo-listing-check/match-exceptions", async (req, res) => {
+    try {
+      const folder = String((req.body as any)?.folder ?? "").trim();
+      const url = String((req.body as any)?.url ?? "").trim();
+      const title = String((req.body as any)?.title ?? "").trim() || undefined;
+      if (!folder || !url) return res.status(400).json({ error: "folder and url are required" });
+      const { confirmPhotoMatchException } = await import("./photo-match-exceptions");
+      const added = await confirmPhotoMatchException(folder, url, title);
+      if (!added) return res.status(422).json({ error: "URL could not be normalized — is it a full http(s) listing URL?" });
+      res.json({ ok: true, exception: added });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to save match exception" });
+    }
+  });
+  app.post("/api/photo-listing-check/match-exceptions/remove", async (req, res) => {
+    try {
+      const folder = String((req.body as any)?.folder ?? "").trim();
+      const url = String((req.body as any)?.url ?? "").trim();
+      if (!folder || !url) return res.status(400).json({ error: "folder and url are required" });
+      const { unconfirmPhotoMatchException } = await import("./photo-match-exceptions");
+      const removed = await unconfirmPhotoMatchException(folder, url);
+      res.json({ ok: true, removed });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to remove match exception" });
     }
   });
 

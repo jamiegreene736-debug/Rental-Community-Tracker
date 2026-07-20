@@ -2038,10 +2038,8 @@ function AdminDashboard() {
   const avgBedrooms = dashboardRowCount
     ? Math.round((dashboardRows.reduce((s, p) => s + p.bedrooms, 0) / dashboardRowCount) * 10) / 10
     : 0;
-  const pricedProperties = dashboardRows.filter((p) => p.lowPrice !== null);
-  const avgLow = pricedProperties.length
-    ? Math.round(pricedProperties.reduce((s, p) => s + (p.lowPrice || 0), 0) / pricedProperties.length)
-    : 0;
+  // (The old listed-price average was replaced by the server's realized
+  // avgPaidNightlyRate — what guests actually paid — on the dashboard tile.)
   const formatCurrency = (value: number) =>
     new Intl.NumberFormat("en-US", {
       style: "currency",
@@ -2104,6 +2102,9 @@ function AdminDashboard() {
   type DashboardRevenueSummary = {
     windowDays: number;
     revenue: number;
+    avgPaidNightlyRate?: number | null;
+    avgPaidNightlyNights?: number;
+    avgPaidNightlyBookings?: number;
     fundsCollected30Days?: number;
     paymentsTaken30Days?: number;
     fundsCollected48Hours?: number;
@@ -3871,6 +3872,43 @@ function AdminDashboard() {
     },
   });
 
+  // "I confirm this listing is okay — stop warning about it" (operator,
+  // 2026-07-20): saves a per-(folder, listing URL) exception the scanner
+  // suppresses at the same seam as our own authorized URLs, then kicks the
+  // folder's deep rescan so the row's verdict heals through the REAL scanner
+  // path (a still-flagged different listing keeps the warning honest).
+  const confirmMatchOkMutation = useMutation({
+    mutationFn: async (vars: {
+      folder: string; url: string; title: string;
+      propertyName: string; unitLabel: string; platforms: DuplicatePhotoPlatform[];
+    }) => {
+      const r = await apiRequest("POST", "/api/photo-listing-check/match-exceptions", {
+        folder: vars.folder,
+        url: vars.url,
+        title: vars.title,
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: (_data, vars) => {
+      toast({
+        title: "Listing confirmed okay",
+        description: "This exact listing won't raise the warning again. Rescanning the unit so the alert clears if nothing else matched.",
+      });
+      // Heal the row through the real scanner (exceptions apply on the rescan).
+      confirmPhotosReplacedMutation.mutate({
+        folder: vars.folder,
+        propertyName: vars.propertyName,
+        unitLabel: vars.unitLabel,
+        platforms: vars.platforms,
+      });
+    },
+    onError: (e: any) => toast({ title: "Could not save the confirmation", description: e.message, variant: "destructive" }),
+  });
+
   const startBulkPhotoCommunityCheck = async (propertyIds: number[]) => {
     const targets = allProperties.filter((p) => propertyIds.includes(p.id));
     if (targets.length === 0) {
@@ -4040,9 +4078,24 @@ function AdminDashboard() {
           <Card className="p-4 sm:col-span-2 lg:col-span-2">
             <div className="flex items-start gap-2 mb-1 min-h-8">
               <DollarSign className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground font-medium">Avg Low Price/Night + 30-day booking stats</span>
+              <span className="text-xs text-muted-foreground font-medium">Avg Paid Rate/Night + 30-day booking stats</span>
             </div>
-            <p className="text-2xl font-bold" data-testid="text-avg-price">${avgLow.toLocaleString()}</p>
+            {/* Realized rate — what guests ACTUALLY paid per night across the
+                past 30 days' bookings (nights-weighted), not the listed price. */}
+            <p className="text-2xl font-bold" data-testid="text-avg-price">
+              {revenueSummaryLoading
+                ? "..."
+                : revenueSummary?.avgPaidNightlyRate != null
+                  ? `$${revenueSummary.avgPaidNightlyRate.toLocaleString()}`
+                  : "—"}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              {revenueSummary?.avgPaidNightlyRate != null
+                ? `what guests paid · ${revenueSummary.avgPaidNightlyBookings ?? 0} bookings over ${revenueSummary.avgPaidNightlyNights ?? 0} nights`
+                : revenueSummaryLoading
+                  ? ""
+                  : "no priced bookings in the past 30 days"}
+            </p>
             <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
               <Link
                 href={operationsHrefForBooking(revenueSummary?.largestBooking)}
@@ -7534,17 +7587,41 @@ function AdminDashboard() {
                                         </span>
                                         {pg.links.map((link) => (
                                           <span key={link.url} className="block pl-2">
-                                            <a
-                                              href={link.url}
-                                              target="_blank"
-                                              rel="noopener noreferrer"
-                                              className="flex items-center gap-1 text-red-700 underline underline-offset-2 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200"
-                                              title={link.url}
-                                              data-testid={`link-duplicate-listing-${r.folder}-${link.platform}`}
-                                            >
-                                              <ExternalLink className="h-3 w-3 shrink-0" />
-                                              <span className="truncate">{link.title}</span>
-                                            </a>
+                                            <span className="flex items-center gap-2">
+                                              <a
+                                                href={link.url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="flex min-w-0 items-center gap-1 text-red-700 underline underline-offset-2 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200"
+                                                title={link.url}
+                                                data-testid={`link-duplicate-listing-${r.folder}-${link.platform}`}
+                                              >
+                                                <ExternalLink className="h-3 w-3 shrink-0" />
+                                                <span className="truncate">{link.title}</span>
+                                              </a>
+                                              {/* Per-listing false-positive escape: confirm THIS exact
+                                                  listing is fine and stop future warnings for it. New,
+                                                  different matches still warn. */}
+                                              <button
+                                                type="button"
+                                                className="shrink-0 rounded border border-emerald-300 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
+                                                disabled={confirmMatchOkMutation.isPending || confirmPhotosReplacedMutation.isPending}
+                                                onClick={() => {
+                                                  if (!window.confirm(`Confirm this listing is okay?\n\n${link.title}\n${link.url}\n\nFuture scans will stop warning about THIS exact listing for ${r.unitLabel}. Different listings that match your photos will still raise the alert.`)) return;
+                                                  confirmMatchOkMutation.mutate({
+                                                    folder: r.folder,
+                                                    url: link.url,
+                                                    title: link.title,
+                                                    propertyName: r.propertyName,
+                                                    unitLabel: r.unitLabel,
+                                                    platforms: r.platforms,
+                                                  });
+                                                }}
+                                                data-testid={`button-confirm-match-ok-${r.folder}-${link.platform}`}
+                                              >
+                                                ✓ This listing is OK
+                                              </button>
+                                            </span>
                                             {link.matchedPhotoUrls.length > 0 ? (
                                               <span className="mt-0.5 flex flex-wrap items-center gap-1 pl-4">
                                                 <span className="text-muted-foreground">Your photos found there:</span>

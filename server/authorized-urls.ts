@@ -22,24 +22,17 @@
 
 import { guestyRequest } from "./guesty-sync";
 import { storage } from "./storage";
+import { normalizeListingUrlForMatch } from "../shared/photo-match-exceptions";
 
 const REFRESH_MS = 30 * 60 * 1000; // 30 minutes — Guesty data doesn't drift faster.
 
 type CachedSet = { urls: Set<string>; at: number };
 let cache: CachedSet | null = null;
 
-export function normalizeListingUrl(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  let u: URL;
-  try { u = new URL(raw.trim()); } catch { return null; }
-  const host = u.hostname.replace(/^www\./, "").toLowerCase();
-  const path = u.pathname
-    .replace(/\.[a-z0-9.-]+$/i, "")
-    .replace(/\/+$/, "")
-    .toLowerCase();
-  if (!host || !path) return null;
-  return `${host}${path}`;
-}
+// Normalization moved to shared/photo-match-exceptions.ts (2026-07-20) so the
+// operator-confirmed match exceptions compare with the EXACT same key as the
+// authorized-URL suppression. Re-exported to keep this module's API stable.
+export const normalizeListingUrl = normalizeListingUrlForMatch;
 
 // Pluck the public URL out of a channel integration sub-object. Mirrors
 // the ordering used by the client's guestyService.pickChannelUrl.
