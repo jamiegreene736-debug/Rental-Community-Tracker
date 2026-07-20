@@ -20,6 +20,8 @@
 // installment. Ties break to the newest email; within one email the LAST
 // match of the winning tier wins (summaries sit at the bottom).
 
+import { stripLinkMarkers } from "./email-mime";
+
 export type PaidRateMailbox = "guest-inbox" | "buy-in-email";
 
 export type PaidRateEmail = {
@@ -104,7 +106,10 @@ export function extractPaidAmountFromEmailText(
   subject: string | null | undefined,
   body: string | null | undefined,
 ): PaidAmountCandidate | null {
-  const text = `${subject ?? ""}\n${body ?? ""}`;
+  // "[link: …]" markers (preserved hyperlinks) are stripped first — a receipt
+  // URL's digit runs must never be mistaken for a money figure, and a marker
+  // on a labeled line would pollute the verbatim quote.
+  const text = stripLinkMarkers(`${subject ?? ""}\n${body ?? ""}`);
   const lines = text.split(/\r?\n/);
   let best: PaidAmountCandidate | null = null;
   const consider = (tier: number, label: string, amount: number, quote: string) => {

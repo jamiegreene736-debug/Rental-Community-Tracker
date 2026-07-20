@@ -85,18 +85,63 @@ function codePointToChar(codePoint: number): string {
   }
 }
 
+// Marker format for hyperlinks preserved out of HTML emails: "[link: <url>]".
+// The exact shape is LOAD-BEARING in three places — the client linkifier
+// renders the URL clickable, stripLinkMarkers() removes it so the id-less
+// email surrogate dedup keys hash the SAME value for pre-link and post-link
+// bodies (else every legacy HTML email without a Message-ID would re-import
+// as a duplicate), and the sync-time legacy-row heal detects it. Change all
+// four together or not at all.
+const LINK_MARKER_RE = /\s?\[link:\s\S[^\]]*\]/g;
+
+/** Remove "[link: …]" markers — used for surrogate dedup hashing + snippets. */
+export function stripLinkMarkers(text: string): string {
+  return String(text ?? "").replace(LINK_MARKER_RE, "");
+}
+
+// Rewrite <a href="…">text</a> to "text [link: url]" BEFORE the generic tag
+// strip discards the href (operator ask 2026-07-20: rental-agreement /
+// confirmation links in the alias inbox must stay clickable). http(s) only —
+// mailto/tel/javascript/cid anchors keep just their text. An anchor whose text
+// IS the URL gets no marker (no duplication), and the same href is only marked
+// once per email (button emails repeat one URL across image + text anchors).
+function preserveAnchorHrefs(html: string): string {
+  const seen = new Set<string>();
+  return html.replace(
+    /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi,
+    (_m, dq: string | undefined, sq: string | undefined, bare: string | undefined, inner: string) => {
+      const href = (dq ?? sq ?? bare ?? "").trim().replace(/&amp;/gi, "&");
+      if (!/^https?:\/\//i.test(href)) return ` ${inner} `;
+      const innerText = inner
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (innerText.includes(href) || seen.has(href)) return ` ${inner} `;
+      seen.add(href);
+      return ` ${inner} [link: ${href}] `;
+    },
+  );
+}
+
 // HTML → text that PRESERVES the email's line structure. Block-level tags and
 // <br> become newlines (an operator reading a long PM confirmation in the alias
 // email history needs the paragraphs the sender wrote); only horizontal
 // whitespace is collapsed. The old version collapsed ALL whitespace to single
 // spaces, which stored long HTML emails as one unreadable clump —
 // shared/email-body-format.ts reflows those legacy rows at display time.
+// Hyperlink hrefs survive as "[link: url]" markers (see preserveAnchorHrefs).
 export function stripHtml(html: string): string {
-  return html
+  // Comments/style/script/head go FIRST: Outlook MSO conditional comments
+  // duplicate the visible anchors, and running the anchor pass over them would
+  // mark the commented-out copy (then delete it with the comment) while the
+  // visible twin gets dedupe-skipped — losing the link entirely.
+  const withoutDeadRegions = html
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<head[\s\S]*?<\/head>/gi, " ")
-    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ");
+  return preserveAnchorHrefs(withoutDeadRegions)
     .replace(/<(?:br|hr)[^>]*\/?>/gi, "\n")
     .replace(/<\/(?:p|div|tr|table|h[1-6]|li|ul|ol|blockquote|pre|section|article|header|footer)>/gi, "\n")
     .replace(/<(?:p|div|tr|h[1-6]|li|blockquote)(?:\s[^>]*)?>/gi, "\n")

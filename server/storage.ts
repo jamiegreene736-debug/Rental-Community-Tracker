@@ -187,6 +187,7 @@ export interface IStorage {
   getBuyInByTravelerEmail(email: string): Promise<BuyIn | undefined>;
   createGuestInboxMessage(values: InsertGuestInboxMessage): Promise<GuestInboxMessage>;
   getGuestInboxMessages(aliasEmail: string, limit?: number): Promise<GuestInboxMessage[]>;
+  updateGuestInboxMessageBody(id: number, body: string): Promise<void>;
   attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined>;
   detachBuyIn(buyInId: number): Promise<BuyIn | undefined>;
 
@@ -566,6 +567,13 @@ export class DatabaseStorage implements IStorage {
       .where(sql`lower(${guestInboxMessages.aliasEmail}) = ${e}`)
       .orderBy(desc(guestInboxMessages.receivedAt))
       .limit(limit);
+  }
+
+  // Body-only rewrite, used solely by the sync-time link heal (rows stored
+  // before 2026-07-20 lost their hyperlinks at stripHtml time; the fresh parse
+  // of the same IMAP message recovers them). Never touches any other column.
+  async updateGuestInboxMessageBody(id: number, body: string): Promise<void> {
+    await db.update(guestInboxMessages).set({ body }).where(eq(guestInboxMessages.id, id));
   }
 
   async attachBuyIn(buyInId: number, reservationId: string): Promise<BuyIn | undefined> {
