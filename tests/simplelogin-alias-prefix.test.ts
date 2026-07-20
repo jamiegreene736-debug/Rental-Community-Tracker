@@ -44,12 +44,13 @@ test("two units on one reservation get DISTINCT first-choice prefixes (the 2026-
     unitLabel: "Unit B",
     buyInId: 527,
   });
-  // The unit token LEADS the prefix (operator 2026-07-20): a trailing ".a"
-  // vs ".b" read as "the same alias" at a glance; "unit.a." vs "unit.b."
-  // up front is visibly distinct and self-describing.
-  assert.strictEqual(unitA[0], "unit.a.thien.tran.4c015c");
-  assert.strictEqual(unitB[0], "unit.b.thien.tran.4c015c");
+  // Unit aliases stay `first.last.<numbers>` (operator 2026-07-20, superseding
+  // the same-day "unit.b." lead-in) with a per-unit 6-digit tail, so the two
+  // units' trailing numbers are COMPLETELY different — never one character.
+  assert.strictEqual(unitA[0], "thien.tran.261243");
+  assert.strictEqual(unitB[0], "thien.tran.618938");
   assert.notStrictEqual(unitA[0], unitB[0]);
+  assert.ok(/^thien\.tran\.\d{6}$/.test(unitA[0]) && /^thien\.tran\.\d{6}$/.test(unitB[0]));
 });
 
 test("candidates fall back to buyInId then entropy, all unique", () => {
@@ -61,11 +62,29 @@ test("candidates fall back to buyInId then entropy, all unique", () => {
     entropy: "zz99xx",
   });
   assert.deepStrictEqual(candidates, [
-    "unit.b.thien.tran.4c015c",
-    "unit.b.thien.tran.4c015c.b527",
-    "unit.b.thien.tran.4c015c.zz99xx",
+    "thien.tran.618938",
+    "thien.tran.618938.b527",
+    "thien.tran.618938.zz99xx",
   ]);
   assert.strictEqual(new Set(candidates).size, candidates.length);
+});
+
+test("the same unit re-mints deterministically; different reservations differ", () => {
+  const again = aliasPrefixCandidates({
+    guestName: "Thien Tran",
+    reservationId: RESERVATION,
+    unitLabel: "Unit B",
+    buyInId: 527,
+  });
+  assert.strictEqual(again[0], "thien.tran.618938");
+  const otherReservation = aliasPrefixCandidates({
+    guestName: "Thien Tran",
+    reservationId: "6a357e7c60363d0014ae9958",
+    unitLabel: "Unit B",
+    buyInId: 999,
+  });
+  assert.strictEqual(otherReservation[0], "thien.tran.410862");
+  assert.notStrictEqual(again[0], otherReservation[0]);
 });
 
 test("legacy reservation-level call (no unit) keeps the historical base prefix first", () => {
