@@ -13730,7 +13730,30 @@ Requirements:
         .where(eq(buyInEmails.reservationId, reservationId))
         .orderBy(desc(buyInEmails.sentAt))
         .limit(100);
-      res.json({ reservationId, alias: alias ?? null, aliases, buyIns, contacts, emails });
+      // Reconcile the bought-in mark on every read: ANY inbound email at a
+      // unit's alias verifies the purchase (operator rule 2026-07-20), so
+      // units whose emails were ingested BEFORE the auto-mark shipped heal the
+      // moment their panel loads. The helper never re-marks a booked row.
+      const autoMarkedBuyInIds: number[] = [];
+      try {
+        const { markBuyInBoughtInFromInboundEmail } = await import("./guest-inbox-sync");
+        const attempted = new Set<number>();
+        for (const email of emails) {
+          const targetId = email.buyInId;
+          if (String(email.direction ?? "") !== "inbound" || targetId == null || attempted.has(targetId)) continue;
+          attempted.add(targetId);
+          if (await markBuyInBoughtInFromInboundEmail(targetId, String(email.toEmail ?? ""), "buy-in-communications")) {
+            autoMarkedBuyInIds.push(targetId);
+          }
+        }
+      } catch (markErr: any) {
+        console.warn("[buy-in-email] auto-mark bought-in failed:", markErr?.message ?? markErr);
+      }
+      // Serve the post-mark rows so the panel reflects the flip immediately.
+      const responseBuyIns = autoMarkedBuyInIds.length > 0
+        ? await storage.getBuyInsByReservation(reservationId)
+        : buyIns;
+      res.json({ reservationId, alias: alias ?? null, aliases, buyIns: responseBuyIns, contacts, emails, autoMarkedBuyInIds });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch buy-in communications", message: err.message });
     }
@@ -14015,6 +14038,16 @@ Requirements:
       } catch (extractErr: any) {
         console.warn("[guest-inbox] arrival extract failed:", extractErr?.message ?? extractErr);
       }
+      // Reconcile the bought-in mark on every read: an inbound email at this
+      // alias verifies the purchase, and units whose emails were ingested
+      // BEFORE the auto-mark shipped heal the moment the panel is opened.
+      let autoMarkedBoughtIn = false;
+      try {
+        const { autoMarkBoughtInFromAliasEmails } = await import("./guest-inbox-sync");
+        autoMarkedBoughtIn = await autoMarkBoughtInFromAliasEmails(aliasEmail);
+      } catch (markErr: any) {
+        console.warn("[guest-inbox] auto-mark bought-in failed:", markErr?.message ?? markErr);
+      }
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
       const messages = await storage.getGuestInboxMessages(aliasEmail, limit);
       const resolvedBuyInId = Number.isFinite(queryBuyInId) && queryBuyInId > 0
@@ -14038,6 +14071,10 @@ Requirements:
         } : null,
         arrivalExtracted: arrivalExtract.updated,
         arrivalFieldsUpdated: arrivalExtract.fields,
+        // True when THIS read flipped the owning buy-in to booked (inbound
+        // alias email = purchase proof) — the client refreshes the bookings
+        // rows so the "Bought in" badge appears without a reload.
+        autoMarkedBoughtIn,
         syncResult,
       });
     } catch (err: any) {

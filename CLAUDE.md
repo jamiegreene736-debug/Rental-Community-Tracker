@@ -43,6 +43,34 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (alias inbox: AUTO-mark bought in on any inbound alias email + Gmail-style two-pane
+  redesign): Operator (screenshot of the "Unit email alias / Alias email history" panel): any email
+  hitting the unit's alias IS verification the unit was bought in → auto-mark; and redesign the
+  alias emails like a Gmail inbox (sidebar previews → click into the email). SHIPPED
+  (`claude/alias-inbox-gmail-auto-bought`): (1) ONE marker `markBuyInBoughtInFromInboundEmail`
+  (server/guest-inbox-sync.ts; pure predicate shared/alias-bought-in.ts — inbound-only, never
+  re-marks booked so bookedAt stays the FIRST proof, skips cancelled; kill
+  ALIAS_AUTO_BOUGHT_IN_DISABLED=1) fires at BOTH IMAP ingestion seams (guest_inbox_messages import
+  AND buy_in_emails insert — the two 5-min ticks) and RECONCILES on both panel reads
+  (GET /api/guest-inbox + GET …/buy-in-communications) so units whose emails were ingested before
+  the feature shipped (the screenshot's unit) heal on next panel open; responses carry
+  autoMarkedBoughtIn/autoMarkedBuyInIds → the client invalidates the bookings queries + toasts
+  "Marked bought in" and the green badge appears without a reload. bookedAt is set explicitly at
+  the storage seam (storage.updateBuyIn bypasses the PATCH handler's auto-stamp — don't remove).
+  (2) "Alias email history" (BuyInVendorEmailPanel, bookings.tsx) is now a two-pane Gmail-style
+  inbox: left sidebar rows (sender, compact date, subject, one-line snippet via the SAME
+  formatEmailBodyForDisplay, "sent" chip on outbound), click → reading pane (subject header,
+  inbound chip, Reply, From/To + SimpleLogin masking note, attachments, inline reply composer —
+  all preserved verbatim); newest email open by default; switching messages closes a
+  half-drafted reply; stacks on phones. Verified: alias-bought-in 22/0 (new, in npm chain),
+  guest-inbox-sync/buy-in-email-sync/display/arrival-extraction/pipeline-logic green, full
+  `npm test` exit 0, build clean, `npm run check` 335 = baseline (stash A/B identical), UI proven
+  on the BUILT bundle (static SPA + Playwright, mocked /api: two-pane renders, row click swaps
+  the reading pane, selected-row highlight, auto-mark toast + refresh — 10/10). Live IMAP leg not
+  smokeable in-session — post-deploy: open the screenshot unit's panel; it should flip to
+  "Bought in" on load and the history should render as the two-pane inbox. See AGENTS.md
+  Cowork-checkout section ("AUTO-mark on alias email") + the 2026-07-20 Decision Log line.
+
 - 2026-07-19 (buy-in slot: "Mark as bought in" + "Buy this unit in" REMOVED + "Send unit
   confirmation to guest"): Operator asked for (a) a UI affordance representing that an attached
   unit was actually PAID for/bought in, (b) removal of the "Buy this unit in" button (the

@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { extractEmailAddress, SIMPLELOGIN_MAILBOX_EMAIL } from "./simplelogin";
 import { extractReadableTextFromMimeEmail, parseEmailHeaders } from "@shared/email-mime";
+import { aliasEmailProvesPurchase } from "@shared/alias-bought-in";
 import type { InsertGuestInboxMessage } from "@shared/schema";
 
 // Re-exported for the existing importers/tests (buy-in-email-sync.ts,
@@ -226,7 +227,64 @@ async function importParsedEmail(parsed: ParsedRawEmail, filterAlias?: string): 
   } catch (err: any) {
     console.warn("[guest-inbox] arrival extract failed:", err?.message ?? err);
   }
+  // A freshly-ingested INBOUND email is proof of purchase — flip the owning
+  // buy-in to bought in right away (the 5-min background tick reaches here
+  // with no operator involvement). Fail-soft: a mark failure must never make
+  // the import look failed (the email row is already persisted).
+  try {
+    await autoMarkBoughtInFromAliasEmails(aliasEmail);
+  } catch (err: any) {
+    console.warn("[guest-inbox] auto-mark bought-in failed:", err?.message ?? err);
+  }
   return true;
+}
+
+// Any INBOUND email at a buy-in's unit alias verifies the purchase — the alias
+// exists only as that unit's booking email, so nothing mails it before a real
+// booking (VRBO confirmation, host welcome, PM arrival details). Marks the
+// owning buy-in "booked" via the SAME durable transition the bookings-row
+// "Mark as bought in" button records (bookedAt stamped = the proof time,
+// never-re-book guard armed, the unit's checkout button auto-hides). The
+// decision itself is the pure aliasEmailProvesPurchase (shared/alias-bought-in.ts):
+// inbound-only, never re-marks a booked row, skips cancelled buy-ins.
+// Kill switch: ALIAS_AUTO_BOUGHT_IN_DISABLED=1.
+//
+// TWO alias mailboxes feed this (both call in here): guest_inbox_messages
+// (this file's traveler-alias sync) and buy_in_emails (buy-in-email-sync.ts,
+// the bookings-row "Alias email history" panel).
+export async function markBuyInBoughtInFromInboundEmail(
+  buyInId: number,
+  aliasEmail: string,
+  source: string,
+): Promise<boolean> {
+  if (String(process.env.ALIAS_AUTO_BOUGHT_IN_DISABLED ?? "").trim() === "1") return false;
+  if (!Number.isFinite(buyInId) || buyInId <= 0) return false;
+  const { storage } = await import("./storage");
+  const buyIn = await storage.getBuyIn(buyInId);
+  // The caller vouches that an inbound email exists — the predicate still owns
+  // the buy-in-side rules (never re-mark booked, skip cancelled).
+  if (!aliasEmailProvesPurchase(buyIn, [{ direction: "inbound" }])) return false;
+  await storage.updateBuyIn(buyInId, {
+    bookingStatus: "booked",
+    bookedAt: new Date(),
+    bookingError: null,
+  });
+  console.log(
+    `[guest-inbox] auto-marked buy-in ${buyInId} (${buyIn?.unitLabel ?? "unit"}) bought in — inbound email at ${aliasEmail} (${source})`,
+  );
+  return true;
+}
+
+/** Traveler-alias flavor: resolve the buy-in by alias, require a stored inbound email. */
+export async function autoMarkBoughtInFromAliasEmails(aliasEmail: string): Promise<boolean> {
+  const alias = String(aliasEmail ?? "").trim().toLowerCase();
+  if (!alias) return false;
+  const { storage } = await import("./storage");
+  const buyIn = await storage.getBuyInByTravelerEmail(alias);
+  if (!buyIn) return false;
+  const messages = await storage.getGuestInboxMessages(alias, 50);
+  if (!aliasEmailProvesPurchase(buyIn, messages)) return false;
+  return markBuyInBoughtInFromInboundEmail(buyIn.id, alias, "guest-inbox");
 }
 
 const IMAP_FALLBACK_SCAN_CAP = 300;
