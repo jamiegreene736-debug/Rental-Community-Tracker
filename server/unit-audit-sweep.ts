@@ -69,6 +69,7 @@ import {
   MAX_FULL_AUTOMATION_COMMITTED_REPLACEMENTS,
   photoFixRungsForUnit,
   replaceRungOnCooldown,
+  unattendedOtaDuplicateReplaceBlocked,
   shouldRetryCommittedFullAutomationReplacement,
   unitAuditRetryStageIds,
   type PhotoFixRung,
@@ -2003,6 +2004,7 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
 
   let anyOnCooldown = false;
   let anyBudgetSpent = false;
+  let anyOtaAlertOnly = false;
   for (const plan of plans) {
     items.push(`${plan.ref.label}: ${plan.why.join("; ")} → ladder: ${plan.rungs.join(" → ")}`);
     let healed = false;
@@ -2016,6 +2018,27 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
       if (rung === "replace" && !replaceAllowed) {
         blockedOnPermission = true;
         items.push(`${plan.ref.label}: replacement rung skipped (${record.allowReplace ? "AUDIT_REPLACE_DISABLED=1" : "unit replacement unchecked for this run"}) — use Replace photos on the dashboard popup`);
+        break;
+      }
+      // 2026-07-20 operator directive: duplicate photos FOUND on another OTA
+      // listing must never trigger an UNATTENDED replacement — alert-only.
+      // The dashboard duplicate-photos popup (with its per-unit Replace
+      // photos button) is the review surface; the operator decides whether
+      // the match is real. Bedroom-shortfall / community-mismatch
+      // replacements keep the 2026-07-12 automation, and manual sweeps
+      // (explicit operator click) still replace OTA-found units.
+      if (rung === "replace" && unattendedOtaDuplicateReplaceBlocked({
+        source: record.source,
+        otaFound: otaFoundByLabel.has(plan.ref.label),
+        overrideEnvValue: process.env.UNIT_AUDIT_CRON_OTA_REPLACE,
+      })) {
+        anyOtaAlertOnly = true;
+        blockedSoft = true;
+        items.push(`${plan.ref.label}: photos found on another OTA listing — automatic replacement is OFF for this finding (2026-07-20 directive); check the dashboard duplicate-photos alert and use its Replace photos button if the match is real (UNIT_AUDIT_CRON_OTA_REPLACE=1 restores auto-replace)`);
+        void sendOperatorAlert({
+          dedupKey: `photo-duplicate-review:${target.propertyId}:${plan.ref.unitId}`,
+          body: `Photo audit: ${record.propertyName} — ${plan.ref.label} photos were found on another OTA listing. Automatic replacement is OFF — open the dashboard duplicate-photos alert to review the match and use Replace photos if it's real.`,
+        });
         break;
       }
       // Unattended (cron) replacements only: anti-churn cooldown + per-run
@@ -2227,6 +2250,13 @@ async function stagePhotoFix(target: UnitAuditTarget, record: UnitAuditJobRecord
     return {
       verdict: "attention",
       detail: "Fixing these photos needs a unit replacement, which this run wasn't allowed to do — re-run with \"Allow unit replacement\" checked or use Replace photos on the dashboard popup.",
+      items,
+    };
+  }
+  if (anyOtaAlertOnly) {
+    return {
+      verdict: "attention",
+      detail: "Duplicate photos were found on another OTA listing — automatic replacement is OFF for this finding; review the dashboard duplicate-photos alert and use its Replace photos button if the match is real.",
       items,
     };
   }

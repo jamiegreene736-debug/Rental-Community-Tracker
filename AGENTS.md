@@ -4740,7 +4740,11 @@ LOAD-BEARING:
   Unit Audit Sweep for the owning property with `source:"cron"` — so the sweep's photo-fix ladder
   hits the OTA-found → replace-only rung under ALL the unattended rails (proven shortfall, 28-day
   cooldown, the SHARED weekly replacement budget — deliberately never reset here) and reuses the
-  just-written fresh OTA row instead of re-spending Lens. Constraints that look like gaps but are
+  just-written fresh OTA row instead of re-spending Lens. 2026-07-20 UPDATE: the queued sweep is now
+  ALERT-ONLY for the duplicate finding itself — Unit Audit Sweep rail #15(d) blocks the unattended
+  replace rung for OTA-found triggers, so this reaction verifies + flags + alerts (dashboard
+  duplicate-photos popup + SMS) and the operator replaces manually from the popup
+  (`UNIT_AUDIT_CRON_OTA_REPLACE=1` restores auto-replace). Constraints that look like gaps but are
   the design: fires on FLIPS only (a folder that STAYS found is the weekly audit cron's job — no
   weekly re-queue churn); fires from the SCHEDULER path only (`onNewDetection` is passed only by
   the tick — on-demand deep checks and the audit sweep's own verify rescans must never trigger
@@ -5153,6 +5157,20 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    the collage stage to re-compose (in-memory `replacedThisSweep` hint —
    a resume mid-sweep loses it; the next weekly run heals staleness).
    Cooldown/budget blocks report `attention`, never a hard fail.
+   (d) 2026-07-20 CARVE-OUT — OTA-DUPLICATE findings are ALERT-ONLY
+   unattended: when the replace rung was triggered because the unit's
+   photos were FOUND on another OTA listing (duplicates), a cron-source
+   sweep (weekly scheduler AND the found-flip reactive sweep) SKIPS the
+   replacement — pure `unattendedOtaDuplicateReplaceBlocked`
+   (shared/unit-audit-sweep-logic.ts) — reports `attention` pointing at
+   the dashboard duplicate-photos alert, and texts the operator
+   (`photo-duplicate-review:` dedup key). The operator reviews the match
+   in the popup and clicks its Replace photos button when it's real;
+   manual sweeps still replace (explicit click), and bedroom-shortfall /
+   community-mismatch automation is untouched.
+   `UNIT_AUDIT_CRON_OTA_REPLACE=1` restores the pre-2026-07-20
+   auto-replace. Do NOT "fix" the OTA-found → replace rung to run
+   unattended again — that reverts an explicit operator directive.
 
 16. **PROVENANCE upgrade for "can't confirm photos" (2026-07-12) — three
    rules that must not drift:**
@@ -6113,3 +6131,5 @@ Welcome. When in doubt, ask the human.
 2026-07-20 · Jamie (Operations screenshot): "remove Re-Verify, Payment terms, and Guest Page from the attached-unit toolbar; improve the UI for Send Confirmation to Guest / Alternative Unit / Message AD; make the rest uniform" · SHIPPED (`claude/button-ui-cleanup-8e9746`) · The three buttons AND their now-dead machinery are fully removed (PaymentTermsButton + VrboPaymentScheduleClient type, the per-slot VerifyRateDialog + verifyTarget state, guestAlternativePageMutation + its combo-label parsers) — the capabilities themselves live on: the manual buy-in dialog still reads VRBO checkout terms via /api/operations/vrbo-payment-schedule and rates via /api/operations/verify-pm-listing, and guest pages build exclusively through RelocateGuestDialog createPage (Alternative Unit / Send unit confirmation), which already submits the same combo + proximity context. Toolbar layout is now: purchase status → three primary guest-messaging pills (Alternative Unit = brand gradient, Send unit confirmation = emerald, Message AD = sky; h-7 rounded-full) → divider → uniform h-7 ghost utilities (Inbox, Find sites, Unit details, Confirm mgmt contact) → sent badges → Detach (red hover). NOTE: the shadcn Button default variant paints a brand-teal GRADIENT via background-image — a bg-<color> override alone is invisible under it; tinted pills need `bg-none` too (twMerge treats the gradient as background-image, not a bg-color conflict). Locks repointed with intent preserved: pipeline-logic's Guest-page-action lock now guards the RelocateGuestDialog machinery + asserts the removed buttons stay gone; relocation-scenario's party-size lock repointed to createPage's const. Full `npm test` REAL exit 0, check 335 = baseline (stash A/B identical), removed strings bundle-grepped gone, toolbar proven on the BUILT bundle (static SPA + Playwright, mocked /api: presence/absence + computed pill colors emerald rgb(5,150,105) / sky rgb(2,132,199)).
 
 2026-07-20 · Jamie (builder screenshot): "Unit A is not a 3 BR it's a 2 BR. Please update and see why this changed to the incorrect bedroom count." · DIAGNOSED LIVE (prod DB: community_drafts 20, unit_swaps 74, replacement_find_jobs prfj_mrrhzffg_h9cq4x) + FIXED (`claude/cliffs-unit-a-bedrooms`) · RECURRENCE of the 2026-07-18 Cliffs incident through the OTHER rung: the 2026-07-19 weekly audit OTA-flagged Unit A's gallery (the #3304 photos live on the real owner's OTA listings) and the replace rung correctly fired — but every find-unit bedroom gate was a FLOOR (">= requiredBedrooms"), so with requiredBedrooms=2 the finder returned 3BR Redfin unit #5308, the orchestrator committed it (swap 74, 2026-07-19 07:55Z), and the #24 repoint dutifully flipped the draft to 3BR/7-combined; the audit's descriptions stage then regenerated overrides saying "Unit A (3BR)". The 2026-07-18 Decision Log had already NAMED this hole ("find-unit's bedroom gate is a MINIMUM, so a 4BR passed a 3BR requirement" — unit B's 3→4 flip) but only the find-new rung got the exact-match guard then. NOW CLOSED at both layers (Load-Bearing Unit Audit Sweep #25): shared `replacementBedroomMismatch` drives ALL five find-unit gates (exact when both counts known; unknown passes) + the auto-replace orchestrator burns mismatched candidates pre-commit (burnedBedrooms → bounded find-restart). LIVE FIX: draft 20 restored to 2/4/6 (bedding/short-description columns still carried the operator's 7/18 2BR values — the swap only touched the bedroom counts); Unit A still carries #5308's 3BR gallery + the stale 3BR description overrides — post-deploy: re-run Replace photos on Unit A (now exact-2BR) and regenerate+push descriptions. Locked by tests/find-new-bedroom-guard.test.ts (27/0); pipeline-logic's old floor-string lock repointed to the predicate. Full `npm test` REAL exit 0, check 335 = baseline (A/B identical up to TS union-ordering noise), build clean.
+
+2026-07-20 · Jamie: "Instead of having the photos be replaced automatically when they have found duplicates please stop this from being automatic and instead have it just alert me for me to manually check myself with an alert on the dashboard." · SHIPPED (`claude/photo-duplicate-alerts-cbb7bc`) · PARTIAL REVERSAL of the 2026-07-12 "cron UNIT REPLACEMENT ON" directive, scoped to the OTA-DUPLICATE trigger only: pure `unattendedOtaDuplicateReplaceBlocked` (shared/unit-audit-sweep-logic.ts) gates the photo-fix ladder's replace rung on every cron-source sweep (weekly scheduler + the found-flip reactive sweep) when the trigger is otaFound — the sweep reports `attention` pointing at the dashboard duplicate-photos popup (the pre-existing alert surface, unchanged) and texts the operator (`photo-duplicate-review:` dedup key); the popup's per-unit Replace photos button is the manual path. Deliberately NOT gated: manual sweeps (explicit operator click still replaces), bedroom-shortfall/community-mismatch automation (the 2026-07-12 "100% automated" bedroom directive stands), and the operator-clicked one-click auto-replace orchestrator. `UNIT_AUDIT_CRON_OTA_REPLACE=1` restores unattended auto-replace. See Load-Bearing Unit Audit Sweep #15(d). Locked in tests/unit-audit-sweep.test.ts (pure matrix + source guards on the gate/SMS/verdict wiring) + tests/photo-listing-decision.test.ts (reactive-sweep alert-only wording).

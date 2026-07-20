@@ -7,6 +7,12 @@
 // OTA-found → replace-only rung); this module just closes the latency gap by queuing that sweep the
 // moment the scanner flips a folder to "found", plus texting the operator (operator-alerts.ts).
 //
+// 2026-07-20 DIRECTIVE — ALERT-ONLY for duplicates: the queued sweep no longer auto-replaces the
+// OTA-found unit. unattendedOtaDuplicateReplaceBlocked (shared/unit-audit-sweep-logic.ts) gates the
+// replace rung on every cron-source sweep so a duplicate finding surfaces via the dashboard
+// duplicate-photos alert (+ operator SMS) and the operator checks the match himself; the popup's
+// Replace photos button is the manual path. UNIT_AUDIT_CRON_OTA_REPLACE=1 restores auto-replace.
+//
 // SAFETY POSTURE (load-bearing):
 //   - Fires ONLY on FLIPS (non-found → found, the same transitions that write photo_listing_alerts
 //     rows) and ONLY from the weekly scheduler path — a folder that STAYS found does not re-queue a
@@ -117,13 +123,16 @@ export async function reactToPhotoListingDetections(d: PhotoListingDetection): P
         const res = await startUnitAuditSweep({
           propertyId: prop.propertyId,
           autoFix: true,
-          // Same replacement posture as the weekly audit cron — the cron rails (proven shortfall,
-          // cooldown, shared weekly budget) are what make unattended replacement safe here too.
+          // Same replacement posture as the weekly audit cron. NOTE (2026-07-20 directive):
+          // OTA-duplicate findings are ALERT-ONLY inside the sweep regardless of this flag
+          // (unattendedOtaDuplicateReplaceBlocked) — this sweep re-verifies and flags but
+          // never auto-replaces the flagged unit; the operator reviews via the dashboard
+          // duplicate-photos popup. allowReplace still governs bedroom-shortfall repairs.
           allowReplace: String(process.env.UNIT_AUDIT_CRON_REPLACE ?? "").trim() !== "0",
           source: "cron",
         });
         sweepNote = res.ok
-          ? "Auto-fix audit sweep queued (dashboard Audit column tracks it)"
+          ? "Verification sweep queued (dashboard Audit column tracks it); automatic replacement is OFF for duplicate findings — review the dashboard duplicate-photos alert"
           : `Auto-fix sweep NOT queued (${res.error})`;
       }
       console.error(`[photo-found-reaction] ${d.folder}: photos found on ${platformNames(d.photoFoundFlips)} — ${sweepNote}`);

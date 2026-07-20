@@ -174,6 +174,12 @@ check(
 );
 
 check(
+  "reactive sweep is ALERT-ONLY for duplicate findings (2026-07-20): the SMS + note say replacement is OFF and point at the dashboard alert",
+  reactionsSrc.includes("unattendedOtaDuplicateReplaceBlocked") &&
+    reactionsSrc.includes("automatic replacement is OFF for duplicate findings"),
+);
+
+check(
   "cron replace blocks (cooldown + budget) text the operator via sendOperatorAlert",
   sweepSrc.includes("replace-blocked-cooldown:") && sweepSrc.includes("replace-blocked-budget:"),
 );
