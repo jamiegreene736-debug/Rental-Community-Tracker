@@ -10084,14 +10084,14 @@ export default function Bookings() {
         title: created.length > 0
           ? `${created.length} find-run${created.length === 1 ? "" : "s"} queued on your Mac`
           : "No find-runs were queued",
-        // The double-attach hazard rides permanently on the toast (and the
-        // trigger button's title) — it is a real money risk.
+        // (The old "don't run the server bulk queue" warning retired with the
+        // server trigger button, #1144 — the button disables while a
+        // pre-removal queue is still running.)
         description: [
           created.length > 0
             ? "They run one at a time with no window and no send press — watch the live log on each row. You'll hear a chime if one needs you."
             : "Every item was skipped — see the reasons below.",
           ...notes,
-          "Don't run the server bulk queue on these bookings at the same time.",
         ].join(" "),
         variant: created.length === 0 ? "destructive" : undefined,
       });
@@ -10237,28 +10237,6 @@ export default function Bookings() {
       console.warn("[bulk-buy-ins] failed to write server log", error);
     }
   };
-  const buildBulkQueueItem = (reservation: GuestyReservation, jobId: string): BulkBuyInQueueItem | null => {
-    const meta = reservationPropertyMeta.get(reservation._id);
-    if (!meta?.propertyId) return null;
-    const guestName = reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest";
-    return {
-      id: `${jobId}:${reservation._id}`,
-      jobId,
-      reservationId: reservation._id,
-      propertyId: meta.propertyId,
-      listingId: meta.guestyListingId,
-      propertyName: meta.propertyName,
-      guestName,
-      checkIn: checkInOf(reservation) ?? "",
-      checkOut: checkOutOf(reservation) ?? "",
-      queuedFor: bulkBuyInQueuedForText(reservation, meta.propertyName, meta.propertyId),
-      status: "queued",
-      message: "Queued",
-      // ALL slots: the queue detaches any attached units and re-fills every slot,
-      // so the filled/total report is against the full unit count, not just open.
-      totalSlots: reservation.slots.length,
-    };
-  };
   const selectAllEligibleGlobalBookings = () => {
     setBulkSelectedReservations((prev) => {
       const next = { ...prev };
@@ -10393,139 +10371,6 @@ export default function Bookings() {
     };
     void tick();
     bulkPollTimerRef.current = setInterval(() => void tick(), 3000);
-  };
-
-  // Build one reservation's fully self-contained payload for the server bulk job:
-  // the ground-floor scan + net revenue + the attached buy-in ids to detach. Done
-  // up front (operator present) so the server never needs the client mid-run.
-  const buildBulkAutoFillItemPayload = async (reservation: GuestyReservation): Promise<BulkAutoFillItemPayload | null> => {
-    const meta = reservationPropertyMeta.get(reservation._id);
-    if (!meta?.propertyId) return null;
-    const propertyId = meta.propertyId;
-    const unitConfig = PROPERTY_UNIT_CONFIGS[propertyId];
-    const toDateOnly = (s?: string) => (!s ? "" : /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s.slice(0, 10));
-    const ci = toDateOnly(reservation.checkInDateLocalized ?? reservation.checkIn);
-    const co = toDateOnly(reservation.checkOutDateLocalized ?? reservation.checkOut);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(ci) || !/^\d{4}-\d{2}-\d{2}$/.test(co)) return null;
-    // ALL slots — the queue detaches every attached unit and re-fills the full set.
-    const slots = reservation.slots.map((s) => ({
-      unitId: s.unitId, unitLabel: s.unitLabel, bedrooms: s.bedrooms, community: s.community ?? null,
-    }));
-    if (slots.length === 0) return null;
-
-    let groundFloorBedrooms: number[] = [];
-    if (unitConfig) {
-      try {
-        const req = await apiRequest("GET", groundFloorRequirementHref(reservation, propertyId))
-          .then((r) => r.json() as Promise<GroundFloorRequirement>);
-        groundFloorBedrooms = groundFloorTargetBedrooms(req).map(Number).filter((n) => Number.isFinite(n) && n > 0);
-      } catch { groundFloorBedrooms = []; }
-    }
-
-    const community = unitConfig?.community ?? reservation.slots.find((s) => s.community)?.community ?? null;
-    return {
-      reservationId: reservation._id,
-      propertyId,
-      listingId: meta.guestyListingId ?? null,
-      propertyName: meta.propertyName,
-      community,
-      checkIn: ci,
-      checkOut: co,
-      slots,
-      groundFloorBedrooms,
-      // Same getNetRevenue the single button uses, so the server profit gate
-      // matches the row's profit number (0 / unknown disables the gate).
-      expectedRevenue: getNetRevenue(reservation),
-      buyInIdsToDetach: reservation.slots.filter((s) => s.buyIn?.id).map((s) => s.buyIn!.id),
-      guestName: reservation.guest?.fullName ?? reservation.guest?.firstName ?? "Guest",
-      queuedFor: bulkBuyInQueuedForText(reservation, meta.propertyName, propertyId),
-    };
-  };
-
-  const startBulkBuyInQueue = async () => {
-    const jobId = `bulk-buy-in-${Date.now()}`;
-    const selected = selectedBulkEligibleReservations;
-    const displayItems = selected
-      .map((reservation) => buildBulkQueueItem(reservation, jobId))
-      .filter((item): item is BulkBuyInQueueItem => !!item);
-    if (displayItems.length === 0) {
-      toast({
-        title: "No eligible bookings selected",
-        description: "Select bookings with open buy-in slots from the global All bookings table.",
-      });
-      return;
-    }
-
-    bulkBuyInCancelRef.current = false;
-    setBulkBuyInQueueItems(displayItems);
-    bulkItemsRef.current = displayItems;
-    setBulkBuyInQueueOpen(true);
-    setBulkBuyInQueueRunning(true);
-
-    // Build each reservation's payload (ground-floor scans run here, while the
-    // operator is present), then hand the WHOLE list to the server, which walks
-    // the queue on its own. The operator can close the tab/browser after this.
-    let payloads: BulkAutoFillItemPayload[] = [];
-    try {
-      payloads = (await Promise.all(selected.map((r) => buildBulkAutoFillItemPayload(r))))
-        .filter((p): p is BulkAutoFillItemPayload => !!p);
-    } catch (e: any) {
-      toast({ title: "Could not prepare the queue", description: e?.message ?? String(e), variant: "destructive" });
-      setBulkBuyInQueueRunning(false);
-      return;
-    }
-    if (payloads.length === 0) {
-      toast({ title: "No eligible bookings", description: "None of the selected bookings could be prepared.", variant: "destructive" });
-      setBulkBuyInQueueRunning(false);
-      return;
-    }
-    bulkPayloadsRef.current = payloads;
-    bulkActiveReservationIdsRef.current = new Set(payloads.map((p) => p.reservationId));
-
-    // Ride through a server redeploy on START. The operator may click Run exactly
-    // when Railway is mid-deploy — the server then returns 502 "Application failed
-    // to respond" (or the fetch fails outright) for the cold-boot window. Without
-    // this the initial POST throws once, the dialog shows a dead error, and the
-    // queue only runs if the operator notices and clicks again (the "took a couple
-    // minutes to start the search" report, 2026-06-10). So retry transient
-    // 502/503/504 + network failures for a bounded window, surfacing a "restarting…"
-    // notice so the wait is legible; a real 4xx (bad payload / auth-redirect) still
-    // fails fast. Mirrors the poller's 404 auto-resume (M4). A Cancel click breaks
-    // out via bulkBuyInCancelRef.
-    const startPostDeadline = Date.now() + 180_000; // ~3 min covers a Railway cold boot
-    const isTransientStartError = (err: any) => {
-      const msg = String(err?.message ?? err ?? "");
-      return /^(502|503|504):/.test(msg) || /failed to fetch|fetch failed|networkerror|load failed/i.test(msg);
-    };
-    let startAttempt = 0;
-    try {
-      let resp: any;
-      for (;;) {
-        try {
-          resp = await apiRequest("POST", "/api/operations/bulk-auto-fill", { items: payloads }).then((r) => r.json());
-          break;
-        } catch (err: any) {
-          if (bulkBuyInCancelRef.current || !isTransientStartError(err) || Date.now() >= startPostDeadline) throw err;
-          startAttempt += 1;
-          toast({
-            title: "Server is restarting — retrying…",
-            description: `The queue starts automatically once the server is back (attempt ${startAttempt}).`,
-          });
-          await new Promise((resolve) => setTimeout(resolve, 5_000));
-        }
-      }
-      if (!resp?.bulkJobId) throw new Error(resp?.error || "Could not start the bulk queue.");
-      setBulkAutoFillJobId(resp.bulkJobId);
-      if (resp.status) applyBulkStatus(resp.status);
-      startBulkPoller(resp.bulkJobId);
-      toast({
-        title: "Bulk queue started on the server",
-        description: "It keeps running even if you close this tab or your browser. Reopen Bookings to check progress.",
-      });
-    } catch (e: any) {
-      toast({ title: "Could not start the bulk queue", description: e?.message ?? String(e), variant: "destructive" });
-      setBulkBuyInQueueRunning(false);
-    }
   };
 
   const toggleExpanded = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -11157,12 +11002,11 @@ export default function Bookings() {
                   {/* The bulk process routes through HEADLESS find-runs
                       (2026-07-20): one run per selected booking, drained one
                       at a time by the Mac runner — no Cowork window, no send
-                      press, per-row live logs. The server engine stays
-                      available below as the fallback — it's the only route
-                      from a phone (the runs need the Mac awake), and the only
-                      one that detaches + re-searches fully-attached bookings.
-                      Both are disabled while a server queue runs so the two
-                      engines never attach to the same slots concurrently. */}
+                      press, per-row live logs. The server bulk engine lost
+                      its trigger the same day (#1144); the button still
+                      disables while a pre-removal/boot-resumed server queue
+                      runs so the two engines never attach to the same slots
+                      concurrently. */}
                   <Button
                     type="button"
                     size="sm"
@@ -11172,7 +11016,7 @@ export default function Bookings() {
                     // is the problem this gate exists to prevent.
                     disabled={bulkBuyInQueueRunning || bulkCoworkLaunching || bulkFindReady.length === 0}
                     data-testid="button-run-bulk-cowork"
-                    title="Queues a headless find-run for every selected booking — no window, no send press; they run one at a time on your Mac and you can walk away. Each run finds and attaches the cheapest qualifying units for the booking's open slots. It never books and never detaches, and you'll hear a chime if a site raises a bot check. Prepare the checkouts afterwards with 'Prepare all checkouts in Cowork'. Don't run the server bulk queue on these bookings at the same time."
+                    title="Queues a headless find-run for every selected booking — no window, no send press; they run one at a time on your Mac and you can walk away. Each run finds and attaches the cheapest qualifying units for the booking's open slots. It never books and never detaches, and you'll hear a chime if a site raises a bot check. Prepare the checkouts afterwards with 'Prepare all checkouts in Cowork'."
                   >
                     <Sparkles className="h-3.5 w-3.5 mr-1.5" />
                     {bulkCoworkLaunching
@@ -11248,15 +11092,11 @@ export default function Bookings() {
                         </Button>
                       </span>
                     ))}
-                  {/* PERMANENT home for the double-attach hazard. It used to
-                      live in the bulk dialog this change removed; a toast is
-                      not a home for a real money hazard (TOAST_LIMIT is 1 and
-                      it auto-dismisses in ~5s). */}
-                  {selectedBulkCoworkReservations.length > 0 && (
-                    <span className="text-[11px] text-amber-700 dark:text-amber-400">
-                      Don&apos;t run the server bulk queue on these bookings at the same time.
-                    </span>
-                  )}
+                  {/* The server bulk queue lost its trigger button (2026-07-20)
+                      so the double-attach hazard now only exists while a queue
+                      resumed from before that removal is still running — and the
+                      Cowork buttons above are disabled for that whole window via
+                      bulkBuyInQueueRunning. */}
                   {/* A multi-reservation batch relays, so Claude Desktop
                       shows a short launcher rather than the brief itself. This
                       is the on-demand way back to the actual batch text. */}
@@ -11277,22 +11117,11 @@ export default function Bookings() {
                       View prompt
                     </Button>
                   )}
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={startBulkBuyInQueue}
-                    disabled={bulkBuyInQueueRunning || selectedBulkEligibleReservations.length === 0}
-                    data-testid="button-run-bulk-buy-ins"
-                    title="The server-side engine (SearchAPI + sidecar): detaches the selected bookings' units and re-searches every slot from scratch. Use for re-searching fully-attached bookings, or when you're away from your Mac."
-                  >
-                    {bulkBuyInQueueRunning ? (
-                      <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                    ) : (
-                      <Zap className="h-3.5 w-3.5 mr-1.5" />
-                    )}
-                    Run bulk buy-ins (server) ({selectedBulkEligibleReservations.length})
-                  </Button>
+                  {/* The server bulk trigger button was removed 2026-07-20 —
+                      bulk filling is Cowork-only now. The server engine
+                      (bulk-auto-fill-job.ts) stays for boot-resume of an
+                      already-running queue; "Queue status" below is how such a
+                      resumed queue stays visible and cancellable. */}
                   {bulkBuyInQueueItems.length > 0 && (
                     <Button
                       type="button"
@@ -13722,7 +13551,7 @@ export default function Bookings() {
                   <div className="divide-y">
                     {bulkBuyInQueueItems.length === 0 ? (
                       <div className="px-3 py-8 text-center text-sm text-muted-foreground">
-                        Select bookings in the global table and click Run bulk buy-ins.
+                        No server bulk queue is running. Bulk filling now runs through the Auto Cowork bulk and Prepare-all-checkouts buttons.
                       </div>
                     ) : (
                       bulkBuyInQueueItems.map((item) => {
