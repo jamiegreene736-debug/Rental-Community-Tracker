@@ -46,6 +46,7 @@ import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log"
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
 import { mergeAliasThread } from "@shared/unified-buyin-alias";
+import { buildArrivalRequestEmail, resolveBookedListingTitle } from "@shared/arrival-request-compose";
 import { paidRateTone, type PaidRateSourceRecord } from "@shared/paid-rate-extraction";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
@@ -14256,19 +14257,23 @@ function BuyInVendorEmailPanel({
   const guestName = reservation.guest?.fullName ?? "";
   const [vendorName, setVendorName] = useState(buyIn.managementCompany ?? "");
   const [vendorEmail, setVendorEmail] = useState(() => extractEmailForInput(buyIn.managementContact ?? ""));
-  const [subject, setSubject] = useState(() => `Arrival details request for ${buyIn.unitLabel || buyIn.propertyName}`);
+  // Compose defaults identify the unit by the PM's OWN listing (title from the
+  // buy-in notes or the VRBO confirmation in the alias thread, plus the booked
+  // listing URL) — never just our internal Guesty listing name, which means
+  // nothing to the property manager (operator, 2026-07-20). Signed as the guest
+  // (operator request) so the PM ties the request to the booking.
+  const initialCompose = buildArrivalRequestEmail({
+    listingTitle: resolveBookedListingTitle({ notes: buyIn.notes }),
+    listingUrl: buyIn.airbnbListingUrl,
+    guestName,
+    checkInText: fmtDate(buyIn.checkIn),
+    checkOutText: fmtDate(buyIn.checkOut),
+    fallbackPropertyName: buyIn.propertyName,
+    unitLabel: buyIn.unitLabel,
+  });
+  const [subject, setSubject] = useState(initialCompose.subject);
   const [attachments, setAttachments] = useState<AliasEmailAttachment[]>([]);
-  const [body, setBody] = useState(() => [
-    `Hi,`,
-    ``,
-    `We booked ${buyIn.propertyName}${buyIn.unitLabel ? ` - ${buyIn.unitLabel}` : ""} for ${guestName || "our guest"} from ${fmtDate(buyIn.checkIn)} to ${fmtDate(buyIn.checkOut)}.`,
-    `Can you please send the arrival details, property address, access code, Wi-Fi, parking instructions, and any check-in notes when available?`,
-    ``,
-    `Thank you,`,
-    // Sign as the guest on the reservation (operator request) so the PM ties the
-    // request to the booking; fall back to a neutral name when unknown.
-    `${guestName || "Reservations"}`,
-  ].join("\n"));
+  const [body, setBody] = useState(initialCompose.body);
 
   const queryKey = ["/api/bookings", reservation._id, "buy-in-communications"];
   const { data, isLoading } = useQuery<BuyInCommunicationsResponse>({
@@ -14298,6 +14303,50 @@ function BuyInVendorEmailPanel({
     refetchInterval: travelerEmail ? 30_000 : false,
   });
   const bookingMessages = guestThreadQuery.data?.messages ?? [];
+
+  // The booked listing's title usually arrives WITH the thread (the VRBO
+  // confirmation email) — upgrade the compose defaults when it lands, but
+  // never clobber text the operator already edited: replace only while the
+  // current value still equals the last auto-generated default.
+  const upgradedCompose = useMemo(
+    () =>
+      buildArrivalRequestEmail({
+        listingTitle: resolveBookedListingTitle({
+          notes: buyIn.notes,
+          emailTexts: [
+            ...emails.map((row) => String(row.body ?? "")),
+            ...bookingMessages.map((row) => String(row.body ?? "")),
+          ],
+        }),
+        listingUrl: buyIn.airbnbListingUrl,
+        guestName,
+        checkInText: fmtDate(buyIn.checkIn),
+        checkOutText: fmtDate(buyIn.checkOut),
+        fallbackPropertyName: buyIn.propertyName,
+        unitLabel: buyIn.unitLabel,
+      }),
+    [buyIn.notes, buyIn.airbnbListingUrl, buyIn.propertyName, buyIn.unitLabel, buyIn.checkIn, buyIn.checkOut, guestName, emails, bookingMessages],
+  );
+  const lastComposeDefaultsRef = useRef(initialCompose);
+  useEffect(() => {
+    const prev = lastComposeDefaultsRef.current;
+    if (upgradedCompose.subject !== prev.subject || upgradedCompose.body !== prev.body) {
+      setSubject((cur) => (cur === prev.subject ? upgradedCompose.subject : cur));
+      setBody((cur) => (cur === prev.body ? upgradedCompose.body : cur));
+      lastComposeDefaultsRef.current = upgradedCompose;
+    }
+  }, [upgradedCompose.subject, upgradedCompose.body]);
+
+  // "Confirm mgmt contact" saves the company + email onto the buy-in row;
+  // mirror them into the PM contact fields the moment the refreshed row
+  // arrives (never overwrite something the operator already typed), so
+  // "Send PM email" is ready without re-entering the scraped contact.
+  useEffect(() => {
+    const savedName = String(buyIn.managementCompany ?? "").trim();
+    if (savedName) setVendorName((cur) => (cur.trim() ? cur : savedName));
+    const savedEmail = extractEmailForInput(buyIn.managementContact ?? "") || String(contact?.vendorEmail ?? "").trim();
+    if (savedEmail) setVendorEmail((cur) => (cur.trim() ? cur : savedEmail));
+  }, [buyIn.managementCompany, buyIn.managementContact, contact?.vendorEmail]);
 
   useEffect(() => {
     if (!guestThreadQuery.data?.arrivalExtracted) return;
@@ -15059,6 +15108,9 @@ function ConfirmManagementContactButton({
       setResult(body.contact);
       onApplied?.(body.applied);
       queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      // Global-summary rows carry the buy-ins too — refresh them so the alias
+      // panel's PM contact fields pick up the saved company/email everywhere.
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
       queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
       invalidateArrivalDetailsQueries();
       toast({

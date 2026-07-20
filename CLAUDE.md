@@ -43,6 +43,31 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (FOLLOW-UP: PM email populates the pm@example.com field + compose names the BOOKED
+  listing): Operator (unit B screenshot): the mgmt-contact lookup saved "Alii Resorts" but no
+  email — have the scraped email populate/save into the PM contact email field, then Compose →
+  Send PM email sends to it FROM the unit alias with the outbound saved to the alias history and
+  replies landing in the alias thread; and the composed request must name the BUY-IN listing, not
+  our Guesty listing. KEY FINDING (don't re-chase): the send leg was ALREADY complete —
+  POST /api/buy-ins/:id/vendor-email auto-creates the SimpleLogin reverse-alias vendor contact,
+  sends so the PM sees the unit alias, records the outbound buy_in_emails row, and replies route
+  back through the alias into the merged thread. SHIPPED (`claude/pm-email-populate-send`):
+  (1) lookup EMAIL HUNT — the prompt now states an EMAIL ADDRESS is the priority and mandates a
+  web search for the company's address when the confirmation email names the company but shows
+  only a phone; new `emailSourceUrl` on the JSON/provenance, validated like a web contact (own
+  http(s) page + 0.6 confidence floor) while the phone stays email-cited digit-for-digit —
+  a free-floating email address is still rejected. (2) panel fields SYNC from the saved
+  buy_ins.managementCompany/managementContact (+ vendor-contact row) whenever the field is empty —
+  never overwrites typed input; confirm button also invalidates /api/bookings/guesty-all.
+  (3) NEW pure shared/arrival-request-compose.ts — booked-listing title from the buy-in notes
+  (confident branches of titleFromBuyInNoteText only) else from the VRBO confirmation ALREADY in
+  the alias thread ("Hosted by <title>'s rental company" / the title line above "Vrbo reservation
+  ID:"), and buildArrivalRequestEmail identifies the unit as `your listing "<title>" (<vrbo url>)`
+  — the internal Guesty name only as last-resort fallback; compose defaults UPGRADE when the
+  thread loads but only while the operator hasn't edited (lastComposeDefaultsRef guard).
+  Locked by tests/arrival-request-compose.test.ts (in the npm chain) + new emailSourceUrl matrix
+  in tests/management-contact-lookup.test.ts.
+
 - 2026-07-20 (FOLLOW-UP: "Confirm mgmt contact" 422 "quote is not verbatim-present" on an HONEST
   quote — VRBO-unicode tolerance): Operator (unit B toast). NOT a hallucination (don't re-chase):
   the VRBO confirmation DOES name the on-site team ("Contact Alii Resorts …" + phone +18088796284),
