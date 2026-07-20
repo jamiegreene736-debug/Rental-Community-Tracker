@@ -16,6 +16,7 @@ import {
   bulkPricingRefreshJobItems as bulkPricingRefreshJobItemRows,
   bulkPricingRefreshJobs as bulkPricingRefreshJobRows,
   buyInEmails,
+  buyIns as buyInRows,
   buyInVendorContacts,
   comboPhotoFetchJobItems as comboPhotoFetchJobItemRows,
   comboPhotoFetchJobs as comboPhotoFetchJobRows,
@@ -34,7 +35,7 @@ import {
 } from "@shared/schema";
 import type { BuyIn, BookingAlternativePage, InsertUnitSwap, UnitSwap } from "@shared/schema";
 import { db } from "./db";
-import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { getPropertyUnits, getUnitConfig, PROPERTY_UNIT_CONFIGS } from "@shared/property-units";
 import { occupancyForBedrooms } from "@shared/occupancy";
 import { withListingStayDates } from "@shared/listing-stay-dates";
@@ -13714,13 +13715,60 @@ Requirements:
       } catch (markErr: any) {
         console.warn("[buy-in-email] auto-mark bought-in failed:", markErr?.message ?? markErr);
       }
+      // Reconcile the actually-paid rate on every read too: emails ingested
+      // BEFORE the paid-rate feature shipped get their charged total
+      // extracted the moment the panel loads. Fail-soft, kill switch inside.
+      const paidRateUpdatedBuyInIds: number[] = [];
+      try {
+        const { refreshPaidRateForBuyIn } = await import("./paid-rate-extract");
+        for (const b of buyIns) {
+          if (await refreshPaidRateForBuyIn(b.id)) paidRateUpdatedBuyInIds.push(b.id);
+        }
+      } catch (rateErr: any) {
+        console.warn("[buy-in-email] paid-rate extract failed:", rateErr?.message ?? rateErr);
+      }
       // Serve the post-mark rows so the panel reflects the flip immediately.
-      const responseBuyIns = autoMarkedBuyInIds.length > 0
+      const responseBuyIns = autoMarkedBuyInIds.length > 0 || paidRateUpdatedBuyInIds.length > 0
         ? await storage.getBuyInsByReservation(reservationId)
         : buyIns;
-      res.json({ reservationId, alias: alias ?? null, aliases, buyIns: responseBuyIns, contacts, emails, autoMarkedBuyInIds });
+      res.json({ reservationId, alias: alias ?? null, aliases, buyIns: responseBuyIns, contacts, emails, autoMarkedBuyInIds, paidRateUpdatedBuyInIds });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch buy-in communications", message: err.message });
+    }
+  });
+
+  // Reporting pull for the actually-paid rates extracted from alias inboxes
+  // (operator ask 2026-07-19: "keep this data stored somewhere so in the
+  // future I can pull it for reporting"). One row per buy-in that has an
+  // extracted paid rate, with the recorded cost + variance + provenance.
+  app.get("/api/reports/buy-in-paid-rates", async (_req, res) => {
+    try {
+      const rows = await db
+        .select()
+        .from(buyInRows)
+        .where(isNotNull(buyInRows.paidRate))
+        .orderBy(desc(buyInRows.checkIn));
+      res.json({
+        rows: rows.map((b) => {
+          const cost = Number(b.costPaid);
+          const paid = Number(b.paidRate);
+          return {
+            buyInId: b.id,
+            reservationId: b.guestyReservationId,
+            propertyName: b.propertyName,
+            unitLabel: b.unitLabel,
+            checkIn: b.checkIn,
+            checkOut: b.checkOut,
+            bookingStatus: b.bookingStatus,
+            costPaid: b.costPaid,
+            paidRate: b.paidRate,
+            variance: Number.isFinite(cost) && Number.isFinite(paid) ? Number((paid - cost).toFixed(2)) : null,
+            paidRateSource: b.paidRateSource ?? null,
+          };
+        }),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to pull paid rates", message: err?.message ?? String(err) });
     }
   });
 
@@ -14013,6 +14061,15 @@ Requirements:
       } catch (markErr: any) {
         console.warn("[guest-inbox] auto-mark bought-in failed:", markErr?.message ?? markErr);
       }
+      // Reconcile the actually-paid rate on every read (heals emails ingested
+      // before the paid-rate feature shipped). Fail-soft.
+      let paidRateUpdated = false;
+      try {
+        const { refreshPaidRateForAlias } = await import("./paid-rate-extract");
+        paidRateUpdated = await refreshPaidRateForAlias(aliasEmail);
+      } catch (rateErr: any) {
+        console.warn("[guest-inbox] paid-rate extract failed:", rateErr?.message ?? rateErr);
+      }
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
       const messages = await storage.getGuestInboxMessages(aliasEmail, limit);
       const resolvedBuyInId = Number.isFinite(queryBuyInId) && queryBuyInId > 0
@@ -14040,6 +14097,10 @@ Requirements:
         // alias email = purchase proof) — the client refreshes the bookings
         // rows so the "Bought in" badge appears without a reload.
         autoMarkedBoughtIn,
+        // True when THIS read extracted/updated the actually-paid rate from
+        // an alias email — client refreshes the bookings rows so the green/
+        // red "paid $X" figure appears without a reload.
+        paidRateUpdated,
         syncResult,
       });
     } catch (err: any) {

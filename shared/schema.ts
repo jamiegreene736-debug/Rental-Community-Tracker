@@ -87,6 +87,14 @@ export const buyIns = pgTable("buy_ins", {
   // written by refreshArrivalDetailsForReservation. Powers the ✓ "from email"
   // badges in the Message AD dialog.
   arrivalExtraction: jsonb("arrival_extraction"),
+  // --- Actual-paid rate from the alias inbox (2026-07-19) ---
+  // The charged total extracted from inbound emails at the unit's traveler
+  // alias (VRBO/Booking confirmation "Total", payment receipts) by
+  // server/paid-rate-extract.ts. Durable so it can be pulled for reporting;
+  // paidRateSource is the PaidRateSourceRecord provenance (source email
+  // subject/from/date + the verbatim quoted line the amount came from).
+  paidRate: numeric("paid_rate", { precision: 10, scale: 2 }),
+  paidRateSource: jsonb("paid_rate_source"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
