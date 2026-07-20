@@ -69,8 +69,11 @@ check("guest-inbox-sync: fires at the ingestion seam (new mail via the 5-min tic
   guestInboxSyncSrc.includes("await autoMarkBoughtInFromAliasEmails(aliasEmail)"));
 check("buy-in-email-sync: fires after the inbound buy_in_emails insert",
   buyInEmailSyncSrc.includes("markBuyInBoughtInFromInboundEmail(buyInId, parsed.aliasEmail"));
+// Repointed 2026-07-20 (per-unit alias-thread scoping): the reconcile now
+// walks EVERY alias in the unit's set (guestThreadAliasesForBuyIn), not one
+// bare travelerEmail — same intent, wider coverage.
 check("routes: GET /api/guest-inbox reconciles + reports the flip",
-  routesSrc.includes("autoMarkBoughtInFromAliasEmails(aliasEmail)")
+  routesSrc.includes("autoMarkBoughtInFromAliasEmails(candidate)")
   && routesSrc.includes("autoMarkedBoughtIn,"));
 check("routes: buy-in-communications reconciles every inbound email's buy-in + reports ids",
   routesSrc.includes('markBuyInBoughtInFromInboundEmail(targetId, String(email.toEmail ?? ""), "buy-in-communications")')

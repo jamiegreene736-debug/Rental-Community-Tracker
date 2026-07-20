@@ -145,6 +145,7 @@ import {
 import { isHostPost, isSystemPost } from "@shared/guesty-post-classify";
 import { AGENT_REPLY_SIGNOFF_NAME } from "@shared/agent-identity";
 import { agentSafeBuyIn } from "@shared/agent-buyin-view";
+import { guestThreadAliasesForBuyIn } from "@shared/unified-buyin-alias";
 import path from "path";
 import fs from "fs";
 import sharp from "sharp";
@@ -13922,7 +13923,17 @@ Requirements:
       const { extractPhoneForSms, pmSmsPhoneKey } = await import("@shared/pm-sms");
       const phone = normalizePhone(String(req.query.phone ?? "").trim() || extractPhoneForSms(buyIn.managementContact));
       const key = pmSmsPhoneKey(phone);
-      const messages = key ? await storage.getQuoSmsMessagesByPhoneLast10(key) : [];
+      const allForPhone = key ? await storage.getQuoSmsMessagesByPhoneLast10(key) : [];
+      // Per-unit/per-booking scoping (operator ask 2026-07-20, "SMS/Text
+      // History" split): outbound sends stamp this buy-in's reservationId, so
+      // texts to the SAME PM phone about a DIFFERENT reservation stay out of
+      // this thread. Inbound webhook mirrors carry no reservationId — those
+      // stay (a PM reply can't be pinned to a booking from the phone alone).
+      const rid = String(buyIn.guestyReservationId ?? "").trim();
+      const messages = allForPhone.filter((m) => {
+        const mRid = String(m.reservationId ?? "").trim();
+        return !mRid || !rid || mRid === rid;
+      });
       res.json({
         buyInId,
         phone: key ? phone : "",
@@ -14276,20 +14287,50 @@ Requirements:
   app.get("/api/guest-inbox", async (req, res) => {
     try {
       let aliasEmail = String(req.query.aliasEmail ?? "").trim().toLowerCase();
+      // ALL alias mailboxes that belong to this unit's thread. For the
+      // ?buyInId= path this is the guestThreadAliasesForBuyIn resolution
+      // (2026-07-20 "email history is the same for both aliases" fix): the
+      // unit's buyInId-SCOPED alias FIRST, travelerEmail only when a sibling
+      // doesn't share it — a bare travelerEmail read either missed the scoped
+      // mailbox (unit A: legacy base address, scoped .a@ alias) or poured a
+      // shared legacy address's thread into BOTH unit panels.
+      let aliasEmails: string[] = aliasEmail ? [aliasEmail] : [];
       const queryBuyInId = Number(req.query.buyInId);
       if (!aliasEmail && Number.isFinite(queryBuyInId) && queryBuyInId > 0) {
         const buyIn = await storage.getBuyIn(queryBuyInId);
-        aliasEmail = String(buyIn?.travelerEmail ?? "").trim().toLowerCase();
+        if (buyIn) {
+          const siblings = buyIn.guestyReservationId
+            ? await storage.getBuyInsByReservation(buyIn.guestyReservationId)
+            : [buyIn];
+          const aliasRows = buyIn.guestyReservationId
+            ? await db
+                .select()
+                .from(reservationAliases)
+                .where(eq(reservationAliases.reservationId, buyIn.guestyReservationId))
+            : [];
+          aliasEmails = guestThreadAliasesForBuyIn({
+            buyInId: buyIn.id,
+            travelerEmail: buyIn.travelerEmail,
+            siblings: siblings.map((s) => ({ id: s.id, travelerEmail: s.travelerEmail })),
+            aliasRows: aliasRows.map((r) => ({ buyInId: r.buyInId ?? null, aliasEmail: r.aliasEmail })),
+          });
+        }
+        aliasEmail = aliasEmails[0] ?? "";
       }
       if (!aliasEmail) {
         return res.json({ aliasEmail: null, guestName: null, messages: [], arrivalDetails: null, arrivalExtracted: false, arrivalFieldsUpdated: [] });
       }
       // Pull VRBO confirmations from the SimpleLogin forwarding mailbox when the
       // inbound webhook hasn't recorded them yet (common after manual buy-in).
+      // Every leg below walks EVERY alias in the unit's set (usually 1-2):
+      // the scoped alias and a distinct travelerEmail can both hold mail.
       let syncResult: { imported: number; skipped?: string } = { imported: 0 };
       try {
         const { syncGuestInboxForAlias } = await import("./guest-inbox-sync");
-        syncResult = await syncGuestInboxForAlias(aliasEmail);
+        for (const candidate of aliasEmails) {
+          const r = await syncGuestInboxForAlias(candidate);
+          syncResult = { imported: syncResult.imported + r.imported, skipped: r.skipped ?? syncResult.skipped };
+        }
       } catch (syncErr: any) {
         console.warn("[guest-inbox] mailbox sync failed:", syncErr?.message ?? syncErr);
         syncResult = { imported: 0, skipped: syncErr?.message ?? "sync failed" };
@@ -14301,7 +14342,11 @@ Requirements:
       };
       try {
         const { applyArrivalDetailsFromGuestInbox } = await import("./guest-inbox-arrival");
-        arrivalExtract = await applyArrivalDetailsFromGuestInbox(aliasEmail);
+        for (const candidate of aliasEmails) {
+          const r = await applyArrivalDetailsFromGuestInbox(candidate);
+          if (r.updated) arrivalExtract = r;
+          else if (!arrivalExtract.buyInId && r.buyInId) arrivalExtract = { ...arrivalExtract, buyInId: r.buyInId };
+        }
       } catch (extractErr: any) {
         console.warn("[guest-inbox] arrival extract failed:", extractErr?.message ?? extractErr);
       }
@@ -14311,7 +14356,9 @@ Requirements:
       let autoMarkedBoughtIn = false;
       try {
         const { autoMarkBoughtInFromAliasEmails } = await import("./guest-inbox-sync");
-        autoMarkedBoughtIn = await autoMarkBoughtInFromAliasEmails(aliasEmail);
+        for (const candidate of aliasEmails) {
+          if (await autoMarkBoughtInFromAliasEmails(candidate)) autoMarkedBoughtIn = true;
+        }
       } catch (markErr: any) {
         console.warn("[guest-inbox] auto-mark bought-in failed:", markErr?.message ?? markErr);
       }
@@ -14320,12 +14367,21 @@ Requirements:
       let paidRateUpdated = false;
       try {
         const { refreshPaidRateForAlias } = await import("./paid-rate-extract");
-        paidRateUpdated = await refreshPaidRateForAlias(aliasEmail);
+        for (const candidate of aliasEmails) {
+          if (await refreshPaidRateForAlias(candidate)) paidRateUpdated = true;
+        }
       } catch (rateErr: any) {
         console.warn("[guest-inbox] paid-rate extract failed:", rateErr?.message ?? rateErr);
       }
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
-      const messages = await storage.getGuestInboxMessages(aliasEmail, limit);
+      // Union of the unit's alias mailboxes, deduped by row id, newest first.
+      const messageLists = await Promise.all(aliasEmails.map((candidate) => storage.getGuestInboxMessages(candidate, limit)));
+      const seenMessageIds = new Set<number>();
+      const messages = messageLists
+        .flat()
+        .filter((m) => (seenMessageIds.has(m.id) ? false : (seenMessageIds.add(m.id), true)))
+        .sort((a, b) => new Date(b.receivedAt as any).getTime() - new Date(a.receivedAt as any).getTime())
+        .slice(0, limit);
       const resolvedBuyInId = Number.isFinite(queryBuyInId) && queryBuyInId > 0
         ? queryBuyInId
         : arrivalExtract.buyInId ?? (await storage.getBuyInByTravelerEmail(aliasEmail))?.id ?? null;

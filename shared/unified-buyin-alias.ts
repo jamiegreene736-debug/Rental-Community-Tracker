@@ -104,6 +104,51 @@ export function mergeAliasThread<E extends AliasThreadPmEmail, M extends AliasTh
 }
 
 /**
+ * Which alias mailboxes belong to THIS unit's email history (the panel's
+ * booking-thread leg + /api/guest-inbox?buyInId=). Attribution-exact, the
+ * 2026-07-20 "email history is the same for both aliases" fix:
+ *
+ *  - the unit's buyInId-SCOPED reservation_aliases rows always count;
+ *  - `travelerEmail` counts UNLESS a sibling unit shares the same address
+ *    while this unit has its own scoped alias — a legacy shared travelerEmail
+ *    (the pre-unification collision) must not pour the sibling's booking
+ *    thread into both panels. With no scoped alias the shared address is the
+ *    only mailbox we have, so it stays (legacy behavior, better than empty);
+ *  - a reservation-LEVEL alias row (buyInId null) is attributable only when
+ *    the reservation has exactly ONE attached unit (same rule as
+ *    aliasCandidatesForBuyIn in server/arrival-email-extract.ts).
+ *
+ * Order matters: the first entry is the PRIMARY alias (scoped first) — the
+ * one the UI displays and replies send from.
+ */
+export function guestThreadAliasesForBuyIn(input: {
+  buyInId: number;
+  travelerEmail: string | null | undefined;
+  siblings: Array<{ id: number; travelerEmail?: string | null }>;
+  aliasRows: Array<{ buyInId: number | null; aliasEmail: string | null | undefined }>;
+}): string[] {
+  const out: string[] = [];
+  const add = (value: string | null | undefined) => {
+    const email = String(value ?? "").trim().toLowerCase();
+    if (email && !out.includes(email)) out.push(email);
+  };
+  const scoped = input.aliasRows.filter((row) => row.buyInId === input.buyInId);
+  for (const row of scoped) add(row.aliasEmail);
+  const traveler = String(input.travelerEmail ?? "").trim().toLowerCase();
+  const travelerShared = !!traveler && input.siblings.some(
+    (s) => s.id !== input.buyInId && String(s.travelerEmail ?? "").trim().toLowerCase() === traveler,
+  );
+  if (traveler && !(travelerShared && out.length > 0)) add(traveler);
+  const attachedCount = input.siblings.length;
+  if (attachedCount === 1) {
+    for (const row of input.aliasRows) {
+      if (row.buyInId == null) add(row.aliasEmail);
+    }
+  }
+  return out;
+}
+
+/**
  * The pre-unification collision left two units on one reservation sharing a
  * travelerEmail. An UNBOOKED unit whose address is shared with a sibling should
  * be re-minted onto its own unit alias; a BOOKED unit keeps its address (VRBO

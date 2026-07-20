@@ -13193,6 +13193,7 @@ export default function Bookings() {
                               reservation={r}
                               buyIn={slot.buyIn}
                               showAliasControls
+                              unitDisplayLabel={slot.unitLabel}
                             />
                           )}
                           {slot.buyIn && (
@@ -14059,10 +14060,16 @@ function BuyInVendorEmailPanel({
   reservation,
   buyIn,
   showAliasControls,
+  unitDisplayLabel,
 }: {
   reservation: GuestyReservation;
   buyIn: BuyIn;
   showAliasControls: boolean;
+  // Human slot label ("Unit A"/"Unit B") for the history headers — the two
+  // units' threads are full of near-identical VRBO system emails, so each
+  // collapsed section names its unit (operator report 2026-07-20: "the email
+  // history is the same for both of the aliases").
+  unitDisplayLabel?: string;
 }) {
   const { toast } = useToast();
   const guestName = reservation.guest?.fullName ?? "";
@@ -14108,11 +14115,15 @@ function BuyInVendorEmailPanel({
   // renders in the SAME panel, merged+deduped with the PM history — the old
   // separate "VRBO guest thread" block is gone.
   const travelerEmail = String(buyIn.travelerEmail ?? "").trim();
+  // Enabled whenever the unit has ANY alias mailbox — a scoped alias row can
+  // exist without a travelerEmail (and vice versa); the server resolves the
+  // full per-unit alias set from buyInId (guestThreadAliasesForBuyIn).
+  const hasAliasMailbox = !!travelerEmail || !!alias;
   const guestThreadQuery = useQuery<GuestInboxResponse>({
     queryKey: ["/api/guest-inbox", buyIn.id],
     queryFn: () => apiGetJson(`/api/guest-inbox?buyInId=${buyIn.id}`),
-    enabled: !!travelerEmail,
-    refetchInterval: travelerEmail ? 30_000 : false,
+    enabled: hasAliasMailbox,
+    refetchInterval: hasAliasMailbox ? 30_000 : false,
   });
   const bookingMessages = guestThreadQuery.data?.messages ?? [];
 
@@ -14502,7 +14513,17 @@ function BuyInVendorEmailPanel({
         </div>
       </details>
       <details className="rounded-md border bg-background/70 p-2">
-        <summary className="cursor-pointer text-xs font-medium">Email history ({mergedThread.length})</summary>
+        <summary className="cursor-pointer text-xs font-medium">
+          Email history{unitDisplayLabel ? ` — ${unitDisplayLabel}` : ""} ({mergedThread.length})
+        </summary>
+        {/* Scoping receipt: which alias mailbox this unit's thread reads —
+            makes it obvious the sibling unit's near-identical VRBO emails are
+            NOT the same messages (2026-07-20 operator report). */}
+        <div className="mt-1.5 text-[10px] text-muted-foreground">
+          Only this unit's emails — sent to{" "}
+          <span className="font-mono">{alias?.aliasEmail ?? buyIn.travelerEmail ?? "the unit alias"}</span>
+          {" "}and its PM thread.
+        </div>
         {mergedThread.length === 0 && (
           <div className="mt-2 text-[11px] text-muted-foreground">
             No emails saved for this unit yet — PM/vendor replies, VRBO confirmations, and arrival details sent to the unit alias will appear here.
@@ -14803,7 +14824,7 @@ function BuyInVendorEmailPanel({
         </div>
         )}
       </details>
-      <PmSmsThread buyIn={buyIn} />
+      <PmSmsThread buyIn={buyIn} unitDisplayLabel={unitDisplayLabel} />
       {travelerEmail && hasInboundHost && (
         <div className="space-y-1.5 rounded-md border bg-sky-50/40 p-2 dark:bg-sky-950/20">
           <Textarea
@@ -14857,7 +14878,7 @@ type PmSmsThreadResponse = {
   inboundConfigured: boolean;
 };
 
-function PmSmsThread({ buyIn }: { buyIn: BuyIn }) {
+function PmSmsThread({ buyIn, unitDisplayLabel }: { buyIn: BuyIn; unitDisplayLabel?: string }) {
   const { toast } = useToast();
   const [phone, setPhone] = useState(() => extractPhoneForSms(buyIn.managementContact ?? ""));
   const [draft, setDraft] = useState("");
@@ -14912,7 +14933,8 @@ function PmSmsThread({ buyIn }: { buyIn: BuyIn }) {
     >
       <summary className="cursor-pointer text-xs font-medium">
         <MessageSquare className="mr-1 inline h-3.5 w-3.5 text-teal-600" />
-        Text messages with PM{messages.length > 0 ? ` (${messages.length})` : ""}
+        SMS/Text History{unitDisplayLabel ? ` — ${unitDisplayLabel}` : ""}
+        {messages.length > 0 ? ` (${messages.length})` : ""}
       </summary>
       <div className="mt-2 space-y-2">
         <div className="flex items-center gap-2">
