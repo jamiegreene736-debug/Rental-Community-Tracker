@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -29,7 +30,7 @@ import {
   type AliasEmailAttachment,
 } from "@/lib/emailAttachments";
 import {
-  ArrowLeft, Building2, Calendar, Search, Link2, Unlink, ExternalLink,
+  Building2, Calendar, Search, Link2, Unlink, ExternalLink,
   RefreshCw, AlertCircle, CheckCircle2, TrendingUp, TrendingDown, BedDouble,
   ChevronDown, ChevronRight, Globe, ShoppingCart, Zap, Camera,
   ArrowUpDown, ArrowUp, ArrowDown, Star, Copy, FileText, XCircle,
@@ -10741,11 +10742,7 @@ export default function Bookings() {
       )}
       {/* Header */}
       <div className="sticky top-[65px] z-40 flex flex-wrap items-center gap-3 border-b bg-card/95 px-4 py-3 shadow-sm backdrop-blur sm:gap-4 sm:px-6 sm:py-4">
-        <Link href="/">
-          <Button variant="ghost" size="sm" className="gap-1" data-testid="button-back-home">
-            <ArrowLeft className="h-4 w-4" /> Dashboard
-          </Button>
-        </Link>
+        <AppBackButton testId="button-back-home" />
         <div className="hidden sm:block h-5 w-px bg-border" />
         <div className="min-w-0">
           <h1 className="font-semibold text-lg leading-tight">Operations</h1>

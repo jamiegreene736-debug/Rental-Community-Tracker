@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -1583,9 +1584,7 @@ export default function BuilderPreflight() {
     return (
       <div className="max-w-2xl mx-auto p-8 text-center">
         <p className="text-muted-foreground">Property not found.</p>
-        <Button variant="outline" className="mt-4" onClick={() => setLocation("/")}>
-          Back to Dashboard
-        </Button>
+        <AppBackButton className="mt-4" testId="button-back-not-found" />
       </div>
     );
   }

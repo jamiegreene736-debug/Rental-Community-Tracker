@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import AppBackButton from "@/components/AppBackButton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
@@ -21,7 +21,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  ArrowLeft,
   Loader2,
   Play,
   Clock,
@@ -243,11 +242,7 @@ export default function AvailabilityScanner() {
       <div className="max-w-7xl mx-auto p-4 sm:p-6">
         <div className="flex items-center justify-between gap-4 mb-6 flex-wrap">
           <div className="flex items-center gap-3">
-            <Link href="/">
-              <Button variant="ghost" size="sm" data-testid="button-back-home">
-                <ArrowLeft className="h-4 w-4 mr-1" /> Dashboard
-              </Button>
-            </Link>
+            <AppBackButton testId="button-back-home" />
             <div>
               <h1 className="text-2xl font-bold flex items-center gap-2">
                 <CalendarSearch className="h-6 w-6" />
