@@ -28,6 +28,7 @@ import {
   insertCommunityDraftSchema,
   insertManualReservationSchema,
   insertUnitSwapSchema,
+  reservationAgentShares,
   reservationAliases,
   rentalAgreements,
   queueJobEvents as queueJobEventRows,
@@ -143,6 +144,7 @@ import {
 } from "@shared/arrival-details-warning";
 import { isHostPost, isSystemPost } from "@shared/guesty-post-classify";
 import { AGENT_REPLY_SIGNOFF_NAME } from "@shared/agent-identity";
+import { agentSafeBuyIn } from "@shared/agent-buyin-view";
 import path from "path";
 import fs from "fs";
 import sharp from "sharp";
@@ -13694,6 +13696,22 @@ Requirements:
   app.get("/api/bookings/:reservationId/buy-in-communications", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
+      // Agent-limited view (2026-07-20): agents may open the PM email thread
+      // ONLY for reservations the operator shared via "Show in agent portal",
+      // and the buy-in rows they receive are projected through the
+      // agentSafeBuyIn whitelist (no costPaid / paidRate / notes — see
+      // shared/agent-buyin-view.ts). Admin + loopback responses are unchanged.
+      const isAgentSession = (res.locals.portalSession as { role?: string } | undefined)?.role === "agent";
+      if (isAgentSession) {
+        const [share] = await db
+          .select()
+          .from(reservationAgentShares)
+          .where(eq(reservationAgentShares.reservationId, reservationId))
+          .limit(1);
+        if (!share) {
+          return res.status(403).json({ error: "This reservation is not shared with the agent portal" });
+        }
+      }
       // Pull PM/vendor reverse-alias replies from the SimpleLogin forwarding
       // mailbox before reading history — the inbound webhook is not configured in
       // prod, so this IMAP poll is what surfaces incoming vendor emails (mirrors
@@ -13763,9 +13781,129 @@ Requirements:
       const responseBuyIns = autoMarkedBuyInIds.length > 0 || paidRateUpdatedBuyInIds.length > 0
         ? await storage.getBuyInsByReservation(reservationId)
         : buyIns;
-      res.json({ reservationId, alias: alias ?? null, aliases, buyIns: responseBuyIns, contacts, emails, autoMarkedBuyInIds, paidRateUpdatedBuyInIds });
+      res.json({
+        reservationId,
+        alias: alias ?? null,
+        aliases,
+        buyIns: isAgentSession ? responseBuyIns.map(agentSafeBuyIn) : responseBuyIns,
+        contacts,
+        emails,
+        autoMarkedBuyInIds,
+        paidRateUpdatedBuyInIds,
+      });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch buy-in communications", message: err.message });
+    }
+  });
+
+  // ── Agent-portal reservation shares (operator spec 2026-07-20) ─────────────
+  // The operator shares reservations with the agent portal one by one; the
+  // agent then gets a LIMITED view (PM email thread + arrival/unit info, no
+  // financial fields). GET/POST /api/agent-shares are deliberately NOT in the
+  // agent allowlist (server/auth.ts) — only the operator can toggle a share.
+  app.get("/api/agent-shares", async (_req, res) => {
+    try {
+      const rows = await db
+        .select()
+        .from(reservationAgentShares)
+        .orderBy(desc(reservationAgentShares.createdAt));
+      res.json({ reservationIds: rows.map((r) => r.reservationId), shares: rows });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to list agent shares", message: err?.message ?? String(err) });
+    }
+  });
+
+  app.post("/api/agent-shares", async (req, res) => {
+    try {
+      const reservationId = String(req.body?.reservationId ?? "").trim();
+      const shared = req.body?.shared !== false;
+      if (!reservationId) return res.status(400).json({ error: "reservationId is required" });
+      if (shared) {
+        const sharedBy = (res.locals.portalSession as { username?: string } | undefined)?.username ?? "admin";
+        await db
+          .insert(reservationAgentShares)
+          .values({ reservationId, sharedBy })
+          .onConflictDoNothing();
+      } else {
+        await db.delete(reservationAgentShares).where(eq(reservationAgentShares.reservationId, reservationId));
+      }
+      res.json({ reservationId, shared });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to update agent share", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Agent-facing list of the shared reservations. Reservation summaries come
+  // from a FIELD-LIMITED Guesty read (no `money` — guest payment data never
+  // reaches this response) and buy-ins go through the agentSafeBuyIn
+  // whitelist. Fail-soft per reservation: a Guesty hiccup still returns the
+  // row with buy-in-derived dates so the email thread stays reachable.
+  app.get("/api/agent/shared-bookings", async (_req, res) => {
+    try {
+      const shares = await db
+        .select()
+        .from(reservationAgentShares)
+        .orderBy(desc(reservationAgentShares.createdAt));
+      const manualRows = shares.some((s) => s.reservationId.startsWith("manual:"))
+        ? await storage.getManualReservations({ includePast: true })
+        : [];
+      const safeFields = encodeURIComponent(
+        "_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest listing listingId confirmationCode integration source",
+      );
+      const bookings = await Promise.all(
+        shares.map(async (share) => {
+          const reservationId = share.reservationId;
+          const attached = await storage.getBuyInsByReservation(reservationId);
+          const units = attached
+            .filter((b) => b.status !== "cancelled")
+            .sort((a, b) => String(a.unitLabel ?? "").localeCompare(String(b.unitLabel ?? "")))
+            .map(agentSafeBuyIn);
+          let guestName = "Guest";
+          let checkIn: string | null = units[0]?.checkIn ?? null;
+          let checkOut: string | null = units[0]?.checkOut ?? null;
+          let status = "";
+          let listingName = units[0]?.propertyName ?? "";
+          let confirmationCode = "";
+          if (reservationId.startsWith("manual:")) {
+            const row = manualRows.find((m) => `manual:${m.id}` === reservationId);
+            if (row) {
+              guestName = row.guestName;
+              checkIn = row.checkIn;
+              checkOut = row.checkOut;
+              status = row.status ?? "manual";
+              listingName = listingName || "Manual booking";
+              confirmationCode = reservationId;
+            }
+          } else {
+            try {
+              const reservation = (await guestyRequest("GET", `/reservations/${reservationId}?fields=${safeFields}`)) as any;
+              const guest = reservation?.guest ?? {};
+              guestName = firstNonEmptyString(guest?.fullName, guest?.name, guest?.firstName, "Guest");
+              checkIn = reservation?.checkInDateLocalized ?? reservation?.checkIn ?? checkIn;
+              checkOut = reservation?.checkOutDateLocalized ?? reservation?.checkOut ?? checkOut;
+              status = String(reservation?.status ?? "");
+              listingName = guestyListingName(reservation?.listing ?? {}, listingName || "Guesty listing");
+              confirmationCode = firstNonEmptyString(reservation?.confirmationCode, reservationId);
+            } catch (guestyErr: any) {
+              console.warn(`[agent-shares] Guesty read failed for ${reservationId}: ${guestyErr?.message ?? guestyErr}`);
+            }
+          }
+          return {
+            reservationId,
+            sharedAt: share.createdAt,
+            guestName,
+            checkIn,
+            checkOut,
+            status,
+            listingName,
+            confirmationCode,
+            units,
+          };
+        }),
+      );
+      res.json({ bookings });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to list shared bookings", message: err?.message ?? String(err) });
     }
   });
 
@@ -13857,6 +13995,22 @@ Requirements:
       const attachments = normalizeBuyInEmailAttachments(req.body?.attachments);
       if (!reservationId || !vendorEmail || !subject || !body) {
         return res.status(400).json({ error: "reservationId, vendorEmail, subject, and body are required" });
+      }
+
+      // Agent-limited view (2026-07-20): an agent may reply to the PM only on
+      // a reservation the operator shared, and only for a buy-in that really
+      // belongs to that reservation (so a forged buyInId can't send from
+      // another booking's alias).
+      if ((res.locals.portalSession as { role?: string } | undefined)?.role === "agent") {
+        const [share] = await db
+          .select()
+          .from(reservationAgentShares)
+          .where(eq(reservationAgentShares.reservationId, reservationId))
+          .limit(1);
+        const reservationBuyIns = share ? await storage.getBuyInsByReservation(reservationId) : [];
+        if (!share || !reservationBuyIns.some((b) => b.id === buyInId)) {
+          return res.status(403).json({ error: "This reservation is not shared with the agent portal" });
+        }
       }
 
       // Prefer the SimpleLogin reverse alias (so the PM sees the guest alias and

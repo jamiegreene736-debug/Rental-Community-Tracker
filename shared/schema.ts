@@ -307,6 +307,19 @@ export const insertManualReservationSchema = createInsertSchema(manualReservatio
 export type InsertManualReservation = z.infer<typeof insertManualReservationSchema>;
 export type ManualReservation = typeof manualReservations.$inferSelect;
 
+// Per-reservation opt-in for the agent portal's LIMITED buy-in view
+// (operator spec 2026-07-20): the agent sees ONLY reservations the operator
+// explicitly shared, one by one — a row here IS the share. The agent-facing
+// routes (buy-in-communications, /api/agent/shared-bookings, vendor-email
+// send) gate on this table for agent sessions; admins are unaffected.
+export const reservationAgentShares = pgTable("reservation_agent_shares", {
+  reservationId: text("reservation_id").primaryKey(),
+  sharedBy: text("shared_by"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type ReservationAgentShare = typeof reservationAgentShares.$inferSelect;
+
 export const reservationAliases = pgTable("reservation_aliases", {
   id: serial("id").primaryKey(),
   reservationId: text("reservation_id").notNull(),

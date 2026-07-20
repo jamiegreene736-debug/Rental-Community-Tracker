@@ -65,6 +65,18 @@ assert.equal(isAgentAllowedPath(req("DELETE", "/api/inbox/guest-issues/42")), fa
 assert.equal(isAgentAllowedPath(req("POST", "/api/inbox/guest-issues/42")), false);
 console.log("  ✓ allows agents to read/create/comment on guest issues but not delete");
 
+// Agent-limited buy-in view (2026-07-20): the shared-bookings list + the PM
+// reply send are agent-reachable (handlers gate on reservation_agent_shares +
+// the agentSafeBuyIn whitelist); the share TOGGLE itself stays operator-only.
+assert.equal(isAgentAllowedPath(req("GET", "/api/agent/shared-bookings")), true);
+assert.equal(isAgentAllowedPath(req("POST", "/api/buy-ins/42/vendor-email")), true);
+assert.equal(isAgentAllowedPath(req("GET", "/api/bookings/res123/buy-in-communications")), true);
+assert.equal(isAgentAllowedPath(req("GET", "/api/agent-shares")), false);
+assert.equal(isAgentAllowedPath(req("POST", "/api/agent-shares")), false);
+assert.equal(isAgentAllowedPath(req("POST", "/api/buy-ins/abc/vendor-email")), false);
+assert.equal(isAgentAllowedPath(req("GET", "/api/reports/buy-in-paid-rates")), false);
+console.log("  ✓ agent-limited buy-in view routes allowed; share toggle + paid-rate report blocked");
+
 assert.equal(isAgentAllowedPath(req("GET", "/api/property/market-rates")), false);
 assert.equal(isAgentAllowedPath(req("POST", "/api/pricing/bulk-refresh")), false);
 assert.equal(isAgentAllowedPath(req("POST", "/api/community/drafts")), false);

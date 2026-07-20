@@ -99,6 +99,7 @@ import { resolveDraftUnitBedrooms } from "@shared/draft-unit-bedrooms";
 import { photoCommunityStatusLabel, type PhotoCommunityRowStatus } from "@shared/photo-community-status-logic";
 import { unitAuditBadge } from "@shared/unit-audit-sweep-logic";
 import { UnitAuditDialog, type UnitAuditDashboardStatus } from "@/components/unit-audit-dialog";
+import AgentSharedBookings from "@/components/agent-shared-bookings";
 import {
   guestyPushStatusForItem,
   summarizeBulkPricingGuestyPush,
@@ -1380,6 +1381,11 @@ function AgentPropertyPortal() {
             )}
           </div>
         </Card>
+
+        {/* Limited buy-in view (operator spec 2026-07-20): PM email threads
+            for the reservations the operator explicitly shared — financial
+            data is stripped server-side. */}
+        <AgentSharedBookings />
 
         <Dialog open={!!callbackCall} onOpenChange={(open) => {
           if (!open) {

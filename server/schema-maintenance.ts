@@ -126,6 +126,16 @@ export async function ensureRuntimeSchema(): Promise<void> {
       ON reservation_aliases (reservation_id, buy_in_id)
   `);
   console.log("[schema] ensured reservation_aliases per-buy-in alias support");
+  // Agent-portal per-reservation shares (limited buy-in view, 2026-07-20):
+  // a row = the operator clicked "Show in agent portal" for that reservation.
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS reservation_agent_shares (
+      reservation_id text PRIMARY KEY,
+      shared_by text,
+      created_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured reservation_agent_shares table");
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS buy_in_vendor_contacts (
       id serial PRIMARY KEY,

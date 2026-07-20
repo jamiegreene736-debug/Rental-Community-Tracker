@@ -43,6 +43,45 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (agent-limited buy-in view — per-reservation "Show in agent portal"): Operator: the
+  agent needs a LIMITED view of the buy-in unit section — the back-and-forth PM emails, NO
+  financial info (what the guest paid etc.), and only reservations he shares one by one. SHIPPED
+  (`claude/agent-backend-buy-in-limited-7c9da9`): NEW `reservation_agent_shares` table (schema +
+  schema-maintenance CREATE) + operator-only `GET/POST /api/agent-shares` driving a
+  "Show in agent portal" toggle in the bookings expanded-row action strip; agent portal home
+  (AgentPropertyPortal) gains "Shared bookings · PM communications"
+  (client/src/components/agent-shared-bookings.tsx) — per shared reservation: units'
+  arrival/PM info, the buy_in_emails thread, and a reply composer. KEY LEAK CLOSED (don't
+  re-chase): `GET /api/bookings/:id/buy-in-communications` was ALREADY agent-allowlisted but
+  returned full buy_ins rows incl. costPaid/paidRate — the handler now 403s agent sessions
+  without a share row and projects buy-ins through the `agentSafeBuyIn` WHITELIST
+  (shared/agent-buyin-view.ts; notes excluded too — Cowork notes carry "$" totals; whitelist means
+  future financial columns can't leak by default). `POST /api/buy-ins/:id/vendor-email` is now
+  agent-allowed but double-gated (shared reservation + buyInId must belong to it);
+  `/api/agent/shared-bookings` reads Guesty with a fields= that has NO `money` (test-locked).
+  Locked by tests/agent-buyin-view.test.ts (npm chain) + new tests/auth-agent.test.ts rows.
+  Verified: build clean (strings bundle-grepped), `npm run check` 335 = baseline (stash A/B
+  identical up to union-ordering noise), full chain green minus the documented
+  city-vrbo-expansion.smoke sidecar flake. See AGENTS.md "Agent-limited buy-in view" +
+  the 2026-07-20 Decision Log line.
+
+- 2026-07-20 (duplicate-photo findings: automatic replacement OFF — dashboard alert only): Operator:
+  "stop this from being automatic and instead have it just alert me for me to manually check myself
+  with an alert on the dashboard." SHIPPED (`claude/photo-duplicate-alerts-cbb7bc`): unattended
+  (cron-source) audit sweeps — the weekly scheduler AND the found-flip reactive sweep — no longer
+  auto-replace a unit whose photos were FOUND on another OTA. Pure
+  `unattendedOtaDuplicateReplaceBlocked` (shared/unit-audit-sweep-logic.ts) gates the replace rung
+  when the trigger is otaFound: the stage reports attention pointing at the EXISTING dashboard
+  duplicate-photos popup (still auto-raises red on found rows — no client change needed) + operator
+  SMS (`photo-duplicate-review:` dedup); the popup's per-unit "Replace photos" button is the manual
+  path (that one-click orchestrator is operator-clicked, untouched). SCOPE (don't widen or
+  re-automate): manual sweeps still replace; bedroom-shortfall/community-mismatch automation (the
+  2026-07-12 bedroom directive) untouched; `UNIT_AUDIT_CRON_OTA_REPLACE=1` restores the old
+  unattended auto-replace. Locked: unit-audit-sweep 208/0 (pure matrix + source guards on
+  gate/SMS/attention wiring), photo-listing-decision (reactive sweepNote/SMS say replacement is OFF
+  and point at the dashboard alert). Verified: full `npm test` REAL exit 0, check = baseline
+  (stash A/B), build clean. See AGENTS.md Unit Audit Sweep #15(d) + the 2026-07-20 Decision Log line.
+
 - 2026-07-20 (dashboard avg tile → REALIZED paid rate + photo-match "this listing is OK" exceptions):
   Operator: (a) the "$867 Avg Low Price/Night" tile must average what guests ACTUALLY paid in our
   system, not the listed price; (b) the duplicate-photos warning needs a per-match escape — confirm

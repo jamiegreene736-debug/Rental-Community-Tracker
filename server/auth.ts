@@ -279,6 +279,16 @@ function agentApiMethodAllowed(req: Request): boolean {
 
   if (method === "GET" && /^\/api\/bookings\/[^/]+\/(arrival-details|buy-in-communications|rental-agreement)$/.test(path)) return true;
 
+  // Agent-limited buy-in view (2026-07-20): the agent sees ONLY reservations
+  // the operator shared via "Show in agent portal" — the handlers enforce the
+  // reservation_agent_shares gate + a financial-field whitelist projection
+  // (shared/agent-buyin-view.ts), so allowlisting the paths is safe.
+  // /api/agent-shares (the toggle) stays admin-only: deliberately NOT listed.
+  if (method === "GET" && path === "/api/agent/shared-bookings") return true;
+  // Reply to the PM from the unit alias — handler 403s unless the buy-in's
+  // reservation is shared with the agent portal.
+  if (method === "POST" && /^\/api\/buy-ins\/\d+\/vendor-email$/.test(path)) return true;
+
   return false;
 }
 
