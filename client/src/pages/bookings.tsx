@@ -335,6 +335,9 @@ type BuyInCommunicationsResponse = {
   buyIns: BuyIn[];
   contacts: BuyInVendorContactRecord[];
   emails: BuyInEmailRecord[];
+  // Buy-ins THIS read auto-marked bought in (an inbound alias email is
+  // purchase proof) — non-empty triggers a bookings-row refresh client-side.
+  autoMarkedBuyInIds?: number[];
 };
 
 type AutoFillSearchSummary = {
@@ -5775,6 +5778,9 @@ type GuestInboxResponse = {
   arrivalDetails?: GuestInboxArrivalDetails | null;
   arrivalExtracted?: boolean;
   arrivalFieldsUpdated?: string[];
+  // True when THIS read flipped the owning buy-in to booked (inbound alias
+  // email = purchase proof) — triggers a bookings-row refresh client-side.
+  autoMarkedBoughtIn?: boolean;
   syncResult?: { imported: number; skipped?: string };
 };
 
@@ -14118,6 +14124,17 @@ function BuyInVendorEmailPanel({
     queryClient.invalidateQueries({ queryKey: ["/api/bookings"], predicate: (q) => String(q.queryKey[2] ?? "") === "unit-proximity" });
   }, [guestThreadQuery.data?.arrivalExtracted, guestThreadQuery.data?.arrivalFieldsUpdated?.join(",")]);
 
+  // The /api/guest-inbox read also reconciles the bought-in mark (an inbound
+  // alias email is purchase proof). Refresh the rows when it performed the
+  // flip — invalidate-only; the buy-in-communications effect below owns the
+  // toast so a race can't show it twice.
+  useEffect(() => {
+    if (!guestThreadQuery.data?.autoMarkedBoughtIn) return;
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+  }, [guestThreadQuery.data?.autoMarkedBoughtIn]);
+
   const createAlias = useMutation({
     mutationFn: () => apiRequest("POST", `/api/bookings/${reservation._id}/simplelogin/alias`, { guestName, buyInId: buyIn.id }).then((r) => r.json()),
     onSuccess: () => {
@@ -14198,6 +14215,32 @@ function BuyInVendorEmailPanel({
     }
   };
 
+  // The server reconciles the bought-in mark on every buy-in-communications
+  // read — an inbound email at a unit alias verifies the purchase. When THIS
+  // read performed a flip, refresh the bookings rows so the green "Bought in"
+  // badge appears without a reload. Ref-guarded: one flip invalidates once.
+  const autoMarkHandledRef = useRef("");
+  useEffect(() => {
+    const ids = data?.autoMarkedBuyInIds ?? [];
+    if (ids.length === 0) return;
+    const key = ids.slice().sort((a, b) => a - b).join(",");
+    if (autoMarkHandledRef.current === key) return;
+    autoMarkHandledRef.current = key;
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+    toast({
+      title: "Marked bought in",
+      description: "An email arrived at the unit alias — the purchase is verified and recorded.",
+    });
+  }, [data?.autoMarkedBuyInIds]);
+
+  // ── Gmail-style alias inbox: which message is open in the reading pane ──────
+  // Selection is a stable row KEY over the MERGED thread (pm-<id> /
+  // booking-<id>); openRow is derived after mergeAliasThread below. Newest
+  // message opens by default; a refetched-away selection falls back to newest.
+  const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
+
   // ── Inline reply to a specific email in the Alias email history ─────────────
   // Freeform body, "Re: …" subject, sent to whoever the email is with (the PM's
   // real address) via the SAME reverse-alias send path as the composer above. One
@@ -14257,6 +14300,10 @@ function BuyInVendorEmailPanel({
   // ONE history for the unit: PM/vendor emails + booking-thread messages,
   // deduped (the unified alias means both IMAP ingesters see the same mail).
   const mergedThread = mergeAliasThread(emails, bookingMessages);
+  // The open reading-pane row (Gmail-style inbox): the selected key when it
+  // still exists, else the newest message.
+  const openRow = mergedThread.find((r) => aliasThreadRowKey(r) === selectedRowKey) ?? mergedThread[0] ?? null;
+  const openRowKey = openRow ? aliasThreadRowKey(openRow) : null;
 
   return (
     <div className="border-t bg-muted/15 px-3 py-2.5 space-y-2">
@@ -14387,36 +14434,123 @@ function BuyInVendorEmailPanel({
       </details>
       <details className="rounded-md border bg-background/70 p-2" open={mergedThread.length > 0}>
         <summary className="cursor-pointer text-xs font-medium">Email history ({mergedThread.length})</summary>
-        <div className="mt-2 space-y-2">
-          {mergedThread.length === 0 && (
-            <div className="text-[11px] text-muted-foreground">
-              No emails saved for this unit yet — PM/vendor replies, VRBO confirmations, and arrival details sent to the unit alias will appear here.
-              {guestThreadQuery.data?.syncResult?.skipped === "IMAP not configured" && (
-                <span className="block mt-1 text-amber-700 dark:text-amber-300">
-                  Mailbox sync is not configured on the server — ask ops to set GUEST_INBOX_IMAP_* credentials.
-                </span>
-              )}
-            </div>
-          )}
-          {mergedThread.map((row) => {
+        {mergedThread.length === 0 && (
+          <div className="mt-2 text-[11px] text-muted-foreground">
+            No emails saved for this unit yet — PM/vendor replies, VRBO confirmations, and arrival details sent to the unit alias will appear here.
+            {guestThreadQuery.data?.syncResult?.skipped === "IMAP not configured" && (
+              <span className="block mt-1 text-amber-700 dark:text-amber-300">
+                Mailbox sync is not configured on the server — ask ops to set GUEST_INBOX_IMAP_* credentials.
+              </span>
+            )}
+          </div>
+        )}
+        {mergedThread.length > 0 && (
+        <div
+          className="mt-2 flex flex-col overflow-hidden rounded-md border md:h-[440px] md:flex-row"
+          data-testid={`alias-inbox-${buyIn.id}`}
+        >
+          {/* Gmail-style message list over the MERGED thread (PM history ∪
+              booking thread): newest first; click a row to open it in the
+              reading pane. On phones the list sits above the message. */}
+          <div className="max-h-56 shrink-0 overflow-y-auto border-b bg-muted/20 md:h-full md:max-h-none md:w-64 md:border-b-0 md:border-r lg:w-72">
+            {mergedThread.map((row) => {
+              const rowKey = aliasThreadRowKey(row);
+              const rowOpen = rowKey === openRowKey;
+              const rowClass = `block w-full border-b border-l-2 px-2.5 py-2 text-left transition-colors last:border-b-0 ${
+                rowOpen ? "border-l-primary bg-background" : "border-l-transparent hover:bg-muted/40"
+              }`;
+              const selectRow = () => {
+                setSelectedRowKey(rowKey);
+                // Switching messages closes a reply drafted on another one.
+                if (replyingId !== null && !(row.source === "pm" && replyingId === row.email.id)) closeReply();
+              };
+              if (row.source === "booking") {
+                const m = row.message;
+                const outbound = (m.direction ?? "inbound") === "outbound";
+                return (
+                  <button
+                    type="button"
+                    key={rowKey}
+                    onClick={selectRow}
+                    aria-current={rowOpen ? "true" : undefined}
+                    className={rowClass}
+                    data-testid={`alias-inbox-row-${rowKey}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate text-[11px] font-medium">{outbound ? "You → host" : m.fromEmail}</span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">{shortAliasEmailDate(m.receivedAt)}</span>
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1.5">
+                      {outbound && <Badge variant="outline" className="h-4 shrink-0 px-1 text-[9px]">sent</Badge>}
+                      <span className="min-w-0 truncate text-[11px] font-semibold">{m.subject}</span>
+                    </div>
+                    <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{aliasEmailSnippet(m.body)}</div>
+                  </button>
+                );
+              }
+              const email = row.email;
+              // Resolve THIS row's vendor for the "who it's with" line — same
+              // per-email contact match the reading pane uses.
+              const rowContact = data?.contacts?.find(
+                (c) => c.reverseAliasEmail && c.reverseAliasEmail.toLowerCase() === (email.toEmail ?? "").trim().toLowerCase(),
+              ) ?? contact;
+              const rowSeen = vendorVisibleEmailAddresses(email, {
+                aliasEmail: alias?.aliasEmail,
+                vendorEmail: rowContact?.vendorEmail,
+                reverseAliasEmail: rowContact?.reverseAliasEmail,
+              });
+              return (
+                <button
+                  type="button"
+                  key={rowKey}
+                  onClick={selectRow}
+                  aria-current={rowOpen ? "true" : undefined}
+                  className={rowClass}
+                  data-testid={`alias-inbox-row-${rowKey}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="min-w-0 truncate text-[11px] font-medium">
+                      {email.direction === "inbound" ? rowSeen.from : rowSeen.to}
+                    </span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">{shortAliasEmailDate(email.sentAt)}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-1.5">
+                    {email.direction !== "inbound" && (
+                      <Badge variant="outline" className="h-4 shrink-0 px-1 text-[9px]">sent</Badge>
+                    )}
+                    <span className="min-w-0 truncate text-[11px] font-semibold">{email.subject}</span>
+                  </div>
+                  <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{aliasEmailSnippet(email.body)}</div>
+                </button>
+              );
+            })}
+          </div>
+          {/* Reading pane: the opened message (defaults to the newest). */}
+          <div className="min-w-0 flex-1 overflow-y-auto bg-background">
+          {(() => {
+            const row = openRow!;
             if (row.source === "booking") {
               // Booking-thread message (VRBO confirmation / host mail) that the
-              // PM history didn't also capture — simple card, no attachments.
+              // PM history didn't also capture — no attachments/reverse-alias
+              // reply path; the host-reply composer below the inbox answers it.
               const m = row.message;
               const outbound = (m.direction ?? "inbound") === "outbound";
               return (
-                <div
-                  key={`booking-${m.id}`}
-                  className={`rounded border p-2 text-xs ${outbound ? "bg-sky-100 dark:bg-sky-900/40 ml-6" : "bg-sky-50/60 dark:bg-sky-950/30 mr-6"}`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium truncate">{outbound ? "You → host" : m.subject}</span>
-                    <span className="text-[10px] text-muted-foreground whitespace-nowrap">{fmtDate(m.receivedAt)}</span>
+                <div className="p-3 text-[11px]">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-sm font-semibold leading-snug">{m.subject || (outbound ? "You → host" : "(no subject)")}</span>
+                    <Badge variant={outbound ? "outline" : "secondary"} className="shrink-0 text-[10px]">
+                      {outbound ? "sent" : "booking thread"}
+                    </Badge>
                   </div>
-                  <div className="text-[10px] text-muted-foreground truncate">
-                    {outbound ? `To: ${m.toEmail}` : `From: ${m.fromEmail}`} · booking thread
+                  <div className="mt-1.5 space-y-0.5 border-b pb-2 text-[10px] text-muted-foreground">
+                    <div className="truncate"><span className="font-medium">From:</span> {m.fromEmail}</div>
+                    <div className="truncate"><span className="font-medium">To:</span> {m.toEmail}</div>
+                    <div>{formatEmailTimestampForDisplay(m.receivedAt) ?? "—"} · booking thread</div>
                   </div>
-                  <div className="mt-1 whitespace-pre-wrap break-words text-[11px] line-clamp-6">{String(m.body || "").slice(0, 4000)}</div>
+                  <div className="mt-2 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
+                    {String(m.body || "").slice(0, 6000)}
+                  </div>
                 </div>
               );
             }
@@ -14442,9 +14576,9 @@ function BuyInVendorEmailPanel({
             const replyTo = replyRecipientForBuyInEmail(email, emailCtx);
             const isReplying = replyingId === email.id;
             return (
-              <div key={email.id} className="rounded-md border bg-background p-3 text-[11px] shadow-sm">
+              <div key={email.id} className="p-3 text-[11px]">
                 <div className="flex items-start justify-between gap-2">
-                  <span className="text-xs font-semibold leading-snug">{email.subject}</span>
+                  <span className="text-sm font-semibold leading-snug">{email.subject}</span>
                   <div className="flex shrink-0 items-center gap-1.5">
                     <Badge variant={email.direction === "inbound" ? "secondary" : "outline"} className="text-[10px]">
                       {email.direction}
@@ -14595,8 +14729,10 @@ function BuyInVendorEmailPanel({
                 )}
               </div>
             );
-          })}
+          })()}
+          </div>
         </div>
+        )}
       </details>
       {travelerEmail && hasInboundHost && (
         <div className="space-y-1.5 rounded-md border bg-sky-50/40 p-2 dark:bg-sky-950/20">
@@ -14629,6 +14765,30 @@ function BuyInVendorEmailPanel({
 function extractEmailForInput(value: string): string {
   const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return match?.[0] ?? "";
+}
+
+// Stable selection key for a merged alias-thread row (Gmail-style inbox):
+// PM-history rows and booking-thread rows have independent id spaces.
+function aliasThreadRowKey(row: { source: "pm" | "booking"; email?: { id: number }; message?: { id: number } }): string {
+  return row.source === "booking" ? `booking-${row.message?.id}` : `pm-${row.email?.id}`;
+}
+
+// Compact Gmail-style date for the alias-inbox list rows: time-of-day for
+// today's mail, "Jul 19" otherwise.
+function shortAliasEmailDate(value: string | Date | null | undefined): string {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay
+    ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// One-line message preview under the subject in the alias-inbox list.
+function aliasEmailSnippet(body: string | null | undefined): string {
+  return formatEmailBodyForDisplay(String(body ?? "")).replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
 function ArrivalDetailsDialog({

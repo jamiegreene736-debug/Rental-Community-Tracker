@@ -275,6 +275,16 @@ export async function syncBuyInVendorEmailsForReservation(
           if (parsed.receivedAt) values.sentAt = parsed.receivedAt;
           await db.insert(buyInEmails).values(values as any);
           imported += 1;
+          // An inbound email at the unit alias is proof the unit was actually
+          // bought in — record the durable "booked" transition on the owning
+          // buy-in (same rules as the guest-inbox sync; fail-soft so a mark
+          // failure never fails the import).
+          try {
+            const { markBuyInBoughtInFromInboundEmail } = await import("./guest-inbox-sync");
+            await markBuyInBoughtInFromInboundEmail(buyInId, parsed.aliasEmail, "buy-in-email");
+          } catch (err: any) {
+            console.warn("[buy-in-email] auto-mark bought-in failed:", err?.message ?? err);
+          }
         }
       } finally {
         lock.release();
