@@ -54,8 +54,11 @@ Before making any changes:
   in its place a confirm-gated "Mark as bought in" (optional confirmation-number prompt) PATCHes
   the existing /api/buy-ins/:id booked transition (bookedAt server-stamped, never-re-book guard
   armed, Cowork checkout button auto-hides). Offered from idle/failed rows, request_submitted
-  ("Host accepted — mark booked"), and CRUCIALLY awaiting_payment ("Paid — mark bought in"
-  beside the existing "Not paid — reset" — the two honest exits from the payment handoff). All
+  ("Host accepted — mark booked"), and CRUCIALLY awaiting_payment ("Paid — mark booked"
+  beside the existing "Not paid — reset" — the two honest exits from the payment handoff;
+  reconciled at merge time with the same-day #1115 headless-checkout PR, whose richer
+  markBookedAfterPayment recorder — confirmation-number prompt, "REQUEST" → request_submitted —
+  is now the ONE recorder every state's button calls). All
   durable badges + claim resets preserved (test-locked). (2) "Send unit confirmation to guest"
   reuses the ENTIRE alternatives machinery via payload `pageKind: "unit-confirmation"` (jsonb
   only, no schema change; RelocateGuestDialog parameterized by kind): same photo

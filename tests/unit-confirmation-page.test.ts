@@ -154,7 +154,7 @@ check("bookings: operator can record a completed purchase (PATCH booked)",
   && bookingsSrc.includes("button-mark-bought-in-")
   && bookingsSrc.includes('{ bookingStatus: "booked" }'));
 check("bookings: the payment handoff offers the PAID exit next to the reset",
-  bookingsSrc.includes("Paid — mark bought in")
+  bookingsSrc.includes("Paid — mark booked")
   && bookingsSrc.includes("Not paid — reset"));
 check("bookings: the old 'Buy this unit in' checkout trigger is GONE (client no longer drives the dormant sidecar checkout job)",
   !bookingsSrc.includes("Buy this unit in")

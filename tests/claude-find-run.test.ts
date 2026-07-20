@@ -35,7 +35,8 @@ import {
   scrubClaudeFindRunToken,
   serializeClaudeFindRunStore,
 } from "../shared/claude-find-run";
-import { buildCoworkBuyInPrompt, type CoworkBuyInPromptInput } from "../shared/cowork-buyin-prompt";
+import { checkoutRunEligibility } from "../shared/claude-find-run";
+import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, type CoworkBuyInPromptInput } from "../shared/cowork-buyin-prompt";
 // The daemon runner is plain node .mjs — import its twins directly.
 import {
   browserMcpFailure as runnerBrowserMcpFailure,
@@ -658,8 +659,260 @@ console.log("claude-find-run: source wiring");
     "shared + runner: the guest-happy curl is a labelled milestone (both twins)",
     sharedSrc.includes('if (endpoint === "guest-happy") return "Recording the guest-expectation verdict"')
       && runnerSrc.includes('if (endpoint === "guest-happy") return "Recording the guest-expectation verdict"')
-      && runnerSrc.includes("(buy-ins|attach|guest-happy)"),
+      && runnerSrc.includes("(buy-ins|attach|guest-happy|checkout-claim\\/complete|checkout-claim\\/release|checkout-claim|traveler-email|buy-in)"),
   );
+}
+
+// ── HEADLESS CHECKOUT RUNS (2026-07-20) ─────────────────────────────────────
+console.log("claude-find-run: checkout-run eligibility (server-authoritative money data)");
+{
+  const okRow = {
+    id: 538,
+    guestyReservationId: "res-1",
+    bookingStatus: "not_started",
+    airbnbListingUrl: "https://www.vrbo.com/4768896",
+    costPaid: "1968.00",
+    unitLabel: "Luana Kai C307",
+    unitId: "unit-b",
+  };
+  const ok = checkoutRunEligibility(okRow, "res-1");
+  check("a clean attached VRBO buy-in is eligible", ok.ok === true);
+  check(
+    "the approved unit carries id/label/URL/COST from the ROW (the brief's money anchor)",
+    ok.ok === true && ok.unit.buyInId === 538 && ok.unit.costPaid === 1968
+      && ok.unit.listingUrl === "https://www.vrbo.com/4768896" && ok.unit.unitLabel === "Luana Kai C307",
+  );
+  check("missing row → not found", checkoutRunEligibility(null, "res-1").ok === false);
+  check(
+    "attached to ANOTHER reservation → rejected (a run must never prepare another booking's unit)",
+    checkoutRunEligibility({ ...okRow, guestyReservationId: "res-OTHER" }, "res-1").ok === false,
+  );
+  check(
+    "booked / request_submitted → rejected (re-preparing risks a DUPLICATE purchase)",
+    checkoutRunEligibility({ ...okRow, bookingStatus: "booked" }, "res-1").ok === false
+      && checkoutRunEligibility({ ...okRow, bookingStatus: "request_submitted" }, "res-1").ok === false,
+  );
+  check(
+    "queued / in_progress / awaiting_payment → rejected (a handoff is already active)",
+    (["queued", "in_progress", "awaiting_payment"] as const).every(
+      (s) => checkoutRunEligibility({ ...okRow, bookingStatus: s }, "res-1").ok === false,
+    ),
+  );
+  check(
+    "a non-VRBO listing → rejected with the re-channel pointer",
+    (() => {
+      const r = checkoutRunEligibility({ ...okRow, airbnbListingUrl: "https://www.booking.com/hotel/x" }, "res-1");
+      return r.ok === false && /Find property on VRBO/.test(r.error);
+    })(),
+  );
+  check(
+    "http (not https) vrbo → rejected",
+    checkoutRunEligibility({ ...okRow, airbnbListingUrl: "http://www.vrbo.com/1" }, "res-1").ok === false,
+  );
+  check(
+    "a vrbo-lookalike host → rejected",
+    checkoutRunEligibility({ ...okRow, airbnbListingUrl: "https://vrbo.com.evil.example/1" }, "res-1").ok === false,
+  );
+  check("no listing URL → rejected", checkoutRunEligibility({ ...okRow, airbnbListingUrl: null }, "res-1").ok === false);
+  check(
+    "zero / missing costPaid → rejected (it arms the 15% guard)",
+    checkoutRunEligibility({ ...okRow, costPaid: "0" }, "res-1").ok === false
+      && checkoutRunEligibility({ ...okRow, costPaid: null }, "res-1").ok === false,
+  );
+}
+
+console.log("claude-find-run: headless checkout brief");
+{
+  const input = {
+    reservationId: "res-1",
+    guestName: "Jacelyn Tsu",
+    propertyName: "Menehune Shores - 4BR Condos - Sleeps 12",
+    checkIn: "2026-07-21",
+    checkOut: "2026-07-26",
+    units: [{ buyInId: 538, unitLabel: "Luana Kai C307", listingUrl: "https://www.vrbo.com/4768896", costPaid: "1968" }],
+    party: { total: 12, adults: 10, children: 2 } as any,
+    baseUrl: "https://portal.example",
+  };
+  const headless = buildCoworkCheckoutPrompt(input, { headlessRun: { runId: "run-9", runToken: "tok-9" } });
+  const plain = buildCoworkCheckoutPrompt(input);
+  check(
+    "headless brief calls ONLY the run-scoped proxies (buy-in read, claim, complete, release, traveler-email)",
+    headless.includes("/api/claude-find-runs/agent/run-9/buy-in")
+      && headless.includes("/api/claude-find-runs/agent/run-9/checkout-claim")
+      && headless.includes("/api/claude-find-runs/agent/run-9/checkout-claim/complete")
+      && headless.includes("/api/claude-find-runs/agent/run-9/checkout-claim/release")
+      && headless.includes("/api/claude-find-runs/agent/run-9/traveler-email")
+      && !headless.includes("/api/cowork/checkout-claims")
+      && !headless.includes("/api/buy-ins/"),
+  );
+  check("headless brief authenticates every call with the run token", headless.includes("X-Run-Token: tok-9"));
+  check(
+    "headless brief ENDS at the handoff — no wait-for-my-click phase, no chat-recorded result",
+    !headless.includes("WAIT without touching the page")
+      && /never write "booked" or "request_submitted"/.test(headless)
+      && headless.includes("ATTENTION: awaiting payment"),
+  );
+  check(
+    "headless brief keeps the prepared tab OPEN and closes only its own other tabs",
+    headless.includes("KEEP THE PREPARED CHECKOUT TAB OPEN") && headless.includes("Close only the OTHER tabs"),
+  );
+  check(
+    "headless brief keeps every money guard verbatim-in-spirit (waiver-only, human-only submit, 15%)",
+    headless.includes("Damage waiver ONLY")
+      && /final submit is human-only/.test(headless)
+      && headless.includes("15% above")
+      && headless.includes("Leave card number, expiration, and security-code fields")
+      && headless.includes("empty. Never access card data and NEVER click the final purchase control."),
+  );
+  check(
+    "headless brief swaps the Cowork sounds/bot protocol for the marker protocol",
+    !/afplay|osascript|Sosumi/.test(headless) && headless.includes("ATTENTION: bot check on"),
+  );
+  check(
+    "the PLAIN checkout brief is untouched by the new opt (deep-link/bulk path intact)",
+    plain.includes("/api/cowork/checkout-claims")
+      && plain.includes("WAIT without touching the page")
+      && plain.includes("afplay /System/Library/Sounds/Glass.aiff")
+      && !plain.includes("X-Run-Token"),
+  );
+}
+
+console.log("claude-find-run: checkout milestones (both describeToolUse twins)");
+{
+  const bashLine = (cmd: string) =>
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: cmd } }] } });
+  const cases: Array<[string, string]> = [
+    ["curl -sS https://x/api/claude-find-runs/agent/run-9/buy-in -H h", "Reading the buy-in record"],
+    ["curl -sS -X POST https://x/api/claude-find-runs/agent/run-9/traveler-email -d '{}'", "Minting the traveler alias email"],
+    ["curl -sS -X POST https://x/api/claude-find-runs/agent/run-9/checkout-claim -d '{}'", "Claiming the reservation's checkout lane"],
+    ["curl -sS -X POST https://x/api/claude-find-runs/agent/run-9/checkout-claim/complete -d '{}'", "Recording the payment handoff — awaiting your card"],
+    ["curl -sS -X POST https://x/api/claude-find-runs/agent/run-9/checkout-claim/release -d '{}'", "Releasing the checkout lane"],
+    ["curl -sS -X POST https://x/api/claude-find-runs/agent/run-9/buy-ins -d '{}'", "Creating a buy-in record via the portal"],
+  ];
+  for (const [cmd, expected] of cases) {
+    const sharedEvent = classifyClaudeStreamLine(bashLine(cmd), iso(0));
+    const runnerEvent = runnerClassify(bashLine(cmd), iso(0));
+    check(
+      `"${expected}" — shared and runner twins agree`,
+      sharedEvent?.text === expected && runnerEvent?.text === expected,
+      { shared: sharedEvent?.text, runner: runnerEvent?.text },
+    );
+  }
+}
+
+console.log("claude-find-run: checkout-run source wiring");
+{
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const serverSrc = fs.readFileSync(path.join(here, "../server/claude-find-runs.ts"), "utf8");
+  const runnerSrc = fs.readFileSync(path.join(here, "../daemon/vrbo-sidecar/claude-find-runner.mjs"), "utf8");
+  check(
+    "the create endpoint reads the buy-in via loopback and gates on checkoutRunEligibility",
+    serverSrc.includes('app.post("/api/claude-find-runs/checkout"')
+      && serverSrc.includes("`${loopbackBaseUrl()}/api/buy-ins/${buyInId}`")
+      && serverSrc.includes("checkoutRunEligibility(row, reservationId)"),
+  );
+  check(
+    "the create endpoint refuses to queue without the booking guest's full name",
+    serverSrc.includes("full name is required"),
+  );
+  check(
+    "ONE live run per reservation across BOTH kinds (find blocks checkout and vice versa)",
+    (serverSrc.match(/activeClaudeFindRunForReservation\(store\.runs, /g) ?? []).length >= 2,
+  );
+  check(
+    "every checkout proxy is gated on run kind + pinned buyInId",
+    serverSrc.includes('run.kind !== "checkout"')
+      && serverSrc.includes("const checkoutRunFor")
+      && serverSrc.includes("reservationId: gate.run.reservationId")
+      && serverSrc.includes("/api/buy-ins/${gate.buyInId}"),
+  );
+  check(
+    // The agent must never be able to write a booking result: the operator
+    // records the paid outcome. There is deliberately NO bookingStatus proxy.
+    "no agent proxy can PATCH a bookingStatus",
+    !/agent\/[^"]*"\s*,[^]*?bookingStatus/.test(serverSrc.slice(serverSrc.indexOf("CHECKOUT-run agent proxies"))),
+  );
+  check(
+    "the checkout run record pins kind + buyInId and embeds the headless brief",
+    serverSrc.includes('kind: "checkout"')
+      && serverSrc.includes("buyInId,")
+      && serverSrc.includes("buildCoworkCheckoutPrompt(")
+      && serverSrc.includes("{ headlessRun: { runId: id, runToken: token } }"),
+  );
+  check(
+    // The runner Chrome launches minimized/off-screen; a checkout handoff (or
+    // a bot wall) needs the window IN FRONT of the operator. Surfacing rides
+    // the ATTENTION path so both cases get it.
+    "the runner surfaces its Chrome window whenever attention is raised",
+    runnerSrc.includes("async function surfaceRunnerChrome")
+      && runnerSrc.includes("Browser.setWindowBounds")
+      && runnerSrc.includes("void surfaceRunnerChrome();"),
+  );
+
+  // ── The YELLOW card-handoff pop-up (operator directive 2026-07-20) ────────
+  console.log("claude-find-run: yellow card-handoff pop-up");
+  check(
+    // The payment handoff gets the sidecar's yellow challenge treatment ON THE
+    // PREPARED CHECKOUT TAB: near-fullscreen window + tab activation + an
+    // injected top banner and border, in the sidecar's exact yellows.
+    // Behaviorally proven against a real CDP Chrome pre-merge (banner painted
+    // into the vrbo tab only, click-transparent, idempotent).
+    "the payment handoff paints the yellow banner + border into the checkout tab",
+    runnerSrc.includes("export async function surfaceCheckoutHandoff")
+      && runnerSrc.includes("rct-findrun-card-banner")
+      && runnerSrc.includes("rct-findrun-card-border")
+      && runnerSrc.includes("#fde047")
+      && runnerSrc.includes("#facc15")
+      && runnerSrc.includes("ADD THE CREDIT CARD")
+      && runnerSrc.includes("No purchase has been submitted")
+      && runnerSrc.includes("/json/activate/")
+      && runnerSrc.includes("Runtime.evaluate"),
+  );
+  check(
+    // DISPLAY-ONLY is load-bearing: the border must be click-transparent and
+    // nothing may touch the payment form. The card + final click are the
+    // operator's alone.
+    "the injected treatment is display-only (click-transparent border, no form access)",
+    runnerSrc.includes("pointer-events: none")
+      // (\.value\s*=[^=] — a bare assignment; `.value === "painted"` is the
+      // legit CDP result read and must not trip this.)
+      && !/(querySelector\(\s*["']input|\.value\s*=[^=]|\.click\(\)|\.submit\(\))/.test(
+        runnerSrc.slice(runnerSrc.indexOf("surfaceCheckoutHandoff"), runnerSrc.indexOf("let attentionAlarm")),
+      ),
+  );
+  check(
+    "awaiting-payment attention routes to the yellow pop-up; other attention keeps plain surfacing",
+    runnerSrc.includes("/^awaiting payment\\b/i.test(String(reason ?? \"\").trim())")
+      && runnerSrc.includes("void surfaceCheckoutHandoff(reason);"),
+  );
+  // DRIFT-LOCK, behavioral: the headless checkout brief MANDATES the exact
+  // ATTENTION line; after scanMarkers strips the marker, the remaining reason
+  // must match the runner's routing regex — reword either side alone and this
+  // trips before the operator loses the yellow pop-up.
+  {
+    const brief = buildCoworkCheckoutPrompt(
+      {
+        reservationId: "res-1",
+        guestName: "Jacelyn Tsu",
+        propertyName: "Menehune Shores",
+        checkIn: "2026-07-21",
+        checkOut: "2026-07-26",
+        units: [{ buyInId: 538, unitLabel: "Luana Kai C307", listingUrl: "https://www.vrbo.com/1", costPaid: "1968" }],
+        baseUrl: "https://x.example",
+      },
+      { headlessRun: { runId: "r", runToken: "t" } },
+    );
+    const mandated = brief.split("\n").find((l) => l.trim().startsWith("ATTENTION: awaiting payment"));
+    const scanned = mandated ? runnerScanMarkers(mandated.trim()) : { attention: null };
+    check(
+      "the brief's mandated handoff line survives scanMarkers AND matches the routing regex",
+      typeof scanned.attention === "string" && /^awaiting payment\b/i.test(scanned.attention),
+      scanned.attention,
+    );
+  }
 }
 
 console.log(`\nclaude-find-run: ${pass} passed, ${fail} failed`);
