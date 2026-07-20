@@ -55,7 +55,7 @@ import {
   anyDifferentCommunityVerdict,
   bedroomsFromListingTitleText,
 } from "@shared/relocation-scenario";
-import { buildArrivalDetailsGuestMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
+import { ARRIVAL_SMS_HARD_LIMIT, buildArrivalDetailsGuestMessage, buildArrivalDetailsSmsMessage, type ArrivalUnitDetail } from "@shared/arrival-details-message";
 import type { ArrivalExtractionRecord } from "@shared/arrival-email-verification";
 import { resolveIslandRegion } from "@shared/area-identity";
 import { textMatchesResortPhrase } from "@shared/buy-in-market";
@@ -6003,6 +6003,13 @@ function ArrivalDetailsMessageDialog({
   // as an amber "queued, don't resend" notice (resending piles up duplicates).
   const [sendPending, setSendPending] = useState(false);
   const messageEditedRef = useRef(false);
+  // SMS leg: compact editable preview + explicit confirm. The SMS body is
+  // rebuilt from the units (buildArrivalDetailsSmsMessage — short, ASCII,
+  // capped under Quo's 1,600-char limit), never the long channel message.
+  const [smsOpen, setSmsOpen] = useState(false);
+  const [smsText, setSmsText] = useState("");
+  const [smsSentTo, setSmsSentTo] = useState<string | null>(null);
+  const smsEditedRef = useRef(false);
 
   // Pull arrival details straight from the guest booking-alias inbox: live IMAP
   // sync + Claude extraction with verbatim verification (server rejects any
@@ -6048,6 +6055,42 @@ function ArrivalDetailsMessageDialog({
       isHawaii,
     }));
   }, [data, firstName, propertyName, reservation]);
+
+  useEffect(() => {
+    if (!data || smsEditedRef.current) return;
+    const units = (data.units ?? []).map(arrivalUnitDetailForMessage).filter(hasArrivalDetailContent);
+    const regionSource = units.map((u) => u.unitAddress).filter(Boolean).join(" ") || propertyName || "";
+    const region = resolveIslandRegion(regionSource);
+    const isHawaii = region ? !/\bflorida\b/i.test(region) : true;
+    setSmsText(buildArrivalDetailsSmsMessage({
+      guestFirstName: firstName,
+      propertyName,
+      checkInIso: checkInOf(reservation),
+      units,
+      isHawaii,
+    }));
+  }, [data, firstName, propertyName, reservation]);
+
+  const sendSms = useMutation({
+    mutationFn: async () => {
+      const text = smsText.trim();
+      if (!text) throw new Error("The SMS message is empty.");
+      if (text.length > ARRIVAL_SMS_HARD_LIMIT) {
+        throw new Error(`SMS is ${text.length} characters — the limit is ${ARRIVAL_SMS_HARD_LIMIT}. Shorten it before sending.`);
+      }
+      return apiPostJsonWithTimeout<{ ok?: boolean; to?: string }>(
+        `/api/bookings/${encodeURIComponent(reservation._id)}/arrival-details/send-sms`,
+        { body: text },
+        60_000,
+      );
+    },
+    onSuccess: (body) => {
+      setSmsSentTo(body?.to ?? "the guest's phone on file");
+      toast({ title: "Arrival details texted", description: `SMS sent to ${body?.to ?? "the guest"}.` });
+    },
+    onError: (e: any) =>
+      toast({ title: "SMS send failed", description: e?.message ?? String(e), variant: "destructive" }),
+  });
 
   const sendMessage = useMutation({
     mutationFn: async () => {
@@ -6167,6 +6210,7 @@ function ArrivalDetailsMessageDialog({
                   disabled={pullFromEmail.isPending}
                   onClick={() => {
                     messageEditedRef.current = false;
+                    smsEditedRef.current = false;
                     pullFromEmail.mutate();
                   }}
                   data-testid="button-pull-arrival-from-email"
@@ -6182,6 +6226,7 @@ function ArrivalDetailsMessageDialog({
                   className="h-7 text-[10px]"
                   onClick={() => {
                     messageEditedRef.current = false;
+                    smsEditedRef.current = false;
                     void refetch();
                   }}
                 >
@@ -6218,6 +6263,49 @@ function ArrivalDetailsMessageDialog({
                   </div>
                 )
               )}
+              {smsOpen && (
+                <div className="rounded border border-violet-200 bg-violet-50/40 p-3 space-y-2 dark:border-violet-900 dark:bg-violet-950/20" data-testid="arrival-sms-panel">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="arrivalDetailsSms" className="text-xs font-medium">
+                      SMS to guest <span className="text-muted-foreground font-normal">(compact version — goes to the phone on file)</span>
+                    </Label>
+                    <span className={`text-[10px] ${smsText.length > ARRIVAL_SMS_HARD_LIMIT ? "text-red-600 font-semibold" : "text-muted-foreground"}`}>
+                      {smsText.length}/{ARRIVAL_SMS_HARD_LIMIT} chars · ~{Math.max(1, Math.ceil(smsText.length / 153))} segment{Math.ceil(smsText.length / 153) === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <Textarea
+                    id="arrivalDetailsSms"
+                    rows={8}
+                    value={smsText}
+                    onChange={(e) => {
+                      smsEditedRef.current = true;
+                      if (smsSentTo) setSmsSentTo(null);
+                      setSmsText(e.target.value);
+                    }}
+                    className="text-sm font-mono"
+                    data-testid="input-arrival-details-sms"
+                  />
+                  {smsSentTo ? (
+                    <div className="rounded border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-xs text-emerald-950">
+                      Texted to {smsSentTo}. Edit the message to re-enable sending.
+                    </div>
+                  ) : (
+                    <div className="flex justify-end">
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => sendSms.mutate()}
+                        disabled={!smsText.trim() || smsText.length > ARRIVAL_SMS_HARD_LIMIT || sendSms.isPending}
+                        data-testid="button-send-arrival-details-sms"
+                      >
+                        {sendSms.isPending
+                          ? <><Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> Texting…</>
+                          : <><MessageSquare className="mr-1 h-3.5 w-3.5" /> Send SMS now</>}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -6225,6 +6313,15 @@ function ArrivalDetailsMessageDialog({
           <Button variant="ghost" onClick={onClose}>Close</Button>
           <Button type="button" variant="outline" onClick={copyMessage} disabled={!message.trim()}>
             <Copy className="mr-1 h-3.5 w-3.5" /> Copy
+          </Button>
+          <Button
+            type="button"
+            variant={smsOpen ? "secondary" : "outline"}
+            onClick={() => setSmsOpen((v) => !v)}
+            disabled={isLoading}
+            data-testid="button-toggle-arrival-details-sms"
+          >
+            <MessageSquare className="mr-1 h-3.5 w-3.5" /> {smsOpen ? "Hide SMS" : "Send via SMS"}
           </Button>
           <Button
             type="button"

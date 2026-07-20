@@ -22,6 +22,7 @@ import {
   comboPhotoFetchJobs as comboPhotoFetchJobRows,
   communityResearchSearches as communityResearchSearchRows,
   communityPricingRefreshJobs as communityPricingRefreshJobRows,
+  guestPhoneOverrides,
   guestyPropertyMap,
   insertBuyInSchema,
   insertCommunityDraftSchema,
@@ -221,7 +222,7 @@ import {
   isSidecarLaneCancellationRequested,
   isSidecarLaneOwner,
 } from "./sidecar-lane";
-import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
+import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, phoneLast10, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts, setAutoSendConfig, runAutoSendQueue } from "./auto-reply";
 import { loopbackRequestHeaders, resolvePortalSession, isLoopback } from "./auth";
@@ -12598,6 +12599,93 @@ Requirements:
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to refresh arrival details from email", message: err?.message ?? String(err) });
+    }
+  });
+
+  // POST /api/bookings/:reservationId/arrival-details/send-sms
+  // Texts the (operator-reviewed) arrival-details message to the guest's phone
+  // on file. Phone ladder mirrors the refund-SMS leg: operator-saved inbox
+  // override (guest_phone_overrides, matched by reservationId) wins, then the
+  // Guesty guest profile's phone; manual reservations use their own saved
+  // guestPhone. Send goes through sendQuoSms (1,600-char Quo ceiling enforced
+  // there; the client builder targets well under it).
+  app.post("/api/bookings/:reservationId/arrival-details/send-sms", async (req, res) => {
+    try {
+      const reservationId = String(req.params.reservationId ?? "").trim();
+      if (!reservationId) return res.status(400).json({ error: "reservationId required" });
+      const body = String(req.body?.body ?? "").trim();
+      if (!body) return res.status(400).json({ error: "Message body is required" });
+
+      const config = getQuoSmsConfigStatus();
+      if (!config.configured) {
+        return res.status(503).json({
+          error: "SMS is not configured",
+          message: `Add ${config.missing.join(" and ")} in Railway before sending texts.`,
+          missing: config.missing,
+        });
+      }
+
+      let phone = "";
+      let guestName: string | null = null;
+
+      const manualMatch = /^manual:(\d+)$/.exec(reservationId);
+      if (manualMatch) {
+        const row = await storage.getManualReservation(parseInt(manualMatch[1], 10));
+        if (!row) return res.status(404).json({ error: "Manual reservation not found" });
+        phone = normalizePhone(row.guestPhone ?? "");
+        guestName = row.guestName ?? null;
+      } else {
+        // Operator-saved inbox phone first (curated), newest override wins.
+        try {
+          const overrides = await db
+            .select()
+            .from(guestPhoneOverrides)
+            .where(eq(guestPhoneOverrides.reservationId, reservationId))
+            .orderBy(desc(guestPhoneOverrides.updatedAt))
+            .limit(1);
+          const saved = normalizePhone(overrides[0]?.phone ?? "");
+          if (phoneLast10(saved)) phone = saved;
+        } catch { /* fall through to the Guesty profile phone */ }
+        if (!phoneLast10(phone)) {
+          const fields = encodeURIComponent("guest");
+          const reservation = await guestyRequest("GET", `/reservations/${encodeURIComponent(reservationId)}?fields=${fields}`) as any;
+          const guest = reservation?.guest ?? {};
+          guestName = firstNonEmptyString(guest?.fullName, guest?.name, guest?.firstName) || null;
+          const candidates = [
+            guest?.phone,
+            guest?.phoneNumber,
+            guest?.phone_number,
+            guest?.mobile,
+            guest?.cellphone,
+            guest?.homePhone,
+            ...(Array.isArray(guest?.phones) ? guest.phones : []),
+          ];
+          for (const c of candidates) {
+            const raw = c && typeof c === "object" ? (c as any).number ?? (c as any).phone ?? (c as any).value : c;
+            const normalized = normalizePhone(String(raw ?? ""));
+            if (phoneLast10(normalized)) { phone = normalized; break; }
+          }
+        }
+      }
+
+      if (!phoneLast10(phone)) {
+        return res.status(422).json({
+          error: "No guest phone on file",
+          message: "No guest phone number found (Guesty guest profile or saved inbox phone). Save one in the Guest Inbox, then try again.",
+        });
+      }
+
+      const message = await sendQuoSms({
+        conversationId: null,
+        reservationId,
+        guestName,
+        to: phone,
+        body,
+      });
+      res.json({ ok: true, to: phone, message });
+    } catch (err: any) {
+      console.error(`[quo-sms] arrival-details SMS failed for reservation ${req.params.reservationId}: ${err?.message ?? err}`);
+      res.status(500).json({ error: "Failed to send arrival-details SMS", message: err?.message ?? String(err) });
     }
   });
 

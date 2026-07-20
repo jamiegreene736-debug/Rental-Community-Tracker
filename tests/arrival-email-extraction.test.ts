@@ -14,6 +14,11 @@ import {
   extractArrivalDetailsWithClaude,
   extractArrivalDetailsWithRegex,
 } from "../server/arrival-email-extract";
+import {
+  ARRIVAL_SMS_HARD_LIMIT,
+  ARRIVAL_SMS_TARGET_LIMIT,
+  buildArrivalDetailsSmsMessage,
+} from "../shared/arrival-details-message";
 import type { GuestInboxMessage } from "../shared/schema";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -487,6 +492,54 @@ assert.match(extractSrc, /extractReadableFromStoredMimeBody/, "extraction heals 
     "760 S Kihei Rd Unit 106, Kihei, HI 96753",
     "corrupt date-address replaced by the real street when a later email carries it",
   );
+}
+
+// ── SMS builder: compact, capped, sheds detail gracefully ────────────────────
+{
+  const baseUnit = {
+    unitLabel: "Menehune Shores 2BR",
+    unitAddress: "760 S Kihei Rd Unit 106, Kihei, HI 96753",
+    accessCode: "3438*",
+    wifiName: "SpectrumSetup-C1",
+    wifiPassword: "littleshark860",
+    parkingInfo: "Up to 2 vehicles in the marked stalls.",
+    arrivalNotes: "Lobby code: 1025\nPool code: 5747",
+  };
+  const sms = buildArrivalDetailsSmsMessage({
+    guestFirstName: "Jacelyn",
+    propertyName: "Menehune Shores",
+    checkInIso: "2026-07-21",
+    units: [baseUnit],
+    isHawaii: true,
+  });
+  assert.ok(sms.startsWith("Aloha Jacelyn"), "Hawaii greeting");
+  assert.ok(sms.includes("Access code: 3438*"), "code present");
+  assert.ok(sms.includes("SpectrumSetup-C1 / littleshark860"), "wifi present");
+  assert.ok(sms.includes("Mahalo, John Carpenter"), "sign-off present");
+  assert.ok(sms.length <= ARRIVAL_SMS_TARGET_LIMIT, `compact SMS under target (${sms.length})`);
+  assert.ok(!/[‘’“”—]/.test(sms), "ASCII only");
+
+  // Oversized notes shed before codes ever would.
+  const bloated = { ...baseUnit, arrivalNotes: "N".repeat(2000) };
+  const shed = buildArrivalDetailsSmsMessage({
+    guestFirstName: "Jacelyn",
+    propertyName: "Menehune Shores",
+    checkInIso: "2026-07-21",
+    units: [bloated, { ...bloated, unitLabel: "Unit B" }],
+    isHawaii: true,
+  });
+  assert.ok(shed.length <= ARRIVAL_SMS_HARD_LIMIT, "never exceeds the Quo hard limit");
+  assert.ok(shed.includes("Access code: 3438*"), "codes survive shedding");
+  assert.ok(!shed.includes("NNNNN"), "oversized notes were shed");
+
+  const zeroUnit = buildArrivalDetailsSmsMessage({
+    guestFirstName: "Sam",
+    propertyName: "",
+    units: [],
+    isHawaii: false,
+  });
+  assert.ok(zeroUnit.includes("still confirming"), "zero-unit SMS stays honest");
+  assert.ok(zeroUnit.startsWith("Hi Sam"), "mainland greeting");
 }
 
 console.log("arrival-email-extraction tests passed");

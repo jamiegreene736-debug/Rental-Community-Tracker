@@ -66,6 +66,76 @@ function arrivalGreeting(firstName: string, isHawaii: boolean): string {
   return name ? `${opener} ${name},` : `${opener} there,`;
 }
 
+// Quo/OpenPhone rejects bodies over 1,600 chars (sendQuoSms throws). Target a
+// comfortable margin below that so the operator can still edit before sending.
+export const ARRIVAL_SMS_HARD_LIMIT = 1600;
+export const ARRIVAL_SMS_TARGET_LIMIT = 1400;
+
+function formatShortDate(isoYmd: string): string {
+  const [y, m, d] = isoYmd.slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d) return isoYmd;
+  return new Date(y, m - 1, d).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+}
+
+/**
+ * Compact SMS variant of the arrival-details message. Same facts as the
+ * channel message, none of the long prose: greeting + check-in date, per-unit
+ * address/code/Wi-Fi/parking/notes lines, short reply invitation, sign-off.
+ * ASCII only. If the assembled text would exceed the target limit it sheds
+ * detail gracefully (notes first, then parking, then local contact) and as a
+ * last resort hard-truncates under the Quo 1,600-char ceiling — a too-long
+ * body would otherwise fail the send outright.
+ */
+export function buildArrivalDetailsSmsMessage(args: {
+  guestFirstName: string;
+  propertyName: string;
+  checkInIso?: string;
+  units: ArrivalUnitDetail[];
+  isHawaii?: boolean;
+}): string {
+  const isHawaii = args.isHawaii ?? true;
+  const name = String(args.guestFirstName ?? "").trim();
+
+  const assemble = (level: number): string => {
+    const lines: string[] = [];
+    lines.push(
+      `${isHawaii ? "Aloha" : "Hi"}${name ? ` ${name}` : ""} - arrival details for your stay${args.propertyName ? ` at ${args.propertyName}` : ""}${args.checkInIso ? ` (check-in ${formatShortDate(args.checkInIso)})` : ""}:`,
+    );
+    if (args.units.length === 0) {
+      lines.push("");
+      lines.push("We are still confirming the final unit access details and will text them shortly.");
+    }
+    args.units.forEach((unit, index) => {
+      lines.push("");
+      lines.push(`${args.units.length > 1 ? `Unit ${index + 1}: ` : ""}${unit.unitLabel}`);
+      if (unit.unitAddress) lines.push(`Address: ${unit.unitAddress}`);
+      if (unit.accessCode) lines.push(`Access code: ${unit.accessCode}`);
+      if (unit.wifiName || unit.wifiPassword) {
+        lines.push(`Wi-Fi: ${unit.wifiName || "Network TBD"}${unit.wifiPassword ? ` / ${unit.wifiPassword}` : ""}`);
+      }
+      // Detail-shedding ladder: level 0 = everything, 1 = drop notes,
+      // 2 = drop parking + local contact too (codes/address/Wi-Fi never shed).
+      if (level < 2 && unit.parkingInfo) lines.push(`Parking: ${unit.parkingInfo}`);
+      if (level < 2 && (unit.managementCompany || unit.managementContact)) {
+        lines.push(`Local contact: ${[unit.managementCompany, unit.managementContact].filter(Boolean).join(" - ")}`);
+      }
+      if (level < 1 && unit.arrivalNotes) lines.push(`Notes: ${unit.arrivalNotes}`);
+    });
+    lines.push("");
+    lines.push(`Reply here with any questions. ${isHawaii ? "Mahalo" : "Thanks"}, ${OUTBOUND_SENDER_NAME} - ${OUTBOUND_BRAND_NAME}`);
+    return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  };
+
+  for (let level = 0; level <= 2; level++) {
+    const text = assemble(level);
+    if (text.length <= ARRIVAL_SMS_TARGET_LIMIT) return text;
+  }
+  const minimal = assemble(2);
+  return minimal.length <= ARRIVAL_SMS_HARD_LIMIT
+    ? minimal
+    : `${minimal.slice(0, ARRIVAL_SMS_HARD_LIMIT - 3)}...`;
+}
+
 /** Guest-facing arrival-details message body (Guesty / VRBO / Booking.com thread). */
 export function buildArrivalDetailsGuestMessage(args: {
   guestFirstName: string;
