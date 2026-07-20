@@ -43,6 +43,25 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (Message AD extraction missed the door code — extraction read the WRONG mailbox):
+  Operator (Unit-arrival-details screenshot, Menehune unit A): address/Wi-Fi extracted but the door
+  code — provably in the alias inbox — was not. ROOT CAUSE (don't re-chase): the arrival email
+  ("Your Menehune 106 Arrival Instructions", door code 6509) was delivered to the unit-scoped alias
+  (jacelyn.tsu.ae9958.a@) and ingested into buy_in_emails, but refreshArrivalDetailsForReservation
+  read ONLY guest_inbox_messages for buyIn.travelerEmail (legacy base jacelyn.tsu@) → Claude saw ZERO
+  emails; the panel's address/Wi-Fi came from the ingestion-time regex, which itself can't read
+  sentence-form codes ("The door code is 6509." has no "Door code:" label). SHIPPED
+  (`claude/guest-arrival-extraction-fix-fa89a8`): extraction now reads the MERGED per-unit thread —
+  aliasCandidatesForBuyIn (travelerEmail + the buyInId-scoped reservation_aliases row;
+  reservation-level aliases only when a single unit is attached, attribution-exact) +
+  extractionMessagesFromSources (buy_in_emails ∪ guest_inbox_messages, deduped via mergeAliasThread),
+  with syncBuyInVendorEmailsForReservation pulled first; bodies healed via
+  extractReadableFromStoredMimeBody before parsing; regex fallback gained tight-capture sentence-form
+  door/gate-code patterns. Verification layer untouched (verbatim quotes still required). Locked in
+  tests/arrival-email-extraction.test.ts (+ 4 source guards on the refresh wiring). NOTE this env:
+  city-vrbo-expansion.smoke fails even on a CLEAN tree while the local sidecar is live (its
+  worker-offline assertions) — full chain minus that suite ran 0 failures; check 335 = baseline.
+
 - 2026-07-20 (unit aliases "still the same" → per-unit NUMERIC tails; the interim unit.b lead-in
   was REJECTED): Operator (screenshot): unit A and B aliases read as identical. NOT a duplicate
   (don't re-chase): the stored aliases were distinct but only by the trailing letter

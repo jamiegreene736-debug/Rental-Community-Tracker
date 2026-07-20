@@ -215,6 +215,9 @@ export function parseArrivalDetailsFromText(
 
   const gateCode = pick("accessCode", [
     /(?:gate\s*(?:code|#|passcode)?|community\s*gate|resort\s*gate)\s*[:\-]\s*([^\n]+)/i,
+    // Sentence form: "The pool gate code is: C7601." — tight capture so the
+    // trailing prose can't bloat the value past the code-length guard.
+    /(?:pool\s+|community\s+|resort\s+)?gate\s*code\s+is\s*[:\-]?\s*([A-Za-z0-9#*][A-Za-z0-9#*\-]{2,11})/i,
   ]);
   const elevatorCode = pick("accessCode", [
     /(?:elevator\s*(?:code|#|passcode)?|lift\s*code)\s*[:\-]\s*([^\n]+)/i,
@@ -222,6 +225,10 @@ export function parseArrivalDetailsFromText(
   const doorCode = pick("accessCode", [
     /(?:door\s*(?:code|#|passcode)?|unit\s*(?:code|door code)|lockbox\s*code|keypad\s*code)\s*[:\-]\s*([^\n]+)/i,
     /(?:access code|entry code)\s*[:\-]\s*([^\n]+)/i,
+    // Sentence form: "The door code is 6509." — hosts write codes in prose at
+    // least as often as in "Door code:" label lines (the 2026-07-20 Menehune
+    // arrival email). Tight capture, never [^\n]+.
+    /(?:door|entry|access|keypad|lockbox)\s*code\s+is\s*[:\-]?\s*([A-Za-z0-9#*][A-Za-z0-9#*\-]{2,11})/i,
     /(?:your\s+secure\s+code\s+is|secure\s+code)\s*[:\-]?\s*(\d{4,8})\b/i,
   ]);
 
