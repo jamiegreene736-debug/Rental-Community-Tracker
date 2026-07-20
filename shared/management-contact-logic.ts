@@ -54,6 +54,9 @@ export type ParsedManagementContact = {
   website: string;
   sourceKind: ManagementContactSourceKind;
   sourceUrl: string;
+  /** When the EMAIL ADDRESS came from a web page while the rest came from an
+   * email (the phone-only-confirmation class), the page it came from. */
+  emailSourceUrl: string;
   emailIndex: number | null;
   quote: string;
   confidence: number;
@@ -68,6 +71,7 @@ export type ManagementContactSourceRecord = {
   website: string | null;
   sourceKind: ManagementContactSourceKind;
   sourceUrl: string | null;
+  emailSourceUrl: string | null;
   emailSubject: string | null;
   emailDate: string | null;
   quote: string | null;
@@ -103,7 +107,7 @@ export function buildManagementContactPrompt(input: ManagementContactLookupInput
   ].filter(Boolean);
 
   return [
-    `You are helping a vacation-rental operator reach the LOCAL ON-SITE management team for a unit they just booked (front desk, on-site property manager, or the management company that services this specific building/resort). They need a phone number and/or email to call about missing arrival details.`,
+    `You are helping a vacation-rental operator reach the LOCAL ON-SITE management team for a unit they just booked (front desk, on-site property manager, or the management company that services this specific building/resort). They need a phone number and/or email to call about missing arrival details. An EMAIL ADDRESS is the priority — the operator sends the arrival-details request by email.`,
     ``,
     `## Booking context`,
     contextLines.join("\n"),
@@ -115,6 +119,7 @@ export function buildManagementContactPrompt(input: ManagementContactLookupInput
     `## What to do`,
     `1. FIRST check the emails above — booking confirmations often name the property manager or host company with a phone number or email. A contact found there is the best answer: cite the email index and copy the EXACT line(s) containing the contact into "quote" verbatim.`,
     `2. If the emails don't have it, check the booked listing page URL for the host/manager identity, then WEB-SEARCH for that company's (or the resort front desk's) phone/email. Prefer the manager's own website or the resort's official front-desk number over aggregator sites.`,
+    `2b. If the emails NAME the management company but show no email address (a phone is not enough), WEB-SEARCH for that company's email address and include it — keep sourceKind "email" for the email-cited parts and put the page the ADDRESS came from in "emailSourceUrl".`,
     `3. The contact must be for the LOCAL/on-site operation for THIS resort or building — never a national OTA support line (VRBO/Expedia/Booking.com customer service is NOT an answer), and never a different resort.`,
     ``,
     `## Output — respond with ONLY this JSON object`,
@@ -126,6 +131,7 @@ export function buildManagementContactPrompt(input: ManagementContactLookupInput
     `  "website": "company website if available",`,
     `  "sourceKind": "email" | "listing-page" | "web",`,
     `  "sourceUrl": "page URL the contact came from (required unless sourceKind is email)",`,
+    `  "emailSourceUrl": "page URL the EMAIL ADDRESS came from, when it was web-found while the rest came from an email",`,
     `  "emailIndex": <number — required when sourceKind is email>,`,
     `  "quote": "verbatim line(s) from the email containing the contact (email source only)",`,
     `  "confidence": 0.0-1.0,`,
@@ -155,6 +161,7 @@ export function parseManagementContactJson(raw: unknown): ParsedManagementContac
     website: str(o.website, 400),
     sourceKind,
     sourceUrl: str(o.sourceUrl, 600),
+    emailSourceUrl: str(o.emailSourceUrl, 600),
     emailIndex: Number.isInteger(emailIndexNum) && emailIndexNum >= 0 ? emailIndexNum : null,
     quote: str(o.quote, 1200),
     confidence: clamp01(Number(o.confidence)),
@@ -281,7 +288,15 @@ export function validateManagementContact(
       return { ok: false, reason: "Phone number is not present in the cited email" };
     }
     if (hasEmail && !foldForContactCompare(rawHaystack).includes(parsed.email.toLowerCase())) {
-      return { ok: false, reason: "Email address is not present in the cited email" };
+      // The confirmation email often names the company + phone but no email
+      // address (the Alii Resorts class); the model then web-hunts the address.
+      // That web-found address is acceptable under the SAME rules as a
+      // web-sourced contact: its own http(s) page + the confidence floor.
+      const webBackedEmail = isHttpUrl(parsed.emailSourceUrl)
+        && parsed.confidence >= MANAGEMENT_CONTACT_WEB_CONFIDENCE_FLOOR;
+      if (!webBackedEmail) {
+        return { ok: false, reason: "Email address is not present in the cited email (and no web source page was cited for it)" };
+      }
     }
     return { ok: true, contact: parsed };
   }
@@ -330,6 +345,7 @@ export function buildManagementContactSourceRecord(args: {
     website: contact.website || null,
     sourceKind: contact.sourceKind,
     sourceUrl: contact.sourceUrl || null,
+    emailSourceUrl: contact.emailSourceUrl || null,
     emailSubject: sourceEmail?.subject ?? null,
     emailDate: sourceEmail?.receivedAt ?? null,
     quote: contact.quote || null,

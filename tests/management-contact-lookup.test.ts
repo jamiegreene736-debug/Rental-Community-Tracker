@@ -195,6 +195,40 @@ v = validateManagementContact(
 assert.equal(v.ok, false, "quote with an invented digit run still rejected");
 console.log("  ✓ live VRBO shape: honest quotes verify; hallucinations still rejected");
 
+// ── web-found EMAIL ADDRESS alongside an email-cited contact (2026-07-20) ────
+// The confirmation email names Alii Resorts + phone but no email address; the
+// operator SENDS the arrival-details request by email, so the model web-hunts
+// the address. Acceptable only with its own http(s) page + the confidence floor.
+const aliiWithWebEmail = { ...aliiBase, email: "info@aliiresorts.com", emailSourceUrl: "https://aliiresorts.com/contact" };
+v = validateManagementContact(aliiWithWebEmail, vrboEmails);
+assert.equal(v.ok, true, "web-found email accepted when it cites its own page and clears the floor");
+
+v = validateManagementContact({ ...aliiBase, email: "info@aliiresorts.com" }, vrboEmails);
+assert.equal(v.ok, false, "email absent from the cited email AND no web source page → rejected");
+assert.match((v as any).reason, /no web source page/, "reason names the missing web citation");
+
+v = validateManagementContact({ ...aliiWithWebEmail, emailSourceUrl: "aliiresorts.com/contact" }, vrboEmails);
+assert.equal(v.ok, false, "non-http emailSourceUrl does not count as a citation");
+
+v = validateManagementContact({ ...aliiWithWebEmail, confidence: MANAGEMENT_CONTACT_WEB_CONFIDENCE_FLOOR - 0.1 }, vrboEmails);
+assert.equal(v.ok, false, "web-found email below the confidence floor → rejected");
+
+// Prompt drives the hunt: email is the stated priority + the emailSourceUrl field exists.
+assert.ok(/An EMAIL ADDRESS is the priority/.test(prompt), "prompt states the email-address priority");
+assert.ok(prompt.includes('"emailSourceUrl"'), "prompt output schema carries emailSourceUrl");
+assert.ok(/WEB-SEARCH for that company's email address/.test(prompt), "prompt mandates the web hunt when the emails have no address");
+
+// Provenance carries the email's own source page.
+const webEmailRecord = buildManagementContactSourceRecord({
+  contact: aliiWithWebEmail,
+  emails: vrboEmails,
+  searchCount: 3,
+  model: "m",
+  now: new Date("2026-07-20T16:00:00.000Z"),
+});
+assert.equal(webEmailRecord.emailSourceUrl, "https://aliiresorts.com/contact", "record carries the email's web source page");
+console.log("  ✓ web-found email address: cited + floored, never free-floating");
+
 // ── validation: web-sourced ──
 const webContact = parseManagementContactJson({
   found: true,
