@@ -672,11 +672,16 @@ async function handleRun(run) {
 
   // Clean env: never leak the daemon's ADMIN_SECRET into the agent process,
   // and strip nested-session guards. CLAUDE_FIND_RUN_API_KEY (optional) rides
-  // in as ANTHROPIC_API_KEY for API-billed auth; otherwise the CLI login is
-  // used.
+  // in as ANTHROPIC_API_KEY for API-billed auth; otherwise the CLI's
+  // SUBSCRIPTION login is used — the daemon's own ANTHROPIC_API_KEY (exported
+  // by run-vrbo-sidecar.sh for worker.mjs's vision fallback) is deliberately
+  // STRIPPED here, because an inherited key silently flips every find-run to
+  // per-token API billing (~$4-10/run measured 2026-07-20). Opting back into
+  // API billing must be explicit via CLAUDE_FIND_RUN_API_KEY.
   const childEnv = { ...process.env };
   delete childEnv.ADMIN_SECRET;
   delete childEnv.CLAUDECODE;
+  delete childEnv.ANTHROPIC_API_KEY;
   // Give the CLI a real budget for the ~2.6s MCP connect. Without headroom the
   // default can lapse under load and the browser is marked "failed" at init.
   if (!childEnv.MCP_TIMEOUT) childEnv.MCP_TIMEOUT = String(CLI_MCP_TIMEOUT_MS);
