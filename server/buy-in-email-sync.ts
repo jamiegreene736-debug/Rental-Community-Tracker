@@ -285,6 +285,13 @@ export async function syncBuyInVendorEmailsForReservation(
           } catch (err: any) {
             console.warn("[buy-in-email] auto-mark bought-in failed:", err?.message ?? err);
           }
+          // Same email may carry the charged total — persist the paid rate.
+          try {
+            const { refreshPaidRateForBuyIn } = await import("./paid-rate-extract");
+            await refreshPaidRateForBuyIn(buyInId);
+          } catch (err: any) {
+            console.warn("[buy-in-email] paid-rate extract failed:", err?.message ?? err);
+          }
         }
       } finally {
         lock.release();

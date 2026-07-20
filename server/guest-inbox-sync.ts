@@ -236,6 +236,14 @@ async function importParsedEmail(parsed: ParsedRawEmail, filterAlias?: string): 
   } catch (err: any) {
     console.warn("[guest-inbox] auto-mark bought-in failed:", err?.message ?? err);
   }
+  // The same inbound email may carry the charged total (VRBO confirmation
+  // "Total", payment receipt) — extract + persist the actually-paid rate.
+  try {
+    const { refreshPaidRateForAlias } = await import("./paid-rate-extract");
+    await refreshPaidRateForAlias(aliasEmail);
+  } catch (err: any) {
+    console.warn("[guest-inbox] paid-rate extract failed:", err?.message ?? err);
+  }
   return true;
 }
 
