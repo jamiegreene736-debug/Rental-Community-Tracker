@@ -684,6 +684,25 @@ export function replaceRungOnCooldown(
   return nowMs - lastSwapAtMs < cooldownDays * 24 * 60 * 60 * 1000;
 }
 
+// ── OTA-duplicate findings are ALERT-ONLY for unattended sweeps (2026-07-20) ─
+// Operator directive: when a unit's photos are FOUND on another OTA listing,
+// stop replacing the photos automatically — raise the dashboard
+// duplicate-photos alert instead so the operator can check the match himself
+// and click Replace photos when it's real. This gates ONLY the OTA-found
+// trigger on cron-source (weekly scheduler + found-flip reactive) sweeps;
+// bedroom-shortfall / community-mismatch replacements keep the 2026-07-12
+// automation, and manual sweeps (an explicit operator click) still replace.
+// UNIT_AUDIT_CRON_OTA_REPLACE=1 restores the old unattended auto-replace.
+export function unattendedOtaDuplicateReplaceBlocked(input: {
+  source: string;
+  otaFound: boolean;
+  overrideEnvValue?: string | null;
+}): boolean {
+  if (input.source !== "cron") return false;
+  if (!input.otaFound) return false;
+  return String(input.overrideEnvValue ?? "").trim() !== "1";
+}
+
 // ── Self-verifying audit: double/triple-check rails (2026-07-12) ─────────────
 // Operator directive off a live receipt ("2 need your attention, 1 could not
 // be verified — … fix the review so that no human intervention is needed …
