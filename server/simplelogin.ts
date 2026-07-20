@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 type SimpleLoginSuffix = {
   suffix: string;
   signed_suffix: string;
@@ -36,7 +38,8 @@ async function simpleLoginRequest<T>(method: string, path: string, body?: unknow
   return payload as T;
 }
 
-export function aliasPrefixForGuest(guestName: string | null | undefined, reservationId: string): string {
+/** "Jacelyn Tsu" -> "jacelyn.tsu" (first two name tokens, slugged). */
+export function aliasGuestNameBase(guestName: string | null | undefined): string {
   const parts = String(guestName || "guest")
     .toLowerCase()
     .normalize("NFKD")
@@ -46,9 +49,26 @@ export function aliasPrefixForGuest(guestName: string | null | undefined, reserv
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2);
-  const base = parts.length >= 2 ? `${parts[0]}.${parts[1]}` : parts[0] || "guest";
+  return parts.length >= 2 ? `${parts[0]}.${parts[1]}` : parts[0] || "guest";
+}
+
+export function aliasPrefixForGuest(guestName: string | null | undefined, reservationId: string): string {
+  const base = aliasGuestNameBase(guestName);
   const safeReservation = reservationId.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(-6);
   return `${base}.${safeReservation || Date.now().toString(36)}`.replace(/^\.+|\.+$/g, "");
+}
+
+// Per-unit numeric tail: a deterministic 6-digit number derived from
+// (reservationId, unit token), so two units on one reservation get COMPLETELY
+// different trailing numbers (operator 2026-07-20: aliases must stay
+// `first.last.<numbers>` \u2014 no "unit.b." words \u2014 but the numbers must differ
+// visibly, not by one trailing character). Deterministic so a retried mint
+// walks the same candidates; cross-reservation uniqueness comes from hashing
+// the full reservation id (rare collisions fall through the buyInId/entropy
+// candidates when SimpleLogin says "already exists").
+export function aliasUnitNumericTail(reservationId: string, unitKey: string): string {
+  const digest = createHash("sha1").update(`${reservationId}|${unitKey}`).digest("hex");
+  return String(parseInt(digest.slice(0, 12), 16) % 1_000_000).padStart(6, "0");
 }
 
 // Short slug for a unit label: "Unit B" -> "b", "Unit 812" -> "812". Empty when
@@ -78,14 +98,17 @@ export function aliasPrefixCandidates(input: {
   entropy?: string;
 }): string[] {
   const unitToken = aliasUnitToken(input.unitLabel);
-  // Unit-scoped aliases LEAD with the unit token (`unit.b.jacelyn.tsu.ae9958`)
-  // instead of trailing it (`jacelyn.tsu.ae9958.b`) — operator 2026-07-20: two
-  // units' aliases differing only in the last character before the @ read as
-  // "the same" at a glance. Putting `unit.<token>.` first makes each unit's
-  // address visibly distinct and self-describing. Reservation-level aliases
-  // (no unit token) keep the historical guest-first base.
+  // Unit-scoped aliases are `first.last.<6-digit tail>` where the tail derives
+  // from (reservation, unit) — two units on one reservation get COMPLETELY
+  // different trailing numbers (jacelyn.tsu.417382@ vs jacelyn.tsu.902165@).
+  // Operator 2026-07-20 (supersedes the same-day "unit.b." lead-in, which read
+  // "super weird"): keep the clean firstname.lastname shape and just make the
+  // NUMBERS at the end differ — the original `<res6>.a`/`<res6>.b` tails
+  // differed by one trailing character and read as the same alias.
+  // Reservation-level aliases (no unit token) keep the historical guest+res6
+  // base.
   const base = unitToken
-    ? `unit.${unitToken}.${aliasPrefixForGuest(input.guestName, input.reservationId)}`
+    ? `${aliasGuestNameBase(input.guestName)}.${aliasUnitNumericTail(input.reservationId, unitToken)}`
     : aliasPrefixForGuest(input.guestName, input.reservationId);
   const candidates = [base];
   if (typeof input.buyInId === "number" && Number.isFinite(input.buyInId)) {

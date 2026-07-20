@@ -43,19 +43,23 @@ Before making any changes:
 
 ## Recent operational notes
 
-- 2026-07-20 (unit aliases "still the same" — unit token now LEADS the alias): Operator
-  (screenshot): unit A and B aliases read as identical. NOT a duplicate (don't re-chase): the
-  stored aliases were distinct but only by the trailing letter (jacelyn.tsu.ae9958.a@ vs .b@) —
-  the #1118 unit-token walk appends one char, invisible at a glance. SHIPPED
-  (`claude/unit-b-distinct-alias`): `aliasPrefixCandidates` (server/simplelogin.ts) now leads
-  unit-scoped prefixes with the unit token — new mints read `unit.b.jacelyn.tsu.ae9958@…` —
-  self-describing and visibly distinct; reservation-level aliases keep the guest-first base;
-  fallback walk (.b<id> → entropy) unchanged. Locked in tests/simplelogin-alias-prefix.test.ts.
-  LIVE FIX (same session): unit B of the Menehune reservation (buy-in 540, unbooked, zero
-  emails, empty travelerEmail — safe) had its alias row deleted + re-minted via the deployed
-  portal → `unit.b.jacelyn.tsu.ae9958@emailprivaccy.com`, travelerEmail backfilled; unit A's
-  BOOKED alias/address untouched (VRBO already has it). Existing aliases elsewhere keep their
-  old shape by design — only new mints change. Also confirmed live: buy-in 539 auto-marked
+- 2026-07-20 (unit aliases "still the same" → per-unit NUMERIC tails; the interim unit.b lead-in
+  was REJECTED): Operator (screenshot): unit A and B aliases read as identical. NOT a duplicate
+  (don't re-chase): the stored aliases were distinct but only by the trailing letter
+  (jacelyn.tsu.ae9958.a@ vs .b@) — the #1118 unit-token walk appends one char, invisible at a
+  glance. FIRST CUT (PR #1120, `unit.b.jacelyn.tsu.ae9958@…`) was rejected same-day ("sounds
+  super weird have unit.b.guest name"). FINAL (`claude/alias-numeric-tail`): unit-scoped alias
+  prefixes are `first.last.<6-digit tail>` — `aliasUnitNumericTail(reservationId, unitToken)`
+  (server/simplelogin.ts; sha1 → 6 digits, deterministic so retries walk the same candidates) —
+  sibling units get COMPLETELY different trailing numbers (jacelyn.tsu.672676@ vs
+  jacelyn.tsu.410862@); reservation-level aliases keep the guest+res6 base; the buyInId/entropy
+  fallback walk is unchanged. Locked in tests/simplelogin-alias-prefix.test.ts. LIVE FIX: unit B
+  of the Menehune reservation (buy-in 540 — unbooked, zero emails; safety-read before each
+  delete) re-minted TWICE across the two cuts, final alias `jacelyn.tsu.410862@emailprivaccy.com`
+  with travelerEmail cleared + re-backfilled; unit A's BOOKED alias/address untouched (VRBO
+  already has it). Orphaned SimpleLogin aliases (the .b + unit.b intermediates) forward to the
+  same mailbox and expire Aug 25 — harmless, left in place. Existing aliases elsewhere keep
+  their old shape by design — only new mints change. Also confirmed live: buy-in 539 auto-marked
   `booked` by the alias-email feature (previous PR working in prod).
 
 - 2026-07-20 (alias inbox: AUTO-mark bought in on any inbound alias email + Gmail-style two-pane
